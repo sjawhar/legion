@@ -50,7 +50,7 @@ func compactDoors() []compactDoor {
 			t.Helper()
 			grant := controllerGrant(t, h)
 			return h.request(http.MethodPost, "/legion/v1/claims/compact",
-				CompactRequest{GrantID: grant.GrantID, Issue: issue, Role: string(role)}, nil)
+				ClaimRequest{GrantID: grant.GrantID, Issue: issue, Role: string(role)}, nil)
 		}},
 	}
 }
@@ -222,7 +222,7 @@ func TestADelayedCompactionAnswersItsRealResultAndAFreshSessionDuringItIsRefused
 	refused := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(token)+"/retry", RetryRequest{FreshSession: true})
 
 	wantFreshSessionRefusal(t, refused, http.StatusConflict, claimInATurn,
-		string(token)+" is in a turn: a fresh session would cut that turn off, so ask for one after the turn ends")
+		string(token)+" is in a turn: a fresh session would cut that turn off, so ask again after the turn ends")
 	if after := h.stored(token); after.Session != "ses_implementer" {
 		t.Errorf("the refused claim records session %q, want the session it had", after.Session)
 	}
@@ -268,11 +268,12 @@ func TestASecondCompactionOfAClaimBeingCompactedIsRefused(t *testing.T) {
 	<-answered
 }
 
-// A claim in a turn is refused through either door, word for word as a fresh session refuses
-// one — both operations give that refusal from the same place (api's refuseInATurn), so a
-// controller reads one sentence for both: a compaction aborts whatever turn its session is
-// running, and that turn may be the one that ends the run of provider errors.
-func TestACompactionIsRefusedForAClaimInATurn(t *testing.T) {
+// A claim in a turn is refused through either door, and the refusal names the compaction: a
+// compaction aborts whatever turn its session is running, and that turn may be the one that
+// ends the run of provider errors. A controller whose skill has it compact first must not read
+// a refusal telling it to ask for a fresh session, which is the operation it is to try second
+// (api's refuseInATurn).
+func TestACompactionRefusedForAClaimInATurnNamesTheCompaction(t *testing.T) {
 	for _, door := range compactDoors() {
 		t.Run(door.name, func(t *testing.T) {
 			h := compactHarness(t, nil)
@@ -286,7 +287,7 @@ func TestACompactionIsRefusedForAClaimInATurn(t *testing.T) {
 			recorder := door.ask(t, h, "LEGION-209", claim.RoleImplementer)
 
 			wantFreshSessionRefusal(t, recorder, http.StatusConflict, claimInATurn,
-				string(token)+" is in a turn: a fresh session would cut that turn off, so ask for one after the turn ends")
+				string(token)+" is in a turn: a compaction would abort that turn, so ask again after the turn ends")
 		})
 	}
 }
@@ -361,7 +362,7 @@ func TestTheControllersCompactRefusesTheRoleController(t *testing.T) {
 	grant := controllerGrant(t, h)
 
 	recorder := h.request(http.MethodPost, "/legion/v1/claims/compact",
-		CompactRequest{GrantID: grant.GrantID, Issue: "LEGION-209", Role: "controller"}, nil)
+		ClaimRequest{GrantID: grant.GrantID, Issue: "LEGION-209", Role: "controller"}, nil)
 
 	wantFreshSessionRefusal(t, recorder, http.StatusBadRequest, "INVALID_ROLE",
 		"role must be one of architect, planner, implementer, tester, reviewer, merger; "+
@@ -384,11 +385,11 @@ func TestTheControllersCompactNeedsAControllerGrantAndAClaim(t *testing.T) {
 	decodeInto(t, minted, &worker)
 
 	assertFailure(t, h.request(http.MethodPost, "/legion/v1/claims/compact",
-		CompactRequest{GrantID: worker.GrantID, Issue: "LEGION-209", Role: string(claim.RoleImplementer)}, nil),
+		ClaimRequest{GrantID: worker.GrantID, Issue: "LEGION-209", Role: string(claim.RoleImplementer)}, nil),
 		http.StatusForbidden, "CONTROLLER_REQUIRED")
 
 	assertFailure(t, h.request(http.MethodPost, "/legion/v1/claims/compact",
-		CompactRequest{GrantID: controllerGrant(t, h).GrantID, Issue: "LEGION-777", Role: string(claim.RoleTester)}, nil),
+		ClaimRequest{GrantID: controllerGrant(t, h).GrantID, Issue: "LEGION-777", Role: string(claim.RoleTester)}, nil),
 		http.StatusNotFound, "NO_CLAIM")
 }
 
@@ -414,5 +415,56 @@ func TestACompactionWhoseAnswerNeverCameGivesTheClaimBack(t *testing.T) {
 	}
 	if prompts := conn.Prompts(); len(prompts) != 1 || prompts[0].DeliveryID != owed {
 		t.Fatalf("the connection was sent %#v, want the one task the claim owed (%s)", prompts, owed)
+	}
+}
+
+// A claim the machine takes no compaction in is refused in the words of its own state, not as a
+// claim in a turn. Two reach the machine rather than the route's own read: a claim whose agent
+// registered and is not ready yet, which the table ignores, and a ready claim whose shim is not
+// connected, which the daemon cannot ask through at all.
+func TestACompactionRefusedForAClaimThatIsNotReadyNamesWhatIsWrong(t *testing.T) {
+	t.Run("a claim whose agent registered and is not ready", func(t *testing.T) {
+		h := compactHarness(t, nil)
+		token, _ := h.launchIn("LEGION-208", "LEGION-209", claim.RoleImplementer)
+		h.registered(h.bootToken(token), "ses_implementer")
+		connected(h, token)
+		if got := h.stored(token).State; got != supervise.StateRegistered {
+			t.Fatalf("the launched worker is %s, want registered", got)
+		}
+
+		recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(token)+"/compact", nil)
+
+		assertFailure(t, recorder, http.StatusConflict, claimUnsettled)
+	})
+	t.Run("a ready claim whose shim is not connected", func(t *testing.T) {
+		h := compactHarness(t, nil)
+		token := readyImplementer(t, h)
+
+		recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(token)+"/compact", nil)
+
+		assertFailure(t, recorder, http.StatusConflict, compactionFailed)
+	})
+}
+
+// The reason a compaction did not run is words the daemon did not write — Oh My Pi's, and
+// through it a summarizer model's own explanation — and it reaches the controller's tool result
+// and so its next prompt. The answer carries what the operation needs of it and no more.
+func TestACompactionsReasonIsBoundedBeforeItReachesTheCaller(t *testing.T) {
+	h := compactHarness(t, nil)
+	token := idleOnTheLadder(t, h)
+	conn := connected(h, token)
+	conn.RefuseCompact("Already compacted. " + strings.Repeat("and here is why at length. ", 200))
+
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(token)+"/compact", nil)
+
+	answer := decodeCompaction(t, recorder)
+	if len(answer.Reason) > reasonBound+len("…") {
+		t.Fatalf("the answer carried %d bytes of reason, want at most %d", len(answer.Reason), reasonBound+len("…"))
+	}
+	if !strings.HasPrefix(answer.Reason, "Already compacted.") {
+		t.Fatalf("the answer's reason is %q, want it to start with what Oh My Pi said", answer.Reason)
+	}
+	if !strings.HasSuffix(answer.Reason, "…") {
+		t.Fatalf("the answer's reason is %q, want the cut marked so a reader sees the sentence did not end", answer.Reason)
 	}
 }

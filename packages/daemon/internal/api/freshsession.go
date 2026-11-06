@@ -10,11 +10,12 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
-// FreshSessionRequest is the controller's fresh_session: the claim on Role of Issue leaves the
-// session it recorded behind and starts again in a new one. Role is a workflow role or
-// `architect`; the project controller is no role here, so the controller's own claim cannot be
-// named at all (claim.IsRole, whose six roles the controller is not one of).
-type FreshSessionRequest struct {
+// ClaimRequest is what either of the controller's two claim recoveries names: the claim on Role
+// of Issue, under the caller's controller grant. Role is a workflow role or `architect`; the
+// project controller is no role here, so the controller's own claim cannot be named at all
+// (claim.IsRole, whose six roles the controller is not one of). The fresh session and the
+// compaction take the same three members, so they take one type (controllerClaim).
+type ClaimRequest struct {
 	GrantID string `json:"grantId"`
 	Issue   string `json:"issue"`
 	Role    string `json:"role"`
@@ -25,71 +26,119 @@ type FreshSessionRequest struct {
 // nothing else, since what it does next it reads in the state.
 type FreshSessionResponse struct{}
 
-// freshSessionRefused are the two refusals the effect writes itself, which both doors give word
-// for word (freshSession).
+// The refusals both recoveries write themselves, which all four doors give word for word
+// (freshSession, compact).
 const (
-	// claimInATurn: suspending a claim mid-turn would cut the turn off, and that turn may be the
-	// one that ends the run of provider errors.
+	// claimInATurn: cutting a running turn off would lose the turn that may be the one ending
+	// the run of provider errors, so both recoveries refuse a claim in one (refuseInATurn).
 	claimInATurn = "CLAIM_IN_A_TURN"
 	// claimUnsettled: a claim between states — queued, or with a launch in flight — has no agent
-	// to stop and no stopped process to start.
+	// to stop, no stopped process to start and no session to compact.
 	claimUnsettled = "CLAIM_UNSETTLED"
 )
 
 // freshSessionReason is what the suspension of a live claim records as its cause.
 const freshSessionReason = "a fresh session was asked for"
 
-// claimFreshSession is the controller's door onto the fresh session (freshSession): the claim is
-// named by its issue and role rather than by a token the controller never sees, and the caller
-// is its project's controller rather than the operator. The effect is the operator's own, and so
-// are its refusals; only the authentication differs.
-func (s *server) claimFreshSession(w http.ResponseWriter, r *http.Request) {
-	var req FreshSessionRequest
+// controllerOp is one of the two claim recoveries in the words its own refusals name it by,
+// which both of its doors give: name reads inside a sentence about the operation,
+// notTheController is what the refusal of the role `controller` says the operation does not do
+// to the project's own controller (controllerClaim), and cutsTheTurn is what the refusal of a
+// claim in a turn says the operation would do to that turn (refuseInATurn).
+type controllerOp struct {
+	name             string
+	notTheController string
+	cutsTheTurn      string
+}
+
+var (
+	compactOp = controllerOp{
+		name:             "a compaction",
+		notTheController: "the controller does not compact its own session",
+		cutsTheTurn:      "a compaction would abort that turn",
+	}
+	freshSessionOp = controllerOp{
+		name:             "a fresh session",
+		notTheController: "its own claim takes no fresh session",
+		cutsTheTurn:      "a fresh session would cut that turn off",
+	}
+)
+
+// controllerTarget is the claim a controller's recovery named, read and authenticated: the
+// machine to run the effect on, and the issue and role the caller spelled, which the route logs
+// as the controller named them.
+type controllerTarget struct {
+	machine *supervise.Machine
+	token   claim.Token
+	issue   string
+	role    claim.Role
+}
+
+// controllerClaim is the door both of the controller's claim recoveries come through
+// (claimFreshSession, claimCompact): the claim is named by its issue and role rather than by a
+// token the controller never sees, and the caller is its project's controller rather than the
+// operator. It answers every refusal of the body, the grant and the lookup itself, and reports
+// false when it has; only the effect behind it differs between the two.
+//
+// The controller is refused its own claim here and nowhere else: the token is built from the
+// issue and the role, and no issue's role spells the controller's token (claim.ControllerToken),
+// so a role this check takes can never name it.
+func (s *server) controllerClaim(w http.ResponseWriter, r *http.Request, op controllerOp) (controllerTarget, bool) {
+	var req ClaimRequest
 	if !s.readBody(w, r, &req, s.redeemIdentityCheck) || !requireFailureFields(w,
 		field{"grantId", req.GrantID}, field{"issue", req.Issue}, field{"role", req.Role}) {
-		return
+		return controllerTarget{}, false
 	}
 	if !claim.IsIssueKey(req.Issue) {
 		writeFailure(w, http.StatusBadRequest, "INVALID_ISSUE", "issue must be a Dispatch issue key")
-		return
+		return controllerTarget{}, false
 	}
-	// The controller is refused its own claim here and nowhere else: the token is built from the
-	// issue and the role, and no issue's role spells the controller's token
-	// (claim.ControllerToken), so a role this check takes can never name it.
 	role := claim.Role(req.Role)
 	if !claim.IsRole(role) {
 		writeFailure(w, http.StatusBadRequest, "INVALID_ROLE", fmt.Sprintf(
-			"role must be one of %s; the project's controller is none of them, and its own claim takes no fresh session",
-			roleList()))
-		return
+			"role must be one of %s; the project's controller is none of them, and %s",
+			roleList(), op.notTheController))
+		return controllerTarget{}, false
 	}
 	token, err := claim.NewToken(s.project, req.Issue, role)
 	if err != nil {
-		s.logFailure("api: build the claim token of a fresh session", "issue", req.Issue, "role", req.Role, "error", err)
+		s.logFailure("api: build the claim token of "+op.name, "issue", req.Issue, "role", req.Role, "error", err)
 		writeFailure(w, http.StatusInternalServerError, "CLAIM_TOKEN_FAILED", err.Error())
-		return
+		return controllerTarget{}, false
 	}
 	grant, ok := s.redeem(w, r, req.GrantID)
 	if !ok {
-		return
+		return controllerTarget{}, false
 	}
 	if !grant.Controller {
-		writeFailure(w, http.StatusForbidden, "CONTROLLER_REQUIRED", "a fresh session requires a controller grant")
-		return
+		writeFailure(w, http.StatusForbidden, "CONTROLLER_REQUIRED", op.name+" requires a controller grant")
+		return controllerTarget{}, false
 	}
 	m, supervised := s.supervisor.Machine(token)
 	if !supervised {
 		writeFailure(w, http.StatusNotFound, "NO_CLAIM", "no claim "+string(token))
+		return controllerTarget{}, false
+	}
+	return controllerTarget{machine: m, token: token, issue: req.Issue, role: role}, true
+}
+
+// claimFreshSession is the controller's door onto the fresh session (freshSession). The effect
+// is the operator's own, and so are its refusals; only the authentication differs
+// (controllerClaim).
+func (s *server) claimFreshSession(w http.ResponseWriter, r *http.Request) {
+	target, ok := s.controllerClaim(w, r, freshSessionOp)
+	if !ok {
 		return
 	}
-	if _, ok := s.freshSession(w, r, m, token); !ok {
+	if _, ok := s.freshSession(w, r, target.machine, target.token); !ok {
 		return
 	}
-	s.log.Info("api: the controller started a claim in a fresh session", "claim", token, "issue", req.Issue, "role", req.Role)
+	s.log.Info("api: the controller started a claim in a fresh session",
+		"claim", target.token, "issue", target.issue, "role", target.role)
 	writeJSON(w, http.StatusOK, FreshSessionResponse{})
 }
 
-// roleList names the roles a fresh session takes, in the order the workflow reaches them.
+// roleList names the roles a claim can be on, in the order the workflow reaches them.
 func roleList() string {
 	names := make([]string, 0, len(claim.Roles))
 	for _, role := range claim.Roles {
@@ -112,10 +161,10 @@ func roleList() string {
 // It is three operator commands in a row, and nothing else: `legion claims suspend` for a claim
 // that runs, then `legion claims forget-session`, then the start — `legion claims resume` for a
 // suspended claim, and the retry for one that failed or an operator stopped, which a resume is
-// refused for (supervise's table) and whose phase worker is started through its issue's phase,
-// since that is what hands the relaunched role the phase's task (retryStart). The new session
-// also puts the claim's run of provider-error turns back to zero
-// (supervise.Machine.forgetSession), so a second notice can come for the same claim.
+// refused for (supervise's table). A phase worker is started through its issue's phase whichever
+// of those two started it, since that is what hands the relaunched role the phase's task
+// (restartWorkedPhase). The new session also puts the claim's run of provider-error turns back
+// to zero (supervise.Machine.forgetSession), so a second notice can come for the same claim.
 //
 // The forget goes before the start, and for a phase worker that means before intake.ApplyFact,
 // because the start the fact queues is an outbox row a lane runs once the fact commits:
@@ -154,7 +203,7 @@ func (s *server) freshSession(w http.ResponseWriter, r *http.Request, m *supervi
 	}
 	switch {
 	case c.State == supervise.StateWorking:
-		return 0, refuseInATurn(w, token)
+		return 0, refuseInATurn(w, token, freshSessionOp)
 	case startsAgain(c.State):
 	case agentRunning(c.State):
 		held, ok := s.claimEvent(w, r, m, token, "suspend",
@@ -166,7 +215,7 @@ func (s *server) freshSession(w http.ResponseWriter, r *http.Request, m *supervi
 		// (supervise's holdSuspension): the process still runs, so the claim is in a turn after
 		// all and the caller is told what it would have been told a moment earlier.
 		if held {
-			return 0, refuseInATurn(w, token)
+			return 0, refuseInATurn(w, token, freshSessionOp)
 		}
 	default:
 		writeFailure(w, http.StatusConflict, claimUnsettled, fmt.Sprintf(
@@ -177,21 +226,34 @@ func (s *server) freshSession(w http.ResponseWriter, r *http.Request, m *supervi
 	if session := m.Claim().Session; session != "" && !s.forgetRecordedSession(w, r, m, token, session) {
 		return 0, false
 	}
-	if m.Claim().State == supervise.StateSuspended {
-		if _, ok := s.claimEvent(w, r, m, token, "resume", supervise.RequestResume{Claim: token}); !ok {
-			return 0, false
-		}
-		s.log.Info("api: a fresh session was started for a claim that was suspended", "claim", token)
-		return http.StatusOK, true
+	if m.Claim().State != supervise.StateSuspended {
+		return s.retryStart(w, r, m, token)
 	}
-	return s.retryStart(w, r, m, token)
+	if _, ok := s.claimEvent(w, r, m, token, "resume", supervise.RequestResume{Claim: token}); !ok {
+		return 0, false
+	}
+	s.log.Info("api: a fresh session was started for a claim that was suspended", "claim", token)
+	// A phase worker that owes no task is handed one by its issue's phase, through the same
+	// restart the start of a stopped claim runs (restartWorkedPhase): the resume above starts
+	// the agent and nothing more, so without it a tester waiting on CI, or a worker an idle
+	// release suspended, comes back in a new session with nothing to do. A claim that still
+	// owes a task keeps it — the resume sends that one — and an architect is never started
+	// through a phase at all.
+	if m.Claim().Pending == nil {
+		if status, ok, restarted := s.restartWorkedPhase(w, r, token, m.Claim()); restarted {
+			return status, ok
+		}
+	}
+	return http.StatusOK, true
 }
 
-// refuseInATurn is the one refusal of a claim whose turn is running, word for word through both
-// doors. It always reports false, so a caller returns it as its own answer.
-func refuseInATurn(w http.ResponseWriter, token claim.Token) bool {
+// refuseInATurn is the refusal of a claim whose turn is running, which both recoveries give:
+// the operation names itself and what it would do to the turn, so a controller told to compact
+// first is not told to ask for a fresh session instead (controllerOp). It always reports false,
+// so a caller returns it as its own answer.
+func refuseInATurn(w http.ResponseWriter, token claim.Token, op controllerOp) bool {
 	writeFailure(w, http.StatusConflict, claimInATurn, fmt.Sprintf(
-		"%s is in a turn: a fresh session would cut that turn off, so ask for one after the turn ends", token))
+		"%s is in a turn: %s, so ask again after the turn ends", token, op.cutsTheTurn))
 	return false
 }
 
@@ -202,10 +264,10 @@ func startsAgain(state supervise.ClaimState) bool {
 }
 
 // agentRunning is whether a claim runs an agent that is in no turn: one registered, ready or
-// idle. It is the set both operations of this shape reach — a fresh session suspends such a
-// claim at once, where a claim whose launch has not registered yet holds its suspension instead
-// (supervise's holdSuspendUntilReady) and is refused rather than waited for; a compaction asks
-// such a claim's Oh My Pi session, where every other state has none to ask (compact).
+// idle. It is the set the fresh session suspends at once, where a claim whose launch has not
+// registered yet holds its suspension instead (supervise's holdSuspendUntilReady) and is
+// refused rather than waited for. A compaction takes a narrower set, the two states the
+// machine takes one in (compactable).
 func agentRunning(state supervise.ClaimState) bool {
 	return state == supervise.StateRegistered || state == supervise.StateReady || state == supervise.StateIdle
 }
@@ -213,7 +275,8 @@ func agentRunning(state supervise.ClaimState) bool {
 // claimEvent posts one request to a claim's machine under a decision of the route's, as every
 // operator request on a claim does (claimRequest): it answers the caller itself when the daemon
 // is stopping or the machine refuses, and reports whether the machine held the request for the
-// agent's turn (supervise.ErrSuspendHeld), which is no refusal.
+// agent's turn (supervise.ErrSuspendHeld), which is no refusal. Both recoveries post through
+// it.
 func (s *server) claimEvent(w http.ResponseWriter, r *http.Request, m *supervise.Machine, token claim.Token,
 	request string, ev supervise.Event) (held, ok bool) {
 	ctx, decided := s.decision(r, token)

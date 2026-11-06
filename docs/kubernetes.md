@@ -1062,15 +1062,33 @@ A refusal that lands before the model has sent any text is one Oh My Pi walks th
 A refusal that lands after the text Oh My Pi leaves where it is, so the revert has no fallback of its own to move: there the plugin's own `setModel` walks the chain, and the same timed return brings the session back.
 `scripts/e2e/refusal-fallback-omp.sh` measures the difference on a ten-minute cooldown: with the setting, no request at all reaches the refused model between the fifth minute and the tenth, and the first request after the tenth goes to that model again.
 
-One command replaces a session worth replacing, a session a provider refuses turn after turn among them:
+Two commands replace what a provider keeps refusing, and the compaction is the first of them, because a new session loses what the old one held — what the worker learned of its issue, and what it had not pushed or written down yet:
+
+```sh
+legion claims compact --claim <token> --operator-token-file <file>
+```
+
+It has the claim's Oh My Pi session write a summary of itself and then sends the claim the task it owes again, however much of the provider-error ladder's wait was left: the claim keeps its session, its workspace and everything it knows of its issue, and what goes is the length of the transcript the provider is asked to read.
+The summary is text, because the daemon asks with instructions of its own: Oh My Pi runs its image-based snapcompact method only for a compaction that carries none, and a worker resumed on those images would need a vision model to read its own past (`compactInstructions`, `packages/daemon/internal/api/compact.go`).
+The answer says whether the session was compacted and, when it was not, why — Oh My Pi's own words for a compaction it refused or skipped, `Already compacted` or `Nothing to compact (session too small)`, and the daemon's for a wait that ran out or a transport that failed — and the owed task has gone again either way.
+The command carries no deadline of its own, as no `legion claims` command does, and the daemon bounds that model call over the whole transcript at ten minutes (`runtime.CompactTimeout`).
+While it runs the claim reads `working`, the daemon's one word for a busy agent, so the ladder's re-send and any newer task wait for its end, a second compaction is refused in its own words, and a fresh session is refused as it is in a turn.
+
+A session the compaction left refused is the fresh session's, which is the last resort here:
 
 ```sh
 legion claims retry --claim <token> --operator-token-file <file> --fresh-session
 ```
 
-It reaches a claim the daemon holds failed and one an operator stopped, since `legion claims stop` retires the claim it stops.
-It forgets the session that claim recorded and starts the claim in a new session, with the task of the phase its issue stands in now.
+It reaches every claim of the project that is not in a turn — one idle between the ladder's sends, a suspended one, one an operator stopped (`legion claims stop` retires the claim it stops), a failed one, and a root architect as much as a phase worker — suspending it where it is live, forgetting the session it recorded, and starting it again (`freshSession`, `packages/daemon/internal/api/freshsession.go`).
+A phase worker comes back with the task of the phase its issue stands in now, and a root architect with its tree's catch-up.
 No `forget-session` comes before it, and no recovery here needs an edit of the daemon's store.
+
+Both refuse a claim in a turn, since compacting it or suspending it would cut that turn off and that turn may be the one that ends the run of refusals, and both refuse a claim between states, queued or with a launch in flight.
+The compaction refuses two more: a claim that is suspended, stopped or failed, which runs no session to ask and whose refusal names the fresh session as what starts it again, and a claim whose role runs on the Claude Code harness, which has no Oh My Pi session to compact at all.
+The project's controller holds both as tools of its own, `compact (issue, role)` and `fresh_session (issue, role)`, which name the claim by its issue and role rather than by a token the controller never sees: the effect, the refusals and the answer are the operator's own and only the authentication differs, and a `provider-errors on <KEY>` notice is where the controller reaches for them, the compaction first and a fresh session only when the claim is still refused after it (`skills/legion-controller`).
+The controller's own claim is the one asymmetry: a fresh session of it is refused whatever state it is in, because it would cut the project's one controller off, where a compaction of it is not, since the session, its process and everything the controller holds stay and only the transcript gets shorter.
+The controller cannot name itself through its own door either way, since `controller` is no role a claim token is built from, so the operator's `--claim` is the one way onto that claim.
 
 Use `legion claims forget-session` for a session that is gone rather than refused: a stopped claim's session lost with its volume, or a file session imported before its volume can be reaped.
 Read the claim's recorded session from `legion claims list`, then run:

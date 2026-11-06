@@ -653,7 +653,7 @@ func (r *claimCompactionLive) heldSummaryOutlastsTheTimeout() {
 	// is refused through both doors, and so is a second compaction, each in its own words.
 	time.Sleep(2 * r.cfg.WorkerRPCTimeout)
 	r.refusedThroughBothDoors("a fresh session asked for while the compaction runs", freshSessionDoors, token, r.refusing, claim.RoleTester,
-		http.StatusConflict, "CLAIM_IN_A_TURN", "ask for one after the turn ends")
+		http.StatusConflict, "CLAIM_IN_A_TURN", "a fresh session would cut that turn off, so ask again after the turn ends")
 	r.refusedThroughBothDoors("a second compaction while the first runs", compactDoors, token, r.refusing, claim.RoleTester,
 		http.StatusConflict, "CLAIM_IN_A_TURN", "is being compacted already")
 
@@ -736,7 +736,7 @@ func (r *claimCompactionLive) everyRefusalGetsItsMessage() {
 		return r.claim(tester).State == string(supervise.StateWorking)
 	})
 	r.refusedThroughBothDoors("a worker in a turn of its own", compactDoors, tester, r.refusing, claim.RoleTester,
-		http.StatusConflict, "CLAIM_IN_A_TURN", "ask for one after the turn ends")
+		http.StatusConflict, "CLAIM_IN_A_TURN", "a compaction would abort that turn, so ask again after the turn ends")
 	stand.releaseTurn()
 	r.await(string(tester)+"'s turn to end", 2*time.Minute, func() bool {
 		return r.claim(tester).State != string(supervise.StateWorking)
@@ -751,10 +751,10 @@ func (r *claimCompactionLive) everyRefusalGetsItsMessage() {
 	// The project's controller is no role a claim token is built from, so the controller's own
 	// door — the only one that names a role at all — refuses it by name, for both operations.
 	r.refusedByController("compact naming role controller", "/legion/v1/claims/compact",
-		api.CompactRequest{Issue: r.refusing, Role: string(claim.RoleController)},
+		api.ClaimRequest{Issue: r.refusing, Role: string(claim.RoleController)},
 		http.StatusBadRequest, "INVALID_ROLE", "the project's controller is none of them")
 	r.refusedByController("fresh_session naming role controller", "/legion/v1/claims/fresh-session",
-		api.FreshSessionRequest{Issue: r.refusing, Role: string(claim.RoleController)},
+		api.ClaimRequest{Issue: r.refusing, Role: string(claim.RoleController)},
 		http.StatusBadRequest, "INVALID_ROLE", "the project's controller is none of them")
 	// The operator's door names a claim by its token, and this deployment launches no controller
 	// of its own (`controller: operator`, config.ControllerLaunchOperator, which is what the
@@ -832,7 +832,7 @@ func (r *claimCompactionLive) freshSessionsStartEachWorker() {
 	caughtUp := len(r.architectNotices(r.root, "catch-up"))
 	from = r.daemon.count()
 	status, body := r.controllerRequest("/legion/v1/claims/fresh-session",
-		api.FreshSessionRequest{Issue: r.root, Role: string(claim.RoleArchitect)})
+		api.ClaimRequest{Issue: r.root, Role: string(claim.RoleArchitect)})
 	if status != http.StatusOK {
 		t.Fatalf("the controller's fresh session of %s = %d %s, want 200", architect, status, body)
 	}
@@ -933,7 +933,7 @@ var (
 			return r.d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(token)+"/compact", nil, true)
 		},
 		controller: func(r *claimCompactionLive, issue string, role claim.Role) (int, []byte) {
-			return r.controllerRequest("/legion/v1/claims/compact", api.CompactRequest{Issue: issue, Role: string(role)})
+			return r.controllerRequest("/legion/v1/claims/compact", api.ClaimRequest{Issue: issue, Role: string(role)})
 		},
 	}
 	freshSessionDoors = doorPair{
@@ -943,7 +943,7 @@ var (
 				api.RetryRequest{FreshSession: true}, true)
 		},
 		controller: func(r *claimCompactionLive, issue string, role claim.Role) (int, []byte) {
-			return r.controllerRequest("/legion/v1/claims/fresh-session", api.FreshSessionRequest{Issue: issue, Role: string(role)})
+			return r.controllerRequest("/legion/v1/claims/fresh-session", api.ClaimRequest{Issue: issue, Role: string(role)})
 		},
 	}
 )
@@ -951,20 +951,10 @@ var (
 // controllerRequest posts one of the controller's own requests: a grant minted from the
 // registered controller's session and secret, as its plugin mints one per operation
 // (packages/pi-shared/src/daemon-client.ts), then the route with that grant in the body.
-func (r *claimCompactionLive) controllerRequest(path string, body any) (int, []byte) {
+func (r *claimCompactionLive) controllerRequest(path string, body api.ClaimRequest) (int, []byte) {
 	r.t.Helper()
-	grant := r.controllerGrant()
-	switch request := body.(type) {
-	case api.CompactRequest:
-		request.GrantID = grant
-		return r.d.request(http.MethodPost, path, request, false)
-	case api.FreshSessionRequest:
-		request.GrantID = grant
-		return r.d.request(http.MethodPost, path, request, false)
-	default:
-		r.t.Fatalf("no controller request shape for %T", body)
-		return 0, nil
-	}
+	body.GrantID = r.controllerGrant()
+	return r.d.request(http.MethodPost, path, body, false)
 }
 
 // controllerGrant mints one controller grant over the daemon's own route, the controller-session
@@ -1029,7 +1019,7 @@ func (r *claimCompactionLive) refusedThroughBothDoors(what string, doors doorPai
 
 // refusedByController drives one request only the controller's door can make and holds its
 // refusal. The operator's door names a claim by its token, so it can name no role at all.
-func (r *claimCompactionLive) refusedByController(what, path string, body any, status int, code string, phrases ...string) {
+func (r *claimCompactionLive) refusedByController(what, path string, body api.ClaimRequest, status int, code string, phrases ...string) {
 	r.t.Helper()
 	got, answered := r.controllerRequest(path, body)
 	refusal := r.heldRefusal(what, got, answered, status, code, phrases...)

@@ -1,6 +1,6 @@
 kind: Added
 body: |-
-  `LegionFreshSessionRequest`, the body of the daemon's new `POST /legion/v1/claims/fresh-session`:
+  `LegionClaimRequest`, the body of the daemon's new `POST /legion/v1/claims/fresh-session`:
   a controller grant, an issue and a role. The claim on that role of that issue leaves the session
   it recorded behind and starts again in a new one, which is the effect
   `legion claims retry --fresh-session` runs for an operator. It reaches every claim of the project

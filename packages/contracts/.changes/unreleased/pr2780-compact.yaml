@@ -1,8 +1,10 @@
 kind: Added
 body: |-
-  `LegionCompactRequest` and `LegionCompactResponse`, the body and the answer of the daemon's new
-  `POST /legion/v1/claims/compact`: a controller grant, an issue and a role in, and `compacted`
-  with a `reason` when it is false out. The claim on that role of that issue has its Oh My Pi
+  `LegionCompactResponse`, the answer of the daemon's new `POST /legion/v1/claims/compact`:
+  `compacted`, and a `reason` the daemon cuts to 200 bytes when it is false. That route and
+  `POST /legion/v1/claims/fresh-session` share one body, `LegionClaimRequest`: a controller
+  grant, an issue and a role.
+  The claim on that role of that issue has its Oh My Pi
   session compacted and is then sent the task it owes again, which is the effect
   `legion claims compact` runs for an operator. It is what a claim whose provider keeps refusing
   its session reaches for before a fresh one: the session, its workspace and everything the

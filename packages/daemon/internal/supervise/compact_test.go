@@ -213,3 +213,135 @@ func TestACompactionWithNoInstructionsIsRefusedBeforeAnythingIsSent(t *testing.T
 		t.Fatalf("the claim is %s, want it left idle", got)
 	}
 }
+
+// The ladder has just sent the owed task and the prompt is in flight — acknowledged, with the
+// wait for its turn armed — when the compaction is taken. Oh My Pi runs one thing at a time, so
+// the compaction aborts the turn that prompt started, and the result of an aborted turn carries
+// no error of its own: read as a turn that worked, it would confirm the task and the end of the
+// compaction would retire it unsent. The task is taken back instead, and the end of the
+// compaction sends it again.
+func TestACompactionTakenWhileTheOwedPromptIsInFlightSendsTheTaskAgainAfterIt(t *testing.T) {
+	notices := 0
+	h := ladderStuck(t, &notices)
+	h.advance(promptRetryMax) // the ladder's next step sends the owed task
+	sent := h.wantPrompts(ladderSends + 1)[ladderSends].DeliveryID
+	if got := h.state(); got != StateIdle {
+		t.Fatalf("after the ladder's send the claim is %s, want it idle waiting for the turn", got)
+	}
+	release := h.conn.HoldCompact()
+	compacted := make(chan error, 1)
+	go func() { compacted <- h.m.Compact(h.ctx, testCompactInstructions) }()
+	waitForCompacting(t, h)
+
+	h.must(StreamTurnStart{Claim: h.token})
+	h.mustQuiet(StreamTurnEnd{Claim: h.token})
+	h.must(StreamPromptResult{Claim: h.token, DeliveryID: sent, AgentInvoked: true})
+
+	release()
+	if err := <-compacted; err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	h.m.Wait()
+	owed := h.claim().Pending
+	if owed == nil {
+		t.Fatal("the compaction retired the task whose turn it aborted: the claim owes nothing, and nothing sends it again")
+	}
+	if owed.ID == sent {
+		t.Fatalf("the task kept the id %q its aborted prompt carried; a task taken back goes under a new one, so that prompt's result names nothing", sent)
+	}
+	prompts := h.wantPrompts(ladderSends + 2)
+	if prompts[ladderSends+1].DeliveryID != owed.ID {
+		t.Fatalf("the send after the compaction carried %q, want the task the claim still owes, %q",
+			prompts[ladderSends+1].DeliveryID, owed.ID)
+	}
+}
+
+// A turn Oh My Pi starts as the compaction ends — a follow-up an Envoy delivery queued while the
+// session was being compacted — leaves the claim working for that turn. Idling it there would
+// send the owed task into a running agent, and that turn's own end would then arrive at an idle
+// claim, where it means nothing.
+func TestATurnThatStartsDuringACompactionKeepsTheClaimWorkingUntilItEnds(t *testing.T) {
+	notices := 0
+	h := ladderStuck(t, &notices)
+	owed := h.pending().ID
+	release := h.conn.HoldCompact()
+	compacted := make(chan error, 1)
+	go func() { compacted <- h.m.Compact(h.ctx, testCompactInstructions) }()
+	waitForCompacting(t, h)
+
+	h.must(StreamTurnStart{Claim: h.token})
+
+	release()
+	if err := <-compacted; err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	h.m.Wait()
+	if got := h.state(); got != StateWorking {
+		t.Fatalf("the claim is %s while its agent runs a turn that started under the compaction, want it working", got)
+	}
+	h.wantPrompts(ladderSends)
+
+	h.mustQuiet(StreamTurnEnd{Claim: h.token})
+
+	if got := h.state(); got != StateIdle {
+		t.Fatalf("the claim is %s after that turn ended, want idle", got)
+	}
+	prompts := h.wantPrompts(ladderSends + 1)
+	if prompts[ladderSends].DeliveryID != owed {
+		t.Fatalf("the send after the turn carried %q, want the owed task %q", prompts[ladderSends].DeliveryID, owed)
+	}
+}
+
+// A claim that was ready is ready again when the compaction ends: no turn of it has begun or
+// ended, so idling it would say one had. The rollback of a take the store would not write
+// restores the same state.
+func TestACompactionGivesBackAReadyClaimReady(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
+	h.store.fail("PutClaim", errors.New("the store is down"))
+
+	refused := h.m.Compact(h.ctx, testCompactInstructions)
+
+	if refused == nil {
+		t.Fatal("a compaction the store would not write the take of answered no error")
+	}
+	if got := h.state(); got != StateReady {
+		t.Fatalf("the claim is %s after the take was rolled back, want the ready it was", got)
+	}
+	if got := len(h.conn.Compactions()); got != 0 {
+		t.Fatalf("Oh My Pi was asked for %d compactions, want none: the claim was never taken", got)
+	}
+	h.store.fail("PutClaim", nil)
+
+	if err := h.m.Compact(h.ctx, testCompactInstructions); err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+
+	h.m.Wait()
+	if got := h.state(); got != StateReady {
+		t.Fatalf("the compacted claim is %s, want the ready it was: no turn of it has ended", got)
+	}
+	if got := h.store.load(h.token).State; got != StateReady {
+		t.Fatalf("the stored claim is %s, want ready", got)
+	}
+}
+
+// A compaction whose take the store would not write asked Oh My Pi nothing and sent the claim
+// nothing, so it is told apart from a compaction that ran and was refused: its caller answers
+// a failure rather than report a compaction that did not run, which carries the claim's task
+// with it (api's compact).
+func TestACompactionTheStoreWouldNotTakeSaysNothingWasAsked(t *testing.T) {
+	notices := 0
+	h := ladderStuck(t, &notices)
+	h.store.fail("PutClaim", errors.New("the store is down"))
+
+	err := h.m.Compact(h.ctx, testCompactInstructions)
+
+	if !errors.Is(err, ErrCompactNotTaken) {
+		t.Fatalf("a compaction the store would not take answered %v, want ErrCompactNotTaken", err)
+	}
+	if got := len(h.conn.Compactions()); got != 0 {
+		t.Fatalf("Oh My Pi was asked for %d compactions, want none", got)
+	}
+	h.wantPrompts(ladderSends)
+}

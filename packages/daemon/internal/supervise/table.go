@@ -688,6 +688,14 @@ func RunsNothingStates() []ClaimState {
 	return slices.Clone(runsNothing)
 }
 
+// PromptedStates are the states a claim's agent takes a prompt in: ready, and idle between
+// turns (prompted). It is a copy, so no caller changes the table's own set. The api's
+// compaction holds its own check to it, since these two are the states the table takes a
+// compaction in and no other (fillTable's onCompact rows, api's compactable).
+func PromptedStates() []ClaimState {
+	return slices.Clone(prompted)
+}
+
 const (
 	noProcess     = "no process of this claim is running"
 	noSend        = "no prompt is sent in this state"
@@ -743,7 +751,7 @@ func fillTable(t *builder) {
 
 	// Turns.
 	t.row(onTurnStart, "a turn started", turnStarted, []ClaimState{StateWorking}, prompted...)
-	t.ignore(onTurnStart, "a turn is already in flight", StateWorking)
+	t.row(onTurnStart, "a turn is already in flight; a turn under a compaction is recorded for its end", turnStartedWhileBusy, nil, StateWorking)
 	t.ignore(onTurnStart, "the agent is not ready, so no delivery is in flight", unready...)
 	t.ignore(onTurnStart, noProcess, gone...)
 
@@ -953,7 +961,7 @@ func fillTable(t *builder) {
 	t.ignore(onCompact, "no process of this claim is running, so it has no session to compact", gone...)
 
 	t.row(onCompactEnded, "the compaction is over: reset the run of provider errors it cleared, and send the owed task", compactEnded,
-		[]ClaimState{StateIdle, StateWorking, StateLaunching, StateFailed}, StateWorking)
+		[]ClaimState{StateReady, StateIdle, StateWorking, StateLaunching, StateFailed}, StateWorking)
 	t.ignore(onCompactEnded, "the claim is not in a compaction: the process it ran on was let go first", prompted...)
 	t.ignore(onCompactEnded, "the agent is not ready, so the compaction's process is gone", unready...)
 	t.ignore(onCompactEnded, "no process of this claim is running, so the compaction's own is gone", gone...)
@@ -1315,6 +1323,22 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 	return nil
 }
 
+// turnStartedWhileBusy is a turn starting in a claim that is already working. A claim working a
+// turn is in the turn it is already in and nothing moves. A claim working because its session
+// is being compacted has a turn of Oh My Pi's own starting under the compaction — a follow-up
+// an Envoy delivery queued while the session was being compacted — and that turn is recorded on
+// the compaction: its end would otherwise reach an idle claim, where it means nothing, and the
+// compaction's end would send the owed task into a running agent (compactEnded).
+func turnStartedWhileBusy(m *Machine, _ context.Context, _ Event) error {
+	if m.compacting == nil {
+		return nil
+	}
+	m.log.Info("supervise: a turn started while this claim's session is being compacted; the claim is left working for it",
+		"generation", m.claim.Generation)
+	m.compacting.inTurn, m.compacting.back = true, StateIdle
+	return nil
+}
+
 // takeBackSignal takes back this claim's answer to its open round when the turn starting is not
 // the round's own task's: an Envoy notice delivered into the session, or a person's steer, starts
 // a turn the daemon sent nothing for, and that turn can commit work the worker's answer already
@@ -1406,10 +1430,13 @@ func (m *Machine) takeBackSignal(ownTask bool) {
 // compaction aborts whatever turn its session was running, so the agent_end of a background
 // turn can arrive under one, and taking that for the compaction's end would hand the claim its
 // owed task while Oh My Pi is still writing the summary. CompactEnded is the only end of a
-// compaction (compactEnded).
+// compaction (compactEnded). The end is recorded on the compaction all the same: the turn it
+// ends is over, so the compaction's end has none to leave the claim working for, and a claim
+// that has had a turn goes back idle rather than ready.
 func turnEnded(m *Machine, ctx context.Context, _ Event) error {
 	if m.compacting != nil {
 		m.log.Info("supervise: a turn ended while this claim's session is being compacted; the claim stays working until the compaction ends")
+		m.compacting.inTurn, m.compacting.back = false, StateIdle
 		return nil
 	}
 	m.answerByTurnEnd()

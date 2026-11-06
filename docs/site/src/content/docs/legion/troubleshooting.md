@@ -413,10 +413,11 @@ a 429, a 408, a 401, a 403, a 5xx and an error the provider answered no status f
 too: a credential error is the fleet's rather than this claim's work, so it climbs the ladder like
 any other and the controller's notice at six is what tells a person. A newer
 task for that claim replaces the one the error took back and is sent at once, so it does not wait
-out a ladder that reaches ten minutes a step. An update round's question waits behind the owed
-task, as any other task does: the question needs a turn of the worker's own, and that turn would
-fail the way the task's did, so the pod's round waits until a turn of the owed task ends with no
-provider error.
+out a ladder that reaches ten minutes a step; while that claim's session is being compacted it
+waits for the compaction's end instead, as everything the claim is owed does. An update round's
+question waits behind the owed task, as any other task does: the question needs a turn of the
+worker's own, and that turn would fail the way the task's did, so the pod's round waits until a
+turn of the owed task ends with no provider error.
 
 **One provider error does hold the issue**, for its architect: one whose HTTP status is a client
 error, 400 to 499, that is none of 401, 403, 408 and 429. A malformed request is
@@ -428,8 +429,12 @@ architect's to retry or escalate as any held phase is.
 is told once, as `provider-errors on <KEY>`, with the run, the model and the cause
 (`supervise: a run of turns that ended in a provider error; the controller is told`). Nothing is
 held and nothing is stopped by that count: the task is still kept and still sent again. The run
-goes back to zero at the first turn of that claim that ends with no provider error, and only then
-can another notice go. The notice is the claim's own — the issue and the role that names it — so
+goes back to zero three ways: at a turn of that claim that ends with no provider error, at a
+compaction of its session that ran (`legion claims compact`, or the controller's `compact`; one
+Oh My Pi refused or skipped resets nothing, since the session is as it was), and when the claim's
+recorded session is forgotten, by `legion claims retry --fresh-session`, the controller's
+`fresh_session`, or `legion claims forget-session`. Only after one of those can another notice
+go. The notice is the claim's own — the issue and the role that names it — so
 two claims of one issue each get a notice of their own, and in a provider outage every claim that
 reaches six is told.
 

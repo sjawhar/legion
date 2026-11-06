@@ -50,7 +50,7 @@ func freshSessionDoors() []freshSessionDoor {
 			t.Helper()
 			grant := controllerGrant(t, h)
 			return h.request(http.MethodPost, "/legion/v1/claims/fresh-session",
-				FreshSessionRequest{GrantID: grant.GrantID, Issue: issue, Role: string(role)}, nil)
+				ClaimRequest{GrantID: grant.GrantID, Issue: issue, Role: string(role)}, nil)
 		}},
 	}
 }
@@ -116,20 +116,24 @@ type freshSessionCase struct {
 	role  claim.Role
 	// start leaves the claim in that state and answers its token.
 	start func(t *testing.T, h *harness) claim.Token
-	// facts is how many workflow facts the start applies: a phase worker whose process is gone
-	// is started through its issue's phase, which is what hands the relaunched role the phase's
-	// task, and every other claim is started by its own machine.
+	// facts is how many workflow facts the start applies: a phase worker that comes back owing
+	// no task is started through its issue's phase, which is what hands it that phase's task,
+	// and a claim that owes one keeps it and needs no phase.
 	facts int
+	// launches is whether the request itself asks the runtime to launch the claim: the daemon
+	// resumes a claim it suspended, where a claim the workflow's phase start relaunches is
+	// launched by the outbox lane long after this answer.
+	launches bool
 }
 
 func freshSessionCases() []freshSessionCase {
 	return []freshSessionCase{
 		{
-			name: "a phase worker idle on the provider-error ladder", issue: "LEGION-209", role: claim.RoleImplementer,
+			name: "a phase worker idle on the provider-error ladder", issue: "LEGION-209", role: claim.RoleImplementer, launches: true,
 			start: idleOnTheLadder,
 		},
 		{
-			name: "a suspended phase worker", issue: "LEGION-209", role: claim.RoleImplementer,
+			name: "a suspended phase worker", issue: "LEGION-209", role: claim.RoleImplementer, facts: 1, launches: true,
 			start: func(t *testing.T, h *harness) claim.Token {
 				t.Helper()
 				token := readyImplementer(t, h)
@@ -174,7 +178,7 @@ func freshSessionCases() []freshSessionCase {
 			},
 		},
 		{
-			name: "an idle root architect", issue: "LEGION-208", role: claim.RoleArchitect,
+			name: "an idle root architect", issue: "LEGION-208", role: claim.RoleArchitect, launches: true,
 			start: func(t *testing.T, h *harness) claim.Token {
 				t.Helper()
 				if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody()); recorder.Code != http.StatusCreated {
@@ -200,9 +204,11 @@ func freshSessionCases() []freshSessionCase {
 
 // Every claim of the project that is not in a turn gets a new session through either door: the
 // claim forgets the session it recorded and starts again, and the run of provider errors it
-// carried starts again with it, so the project's controller can be told a second time. The
-// phase workers whose process is gone are started through their issue's phase, which is what
-// hands the relaunched role that phase's task; every other claim is started by its own machine.
+// carried starts again with it, so the project's controller can be told a second time. A phase
+// worker that comes back owing no task is started through its issue's phase, which is what
+// hands it that phase's task: without it a tester waiting on CI, or a worker an idle release
+// suspended, would come back in a new session with nothing to do. A claim that still owes a
+// task keeps it, and a root architect works no phase at all.
 func TestAFreshSessionStartsEveryClaimThatIsNotInATurn(t *testing.T) {
 	for _, door := range freshSessionDoors() {
 		for _, tc := range freshSessionCases() {
@@ -235,10 +241,12 @@ func TestAFreshSessionStartsEveryClaimThatIsNotInATurn(t *testing.T) {
 					if fact, ok := facts.recorded()[0].(intake.RestartPhase); !ok || fact.Issue != tc.issue || fact.Role != tc.role {
 						t.Errorf("the fresh session applied %#v, want RestartPhase{%s, %s}", facts.recorded()[0], tc.issue, tc.role)
 					}
+				}
+				if !tc.launches {
 					return
 				}
-				// No fact, so the daemon itself started the claim, and with no recorded session
-				// the launch is a spawn rather than a resume of the session being dropped.
+				// The daemon started the claim itself, and with no recorded session the launch
+				// is a spawn rather than a resume of the session being dropped.
 				launches := h.runtime.Calls()[calls:]
 				if len(launches) == 0 {
 					t.Fatalf("the fresh session asked the runtime nothing, want the claim launched again")
@@ -269,7 +277,7 @@ func TestAFreshSessionIsRefusedForAClaimInATurn(t *testing.T) {
 			recorder := door.ask(t, h, "LEGION-209", claim.RoleImplementer)
 
 			wantFreshSessionRefusal(t, recorder, http.StatusConflict, claimInATurn,
-				string(token)+" is in a turn: a fresh session would cut that turn off, so ask for one after the turn ends")
+				string(token)+" is in a turn: a fresh session would cut that turn off, so ask again after the turn ends")
 			if after := h.stored(token); after.Session != "ses_implementer" || after.State != supervise.StateWorking {
 				t.Errorf("the refused claim is %s recording session %q, want it working on the session it had", after.State, after.Session)
 			}
@@ -285,7 +293,7 @@ func TestTheControllersFreshSessionRefusesTheRoleController(t *testing.T) {
 	grant := controllerGrant(t, h)
 
 	recorder := h.request(http.MethodPost, "/legion/v1/claims/fresh-session",
-		FreshSessionRequest{GrantID: grant.GrantID, Issue: "LEGION-209", Role: "controller"}, nil)
+		ClaimRequest{GrantID: grant.GrantID, Issue: "LEGION-209", Role: "controller"}, nil)
 
 	wantFreshSessionRefusal(t, recorder, http.StatusBadRequest, "INVALID_ROLE",
 		"role must be one of architect, planner, implementer, tester, reviewer, merger; "+
@@ -337,11 +345,11 @@ func TestTheControllersFreshSessionNeedsAControllerGrantAndAClaim(t *testing.T) 
 	decodeInto(t, minted, &worker)
 
 	assertFailure(t, h.request(http.MethodPost, "/legion/v1/claims/fresh-session",
-		FreshSessionRequest{GrantID: worker.GrantID, Issue: "LEGION-209", Role: string(claim.RoleImplementer)}, nil),
+		ClaimRequest{GrantID: worker.GrantID, Issue: "LEGION-209", Role: string(claim.RoleImplementer)}, nil),
 		http.StatusForbidden, "CONTROLLER_REQUIRED")
 
 	assertFailure(t, h.request(http.MethodPost, "/legion/v1/claims/fresh-session",
-		FreshSessionRequest{GrantID: controllerGrant(t, h).GrantID, Issue: "LEGION-777", Role: string(claim.RoleTester)}, nil),
+		ClaimRequest{GrantID: controllerGrant(t, h).GrantID, Issue: "LEGION-777", Role: string(claim.RoleTester)}, nil),
 		http.StatusNotFound, "NO_CLAIM")
 }
 

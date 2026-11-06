@@ -482,7 +482,34 @@ func (s *server) retryClaim(w http.ResponseWriter, r *http.Request) {
 // retryStart starts a claim that is running nothing: one that failed, and one an operator
 // stopped, which retires it. It answers every refusal itself and reports the status its caller's
 // success answer takes. A phase worker is retried through its issue's phase, never on its own,
-// because a worker relaunched outside its phase is handed no task and does nothing:
+// because a worker relaunched outside its phase is handed no task and does nothing
+// (restartWorkedPhase). Every other claim is the machine's to answer (machineRetry): an
+// architect is relaunched, from failed and from the retirement an operator's stop leaves, and a
+// phase worker whose issue works another role's phase, or that has left the workflow, is
+// relaunched on its own with whatever task it still holds. It is how an operator relaunches the
+// claims a runtime failed to launch — every failed claim in turn, with
+// `legion claims retry --failed` — once the cause is gone.
+//
+// The session is the claim's own either way: this start resumes the recorded one. A caller that
+// wants a new session forgets it before calling here (freshSession), which is also what reaches
+// a claim this start refuses.
+func (s *server) retryStart(w http.ResponseWriter, r *http.Request, m *supervise.Machine, token claim.Token) (int, bool) {
+	c := m.Claim()
+	if failedOrRetired(c.State) {
+		if status, ok, restarted := s.restartWorkedPhase(w, r, token, c); restarted {
+			return status, ok
+		}
+	}
+	return s.machineRetry(w, r, m, token)
+}
+
+// restartWorkedPhase starts again the phase the claim's role works, which is what hands a
+// relaunched phase worker that phase's task. Both recoveries run it: the retry of a claim that
+// failed or an operator stopped (retryStart), and the fresh session of a phase worker that
+// comes back owing no task (freshSession). restarted is false for a claim no phase start
+// reaches — an architect, a claim whose issue works another role's phase or has left the
+// workflow, and any claim on a daemon that records no issues — and its caller starts such a
+// claim another way.
 //
 //   - an issue held for that worker's own role (Options.RoleFor of the phase it is held from) is
 //     retried as its architect's retry_or_escalate retries it (intake.RetryOrEscalate): the phase
@@ -491,35 +518,25 @@ func (s *server) retryClaim(w http.ResponseWriter, r *http.Request) {
 //     (intake.RestartPhase). It is where an operator's stop leaves an issue, since a stop is no
 //     death and holds nothing, and where a failure the workflow could not hold leaves one.
 //
-// Either way the start is the workflow's, so the retry answers 202 with the claim as it is until
-// that start runs, and a refusal the workflow gives is the answer. A retry that leaves the issue
-// held relaunched nothing (a lingering tree's members stay where they stood), so it answers 409
-// naming the issue rather than report a retry. Every other claim is the machine's to answer
-// (retryEvent): an architect is relaunched, from failed and from the retirement an operator's
-// stop leaves, and a phase worker whose issue works another role's phase, or that has left the
-// workflow, is relaunched on its own with whatever task it still holds. It is how an operator
-// relaunches the claims a runtime failed to launch — every failed claim in turn, with
-// `legion claims retry --failed` — once the cause is gone.
-//
-// The session is the claim's own either way: this start resumes the recorded one. A caller that
-// wants a new session forgets it before calling here (freshSession), which is also what reaches
-// a claim this start refuses.
-func (s *server) retryStart(w http.ResponseWriter, r *http.Request, m *supervise.Machine, token claim.Token) (int, bool) {
-	c := m.Claim()
-	if !failedOrRetired(c.State) || !isPhaseWorker(c.Role) || s.pool == nil || s.roleFor == nil {
-		return s.machineRetry(w, r, m, token)
+// Either way the start is the workflow's, so this answers 202 with the claim as it is until
+// that start runs, and a refusal the workflow gives is the answer. A restart that leaves the
+// issue held relaunched nothing (a lingering tree's members stay where they stood), so it
+// answers 409 naming the issue rather than report a restart.
+func (s *server) restartWorkedPhase(w http.ResponseWriter, r *http.Request, token claim.Token, c supervise.Claim) (status int, ok, restarted bool) {
+	if !isPhaseWorker(c.Role) || s.pool == nil || s.roleFor == nil {
+		return 0, false, false
 	}
 	if s.stopped(w, "retry") {
-		return 0, false
+		return 0, false, true
 	}
 	recorded, err := s.recordedIssue(r.Context(), c.Issue)
 	if err != nil {
 		s.logFailure("api: read the issue of a phase worker to retry", "claim", token, "error", err)
 		writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("could not read %s's record: %v", c.Issue, err)))
-		return 0, false
+		return 0, false, true
 	}
 	if recorded == nil || s.roleFor(workedPhase(*recorded)) != c.Role {
-		return s.machineRetry(w, r, m, token)
+		return 0, false, false
 	}
 	working := workedPhase(*recorded)
 	fact := intake.Fact(intake.RestartPhase{Issue: c.Issue, Role: c.Role})
@@ -530,24 +547,24 @@ func (s *server) retryStart(w http.ResponseWriter, r *http.Request, m *supervise
 	if err != nil {
 		s.logFailure("api: apply the operator's retry of a phase", "claim", token, "issue", c.Issue, "error", err)
 		writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("could not retry %s's phase %s: %v", c.Issue, working, err)))
-		return 0, false
+		return 0, false, true
 	}
 	if result.Refusal != nil {
 		writeJSON(w, result.Refusal.Status, errorBody(result.Refusal.Message))
-		return 0, false
+		return 0, false, true
 	}
 	after, err := s.recordedIssue(r.Context(), c.Issue)
 	if err != nil {
 		s.logFailure("api: read the issue after the operator's retry of its phase", "claim", token, "issue", c.Issue, "error", err)
 		writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("could not read %s's record after the retry: %v", c.Issue, err)))
-		return 0, false
+		return 0, false, true
 	}
 	if after != nil && after.Phase == phase.Held {
 		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf("%s is still held after the retry of its phase %s, so nothing relaunched %s: its tree lingers, and a lingering tree's members stay where they stood", c.Issue, working, token)))
-		return 0, false
+		return 0, false, true
 	}
 	s.log.Info("api: a retry restarted a phase", "claim", token, "issue", c.Issue, "phase", working)
-	return http.StatusAccepted, true
+	return http.StatusAccepted, true, true
 }
 
 // machineRetry is the retry an architect or a phase worker that runs nothing gets from its own

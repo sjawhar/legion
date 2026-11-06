@@ -201,13 +201,15 @@ export function createLegionTool(deps: {
         "for them instead. " +
         "The controller's read_state returns the daemon's whole state and set_status moves an issue to todo, backlog or icebox. " +
         "fresh_session (issue, role) has one claim leave the session it runs in behind and start again in a new one: the daemon " +
-        "stops the agent if it runs, forgets the session, and starts the claim, which loses everything that session held. The " +
-        "daemon refuses it for a claim in a turn (CLAIM_IN_A_TURN: ask again after the turn ends), for a claim whose launch is in " +
-        "flight (CLAIM_UNSETTLED) and for role controller. " +
+        "stops the agent if it runs, forgets the session, and starts the claim, which loses everything that session held. A " +
+        "phase worker that comes back owing no task is started through its issue's current phase, so it has that phase's work. " +
+        "The daemon refuses it for a claim in a turn (CLAIM_IN_A_TURN: ask again after the turn ends), for a claim whose " +
+        "launch is in flight (CLAIM_UNSETTLED) and for role controller. " +
         "compact (issue, role) shortens one claim's session instead: the daemon has Oh My Pi write a text summary of the " +
         "session so far and then sends the claim the task it owes again, and the claim keeps its session, its workspace and " +
         "everything it knows of its issue. Try compact before fresh_session for a claim that stays stuck. The answer says " +
-        "whether the session was compacted and, when it was not, why; the owed task went again either way. The daemon refuses " +
+        "whether the session was compacted and, when it was not, why; the claim came back and whatever task it owes went " +
+        "again either way. The daemon refuses " +
         "it for a claim that is suspended, stopped or failed (CLAIM_NOT_RUNNING: fresh_session reaches that one), for a claim " +
         "in a turn (CLAIM_IN_A_TURN), for a claim whose launch is in flight (CLAIM_UNSETTLED), for a claim whose role runs on " +
         "Claude Code (CLAIM_NOT_ON_OMP) and for role controller. ",

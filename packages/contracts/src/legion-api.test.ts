@@ -10,7 +10,7 @@ import {
   LegionActivityRequest,
   LegionCapabilityReport,
   LegionChildRequest,
-  LegionCompactRequest,
+  LegionClaimRequest,
   LegionCompactResponse,
   LegionControllerCredentialResponse,
   LegionControllerGrantRequest,
@@ -19,7 +19,6 @@ import {
   LegionEmptyResponse,
   LegionErrorResponse,
   LegionEscalateRequest,
-  LegionFreshSessionRequest,
   LegionGateRegisterRequest,
   LegionGrantRequest,
   LegionGrantResponse,
@@ -785,13 +784,8 @@ test("every request the plugin sends parses and names its required fields", () =
       { grantId: "grant-208", issue: "LEGION-208", status: "todo" },
     ],
     [
-      "fresh session",
-      LegionFreshSessionRequest,
-      { grantId: "grant-208", issue: "LEGION-209", role: "implementer" },
-    ],
-    [
-      "compact",
-      LegionCompactRequest,
+      "claim recovery",
+      LegionClaimRequest,
       { grantId: "grant-208", issue: "LEGION-209", role: "implementer" },
     ],
     [

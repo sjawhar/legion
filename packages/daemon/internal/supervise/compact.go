@@ -24,6 +24,12 @@ import (
 // anything is sent.
 var ErrCompactInstructions = errors.New("a compaction carries custom instructions, so Oh My Pi writes its summary as text rather than snapcompact's images")
 
+// ErrCompactNotTaken is a compaction nothing was asked for: the claim could not be written as
+// working, or it lost its process between the take and the ask. The claim is where the request
+// found it and no task was sent, where every other outcome gives the claim back and sends the
+// task it owes (compactEnded).
+var ErrCompactNotTaken = errors.New("the claim was not taken for a compaction, so nothing was asked of its session")
+
 // compacting is the compaction a claim is in: the connection it runs over and the generation it
 // was taken at, which is what the end of it is fenced on. It is memory only, as a held
 // suspension is: a daemon that restarts mid-compaction leaves a claim stored working, which its
@@ -32,6 +38,15 @@ var ErrCompactInstructions = errors.New("a compaction carries custom instruction
 type compacting struct {
 	conn       runtime.Conn
 	generation uint64
+	// back is the state the claim is given back in: the state the take found it in
+	// (compactStart), so a claim that was ready is ready again rather than idle, which would
+	// say a turn of it had ended. A turn that starts or ends under the compaction makes it
+	// idle, since the claim has had a turn by then (turnStartedWhileBusy, turnEnded).
+	back ClaimState
+	// inTurn is whether a turn Oh My Pi started under the compaction is still running: an
+	// Envoy follow-up it queued, which starts as the compaction ends. The claim is left
+	// working for that turn and its end gives the claim back (compactEnded, turnEnded).
+	inTurn bool
 }
 
 // Compact compacts the claim's Oh My Pi session and sends the task it owes again. It is no event
@@ -53,21 +68,28 @@ type compacting struct {
 // (runtime.RefusalReason); a wait that ran out, or a transport that failed, is an error of its
 // own. The claim is given back and the owed task is sent again in every one of those cases, and
 // only a compaction that ran puts the claim's run of provider-error turns back to zero
-// (compactEnded).
+// (compactEnded). A take that did not happen at all is ErrCompactNotTaken or a *RefusedError,
+// and leaves the claim where it was with its task unsent.
 func (m *Machine) Compact(ctx context.Context, customInstructions string) error {
 	if strings.TrimSpace(customInstructions) == "" {
 		return ErrCompactInstructions
 	}
 	token := m.View().Token
-	if err := m.Handle(ctx, RequestCompact{Claim: token}); err != nil {
+	var refused *RefusedError
+	switch err := m.Handle(ctx, RequestCompact{Claim: token}); {
+	case errors.As(err, &refused):
+		// The claim is in no state to be compacted, and the refusal names that state: its
+		// caller reads which refusal it is from there (api's compactRefusalCode).
 		return err
+	case err != nil:
+		return errors.Join(ErrCompactNotTaken, err)
 	}
 	run, taken := m.compaction()
 	if !taken {
 		// The claim lost its process between the take and this read (letGo), which leaves it
 		// suspended, failed or relaunching rather than working: its own path decides what
 		// happens to it next, and there is no compaction to end.
-		return fmt.Errorf("supervise: %s lost its process before its session could be compacted", token)
+		return fmt.Errorf("%w: %s lost its process before its session could be compacted", ErrCompactNotTaken, token)
 	}
 	err := run.conn.Compact(ctx, customInstructions, runtime.CompactTimeout)
 	// The end runs whatever the compaction did and whatever became of ctx — a caller that hung up
@@ -100,19 +122,36 @@ func (m *Machine) compaction() (compacting, bool) {
 // rather than from the machine. A claim left working by a daemon that stopped mid-compaction is
 // the shape a restart already knows: it asks the agent whether the turn is still running and
 // ends it when the agent says it is not (askTurnOver), and the owed task goes on that end.
+//
+// A prompt the agent has not answered yet is taken back before anything is asked. Oh My Pi runs
+// one thing at a time, so the compaction aborts the turn that prompt started, and the result of
+// an aborted turn carries no error of its own (shimwire.PromptResult): left as it was, the task
+// would be confirmed by that result and retired as worked at the end of the compaction, unsent
+// (promptResulted, settle). Taken back it is unconfirmed under a new id, which the result of
+// the aborted prompt no longer names (Machine.fence), and the end of the compaction sends it.
+// A task re-sent after work that may have run is this operation's lesser fault, as it is at
+// every other send that may repeat one (sendPending).
 func compactStart(m *Machine, ctx context.Context, _ Event) error {
 	conn, ok := m.deps.Conns.Conn(m.claim.Token)
 	if !ok {
 		return &RefusedError{State: m.claim.State, Request: "compact",
 			Reason: "the claim's shim is not connected, so nothing can be asked of its session"}
 	}
-	m.compacting = &compacting{conn: conn, generation: m.claim.Generation}
+	if m.claim.Pending != nil && (m.send != nil || m.resultPending()) {
+		m.log.Info("supervise: the compaction aborts the turn this task's prompt is running; the task goes back to waiting",
+			"delivery", m.claim.Pending.ID)
+		if err := m.takeBackPending(ctx, taskRead); err != nil {
+			return err
+		}
+	}
+	was := m.claim.State
+	m.compacting = &compacting{conn: conn, generation: m.claim.Generation, back: was}
 	m.claim.State = StateWorking
 	m.log.Info("supervise: the claim's session is being compacted; it is busy until the compaction ends",
 		"generation", m.claim.Generation, "session", m.claim.Session)
 	if err := m.persist(ctx); err != nil {
 		m.compacting = nil
-		m.claim.State = StateIdle
+		m.claim.State = was
 		return err
 	}
 	return nil
@@ -139,15 +178,32 @@ func compactStart(m *Machine, ctx context.Context, _ Event) error {
 // is to put the task in front of it again, and the next step of that ladder can be ten minutes
 // away (promptRetryDelay). What the ladder counted stays on the delivery
 // (Delivery.ProviderErrorRetries), so a turn that fails again waits the step it had reached.
+//
+// A turn Oh My Pi started under the compaction and has not ended — a follow-up an Envoy
+// delivery queued while the session was being compacted — leaves the claim working for that
+// turn, and that turn's end gives the claim back and sends the owed task (turnEnded). Idling
+// the claim here would send the owed task into a running turn and leave the daemon reading the
+// agent as free while it works.
 func compactEnded(m *Machine, ctx context.Context, ev Event) error {
 	ended := ev.(CompactEnded)
+	// A claim working with no compaction recorded is one whose process was let go and taken up
+	// again at the same generation; it goes back idle, as every end of a turn leaves one.
+	run := compacting{back: StateIdle}
+	if m.compacting != nil {
+		run = *m.compacting
+	}
 	m.compacting = nil
 	m.disarm(TimerPromptRetry)
 	if ended.Compacted {
 		m.claim.ProviderErrorRun = 0
 	}
 	m.log.Info("supervise: the compaction of the claim's session is over", "compacted", ended.Compacted,
-		"providerErrorRun", m.claim.ProviderErrorRun)
+		"providerErrorRun", m.claim.ProviderErrorRun, "inTurn", run.inTurn)
+	if run.inTurn {
+		// The claim stays working and keeps whatever is held for a turn's end, the suspension
+		// among it: this is not that end.
+		return m.persist(ctx)
+	}
 	if m.held != nil {
 		// A suspension that arrived while the compaction ran was held for it, as one that
 		// arrives in a turn is (holdSuspension); it runs now, exactly as the turn's end runs it.
@@ -155,12 +211,12 @@ func compactEnded(m *Machine, ctx context.Context, ev Event) error {
 			if m.held == nil {
 				return err
 			}
-			m.claim.State = StateIdle
+			m.claim.State = run.back
 			return errors.Join(err, m.persist(ctx))
 		}
 		return nil
 	}
-	m.claim.State = StateIdle
+	m.claim.State = run.back
 	if err := m.persist(ctx); err != nil {
 		return err
 	}

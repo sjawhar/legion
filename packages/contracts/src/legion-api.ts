@@ -905,30 +905,20 @@ export const LegionIssueStatusRequest = z.strictObject({
   status: z.enum(["todo", "backlog", "icebox"]),
 });
 
-/** `api.FreshSessionRequest`, the controller's `fresh_session`: the claim on `role` of `issue`
- * leaves the session it recorded behind and starts again in a new one, which is what a session a
- * provider keeps refusing needs. It is the effect `legion claims retry --fresh-session` runs for
- * an operator, and it reaches every claim of the project that is not in a turn — one idle on the
- * provider-error ladder, a suspended one, one an operator stopped, a failed one, and a root
- * architect. A claim in a turn is refused (`CLAIM_IN_A_TURN`), one whose launch is in flight is
- * refused (`CLAIM_UNSETTLED`), and the project's controller is neither a role here
- * (`INVALID_ROLE`) nor a claim the operator's own door may name (`NOT_THE_CONTROLLER`). */
-export const LegionFreshSessionRequest = z.strictObject({
-  grantId: nonEmptyString,
-  issue: nonEmptyString,
-  role: z.enum(LEGION_ROLES),
-});
-
-/** `api.CompactRequest`, the controller's `compact`: the claim on `role` of `issue` has its Oh
- * My Pi session compacted and is then sent the task it owes again. It is the recovery a claim
- * whose provider keeps refusing its session reaches for first — the session, its workspace and
- * everything the worker knows of its issue stay, and only the transcript gets shorter — where a
- * fresh session keeps nothing. It is the effect `legion claims compact` runs for an operator.
- * The daemon refuses a suspended, stopped or failed claim naming `fresh_session`
- * (`CLAIM_NOT_RUNNING`), a claim in a turn (`CLAIM_IN_A_TURN`), a claim whose launch is in
- * flight (`CLAIM_UNSETTLED`), a claim whose role runs on Claude Code, which has no Oh My Pi
- * session at all (`CLAIM_NOT_ON_OMP`), and the role `controller` (`INVALID_ROLE`). */
-export const LegionCompactRequest = z.strictObject({
+/** `api.ClaimRequest`, what either of the controller's two claim recoveries names: the claim on
+ * `role` of `issue`, under the caller's controller grant. The project's controller is no role
+ * here, so no body can name its claim (`INVALID_ROLE`).
+ *
+ * `fresh_session` has that claim leave the session it recorded behind and start again in a new
+ * one, the effect `legion claims retry --fresh-session` runs for an operator. `compact`
+ * shortens the session instead, the effect `legion claims compact` runs for one: the claim
+ * keeps its session, its workspace and everything it knows of its issue, and is sent the task
+ * it owes again. Both reach every claim of the project that is not in a turn, a root architect
+ * included, and the daemon refuses each with the code and the sentence the controller reads:
+ * `CLAIM_IN_A_TURN`, `CLAIM_UNSETTLED`, `NOT_THE_CONTROLLER`, and for a compaction
+ * `CLAIM_NOT_RUNNING` (a suspended, stopped or failed claim, which `fresh_session` reaches)
+ * and `CLAIM_NOT_ON_OMP` (a role running on Claude Code, which has no Oh My Pi session). */
+export const LegionClaimRequest = z.strictObject({
   grantId: nonEmptyString,
   issue: nonEmptyString,
   role: z.enum(LEGION_ROLES),
@@ -937,8 +927,10 @@ export const LegionCompactRequest = z.strictObject({
 /** `api.CompactResponse`, what became of a compaction. `compacted` is whether Oh My Pi
  * compacted the session, and `reason` why it did not: Oh My Pi's own words for a compaction it
  * refused or skipped ("Already compacted", "Nothing to compact (session too small)"), and the
- * daemon's for a wait that ran out. A compaction that did not run is this answer rather than a
- * failure, because the owed task went to the claim again all the same. */
+ * daemon's for a wait that ran out. The daemon cuts it to 200 bytes, since the words are a
+ * model's and reach the controller's next prompt. A compaction that did not run is this answer
+ * rather than a failure, because the claim came back and whatever task it owes went to it
+ * again all the same. */
 export const LegionCompactResponse = z.object({
   compacted: z.boolean(),
   reason: z.string().optional(),
