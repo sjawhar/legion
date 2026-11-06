@@ -6,16 +6,15 @@
 # registry. Two arms, each with a negative control that must fail the way the bug failed:
 #
 #   --arm stall    a pane whose registration post is wedged forever is detected, bounded, keeps
-#                  refreshing past one record lifetime, and says so exactly once.
+#                  refreshing past one live window, and says so exactly once.
 #   --arm recover  a pane unregistered while its process runs re-registers itself, with no human
 #                  and no write from this script beyond the one delete.
 #
 # The two numbers every budget below is measured in — the pane's refresh interval and the
-# listener's record lifetime — are read at run time out of the files that define them
-# (packages/envoy-client/src/envoy-settings.ts and packages/envoy/internal/session/registry.go,
-# the same two .github/scripts/check-heartbeat-margin.sh parses), never copied here: a copy would
-# go stale the moment either moves and this smoke would measure against a budget the tree no
-# longer has.
+# listener's live window — are read at run time from `@legion/contracts`
+# (`SESSION_HEARTBEAT_MS` and `SESSION_LIVE_WINDOW_MS`, declared once each in
+# packages/contracts/src/envoy-session.ts), never copied here: a copy would go stale the moment
+# either moves and this smoke would measure against a budget the tree no longer has.
 #
 # The listener is the operator's (ENVOY_URL and ENVOY_TOKEN_FILE), or `--local-stack` builds
 # natsd and the listener from this checkout with `go build` and runs both on loopback ports of
@@ -57,29 +56,23 @@ local_stack_fail=refuse
 # shellcheck source=packages/pi-envoy/scripts/local-stack.sh
 source "${script_dir}/local-stack.sh"
 
-# The refresh interval and the record lifetime, out of the tree rather than out of this file.
-settings_file="${repo_root}/packages/envoy-client/src/envoy-settings.ts"
-registry_file="${repo_root}/packages/envoy/internal/session/registry.go"
-readonly settings_file registry_file
-[[ -r "$settings_file" ]] ||
-  refuse "${settings_file} is not readable: this smoke reads DEFAULT_HEARTBEAT_MS from it"
-[[ -r "$registry_file" ]] ||
-  refuse "${registry_file} is not readable: this smoke reads OpenSessionRegistry's default ttl from it"
-default_heartbeat_ms="$(sed -nE 's/^export const DEFAULT_HEARTBEAT_MS = ([0-9_]+);.*$/\1/p' \
-  "$settings_file" | tr -d _)"
-[[ "$default_heartbeat_ms" =~ ^[0-9]+$ ]] ||
-  refuse "${settings_file} declares no single plain-decimal DEFAULT_HEARTBEAT_MS this smoke can read"
-readonly default_heartbeat_ms
-record_ttl="$(sed -nE 's/^[[:space:]]*opts := sessionRegistryOpts\{.*ttl: ([0-9_]+) \* time\.(Second|Minute).*$/\1 \2/p' \
-  "$registry_file" | tr -d _)"
-[[ "$record_ttl" =~ ^[0-9]+\ (Second|Minute)$ ]] ||
-  refuse "${registry_file} declares no single OpenSessionRegistry default ttl in <n> * time.Second|Minute form this smoke can read"
-if [[ "$record_ttl" == *Minute ]]; then
-  record_lifetime_s=$((${record_ttl% *} * 60))
-else
-  record_lifetime_s="${record_ttl% *}"
-fi
-readonly record_ttl record_lifetime_s
+# The refresh interval and the live window, read from @legion/contracts — the one declaration
+# of each, which both languages are generated from — rather than scraped out of a source file,
+# since no pattern over program text can tell a live declaration from one inside a comment. bun
+# runs in this package's directory, where its own @legion/contracts dependency resolves from.
+command -v bun >/dev/null 2>&1 || refuse "bun is required"
+contracts_timing="$(cd -- "${repo_root}/packages/pi-envoy" &&
+  bun -e 'import { SESSION_HEARTBEAT_MS, SESSION_LIVE_WINDOW_MS } from "@legion/contracts";
+console.log(SESSION_HEARTBEAT_MS, SESSION_LIVE_WINDOW_MS);')" ||
+  refuse "reading SESSION_HEARTBEAT_MS and SESSION_LIVE_WINDOW_MS from @legion/contracts failed (the reason is above)"
+[[ "$contracts_timing" =~ ^[0-9]+[[:space:]][0-9]+$ ]] ||
+  refuse "@legion/contracts answered \"${contracts_timing}\" for SESSION_HEARTBEAT_MS and SESSION_LIVE_WINDOW_MS, which is not two whole numbers"
+read -r default_heartbeat_ms live_window_ms <<<"$contracts_timing"
+# Rounded up, as the refresh interval below is: live_window_s is a budget the session must
+# outlive, so a window with a sub-second remainder must not be waited out short.
+live_window_s=$(((live_window_ms + 999) / 1000))
+readonly contracts_timing default_heartbeat_ms live_window_ms live_window_s
+note "read from @legion/contracts: refresh interval ${default_heartbeat_ms} ms (SESSION_HEARTBEAT_MS), live window ${live_window_s}s (SESSION_LIVE_WINDOW_MS)"
 
 arm=""
 control=0
@@ -167,13 +160,13 @@ for tool in "${required[@]}"; do
   command -v "$tool" >/dev/null 2>&1 || refuse "${tool} is required"
 done
 
-# What the pane's refresh interval will be: DEFAULT_HEARTBEAT_MS as the tree declares it, unless
-# the operator shortened it, which is what every "one refresh interval" budget below is measured
-# in.
+# What the pane's refresh interval will be: SESSION_HEARTBEAT_MS as @legion/contracts declares
+# it, unless the operator shortened it, which is what every "one refresh interval" budget below
+# is measured in.
 refresh_ms="${heartbeat_ms:-$default_heartbeat_ms}"
 readonly refresh_ms
 readonly refresh_s=$(((refresh_ms + 999) / 1000))
-note "read from the tree: refresh interval ${default_heartbeat_ms} ms (DEFAULT_HEARTBEAT_MS, ${settings_file}), record lifetime ${record_lifetime_s}s (${record_ttl}, OpenSessionRegistry's default ttl, ${registry_file}); this run refreshes every ${refresh_s}s"
+note "this run refreshes every ${refresh_s}s"
 
 arm_label="$arm"
 ((control == 0)) || arm_label="${arm}, control"
@@ -445,13 +438,13 @@ run_stall() {
   wedged_last_seen="$(row_field "$row" last_seen)"
   note "registration ${wedge_at} is wedged; last_seen at the wedge is ${wedged_last_seen}"
 
-  # One record lifetime past the wedged post plus a margin: before that, a listener record that is
-  # merely not yet expired proves nothing either way.
+  # One live window past the wedged post plus a margin: before that, a listener record that is
+  # merely still inside the window proves nothing either way.
   local margin=60
   ((control == 0)) || margin=90
-  local target=$((wedged_at + record_lifetime_s + margin))
+  local target=$((wedged_at + live_window_s + margin))
   local gone_at=0
-  note "watching until $(date -u -d "@${target}" +%H:%M:%SZ) (${record_lifetime_s}s record lifetime + ${margin}s)"
+  note "watching until $(date -u -d "@${target}" +%H:%M:%SZ) (${live_window_s}s live window + ${margin}s)"
   while (($(date +%s) < target)); do
     sleep "$poll_s"
     # A list this poll could not read says nothing either way; own_row has noted why.
@@ -476,7 +469,7 @@ run_stall() {
   done
 
   read_own_row "$list_read_budget_s" ||
-    verdict_fail "could not read the listener's session list within ${list_read_budget_s}s of the watch ending, so whether the session outlived the ${record_lifetime_s}s record lifetime is unproven: ${list_read_error}"
+    verdict_fail "could not read the listener's session list within ${list_read_budget_s}s of the watch ending, so whether the session outlived the ${live_window_s}s live window is unproven: ${list_read_error}"
   row="$row_json"
   local regs stalls last_seen
   regs="$(last_registration)"
@@ -491,7 +484,7 @@ run_stall() {
   fi
 
   [[ -n "$row" ]] ||
-    verdict_fail "the session is not listed $(($(date +%s) - wedged_at))s after the wedged post; expected it to outlive the ${record_lifetime_s}s record lifetime"
+    verdict_fail "the session is not listed $(($(date +%s) - wedged_at))s after the wedged post; expected it to outlive the ${live_window_s}s live window"
   last_seen="$(row_field "$row" last_seen)"
   ((last_seen > wedged_last_seen)) ||
     verdict_fail "last_seen did not advance past the wedged post: ${wedged_last_seen} at the wedge, ${last_seen} now"
@@ -499,7 +492,7 @@ run_stall() {
     verdict_fail "no registration past the wedged ${wedge_at} was posted (last accepted ${regs}); the refresh did not resume"
   ((stalls == 1)) ||
     verdict_fail "expected exactly one stall line in the pane's log, saw ${stalls}"
-  verdict_pass "${session_id} stayed listed $(($(date +%s) - wedged_at))s after registration ${wedge_at} wedged — past the ${record_lifetime_s}s record lifetime — last_seen advanced ${wedged_last_seen} → ${last_seen}, the fixture logged ${regs} accepted registrations (past the wedged ${wedge_at}, so the refresh kept going), and the pane said the stall exactly once"
+  verdict_pass "${session_id} stayed listed $(($(date +%s) - wedged_at))s after registration ${wedge_at} wedged — past the ${live_window_s}s live window — last_seen advanced ${wedged_last_seen} → ${last_seen}, the fixture logged ${regs} accepted registrations (past the wedged ${wedge_at}, so the refresh kept going), and the pane said the stall exactly once"
 }
 
 run_recover() {

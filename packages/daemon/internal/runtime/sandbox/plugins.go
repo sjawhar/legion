@@ -6,9 +6,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 // pluginsRoot is where a role's installed plugin generations live, under the role's state home
@@ -241,6 +243,119 @@ func installBlock(stateHome string, generation uint64, plugins *runtime.PluginIn
 	)
 }
 
+// skillsInstall is the skills volume as a role's start wrapper names it: the clone `skills-fetch`
+// left and the two records beside it, every path within the pod's SkillsDir mount. A launch of a
+// deployment that names no skills repository carries none.
+type skillsInstall struct {
+	Dir, MarketplaceFile, PluginsFile string
+	// Root is the skills volume's own mount, which `legion skills-check` reads every record of
+	// (SkillsDir), and Legion the `legion` of the image that check runs.
+	Root, Legion string
+}
+
+// skillsInstall names only the skills this launch's pod carries: the kind's setting for a fresh
+// pod, or the repository the kept pod's own shape records. The controller's kind names none.
+func (l launch) skillsInstall(r *Runtime) *skillsInstall {
+	repository := l.kind.skillsRepository(r)
+	if l.kept != nil {
+		repository = l.kept.skills
+	}
+	return skillsInstallation(repository, r.tools.Legion)
+}
+
+func skillsInstallation(repository ghrepo.Repository, legion string) *skillsInstall {
+	if repository.IsZero() {
+		return nil
+	}
+	return &skillsInstall{
+		Dir:             workspace.SkillsClone(SkillsDir, repository),
+		MarketplaceFile: workspace.SkillsMarketplaceFile(SkillsDir),
+		PluginsFile:     workspace.SkillsPluginsFile(SkillsDir),
+		Root:            SkillsDir,
+		Legion:          legion,
+	}
+}
+
+// skillsBlock is the part of the start wrapper a role of a pod with a skills volume runs: it
+// registers the clone skills-fetch left (`omp plugin marketplace add <dir>`), installs every
+// plugin the clone's catalog names from it, and then proves that what Oh My Pi would load is the
+// commit the pod cloned, all before Oh My Pi starts. skills names the clone itself
+// (workspace.SkillsClone), the two records beside it that hold the marketplace's and the plugins'
+// names, the volume's own root, which the check reads every record of, and the image's `legion`,
+// which runs that check.
+//
+// The check is `legion skills-check`, and it is the last thing before the harness for a reason
+// (dispatch://INFRA-1300, R4): the install's own success says a marketplace resolved a plugin of
+// that version, and nothing more. The check compares the bytes Oh My Pi installed with the digest
+// skills-fetch took of that plugin's directory in the clone at the commit it recorded, so an
+// install that resolved something else, a tree something wrote into the plugin cache afterwards,
+// and a volume whose clone changed under a retry each fail the launch with a line of their own
+// naming the clone, rather than an agent running with skills nobody can account for. It reaches no
+// network: it reads the pod's own records and asks Oh My Pi where it installed each plugin.
+//
+// It adds a *local* marketplace, a path on the pod's own volume, and never `owner/repo`. That is
+// the point of the whole arrangement (dispatch://INFRA-1300): a registered local marketplace has
+// no git remote, so neither this step nor Oh My Pi's own startup refresh of a marketplace whose
+// cache is more than 24 hours old fetches anything — measured on the pinned omp 18.13.3, where a
+// stale local marketplace's refresh re-reads the directory and runs no git at all, while the same
+// refresh of an `owner/repo` marketplace clones. A clone in a role's launch context is what ends
+// the pod's gVisor sandbox about four seconds in (dispatch://INFRA-1262), so a role must do none.
+//
+// `add` is run first. If the name is already registered, remove that registration and add the
+// local path again: a kept role may have registered the same name from GitHub, and `update` would
+// fetch that old source instead of rebinding it. No fallback may read the registry's old remote.
+// A failure prints one line naming the directory and exits non-zero, so a missing clone or an
+// incomplete record fails loudly before the harness rather than starting a role without skills.
+// A forced reinstall preserves Oh My Pi's disabled selection, so explicitly enable the installed
+// plugin too: a role that disabled it once must not silently start without its configured skills.
+//
+// It has installBlock's shape, for installBlock's reasons: a subshell with its stdout on stderr,
+// since the shim reads the child's stdout as the RPC frame stream, and every path shell-quoted
+// into the script (shellprefix.Literal) so it travels as literal text. omp is called by the image
+// path the plugin commands live at (defaultAgent), as bun and npm are called by theirs, and never
+// through Options.Agent: that is the harness the shim starts, which a test rig replaces with a
+// stub, and a stub harness still needs the real omp's plugin commands. Each name the records hold
+// is one line of ASCII letters, digits, hyphens, underscores and dots — workspace-init skills
+// refuses anything else — so the `"$name"` reading below carries each whole. The block reads no
+// harness frames: its stdin is /dev/null, and each install also gets /dev/null rather than the
+// loop's plugin records, and the check its own. Its subshell leaves the setup count and the
+// harness's argv unchanged.
+func skillsBlock(skills *skillsInstall) string {
+	omp := shellprefix.Literal(defaultAgent)
+	failMsg := fmt.Sprintf("legion skills: the skills marketplace in %s is not installable; not starting Oh My Pi", skills.Dir)
+	checkMsg := fmt.Sprintf("legion skills: what Oh My Pi would load is not the commit this pod's skills clone in %s recorded; not starting Oh My Pi", skills.Dir)
+	return fmt.Sprintf(`(
+  legion_skills_fail() { echo %s; exit 1; }
+  legion_skills_unverified() { echo %s; exit 1; }
+  [ -d %s ] && [ -r %s ] && [ -r %s ] || legion_skills_fail
+  market=$(cat %s) || legion_skills_fail
+  [ -n "$market" ] || legion_skills_fail
+  %s plugin marketplace add %s || {
+    %s plugin marketplace remove "$market" && %s plugin marketplace add %s
+  } || legion_skills_fail
+  installed=0
+  while IFS= read -r plugin || [ -n "$plugin" ]; do
+    [ -n "$plugin" ] || continue
+    %s plugin install "$plugin@$market" --force </dev/null || legion_skills_fail
+    %s plugin enable "$plugin@$market" </dev/null || legion_skills_fail
+    installed=1
+  done < %s
+  [ "$installed" -eq 1 ] || legion_skills_fail
+  %s skills-check --dir %s --omp %s </dev/null || legion_skills_unverified
+) </dev/null 1>&2
+`,
+		shellprefix.Literal(failMsg),
+		shellprefix.Literal(checkMsg),
+		shellprefix.Literal(skills.Dir), shellprefix.Literal(skills.MarketplaceFile), shellprefix.Literal(skills.PluginsFile),
+		shellprefix.Literal(skills.MarketplaceFile),
+		omp, shellprefix.Literal(skills.Dir),
+		omp, omp, shellprefix.Literal(skills.Dir),
+		omp, omp,
+		shellprefix.Literal(skills.PluginsFile),
+		shellprefix.Literal(skills.Legion), shellprefix.Literal(skills.Root), shellprefix.Literal(defaultAgent),
+	)
+}
+
 // setupBlock runs the deployment's setup command (runtime.kubernetes.setup), whose words are the
 // wrapper's positional parameters after their count: $1 is the count n, the n words after it the
 // command, and the rest the agent's argv. It shifts the count away, runs the first n words in a
@@ -403,14 +518,19 @@ func claudeCodeBlock(stateHome string, generation uint64, lockWait int) string {
 }
 
 // startScript is the start wrapper an agent argv runs in before the harness starts when the launch
-// installs a stale-plugin relaunch's pair (plugins set), runs Claude Code (claudeDir set), the
-// deployment names a setup command, or any of them: for a Claude launch the one `mkdir -p` of the
-// Claude Code configuration directory and then the install of Claude Code itself
-// (claudeCodeBlock), then the plugin install (installBlock) when plugins is set, then the setup
+// installs a stale-plugin relaunch's pair (plugins set), runs Claude Code (claudeDir set), the pod
+// carries a skills volume (skills set), the deployment names a setup command, or any of them: for a
+// Claude launch the one `mkdir -p` of the Claude Code configuration directory and then the install
+// of Claude Code itself (claudeCodeBlock), then the plugin install (installBlock) when plugins is
+// set, then the skills install (skillsBlock) when skills is set, then the setup
 // command (setupBlock), then `exec "$@"` into the agent's real command, only once everything
 // before it has succeeded, so the shim's child is the harness itself from then on. lockWait is
 // the installs' flock bound in seconds (installLockWait), which only a Claude launch's block and
 // an installing launch's render.
+//
+// The skills install comes before the setup command so that a deployment's setup may check what it
+// installed (`omp plugin list | grep -q …`) rather than install anything itself: a role's launch
+// must clone nothing (dispatch://INFRA-1262).
 //
 // claudeDir is the launch's CLAUDE_CONFIG_DIR (claudeConfigDir), "" for an Oh My Pi launch, which
 // therefore never renders claudeCodeBlock. It is made here and nowhere else: it is on the issue's
@@ -418,7 +538,7 @@ func claudeCodeBlock(stateHome string, generation uint64, lockWait int) string {
 // to make, and Claude Code is told it as a variable rather than asked to create it. The path is
 // shell-quoted into the script (shellprefix.Literal), as the install blocks' paths are, so it
 // travels as literal text.
-func startScript(stateHome string, generation uint64, plugins *runtime.PluginInstall, claudeDir string, lockWait int) string {
+func startScript(stateHome string, generation uint64, plugins *runtime.PluginInstall, claudeDir string, skills *skillsInstall, lockWait int) string {
 	script := "set -eu\n"
 	if claudeDir != "" {
 		script += "mkdir -p -- " + shellprefix.Literal(claudeDir) + "\n"
@@ -427,21 +547,24 @@ func startScript(stateHome string, generation uint64, plugins *runtime.PluginIns
 	if plugins != nil {
 		script += installBlock(stateHome, generation, plugins, lockWait)
 	}
+	if skills != nil {
+		script += skillsBlock(skills)
+	}
 	return script + setupBlock + "exec \"$@\"\n"
 }
 
-// startArgv wraps agent in the start wrapper (startScript) when plugins, claudeDir or setup is
-// set: `/bin/sh -c '<script>' legion-start <len(setup)> <setup…> <agent…>`. The setup command and
-// the agent argv ride as positional parameters after $0 (startName), never quoted into the script
-// itself, so none of either is reparsed by the shell. With none of the three — every tmux launch,
-// and every Kubernetes launch of an Oh My Pi role whose deployment names no setup command and
-// which is not installing a stale-plugin relaunch's pair into a kept pod (relaunch.go) — agent is
-// returned unchanged. lockWait is the installs' flock bound in seconds (installLockWait), which
-// only a Claude launch and an installing launch render.
-func startArgv(stateHome string, generation uint64, plugins *runtime.PluginInstall, claudeDir string, setup, agent []string, lockWait int) []string {
-	if plugins == nil && claudeDir == "" && len(setup) == 0 {
+// startArgv wraps agent in the start wrapper (startScript) when plugins, claudeDir, skills or setup
+// is set: `/bin/sh -c '<script>' legion-start <len(setup)> <setup…> <agent…>`. The setup command
+// and the agent argv ride as positional parameters after $0 (startName), never quoted into the
+// script itself, so none of either is reparsed by the shell. With none of the four — every tmux
+// launch, and every Kubernetes launch of an Oh My Pi role whose deployment names neither a setup
+// command nor a skills repository and which is not installing a stale-plugin relaunch's pair into a
+// kept pod (relaunch.go) — agent is returned unchanged. lockWait is the installs' flock bound in
+// seconds (installLockWait), which only a Claude launch and an installing launch render.
+func startArgv(stateHome string, generation uint64, plugins *runtime.PluginInstall, claudeDir string, skills *skillsInstall, setup, agent []string, lockWait int) []string {
+	if plugins == nil && claudeDir == "" && skills == nil && len(setup) == 0 {
 		return agent
 	}
-	argv := []string{"/bin/sh", "-c", startScript(stateHome, generation, plugins, claudeDir, lockWait), startName, strconv.Itoa(len(setup))}
+	argv := []string{"/bin/sh", "-c", startScript(stateHome, generation, plugins, claudeDir, skills, lockWait), startName, strconv.Itoa(len(setup))}
 	return append(append(argv, setup...), agent...)
 }
