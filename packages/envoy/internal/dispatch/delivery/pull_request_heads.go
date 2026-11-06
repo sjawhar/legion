@@ -418,13 +418,9 @@ func repositoryUnreadable(err error) bool {
 // keeps the attribution the row holds (UpsertPullRequestHead), and the reconcile reads it again
 // rather than this read-through standing as the last word.
 func ReadThroughCommitPulls(ctx context.Context, pool *store.Pool, client *githubapp.Client, repoFull, sha string, now time.Time) (int, error) {
-	owner, repo, err := splitRepo(repoFull)
+	owner, repo, token, err := repositoryRead(ctx, client, repoFull)
 	if err != nil {
 		return 0, err
-	}
-	token, err := client.RepositoryToken(ctx, owner, repo)
-	if err != nil {
-		return 0, fmt.Errorf("mint installation token for %s: %w", repoFull, err)
 	}
 	pulls, err := fetchCommitPullPayloads(ctx, client, token, owner, repo, sha)
 	if err != nil {

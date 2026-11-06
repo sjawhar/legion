@@ -305,6 +305,31 @@ const IdempotencyAnswerNotKept = "ANSWER_NOT_KEPT"
 const IdempotencyKeyTTL = 86400000 * time.Millisecond
 const IdempotencyLease = 60000 * time.Millisecond
 
+// SessionHeartbeat is how often a pane's pi-envoy plugin refreshes its listener registration, and
+// SessionLiveWindow how long a session's last registration keeps it live to the listener. Three
+// heartbeats plus one whole listener call fit inside the live window, so two refreshes may fail
+// and the third still completes before the session stops reading live. Generated from
+// SESSION_HEARTBEAT_MS and SESSION_LIVE_WINDOW_MS in packages/contracts, whose doc comments state
+// that arrangement, so the pane's refresh and the listener's window cannot drift apart.
+const SessionHeartbeat = 90000 * time.Millisecond
+const SessionLiveWindow = 300000 * time.Millisecond
+
+// SessionClaimStale is how long a session's role claim may go unrefreshed before a reader treats
+// the process that wrote it as gone, which allows three missed heartbeats at SessionHeartbeat.
+// Generated from SESSION_CLAIM_STALE_MS in packages/contracts so session.ClaimStaleAfter and the
+// Legion daemon's copy of it, which times its last re-hold of a notice, are one number.
+const SessionClaimStale = 300000 * time.Millisecond
+
+// ListenerCallTimeout is how long one attempt of an envoy-client call waits for the listener,
+// ListenerCallRetryDelay the pause before the next attempt, and ListenerCallAttempts how many
+// attempts one call makes. Together they are a whole call's budget, which the heartbeat interval
+// is set to leave room for. Generated from LISTENER_CALL_TIMEOUT_MS, LISTENER_CALL_RETRY_DELAY_MS
+// and LISTENER_CALL_ATTEMPTS in packages/contracts so the client's cost and every check of that
+// budget are computed from one set of numbers.
+const ListenerCallTimeout = 5000 * time.Millisecond
+const ListenerCallRetryDelay = 250 * time.Millisecond
+const ListenerCallAttempts = 2
+
 // DispatchLoginHeader is the request header a page puts on every write it makes, naming the login
 // of the person who pressed it, and DispatchLoginChanged the code of the 409 for one whose caller
 // is anyone else: nothing ran. Generated from DISPATCH_LOGIN_HEADER and DISPATCH_LOGIN_CHANGED in

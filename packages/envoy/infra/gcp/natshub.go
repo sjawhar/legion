@@ -175,6 +175,19 @@ type HubListenerArgs struct {
 	// <hostname>.<tailnetDnsName>, which the hub always serves. Each entry is rendered as written,
 	// since the listener normalizes what it reads.
 	AllowedHosts []string `pulumi:"allowedHosts,optional"`
+	// AgentSecretsUrl, agentSecretsAudience and publicUrl turn on this listener's broker check
+	// together, as agentSecretsUrl and agentSecretsAudience turn on Dispatch's relay: the
+	// secrets broker a caller's broker access token is introspected at
+	// (ENVOY_AGENT_SECRETS_URL), the audience this VM's own Google identity token is minted
+	// for, which is the identity each introspection presents
+	// (ENVOY_AGENT_SECRETS_GOOGLE_AUDIENCE), and the origin a caller reaches this listener at,
+	// which a DPoP proof's target URI is checked against (ENVOY_PUBLIC_URL). Set all three or
+	// none: a hub that sets none renders none of them, and its listener takes no broker token
+	// at all. The hub is a VM, so the audience is its identity; the projected-token file a pod
+	// presents instead is no input here, since the listener refuses it beside the audience.
+	AgentSecretsUrl      string `pulumi:"agentSecretsUrl,optional"`
+	AgentSecretsAudience string `pulumi:"agentSecretsAudience,optional"`
+	PublicUrl            string `pulumi:"publicUrl,optional"`
 }
 
 // Annotate names the type gcp:HubListener in the schema, for the reason NATSUserArgs's gives.
@@ -323,6 +336,12 @@ func newSettings(args *NatsHubArgs) (settings, error) {
 // registers. The operator's entries are checked as their own list, by the rule core owns, so a
 // refusal names listener.allowedHosts and the index the operator wrote, not the index of the
 // rendered list the hub's own address comes first in.
+//
+// Its broker check is checked the same way, by core's rule under the hub's own prefix, so a
+// refusal names listener.agentSecretsUrl, listener.agentSecretsAudience or listener.publicUrl.
+// The listener refuses a partial set when it boots, which the group would answer by recreating
+// the VM that cannot start, so the hub refuses one at preview, naming the input left out; a hub
+// that sets none renders none of the three.
 func resolveListener(args *NatsHubArgs) (*listener, error) {
 	l := args.Listener
 	if l == nil {
@@ -344,11 +363,17 @@ func resolveListener(args *NatsHubArgs) (*listener, error) {
 	if err := core.CheckAllowedHosts("listener.allowedHosts", l.AllowedHosts); err != nil {
 		return nil, err
 	}
+	if err := core.CheckBroker("listener.", l.AgentSecretsUrl, l.AgentSecretsAudience, l.PublicUrl); err != nil {
+		return nil, err
+	}
 	env, err := core.ListenerConfig{
-		MachineID:    args.Hostname,
-		Port:         core.DefaultListenerPort,
-		ListenHost:   "127.0.0.1",
-		AllowedHosts: append([]string{core.TailnetHostName(args.Hostname, args.TailnetDnsName)}, l.AllowedHosts...),
+		MachineID:            args.Hostname,
+		Port:                 core.DefaultListenerPort,
+		ListenHost:           "127.0.0.1",
+		AllowedHosts:         append([]string{core.TailnetHostName(args.Hostname, args.TailnetDnsName)}, l.AllowedHosts...),
+		AgentSecretsURL:      l.AgentSecretsUrl,
+		AgentSecretsAudience: l.AgentSecretsAudience,
+		PublicURL:            l.PublicUrl,
 	}.Env([]string{localNATS})
 	if err != nil {
 		return nil, err
@@ -363,9 +388,12 @@ func resolveListener(args *NatsHubArgs) (*listener, error) {
 // type and the disk type, the group's and the template's inputs, the disk type also quoted by its
 // refusal; the images, written into the user data; the tailnet DNS name, which its own refusal
 // quotes and whose address the listener's environment carries, and each of the listener's further
-// allowed hosts, which that environment carries too; and each user's machine id, which the hub
-// turns into that user's rules before core sees them, so core's refusal would name a rule entry
-// the user never wrote. A user's name and rule entries are core's:
+// allowed hosts, which that environment carries too; the listener's broker check, its
+// agentSecretsUrl, agentSecretsAudience and publicUrl, each rendered into that environment as one
+// variable of the listener's docker run command, and each named here by the hub's own path, since
+// core's refusal of a seed in one would name core's input and not the hub's; and each user's
+// machine id, which the hub turns into that user's rules before core sees them, so core's refusal
+// would name a rule entry the user never wrote. A user's name and rule entries are core's:
 // core.Authorization refuses a seed in either before any refusal of its own quotes it, and the
 // hub's own user refusals name a user by its index alone (authorization). A user's nkey is core's
 // too: it refuses any nkey that is not a user public key, a seed included, without quoting it.
@@ -392,7 +420,10 @@ func seededInput(args *NatsHubArgs) (string, bool) {
 		}
 	}
 	if args.Listener != nil {
-		fields = append(fields, field{"listener.image", args.Listener.Image}, field{"listener.seedSecret", args.Listener.SeedSecret})
+		fields = append(fields, field{"listener.image", args.Listener.Image}, field{"listener.seedSecret", args.Listener.SeedSecret},
+			field{"listener.agentSecretsUrl", args.Listener.AgentSecretsUrl},
+			field{"listener.agentSecretsAudience", args.Listener.AgentSecretsAudience},
+			field{"listener.publicUrl", args.Listener.PublicUrl})
 		for i, entry := range args.Listener.AllowedHosts {
 			fields = append(fields, field{fmt.Sprintf("listener.allowedHosts[%d]", i), entry})
 		}

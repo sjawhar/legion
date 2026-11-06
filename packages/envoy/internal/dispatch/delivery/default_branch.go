@@ -176,11 +176,11 @@ func writeDefaultBranchCommit(ctx context.Context, pool *store.Pool, repoFull, s
 	return nil
 }
 
-// repositoryRead is the prologue of every read the App makes about one repository, here and in
-// commit_held.go: it splits repoFull into the owner and repo GitHub's paths take and mints that
-// repository's installation token. A malformed name comes back as splitRepo's own error and a
-// refused mint as that error wrapped, which cannotSeeRepository and repositoryUnreadable
-// classify.
+// repositoryRead is the prologue of every read the App makes about one repository, here, in
+// commit_held.go and in pull_request_heads.go's ReadThroughCommitPulls: it splits repoFull
+// into the owner and repo GitHub's paths take and mints that repository's installation token.
+// A malformed name comes back as splitRepo's own error and a refused mint as that error
+// wrapped, which cannotSeeRepository and repositoryUnreadable classify.
 func repositoryRead(ctx context.Context, client *githubapp.Client, repoFull string) (owner, repo, token string, err error) {
 	owner, repo, err = splitRepo(repoFull)
 	if err != nil {
