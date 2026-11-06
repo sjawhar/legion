@@ -6,6 +6,12 @@ releases, one per `pi-legion-v*` tag.
 `@sjawhar/pi-legion` was split from `@sjawhar/pi-legion-envoy` 7.x (LEGION-247). Every release
 before the split, and the Envoy plugin's releases after it, are in `packages/pi-envoy/CHANGELOG.md`.
 
+## [18.14.1] - 2026-11-06
+
+### Changed
+
+- A retro learning cites a file and a symbol, or text quoted from the file at the head it commits, instead of a line number, and the claim rule in the shared role-prompt core asks for the same.
+
 ## [18.14.0] - 2026-11-06
 
 ### Changed
