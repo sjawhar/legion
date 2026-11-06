@@ -1055,7 +1055,11 @@ function retroThreads(runDir: string, run: string, label: string, dirCase: strin
   const tip = pushes.at(-1);
   const changed = tip === undefined ? [] : changedFiles(runDir, world.head, tip);
   const wanted = threads.map((thread) => thread.path).toSorted();
-  const textFixesOnly = pushes.length === 1 && changed.toSorted().join("\n") === wanted.join("\n");
+  // What the pushed tip changed above the approved head, which is what retro's rule names: the
+  // text fixes and nothing else. The number of pushes is no part of it — a run that pushes its
+  // commit and then an empty one to carry the pull request onto it (`skill://legion-worker`,
+  // *Every role pushes its own commits*) has pushed the same change twice over.
+  const textFixesOnly = tip !== undefined && changed.toSorted().join("\n") === wanted.join("\n");
   // The body the stand-in kept last, which is the one a reader of the pull request would see.
   const body = calls.findLast((call) => call.body !== undefined)?.body ?? "";
   const counted = /\*\*Threads:\*\*\s*(\d+) resolved, (\d+) unresolved/.exec(body);

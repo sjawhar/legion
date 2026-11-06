@@ -3364,6 +3364,7 @@ const retroNames = [
   "retro-threads-text-fixes-head-6",
   "retro-threads-text-fixes-head-7",
   "retro-threads-text-fixes-head-8",
+  "retro-threads-text-fixes-head-10",
   "retro-threads-text-fixes-base-1",
   "retro-threads-code-defect-head-1",
   "retro-threads-code-defect-head-2",
@@ -3450,6 +3451,12 @@ retroRun("retro-threads-text-fixes-head-7", {
 retroRun("retro-threads-text-fixes-head-8", {
   "calls.jsonl": calls([...closedBoth, threadReply(retroIds[0] ?? "", "2026-09-30T17:34:10.000Z")]),
   "pushes.log": pushed(retro.fixed),
+});
+// A second push that carries the pull request onto the first adds no change above the approved
+// head, and the rule names the commit, never the number of pushes.
+retroRun("retro-threads-text-fixes-head-10", {
+  "calls.jsonl": calls(closedBoth),
+  "pushes.log": pushed(retro.fixed) + pushed(retro.fixed).replace("17:35:00", "17:36:00"),
 });
 // Another label, for the counts.
 retroRun("retro-threads-text-fixes-base-1", {
@@ -3645,6 +3652,13 @@ test("retro-threads, text-fixes: a thread resolved twice passes, and one replied
   expect(out).toMatch(/retro-threads-text-fixes-head-8\tpass=false\t.*replied=2 replyCalls=3 /);
 });
 
+// Catches: a scorer that counts pushes rather than reading what they changed, so a run that
+// pushed its commit and then the empty one that carries the pull request onto it fails although
+// the approved head gained the text fixes and nothing else.
+test("retro-threads, text-fixes: a second push that changes nothing passes", () => {
+  expect(out).toMatch(/retro-threads-text-fixes-head-10\tpass=true\t.*pushes=2 /);
+});
+
 // Catches: a negative control that passes a retro which writes the text over a defect, which
 // would measure nothing.
 test("retro-threads, code-defect: the move back passes, the text fix fails, and the counts are per case", () => {
@@ -3652,7 +3666,7 @@ test("retro-threads, code-defect: the move back passes, the text fix fails, and 
     /retro-threads-code-defect-head-1\tpass=true\t.*pushes=0 .*backward=implementing/
   );
   expect(out).toMatch(/retro-threads-code-defect-head-2\tpass=false\t.*backward=none/);
-  expect(out).toContain("retro-threads:text-fixes\thead\t2/8\t0/8\t0\t0\n");
+  expect(out).toContain("retro-threads:text-fixes\thead\t3/9\t0/9\t0\t0\n");
   expect(out).toContain("retro-threads:text-fixes\tbase\t1/1\t0/1\t0\t0\n");
   expect(out).toContain("retro-threads:code-defect\thead\t1/2\t0/2\t1\t0\n");
 });
