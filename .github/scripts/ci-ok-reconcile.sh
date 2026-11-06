@@ -9,30 +9,41 @@
 # plugin" (114301219205) rather than in CI's own (114301219822). Two things follow. A posted
 # ci-ok is not the ci-ok job's own check run, so GitHub never replaces it on a re-run: a run that
 # failed, was posted a failing ci-ok and was then re-run green would keep that failing check run
-# on the head for ever, and main's ruleset reads every check run of the required name. And it can
-# sit in another workflow's check suite, where no re-run of this workflow reaches it at all.
+# on the head for ever. A re-run's own job check run is different, and measured on the k28 probe
+# of INFRA-1066 (2026-11-06, head ee30dee4): attempt 1's failing ci-ok job check run
+# (127883400181) stays on the head under filter=all, but the default `latest` filter returns
+# attempt 2's alone (127889647834) and GitHub's statusCheckRollup reads SUCCESS with one ci-ok
+# context, so a later attempt of the same job supersedes its own earlier one and nothing here
+# need touch it. A posted ci-ok is the case that does not supersede, and it can also sit in
+# another workflow's check suite, where no re-run of this workflow reaches it at all.
 # PATCHing each of them to this job's conclusion closes both: whatever a head carries under the
-# name ci-ok, it says what this attempt decided.
+# name ci-ok that a job of a run posted, it says what this attempt decided.
 #
 # Why it is not every other ci-ok on the head. One of them can be another workflow run's own
 # ci-ok job check run: main-bypass-check.yaml starts this workflow with `gh workflow run ci.yaml
 # --ref main`, so that dispatched run's github.sha is main's tip, and the queue landed that tip
-# carrying its own merge group's green ci-ok. A dispatched run that failed would otherwise set
-# main's green verdict to failure — a verdict the run that made it concluded itself, about a head
-# this run neither posted on nor re-ran.
+# carrying its own merge group's green ci-ok. GitHub will not let this step rewrite it, which the
+# k28 probe of INFRA-1066 measured on 2026-11-06: an unfiltered copy of this step, run under
+# GITHUB_TOKEN against another run's completed ci-ok job check run (127883380092), was refused
+# three times with "Check run status and conclusions can only be updated internally by GitHub
+# Actions". So the rewrite is impossible rather than merely wrong, and what an unfiltered step
+# costs is the whole retry ladder against a call that cannot succeed, under this job's
+# timeout-minutes, and a warning saying a verdict stands that was never this step's to change.
 #
-# The marker is what separates the two. post-check-run.sh sends an external_id of
-# `ci-ok-post:<the posting run's id>` with every ci-ok it posts, and a job's own check run
-# carries no external_id at all, because GitHub creates it rather than a job. So this step reads
-# each check run's external_id and PATCHes only the ones carrying a ci-ok-post: marker, and the
-# PATCH sends a marker back, so a later attempt's read of this head still finds one.
+# The marker is what separates the two, by what wrote the check run rather than by what it says.
+# post-check-run.sh sends an external_id of `ci-ok-post:<the posting run's id>` with every ci-ok
+# it posts. A job's own check run carries an external_id too - the same probe read a UUID on each
+# of that head's two job check runs - so the test is the ci-ok-post: prefix, not the field's
+# presence. This step PATCHes only the check runs carrying that prefix, and sends a marker back,
+# so a later attempt's read of this head still finds one.
 #
 # What it leaves alone: this job's own check run (CHECK_RUN_ID, `job.check_run_id`), which GitHub
 # concludes itself; a check run that already carries this conclusion, since a PATCH that changes
 # nothing is still a write; one that is not completed, which belongs to a run still deciding
 # — its own job writes its conclusion, and completing it here would overwrite a verdict that is
-# still being made; and one carrying no ci-ok-post: marker, which is another run's own ci-ok job
-# check run and no business of this step's.
+# still being made; and one whose external_id carries no ci-ok-post: prefix, which no job of a
+# run posted, so GitHub answers a PATCH of it with that refusal and the check run is in any case
+# the business of the run whose job GitHub concluded it for.
 #
 # A refusal leaves a warning and never fails the job. The job's conclusion is the verdict, and
 # failing this step would turn a passing one red, which blocks the head this step exists to

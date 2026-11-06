@@ -31,9 +31,10 @@
 # rest of the run.
 #
 # The post carries the external_id ci-ok-post:<this run's id>, which is the marker
-# ci-ok-reconcile.sh looks for: that step rewrites a ci-ok check run only when it carries one. A
-# job's own check run carries no external_id at all, so an unmarked ci-ok on the head is another
-# workflow run's own verdict, which that run's own job concludes.
+# ci-ok-reconcile.sh looks for: that step rewrites a ci-ok check run only when its external_id
+# carries that prefix. A job's own check run carries an external_id of its own, a UUID (measured
+# on both job check runs of INFRA-1066's k28 probe head, 2026-11-06), so the prefix rather than
+# the field's presence is what tells a posted ci-ok from a run's own verdict.
 #
 # So it posts on a merge_group run and nowhere else, and there only in one of four cases: this
 # job's own result is a failure or a cancellation (`cancelled` is what a job its own

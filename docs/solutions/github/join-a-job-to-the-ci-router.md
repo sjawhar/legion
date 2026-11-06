@@ -109,11 +109,20 @@ Two things still run outside that job. The `ci-ok-report` step every other job e
 the failing `ci-ok` of a merge-group run that job's own result decides — its failure or its
 cancellation, or a `changes` that failed or was cancelled — the moment that job ends
 (`.github/scripts/ci-ok-report.sh`), because the `ci-ok` job waits for every job of the run and a
-group that can no longer merge should leave the queue at the first failure. And the `ci-ok` job's
-last step (`.github/scripts/ci-ok-reconcile.sh`) sets every `ci-ok` check run on the head but its
-own to what the job concluded: a posted check run is updated by no re-run and can sit in another
-workflow's suite, so a run that was posted a failing `ci-ok` and then re-run green would stay
-blocked by it. One verdict therefore stands at the end of every attempt.
+group that can no longer merge should leave the queue at the first failure. Every check run it
+posts carries an `external_id` of `ci-ok-post:<that run's id>`. And the `ci-ok` job's
+last step (`.github/scripts/ci-ok-reconcile.sh`) sets to what the job concluded each `ci-ok`
+check run on the head carrying that marker, and only those: a posted check run is updated by no
+re-run and can sit in another workflow's suite, so a run that was posted a failing `ci-ok` and
+then re-run green would stay blocked by it.
+A `ci-ok` without the marker is another workflow run's own job check run — the bypass check
+dispatches `ci.yaml` on main's tip, which carries its merge group's green `ci-ok` — and GitHub
+refuses a PATCH of one under `GITHUB_TOKEN` with "Check run status and conclusions can only be
+updated internally by GitHub Actions" (measured on INFRA-1066's k28 probe, 2026-11-06), so an
+unfiltered step would spend its retry ladder on a call that cannot succeed.
+A job's own check run carries an `external_id` too, a UUID, so the prefix is the test rather
+than the field's presence; and a re-run of the same job supersedes its earlier attempt by
+itself, since `statusCheckRollup` and the default `latest` filter read the newest alone.
 
 The verdict is `.github/scripts/ci-ok.sh`'s. It passes only when `changes` succeeded, lint
 succeeded (it runs on every change), every job `changes` selected succeeded, and every job it

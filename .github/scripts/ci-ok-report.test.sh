@@ -207,9 +207,9 @@ check "reads it and posts" "$(is "$(posted)" 1)"
 check "failing on the job that decided the run" "$(is "$(field .conclusion)" failure)"
 
 echo "case: post-check-run.sh called with no marker"
-# The marker is the one field that tells a posted check run from a job's own check run of the
-# same name, which carries none, and ci-ok-reconcile.sh PATCHes only the check runs that carry
-# one, so a post that set none would leave a check run no later attempt could reconcile.
+# The marker's prefix is what tells a posted check run from a job's own check run of the same
+# name, whose own external_id is a UUID, and ci-ok-reconcile.sh PATCHes only the check runs
+# carrying it, so a post that set none would leave a check run no later attempt could reconcile.
 jobs
 : > "$work/summary.md"
 set +e

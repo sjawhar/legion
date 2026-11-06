@@ -54,8 +54,8 @@ chmod +x "$work/bin/gh"
 # check_runs <id>=<status>[/<conclusion>][@<external id>]...: the head's ci-ok check runs, one
 # per line, as `gh api --jq '.check_runs[] | "\(.id) \(.status) \(.conclusion) \(…)"'` prints
 # them. A check run named with no `@` carries ci-ok-post:9, the marker post-check-run.sh sends
-# with a ci-ok a job posted; `@-` is what the script's jq writes for a check run with no
-# external_id at all, which is a job's own check run.
+# with a ci-ok a job posted; `@-` is what the script's jq writes for a check run GitHub returns
+# no external_id for at all, and a UUID is what a job's own check run carries.
 check_runs() {
   local pair spec marker rest
   : > "$work/check-runs"
@@ -126,10 +126,13 @@ check "and the body carries a marker, so the next attempt's read still finds one
 
 echo "case: another workflow run's own ci-ok job check run on this head"
 # main-bypass-check.yaml dispatches ci.yaml on main, so the dispatched run's github.sha is
-# main's tip, which the queue landed carrying its own group's green ci-ok. A job's own check run
-# carries no external_id at all, which is what tells it from one a job posted, and the run that
-# made it concludes it itself: a failing dispatched run that rewrote it would turn main red.
-check_runs "900=in_progress/null" "100=completed/success@-"
+# main's tip, which the queue landed carrying its own group's green ci-ok. Its external_id is a
+# UUID rather than a ci-ok-post: marker (measured on INFRA-1066's k28 probe head), and GitHub
+# refuses a PATCH of it under GITHUB_TOKEN with "Check run status and conclusions can only be
+# updated internally by GitHub Actions", measured on the same probe: an unfiltered step spends
+# its whole retry ladder on a call that cannot succeed and warns that a verdict stands which was
+# never its to change.
+check_runs "900=in_progress/null" "100=completed/success@07c6d79e-718e-5fab-b991-ebb3c3a6833c"
 run_reconcile failure
 check "exits 0" "$(is "$status" 0)"
 check "is left alone" "$(is "$(patched)" "")"
