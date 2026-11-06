@@ -615,9 +615,6 @@ Each item below names a task and where its code is, then notes on it.
   Anyone else's is skipped, with a `skipped <kind>:<id>` line naming its author and not its text, because anyone signed in can comment on a public pull request and the check is required.
   It names a comment it refuses by kind and id (`comment:<id>`, `review:<id>`, `review-comment:<id>`), never its text;
   delete that comment (a submitted review cannot be deleted, so edit its body), since an edit leaves the old text in its edit history, then re-run the newest failed run of each check that reported it on the current head (`lint`, which also posts the push's `pr-title`, and `pr-title.yaml`'s run once for each other event that is red), never an older run, since a re-run checks the commits of the head its own event named and posts its check there.
-  It also refuses a text that stops GitHub's workflows: `[skip ci]`, `[ci skip]`, `[no ci]`, `[skip actions]` or `[actions skip]` in the title or in the head commit's message, or a `skip-checks: true` trailer line GitHub acts on.
-  It prints the marker and the head commit's sha there, since no reader can cure an unnamed text:
-  cure a title by editing it, a head commit by one more commit whose message carries no marker.
   The check reads the title, body and branch name as the pull request has them when it runs, not as its event carried them, so lint's push-time `pr-title`, which can land after a later edit's run, never passes over text that run refused
 
 - **A skill, a role prompt and an `AGENTS.md` name no person**

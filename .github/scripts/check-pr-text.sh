@@ -18,35 +18,6 @@
 # body, so the title is the only text they read. That failure prints no title text
 # either.
 #
-# It also refuses a GitHub workflow skip instruction in the two texts that carry one. The title is
-# the first: this repository squash-merges with the title as the commit subject and an empty
-# message (squash_merge_commit_title=PR_TITLE, squash_merge_commit_message=BLANK), so an
-# instruction in the title becomes part of main's own commit subject and stops main's runs after
-# the merge. The message of the commit the event names as the head is the second: it decides
-# whether this pull request's own runs start. GitHub's rule, from its "Skip workflow runs" page, is
-# the one applied here:
-#
-#   1. one of `[skip ci]`, `[ci skip]`, `[no ci]`, `[skip actions]` or `[actions skip]`, in any
-#      case, anywhere in the text; or
-#   2. a line that is exactly `skip-checks:true` or `skip-checks: true`, in any case and with
-#      trailing whitespace allowed, in the last block of the commit message, when two or more empty
-#      lines come before that block. A block is a run of lines that are not empty, and a line of
-#      nothing but whitespace counts as empty, as git's own trailer reader counts it. GitHub reads
-#      a trailer in that one place, so a `skip-checks` line in any earlier block, a last block one
-#      empty line below the rest, and a line that starts with the text and goes on, are left alone:
-#      GitHub starts the runs for all three. The title is read by rule 1 alone, since a title is
-#      one line and carries no trailer block.
-#
-# The head commit is the only commit read this way: GitHub reads the skip instruction of a pull
-# request's head commit and of no other commit in the range. A compare range that lists no commit
-# at that sha, which is what a pull request whose head is its base's own commit answers, is logged
-# and refuses nothing.
-#
-# These two refusals print the instruction they matched, and that is the one text this script
-# prints: an instruction is nobody's private name, and an author cannot delete one the log will not
-# spell. The head commit refusal names the commit by its sha and asks for one more commit, whose
-# message becomes the head's; no history has to be rewritten.
-#
 # It reads the event payload GitHub writes to GITHUB_EVENT_PATH, never the step's environment,
 # which the runner prints in the job log. A pull_request or pull_request_review payload carries
 # the pull request: its number, and the base and head sha the run checks, which is the head the
@@ -97,22 +68,10 @@ fi
 jq -r '.title' "$live" | tr -d '\000' > "$text/title"
 jq -r '.body // ""' "$live" | tr -d '\000' > "$text/body"
 jq -r '.head.ref' "$live" | tr -d '\000' > "$text/branch"
-# own_status is this script's own refusals: a title that is no conventional commit subject, a title
-# or a head commit message that stops GitHub's workflows. The guard's own exit is $status below.
-own_status=0
+title_status=0
 if ! grep -qE '^[a-z]+(\([^)]+\))?!?: .+' "$text/title"; then
   echo "::error::PR title must be a conventional commit subject (type(scope): summary). Squash merges use the PR title as the commit subject, and the release workflows version from conventional subjects — this repository's squash merges write an empty body, so the title is the only text they read."
-  own_status=1
-fi
-
-# The five strings GitHub stops a push's and a pull request's workflows for, in any case. grep
-# answers nothing and exits 1 for a text that holds none, so each read below ends in `|| true`:
-# under `set -e` an unguarded failure would end the run.
-skip_markers='\[(skip ci|ci skip|no ci|skip actions|actions skip)\]'
-title_marker=$(grep -oiE "$skip_markers" "$text/title" | head -n 1 || true)
-if [ -n "$title_marker" ]; then
-  echo "::error::PR title holds $title_marker, which stops GitHub's workflows. This repository's squash merges use the title as main's commit subject, so that text would stop main's own runs after the merge. Edit the title to one without it."
-  own_status=1
+  title_status=1
 fi
 
 # GitHub limits this route to 250 commits for a call with no paging parameter: `?per_page=100` is
@@ -134,55 +93,6 @@ if [ "$listed_commits" -ne "$total_commits" ]; then
 fi
 jq -r '.commits[] | .commit.message, .commit.author.name, .commit.author.email, .commit.committer.name, .commit.committer.email' \
   "$compare_json" | tr -d '\000' > "$text/commits"
-
-# skip_checks_trailer <file>: prints the `skip-checks` trailer GitHub reads in that commit message,
-# which is a line of the message's last block that is exactly `skip-checks:true` or
-# `skip-checks: true` (any case, trailing whitespace allowed) when two or more empty lines come
-# before that block. The last block is the run of lines that are not empty holding the message's
-# last such line; a line of nothing but whitespace counts as empty. Prints nothing, and exits 0,
-# for a message GitHub starts the runs for.
-skip_checks_trailer() {
-  local -a lines
-  local last start i
-  mapfile -t lines < "$1"
-  last=-1
-  for ((i = ${#lines[@]} - 1; i >= 0; i--)); do
-    if [ -n "${lines[i]//[[:space:]]/}" ]; then last=$i; break; fi
-  done
-  if [ "$last" -lt 0 ]; then return 0; fi
-  start=$last
-  while [ "$start" -gt 0 ] && [ -n "${lines[start - 1]//[[:space:]]/}" ]; do start=$((start - 1)); done
-  # start is the block's first line, so the line before it is empty already; the one before that
-  # must be empty too, which is GitHub's "preceded by two empty lines".
-  if [ "$start" -lt 2 ] || [ -n "${lines[start - 2]//[[:space:]]/}" ]; then return 0; fi
-  printf '%s\n' "${lines[@]:start:last - start + 1}" \
-    | grep -m 1 -iE '^skip-checks: ?true[[:space:]]*$' || true
-}
-
-# The head commit alone: GitHub reads the skip instruction of the commit the event names as the
-# head and of no other commit in the range. The entries are counted apart from the message read, so
-# a range that lists no commit at that sha is told apart from one whose head commit's message is
-# empty.
-head_message="$work/head-message"
-jq -r --arg head "$head" '.commits[] | select(.sha == $head) | .commit.message' "$compare_json" \
-  | tr -d '\000' > "$head_message"
-head_entries=$(jq -s --arg head "$head" '[.[].commits[] | select(.sha == $head)] | length' "$compare_json")
-if [ "$head_entries" -eq 0 ]; then
-  echo "the compare range lists no commit at $head, so no head commit message is read for a text that stops GitHub's workflows"
-else
-  head_marker=$(grep -oiE "$skip_markers" "$head_message" | head -n 1 || true)
-  if [ -z "$head_marker" ]; then head_marker=$(skip_checks_trailer "$head_message"); fi
-  # The trailer regex allows trailing whitespace, and a CRLF message leaves the line's carriage
-  # return on the marker ($(…) strips the newline, not the return before it). A carriage return
-  # inside an ::error:: line ends the annotation there, so the rest of the refusal — the commit to
-  # push — would land on a plain log line. Strip it; an empty marker stays empty and refuses
-  # nothing.
-  head_marker=${head_marker%"${head_marker##*[![:space:]]}"}
-  if [ -n "$head_marker" ]; then
-    echo "::error::the head commit $head holds $head_marker, which stops GitHub's workflows, so no run of this pull request reports. Push one more commit whose message holds no such text: it becomes the head, and no commit has to be rewritten."
-    own_status=1
-  fi
-fi
 
 # Who counts: an issue comment, review or review comment is scanned only when an App installed on
 # this repository posted it (it posts as a Bot, which only such an App or github-actions can do;
@@ -259,7 +169,7 @@ if [ "$status" -ne 0 ] && grep -q -E "(^|[:=])$kind_pattern:[0-9]+:" "$work/repo
   echo "    Never re-run an older run: it checks the commits of the head its own event named, and"
   echo "    its check lands on that head, not the current one."
 fi
-if [ "$status" -eq 0 ] && [ "$own_status" -ne 0 ]; then
+if [ "$status" -eq 0 ] && [ "$title_status" -ne 0 ]; then
   exit 1
 fi
 exit "$status"

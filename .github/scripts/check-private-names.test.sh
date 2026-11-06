@@ -496,19 +496,16 @@ case "$1 $2" in
 esac
 GH
 chmod +x "$work/bin/gh"
-# pr_commit <message> <sha> [author email] [committer email]: one commit as both routes list it.
-# The sha is how the script under test picks the head commit out of the compare range, so a case
-# that lists more than one commit gives each of the others a sha of its own.
+# pr_commit <message> [author email] [committer email]: one commit as both routes list it.
 pr_commit() {
-  jq -nc --arg msg "$1" --arg sha "$2" --arg author_email "${3:-dev@example.com}" \
-    --arg committer_email "${4:-dev@example.com}" \
-    '{sha: $sha,
-      commit: {message: $msg, author: {name: "Dev", email: $author_email},
+  jq -nc --arg msg "$1" --arg author_email "${2:-dev@example.com}" \
+    --arg committer_email "${3:-dev@example.com}" \
+    '{commit: {message: $msg, author: {name: "Dev", email: $author_email},
                committer: {name: "Dev", email: $committer_email}}}'
 }
 write_pr_text() {
   local title=$1 body=$2 message=$3 branch=${4:-fix/keep-the-order} commit
-  commit=$(pr_commit "$message" event-head-sha "${5:-}" "${6:-}")
+  commit=$(pr_commit "$message" "${5:-}" "${6:-}")
   jq -nc --argjson commit "$commit" '{total_commits: 1, commits: [$commit]}' > "$work/compare"
   jq -nc --argjson commit "$commit" '[$commit]' > "$work/pr-commits"
   printf '%s' "$body" > "$work/pr-body"
@@ -623,7 +620,7 @@ check "names the commits line" "$(contains "$out" 'commits:5: names the company'
 
 echo "case: the commits of the head the run checks, when a later push lands while it runs"
 write_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order"
-later_commit=$(pr_commit "fix: a later push ($key-7)" later-push-sha)
+later_commit=$(pr_commit "fix: a later push ($key-7)")
 jq -c --argjson later "$later_commit" '. + [$later]' "$work/pr-commits" > "$work/pr-commits.next"
 mv "$work/pr-commits.next" "$work/pr-commits"
 run_pr_text
@@ -648,7 +645,7 @@ check "a list shorter than the route's own total fails loudly" "$(is "$status" 1
 check "names both counts" "$(contains "$out" 'reports 300 commits .* but listed 1')"
 
 write_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order"
-second_commit=$(pr_commit "$(printf 'fix: keep the order\n\nCo-authored-by: A <a@%s%s.example>\n' "$company" "$labs")" second-page-sha)
+second_commit=$(pr_commit "$(printf 'fix: keep the order\n\nCo-authored-by: A <a@%s%s.example>\n' "$company" "$labs")")
 jq -c '.total_commits = 2' "$work/compare" > "$work/compare.next"
 jq -nc --argjson second "$second_commit" '{total_commits: 2, commits: [$second]}' >> "$work/compare.next"
 mv "$work/compare.next" "$work/compare"
@@ -683,125 +680,6 @@ done
 long_body=$(printf '%.0s–' {1..50000})
 run_pr_text "fix(dispatch): keep the inbox order" "$long_body" "fix: keep the order"
 check "a body larger than one environment variable may hold is read" "$(is "$status" 0)"
-
-# The texts GitHub reads as "do not run": the pull request title, which this repository's squash
-# merge turns into main's own commit subject, and the message of the commit the event names as the
-# head, which decides whether this pull request's runs start at all. Both refusals fold into the
-# script's own status, so either alone exits 1. The refusal prints the text it matched — an
-# instruction is nobody's private name — so these cases may name a marker in a description; they
-# keep to neutral text anyway, since the last case of this file reads the whole log.
-echo "case: a title that stops GitHub's workflows"
-run_pr_text "fix(dispatch): keep the inbox order [skip ci]" "Refs LEGION-7" "fix: keep the order"
-check "a title holding a bracket instruction is refused as a workflow-skip" "$(is "$status" 1)"
-check "the title refusal names the instruction and says to edit the title" \
-  "$(contains "$out" '^::error::PR title holds \[skip ci\], .*Edit the title to one without it\.')"
-
-echo "case: a head commit that stops GitHub's workflows, by a bracket instruction"
-run_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" \
-  "$(printf 'fix: keep the order\n\nTried [NO CI] halfway through this line while reading the logs.\n')"
-check "a head commit holding a bracket instruction anywhere is refused as a workflow-skip" "$(is "$status" 1)"
-check "the head refusal names that commit's sha and the instruction" \
-  "$(contains "$out" '^::error::the head commit event-head-sha holds \[NO CI\], which stops')"
-
-echo "case: a head commit that stops GitHub's workflows, by a trailer in its last block"
-run_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" \
-  "$(printf 'fix: keep the order\n\nA line of body.\n\n\nskip-checks: true\n')"
-check "a head commit whose last block holds that trailer is refused as a workflow-skip" "$(is "$status" 1)"
-check "the trailer refusal names the line and asks for one more commit" \
-  "$(contains "$out" '^::error::the head commit event-head-sha holds skip-checks: true, .*Push one more commit')"
-
-echo "case: an instruction on a commit of the range that is not the head"
-# GitHub reads the head commit's message and no other commit's, so neither does this script.
-write_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order"
-earlier_commit=$(pr_commit "fix: an earlier commit [skip ci]" earlier-commit-sha)
-jq -c --argjson earlier "$earlier_commit" '{total_commits: 2, commits: ([$earlier] + .commits)}' \
-  "$work/compare" > "$work/compare.next"
-mv "$work/compare.next" "$work/compare"
-run_pr_text
-check "an instruction on a commit that is not the head is no workflow-skip" "$(is "$status" 0)"
-
-echo "case: a head commit naming the trailer in prose, outside its last block"
-# The shape of a real commit of this repository: a subject, a body paragraph naming the trailer in
-# backticks mid-sentence, then the session trailer as the last block. GitHub reads a trailer in
-# the last block alone, and only two empty lines below the rest, so it starts the runs for this.
-# shellcheck disable=SC2016 # the backticks are the commit message's own markdown, not a substitution
-run_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" \
-  "$(printf 'fix(ci): read the head commit the event names\n\nThe guard reads a `skip-checks: true` line of the last block only, so a\nmessage that names it in prose keeps every run it would have had.\n\nOmp-Session: 01K9ZR4T5V6W7X8Y9Z0A1B2C3D\n')"
-check "a head commit naming the trailer in prose is no workflow-skip" "$(is "$status" 0)"
-
-# The rule that picks the head commit's refusal out of a message, block by block: GitHub reads a
-# `skip-checks` trailer in the last block alone, and only two empty lines below the rest, so a
-# read of the whole message would refuse the two that follow. The third locks the regex's end
-# anchor instead: its trailer is in the last block, two empty lines below the rest, and the line
-# goes on past `true`.
-echo "case: a trailer in a block of the head commit message that is not its last"
-run_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" \
-  "$(printf 'fix: keep the order\n\n\nskip-checks: true\n\n\nA closing paragraph of the body.\n')"
-check "a trailer in an earlier block of the head commit message passes" "$(is "$status" 0)"
-
-echo "case: a last block of the head commit message one empty line below the rest"
-# GitHub's rule is two empty lines; one leaves the line a body line, which starts every run.
-run_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" \
-  "$(printf 'fix: keep the order\n\nA line of body.\n\nskip-checks: true\n')"
-check "a trailer one empty line below the rest of the head commit message passes" "$(is "$status" 0)"
-
-echo "case: a last-block line of the head commit message that starts with the trailer and goes on"
-# The rest of the line is the trailer's value, and GitHub starts the runs for every value but true.
-run_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" \
-  "$(printf 'fix: keep the order\n\nA line of body.\n\n\nskip-checks: true was dropped from the recipe\n')"
-check "a trailer line of the head commit message that goes on passes" "$(is "$status" 0)"
-
-echo "case: the head commit on the compare answer's second page"
-# GitHub lists a compare range oldest first, so a long range puts the head on a later page; the
-# script reads every page as one range and picks the head out of it by its sha.
-write_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order [skip ci]"
-first_page_commit=$(pr_commit "fix: an earlier commit of the range" first-page-sha)
-jq -c --argjson first "$first_page_commit" '{total_commits: 2, commits: [$first]}' "$work/compare" \
-  > "$work/compare.next"
-jq -c '{total_commits: 2, commits: .commits}' "$work/compare" >> "$work/compare.next"
-mv "$work/compare.next" "$work/compare"
-run_pr_text
-check "the head commit on the answer's second page, holding a bracket instruction, is refused" \
-  "$(is "$status" 1)"
-check "that refusal names the sha the event gave" \
-  "$(contains "$out" '^::error::the head commit event-head-sha holds \[skip ci\], which stops')"
-
-echo "case: a compare range that lists no commit at all"
-# What GitHub answers for a pull request whose head is its base's own commit: an empty list, with
-# a total_commits of 0 to match it, so the two counts agree and the script reaches the head read.
-# There is no head commit message to read, so nothing is refused, and the log says so.
-write_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order"
-jq -nc '{total_commits: 0, commits: []}' > "$work/compare"
-run_pr_text
-check "a range listing no commit passes" "$(is "$status" 0)"
-check "the log says the range lists no commit at that sha" \
-  "$(contains "$out" '^the compare range lists no commit at event-head-sha, so no head commit message is read')"
-
-echo "case: a compare range whose commits are all at other shas"
-# The same branch, reached the other way: the route answers with commits, but every sha it lists
-# is another commit's, so head_entries is 0 and no head message is read. The range itself is
-# still scanned, and a private name on one of its commits is refused.
-write_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order"
-range_only_commit=$(pr_commit "fix: a commit of the range ($key-7)" range-only-sha)
-jq -nc --argjson only "$range_only_commit" '{total_commits: 1, commits: [$only]}' > "$work/compare"
-run_pr_text
-check "a commit of such a range is scanned, and its name refused" "$(is "$status" 1)"
-check "names its line" "$(contains "$out" 'commits:1: names the private deployment repository')"
-check "does not print the key" "$(is "$(contains "$out" "$key")" false)"
-check "the log still says the range lists no commit at that sha" \
-  "$(contains "$out" '^the compare range lists no commit at event-head-sha, so no head commit message is read')"
-
-echo "case: a head commit message whose lines end with a carriage return"
-# A CRLF message leaves the carriage return on the line the trailer read matched, and an ::error::
-# line carrying one mid-text ends there on a runner: the half that says what to push would land on
-# a plain log line instead of the annotation.
-cr=$'\r'
-run_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" \
-  "$(printf 'fix: keep the order\r\n\r\n\r\nskip-checks: true\r\n')"
-check "a CRLF head commit message whose last block holds that trailer is refused" "$(is "$status" 1)"
-check "that refusal reads whole, end to end" \
-  "$(contains "$out" '^::error::the head commit event-head-sha holds skip-checks: true, which stops GitHub.s workflows, so no run of this pull request reports\. Push one more commit whose message holds no such text: it becomes the head, and no commit has to be rewritten\.$')"
-check "no carriage return reaches the log" "$(is "$(contains "$out" "$cr")" false)"
 
 echo "case: a pull request's issue comments, reviews and review comments, public on its page"
 clean_pr() { write_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order"; }
