@@ -724,6 +724,9 @@ export class Writes {
     const refusal = refusalFrom(
       kept.state.status === "refused" ? kept.state.refusal : { kind: "interrupted" },
       kept.key,
+      // What it was kept as, not what the file it needs made of it: a missing file leaves the
+      // write nothing to make again, and its method is still the one it would have gone as.
+      kept.request,
       now
     );
     this.#entries.set(entry.write.id, entry);

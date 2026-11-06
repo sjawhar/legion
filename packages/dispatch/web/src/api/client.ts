@@ -219,6 +219,17 @@ export const WRITE_METHODS = ["DELETE", "PATCH", "POST", "PUT"] as const;
 
 export type WriteMethod = (typeof WRITE_METHODS)[number];
 
+/** Whether a write of `method` goes under its key, which it sends as `Idempotency-Key`: a `POST`
+ *  or a `PATCH`, each of which Dispatch would do a second time when a dropped answer has the page
+ *  ask again. A `PUT` or a `DELETE` is the same change however often it is made, so it sends no
+ *  key and Dispatch keeps nothing under one for it. The one place that rule is written: `send`
+ *  reads it as it builds the headers, the retry loop before it calls a key spent
+ *  (`writeUnderKey`), and a kept refusal before it comes back expired (`refusalFrom`).
+ */
+export function goesUnderKey(method: WriteMethod): boolean {
+  return method === "POST" || method === "PATCH";
+}
+
 /** What a request is answered with, for the type checker alone: no request carries it. */
 declare const answeredWith: unique symbol;
 
@@ -792,15 +803,15 @@ export class DispatchApiClient {
     { deadlineMs, key, login, progress, sent }: WriteBounds
   ): Promise<T> {
     const { body, method, path } = request;
-    const idempotent = method === "PUT" || method === "DELETE";
+    const keyed = goesUnderKey(method);
     const form = body instanceof FormData ? body : undefined;
     const json = body === undefined || form !== undefined ? undefined : JSON.stringify(body);
     const keepalive =
-      idempotent && (json === undefined || utf8.encode(json).byteLength < maxKeepaliveBodyBytes);
+      !keyed && (json === undefined || utf8.encode(json).byteLength < maxKeepaliveBodyBytes);
     const init: RequestInit = {
       ...(form !== undefined ? { body: form } : json !== undefined ? { body: json } : {}),
       headers: {
-        ...(idempotent ? {} : { [IDEMPOTENCY_KEY_HEADER]: key }),
+        ...(keyed ? { [IDEMPOTENCY_KEY_HEADER]: key } : {}),
         ...(login === undefined ? {} : { [DISPATCH_LOGIN_HEADER]: login }),
         ...(json === undefined ? {} : { "Content-Type": "application/json" }),
       },

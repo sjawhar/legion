@@ -6,6 +6,7 @@ import { ApiError } from "../../api/client";
 import { SendExpiredError, SendInterruptedError, SendStoppedError } from "./keyed-write";
 import {
   KEPT_SEND_RESUME_MS,
+  type KeptRequest,
   type KeptWrite,
   keptRefusal,
   keptRequest,
@@ -18,6 +19,19 @@ import {
 /** `PRESSED_AT` is when this file's writes were pressed, and `KEY` the key of one pressed then. */
 const PRESSED_AT = 1_700_000_000_000;
 const KEY = keyMinted(PRESSED_AT);
+
+/** The requests a kept write is rebuilt with: a `PATCH` goes under the write's key, and a `PUT`
+ *  and a `DELETE` send none. */
+const KEYED_REQUEST: KeptRequest = {
+  body: { status: "done" },
+  method: "PATCH",
+  path: "/api/v1/issues/CORE-1",
+};
+const UNKEYED_REQUEST: KeptRequest = {
+  body: { dismissed: [], seq: 2 },
+  method: "PUT",
+  path: "/api/v1/me/state/CORE-1",
+};
 
 /** One write as the store keeps it, with every field an entry carries. */
 const kept = (key: string, fields: Partial<KeptWrite> = {}): KeptWrite => ({
@@ -108,21 +122,28 @@ test("an upload's request is kept by its fields and made whole with its file", (
 // too long ago, Dispatch's verdict with its status and code, or another error by its message.
 test("a kept refusal is rebuilt as the error it was", () => {
   const verdict = new ApiError(422, { code: "KEY_REUSED", error: "the key is used" });
-  const rebuilt = refusalFrom(keptRefusal(verdict), KEY, PRESSED_AT);
+  const rebuilt = refusalFrom(keptRefusal(verdict), KEY, KEYED_REQUEST, PRESSED_AT);
   expect(rebuilt).toBeInstanceOf(ApiError);
   expect(rebuilt).toMatchObject({ code: "KEY_REUSED", message: "the key is used" });
   expect((rebuilt as ApiError).status).toBe(422);
-  expect(refusalFrom(keptRefusal(new SendStoppedError()), KEY, PRESSED_AT)).toBeInstanceOf(
-    SendStoppedError
+  expect(
+    refusalFrom(keptRefusal(new SendStoppedError()), KEY, KEYED_REQUEST, PRESSED_AT)
+  ).toBeInstanceOf(SendStoppedError);
+  const interrupted = refusalFrom(
+    keptRefusal(new SendInterruptedError()),
+    KEY,
+    KEYED_REQUEST,
+    PRESSED_AT
   );
-  const interrupted = refusalFrom(keptRefusal(new SendInterruptedError()), KEY, PRESSED_AT);
   expect(interrupted).toBeInstanceOf(SendInterruptedError);
   // A Retry under the same key is made once only while Dispatch still knows the key: one later
   // than its 24 hours is a new write, and the text says so.
   expect(interrupted.message).toBe(
     "Not sent: this page was closed before Dispatch confirmed it. Retry asks again under the same key, so it is delivered at most once if you retry within 24 hours of the first try. After that Dispatch no longer knows the key: a Retry is a new write and may be delivered twice."
   );
-  expect(refusalFrom(keptRefusal(new Error("no route")), KEY, PRESSED_AT)).toMatchObject({
+  expect(
+    refusalFrom(keptRefusal(new Error("no route")), KEY, KEYED_REQUEST, PRESSED_AT)
+  ).toMatchObject({
     message: "no route",
   });
 });
@@ -137,13 +158,34 @@ test("a write kept without a verdict comes back expired once its key has run out
     keptRefusal(new SendStoppedError()),
     keptRefusal(new SendInterruptedError()),
   ]) {
-    const spent = refusalFrom(kept, KEY, PRESSED_AT + IDEMPOTENCY_KEY_TTL_MS);
+    const spent = refusalFrom(kept, KEY, KEYED_REQUEST, PRESSED_AT + IDEMPOTENCY_KEY_TTL_MS);
     expect(spent).toBeInstanceOf(SendExpiredError);
     expect(spent.message).toBe(
       "Dispatch has not confirmed this message. Its key is 24 hours old or more, so Dispatch no longer holds it: a Retry is a new write, which can be delivered a second time if the first one was."
     );
-    expect(refusalFrom(kept, KEY, PRESSED_AT + IDEMPOTENCY_KEY_TTL_MS - 1)).not.toBeInstanceOf(
-      SendExpiredError
+    expect(
+      refusalFrom(kept, KEY, KEYED_REQUEST, PRESSED_AT + IDEMPOTENCY_KEY_TTL_MS - 1)
+    ).not.toBeInstanceOf(SendExpiredError);
+  }
+});
+
+// A `PUT` or a `DELETE` sends no key, so Dispatch keeps nothing under one for it and making it
+// again is the same change: its kept refusal comes back as it ended, however old the key is. So
+// does one kept with no request at all - a write of a kind that makes its own again from its
+// record, pressed and never sent - since nothing of it ever reached Dispatch under that key.
+test("a kept refusal of a write that sends no key never comes back expired", () => {
+  const spent = PRESSED_AT + IDEMPOTENCY_KEY_TTL_MS;
+  const unkeyed: (KeptRequest | null)[] = [
+    UNKEYED_REQUEST,
+    { method: "DELETE", path: "/api/v1/issues/CORE-1/artifacts/spec.md" },
+    null,
+  ];
+  for (const request of unkeyed) {
+    expect(refusalFrom(keptRefusal(new SendStoppedError()), KEY, request, spent).name).toBe(
+      "SendStoppedError"
+    );
+    expect(refusalFrom(keptRefusal(new SendInterruptedError()), KEY, request, spent).name).toBe(
+      "SendInterruptedError"
     );
   }
 });

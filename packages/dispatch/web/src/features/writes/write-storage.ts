@@ -1,4 +1,10 @@
-import { ApiError, WRITE_METHODS, type WriteMethod, type WriteRequest } from "../../api/client";
+import {
+  ApiError,
+  goesUnderKey,
+  WRITE_METHODS,
+  type WriteMethod,
+  type WriteRequest,
+} from "../../api/client";
 import {
   keyExpired,
   SendExpiredError,
@@ -205,15 +211,26 @@ export function keptRefusal(error: Error): KeptRefusal {
 }
 
 /** The refusal `kept` names, rebuilt as the error the write was refused with. `key` is the key of
- *  the write it refused and `now` the time it is read back: a write that ended without Dispatch's
- *  verdict under a key Dispatch has forgotten since (`keyExpired`) comes back expired, since a
- *  Retry of it is now a new write rather than the same one asked again. */
-export function refusalFrom(kept: KeptRefusal, key: string, now: number): Error {
+ *  the write it refused, `request` the one it was kept as, and `now` the time it is read back: a
+ *  write that ended without Dispatch's verdict under a key Dispatch has forgotten since
+ *  (`keyExpired`) comes back expired, since a Retry of it is now a new write rather than the same
+ *  one asked again. Only a write that goes under its key comes back that way (`goesUnderKey`): a
+ *  `PUT` or a `DELETE` sends no key, so Dispatch keeps nothing under one for it and a Retry is
+ *  the same change again however late it is made. Nor does one kept with no request at all: a
+ *  write's request is kept as its first attempt goes out, so one kept without a request sent
+ *  nothing, and Dispatch has never seen its key. */
+export function refusalFrom(
+  kept: KeptRefusal,
+  key: string,
+  request: KeptRequest | null,
+  now: number
+): Error {
+  const spent = request !== null && goesUnderKey(request.method) && keyExpired(key, now);
   switch (kept.kind) {
     case "interrupted":
-      return keyExpired(key, now) ? new SendExpiredError() : new SendInterruptedError();
+      return spent ? new SendExpiredError() : new SendInterruptedError();
     case "stopped":
-      return keyExpired(key, now) ? new SendExpiredError() : new SendStoppedError();
+      return spent ? new SendExpiredError() : new SendStoppedError();
     case "api":
       return new ApiError(kept.status, { code: kept.code ?? undefined, error: kept.message });
     case "error":

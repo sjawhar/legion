@@ -44,6 +44,30 @@ test("a write whose key is older than the key's lifetime sends no attempt", asyn
   expect(refusal).toBeInstanceOf(SendStoppedError);
 });
 
+// The key stops only the write that sends it. A `PUT` or a `DELETE` sends none, so Dispatch
+// keeps nothing under one for it and making it again is the same change: a tab that slept past
+// the key's lifetime still makes it. A `POST` planned the same way is the write the guard is
+// for, and it is refused before any attempt.
+test("a spent key stops a write that sends it and lets one that does not through", async () => {
+  const spent = keyMinted(Date.now() - IDEMPOTENCY_KEY_TTL_MS);
+  let attempts = 0;
+  const answer = await writeUnderKey(
+    () => {
+      attempts += 1;
+      return Promise.resolve({ seq: 2 });
+    },
+    spent,
+    { planned: { body: { seq: 2 }, method: "PUT", path: "/api/v1/me/state/CORE-1" } }
+  );
+  expect(attempts).toBe(1);
+  expect(answer).toEqual({ seq: 2 });
+
+  const refusal = await writeUnderKey(() => Promise.resolve({}), spent, {
+    planned: { body: { body: "hello" }, method: "POST", path: "/api/v1/issues/CORE-1/comments" },
+  }).catch((error: unknown) => error);
+  expect(refusal).toBeInstanceOf(SendExpiredError);
+});
+
 // Retry of a write that ended without Dispatch's verdict asks again under its own key, which
 // Dispatch answers with what the first attempt did. Once the key is spent there is nothing to ask
 // again under, so the Retry is a new write under a new key, which the store and the three

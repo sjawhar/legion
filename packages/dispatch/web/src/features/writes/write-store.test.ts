@@ -80,6 +80,14 @@ const patch: WriteRequest = {
   path: "/api/v1/issues/CORE-1",
 };
 
+/** A pin of CORE-1: a `PUT` sends no `Idempotency-Key`, since making it again is the same
+ *  change. */
+const put: WriteRequest = {
+  body: { dismissed: [], seq: 2 },
+  method: "PUT",
+  path: "/api/v1/me/state/CORE-1",
+};
+
 /** The answers of this file's writes made from their request alone: a test's own spy on
  *  `api.send` takes over from it for that test. */
 let sends: SendAnswers;
@@ -122,9 +130,15 @@ function storeOf(tab = keptTab(), login = "alice", files = memoryFiles()) {
 /** The write `writes` holds now, at `index` in press order. */
 const row = (writes: Writes, index = 0): Write | undefined => writes.rows()[index];
 
-/** A page that has just resumed one status pick on CORE-1, kept in `tab` under `key` as it stood
- *  (`state`) when the page that pressed it went away. */
-function resuming(tab: KeptTab, key: string, state: KeptState): Writes {
+/** A page that has just resumed one write on CORE-1, kept in `tab` under `key` as it stood
+ *  (`state`) when the page that pressed it went away, as the request it last went out as: a
+ *  status pick unless a row names another. */
+function resuming(
+  tab: KeptTab,
+  key: string,
+  state: KeptState,
+  request: WriteRequest = patch
+): Writes {
   tab.storage.setItem(
     `dispatch.write:${key}`,
     JSON.stringify({
@@ -135,7 +149,7 @@ function resuming(tab: KeptTab, key: string, state: KeptState): Writes {
       login: "alice",
       presentation: "indicator",
       pressedAt: Date.now(),
-      request: patch,
+      request,
       sent: true,
       state,
       target: null,
@@ -1381,6 +1395,28 @@ test("a resumed write whose key Dispatch has forgotten makes no attempt", async 
       expect(send).not.toHaveBeenCalled();
       const resumed = row(writes);
       expect(resumed?.status === "refused" && resumed.refusal).toBeInstanceOf(SendExpiredError);
+    } finally {
+      send.mockRestore();
+      tab.close();
+    }
+  });
+});
+
+// A `PUT` sends no key: Dispatch keeps nothing under one for it, and making it again is the same
+// change. So a tab that slept past the key's lifetime makes that write again rather than ending
+// it and telling the reader a Retry may save it a second time.
+test("a resumed write that sends no key goes out under a key older than the lifetime", async () => {
+  await onFakeClock(async () => {
+    const tab = keptTab();
+    const send = spyOn(api, "send").mockResolvedValue({ seq: 2 } as never);
+    try {
+      const spent = keyMinted(Date.now() - IDEMPOTENCY_KEY_TTL_MS);
+      const writes = resuming(tab, spent, { status: "sending" }, put);
+      await tick(60_000);
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(send.mock.calls[0]?.[0]).toEqual(put);
+      expect((send.mock.calls[0]?.[1] as WriteBounds).key).toBe(spent);
+      expect(writes.rows()).toEqual([]);
     } finally {
       send.mockRestore();
       tab.close();

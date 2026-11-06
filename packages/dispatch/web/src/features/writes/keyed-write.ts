@@ -4,6 +4,7 @@ import {
   AnswerNotKeptError,
   ApiError,
   busyRetryAfterMs,
+  goesUnderKey,
   isKeyCommitted,
   isKeyInFlight,
   isUnauthorized,
@@ -262,9 +263,14 @@ export class OneRequestPerWriteError extends Error {
  * `planned` as if it was (`OneRequestPerWriteError`). `signal` stops the trying between attempts -
  * a wait ends at once, an attempt in flight is let finish, since it may already have reached
  * Dispatch and its answer is still the write's - and the write then rejects with
- * `SendStoppedError`. A key Dispatch no longer holds (`keyExpired`) ends the write with
- * `SendExpiredError` before the attempt that would go under it - its first, or the one after a
- * wait - since that attempt would be a new write to Dispatch rather than a repeat of the first.
+ * `SendStoppedError`. A write that goes under its key (`goesUnderKey`) and whose key Dispatch no
+ * longer holds (`keyExpired`) ends with `SendExpiredError` before the attempt that would go under
+ * it - its first, or the one after a wait - since that attempt would be a new write to Dispatch
+ * rather than a repeat of the first. A `PUT` or a `DELETE` sends no key, so Dispatch keeps
+ * nothing under one for it and the age of its key stops nothing. A write whose method is not
+ * known yet - its first attempt builds its own request, and none of it has gone out here - is
+ * held to the check: the page cannot tell it from one that sends a key, and an earlier page may
+ * have sent under this one already.
  */
 export async function writeUnderKey<T>(
   attempt: (bounds: WriteBounds) => Promise<T>,
@@ -302,7 +308,11 @@ export async function writeUnderKey<T>(
     for (;;) {
       // Dispatch keeps a key a day from its first request: once it has forgotten this one, an
       // attempt under it would be a second write of the person's action rather than a repeat.
-      if (keyExpired(key, Date.now())) throw new SendExpiredError();
+      // Only a write that sends the key reaches that memory; a `PUT` or a `DELETE` sends none and
+      // is the same change however often it is made. A write whose request is not known yet is
+      // held to the check, since the page cannot tell it from one that sends a key.
+      const sendsKey = first === undefined || goesUnderKey(first.method);
+      if (sendsKey && keyExpired(key, Date.now())) throw new SendExpiredError();
       try {
         return await attempt({
           deadlineMs: KEYED_SEND_ATTEMPT_MS,
