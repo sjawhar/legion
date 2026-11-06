@@ -84,6 +84,16 @@ export function IssueMarginPanel({
     // wrapper, because they are rendered inside it (`features/margin/margin-slot.tsx`).
     <NoTooltips>
       <div className="flex min-w-0 flex-col gap-3" data-testid="issue-margin">
+        {/* The margin's own cards first, and every section of the panel under them
+            (`features/margin/margin-slot.tsx`): the issue's asks, comments, messages and
+            decisions, in the margin's words and the authors' own, and not the page's declared
+            vocabulary (dispatch://INFRA-1196 R21, `page-structure.ts`). They are first because
+            the margin places an anchored card at a `top` it measures down from the top of its
+            own content (`margin/ThreadList.tsx`'s `regionOrigin`), so anything drawn over them
+            moves that anchor and a card can no longer reach the line its mark is on. */}
+        <div className="contents" {...authorText}>
+          {conversation}
+        </div>
         <PropertySection name="development" sections={sections}>
           <RepoControl
             disabled={isClosed}
@@ -173,18 +183,14 @@ export function IssueMarginPanel({
           ) : null}
         </PropertySection>
         <FocusedNodeFacts node={focused} />
-        {/* The margin's own cards, which the margin draws for every page it is beside and this
-            panel only wraps (`features/margin/margin-slot.tsx`): the issue's asks, comments,
-            messages and decisions, in the margin's words and the authors' own, and not the
-            page's declared vocabulary (dispatch://INFRA-1196 R21, `page-structure.ts`). */}
-        <div className="contents" {...authorText}>
-          {conversation}
-        </div>
-        {/* Under the margin's own content, not above it: the margin places a landed card at a
-          `top` it measures from the content above it, and a section inserted over that content
-          moves the anchor it measured against. */}
+        {/* Under the margin's own content, never above it, for the same reason the sections
+          above are (the panel's head): a section drawn over the margin's cards moves the
+          anchor their placement measures against. */}
         <ConversationStates onPick={onConversationState} state={conversationState} />
-        <div className="contents" {...authorText}>
+        {/* The issue's one conversation panel, under the state controls that drive it. It is
+            the box every spec and every link reaches the conversation by
+            (`#issue-conversation-panel`), which is this panel wherever the shell mounts it. */}
+        <div className="flex min-w-0 flex-col" id="issue-conversation-panel" {...authorText}>
           {conversationList}
         </div>
       </div>

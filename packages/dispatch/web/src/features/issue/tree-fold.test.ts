@@ -9,7 +9,6 @@ import {
   treeRows,
   zoomBreadcrumb,
   zoomedRows,
-  zoomOpensOn,
 } from "./tree-fold";
 
 /**
@@ -168,13 +167,22 @@ test("the frontier holds every node above an open question and no question itsel
   expect([...frontier(issueWithQuestionAt(2))].sort()).toEqual(["CORE-1", "doc-1"]);
 });
 
-test("the zoomed tree is the node it is on and its children, under a breadcrumb", () => {
+test("the zoomed tree opens on the issue with the question's path unfolded under it", () => {
   const root = issueWithQuestionAt(2);
-  expect(zoomOpensOn(root)).toBe("doc-1");
-  const rows = zoomedRows(root, zoomOpensOn(root));
-  expect(idsOf(rows)).toEqual(["doc-1", "question"]);
-  // The path down to it is the breadcrumb, not a row apiece, and nothing below the children is
-  // drawn: there is no second indent level.
-  expect(zoomBreadcrumb(root, zoomOpensOn(root)).map((one) => one.id)).toEqual(["CORE-1"]);
+  // Nothing chosen is the issue itself, so every branch of it is one row away; the path down
+  // to the open question is unfolded under it, at the one level the narrow tree has.
+  const rows = zoomedRows(root, undefined);
+  expect(idsOf(rows)).toEqual(["CORE-1", "doc-1", "question", "other"]);
+  expect(zoomBreadcrumb(root, undefined)).toEqual([]);
   expect(rows.every((row) => row.level <= 2)).toBe(true);
+  const unfolded = rowOf(rows, "doc-1");
+  expect(unfolded?.kind === "node" ? unfolded.expanded : undefined).toBe(true);
+  const other = rowOf(rows, "other");
+  expect(other?.kind === "node" ? other.folded : undefined).toBe(3);
+  // Zoomed into a node, the tree is that node and its children, under a breadcrumb that walks
+  // back to the issue.
+  const inside = zoomedRows(root, "doc-1");
+  expect(idsOf(inside)).toEqual(["doc-1", "question"]);
+  expect(zoomBreadcrumb(root, "doc-1").map((one) => one.id)).toEqual(["CORE-1"]);
+  expect(inside.every((row) => row.level <= 2)).toBe(true);
 });

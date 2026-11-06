@@ -111,6 +111,14 @@ export function NodeRow({
   const stateGlyphs: Readonly<Record<string, Readonly<Record<string, string>>>> =
     GLYPH_TOKENS.states;
   const stateGlyph = node.state === undefined ? undefined : stateGlyphs[node.type]?.[node.state];
+  // What a one-line row gives up when its parts do not fit (R17). A phone's row is 258 px and
+  // a type's word, a session's id and a state's word are long enough together to fill it, so
+  // each gives width up and the text in it is cut. Only the element the text itself sits in
+  // is cut, never one that holds another: a box that reached past its row would be drawn over
+  // whatever sits beside it (c-checks-readable). The whole of every cut word is in the body
+  // the row opens on focus (R2). Above 1024 px the row wraps instead and nothing is cut.
+  const cut = oneLine ? "min-w-0 truncate" : "";
+  const gives = oneLine ? "min-w-0" : "";
 
   // The focused row is brought inside the viewport and clear of the sticky identity block
   // after every move, by the one rule the whole page places a target with (R9,
@@ -153,12 +161,12 @@ export function NodeRow({
         }`}
       >
         <Twisty expanded={expanded} onToggle={onToggle} />
-        <span className="flex items-center gap-1" {...pageChrome}>
+        <span className={`flex items-center gap-1 ${gives}`} {...pageChrome}>
           <NodeGlyph token={GLYPH_TOKENS.types[node.type]} />
-          <span className={textMutedOnCanvas}>{NODE_TYPE_NAMES[node.type]}</span>
+          <span className={`${textMutedOnCanvas} ${cut}`}>{NODE_TYPE_NAMES[node.type]}</span>
         </span>
         {node.author === undefined ? null : (
-          <span className={textMutedOnCanvas} data-node-author="" {...authorText}>
+          <span className={`${textMutedOnCanvas} ${cut}`} data-node-author="" {...authorText}>
             {node.author.id}
           </span>
         )}
@@ -169,35 +177,22 @@ export function NodeRow({
         >
           {first.cut ? `${first.line}…` : first.line}
         </span>
-        {node.alsoUnder.map((chip) => (
-          <Chip chip={chip} key={`also:${chip.ref}`} label={CONTROL_LABELS.also_under} />
-        ))}
-        {node.chips.map((chip) => (
-          <Chip chip={chip} key={chip.ref} />
-        ))}
-        {node.gaps.map((gap) => (
-          <span
-            className={`rounded border px-1 text-xs ${borderDefault} ${textMutedOnCanvas}`}
-            data-gap=""
-            data-gap-kind={gap}
-            key={gap}
-            {...pageChrome}
-          >
-            {GAP_WORDS[gap]}
-          </span>
-        ))}
+        {/* The chips and the gaps are the body's on a one-line row: each is a reference or a
+            sentence, neither of which fits beside the node's own words on a phone's 258 px
+            line, and a row cut to hold them would say less than it does now (R17). */}
+        {oneLine ? null : <NodeEdges node={node} />}
         {/* A row whose own twisty is closed says how many nodes it holds. A branch below the
             drawn levels says it on the one line it folds to, under this row, so the count is
             drawn once however the nodes came to be out of sight. */}
         {folded === undefined || expanded !== false ? null : (
-          <span className={`text-xs ${textMutedOnCanvas}`} {...pageChrome}>
+          <span className={`text-xs ${textMutedOnCanvas} ${cut}`} {...pageChrome}>
             <span {...authorText}>{folded}</span> {CONTROL_LABELS.folded_nodes}
           </span>
         )}
         {state === undefined || node.state === undefined ? null : (
-          <span className="ml-auto flex items-center gap-1 text-xs" {...pageChrome}>
+          <span className={`ml-auto flex items-center gap-1 text-xs ${gives}`} {...pageChrome}>
             {stateGlyph === undefined ? null : <NodeGlyph token={stateGlyph} />}
-            <span className={textMutedOnCanvas} data-node-state={node.state}>
+            <span className={`${textMutedOnCanvas} ${cut}`} data-node-state={node.state}>
               {state}
             </span>
           </span>
@@ -207,6 +202,7 @@ export function NodeRow({
         <NodeBody
           artifact={artifact}
           document={document}
+          edges={oneLine}
           editing={editing}
           isClosed={isClosed}
           node={node}
@@ -244,6 +240,33 @@ function Twisty({ expanded, onToggle }: { expanded?: boolean; onToggle: () => vo
         <path d="M6 3 l5 5 l-5 5" />
       </svg>
     </button>
+  );
+}
+
+/** Every edge of the node that is not the spine, and every gap on it: the chips naming what it
+ *  also sits under and what it points at, and the one word each gap is known by. Drawn on the
+ *  row where the row wraps, and in the body where the row is one line (R17). */
+function NodeEdges({ node }: { node: TreeNode }): ReactNode {
+  return (
+    <>
+      {node.alsoUnder.map((chip) => (
+        <Chip chip={chip} key={`also:${chip.ref}`} label={CONTROL_LABELS.also_under} />
+      ))}
+      {node.chips.map((chip) => (
+        <Chip chip={chip} key={chip.ref} />
+      ))}
+      {node.gaps.map((gap) => (
+        <span
+          className={`rounded border px-1 text-xs ${borderDefault} ${textMutedOnCanvas}`}
+          data-gap=""
+          data-gap-kind={gap}
+          key={gap}
+          {...pageChrome}
+        >
+          {GAP_WORDS[gap]}
+        </span>
+      ))}
+    </>
   );
 }
 
@@ -311,6 +334,7 @@ const BODY_MEASURE = 660;
 function NodeBody({
   artifact,
   document,
+  edges,
   editing,
   isClosed,
   node,
@@ -319,6 +343,9 @@ function NodeBody({
 }: {
   artifact?: Artifact;
   document?: Artifact;
+  /** Whether the chips and gaps of the node belong here: they do wherever the row is one line
+   *  and has no width for them (R17). */
+  edges: boolean;
   editing?: string;
   isClosed: boolean;
   node: TreeNode;
@@ -345,6 +372,11 @@ function NodeBody({
         <div className="flex min-w-0 flex-col" ref={stage} {...authorText} />
       )}
       <NodeFacts facts={node.facts} />
+      {edges && (node.alsoUnder.length > 0 || node.chips.length > 0 || node.gaps.length > 0) ? (
+        <p className="flex flex-wrap items-baseline gap-1">
+          <NodeEdges node={node} />
+        </p>
+      ) : null}
       {node.gaps.map((gap) => (
         <p className={`text-xs ${textMutedOnCanvas}`} key={gap} {...pageChrome}>
           {GAP_LINES[gap]}

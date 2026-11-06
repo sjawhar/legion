@@ -21,6 +21,7 @@ import { expectActivePreset, openIssueAddress } from "./issue-presets";
 import { expectConsecutiveLinksClear } from "./layout";
 import { insertExternalLink, resetDatabase } from "./seed";
 import { navigateInApp, refusePosts, WRITE_REFUSED_TEXT } from "./sends";
+import { assertPageFits } from "./unclipped";
 import { asUser } from "./users";
 
 const session = {
@@ -194,9 +195,11 @@ test("the phone shell traps focus, dismisses on Escape at the right nesting leve
       await page.getByRole("button", { name: /Open review panel/ }).click();
     }
     await page.getByRole("tab", { name: "Pinned" }).click();
-    const margin = page.getByTestId("margin-sheet");
-    await expect(margin.getByText(pinnedMessage)).toBeVisible();
-    await expect(margin.getByText(/^Event \d+$/)).toHaveCount(0);
+    // The margin's sheet holds the issue's whole conversation as well as its own cards, so the
+    // pinned message is drawn twice inside it: the reading here is the Pinned panel's own.
+    const pinned = page.getByTestId("margin-sheet").getByRole("region", { name: "Pinned" });
+    await expect(pinned.getByText(pinnedMessage)).toBeVisible();
+    await expect(pinned.getByText(/^Event \d+$/)).toHaveCount(0);
   } finally {
     await alice.close();
   }
@@ -919,14 +922,31 @@ test("a long name ends in an ellipsis wherever a link or control truncates it @p
       .toHaveAttribute("title", `${longTitle} · e2e-long-title`);
 
     await navigateInApp(page, `/issues/${issue.key}`);
-    await expectEllipsis(page.getByRole("link", { name: longUrl }));
+    // The issue page writes a link's whole address and carries no `title` anywhere
+    // (dispatch://INFRA-1196 R2, R21: what a tooltip said is drawn, because a fact a pointer
+    // alone can reach is a fact a reader on a phone does not have). So neither the external
+    // link nor the route control is cut here and neither has a tooltip to read. What this row
+    // guards of them is the thing that still holds: a long name never widens the page. Each
+    // stays inside the screen, and the page scrolls in one dimension only.
+    const insideScreen = (locator: Locator) =>
+      locator.first().evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.left >= -1 && rect.right <= window.innerWidth + 1;
+      });
+    const longLink = page.getByRole("link", { name: longUrl });
+    await expect(longLink).toBeVisible();
+    expect
+      .soft(await insideScreen(longLink), "the whole address reaches past the screen")
+      .toBe(true);
+    const routeControl = page.getByRole("button", { name: longRoute });
+    await expect(routeControl.first()).toBeVisible();
+    expect.soft(await insideScreen(routeControl), "the route reaches past the screen").toBe(true);
+    await assertPageFits(page);
     await expectEllipsis(
       page
         .getByRole("navigation", { name: "Open decisions" })
         .getByRole("link", { name: longQuestion })
     );
-    // A button that is inline-flex by its own classes is the same case as a link below 1280 px.
-    await expectEllipsis(page.locator(`button[title="${longRoute}"]`));
 
     // The @ picker's detail line: a role's detail names the live session that holds it.
     await navigateInApp(page, `/issues/${issue.key}/conversation`);

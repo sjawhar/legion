@@ -144,37 +144,64 @@ export function treeRows(root: TreeNode, opened: OpenedBranches = NOTHING_OPENED
 
 /**
  * The rows the tree draws at 1024 px and below, where it is read one node at a time: the node
- * the reader is on and its children as one line each, with no second indent level under them.
- * The path down to it is the breadcrumb above the rows (`zoomBreadcrumb`) rather than a row
- * apiece, because the identity block leaves a phone one screenful of rows, not five.
+ * the reader is on and the rows below it as one line each, with no second indent level under
+ * them. The path down to it is the breadcrumb above the rows (`zoomBreadcrumb`) rather than a
+ * row apiece, because the identity block leaves a phone one screenful of rows, not five.
+ *
+ * The tree opens on the issue itself (`zoom` undefined), so every document, decision and child
+ * of the issue is one row away and the breadcrumb always walks back to the whole issue: a
+ * reader on a phone reaches every node a reader at 1440 px reaches, one zoom at a time (R6,
+ * R7).
  *
  * A row the preset draws only as the ancestor of a match (`context`) is no stop of its own
  * here: the one screen a phone has goes to what the preset matched, so a node's children are
  * the nearest rows below it the preset kept. The Checks preset at 390 px therefore draws its
  * checks under the issue, where at 1440 px each sits under the requirement it serves and that
  * requirement is drawn faint above it (R3, R17).
+ *
+ * One path is drawn deeper than that, and only one: the trail down to the first open question
+ * in reading order. Each node of it keeps its own row and the next node of the trail follows
+ * it, at the same one level, so that question is on the first screen with nothing unfolded by
+ * hand even while the tree is on the issue itself (R6). The branches those nodes hold besides
+ * the trail are a zoom away, because a screen that is one trail deep is still one screen.
  */
 export function zoomedRows(
   root: TreeNode,
   zoom: string | undefined,
   context: ReadonlySet<string> = new Set()
 ): DrawnRow[] {
-  const chain = pathTo(root, zoom ?? root.id) ?? [root];
-  const node = chain.at(-1) ?? root;
+  const above = pathTo(root, zoom ?? root.id) ?? [root];
+  const node = above.at(-1) ?? root;
+  const trail = firstQuestion(root, [root]) ?? [];
   const matched = (of: TreeNode): TreeNode[] =>
     of.children.flatMap((child) => (context.has(child.id) ? matched(child) : [child]));
+  // Every row below the node, in reading order: its children, with the rest of the trail
+  // after whichever of them the trail runs through.
+  const below: TreeNode[] = [];
+  for (const child of matched(node)) {
+    const at = trail.findIndex((one) => one.id === child.id);
+    below.push(...(at === -1 ? [child] : trail.slice(at)));
+  }
   const rows: DrawnRow[] = [
     {
       ...(node.children.length > 0 ? { expanded: true } : {}),
       kind: "node",
       level: 1,
       node,
-      ...(chain.length < 2 ? {} : { parent: chain[chain.length - 2]?.id ?? root.id }),
+      ...(above.length < 2 ? {} : { parent: above[above.length - 2]?.id ?? root.id }),
     },
   ];
-  for (const child of matched(node)) {
+  for (const [index, child] of below.entries()) {
+    // Its own twisty says "open" exactly where the trail carries its next node into the row
+    // under it, and "closed", with a count, wherever its branch is a zoom away.
+    const next = below[index + 1];
+    const unfolded = next !== undefined && child.children.includes(next);
     rows.push({
-      ...(child.children.length > 0 ? { expanded: false, folded: child.held } : {}),
+      ...(child.children.length === 0
+        ? {}
+        : unfolded
+          ? { expanded: true }
+          : { expanded: false, folded: child.held }),
       kind: "node",
       level: 2,
       node: child,
@@ -190,14 +217,6 @@ export function zoomBreadcrumb(root: TreeNode, zoom: string | undefined): TreeNo
   return (pathTo(root, zoom ?? root.id) ?? [root]).slice(0, -1);
 }
 
-/** Which node the zoomed tree opens on: the node that holds the first open question waiting on
- *  the reader, so that question is on the first screen, and the issue itself when there is
- *  none. */
-export function zoomOpensOn(root: TreeNode): string {
-  const question = firstQuestion(root, [root]);
-  return (question?.at(-2) ?? root).id;
-}
-
 /** The chain from the root down to `id`, the root first; undefined when the tree holds no such
  *  node. */
 export function pathTo(root: TreeNode, id: string): TreeNode[] | undefined {
@@ -209,7 +228,8 @@ export function pathTo(root: TreeNode, id: string): TreeNode[] | undefined {
   return undefined;
 }
 
-/** The chain down to the first open question in reading order, the root first. */
+/** The chain down to the first open question in reading order, the root first and the question
+ *  itself last; undefined when the tree holds none. */
 function firstQuestion(node: TreeNode, above: readonly TreeNode[]): TreeNode[] | undefined {
   if (node.question) return [...above];
   for (const child of node.children) {

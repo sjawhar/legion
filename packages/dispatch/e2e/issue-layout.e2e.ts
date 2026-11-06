@@ -1417,6 +1417,12 @@ interface PageInventoryFixture {
 
 // c-nothing-lost.
 test("the new page carries every element of the old one @phone", async ({ browser }) => {
+  // Four states, each read through the page's own views - its five presets, the two addresses
+  // beside them, the three views behind a control, the three a width opens, and one per row of
+  // the tree, with the presets walked again where the narrow tree is the way in: about 220
+  // loads of the issue page, each settled over two readings of its accessibility tree. The row
+  // carries a deadline of its own, because that outlasts the 30 s default many times over.
+  test.setTimeout(900_000);
   const fixture = JSON.parse(
     await readFile(
       fileURLToPath(new URL("./fixtures/issue-page-inventory.json", import.meta.url)),
@@ -1480,11 +1486,13 @@ test("the new page carries every element of the old one @phone", async ({ browse
         const rows = nodeRows(page);
         if ((await rows.count()) > index) await rows.nth(index).focus();
       }),
-      // Below 1025 px the tree is zoomed (R17), and the issue's own address draws the spec's
-      // branch alone: a reader reaches a decision, a check or a plan task through the preset
-      // that draws it, and the walk reaches them the same way. At a width that draws the whole
-      // tree the views above already open every row, so these are walked only where they are
-      // the way in.
+      // Below 1025 px the tree is read one node at a time (R17), so what a reader reaches by
+      // zooming the walk reaches by zooming too. The presets first, because a decision, a
+      // check and a plan task sit under the issue in the preset that draws them; then one
+      // zoom per row of the issue's own address, because a node that hangs off a row - the
+      // document a requirement cites - is behind that row's own twisty and nowhere else. At a
+      // width that draws the whole tree the views above already open every row, so neither
+      // walk runs there.
       ...(width > 1024
         ? []
         : PRESET_ORDER.flatMap((preset) =>
@@ -1494,11 +1502,36 @@ test("the new page carries every element of the old one @phone", async ({ browse
               if ((await rows.count()) > index) await rows.nth(index).focus();
             })
           )),
+      ...(width > 1024
+        ? []
+        : Array.from({ length: 24 }, (_unused, into) =>
+            Array.from({ length: 2 }, (_also, index) => async () => {
+              await gotoIssue(page, `/issues/${seeded.key}`);
+              const rows = nodeRows(page);
+              if ((await rows.count()) <= into) return;
+              const twisty = rows.nth(into).getByRole("button", { name: CONTROL_LABELS.unfold });
+              if ((await twisty.count()) === 0) return;
+              await twisty.first().click();
+              // The zoomed node is the first row; its own nodes follow it.
+              const under = nodeRows(page);
+              if ((await under.count()) > index + 1) await under.nth(index + 1).focus();
+            })
+          ).flat()),
     ];
-    for (const [state, size] of [
-      ["open-1440", DESKTOP],
-      ["open-390", PHONE],
-    ] as const) {
+    // Which states this project reads. The fixture was recorded in a desktop browser, so its
+    // 1440 px states are a desktop shell's: setting 1440 px on an iPhone profile draws a
+    // different shell around the same page, and what that shell offers - its search control
+    // among it - is no part of what the issue page carries. So the desktop project reads all
+    // four states and the phone project the two 390 px ones, and between them the check's own
+    // words, at 1440 px and at 390 px, are both still asserted.
+    const desktopProject = test.info().project.name !== "iphone";
+    const states = (
+      [
+        ["open-1440", DESKTOP],
+        ["open-390", PHONE],
+      ] as const
+    ).filter(([state]) => desktopProject || state.endsWith("-390"));
+    for (const [state, size] of states) {
       await page.setViewportSize({ height: size.height, width: size.width });
       await assertInventoryCarried(page, fixture[state], {
         renames: fixture.renames,
@@ -1507,10 +1540,13 @@ test("the new page carries every element of the old one @phone", async ({ browse
       });
     }
     await patchIssue(seeded.key, { status: "done" });
-    for (const [state, size] of [
-      ["closed-1440", DESKTOP],
-      ["closed-390", PHONE],
-    ] as const) {
+    const closed = (
+      [
+        ["closed-1440", DESKTOP],
+        ["closed-390", PHONE],
+      ] as const
+    ).filter(([state]) => desktopProject || state.endsWith("-390"));
+    for (const [state, size] of closed) {
       await page.setViewportSize({ height: size.height, width: size.width });
       await assertInventoryCarried(page, fixture[state], {
         renames: fixture.renames,
@@ -1663,6 +1699,10 @@ test("the new page carries every element of the old one @phone", async ({ browse
 
 // c-urls.
 test("every address of the old page still resolves", async ({ browser }) => {
+  // Eighteen cold loads of the issue page, each one a navigation and its reads: 28 s of the
+  // 30 s default when it was last measured, and over it once the panel draws its own cards
+  // first. The row carries a deadline of its own rather than racing that default.
+  test.setTimeout(300_000);
   await phase(browser, seedWholeIssue, async (page, seeded) => {
     const specSlug = (await getArtifact(seeded.specArtifactId)).slug;
 

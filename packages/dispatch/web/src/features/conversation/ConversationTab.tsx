@@ -84,7 +84,7 @@ import { ReplyButton } from "./ReplyButton";
 import { ReplyTurn, ThreadReplies, TurnActions } from "./ReplyTurn";
 import type { CarriedBlockIds } from "./send-request";
 import { capabilitiesForTarget, TargetedMessageCard } from "./TargetedMessageCard";
-import { useFollowLatest } from "./use-follow-latest";
+import { conversationScrollport, useFollowLatest } from "./use-follow-latest";
 import { useAgents } from "./useAgents";
 import { threadRepliesSendKey, threadReplySendKey, usePhoneThread } from "./usePhoneThread";
 
@@ -742,6 +742,7 @@ function CommentTurn({
         savingCommentEditId={savingCommentEditId}
         onAction={onAction}
         onEdit={editComment}
+        marginItem={false}
         onEditingChange={setEditingCommentId}
         onRetryAction={onRetryAction}
         onToggle={toggleThread}
@@ -954,8 +955,20 @@ export function ConversationTab({
   const [filter, setFilter] = useState<ConversationFilter>("all");
   const isPhoneViewport = useMediaQuery(PHONE_VIEWPORT_QUERY);
   const phone = usePhoneThread({ isPhoneViewport, sendKey, sendingNow });
-  // The comments whose thread the reader has open inline.
-  const [openThreads, setOpenThreads] = useState<ReadonlySet<string>>(() => new Set());
+  // The comments whose thread the reader has open inline. A comment whose card's own reply the
+  // store still holds - out, late or refused - opens with its thread expanded, so whatever
+  // unmounted the last composer leaves the reply where the reader left it: the viewport
+  // narrowing past the width the margin keeps a column at moves this whole list from the margin
+  // into the page's own column, which is a remount (`features/issue/IssuePage.tsx`), and the
+  // send, its draft and its refusal outlive it in the store but the open thread would not.
+  const [openThreads, setOpenThreads] = useState<ReadonlySet<string>>(
+    () =>
+      new Set(
+        heldCardReplies
+          .map((held) => held.request.replyTo?.id)
+          .filter((id): id is string => id !== undefined)
+      )
+  );
   const setThreadOpen = useCallback((id: string, open: boolean) => {
     setOpenThreads((current) => {
       if (current.has(id) === open) return current;
@@ -1058,11 +1071,28 @@ export function ConversationTab({
   const newestShown = loading || failed ? undefined : shown.at(0);
   const latestItemSeq = newestShown === undefined ? undefined : Date.parse(newestShown.at);
   const follow = useFollowLatest({
-    enabled: visible,
+    // An address that names a card places the reader on it (the landing effect below), and the
+    // follow does not take them off it again: both scroll the box the turns are in, which is
+    // the page's one right-hand panel, so a follow that still ran would scroll the landed card
+    // out of the panel it had just brought the reader to.
+    enabled: visible && focus === undefined,
     latestItemSeq,
     onFirstPlacement,
     ownSendCount,
   });
+  // The box the turns scroll in, read afresh whenever the anchor asks for it: the page's one
+  // right-hand panel at every width the margin keeps a column at, and the page itself below
+  // that (`use-follow-latest.ts`). Without it the anchor would read and move the window while
+  // the rows it measures scroll in the panel, and every correction it made would be made to
+  // the wrong box.
+  const turnsScroller = useMemo(
+    () => ({
+      get current(): HTMLElement | null {
+        return conversationScrollport() ?? null;
+      },
+    }),
+    []
+  );
   const { agents } = useAgents(visible);
   const scrolledToFocus = useRef<string | undefined>(undefined);
 
@@ -1166,10 +1196,14 @@ export function ConversationTab({
   return (
     <ViewportAnchor
       as="section"
-      className="flex min-h-[60dvh] flex-col gap-3 pb-56 sm:pb-16 xl:pb-0"
+      // `@container`: the turns are laid out against this box, which is the panel's 384 px at
+      // every width above a phone and the page's own column below it, never the screen's width
+      // (`ReplyTurn.tsx`'s `TurnActions` and `ThreadReplies`).
+      className="@container flex min-h-[60dvh] flex-col gap-3 pb-56 sm:pb-16 xl:pb-0"
       enabled={() => !follow.pinnedToTop()}
       item="data-turn"
       label="Conversation"
+      scroller={turnsScroller}
     >
       {/* Mounted, and hidden, while a phone thread covers it: its draft, a send it has out, that
           send's refusal and its reply are all still there on Back. Mounted on a closed issue too,

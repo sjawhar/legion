@@ -98,12 +98,18 @@ function reachPart(part: keyof typeof PARTS, left = DRAWING_FRAMES): void {
   }
   const inside = TAKES_FOCUS[part];
   const takes = inside === undefined ? found : (found.querySelector<HTMLElement>(inside) ?? found);
-  // The focus is taken without scrolling to it, and the part is then shown from its own top:
-  // what a chord opens is the part, and a control inside a panel that scrolls of its own would
-  // otherwise leave the panel's head above the screen (R9, c-keyboard reads the part's box).
+  // The focus is taken without scrolling to it, and what the chord opens is then shown from its
+  // own top: a control inside a panel that scrolls of its own would otherwise leave the panel's
+  // head above the screen (R9, c-keyboard reads the box). A part taller than the screen cannot
+  // be shown whole - the page's panel is a full-height column (`margin/MarginSheet.tsx`'s
+  // `h-dvh`) - so there the chord shows the control it leaves the reader on instead, and shows
+  // it in the middle of the screen rather than at the panel's own top, which is the one place
+  // in that column the page's sticky identity block reaches across.
   takes.focus({ preventScroll: true });
-  found.scrollIntoView({ block: "start" });
-  bringOnScreen(found);
+  const whole = found.getBoundingClientRect().height <= window.innerHeight;
+  const shown = whole ? found : takes;
+  shown.scrollIntoView({ block: whole ? "start" : "center" });
+  bringOnScreen(shown);
 }
 
 /**

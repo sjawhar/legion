@@ -1,4 +1,12 @@
-import { type ReactNode, useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 
 import { ApiError } from "../../api/client";
@@ -14,6 +22,7 @@ import {
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { ConversationTab } from "../conversation/ConversationTab";
+import { conversationScrollport } from "../conversation/use-follow-latest";
 import { useFillMarginSlot } from "../margin/margin-slot";
 import { statusText } from "../project/board-model";
 import {
@@ -103,6 +112,10 @@ function ItemLandingFailure({
   );
 }
 
+/** How long after a Back or Forward the browser's own scroll restoration is still arriving, so
+ *  the page leaves the window where that reader asked for it rather than zeroing it. */
+const POP_RESTORES_MS = 100;
+
 function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
   const {
     activeTab,
@@ -169,8 +182,12 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
   // to say so before it changed tab (`onBeforeTabChange`), and the presets are navigation, so
   // every control that leaves an address says so first. Taken afterwards it would be the
   // position the page had already clamped to as the panel it is leaving went.
+  // The Conversation is drawn in the page's one right-hand panel, which is a scrollport of its
+  // own wherever the margin keeps a column, so where the reader was in it is that box's scroll
+  // and not the window's (`conversation/use-follow-latest.ts`).
   const recordScroll = useCallback(() => {
-    panelScroll.current[activeTab] = window.scrollY;
+    const port = activeTab === "conversation" ? conversationScrollport() : undefined;
+    panelScroll.current[activeTab] = port === undefined ? window.scrollY : port.scrollTop;
   }, [activeTab]);
 
   const pickState = useCallback(
@@ -290,8 +307,32 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
     // Taken, so the next render of this tab reads the page's own position again rather than a
     // place the reader has since left; leaving the tab records it afresh.
     delete panelScroll.current[activeTab];
-    window.scrollTo({ top });
+    (activeTab === "conversation" ? (conversationScrollport() ?? window) : window).scrollTo({
+      top,
+    });
   }, [activeTab]);
+
+  // The page scrolls the window itself - the tree brings a focused row clear of the sticky
+  // identity block (`identity-block.ts`'s `bringOnScreen`), and below the width the margin
+  // keeps a column at the conversation places the reader at its newest card the same way - so
+  // it puts the window back as it leaves. Nothing else resets it, and a page read through the
+  // scroll the page before it left measures every box against the wrong viewport. A landing
+  // the next page performs runs after this cleanup and stands.
+  //
+  // Back and Forward are the one exception: the browser restores the position it recorded for
+  // the entry it is returning to, and zeroing the window would undo that. A pop in the same
+  // task as the unmount is that reader, and the page leaves the window to them.
+  const popped = useRef(0);
+  useEffect(() => {
+    const pop = () => {
+      popped.current = Date.now();
+    };
+    window.addEventListener("popstate", pop);
+    return () => {
+      window.removeEventListener("popstate", pop);
+      if (Date.now() - popped.current > POP_RESTORES_MS) window.scrollTo({ top: 0 });
+    };
+  }, []);
 
   useDocumentTitle(
     issue.data === undefined ? "Dispatch" : `${issue.data.key} · ${issue.data.title} · Dispatch`

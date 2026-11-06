@@ -124,8 +124,14 @@ test("agentWrittenAskBlockAppearsAndAnswersInPlace", async ({ browser }, testInf
     await expect(ask).toContainText("Should we ship?");
     const decisions = page.getByRole("navigation", { name: "Open decisions" });
     await expect(decisions.getByText("1 open decision", { exact: true })).toBeVisible();
+    // The link says which decision it reaches and reaches it. It carries no `title`: the issue
+    // page draws no tooltip anywhere, because a fact a pointer alone can reach is a fact a
+    // reader on a phone and a reader on the keyboard do not have (dispatch://INFRA-1196 R2,
+    // R21; `components/tooltips.tsx`, which `ProofDocument`'s open-decisions link reads).
     const decisionLink = decisions.getByRole("link", { name: "Should we ship?" });
-    await expect(decisionLink).toHaveAttribute("title", "Should we ship?");
+    await expect(decisionLink).toHaveText("Should we ship?");
+    await expect(decisionLink).toHaveAttribute("href", "#b-ship-decision");
+    await expect(decisionLink).not.toHaveAttribute("title", /./);
     await expect(decisions).toHaveCSS("height", "28px");
     const header = page.getByTestId("issue-header");
     const specification = documentEditor(page).getByRole("heading", { name: "Specification" });

@@ -16,6 +16,7 @@ import {
   getArtifactVersion,
   patchIssue,
 } from "./api";
+import { conversationScrollTop, scrollConversationTo } from "./conversation-scroll";
 import { runDispatch } from "./dispatch-cli";
 import {
   connectedDot,
@@ -415,8 +416,8 @@ test("tab round-trips keep one document connection, the typed text, and the Conv
     await expect(
       page.getByRole("list", { name: "Conversation turns" }).getByText("Existing message 29")
     ).toBeVisible();
-    await page.evaluate(() => window.scrollTo(0, 500));
-    const scrollPosition = await page.evaluate(() => window.scrollY);
+    await scrollConversationTo(page, 500);
+    const scrollPosition = await conversationScrollTop(page);
     expect(scrollPosition).toBeGreaterThan(0);
 
     // Two presets sit between the Spec and the Tree the conversation's address opens - the
@@ -436,7 +437,7 @@ test("tab round-trips keep one document connection, the typed text, and the Conv
       page.getByRole("list", { name: "Conversation turns" }).getByText("Existing message 29")
     ).toBeVisible();
     await expect.poll(sockets).toBe(1);
-    await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(scrollPosition);
+    await expect.poll(() => conversationScrollTop(page)).toBe(scrollPosition);
   } finally {
     await alice.close();
   }

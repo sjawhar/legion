@@ -76,8 +76,29 @@ export function useMarginListeners({
         : { itemId: focusItemId, key: focusSeq },
     [focusItemId, focusSeq]
   );
-  useCardHold({ card: routeCard, composerOpen, margin, placed, sheetExpanded, tab });
-  useCardHold({ card: focusCard, composerOpen, margin, placed, sheetExpanded, tab });
+  // A hold scrolls the margin's scrollport, and on the issue page that is the one scrollport
+  // the whole panel has - the margin's own cards and the issue's conversation together. With
+  // no document open beside the margin the address names a conversation rather than a passage
+  // of one, and the conversation's own list is what places the reader on it
+  // (`conversation/ConversationTab.tsx`); a hold here would scroll them off the turn the
+  // address named, onto the margin's own copy of the same item.
+  const lands = visibleArtifact !== undefined;
+  useCardHold({
+    card: lands ? routeCard : undefined,
+    composerOpen,
+    margin,
+    placed,
+    sheetExpanded,
+    tab,
+  });
+  useCardHold({
+    card: lands ? focusCard : undefined,
+    composerOpen,
+    margin,
+    placed,
+    sheetExpanded,
+    tab,
+  });
 
   // Opening a composer is the reader taking part, so the corrections above stand down - and the
   // composer itself has to be shown. It renders at the top of the margin's scroll content, and

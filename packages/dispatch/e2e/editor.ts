@@ -225,10 +225,11 @@ export async function setSheet(page: Page, project: string, open: boolean): Prom
   await expect(sheet).toHaveAttribute("data-expanded", String(open));
 }
 
-/** The thread card rendered inside a Conversation turn (the margin renders the same thread as
- *  its own card, so a bare `[data-margin-item]` lookup would match both). */
+/** The thread card rendered inside a Conversation turn. The margin renders the same thread as
+ *  its own card, so each card carries its own name (`data-thread-card`) and only the margin's
+ *  carry the margin's (`data-margin-item`), which is what places a landed card by its mark. */
 export function threadCard(page: Page, rootId: string): Locator {
-  return page.locator(`[data-turn="comment:${rootId}"]`).locator(`[data-margin-item="${rootId}"]`);
+  return page.locator(`[data-turn="comment:${rootId}"]`).locator(`[data-thread-card="${rootId}"]`);
 }
 
 /** Where a Conversation turn's thread shows once the reader expands it: in place, in the turn,

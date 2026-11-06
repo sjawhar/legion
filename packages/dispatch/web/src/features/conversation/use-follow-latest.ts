@@ -6,6 +6,40 @@ const FOLLOW_POSITION_TOLERANCE_PX = 1;
 /** Every card and reply carries `data-turn`; the first in the document is the newest card. */
 const NEWEST_TURN_SELECTOR = "[data-turn]";
 
+/**
+ * The box the turns scroll in: the nearest ancestor of the newest card that scrolls down of its
+ * own accord, and the window where there is none. The issue's conversation is drawn in the
+ * page's one right-hand panel, which is a scrollport of its own at every width the margin keeps
+ * a column at (`features/margin/MarginSheet.tsx`'s `h-dvh overflow-y-auto`), so a placement that
+ * scrolled the window alone never moved the reader to the newest card there at all.
+ */
+function scrollportOf(element: Element | null): HTMLElement | undefined {
+  const root = element?.ownerDocument.documentElement;
+  for (
+    let node = element?.parentElement;
+    node !== null && node !== undefined && node !== root;
+    node = node.parentElement
+  ) {
+    const overflow = getComputedStyle(node).overflowY;
+    if ((overflow === "auto" || overflow === "scroll") && node.scrollHeight > node.clientHeight) {
+      return node;
+    }
+  }
+  return undefined;
+}
+
+/** Where the turns' own scrollport stands, which is the window's scroll where there is none. */
+function positionIn(port: HTMLElement | undefined): number {
+  return port === undefined ? window.scrollY : port.scrollTop;
+}
+
+/** The box the issue's conversation scrolls in as the page stands, and `undefined` while the
+ *  page itself is that box: what a page recording where a reader was in the conversation has
+ *  to read and write back (`features/issue/IssuePage.tsx`). */
+export function conversationScrollport(): HTMLElement | undefined {
+  return scrollportOf(document.querySelector(NEWEST_TURN_SELECTOR));
+}
+
 export function useFollowLatest({
   enabled,
   latestItemSeq,
@@ -41,30 +75,34 @@ export function useFollowLatest({
   useLayoutEffect(() => {
     onFirstPlacementRef.current = onFirstPlacement;
   });
-  const followsLatest = useCallback(
-    () =>
-      window.scrollY <= 0 ||
+  const followsLatest = useCallback(() => {
+    const at = positionIn(scrollportOf(document.querySelector(NEWEST_TURN_SELECTOR)));
+    return (
+      at <= 0 ||
       (followScrollY.current !== undefined &&
-        Math.abs(window.scrollY - followScrollY.current) <= FOLLOW_POSITION_TOLERANCE_PX),
-    []
-  );
+        Math.abs(at - followScrollY.current) <= FOLLOW_POSITION_TOLERANCE_PX)
+    );
+  }, []);
 
-  // The newest turn must sit immediately beneath the sticky composer. Recording the actual
-  // post-scroll position distinguishes that automated placement from a reader's later scroll,
-  // regardless of whatever height the issue header has at this breakpoint.
+  // The newest turn must sit immediately beneath the sticky composer, in whichever box the
+  // turns scroll in. Recording the actual post-scroll position distinguishes that automated
+  // placement from a reader's later scroll, regardless of whatever height the issue header has
+  // at this breakpoint.
   const jumpToLatest = useCallback(() => {
     const newest = document.querySelector<HTMLElement>(NEWEST_TURN_SELECTOR);
+    const port = scrollportOf(newest);
     if (newest === null) {
-      window.scrollTo({ top: 0 });
+      (port ?? window).scrollTo({ top: 0 });
     } else {
       const composerHeight =
         document
           .querySelector<HTMLElement>('[aria-label="Comment composer"]')
           ?.getBoundingClientRect().height ?? 0;
-      const target = window.scrollY + newest.getBoundingClientRect().top - composerHeight;
-      window.scrollTo({ top: Math.max(target, 0) });
+      const above = port === undefined ? 0 : port.getBoundingClientRect().top;
+      const target = positionIn(port) + newest.getBoundingClientRect().top - above - composerHeight;
+      (port ?? window).scrollTo({ top: Math.max(target, 0) });
     }
-    followScrollY.current = window.scrollY;
+    followScrollY.current = positionIn(port);
   }, []);
 
   useEffect(() => {
@@ -73,9 +111,11 @@ export function useFollowLatest({
       atTopRef.current = nextAtTop;
       setAtTop(nextAtTop);
     };
-    window.addEventListener("scroll", onScroll, { passive: true });
+    // The scrollport is found afresh on every scroll: it is the window until the panel the
+    // turns are drawn in has more than one screenful in it, and the listener sees both.
+    window.addEventListener("scroll", onScroll, { capture: true, passive: true });
     onScroll();
-    return () => window.removeEventListener("scroll", onScroll);
+    return () => window.removeEventListener("scroll", onScroll, { capture: true });
   }, [followsLatest]);
 
   // The mutation's `onSuccess` bumps `ownSendCount` and invalidates the events query in the same

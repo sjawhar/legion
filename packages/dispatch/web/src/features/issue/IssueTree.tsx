@@ -15,7 +15,6 @@ import {
   treeRows,
   zoomBreadcrumb,
   zoomedRows,
-  zoomOpensOn,
 } from "./tree-fold";
 import { everythingOpened, rowKeyOf } from "./tree-keys";
 import { useNodeEditing } from "./useNodeEditing";
@@ -120,11 +119,15 @@ export function IssueTree({
           branches: new Set([...opened.branches, ...path.map((above) => above.id)]),
           deeper: new Set([...opened.deeper, ...path.map((above) => above.id)]),
         };
-  const on = zoom ?? (target === undefined ? zoomOpensOn(root) : (reveal?.at(-2) ?? root).id);
+  // Where the zoomed tree is rooted. Nothing chosen opens it on the issue itself, so a reader
+  // on a phone sees the whole issue and can reach any branch of it; an address that names a
+  // node opens it on that node's parent, so the node the address named is one of the rows.
+  const on = zoom ?? (target === undefined ? root.id : (reveal?.at(-2) ?? root).id);
   // A reader who zoomed into a node reads the tree from there: the node is the tree's root,
   // the path above it the breadcrumb, and everything below it folded as it was. At 1024 px and
   // below the tree is always zoomed, one node at a time, which is `zoomedRows`.
-  const rooted = zoom === undefined ? root : (pathTo(root, zoom)?.at(-1) ?? root);
+  const rooted =
+    zoom === undefined || zoom === root.id ? root : (pathTo(root, zoom)?.at(-1) ?? root);
   const rows = zoomed
     ? zoomedRows(root, on, context)
     : treeRows(rooted, cycle === EVERYTHING ? everythingOpened(rooted) : shown);
@@ -193,17 +196,15 @@ export function IssueTree({
         deeper: new Set([...held.deeper, ...above]),
       }));
       setZoom((held) =>
-        held === undefined || held === id || above.includes(held) ? held : undefined
+        held === undefined || held === id || above.includes(held) ? held : root.id
       );
       setWanted(id);
     },
     [root]
   );
-  // The issue itself is the whole tree, so zooming to it is zooming out of everything.
-  const zoomTo = useCallback(
-    (id: string | undefined) => setZoom(id === root.id ? undefined : id),
-    [root.id]
-  );
+  // Zooming to the issue is zooming out of everything, and it is held as the issue's own id
+  // rather than as nothing chosen (`setZoom` below), so the zoomed tree stays on the whole
+  // issue instead of falling back to where it opened.
 
   useEffect(() => {
     if (wanted === undefined) return;
@@ -223,11 +224,11 @@ export function IssueTree({
     onPin: pin,
     onReport,
     onReveal: goToNode,
-    onZoom: zoomTo,
+    onZoom: setZoom,
     oneNodeAtATime: zoomed,
     rows,
     root,
-    zoom,
+    zoom: zoomed ? on : zoom,
   });
 
   // An address that names a node puts the focus on it (R19). The row is not on the page until
@@ -273,7 +274,7 @@ export function IssueTree({
               // open question needs on a phone (R6). Its hit box grows by padding instead.
               className="dispatch-inline-link max-w-full truncate underline"
               key={above.id}
-              onClick={() => zoomTo(above.id)}
+              onClick={() => setZoom(above.id)}
               tabIndex={-1}
               type="button"
               {...authorText}
@@ -302,7 +303,7 @@ export function IssueTree({
           onOpenDeeper={openDeeper}
           onPin={pin}
           onToggle={(node, expanded) =>
-            zoomed ? zoomTo(node.id) : unfold(node.id, expanded !== true)
+            zoomed ? setZoom(node.id) : unfold(node.id, expanded !== true)
           }
           {...(openBody === undefined ? {} : { openBody })}
           pinned={pinned}

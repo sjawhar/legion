@@ -481,8 +481,10 @@ function AgentMessageList({
       replyDisabled={replyDisabled}
     />
   );
+  // `@container`: a row's turns lay themselves out against the row's own width, which is the
+  // page's and not the screen's (`conversation/ReplyTurn.tsx`'s `TurnActions`).
   return (
-    <div className={`mt-3 border-t pt-3 ${borderDefault}`}>
+    <div className={`@container mt-3 border-t pt-3 ${borderDefault}`}>
       {newest === undefined ? null : (
         <ol aria-label={`Conversation with ${label}`} className="space-y-2">
           {row(newest)}

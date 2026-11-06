@@ -987,7 +987,11 @@ test("every chord the page bound before the redesign brings a target on screen w
       ).toBe(true);
     }
 
-    // The conversation in its words state and in its everything state: `t c` and `t v`.
+    // The conversation in its words state and in its everything state: `t c` and `t v`. The
+    // panel the conversation is drawn in is a full-height column (`margin/MarginSheet.tsx`'s
+    // `h-dvh`), taller than the screen by construction, so what the chord has to bring on
+    // screen is the conversation's own head - the state controls it leaves the focus in - and
+    // not every pixel of the panel around it, which no panel of that shape could satisfy.
     for (const [second, state] of [
       ["c", "words"],
       ["v", "everything"],
@@ -999,9 +1003,10 @@ test("every chord the page bound before the redesign brings a target on screen w
         await conversationStateControl(page, state).getAttribute("aria-selected"),
         `t ${second} does not open the conversation in its ${state} state`
       ).toBe("true");
-      expect(await onScreen(marginSlot(page)), `t ${second} leaves the panel off screen`).toBe(
-        true
-      );
+      expect(
+        await onScreen(conversationStateControl(page, state)),
+        `t ${second} leaves the conversation off screen`
+      ).toBe(true);
       expect(
         await focusInside(marginSlot(page)),
         `t ${second} does not put the focus in the panel`

@@ -16,24 +16,28 @@ import {
   takenAsUserTurn,
 } from "./TargetedMessageCard";
 
-/** A turn's action icons - copy-reference, Reply, Pin - beside its body: a row on desktop, a
- *  column on the phone so three 44 px targets do not squeeze the text to a sliver. The column
- *  is reversed so the last icon (Pin) keeps the turn's top-right corner on both layouts. */
+/** A turn's action icons - copy-reference, Reply, Pin - beside its body: a column where the box
+ *  the turns are drawn in is narrow, so three 44 px targets do not squeeze the text to a sliver,
+ *  and a row where it is wide. It is that box's own width that decides, not the screen's
+ *  (`@container`, declared by each host): the issue's conversation is drawn in a 384 px panel
+ *  at every width above a phone, while an Agents row is drawn across the page. The column is
+ *  reversed so the last icon (Pin) keeps the turn's top-right corner on both layouts. */
 export function TurnActions({ children }: { children: ReactNode }): ReactNode {
   return (
-    <div className="flex shrink-0 flex-col-reverse items-center self-start sm:flex-row">
+    <div className="flex shrink-0 flex-col-reverse items-center self-start @md:flex-row">
       {children}
     </div>
   );
 }
 
 /** The replies beneath a thread's root, oldest first, indented under a rule so the exchange
- *  reads as one thread. */
+ *  reads as one thread. The indent is the one a narrow box can spare, and the wider one from
+ *  `@md`, read from the same container as the actions above. */
 export function ThreadReplies({ children }: { children: ReactNode }): ReactNode {
   return (
     <ol
       aria-label="Replies"
-      className={`mt-2 ml-4 flex flex-col gap-1 border-l-2 pl-3 sm:ml-8 ${secondaryButtonBorder}`}
+      className={`mt-2 ml-4 flex flex-col gap-1 border-l-2 pl-3 @md:ml-8 ${secondaryButtonBorder}`}
     >
       {children}
     </ol>

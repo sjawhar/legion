@@ -3,7 +3,7 @@ import { type RefObject, useRef } from "react";
 import { useKeymap } from "../shell/keymap";
 import type { TreeNode } from "./issue-tree";
 import { KEY_REPORTS } from "./page-structure";
-import type { DrawnRow } from "./tree-fold";
+import { type DrawnRow, pathTo } from "./tree-fold";
 import { decisionBehind, nextQuestion, rowKeyOf } from "./tree-keys";
 
 /**
@@ -44,8 +44,8 @@ export interface TreeKeyboard {
   readonly onReport: (line: string) => void;
   /** Unfolds the path down to one node and puts the focus on it. */
   readonly onReveal: (id: string) => void;
-  /** Roots the tree at one node, or at the issue again. */
-  readonly onZoom: (id: string | undefined) => void;
+  /** Roots the tree at one node; the issue's own id is the whole tree. */
+  readonly onZoom: (id: string) => void;
   /** Whether the tree is read one node at a time, which is how it is drawn at 1024 px and
    *  below: there the arrows that would walk into a branch zoom into it instead. */
   readonly oneNodeAtATime: boolean;
@@ -53,7 +53,8 @@ export interface TreeKeyboard {
   readonly rows: readonly DrawnRow[];
   /** The tree the preset left, which the keys that look past the drawn rows walk. */
   readonly root: TreeNode;
-  /** The node the tree is rooted at while the reader has zoomed into one. */
+  /** The node the tree is rooted at: the issue itself while the reader has zoomed into
+   *  nothing, and never undefined where the tree is read one node at a time. */
   readonly zoom: string | undefined;
 }
 
@@ -260,12 +261,17 @@ export function useTreeKeymap(tree: TreeKeyboard): void {
       label: "Zoom back out one level",
       run: () => {
         const zoomed = tree.zoom;
-        if (zoomed === undefined) {
+        if (zoomed === undefined || zoomed === tree.root.id) {
           tree.onReport(KEY_REPORTS.whole_tree);
           return;
         }
         tree.onReport("");
-        tree.onZoom(undefined);
+        // Where the tree is read one node at a time the key walks the breadcrumb back up a
+        // crumb at a time, so every node of the issue is reachable from any other; where the
+        // whole tree is drawn there is nothing between a zoom and the issue, so it is the
+        // issue the key comes back to.
+        const above = pathTo(tree.root, zoomed)?.at(-2)?.id ?? tree.root.id;
+        tree.onZoom(tree.oneNodeAtATime ? above : tree.root.id);
         tree.onReveal(zoomed);
       },
       when: reading,
