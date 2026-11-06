@@ -6,7 +6,7 @@ import {
   SESSION_ID_PATTERN,
   shortSessionId,
 } from "@legion/contracts";
-import { matchPath } from "react-router-dom";
+import { generatePath, matchPath } from "react-router-dom";
 
 import type { ArtifactOwner } from "../../api/client";
 import type { Artifact } from "../../api/types";
@@ -80,6 +80,18 @@ export interface InboxRoute {
    *  array is the cleared filter, every question; a value is a person's lowercase email or the
    *  literal `unassigned`. */
   assignees?: readonly string[];
+}
+/**
+ * The live agent view at `/agents/<session id>/live`, whose `?beside=<session id>` names the
+ * session its right pane shows while the path names its left one. `beside` is part of the
+ * address rather than page state so that a link to it opens the same two panes and a reload
+ * restores them. `parseAgentLiveSearch` drops a `beside` equal to `sessionId`: one view cannot
+ * hold both panes of one session, and that pair would leave the pane holding the keyboard
+ * meaningless, since both panes would answer to it.
+ */
+export interface AgentLiveRoute {
+  sessionId: string;
+  beside?: string;
 }
 export type IssueTab =
   | "spec"
@@ -963,6 +975,40 @@ export function buildInboxPath(route: InboxRoute = {}): string {
   }
   const search = query.toString();
   return search === "" ? "/" : `/?${search}`;
+}
+
+/**
+ * The live agent view's whole address, rebuilt from the route as `buildInboxPath` rebuilds the
+ * Inbox's: a query part that is not a field of `AgentLiveRoute` does not survive. A `beside`
+ * equal to `sessionId` is written as the caller asked for it; refusing it is the parser's job.
+ */
+export function buildAgentLivePath(route: AgentLiveRoute): string {
+  // `generatePath` leaves its params as they are, so a session id - whose shape nothing here
+  // constrains - is encoded first, as `features/refs/AgentName.tsx` encodes it for the same link.
+  const path = generatePath(AGENT_LIVE_PATH, { sessionId: encodeURIComponent(route.sessionId) });
+  const query = new URLSearchParams();
+  if (route.beside !== undefined) {
+    query.set("beside", route.beside);
+  }
+  const search = query.toString();
+  return search === "" ? path : `${path}?${search}`;
+}
+
+/**
+ * The route of a live address: the session the path names, and the one `?beside=` names when it
+ * is a session id by the server's rule (`isSessionId`, over `SESSION_ID_PATTERN` in
+ * `packages/contracts/src/dispatch-text-rules.ts`, which the whole value must match) and names
+ * another session. Anything else - absent, empty, malformed, or the path's own session - is
+ * dropped rather than kept, so the caller's next `buildAgentLivePath` writes the address clean.
+ */
+export function parseAgentLiveSearch(sessionId: string, search: string): AgentLiveRoute {
+  const route: AgentLiveRoute = { sessionId };
+  // The first of repeated parameters, as `URLSearchParams.get` reads them.
+  const beside = new URLSearchParams(search).get("beside");
+  if (beside !== null && beside !== sessionId && isSessionId(beside)) {
+    route.beside = beside;
+  }
+  return route;
 }
 
 /**

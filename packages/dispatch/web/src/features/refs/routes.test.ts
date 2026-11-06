@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import { artifactVersionPath } from "../../api/client";
 import type { DispatchReferenceRoute } from "./routes";
 import {
+  buildAgentLivePath,
   buildDispatchReference,
   buildInboxPath,
   buildIssuePath,
@@ -14,6 +15,7 @@ import {
   itemRoute,
   nodeRouteFromHref,
   parseAgentArtifactPath,
+  parseAgentLiveSearch,
   parseDispatchReference,
   parseInboxSearch,
   parseIssuePath,
@@ -990,6 +992,59 @@ test("the inbox's search text round-trips in the address and is absent when empt
     q: "two words",
   };
   expect(parseInboxSearch(buildInboxPath(route).slice(1))).toEqual(route);
+});
+
+// The right pane rides in the address like the Inbox's filters: a link opens the same two panes
+// and a reload restores them, and `buildAgentLivePath` rebuilds the whole query string from the
+// route, so nothing outside it survives.
+test("the live view's beside pane round-trips, and a route without one has no query at all", () => {
+  const route = { beside: "ses-2", sessionId: "ses-1" };
+  expect(buildAgentLivePath(route)).toBe("/agents/ses-1/live?beside=ses-2");
+  expect(parseAgentLiveSearch("ses-1", "?beside=ses-2")).toEqual(route);
+  expect(buildAgentLivePath({ sessionId: "ses-1" })).toBe("/agents/ses-1/live");
+  expect(parseAgentLiveSearch("ses-1", "")).toEqual({ sessionId: "ses-1" });
+});
+
+test("rebuilding a live address drops a query part that is not a field of the route", () => {
+  const route = parseAgentLiveSearch("ses-1", "?beside=ses-2&whatever=1");
+  expect(route).toEqual({ beside: "ses-2", sessionId: "ses-1" });
+  expect(buildAgentLivePath(route)).toBe("/agents/ses-1/live?beside=ses-2");
+});
+
+// A session id is the whole of `SESSION_ID_PATTERN` and nothing less: a space, an angle bracket
+// and a slash are all outside it, so a value holding one is no session id even when a session
+// id is how it begins.
+test("a beside that is not a whole session id is dropped from the live route", () => {
+  for (const search of [
+    "?beside=",
+    "?beside=ses+2",
+    "?beside=ses-2%3Cb%3E",
+    "?beside=dispatch%3A%2F%2Fagent%2Fses-2",
+  ]) {
+    expect([search, parseAgentLiveSearch("ses-1", search)]).toEqual([
+      search,
+      { sessionId: "ses-1" },
+    ]);
+  }
+});
+
+// One view cannot hold both panes of one session, and that pair would leave the pane holding the
+// keyboard meaningless. The builder still writes what the caller asked for; the parser refuses.
+test("a beside naming the path's own session is dropped, and the first of two is read", () => {
+  expect(parseAgentLiveSearch("ses-1", "?beside=ses-1")).toEqual({ sessionId: "ses-1" });
+  expect(buildAgentLivePath({ beside: "ses-1", sessionId: "ses-1" })).toBe(
+    "/agents/ses-1/live?beside=ses-1"
+  );
+  expect(parseAgentLiveSearch("ses-1", "?beside=ses-2&beside=ses-3")).toEqual({
+    beside: "ses-2",
+    sessionId: "ses-1",
+  });
+});
+
+test("a live address percent-encodes the session ids it names and reads them back", () => {
+  const route = { beside: "ses+2", sessionId: "ses&1" };
+  expect(buildAgentLivePath(route)).toBe("/agents/ses%261/live?beside=ses%2B2");
+  expect(parseAgentLiveSearch("ses&1", "?beside=ses%2B2")).toEqual(route);
 });
 
 // The shell reserves its right gutter from this, and `features/margin/Margin.tsx` renders from
