@@ -127,8 +127,9 @@ ARG KUBECTL_SHA256=3cfeaf80be482b435b0aa214aff6e0b2c312ee23c0ff20810c75517b6004c
 # the `apply` program it tests, call the bare name `yq` on PATH. A package runner does reach yq —
 # `go run github.com/mikefarah/yq/v4@v4.54.1` works with this image's Go — but it could supply that
 # bare name only through a file called `yq` on the role's own PATH, which
-# skills/legion-worker/references/tools.md forbids, and `go run` costs seconds per call against the
-# 309 calls one run of that test makes. Debian's `yq` is a different program — kislyuk's Python
+# skills/legion-worker/references/tools.md forbids, and `go run` costs seconds per call: one passing
+# run of that test calls yq 228 times (counted 2026-11-06 at agent-infra main ec59a17a; the count
+# moves with that repository). Debian's `yq` is a different program — kislyuk's Python
 # wrapper over jq, 3.4.3 in trixie, whose command language is another one — so this is a pinned
 # fetch, and an apt package must never take its place. The pin is the SHA-256 of yq_linux_amd64 as
 # the release's own signed `checksums` file gives it: field 19 of that file's yq_linux_amd64 row,
