@@ -905,6 +905,45 @@ export const LegionIssueStatusRequest = z.strictObject({
   status: z.enum(["todo", "backlog", "icebox"]),
 });
 
+/** `api.FreshSessionRequest`, the controller's `fresh_session`: the claim on `role` of `issue`
+ * leaves the session it recorded behind and starts again in a new one, which is what a session a
+ * provider keeps refusing needs. It is the effect `legion claims retry --fresh-session` runs for
+ * an operator, and it reaches every claim of the project that is not in a turn — one idle on the
+ * provider-error ladder, a suspended one, one an operator stopped, a failed one, and a root
+ * architect. A claim in a turn is refused (`CLAIM_IN_A_TURN`), one whose launch is in flight is
+ * refused (`CLAIM_UNSETTLED`), and the project's controller is neither a role here
+ * (`INVALID_ROLE`) nor a claim the operator's own door may name (`NOT_THE_CONTROLLER`). */
+export const LegionFreshSessionRequest = z.strictObject({
+  grantId: nonEmptyString,
+  issue: nonEmptyString,
+  role: z.enum(LEGION_ROLES),
+});
+
+/** `api.CompactRequest`, the controller's `compact`: the claim on `role` of `issue` has its Oh
+ * My Pi session compacted and is then sent the task it owes again. It is the recovery a claim
+ * whose provider keeps refusing its session reaches for first — the session, its workspace and
+ * everything the worker knows of its issue stay, and only the transcript gets shorter — where a
+ * fresh session keeps nothing. It is the effect `legion claims compact` runs for an operator.
+ * The daemon refuses a suspended, stopped or failed claim naming `fresh_session`
+ * (`CLAIM_NOT_RUNNING`), a claim in a turn (`CLAIM_IN_A_TURN`), a claim whose launch is in
+ * flight (`CLAIM_UNSETTLED`), a claim whose role runs on Claude Code, which has no Oh My Pi
+ * session at all (`CLAIM_NOT_ON_OMP`), and the role `controller` (`INVALID_ROLE`). */
+export const LegionCompactRequest = z.strictObject({
+  grantId: nonEmptyString,
+  issue: nonEmptyString,
+  role: z.enum(LEGION_ROLES),
+});
+
+/** `api.CompactResponse`, what became of a compaction. `compacted` is whether Oh My Pi
+ * compacted the session, and `reason` why it did not: Oh My Pi's own words for a compaction it
+ * refused or skipped ("Already compacted", "Nothing to compact (session too small)"), and the
+ * daemon's for a wait that ran out. A compaction that did not run is this answer rather than a
+ * failure, because the owed task went to the claim again all the same. */
+export const LegionCompactResponse = z.object({
+  compacted: z.boolean(),
+  reason: z.string().optional(),
+});
+
 /** `api.GateRegisterRequest`, the architect's current Dispatch document approval target. */
 export const LegionGateRegisterRequest = z.strictObject({
   grantId: nonEmptyString,

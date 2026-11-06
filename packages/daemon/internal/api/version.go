@@ -557,10 +557,34 @@ package api
 // `fixAttempts`, and every worker's `read_record` parses the state through it, which is what
 // this number is for: the boot gate and `legion probe-image` hold plugin and daemon equal, so
 // neither order of the two ever runs.
-// The issue's other half, the provider-error retry, adds no route and changes no shape a plugin
-// parses: a turn that ends in a provider error keeps its task, and the daemon reads that
-// prompt's own result to decide whether the task goes to the same session again or the claim
-// fails (`internal/supervise/providererror.go`). It ships this number's one store migration.
+// The issue's other half, the provider-error retry, adds one route and one tool operation.
+// `POST /legion/v1/claims/fresh-session` (`api.FreshSessionRequest`: `grantId`, `issue`,
+// `role`) takes a controller grant and runs, for the claim on that role of that issue, the
+// effect `legion claims retry --fresh-session` runs for an operator: the claim leaves the
+// session it recorded behind and starts again in a new one, which also puts its run of
+// provider-error turns back to zero. One effect stands behind both doors (api's freshSession),
+// and it reaches every claim of the project that is not in a turn, where the plain retry
+// reaches only a claim that failed and one an operator stopped. The controller's `legion` tool
+// gains `fresh_session (issue, role)`, which posts it, and
+// `packages/contracts/src/legion-api.ts` mirrors the request. `POST /legion/v1/claims/compact`
+// (`api.CompactRequest`: the same three members) is the recovery the controller reaches for
+// first: it compacts the claim's Oh My Pi session and sends the claim the task it owes again,
+// where a fresh session keeps nothing the old one held. It answers `api.CompactResponse`
+// (`compacted`, and `reason` when it is false), and a compaction Oh My Pi refused or skipped is
+// that answer rather than a failure, since the owed task went again all the same. It reaches a
+// claim whose agent is running and in no turn, a root architect included, and refuses a
+// suspended, stopped or failed claim naming fresh_session (`CLAIM_NOT_RUNNING`), a claim in a
+// turn (`CLAIM_IN_A_TURN`), a claim between states (`CLAIM_UNSETTLED`), a Claude Code claim,
+// which runs no Oh My Pi session (`CLAIM_NOT_ON_OMP`), and the role `controller`
+// (`INVALID_ROLE`). The controller's `legion` tool gains `compact (issue, role)` beside
+// `fresh_session`, and `legion claims compact --claim <token>` is the operator's door onto the
+// same effect. Neither route needs a number of its
+// own: this one is the branch's, no release declares it yet, and the gate holds plugin and
+// daemon equal, so a plugin whose tool posts these routes never meets a daemon that does not
+// serve them. The rest of that half adds no route and changes no shape a plugin parses: a turn
+// that ends in a provider error keeps its task, and the daemon reads that prompt's own result
+// to decide whether the task goes to the same session again or the claim fails
+// (`internal/supervise/providererror.go`). It ships this number's one store migration.
 // `20261105004846_provider_error_retry.up.sql` adds the two columns a task a provider error
 // took back is kept by (`pending_task_deliveries.provider_error_retries` and
 // `provider_error_note`) and the claim's run of such turns (`claims.provider_error_run`). The

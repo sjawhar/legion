@@ -857,6 +857,8 @@ func TestTask310RouteGoldens(t *testing.T) {
 	})
 	golden(t, "handoff-complete.json", HandoffCompleteResponse{Note: "pull request #312 is already merged, so READY was published without reading its head's handoffs"})
 	golden(t, "issue-status.json", IssueStatusResponse{})
+	golden(t, "fresh-session.json", FreshSessionResponse{})
+	golden(t, "compact.json", CompactResponse{Reason: "Nothing to compact (session too small)"})
 	golden(t, "gate-register.json", GateRegisterResponse{})
 	golden(t, "wave-release.json", WaveReleaseResponse{Released: []string{"LEGION-209"}})
 	golden(t, "phase-backward.json", PhaseBackwardResponse{})

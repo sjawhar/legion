@@ -490,9 +490,22 @@ prints each one it retried, and exits 1 naming each it refused: run it once the 
 failed launches is gone (a host moved onto tmux, a broken key replaced). It passes over a stopped
 claim, which is retired rather than failed, so name that one with `--claim`.
 
-`legion claims retry --claim <token> --fresh-session` is the whole recovery for a claim whose
-session a provider keeps refusing: it forgets the session that claim recorded and starts the claim
+`legion claims compact --claim <token>` is the first recovery for a claim whose session a
+provider keeps refusing: the daemon has Oh My Pi write a text summary of that session and then
+sends the claim the task it owes again, so the session, its workspace and everything the worker
+knows of its issue stay, and only the transcript the provider is asked to read gets shorter. It
+reaches a claim whose agent is running and in no turn, a root architect included, and refuses a
+suspended, stopped or failed claim naming `--fresh-session`, a claim in a turn, a claim whose
+launch is in flight, and a claim whose role runs on Claude Code, which has no Oh My Pi session.
+A compaction Oh My Pi refused or skipped — a session too small, one already compacted — is
+printed with its reason, and the owed task went again all the same.
+
+`legion claims retry --claim <token> --fresh-session` is the recovery for a claim the compaction
+left refused: it forgets the session that claim recorded and starts the claim
 in a new session with its phase's task, so no `legion claims forget-session` comes before it. It
+reaches a live or suspended claim as well as a failed or stopped one — every claim of the
+project that is not in a turn — so it is what starts a claim the compaction could not reach, and
+a new session loses everything the old one held. It
 forgets that session before it starts the phase, because the start runs the moment the restart
 commits and would otherwise resume the very session you are dropping. A retry the daemon then
 refuses has forgotten the session all the same: the claim keeps its state and its task, the

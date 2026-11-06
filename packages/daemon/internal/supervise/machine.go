@@ -182,6 +182,11 @@ type Claim struct {
 	// store never writes them.
 	SuspensionHeld   bool
 	SuspensionHeldBy SuspendSource
+	// Compacting is whether the claim is working because its session is being compacted rather
+	// than because a turn is (Machine.Compact). It is memory only, as SuspensionHeld is:
+	// Machine.Claim reports it, so a caller can tell a claim in a turn from one being compacted,
+	// and the store never writes it.
+	Compacting bool
 	// PluginContract is the contract the current registration declared: 0 means no contract has
 	// been recorded, which every claim has at the first boot on this release. It is set whenever a
 	// registration records Session/SessionFile/CapabilityHash (register, reregister).
@@ -713,6 +718,13 @@ type Machine struct {
 	// (answerByTurnEnd). turnEnded clears it with the turn, and it is memory only, as askFirst
 	// is: a restart asks the agent again.
 	unseenTurn bool
+	// compacting is the compaction the claim is in (Machine.Compact), nil for none: the claim is
+	// working for as long as one runs, and this is what tells that working apart from a turn's —
+	// a turn that ends under a compaction leaves the claim where it is (turnEnded), and only
+	// CompactEnded gives it back. It is memory only, as the held suspension is: a daemon that
+	// restarts mid-compaction leaves a claim stored working, whose agent's own get_state answer
+	// then ends it (askTurnOver).
+	compacting *compacting
 	// previous is the incarnation the claim last ran and no longer records — stopped by a
 	// suspension, retired, failed on, or found dead — which every launch of the same session hands
 	// the runtime to wait out until one starts. letGo is the one way a process gets here. It is
@@ -1046,6 +1058,7 @@ func (m *Machine) current() Claim {
 	if m.held != nil {
 		c.SuspensionHeld, c.SuspensionHeldBy = true, m.held.By
 	}
+	c.Compacting = m.compacting != nil
 	return c
 }
 
@@ -1184,6 +1197,13 @@ func (m *Machine) fence(ctx context.Context, ev Event) (bool, error) {
 		// superseded generation, or of another session, must never be what says the work is
 		// pushed.
 		return m.fenceRequest("ready_for_update", ev.Generation, ev.Session)
+	case CompactEnded:
+		// A compaction of a process the claim has been relaunched past decides nothing: the
+		// session it compacted is not the one the claim runs now.
+		if ev.Generation != m.claim.Generation {
+			m.dropStale("CompactEnded", "generation", fmt.Sprint(ev.Generation), fmt.Sprint(m.claim.Generation))
+			return false, nil
+		}
 	}
 	return true, nil
 }
@@ -1469,8 +1489,16 @@ func (m *Machine) sessionGone() {
 
 // forgetSession drops the session the claim recorded, leaving the claim as one no agent has
 // registered for: the next launch is a fresh spawn that provisions its workspace anew.
+//
+// It puts the claim's run of provider-error turns back to zero as well (Claim.ProviderErrorRun).
+// The run counts the turns one session had refused in a row, and the new session has had none,
+// so the project's controller can be told again if the new one goes the same way — which is what
+// makes a fresh session a recovery the controller can repeat (api's freshSession). Without it a
+// claim that was told once would never be told again until a turn of it ended with no error at
+// all.
 func (m *Machine) forgetSession() {
 	m.claim.Session, m.claim.SessionFile = "", ""
+	m.claim.ProviderErrorRun = 0
 }
 
 // fail puts the claim where nothing relaunches it: its timers stop, its locator goes, and the
@@ -1571,9 +1599,10 @@ func (m *Machine) retire(ctx context.Context) error {
 // wait after a provider error among them (providererror.go) — no relaunch waits on one
 // (relaunchLater), no send talks to it, no suspension is held for its turn, no stale-plugin
 // relaunch waits for that turn either (refreshPlugin) — the process it was to replace is gone —
-// and the process the claim records, when it records one, moves into previous — the claim no
-// longer runs it (it was stopped, found dead, or left behind), and the next launch of the same
-// session waits it out.
+// no compaction runs against it (Machine.Compact, whose end then finds the claim in another
+// state and decides nothing) — and the process the claim records, when it records one, moves
+// into previous — the claim no longer runs it (it was stopped, found dead, or left behind), and
+// the next launch of the same session waits it out.
 func (m *Machine) letGo() {
 	m.disarmAll()
 	m.relaunch = nil
@@ -1581,6 +1610,7 @@ func (m *Machine) letGo() {
 	m.held = nil
 	m.staleRelaunch = nil
 	m.unseenTurn = false
+	m.compacting = nil
 	if enrollment := ClearEnrollment(&m.claim); enrollment != nil {
 		m.revoke(*enrollment)
 	}
@@ -1818,6 +1848,10 @@ func claimOf(ev Event) claim.Token {
 	case RequestDeliver:
 		return ev.Claim
 	case RequestExit:
+		return ev.Claim
+	case RequestCompact:
+		return ev.Claim
+	case CompactEnded:
 		return ev.Claim
 	}
 	return ""

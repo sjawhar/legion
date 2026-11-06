@@ -76,6 +76,15 @@ const (
 // a bundle in this long is one the daemon stops rather than one it waits longer for.
 const WorkspaceBundleTimeout = 5 * time.Minute
 
+// CompactTimeout is how long Oh My Pi is given to compact a session: the operation's own bound,
+// not worker_rpc_timeout_seconds, because a compaction is a model call over the whole transcript
+// where every other request on this interface is a frame the far side answers at once. It is a
+// constant rather than a setting for the reason WorkspaceBundleTimeout is one: a compaction that
+// cannot finish in this long is one the caller is told about rather than one the daemon waits
+// longer for. Ten minutes is the ladder's own widest step (supervise's promptRetryMax), so a
+// compaction never outlasts the wait the stuck claim is already in.
+const CompactTimeout = 10 * time.Minute
+
 // Conn is one agent's live connection, as everything above the transport sees it: a way to ask
 // the agent to do something, and nothing more. The facts that come back — the acknowledgement,
 // the turn starting, the turn ending, the connection closing — are events on the stream, never
@@ -100,6 +109,12 @@ type Conn interface {
 	// AdoptWorkingCopy makes the agent's side set the author of its working copy, for a
 	// workspace the daemon cannot reach itself.
 	AdoptWorkingCopy(ctx context.Context, id GitIdentity, timeout time.Duration) error
+	// Compact asks Oh My Pi to compact its session's context, writing the summary to
+	// customInstructions, and returns when it answers or bound runs out. Nil is a session
+	// compacted. A compaction Oh My Pi refused or skipped — a session too small, one already
+	// compacted, a summarizer that failed — is a refusal carrying its words (RefusalReason);
+	// every other error is transport.
+	Compact(ctx context.Context, customInstructions string, bound time.Duration) error
 	// BundleWorkspace has the agent's side bundle the unpushed work of the workspace every role
 	// of issue shares, for a release that is about to take the pod, its disk and that workspace
 	// away. A bundle larger than MaxWorkspaceBundleBytes is refused rather than sent, with the

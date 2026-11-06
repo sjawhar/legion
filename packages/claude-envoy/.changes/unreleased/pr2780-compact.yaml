@@ -1,0 +1,7 @@
+kind: Changed
+body: |-
+  The bundled `legion-controller` skill says what a controller does for one claim that stays
+  stuck after a provider-errors notice: `compact` first, which shortens that claim's session and
+  sends it the task it owes again while the session, its workspace and everything the worker
+  knows of its issue stay, and `fresh_session` only when the claim is still refused after that,
+  since a new session loses the claim's context and cures nothing in a provider outage.

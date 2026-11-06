@@ -290,6 +290,7 @@ test("posts every Stage 3 workflow request through its matching route", async ()
     readonly grant: (body: object) => Promise<unknown>;
     readonly handoffComplete: (body: object) => Promise<unknown>;
     readonly issueStatus: (body: object) => Promise<unknown>;
+    readonly freshSession: (body: object) => Promise<unknown>;
     readonly gateRegister: (body: object) => Promise<unknown>;
     readonly waveRelease: (body: object) => Promise<unknown>;
     readonly phaseBackward: (body: object) => Promise<unknown>;
@@ -327,6 +328,12 @@ test("posts every Stage 3 workflow request through its matching route", async ()
       "/legion/v1/issues/status",
       { grantId: "grant-208", issue: "LEGION-208", status: "todo" },
       "issue-status.json",
+    ],
+    [
+      "freshSession",
+      "/legion/v1/claims/fresh-session",
+      { grantId: "grant-208", issue: "LEGION-209", role: "implementer" },
+      "fresh-session.json",
     ],
     [
       "gateRegister",

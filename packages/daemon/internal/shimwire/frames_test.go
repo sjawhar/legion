@@ -53,6 +53,30 @@ func TestEveryExchangedFrameRoundTripsItsWireLine(t *testing.T) {
 			},
 		},
 		{"get_state", `{"type":"get_state","id":"r3"}`, GetState{ID: "r3"}},
+		{
+			// The compaction the daemon asks Oh My Pi for. Its instructions are what make the
+			// summary text rather than snapcompact's images (Compact).
+			"compact",
+			`{"type":"compact","id":"r9","customInstructions":"Write the summary as text."}`,
+			Compact{ID: "r9", CustomInstructions: "Write the summary as text."},
+		},
+		{
+			"compact response",
+			`{"type":"response","id":"r9","command":"compact","success":true,"data":{"summary":"what the turn did"}}`,
+			Response{
+				ID:      "r9",
+				Command: TypeCompact,
+				Success: true,
+				Data:    json.RawMessage(`{"summary":"what the turn did"}`),
+			},
+		},
+		{
+			// What Oh My Pi answers a compaction it skipped: its ManualCompactionNoOpError
+			// reaches the daemon as this refusal, in those words.
+			"skipped compact response",
+			`{"type":"response","id":"r9","command":"compact","success":false,"error":"Nothing to compact (session too small)"}`,
+			Response{ID: "r9", Command: TypeCompact, Success: false, Error: "Nothing to compact (session too small)"},
+		},
 		{"agent_start", `{"type":"agent_start"}`, AgentStart{}},
 		{"replayed agent_start", `{"type":"agent_start","deliveryId":"d1"}`, AgentStart{DeliveryID: "d1"}},
 		{"agent_end", `{"type":"agent_end"}`, AgentEnd{}},
@@ -349,6 +373,22 @@ func TestTheFramesTheShippedCodeValidatesRefuseTheirMalformedForms(t *testing.T)
 		{"no jjEmail", AdoptWorkingCopy{ID: "r4", JJUser: "legion", TimeoutMs: 1}},
 		{"no timeout", AdoptWorkingCopy{ID: "r4", JJUser: "legion", JJEmail: "l@example.com"}},
 		{"negative timeout", AdoptWorkingCopy{ID: "r4", JJUser: "legion", JJEmail: "l@example.com", TimeoutMs: -1}},
+	} {
+		if err := tc.frame.Validate(); !errors.Is(err, ErrMalformedFrame) {
+			t.Fatalf("%s: Validate = %v, want ErrMalformedFrame", tc.name, err)
+		}
+	}
+	// A compaction with no instructions is the one Oh My Pi would answer with snapcompact's
+	// images, which a resumed worker needs a vision model to read, so the daemon never sends it.
+	if err := (Compact{ID: "r9", CustomInstructions: "Write the summary as text."}).Validate(); err != nil {
+		t.Fatalf("Compact.Validate: %v", err)
+	}
+	for _, tc := range []struct {
+		name  string
+		frame Compact
+	}{
+		{"no id", Compact{CustomInstructions: "Write the summary as text."}},
+		{"no instructions", Compact{ID: "r9"}},
 	} {
 		if err := tc.frame.Validate(); !errors.Is(err, ErrMalformedFrame) {
 			t.Fatalf("%s: Validate = %v, want ErrMalformedFrame", tc.name, err)

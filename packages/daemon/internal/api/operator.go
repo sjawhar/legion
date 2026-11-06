@@ -49,7 +49,9 @@ type DeliverRequest struct {
 // caller before this contract did, resumes the claim's recorded session. FreshSession is
 // `legion claims retry --fresh-session`, which starts the claim in a new session instead — what a
 // claim its provider refused needs, since the session those turns were refused in would be
-// refused again.
+// refused again. It is the one effect the controller's fresh_session runs as well
+// (freshSession), and it reaches every claim of the project that is not in a turn, where the
+// plain retry reaches only a claim that failed and one an operator stopped.
 type RetryRequest struct {
 	FreshSession bool `json:"freshSession,omitempty"`
 }
@@ -349,17 +351,13 @@ func (s *server) claimRequest(request string, event func(http.ResponseWriter, *h
 		if !ok {
 			return
 		}
-		status := http.StatusOK
-		ctx, decided := s.decision(r, token)
-		defer decided()
-		if s.stopped(w, request) {
+		held, ok := s.claimEvent(w, r, m, token, request, ev)
+		if !ok {
 			return
 		}
-		if err := m.Handle(ctx, ev); errors.Is(err, supervise.ErrSuspendHeld) {
+		status := http.StatusOK
+		if held {
 			status = http.StatusAccepted
-		} else if err != nil {
-			s.operatorFailure(w, request, token, err)
-			return
 		}
 		s.operatorDone(r, token)
 		writeJSON(w, status, operatorView(m.Claim()))
@@ -384,17 +382,6 @@ func resumeEvent(_ http.ResponseWriter, _ *http.Request, c supervise.Claim) (sup
 
 func stopEvent(_ http.ResponseWriter, _ *http.Request, c supervise.Claim) (supervise.Event, bool) {
 	return supervise.RequestStop{Claim: c.Token}, true
-}
-
-// retryEvent is the operator's retry of an architect or a phase worker that runs nothing: its
-// session relaunched with fresh budgets, or a new session when the body asked for one
-// (RetryRequest, read once by retryClaim). The machine refuses it for a claim in any other state,
-// naming that state, and for the daemon's controller, naming who retries it (supervise's
-// operatorRetry).
-func retryEvent(req RetryRequest) func(http.ResponseWriter, *http.Request, supervise.Claim) (supervise.Event, bool) {
-	return func(_ http.ResponseWriter, _ *http.Request, c supervise.Claim) (supervise.Event, bool) {
-		return supervise.RequestOperatorRetry{Claim: c.Token, FreshSession: req.FreshSession}, true
-	}
 }
 
 // readOptionalBody decodes a request body the route reads when there is one: an operator command
@@ -463,10 +450,39 @@ func forgettable(state supervise.ClaimState) bool {
 	return state == supervise.StateQueued || state == supervise.StateSuspended || state == supervise.StateFailed || state == supervise.StateRetired
 }
 
-// retryClaim is the operator's retry of a claim that is running nothing: one that failed, and one
-// an operator stopped, which retires it. A phase worker is retried through its issue's phase,
-// never on its own, because a worker relaunched outside its phase is handed no task and does
-// nothing:
+// retryClaim is the operator's `legion claims retry`: the claim's own retry (retryStart), or,
+// when the body asks for a new session (RetryRequest), the fresh session the controller's
+// fresh_session runs too (freshSession). The two differ in what they reach and in what they
+// leave behind, and nothing else answers either: a plain retry acts on a claim that failed and
+// on one an operator stopped, resuming the session it recorded, while a fresh session reaches
+// every claim of the project that is not in a turn and drops that session first.
+func (s *server) retryClaim(w http.ResponseWriter, r *http.Request) {
+	token := claim.Token(r.PathValue("token"))
+	m, ok := s.supervisor.Machine(token)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, errorBody("no claim "+string(token)))
+		return
+	}
+	var req RetryRequest
+	if !s.readOptionalBody(w, r, &req) {
+		return
+	}
+	start := s.retryStart
+	if req.FreshSession {
+		start = s.freshSession
+	}
+	status, ok := start(w, r, m, token)
+	if !ok {
+		return
+	}
+	s.operatorDone(r, token)
+	writeJSON(w, status, operatorView(m.Claim()))
+}
+
+// retryStart starts a claim that is running nothing: one that failed, and one an operator
+// stopped, which retires it. It answers every refusal itself and reports the status its caller's
+// success answer takes. A phase worker is retried through its issue's phase, never on its own,
+// because a worker relaunched outside its phase is handed no task and does nothing:
 //
 //   - an issue held for that worker's own role (Options.RoleFor of the phase it is held from) is
 //     retried as its architect's retry_or_escalate retries it (intake.RetryOrEscalate): the phase
@@ -475,78 +491,37 @@ func forgettable(state supervise.ClaimState) bool {
 //     (intake.RestartPhase). It is where an operator's stop leaves an issue, since a stop is no
 //     death and holds nothing, and where a failure the workflow could not hold leaves one.
 //
-// Either way the start is the workflow's, so the route answers 202 with the claim as it is until
-// that start runs, and a refusal the workflow gives is the route's answer. A retry that leaves
-// the issue held relaunched nothing (a lingering tree's members stay where they stood), so the
-// route answers 409 naming the issue rather than report a retry. Every other claim is the
-// machine's to answer (retryEvent): an architect is relaunched, from failed and from the
-// retirement an operator's stop leaves, and a phase worker whose issue works another role's
-// phase, or that has left the workflow, is relaunched on its own with whatever task it still
-// holds. It is how an operator relaunches the claims a runtime failed to launch — every failed
-// claim in turn, with `legion claims retry --failed` — once the cause is gone.
+// Either way the start is the workflow's, so the retry answers 202 with the claim as it is until
+// that start runs, and a refusal the workflow gives is the answer. A retry that leaves the issue
+// held relaunched nothing (a lingering tree's members stay where they stood), so it answers 409
+// naming the issue rather than report a retry. Every other claim is the machine's to answer
+// (retryEvent): an architect is relaunched, from failed and from the retirement an operator's
+// stop leaves, and a phase worker whose issue works another role's phase, or that has left the
+// workflow, is relaunched on its own with whatever task it still holds. It is how an operator
+// relaunches the claims a runtime failed to launch — every failed claim in turn, with
+// `legion claims retry --failed` — once the cause is gone.
 //
-// --fresh-session (RetryRequest) is the other half of that retry, and it is the claim's own: a
-// phase worker forgets the session it recorded (supervise's RequestForgetSession) before the
-// phase's restart is applied, so the start that relaunches it spawns a fresh agent and gives it
-// the phase's task, and every other claim forgets it inside the retry the machine makes
-// (supervise's operatorRetry). That is what a session the provider refuses needs — resuming it
-// is refused again, turn after turn — and the one thing no route could do before without naming
-// the session by hand.
-//
-// The forget goes before intake.ApplyFact because the start the fact queues is an outbox row a
-// lane runs once the fact commits: ApplyFact runs its commit hooks on the committed fact, those
-// hooks wake the outbox lane, and the lane starts the claim on a goroutine of its own (the
-// daemon's outbox lanes). A forget sent after the fact races that lane. A lane that reaches the
-// machine first relaunches the claim on the very session this request means to drop, and the
-// forget then arrives at a launching claim, where the table ignores it (supervise's
-// onForgetSession rows) and the machine answers the operator a refusal: the operator reads an
-// error and the phase runs on in the session the provider keeps refusing.
-//
-// What this order costs is the session id of a refused retry. Three answers come after the
-// forget and relaunch nothing: a fact the store would not apply, the workflow's own refusal of
-// it, and an issue the retry leaves held because its tree lingers. The claim each leaves behind
-// records no session, so its next accepted retry spawns a fresh agent rather than resuming the
-// one it had. Only the claim's record of the session goes: the session and its file stand, and
-// this route logs the id it dropped, so an operator who wanted that session can read it there.
-// The read of the issue after the fact is not one of them — the fact is committed by then, and
-// the start it queued relaunches the claim whatever that read answers — and the read before the
-// fact comes before the forget, so a claim it refuses keeps its session. A forget that loses the
-// race to the lane, by contrast, leaves no way at all to drop the session the retry was for.
-func (s *server) retryClaim(w http.ResponseWriter, r *http.Request) {
-	token := claim.Token(r.PathValue("token"))
-	m, ok := s.supervisor.Machine(token)
-	if !ok {
-		writeJSON(w, http.StatusNotFound, errorBody("no claim "+string(token)))
-		return
-	}
-	// The body is read once here: both halves of the retry read it, and the request's body can be
-	// read only once.
-	var req RetryRequest
-	if !s.readOptionalBody(w, r, &req) {
-		return
-	}
+// The session is the claim's own either way: this start resumes the recorded one. A caller that
+// wants a new session forgets it before calling here (freshSession), which is also what reaches
+// a claim this start refuses.
+func (s *server) retryStart(w http.ResponseWriter, r *http.Request, m *supervise.Machine, token claim.Token) (int, bool) {
 	c := m.Claim()
 	if !failedOrRetired(c.State) || !isPhaseWorker(c.Role) || s.pool == nil || s.roleFor == nil {
-		s.claimRequest("retry", retryEvent(req))(w, r)
-		return
+		return s.machineRetry(w, r, m, token)
 	}
 	if s.stopped(w, "retry") {
-		return
+		return 0, false
 	}
 	recorded, err := s.recordedIssue(r.Context(), c.Issue)
 	if err != nil {
 		s.logFailure("api: read the issue of a phase worker to retry", "claim", token, "error", err)
 		writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("could not read %s's record: %v", c.Issue, err)))
-		return
+		return 0, false
 	}
 	if recorded == nil || s.roleFor(workedPhase(*recorded)) != c.Role {
-		s.claimRequest("retry", retryEvent(req))(w, r)
-		return
+		return s.machineRetry(w, r, m, token)
 	}
 	working := workedPhase(*recorded)
-	if req.FreshSession && !s.forgetRecordedSession(w, r, m, token, c.Session) {
-		return
-	}
 	fact := intake.Fact(intake.RestartPhase{Issue: c.Issue, Role: c.Role})
 	if recorded.Phase == phase.Held {
 		fact = intake.RetryOrEscalate{Issue: c.Issue, Decision: intake.RetryDecision}
@@ -555,25 +530,42 @@ func (s *server) retryClaim(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.logFailure("api: apply the operator's retry of a phase", "claim", token, "issue", c.Issue, "error", err)
 		writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("could not retry %s's phase %s: %v", c.Issue, working, err)))
-		return
+		return 0, false
 	}
 	if result.Refusal != nil {
 		writeJSON(w, result.Refusal.Status, errorBody(result.Refusal.Message))
-		return
+		return 0, false
 	}
 	after, err := s.recordedIssue(r.Context(), c.Issue)
 	if err != nil {
 		s.logFailure("api: read the issue after the operator's retry of its phase", "claim", token, "issue", c.Issue, "error", err)
 		writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("could not read %s's record after the retry: %v", c.Issue, err)))
-		return
+		return 0, false
 	}
 	if after != nil && after.Phase == phase.Held {
 		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf("%s is still held after the retry of its phase %s, so nothing relaunched %s: its tree lingers, and a lingering tree's members stay where they stood", c.Issue, working, token)))
-		return
+		return 0, false
 	}
-	s.log.Info("api: the operator retried a phase", "claim", token, "issue", c.Issue, "phase", working, "freshSession", req.FreshSession)
-	s.operatorDone(r, token)
-	writeJSON(w, http.StatusAccepted, operatorView(m.Claim()))
+	s.log.Info("api: a retry restarted a phase", "claim", token, "issue", c.Issue, "phase", working)
+	return http.StatusAccepted, true
+}
+
+// machineRetry is the retry an architect or a phase worker that runs nothing gets from its own
+// machine: fresh budgets, and the session the claim records relaunched. The machine refuses it
+// for a claim in any other state, naming that state, and for the daemon's controller, naming
+// who retries it (supervise's operatorRetry). A caller that asked for a new session has
+// forgotten the recorded one before it gets here (freshSession), so the relaunch spawns rather
+// than resumes. A relaunch the machine holds for the agent's turn answers 202, as every
+// operator request on a claim answers one (claimRequest).
+func (s *server) machineRetry(w http.ResponseWriter, r *http.Request, m *supervise.Machine, token claim.Token) (int, bool) {
+	held, ok := s.claimEvent(w, r, m, token, "retry", supervise.RequestOperatorRetry{Claim: token})
+	if !ok {
+		return 0, false
+	}
+	if held {
+		return http.StatusAccepted, true
+	}
+	return http.StatusOK, true
 }
 
 // failedOrRetired is whether a claim's state is one the operator's retry acts on through its
@@ -592,18 +584,19 @@ func workedPhase(issue record.Issue) phase.Phase {
 	return issue.Phase
 }
 
-// forgetRecordedSession has the claim drop the session it recorded, for a retry that asked for a
-// new one, and reports whether it did: a machine that refuses it — a claim running the session,
-// which no retry of this route reaches, or one that recorded another session since the route read
-// it — is the operator's answer, given in place of the retry's own.
+// forgetRecordedSession has the claim drop the session it recorded, for a caller that is
+// starting it in a new one (freshSession), and reports whether it did: a machine that refuses
+// it — a claim running the session, which no fresh session reaches, or one that recorded
+// another session since the route read it — is the caller's answer, given in place of the
+// start's own.
 func (s *server) forgetRecordedSession(w http.ResponseWriter, r *http.Request, m *supervise.Machine, token claim.Token, session string) bool {
 	ctx, decided := s.decision(r, token)
 	defer decided()
 	if err := m.Handle(ctx, supervise.RequestForgetSession{Claim: token, Session: session}); err != nil {
-		s.operatorFailure(w, "retry", token, err)
+		s.operatorFailure(w, "forget-session", token, err)
 		return false
 	}
-	s.log.Info("api: the operator's retry left the claim's session behind", "claim", token, "session", session)
+	s.log.Info("api: a fresh session left the claim's recorded session behind", "claim", token, "session", session)
 	return true
 }
 

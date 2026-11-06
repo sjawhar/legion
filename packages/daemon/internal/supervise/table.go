@@ -384,14 +384,12 @@ type RequestRetry struct{ Claim claim.Token }
 // still decides whether the relaunch runs at all: a tree whose cleanup is reserved refuses the
 // launch (revive, Store.AdmitClaim), as it refuses the workflow's own retry of a retired claim.
 //
-// FreshSession is `legion claims retry --fresh-session`: the claim forgets its recorded session
-// before the relaunch, so the role starts a new one. It is a field rather than an event of its
-// own, as the closes are, because both answers are the same decision made by the same caller —
-// the claim runs again — and neither skips a check the other makes: it says only which session
-// the retry starts.
+// A caller that wants the claim to start in a new session forgets the recorded one first
+// (RequestForgetSession), as `legion claims retry --fresh-session` and the controller's
+// fresh_session both do through the api's one fresh-session effect: this retry starts whatever
+// session the claim records when it arrives, and a claim that records none is spawned fresh.
 type RequestOperatorRetry struct {
-	Claim        claim.Token
-	FreshSession bool
+	Claim claim.Token
 }
 
 // RequestForgetSession drops the named recorded session of a suspended, failed, or retired claim.
@@ -442,6 +440,24 @@ type RequestExit struct {
 	Reason     string
 }
 
+// RequestCompact takes the claim for a compaction of its Oh My Pi session, which is what a claim
+// whose provider keeps refusing its session needs before anything is started again
+// (Machine.Compact). It carries no instructions: the ask itself is the caller's, made with no
+// lock held, and this is only the moment the claim becomes busy.
+type RequestCompact struct{ Claim claim.Token }
+
+// CompactEnded is the compaction over, posted by whoever asked for it (Machine.Compact).
+// Generation is the generation the claim was taken at, so an end that reaches a claim its
+// relaunch has moved past decides nothing. Compacted is whether Oh My Pi compacted the session:
+// false for a compaction it refused or skipped and for a wait that ran out, each of which gives
+// the claim back and sends the owed task again all the same, and only true puts the claim's run
+// of provider-error turns back to zero.
+type CompactEnded struct {
+	Claim      claim.Token
+	Generation uint64
+	Compacted  bool
+}
+
 func (RuntimeObservation) isEvent()   {}
 func (StreamHello) isEvent()          {}
 func (StreamTurnStart) isEvent()      {}
@@ -472,6 +488,8 @@ func (RequestOperatorRetry) isEvent() {}
 func (RequestForgetSession) isEvent() {}
 func (RequestDeliver) isEvent()       {}
 func (RequestExit) isEvent()          {}
+func (RequestCompact) isEvent()       {}
+func (CompactEnded) isEvent()         {}
 
 // eventKind is what the table is keyed on beside the state: an event's type, with a Timer split
 // by its kind, because each wait means a different thing.
@@ -511,6 +529,9 @@ const (
 	onForgetSession eventKind = "request_forget_session"
 	onDeliver       eventKind = "request_deliver"
 	onExit          eventKind = "request_exit"
+	onCompact       eventKind = "request_compact"
+
+	onCompactEnded eventKind = "compact_ended"
 
 	onStalePlugin eventKind = "stale_plugin"
 
@@ -584,6 +605,10 @@ func kindOf(ev Event) eventKind {
 		return onDeliver
 	case RequestExit:
 		return onExit
+	case RequestCompact:
+		return onCompact
+	case CompactEnded:
+		return onCompactEnded
 	}
 	return ""
 }
@@ -613,6 +638,8 @@ func requestName(ev Event) (string, bool) {
 		return "deliver", true
 	case RequestExit:
 		return "exit", true
+	case RequestCompact:
+		return "compact", true
 	case PodUpdateSignalled:
 		return "ready_for_update", true
 	}
@@ -916,6 +943,20 @@ func fillTable(t *builder) {
 		[]ClaimState{StateRetired, StateSuspended}, StateRegistered, StateReady, StateWorking, StateIdle)
 	t.row(onExit, "the exit of a process the daemon already ended", nothingToDo, nil, gone...)
 	t.ignore(onExit, notRegistered, StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected)
+
+	// The compaction of the claim's Oh My Pi session, which reaches an agent that is running and
+	// in no turn: the claim is working for as long as it runs, and the end gives it back
+	// (internal/supervise/compact.go).
+	t.row(onCompact, "take the claim for a compaction of its session", compactStart, []ClaimState{StateWorking}, prompted...)
+	t.ignore(onCompact, "the claim is busy: a turn is running, or its session is already being compacted", StateWorking)
+	t.ignore(onCompact, "the agent is not ready, so it has no session to compact", unready...)
+	t.ignore(onCompact, "no process of this claim is running, so it has no session to compact", gone...)
+
+	t.row(onCompactEnded, "the compaction is over: reset the run of provider errors it cleared, and send the owed task", compactEnded,
+		[]ClaimState{StateIdle, StateWorking, StateLaunching, StateFailed}, StateWorking)
+	t.ignore(onCompactEnded, "the claim is not in a compaction: the process it ran on was let go first", prompted...)
+	t.ignore(onCompactEnded, "the agent is not ready, so the compaction's process is gone", unready...)
+	t.ignore(onCompactEnded, "no process of this claim is running, so the compaction's own is gone", gone...)
 }
 
 type builder struct{ rules map[key]rule }
@@ -1360,7 +1401,17 @@ func (m *Machine) takeBackSignal(ownTask bool) {
 // launching, which sendPending hands nothing (delivery.go), so the send costs that case nothing.
 //
 // answerByTurnEnd runs first of all, before the marks it reads are cleared (askFirst, unseenTurn).
+//
+// A claim working because its session is being compacted is left exactly where it is: a
+// compaction aborts whatever turn its session was running, so the agent_end of a background
+// turn can arrive under one, and taking that for the compaction's end would hand the claim its
+// owed task while Oh My Pi is still writing the summary. CompactEnded is the only end of a
+// compaction (compactEnded).
 func turnEnded(m *Machine, ctx context.Context, _ Event) error {
+	if m.compacting != nil {
+		m.log.Info("supervise: a turn ended while this claim's session is being compacted; the claim stays working until the compaction ends")
+		return nil
+	}
 	m.answerByTurnEnd()
 	m.askFirst, m.unseenTurn = false, false
 	if m.held != nil {
@@ -1713,23 +1764,17 @@ func retry(m *Machine, ctx context.Context, _ Event) error {
 // operatorRetry is the operator's retry of a claim that runs nothing: retry, for an architect —
 // its tree's root or a sub-architect, which nothing else relaunches — and for a phase worker
 // whose issue works no phase of its role, which the route has already established before it
-// reaches the machine (api's retryClaim starts the phase itself for every other one). The
+// reaches the machine (api's retryStart starts the phase itself for every other one). The
 // daemon's controller has a retry of its own, its keeper, so it alone is refused. A claim's role
 // never changes, so the refusal cannot race the decision it guards.
 //
-// A retry that asks for a new session forgets the recorded one before the relaunch
-// (RequestOperatorRetry.FreshSession), so the launch spawns a fresh agent, as the forget-session
-// route's own action leaves a claim: resuming a session whose turns the provider refused would be
-// refused again.
+// It relaunches the session the claim records. A start that must not use that session has
+// dropped it before this runs (RequestForgetSession), so the launch spawns a fresh agent:
+// resuming a session whose turns the provider refused would be refused again.
 func operatorRetry(m *Machine, ctx context.Context, ev Event) error {
 	if m.claim.Role == claim.RoleController {
 		return &RefusedError{State: m.claim.State, Request: "retry",
 			Err: fmt.Errorf("%w; the daemon's controller keeper retries the controller", ErrRetryNotTheController)}
-	}
-	if ev.(RequestOperatorRetry).FreshSession {
-		m.log.Info("supervise: the operator's retry starts a new session", "session", m.claim.Session,
-			"sessionFile", m.claim.SessionFile)
-		m.forgetSession()
 	}
 	return retry(m, ctx, ev)
 }

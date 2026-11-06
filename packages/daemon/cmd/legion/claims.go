@@ -22,7 +22,9 @@ import (
 // claimsCommands is the operator's hand on the daemon's claims, one subcommand per operator route
 // and the one list of them `legion claims --help` names (internal/api/operator.go). retry relaunches
 // a failed claim: an architect on its session with fresh budgets, a phase worker through its issue's
-// held phase; with --failed, every failed claim. close is the tree's close, through its root claim,
+// held phase; with --failed, every failed claim. compact shortens a running claim's session and
+// sends it the task it owes again, which is what a claim whose provider keeps refusing its session
+// reaches for before a fresh one. close is the tree's close, through its root claim,
 // for a tree no workflow issue backs: the root, then every other claim of the tree.
 var claimsCommands = map[string]command{
 	"spawn":          runClaimsSpawn,
@@ -31,6 +33,7 @@ var claimsCommands = map[string]command{
 	"resume":         claimRequest("resume"),
 	"stop":           claimRequest("stop"),
 	"retry":          runClaimsRetry,
+	"compact":        runClaimsCompact,
 	"forget-session": runClaimsForgetSession,
 	"close":          claimRequest("close"),
 	"list":           runClaimsList,
@@ -287,6 +290,44 @@ func runClaimsForgetSession(ctx context.Context, args []string, stdout, stderr i
 	}
 	return c.send(ctx, op, http.MethodPost, "/"+url.PathEscape(*token)+"/forget-session",
 		api.ForgetSessionRequest{Session: *session}, printClaim)
+}
+
+// runClaimsCompact compacts --claim's Oh My Pi session and has the daemon send the claim the
+// task it owes again: what a claim whose provider keeps refusing its session reaches for before
+// a fresh session, since the session, its workspace and everything the worker knows of its issue
+// stay where they are (api's compact).
+//
+// The request carries no deadline of its own, as no `legion claims` request does: a compaction
+// is a model call over the whole transcript, and the daemon bounds it at ten minutes
+// (runtime.CompactTimeout). The daemon's answer is printed whether or not the session was
+// compacted — a session too small to compact, or one already compacted, is reported with Oh My
+// Pi's own words for it, and the owed task has gone again in either case.
+func runClaimsCompact(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	c := newClaimsCall("compact", stdout, stderr)
+	token := c.flags.String("claim", "", "the claim's token (required)")
+	if code, ok := c.parse(args, "claim"); !ok {
+		return code
+	}
+	op, ok := c.connect()
+	if !ok {
+		return 1
+	}
+	return c.send(ctx, op, http.MethodPost, "/"+url.PathEscape(*token)+"/compact", nil, printCompaction)
+}
+
+// printCompaction is the one line a compaction prints: whether the session was compacted, and
+// why it was not when it was not.
+func printCompaction(w io.Writer, answer []byte) error {
+	var compaction api.CompactResponse
+	if err := decodeAnswer(answer, &compaction); err != nil {
+		return err
+	}
+	if compaction.Compacted {
+		_, err := fmt.Fprintln(w, "compacted; the owed task was sent again")
+		return err
+	}
+	_, err := fmt.Fprintf(w, "not compacted: %s; the owed task was sent again\n", orNone(compaction.Reason))
+	return err
 }
 
 // runClaimsRetry retries --claim, or with --failed every claim the daemon holds failed, in the

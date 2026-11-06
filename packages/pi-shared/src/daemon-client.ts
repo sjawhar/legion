@@ -1,11 +1,14 @@
 import {
   type LegionActivityRequest,
   LegionChildRequest,
+  LegionCompactRequest,
+  LegionCompactResponse,
   LegionControllerGrantRequest,
   LegionControllerRegisterResponse,
   type LegionControllerRegistration,
   LegionEmptyResponse,
   LegionErrorResponse,
+  LegionFreshSessionRequest,
   LegionGateRegisterRequest,
   LegionGrantRequest,
   LegionGrantResponse,
@@ -114,9 +117,22 @@ export interface LegionDaemonClient {
   readonly issueStatus: (
     input: z.input<typeof LegionIssueStatusRequest>
   ) => Promise<z.output<typeof LegionEmptyResponse>>;
+  /** The controller's `fresh_session`: the claim on `role` of `issue` leaves its recorded
+   * session behind and starts again in a new one, the effect
+   * `legion claims retry --fresh-session` runs for an operator. */
+  readonly freshSession: (
+    input: z.input<typeof LegionFreshSessionRequest>
+  ) => Promise<z.output<typeof LegionEmptyResponse>>;
   readonly gateRegister: (
     input: z.input<typeof LegionGateRegisterRequest>
   ) => Promise<z.output<typeof LegionEmptyResponse>>;
+  /** The controller's `compact`: the claim on `role` of `issue` has its Oh My Pi session
+   * compacted and is then sent the task it owes again, the effect `legion claims compact` runs
+   * for an operator. The answer says whether the session was compacted and, when it was not,
+   * why; the owed task went again either way. */
+  readonly compact: (
+    input: z.input<typeof LegionCompactRequest>
+  ) => Promise<z.output<typeof LegionCompactResponse>>;
   readonly waveRelease: (
     input: z.input<typeof LegionWaveReleaseRequest>
   ) => Promise<z.output<typeof LegionWaveReleaseResponse>>;
@@ -472,6 +488,15 @@ export function createLegionDaemonClient(
       ),
     issueStatus: (input) =>
       post("/legion/v1/issues/status", LegionIssueStatusRequest, LegionEmptyResponse, input),
+    freshSession: (input) =>
+      post(
+        "/legion/v1/claims/fresh-session",
+        LegionFreshSessionRequest,
+        LegionEmptyResponse,
+        input
+      ),
+    compact: (input) =>
+      post("/legion/v1/claims/compact", LegionCompactRequest, LegionCompactResponse, input),
     gateRegister: (input) =>
       post("/legion/v1/gates/register", LegionGateRegisterRequest, LegionEmptyResponse, input),
     waveRelease: (input) =>

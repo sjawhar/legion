@@ -49,17 +49,18 @@ func TestTheOperatorsRetryRelaunchesAStoppedClaim(t *testing.T) {
 	}
 }
 
-// --fresh-session is the one thing that changes which session the operator's retry starts: with
-// the flag the claim forgets the recorded session before the relaunch, so the runtime spawns a
-// new agent — what a claim whose provider refused its session needs, since resuming it would be
-// refused again — and without it the recorded session is resumed.
-func TestTheOperatorsRetryStartsANewSessionOnlyWhenItAsksForOne(t *testing.T) {
+// The operator's retry starts the session the claim records, and nothing else chooses that: a
+// claim that has forgotten its session first (RequestForgetSession, which `legion claims retry
+// --fresh-session` and the controller's fresh_session both send before this retry) is spawned a
+// new agent, which is what a claim whose provider refused its session needs, since resuming it
+// would be refused again.
+func TestTheOperatorsRetryStartsTheSessionTheClaimRecords(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		fresh bool
 	}{
-		{"a retry that asks for nothing", false},
-		{"--fresh-session", true},
+		{"a retry of a claim that records its session", false},
+		{"a retry of a claim that forgot it", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarnessOf(t, rootClaim())
@@ -69,8 +70,11 @@ func TestTheOperatorsRetryStartsANewSessionOnlyWhenItAsksForOne(t *testing.T) {
 			}
 			h.wantState(StateFailed)
 			spawns, resumes := len(h.calls("Spawn")), len(h.calls("Resume"))
+			if tc.fresh {
+				h.must(RequestForgetSession{Claim: h.token, Session: session})
+			}
 
-			h.must(RequestOperatorRetry{Claim: h.token, FreshSession: tc.fresh})
+			h.must(RequestOperatorRetry{Claim: h.token})
 
 			h.wantState(StateLaunching)
 			if !tc.fresh {
@@ -87,10 +91,10 @@ func TestTheOperatorsRetryStartsANewSessionOnlyWhenItAsksForOne(t *testing.T) {
 			h.wantCalls("Resume", resumes)
 			calls := h.wantCalls("Spawn", spawns+1)
 			if got := calls[len(calls)-1].Spec.ResumeSessionFile; got != "" {
-				t.Fatalf("the fresh-session retry spawned with resume session file %q, want none", got)
+				t.Fatalf("the retry of a claim that forgot its session spawned with resume session file %q, want none", got)
 			}
 			if c := h.claim(); c.Session != "" || c.SessionFile != "" {
-				t.Fatalf("the fresh-session retry left session %q (%q) on the claim, want both forgotten", c.Session, c.SessionFile)
+				t.Fatalf("the retry left session %q (%q) on the claim, want both forgotten", c.Session, c.SessionFile)
 			}
 		})
 	}

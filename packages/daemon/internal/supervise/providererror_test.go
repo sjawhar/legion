@@ -491,6 +491,35 @@ func TestATurnThatEndsWithNoProviderErrorEndsTheRun(t *testing.T) {
 	}
 }
 
+// A new session starts the run of provider errors again: the run counts the turns one session
+// had refused in a row, and the session the claim is about to start has had none. Without the
+// reset a claim the controller was told of once could never be told of again until a turn of it
+// ended with no error at all — and the fresh session the controller starts for it
+// (api's freshSession) is what makes the second notice worth having.
+func TestForgettingTheSessionStartsTheRunOfProviderErrorsAgain(t *testing.T) {
+	h := workingClaim(t)
+	for turn := range providerErrorRunTold {
+		h.errorTurn(StreamPromptResult{Error: "overloaded_error", HTTPStatus: 529})
+		h.climbs(turn+1, promptRetryDelay(turn+1))
+	}
+	if got := h.claim().ProviderErrorRun; got != providerErrorRunTold {
+		t.Fatalf("the run of provider errors is %d, want the %d the controller is told at", got, providerErrorRunTold)
+	}
+	// The claim is in the turn the last send started, as a claim climbing the ladder is; the
+	// fresh session the controller asks for comes between turns, which is where this one is.
+	h.mustQuiet(StreamTurnEnd{Claim: testToken})
+	h.must(RequestSuspend{Claim: testToken, Reason: "a fresh session was asked for", By: SuspendedByOperator})
+
+	h.must(RequestForgetSession{Claim: testToken, Session: session})
+
+	if got := h.claim().ProviderErrorRun; got != 0 {
+		t.Errorf("the run of provider errors is %d after the session was forgotten, want 0", got)
+	}
+	if got := h.store.load(testToken).ProviderErrorRun; got != 0 {
+		t.Errorf("the stored run of provider errors is %d after the session was forgotten, want 0", got)
+	}
+}
+
 // The one exit from a run of provider errors is the project's controller, told once. There is no
 // hold and no attempt limit behind it.
 func TestTheSixthProviderErrorTurnInARowTellsTheControllerOnce(t *testing.T) {

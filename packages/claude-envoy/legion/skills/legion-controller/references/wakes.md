@@ -134,6 +134,15 @@ chain refuses the same work. Either way, `envoy_publish` the key, the role and t
 issue's architect, which is who can narrow the work. Re-admit nothing and park nothing, because
 the task is not lost and the session still runs.
 
+One claim that stays stuck after that is yours to act on, and `compact` is the first thing you
+reach for: it has the daemon shorten that claim's Oh My Pi session to a text summary and send
+the claim the task it owes again, and the claim keeps its session, its workspace and everything
+it knows of its issue. The answer says whether the session was compacted and, when it was not,
+why; the owed task went again either way. Use `fresh_session` only when the claim is still
+refused after a compaction, because a new session loses everything the old one held — what the
+worker learned of its issue, and what it had not yet pushed or written down — and cures nothing
+in a provider outage, where the next session's turns are refused as the last one's were.
+
 ## GitHub mentions
 
 Read the mention and its artifact. Answer a mention that asks you for triage or for information

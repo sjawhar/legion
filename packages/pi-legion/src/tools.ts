@@ -1,4 +1,4 @@
-import type { LegionRole } from "@legion/contracts";
+import { LEGION_ROLES, type LegionRole } from "@legion/contracts";
 import {
   LegionGateRegisterRequest,
   type LegionGrant,
@@ -64,7 +64,7 @@ const OPERATIONS: Readonly<Record<LegionToolRole, readonly string[]>> = {
     "handoff_complete",
     "ready_for_update",
   ],
-  controller: ["read_state", "set_status"],
+  controller: ["read_state", "set_status", "fresh_session", "compact"],
 };
 
 /** The fields each operation beyond the phase ops takes; a phase op's are `PhaseOpArguments`'. */
@@ -78,6 +78,8 @@ const OPERATION_FIELDS: Readonly<Record<string, readonly string[]>> = {
   rerun_child: ["issue"],
   read_state: [],
   set_status: ["issue", "status"],
+  fresh_session: ["issue", "role"],
+  compact: ["issue", "role"],
 };
 
 const ISSUE_STATUSES = ["todo", "backlog", "icebox"] as const;
@@ -110,6 +112,7 @@ function toolSchema(pi: PiApi): unknown {
     ready: phase.ready,
     round: phase.round,
     status: z.enum(ISSUE_STATUSES).optional(),
+    role: z.enum(LEGION_ROLES).optional(),
   });
 }
 
@@ -196,7 +199,18 @@ export function createLegionTool(deps: {
         "sign_off is the architect's acceptance of an issue in accepting, moving it to retro; the daemon refuses it in every " +
         "other phase (SIGNOFF_OUTSIDE_ACCEPTING), and issues still running beneath it do not hold it: a root's close waits " +
         "for them instead. " +
-        "The controller's read_state returns the daemon's whole state and set_status moves an issue to todo, backlog or icebox. ",
+        "The controller's read_state returns the daemon's whole state and set_status moves an issue to todo, backlog or icebox. " +
+        "fresh_session (issue, role) has one claim leave the session it runs in behind and start again in a new one: the daemon " +
+        "stops the agent if it runs, forgets the session, and starts the claim, which loses everything that session held. The " +
+        "daemon refuses it for a claim in a turn (CLAIM_IN_A_TURN: ask again after the turn ends), for a claim whose launch is in " +
+        "flight (CLAIM_UNSETTLED) and for role controller. " +
+        "compact (issue, role) shortens one claim's session instead: the daemon has Oh My Pi write a text summary of the " +
+        "session so far and then sends the claim the task it owes again, and the claim keeps its session, its workspace and " +
+        "everything it knows of its issue. Try compact before fresh_session for a claim that stays stuck. The answer says " +
+        "whether the session was compacted and, when it was not, why; the owed task went again either way. The daemon refuses " +
+        "it for a claim that is suspended, stopped or failed (CLAIM_NOT_RUNNING: fresh_session reaches that one), for a claim " +
+        "in a turn (CLAIM_IN_A_TURN), for a claim whose launch is in flight (CLAIM_UNSETTLED), for a claim whose role runs on " +
+        "Claude Code (CLAIM_NOT_ON_OMP) and for role controller. ",
     }),
     defaultInactive: true,
     parameters: toolSchema(pi),
@@ -242,8 +256,22 @@ export function createLegionTool(deps: {
         const client = daemon();
         if (active.kind === "controller") {
           if (operation === "read_state") return jsonSuccess(await client.state());
-          // set_status, the controller's one write: validated whole before its grant is minted.
+          // The controller's three writes: each validated whole before its grant is minted.
           const issue = requiredString(parameters, operation, "issue");
+          if (operation === "fresh_session" || operation === "compact") {
+            const role = LEGION_ROLES.find((candidate) => candidate === parameters.role);
+            if (role === undefined) {
+              throw new Error(`${operation} requires role ${LEGION_ROLES.join(", ")}`);
+            }
+            const { grantId } = await controllerGrant(active.sessionID);
+            if (operation === "compact") {
+              // The answer is the daemon's own: a compaction Oh My Pi refused or skipped says so
+              // and names why, and the claim was sent the task it owes again either way.
+              return jsonSuccess(await client.compact({ grantId, issue, role }));
+            }
+            await client.freshSession({ grantId, issue, role });
+            return jsonSuccess({});
+          }
           const status = ISSUE_STATUSES.find((candidate) => candidate === parameters.status);
           if (status === undefined) {
             throw new Error(`set_status requires status ${ISSUE_STATUSES.join(", ")}`);
