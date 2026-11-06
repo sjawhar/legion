@@ -1075,9 +1075,8 @@ export function Inbox({
     const row = handRow();
     return row === undefined ? undefined : rowId(row);
   };
-  /** The row `e` dismisses: the thread row in hand, as the route names it - its id and the
-   *  version the page is showing it at. An Ask or an Approval row has no Dismiss at all
-   *  (`dismissRow`). */
+  /** The row `e` dismisses: the thread row in hand, as the route names it - its id and what the
+   *  page drew in it. An Ask or an Approval row has no Dismiss at all (`dismissRow`). */
   const dismissableRow = (): InboxDismissRow | undefined => {
     const row = handRow();
     return row === undefined ? undefined : dismissRow(row);

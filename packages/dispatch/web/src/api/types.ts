@@ -157,6 +157,7 @@ export type {
   HandoffSummary,
   InboxDismissRequest,
   InboxDismissResponse,
+  InboxDismissSeen,
   InboxDocument,
   InboxListState,
   InboxRow,

@@ -8,11 +8,11 @@
  * that takes it out, and in the Dismissed view the same write with `restore` puts it back.
  *
  * One press is one `POST /api/v1/me/inbox/dismiss` (`inboxDismissRequest`), naming either the row
- * ids it changes with the version it dismisses each of them by - which is every press made over a
+ * ids it changes with what the page drew in each of them - which is every press made over a
  * list the reader has whole, a **Select all** of the unpaged Inbox read included - or, where the
  * list pages at the server and the ids are not all loaded, the narrowing it is under with
- * `dismiss_through`, that list read's own `as_of`, where the server reads each row's version
- * itself. The press is applied here first, because the reader pressed it: the rows leave the view
+ * `dismiss_through`, that list read's own `as_of`, where the server draws the rows itself. The
+ * press is applied here first, because the reader pressed it: the rows leave the view
  * they were in and the unread count every badge shares drops by the unread ones among them. A
  * refused press puts each row back where it stood and the page says so (`dismissRefusalText`),
  * which an old server with no such route is one way of causing. A row somebody wrote in since
@@ -35,6 +35,7 @@ import {
 import type {
   InboxDismissRequest,
   InboxDismissResponse,
+  InboxDismissSeen,
   MyRepliesResponse,
   MyReplyRow,
 } from "../../api/types";
@@ -44,21 +45,29 @@ import type { InboxFilters } from "./InboxBar";
 import { type InboxListRow, rowId } from "./list-row";
 import { inboxWriteScope, inWriteScope } from "./write-scope";
 
-/** One row a press names, and the version it dismisses it by. The version is what keeps a press
- *  from burying a reply the page never drew: a reply that lands while the press is in flight is
- *  stamped when its own transaction began, which can be before the press's mark, so the server
- *  cannot tell the two apart by time and reads this instead (`seen_replies`). */
+/** One row a press names, and what the page drew in it. The server writes a row's mark only
+ *  while the row still holds what the page drew, so a press buries no write this page never
+ *  drew; why no comparison of times can stand in for that check is written once, on the
+ *  increment in `20261105093501_user_threads_record_dismissed.up.sql`. */
 export interface InboxDismissRow {
   /** The id `POST /api/v1/me/inbox/dismiss` names the row by. */
   readonly id: string;
-  /** The newest reply the row showed, which is the row's own `reply.id`. */
-  readonly seen: string;
+  /** What the page drew in the row, as the body carries it (`seen_replies`). */
+  readonly seen: InboxDismissSeen;
 }
 
-/** What a press names `thread` as, read off the row the page is drawing: a press carries the
- *  version the reader saw, never one looked up again when the request is built. */
+/** What a press names `thread` as, read off the row the page is drawing: a press carries what
+ *  the reader was shown, never anything looked up again when the request is built. A Reply row
+ *  carries its own version; an Agent row has none of its own, so it carries the newest session
+ *  reply it showed and the ids it drew as unread. */
 export function dismissThreadRow(thread: MyReplyRow): InboxDismissRow {
-  return { id: rowId({ kind: "thread", thread }), seen: thread.reply.id };
+  return {
+    id: rowId({ kind: "thread", thread }),
+    seen:
+      thread.kind === "agent"
+        ? { newest_reply: thread.reply.id, unread_replies: thread.unread_reply_ids }
+        : { version: thread.version },
+  };
 }
 
 /** The row `POST /api/v1/me/inbox/dismiss` names `row` as, or undefined for a row it cannot name:
@@ -73,20 +82,20 @@ export function dismissRow(row: InboxListRow): InboxDismissRow | undefined {
   return prefixes.some((prefix) => named.id.startsWith(prefix)) ? named : undefined;
 }
 
-/** What one press changes: the rows it names, each with the version it dismisses that row by - a
+/** What one press changes: the rows it names, each with what the page drew in it - a
  *  row's own Dismiss, a picked selection, and a **Select all** of a list the reader has whole -
  *  or the whole group under the list's own narrowing, which only the paged Dismissed view needs:
  *  there the ids behind **Show more** are not loaded, so the request names the narrowing and the
- *  list's read mark instead, and the server reads each row's version itself. `restore` puts the
+ *  list's read mark instead, and the server draws the rows itself. `restore` puts the
  *  threads back in the Inbox rather than taking them out. */
 export type InboxDismissInput =
   | { readonly restore?: boolean; readonly rows: readonly InboxDismissRow[] }
   | { readonly filters: InboxFilters; readonly restore?: boolean; readonly through: string };
 
-/** The body one press sends. A dismissal that names its rows carries one version per row with
+/** The body one press sends. A dismissal that names its rows carries one entry per row with
  *  them; the two forms that carry none are the ones the route refuses it on - a restore, which
- *  clears the marks and checks no version, and the narrowing, where the server reads each row's
- *  version itself. */
+ *  draws the rows back rather than burying anything, and the narrowing, where the server draws
+ *  the rows itself. */
 export function inboxDismissBody(input: InboxDismissInput): InboxDismissRequest {
   if (!("rows" in input)) {
     const restore = input.restore === true ? { restore: true } : {};

@@ -76,6 +76,7 @@ function commentRow(overrides: Partial<MyReplyThreadRow> = {}): MyReplyThreadRow
     thread_id: "comment-1",
     unread: true,
     unread_count: 1,
+    version: 1,
     ...overrides,
   };
 }

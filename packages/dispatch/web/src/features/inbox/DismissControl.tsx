@@ -10,8 +10,8 @@ import { dismissThreadRow, type InboxDismissRow } from "./useInboxDismiss";
  *  the short row, the reading column's head and the card. */
 export interface RowDismiss {
   /** Takes the row out of the view it is drawn in: out of the Inbox, or - in the Dismissed view -
-   *  back into it. The row carries the version it is dismissed by, which the control reads off
-   *  the row it is drawn on, so a press names what the reader was shown. */
+   *  back into it. The row carries what the page drew in it, which the control reads off the row
+   *  it is drawn on, so a press names what the reader was shown. */
   dismiss: (row: InboxDismissRow) => void;
   /** The row ids whose own press is still out. */
   pending: ReadonlySet<string>;

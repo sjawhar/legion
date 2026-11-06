@@ -53,8 +53,8 @@ export interface InboxSelection {
   readonly dismissedHere: (id: string) => boolean;
   /** One press over the threads the bar is counting. */
   readonly dismissPick: () => void;
-  /** One press over the rows given, from a row's own control or from `e`: each row with the
-   *  version it is dismissed by (`InboxDismissRow`). */
+  /** One press over the rows given, from a row's own control or from `e`: each row with what
+   *  the page drew in it (`InboxDismissRow`). */
   readonly dismissRows: (rows: readonly InboxDismissRow[]) => void;
   /** The one dismiss write this list shares, for what it is doing and what it was refused. */
   readonly dismissWrite: InboxDismiss;
@@ -64,8 +64,8 @@ export interface InboxSelection {
   readonly selectAll: () => void;
   /** The marked asks the view is drawing, which is what **Snooze** defers. */
   readonly selectedAsks: readonly string[];
-  /** The thread rows a **Dismiss** press names, each with the version it dismisses that row by,
-   *  which is what the bar counts for that press. */
+  /** The thread rows a **Dismiss** press names, each with what the page drew in it, which is
+   *  what the bar counts for that press. */
   readonly selectedThreads: readonly InboxDismissRow[];
   readonly snoozePick: (until: string) => void;
   /** What the reader is told about the last bulk snooze the server refused in part. */
@@ -158,7 +158,7 @@ export function useInboxSelection({
   const selectedAsks = selected.filter((id) => rows.get(id)?.kind === "ask");
   // Under **Select all** the press covers every thread row the narrowing matches, drawn or not:
   // the Inbox's read is unpaged, so these are all of them, and one request names them all, each
-  // with the version its own row is showing (`dismissRow`).
+  // with the values its own row is drawn from (`dismissRow`).
   const selectedThreads: InboxDismissRow[] = [];
   for (const id of allRows ? [...rows.keys()] : selected) {
     const row = rows.get(id);

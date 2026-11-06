@@ -1,4 +1,4 @@
-import { INBOX_DISMISSED_PAGE } from "@legion/contracts";
+import { INBOX_DISMISSED_PAGE, type InboxDismissSeen } from "@legion/contracts";
 import { type BrowserContext, expect, type Page, type Request, test } from "@playwright/test";
 import { GROUP_PAGE } from "../web/src/features/inbox/InboxGroups";
 
@@ -38,9 +38,10 @@ import { asUser } from "./users";
  * out and **Move to Inbox** puts it back; a reply somebody else writes brings a dismissed thread
  * back unread, and the reader's own reply leaves it where it is.
  *
- * A press that names its rows names the version it dismisses each of them by (`seen_replies`),
- * the newest reply that row showed, so the server writes no mark over a reply the page never
- * drew; a **Move to Inbox** names none, which is what the route takes a restore as.
+ * A press that names its rows carries what the page drew in each of them (`seen_replies`) - a
+ * Reply row's own version, an Agent row's newest session reply and the ids it drew as unread -
+ * so the server writes no mark over a write the page never drew; a **Move to Inbox** carries
+ * none, which is what the route takes a restore as.
  *
  * Everything here is made up: this repository is public, so nothing names a real person, host or
  * project.
@@ -144,16 +145,19 @@ async function inboxThreads(): Promise<number> {
   return (await listMyReplies({ kind: ["reply", "agent"], state: "inbox" })).total;
 }
 
-/** The version each Inbox row is dismissed by, read out of the same list route the page reads:
- *  the newest reply the row shows (`reply.id`), keyed by that row's own id, which is exactly
- *  what a dismissal of it carries in `seen_replies`. Read before the press, since the rows it
- *  takes out are gone from this state afterwards. */
-async function seenReplies(): Promise<Record<string, string>> {
+/** What the page drew in each Inbox row, read out of the same list route the page reads and
+ *  keyed by that row's own id, which is exactly what a dismissal of it carries in
+ *  `seen_replies`: a Reply row's own `version`, and an Agent row's newest session reply with the
+ *  ids it answered as unread. Read before the press, since the rows it takes out are gone from
+ *  this state afterwards. */
+async function seenReplies(): Promise<Record<string, InboxDismissSeen>> {
   const { rows } = await listMyReplies({ kind: ["reply", "agent"], state: "inbox" });
   return Object.fromEntries(
     rows.map((row) => [
       row.kind === "agent" ? agentRowId(row.thread_id) : replyRowId(row.thread_id),
-      row.reply.id,
+      row.kind === "agent"
+        ? { newest_reply: row.reply.id, unread_replies: row.unread_reply_ids }
+        : { version: row.version },
     ])
   );
 }
@@ -250,8 +254,8 @@ test("the row's Dismiss takes a thread out of the list, the counts and the Inbox
     await expect(control.first()).toHaveText("Dismiss");
 
     // One press: the row goes, the selection moves to the next row, and the unread thread it
-    // took goes off the reader's Inbox number. The body names the row and the newest reply the
-    // list answered for it, which is the version the server writes the mark under.
+    // took goes off the reader's Inbox number. The body names the row and the version the list
+    // answered for it, which is the version the server writes the mark under.
     const seen = await seenReplies();
     const sent = nextDismiss(page);
     await control.first().click();
@@ -381,12 +385,13 @@ test("three thread rows picked with x go out together in one bulk Dismiss", asyn
     const dismiss = bar.getByRole("button", { name: "Dismiss selected threads" });
     await expect(dismiss).toBeVisible();
 
-    // One press names all three rows, each with its own version, and all three leave the list.
+    // One press names all three rows, each with what the list drew in it, and all three leave
+    // the list.
     const seen = await seenReplies();
     const sent = nextDismiss(page);
     await dismiss.click();
     const body = (await sent).postDataJSON() as {
-      seen_replies?: Record<string, string>;
+      seen_replies?: Record<string, InboxDismissSeen>;
       threads?: string[];
     };
     expect(new Set(body.threads)).toEqual(new Set(picked));
@@ -446,7 +451,7 @@ test("Select all dismisses every row of the group in one request that names each
     const body = (await sent).postDataJSON() as {
       dismiss_through?: string;
       kind?: string[];
-      seen_replies?: Record<string, string>;
+      seen_replies?: Record<string, InboxDismissSeen>;
       threads?: string[];
     };
     expect(Object.keys(body).sort()).toEqual(["seen_replies", "threads"]);
@@ -454,7 +459,7 @@ test("Select all dismisses every row of the group in one request that names each
     expect(named.size).toBe(THREADS);
     expect([...named].every((id) => id.startsWith("reply:"))).toBe(true);
     for (const id of drawn) expect(named.has(id)).toBe(true);
-    // One version per row it names, each the newest reply the list answered for that row.
+    // One entry per row it names, each what the list answered for that row.
     expect(body.seen_replies).toEqual(seen);
 
     // Every row of the band goes, the ones behind **Show more** with them.
@@ -525,15 +530,15 @@ test("Select all under a search dismisses every matching row of a band wider tha
     await bar.getByRole("button", { name: "Dismiss selected threads" }).click();
     const body = (await sent).postDataJSON() as {
       dismiss_through?: string;
-      seen_replies?: Record<string, string>;
+      seen_replies?: Record<string, InboxDismissSeen>;
       threads?: string[];
     };
     expect(Object.keys(body).sort()).toEqual(["seen_replies", "threads"]);
     expect(new Set(body.threads).size).toBe(MATCHING);
-    // One entry per row it named, and the version of each is the list's own.
+    // One entry per row it named, and each is the version the list answered for that row.
     expect(new Set(Object.keys(body.seen_replies ?? {}))).toEqual(new Set(body.threads));
-    for (const [id, version] of Object.entries(body.seen_replies ?? {})) {
-      expect(version).toBe(seen[id]);
+    for (const [id, drawn] of Object.entries(body.seen_replies ?? {})) {
+      expect(drawn).toEqual(seen[id]);
     }
 
     await expect(rows).toHaveCount(0);

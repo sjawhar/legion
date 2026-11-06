@@ -521,8 +521,8 @@ func TestDismissRefusesAnAgentRootWhoseNewestReplyThePageNeverDrew(t *testing.T)
 // Five of them are seen_replies', the version a named dismissal carries for every row it names:
 // a dismissal leaving a row out, which is also what a client written before the version was
 // asked for sends; a version for a row threads does not name, which is a page asking about a row
-// it did not ask to dismiss; a version that is neither null nor a uuid; and the map on a
-// restore, which checks nothing, or beside the filters, where the server reads each row's
+// it did not ask to dismiss; an entry that is not the object its row's kind takes; and the map
+// on a restore, which checks nothing, or beside the filters, where the server reads each row's
 // version itself.
 func TestDismissRefusesWhatItCannotChange(t *testing.T) {
 	handler := newTestHandler(t)

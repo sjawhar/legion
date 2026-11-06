@@ -5,8 +5,9 @@ import type { MyReplyAgentRow, MyReplyThreadRow } from "../../api/types";
 import type { RepliesOwner } from "./useMarkThreadRead";
 
 /** One unread thread row for `threadId`, as `GET /api/v1/me/replies` answers it: a Reply row,
- *  read through a mark older than its reply. An Agent row is a shape of its own, which the tests
- *  that need one build themselves. */
+ *  read through a mark older than its reply, at a version of its own - not 0, so a test cannot
+ *  pass on a missing field. An Agent row is a shape of its own, which the tests that need one
+ *  build themselves. */
 export function replyRow(
   threadId: string,
   overrides: Partial<MyReplyThreadRow> = {}
@@ -27,6 +28,7 @@ export function replyRow(
     thread_id: threadId,
     unread: true,
     unread_count: 1,
+    version: 3,
     ...overrides,
   };
 }

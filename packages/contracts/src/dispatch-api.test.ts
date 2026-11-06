@@ -493,6 +493,7 @@ test("models the Inbox's Reply and Agent rows and the read mark's event", () => 
         read_through: "2026-10-11T23:00:00Z",
         unread: true,
         unread_count: 1,
+        version: 7,
       },
       {
         thread_id: "ask-1",
@@ -511,6 +512,7 @@ test("models the Inbox's Reply and Agent rows and the read mark's event", () => 
         read_through: "2026-10-11T23:00:00Z",
         unread: true,
         unread_count: 1,
+        version: 8,
       },
       {
         thread_id: "comment-3",
@@ -529,6 +531,7 @@ test("models the Inbox's Reply and Agent rows and the read mark's event", () => 
         read_through: "2026-10-11T23:00:00Z",
         unread: false,
         unread_count: 0,
+        version: 9,
         anchor: {
           artifact_id: "doc-1",
           block_id: "b-1",
@@ -584,12 +587,16 @@ test("models the Inbox's Reply and Agent rows and the read mark's event", () => 
     // Each kind carries its own fields and only those: a Reply row the read mark it counts
     // against, an Agent row the ids its replies are read by and the session they came from.
     page.rows.map((row) => (row.kind === "agent" ? row.unread_reply_ids : [row.read_through])),
+    // A Reply row's own version, which a dismissal of that row is held to. An Agent row has no
+    // `user_threads` row, so the shape carries no version on one at all.
+    page.rows.map((row) => (row.kind === "agent" ? undefined : row.version)),
     agent?.kind === "agent" ? agent.session.name : undefined,
     event.payload.thread_id,
   ]).toEqual([
     ["comment:reply", "ask:answer", "comment:reply", "agent:reply"],
     [1, 1, 0, 1],
     [["2026-10-11T23:00:00Z"], ["2026-10-11T23:00:00Z"], ["2026-10-11T23:00:00Z"], ["message-2"]],
+    [7, 8, 9, undefined],
     "planner",
     "comment-1",
   ]);

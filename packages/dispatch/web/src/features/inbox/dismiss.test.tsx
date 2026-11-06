@@ -20,10 +20,19 @@ import {
 } from "../../api/queries";
 import type { InboxRow, MyRepliesResponse, MyReplyRow } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
-import { replyRow } from "../threads/replies-fixture";
+import { plannerAgentRow, replyRow } from "../threads/replies-fixture";
 import { Inbox } from "./Inbox";
 import { issueAsk } from "./inbox-fixture";
-import { dismissesThread, dismissRefusalText, inboxDismissBody } from "./useInboxDismiss";
+import {
+  dismissesThread,
+  dismissRefusalText,
+  dismissThreadRow,
+  inboxDismissBody,
+} from "./useInboxDismiss";
+
+/** What a press carries for one of this file's Reply rows: the version the fixture draws them
+ *  at, which every row of it shares. */
+const SEEN = { version: replyRow("c1").version };
 
 const AS_OF = "2026-10-12T02:00:00Z";
 
@@ -76,29 +85,28 @@ function rowIds(): string[] {
   );
 }
 
-test("the body names either the rows with their versions or the list's narrowing with its read mark", () => {
-  // A dismissal names every row it changes with the version it dismisses that row by: the newest
-  // reply the page showed in it, one entry per row, which is what keeps the press from burying a
-  // reply the page never drew.
-  expect(
-    inboxDismissBody({
-      rows: [
-        { id: "reply:c1", seen: "c1-reply" },
-        { id: "agent:message-1", seen: "reply-1" },
-      ],
-    })
-  ).toEqual({
-    seen_replies: { "agent:message-1": "reply-1", "reply:c1": "c1-reply" },
+test("the body names either the rows with what the page drew in each or the list's narrowing with its read mark", () => {
+  // A dismissal names every row it changes with what the page drew in it, per kind: a Reply
+  // row's own version, and an Agent row's newest session reply with the ids it drew as unread,
+  // which is what keeps the press from burying a write the page never drew.
+  const reply = replyRow("c1");
+  const agent = plannerAgentRow();
+  expect(inboxDismissBody({ rows: [dismissThreadRow(reply), dismissThreadRow(agent)] })).toEqual({
+    seen_replies: {
+      "agent:message-1": { newest_reply: "reply-1", unread_replies: ["reply-1"] },
+      "reply:c1": { version: reply.version },
+    },
     threads: ["reply:c1", "agent:message-1"],
   });
-  // A restore clears the marks and checks no version, so it carries none: the route refuses a
-  // restore that names one.
-  expect(inboxDismissBody({ restore: true, rows: [{ id: "reply:c1", seen: "c1-reply" }] })).toEqual(
-    { restore: true, threads: ["reply:c1"] }
-  );
+  // A restore draws the rows back rather than burying anything, so it carries nothing: the
+  // route refuses a restore that names any.
+  expect(inboxDismissBody({ restore: true, rows: [dismissThreadRow(reply)] })).toEqual({
+    restore: true,
+    threads: ["reply:c1"],
+  });
   // **Select all** of the paged view: the ids are not all loaded, so the narrowing and the list's
-  // own `as_of` go instead - never both, which the route refuses - and it carries no version
-  // either, the server reading each row's own there.
+  // own `as_of` go instead - never both, which the route refuses - and it carries nothing drawn
+  // either, the server drawing the rows itself there.
   expect(inboxDismissBody({ filters: { type: ["reply"] }, through: AS_OF })).toEqual({
     dismiss_through: AS_OF,
     kind: ["reply"],
@@ -114,15 +122,13 @@ test("a press under the narrowing changes the threads the list answers at or bef
     dismissesThread({ ...row, reply: { ...row.reply, created_at: "2026-10-12T03:00:00Z" } }, body)
   ).toBe(false);
   // By id, the narrowing says nothing: the ids alone decide.
-  expect(
-    dismissesThread(row, inboxDismissBody({ rows: [{ id: "reply:c1", seen: "c1-reply" }] }))
-  ).toBe(true);
-  expect(
-    dismissesThread(row, inboxDismissBody({ rows: [{ id: "reply:c9", seen: "c9-reply" }] }))
-  ).toBe(false);
+  expect(dismissesThread(row, inboxDismissBody({ rows: [dismissThreadRow(row)] }))).toBe(true);
+  expect(dismissesThread(row, inboxDismissBody({ rows: [dismissThreadRow(replyRow("c9"))] }))).toBe(
+    false
+  );
 });
 
-test("the row's Dismiss sends the row's own id and version and takes it out of the list at once", async () => {
+test("the row's Dismiss sends the row's own id and drawn version and takes it out of the list at once", async () => {
   const dismissed = answerInboxDismisses();
   const settle = Promise.withResolvers<{ dismissed: number }>();
   dismissed.mockReturnValue(settle.promise);
@@ -136,7 +142,7 @@ test("the row's Dismiss sends the row's own id and version and takes it out of t
   // by the one unread row it took.
   await waitFor(() => expect(rowIds()).toEqual(["reply:c9"]));
   expect(dismissed.mock.calls[0]?.[0]).toEqual({
-    seen_replies: { "reply:c1": "c1-reply" },
+    seen_replies: { "reply:c1": SEEN },
     threads: ["reply:c1"],
   });
   settle.resolve({ dismissed: 1 });
@@ -200,7 +206,7 @@ test("`e` dismisses the thread row in hand and does nothing on an ask", async ()
   fireEvent.keyDown(document.body, { key: "e" });
   await waitFor(() => expect(dismissed).toHaveBeenCalledTimes(1));
   expect(dismissed.mock.calls[0]?.[0]).toEqual({
-    seen_replies: { "reply:c1": "c1-reply" },
+    seen_replies: { "reply:c1": SEEN },
     threads: ["reply:c1"],
   });
   expect(rowIds()).not.toContain("reply:c1");
@@ -230,12 +236,12 @@ test("the bulk bar offers Snooze for the asks among the selection and Dismiss fo
   fireEvent.click(screen.getByRole("button", { name: "Dismiss selected threads" }));
   await waitFor(() => expect(rowIds()).not.toContain("reply:c1"));
   expect(dismissed.mock.calls[0]?.[0]).toEqual({
-    seen_replies: { "reply:c1": "c1-reply" },
+    seen_replies: { "reply:c1": SEEN },
     threads: ["reply:c1"],
   });
 });
 
-test("Select all over the Inbox's own read names every row of the group by id and version", async () => {
+test("Select all over the Inbox's own read names every row of the group by id and drawn version", async () => {
   const dismissed = answerInboxDismisses();
   dismissed.mockResolvedValue({ dismissed: 2 });
   renderInbox(seeded([replyRow("c1"), replyRow("c9")]));
@@ -252,7 +258,7 @@ test("Select all over the Inbox's own read names every row of the group by id an
   fireEvent.click(screen.getByRole("button", { name: "Dismiss selected threads" }));
   await waitFor(() => expect(dismissed).toHaveBeenCalledTimes(1));
   expect(dismissed.mock.calls[0]?.[0]).toEqual({
-    seen_replies: { "reply:c1": "c1-reply", "reply:c9": "c9-reply" },
+    seen_replies: { "reply:c1": SEEN, "reply:c9": SEEN },
     threads: ["reply:c1", "reply:c9"],
   });
 });
