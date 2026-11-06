@@ -77,10 +77,10 @@ const (
 	// kindSourcePrefix opens the Source of a kind secret (KindSource). The kind and store source
 	// are frozen into a request, so changing or clearing the kind ends every live grant.
 	kindSourcePrefix = "mint:"
-	// TagRemoved is the value of `agent-secrets secret retag --kind`, `--github-owners` and
-	// `--max-grant` that removes the tag. It is never a login a github-owners tag names: an entry
-	// that reads `none` in any case was written by hand, and is refused rather than read as an
-	// account (ParseGitHubOwners).
+	// TagRemoved is the value of `agent-secrets secret retag --kind`, `--github-owners`,
+	// `--requesters` and `--max-grant` that removes the tag. It is never a login a github-owners
+	// tag names: an entry that reads `none` in any case was written by hand, and is refused
+	// rather than read as an account (ParseGitHubOwners).
 	TagRemoved = "none"
 	// TagRollbackGuard and RollbackGuardValue are the tag `agent-secrets secret` writes beside every
 	// kind, and the value it writes. This broker never reads the tag. Brokers from
