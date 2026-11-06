@@ -745,23 +745,34 @@ func sessionHeld(err error) bool {
 // until their process restarts.
 const heldRetryCap = 5 * time.Minute
 
-// enrolPrincipal names the principal the broker would key an enrolment this helper made now on
-// (enroll.carryPrincipal): the person of a credential that carries an operator — a sign-in's,
-// and the approver of this machine's login alike — and this machine's own fleet account
-// otherwise. Whether a SESSION_HELD refusal still stands turns on it alone, and the helper
-// chooses the credential again at every attempt, so it is read again at every refusal and kept
-// nowhere. An authority this box cannot read at all is named as that, so the line still says
-// who the helper asked as, and the next refusal that can read one is a change rather than a
-// repeat.
-func (s *Server) enrolPrincipal(ctx context.Context) string {
-	authority, _, err := s.Broker.enrolAuthority(ctx)
+// sessionHeldUnder is a SESSION_HELD refusal (sessionHeld) carrying the operator of the
+// credential the attempt it refused signed with: a person's address for a sign-in's
+// credential and for the approver of this machine's login alike, and none for the credential
+// this machine's identity traded for, which the broker keys on its fleet account
+// (enroll.carryPrincipal). Broker.enrollUnder wraps the refusal as it answers it, because the
+// refusal is of the principal THAT attempt enrolled under: choosing the principal again
+// afterwards reads SignIns, which can trade with the broker, so a sign-in landing between the
+// POST and that read would name a principal the broker never refused.
+type sessionHeldUnder struct {
+	operator string
+	err      error
+}
+
+func (e *sessionHeldUnder) Error() string { return e.err.Error() }
+
+func (e *sessionHeldUnder) Unwrap() error { return e.err }
+
+// heldPrincipal names the principal the attempt err refused enrolled under, and reports
+// whether err is such a refusal at all.
+func heldPrincipal(err error) (string, bool) {
+	var refusal *sessionHeldUnder
 	switch {
-	case err != nil:
-		return "an authority this box cannot read: " + err.Error()
-	case authority.Operator != "":
-		return "the person " + authority.Operator
+	case !errors.As(err, &refusal):
+		return "", false
+	case refusal.operator != "":
+		return "the person " + refusal.operator, true
 	default:
-		return "this machine"
+		return "this machine", true
 	}
 }
 
@@ -935,14 +946,13 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 		// for one runtime id outright). Retrying on here would spin against that refusal,
 		// since this retry waits only on a login, never on the rename's wake.
 		renamed := false
-		// held says the attempt just made was refused the session name (403 SESSION_HELD),
-		// the one failure this loop answers on a ladder of its own: heldDelay is how long
-		// until the next attempt, doubling to heldRetryCap rather than to the minute every
-		// other enroll failure retries on, and heldAs is the principal the last line was
-		// written for, so a name held for hours costs one line per principal and not one a
-		// minute. Both live as long as this pass's retry does, and a rename starts them
-		// over with the name it brings.
-		held := false
+		// heldAs is the principal the last SESSION_HELD line was written for, and heldDelay
+		// how long until the next attempt at a session name another principal holds — the one
+		// failure this loop answers on a ladder of its own, doubling to heldRetryCap rather
+		// than to the minute every other enroll failure retries on. The refusal carries the
+		// principal the attempt it refused enrolled under (heldPrincipal), so a name held for
+		// hours costs one line per principal and not one a minute. Both live as long as this
+		// pass's retry does, and a rename starts them over with the name it brings.
 		heldAs := ""
 		heldDelay := time.Second
 		pass := sess.identity().Generation
@@ -953,17 +963,19 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 				return
 			}
 			sess.setError(err.Error())
-			if held {
-				if principal := s.enrolPrincipal(ctx); principal != heldAs {
+			if principal, held := heldPrincipal(err); held {
+				if principal != heldAs {
 					heldAs = principal
-					s.Log.Error("session cannot enroll yet: the broker holds this session name for another principal, so it refuses the authority this box enrols under. This session keeps asking and signs nothing until it enrols; the person who holds the name signing in on this box (agent-secrets login) makes the next attempt theirs, and that one enrols",
-						"runtime_id", sess.RuntimeID(), "session_id", sess.SessionID(), "enrolling_as", principal, "in", heldDelay, "error", err)
+					s.Log.Error("session cannot enroll yet: the broker holds this session name for another principal, so it refuses the authority this box enrols under. This session keeps asking and signs nothing until it enrols; the person who holds the name signing in on this box (agent-secrets login) makes the next attempt theirs, and that one enrols, within five minutes of the sign-in",
+						"runtime_id", sess.RuntimeID(), "session_id", sess.SessionID(), "held_by_other", true, "enrolling_as", principal, "in", heldDelay, "error", err)
 				}
 				// One attempt per heldDelay: retryUntilStop waits its own delay after this
-				// returns, so what is waited here is the rest of it. A login installed
+				// returns, so what is waited here is the rest of it. A machine login installed
 				// meanwhile closes that retry's wake, so the next attempt comes as soon as
-				// this wait ends — the credential a login installs may be the one the name
-				// is held for.
+				// this wait ends — the credential a machine login installs may be the one the
+				// name is held for. A person's sign-in closes nothing: the next attempt reads
+				// the file they wrote (brokerclient.SignInAuthority.Current), so they wait out
+				// the rest of this ladder, up to heldRetryCap.
 				if rest := heldDelay - delay; rest > 0 {
 					select {
 					case <-time.After(rest):
@@ -995,11 +1007,6 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 			}
 			var err error
 			id, lease, err = s.Broker.EnrollIdentity(ctx, cur)
-			// Read on every attempt and kept nowhere: the refusal is of the principal this
-			// attempt enrolled under (sessionHeld), and the next attempt chooses that
-			// principal afresh, so a failure of any other kind after one goes back to the
-			// ordinary retry and its line.
-			held = sessionHeld(err)
 			return err
 		})
 		if renamed {

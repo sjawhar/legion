@@ -1368,7 +1368,8 @@ func (b *Broker) enrollAs(ctx context.Context, kind, runtimeID, thumbprint strin
 // credential carries one, since the broker refuses an enrolment that states an operator its
 // credential does not have. cred is non-nil only where authority is this machine's own held
 // credential, and a 401 LAUNCHER_INVALID drops exactly that one (clearOnInvalid); a person's
-// credential is the caller's to settle.
+// credential is the caller's to settle. A 403 SESSION_HELD answers with the operator this
+// request signed as, which is the principal the broker refused (sessionHeldUnder).
 func (b *Broker) enrollUnder(ctx context.Context, authority *brokerclient.Authority, cred *machineCredential,
 	kind, runtimeID, thumbprint string, sessionID *string,
 ) (string, time.Time, error) {
@@ -1393,10 +1394,16 @@ func (b *Broker) enrollUnder(ctx context.Context, authority *brokerclient.Author
 	req.Header.Set("Content-Type", "application/json")
 	var out leaseReply
 	if err := b.do(req, []int{http.StatusOK, http.StatusCreated}, &out); err != nil {
-		if cred == nil {
-			return "", time.Time{}, err
+		if cred != nil {
+			err = b.clearOnInvalid(cred, err)
 		}
-		return "", time.Time{}, b.clearOnInvalid(cred, err)
+		if sessionHeld(err) {
+			// The broker refuses the name to the principal this request signed as and to no
+			// other, and enrollLoop's ladder turns on which that was, so it travels with the
+			// refusal rather than being chosen again after the answer (sessionHeldUnder).
+			err = &sessionHeldUnder{operator: authority.Operator, err: err}
+		}
+		return "", time.Time{}, err
 	}
 	if out.EnrollmentID == "" {
 		return "", time.Time{}, fmt.Errorf("broker returned no enrollment_id")

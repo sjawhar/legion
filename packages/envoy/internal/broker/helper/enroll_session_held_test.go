@@ -176,21 +176,18 @@ func TestAnEnrollRefusedSessionHeldBacksOffAndEnrolsWhenThePrincipalChanges(t *t
 	}
 
 	// One line for the whole stretch, not one per attempt: a name held for hours must not
-	// fill the journal. The line is written when the principal the attempt enrolled under
-	// changes, nothing changed it until grace signed in, and that attempt enrolled rather
-	// than being refused — so one line is all of them.
+	// fill the journal. The line is found by the field it carries rather than by its
+	// wording, so rewording it costs this test nothing; it is written when the principal the
+	// attempt enrolled under changes, nothing changed it until grace signed in, and that
+	// attempt enrolled rather than being refused — so one line is all of them.
 	lines := 0
 	for _, rec := range logRecords(t, &out) {
-		msg, _ := rec["msg"].(string)
-		if !strings.Contains(msg, "the broker holds this session name for another principal") {
+		if rec["held_by_other"] != true {
 			continue
 		}
 		lines++
 		if got := rec["enrolling_as"]; got != "the person ada@example.com" {
-			t.Errorf("the line says the session enrolled as %v, want the principal of the credential this box enrolled under", got)
-		}
-		if !strings.Contains(msg, "signing in on this box") {
-			t.Errorf("the line reads %q; it must say that the person holding the name signing in on this box enrols the session, never that the session should give the name up", msg)
+			t.Errorf("the line says the session enrolled as %v, want the principal of the credential THAT attempt enrolled under, carried on the refusal itself", got)
 		}
 	}
 	if lines != 1 {
