@@ -809,6 +809,35 @@ func claimRole(t *testing.T, d *listenerDeps, sessionID, role string) {
 	}
 }
 
+// ageRoleClaim moves role's stored claim back by age, both the moment it was claimed and the
+// renewal that follows it (store.RoleClaim), as a holder that has stopped answering for its claim
+// leaves it. Nothing frees a claim renewed inside the live window, so a test about a holder that
+// is gone has to age the claim the holder left behind.
+func ageRoleClaim(t *testing.T, d *listenerDeps, role string, age time.Duration) {
+	t.Helper()
+	roles, err := d.client.JS().KeyValue(bus.RoleClaimBucket)
+	if err != nil {
+		t.Fatalf("open the role bucket: %v", err)
+	}
+	entry, err := roles.Get(role)
+	if err != nil {
+		t.Fatalf("read %s's claim: %v", role, err)
+	}
+	claim, err := store.DecodeRoleClaim(entry.Value())
+	if err != nil {
+		t.Fatalf("decode %s's claim: %v", role, err)
+	}
+	aged := time.Now().Add(-age).UnixMilli()
+	claim.ClaimedAt, claim.RenewedAt = aged, aged
+	record, err := json.Marshal(claim)
+	if err != nil {
+		t.Fatalf("encode %s's aged claim: %v", role, err)
+	}
+	if _, err := roles.Update(role, record, entry.Revision()); err != nil {
+		t.Fatalf("store %s's aged claim: %v", role, err)
+	}
+}
+
 // A role claim refreshes the claimant's session entry, and the entry it writes names no serving
 // port. An entry an earlier listener stored with one would otherwise be renewed by every claim
 // its client makes, while each of that client's registrations is refused (subscribeHandler); and
@@ -931,10 +960,14 @@ func TestTheRoleReaperWhoseSessionCacheTrailsTheBucketKeepsAFreshClaim(t *testin
 	if err := claimant.sessions.Delete(context.Background(), "ses_gone_holder"); err != nil {
 		t.Fatalf("end ses_gone_holder's session: %v", err)
 	}
+	// The gone holder stopped answering for its claim when its session ended, which the claim's
+	// renewal has to say too: a claim renewed inside the live window is kept whatever the
+	// session bucket has lost.
+	ageRoleClaim(t, claimant, "lapsed-claim", 2*observer.sessions.TTL())
 	live := func(sessionID string) bool {
 		return roleHolderMayBeLive(logging.New("test"), observer.sessions, sessionID)
 	}
-	if reaped, err := observer.registry.ReapRoleClaims(live, observer.sessions.TTL()); err != nil || reaped != 1 {
+	if reaped, err := observer.registry.ReapRoleClaims(live, observer.sessions.TTL(), observer.sessions.TTL()); err != nil || reaped != 1 {
 		t.Fatalf("reap role claims = %d, %v; want the one claim whose holder left the bucket", reaped, err)
 	}
 	for role, want := range map[string]string{"fresh-claim": "ses_fresh_holder", "lapsed-claim": ""} {
@@ -1142,7 +1175,9 @@ func TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim(t *testing.T) {
 		live := func(sessionID string) bool {
 			return roleHolderMayBeLive(logging.New("test"), observer.sessions, sessionID)
 		}
-		if reaped, err := observer.registry.ReapRoleClaims(live, observer.sessions.TTL()); err != nil || reaped != 0 {
+		// A live window of zero so the claim's own renewal keeps nothing here: what must keep
+		// it is the session bucket the reaper cannot read.
+		if reaped, err := observer.registry.ReapRoleClaims(live, observer.sessions.TTL(), 0); err != nil || reaped != 0 {
 			t.Fatalf("reap role claims while the session bucket cannot be read = %d, %v; want none", reaped, err)
 		}
 		if holder := holderOf(t, claimant, "unread"); holder != "ses_holder" {
@@ -1426,7 +1461,7 @@ func TestRoleClaimRestoresWhileHolderIsLiveAndDropsAfterTTL(t *testing.T) {
 	}
 	reaped, err := restoredRegistry.ReapRoleClaims(func(id string) bool {
 		return roleHolderMayBeLive(logging.New("test"), restoredSessions, id)
-	}, live)
+	}, live, live)
 	if err != nil || reaped != 1 {
 		t.Fatalf("the role reaper released %d claims, %v; want the one whose holder is gone", reaped, err)
 	}

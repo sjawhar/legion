@@ -1568,7 +1568,7 @@ func roleSetHandler(d *listenerDeps, machineID string, logger *logging.Logger) h
 				}
 			}
 		}
-		item, err := d.registry.SetRoleWithPrevious(ctx, body.SessionID, machineID, body.Role, previous, body.Soft, body.IfClaimRevision, supersedable...)
+		item, err := d.registry.SetRoleWithPrevious(ctx, body.SessionID, machineID, "", body.Role, previous, body.Soft, body.IfClaimRevision, supersedable...)
 		var stale *store.ErrRoleClaimRevisionMismatch
 		if errors.As(err, &stale) {
 			writeJSON(w, http.StatusConflict, map[string]any{

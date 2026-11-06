@@ -25,6 +25,20 @@ type RoleClaim struct {
 	HolderSessionID   string `json:"holder_session_id"`
 	ClaimedAt         int64  `json:"claimed_at"`
 	PreviousSessionID string `json:"previous_session_id"`
+	// ClientInstanceID is the client instance of the process that holds the claim, which the
+	// claimant named when it took the role. A session id alone does not name that process: a
+	// second process can resume a live session's id, and it carries a client instance of its
+	// own, so this field is what tells the two apart and keeps the second from taking,
+	// releasing or reaping the first's role. Empty where the claimant named none - a claim an
+	// earlier build wrote, or one whose caller has no instance - and an empty instance is
+	// never evidence that two claims come from the same process.
+	ClientInstanceID string `json:"client_instance_id,omitempty"`
+	// RenewedAt is the wall clock in milliseconds at which the holder's process last answered
+	// for this claim; a claim write stamps it with that write's own ClaimedAt. Zero means the
+	// record carries no renewal, which a claim an earlier build wrote does not, and such a
+	// claim is read at the time it was claimed rather than at the epoch: every reader of a
+	// renewal reads it through LastAnsweredAt, which says so.
+	RenewedAt int64 `json:"renewed_at,omitempty"`
 	// Revision is the role bucket revision the claim was read at, which roleClaim stamps on
 	// every claim it decodes and nothing stores: it belongs to the entry, not to the record,
 	// so it is never marshalled back into the bucket. Zero means no claim record was read -
@@ -36,6 +50,19 @@ type RoleClaim struct {
 	Revision uint64 `json:"-"`
 }
 
+// LastAnsweredAt is the wall clock in milliseconds at which this claim's holder last answered for
+// it: RenewedAt where the record carries one, and ClaimedAt, the moment the claim was written,
+// where it does not. It is the one reading of a claim's renewal, so a claim stored before this
+// build, which carries no RenewedAt, is read at the time it was claimed rather than at the epoch,
+// where every window would already have passed. A claim carrying neither is zero, which is older
+// than any window.
+func (c RoleClaim) LastAnsweredAt() int64 {
+	if c.RenewedAt > 0 {
+		return c.RenewedAt
+	}
+	return c.ClaimedAt
+}
+
 // ExpiredRoleClaimRelease reports the conditional-delete outcome for an
 // expired role claim.
 type ExpiredRoleClaimRelease uint8
@@ -45,6 +72,12 @@ const (
 	ExpiredRoleClaimMissing
 	ExpiredRoleClaimSuperseded
 	ExpiredRoleClaimRetained
+	// ExpiredRoleClaimRenewed is a claim its holder still answers for: its renewal
+	// (RoleClaim.LastAnsweredAt) is inside the live window, so nothing frees it, whatever the
+	// holder's session record says. It is its own outcome rather than
+	// ExpiredRoleClaimRetained so that a caller can tell a holder that is still renewing its
+	// claim from one given the restart grace of a listener that has just opened.
+	ExpiredRoleClaimRenewed
 )
 
 // roleRevisions reads the revision of every role claim kv holds, for the grace a restored claim's
@@ -97,6 +130,11 @@ var ErrMalformedRoleClaim = errors.New("malformed role claim")
 // DecodeRoleClaim reads a stored role claim record: a structured claim naming a holder, or a bare
 // session id an earlier build stored. Any other record is ErrMalformedRoleClaim. Dispatch's outbox
 // reads the role bucket through it too (roles.Buckets), so the two readers cannot drift.
+//
+// A record that carries no client instance id, no renewal, or neither is read, not refused: a
+// claim an earlier build wrote names no process and no renewal, and both fields are left zero, as
+// they are for the bare session id. A missing field is never ErrMalformedRoleClaim, which is a
+// record this build cannot read at all.
 func DecodeRoleClaim(value []byte) (RoleClaim, error) {
 	var claim RoleClaim
 	err := json.Unmarshal(value, &claim)
@@ -359,10 +397,30 @@ func (r *Registry) releaseRoleClaim(ctx context.Context, sessionID, role string)
 	return nil
 }
 
-// ReleaseExpiredRoleClaim drops role only when sessionID remains its holder and
-// a restored claim has exhausted the session registry's TTL. A listener restart
-// therefore gives an existing holder one TTL to register again, while an
+// renewedWithin reports whether claim's holder answered for it less than liveWindow ago
+// (RoleClaim.LastAnsweredAt), against this registry's clock. It is the one test of a claim's
+// renewal, which ReleaseExpiredRoleClaim and the role claim reaper both read it through, so the
+// sweep and the release can never disagree over which claims a holder still renews. A liveWindow
+// of zero is a caller that configured no live window, and keeps nothing; so is a claim that
+// carries neither a renewal nor a claim time, whose renewal is older than any window.
+func (r *Registry) renewedWithin(claim RoleClaim, liveWindow time.Duration) bool {
+	return liveWindow > 0 && r.now().Sub(time.UnixMilli(claim.LastAnsweredAt())) < liveWindow
+}
+
+// ReleaseExpiredRoleClaim drops role only when sessionID remains its holder, the holder has not
+// answered for its claim inside liveWindow, and a restored claim has exhausted sessionTTL. A
+// listener restart therefore gives an existing holder one sessionTTL to register again, while an
 // already-expired holder cannot block a new claimant forever.
+//
+// The two windows are different grants and are passed separately even where a deployment
+// configures them from one setting. sessionTTL is the restart grace, measured from this
+// registry's own start and given only to a claim this registry restored at that start.
+// liveWindow is measured against the claim's own renewal (RoleClaim.LastAnsweredAt), given to
+// every claim, and read before anything else about the holder: a claim its holder still renews is
+// kept as ExpiredRoleClaimRenewed whatever the session bucket says of that holder. That is the
+// claim a second process cannot reap by deregistering the session id it resumed, which leaves the
+// holder's session record gone while the holder itself goes on answering. A liveWindow of zero
+// keeps nothing, as a sessionTTL of zero grants no restart grace.
 //
 // Its result distinguishes a confirmed deletion from a concurrent removal or
 // replacement, so callers never report that a lost conditional delete released
@@ -375,7 +433,7 @@ func (r *Registry) releaseRoleClaim(ctx context.Context, sessionID, role string)
 // caller has just found gone from the session bucket, so at worst a lapsed holder's claim is
 // released a moment after the caller was told the bus did not answer, and a fresh claim that
 // landed meanwhile is never touched.
-func (r *Registry) ReleaseExpiredRoleClaim(ctx context.Context, role, sessionID string, sessionTTL time.Duration) (ExpiredRoleClaimRelease, error) {
+func (r *Registry) ReleaseExpiredRoleClaim(ctx context.Context, role, sessionID string, sessionTTL, liveWindow time.Duration) (ExpiredRoleClaimRelease, error) {
 	claim, entry, err := r.roleClaim(ctx, role)
 	if err != nil {
 		return ExpiredRoleClaimRetained, fmt.Errorf("release role %s's expired claim held by %s: %w", role, sessionID, err)
@@ -385,6 +443,9 @@ func (r *Registry) ReleaseExpiredRoleClaim(ctx context.Context, role, sessionID 
 	}
 	if claim.HolderSessionID != sessionID {
 		return ExpiredRoleClaimSuperseded, nil
+	}
+	if r.renewedWithin(claim, liveWindow) {
+		return ExpiredRoleClaimRenewed, nil
 	}
 	r.mu.RLock()
 	restoredRevision, restored := r.restoredRoleRevisions[role]
@@ -466,8 +527,12 @@ func (e *ErrRoleClaimRevisionMismatch) Error() string {
 // instance id. So a resumed session can recover a role its own earlier
 // session held without ever taking one from a live peer, or from a live
 // session of another client instance.
+//
+// The claim it writes names no client instance (RoleClaim.ClientInstanceID): its callers hold
+// none to give, so each passes an empty one to SetRoleWithPrevious, and the claim says which
+// session holds the role without saying which process does.
 func (r *Registry) SetRole(sessionID, machineID, role string, soft bool, supersedable ...string) (Interest, error) {
-	return r.SetRoleWithPrevious(context.Background(), sessionID, machineID, role, "", soft, nil, supersedable...)
+	return r.SetRoleWithPrevious(context.Background(), sessionID, machineID, "", role, "", soft, nil, supersedable...)
 }
 
 // SetRoleWithPrevious records the session ID that a successful soft claim
@@ -476,6 +541,12 @@ func (r *Registry) SetRole(sessionID, machineID, role string, soft bool, superse
 // not lose the role reaches this call as provenance with no place in
 // supersedable, so this call answers *ErrRoleHeld naming the holder exactly as
 // it does for any other live holder.
+//
+// clientInstanceID is the client instance of the claimant's own process, which the claim records
+// as the process that holds the role (RoleClaim.ClientInstanceID), and the claim is stamped
+// claimed and renewed at the same moment (ClaimedAt and RenewedAt, one reading of this
+// registry's clock), so a claim is live from the instant it lands. A caller with no instance to
+// give passes an empty one, and the claim then names no process.
 //
 // Each bucket call waits no longer than ctx (bus.Bounded): POST /v1/roles/set passes its request's
 // own context. A call ctx abandoned may still land after this answer. A hard claim that names no
@@ -506,7 +577,7 @@ func (r *Registry) SetRole(sessionID, machineID, role string, soft bool, superse
 // precondition a scheduler needs that last-claim-wins and the soft rules cannot give it: a read of
 // the role and the claim that follows are one decision, and a claim that landed between them
 // refuses this one rather than being overwritten by it. A nil ifClaimRevision claims as before.
-func (r *Registry) SetRoleWithPrevious(ctx context.Context, sessionID, machineID, role, previousSessionID string, soft bool, ifClaimRevision *uint64, supersedable ...string) (Interest, error) {
+func (r *Registry) SetRoleWithPrevious(ctx context.Context, sessionID, machineID, clientInstanceID, role, previousSessionID string, soft bool, ifClaimRevision *uint64, supersedable ...string) (Interest, error) {
 	roleTopic := contracts.RoleTopicPrefix + role
 	oldClaim, entry, err := r.roleClaim(ctx, role)
 	if err != nil {
@@ -534,10 +605,13 @@ func (r *Registry) SetRoleWithPrevious(ctx context.Context, sessionID, machineID
 		return Interest{}, err
 	}
 
+	now := r.now().UnixMilli()
 	claim := RoleClaim{
 		HolderSessionID:   sessionID,
-		ClaimedAt:         r.now().UnixMilli(),
+		ClaimedAt:         now,
 		PreviousSessionID: "",
+		ClientInstanceID:  clientInstanceID,
+		RenewedAt:         now,
 	}
 	if soft {
 		claim.PreviousSessionID = previousSessionID

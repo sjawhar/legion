@@ -126,14 +126,21 @@ func (r *Registry) deleteInterestAt(ctx context.Context, sessionID string) (bool
 	return true, nil
 }
 
-// ReapRoleClaims removes claims whose holders did not re-register before the
-// session TTL elapsed. It is intentionally separate from Reap: the interest
-// reaper must not tear down a role during a listener restart grace window. A
-// claim this build cannot read (bus.ErrRefused: one stored under a key NATS
-// refuses, too long or outside its key alphabet) no build can resolve or write
-// again, so it is deleted too; one it cannot delete either (a key outside the
-// alphabet) is skipped, and the sweep goes on.
-func (r *Registry) ReapRoleClaims(isAlive func(string) bool, sessionTTL time.Duration) (int, error) {
+// ReapRoleClaims removes claims whose holders no longer answer for them and did not re-register
+// before the session TTL elapsed. It is intentionally separate from Reap: the interest reaper
+// must not tear down a role during a listener restart grace window. A claim this build cannot
+// read (bus.ErrRefused: one stored under a key NATS refuses, too long or outside its key
+// alphabet) no build can resolve or write again, so it is deleted too; one it cannot delete
+// either (a key outside the alphabet) is skipped, and the sweep goes on.
+//
+// A claim passes two tests before it is freed, and its own renewal is read first: a claim whose
+// holder answered for it less than liveWindow ago (RoleClaim.LastAnsweredAt) is kept without
+// isAlive being asked at all, because the holder goes on renewing the claim whatever the session
+// bucket says of the session id it registered under - a second process that resumed that id and
+// then deregistered it leaves the record gone and the holder running. Only a claim past that
+// window is weighed by isAlive, and only one both tests give up is released
+// (ReleaseExpiredRoleClaim, which weighs sessionTTL, the restart grace, as well).
+func (r *Registry) ReapRoleClaims(isAlive func(string) bool, sessionTTL, liveWindow time.Duration) (int, error) {
 	roles, err := r.roleKeys()
 	if err != nil {
 		return 0, err
@@ -156,10 +163,10 @@ func (r *Registry) ReapRoleClaims(isAlive func(string) bool, sessionTTL time.Dur
 		if err != nil {
 			return 0, err
 		}
-		if claim.HolderSessionID == "" || isAlive(claim.HolderSessionID) {
+		if claim.HolderSessionID == "" || r.renewedWithin(claim, liveWindow) || isAlive(claim.HolderSessionID) {
 			continue
 		}
-		release, err := r.ReleaseExpiredRoleClaim(context.Background(), role, claim.HolderSessionID, sessionTTL)
+		release, err := r.ReleaseExpiredRoleClaim(context.Background(), role, claim.HolderSessionID, sessionTTL, liveWindow)
 		if err != nil {
 			return 0, err
 		}
@@ -187,13 +194,14 @@ func (r *Registry) StartReaper(ctx context.Context, live func(sessionID string) 
 	})
 }
 
-// StartRoleClaimReaper expires role holders that fail to re-register after a
-// listener restart. It is independent of interest reaping because a role is a
-// point-to-point route rather than a general subscription. It runs until ctx ends, and the
-// channel it returns is closed once it has returned, as StartReaper's is.
-func (r *Registry) StartRoleClaimReaper(ctx context.Context, isAlive func(string) bool, interval, sessionTTL time.Duration) <-chan struct{} {
+// StartRoleClaimReaper expires role holders that stop answering for their claims and fail to
+// re-register after a listener restart. It is independent of interest reaping because a role is
+// a point-to-point route rather than a general subscription. It runs until ctx ends, and the
+// channel it returns is closed once it has returned, as StartReaper's is. Each pass keeps a claim
+// renewed inside liveWindow and a restored claim inside sessionTTL (ReapRoleClaims).
+func (r *Registry) StartRoleClaimReaper(ctx context.Context, isAlive func(string) bool, interval, sessionTTL, liveWindow time.Duration) <-chan struct{} {
 	return everyInterval(ctx, interval, func() {
-		count, err := r.ReapRoleClaims(isAlive, sessionTTL)
+		count, err := r.ReapRoleClaims(isAlive, sessionTTL, liveWindow)
 		if err != nil {
 			r.logger().Error("role claim reaper cycle failed", slog.String("error", err.Error()))
 			return
