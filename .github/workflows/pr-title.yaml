@@ -57,21 +57,24 @@ on:
   pull_request_review:
     types: [submitted, edited]
 
-# A run cancels the run before it of the same pull request and event, so a pull request holds at
-# most one running and one pending PR Title run per event however many edits and reviews arrive.
-# Nothing is lost: each run reads the title, body, comments and reviews as they are when it runs,
-# and the commits of the head its event names, so the newest repeats every check of the runs it
-# cancels. The event is in the group because GitHub lists a pull request's checks once per check
-# name and event (as `gh pr checks` does): a review run that cancelled a pull_request run would
-# leave that event's latest `pr-title` cancelled on the head until the next push or edit. A review
-# run checks with main's copy of check-pr-text.sh; ci.yaml's required `pr-title` job checks a pull
-# request that changes it with
-# its own copy (that file says when the job runs: at every push to a pull request that is not a
-# draft, when a draft is marked ready, and on the merge queue's group). Every event here carries
-# the pull request, so its number is the whole key.
+# A run of this workflow never cancels the run before it, because this job's own check run is
+# named `pr-title`, the name main's ruleset requires, and a cancelled check run of a required
+# name is no pass: a cancelled run would leave that shape on the head until the next event
+# replaced it. Measured on this pull request at 9a2a3f87, where four edits and review replies
+# arriving while runs were in flight left four cancelled `pr-title` check runs beside the two
+# that succeeded. A run here is seconds long and reads the title, body, comments and reviews as
+# they are when it runs, so letting two of them finish costs a runner for those seconds and
+# leaves two passing check runs rather than one passing and one cancelled. The group still
+# carries the event, so GitHub lists a pull request's checks once per check name and event (as
+# `gh pr checks` does) and a review run and a pull_request run never share a queue position.
+# A review run checks with main's copy of check-pr-text.sh; ci.yaml's required `pr-title` job
+# checks a pull request that changes it with its own copy (that file says when the job runs: at
+# every push to a pull request that is not a draft, when a draft is marked ready, and on the
+# merge queue's group). Every event here carries the pull request, so its number is the whole
+# key.
 concurrency:
   group: pr-title-${{ github.event_name }}-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 # The job clones the repository for check-pr-text.sh, which reads the pull request's commits
 # through the compare route (`contents: read`), its reviews and review comments

@@ -160,6 +160,15 @@ no token scope, so a fork's head carries both. What a fork cannot get is the ear
 of a doomed merge-group run, which no fork is ever in: this repository takes no fork pull
 requests, whose runs wait for an approval nobody gives.
 
+A workflow whose own job is named for a required check cancels no run of its own, for the same
+reason: a cancelled check run of a required name is no pass either, so a run a newer one cancels
+leaves that shape on the head until the next event replaces it.
+Measured on #2771 at `9a2a3f87`, where four edits and review replies arriving while PR Title
+runs were in flight left four cancelled `pr-title` check runs beside the two that succeeded.
+pr-title.yaml is the one such workflow, and its group therefore carries
+`cancel-in-progress: false`; its runs are seconds long, so two of them finishing costs a runner
+for those seconds and leaves two passing check runs.
+
 A job whose main half must run on a push to main, as the docs site's Pages deploy must, cannot be
 a job of the router: the router runs on no push. Its main half is a push-only workflow of its own
 with a workflow-level group keyed on the ref (`cancel-in-progress: false`, and no `queue:` key,
