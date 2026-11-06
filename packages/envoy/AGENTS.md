@@ -216,6 +216,16 @@ Each item below names a task and where its code is, then notes on it.
   The version mode is the one tree a read, not a write, first stores: no write produces it, so `getArtifactVersion` stores a past version's tree on its first read.
   A search snippet, a cut tree, a headline's plain words and a live socket frame are built on the read and copy no stored bytes: a snippet is cut per query and belongs to no stored text.
 
+- **A list's ETag, its 304 and its kept answer**: `api/list_answers.go`
+
+  The comment list and the activity feed each answer an `ETag` and a `304 Not Modified` to a matching `If-None-Match`, and keep their whole encoded and compressed answer under that ETag in a 64 MiB least-recently-used cache, one entry per content coding.
+  Each list reads its validator first, answers the 304 and looks the kept answer up **before** it builds a body, so a warm read writes those bytes out having read none of its rows, encoded nothing and compressed nothing.
+  The feed's validator is the issue's `last_seq`, the paging query, the trees variant and the parser version, because every append advances `last_seq` in its own transaction.
+  The comment list's is `comment_watermarks.seq` beside `last_seq`: its body carries mentions and deliveries that the claim and the resolution rewrite in place with no event appended, so `last_seq` alone would serve a stale `304`, and a count with a newest timestamp would too, since `state`, `envelope_id`, `error` and `resolve_error` move no time of their own.
+  That counter is raised per list owner by a deferred constraint trigger on `comments`, `comment_mentions` and `comment_deliveries` (migration `20261106020619`), so every writer bumps it, whatever column it wrote and whoever adds the next writer.
+  It is deferred because an immediate trigger takes the counter row where the write happens and holds it to commit, which serialises every comment write of one issue behind the longest transaction touching it — measured, that hung the api suite for its whole 90-minute timeout on the test that holds a comment write open.
+  Deferred, the bump is still inside the writer's transaction, so a reader sees the new rows and the new counter together or neither, and two commits that overlap each add one, because the bump is an upsert that reads the row the commit it waited on left.
+
 - **Filling the display trees of older texts**: `internal/dispatch/texttreefill/`
 
   The pass that fills the texts written before this build, or before a change of `pmdoc.DisplayTreeVersion`: leased (`text-tree-fill`), at most two workers, newest first, its cursor the `text_tree_rebuild` row of the version it fills, so a restart resumes rather than starting again.
