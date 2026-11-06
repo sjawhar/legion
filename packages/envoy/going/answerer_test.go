@@ -1,9 +1,11 @@
 package going_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"reflect"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	"github.com/sjawhar/envoy/going"
 	"github.com/sjawhar/envoy/going/goingtest"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // testTokensPerMinute is a quota far past anything one test's prompts cost, so every test but the
@@ -151,8 +154,14 @@ type reads struct {
 func (r *reads) request(words string) going.Request {
 	return going.Request{
 		Words: words,
-		Search: func(_ context.Context, q string) ([]going.Hit, error) {
+		Search: func(ctx context.Context, q string) ([]going.Hit, error) {
 			r.queries = append(r.queries, q)
+			// A real store read answers the context's own ending first (pgx does), which is
+			// what makes a read taken after the run was stopped context.Canceled rather than
+			// the store's own refusal.
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			if r.err != nil && len(r.queries) > r.served {
 				return nil, r.err
 			}
@@ -225,8 +234,9 @@ func TestNewAnswererRefusesAnswererWithoutAModel(t *testing.T) {
 	}
 }
 
-// TestRunKeepsALinkToAnItemItWasGiven: the model links a hit it was given, the link survives
-// whole, the item is named once, and end is last.
+// TestRunKeepsALinkToAnItemItWasGiven: the model links a hit it was given, the link reaches the
+// reader as the item frame that names that hit and as the link's own visible text, which the
+// text frames carry as plain text, and end is last.
 func TestRunKeepsALinkToAnItemItWasGiven(t *testing.T) {
 	link := fmt.Sprintf("[%s](%s)", routeHit.Title, routeHit.Href)
 	model := goingtest.NewModel(t, goingtest.Reply{Text: "The order is settled on " + link + ".", Chunk: 5})
@@ -241,8 +251,11 @@ func TestRunKeepsALinkToAnItemItWasGiven(t *testing.T) {
 	if got := stream.terminal(t).Name; got != contracts.GoingEventEnd {
 		t.Fatalf("stream ended with %s, want %s: %v", got, contracts.GoingEventEnd, stream.names())
 	}
-	if got := stream.text(); !strings.Contains(got, link) {
-		t.Errorf("answer = %q, want it to hold the link %q whole", got, link)
+	if got := stream.text(); !strings.Contains(got, routeHit.Title) {
+		t.Errorf("answer = %q, want it to hold the link's own text %q", got, routeHit.Title)
+	}
+	if got := stream.text(); strings.Contains(got, routeHit.Href) || strings.Contains(got, "](") {
+		t.Errorf("answer = %q, want no link syntax in a text frame: the item frame is the link", got)
 	}
 	if got := stream.count(contracts.GoingEventItem); got != 1 {
 		t.Fatalf("stream holds %d item events, want 1: %v", got, stream.names())
@@ -283,8 +296,9 @@ func TestRunCutsAReplyPastTheWordCap(t *testing.T) {
 	}
 }
 
-// TestRunNeverEmitsALinkOutsideTheCitationSet: no byte of a link to something the model was never
-// given reaches a reader, and the stream says the answer was changed.
+// TestRunNeverEmitsALinkOutsideTheCitationSet: a link to something the model was never given
+// reaches a reader as its own text and no more - no target, no link syntax, no item - and the
+// stream says the answer was changed.
 func TestRunNeverEmitsALinkOutsideTheCitationSet(t *testing.T) {
 	model := goingtest.NewModel(t, goingtest.Reply{
 		Text:  "The order is settled on [another issue](" + outsideAnswerHref + ") instead.",
@@ -304,8 +318,8 @@ func TestRunNeverEmitsALinkOutsideTheCitationSet(t *testing.T) {
 	if !ok || changed.Dropped != 1 {
 		t.Errorf("changed = %+v, want one dropped link", changed)
 	}
-	if got := stream.text(); strings.Contains(got, outsideAnswerHref) || strings.Contains(got, "another issue") {
-		t.Errorf("answer = %q, want no byte of the dropped link", got)
+	if got := stream.text(); strings.Contains(got, outsideAnswerHref) || strings.Contains(got, "](") {
+		t.Errorf("answer = %q, want no target and no link syntax of the link the server dropped", got)
 	}
 	if got := stream.count(contracts.GoingEventItem); got != 0 {
 		t.Errorf("stream holds %d item events, want none for an answer that cited nothing", got)
@@ -555,6 +569,47 @@ func TestRunEndsWhenAToolsSearchCannotBeRead(t *testing.T) {
 	}
 	if got := stream.count(contracts.GoingEventText); got != 0 {
 		t.Errorf("stream holds %d text events, want none: the run ended before any answer was written", got)
+	}
+}
+
+// TestRunEndsOnTheFirstFailedReadOfATurnsCalls: a turn that calls the tool twice and whose first
+// search the store could not serve ends on that read - the reader is told ANSWER_FAILED, the
+// second call is never run, and the store's own error is logged once. The second search would
+// run under the context the first one ended, so it could only answer context.Canceled: a run
+// that let it would tell the reader its answer did not arrive in time, which is not what
+// happened, and would say nothing at all about the store.
+func TestRunEndsOnTheFirstFailedReadOfATurnsCalls(t *testing.T) {
+	var logged bytes.Buffer
+	logtest.SetDefault(t, slog.NewTextHandler(&logged, nil))
+	model := goingtest.NewModel(t,
+		goingtest.Reply{ToolCalls: []going.ToolCall{
+			{ID: "call_1", Name: contracts.GoingSearchTool, Arguments: `{"q":"who owns it"}`},
+			{ID: "call_2", Name: contracts.GoingSearchTool, Arguments: `{"q":"and who answers it"}`},
+		}},
+		goingtest.Reply{Text: "An answer nobody should ever be written."},
+	)
+	answerer := testAnswerer(t, model, going.AnswererConfig{})
+	stream := &answerStream{}
+	search := testReads()
+	// The run's own seeding search is served; both searches of the turn after it are not.
+	search.served = 1
+	search.err = errors.New("the store refused this read")
+
+	if err := answerer.Run(t.Context(), search.request("who owns the broadcast order"), stream.emit); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if got := stream.code(t); got != contracts.GoingErrorAnswerFailed {
+		t.Errorf("error code = %s, want %s: the store failed, the run did not run out of time", got, contracts.GoingErrorAnswerFailed)
+	}
+	if len(search.queries) != 2 {
+		t.Errorf("searches = %q, want the seeding search and the first of the turn's two calls", search.queries)
+	}
+	if got := model.Calls(); got != 1 {
+		t.Errorf("model served %d calls, want the one turn that called the tool: the run ended on that search", got)
+	}
+	if got := strings.Count(logged.String(), search.err.Error()); got != 1 {
+		t.Errorf("the store's error is logged %d times in %q, want once", got, logged.String())
 	}
 }
 

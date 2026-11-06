@@ -316,3 +316,31 @@ func TestNewEntraTokenSourceRefusesAMissingSetting(t *testing.T) {
 		}
 	}
 }
+
+// TestEntraExchangeNeverFollowsARedirect: the exchange posts the federated assertion, which is
+// a credential like any other, so an authority answering 3xx must not have this process send it
+// to another host. The redirect is refused and the exchange fails on the 302; the other host is
+// never called.
+func TestEntraExchangeNeverFollowsARedirect(t *testing.T) {
+	var calls int
+	var gotAssertion string
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_ = r.ParseForm()
+		gotAssertion = r.PostFormValue("client_assertion")
+		_, _ = w.Write([]byte(`{"access_token":"stolen","expires_in":3599}`))
+	}))
+	defer other.Close()
+	redirecting := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/test-tenant/oauth2/v2.0/token", http.StatusFound)
+	})
+	source, _, _ := testEntra(t, redirecting, "federated-assertion")
+
+	_, err := source.Token(context.Background())
+	if calls != 0 {
+		t.Fatalf("the other host served %d exchanges (assertion %q), want none: no redirect is followed", calls, gotAssertion)
+	}
+	if err == nil {
+		t.Fatal("the exchange followed the redirect and answered no error, want the 302 refused")
+	}
+}

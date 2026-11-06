@@ -614,26 +614,50 @@ func TestGoingStreamRefusesAnotherOwnersPersonalToken(t *testing.T) {
 	}
 }
 
-// A run whose recorded author names nobody is nobody's to read. The deployment's shared token
-// resolves as {} (server.go), so the run it asks names no session, no person and no workload,
-// and every holder of that one token would otherwise read every other holder's run - and a
-// pod's service-account token, {Service: &subject}, carries the same empty kind and id, so a
-// comparison of those two alone would serve the pod's run to the shared token as well.
+// The POST refuses a credential that names nobody and records nothing. The deployment's shared
+// token resolves as {} (server.go), so the run it asked for would name no session, no person
+// and no workload, and the stream serves such a run to nobody: the model would be called and
+// the deployment's paced quota spent on frames every reader of them is answered 404.
+func TestGoingRequestRefusesAnAskerThatNamesNobody(t *testing.T) {
+	answerer := &fakeAnswerer{frames: []going.Event{going.End(1, 0)}}
+	rig := newGoingRoutesRig(t, answerer)
+
+	asked := rig.askUnder(t, "agent-token", map[string]any{"words": "whose run is this?"})
+	if asked.Code != http.StatusForbidden {
+		t.Fatalf("ask under the shared token: status=%d body=%s, want 403", asked.Code, asked.Body.String())
+	}
+	if refusal := decodeBody[refusalAnswer](t, asked); refusal.Code != codeGoingAskerNamesNobody {
+		t.Fatalf("ask under the shared token: code=%q, want %s", refusal.Code, codeGoingAskerNamesNobody)
+	}
+	var recorded int
+	if err := rig.database.Pool.QueryRow(context.Background(), `select count(*) from going_requests`).Scan(&recorded); err != nil {
+		t.Fatalf("count the recorded runs: %v", err)
+	}
+	if recorded != 0 {
+		t.Fatalf("the refused ask recorded %d runs, want none", recorded)
+	}
+	if questions, _, _ := answerer.read(); len(questions) != 0 {
+		t.Fatalf("the refused ask reached the model with %q, want nothing asked of it", questions)
+	}
+}
+
+// A run whose recorded author names nobody is nobody's to read: a row an earlier build recorded
+// under the deployment's shared token, which resolves as {}, and a pod's run, {Service:
+// &subject}, which carries the same empty kind and id - so a comparison of those two alone
+// would serve the pod's run to the shared token.
 func TestGoingStreamRefusesARunWhoseAuthorNamesNobody(t *testing.T) {
 	rig := newGoingRoutesRig(t, nil)
 
-	asked := rig.askUnder(t, "agent-token", map[string]any{"words": "whose run is this?"})
-	if asked.Code != http.StatusCreated {
-		t.Fatalf("ask under the shared token: status=%d body=%s", asked.Code, asked.Body.String())
+	nobodys, err := rig.server.recordGoingRequest(context.Background(), model.Actor{}, "", "whose run is this?")
+	if err != nil {
+		t.Fatalf("record a run naming nobody: %v", err)
 	}
-	run := decodeBody[askedRun](t, asked)
-	rig.awaitTerminal(t, run.ID)
-	nobodys := rig.streamUnder(t, run.ID, "agent-token")
-	if nobodys.Code != http.StatusNotFound {
-		t.Fatalf("the shared token reading the run it asked: status=%d body=%s, want 404", nobodys.Code, nobodys.Body.String())
+	refused := rig.streamUnder(t, nobodys.ID, "agent-token")
+	if refused.Code != http.StatusNotFound {
+		t.Fatalf("the shared token reading a run naming nobody: status=%d body=%s, want 404", refused.Code, refused.Body.String())
 	}
-	if refusal := decodeBody[refusalAnswer](t, nobodys); refusal.Code != codeGoingRequestNotFound {
-		t.Fatalf("the shared token reading the run it asked: code=%q, want %s", refusal.Code, codeGoingRequestNotFound)
+	if refusal := decodeBody[refusalAnswer](t, refused); refusal.Code != codeGoingRequestNotFound {
+		t.Fatalf("the shared token reading a run naming nobody: code=%q, want %s", refusal.Code, codeGoingRequestNotFound)
 	}
 
 	subject := "system:serviceaccount:dispatch:answerer"
@@ -742,4 +766,38 @@ func TestGoingRequestGivesItsRunAConnectionMarkOfItsOwn(t *testing.T) {
 	}
 	release()
 	rig.awaitTerminal(t, run.ID)
+}
+
+// A POST whose run cannot be given a connection mark of its own answers that failure and
+// records nothing. The mark is taken before the question is recorded, as every other caller of
+// store.ForConcurrentRead answers its refusal (comment_create.go): a run nothing will answer
+// must not leave a caller a 201 and a stream that only runs out its deadline. Here the
+// request's own context already holds one of the pool's connections, which is the one thing
+// ForConcurrentRead refuses (store.ErrNestedAcquire).
+func TestGoingRequestAnswersTheFailureWhenItsRunCannotBeDetached(t *testing.T) {
+	answerer := &fakeAnswerer{frames: []going.Event{going.End(1, 0)}}
+	rig := newGoingRoutesRig(t, answerer)
+	held, release := store.HoldsConnection(context.Background())
+	defer release()
+
+	request := httptest.NewRequestWithContext(held, http.MethodPost, "/api/v1/going/requests",
+		strings.NewReader(`{"words":"who answers a run nothing can detach?"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Dispatch-User", "alice")
+	response := httptest.NewRecorder()
+	rig.server.createGoingRequest(response, request)
+
+	if response.Code == http.StatusCreated {
+		t.Fatalf("ask: status=%d body=%s, want the failure and not a run nothing answers", response.Code, response.Body.String())
+	}
+	var recorded int
+	if err := rig.database.Pool.QueryRow(context.Background(), `select count(*) from going_requests`).Scan(&recorded); err != nil {
+		t.Fatalf("count the recorded runs: %v", err)
+	}
+	if recorded != 0 {
+		t.Fatalf("the failed ask recorded %d runs, want none: nothing would ever answer them", recorded)
+	}
+	if questions, _, _ := answerer.read(); len(questions) != 0 {
+		t.Fatalf("the failed ask reached the model with %q, want nothing asked of it", questions)
+	}
 }

@@ -35,6 +35,14 @@ import (
 // already know - whether that run exists, and whether it is anyone's.
 const codeGoingRequestNotFound = "GOING_REQUEST_NOT_FOUND"
 
+// codeGoingAskerNamesNobody refuses the POST of a credential that names nobody: the
+// deployment's shared token, which resolves as {} (server.go). The stream serves a run to the
+// credential that asked it and to no other, and comparing identities cannot tell two holders
+// of one shared token apart, so such a run would be readable by nobody - the model called, the
+// deployment's paced quota spent, and every reader of it answered 404. It is refused where
+// that is cheap and plain, before anything is recorded.
+const codeGoingAskerNamesNobody = "GOING_ASKER_NAMES_NOBODY"
+
 // goingStreamPoll is how often an open stream reads the record for frames the run has stored
 // since its last read. The frames are rows, so a reader learns of one by reading: this is the
 // delay a reader may see on a frame, and at a few reads a second over a run's window it is a
@@ -78,6 +86,9 @@ type goingCapability struct {
 // the answer itself runs behind it on s.detached, which shutdown waits for (server.detached): a
 // run takes contracts.GoingRunWindow, which is far too long to hold an answer for.
 //
+// A credential that names nobody is refused here, before anything is recorded
+// (codeGoingAskerNamesNobody): the stream would serve its run to no reader at all.
+//
 // A deployment with no model configured records the question exactly the same way and stores the
 // run's error frame instead of answering it (startGoingRun), so a caller learns that from the
 // stream, where every other failure of a run is reported, rather than from a status of this
@@ -85,14 +96,22 @@ type goingCapability struct {
 func (s *server) createGoingRequest(w http.ResponseWriter, r *http.Request) {
 	// The caller's own credential names the writer: this route takes no `actor`, so a question
 	// is recorded for whoever asked it - the person at the browser, the session a broker-issued
-	// token proved, or the deployment's shared token - and the stream compares the reader with
-	// it. Recorded, as every actor a row holds is (model.Actor.Recorded).
+	// token proved, or the person a personal token belongs to - and the stream compares the
+	// reader with it. Recorded, as every actor a row holds is (model.Actor.Recorded).
 	caller, _, err := s.optionalActor(r)
 	if err != nil {
 		s.writeAuthenticationError(w, err)
 		return
 	}
 	actor := caller.Recorded()
+	// A credential that names nobody asks nothing: see codeGoingAskerNamesNobody. Refused here,
+	// before the record, so no run is stored and no quota is spent on an answer no reader of it
+	// would ever be served.
+	if !goingActorNamesSomebody(actor) {
+		writeError(w, codeGoingAskerNamesNobody, http.StatusForbidden,
+			"this credential names nobody, so the run it asked for would be nobody's to read: ask under a credential that names a session, a person or a workload")
+		return
+	}
 	var input createGoingRequestInput
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
@@ -122,11 +141,6 @@ func (s *server) createGoingRequest(w http.ResponseWriter, r *http.Request) {
 		refuseWriteOutsideProjectScope(w, covers, project)
 		return
 	}
-	request, err := s.recordGoingRequest(r.Context(), actor, project, words)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
 	// Detached from the request, as a broadcast's deliveries are (broadcasts.go): SIGTERM
 	// cancels the server's lifetime before the HTTP drain begins, so a run bound to either the
 	// request or the lifetime would be cut off with frames it had not stored, and a reader would
@@ -141,16 +155,22 @@ func (s *server) createGoingRequest(w http.ResponseWriter, r *http.Request) {
 	// would lose that settle to the run's first search and the key would store no answer: a
 	// repeat would then be recorded as a second question instead of being answered this run's
 	// id.
+	//
+	// Taken before the question is recorded, as every other caller of ForConcurrentRead answers
+	// its refusal (comment_create.go): a run that cannot be detached is a run nothing would
+	// answer, so recording the question first would leave the caller a 201 and a stream that
+	// only runs out its deadline.
 	answering, err := store.ForConcurrentRead(context.WithoutCancel(r.Context()))
 	if err != nil {
-		// Only a caller still holding a connection is refused a mark of its own, which this
-		// handler is not by now: its record transaction committed above. The question is
-		// recorded all the same, so the caller is answered its run, and the reader of that run
-		// ends it at its deadline (streamGoingAnswer) as it ends a run whose pod died.
-		slog.Error("dispatch going: the run could not be detached", "request", request.ID, "error", err)
-	} else {
-		s.detached.goDetached(func() { s.startGoingRun(answering, request) })
+		s.writeHandlerError(w, err)
+		return
 	}
+	request, err := s.recordGoingRequest(r.Context(), actor, project, words)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	s.detached.goDetached(func() { s.startGoingRun(answering, request) })
 	WriteJSON(w, http.StatusCreated, request)
 }
 
@@ -264,9 +284,11 @@ func (s *server) streamGoingAnswer(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	// Every field of the recorded identity, through goingSameActor, and never model.Actor.SameAs:
-	// a run whose author names nobody at all is nobody's to read.
-	if !goingActorNamesSomebody(request.Author) || !goingSameActor(request.Author, actor) {
+	// The whole credential, through model.Actor.SameCredential and never SameAs alone, which
+	// would make any two personal tokens one writer: a run is read by the credential that
+	// asked it, and a run whose author names nobody at all is nobody's to read. Rows recorded
+	// before the POST refused such a credential are still held here.
+	if !goingActorNamesSomebody(request.Author) || !request.Author.SameCredential(actor) {
 		writeGoingRequestNotFound(w)
 		return
 	}
@@ -338,34 +360,13 @@ func (s *server) streamGoingAnswer(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// goingSameActor reports whether a run's recorded author and the caller asking to read it are
-// the one identity. model.Actor.SameAs is what Dispatch compares actors with elsewhere and must
-// not be reached for here: it compares Kind and ID alone, and three of the credentials
-// optionalActor resolves carry no ID at all - a personal token is {Kind: "session", ID: "",
-// Owner: &owner} (agent_tokens.go), the deployment's shared token is {}, and a pod's
-// service-account token is {Service: &subject}. Under SameAs any two personal tokens are one
-// writer, whoever owns them, and the shared token is every pod's token, which would serve one
-// caller's run to another. So every field of the identity the record keeps is compared: the
-// kind, the id, and the person and the workload the credential named.
-func goingSameActor(author, caller model.Actor) bool {
-	return author.Kind == caller.Kind && author.ID == caller.ID &&
-		goingSameName(author.Owner, caller.Owner) && goingSameName(author.Service, caller.Service)
-}
-
-// goingSameName compares one optional name of two actors: both unset, or both the same name.
-func goingSameName(author, caller *string) bool {
-	if author == nil || caller == nil {
-		return author == caller
-	}
-	return *author == *caller
-}
-
-// goingActorNamesSomebody reports whether a recorded author names any caller at all: a session
-// or person id, the person a personal token belongs to, or the workload a service-account token
-// proved. A run recorded under a credential that names none of them - the deployment's shared
-// token, which resolves as {} - is nobody's, and is read by nobody: comparing identities cannot
-// tell two holders of that one token apart, so the run every holder could claim is a run none
-// of them is served. The reader is answered codeGoingRequestNotFound, as an unknown id is.
+// goingActorNamesSomebody reports whether an actor names any caller at all: a session or person
+// id, the person a personal token belongs to, or the workload a service-account token proved. A
+// credential that names none of them - the deployment's shared token, which resolves as {} -
+// is nobody: comparing identities cannot tell two holders of that one token apart, so a run it
+// asked for would be a run every holder could claim and none is served. The POST refuses such
+// a caller (codeGoingAskerNamesNobody), and the stream answers a row an earlier build recorded
+// under one with codeGoingRequestNotFound, as it answers an unknown id.
 func goingActorNamesSomebody(actor model.Actor) bool {
 	return actor.ID != "" || actor.Owner != nil || actor.Service != nil
 }

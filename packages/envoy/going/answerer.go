@@ -28,7 +28,7 @@ var answerRules = fmt.Sprintf(`You answer one question from the items you are gi
 Answer in at most %d words. An answer past that is cut where it passes them.
 Answer only from the items given to you. When they do not hold the answer, say that Dispatch holds no answer to the question; never answer from anything else you know.
 Link each item you use as a markdown link whose target is that item's own href, exactly as it is given to you.
-Never link anything else. A link to any other target is dropped before the reader sees it, and the reader is told the answer was changed.
+Never link anything else. A link to any other target reaches the reader as its own visible text alone, with the target dropped, and the reader is told the answer was changed.
 Call %s to search Dispatch again when the items you have do not answer the question. It takes q, the words to search for.`,
 	contracts.GoingAnswerWordMax, contracts.GoingSearchTool)
 
@@ -117,7 +117,7 @@ func (a *Answerer) Run(ctx context.Context, request Request, emit func(Event) er
 	// what the question itself found before it is asked anything.
 	items, err := run.search(ctx, request.Words)
 	if err != nil {
-		return run.send(Fault(readFaultCode(ctx, err)))
+		return run.readFault(ctx, err)
 	}
 
 	// One filter for the whole run, so every content delta of every turn is cleared by the same
@@ -151,7 +151,7 @@ func (a *Answerer) Run(ctx context.Context, request Request, emit func(Event) er
 	// cleared and emitted stays emitted: it was cleared, and an error frame is terminal, so no
 	// end follows it.
 	if run.readErr != nil {
-		return run.send(Fault(readFaultCode(ctx, run.readErr)))
+		return run.readFault(ctx, run.readErr)
 	}
 	switch result.Fault {
 	case loopFaultTime:
@@ -169,13 +169,10 @@ func (a *Answerer) Run(ctx context.Context, request Request, emit func(Event) er
 		// named beside it.
 		slog.Warn("going: the model service refused the run", "detail", result.Detail)
 		return run.send(Fault(contracts.GoingErrorAnswerFailed))
-	case loopFaultCalls:
-		// Spending the call budget ends the answer, and ends it as an answer: the budget is the
-		// budget, and what the filter cleared up to here is a whole answer, so the run ends
-		// through the filter's own Close and not with an error frame.
-		return filter.Close()
 	}
-	// The model answered.
+	// The model answered, or it spent the call budget: either way what the filter cleared up to
+	// here is a whole answer - the budget is the budget - so the run ends through the filter's
+	// own Close and not with an error frame.
 	return filter.Close()
 }
 
@@ -195,8 +192,11 @@ type answerRun struct {
 	runesLeft int
 	spent     bool
 
-	// readErr is a store read that failed, which ends the run: Run sends its code as the run's
-	// one ending, and stop has already kept the loop from making another call.
+	// readErr is the first store read that failed, which ends the run: Run sends its code as
+	// the run's one ending, and stop has already kept the loop from making another call. The
+	// first is kept because it is the one that ended the run - a read made after stop answers
+	// context.Canceled, which would say the run ran out of time rather than that the store
+	// failed.
 	readErr error
 	// stop ends the loop's model calls. Run holds the cancel of the context it runs the loop
 	// on, so a tool that ends the run stops it there rather than letting one more call be made.
@@ -213,6 +213,15 @@ func (r *answerRun) send(event Event) error {
 		return err
 	}
 	return nil
+}
+
+// readFault ends the run on a store read that failed: the reader is told one code, and the
+// read's own error is said here, where the run's time fault and the provider's refusal are
+// said, so an operator whose store refused a read of an answer reads why. It is the one place
+// that error is logged, and it carries no credential and none of the question's words.
+func (r *answerRun) readFault(ctx context.Context, err error) error {
+	slog.Warn("going: a store read the answer needed failed", "error", err)
+	return r.send(Fault(readFaultCode(ctx, err)))
 }
 
 // search makes one search of the run and renders its hits for the model. Every hit found joins
@@ -275,7 +284,11 @@ func (r *answerRun) searchTool() loopTool {
 			if err != nil {
 				// The run ends on this read, so the loop makes no further call and this result
 				// reaches no model (Answerer.Run reads readErr before the loop's own fault).
-				r.readErr = err
+				// The first failure stands: a tool call of this same turn, run before the loop
+				// reads the ended context, would answer context.Canceled and rename the ending.
+				if r.readErr == nil {
+					r.readErr = err
+				}
 				r.stop()
 				return "That search could not be served. This run ends here.", true
 			}

@@ -6,10 +6,16 @@
  */
 
 /** The frame carrying the next piece of the answer's text, in the order the model wrote it.
+ *  The text is plain text: every ASCII punctuation byte in it is backslash-escaped, so nothing
+ *  a renderer is given can become a link, an image, a tag or a code span - not by itself, and
+ *  not by the end of one frame meeting the start of the next. A `text` frame never carries a
+ *  link; the `item` frame is where the links of an answer live.
  *  Generated into Go as `contracts.GoingEventText`. */
 export const GOING_EVENT_TEXT = "text";
 
-/** The frame naming one thing the answer cites, so the page can link it.
+/** The frame naming one thing the answer cites, so the page can link it. Its `href` is the
+ *  cited item's own href, and it is the one link the stream carries: the server emits the
+ *  link's visible text as escaped plain text and this frame beside it.
  *  Generated into Go as `contracts.GoingEventItem`. */
 export const GOING_EVENT_ITEM = "item";
 
@@ -17,13 +23,16 @@ export const GOING_EVENT_ITEM = "item";
  *  Generated into Go as `contracts.GoingEventCut`. */
 export const GOING_EVENT_CUT = "cut";
 
-/** The frame saying the answer was changed: it linked something the model was never given, and
- *  the server dropped that link rather than emitting it. `dropped` is how many it dropped.
+/** The frame saying the server did not pass the answer on as the model wrote it. `dropped` is
+ *  how many pieces of it that came to: a link or image reduced to the text a reader sees of it,
+ *  a dropped tag or autolink, and a token GFM would have linked on its own. A link to an item
+ *  the model was given is no such change: the `item` frame carries it.
  *  Generated into Go as `contracts.GoingEventChanged`. */
 export const GOING_EVENT_CHANGED = "changed";
 
 /** The frame saying the model produced no answer text at all. An answer that kept no link is
- *  not this: it is shown, and its `end` frame's `items` of 0 says it rests on no source.
+ *  not this, and neither is one the server reduced or dropped every token of: each is shown
+ *  with what it came to, and its `end` frame's `items` of 0 says it rests on no source.
  *  Generated into Go as `contracts.GoingEventNone`. */
 export const GOING_EVENT_NONE = "none";
 
@@ -86,14 +95,15 @@ export const GOING_RUN_MS = 30_000;
  *  finished run is not kept for ever. Generated into Go as `contracts.GoingRequestTTL`. */
 export const GOING_REQUEST_TTL_MS = 3_600_000;
 
-/** The next piece of the answer's text. */
+/** The next piece of the answer's text, as plain text whose every ASCII punctuation byte is
+ *  backslash-escaped, so a renderer makes no link, image, tag or code span of any of it. */
 export interface GoingTextEvent {
   readonly event: typeof GOING_EVENT_TEXT;
   readonly data: { readonly text: string };
 }
 
 /** One thing the answer cites: its kind and id name it, `href` links it and `title` names it to a
- *  reader. */
+ *  reader. This is the one frame of the stream that carries a link. */
 export interface GoingItemEvent {
   readonly event: typeof GOING_EVENT_ITEM;
   readonly data: {
@@ -110,8 +120,8 @@ export interface GoingCutEvent {
   readonly data: { readonly words: number };
 }
 
-/** The answer linked something the model was never given; `dropped` is how many such links the
- *  server dropped. */
+/** The server did not pass the answer on as the model wrote it; `dropped` is how many pieces of
+ *  it that came to, links and images reduced to their text among them. */
 export interface GoingChangedEvent {
   readonly event: typeof GOING_EVENT_CHANGED;
   readonly data: { readonly dropped: number };

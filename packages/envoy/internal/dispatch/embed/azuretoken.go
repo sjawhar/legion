@@ -50,7 +50,9 @@ type EntraConfig struct {
 	Scope string
 	// Authority replaces entraDefaultAuthority; a test points it at a local server.
 	Authority string
-	// HTTPClient replaces http.DefaultClient; a test injects one.
+	// HTTPClient replaces http.DefaultClient; a test injects one. It is never mutated: the
+	// client the exchange is made on is a copy of it that refuses redirects
+	// (withoutRedirects), so the federated assertion reaches the configured authority alone.
 	HTTPClient *http.Client
 }
 
@@ -86,7 +88,7 @@ func NewEntraTokenSource(cfg EntraConfig) (*EntraTokenSource, error) {
 	if !base.IsAbs() || base.Host == "" {
 		return nil, errors.New("embed: entra authority must be an absolute URL with a host")
 	}
-	client := cmp.Or(cfg.HTTPClient, http.DefaultClient)
+	client := withoutRedirects(cmp.Or(cfg.HTTPClient, http.DefaultClient))
 	return &EntraTokenSource{
 		tokenURL:  strings.TrimRight(authority, "/") + "/" + url.PathEscape(cfg.TenantID) + "/oauth2/v2.0/token",
 		clientID:  cfg.ClientID,

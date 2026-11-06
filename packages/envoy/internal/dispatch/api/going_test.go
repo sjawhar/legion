@@ -321,3 +321,59 @@ func TestTheMaintenancePassEndsAGoingRunNobodyReads(t *testing.T) {
 		t.Fatalf("the maintenance pass left %v, want %s", frames, deadline)
 	}
 }
+
+// The sweep queues one terminal write per overdue run and sends them as one batch, which
+// Postgres runs as one implicit transaction. Another pod's TTL delete may remove a run between
+// the sweep's read of the overdue ids and its write, and the foreign key would then fail that
+// write and every write queued behind it, so a pass would end nothing and the delete below it
+// would not run either. A write for a run the record no longer holds stores nothing instead
+// (goingNextEvent), and the runs queued beside it keep their ending.
+func TestAGoingTerminalWriteForAMissingRunLeavesItsBatchStanding(t *testing.T) {
+	rig := newGoingRig(t)
+	ctx := context.Background()
+	overdue := rig.record(t, "who ends this one?")
+	rig.age(t, overdue.ID, time.Minute, time.Second)
+	deleted := rig.record(t, "and this one, which is gone by then?")
+	if _, err := rig.database.Pool.Exec(ctx, `delete from going_requests where id = $1::uuid`, deleted.ID); err != nil {
+		t.Fatalf("delete the run under the sweep: %v", err)
+	}
+
+	// The batch the sweep sends, in the order it queues the ids it read: the deleted run first,
+	// so a failure of its write would take the live run's ending with it.
+	deadline := going.Fault(contracts.GoingErrorAnswerDidNotArrive)
+	data, err := json.Marshal(deadline.Data)
+	if err != nil {
+		t.Fatalf("marshal the deadline frame: %v", err)
+	}
+	batch := &pgx.Batch{}
+	for _, id := range []string{deleted.ID, overdue.ID} {
+		batch.Queue(goingEndEvent, id, deadline.Name, data)
+	}
+	if err := rig.database.Pool.SendBatch(ctx, batch).Close(); err != nil {
+		t.Fatalf("the batch failed over one deleted run: %v", err)
+	}
+
+	ending := fmt.Sprintf(`1 %s {"code":%q}`, contracts.GoingEventError, contracts.GoingErrorAnswerDidNotArrive)
+	if frames := rig.frames(t, overdue.ID); len(frames) != 1 || frames[0] != ending {
+		t.Fatalf("the run queued behind the deleted one holds %v, want %s", frames, ending)
+	}
+	var stored int
+	if err := rig.database.Pool.QueryRow(ctx,
+		`select count(*) from going_events where request_id = $1::uuid`, deleted.ID).Scan(&stored); err != nil {
+		t.Fatalf("count the deleted run's frames: %v", err)
+	}
+	if stored != 0 {
+		t.Fatalf("the deleted run stored %d frames, want none: the record holds no such run", stored)
+	}
+
+	// And the pass itself still ends the overdue runs it read, with the delete that follows
+	// them: one missing run neither fails the sweep nor skips its delete.
+	stale := rig.record(t, "asked an age ago")
+	rig.age(t, stale.ID, contracts.GoingRequestTTL+time.Minute, contracts.GoingRequestTTL)
+	if err := sweepGoingRequests(ctx, rig.database.Pool); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if _, err := rig.server.readGoingRequest(ctx, stale.ID); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("the run past its TTL reads %v, want pgx.ErrNoRows: the pass reached its delete", err)
+	}
+}

@@ -115,7 +115,7 @@ func (s *server) recordGoingRequest(ctx context.Context, author model.Actor, pro
 // readGoingRequest is one run by id, pgx.ErrNoRows when the record holds none: a run that was
 // never asked, or one the sweep has deleted past contracts.GoingRequestTTL. What a run the
 // caller does not own answers is the caller's to decide, which is why the row carries its
-// Author: model.Actor.SameAs compares it with the reader's.
+// Author: model.Actor.SameCredential compares it with the reader's.
 func (s *server) readGoingRequest(ctx context.Context, id string) (goingRequest, error) {
 	return scanGoingRequest(s.deps.Store.Pool.QueryRow(ctx, `
 		select `+goingRequestColumns+` from going_requests where id = $1::uuid
@@ -142,24 +142,32 @@ func (s *server) appendGoingEvent(ctx context.Context, requestID string, event g
 // goingNextEvent inserts one frame at the run's next sequence, read and written in the one
 // statement, doing nothing where another writer took that sequence in between and returning no
 // row where it stored none.
+//
+// The having is what keeps a frame of a run the record no longer holds from being an error:
+// the TTL delete of another pod's sweep may remove a run between any reader of it and this
+// write, and the foreign key would then fail the statement - and, in the sweep's own batch,
+// every write queued after it, since that batch is one implicit transaction. A run that is
+// gone stores nothing instead, which is pgx.ErrNoRows to the caller: what an ended run already
+// answers, and what a writer with nothing left to write is owed.
 const goingNextEvent = `
 	insert into going_events (request_id, sequence, name, data)
 	select $1::uuid, coalesce(max(sequence), 0) + 1, $2::text, $3::jsonb
-	from going_events where request_id = $1::uuid`
+	from going_events where request_id = $1::uuid
+	having exists (select 1 from going_requests where id = $1::uuid)`
 
-// goingAppendEvent is that insert for a frame that does not end the stream: the having stores
-// nothing once the run has a terminal frame, so an answer still writing when a reader at the
-// deadline or the sweep ended the run under it adds nothing after the frame a reader stopped
-// on. bool_or answers null over a run with no frames yet, which coalesce reads as the run not
-// having ended.
+// goingAppendEvent is that insert for a frame that does not end the stream: the condition added
+// here stores nothing once the run has a terminal frame, so an answer still writing when a
+// reader at the deadline or the sweep ended the run under it adds nothing after the frame a
+// reader stopped on. bool_or answers null over a run with no frames yet, which coalesce reads
+// as the run not having ended.
 const goingAppendEvent = goingNextEvent + `
-	having not coalesce(bool_or(name = any($4::text[])), false)
+	and not coalesce(bool_or(name = any($4::text[])), false)
 	on conflict do nothing
 	returning sequence`
 
-// goingEndEvent is that insert for a terminal frame, the one write with no such condition: what
-// keeps a run to one ending is the going_events_terminal index, which this conflicts with where
-// the run is already ended, and not a read taken before the insert.
+// goingEndEvent is that insert for a terminal frame, which asks no more of the run than that it
+// still exists: what keeps a run to one ending is the going_events_terminal index, which this
+// conflicts with where the run is already ended, and not a read taken before the insert.
 const goingEndEvent = goingNextEvent + `
 	on conflict do nothing
 	returning sequence`
@@ -302,8 +310,11 @@ func scanGoingEvent(row pgx.Row) (goingEvent, error) {
 // the answer itself ended between the read and the write keeps that frame, since the write does
 // nothing on a conflict; a run whose next sequence went to a frame of its own meanwhile stores
 // nothing here and is ended by the next pass, where endGoingRun, which has a reader waiting on
-// it, tries the sequence after it at once. The delete is why a reader that reconnects within
-// the hour still finds its answer, and nothing older is kept.
+// it, tries the sequence after it at once. A run deleted between the read and the write - this
+// pass's own delete below runs in another pod too - stores nothing either (goingNextEvent), so
+// one missing run neither fails the pass nor costs the runs queued behind it their ending. The
+// delete is why a reader that reconnects within the hour still finds its answer, and nothing
+// older is kept.
 func sweepGoingRequests(ctx context.Context, pool *store.Pool) error {
 	deadline := going.Fault(contracts.GoingErrorAnswerDidNotArrive)
 	data, err := json.Marshal(deadline.Data)

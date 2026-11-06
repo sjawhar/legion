@@ -2098,10 +2098,11 @@ Where the server generates text is one setting, `DISPATCH_ANSWERER` (Required co
 The two are separate requests because the server wraps every `POST` in its idempotency layer and that layer holds a whole answer rather than streaming it (Keyed writes, below), and because a deployment of more than one pod spreads two requests across pods:
 the run's frames are rows of `going_events`, so any pod serves any reader, and a reader that drops resumes with `Last-Event-ID` after the last sequence it saw.
 A repeat of the `POST` under one `Idempotency-Key` answers the first run's id, and its stream replays the same stored frames.
+A run belongs to the credential that asked it, which the stream compares its reader with, so the `POST` refuses a credential that names nobody — the deployment's shared token, which resolves as `{}` — with `403 GOING_ASKER_NAMES_NOBODY` and records nothing: no reader of such a run could ever be served it.
 
 What the model is given is what the caller may already read: the hits of the server's own search of that project, and each hit's own stored text, at most 2,000 runes a hit and 30,000 in one run, after which a hit is still named to the model with no body and stays something the answer may cite.
 The model may search twice more through one tool, the server supplying the project, the limit and the offset so it cannot widen the search, and a fourth search is refused back to the model.
-The citation rule is the server's and not the model's: a span of the answer that may become a link is held until it closes, a link to something the model was given is kept whole and raises `item` once for that thing, and a link to anything else is dropped whole and never emitted, which the stream says with `changed`.
+The citation rule is the server's and not the model's: a text frame carries plain text alone, every byte of it escaped, so an answer's links are its `item` frames and nothing else — a link to something the model was given raises `item` once for that thing, every other link and every image is counted in `changed`, and either way the reader is written the link's own visible text and no byte of its target.
 An answer is cut at 120 words with `cut`, one that links nothing ends `none`, and either way `end` closes the stream.
 
 A run has 30 seconds, and that window belongs to the record: `going_requests.ends_at` is written by the `POST`, never held as a timer in the process running the answer.

@@ -151,6 +151,13 @@ func runLoop(ctx context.Context, request loopRequest) (loopResult, error) {
 		}
 		messages = append(messages, Message{Role: "assistant", ToolCalls: calls})
 		for _, call := range calls {
+			// The tools of one turn stop where the run does: a tool that ended it (answerer.go:
+			// a search the store could not serve) cancels this context, and the calls after it
+			// would run against a store that can only answer context.Canceled, which would
+			// rename the run's ending. The run is over, so no result of theirs is owed anyone.
+			if err := ctx.Err(); err != nil {
+				return loopResult{Fault: loopFaultTime}, err
+			}
 			output, isError := runTool(ctx, request.Tools, call)
 			if isError {
 				output = toolErrorPrefix + output

@@ -24,12 +24,16 @@ func (e Event) Terminal() bool {
 	return e.Name == contracts.GoingEventEnd || e.Name == contracts.GoingEventError
 }
 
-// TextData carries the next piece of the answer, in the order the model wrote it.
+// TextData carries the next piece of the answer, in the order the model wrote it. It is plain
+// text: every ASCII punctuation byte in it is backslash-escaped, so nothing a renderer is given
+// can become a link, an image, a tag or a code span, by itself or by two frames meeting. The
+// links of an answer are its ItemData frames and nothing else.
 type TextData struct {
 	Text string `json:"text"`
 }
 
-// ItemData names one thing the answer cites, so the reader's page can link it.
+// ItemData names one thing the answer cites, so the reader's page can link it. Href is the
+// cited hit's own href, and it is the one link the stream carries.
 type ItemData struct {
 	Kind  string `json:"kind"`
 	ID    string `json:"id"`
@@ -42,8 +46,10 @@ type CutData struct {
 	Words int `json:"words"`
 }
 
-// ChangedData says the answer linked something the model was never given, with how many such
-// links the server dropped rather than emitting them.
+// ChangedData says the server did not pass the model's answer on as the model wrote it, with how
+// many pieces of it that came to: a link or image reduced to the text a reader sees of it, a
+// dropped tag or autolink, and a token GFM would have linked on its own. A link to a hit the
+// model was given is no such change: the item frame carries it.
 type ChangedData struct {
 	Dropped int `json:"dropped"`
 }
@@ -64,7 +70,7 @@ type ErrorData struct {
 	Code string `json:"code"`
 }
 
-// Text is the next piece of the answer.
+// Text is the next piece of the answer, escaped as TextData says.
 func Text(text string) Event {
 	return Event{Name: contracts.GoingEventText, Data: TextData{Text: text}}
 }
@@ -84,14 +90,15 @@ func Cut(words int) Event {
 	return Event{Name: contracts.GoingEventCut, Data: CutData{Words: words}}
 }
 
-// Changed says the answer was changed: it linked what the model was never given, and the server
-// dropped that link.
+// Changed says the server did not pass the answer on as the model wrote it: a link or an image
+// stands as the text a reader sees of it, and a tag or a token GFM would have linked is gone.
 func Changed(dropped int) Event {
 	return Event{Name: contracts.GoingEventChanged, Data: ChangedData{Dropped: dropped}}
 }
 
-// None says the model wrote no answer. An answer that kept no link is not none: it is shown,
-// and its end's items of 0 is what tells the reader it rests on no source.
+// None says the model wrote no answer. An answer that kept no link is not none, and neither is
+// one the server reduced or dropped every token of: each is shown with what it came to, and
+// end's items of 0 is what tells the reader it rests on no source.
 func None() Event {
 	return Event{Name: contracts.GoingEventNone, Data: NoneData{}}
 }

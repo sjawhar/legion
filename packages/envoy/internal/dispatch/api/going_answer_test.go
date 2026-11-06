@@ -162,9 +162,10 @@ func goingFrameNames(frames []liveGoingFrame) []string {
 
 // The whole answer, end to end, with the answerer a deployment runs: Dispatch's own search and
 // stored text reach the model, and what the model writes reaches a reader as the stream's frames.
-// The item the answer links is named as an item frame, the link survives whole in the text, and
-// the text the model was given is the item's own stored text - goingItemText's, the text
-// search ranked.
+// The item the answer links is named as an item frame carrying that item's own href, the link's
+// visible text reaches the reader in the text frames while no byte of its target does, and the
+// text the model was given is the item's own stored text - goingItemText's, the text search
+// ranked.
 //
 // The reader here is a real connection, because what it proves is a matter of time and not of
 // bytes: the model pauses goingFramePause between the frames of its reply, so the reply takes
@@ -177,7 +178,8 @@ func TestGoingAnswersFromWhatDispatchHoldsWhileTheModelIsStillWriting(t *testing
 	// below rather than assumed.
 	const issueKey = project + "-1"
 	const href = "/issues/" + issueKey
-	link := "[The pelican migration](" + href + ")"
+	const linkText = "The pelican migration"
+	link := "[" + linkText + "](" + href + ")"
 	answerer, model := newGoingModelAnswerer(t, goingtest.Reply{
 		Text: "The pelicans arrive in spring, and the note Dispatch holds says so: " + link + ".",
 		// Four runes a frame over that reply is twenty-seven frames, each a stored text frame of
@@ -223,8 +225,15 @@ func TestGoingAnswersFromWhatDispatchHoldsWhileTheModelIsStillWriting(t *testing
 	if cited.Kind != "issue" || cited.ID != issueKey || cited.Href != href || cited.Title != issueTitle {
 		t.Errorf("the item frame is %+v, want the seeded issue (issue %s %s %q)", cited, issueKey, href, issueTitle)
 	}
-	if answer := answerText(t, frames); !strings.Contains(answer, link) {
-		t.Errorf("the answer reads %q, want it to carry the link %q whole", answer, link)
+	// A text frame carries plain text: the link the model wrote reaches the reader as its own
+	// visible text, and the link itself is the item frame above. So the answer still names the
+	// item it used, and no target of the model's is ever written into the text.
+	answer := answerText(t, frames)
+	if !strings.Contains(answer, linkText) {
+		t.Errorf("the answer reads %q, want the linked item's own text %q in it", answer, linkText)
+	}
+	if strings.Contains(answer, href) || strings.Contains(answer, "](") {
+		t.Errorf("the answer reads %q, want no target and no link syntax: the item frame is the link", answer)
 	}
 	for _, unwanted := range []string{contracts.GoingEventChanged, contracts.GoingEventError, contracts.GoingEventNone} {
 		for _, frame := range frames {
