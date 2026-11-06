@@ -53,10 +53,9 @@ func TestMain(m *testing.M) { os.Exit(runRemovingTheStandins(m)) }
 
 // runRemovingTheStandins runs the package's tests and removes the stand-in binaries' directory
 // afterwards. standins makes that directory during a test, not here, so the deferred call reads
-// standinDir when it runs rather than taking its value now, when it is still empty. The removal
-// is deferred rather than written after m.Run: it already ran whatever m.Run returned, and now
-// it also runs when setup here panics. A run killed by a signal still keeps the directory,
-// which nothing here can help.
+// standinDir when it runs rather than taking its value now, when it is still empty. Being
+// deferred, the removal also runs when setup here panics. A run killed by a signal still keeps
+// the directory, which nothing here can help.
 func runRemovingTheStandins(m *testing.M) int {
 	defer func() {
 		if standinDir != "" {

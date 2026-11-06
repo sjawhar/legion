@@ -36,9 +36,8 @@ var signInSecretFile string
 func TestMain(m *testing.M) { os.Exit(runWithASignInSecretFile(m)) }
 
 // runWithASignInSecretFile writes the sign-in secret file every test's environment names and
-// removes its directory afterwards. The removal is deferred rather than written after m.Run: it
-// already ran whatever m.Run returned, and now it also runs when the panics below fire. A run
-// killed by a signal still keeps the directory, which nothing here can help.
+// removes its directory afterwards. The removal is deferred, so it also runs when the panics
+// below fire. A run killed by a signal still keeps the directory, which nothing here can help.
 func runWithASignInSecretFile(m *testing.M) int {
 	dir, err := os.MkdirTemp("", "broker-config-signin")
 	if err != nil {

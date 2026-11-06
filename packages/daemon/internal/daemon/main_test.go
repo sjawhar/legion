@@ -38,9 +38,8 @@ func TestMain(m *testing.M) {
 // runRemovingTheBuiltListener runs the package's tests and removes the directory the built Envoy
 // listener of the idle rig sits in afterwards (removeIdleRigListenerBuild). The build happens
 // during a test, not here, so the removal reads the directory when it runs rather than taking its
-// name now, when there is none. It is deferred rather than written after the run: it already ran
-// whatever the run returned, and now it also runs when setup here panics. A run killed by a
-// signal still keeps the directory, which nothing here can help.
+// name now, when there is none. Being deferred, it also runs when setup here panics. A run
+// killed by a signal still keeps the directory, which nothing here can help.
 func runRemovingTheBuiltListener(m *testing.M) int {
 	defer removeIdleRigListenerBuild()
 	return testnats.Main(m)

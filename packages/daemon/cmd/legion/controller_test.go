@@ -891,12 +891,12 @@ func TestControllerStartOmitsTheOptionalPointersTheFileDoesNotSet(t *testing.T) 
 		"project: demo", "daemon_url: " + d.url, "operator_token_file: ./operator-token",
 		"envoy_url: http://envoy.test:9020", "nats_urls: [nats://a:4222]",
 	}})
-	fixtureenv.Unset(t, "DISPATCH_URL", "DISPATCH_TOKEN_FILE", "ENVOY_TOKEN_FILE", "NATS_NKEY_SEED_FILE")
+	fixtureenv.Unset(t, startupRestored...)
 	if code, _, errb := c.run(); code != 0 {
 		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
 	}
 	env := c.env()
-	for _, name := range []string{"DISPATCH_URL", "DISPATCH_TOKEN_FILE", "ENVOY_TOKEN_FILE", "NATS_NKEY_SEED_FILE"} {
+	for _, name := range startupRestored {
 		if _, set := env[name]; set {
 			t.Errorf("%s is set with no key naming it", name)
 		}

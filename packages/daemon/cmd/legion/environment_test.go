@@ -8,7 +8,9 @@ import (
 // startupRestored are the variables TestControllerStartOmitsTheOptionalPointersTheFileDoesNotSet
 // takes out of this binary's own environment for its own run. Each is a pointer a pane's run of
 // `legion controller start` reads, so a test that left one of them gone would hand every test
-// after it an environment the process never had.
+// after it an environment the process never had. That test names this list rather than spelling
+// the variables again, both where it clears them and where it reads the child's environment
+// back, so a name added here is cleared, asserted at the call site, and restored below.
 var startupRestored = []string{"DISPATCH_URL", "DISPATCH_TOKEN_FILE", "ENVOY_TOKEN_FILE", "NATS_NKEY_SEED_FILE"}
 
 // startupValue is what the process held of one variable: its value, and whether it held the

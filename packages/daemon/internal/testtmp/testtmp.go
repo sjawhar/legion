@@ -8,7 +8,8 @@
 // copies, not one package imported twice, because Go's internal rule reads a path prefix: nothing
 // outside packages/envoy may import github.com/sjawhar/envoy/internal/..., and nothing outside
 // packages/daemon may import github.com/sjawhar/legion/daemon/internal/..., so neither module can
-// reach the other's copy. Change one and change the other.
+// reach the other's copy. Change one and change the other, except the paragraph of Dir's comment
+// naming the sites that keep a directory of their own, which each module writes for itself.
 package testtmp
 
 import (

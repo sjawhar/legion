@@ -1,10 +1,12 @@
 package testtmp
 
 import (
+	"bytes"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -93,10 +95,24 @@ func placements(t *testing.T, root string) []string {
 }
 
 // placementsInFile reads one test file, named relative from the module root in what it answers.
+// A file whose bytes hold neither TempDir nor MkdirTemp is not parsed: an offence is reported
+// from a selector whose Sel.Name is one of those two, copied from these same bytes, so such a
+// file can hold none. Most of the module's test files hold neither and go unparsed, where
+// parsing every one of them builds tens of megabytes of syntax tree on every run.
+//
+// One difference comes with the filter: a test file that does not parse fails this check only
+// when it mentions one of the two names. The Go build is what reads the rest.
 func placementsInFile(t *testing.T, path, relative string) []string {
 	t.Helper()
+	source, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", relative, err)
+	}
+	if !bytes.Contains(source, []byte("TempDir")) && !bytes.Contains(source, []byte("MkdirTemp")) {
+		return nil
+	}
 	files := token.NewFileSet()
-	parsed, err := parser.ParseFile(files, path, nil, parser.SkipObjectResolution)
+	parsed, err := parser.ParseFile(files, path, source, parser.SkipObjectResolution)
 	if err != nil {
 		t.Fatalf("parse %s: %v", relative, err)
 	}

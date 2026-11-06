@@ -55,6 +55,8 @@ type idleRigPods struct {
 	// second start, which is what a wake must produce.
 	started map[string]int
 
+	// dirMu guards dirNext, the counter privateDir numbers each launcher's directory with.
+	// dirRoot is set once, in newIdleRigPods, and only read afterwards.
 	dirMu   sync.Mutex
 	dirRoot string
 	dirNext int
@@ -70,8 +72,20 @@ type idleRigPodProcesses struct {
 
 func newIdleRigPods(t *testing.T, address func() string, session ompsessions.Database, dial func(ctx context.Context) (sessionproxy.Dialer, error)) *idleRigPods {
 	t.Helper()
+	// Each launcher's private directory is a numbered subdirectory of this root, and the unix
+	// socket of a generation's session database proxy is `<dir>/g<n>/.s.PGSQL.5432`. A unix
+	// socket path is bounded at 107 bytes (docs/testing.md), so the root comes from testtmp.Dir,
+	// told the longest path a launcher builds under it: a counter, the generation directory and
+	// the session socket's name, written with the constants production uses. The helper measures
+	// the root it made against that path and takes a shorter base where the machine's own
+	// temporary directory leaves too little room. The root is made here, on the test's own
+	// goroutine, because testtmp.Dir ends in t.Fatalf when neither base takes a directory, and
+	// privateDir runs on the fake Kubernetes server's goroutine, where a t.Fatalf would stop
+	// that goroutine alone and leave the test to run to its deadline.
+	root := testtmp.Dir(t, filepath.Join("999", shimwire.GenerationDir(999), ompsessions.SocketName))
 	p := &idleRigPods{t: t, address: address, session: session, dial: dial,
-		running: map[string]*idleRigPodProcesses{}, logs: &syncBuffer{}, started: map[string]int{}}
+		running: map[string]*idleRigPodProcesses{}, logs: &syncBuffer{}, started: map[string]int{},
+		dirRoot: root}
 	t.Cleanup(p.stopAll)
 	return p
 }
@@ -111,13 +125,9 @@ func (p *idleRigPods) podReady(pod, podUID string, roles map[string]string, reco
 	}
 }
 
-// privateDir is one launcher's private directory, where its generations' credentials and the
-// unix socket of each generation's session database proxy live. The socket is
-// `<dir>/g<n>/.s.PGSQL.5432` and a unix socket path is bounded at 107 bytes (docs/testing.md),
-// so the root comes from testtmp.Dir, told the longest path a launcher builds under it: a
-// counter, the generation directory and the session socket's name, written with the constants
-// production uses. The helper measures the root it made against that path and takes a shorter
-// base where the machine's own temporary directory leaves too little room.
+// privateDir is one launcher's private directory, where its generations' credentials and the unix
+// socket of each generation's session database proxy live: a numbered subdirectory of the root
+// newIdleRigPods made, whose budget that function explains.
 //
 // The root was `<os.TempDir()>/p<pid>` before, which two takers could share. dirRoot is a field
 // of each idleRigPods value, but that path was the same for every value in one process, so two
@@ -129,9 +139,6 @@ func (p *idleRigPods) podReady(pod, podUID string, roles map[string]string, reco
 func (p *idleRigPods) privateDir() (string, error) {
 	p.dirMu.Lock()
 	defer p.dirMu.Unlock()
-	if p.dirRoot == "" {
-		p.dirRoot = testtmp.Dir(p.t, filepath.Join("999", shimwire.GenerationDir(999), ompsessions.SocketName))
-	}
 	p.dirNext++
 	dir := filepath.Join(p.dirRoot, strconv.Itoa(p.dirNext))
 	if err := os.MkdirAll(dir, 0o700); err != nil {

@@ -180,9 +180,7 @@ var runtimeOptionalEnv = []string{"LEGION_PROVISION_TOKEN_FILE", "LEGION_REPOSIT
 // setenv is the volume's environment for an in-process run of `provision`.
 func (v *issueVolume) setenv(t *testing.T) {
 	t.Helper()
-	for _, name := range runtimeOptionalEnv {
-		fixtureenv.Unset(t, name)
-	}
+	fixtureenv.Unset(t, runtimeOptionalEnv...)
 	for name, value := range v.env {
 		t.Setenv(name, value)
 	}

@@ -8,7 +8,9 @@
 // are copies, not one package imported twice, because Go's internal rule reads a path prefix:
 // nothing outside packages/envoy may import github.com/sjawhar/envoy/internal/..., and nothing
 // outside packages/daemon may import github.com/sjawhar/legion/daemon/internal/..., so neither
-// module can reach the other's copy. Change one and change the other.
+// module can reach the other's copy. Change one and change the other, except the paragraph of
+// Dir's comment naming the sites that keep a directory of their own, which each module writes
+// for itself.
 package testtmp
 
 import (
@@ -50,18 +52,9 @@ const fallbackBase = "/tmp"
 //     code that predicted its base instead returns a path that fails later at bind with
 //     `invalid argument`.
 //
-// Two kinds of site keep a directory of their own on purpose and do not come here:
-//
-//   - packages/daemon/internal/shim/socketpath_test.go's roleTempDir, which builds a deliberately
-//     long directory, as long as the TMPDIR a Legion role is told, so that its test proves sockets
-//     still bind where a role runs. A short directory would take the proof away.
-//   - the once-per-binary build directories of
-//     packages/daemon/internal/daemon/idle_rig_listener_test.go,
-//     packages/daemon/internal/stream/integration_test.go,
-//     packages/daemon/internal/runtime/tmux/tmux_real_test.go, packages/daemon/cmd/legion/main_test.go
-//     and packages/daemon/internal/workspace/workspace_test.go. They bind no socket, so they need
-//     no byte budget, and no *testing.T outlives them, so they keep os.MkdirTemp("", …) and a
-//     removal of their own.
+// No site in this module keeps a directory of its own on purpose: every test here that wants a
+// temporary directory comes to Dir, and internal/testtmp is the sole exception the guard beside
+// this file lists. The daemon copy of this file names that module's exempt sites.
 func Dir(t testing.TB, longest string) string {
 	t.Helper()
 	base := os.TempDir()

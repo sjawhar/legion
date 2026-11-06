@@ -35,9 +35,8 @@ const testTimeout = 30 * time.Second
 func TestMain(m *testing.M) { os.Exit(runUnderAHomeOfThePackagesOwn(m)) }
 
 // runUnderAHomeOfThePackagesOwn does the setup the comment above describes and removes the home
-// afterwards. The removal is deferred rather than written after m.Run: it already ran whatever
-// m.Run returned, and now it also runs when the setup below panics. A run killed by a signal
-// still keeps the home, which nothing here can help.
+// afterwards. The removal is deferred, so it also runs when the setup below panics. A run killed
+// by a signal still keeps the home, which nothing here can help.
 func runUnderAHomeOfThePackagesOwn(m *testing.M) int {
 	if err := fixtureenv.Guard(); err != nil {
 		fmt.Fprintln(os.Stderr, "TestMain:", err)

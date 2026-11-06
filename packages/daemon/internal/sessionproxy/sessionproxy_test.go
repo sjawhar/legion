@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/testtmp"
 )
 
@@ -781,15 +782,14 @@ func TestStartRefusesWhenItsContextHasEnded(t *testing.T) {
 func TestCloseUnlinksNoSocketThroughALinkedDirectory(t *testing.T) {
 	// The sockets bound here are g1/.s.PGSQL.5432 and the sibling's g2/.s.PGSQL.5432, of the
 	// same length, so that pair is the room the directory needs.
-	base := testtmp.Dir(t, filepath.Join("g1", ".s.PGSQL.5432"))
+	base := testtmp.Dir(t, filepath.Join("g1", ompsessions.SocketName))
 	own, sibling := filepath.Join(base, "g1"), filepath.Join(base, "g2")
 	for _, dir := range []string{own, sibling} {
 		if err := os.Mkdir(dir, 0o700); err != nil {
 			t.Fatalf("make %s: %v", dir, err)
 		}
 	}
-	const name = ".s.PGSQL.5432"
-	siblingListener, err := net.Listen("unix", filepath.Join(sibling, name))
+	siblingListener, err := net.Listen("unix", filepath.Join(sibling, ompsessions.SocketName))
 	if err != nil {
 		t.Fatalf("listen as the sibling: %v", err)
 	}
@@ -797,7 +797,7 @@ func TestCloseUnlinksNoSocketThroughALinkedDirectory(t *testing.T) {
 	defer siblingListener.Close()
 
 	up := newUpstream(t)
-	proxy := startProxy(context.Background(), t, up, &fakeDialer{addr: up.listener.Addr().String()}, filepath.Join(own, name))
+	proxy := startProxy(context.Background(), t, up, &fakeDialer{addr: up.listener.Addr().String()}, filepath.Join(own, ompsessions.SocketName))
 	// The agent's swap: its own directory moved aside, a link to the sibling's in its place.
 	moved := filepath.Join(base, "g1.moved")
 	if err := os.Rename(own, moved); err != nil {
@@ -809,17 +809,17 @@ func TestCloseUnlinksNoSocketThroughALinkedDirectory(t *testing.T) {
 	if err := proxy.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if _, err := os.Lstat(filepath.Join(sibling, name)); err != nil {
+	if _, err := os.Lstat(filepath.Join(sibling, ompsessions.SocketName)); err != nil {
 		t.Fatalf("the sibling's socket is gone after the proxy's Close: %v", err)
 	}
-	if _, err := os.Lstat(filepath.Join(moved, name)); err != nil {
+	if _, err := os.Lstat(filepath.Join(moved, ompsessions.SocketName)); err != nil {
 		t.Fatalf("the proxy's own socket is gone after Close, which should have left it to its owner: %v", err)
 	}
 	// The owner's removal of the generation's path takes the link, never what it points at.
 	if err := os.RemoveAll(own); err != nil {
 		t.Fatalf("remove %s: %v", own, err)
 	}
-	if _, err := os.Lstat(filepath.Join(sibling, name)); err != nil {
+	if _, err := os.Lstat(filepath.Join(sibling, ompsessions.SocketName)); err != nil {
 		t.Fatalf("the sibling's socket is gone after the generation's directory was removed: %v", err)
 	}
 }

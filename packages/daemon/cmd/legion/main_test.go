@@ -47,9 +47,8 @@ func TestMain(m *testing.M) {
 }
 
 // runWithoutTheOperatorsJJConfig runs the package's tests with a jj configuration directory of
-// their own and removes it afterwards. The removal is deferred rather than written after m.Run:
-// it already ran whatever m.Run returned, and now it also runs when the setup below panics. A
-// run killed by a signal still keeps the directory, which nothing here can help.
+// their own and removes it afterwards. The removal is deferred, so it also runs when the setup
+// below panics. A run killed by a signal still keeps the directory, which nothing here can help.
 func runWithoutTheOperatorsJJConfig(m *testing.M) int {
 	// Every test below starts isolated from the operator's own jj configuration — in particular
 	// fsmonitor.backend = "watchman" on this devbox: JJ_CONFIG names a file that does not exist,
