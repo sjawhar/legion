@@ -526,6 +526,21 @@ func assertCredentialedEnvironmentBounded(t *testing.T, command Command, timeout
 	}
 }
 
+// requireCheckedOut fails unless the issue's workspace holds the default branch's whole tree, what
+// a checkout leaves: its sparse patterns are the whole tree (.), and the files it lists are the
+// files the shared clone lists at main@origin.
+func requireCheckedOut(t *testing.T, working Workspace) {
+	t.Helper()
+	if listed := strings.TrimSpace(runSetup(t, working.Dir, "jj", "sparse", "list", "-R", working.Dir)); listed != "." {
+		t.Errorf("the workspace's sparse patterns are %q, want the whole tree (.)", listed)
+	}
+	files := strings.Fields(runSetup(t, working.Dir, "jj", "file", "list", "-R", working.Dir))
+	want := strings.Fields(runSetup(t, working.Clone, "jj", "file", "list", "-r", "main@origin", "--ignore-working-copy", "-R", working.Clone))
+	if !slices.Equal(files, want) || len(want) == 0 {
+		t.Errorf("the workspace holds %q, want the default branch's files %q", files, want)
+	}
+}
+
 // tokenProbe runs every command through runner, first recording whether a one-shot token file
 // exists under dir while the command runs.
 type tokenProbe struct {
@@ -851,16 +866,9 @@ func TestProvisionFromAFeedLeavesTheSharedCloneWithNoWorkingTree(t *testing.T) {
 		t.Errorf("the clone was made with %q, want --no-checkout: no working tree", clone.Argv)
 	}
 
-	files := strings.Fields(runSetup(t, working.Dir, "jj", "file", "list", "-R", working.Dir))
-	want := strings.Fields(runSetup(t, cloneDir, "jj", "file", "list", "-r", "main@origin", "--ignore-working-copy", "-R", cloneDir))
-	if !slices.Equal(files, want) || len(want) == 0 {
-		t.Errorf("the workspace holds %q, want the default branch's files %q", files, want)
-	}
+	requireCheckedOut(t, working)
 	if status := runSetup(t, working.Dir, "jj", "status", "-R", working.Dir); !strings.Contains(status, "The working copy has no changes") {
 		t.Errorf("jj status in the workspace = %q, want no change", status)
-	}
-	if listed := strings.TrimSpace(runSetup(t, working.Dir, "jj", "sparse", "list", "-R", working.Dir)); listed != "." {
-		t.Errorf("the workspace's sparse patterns are %q, want the whole tree (.)", listed)
 	}
 }
 
@@ -879,8 +887,7 @@ func TestTheSharedClonesCloneIsBoundedByCloneTimeout(t *testing.T) {
 	var steps []string
 	var given []time.Duration
 	for _, call := range run.Calls()[before:] {
-		if commandWith(call.Argv, "git", "clone") || commandWith(call.Argv, "jj", "git", "init", "--colocate") ||
-			commandWith(call.Argv, "jj", "sparse", "set") || commandWith(call.Argv, "jj", "abandon") {
+		if isSharedCloneStep(call.Argv) {
 			steps = append(steps, strings.Join(call.Argv[:3], " "))
 			given = append(given, call.Timeout)
 			if call.Timeout > CloneTimeout || call.Timeout < CloneTimeout-time.Minute {
@@ -891,7 +898,7 @@ func TestTheSharedClonesCloneIsBoundedByCloneTimeout(t *testing.T) {
 		// The checkout is the one provisioning command outside the clone's steps whose time
 		// follows the repository's size, so it holds CheckoutTimeout, its own
 		// (TestProvisionBoundsEachCommandByItsOwnBudget reads every command's).
-		if commandWith(call.Argv, "jj", "sparse", "reset") {
+		if isCheckout(call.Argv) {
 			if call.Timeout != CheckoutTimeout {
 				t.Errorf("%q ran under %s, want CheckoutTimeout %s", call.Argv, call.Timeout, CheckoutTimeout)
 			}
@@ -1000,6 +1007,16 @@ func sharedCloneStep(argv []string) string {
 		return strings.Join(argv[:2], " ")
 	}
 	return ""
+}
+
+// isSharedCloneStep answers for every size-following step of the shared clone's clone from a feed:
+// the four commands feedClone runs under one CloneTimeout — the local `git clone`, jj's import of
+// every commit (`jj git init --colocate`), and the sparse clear and the abandon that leave the
+// clone with no working tree. It is not sharedCloneStep above, which is one case's clock-naming
+// function and deliberately names only the two of those steps that case gives clock time to.
+func isSharedCloneStep(argv []string) bool {
+	return commandWith(argv, "git", "clone") || commandWith(argv, "jj", "git", "init", "--colocate") ||
+		commandWith(argv, "jj", "sparse", "set") || commandWith(argv, "jj", "abandon")
 }
 
 // The feed is GitHub as it stood when the pod's workspace-fetch ran, and a tree agent can push to

@@ -61,7 +61,7 @@ func New(t testing.TB, issue string, before ...func(d *Disk)) *Disk {
 		func(d *Disk, root string) {
 			d.Run(root, "jj", "git", "clone", "--colocate", d.Remote, d.Clone)
 		},
-		func(d *Disk, _ string) {
+		func(d *Disk) {
 			d.Run(d.Clone, "jj", "workspace", "add", "--name", strings.ToLower(d.Issue), d.Workspace)
 		})
 }
@@ -88,7 +88,7 @@ func NewWithoutCloneTree(t testing.TB, issue string, before ...func(d *Disk)) *D
 			d.Run(d.Clone, "jj", "sparse", "set", "--clear", "--color=never", "-R", d.Clone)
 			d.Run(d.Clone, "jj", "abandon", "@", "--color=never", "-R", d.Clone)
 		},
-		func(d *Disk, _ string) {
+		func(d *Disk) {
 			d.Run(d.Clone, "jj", "workspace", "add", d.Workspace, "--name", strings.ToLower(d.Issue),
 				"--revision", d.Base, "--sparse-patterns", "empty", "-R", d.Clone)
 			d.Run(d.Workspace, "jj", "sparse", "reset")
@@ -101,10 +101,10 @@ func NewWithoutCloneTree(t testing.TB, issue string, before ...func(d *Disk)) *D
 // issue's branch, the before hooks run on it, and the records provisioning writes — what the clone
 // held when it was made (workspace.RecordHeld), when the workspace was created
 // (workspace.RecordCreated) — with the issue's bookmark tracked. clone makes the shared clone and
-// add the issue's workspace of it, each the way its constructor builds one; root is the directory
-// the disk is laid out under, where a jj that opens no repository runs, as provisioning runs those
-// in the clone's parent (workspace.cloneSteps).
-func newDisk(t testing.TB, issue string, before []func(d *Disk), clone, add func(d *Disk, root string)) *Disk {
+// add the issue's workspace of it, each the way its constructor builds one; root, which clone is
+// given, is the directory the disk is laid out under, where a jj that opens no repository runs, as
+// provisioning runs those in the clone's parent (workspace.cloneSteps).
+func newDisk(t testing.TB, issue string, before []func(d *Disk), clone func(d *Disk, root string), add func(d *Disk)) *Disk {
 	t.Helper()
 	for _, tool := range []string{"git", "jj"} {
 		if _, err := exec.LookPath(tool); err != nil {
@@ -148,7 +148,7 @@ func newDisk(t testing.TB, issue string, before []func(d *Disk), clone, add func
 	if err := workspace.RecordHeld(context.Background(), workspace.NewRunner(time.Minute, d.tools()), d.Clone); err != nil {
 		t.Fatal(err)
 	}
-	add(d, root)
+	add(d)
 	if err := workspace.RecordCreated(d.Workspace, d.Provisioned); err != nil {
 		t.Fatal(err)
 	}

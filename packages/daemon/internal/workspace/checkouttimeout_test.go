@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -69,11 +68,10 @@ func TestProvisionBoundsEachCommandByItsOwnBudget(t *testing.T) {
 			// The shared clone's own size-following steps carry what remains of CloneTimeout, and
 			// are TestTheSharedClonesCloneIsBoundedByCloneTimeout's: they are recognised here the
 			// way that case recognises them, and left to it.
-			if commandWith(call.Argv, "git", "clone") || commandWith(call.Argv, "jj", "git", "init", "--colocate") ||
-				commandWith(call.Argv, "jj", "sparse", "set") || commandWith(call.Argv, "jj", "abandon") {
+			if isSharedCloneStep(call.Argv) {
 				continue
 			}
-			if commandWith(call.Argv, "jj", "sparse", "reset") {
+			if isCheckout(call.Argv) {
 				checkouts++
 				if call.Timeout != CheckoutTimeout {
 					t.Errorf("%s: the checkout %q was given %s, want CheckoutTimeout %s", round, call.Argv, call.Timeout, CheckoutTimeout)
@@ -108,14 +106,11 @@ func TestProvisionChecksOutPastTheRunnersBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
-	if listed := strings.TrimSpace(runSetup(t, working.Dir, "jj", "sparse", "list", "-R", working.Dir)); listed != "." {
-		t.Errorf("the workspace's sparse patterns are %q, want the whole tree (.)", listed)
-	}
+	requireCheckedOut(t, working)
+	// The file list requireCheckedOut read is read again here: what this case proves beyond it is
+	// that the checkout wrote each of those files to disk, and the list is unchanged between the
+	// two reads — nothing writes to the workspace in between.
 	files := strings.Fields(runSetup(t, working.Dir, "jj", "file", "list", "-R", working.Dir))
-	want := strings.Fields(runSetup(t, working.Clone, "jj", "file", "list", "-r", "main@origin", "--ignore-working-copy", "-R", working.Clone))
-	if !slices.Equal(files, want) || len(want) == 0 {
-		t.Errorf("the workspace holds %q, want the default branch's files %q", files, want)
-	}
 	for _, file := range files {
 		if _, err := os.Stat(filepath.Join(working.Dir, file)); err != nil {
 			t.Errorf("the checkout left %s unwritten: %v", file, err)
