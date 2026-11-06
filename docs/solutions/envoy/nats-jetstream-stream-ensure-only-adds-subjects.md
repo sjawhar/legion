@@ -93,9 +93,10 @@ The cap is the one of these a deployed stream can refuse. A create carries it on
 nats-server, but every server before v2.12.5 refuses an update that changes `MaxConsumers` on a
 stream that already exists (`nats: stream configuration update can not change MaxConsumers`,
 measured on v2.10.29, v2.11.0 and v2.12.0), and that refusal, which names `max_consumers`, the
-value the binary asks for and that floor (`refusedSettings`), stops the listener's start. A
-deployment whose server is older and whose stream exists therefore upgrades the nats-server
-first, keeping its store, and the next start sets the cap.
+value the binary asks for and that floor (`refusedSettings`), stops the listener's start, while
+Dispatch's server, which reconciles in the background, keeps serving and retries it. A deployment
+whose server is older and whose stream holds a cap below 24000, or none, therefore upgrades the
+nats-server first, keeping its store, and the next start sets the cap.
 
 So every program that owns the stream runs a keeper (`internal/bus/keeper.go`): every 30 seconds
 it reads the stream again and writes it back (`keepStream`, `keptStream`) with copies below its

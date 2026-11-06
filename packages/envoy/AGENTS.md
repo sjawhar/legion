@@ -119,9 +119,10 @@ Each item below names a task and where its code is, then notes on it.
   Lowering the cap (`nats stream edit ENVOY_NOTIFICATIONS --max-consumers=<n>`) is an operator step that needs every program's binary lowered first.
   A stream the server already holds takes a cap change only on nats-server v2.12.5 or later:
   every server before it refuses such an update with `nats: stream configuration update can not change MaxConsumers`, measured on v2.10.29, v2.11.0 and v2.12.0.
-  That refusal names `max_consumers`, the value the binary asks for and the floor (`refusedSettings`), and stops the listener's start;
-  a deployment on an older server that already holds the stream therefore cannot start a listener of this release.
-  A create carries the cap on every nats-server, so such an operator upgrades the nats-server first, keeping its store, and the listener's next start sets the cap
+  That refusal names `max_consumers`, the value the binary asks for and the floor (`refusedSettings`).
+  It stops the listener's start, while Dispatch's server, which reconciles in the background, keeps serving but neither reconciles nor keeps the stream, and logs `envoy nats reconnect hook failed; it is retried` until that becomes `envoy nats reconnect hooks have not succeeded` at ERROR;
+  so a deployment on an older server whose stream holds a cap below 24000, or none, cannot start a listener of this release.
+  A create carries the cap on every nats-server, and a stream already at the cap needs no change, so only such a deployment upgrades the nats-server first, keeping its store, and the listener's next start sets the cap
 
 - **Session delivery**: `internal/session/session.go`
 
@@ -3563,8 +3564,8 @@ that is the rule and not a transitional measure, and it is what lets Dispatch de
   a clustered deployment sets both alike in every envoy-listener and in the Dispatch server.
   A create carries the consumer cap on every nats-server, but a stream the server already holds takes a cap change only on v2.12.5 or later:
   every server before it refuses such an update with `nats: stream configuration update can not change MaxConsumers`, measured on v2.10.29, v2.11.0 and v2.12.0.
-  That refusal names `max_consumers`, the value the binary asks for and the floor, and stops the listener's start (`refusedSettings`), so a deployment on an older server that already holds the stream upgrades the nats-server first, keeping its store;
-  the next start then sets the cap.
+  That refusal names `max_consumers`, the value the binary asks for and the floor, and stops the listener's start (`refusedSettings`), and Dispatch's server, which reconciles in the background, retries the reconcile and starts no keeper until it passes;
+  so a deployment on an older server whose stream holds a cap below 24000, or none, upgrades the nats-server first, keeping its store, and the next start then sets the cap.
   JetStream's stream update has no compare-and-swap:
   a start with other (or no) settings, or another subject list, that reads the stream before another start's write and writes after it puts the old subjects, copies, byte limit and metadata back.
 

@@ -531,10 +531,9 @@ func (r streamReconciliation) log() {
 // limits, direct get and the rest) stays as it is. A stream that already holds all of that gets no
 // update, and one that lacks only the key gets its own configuration back with the key added.
 // A refused create or update names the settings it carried (refusedSettings). A create carries the
-// consumer cap on every nats-server, but every server before streamMaxConsumersFloor refuses an
-// update that changes the cap of a stream that already exists (`nats: stream configuration update
-// can not change MaxConsumers`), so under an older server a deployed stream created without the
-// cap keeps the server's default of 1000 until the stream is recreated.
+// consumer cap on every nats-server, but a server before streamMaxConsumersFloor refuses an update
+// that changes the cap of a stream that already exists, so on such a server a start against a
+// deployed stream whose cap is below cfg's, or unset, is refused.
 //
 // Every bus.ConnectOwningStream caller runs this on the one stream, and JetStream's stream update
 // has no compare-and-swap, so two starts can each read the stream before either writes, and the
@@ -627,13 +626,9 @@ func keptStream(info *nats.StreamInfo, cfg *nats.StreamConfig) nats.StreamConfig
 // operator changed. A release that changed one would have its keeper and an older release's each
 // put their own value back every period while both run.
 //
-// The cap is read from the deployed configuration the same way, with one difference: nats-server
-// reads a deployed -1 and a deployed 0 alike as "not set" and then applies its own default of 1000
-// (JSDefaultMaxConsumersPerStream), so both are below the compiled cap and both are raised to it.
-// The write that carries the raise reaches a deployed stream only on streamMaxConsumersFloor or
-// later: every server before it refuses an update that changes MaxConsumers on a stream that
-// already exists (`nats: stream configuration update can not change MaxConsumers`), and the
-// refusal names the cap and the floor (refusedSettings).
+// A deployed cap of -1 or 0 is one nats-server reads as unset, applying its own default of 1000
+// (StreamMaxConsumers), so it is raised as a smaller cap is. The update that carries the raise
+// needs streamMaxConsumersFloor or later on a stream that already exists (refusedSettings).
 func ownedStream(info *nats.StreamInfo, cfg *nats.StreamConfig) nats.StreamConfig {
 	owned := info.Config
 	owned.Replicas = max(info.Config.Replicas, cfg.Replicas)

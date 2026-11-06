@@ -487,10 +487,12 @@ default of 1000, so a start and the keeper raise either to 24000 as they raise a
 Setting the cap on a stream the server already holds needs nats-server v2.12.5 or later: every
 server before it refuses an update that changes `MaxConsumers` with
 `nats: stream configuration update can not change MaxConsumers` (measured on v2.10.29, v2.11.0 and
-v2.12.0), which stops the listener's start with an error naming `max_consumers` and that version.
-A create carries the cap on every version. So a deployment whose NATS is older and whose stream
-already exists upgrades the NATS server first, keeping its store, and the next listener start sets
-the cap.
+v2.12.0). That stops the listener's start with an error naming `max_consumers` and that version,
+and Dispatch's server, which keeps serving, retries the reconcile and logs
+`envoy nats reconnect hook failed; it is retried` until it passes. A create carries the cap on
+every version, and a stream already at the cap needs no change. So a deployment whose NATS is
+older and whose stream holds a cap below 24000, or none, upgrades the NATS server first, keeping
+its store, and the next listener start sets the cap.
 
 During a rollout with mixed settings the stream can therefore sit below the setting for up to 30
 seconds after the last start. To lower the copies, or to lower or remove the limit, change the
