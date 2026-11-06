@@ -200,7 +200,10 @@ func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, 
 // HTTP route passes its request's own context. A write or delete ctx abandoned may still land after
 // this answer; releaseRoleClaim, deleteInterest and removeInterestTopics each say why that is safe.
 // A record this build cannot decode (ErrMalformedInterest) is deleted all the same; removing some
-// topics leaves it as it is (removeInterestTopics).
+// topics leaves it as it is (removeInterestTopics). The claims a deregistration releases come
+// from two sources: the role topics of the session's own interest record (releaseRoleClaims),
+// which runs first, and then the roles the role claim view names it the holder of
+// (releaseAllRoleClaims).
 func (r *Registry) Remove(ctx context.Context, sessionID string, topics []string) error {
 	if len(topics) == 0 {
 		item, err := r.Get(ctx, sessionID)
