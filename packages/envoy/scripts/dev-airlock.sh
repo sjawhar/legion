@@ -187,6 +187,10 @@ AWS_SECRET="AIRLOCK_AWS_KEY"
 # and open nothing; a check compares what a stand-in was sent against them by length and prefix.
 DEMO_VALUE="the-real-airlock-demo-token-9f3a7c"
 SCOPED_VALUE="the-real-airlock-scoped-token-4b1e"
+# The session token of the stack's AWS key pair. One string for both halves of the stand: the
+# fake store hands it to the broker as part of the stored value, and --aws-session-token tells
+# the stand-in AWS service to require exactly it, so a call the proxy signed again verifies.
+AWS_SESSION_TOKEN="the-stand-in-aws-session-token"
 # A federated token in the shape the azure-login minter reads: a JWT whose exp claim is
 # 4102444800 (2100-01-01). It is signed by nobody and the stand-in Microsoft endpoint takes any
 # assertion.
@@ -352,9 +356,10 @@ mkdir -p "$BIN_DIR"
 
 # --- The stand-ins. Each HTTPS stand's certificate carries the name the rules bind it to, since
 # the proxy verifies the name it dialled against the certificate the stand presents. The
-# Microsoft stand carries the resource host's name too: it answers a token request at
-# /{tenant}/oauth2/v2.0/token and leaves every other request to its own body, so one process
-# plays the token endpoint and the service an access token is spent at. ---
+# Microsoft stand carries the resource host's name too: it answers the tenant's OpenID
+# configuration document, which is the first thing az reads of an authority, and a token
+# request at /{tenant}/oauth2/v2.0/token, and leaves every other request to its own body, so
+# one process plays the authority and the service an access token is spent at. ---
 echo "dev-airlock: starting dev-airlock-stands..." >&2
 : >"$STANDS_LOG"
 "$STANDS_BIN" --dir "$STANDS_DIR" \
@@ -365,6 +370,7 @@ echo "dev-airlock: starting dev-airlock-stands..." >&2
   --address "aws=$AWS_ADDRESS" --host "aws=$AWS_HOST" \
   --github-owner "$GITHUB_OWNER=$GITHUB_INSTALLATION" \
   --google-lifetime 7m \
+  --aws-session-token "$AWS_SESSION_TOKEN" \
   >"$STANDS_JSON" 2> >(trap '' TERM INT; exec tee -a "$STANDS_LOG" >&2) &
 STANDS_PID=$!
 await "dev-airlock-stands" 60 "$STANDS_LOG" 'stands listening records=' "$STANDS_PID"
@@ -419,7 +425,7 @@ jq -n \
   --arg demo "$DEMO_VALUE" --arg scoped "$SCOPED_VALUE" \
   --arg appid "$GITHUB_APP_ID" --rawfile appkey "$GITHUB_APP_KEY_FILE" \
   --arg owner "$GITHUB_OWNER" \
-  --arg awskey "$AWS_KEY_ID" --arg awssecret "$AWS_SECRET_KEY" \
+  --arg awskey "$AWS_KEY_ID" --arg awssecret "$AWS_SECRET_KEY" --arg awssession "$AWS_SESSION_TOKEN" \
   '{secrets: [
      {name: ($prefix + "airlock-demo-token"), kms_key_id: $kms,
       tags: {owner: $service, tier: "agent"}, value: $demo},
@@ -439,7 +445,7 @@ jq -n \
      {name: ($prefix + "airlock-aws-key"), kms_key_id: $kms,
       tags: {owner: $service, tier: "agent"},
       value: ({access_key_id: $awskey, secret_access_key: $awssecret,
-               session_token: "the-stand-in-aws-session-token"} | tojson)}
+               session_token: $awssession} | tojson)}
    ]}' >"$FAKE_SECRETS_FILE"
 chmod 600 "$FAKE_SECRETS_FILE"
 printf '%s' "$AZURE_FEDERATED_TOKEN" >"$AZURE_TOKEN_FILE"

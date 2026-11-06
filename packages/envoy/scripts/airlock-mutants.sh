@@ -32,12 +32,26 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENVOY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_DIR="$(cd "$ENVOY_DIR/../.." && pwd)"
-AIRLOCK_DIR="$ENVOY_DIR/internal/broker/airlock"
-MUTANT_DIR="$AIRLOCK_DIR/testdata/mutants"
-MODEL="$AIRLOCK_DIR/lean/.lake/build/bin/airlock-model"
+AIRLOCK_PKG_DIR="$ENVOY_DIR/internal/broker/airlock"
+MUTANT_DIR="$AIRLOCK_PKG_DIR/testdata/mutants"
+MODEL="$AIRLOCK_PKG_DIR/lean/.lake/build/bin/airlock-model"
 
 usage() {
-	sed -n '2,29p' "${BASH_SOURCE[0]}"
+	cat <<'EOF'
+usage: airlock-mutants.sh [<name>...]
+
+Applies each mutant of internal/broker/airlock/testdata/mutants to a copy of packages/envoy
+under $TMPDIR and requires that copy to fail: a go-*.patch must fail the comparison fuzz test
+over the committed seed corpus, and a lean-*.patch must fail `lake build`, because a proof no
+longer holds, or that same comparison against the mutated model.
+
+  <name>   a patch's file name, with or without the .patch suffix (for example
+           go-carries-value); with no name, every mutant of testdata/mutants
+
+No patch is ever applied to this repository. It prints one PASS: or FAIL: line per mutant and
+a last line saying how many were caught, exits non-zero when a mutant was not caught, and
+exits 2 when go, lake or both patch and git are missing.
+EOF
 }
 
 case "${1:-}" in
@@ -101,7 +115,7 @@ if [[ "$needs_lake" == true ]] && ! command -v lake >/dev/null 2>&1; then
 fi
 if [[ "$needs_model" == true && ! -x "$MODEL" ]]; then
 	echo "airlock-mutants: no built model at $MODEL" >&2
-	echo "  Build it: (cd $AIRLOCK_DIR/lean && lake build)" >&2
+	echo "  Build it: (cd $AIRLOCK_PKG_DIR/lean && lake build)" >&2
 	exit 2
 fi
 

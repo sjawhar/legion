@@ -132,6 +132,13 @@ func (s *Server) valuesFor(ctx context.Context, grantID string) (map[string]requ
 	}
 	s.valuesMu.Unlock()
 
+	// The common path, checked before the single-flight lock: the grant's values are held and
+	// still usable, so every parallel request of one grant answers from them at once. Taking
+	// read first would put them all in a queue behind a read that is not going to happen.
+	if values, _, fresh := held.held(s.now(), s.keepValues); fresh {
+		return values, nil
+	}
+
 	held.read.Lock()
 	defer held.read.Unlock()
 	values, drops, fresh := held.held(s.now(), s.keepValues)
@@ -188,9 +195,9 @@ func (s *Server) serveBound(w http.ResponseWriter, r *http.Request) {
 		// The three names the decision compares are ASCII lower-cased, as the entry's hosts
 		// are: host names are case-insensitive and the model compares them exactly, so a
 		// client that wrote "API.example.com" in one of the three is not a mismatch. The fold
-		// is ASCII-only for the reason asciiLower gives.
-		SNI:        asciiLower(sniOf(r)),
-		HostHeader: asciiLower(hostHeaderOf(r.Host)),
+		// is ASCII-only for the reason airlock.ASCIILower gives.
+		SNI:        airlock.ASCIILower(sniOf(r)),
+		HostHeader: airlock.ASCIILower(hostHeaderOf(r.Host)),
 		Method:     r.Method,
 		Path:       r.URL.Path,
 		Headers:    headersOf(r.Header),
@@ -202,8 +209,7 @@ func (s *Server) serveBound(w http.ResponseWriter, r *http.Request) {
 		Body: "",
 	}
 
-	candidates := s.candidates(info.grant, info.host)
-	if len(candidates) == 0 {
+	if len(info.candidates) == 0 {
 		// The host was bound when the connection was opened and is not now, which one reload
 		// of nothing can produce: the rules are read once at boot. Refused rather than
 		// forwarded, since a connection to a bound host that carries no name has no business
@@ -211,23 +217,21 @@ func (s *Server) serveBound(w http.ResponseWriter, r *http.Request) {
 		s.refuse(w, info, r, pair{}, http.StatusForbidden, "no name of this grant is bound to "+info.host)
 		return
 	}
-	chosen := choosePair(candidates, info.grant, request)
+	chosen := choosePair(info.candidates, info.grant, request)
 	// The entry's kind is what the value behind this name is: "" a string a header carries,
 	// which the swap below puts there; "aws" a key pair the call itself has to be signed with
 	// (aws.go); "azure" a federated token that has to be exchanged at a token endpoint for an
 	// access token (azure.go). Validate allows no other kind, so an entry this reads nothing
-	// for is a header swap.
-	kind := ""
-	if entry := s.rules.Lookup(chosen.name); entry != nil {
-		kind = entry.Kind
-	}
+	// for is a header swap. It is the kind candidates already read for this name, carried on
+	// the pair rather than looked up again.
+	kind := chosen.kind
 	if s.noKind {
 		// Options.NoKind: the entry's kind is read as none, so an azure or aws entry takes
 		// the plain header swap below. It is the negative control of the check those two
 		// kinds belong to, and is refused on a production start.
 		kind = ""
 	}
-	exchange := kind == airlockKindAzure && isTokenRequest(r)
+	exchange := kind == airlock.KindAzure && isTokenRequest(r)
 	if exchange {
 		// A token request carries the grant's placeholder in its form rather than in a header,
 		// so what it is handled for is the federated slot whatever choosePair read of its
@@ -273,11 +277,20 @@ func (s *Server) serveBound(w http.ResponseWriter, r *http.Request) {
 	}
 
 	grant := airlock.Grant{Secret: chosen.name, Placeholder: placeholder}
-	if allowed, why := airlock.Decide(s.rules, grant, value, request); !allowed {
-		s.refuse(w, info, r, chosen, http.StatusForbidden, why)
-		return
+	// refused answers a request the decision will not carry, and reports that it did. The
+	// reason and the status are airlock.Decide's own, as they were when every path through
+	// this function asked it first.
+	refused := func() bool {
+		allowed, why := airlock.Decide(s.rules, grant, value, request)
+		if !allowed {
+			s.refuse(w, info, r, chosen, http.StatusForbidden, why)
+		}
+		return !allowed
 	}
 	if exchange {
+		if refused() {
+			return
+		}
 		// The one request the proxy answers itself: the broker makes the exchange with the
 		// real federated token and hands the command a placeholder access token.
 		s.exchangeToken(w, info, r, chosen, value)
@@ -288,7 +301,10 @@ func (s *Server) serveBound(w http.ResponseWriter, r *http.Request) {
 	// headers the entry names and nothing else; the AWS path replaces the signature, which is
 	// the Authorization header, the date, the session token and the canonical query.
 	header, rawQuery := http.Header(nil), r.URL.RawQuery
-	if kind == airlockKindAWS {
+	if kind == airlock.KindAWS {
+		if refused() {
+			return
+		}
 		signed, signedQuery, why := s.signAWS(r.Context(), r, hostHeaderOf(info.target), info.grant.Names[chosen.name].Slots, secret.Slots)
 		if why != "" {
 			s.refuse(w, info, r, chosen, http.StatusForbidden, why)
@@ -296,9 +312,18 @@ func (s *Server) serveBound(w http.ResponseWriter, r *http.Request) {
 		}
 		header, rawQuery = signed, signedQuery
 	} else {
+		// The swap first, and the decision only to explain a refusal. Decide and Rewrite take
+		// the one decision (airlock.check), which is deterministic and has no side effect, so
+		// Rewrite answers nil for exactly the requests Decide refuses: running it first costs
+		// an allowed swap - the commonest request the proxy serves - one decision rather than
+		// two, and leaves the refusal, the order its reasons are reported in and the 403
+		// exactly as they were.
 		rewritten := airlock.Rewrite(s.rules, grant, value, request)
 		if rewritten == nil {
-			// Decide and Rewrite take the one decision (airlock.check), so this is
+			if refused() {
+				return
+			}
+			// Decide allowed what Rewrite refused, which the one decision behind both makes
 			// unreachable; refusing rather than forwarding is what keeps it unreachable and
 			// harmless if the two ever part.
 			s.refuse(w, info, r, chosen, http.StatusForbidden, "the swap refused a request the decision allowed")
@@ -384,11 +409,18 @@ func (s *Server) callFields(info connInfo, r *http.Request, chosen pair, status 
 // pair is one (name, slot) of a grant: which secret a request may be handled for, and which of
 // that secret's values. A github-app name has one slot per installation and no value slot, so
 // the pair rather than the name is what says which token a request's placeholder stands for.
-type pair struct{ name, slot string }
+// kind is the entry's own kind, read when the pair was made, so that the request this pair is
+// chosen for needs no second Lookup of the name.
+type pair struct{ name, slot, kind string }
 
 // candidates is every (name, slot) pair of the grant whose name's entry binds the CONNECT host,
 // sorted by name and then by slot. Sorted because the choice below takes the first of them, and
 // a map's order would make which value a request is handled for depend on the run.
+//
+// It is a pure function of the grant, the host and the rules, every one of them fixed for the
+// life of a decrypted connection, so it runs once per connection (connectBound) and its answer
+// travels in connInfo rather than being built again - a map walk, a Lookup and a HostBound per
+// name, and a sort - for each request on it.
 func (s *Server) candidates(grant requests.AirlockConnection, host string) []pair {
 	var pairs []pair
 	for name, held := range grant.Names {
@@ -397,7 +429,7 @@ func (s *Server) candidates(grant requests.AirlockConnection, host string) []pai
 			continue
 		}
 		for slot := range held.Slots {
-			pairs = append(pairs, pair{name: name, slot: slot})
+			pairs = append(pairs, pair{name: name, slot: slot, kind: entry.Kind})
 		}
 	}
 	slices.SortFunc(pairs, func(a, b pair) int {

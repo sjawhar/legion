@@ -1,9 +1,10 @@
 // packages/envoy/internal/broker/airlock/airlocktest/stands.go
-// The four stand-ins a Service answers as: GitHub's App endpoints, Google's token endpoint,
-// Microsoft's token endpoint and an AWS service that checks the signature it was sent. Each is a
-// value holding what it answers and what it was asked, and each installs its Answer on a Service
-// (Service.AnswerWith), so one of them may play a host of its own in the command and the same
-// one may play the bound host of a row that already has a service.
+// The five stand-ins a Service answers as: GitHub's App endpoints, Google's token endpoint,
+// Microsoft's authority, an AWS service that checks the signature it was sent, and the
+// WebSocket upgrade a bound host answers. Each is a value holding what it answers and what it
+// was asked, and each installs its Answer on a Service (Service.AnswerWith), so one of them
+// may play a host of its own in the command and the same one may play the bound host of a row
+// that already has a service.
 package airlocktest
 
 import (
@@ -184,8 +185,10 @@ type MicrosoftOptions struct {
 	// Tokens is the access token each exchange answers in turn; the last one answers every
 	// exchange after it. None is one stand-in token for every exchange.
 	Tokens []string
-	// IDToken is the id_token the answer carries beside the access token, as Microsoft's does,
-	// so a row can pin that the proxy hands the command no token but the access one.
+	// IDToken is the id_token the answer carries beside the access token, so a row can pin
+	// that the proxy hands the command no token but the access one. None leaves the field out
+	// altogether, as Microsoft's own answer to a client-credentials exchange leaves it out: a
+	// client's library reads an id_token that is there and an empty one makes it fail.
 	IDToken string
 	// Assertion is the client_assertion the endpoint accepts, and "" accepts any: an exchange
 	// carrying another assertion is answered 401, as Microsoft answers an assertion that is not
@@ -198,11 +201,13 @@ type MicrosoftOptions struct {
 	Refuse int
 }
 
-// MicrosoftStand is the token endpoint the azure kind exchanges a federated token at: it records
-// the client_assertion each exchange carried, readable back through Exchanges and in the
-// Service's own record, and answers an access token. It answers token requests alone and leaves
-// every other request to the service's own body, because the host it stands in for serves an API
-// beside its token endpoint and a row drives both.
+// MicrosoftStand is the authority the azure kind exchanges a federated token at: it answers
+// the tenant's OpenID configuration document, which is the first thing a client reads of an
+// authority, and the token endpoint itself, recording the client_assertion each exchange
+// carried - readable back through Exchanges and in the Service's own record - and answering an
+// access token. It answers those two alone and leaves every other request to the service's own
+// body, because the host it stands in for serves an API beside its token endpoint and a row
+// drives both.
 type MicrosoftStand struct {
 	options MicrosoftOptions
 
@@ -240,8 +245,78 @@ func isTokenRequest(seen Request) bool {
 	return seen.Method == http.MethodPost && strings.Contains(seen.Path, "/oauth2/") && strings.HasSuffix(seen.Path, "/token")
 }
 
-// Answer is Microsoft's answer to one exchange, and false for any other request.
+// openIDConfigurationSuffix is what a tenant's OpenID configuration document is served under,
+// after the tenant itself: GET /{tenant}/v2.0/.well-known/openid-configuration. It is the
+// first call `az login` makes against an authority, before any token request, and a client
+// that cannot read it never gets as far as the exchange.
+const openIDConfigurationSuffix = "/v2.0/.well-known/openid-configuration"
+
+// configurationTenant is the tenant whose OpenID configuration a request asks for, and false
+// for every other request. The tenant is one path segment, as Microsoft's authorities are.
+func configurationTenant(seen Request) (string, bool) {
+	if seen.Method != http.MethodGet {
+		return "", false
+	}
+	tenant, ok := strings.CutSuffix(seen.Path, openIDConfigurationSuffix)
+	if !ok {
+		return "", false
+	}
+	tenant = strings.TrimPrefix(tenant, "/")
+	if tenant == "" || strings.Contains(tenant, "/") {
+		return "", false
+	}
+	return tenant, true
+}
+
+// configuration writes the tenant's OpenID configuration document, every endpoint of it on
+// this stand's own base URL - the scheme and authority the request arrived on - so a client
+// that reads the document makes every call after it against this process and none against
+// Microsoft. The fields are the ones the Azure CLI's own library reads of it; a field it does
+// not read is here because the document it reads from Microsoft carries it and a client that
+// compares what it got with what it expected should find no difference.
+func configuration(w http.ResponseWriter, seen Request, tenant string) {
+	base := "https://" + seen.Host + "/" + tenant
+	doc := map[string]any{
+		"issuer":                                base + "/v2.0",
+		"authorization_endpoint":                base + "/oauth2/v2.0/authorize",
+		"token_endpoint":                        base + "/oauth2/v2.0/token",
+		"device_authorization_endpoint":         base + "/oauth2/v2.0/devicecode",
+		"end_session_endpoint":                  base + "/oauth2/v2.0/logout",
+		"jwks_uri":                              base + "/discovery/v2.0/keys",
+		"userinfo_endpoint":                     "https://" + seen.Host + "/oidc/userinfo",
+		"token_endpoint_auth_methods_supported": []string{"client_secret_post", "private_key_jwt", "client_secret_basic"},
+		"response_modes_supported":              []string{"query", "fragment", "form_post"},
+		"response_types_supported":              []string{"code", "id_token", "code id_token", "id_token token"},
+		"grant_types_supported":                 []string{"authorization_code", "refresh_token", "client_credentials", "implicit", "urn:ietf:params:oauth:grant-type:device_code"},
+		"scopes_supported":                      []string{"openid", "profile", "email", "offline_access"},
+		"subject_types_supported":               []string{"pairwise"},
+		"id_token_signing_alg_values_supported": []string{"RS256"},
+		"claims_supported": []string{
+			"sub", "iss", "aud", "exp", "iat", "auth_time", "acr", "nonce", "preferred_username",
+			"name", "tid", "ver", "at_hash", "c_hash", "email",
+		},
+		"request_uri_parameter_supported": false,
+		"http_logout_supported":           true,
+		"frontchannel_logout_supported":   true,
+		// The three a cloud's own metadata is read from, each this stand's own: the CLI reads
+		// them to tell which cloud it is speaking to.
+		"tenant_region_scope":   "NA",
+		"cloud_instance_name":   seen.Host,
+		"cloud_graph_host_name": seen.Host,
+		"msgraph_host":          seen.Host,
+		"rbac_url":              "https://" + seen.Host,
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(doc)
+}
+
+// Answer is Microsoft's answer to one exchange and to a tenant's OpenID configuration, and
+// false for any other request.
 func (m *MicrosoftStand) Answer(w http.ResponseWriter, _ *http.Request, seen Request) bool {
+	if tenant, ok := configurationTenant(seen); ok {
+		configuration(w, seen, tenant)
+		return true
+	}
 	if !isTokenRequest(seen) {
 		return false
 	}
@@ -274,8 +349,12 @@ func (m *MicrosoftStand) Answer(w http.ResponseWriter, _ *http.Request, seen Req
 		lifetime = 3599 * time.Second
 	}
 	seconds := int64(lifetime / time.Second)
-	fmt.Fprintf(w, `{"token_type":"Bearer","expires_in":%d,"ext_expires_in":%d,"access_token":%q,"id_token":%q}`,
-		seconds, seconds, token, m.options.IDToken)
+	idToken := ""
+	if m.options.IDToken != "" {
+		idToken = fmt.Sprintf(`,"id_token":%q`, m.options.IDToken)
+	}
+	fmt.Fprintf(w, `{"token_type":"Bearer","expires_in":%d,"ext_expires_in":%d,"access_token":%q%s}`,
+		seconds, seconds, token, idToken)
 	return true
 }
 
@@ -284,6 +363,93 @@ func (m *MicrosoftStand) Exchanges() []url.Values {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]url.Values(nil), m.forms...)
+}
+
+// AzureResourceOptions is what an AzureResourceStand answers with.
+type AzureResourceOptions struct {
+	// Subscription is the subscription id the stand holds, and "" is one of its own. A client
+	// that signs in to a cloud reads the subscriptions of the tenant it signed in to before it
+	// will run anything, so the stand holds exactly one.
+	Subscription string
+	// Tenant is the tenant that subscription is in, and "" is the stand-in tenant.
+	Tenant string
+}
+
+// AzureResourceStand is the Azure Resource Manager an access token is spent at: the two routes
+// a signed-in client reads before it does anything - the tenant's subscriptions, and one
+// subscription's resource groups - each answered as the Resource Manager answers them, so a
+// client that reached this stand with a token is a client that signed in and ran a command
+// rather than one that stopped at a body it could not read.
+//
+// It answers those routes alone and leaves every other request to the service's own body,
+// which is what lets one Service play the authority and the Resource Manager at once
+// (Answers).
+type AzureResourceStand struct {
+	options AzureResourceOptions
+}
+
+// NewAzureResourceStand builds one. Install it with Service.AnswerWith(stand.Answer).
+func NewAzureResourceStand(o AzureResourceOptions) *AzureResourceStand {
+	return &AzureResourceStand{options: o}
+}
+
+// Subscription is the subscription id this stand holds.
+func (a *AzureResourceStand) Subscription() string {
+	if a.options.Subscription == "" {
+		return "4b6e1dcd-6f2a-4d0e-9a2c-7f9b0a1c2d3e"
+	}
+	return a.options.Subscription
+}
+
+// Tenant is the tenant that subscription is in.
+func (a *AzureResourceStand) Tenant() string {
+	if a.options.Tenant == "" {
+		return "the-stand-in-tenant"
+	}
+	return a.options.Tenant
+}
+
+// Answer is the Resource Manager's answer to those two routes, and false for every other
+// request.
+func (a *AzureResourceStand) Answer(w http.ResponseWriter, _ *http.Request, seen Request) bool {
+	if seen.Method != http.MethodGet {
+		return false
+	}
+	var doc map[string]any
+	switch {
+	case seen.Path == "/subscriptions":
+		doc = map[string]any{"value": []any{map[string]any{
+			"id":             "/subscriptions/" + a.Subscription(),
+			"subscriptionId": a.Subscription(),
+			"tenantId":       a.Tenant(),
+			"displayName":    "the stand-in subscription",
+			"state":          "Enabled",
+		}}}
+	case strings.HasPrefix(seen.Path, "/subscriptions/"):
+		// Everything under one subscription - its resource groups, its providers - is empty:
+		// what a check drives here is the call and the token it carried, never a resource.
+		doc = map[string]any{"value": []any{}}
+	default:
+		return false
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(doc)
+	return true
+}
+
+// Answers is the one Answer a Service is given when several stand-ins share it: each in turn
+// until one answers, and false when none did, which leaves the service its own body. It is how
+// one process plays two hosts of one certificate - the Microsoft authority and the Resource
+// Manager an access token is spent at - since a Service holds one Answer.
+func Answers(answers ...Answer) Answer {
+	return func(w http.ResponseWriter, r *http.Request, seen Request) bool {
+		for _, answer := range answers {
+			if answer(w, r, seen) {
+				return true
+			}
+		}
+		return false
+	}
 }
 
 // AWSOptions is the key an AWSStand verifies a call with.
@@ -427,4 +593,74 @@ func hmacOf(key []byte, data string) []byte {
 	mac := hmac.New(sha256.New, key)
 	mac.Write([]byte(data))
 	return mac.Sum(nil)
+}
+
+// UpgradeOptions is the one route an UpgradeStand answers.
+type UpgradeOptions struct {
+	// Path is the path it answers an upgrade at, and "" is "/socket". One path and not every
+	// path, because the host that serves a WebSocket serves an API beside it: every other
+	// request is left to the service's own body, as the Microsoft stand leaves everything
+	// that is not its authority's.
+	Path string
+}
+
+// UpgradeStand is the WebSocket upgrade a bound host answers: 101 on its one path and then the
+// little line protocol a caller passes frames with - one line in, and "the service read
+// <that line>" back. It is what shows an upgrade crossing the airlock: the request is decided
+// and swapped like any other, and once this has answered 101 the proxy joins the two
+// connections and the bytes pass both ways until either side closes.
+//
+// Past the 101 it says nothing about an error: the connection ends when the caller walks away
+// or the proxy's idle limit closes it, and each caller reads the frames - or their absence -
+// from its own side.
+type UpgradeStand struct {
+	options UpgradeOptions
+}
+
+// NewUpgradeStand builds one. Install it with Service.AnswerWith(stand.Answer).
+func NewUpgradeStand(o UpgradeOptions) *UpgradeStand { return &UpgradeStand{options: o} }
+
+// Path is the path this stand answers an upgrade at.
+func (u *UpgradeStand) Path() string {
+	if u.options.Path == "" {
+		return "/socket"
+	}
+	return u.options.Path
+}
+
+// Answer answers one upgrade, and false for every request on another path.
+func (u *UpgradeStand) Answer(w http.ResponseWriter, r *http.Request, seen Request) bool {
+	if seen.Path != u.Path() {
+		return false
+	}
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "the stand-in service cannot be taken over", http.StatusInternalServerError)
+		return true
+	}
+	if r.Header.Get("Upgrade") != "websocket" {
+		http.Error(w, "the stand-in service was sent no Upgrade header", http.StatusBadRequest)
+		return true
+	}
+	conn, buffered, err := hijacker.Hijack()
+	if err != nil {
+		http.Error(w, "the stand-in service could not hijack: "+err.Error(), http.StatusInternalServerError)
+		return true
+	}
+	defer conn.Close()
+	if _, err := buffered.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"); err != nil {
+		return true
+	}
+	if err := buffered.Flush(); err != nil {
+		return true
+	}
+	frame, err := buffered.ReadString('\n')
+	if err != nil {
+		return true
+	}
+	if _, err := buffered.WriteString("the service read " + strings.TrimSpace(frame) + "\n"); err != nil {
+		return true
+	}
+	_ = buffered.Flush()
+	return true
 }

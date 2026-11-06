@@ -33,8 +33,17 @@ const (
 	leafBackdate = time.Minute
 )
 
+// leafCacheSize is how many hosts' leaves Authority keeps. There is a cap because the hosts
+// are not the proxy's to count: an entry may bind a pattern ("*.example.com"), and a command
+// that CONNECTs to a distinct resolvable subdomain each time would otherwise grow this map by
+// a key and a certificate per name for as long as the pod lives. A thousand is far more hosts
+// than a grant reaches and small enough to bound; past it the oldest leaf goes, and a host
+// that comes back is signed again, which costs one key and one signature and changes nothing
+// a client sees, since no leaf is ever held anywhere but here.
+const leafCacheSize = 1024
+
 // Authority is the proxy's certificate authority: the mounted key and certificate, and one leaf
-// per host, minted on that host's first bound connection and kept for the life of the process.
+// per host, minted on that host's first bound connection and kept until the cap above evicts it.
 // Every method is safe for concurrent use, since one map is shared by every connection.
 type Authority struct {
 	cert *x509.Certificate
@@ -42,6 +51,9 @@ type Authority struct {
 
 	mu     sync.Mutex
 	leaves map[string]*tls.Certificate
+	// minted is the hosts of leaves in the order they were signed, oldest first, which is the
+	// order the cap evicts in.
+	minted []string
 }
 
 // NewAuthority reads the PEM certificate of certFile and the PEM private key of keyFile, and
@@ -84,7 +96,9 @@ func (a *Authority) Certificate() *x509.Certificate { return a.cert }
 // leaf is host's certificate, signed once and then answered from the map: a host the agent calls
 // a thousand times costs one key and one signature. The chain it answers holds the authority's
 // own certificate as well as the leaf, so a command that trusts the authority alone - which is
-// every command the broker releases to - completes the chain without fetching anything.
+// every command the broker releases to - completes the chain without fetching anything. The map
+// holds leafCacheSize hosts and the oldest goes to make room, which costs the host that comes
+// back one key and one signature again.
 func (a *Authority) leaf(host string) (*tls.Certificate, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -121,6 +135,11 @@ func (a *Authority) leaf(host string) (*tls.Certificate, error) {
 		return nil, err
 	}
 	c := &tls.Certificate{Certificate: [][]byte{der, a.cert.Raw}, PrivateKey: key}
+	if len(a.minted) >= leafCacheSize {
+		delete(a.leaves, a.minted[0])
+		a.minted = a.minted[1:]
+	}
 	a.leaves[host] = c
+	a.minted = append(a.minted, host)
 	return c, nil
 }

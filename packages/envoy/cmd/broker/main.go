@@ -847,8 +847,10 @@ func readAirlockTestUpstreamRoots(path string) (*x509.CertPool, error) {
 }
 
 // airlockTestResolver is BROKER_AIRLOCK_TEST_RESOLVE as the proxy's Resolve: the address the
-// setting gives a host, and the ordinary lookup for every host it does not name. It answers nil
-// for a setting that names none, which leaves the proxy its own resolver.
+// setting gives a host, and the proxy's own lookup (airlockproxy.ResolveHost) for every host it
+// does not name, so a host this setting says nothing about resolves exactly as it would with
+// the setting unset. It answers nil for a setting that names none, which leaves the proxy its
+// own resolver.
 func airlockTestResolver(hosts map[string]netip.Addr) func(context.Context, string) ([]netip.Addr, error) {
 	if len(hosts) == 0 {
 		return nil
@@ -857,17 +859,7 @@ func airlockTestResolver(hosts map[string]netip.Addr) func(context.Context, stri
 		if addr, named := hosts[host]; named {
 			return []netip.Addr{addr}, nil
 		}
-		if addr, err := netip.ParseAddr(host); err == nil {
-			return []netip.Addr{addr.Unmap()}, nil
-		}
-		addrs, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
-		if err != nil {
-			return nil, err
-		}
-		for i, addr := range addrs {
-			addrs[i] = addr.Unmap()
-		}
-		return addrs, nil
+		return airlockproxy.ResolveHost(ctx, host)
 	}
 }
 

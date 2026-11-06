@@ -181,13 +181,17 @@ type Server struct {
 }
 
 // connInfo is what a decrypted connection carries into each request on it: the CONNECT target
-// it was opened for and the grant whose password opened it.
+// it was opened for, the grant whose password opened it, and the (name, slot) pairs of that
+// grant the target is bound to, which are the same for every request on the connection.
 type connInfo struct {
 	// target is the CONNECT authority, always with a port; host is its host alone, ASCII
 	// lower-cased, which is the airlock.Request's ConnectHost.
 	target string
 	host   string
 	grant  requests.AirlockConnection
+	// candidates is Server.candidates for this grant and this host, read once when the
+	// connection was opened: the grant, the host and the rules are all fixed for its life.
+	candidates []pair
 }
 
 // connKey is the context key connInfo travels under.
@@ -216,7 +220,7 @@ func New(o Options) *Server {
 		s.log = slog.Default()
 	}
 	if s.resolve == nil {
-		s.resolve = resolveHost
+		s.resolve = ResolveHost
 	}
 	if s.dial == nil {
 		dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
@@ -374,7 +378,7 @@ func (s *Server) serveConnect(w http.ResponseWriter, r *http.Request, grant requ
 		http.Error(w, "airlock: "+r.Host+" is no host and port", http.StatusBadRequest)
 		return
 	}
-	host = asciiLower(host)
+	host = airlock.ASCIILower(host)
 	target = net.JoinHostPort(host, port)
 	if err := s.refuseLocalAddress(r.Context(), host, port); err != nil {
 		http.Error(w, "airlock: "+err.Error(), http.StatusForbidden)
@@ -394,8 +398,10 @@ func (s *Server) serveConnect(w http.ResponseWriter, r *http.Request, grant requ
 
 // connectBound answers a CONNECT to a host one of the grant's names is bound to: the proxy
 // opens the TLS itself, with a certificate of its own authority, and hands the decrypted
-// connection to the inner server.
+// connection to the inner server. The grant's candidate (name, slot) pairs for this host are
+// read here, once, and carried into every request on the connection (connInfo.candidates).
 func (s *Server) connectBound(hijacker http.Hijacker, grant requests.AirlockConnection, target, host string) {
+	candidates := s.candidates(grant, host)
 	client, err := hijack(hijacker)
 	if err != nil {
 		return
@@ -420,7 +426,7 @@ func (s *Server) connectBound(hijacker http.Hijacker, grant requests.AirlockConn
 		},
 	})
 	connection := net.Conn(decrypted)
-	s.conns.Store(connection, connInfo{target: target, host: host, grant: grant})
+	s.conns.Store(connection, connInfo{target: target, host: host, grant: grant, candidates: candidates})
 	s.track(connection)
 	if !s.innerLn.hand(connection) {
 		// The drain closed the listener between the hijack and here.
@@ -474,7 +480,7 @@ func (s *Server) connectTunnel(w http.ResponseWriter, r *http.Request, hijacker 
 // servePlain answers an absolute-URL proxy request, which is plain HTTP: a command that asked
 // for http:// rather than https://.
 func (s *Server) servePlain(w http.ResponseWriter, r *http.Request, grant requests.AirlockConnection) {
-	host := asciiLower(r.URL.Hostname())
+	host := airlock.ASCIILower(r.URL.Hostname())
 	if s.boundHost(grant, host) {
 		// Plain HTTP to a bound host is refused rather than swapped into: the value would
 		// cross the network in the clear, and no rule of the airlock says a secret may. The
@@ -542,20 +548,6 @@ func hijack(hijacker http.Hijacker) (net.Conn, error) {
 		return &prefixConn{Conn: conn, rest: bytes.NewReader(slices.Clone(ahead))}, nil
 	}
 	return conn, nil
-}
-
-// asciiLower lower-cases A-Z alone, the same narrow fold internal/broker/airlock makes and for
-// the same reason: strings.ToLower folds U+212A KELVIN SIGN onto "k", so a CONNECT to
-// "githu\u212a.com" lower-cased that way would reach - and be bound by - the entry for
-// "githuk.com". Host names are ASCII, and a name that is not is no host of any rule.
-func asciiLower(s string) string {
-	b := []byte(s)
-	for i, c := range b {
-		if 'A' <= c && c <= 'Z' {
-			b[i] = c + 'a' - 'A'
-		}
-	}
-	return string(b)
 }
 
 // slogWriter is net/http's ErrorLog as one slog line each.

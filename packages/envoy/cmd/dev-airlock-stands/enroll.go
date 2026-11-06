@@ -36,6 +36,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
+	"github.com/sjawhar/envoy/internal/brokerclient"
 )
 
 // enrollTimeout bounds each of the two calls: a local broker answers in milliseconds, and a
@@ -83,7 +84,9 @@ func runEnrollPod(ctx context.Context, args []string, stdout, stderr io.Writer) 
 			return exitUsageError
 		}
 	}
-	base := strings.TrimRight(*url, "/")
+	// The one rule both halves of this client read an address by, so --url takes an address
+	// typed with however many trailing slashes exactly as agent-secrets does.
+	base := brokerclient.WithoutTrailingSlashes(*url)
 	registrarToken, err := readToken(*tokenFile)
 	if err != nil {
 		fmt.Fprintf(stderr, "dev-airlock-stands enroll-pod: %v\n", err)

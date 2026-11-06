@@ -20,45 +20,17 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/airlock/airlocktest"
 )
 
-// upgradeStandIn makes the stand-in service answer 101 and then speak the little line protocol
-// these rows pass frames with: one line in, one line out.
+// upgradePath is the path these rows upgrade at: the stand-in service answers an upgrade
+// there and its own body everywhere else, as S does in the broker's local stack.
+const upgradePath = "/v1/socket"
+
+// upgradeStandIn makes the stand-in service answer 101 at that path and then speak the little
+// line protocol these rows pass frames with: one line in, one line out. It is airlocktest's
+// own upgrade stand, the one cmd/dev-airlock-stands installs on S, so these rows and a check
+// script drive the one answer.
 func upgradeStandIn(t *testing.T, r *rig) {
 	t.Helper()
-	r.answerWith(func(w http.ResponseWriter, req *http.Request, _ airlocktest.Request) bool {
-		hijacker, ok := w.(http.Hijacker)
-		if !ok {
-			http.Error(w, "the stand-in service cannot be taken over", http.StatusInternalServerError)
-			return true
-		}
-		if req.Header.Get("Upgrade") != "websocket" {
-			http.Error(w, "the stand-in service was sent no Upgrade header", http.StatusBadRequest)
-			return true
-		}
-		conn, buffered, err := hijacker.Hijack()
-		if err != nil {
-			t.Errorf("the stand-in service could not hijack: %v", err)
-			return true
-		}
-		defer conn.Close()
-		// Past the 101 the stand-in says nothing about an error: the connection ends when the
-		// command walks away or the idle limit closes it, and each row reads the frames - or
-		// their absence - from the command's own side.
-		if _, err := buffered.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"); err != nil {
-			return true
-		}
-		if err := buffered.Flush(); err != nil {
-			return true
-		}
-		frame, err := buffered.ReadString('\n')
-		if err != nil {
-			return true
-		}
-		if _, err := buffered.WriteString("the service read " + strings.TrimSpace(frame) + "\n"); err != nil {
-			return true
-		}
-		_ = buffered.Flush()
-		return true
-	})
+	r.answerWith(airlocktest.NewUpgradeStand(airlocktest.UpgradeOptions{Path: upgradePath}).Answer)
 }
 
 // upgradeThrough opens a connection to the bound host through the proxy, sends the upgrade
@@ -75,7 +47,7 @@ func upgradeThrough(t *testing.T, r *rig) (*http.Response, net.Conn, *bufio.Read
 		t.Fatalf("the TLS handshake with the proxy: %v", err)
 	}
 	t.Cleanup(func() { decrypted.Close() })
-	request := "GET /v1/socket HTTP/1.1\r\n" +
+	request := "GET " + upgradePath + " HTTP/1.1\r\n" +
 		"Host: " + boundHost + "\r\n" +
 		"Upgrade: websocket\r\n" +
 		"Connection: Upgrade\r\n" +

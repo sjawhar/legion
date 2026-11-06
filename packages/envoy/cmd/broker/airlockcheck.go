@@ -245,16 +245,18 @@ func shown(value string) string {
 	return value
 }
 
-// secretNames is every name either file holds, sorted.
+// secretNames is every name either file holds, sorted: the two files' names as sortedUnion,
+// which is the same union-and-sort every other pair of lists in this report takes.
 func secretNames(old, now airlock.Rules) []string {
-	names := make(map[string]struct{}, len(old.Secrets)+len(now.Secrets))
+	was := make([]string, 0, len(old.Secrets))
 	for _, s := range old.Secrets {
-		names[s.Name] = struct{}{}
+		was = append(was, s.Name)
 	}
+	is := make([]string, 0, len(now.Secrets))
 	for _, s := range now.Secrets {
-		names[s.Name] = struct{}{}
+		is = append(is, s.Name)
 	}
-	return slices.Sorted(maps.Keys(names))
+	return sortedUnion(was, is)
 }
 
 // sortedUnion is every value in either list, once each, sorted.

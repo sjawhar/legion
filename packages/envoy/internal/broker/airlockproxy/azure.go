@@ -34,13 +34,21 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/requests"
 )
 
-// airlockKindAzure is the rules entry kind of an azure-login secret (airlock.SecretRule.Kind).
-const airlockKindAzure = "azure"
+// The two bounds on what the broker reads of an exchange: a token request's form, which carries
+// an assertion of a few kilobytes, and the endpoint's answer, which carries an access token of
+// the same order. Neither is streamed, since the broker reads both whole.
+const (
+	maxTokenRequest = 1 << 20
+	maxTokenAnswer  = 1 << 20
+)
 
-// An access slot - requests.SlotAzureAccessPrefix and what this file writes after it - names
-// one access token the proxy exchanged a grant's federated token for. What follows the prefix
-// is everything a broker pod needs to make that exchange for itself: this JSON object,
-// base64url with no padding.
+// azureExchange is one exchange at a token endpoint: where it is made, what it asks a token
+// for, and which application it is made as. It is what an azure-access slot carries.
+//
+// An access slot - requests.SlotAzureAccessPrefix and what azureAccessSlot writes after it -
+// names one access token the proxy exchanged a grant's federated token for. What follows the
+// prefix is everything a broker pod needs to make that exchange for itself: this object as
+// JSON, base64url with no padding.
 //
 //	{"endpoint":"https://login.microsoftonline.com/<tenant>/oauth2/v2.0/token",
 //	 "scope":"https://management.azure.com/.default",
@@ -58,17 +66,6 @@ const airlockKindAzure = "azure"
 // log line: that alphabet has no "+", "/" or "=" to escape anywhere, and the same object always
 // encodes to the same string - encoding/json writes a struct's fields in the struct's own order
 // - so two pods that exchange one scope name one slot and share one placeholder.
-
-// The two bounds on what the broker reads of an exchange: a token request's form, which carries
-// an assertion of a few kilobytes, and the endpoint's answer, which carries an access token of
-// the same order. Neither is streamed, since the broker reads both whole.
-const (
-	maxTokenRequest = 1 << 20
-	maxTokenAnswer  = 1 << 20
-)
-
-// azureExchange is one exchange at a token endpoint: where it is made, what it asks a token
-// for, and which application it is made as. It is what an azure-access slot carries.
 type azureExchange struct {
 	Endpoint string `json:"endpoint"`
 	Scope    string `json:"scope"`
@@ -264,7 +261,7 @@ func (s *Server) azureAccess(ctx context.Context, info connInfo, chosen pair, se
 		return "", errors.New("the slot of this placeholder names no https token endpoint")
 	}
 	entry := s.rules.Lookup(chosen.name)
-	if entry == nil || !airlock.HostBound(entry.Hosts, asciiLower(endpoint.Hostname())) {
+	if entry == nil || !airlock.HostBound(entry.Hosts, airlock.ASCIILower(endpoint.Hostname())) {
 		// The exchange is a call the broker makes with the real federated token, so where it
 		// is made is held to the same hosts as every other call of this name: the rules file's.
 		return "", errors.New("the token endpoint this slot names is no host " + chosen.name + " is bound to")

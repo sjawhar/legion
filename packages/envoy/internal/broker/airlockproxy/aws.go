@@ -33,9 +33,6 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/requests"
 )
 
-// airlockKindAWS is the rules entry kind of an AWS key pair (airlock.SecretRule.Kind).
-const airlockKindAWS = "aws"
-
 // The two signature schemes an Authorization header of an AWS call opens with: Signature
 // Version 4, which this file signs again, and Signature Version 4a, which it refuses. 4a signs
 // with an ECDSA key derived from the secret key and covers several regions at once, so signing

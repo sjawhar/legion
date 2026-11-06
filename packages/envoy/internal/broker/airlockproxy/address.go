@@ -19,9 +19,12 @@ import (
 // it, so it is spelled out here.
 var clusterRange = netip.MustParsePrefix("100.64.0.0/10")
 
-// resolveHost is the default of Server.resolve: the addresses a host name has right now, or the
-// address a host that is an address literal already is.
-func resolveHost(ctx context.Context, host string) ([]netip.Addr, error) {
+// ResolveHost is the default of Server.resolve: the addresses a host name has right now, or the
+// address a host that is an address literal already is. It is exported because a caller that
+// gives Options.Resolve a resolver of its own - cmd/broker, whose BROKER_AIRLOCK_TEST_RESOLVE
+// answers for the hosts it names and nothing else - falls back to exactly this for every other
+// host, and a second copy of it would be a second rule about where a name is.
+func ResolveHost(ctx context.Context, host string) ([]netip.Addr, error) {
 	if addr, err := netip.ParseAddr(host); err == nil {
 		return []netip.Addr{addr.Unmap()}, nil
 	}

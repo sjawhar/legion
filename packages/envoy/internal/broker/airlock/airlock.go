@@ -35,6 +35,19 @@ type SecretRule struct {
 	Judge   *uint32  `json:"judge"`   // the judge's longest lifetime, in seconds
 }
 
+// KindAWS and KindAzure are the two kinds a rules entry may name (SecretRule.Kind), beside the
+// empty kind of a value a header simply carries. Validate allows no other, and each of them
+// says what the value behind the name is rather than where it may go: an AWS key pair, which
+// the proxy signs a call again with, and an azure-login secret, whose federated token is
+// exchanged for an access token. They are here rather than private to each reader because
+// three packages - the proxy's aws.go and azure.go and the broker's own release
+// (internal/broker/requests) - each held a constant of the same string, and a kind is one
+// wire word for all of them.
+const (
+	KindAWS   = "aws"
+	KindAzure = "azure"
+)
+
 // Rules is the whole airlock.json file.
 type Rules struct {
 	Secrets []SecretRule `json:"secrets"`
@@ -291,3 +304,15 @@ func asciiLower(s string) string {
 	}
 	return string(b)
 }
+
+// ASCIILower lower-cases A-Z alone. Host names and header names are ASCII tokens, and the
+// Unicode folding of strings.ToLower and strings.EqualFold would fold U+212A KELVIN SIGN
+// onto "k", so "githu\u212a.com" would reach the rule for "githuk.com"; the model folds no
+// such thing.
+//
+// It is exported for the proxy port (internal/broker/airlockproxy), which folds the CONNECT
+// host, the SNI and the Host header this same narrow way before the decision compares them.
+// That package held a byte-for-byte copy of the fold, and host matching is sound only while
+// the two are one function. It is the same fold the model makes, unchanged by being exported,
+// as airlock.Carries is the same function the model calls carries.
+func ASCIILower(s string) string { return asciiLower(s) }

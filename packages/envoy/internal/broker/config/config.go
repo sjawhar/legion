@@ -1037,7 +1037,7 @@ func Load(getenv func(string) string) (Config, error) {
 		MachineLoginURL:           strings.TrimSpace(getenv("BROKER_MACHINE_LOGIN_URL")),
 		SecretsStore:              orDefault(getenv("BROKER_SECRETS_STORE"), secrets.StoreAWS),
 		SecretsPrefix:             getenv("BROKER_SECRETS_PREFIX"),
-		AirlockRulesFile:          orDefault(getenv("BROKER_AIRLOCK_RULES_FILE"), ""),
+		AirlockRulesFile:          getenv("BROKER_AIRLOCK_RULES_FILE"),
 		AirlockListenAddr:         orDefault(getenv("BROKER_AIRLOCK_LISTEN_ADDR"), "127.0.0.1:13381"),
 		AirlockProxyURL:           strings.TrimSpace(getenv("BROKER_AIRLOCK_PROXY_URL")),
 		AirlockCACertFile:         strings.TrimSpace(getenv("BROKER_AIRLOCK_CA_CERT_FILE")),
@@ -1116,14 +1116,14 @@ func Load(getenv func(string) string) (Config, error) {
 	// proxy cannot run without are required with the rules file, and the refusal names the ones
 	// missing. With no rules file there is no proxy and all four are ignored.
 	if cfg.AirlockRulesFile != "" {
+		// One value per airlockProxySettings entry, read in that order, so the missing ones
+		// are named in the order the message naming them uses and one list is walked rather
+		// than two that could part.
+		values := []string{cfg.AirlockProxyURL, cfg.AirlockCACertFile, cfg.AirlockCAKeyFile}
 		var missing []string
-		for _, req := range []struct{ name, value string }{
-			{"BROKER_AIRLOCK_PROXY_URL", cfg.AirlockProxyURL},
-			{"BROKER_AIRLOCK_CA_CERT_FILE", cfg.AirlockCACertFile},
-			{"BROKER_AIRLOCK_CA_KEY_FILE", cfg.AirlockCAKeyFile},
-		} {
-			if req.value == "" {
-				missing = append(missing, req.name)
+		for i, setting := range airlockProxySettings {
+			if values[i] == "" {
+				missing = append(missing, setting)
 			}
 		}
 		if len(missing) > 0 {

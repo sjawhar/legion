@@ -58,10 +58,6 @@ const (
 	SlotAzureAccessPrefix  = "azure-access:"
 )
 
-// airlockKindAWS is the airlock entry kind of a stored AWS key pair, the one entry kind that
-// changes which slots a stored secret fills (airlock.SecretRule.Kind).
-const airlockKindAWS = "aws"
-
 // PlaceholderPrefix opens every placeholder, so a value that leaks into a log or a bug report is
 // recognizable for what it is: a string that stands for a secret rather than a secret.
 const PlaceholderPrefix = "agent-secrets-placeholder-"
@@ -237,8 +233,9 @@ type airlockSplit struct {
 	fill func(bySlot map[string]string) (string, error)
 }
 
-// slots are the name's slots, sorted, which is the order the proxy password is chosen in.
-func (s airlockSplit) slots() []string { return sortedKeys(s.values) }
+// slots are the name's slots, sorted, so they are in one order whatever the map iteration gave,
+// which is the order the proxy password is chosen in.
+func (s airlockSplit) slots() []string { return slices.Sorted(maps.Keys(s.values)) }
 
 // airlockSplitOf reads value, the real value a release of an airlock name read or minted, and
 // answers which slots that value fills, what each of them holds, and the shape the session gets
@@ -263,7 +260,7 @@ func airlockSplitOf(entry *airlock.SecretRule, kind, value string) (airlockSplit
 		return githubAppSplit(value)
 	case kind == policy.KindAzureLogin:
 		return objectSplit(value, map[string]string{"federated_token": SlotAzureFederated}, nil)
-	case kind == "" && entry.Kind == airlockKindAWS:
+	case kind == "" && entry.Kind == airlock.KindAWS:
 		return objectSplit(value, map[string]string{"access_key_id": SlotAWSAccessKeyID, "secret_access_key": SlotAWSSecretAccessKey},
 			map[string]string{"session_token": SlotAWSSessionToken})
 	default:
@@ -391,10 +388,6 @@ func marshalObject(doc map[string]json.RawMessage) (string, error) {
 	}
 	return string(out), nil
 }
-
-// sortedKeys is a map's keys, sorted, so a split's slots are in one order whatever the map
-// iteration gave.
-func sortedKeys(m map[string]string) []string { return slices.Sorted(maps.Keys(m)) }
 
 // airlockRelease mints each airlock name's placeholders, writes proxy as those names' delivery,
 // and answers what the session is told: where the proxy is, the certificate to trust it by, the

@@ -1,14 +1,17 @@
 // Command dev-airlock-stands serves the airlock's stand-ins to the broker's local stack
 // (scripts/dev-broker.sh and the airlock checks run beside it), so a check script drives the
 // same stand-ins the Go tests do: the two HTTPS services S and T, which record every request
-// they get; the stand-in GitHub and Google endpoints a github-app and a google-login secret are
-// minted at; the stand-in Microsoft token endpoint the azure kind exchanges at; and a stand-in
-// AWS service that verifies Signature Version 4 with the real test key. Every one of them is
-// internal/broker/airlock/airlocktest's, which is why one implementation answers both.
+// they get and of which S answers a WebSocket upgrade at /socket; the stand-in GitHub and
+// Google endpoints a github-app and a google-login secret are minted at; the stand-in
+// Microsoft authority the azure kind reads a tenant's OpenID configuration from and exchanges
+// at; and a stand-in AWS service that verifies Signature Version 4 with the real test key and
+// the real session token. Every one of them is internal/broker/airlock/airlocktest's, which is
+// why one implementation answers both.
 //
 //	dev-airlock-stands [--dir <path>] [--address <stand>=<host:port> ...] [--host <stand>=<name> ...]
 //	                   [--github-owner <owner>=<installation id> ...] [--google-lifetime <duration>]
-//	                   [--aws-key <key id>=<secret key>] [--records-address <host:port>]
+//	                   [--aws-key <key id>=<secret key>] [--aws-session-token <token>]
+//	                   [--records-address <host:port>]
 //	dev-airlock-stands front --listen <host:port> [--backend <host:port> ...] [--backends-file <path>]
 //	dev-airlock-stands enroll-pod --url <broker> --token-file <path> --pod-token-file <path>
 //	                   --pod-uid <uid> --thumbprint <thumbprint> [--service <name>] [--session <id>]
@@ -88,6 +91,11 @@ var stands = []string{standS, standT, standGitHub, standGoogle, standMicrosoft, 
 // the proxy, whose extra roots BROKER_AIRLOCK_TEST_UPSTREAM_CA_FILE names.
 var plainStands = map[string]bool{standGitHub: true, standGoogle: true}
 
+// upgradePath is the one path S answers a WebSocket upgrade at, and the path a check drives
+// an upgrade through the airlock on. It is a path of its own rather than every path of S, so
+// that each of S's other routes still answers the service's own body and records the request.
+const upgradePath = "/socket"
+
 // The AWS key pair the AWS stand verifies a call against when --aws-key names none. The key id
 // is in the shape AWS mints them, since the stand reads it out of each call's Credential.
 const (
@@ -125,14 +133,15 @@ func main() {
 // options is what the flags say: everything serve needs and nothing it reads from the
 // environment.
 type options struct {
-	dir            string
-	addresses      standFlags
-	hosts          hostFlags
-	installations  map[string]int64
-	googleLifetime time.Duration
-	awsKeyID       string
-	awsSecretKey   string
-	recordsAddress string
+	dir             string
+	addresses       standFlags
+	hosts           hostFlags
+	installations   map[string]int64
+	googleLifetime  time.Duration
+	awsKeyID        string
+	awsSecretKey    string
+	awsSessionToken string
+	recordsAddress  string
 }
 
 // run reads the subcommand, if there is one, and otherwise serves the stands. The two
@@ -157,6 +166,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs.DurationVar(&o.googleLifetime, "google-lifetime", time.Hour, "the Google stand's answer says the access token lasts `<duration>`")
 	fs.StringVar(&o.recordsAddress, "records-address", "127.0.0.1:0", "serve the recording routes at `<host:port>`")
 	awsKey := fs.String("aws-key", "", "the AWS stand verifies each call against `<key id>=<secret key>`, and with none a pair of its own")
+	fs.StringVar(&o.awsSessionToken, "aws-session-token", "", "the AWS stand requires `<token>` as the X-Amz-Security-Token of each call; with none it refuses a call that carries any, which is the pair that has no session token")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -361,12 +371,21 @@ func serve(ctx context.Context, o options, stdout, stderr io.Writer) int {
 		}
 		out.Stands[name] = entry
 	}
-	// S and T answer their own body and record what they were sent, which is all they are for;
-	// the other four answer as the service they stand in for.
+	// S answers an upgrade on one path of its own and its own body everywhere else, and T its
+	// own body and nothing more; the other four answer as the service they stand in for. Every
+	// one of them records what it was sent, which is what they are all for.
+	services[standS].AnswerWith(airlocktest.NewUpgradeStand(airlocktest.UpgradeOptions{Path: upgradePath}).Answer)
 	services[standGitHub].AnswerWith(airlocktest.NewGitHubStand(airlocktest.GitHubOptions{Installations: o.installations}).Answer)
 	services[standGoogle].AnswerWith(airlocktest.NewGoogleStand(airlocktest.GoogleOptions{Lifetime: o.googleLifetime}).Answer)
-	services[standMicrosoft].AnswerWith(airlocktest.NewMicrosoftStand(airlocktest.MicrosoftOptions{}).Answer)
-	services[standAWS].AnswerWith(airlocktest.NewAWSStand(airlocktest.AWSOptions{KeyID: o.awsKeyID, SecretKey: o.awsSecretKey}).Answer)
+	// The Microsoft stand plays both hosts of its one certificate: the authority a federated
+	// token is exchanged at, and the Resource Manager that access token is then spent at.
+	services[standMicrosoft].AnswerWith(airlocktest.Answers(
+		airlocktest.NewMicrosoftStand(airlocktest.MicrosoftOptions{}).Answer,
+		airlocktest.NewAzureResourceStand(airlocktest.AzureResourceOptions{}).Answer,
+	))
+	services[standAWS].AnswerWith(airlocktest.NewAWSStand(airlocktest.AWSOptions{
+		KeyID: o.awsKeyID, SecretKey: o.awsSecretKey, SessionToken: o.awsSessionToken,
+	}).Answer)
 
 	records := &http.Server{Handler: recordsHandler(services), ReadHeaderTimeout: 30 * time.Second}
 	recordsURL, stopRecords, err := serveRecords(records, o.recordsAddress)

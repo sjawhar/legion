@@ -573,7 +573,7 @@ check_k1() {
 	plain_value="the-control-airlock-plain-token-$RANDOM$RANDOM"
 	add_fake_secret "${STACK_SECRETS_PREFIX}airlock-plain-token" \
 		'{"owner":"legion-daemon","tier":"agent"}' "$plain_value"
-	github_app="$(jq -r --arg n "${STACK_SECRETS_PREFIX}airlock-github-app" '.secrets[] | select(.name == $n) | .value' "$AIRLOCK_FAKE_SECRETS_FILE")"
+	github_app="$(stored_value "${STACK_SECRETS_PREFIX}airlock-github-app")"
 	add_fake_secret "${STACK_SECRETS_PREFIX}airlock-plain-github" \
 		'{"owner":"legion-daemon","tier":"agent","kind":"github-app","github-owners":"acme-org"}' "$github_app"
 	reread_all AIRLOCK_PLAIN_TOKEN
@@ -731,7 +731,6 @@ EOF
 	chmod 600 "$WORK_DIR/k3-real"
 	agent-secrets AIRLOCK_SCOPED_TOKEN -- bash "$WORK_DIR/k3-steps.sh" >"$WORK_DIR/k3-cli.log" 2>&1 || true
 	rm -f "$WORK_DIR/k3-real"
-	# shellcheck disable=SC1090
 	declare -A K3
 	while IFS='=' read -r key value; do K3["$key"]="$value"; done <"$WORK_DIR/k3-out"
 
@@ -1098,17 +1097,14 @@ check_k5() {
 # boto3, so the check installs them with scripts/airlock-clients.sh, which pins a version and
 # checks its SHA-256 before anything of it runs, and reads that script's exports.
 #
-# Two things this stack cannot do, each named in the evidence of the property it belongs to
-# rather than dropped:
-#
-#   - `az login` begins by reading the tenant's OpenID configuration
-#     (GET /{tenant}/v2.0/.well-known/openid-configuration), and the stand-in Microsoft endpoint
-#     answers token requests alone and leaves every other path to the service's own fixed text,
-#     so az stops there. The five az-broker runs are made and what they reached is reported, and
-#     the exchange and the swap are then driven as az would have driven them.
-#   - the stand-in AWS service is told no session token (cmd/dev-airlock-stands has no flag for
-#     airlocktest.AWSOptions.SessionToken), while the stack's AWS secret has one, so it refuses
-#     every call that carries one.
+# The stack's stand-ins play the two clouds whole, so both clients run as they do in anger: the
+# Microsoft stand answers the tenant's OpenID configuration document and the token endpoint,
+# the same host plays the Resource Manager an access token is spent at, and the AWS stand is
+# told the session token the stack's own AWS secret holds, so a signature it verifies is one
+# AWS would verify. az is driven through its own private cloud with MSAL's instance discovery
+# turned off (AZURE_CORE_INSTANCE_DISCOVERY=false, the setting Azure Stack deployments use):
+# that discovery asks login.microsoftonline.com whether a cloud's authority is a Microsoft one,
+# which no stand-in authority can ever be, and it is the one az step no stand could answer.
 
 # k6_clients reads the exports of scripts/airlock-clients.sh, which installs az and boto3 at a
 # pinned, checked version. Its own lines go to this script's stderr; its stdout is the exports.
@@ -1173,11 +1169,18 @@ approve_watch() { # <the file the CLI's stderr goes to>
 # az-broker makes its own AZURE_CONFIG_DIR and logs in at once, leaving no moment to register a
 # cloud in it, so the registration is here: this wrapper registers the cloud in whatever
 # directory az-broker made and then runs the real az with the arguments it was given.
+#
+# It also turns MSAL's instance discovery off, which is what an Azure Stack deployment does
+# (az's own core.instance_discovery, as AZURE_CORE_INSTANCE_DISCOVERY): that discovery asks
+# login.microsoftonline.com whether this cloud's authority is a Microsoft one, and the answer
+# for a stand-in authority is and must be no. It is the one call of az's a stand cannot answer,
+# since it is made to Microsoft's own host and about the stand rather than to it.
 k6_azure_wrapper() {
 	mkdir -p "$WORK_DIR/k6/bin"
 	cat >"$WORK_DIR/k6/bin/az" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
+export AZURE_CORE_INSTANCE_DISCOVERY=false
 if [ -n "\${AZURE_CONFIG_DIR:-}" ] && [ ! -f "\$AZURE_CONFIG_DIR/clouds.config" ]; then
   "$REAL_AZ" cloud register -n airlock --skip-endpoint-discovery \\
     --endpoint-active-directory "$AIRLOCK_MICROSOFT_URL" \\
@@ -1218,55 +1221,40 @@ k6_azure() {
 	# produces: that hop is `secret-run AZURE_ADMIN -- az-broker`, and secret-run is check k7's
 	# subject and needs a dotfiles checkout this pod has not got, so the check runs the half of
 	# az-broker that drives az, under the release that hop would have made.
+	#
+	# What each run does once az-broker has logged it in: `az group list`, the admin command,
+	# and then `az account get-access-token`, which prints the access token az itself holds -
+	# the one the broker's exchange handed it, which has to be a placeholder and never the real
+	# token the Resource Manager is sent.
+	cat >"$d/az-steps.sh" <<EOF
+set -u
+az group list -o json
+az account get-access-token -o json >$d/access.json
+EOF
 	local run
 	: >"$d/runs.log"
 	for run in 1 2 3 4 5; do
 		echo "=== run $run ===" >>"$d/runs.log"
 		PATH="$d/bin:$PATH" agent-secrets AIRLOCK_AZURE_LOGIN --ttl 1h --wait 5m -- sh -c '
 			export AZURE_ADMIN="$AIRLOCK_AZURE_LOGIN" AZ_BROKER_INNER=1
-			exec bash '"$d"'/az-broker -- az group list -o json' >>"$d/runs.log" 2>>"$d/cli.err"
+			exec bash '"$d"'/az-broker -- bash '"$d"'/az-steps.sh' >>"$d/runs.log" 2>>"$d/cli.err"
 		echo "exit $?" >>"$d/runs.log"
 	done
+	kill "$watcher" 2>/dev/null || true
 	K6_AZ_RUNS="$(grep -c '^exit ' "$d/runs.log")"
 	K6_AZ_FAILED="$(grep -c '^exit [^0]' "$d/runs.log" || true)"
 	K6_AZ_ERROR="$(grep -m1 '^ERROR' "$d/cli.err" | tr -d '\r')"
-	K6_AZ_REACHED="$(records "microsoft" | jq -r --argjson n "$microsoft_before" '[.[$n:][] | .method + " " + .path] | unique | join("; ")')"
-
-	# The exchange and the swap, driven as az would have driven them: the token request az's
-	# library posts once it has read the configuration, and then the five calls to the Resource
-	# Manager, each on a connection of its own so the front gives them to both processes.
-	local exchange_before
-	exchange_before="$(records_count microsoft)"
-	cat >"$d/azure-steps.sh" <<EOF
-set -u
-out=$d/azure-out
-: >"\$out"
-tenant=\$(printf '%s' "\$AIRLOCK_AZURE_LOGIN" | jq -r .tenant_id)
-client=\$(printf '%s' "\$AIRLOCK_AZURE_LOGIN" | jq -r .client_id)
-printf '%s' "\$AIRLOCK_AZURE_LOGIN" | jq -r .federated_token >$d/assertion
-curl -sS -X POST "$AIRLOCK_MICROSOFT_URL/\$tenant/oauth2/v2.0/token" \\
-  --data-urlencode "grant_type=client_credentials" \\
-  --data-urlencode "client_id=\$client" \\
-  --data-urlencode "scope=$AIRLOCK_AZURE_RESOURCE_URL/.default" \\
-  --data-urlencode "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \\
-  --data-urlencode "client_assertion=\$(cat $d/assertion)" >$d/token-answer.json
-jq -r '.access_token // ""' $d/token-answer.json >$d/access
-for i in 1 2 3 4 5; do
-  printf 'arm%s=%s\n' "\$i" "\$(curl -sS -o /dev/null -w %{http_code} -H "Authorization: Bearer \$(cat $d/access)" "$AIRLOCK_AZURE_RESOURCE_URL/subscriptions?api-version=2022-12-01")" >>"\$out"
-done
-EOF
-	agent-secrets AIRLOCK_AZURE_LOGIN --ttl 1h --wait 5m -- bash "$d/azure-steps.sh" >>"$d/runs.log" 2>>"$d/cli.err"
-	kill "$watcher" 2>/dev/null || true
 
 	local recs
-	recs="$(records microsoft | jq --argjson n "$exchange_before" '.[$n:]')"
+	recs="$(records microsoft | jq --argjson n "$microsoft_before" '.[$n:]')"
+	K6_AZ_REACHED="$(printf '%s' "$recs" | jq -r '[.[] | .method + " " + .path] | unique | join("; ")')"
 	K6_AZ_ASSERTION="$(printf '%s' "$recs" | jq -r '[.[] | select(.path | endswith("/token")) | .body | capture("client_assertion=(?<a>[^&]*)") | .a] | .[0] // ""')"
 	# The form's own percent-encoding: a JWT holds none of the characters a form escapes but
 	# the "=" of its padding, and the comparison is against the stack's own token.
 	K6_AZ_ASSERTION="${K6_AZ_ASSERTION//%3D/=}"
-	K6_AZ_ACCESS="$(cat "$d/access" 2>/dev/null)"
+	K6_AZ_ACCESS="$(jq -r '.accessToken // ""' "$d/access.json" 2>/dev/null)"
 	mapfile -t K6_AZ_ARM_HEADERS < <(printf '%s' "$recs" | jq -r '.[] | select(.path == "/subscriptions") | .header.Authorization // [] | .[]')
-	K6_AZ_ARM_STATUS="$(tr '\n' ' ' <"$d/azure-out" 2>/dev/null)"
+	K6_AZ_ARM_STATUS="$(grep '^exit ' "$d/runs.log" | tr '\n' ' ')"
 	K6_AZ_EXCHANGES="$(printf '%s' "$recs" | jq '[.[] | select(.path | endswith("/token"))] | length')"
 	K6_AZ_SERVED="$(for log in "$AIRLOCK_DIR"/broker*.log; do printf '%s:%s ' "${log##*/}" "$(grep -c 'a call to a bound host' "$log")"; done)"
 }
@@ -1432,17 +1420,19 @@ check_k6() {
 	local federated access_shape
 	federated="$(cat "$AIRLOCK_DIR/azure-identity-token")"
 	access_shape="$(shape "$K6_AZ_ACCESS")"
-	observe "the five az-broker runs: $K6_AZ_RUNS runs, $K6_AZ_FAILED of them non-zero; what they reached on the Microsoft stand-in was $K6_AZ_REACHED, and az said: $K6_AZ_ERROR"
+	observe "the five az-broker runs: $K6_AZ_RUNS runs, $K6_AZ_FAILED of them non-zero ($K6_AZ_ARM_STATUS); what they reached on the Microsoft stand-in was $K6_AZ_REACHED, and the first ERROR line az wrote, if any, was: ${K6_AZ_ERROR:-none}"
 	observe "the exchange: the token endpoint was asked $K6_AZ_EXCHANGES times and its client_assertion was $(shape "$K6_AZ_ASSERTION") against the stack's own federated token $(shape "$federated") (compared by SHA-256 and length)"
-	observe "the answer the command got carried an access token of $access_shape, which opens 'agent-secrets-placeholder': $(contains agent-secrets-placeholder "$K6_AZ_ACCESS" && echo yes || echo no)"
-	observe "the five Resource Manager calls answered $K6_AZ_ARM_STATUS and their Authorization headers were: $(for h in "${K6_AZ_ARM_HEADERS[@]+"${K6_AZ_ARM_HEADERS[@]}"}"; do printf '%s; ' "$(shape "$h")"; done)"
+	observe "the access token az itself holds after its login (az account get-access-token) is $access_shape, which opens 'agent-secrets-placeholder': $(contains agent-secrets-placeholder "$K6_AZ_ACCESS" && echo yes || echo no)"
+	observe "the Resource Manager calls az made, one per run, and their Authorization headers: $(for h in "${K6_AZ_ARM_HEADERS[@]+"${K6_AZ_ARM_HEADERS[@]}"}"; do printf '%s; ' "$(shape "$h")"; done)"
 	observe "the brokers' own logs of calls to a bound host, which is how many each process served: $K6_AZ_SERVED"
 
 	judge "$([ "$K6_AZ_EXCHANGES" -gt 0 ] && contains "$federated" "$K6_AZ_ASSERTION" && echo 0 || echo 1)" \
 		"the stand-in token endpoint gets the real federated token" \
 		"its client_assertion is the stack's own federated token by SHA-256 and length ($(shape "$K6_AZ_ASSERTION")), over $K6_AZ_EXCHANGES exchanges"
 
-	fail "az gets a placeholder access token — this step cannot run on this stack. Each of the $K6_AZ_RUNS az-broker runs reached the stand-in Microsoft endpoint and stopped at the first call az makes, GET /{tenant}/v2.0/.well-known/openid-configuration ($K6_AZ_REACHED), because airlocktest.MicrosoftStand answers token requests alone (its isTokenRequest) and leaves every other path to the service's own fixed text, so az read '$K6_AZ_ERROR'. It needs cmd/dev-airlock-stands' Microsoft stand to answer the tenant's OpenID configuration document. What az would have been answered was driven in its place: the same token request, posted under the same grant, was answered an access token of $access_shape that opens 'agent-secrets-placeholder' ($(contains agent-secrets-placeholder "$K6_AZ_ACCESS" && echo yes || echo no)), and no real access token reached the command."
+	judge "$([ "$K6_AZ_RUNS" = 5 ] && [ "$K6_AZ_FAILED" = 0 ] && contains agent-secrets-placeholder "$K6_AZ_ACCESS" && echo 0 || echo 1)" \
+		"az gets a placeholder access token" \
+		"all five az-broker runs logged in against the stand-in cloud and listed resource groups ($K6_AZ_FAILED of $K6_AZ_RUNS exited non-zero), and the token az holds is $access_shape, which opens 'agent-secrets-placeholder': $(contains agent-secrets-placeholder "$K6_AZ_ACCESS" && echo yes || echo no)"
 
 	local arm_calls=0 arm_real=0 header
 	for header in "${K6_AZ_ARM_HEADERS[@]+"${K6_AZ_ARM_HEADERS[@]}"}"; do
@@ -1451,7 +1441,7 @@ check_k6() {
 	done
 	judge "$([ "$arm_calls" = 5 ] && [ "$arm_real" = 5 ] && [ "$(echo "$K6_AZ_SERVED" | tr ' ' '\n' | grep -c ':[1-9]')" -ge 2 ] && echo 0 || echo 1)" \
 		"the stand-in Resource Manager gets a real access token in Authorization on all five runs, whichever process served each call" \
-		"$arm_real of $arm_calls calls carried a token that is no placeholder, each answered by whichever broker the front gave its connection to ($K6_AZ_SERVED); the five calls are the ones the azure-access placeholder was spent on, az having stopped at the configuration document"
+		"$arm_real of $arm_calls calls carried a token that is no placeholder, each answered by whichever broker the front gave its connection to ($K6_AZ_SERVED); the five calls are az's own, one per run, made with the azure-access placeholder the exchange handed it"
 
 	k6_aws
 	local aws_secret aws_session
@@ -1465,13 +1455,9 @@ check_k6() {
 
 	local accepted
 	accepted="$(printf '%s' "$K6_AWS_RECS" | jq '[.[] | select(.path != "")] | length')"
-	if contains "X-Amz-Security-Token" "${K6AWS[sts]}" || contains "403" "${K6AWS[sts]}"; then
-		fail "the stand-in AWS service accepts each signature of the STS call, the list and the upload, with the real session token, and finds no placeholder in them — this step cannot run on this stack. The proxy signed each of the $accepted calls again with the real key: every Credential the stand-in recorded names the real key id ($K6_AWS_KEYIDS against $AIRLOCK_AWS_KEY_ID) and $K6_AWS_PLACEHOLDERS of them carried a placeholder. The stand-in refuses them for the session token alone: dev-airlock.sh's AWS secret holds one ($(shape "$aws_session")) and cmd/dev-airlock-stands has no flag for airlocktest.AWSOptions.SessionToken, so its stand verifies against the empty session token and answers 'X-Amz-Security-Token = ...; want \"\"'. It needs that command to take the session token its own fake secret store hands out. The three calls said: '${K6AWS[sts]}' / '${K6AWS[ls]}' / '${K6AWS[cp]}'."
-	else
-		judge "$([ "$K6_AWS_PLACEHOLDERS" = 0 ] && [ "$accepted" -ge 3 ] && contains "$AIRLOCK_AWS_KEY_ID" "$K6_AWS_KEYIDS" && echo 0 || echo 1)" \
-			"the stand-in AWS service accepts each signature of the STS call, the list and the upload, with the real session token, and finds no placeholder in them" \
-			"$accepted calls verified against the real key id $K6_AWS_KEYIDS, with $K6_AWS_PLACEHOLDERS placeholders among them"
-	fi
+	judge "$([ "$K6_AWS_PLACEHOLDERS" = 0 ] && [ "$accepted" -ge 3 ] && contains "$AIRLOCK_AWS_KEY_ID" "$K6_AWS_KEYIDS" && ! contains "403" "${K6AWS[sts]}" && echo 0 || echo 1)" \
+		"the stand-in AWS service accepts each signature of the STS call, the list and the upload, with the real session token, and finds no placeholder in them" \
+		"$accepted calls were verified against the real key id $K6_AWS_KEYIDS and the stack's own session token ($(shape "$aws_session")), with $K6_AWS_PLACEHOLDERS placeholders among them; the three calls said '${K6AWS[sts]}' / '${K6AWS[ls]}' / '${K6AWS[cp]}'"
 
 	judge "$(contains "refusing a chunk-signed upload" "$K6_AWS_CHUNK" && contains "refusing a presigned URL" "$K6_AWS_PRESIGNED" && echo 0 || echo 1)" \
 		"the chunk-signed upload and the presigned URL get an error that names them" \
@@ -1656,9 +1642,13 @@ console.log(answer.status, (await answer.text()).slice(0, 200));
 TS
 say "slack=\$(bun run $d/slack.ts 2>&1 | tail -n 1 | tr -d '\r')"
 
-# gh api under secret-run for GITHUB_ADMIN_PAT: the line shims/gh itself prints for an admin
-# action, with that shim first on PATH so the call goes through it.
-say "gh=\$(secret-run --reason 'k7: one gh api call with a fake admin token' GITHUB_ADMIN_PAT -- sh -c 'GH_TOKEN=\$GITHUB_ADMIN_PAT GITHUB_TOKEN=\$GITHUB_ADMIN_PAT exec gh api user' 2>&1 | tail -n 1 | tr -d '\r')"
+# gh api under secret-run for GITHUB_ADMIN_PAT: the admin line of shims/gh itself, with the
+# directory of the real GitHub CLI first on PATH for this one step. That line sets GH_TOKEN,
+# and the only other gh in this pod is Legion's wrapper, which refuses a call whose GH_TOKEN
+# is set and refuses to run at all when another gh is ahead of it on PATH; \$LEGION_GH_PATH is
+# the real CLI the wrapper itself runs. Nothing else of the step changes, so what GitHub is
+# sent is the consumer's own command with the consumer's own fake value.
+say "gh=\$(secret-run --reason 'k7: one gh api call with a fake admin token' GITHUB_ADMIN_PAT -- sh -c 'PATH=$K7_GH_DIR:\$PATH GH_TOKEN=\$GITHUB_ADMIN_PAT GITHUB_TOKEN=\$GITHUB_ADMIN_PAT exec gh api user' 2>&1 | tail -n 1 | tr -d '\r')"
 
 # pulumi preview of a program whose Tailscale provider calls tailscale:getDevices.
 say "pulumi=\$(cd $d/pulumi && export PULUMI_CONFIG_PASSPHRASE= PULUMI_BACKEND_URL=file://$d/pulumi/state TAILSCALE_API_KEY="\$TAILSCALE_API_KEY" TAILSCALE_TAILNET=example.com && pulumi stack init k7 >/dev/null 2>&1; pulumi preview --stack k7 --non-interactive 2>&1 | grep -iE 'error|refus|unauthor|401|403' | head -n 1 | tr -d '\r')"
@@ -1708,6 +1698,16 @@ check_k7() {
 	expect "S got the fake value in each client's call"
 	expect "the command's exit status is 3, and the CLI's stderr has the line agent-secrets: NAME from …"
 	expect "the negative control, the same runs with a CLI built without the change, shows no call through the proxy port"
+
+	# The real GitHub CLI, which the gh step puts first on PATH: LEGION_GH_PATH names it, and
+	# it is the binary Legion's own gh wrapper runs. Without it there is no gh in this pod the
+	# consumer's admin line can run - the wrapper refuses a call whose GH_TOKEN is set - and
+	# the step is refused rather than run against the wrapper, whose refusal is its own and
+	# says nothing about the airlock.
+	K7_GH_DIR=""
+	if [ -n "${LEGION_GH_PATH:-}" ] && [ -x "${LEGION_GH_PATH:-}" ]; then
+		K7_GH_DIR="$(dirname "$LEGION_GH_PATH")"
+	fi
 
 	k6_clients
 	start_stack
@@ -1820,7 +1820,13 @@ EOF
 		"$logged calls to a bound host were logged by the proxy, $swapped of them allowed and so swapped"
 	judge "$([ "$refused" = 6 ] && echo 0 || echo 1)" \
 		"each real service refused the fake value" "$refused of the 6 consumers that can run in this pod refused it${refusals}"
-	fail "the gh consumer's own call is refused the fake value by GitHub — this step cannot run in this pod. shims/gh's own admin line is \`secret-run … GITHUB_ADMIN_PAT -- sh -c 'GH_TOKEN=\$GITHUB_ADMIN_PAT exec gh …'\`, and the only gh this pod has is Legion's wrapper (/opt/legion/bin/gh, which runs \`legion gh\`): it refuses a call whose GH_TOKEN is set ('legion gh: GH_TOKEN is set, and gh sends it in place of the token of the owner the command targets, so it sends no token; unset GH_TOKEN') and refuses to run at all when another gh is first on PATH. It needs the real GitHub CLI on PATH. What it said here: $(printf '%s' "${K7[gh]-}" | head -c 200). The same fake value does reach GitHub on this run's git step, where github.com refused it: ${K7[git]-}"
+	if [ -z "$K7_GH_DIR" ]; then
+		fail "the gh consumer's own call is refused the fake value by GitHub — this step did not run: LEGION_GH_PATH is unset or names no runnable file in this pod, and it names the only real GitHub CLI here. shims/gh's own admin line is \`secret-run … GITHUB_ADMIN_PAT -- sh -c 'GH_TOKEN=\$GITHUB_ADMIN_PAT exec gh …'\`, and the other gh on PATH is Legion's wrapper, which refuses a call whose GH_TOKEN is set and refuses to run at all when another gh is ahead of it, so running the step against the wrapper would prove nothing about the airlock. Set LEGION_GH_PATH to the real CLI and run this check again."
+	else
+		judge "$(printf '%s' "${K7[gh]-}" | grep -qiE '401|403|Bad credentials|unauthor' && echo 0 || echo 1)" \
+			"the gh consumer's own call is refused the fake value by GitHub" \
+			"the real GitHub CLI ($LEGION_GH_PATH, first on PATH for that one step) sent the fake admin token to api.github.com through the proxy and GitHub answered: $(printf '%s' "${K7[gh]-}" | head -c 200)"
+	fi
 	judge "$([ "$with_value" = "$clients" ] && echo 0 || echo 1)" \
 		"S got the fake value in each client's call" \
 		"$with_value of $clients clients' calls carried it, compared by SHA-256 and length"
@@ -2506,13 +2512,9 @@ check_k9() {
 	upgrade_header="$(printf '%s' "$upgrade_recs" | jq -r '[.[] | select(.path == "/socket") | .header.Authorization // [] | .[]] | .[0] // ""')"
 	upgrade_status="$(jq -r '.status // 0' "$WORK_DIR/k9/upgrade.json")"
 	observe "the WebSocket upgrade: $(cat "$WORK_DIR/k9/upgrade.json" | tr -d '\n' | head -c 300); S recorded its Upgrade header as $(printf '%s' "$upgrade_recs" | jq -r '[.[] | select(.path == "/socket") | .header.Upgrade // [] | .[]] | .[0] // ""') and its Authorization as $(shape "$upgrade_header") against the stored $(shape "$demo_value") (compared by SHA-256 and length)"
-	if [ "$upgrade_status" = 101 ]; then
-		judge "$(contains "$demo_value" "$upgrade_header" && contains "the service read" "$(jq -r '.frames // ""' "$WORK_DIR/k9/upgrade.json")" && echo 0 || echo 1)" \
-			"the WebSocket upgrade reaches S with the real value in its header, and frames pass both ways" \
-			"S answered 101 and the frame came back: $(jq -r '.frames // ""' "$WORK_DIR/k9/upgrade.json")"
-	else
-		fail "the WebSocket upgrade reaches S with the real value in its header, and frames pass both ways — the first half ran and the second cannot run on this stack. S got the upgrade request through the proxy and its Authorization carried the real value ($(shape "$upgrade_header") against the stored $(shape "$demo_value"), compared by SHA-256 and length), but dev-airlock.sh's S answers every request from airlocktest.Service's own fixed body and never 101: the 101 and the line protocol the proxy's own upgrade test drives are an Answer installed in Go (internal/broker/airlockproxy/upgrade_test.go's upgradeStandIn), and cmd/dev-airlock-stands installs none. It needs that command to serve an upgrade route. Here S answered $upgrade_status."
-	fi
+	judge "$([ "$upgrade_status" = 101 ] && contains "$demo_value" "$upgrade_header" && contains "the service read" "$(jq -r '.frames // ""' "$WORK_DIR/k9/upgrade.json")" && echo 0 || echo 1)" \
+		"the WebSocket upgrade reaches S with the real value in its header, and frames pass both ways" \
+		"S answered $upgrade_status, its Authorization carried the real value ($(shape "$upgrade_header") against the stored $(shape "$demo_value"), compared by SHA-256 and length), and the frame that came back was: $(jq -r '.frames // ""' "$WORK_DIR/k9/upgrade.json")"
 
 	# One broker stopped while a connection through it is open, and then the next call. The
 	# connection is this run's own gap connection on the second broker's proxy port, so what is

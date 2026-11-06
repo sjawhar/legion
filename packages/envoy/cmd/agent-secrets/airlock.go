@@ -9,6 +9,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"maps"
 	"net/url"
@@ -215,12 +216,12 @@ func trustBundle(environ []string, caPEM string) []byte {
 	var bundle []byte
 	if inherited, ok := readTrustFile(environ); ok {
 		bundle = inherited
-		if len(bundle) > 0 && !strings.HasSuffix(string(bundle), "\n") {
+		if len(bundle) > 0 && !bytes.HasSuffix(bundle, []byte("\n")) {
 			bundle = append(bundle, '\n')
 		}
 	}
 	bundle = append(bundle, caPEM...)
-	if !strings.HasSuffix(string(bundle), "\n") {
+	if !bytes.HasSuffix(bundle, []byte("\n")) {
 		bundle = append(bundle, '\n')
 	}
 	return bundle
@@ -250,7 +251,7 @@ func wgetrcFor(environ []string, bundle string) []byte {
 	if named := envValue(environ, "WGETRC"); named != "" {
 		if data, err := os.ReadFile(named); err == nil {
 			out = data
-			if len(out) > 0 && !strings.HasSuffix(string(out), "\n") {
+			if len(out) > 0 && !bytes.HasSuffix(out, []byte("\n")) {
 				out = append(out, '\n')
 			}
 		}
