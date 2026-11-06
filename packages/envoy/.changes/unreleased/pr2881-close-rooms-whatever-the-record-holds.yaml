@@ -1,0 +1,8 @@
+kind: Fixed
+body: |-
+  A closed issue's document rooms now close in every process that hears the close, whatever each
+  room's record already held. A room loaded after its issue closed wrote that record itself, with
+  no close behind it, and the close that followed then closed nothing: the room kept its browsers
+  on the admission they connected with, writable ones included, until the idle sweep took it 60 to
+  90 s later. The append gate that closes a room whose issue closed unheard returned on the same
+  record for the same reason, and now closes it.
