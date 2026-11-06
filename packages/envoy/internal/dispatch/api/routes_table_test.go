@@ -109,7 +109,7 @@ func TestWriteRouteIndexCarriesEveryRouteTheTableHas(t *testing.T) {
 // The table is the registration: every row is mounted, every row is described, and the
 // count only moves when a route is deliberately added or removed.
 func TestRoutesTablePinsEveryRegisteredRoute(t *testing.T) {
-	const registeredRoutes = 163
+	const registeredRoutes = 166
 	routes := (&server{}).routes()
 	if len(routes) != registeredRoutes {
 		t.Fatalf("routes() has %d rows, want %d (update the pin when adding a route)", len(routes), registeredRoutes)
@@ -199,11 +199,20 @@ func authRefusal(response *httptest.ResponseRecorder) (bool, string) {
 	return false, ""
 }
 
-// personalTokenHolding mints a personal agent token on the test store holding exactly the scopes
-// named, and answers its plaintext: the credential a scoped row admits. The row is written
-// straight to the table rather than minted through POST /api/v1/me/agent-tokens, which is itself
-// one of the rows under test and needs a credential of this kind to call.
+// personalTokenHolding mints a personal agent token of alice's on the test store holding exactly
+// the scopes named, and answers its plaintext: the credential a scoped row admits.
 func personalTokenHolding(t *testing.T, database *store.Store, scopes ...string) string {
+	t.Helper()
+	return personalTokenOwnedBy(t, database, "alice", scopes...)
+}
+
+// personalTokenOwnedBy mints one person's personal agent token holding exactly the scopes named.
+// The row is written straight to the table rather than minted through POST
+// /api/v1/me/agent-tokens, which is itself one of the rows under test and needs a credential of
+// this kind to call. The owner is a parameter because two owners' tokens are what tells a route
+// comparing whole identities from one comparing kind and id alone: every personal token resolves
+// with an empty id (agent_tokens.go), so only the owner tells them apart.
+func personalTokenOwnedBy(t *testing.T, database *store.Store, owner string, scopes ...string) string {
 	t.Helper()
 	plaintext, hash, err := newAgentToken()
 	if err != nil {
@@ -217,7 +226,7 @@ func personalTokenHolding(t *testing.T, database *store.Store, scopes ...string)
 	if _, err := database.Pool.Exec(context.Background(), `
 		insert into agent_tokens (owner, name, token_hash, prefix, scopes)
 		values ($1, $2, $3, $4, $5)
-	`, "alice", "probe", hash[:], plaintext[len("dsp_"):len("dsp_")+agentTokenPrefixLength], scopes); err != nil {
+	`, owner, "probe", hash[:], plaintext[len("dsp_"):len("dsp_")+agentTokenPrefixLength], scopes); err != nil {
 		t.Fatalf("insert a personal token: %v", err)
 	}
 	return plaintext

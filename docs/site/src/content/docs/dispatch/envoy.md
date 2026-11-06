@@ -311,7 +311,7 @@ session registered through, which every registration sends:
 | Field | Oh My Pi | Claude Code |
 | --- | --- | --- |
 | `plugin` | `@sjawhar/pi-envoy` | `@sjawhar/claude-envoy` |
-| `plugin_version` | the package version (a source checkout reports the version of the last release in its history) | the first 12 characters of the marketplace commit Claude Code installed it from, or `source` when it runs from outside Claude Code's plugin cache (a checkout, `--plugin-dir`) |
+| `plugin_version` | the published package's version (a source checkout reports its committed `package.json`, which names no release: a release commits nothing, and the build job writes the version into the manifest it packs) | the published `@sjawhar/claude-envoy` version Claude Code installed, or `source` when it runs from outside Claude Code's plugin cache (a checkout, `--plugin-dir`) |
 
 A session whose plugin predates the two fields shows neither. The `envoy_sessions` tool of the
 Oh My Pi and Claude Code plugins shows them too.
@@ -347,11 +347,11 @@ Whether a session has the recovery of missed messages above and the 10-second co
 read from its row:
 
 - **Oh My Pi:** it does when its `plugin_version` is at or above the first `@sjawhar/pi-envoy`
-  release cut after the change that added these fields merged (the first whose changelog lists
+  release cut after the change that added these fields merged (the first whose release notes list
   `plugin_version`).
-- **Claude Code:** it does when its commit contains that change's squash commit:
-  `gh api repos/cybermonklabs/legion/compare/<squash commit>...<plugin_version> --jq .status` answers
-  `ahead` or `identical`.
+- **Claude Code:** it does when its `plugin_version` is at or above the first
+  `@sjawhar/claude-envoy` release cut after the change that added these fields merged (the first
+  whose release notes list `plugin_version`), as for Oh My Pi above.
 - **Anything else:** `source` and a row without the fields are checked by hand, or counted as not
   having it.
 

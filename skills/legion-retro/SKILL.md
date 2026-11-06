@@ -61,8 +61,8 @@ for a finished retro only.
    working options, approaches you abandoned, and code another issue could reuse, so the second
    answer does not set your list. Then run `task(agent="oracle")` (read-only) with the issue, the
    pull request body and the diff in its brief, asking for reusable learnings, and `wait` for its
-   answer, since it runs as a job of its own. You decide which points to keep. Drop one that cites
-   no file, line or commit of this pull request.
+   answer, since it runs as a job of its own. You decide which points to keep. Drop a point that
+   cites no file, symbol, quoted text or commit of this pull request.
 3. **Record the learnings.** Write each kept point you can state as a rule a worker on another
    issue could follow as one `dispatch comment` on the issue, per
    `skill://legion-retro/references/learnings.md`, which says what a point must carry for the

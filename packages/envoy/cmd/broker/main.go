@@ -353,6 +353,12 @@ func main() {
 	credentialLifetime := time.Duration(cfg.LauncherCredentialSeconds) * time.Second
 	oauthStore := oauthstore.New(st.Pool)
 	oauthStore.Reused = enroll.RevokeReusedCredential
+	// The one table that says which principal holds a session name is written by both of the
+	// things that name a session: the token exchange, at every token it mints, and an
+	// enrollment, at every session it enrols (enroll.Service.Sessions). So a name a session
+	// writes its Dispatch tokens under and the name its grant follows have one holder, and a
+	// name another principal holds is refused either way.
+	enr.Sessions = oauthStore
 	// On serving, not ctx, for the same reason the policy's own loads are: this runs after the
 	// bind above, so a SIGTERM arriving here finds a pod the load balancer may already be sending
 	// requests to, and such a pod has to drain rather than die with "context canceled" where its
@@ -453,7 +459,7 @@ func main() {
 	}
 	sweeper := &requests.Sweeper{
 		Enrollments: enr, Machine: reqMachine, MachineLogins: mach, OAuth: oauthStore,
-		Interval: sweep, Wake: waker,
+		Interval: sweep, SessionCarry: time.Duration(cfg.SessionCarrySeconds) * time.Second, Wake: waker,
 	}
 	go sweeper.Run(ctx)
 	// The client check, beside the sweeper and on the same context: at boot and every hour

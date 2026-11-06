@@ -90,14 +90,19 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is the one `DaemonAPIVersion` declares, last bumped by contract 50's production check
+number is the one `DaemonAPIVersion` declares, last bumped by contract 52's production check
 (INFRA-809: the project's `projects.<KEY>.production_check`, `off` or `tester` and `tester` by
 default, decides whether a merge that closes an issue opens a check and who works it; the
 `check` object of `GET /legion/v1/state` gains `role`, the role the check recorded when it
 opened, and its `nextWakeAt` is when the next look is due — the time the checking agent named
 for itself, the retry of a look nobody reported, or the check's own bound where neither stands;
 `handoff_complete` gains `wakeAt`, which a `pending` report on a look that is not the check's
-last must carry and no other report may), after contract 49's memory group (each
+last must carry and no other report may), after contract 51's admission cap over the
+issues at work (`admission.active` and `admission.waiting` on `GET /legion/v1/state` name issues
+rather than trees, `admission.trees` is the root of every live tree, and each issue record carries
+its `tree`; a strict reader before 51 refuses a state carrying either new key, so a caller from a
+pod below 51 is served the state without them, and a controller below 51 reads `active` as the
+trees at work), after contract 49's memory group (each
 issue of `GET /legion/v1/state` carries its tree's `memoryGroup`, `memoryDrawMode` and
 `memoryDrawnAt`, which a strict reader before 49 refuses, and a caller from a pod below 49 is
 served the state without them), after contract 48's idle release (the plugin reports each

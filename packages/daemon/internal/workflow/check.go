@@ -282,7 +282,7 @@ func (e *Engine) endLookPending(ctx context.Context, tx pgx.Tx, check *record.Pr
 	if err != nil {
 		return err
 	}
-	if InWorkflow(issue) {
+	if record.InWorkflow(issue) {
 		e.logOnCommit(ctx, "workflow: production check waits while its issue runs again", "issue", issue.Key, "mergeCommit", check.MergeSHA,
 			"look", check.Looks, "phase", issue.Phase)
 		return nil
@@ -352,7 +352,7 @@ func (e *Engine) closeCheck(ctx context.Context, tx pgx.Tx, check *record.Produc
 	if err != nil {
 		return err
 	}
-	if InWorkflow(issue) {
+	if record.InWorkflow(issue) {
 		e.logOnCommit(ctx, "workflow: production check closed while its issue runs again; its claims and pod are the run's", "issue", issue.Key,
 			"mergeCommit", check.MergeSHA, "phase", issue.Phase)
 		return nil
@@ -473,7 +473,7 @@ func (e *Engine) checkWakeDue(ctx context.Context, tx pgx.Tx, fact intake.CheckW
 	if err != nil {
 		return intake.Result{}, err
 	}
-	if InWorkflow(issue) {
+	if record.InWorkflow(issue) {
 		e.logOnCommit(ctx, "workflow: production check wake deferred while its issue runs again", "issue", issue.Key,
 			"mergeCommit", check.MergeSHA, "look", check.Looks, "phase", issue.Phase, "reason", fact.Reason)
 		check.WakeAt = e.clampWake(*check, e.lookRetry())
@@ -511,7 +511,7 @@ func (e *Engine) checkBound(ctx context.Context, tx pgx.Tx, fact intake.CheckBou
 	if err != nil {
 		return intake.Result{}, err
 	}
-	if InWorkflow(issue) {
+	if record.InWorkflow(issue) {
 		e.logOnCommit(ctx, "workflow: production check bound came due while its issue runs again", "issue", issue.Key, "mergeCommit", check.MergeSHA, "phase", issue.Phase)
 		return intake.Result{}, e.closeCheck(ctx, tx, check, record.CheckNotRun)
 	}

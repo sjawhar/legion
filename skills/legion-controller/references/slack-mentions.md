@@ -113,7 +113,9 @@ architect for it, whatever it asks. For a person's mention, take the first of th
 
 - **A question about state.** "What is Legion working on?", "Where is ACME-12?", "Why is it held?"
   Answer from `read_state` and Dispatch as they stand now, never from memory: each issue's
-  `issues.<KEY>.phase`, its pull request, `admission.active` and `admission.waiting`. Say what you
+  `issues.<KEY>.phase` and `issues.<KEY>.tree`, its pull request, `admission.trees` for the trees
+  that run, and `admission.active` and `admission.waiting` for the issues at work and the issues
+  in the line. Say what you
   read, citing for each fact the `read_state` field or the `dispatch read` line it came from.
 - **A request for work.** Someone wants a change made, a bug fixed, something investigated. Search
   first (`skill://dispatch-first`): when an open issue already tracks it, reply with that issue and

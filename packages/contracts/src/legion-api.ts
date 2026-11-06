@@ -224,7 +224,7 @@ const legionCheckWakeView = z.object({
 });
 
 /** `api.CheckView` — an issue's open production check, the work the project's `production_check`
- * role takes after the merge closed the issue (contract 33, contract 50): the repository, pull
+ * role takes after the merge closed the issue (contract 33, contract 52): the repository, pull
  * request and merge commit the check looks for in production (`mergeCommit` is empty for a pull
  * request merged before the daemon recorded merge commits), when it opened, the role the check
  * records as the one that works it (`role`), how many looks that role has taken and whether the
@@ -347,6 +347,13 @@ const legionIssue = z.object({
   generation: z.number().int().nonnegative(),
   phase: z.enum(LEGION_PHASES),
   status: nonEmptyString,
+  /** The key of the root of the issue's tree, equal to `key` on a root (contract 51). A child
+   * holds an admission slot of its own, so neither `admission.active` nor `admission.waiting`
+   * says which tree an issue belongs to; a reader tells a child from a root here, and finds the
+   * members of a tree that lingers. Absent on an issue the workflow does not record (phase
+   * `unrecorded`, an operator's claim), which stands in no tree, and absent from every issue of
+   * the body the route serves a caller before 51 (`api.stateFor`, `withoutTrees`). */
+  tree: issueKey.optional(),
   /** The repository (`owner/name`) the issue targets and that repository's default branch, taken
    * when the daemon first recorded the issue and never changed after; absent on an issue the
    * workflow does not record (phase `unrecorded`, an operator's claim) (contract 31). */
@@ -392,14 +399,27 @@ const legionBlockedIssue = z.object({
 });
 
 /** `api.Admission` — the issue cap and the issues under it, in Dispatch rank order. Concurrency
- * is capped on issues, never on workers: there is no worker queue on this wire. `blocked` is
- * every root and every child Legion is waiting to start behind a Dispatch issue nobody has
- * finished, by issue key; `waiting` stays the roots' waiting line, so a blocked root is in both.
+ * is capped on issues, never on workers: there is no worker queue on this wire. Since contract 51
+ * the cap counts the issues at work rather than the trees (dispatch://INFRA-980): `active` is
+ * every issue holding a slot and `waiting` the admission line, children as much as roots, so one
+ * tree with three working children holds three slots and a tree whose issues only wait holds
+ * none. `trees` is the root of every live tree, sorted, which a reader needs because a running
+ * tree may hold no slot at all — the controller reads it where it read `active` as the running
+ * trees. A daemon at this contract writes it on every state, empty rather than null, and it is
+ * optional here only because that daemon leaves it off one body: a reader before 51 refuses the
+ * key outright, so the route strips `trees` and the issues' `tree` for a caller in a pod whose
+ * claims record a contract below 51, and for a caller in a pod whose claims it cannot read at
+ * all, which may be a pod at this contract (`api.stateFor`, `withoutTrees`). A reader that finds
+ * it absent has been served that stripped body and learns nothing about which trees run; it is
+ * never a daemon older than this plugin, whom the boot gate and `legion probe-image` refuse.
+ * `blocked` is every root and every child Legion is waiting to start behind a Dispatch
+ * issue nobody has finished, by issue key; a blocked issue the line carries is in `waiting` too.
  * The controller names them in the day's report and takes nothing for them. */
 const legionAdmission = z.object({
   cap: z.number().int().nonnegative(),
   active: z.array(nonEmptyString),
   waiting: z.array(nonEmptyString),
+  trees: z.array(issueKey).optional(),
   blocked: z.array(legionBlockedIssue),
   free: z.number().int().nonnegative().optional(),
 });
@@ -911,7 +931,7 @@ export const LegionControllerGrantRequest = z.strictObject({
  * all three are optional here, and the daemon requires each where it applies. `verdict` is `pass`
  * or `fail` for the tester's completion, `pass`, `pending` or `fail` for a check report
  * (`CHECK_VERDICT_REQUIRED`), and the empty string for every other completion; it stays a string
- * on the wire, as the Go field is. `wakeAt` is the check report's alone (contract 50): when the
+ * on the wire, as the Go field is. `wakeAt` is the check report's alone (contract 52): when the
  * checking agent asks to be woken for its next look, which a pending report on a look that is not
  * the check's last must name (`CHECK_WAKE_REQUIRED`) and which no other verdict and no phase
  * completion may carry (`CHECK_WAKE_UNEXPECTED`). It is a `LegionInstant`, not a `timestamp`:
@@ -975,8 +995,10 @@ export const LegionEscalateRequest = z.strictObject({
 });
 
 /** `api.SignOffRequest`, the owning architect's acceptance of an issue in `accepting`, which moves
- * it to `retro`; the daemon refuses it in every other phase (`SIGNOFF_OUTSIDE_ACCEPTING`). Issues
- * still in the workflow beneath it do not hold it: a root's close waits for them instead. */
+ * it to `retro`; the daemon refuses it in every other phase (`SIGNOFF_OUTSIDE_ACCEPTING`). Since
+ * contract 51 it is also refused while an issue beneath that one is still in the workflow
+ * (`SIGNOFF_CHILD_IN_WORKFLOW`, naming them): children are accepted and merged before their
+ * parent, whose own head proves their merged work (dispatch://INFRA-980). */
 export const LegionSignOffRequest = z.strictObject({
   grantId: nonEmptyString,
   issue: nonEmptyString,

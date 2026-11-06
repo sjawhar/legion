@@ -21,7 +21,9 @@ create trigger artifact_versions_block_index_owed after insert on artifact_versi
 // statements as a catalog-only kind. What a regular expression over the text would be fooled by -
 // a trigger in a comment, in a string literal, in a dollar-quoted function body, or beside another
 // statement on one line - is read as the server reads it, and a migration that adds an index or a
-// column default, or holds any statement outside the allowlist, is not exempt.
+// column default, or holds any statement outside the allowlist, is not exempt. A drop is exempt
+// only with RESTRICT, the default: what a cascade drops besides the object the statement names is
+// not in the statement, so the census cannot read it.
 func TestTableSizeExemptionReadsStatementsAsPostgresParsesThem(t *testing.T) {
 	for name, tc := range map[string]struct{ sql, want string }{
 		"0122, a function and a trigger":  {migration0122, "create function and create trigger"},
@@ -44,6 +46,14 @@ func TestTableSizeExemptionReadsStatementsAsPostgresParsesThem(t *testing.T) {
 		// function runs none of them.
 		"an index inside a dollar-quoted body": {"create function f() returns void language plpgsql as $body$ begin create index i on things (kind); end $body$;", "create function"},
 
+		// Dropping a trigger writes pg_trigger and dropping a function writes pg_proc, reading no
+		// row of the table, so a drop with RESTRICT - the default - is exempt as a create is.
+		"20261102233626, a dropped trigger and its function": {"drop trigger artifact_versions_embeddings_enqueue on artifact_versions;\ndrop function embeddings_enqueue_document();", "drop trigger and drop function"},
+		"a dropped trigger alone":                            {"drop trigger t_owed on things;", "drop trigger"},
+		"a dropped trigger if exists":                        {"drop trigger if exists t_owed on things;", "drop trigger"},
+		"a dropped function alone":                           {"drop function owe();", "drop function"},
+		"a drop beside a created trigger":                    {"drop trigger t_old on things; create trigger t_owed after insert on things for each row execute function owe();", "drop trigger and create trigger"},
+
 		"an index":                                  {"create index things_kind on things (kind);", ""},
 		"an index concurrently":                     {"create index concurrently things_kind on things (kind)", ""},
 		"a column with a default":                   {"alter table things add column note text default 'x';", ""},
@@ -55,10 +65,23 @@ func TestTableSizeExemptionReadsStatementsAsPostgresParsesThem(t *testing.T) {
 		"a trigger only in a string literal":        {"update things set kind = 'create trigger t after insert on things for each row execute function owe()'", ""},
 		"a trigger only in a dollar-quoted literal": {"select $$; create trigger t after insert on things for each row execute function owe(); $$", ""},
 		"a trigger inside a DO block":               {"do $$ begin create trigger t after insert on things for each row execute function owe(); end $$;", ""},
+		// A drop of anything else reads or removes rows, and a drop with cascade reaches objects
+		// the statement does not name, so neither is exempt.
+		"a dropped table":                 {"drop table things;", ""},
+		"a dropped index":                 {"drop index things_kind;", ""},
+		"a dropped view":                  {"drop view v;", ""},
+		"a dropped schema":                {"drop schema s;", ""},
+		"a dropped procedure":             {"drop procedure p();", ""},
+		"a dropped function with cascade": {"drop function owe() cascade;", ""},
+		"a dropped trigger with cascade":  {"drop trigger t_owed on things cascade;", ""},
+		"a drop beside an index":          {"drop trigger t_owed on things; create index things_kind on things (kind);", ""},
+		"a drop only in a comment":        {"-- drop trigger t_owed on things;\ncreate index things_kind on things (kind);", ""},
+		"a drop only in a string literal": {"update things set kind = 'drop trigger t_owed on things'", ""},
 		// A set is a parameter of the transaction: it takes no lock and reads no row, so it
 		// cannot make a lock window grow with a table, and a migration that bounds its own lock
 		// wait keeps the exemption its other statements earn.
 		"a set before a trigger":       {"set local lock_timeout = '1s'; create trigger t after insert on things for each row execute function owe();", "set and create trigger"},
+		"a set before a drop":          {"set local lock_timeout = '1s'; drop trigger t_owed on things;", "set and drop trigger"},
 		"a set and nothing else":       {"set local lock_timeout = '1s';", "set"},
 		"a set before an index":        {"set local lock_timeout = '1s'; create index i on things (kind);", ""},
 		"a comment and nothing else":   {"-- create trigger t after insert on things for each row execute function owe();\n", ""},
