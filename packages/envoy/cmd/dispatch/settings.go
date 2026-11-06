@@ -35,9 +35,9 @@ type setting struct {
 }
 
 // settings is every Dispatch setting, in the order an operator meets them: storage, identity,
-// where the server listens, NATS, the Envoy listener, projects, the GitHub App, cookies,
-// service-account tokens, the secrets broker, meaning search's model service, the dashboard, and
-// local and test runs.
+// where the server listens, NATS, the Envoy listener, projects and the issues the search bar
+// files, the GitHub App, cookies, service-account tokens, the secrets broker, meaning search's
+// model service, the dashboard, and local and test runs.
 var settings = []setting{
 	{Name: "DATABASE_URL", Required: "yes",
 		Description: "Postgres connection string. The server migrates the database before serving; `census`, `backfill-block-ids`, `backfill-anchor-blocks`, `backfill-files`, `rebuild-refs` and `stored-order` read it too. A `pool_max_conns` parameter is refused."},
@@ -97,6 +97,10 @@ var settings = []setting{
 		Description: "Comma-separated `owner/repo=KEY` mappings seeded at startup; a mapping saved in the dashboard wins."},
 	{Name: "DISPATCH_DEFAULT_PROJECT", Required: "no",
 		Description: "Project an external issue from an unmapped repository is created in; it must already exist."},
+	{Name: "DISPATCH_NEW_ISSUE_LABEL", Default: "the issue carries no label", Required: "no",
+		Description: "Label an issue carries that the search bar files from the words a person typed, when those words match nothing the bar found; it is added to that issue alone."},
+	{Name: "DISPATCH_NEW_ISSUE_SESSION", Default: "the issue is made and no conversation is started on it", Required: "no",
+		Description: "Envoy session an issue the search bar files from a person's typed words is routed to, written as the session's own id: the bar sets the issue's route to it and posts the person's words to it as the issue's first message."},
 	{Name: "DISPATCH_APP_CLIENT_ID", Required: "no",
 		Description: "GitHub App client ID, which names the App in the JWT its private key signs. Set, the App comes from the `DISPATCH_APP_*` variables instead of `~/.local/share/dispatch/app.json`."},
 	{Name: "DISPATCH_APP_PEM_B64", Required: "no",

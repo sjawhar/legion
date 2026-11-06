@@ -1,0 +1,6 @@
+kind: Added
+body: |-
+  Words a person types in Dispatch's bar that match nothing are offered as a new issue, and nothing is written until the person accepts.
+  Accepted, the words become that issue's first verification criterion word for word - one `check` block carrying no attributes - and Dispatch writes no word of its own into the issue.
+  Two settings say what such an issue is: `DISPATCH_NEW_ISSUE_LABEL`, the label it carries, and `DISPATCH_NEW_ISSUE_SESSION`, the session it is routed to and its first message goes to; with no session the issue is made and the bar says that no conversation was started.
+  Both are unset by default, and `GET /api/v1/settings/new-issue` is how the dashboard reads them.

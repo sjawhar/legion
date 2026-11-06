@@ -2467,6 +2467,12 @@ Each item below names a path with its method and identity, then its purpose.
   It arms the process the call reached, not every process.
   Not mounted otherwise.
 
+- `/api/v1/settings/new-issue/_test` (POST; cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1`)
+
+  `{label, session}` replaces what `GET /api/v1/settings/new-issue` answers on the process the call reached, in place of what that process's environment set; an empty value is none, and a bad body is `400`.
+  A browser test reads the bar with a label and a session configured and then with the session cleared, which no deployment setting can change while the server runs.
+  Not mounted otherwise.
+
 - `/ws/live` (GET; cookie, trusted header, or bearer)
 
   One WebSocket per browser tab, serving delivery, events, and agent subscriptions.
@@ -2549,6 +2555,13 @@ Each item below names a path with its method and identity, then its purpose.
 
   List every project that names a default assignee, by project key, as `[{project, assignee}]`; a project with no default is left out.
   It needs the `person` scope, since the default names a person.
+
+- `/api/v1/settings/new-issue` (GET; cookie, trusted header, or bearer)
+
+  What the dashboard's search bar files a person's typed words as when those words match nothing it found:
+  `{label, session}`, the label that new issue carries and the session it is routed to and its first message goes to, as `DISPATCH_NEW_ISSUE_LABEL` and `DISPATCH_NEW_ISSUE_SESSION` set them.
+  Each is `""` where the deployment set none: the issue then carries no label, and the bar makes it and starts no conversation on it.
+  The bar writes the issue itself, through `POST /api/v1/issues` and the issue's own artifact, patch and message routes, so this read is all the configuration adds to the API.
 
 - `/api/v1/projects/{key}/default-assignee` (PUT; cookie, trusted header, or bearer; needs the `person` scope)
 

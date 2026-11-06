@@ -173,6 +173,7 @@ var writeClasses = map[string]writeScope{
 	"POST /api/v1/live/_test/disconnect":                   scopeDeployment,
 	"POST /api/v1/live/_test/rotate":                       scopeDeployment,
 	"POST /api/v1/artifacts/_test/quiesce":                 scopeDeployment,
+	"POST /api/v1/settings/new-issue/_test":                scopeDeployment,
 	"POST /api/v1/writes/_test/slow":                       scopeDeployment,
 }
 
@@ -338,6 +339,7 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPost, "/api/v1/projects/{key}/architecture-source/sync", authAny, "Kept for dispatch clients older than this release, logged at warn: import every architecture source of a project now and answer one row, the first in id order whose last_error is set or else the first; 404 SOURCE_NOT_FOUND without a source. POST /api/v1/projects/{key}/architecture-sources/sync replaces it.", s.syncSingularArchitectureSource},
 		{http.MethodGet, "/api/v1/projects/{key}/architecture", authAny, "A project's component tree with the work attached: its sources' sync bookkeeping, each component with its source repository, per-component counts and issue rows, plus unassigned, not-architectural, and retired-link issues; 404 SOURCE_NOT_FOUND without a source.", s.getArchitectureTree},
 		{http.MethodGet, "/api/v1/settings/project-default-assignees", authAny, "List every project that names a default assignee, by project key: the last step of a create's assignee chain. Needs the person scope, as the default names a person: a credential the deployment configured, the shared token or a pod's, holds none.", s.listProjectDefaultAssignees},
+		{http.MethodGet, "/api/v1/settings/new-issue", authAny, "What the dashboard's search bar files a person's unmatched typed words as: {label, session}, the label that new issue carries and the session it is routed to and its first message goes to, as this deployment configured them (DISPATCH_NEW_ISSUE_LABEL, DISPATCH_NEW_ISSUE_SESSION). Each is \"\" where it configured none: no label on the issue, and no conversation started on it. The bar writes the issue itself, through POST /api/v1/issues and the issue's own artifact, patch and message routes.", s.getNewIssueSettings},
 		{http.MethodPut, "/api/v1/projects/{key}/default-assignee", authAny, "Set a project's default assignee {assignee} (the email of a person who has signed in, or null to clear it): who an issue created with no assignee, by nobody, under no parent or under a parent with nobody on it, goes to. Needs the person scope, as the default names a person: a credential the deployment configured, the shared token or a pod's, holds none.", s.putProjectDefaultAssignee},
 		{http.MethodGet, "/api/v1/settings/delivery", authAny, "The delivery timeline's one configuration record (deploy repository, workflow paths, production job names, optional production apply step, population authors, excluded repositories, and the Pipeline page's optional staging end-to-end, staging deploy and PR-checks roll-up job names), or null when it has not been set.", s.getDeliverySettings},
 		{http.MethodPut, "/api/v1/settings/delivery", authAny, "Set the delivery timeline's configuration after proving the GitHub App can read the deploy repository; 409 DELIVERY_SETTINGS_ACCESS a credential or repository problem.", s.putDeliverySettings},
@@ -483,8 +485,8 @@ func (s *server) routes() []apiRoute {
 	// The live-socket disconnect, live-socket rotate, quiesce and publish hooks (the 1st, 2nd, 3rd
 	// and 5th below) act on every process serving the database, answering once each has
 	// (test_hooks_fanout.go); outside-schema (the 4th) writes the stored history, which every
-	// process reads, and the slow-write arm (the 6th) delays the keyed writes of the process it
-	// armed, so each runs only where its call lands.
+	// process reads, and the slow-write arm (the 6th) and the new-issue settings (the 7th) act on
+	// the process the call lands on, so each runs only where it lands.
 	if s.deps.TestHooksEnabled {
 		rows = append(rows,
 			routeRow{http.MethodPost, "/api/v1/live/_test/disconnect", authAny, "Test hook: close every open live socket on every process with 1012, as a restart does.", s.disconnectLiveSockets},
@@ -493,6 +495,7 @@ func (s *server) routes() []apiRoute {
 			routeRow{http.MethodPost, "/api/v1/artifacts/{id}/_test/outside-schema", authAny, "Test hook: write a crafted tree outside the Proof schema.", s.injectArtifactSchemaFailure},
 			routeRow{http.MethodPost, "/api/v1/agents/{session_id}/stream/_test/publish", authAny, "Test hook: publish one frame to a session's conversation viewers on every process.", s.publishAgentStreamFrame},
 			routeRow{http.MethodPost, "/api/v1/writes/_test/slow", authAny, "Test hook: {method, path, delay_ms} delays every keyed run of that method and path by delay_ms after its key is claimed, on the handler's own context; 0 disarms.", s.armSlowWrite},
+			routeRow{http.MethodPost, "/api/v1/settings/new-issue/_test", authAny, "Test hook: {label, session} replaces, on the process the call lands on, the new-issue label and session GET /api/v1/settings/new-issue answers from its environment; an empty value is none.", s.setNewIssueSettings},
 		)
 	}
 	routes := make([]apiRoute, len(rows))

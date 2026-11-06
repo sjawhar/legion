@@ -41,6 +41,7 @@ import { MarkdownPreview } from "../refs/MarkdownPreview";
 import { searchSnippetMarkdown } from "../refs/markdown-fragment";
 import { referenceTriggerProps } from "../refs/RefPreview";
 import {
+  buildIssuePath,
   buildProjectPath,
   type DispatchReferenceRoute,
   nodeRouteFromHref,
@@ -57,6 +58,7 @@ import {
   scopeOfPage,
   scopeOfProject,
 } from "./bar-scope";
+import { NEW_ISSUE_GROUP_ID, NEW_ISSUE_OPTION_ID, useNewIssueOffer } from "./NewIssueOffer";
 import { type RecentItem, readRecents } from "./recents";
 import { SearchFilterBar } from "./SearchFilterBar";
 import { SearchOperators } from "./SearchOperators";
@@ -96,8 +98,15 @@ interface RecentRow {
   kind: "recent";
 }
 
+/** The offer of the words in the box as a new issue, which the bar lists when its search
+ *  matched nothing. */
+interface NewIssueRow {
+  id: string;
+  kind: "new-issue";
+}
+
 /** One selectable line, whatever it came from: arrows, Enter and `aria-activedescendant` see only these. */
-type PaletteRow = ActionRow | ProjectRow | RecentRow | ResultRow;
+type PaletteRow = ActionRow | NewIssueRow | ProjectRow | RecentRow | ResultRow;
 
 function SearchResultIcon({ kind }: { kind: SearchResultKind }): ReactNode {
   const common = {
@@ -286,14 +295,15 @@ function CommandOption({
 }
 
 /** One labelled run of command rows: the Recent items the bar opens on, the Actions a query
- *  leads to, the More actions it matches further in, or the Projects it names. */
+ *  leads to, the More actions it matches further in, the Projects it names, or the New issue it
+ *  offers for words that matched nothing. */
 interface CommandSection {
   id: string;
   label: string;
   options: readonly {
     hint: ReactNode;
     label: string;
-    row: ActionRow | ProjectRow | RecentRow;
+    row: ActionRow | NewIssueRow | ProjectRow | RecentRow;
   }[];
 }
 
@@ -521,6 +531,18 @@ function PaletteDialog({
         ),
       }))
     : [];
+  // Words the search answered and matched nothing with: the bar offers them as a new issue,
+  // under the rows this page can do and the projects they name, and never above them - the
+  // offer is the last thing left when nothing else answers.
+  const newIssue = useNewIssueOffer({
+    offered: showHits && results.length === 0,
+    onOpen: (key) => {
+      navigate(buildIssuePath({ key, kind: "issue" }));
+      onClose();
+    },
+    project: pageProject,
+    words: searchText,
+  });
   const commandSections: readonly CommandSection[] = [
     {
       id: RECENT_GROUP_ID,
@@ -550,25 +572,45 @@ function PaletteDialog({
       })),
     },
   ];
+  // The two sections at the foot of the list, which the highlight never starts on and the
+  // arrows reach last: a More action is a coincidence of words, and filing an issue is a write,
+  // so neither runs on an Enter the reader meant for the row above. The offer is last of all,
+  // under the actions, because it is the one row that writes.
+  const newIssueSection: CommandSection = {
+    id: NEW_ISSUE_GROUP_ID,
+    label: "New issue",
+    options:
+      newIssue === undefined
+        ? []
+        : [
+            {
+              hint: null,
+              label: newIssue.label,
+              row: { id: NEW_ISSUE_OPTION_ID, kind: "new-issue" } as const,
+            },
+          ],
+  };
   const moreActions: CommandSection = {
     id: MORE_ACTIONS_GROUP_ID,
     label: "More actions",
     options: actionOptions.filter((option) => !option.leads),
   };
+  const footRows = newIssueSection.options.length + moreActions.options.length;
   // What the list shows, in the order it shows it: the arrows walk this same list.
   const rows: PaletteRow[] = [
     ...commandSections.flatMap((section) => section.options.map((option) => option.row)),
     ...hitGroups.flatMap((group) => group.rows),
     ...moreActions.options.map((option) => option.row),
+    ...newIssueSection.options.map((option) => option.row),
   ];
   // The highlight is the row the reader sees highlighted, held by its id: hits arriving below
   // the actions, or a refetch re-ranking them, leave it on that row. A new query sends it to the
   // head, and so does its row leaving the list; the head it lands on is then adopted, so the row
   // coming back does not take the highlight back from it. The head is the first row unless that
-  // is one of the More actions, which come last: with only those listed, nothing is highlighted,
-  // and Enter runs nothing until the reader arrows.
+  // is one of the foot rows - the New issue offer and the More actions, which come last: with
+  // only those listed, nothing is highlighted, and Enter runs nothing until the reader arrows.
   const chosen = rows.findIndex((row) => row.id === activeId);
-  const activeIndex = chosen === -1 && rows.length > moreActions.options.length ? 0 : chosen;
+  const activeIndex = chosen === -1 && rows.length > footRows ? 0 : chosen;
   const activeRow = rows[activeIndex];
   const shownId = activeRow?.id ?? null;
   if (shownId !== activeId) {
@@ -598,6 +640,13 @@ function PaletteDialog({
   useCloseOnNavigation(true, onClose);
 
   const selectRow = (row: PaletteRow) => {
+    if (row.kind === "new-issue") {
+      // The one row that writes: it makes the issue with the bar still open, so the person
+      // reads what was made and, with no session named, that nothing was started on it. It
+      // closes the bar itself, by opening the issue.
+      newIssue?.select();
+      return;
+    }
     if (row.kind === "action") {
       onAction(row.action.run);
     } else {
@@ -636,7 +685,7 @@ function PaletteDialog({
   // More actions after an earlier answer keeps moving over the whole list. `isFetching`, not the
   // message's `isPending`: with a stale cached answer `isPending` is false while the refetch runs.
   const searchOut = waitingForQuery || (queryEnabled && search.isFetching);
-  const firstMore = rows.length - moreActions.options.length;
+  const firstMore = rows.length - footRows;
   const walkable = searchOut && activeIndex < firstMore ? firstMore : rows.length;
   const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (handleScopeKey(event)) {
@@ -831,8 +880,16 @@ function PaletteDialog({
                 );
               })}
               <CommandGroup activeId={activeRow?.id} onSelect={selectRow} section={moreActions} />
+              <CommandGroup
+                activeId={activeRow?.id}
+                onSelect={selectRow}
+                section={newIssueSection}
+              />
             </div>
           )}
+          {/* What the bar says about the issue it made from these words, above the message that
+              says the search found none: the issue it made is the answer to that search. */}
+          {newIssue?.said}
           {tooShort ? (
             <p className={`shrink-0 px-3 py-3 text-sm ${textMutedOnSurface}`}>
               Type at least 2 characters

@@ -374,3 +374,14 @@ export interface CredentialCapabilities {
    *  for a person to type on `/credentials/machine`. False for a Dispatch with no broker. */
   machine_code_page: boolean;
 }
+
+/** What the bar files a person's typed words as when they match nothing it found, from
+ *  `GET /api/v1/settings/new-issue`: the deployment's own two settings. Each is `""` where the
+ *  deployment set none - the issue then carries no label, and the bar makes it and starts no
+ *  conversation on it. */
+export interface NewIssueSettings {
+  /** The label the new issue carries. */
+  label: string;
+  /** The id of the session the new issue is routed to and its first message goes to. */
+  session: string;
+}
