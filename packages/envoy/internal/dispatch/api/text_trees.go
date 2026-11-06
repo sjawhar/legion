@@ -21,9 +21,8 @@ import (
 // and changes no answer. Nothing else is reported: the answer a reader is given is the same either
 // way.
 //
-// A caller still holding a pooled connection stores nothing. Taking a second connection while one
-// is held is the deadlock store.ErrNestedAcquire refuses, and work this optional asks rather than
-// being refused, which would log the refusal's stack in a path that is working as intended.
+// The store itself is texttrees.StoreFor, the one policy every path that writes a stored text
+// keeps, which is also why a caller still holding a pooled connection stores nothing.
 func (s *server) storeDisplayTrees(ctx context.Context, subject string, texts ...string) {
 	s.storeDisplayTreesIn(ctx, pmdoc.DisplayLatest, subject, texts...)
 }
@@ -33,24 +32,9 @@ func (s *server) storeDisplayTrees(ctx context.Context, subject string, texts ..
 // past version is read in the version mode, which no write produces, so its tree is stored by
 // the first read of it (getArtifactVersion) and by nothing else.
 func (s *server) storeDisplayTreesIn(ctx context.Context, mode pmdoc.DisplayMode, subject string, texts ...string) {
-	if len(texts) == 0 {
-		return
-	}
-	if store.HoldsPooledConnection(ctx) {
-		return
-	}
-	if err := texttrees.New(s.displayTreePool()).Store(ctx, mode, texts...); err != nil {
+	if err := texttrees.StoreFor(ctx, s.deps.Store, mode, texts...); err != nil {
 		slog.Warn("dispatch: store display trees failed", "subject", subject, "mode", int(mode), "error", err)
 	}
-}
-
-// displayTreePool is the pool the trees are stored through, nil on a server with no database - one
-// a test builds directly - where the store answers its own refusal and the write is unaffected.
-func (s *server) displayTreePool() *store.Pool {
-	if s.deps.Store == nil {
-		return nil
-	}
-	return s.deps.Store.Pool
 }
 
 // primeDisplayTrees puts the stored display tree of each of texts into this process's display
@@ -121,7 +105,7 @@ func (s *server) primeDisplayTreesIn(ctx context.Context, mode pmdoc.DisplayMode
 	if store.HoldsPooledConnection(ctx) {
 		return distinct
 	}
-	stored, err := texttrees.New(s.displayTreePool()).Read(ctx, mode, sums)
+	stored, err := texttrees.For(s.deps.Store).Read(ctx, mode, sums)
 	if err != nil {
 		slog.Warn("dispatch: read display trees failed", "texts", len(sums), "error", err)
 		return distinct
@@ -136,7 +120,7 @@ func (s *server) primeDisplayTreesIn(ctx context.Context, mode pmdoc.DisplayMode
 			missing = append(missing, distinct[index])
 			continue
 		}
-		pmdoc.PutStoredDisplayTree(distinct[index], mode, tree)
+		pmdoc.PutStoredDisplayTree(sum, mode, tree)
 	}
 	return missing
 }
@@ -196,17 +180,6 @@ func (s *server) storeEventDisplayTrees(ctx context.Context, events []model.Even
 	s.storeDisplayTrees(ctx, subject, texts...)
 }
 
-// askDisplayTexts appends every stored text of an ask to texts: its question, and the label and
-// description of each of its answer options. The ask's answer and resolution are not among them -
-// they are written by the transitions, which store their own (closeAsk).
-func askDisplayTexts(texts []string, question string, options []model.AskOption) []string {
-	texts = append(texts, question)
-	for _, option := range options {
-		texts = append(texts, option.Label, option.Description)
-	}
-	return texts
-}
-
 // eventDisplayTexts appends every stored text the events carry a tree for, found by the reader
 // the shaping uses (eventPayloadTexts), so what a read primes and stores is exactly what that
 // read answers.
@@ -241,19 +214,13 @@ func messageDisplayTexts(texts []string, messages ...model.Message) []string {
 	return texts
 }
 
-// askReadDisplayTexts appends every stored text an ask is shown with: its question, the label
-// and description of each option, the text of the answer it carries and the reason it was
-// resolved with (askRead.shape). It is the read's list where askDisplayTexts is the write's: a
-// write stores the texts it wrote, and a reader is shown those and what the transitions wrote.
+// askReadDisplayTexts appends every stored text each of asks is shown with (askRead.shape),
+// which is texttrees.AskShownTexts, the list this read and the background fill of the trees
+// share: a write stores the texts it wrote (texttrees.AskWrittenTexts), and a reader is shown
+// those and what the transitions wrote.
 func askReadDisplayTexts(texts []string, asks ...model.Ask) []string {
 	for _, ask := range asks {
-		texts = askDisplayTexts(texts, ask.Question, ask.Options)
-		if ask.Answer != nil && ask.Answer.Text != nil {
-			texts = append(texts, *ask.Answer.Text)
-		}
-		if ask.Resolution != nil {
-			texts = append(texts, ask.Resolution.Reason)
-		}
+		texts = texttrees.AskShownTexts(texts, ask.Question, ask.Options, ask.Answer, ask.Resolution)
 	}
 	return texts
 }
@@ -274,7 +241,7 @@ func askAnswerDisplayTexts(texts []string, answers []model.AskAnswer) []string {
 // (storeEventDisplayTrees) and this is the read that copies them back.
 func askEditDisplayTexts(texts []string, edits []model.AskEdit) []string {
 	for _, edit := range edits {
-		texts = askDisplayTexts(texts, edit.Previous.Question, edit.Previous.Options)
+		texts = texttrees.AskWrittenTexts(texts, edit.Previous.Question, edit.Previous.Options)
 	}
 	return texts
 }

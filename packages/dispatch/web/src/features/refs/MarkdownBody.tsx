@@ -99,9 +99,11 @@ const paintBlock: PaintMarkdown = (element, parsed, serializer) => {
 /**
  * One node into `parent`, yielding where the work can be cut: a node holding several block
  * children - a list, a quote, the document itself - is opened with its own `toDOM`, as the
- * serializer would, and its children go in one at a time; everything else, a textblock and its
- * marks included, goes in whole, since splitting inline content would split a mark across
- * elements.
+ * serializer would, and its children go in one at a time; everything else goes in whole. A
+ * textblock and its marks do, since splitting inline content would split a mark across
+ * elements, and so does a node holding one child or none, which has no second child to cut
+ * between - a quote around an 8,000-item list is one such node, and serialises in the one piece
+ * its own child is.
  *
  * An opened node is opened exactly as `DOMSerializer.serializeNode` opens it: its attributes go
  * to `renderSpec` as the guard wants them, and its own marks wrap what comes back, outermost

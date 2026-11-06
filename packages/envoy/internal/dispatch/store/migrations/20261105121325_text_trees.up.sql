@@ -28,9 +28,14 @@
 -- far through the stored texts that version's pass has reached (through) and whether it has
 -- finished (done). It holds no row until a pass writes one.
 --
--- No index beside the primary key: the one read is `where version = $1 and mode = $2 and sum =
--- any($3)`, which reads the primary key by its leading column, and no query of the background pass
--- is written yet to name another.
+-- One index beside the primary key, on version alone. A read names the whole key - `where
+-- version = $1 and mode = $2 and sum = any($3)` - and reads the primary key by its leading
+-- column. The background pass's hourly retention names version and nothing else, on both of its
+-- statements: the two newest versions the table holds (`select distinct version ... order by
+-- version desc limit 2`) and the delete of everything below them (`where version < ...`). The
+-- primary key leads on sum, so neither statement can use it, and each would read the whole of a
+-- multi-gigabyte table every hour to delete the nothing a deploy that shipped no parser change
+-- leaves behind (texttreefill's retainQuery).
 --
 -- Two new tables, nothing altered: the release before this one neither reads nor writes them, so
 -- it rolls beside this one and reads and writes this schema as it always did (store/README.md).
@@ -44,6 +49,8 @@ create table text_trees (
     created_at timestamptz not null default now(),
     primary key (sum, mode, version)
 );
+
+create index text_trees_version on text_trees (version);
 
 create table text_tree_rebuild (
     version integer primary key,

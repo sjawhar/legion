@@ -2,10 +2,12 @@
 // every path that stores a text and read by every path that answers one (migration
 // 20261105121325).
 //
-// It is a package of its own, depending on store and pmdoc and on nothing else of the server,
-// because neither of the two packages that write stored texts can own it: api and docs both write
-// them, and docs cannot import api. Everything either of them needs is here, so a third writer -
-// the architecture importer is one - reaches the table the same way.
+// It is a package of its own, depending on store, pmdoc and model and on nothing else of the
+// server, because neither of the two packages that write stored texts can own it: api and docs
+// both write them, and docs cannot import api. Everything either of them needs is here, so a
+// third writer - the architecture importer is one - reaches the table the same way, and the one
+// list of an ask's stored texts a reader and the background fill must agree on lives here too
+// (AskShownTexts).
 package texttrees
 
 import (
@@ -31,12 +33,44 @@ type Table struct {
 // never allowed to fail the write it belongs to.
 func New(pool *store.Pool) Table { return Table{pool: pool} }
 
+// For is the table over the pool of st, the store a server or a service was built with, and over
+// no pool at all where that store is nil - a test builds one, and every route of it refuses
+// anyway - so a caller unwraps no pool of its own and a nil store costs a refusal rather than a
+// panic.
+func For(st *store.Store) Table {
+	if st == nil {
+		return Table{}
+	}
+	return New(st.Pool)
+}
+
 // errNoPool is every method's answer on a table with no pool behind it.
 var errNoPool = errors.New("texttrees: no database pool")
 
-// Sum finds one text's tree: the SHA-256 of the text, which is how pmdoc keys its own cache of the
-// trees it reads (displayCacheKey), so the two agree on what one text is.
-func Sum(text string) [32]byte { return sha256.Sum256([]byte(text)) }
+// Sum names the text one tree is of: pmdoc.TextSum, the key that package holds its own cache of
+// read trees under, so a row of this table and an entry of that cache are found by the same
+// bytes and the two agree on what one text is.
+func Sum(text string) [32]byte { return pmdoc.TextSum(text) }
+
+// StoreFor stores the display trees of texts through st's pool, under the one policy every path
+// that writes a stored text keeps (api's storeDisplayTrees, docs' storeVersionTrees,
+// architecture's storeComponentTrees): the store stands behind that write's own commit, never
+// inside its transaction, and what it answers is logged by its caller under a subject of that
+// caller's and changes no answer, because a tree that cannot be stored costs a later reader a
+// markdown read and nothing more.
+//
+// It stores nothing and answers nil in the two cases that are no failure. There is no text to
+// store; or the caller still holds a pooled connection, where taking a second one is the
+// deadlock store.ErrNestedAcquire refuses, and work this optional asks rather than being
+// refused, which would log the refusal's stack in a path that is working as intended.
+//
+// A nil store - one a test builds with no database - answers errNoPool, as a nil pool does.
+func StoreFor(ctx context.Context, st *store.Store, mode pmdoc.DisplayMode, texts ...string) error {
+	if len(texts) == 0 || store.HoldsPooledConnection(ctx) {
+		return nil
+	}
+	return For(st).Store(ctx, mode, texts...)
+}
 
 // Store reads each of texts for display in mode and stores the trees, keyed by the text's Sum, the
 // mode and the display parser version this process runs at (pmdoc.DisplayTreeVersionNow). A text

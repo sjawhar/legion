@@ -185,7 +185,7 @@ func TestTheFillResumesFromItsCursorRatherThanStartingAgain(t *testing.T) {
 	version := pmdoc.DisplayTreeVersionNow()
 
 	// One batch, as far as a process that is stopped right after its first batch commits gets.
-	through, _, err := readCursor(ctx, fill, version)
+	through, _, err := openCursor(ctx, fill, version)
 	if err != nil {
 		t.Fatalf("open the cursor: %v", err)
 	}
@@ -438,7 +438,7 @@ func TestTheFillGetsThroughTheCorpusWellWithinADayAtTwoWorkers(t *testing.T) {
 	// One round of every kind's head over the seeded corpus, which is the cost a batch pays
 	// twice - once to choose its cut and once to take its range - however few texts it takes.
 	scanned := time.Now()
-	if _, err := headCandidates(ctx, fill, time.Now()); err != nil {
+	if _, err := headMoments(ctx, fill, time.Now()); err != nil {
 		t.Fatalf("time a candidate scan: %v", err)
 	}
 	scan := time.Since(scanned)

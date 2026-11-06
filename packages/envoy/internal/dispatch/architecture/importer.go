@@ -725,7 +725,9 @@ func (i *Importer) project(
 // one of the pool taken under a lock (store.ErrNestedAcquire).
 //
 // A failure is logged with the project it was for and changes nothing: a read of a component
-// whose tree is missing reads its prose, as it did before there was a table.
+// whose tree is missing reads its prose, as it did before there was a table. The store is
+// texttrees.StoreFor, the one policy every path that writes a stored text keeps, so an importer
+// whose caller still holds a pooled connection stores nothing rather than being refused one.
 func (i *Importer) storeComponentTrees(ctx context.Context, project string, parsed Model) {
 	if i.store == nil || len(parsed.Components) == 0 {
 		return
@@ -734,7 +736,7 @@ func (i *Importer) storeComponentTrees(ctx context.Context, project string, pars
 	for _, component := range parsed.Components {
 		prose = append(prose, component.Prose)
 	}
-	if err := texttrees.New(i.store.Pool).Store(ctx, pmdoc.DisplayLatest, prose...); err != nil {
+	if err := texttrees.StoreFor(ctx, i.store, pmdoc.DisplayLatest, prose...); err != nil {
 		slog.Warn("dispatch: store architecture component display trees failed", "project", project, "error", err)
 	}
 }

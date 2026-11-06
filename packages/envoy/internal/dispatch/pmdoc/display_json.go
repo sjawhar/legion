@@ -17,6 +17,12 @@ import (
 // not a target to fill.
 const DisplayCacheBytes = 64 << 20
 
+// TextSum names one stored text: its SHA-256, which is what the display cache keys a reading of
+// that text by (displayCacheKey) and what the stored trees are keyed by too (texttrees.Sum). A
+// caller that holds the sum asks this package for a reading without the text and without hashing
+// it a second time (HoldsDisplayTree, PutStoredDisplayTree).
+func TextSum(text string) [32]byte { return sha256.Sum256([]byte(text)) }
+
 // DisplayJSON is the ProseMirror tree markdown is shown as (ReadForDisplay), encoded as the JSON
 // a response carries beside the stored text, or nil for text with nothing in it. The read never
 // refuses, so neither does this; an encoding that fails - which only an attribute no JSON holds
@@ -29,7 +35,7 @@ func DisplayJSON(markdown string, mode DisplayMode) json.RawMessage {
 	if markdown == "" {
 		return nil
 	}
-	key := displayCacheKey{sum: sha256.Sum256([]byte(markdown)), mode: mode}
+	key := displayCacheKey{sum: TextSum(markdown), mode: mode}
 	if tree, held := displayCache.Get(key); held {
 		return tree
 	}
@@ -61,7 +67,7 @@ func DisplayTreeToStore(markdown string, mode DisplayMode) json.RawMessage {
 	if markdown == "" {
 		return nil
 	}
-	if tree, held := displayCache.Get(displayCacheKey{sum: sha256.Sum256([]byte(markdown)), mode: mode}); held {
+	if tree, held := displayCache.Get(displayCacheKey{sum: TextSum(markdown), mode: mode}); held {
 		return tree
 	}
 	tree, err := json.Marshal(ReadForDisplay(markdown, mode).toDisplayJSON())
@@ -85,9 +91,10 @@ func HoldsDisplayTree(sum [32]byte, mode DisplayMode) bool {
 	return held
 }
 
-// PutStoredDisplayTree puts a tree this process did not read - the text_trees row of markdown in
-// mode, read back by a reader that is about to answer it (texttrees) - into the display cache,
-// so the DisplayJSON that follows answers these bytes and reads no markdown.
+// PutStoredDisplayTree puts a tree this process did not read - the text_trees row of the text
+// whose sum is sum, read in mode and read back by a reader that is about to answer it
+// (texttrees) - into the display cache, so the DisplayJSON that follows answers these bytes and
+// reads no markdown.
 //
 // The cache is the first of two levels: the trees this process has already served stand in front
 // of the table, so a hot list - an issue's comments re-read on every event of it - costs neither
@@ -97,13 +104,16 @@ func HoldsDisplayTree(sum [32]byte, mode DisplayMode) bool {
 // this one copied the bytes. That is what lets a test assert that a comment list read after a
 // restart built nothing.
 //
-// An empty text has no tree and no key, and a row holding no bytes is no tree either; both are
-// ignored, so nothing a caller passes can shadow a reading with nothing.
-func PutStoredDisplayTree(markdown string, mode DisplayMode, tree json.RawMessage) {
-	if markdown == "" || len(tree) == 0 {
+// The caller passes the sum it read the row under (TextSum), the same key it asked the table
+// with, so a read of a list hashes each of its texts once rather than once a level. An empty
+// text has no tree and no row, so no caller holds a sum to put for one, and a row holding no
+// bytes is no tree either and is ignored: nothing a caller passes can shadow a reading with
+// nothing.
+func PutStoredDisplayTree(sum [32]byte, mode DisplayMode, tree json.RawMessage) {
+	if len(tree) == 0 {
 		return
 	}
-	displayCache.Put(displayCacheKey{sum: sha256.Sum256([]byte(markdown)), mode: mode}, tree)
+	displayCache.Put(displayCacheKey{sum: sum, mode: mode}, tree)
 }
 
 // displayTreeBuilds counts what DisplayTreeBuilds answers.

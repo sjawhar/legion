@@ -163,6 +163,8 @@ func TestSettlementApplyStampStampsTheBlockIdsTheDocumentLacks(t *testing.T) {
 		t.Fatalf("the document the settlement read needs %d block ids, want the one the test left it", repairs)
 	}
 	step, outcome = settle.applyStamp(ctx)
+	// settleOn and not settleStampOnly: nothing moved this room, so the settlement goes on to
+	// its repairs rather than ending on the stamp it just wrote.
 	requireStageGoesOn(t, "applyStamp", step, outcome)
 
 	if settle.stamp == nil || len(settle.slots) != 1 {
@@ -170,9 +172,6 @@ func TestSettlementApplyStampStampsTheBlockIdsTheDocumentLacks(t *testing.T) {
 	}
 	if repairs := pmdoc.BlockIDRepairCount(settle.reconciled); repairs != 0 {
 		t.Fatalf("the stamped tree still needs %d block ids", repairs)
-	}
-	if settle.stampSuperseded {
-		t.Fatal("applyStamp found the settlement superseded on a room nothing moved")
 	}
 }
 
@@ -200,9 +199,8 @@ func TestSettlementCommitStampCommitsTheStampAlone(t *testing.T) {
 	state.roomGeneration = service.nextRoomGeneration()
 	state.mu.Unlock()
 	step, outcome = settle.applyStamp(ctx)
-	requireStageGoesOn(t, "applyStamp", step, outcome)
-	if !settle.stampSuperseded {
-		t.Fatal("applyStamp left the settlement to go on over a document that moved under its read")
+	if step != settleStampOnly || outcome != (settleOutcome{}) {
+		t.Fatalf("applyStamp ended at step %d with outcome %+v, want the stamp alone left to commit", step, outcome)
 	}
 
 	step, outcome = settle.commitStamp(ctx)

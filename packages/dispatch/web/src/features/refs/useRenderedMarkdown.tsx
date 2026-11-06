@@ -373,23 +373,22 @@ function keepTheReadersPlace(element: HTMLElement): ReadersPlace {
  * has `markdown` parsed here instead and handed to `paint` the same way; and without an engine,
  * a tree the schema refuses or a parse the engine refuses, `markdown` is written into the
  * element as literal text with `isFallback` set. A dispatch:// reference stays literal text to
- * Markdown (it isn't a scheme GFM
- * autolinks), so bare refs then get wrapped into real links; a same-origin dashboard URL is
- * already a real link by then (GFM autolinked it, or the author wrote it as Markdown link
- * syntax). Either way, every reference anchor gets its href rewritten to the SPA route and its
- * text handed to a portal-mounted `RefLink` for the resolved title. `decorate` runs last, on the
- * fallback text as on a painted element, so a `<mark>` it adds never splits a reference before
- * the link pass sees it, and a plain lead it prepends is never read as a reference; it answers the
- * anchors the portals mount into, so it may replace an anchor's element. Each Dispatch picture's
- * placeholder is found after it, wherever it left one (`MarkdownPreview` puts an inert span in a
- * link's place), and gets a portal-mounted `DispatchPicture` in the shape `pictures` names.
- * Where the app provides a decision card (`TextAskCard`), each `ask` shell a parsed `paint` drew
- * gets one, mounted in the same commit (`collectAskHosts`); the card is a dependency, so a new
- * provider value renders again. On a painted body, each fenced `mermaid` block then draws as its
- * diagram (`drawMermaidDiagrams`, which draws a source it has not drawn before late, once its
- * worker answers; the paint that replaces it, and the unmount, cancel that). It runs after every
- * other pass, so a `dispatch://` in a diagram's label is never wrapped as a link or collected as
- * a reference.
+ * Markdown (it isn't a scheme GFM autolinks), so bare refs then get wrapped into real links; a
+ * same-origin dashboard URL is already a real link by then (GFM autolinked it, or the author
+ * wrote it as Markdown link syntax). Either way, every reference anchor gets its href rewritten
+ * to the SPA route and its text handed to a portal-mounted `RefLink` for the resolved title.
+ * `decorate` runs last, on the fallback text as on a painted element, so a `<mark>` it adds
+ * never splits a reference before the link pass sees it, and a plain lead it prepends is never
+ * read as a reference; it answers the anchors the portals mount into, so it may replace an
+ * anchor's element. Each Dispatch picture's placeholder is found after it, wherever it left one
+ * (`MarkdownPreview` puts an inert span in a link's place), and gets a portal-mounted
+ * `DispatchPicture` in the shape `pictures` names. Where the app provides a decision card
+ * (`TextAskCard`), each `ask` shell a parsed `paint` drew gets one, mounted in the same commit
+ * (`collectAskHosts`); the card is a dependency, so a new provider value renders again. On a
+ * painted body, each fenced `mermaid` block then draws as its diagram (`drawMermaidDiagrams`,
+ * which draws a source it has not drawn before late, once its worker answers; the paint that
+ * replaces it, and the unmount, cancel that). It runs after every other pass, so a `dispatch://`
+ * in a diagram's label is never wrapped as a link or collected as a reference.
  * `onRendered` fires after each render lands; the newest callback is the one called, and a new
  * callback alone re-renders nothing. `paint` and `decorate` are dependencies: a caller passes a
  * module-level function or memoises one on what it reads. The options object itself is not one,
@@ -399,13 +398,12 @@ function keepTheReadersPlace(element: HTMLElement): ReadersPlace {
  * page's own thread (`markdown-engine.ts`), so it lands a frame or more after the commit that
  * rendered it. A stored text never does, however long it is: its tree is drawn in the commit
  * that mounted it. Until a parse lands, `isPending` is set and the element holds the body's own
- * literal text - selectable,
- * under nothing - unless it already holds a paint of an earlier source, which it keeps instead,
- * so a streaming turn never flips back to its source between frames. Every paint, the pending
- * one included, recomputes the ask hosts, the reference anchors and the picture anchors in the
- * same callback, so no portal is left pointing into a page that has been replaced; a kept paint
- * replaces nothing and keeps the portals it has. `onRendered` fires on the paint that formats
- * the body, never on the pending one.
+ * literal text - selectable, under nothing - unless it already holds a paint of an earlier
+ * source, which it keeps instead, so a streaming turn never flips back to its source between
+ * frames. Every paint, the pending one included, recomputes the ask hosts, the reference anchors
+ * and the picture anchors in the same callback, so no portal is left pointing into a page that
+ * has been replaced; a kept paint replaces nothing and keeps the portals it has. `onRendered`
+ * fires on the paint that formats the body, never on the pending one.
  *
  * The wait for an answer belongs to this element, not to the render of one frame. A turn
  * streaming into the live view renders up to ten frames a second (`AgentThread.tsx`), and every

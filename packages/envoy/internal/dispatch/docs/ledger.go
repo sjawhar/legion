@@ -183,32 +183,29 @@ func (l *Ledger) publishEvents() {
 // stored must not fail a write that has committed: a read of a version whose tree is missing
 // reads the markdown, exactly as it did before there was a table.
 //
-// A failure is logged with the documents it was for and changes no answer. A caller still holding
-// a pooled connection stores nothing, for the reason api's storeDisplayTrees gives.
+// A failure is logged with the documents it was for and changes no answer. The store itself is
+// texttrees.StoreFor, the one policy every path that writes a stored text keeps, which is also
+// why a caller still holding a pooled connection stores nothing; the texts are gathered only
+// where there is something to store, so that caller builds no slice either.
 func (l *Ledger) storeVersionTrees(ctx context.Context) {
 	if len(l.versionTexts) == 0 || store.HoldsPooledConnection(ctx) {
 		return
 	}
-	texts := make([]string, 0, len(l.versionTexts))
-	documents := make([]string, 0, len(l.versionTexts))
-	for _, written := range l.versionTexts {
-		texts = append(texts, written.markdown)
-		documents = append(documents, written.artifactID)
-	}
+	written := l.versionTexts
 	l.versionTexts = nil
-	if err := texttrees.New(l.service.textTreePool()).Store(ctx, pmdoc.DisplayLatest, texts...); err != nil {
+	texts := make([]string, 0, len(written))
+	for _, one := range written {
+		texts = append(texts, one.markdown)
+	}
+	if err := texttrees.StoreFor(ctx, l.service.store, pmdoc.DisplayLatest, texts...); err != nil {
+		// The documents are listed for this line alone, so they are gathered where it is written
+		// rather than on every committed write.
+		documents := make([]string, 0, len(written))
+		for _, one := range written {
+			documents = append(documents, one.artifactID)
+		}
 		slog.Warn("dispatch: store document version display trees failed", "documents", documents, "error", err)
 	}
-}
-
-// textTreePool is the pool a stored text's display tree is stored through: nil on a service with
-// no database, which a test builds, where the store answers its own refusal and no caller is
-// affected.
-func (s *Service) textTreePool() *store.Pool {
-	if s == nil || s.store == nil {
-		return nil
-	}
-	return s.store.Pool
 }
 
 // commit is Commit up to the publish. Another transaction can run between the two, and tests

@@ -27,6 +27,11 @@ const (
 	// settleOn is no ending: the stage left the settlement going on, and the outcome beside it is
 	// nothing. Only settleRoomWithin reads it; a settlement never ends on it.
 	settleOn
+	// settleStampOnly is the one stage ending that names the stage after it: the document moved
+	// under the settlement's read, so the block-id stamp applyStamp wrote into the room is all
+	// this settlement commits, and settleRoomWithin goes on to commitStamp and to no stage after
+	// it. Only applyStamp answers it, and the outcome beside it is nothing.
+	settleStampOnly
 )
 
 // settlement is one document's settlement, as its stages run it (settleRoomWithin): the room it
@@ -77,13 +82,9 @@ type settlement struct {
 	// reconciled is the tree the ask blocks are reconciled on, the stamp's when it stamped ids;
 	// versioned is the one the version is rendered from, read again after the repairs when the
 	// settlement wrote any.
-	reconciled *pmdoc.Node
-	versioned  *pmdoc.Node
-	// stampSuperseded marks a settlement whose stamp is all it commits: the document moved under
-	// its read, so commitStamp commits that stamp alone and the settlement ends with it
-	// (applyStamp).
-	stampSuperseded bool
-	reconciliation  settlementReconciliation
+	reconciled     *pmdoc.Node
+	versioned      *pmdoc.Node
+	reconciliation settlementReconciliation
 	// snapshotCursor is the head the version records (doc_update_version), through which every one
 	// of the room's updates it holds is stored.
 	snapshotCursor int64
@@ -172,14 +173,14 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	if step, outcome := settle.readLocked(ctx, parent); step != settleOn {
 		return outcome
 	}
-	if step, outcome := settle.applyStamp(ctx); step != settleOn {
-		return outcome
-	}
-	if settle.stampSuperseded {
+	switch step, outcome := settle.applyStamp(ctx); step {
+	case settleStampOnly:
 		// The document moved under the settlement's read, so the stamp in the room is all it
-		// commits. This return is what keeps the copy lock reconcileAskBlocks takes below out of
-		// the transaction that holds the stamp's pending row.
-		_, outcome := settle.commitStamp(ctx)
+		// commits. Committing it here rather than below is what keeps the copy lock
+		// reconcileAskBlocks takes out of the transaction that holds the stamp's pending row.
+		_, stamped := settle.commitStamp(ctx)
+		return stamped
+	case settleDone:
 		return outcome
 	}
 	if step, outcome := settle.planRepairs(ctx); step != settleOn {
@@ -238,6 +239,10 @@ func (st *settlement) take(parent context.Context) (settleStep, settleOutcome) {
 // readLocked is what the settlement reads once its transaction holds the document's owner row: the
 // latest version, the document's cursor lock, the gate the room's instance passes, the tree it
 // reconciles and the rendering of that tree, and whom its version credits.
+//
+// It is given both of the settlement's contexts: ctx carries this settlement's ledger, cursor and
+// transaction, and is what every read here runs under; parent is the lifetime the gate's reload
+// of a room behind the durable head is given, once this transaction has been rolled back.
 func (st *settlement) readLocked(ctx context.Context, parent context.Context) (settleStep, settleOutcome) {
 	s, room, state, tx := st.service, st.room, st.state, st.tx
 	latest, err := latestVersion(ctx, tx, room)
@@ -380,9 +385,9 @@ func (st *settlement) commitFailed(advanced bool, err error) settleOutcome {
 // applyStamp stamps the block ids the settlement's read lacks into the room; a settlement whose
 // read lacks none writes nothing here. It is also where the settlement meets a room gone or a
 // document moved under its read, under the one hold of the room's state that records the ask
-// blocks the stamp renamed. A settlement that goes on from here holding a stamp in the room
-// (stampSuperseded) goes on only to commitStamp; any other holds the ask blocks' sources read
-// under that state.
+// blocks the stamp renamed. A settlement that holds a stamp in the room and meets a document
+// that moved under its read ends here with settleStampOnly, which goes on to commitStamp and to
+// nothing after it; any other goes on holding the ask blocks' sources read under that state.
 func (st *settlement) applyStamp(ctx context.Context) (settleStep, settleOutcome) {
 	s, room, state := st.service, st.room, st.state
 	st.reconciled = st.read
@@ -426,8 +431,7 @@ func (st *settlement) applyStamp(ctx context.Context) (settleStep, settleOutcome
 		if len(st.slots) == 0 {
 			return settleDone, settleOutcome{}
 		}
-		st.stampSuperseded = true
-		return settleOn, settleOutcome{}
+		return settleStampOnly, settleOutcome{}
 	}
 	// The ask blocks' sources are read now, after the tree they are reconciled on: an update in that
 	// tree whose observer has already run has recorded who introduced its blocks, and one whose
@@ -438,7 +442,7 @@ func (st *settlement) applyStamp(ctx context.Context) (settleStep, settleOutcome
 }
 
 // commitStamp commits the block-id stamp of a settlement the document moved under
-// (stampSuperseded): that stamp is in the room and its browsers, so it is stored and broadcast and
+// (settleStampOnly): that stamp is in the room and its browsers, so it is stored and broadcast and
 // its transaction committed with no version, and the settlement ends with it.
 func (st *settlement) commitStamp(ctx context.Context) (settleStep, settleOutcome) {
 	s, room, tx := st.service, st.room, st.tx
@@ -597,9 +601,9 @@ func (st *settlement) commitVersion(ctx context.Context) (settleStep, settleOutc
 	state.mu.Lock()
 	// A settlement that wrote into the room commits what it wrote even when the document has moved
 	// since its read: the room and its peers hold those updates, and dropped here they would never
-	// reach the store. Its version is the document as it stood at its last read, after the
-	// repairs, every update of which this transaction stores; a move made after that read is in a
-	// later version.
+	// reach the store. Its version is the document as it stood at its last read, after the repairs,
+	// every update of which this transaction stores; a move made after that read is in a later
+	// version.
 	if s.stopping.Load() || state.closed || state.failed != nil || (state.roomGeneration != st.generation && len(st.slots) == 0) {
 		s.unlockState(room, state)
 		s.discardSuppressedPersistence(room, st.slots...)

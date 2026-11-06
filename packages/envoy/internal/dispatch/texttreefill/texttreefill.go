@@ -85,21 +85,22 @@ const (
 	kindComponent = "component"
 )
 
-// storedTexts lists every row that holds a stored text as the moment it was written, the kind of
-// row it is and the key that reads it back. It never projects the text itself: the batch is
-// chosen by time alone and the texts are read back by key afterwards (textsOf), because a sort
-// over a projection carrying the markdown would detoast the whole corpus - 5.8 GB of it - on
-// every batch.
+// storedTexts lists every row that holds a stored text as the kind of row it is and the key that
+// reads it back, inside a time range its caller names. It never projects the text itself: the
+// batch is chosen by time alone and the texts are read back by key afterwards (textsOf), because
+// a sort over a projection carrying the markdown would detoast the whole corpus - 5.8 GB of it -
+// on every batch. It projects no moment either, the range having said all a batch needs of them
+// (headOfKind is where a moment is read).
 //
 // A row whose text is empty is left out: an empty text has no tree and no row to fill
 // (pmdoc.DisplayJSON), so counting it would leave every pass with work it can never finish.
 // Components carry no time of their own - an import replaces a project's whole set - so they are
 // ordered by the import that wrote them, and their key is a pair.
 //
-// It orders nothing. wholeBatch is its one use: the whole of a time range, which a batch takes
-// as it finds it.
+// It orders nothing. wholeBatch and restOfBatch are its two uses: the whole of a time range,
+// which a batch takes as it finds it.
 const storedTexts = `
-	select created_at, kind, owner, id from (
+	select kind, owner, id from (
 		select created_at, '` + kindComment + `', '', id::text from comments where body <> ''
 		union all
 		select created_at, '` + kindMessage + `', '', id::text from messages where body <> ''
@@ -121,33 +122,34 @@ const storedTexts = `
 	) stored (created_at, kind, owner, id)
 `
 
-// headOfKind is the newest fillBatch stored texts of one kind written before the cursor, as the
-// moment each was written and the key that reads it back. One statement a kind rather than one
-// over the union above, for two reasons: a kind's newest-first key is its own - the reviews' is
-// docs.ReviewOrder, the order their events committed, because artifact_reviews.created_at is its
-// transaction's start and its id is random (api's TestEveryReviewReadOrdersByReviewOrder holds
-// every read of that table in the module to it) - and each statement then sorts one table's rows
-// rather than a seven-way union's.
+// headOfKind is the moment each of the newest fillBatch stored texts of one kind written before
+// the cursor was written. The moment is all it answers: the keys of the rows a batch takes come
+// from wholeBatch, so a key read here would be a key read twice and seven batches of them sorted
+// for nothing. One statement a kind rather than one over the union above, for two reasons: a
+// kind's newest-first key is its own - the reviews' is docs.ReviewOrder, the order their events
+// committed, because artifact_reviews.created_at is its transaction's start and its id is random
+// (api's TestEveryReviewReadOrdersByReviewOrder holds every read of that table in the module to
+// it) - and each statement then sorts one table's rows rather than a seven-way union's.
 //
 // What the heads decide is only where to cut. The batch itself is wholeBatch, every stored text
 // in the range the cut opens, so a kind whose head is ordered by something other than time
 // leaves nothing behind: a row of it the head did not name is still in that range.
 var headOfKind = map[string]string{
-	kindComment: `select created_at, '', id::text from comments
+	kindComment: `select created_at from comments
 		 where body <> '' and created_at < $1 order by created_at desc limit $2`,
-	kindMessage: `select created_at, '', id::text from messages
+	kindMessage: `select created_at from messages
 		 where body <> '' and created_at < $1 order by created_at desc limit $2`,
-	kindBroadcast: `select created_at, '', id::text from broadcasts
+	kindBroadcast: `select created_at from broadcasts
 		 where body <> '' and created_at < $1 order by created_at desc limit $2`,
-	kindAsk: `select created_at, '', id::text from asks
+	kindAsk: `select created_at from asks
 		 where created_at < $1 order by created_at desc limit $2`,
-	kindVersion: `select created_at, '', id::text from artifact_versions
+	kindVersion: `select created_at from artifact_versions
 		 where markdown is not null and markdown <> '' and created_at < $1
 		 order by created_at desc limit $2`,
-	kindReview: `select created_at, '', id::text from artifact_reviews
+	kindReview: `select created_at from artifact_reviews
 		 where reason is not null and reason <> '' and created_at < $1
 		 order by ` + docs.ReviewOrder + ` limit $2`,
-	kindComponent: `select snapshot.imported_at, component.project_key, component.id
+	kindComponent: `select snapshot.imported_at
 		  from components component
 		  join architecture_snapshots snapshot on snapshot.id = component.snapshot_id
 		 where component.prose <> '' and snapshot.imported_at < $1
@@ -161,6 +163,10 @@ var headOfKind = map[string]string{
 // cursor that moved to a moment it had only half covered would strand the other half, and one
 // that stopped short of a moment whose rows fill a whole batch would never move at all.
 const wholeBatch = storedTexts + ` where created_at < $1 and created_at >= $2`
+
+// restOfBatch is wholeBatch with no moment to cut at: every stored text left under the cursor,
+// which is what the last batch takes once every kind's head came back shorter than a batch.
+const restOfBatch = storedTexts + ` where created_at < $1`
 
 // Run fills the display trees of the stored texts that have none at this build's display parser
 // version, and keeps the table to the two newest versions, once an aligned hour across every
@@ -186,7 +192,7 @@ func Run(ctx context.Context, pool *store.Pool, leases duty.Leases) {
 func pass(ctx context.Context, pool *store.Pool) {
 	fill, err := pool.TextTrees()
 	if err != nil {
-		slog.Error("dispatch: display tree fill", "error", err)
+		slog.Error("dispatch: display tree fill could not open its pool", "error", err)
 		return
 	}
 	version := pmdoc.DisplayTreeVersionNow()
@@ -241,7 +247,7 @@ type filled struct {
 // which a rolling deploy runs beside it - is stored by the first read of it, exactly as it was
 // before this pass existed.
 func fillVersion(ctx context.Context, fill *store.Pool, version int) (filled, error) {
-	through, finished, err := readCursor(ctx, fill, version)
+	through, finished, err := openCursor(ctx, fill, version)
 	if err != nil {
 		return filled{}, err
 	}
@@ -303,14 +309,14 @@ func fillOneBatch(ctx context.Context, fill *store.Pool, table texttrees.Table, 
 	return done, nil
 }
 
-// readCursor answers how far the pass for version has reached and whether it has finished,
-// writing the row at the first pass of a version. A new row starts at the moment it is written,
+// openCursor writes the pass's row for version where there is none and answers how far that
+// pass has reached and whether it has finished. A new row starts at the moment it is written,
 // not at the oldest text: every text written from then on has its tree stored by the write that
 // stored it, so the pass has nothing to do above that moment and everything below it.
 //
 // It takes no lock on the row. The lease is what keeps two processes out of one pass
 // (duty.Exclusive, fillLease), and a second process reading this row has already lost it.
-func readCursor(ctx context.Context, fill *store.Pool, version int) (through time.Time, done bool, err error) {
+func openCursor(ctx context.Context, fill *store.Pool, version int) (through time.Time, done bool, err error) {
 	if _, err := fill.Exec(ctx, `
 		insert into text_tree_rebuild (version, through) values ($1, now()) on conflict do nothing
 	`, version); err != nil {
@@ -327,18 +333,23 @@ func readCursor(ctx context.Context, fill *store.Pool, version int) (through tim
 // nextBatch reads back the texts of the newest whole batch of stored texts written before
 // through, the moment to move the cursor to, and whether this is the last batch there is.
 func nextBatch(ctx context.Context, fill *store.Pool, through time.Time) (texts []string, cut time.Time, last bool, err error) {
-	head, err := headCandidates(ctx, fill, through)
+	head, err := headMoments(ctx, fill, through)
 	if err != nil {
 		return nil, time.Time{}, false, err
 	}
 	if len(head) < fillBatch {
 		// Every head was shorter than a batch, so between them they hold every stored text left
-		// and there is nothing below them to come back for.
-		texts, err := textsOf(ctx, fill, head)
+		// and there is nothing below them to come back for: the batch is every row under the
+		// cursor, taken with no moment to cut at (restOfBatch).
+		rest, err := readCandidates(ctx, fill, restOfBatch, through)
+		if err != nil {
+			return nil, time.Time{}, false, err
+		}
+		texts, err = textsOf(ctx, fill, rest)
 		return texts, through, true, err
 	}
-	cut = head[fillBatch-1].at
-	whole, err := readCandidates(ctx, fill, "", wholeBatch, through, cut)
+	cut = head[fillBatch-1]
+	whole, err := readCandidates(ctx, fill, wholeBatch, through, cut)
 	if err != nil {
 		return nil, time.Time{}, false, err
 	}
@@ -346,51 +357,49 @@ func nextBatch(ctx context.Context, fill *store.Pool, through time.Time) (texts 
 	return texts, cut, false, err
 }
 
-// headCandidates is every kind's head (headOfKind) under one cursor, newest first across the
-// kinds. It is read for its fillBatch-th row alone, the moment to cut the batch at: a cut taken
-// from the merged heads is a moment the batch below it is about a batch's worth of rows, and it
-// is always below the cursor, which is what moves the pass on.
+// headMoments is the moment of every row of every kind's head (headOfKind) under one cursor,
+// newest first across the kinds. It is read for its fillBatch-th moment alone, the one to cut
+// the batch at: a cut taken from the merged heads is a moment the batch below it is about a
+// batch's worth of rows, and it is always below the cursor, which is what moves the pass on.
 //
 // A kind whose head is ordered by something other than time - the reviews' is - can name a row
 // older than that cut and leave a newer one out. Neither matters here: the rows the batch takes
 // are wholeBatch's, every stored text in the range the cut opens.
-func headCandidates(ctx context.Context, fill *store.Pool, through time.Time) ([]candidate, error) {
-	var head []candidate
-	for kind, query := range headOfKind {
-		found, err := readCandidates(ctx, fill, kind, query, through, fillBatch)
+func headMoments(ctx context.Context, fill *store.Pool, through time.Time) ([]time.Time, error) {
+	var head []time.Time
+	for _, query := range headOfKind {
+		rows, err := fill.Query(ctx, query, through, fillBatch)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("list the stored texts to fill: %w", err)
+		}
+		found, err := pgx.CollectRows(rows, pgx.RowTo[time.Time])
+		if err != nil {
+			return nil, fmt.Errorf("list the stored texts to fill: %w", err)
 		}
 		head = append(head, found...)
 	}
-	slices.SortFunc(head, func(left, right candidate) int { return right.at.Compare(left.at) })
+	slices.SortFunc(head, func(left, right time.Time) int { return right.Compare(left) })
 	return head, nil
 }
 
-// candidate is one row that holds a stored text: when it was written, the kind of row it is and
-// the key that reads it back - the row's id, and for a component the project it belongs to too.
+// candidate is one row that holds a stored text: the kind of row it is and the key that reads it
+// back - the row's id, and for a component the project it belongs to too.
 type candidate struct {
-	at    time.Time
 	kind  string
 	owner string
 	id    string
 }
 
-// readCandidates runs one batch query and drains it, so no cursor of this pool is open while the
-// batch's texts are read back and stored. A query of one kind (headOfKind) is named by that
-// kind and answers the moment and the key alone; the query over every kind at once (wholeBatch)
-// is named by the empty kind and answers each row's own.
-func readCandidates(ctx context.Context, fill *store.Pool, kind, query string, args ...any) ([]candidate, error) {
+// readCandidates runs one batch query over every kind at once (wholeBatch, restOfBatch) and
+// drains it, so no cursor of this pool is open while the batch's texts are read back and stored.
+func readCandidates(ctx context.Context, fill *store.Pool, query string, args ...any) ([]candidate, error) {
 	rows, err := fill.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list the stored texts to fill: %w", err)
 	}
 	found, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (candidate, error) {
-		found := candidate{kind: kind}
-		if kind == "" {
-			return found, row.Scan(&found.at, &found.kind, &found.owner, &found.id)
-		}
-		return found, row.Scan(&found.at, &found.owner, &found.id)
+		var found candidate
+		return found, row.Scan(&found.kind, &found.owner, &found.id)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list the stored texts to fill: %w", err)
@@ -457,9 +466,11 @@ func textColumn(ctx context.Context, fill *store.Pool, kind, query string, args 
 }
 
 // askTexts reads back every stored text an ask holds: its question, the label and description of
-// each of its options, the text of the answer it carries and the reason it was resolved with,
-// which is the list a reader of an ask is shown (api's askReadDisplayTexts). The three jsonb
-// columns are decoded here rather than read as columns because that is how the row holds them.
+// each of its options, the text of the answer it carries and the reason it was resolved with.
+// The list itself is texttrees.AskShownTexts, the one a reader of an ask is shown (api's
+// askReadDisplayTexts), so the pass stores the trees that read answers and no others. The three
+// jsonb columns are decoded here rather than read as columns because that is how the row holds
+// them.
 //
 // A column this process cannot decode is logged and skipped, and the rest of the ask is stored:
 // the pass must not stop on one row, since a pass that fails on it would take the same batch
@@ -479,26 +490,28 @@ func askTexts(ctx context.Context, fill *store.Pool, ids []string) ([]string, er
 		if err := rows.Scan(&id, &question, &options, &answer, &resolution); err != nil {
 			return nil, fmt.Errorf("read the stored texts of %q: %w", kindAsk, err)
 		}
-		texts = append(texts, question)
 		var carried []model.AskOption
 		if _, err := decodeAskPart(options, &carried); err != nil {
 			slog.Warn("dispatch: display tree fill read an ask's options", "ask", id, "error", err)
-		}
-		for _, option := range carried {
-			texts = append(texts, option.Label, option.Description)
+			// Skipped whole, as the answer and the resolution are: a half-decoded slice holds
+			// whichever options the decode reached, which is no part of what a reader is shown.
+			carried = nil
 		}
 		var given model.AskAnswer
+		var carriedAnswer *model.AskAnswer
 		if _, err := decodeAskPart(answer, &given); err != nil {
 			slog.Warn("dispatch: display tree fill read an ask's answer", "ask", id, "error", err)
-		} else if given.Text != nil {
-			texts = append(texts, *given.Text)
+		} else {
+			carriedAnswer = &given
 		}
 		var resolved model.AskResolution
+		var carriedResolution *model.AskResolution
 		if held, err := decodeAskPart(resolution, &resolved); err != nil {
 			slog.Warn("dispatch: display tree fill read an ask's resolution", "ask", id, "error", err)
 		} else if held {
-			texts = append(texts, resolved.Reason)
+			carriedResolution = &resolved
 		}
+		texts = texttrees.AskShownTexts(texts, question, carried, carriedAnswer, carriedResolution)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("read the stored texts of %q: %w", kindAsk, err)

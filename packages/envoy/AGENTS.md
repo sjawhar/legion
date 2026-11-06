@@ -230,8 +230,8 @@ Each item below names a task and where its code is, then notes on it.
 - **Filling the display trees of older texts**: `internal/dispatch/texttreefill/`
 
   The pass that fills the texts written before this build, or before a change of `pmdoc.DisplayTreeVersion`: leased (`text-tree-fill`), at most two workers, newest first, its cursor the `text_tree_rebuild` row of the version it fills, so a restart resumes rather than starting again.
-  It takes its candidates one statement per kind and reads the texts back by key, never projecting the markdown into a sort, which on this corpus would detoast gigabytes for every batch.
-  The table keeps the trees of the two newest parser versions: a rolling deploy runs two builds at once and a rollback runs the older one again, so deleting the older version's rows would strand those pods on misses, and each miss writes a row back.
+  It cuts each batch with one statement a kind, which answers the moments of that kind's newest thousand rows and nothing else, takes the batch itself with one statement over every kind at once, and reads the texts back by key, never projecting the markdown into a sort, which on this corpus would detoast gigabytes for every batch.
+  The table keeps the trees of the two newest parser versions: a rolling deploy runs two builds at once and a rollback runs the older one again, so deleting the older version's rows would strand those pods on misses, and each miss writes a row back; the hourly delete and the query of the two newest versions both name `version` alone, which the primary key cannot lead on, so the table carries an index on it.
 
 - **Delivery measures**: `internal/dispatch/delivery/measures/`
 

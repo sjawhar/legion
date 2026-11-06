@@ -29,7 +29,7 @@ const coldFeedComments = 200
 // empties too: a real first read also parses each statement it runs, this one does not, and a
 // cold read measured here is the work of the server alone.
 func coldFeedDisplayCache(filler json.RawMessage, round int) {
-	pmdoc.PutStoredDisplayTree("a cold feed benchmark's display cache filler "+strconv.Itoa(round),
+	pmdoc.PutStoredDisplayTree(pmdoc.TextSum("a cold feed benchmark's display cache filler "+strconv.Itoa(round)),
 		pmdoc.DisplayLatest, filler)
 }
 
@@ -134,7 +134,6 @@ func BenchmarkTheActivityFeedsColdStages(b *testing.B) {
 		b.Fatalf("the feed of %s holds %d events, want %d", key, len(events), coldFeedComments)
 	}
 	texts := eventDisplayTexts(nil, events...)
-	distinct := make([]string, 0, len(texts))
 	sums := make([][32]byte, 0, len(texts))
 	seen := make(map[[32]byte]struct{}, len(texts))
 	for _, text := range texts {
@@ -143,7 +142,6 @@ func BenchmarkTheActivityFeedsColdStages(b *testing.B) {
 			continue
 		}
 		seen[sum] = struct{}{}
-		distinct = append(distinct, text)
 		sums = append(sums, sum)
 	}
 	table := texttrees.New(database.Pool)
@@ -180,10 +178,11 @@ func BenchmarkTheActivityFeedsColdStages(b *testing.B) {
 		for b.Loop() {
 			b.StopTimer()
 			round++
-			pmdoc.PutStoredDisplayTree("a cold stage benchmark's filler "+strconv.Itoa(round), pmdoc.DisplayLatest, filler)
+			pmdoc.PutStoredDisplayTree(pmdoc.TextSum("a cold stage benchmark's filler "+strconv.Itoa(round)),
+				pmdoc.DisplayLatest, filler)
 			b.StartTimer()
-			for index, sum := range sums {
-				pmdoc.PutStoredDisplayTree(distinct[index], pmdoc.DisplayLatest, stored[sum])
+			for _, sum := range sums {
+				pmdoc.PutStoredDisplayTree(sum, pmdoc.DisplayLatest, stored[sum])
 			}
 		}
 	})
@@ -191,8 +190,8 @@ func BenchmarkTheActivityFeedsColdStages(b *testing.B) {
 	b.Run("the trees of the answer", func(b *testing.B) {
 		b.ReportAllocs()
 		shaped := make([]model.Event, len(events))
-		for index, sum := range sums {
-			pmdoc.PutStoredDisplayTree(distinct[index], pmdoc.DisplayLatest, stored[sum])
+		for _, sum := range sums {
+			pmdoc.PutStoredDisplayTree(sum, pmdoc.DisplayLatest, stored[sum])
 		}
 		for b.Loop() {
 			copy(shaped, events)
