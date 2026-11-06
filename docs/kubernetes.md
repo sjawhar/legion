@@ -2399,7 +2399,7 @@ Mount it with `defaultMode: 0440`, never the kubelet's default `0644`, which oth
 any other seed file, the daemon's own or another user's, stays 0600.
 A daemon running as root in a pod has no such exception:
 under `fsGroup` its mount is `root:<fsGroup>` 0440, which the reader refuses for a root reader, so give that pod no `fsGroup` and mount the Secret with `defaultMode: 0400`, or pass the seed as `NATS_NKEY_SEED` (and the daemon's own as `NATS_DAEMON_NKEY_SEED`) from a `secretKeyRef`.
-`legion start --check-config` reads the seed as boot does, and its OK line then names the seed's user by public key (`Config OK: project=<project> nats-nkey-user=U…`), never the seed.
+`legion start --check-config` reads the seed as boot does, and its OK line then names the seed's user by public key (`Config OK: project=<project> design-gate-steps=<steps> nats-nkey-user=U…`), never the seed.
 With one, every pod's `NATS_NKEY_SEED_FILE` names `/var/run/legion/providers/NATS_NKEY_SEED`, the providers Secret's own `NATS_NKEY_SEED` key, which every pod and the image probe mount beside the `provider_keys`, whatever a launch carries:
 the daemon never copies the seed into a claim's Secret.
 Put the same seed in the providers Secret under that key.
