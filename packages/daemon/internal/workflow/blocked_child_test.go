@@ -298,7 +298,7 @@ func TestAnUnblockedChildWaitsForItsTreesGate(t *testing.T) {
 // say now: a blocker a person added after the tree was opened, or one a tree Legion took back
 // still names (record.Issue.TakenBack, which promotion admitted whatever its links say). The
 // line carries the root as an issue of its own (record.Waiting's LineFirstPhase) and
-// candidateWaitsOn asks blockers.Holds of it, which answers nothing for a root, so no blocker
+// blockers.LineWaitsOn asks blockers.Holds of it, which answers nothing for a root, so no blocker
 // keeps it out.
 func TestTheGateOpeningStartsAnAdmittedRootWhateverItsLinksSay(t *testing.T) {
 	for _, tc := range []struct {

@@ -27,9 +27,11 @@ func ChildCycleReason(child, ancestor string) string {
 
 // ChildrenFirstNotice is what the tree's architect is told when a parent's own first phase begins
 // to wait for its children: the parent, each open child with the Dispatch status that holds it,
-// what ends the wait, and each cycle among them. It is told once per issue and generation
-// (admit's tellChildrenFirst), so a child filed later during one wait tells nobody again and a
-// re-admitted tree, whose architect writes its spec anew, is told anew.
+// what ends the wait, and each cycle among them. It is told once per issue and run of its tree —
+// the mark's key is the issue, its tree and that tree's root generation (admit's
+// tellChildrenFirst) — so a child filed later during one wait tells nobody again, while a
+// re-admitted tree, whose architect writes its spec anew, and a sub-parent handed over to a tree
+// of its own are told anew.
 func ChildrenFirstNotice(wait record.ChildWait) record.Notice {
 	named := make([]string, 0, len(wait.Open))
 	var cycles []string

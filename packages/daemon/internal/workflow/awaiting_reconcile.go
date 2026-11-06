@@ -282,10 +282,16 @@ type awaitDecision struct {
 func decideAwait(v awaitView) awaitDecision {
 	root := v.Root
 	switch {
-	case root.Phase != phase.Admitted || !claim.IsTreeRoot(root.Key, root.Tree) || root.Lingers() || !record.InWorkflow(root):
-		return awaitDecision{Why: "it is not an admitted root of a tree in the workflow"}
+	// Rule 0 is record.CanWaitOnPerson alone: it tests the phase, the linger and the workflow,
+	// and through AtWork that the issue is a tree root whose design gate has never opened, so
+	// every standing a second case here could reject it rejects already. Only what to say of a
+	// rejection is decided here, and the slot row is what divides the two: a root that holds no
+	// slot at all, and one holding a slot its own work no longer takes.
 	case !record.CanWaitOnPerson(root, record.GateValue(v.Gate), v.Slotted):
-		return awaitDecision{Why: "it holds no admission slot for work of its own"}
+		if !v.Slotted {
+			return awaitDecision{Why: "it holds no admission slot for work of its own"}
+		}
+		return awaitDecision{Why: "it is not an admitted root of a tree in the workflow whose spec its architect is still writing"}
 	case root.DeclaredSeq == 0:
 		return awaitDecision{Why: "its architect has handed nothing to a person since it was last given work"}
 	}
