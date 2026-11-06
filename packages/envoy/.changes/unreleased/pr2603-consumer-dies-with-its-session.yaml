@@ -1,11 +1,15 @@
 kind: Changed
 body: |-
-  A session's JetStream consumer dies with its session: the session reaper deletes the consumer of
-  every record it deletes, so the stream holds a consumer for each session a deployment has rather
-  than for each it has ever relayed. A session inside the gone horizon keeps its consumer and the
-  position it holds, whether it is live or has stopped answering, and so does one that registered
-  again between the reaper's decision and its delete. The consumers' 72-hour inactive threshold
-  stays the backstop for a session no reaper pass ever sees, and a consumer the pass could not
-  delete is logged and left to it.
+  A session's JetStream consumer dies with its session, on both paths that end one: a clean stop
+  (`DELETE /v1/sessions/<session_id>`, which every plugin's deregister and the Legion daemon's stop
+  of a role make) deletes the consumer where it removed the registration, and the session reaper
+  deletes the consumer of every record it reaps. So the stream holds a consumer for each session a
+  deployment has rather than for each it has ever relayed. A session that stays keeps its consumer
+  and the position it holds: one inside the gone horizon, live or stalled, and one whose
+  conditional stop was refused. A registration that races a delete is answered with a consumer
+  either way, the delete and the registration holding the session's own lock, and a delete that
+  lost the race recreates the consumer at the start that registration was answered with. The
+  consumers' 72-hour inactive threshold stays the backstop for a consumer no delete names, and a
+  delete that failed is logged and left to it.
 custom:
     Issue: pr2603

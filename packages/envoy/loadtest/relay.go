@@ -328,3 +328,51 @@ func startPullSpy(url string) (*pullSpy, error) {
 }
 
 func (p *pullSpy) close() { p.nc.Close() }
+
+// streamConsumers is ENVOY_NOTIFICATIONS's own consumer_count, read from the stream's info at the
+// step's start and at its end. It counts the consumers of that stream alone: the sessions'
+// s-<session id> consumers, the listener's durable and Dispatch's. The sampler's server-wide /jsz
+// count (resources.js_consumers_max, js_consumers_last) counts every consumer the server holds,
+// the KV buckets' watchers among them, so the two numbers answer different questions and the
+// run's report keeps them apart.
+type streamConsumers struct {
+	// Start is the count before the sessions register, End the count after the load and the
+	// grace. A read that failed leaves its count null, and StartError or EndError says why: the
+	// count is unknown, never 0, and the step's health rule refuses nothing on a count it does
+	// not have (errStreamConsumers).
+	Start      *int   `json:"start"`
+	End        *int   `json:"end"`
+	StartError string `json:"start_error,omitempty"`
+	EndError   string `json:"end_error,omitempty"`
+}
+
+// readStreamConsumers reads ENVOY_NOTIFICATIONS's consumer_count for the report and logs it under
+// when ("start" or "end"). A failed read is the error alone, with no count: the step runs on.
+func (st *step) readStreamConsumers(when string) (*int, string) {
+	n, err := streamConsumerCount(st.cfg.ep.nats)
+	if err != nil {
+		st.lg.Printf("%s consumers at the step's %s: %v", bus.Stream, when, err)
+		return nil, err.Error()
+	}
+	st.lg.Printf("%s consumers at the step's %s: %d", bus.Stream, when, n)
+	return &n, ""
+}
+
+// streamConsumerCount is the consumer_count ENVOY_NOTIFICATIONS's own info reports
+// ($JS.API.STREAM.INFO), read on a connection of its own.
+func streamConsumerCount(url string) (int, error) {
+	nc, err := nats.Connect(url, nats.Name("loadgen-stream-info"), nats.Timeout(5*time.Second))
+	if err != nil {
+		return 0, fmt.Errorf("nats connect: %w", err)
+	}
+	defer nc.Close()
+	js, err := nc.JetStream()
+	if err != nil {
+		return 0, fmt.Errorf("jetstream: %w", err)
+	}
+	info, err := js.StreamInfo(bus.Stream)
+	if err != nil {
+		return 0, fmt.Errorf("stream info %s: %w", bus.Stream, err)
+	}
+	return info.State.Consumers, nil
+}

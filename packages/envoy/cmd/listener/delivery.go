@@ -927,12 +927,11 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 		// The caches, the echo rule and an unreadable delivery mode judge the message before the
 		// session's own state does, as they always have; what is left is a message this path
 		// would push, or refuse on the session's entry. A session past the live window is
-		// answering nothing: its port, if it has one, does not take a push, and if it receives
-		// on its own subscription this listener was never going to push to it anyway. Either way
-		// nothing here failed - the message stays in the stream for the session to read back
-		// (POST /v1/replay), its own consumer still holds the copy its relay pushes when it
-		// answers again, and its record, its claims and its interests all stand - so this is a
-		// skip with a status of its own and not a delivery failure, which would publish an
+		// answering nothing, and a session receives what its own consumer holds and nothing else,
+		// so this path had nothing to hand it in any case. Either way nothing here failed - the
+		// message stays in the stream, its own consumer still holds the copy its relay pushes
+		// when it answers again, and its record, its claims and its interests all stand - so this
+		// is a skip with a status of its own and not a delivery failure, which would publish an
 		// exception and NAK the message for a session that is simply slow. The state is the
 		// session record's own age (session.SessionRegistry.Lookup) and never this cache's
 		// membership, which is also why it is read here rather than taken from the entry the

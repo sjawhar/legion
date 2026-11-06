@@ -25,8 +25,12 @@ const (
 	// acked at once; the server delivers no more until one is.
 	SessionConsumerMaxAckPending = 1024
 	// SessionConsumerInactiveThreshold is how long a session consumer outlives its last pull: the
-	// stream's retention, so a session that comes back while the stream still holds what it missed
-	// resumes where it stopped.
+	// stream's retention, so a session that comes back while its consumer stands resumes where it
+	// stopped. It is the backstop and no longer the usual end of a consumer's life: a clean stop
+	// and the session reaper each delete the consumer of the session record they delete
+	// (cmd/listener's deleteSessionConsumer, session.SessionReaper.DeleteConsumer), and a session
+	// whose consumer went with its record is given a new one at its next registration's resume
+	// point, or else at the first message the stream still holds on its own agent subject.
 	SessionConsumerInactiveThreshold = contracts.DeliveryDuplicateWindow
 )
 

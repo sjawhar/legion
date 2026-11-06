@@ -441,13 +441,14 @@ api() { # api PORT METHOD PATH [BODY]
 # registered SESSION SELF TOPICS… writes one session's registration straight onto the wire: the
 # same POST /v1/interests/subscribe a plugin's heartbeat makes, for the sessions a check needs to
 # age by the second rather than by a process's own clock. The listener refuses a registration that
-# names a port (sjawhar/legion#2674), so every session here receives on its own NATS connection.
+# names a port (sjawhar/legion#2674), and a session receives what its own consumer holds and
+# nothing else, so the registration below names no port.
 # It asks for the session consumer, as every plugin's registration does (dispatch://INFRA-771):
 # whatever else a registration says, one that asks for no consumer is refused 409 not_requested
 # and writes nothing (`consumerFor`), so a session registered without it would exist for no check
-# to read. The ask does not turn on SELF: `self_subscribed` records what the session says of
-# itself and decides no delivery any more, since a session receives what its own consumer holds
-# and nothing else.
+# to read. SELF decides nothing here: it sets `self_subscribed`, which records what the session
+# says of itself and which no delivery reads any more, so a check reads it back and nothing else
+# follows from it.
 registered() {
   local session=$1 self=$2 body
   shift 2

@@ -137,10 +137,10 @@ func TestTablesShowSessionDelivery(t *testing.T) {
 	text := section(md, "Session delivery, listener and NATS")
 	cells := rowCells(text, "after")
 	if cells == nil || cells[1] != "1000 / 0" || cells[2] != "12 / 80" || cells[6] != "0.100 / 0.120" ||
-		cells[7] != "80 / 85 (90)" || cells[10] != "1,003" || cells[11] != "40.0 / 33.3" {
+		cells[7] != "80 / 85 (90)" || cells[10] != "? / ? (0)" || cells[11] != "1,003" || cells[12] != "40.0 / 33.3" {
 		t.Errorf("the consumer step's row: %q\n%s", cells, text)
 	}
-	if cells := rowCells(text, "before"); cells == nil || cells[1] != "-" || cells[10] != "-" {
+	if cells := rowCells(text, "before"); cells == nil || cells[1] != "-" || cells[11] != "-" {
 		t.Errorf("the step with no delivery summary: %q\n%s", cells, text)
 	}
 	if !strings.Contains(text, "Envoy-Stored-At") {

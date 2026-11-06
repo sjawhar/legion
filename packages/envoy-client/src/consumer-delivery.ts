@@ -676,10 +676,10 @@ export function gapNoticeText(notice: ConsumerGapNotice): string {
 
 /**
  * What a session is told when the listener can give it no consumer, worded once for every host:
- * its registration was refused (`503 consumer_error|no_grant`, `409
- * not_requested|invalid_session_id`) or failed, so nothing reaches it until a later registration
- * is accepted. `why` is the listener's own message, which carries its machine-readable reason.
- * Each host shows it where it shows a gap notice and says once per outage.
+ * its registration was refused, by one of the reasons `ErrorWireSchema.reason` lists
+ * (`transport.ts`), or it failed, so nothing reaches it until a later registration is accepted.
+ * `why` is the listener's own message, which carries its machine-readable reason. Each host
+ * shows it where it shows a gap notice and says once per outage.
  */
 export function inboundUnavailableNoticeText(why: string): string {
   return envoyNoticeText({

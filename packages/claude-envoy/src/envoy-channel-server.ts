@@ -900,9 +900,9 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   /**
    * Said once per outage: the listener refused this session's registration, so it has no consumer
    * and receives nothing. The session still runs, and the heartbeat registers again every tick
-   * until one is accepted; the reason is the listener's own (`consumer_error`, `no_grant`,
-   * `not_requested`, `invalid_session_id`), which the error carries in its message and which
-   * `inboundUnavailableNoticeText` words for every host.
+   * until one is accepted; the reason is the listener's own, one of those
+   * `ErrorWireSchema.reason` lists (`@legion/envoy-client`'s `transport.ts`), which the error
+   * carries in its message and which `inboundUnavailableNoticeText` words for every host.
    */
   const inboundOutage = inboundUnavailable((why) => {
     process.stderr.write(
@@ -983,9 +983,9 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
         })
         return registering
       },
-      // A registration the listener refused (`503 consumer_error|no_grant`, `409
-      // not_requested|invalid_session_id`) leaves the session with no consumer at all, as every
-      // other failed registration does: the session is told once and the heartbeat asks again.
+      // A registration the listener refused, for any of the reasons `ErrorWireSchema.reason`
+      // lists, leaves the session with no consumer at all, as every other failed registration
+      // does: the session is told once and the heartbeat asks again.
       answered: (result) => {
         if (asking !== undefined) takeDeliveryAnswer(sessionID, asking, result)
       },

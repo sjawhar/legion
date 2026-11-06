@@ -34,8 +34,9 @@ arrives after a `/clear` moved the session to another id is answered `nak`. The 
 (the resume point and each topic's follow time) is the
 `consumer` part of the id's state file, written whenever it changes. An id with no snapshot of
 its own starts its consumer at the stream's end, so it is shown nothing published before it
-first registered. A registration the listener can give no consumer is refused by name (`503
-no_grant` or `consumer_error`, `409 not_requested` or `invalid_session_id`) and nothing is
+first registered. A registration the listener can give no consumer is refused by name, with the
+reason the one canonical list holds (`ErrorWireSchema.reason`,
+`packages/envoy-client/src/transport.ts`), and nothing is
 registered: the server says so on stderr and asks again at each heartbeat. There is no second
 path to fall back to.
 

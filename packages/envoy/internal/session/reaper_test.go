@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -196,6 +197,69 @@ func TestAReaperPassDeletesTheConsumerOfEveryRecordItDeleted(t *testing.T) {
 	}
 	if want := []string{"ses_gone"}; !slices.Equal(consumers, want) {
 		t.Fatalf("the pass deleted the consumers of %v, want %v: every record it kept keeps its consumer", consumers, want)
+	}
+}
+
+// A consumer the pass could not delete holds up nothing: the record whose consumer it is was
+// already deleted and is still counted, the record behind it is reaped and its consumer asked for
+// too, and the failure is one WARN naming the session, which is the only record anyone has of the
+// consumer left on the stream until its inactive threshold takes it. A pass that gave up on the
+// failure would leave every record behind it standing for a session that is gone, one more
+// listener restart each cycle away from being judged again.
+func TestAReaperPassWarnsOnAConsumerItCouldNotDeleteAndReapsTheRecordsBehindIt(t *testing.T) {
+	client := setupNATS(t)
+	now := &clock{}
+	// The logger the listener gives the registry (WithSessionLogger) is where the pass writes,
+	// so the WARN is read from there rather than from the process's default logger.
+	var logs lockedBuffer
+	r := reapingRegistry(t, client, now, WithSessionLogger(slog.New(slog.NewTextHandler(&logs, nil))))
+	for _, id := range []string{"ses_one", "ses_two"} {
+		if err := r.Put(id, SessionEntry{Port: 1, MachineID: "m1"}); err != nil {
+			t.Fatalf("register %s: %v", id, err)
+		}
+	}
+	// Both records are past the two-minute horizon, so the pass judges both gone.
+	now.advance(3 * time.Minute)
+
+	// The pass's first consumer delete fails, whichever record it reaches first: the order the
+	// candidates are judged in is the copy's, not the test's.
+	const refusal = "the server refused the consumer delete"
+	var asked []string
+	reaper := SessionReaper{DeleteConsumer: func(_ context.Context, sessionID string) error {
+		asked = append(asked, sessionID)
+		if len(asked) == 1 {
+			return errors.New(refusal)
+		}
+		return nil
+	}}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if reaped := r.ReapSessions(ctx, reaper); reaped != 2 {
+		t.Fatalf("the pass reaped %d records, want both: a consumer it could not delete costs no record its delete", reaped)
+	}
+	for _, id := range []string{"ses_one", "ses_two"} {
+		if _, err := r.Refresh(ctx, id); !errors.Is(err, natsgo.ErrKeyNotFound) {
+			t.Fatalf("the bucket's record of %s after the pass = %v, want it deleted", id, err)
+		}
+	}
+	if want := []string{"ses_one", "ses_two"}; !slices.Equal(slices.Sorted(slices.Values(asked)), want) {
+		t.Fatalf("the pass asked for the consumers of %v, want %v: the record behind the failed delete is asked for too", asked, want)
+	}
+
+	var warning string
+	for line := range strings.SplitSeq(logs.String(), "\n") {
+		if strings.Contains(line, `msg="session reaper deleted a record and could not delete its session consumer"`) {
+			warning = line
+		}
+	}
+	if warning == "" {
+		t.Fatalf("the pass logged nothing for the consumer of %s it could not delete; its lines were:\n%s", asked[0], logs.String())
+	}
+	for _, want := range []string{"level=WARN", "session_id=" + asked[0], refusal} {
+		if !strings.Contains(warning, want) {
+			t.Fatalf("the line for the consumer it could not delete is %q, which does not say %q", warning, want)
+		}
 	}
 }
 

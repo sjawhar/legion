@@ -5,7 +5,7 @@ body: |-
   wrote it. A publish to a topic the stream captures is stored once and answered with the envelope
   alone, and every subscribed session reads that one copy from its own consumer, so there is no
   recipient to report. A send addressed to one session still names that recipient's state and its
-  last registration (`recipient_state`, `last_seen`), and `GET /v1/sessions` still reports every
-  session's state, so what a sender could learn from the field it reads there.
+  last registration (`recipient_state`, `last_seen`), and a sender that wants a session's state
+  reads it from `GET /v1/sessions`, which reports one for every session.
 custom:
     Issue: pr2603

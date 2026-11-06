@@ -347,9 +347,9 @@ order; that relay, not a subscription of this plugin's, is where the session's m
   subject and every followed topic, each of which the stream stores (`streamStores`; the listener
   drops any other `notifications.` topic from the registration and names it in a warning, so a
   row an earlier build left still registers). A registration the listener can
-  give no consumer is refused by name (`503 no_grant` or `consumer_error`, `409 not_requested` or
-  `invalid_session_id`) and nothing is registered: the session starts with Envoy inbound
-  unavailable, says so, and asks again at each heartbeat. There is no second path to fall back to.
+  give no consumer is refused by name, with one of the reasons `ErrorWireSchema.reason` lists
+  (`@legion/envoy-client`'s `transport.ts`), and nothing is registered: the session starts with
+  Envoy inbound unavailable, says so, and asks again at each heartbeat. There is no second path to fall back to.
 - Each relay frame is answered `received` as it decodes, then goes through `deliver`, the one path
   into the session. Its claim answers the listener as the claim ends: `done` once it settles, which is the
   `message_end` of the frame's card or person's turn (`UnwrittenFrames`), at once for a frame

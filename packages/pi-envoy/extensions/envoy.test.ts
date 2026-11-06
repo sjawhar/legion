@@ -16412,7 +16412,6 @@ console.log(JSON.stringify(args));
     globalThis.fetch = async (input, init) => {
       const path = new URL(input.toString()).pathname;
       requests.push(`${init?.method ?? "GET"} ${path}`);
-      if (path === "/v1/replay") return emptyReplay(init);
       if (path === "/v1/sessions/ses_shutdown") {
         registrationPendingAtDelete = registrationPending;
         return response({});
@@ -16473,7 +16472,6 @@ console.log(JSON.stringify(args));
     globalThis.fetch = async (input, init) => {
       const path = new URL(input.toString()).pathname;
       requests.push(`${init?.method ?? "GET"} ${path}`);
-      if (path === "/v1/replay") return emptyReplay(init);
       if (path === "/v1/sessions/ses_shutdown") return response({});
       if (path === "/v1/interests/subscribe") {
         registrations += 1;

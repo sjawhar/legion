@@ -237,6 +237,18 @@ database (the lock probe, the ungranted-lock sampler, the 5 s sampler's `pg_stat
 transaction-id probe and the Postgres version in `meta.json`) feed none of those columns. A failure
 of one of them marks its own table, or `meta.json`, and the step does not fail.
 
+**A step whose stream keeps more consumers than its sessions fails.** `loadgen run` reads
+`ENVOY_NOTIFICATIONS`'s own `consumer_count` from the stream's info twice, before the sessions
+register and after the load and the grace, and writes both under `sessions.stream_consumers`
+(`start`, `end`), beside `sessions.registered`. A session's consumer goes with its session's
+record, at a clean stop and at the session reaper's pass, so the stream's consumers follow the
+fleet rather than its churn: a step that ends with more than twice the sessions it registered
+exits with status 1, naming the count, the bound and the sessions. The denominator is the
+sessions the step registered, which are the sessions within the gone horizon (one hour): a step
+runs for minutes, and the reset before it leaves the stream with no consumer of an earlier step,
+which is what the `start` count shows. A read that failed leaves its count `null`, with
+`start_error` or `end_error` saying why, and refuses no step: the rule holds no number then.
+
 To run a step name again, remove its step directory first.
 
 `loadgen run` also takes `-nats-conns` (default 50), the NATS connections that the sessions share.
@@ -640,6 +652,15 @@ the step directory.
 and counts the pull requests on the stream's consumers, those of session consumers
 (`s-<session>`) apart. The 5 s sampler also reads NATS `/jsz`: the JetStream consumers and API
 requests.
+
+The run counts the stream's consumers twice over, and the two counts answer different questions.
+`sessions.stream_consumers` is `ENVOY_NOTIFICATIONS`'s own `consumer_count`, from the stream's
+info, at the step's start and at its end: the session consumers, the listener's durable and
+Dispatch's, and nothing else. It is the count the step's health rule judges (A step whose stream
+keeps more consumers than its sessions fails, above). `resources.js_consumers_max` and
+`js_consumers_last` are the 5 s sampler's `/jsz` count of every consumer the server holds, the
+key-value buckets' watchers among them, so that number is larger and says nothing about one
+stream.
 
 ### Event kinds
 
@@ -1338,10 +1359,10 @@ Every percentile in the harness is the lower nearest rank: the value at index
 
 | File | What it holds |
 | --- | --- |
-| `summary.json` | The step's results. Every table cell comes from it (The tables, below). `config.marker_nonce` is the run's marker nonce (Event kinds, above). `config.dashboard` is the dashboard stream the build under test served, `live` or `sse` (The dashboard stream, above), and `config.live` their count. `stack_exits` is there only when a stack process exited during the step: each entry's `name`, `pid` and `first_seen_gone`. Such a step failed. `events.commits_error` is there only when the run's commit rows could not be read (Delivery latency, above). Such a step failed too. |
+| `summary.json` | The step's results. Every table cell comes from it (The tables, below). `config.marker_nonce` is the run's marker nonce (Event kinds, above). `config.dashboard` is the dashboard stream the build under test served, `live` or `sse` (The dashboard stream, above), and `config.live` their count. `sessions.stream_consumers` is `ENVOY_NOTIFICATIONS`'s own `consumer_count` at the step's `start` and `end`, beside `sessions.registered`; a count `null`, with `start_error` or `end_error`, is a read that failed. `stack_exits` is there only when a stack process exited during the step: each entry's `name`, `pid` and `first_seen_gone`. Such a step failed. `events.commits_error` is there only when the run's commit rows could not be read (Delivery latency, above). Such a step failed too, and so did a step whose `sessions.stream_consumers.end` is above twice `sessions.registered` (Run one step, above). |
 | `TABLES.md` | The tables of this step. `loadgen tables` writes it. |
 | `meta.json` | Mode 600 (owner only). The step name and arguments (`args`: the normalized flag list, each flag given to `loadgen run` once as `-name=value` in name order, with the values of `-token` and `-listener-token` replaced by `<redacted>`, the URL of each of `-url`, `-listener`, `-nats-mon` and `-pprof` read whole by Go's `net/url` and written without its userinfo and its `password` parameter, and `-nats` split at commas as nats.go splits it, each server without its own userinfo; the user name goes too, since nats.go takes a user name with no password as the NATS token. `-pg` is written from pgx's own parse of it (`pgconn.ParseConfig`, the parser `pgx.Connect` uses), never from the text given: `postgres://`, each host and port pgx would try, comma-separated (a port the URL leaves out as pgx fills it in, such as 5432), then `/` and the database, such as `postgres://127.0.0.1:15432/dispatch`; never its user, password, `sslpassword` or any other parameter, and `<redacted>` when pgx does not read it as a URL. No file of the step, and no line that `loadgen run` prints, holds a token, a URL password or a NATS token), `start`, `window_start`, `window_end`, `end`, `nproc`, CPU model, kernel, `box_busy_before` and `box_busy_before_window_s` (5), `GOMAXPROCS` of Dispatch (`unset` by default), the Postgres version (`postgres_version`: empty when it could not be read, and then `postgres_version_error` says why), `build_commit` and `build_dirty` (the checkout `stack.sh` built from), `dispatch_commit`, `dispatch_binary_sha256` and `dispatch_build` (the whole of `$LOADTEST_ROOT/bin/envoy-dispatch.json`: the Dispatch binary this step ran, which `--dispatch-commit`/`LOADTEST_DISPATCH_COMMIT` makes another commit than `build_commit`; empty, and `run.log` says so, when that file is absent), the seed meta, the `stack.json` path, `pg_direct` (always `false` under `-allow-foreign`, which takes nothing about the target from `stack.json`), `allow_foreign`, the pids and `marker_nonce`. `box_busy_before` is the share of the box's CPU time, all CPUs, that was not idle or I/O wait over 5 s just before the step, from two `/proc/stat` reads: `run-step.sh` reads it with `loadgen box-busy` before its reset and passes it as `-box-busy-before`; a `loadgen run` without that flag reads it itself (Requirements, above). `null` when `/proc/stat` gave no ticks. |
-| `run.log` | `loadgen run`'s log: the configuration with the marker nonce, the guard, the dashboard choice (the stream count, `live` or `sse`, and the URL), a warning when `box_busy_before` is above 10%, the sampler's pids, the NATS subscriptions, the registrations, the window, failed writes, the first three failed reads of each Postgres probe and of the 5 s sampler's Postgres, pprof and NATS reads (and each one's total, past three), a failed read of the commit rows, of the transaction ids or of the Postgres version, the result line, and the failure line when a stack process exited or the commit rows were not read. An endpoint that a line names is written without its URL password. |
+| `run.log` | `loadgen run`'s log: the configuration with the marker nonce, the guard, the dashboard choice (the stream count, `live` or `sse`, and the URL), a warning when `box_busy_before` is above 10%, the sampler's pids, the NATS subscriptions, the registrations, the stream's consumer count at the step's start and at its end (or why that read failed), the window, failed writes, the first three failed reads of each Postgres probe and of the 5 s sampler's Postgres, pprof and NATS reads (and each one's total, past three), a failed read of the commit rows, of the transaction ids or of the Postgres version, the result line, and the failure line when a stack process exited, the commit rows were not read or the stream kept more consumers than the step's sessions. An endpoint that a line names is written without its URL password. |
 | `samples.json` | The 5 s samples: CPU ticks and RSS per process, `/proc/stat` ticks, Postgres connections by state, goroutines, pool waiters, the heap (every 15 s, under `-heap-samples` alone), NATS `/varz`. The heap is `heap_live_bytes` and `heap_live_objects`: the sums of `inuse_space` and `inuse_objects` in Dispatch's binary heap profile (`/debug/pprof/heap`), which the runtime scales from its sampled records to estimates of the live heap as of its last GC. It is not runtime.MemStats `HeapInuse`, and the sampler never reads `?debug=1`: that text formats every heap record, grew past 500 MB, and its reads took 29% of Dispatch's CPU in the r16 replay. Without `-heap-samples`, which is the default, no sample holds a heap read at all and the harness asks Dispatch for no heap profile inside the window (Resources, below). An older run's `samples.json` holds `heap_inuse` (with `heap_alloc` and `heap_sys`, read in each sample, with no `heap_at`), runtime.MemStats from `?debug=1`; `loadgen curves` still reads it, under its own name. `failed_reads` names a sample's reads that failed (`postgres`, `goroutines`, `heap`, `nats`); their values in that sample are 0 (`nats` empty) and enter no statistic. A read that failed once the run had ended is neither named nor counted. The heap read runs on its own, one at a time with up to 2 minutes each, so a slow read of a large heap delays no sample: each read lands in the first sample after it ends, with its end in `heap_at`, and enters the window (`heap_in_window`, `resources.heap_live_mib`, `pprof_read_errors`) by that time. |
 | `cpu.pprof` | Dispatch's CPU profile over the whole window. |
 | `heap.pprof` | Dispatch's heap profile at the end of the window. |
@@ -1525,7 +1546,8 @@ leave it off where Dispatch's CPU is (a replay that compares one build against a
 | `listener cores first / last third` | cores | The listener's cores over the first and the last third of the window's samples. | `resources.trends.listener` |
 | `listener RSS MiB first / last third (max)` | MiB | Its mean RSS in each third, then its highest. `resources.trends.listener.rss_slope_mib_per_min` holds the least-squares slope. | `resources.trends.listener`, `resources.rss_mib_max.listener` |
 | `NATS cores first / last third`, `NATS RSS MiB first / last third (max)` | cores, MiB | The same for `nats-server`. | `resources.trends.nats` |
-| `JetStream consumers max` | count | The most JetStream consumers in a sample (`/jsz`). | `resources.js_consumers_max` |
+| `ENVOY_NOTIFICATIONS consumers start / end (sessions registered)` | count | That stream's own `consumer_count` before the sessions register and after the load, then the sessions the step registered. `?` is a count the read did not get. A step whose end count is above twice those sessions fails (Run one step, above). | `sessions.stream_consumers`, `sessions.registered` |
+| `JetStream consumers max (server-wide)` | count | The most JetStream consumers in a sample (`/jsz`): every consumer the server holds, the key-value buckets' watchers included. | `resources.js_consumers_max` |
 | `pull requests/s all / session` | per second | The pull requests on the stream's consumers, then those on session consumers. | `resources.pull_requests_per_s`, `resources.session_pull_requests_per_s` |
 | `JetStream API requests/s` | per second | The JetStream API requests (`/jsz` `api.total`). | `resources.js_api_per_s` |
 

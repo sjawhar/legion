@@ -2458,8 +2458,8 @@ export default function envoyExtension(pi: PiApi): void {
 
   // Said once per outage: the listener refused this session's registration, so no consumer
   // delivers to it and Envoy inbound is unavailable. The session still starts and runs; the
-  // reason is the listener's own (`consumer_error`, `no_grant`, `not_requested`,
-  // `invalid_session_id`, carried in the error's message), which
+  // reason is the listener's own, one of those `ErrorWireSchema.reason` lists
+  // (`@legion/envoy-client`'s `transport.ts`), carried in the error's message, which
   // `inboundUnavailableNoticeText` words for every host, and the heartbeat registers again
   // every tick until one is accepted.
   const inboundOutage = inboundUnavailable((why) => {
@@ -2513,9 +2513,9 @@ export default function envoyExtension(pi: PiApi): void {
           plugin: { name: packageName, version: packageVersion },
           delivery,
         }),
-      // A registration the listener refused leaves the session with no consumer at all
-      // (`503 consumer_error|no_grant`, `409 not_requested|invalid_session_id`): the outage
-      // tells the session once and the heartbeat asks again.
+      // A registration the listener refused, for any of the reasons `ErrorWireSchema.reason`
+      // lists, leaves the session with no consumer at all: the outage tells the session once
+      // and the heartbeat asks again.
       answered: (result) => {
         if (asking !== undefined) takeDeliveryAnswer(registeringFor, asking, result);
       },
@@ -2932,10 +2932,10 @@ export default function envoyExtension(pi: PiApi): void {
     // the host has moved to meanwhile as a continuation of the one it was made for (`noteMove`),
     // and the role of that session would be claimed for it.
     if (registration === undefined) handle.markEstablished(host);
-    // Armed whether or not this registration was accepted: a registration the listener refuses
-    // (`503 consumer_error|no_grant`, `409 not_requested|invalid_session_id`) leaves the session
-    // with no consumer and so no inbound at all, and the heartbeat is the path that asks again,
-    // which is what the session was told (`inboundOutage`).
+    // Armed whether or not this registration was accepted: a registration the listener refuses,
+    // for any of the reasons `ErrorWireSchema.reason` lists, leaves the session with no consumer
+    // and so no inbound at all, and the heartbeat is the path that asks again, which is what the
+    // session was told (`inboundOutage`).
     ensureHeartbeat(context);
 
     // The nested move has its own queue and its own deadline: it is fenced by `roleMoves`, not

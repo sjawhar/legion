@@ -23,6 +23,8 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/sjawhar/envoy/internal/bus"
 )
 
 // maxRequestsInFlight caps the request generator: above 600 req/s times the 30 s client
@@ -316,6 +318,10 @@ type sessionsSummary struct {
 	NATSConnections   int   `json:"nats_connections"`
 	// Delivery is how the sessions' consumer delivery went, which is the only delivery there is.
 	Delivery *sessionDeliverySummary `json:"delivery,omitempty"`
+	// StreamConsumers is ENVOY_NOTIFICATIONS's own consumer_count at the step's start and end,
+	// beside Registered, the sessions this step registered: the stream's consumer population
+	// against the fleet that asked for it.
+	StreamConsumers streamConsumers `json:"stream_consumers"`
 }
 
 type summary struct {
@@ -414,6 +420,8 @@ func execute(cfg runConfig, sf seedFile) error {
 		meta.Replay = &st.replay.meta
 	}
 
+	st.consumers.Start, st.consumers.StartError = st.readStreamConsumers("start")
+
 	ns, err := st.subscribeSessions()
 	defer ns.close()
 	if err != nil {
@@ -446,6 +454,7 @@ func execute(cfg runConfig, sf seedFile) error {
 	cancel()
 	pr.waitSampler()
 	ns.close()
+	st.consumers.End, st.consumers.EndError = st.readStreamConsumers("end")
 	ns.envelopes.write(cfg.out, lg)
 	if ns.relay != nil {
 		ns.relay.writeFrames(cfg.out, st.sessions, lg)
@@ -486,6 +495,9 @@ type step struct {
 	watchers [][]int   // by issue, the sessions that watch it
 	// start is when the generators start; the window runs from winStart to winEnd.
 	start, winStart, winEnd time.Time
+	// consumers is ENVOY_NOTIFICATIONS's consumer_count at the step's start and at its end
+	// (readStreamConsumers), which summary.json carries under sessions.stream_consumers.
+	consumers streamConsumers
 	// replay is the replay's run state under -source replay.
 	replay *replayRun
 }
@@ -778,7 +790,7 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 		Requests: summarizeRequests(reqs.recs.snapshot(), int(reqs.dropped.Load()), cfg.requests, durS),
 		Sessions: sessionsSummary{
 			Registered: int(reg.ok.Load()), RegisterErrors: int(reg.errs.Load()), HeartbeatErrors: reg.heartbeatErrs.Load(),
-			NATSSubscriptions: ns.subs, NATSConnections: len(ns.conns),
+			NATSSubscriptions: ns.subs, NATSConnections: len(ns.conns), StreamConsumers: st.consumers,
 		},
 		CommitOrderLock: summarizeLock(pr.lp.samples, pr.lp.errors),
 		UngrantedLocks:  summarizeUngranted(pr.ls.samples, pr.ls.errors),
@@ -814,11 +826,12 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 }
 
 // stepFailure is why the step failed, nil when it did not: a stack process exited during it
-// (errStackExits), or the run's commit rows were not read (events.commits_error), so its
-// committed, receipt and delivery columns measure nothing. The other reads of the run's database,
-// the lock probe, the ungranted-lock sampler, the 5 s sampler's pg_stat_activity, the
-// transaction-id probe and the Postgres version, feed none of those columns: a failure of one
-// marks its own table, or meta.json, and does not fail the step.
+// (errStackExits), the run's commit rows were not read (events.commits_error), so its committed,
+// receipt and delivery columns measure nothing, or the stream ended the step with more consumers
+// than its sessions account for (errStreamConsumers). The other reads of the run's database, the
+// lock probe, the ungranted-lock sampler, the 5 s sampler's pg_stat_activity, the transaction-id
+// probe and the Postgres version, feed none of those columns: a failure of one marks its own
+// table, or meta.json, and does not fail the step.
 func stepFailure(sum summary) error {
 	var why []string
 	if err := errStackExits(sum.StackExits); err != nil {
@@ -827,6 +840,9 @@ func stepFailure(sum summary) error {
 	if sum.Events.commitsUnread() {
 		why = append(why, fmt.Sprintf("the run's commit rows were not read (summary.json events.commits_error: %s); this row's committed, receipt and delivery columns do not measure the load",
 			sum.Events.CommitsError))
+	}
+	if err := errStreamConsumers(sum.Sessions); err != nil {
+		why = append(why, err.Error())
 	}
 	if len(why) == 0 {
 		return nil
@@ -844,6 +860,46 @@ func errStackExits(exits []stackExit) error {
 		gone[i] = fmt.Sprintf("%s (pid %d) exited during the step (first seen gone at %s)", x.Name, x.PID, x.FirstSeenGone.UTC().Format(time.RFC3339))
 	}
 	return fmt.Errorf("%s; this row does not measure the load", strings.Join(gone, ", "))
+}
+
+// consumersPerSession is how many consumers ENVOY_NOTIFICATIONS may hold at a step's end for each
+// session the step registered.
+const consumersPerSession = 2
+
+// errStreamConsumers is the step's failure when ENVOY_NOTIFICATIONS held more than
+// consumersPerSession consumers for each session the step registered at the step's end, nil
+// otherwise.
+//
+// The rule counts the sessions this step registered, over the step itself, and those are the
+// sessions within the gone horizon (session.GoneHorizon, one hour): a step runs for minutes, so
+// every session it registered is inside the horizon when it ends, and a step starts on a stream
+// that holds no consumer of an earlier one, since the reset before it restarts NATS on a fresh
+// JetStream store (stack.sh reset) or removes the stream (cluster.sh). The start count is what
+// shows that: a step run without a reset inherits the earlier consumers, and its start count
+// names them.
+//
+// A session's consumer goes with its record, at a clean stop and at the session reaper's pass, so
+// the stream's population follows the fleet rather than its churn. The step's own sessions stop
+// registering when the step ends while their consumers stand until that pass, so the count at the
+// end holds the step's sessions, the listener's durable and Dispatch's, and the consumers of
+// sessions that stopped inside the step. Twice the sessions leaves room for those and still
+// refuses a step whose consumers follow the churn: before this change production carried 6,100 to
+// 6,450 consumers over 72 hours against about 650 live sessions, at 75 to 80 consumer births an
+// hour (dispatch://INFRA-777), about ten times its fleet.
+//
+// A step that registered no session has no denominator, and a step whose end read failed has no
+// count: neither is refused, since the rule refuses nothing on a number it does not have.
+func errStreamConsumers(s sessionsSummary) error {
+	end := s.StreamConsumers.End
+	if end == nil || s.Registered == 0 {
+		return nil
+	}
+	bound := consumersPerSession * s.Registered
+	if *end <= bound {
+		return nil
+	}
+	return fmt.Errorf("%s held %d consumers at the step's end (summary.json sessions.stream_consumers.end), above the %d that the %d sessions this step registered allow: the stream's consumers follow the step's churn rather than its sessions",
+		bus.Stream, *end, bound, s.Registered)
 }
 
 func summarizeRequests(reqs []reqRec, dropped int, target, durationS float64) requestsSummary {

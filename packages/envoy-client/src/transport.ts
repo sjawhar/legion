@@ -29,12 +29,13 @@ export type SessionState = z.infer<typeof SessionStateSchema>;
 /**
  * What an agent must do about a session that stopped answering (dispatch://INFRA-392). Every
  * answer that names a session in that state says this, in one wording: the tool descriptions
- * (`tool-contract.ts`), the send confirmation, the publish confirmation, and the refusal an
- * unresponsive holder's role lookup or publish gets, which is read at the moment an agent
- * decides whether its peer is alive. The minutes are counted from the holder's last registration
- * (`last_seen`) and are `ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS` itself, the sum the Dispatch server
- * refuses another agent's take by, so a change of that constant changes this sentence with it
- * rather than leaving it saying a number nothing enforces.
+ * (`tool-contract.ts`), the send confirmation, and the refusal an unresponsive holder's role
+ * lookup or publish gets, which is read at the moment an agent decides whether its peer is
+ * alive. A publish answer names no recipient at all, so it says nothing of the kind. The minutes
+ * are counted from the holder's last registration (`last_seen`) and are
+ * `ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS` itself, the sum the Dispatch server refuses another
+ * agent's take by, so a change of that constant changes this sentence with it rather than
+ * leaving it saying a number nothing enforces.
  */
 export const UNRESPONSIVE_RULE =
   "An unresponsive session is not dead: it keeps its role claims and its issue claims, and a " +
@@ -59,8 +60,8 @@ const InterestWireSchema = z.object({
 /**
  * How the listener delivers a session's stored subjects, answered to every registration it
  * accepts: `consumer` relays the session's durable consumer on `subject`. There is no other
- * mode — a registration no session consumer can be given is refused (503 `consumer_error` or
- * `no_grant`, 409 `not_requested` or `invalid_session_id`), never answered.
+ * mode — a registration no session consumer can be given is refused by one of the reasons
+ * `ErrorWireSchema.reason` lists below, never answered.
  */
 const DeliveryAnswerWireSchema = z.object({
   mode: z.literal("consumer"),
@@ -132,8 +133,14 @@ const RoleHeldWireSchema = z.object({
 const ErrorWireSchema = z.object({
   error: z.string(),
   code: z.string().optional(),
-  // The machine-readable why of a registration the listener refused because it can give the
-  // session no consumer (`consumer_error`, `no_grant`, `not_requested`, `invalid_session_id`).
+  // Why the listener refused a registration it can give the session no consumer. This list is
+  // the one every other comment in these packages points at, and it is the listener's own
+  // (`cmd/listener/session_delivery.go`'s delivery reason constants and the refusals that carry
+  // them): 503 `consumer_error` (a consumer call that failed, or a listener holding no
+  // session-consumer connection), 503 `no_grant` (the listener's NATS user may not manage
+  // session consumers), 503 `consumer_limit` (the stream holds as many consumers as its
+  // `max_consumers` allows, so the server creates no more), 409 `not_requested` (the
+  // registration asked for no consumer) and 409 `invalid_session_id` (the id names no consumer).
   reason: z.string().optional(),
   expected: z.array(z.string()).optional(),
   state: SessionStateSchema.optional(),
@@ -516,8 +523,8 @@ export class EnvoyApiError extends Error {
   readonly code: string | undefined;
   /**
    * Why the listener refused, when its error body carries one: the reason a registration no
-   * session consumer can be given is refused with (`consumer_error`, `no_grant`,
-   * `not_requested`, `invalid_session_id`).
+   * session consumer can be given is refused with, one of those `ErrorWireSchema.reason` names
+   * above.
    */
   readonly reason: string | undefined;
   /** The session the refusal is about: a role's holder, where its body names one. */

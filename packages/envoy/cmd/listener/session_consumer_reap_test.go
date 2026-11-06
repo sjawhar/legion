@@ -2,14 +2,17 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/session"
@@ -76,14 +79,43 @@ func newSessionConsumerReapRig(t *testing.T) *sessionConsumerReapRig {
 }
 
 // register posts sessionID's registration as its plugin's heartbeat does, so the listener creates
-// the session's consumer and writes its record.
-func (rig *sessionConsumerReapRig) register(t *testing.T, sessionID string) {
+// the session's consumer and writes its record, and returns the answer the session reads, whose
+// delivery field names what it is delivered to through.
+func (rig *sessionConsumerReapRig) register(t *testing.T, sessionID string) subscribeResponse {
 	t.Helper()
 	recorder := httptest.NewRecorder()
 	body := strings.NewReader(consumerRegistration(sessionID, "e"))
 	rig.mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", body))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("register %s: status %d: %s", sessionID, recorder.Code, recorder.Body.String())
+	}
+	var answer subscribeResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &answer); err != nil {
+		t.Fatalf("decode the answer to %s's registration: %v: %s", sessionID, err, recorder.Body.String())
+	}
+	return answer
+}
+
+// waitForRecordDeleted waits, reading the bucket rather than the cache, until sessionID has no
+// record there (session.SessionRegistry.Refresh). It is how a test holding a registration open
+// waits for the reaper pass it started to have deleted the record that registration is replacing,
+// so the pass's consumer delete is one the registration really raced. A deadline reached is
+// reported and not fatal: the caller holds the session's lock, which a fatal would never release,
+// and the pass that deleted nothing fails the test on its own count.
+func (rig *sessionConsumerReapRig) waitForRecordDeleted(t *testing.T, sessionID string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for {
+		_, err := rig.sessions.Refresh(ctx, sessionID)
+		if errors.Is(err, nats.ErrKeyNotFound) {
+			return
+		}
+		if ctx.Err() != nil {
+			t.Errorf("the record of %s is still in the bucket (%v); want the pass to have deleted it", sessionID, err)
+			return
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -140,4 +172,47 @@ func TestAReaperPassDeletesTheReapedSessionsConsumerAndKeepsTheOthers(t *testing
 	}
 	rig.requireConsumer(t, "ses_stalled", "after the pass that reaped ses_reaped")
 	rig.requireConsumer(t, "ses_live", "after the pass that reaped ses_reaped")
+}
+
+// A registration that lands while the reaper deletes its session's record keeps the consumer it
+// is answered with. The pass judged the record the session left behind, not the one its
+// registration writes, so the consumer it deletes afterwards is the one that registration just
+// created, and a session told it is delivered to through a consumer that no longer exists
+// receives nothing until its next heartbeat recreates one at its resume point, a pause of up to
+// the heartbeat's own period with the position the consumer held lost.
+//
+// The interleaving is built rather than waited for: afterRegisterFilter runs under the session's
+// lock, after the registration's consumer call and before the row and the entry it writes, and
+// from there the test runs the pass and waits for its record delete. So the pass deletes the
+// record of a session that is registering again, and goes on to delete that session's consumer
+// with the registration already holding one.
+func TestARegistrationThatRacesTheReapOfItsRecordKeepsItsConsumer(t *testing.T) {
+	rig := newSessionConsumerReapRig(t)
+	rig.register(t, "ses_back")
+	// Past the two-minute gone horizon, so the pass below judges the record this session's next
+	// registration replaces.
+	rig.now.advance(3 * time.Minute)
+	rig.requireConsumer(t, "ses_back", "after its first registration")
+
+	reaped := make(chan int, 1)
+	var raced sync.Once
+	rig.delivery.afterRegisterFilter = func() {
+		raced.Do(func() {
+			go func() { reaped <- rig.reap(t) }()
+			rig.waitForRecordDeleted(t, "ses_back")
+		})
+	}
+	answer := rig.register(t, "ses_back")
+
+	if answer.Delivery == nil || answer.Delivery.Mode != deliveryModeConsumer {
+		t.Fatalf("the registration that raced the pass was answered delivery %+v, want %s",
+			answer.Delivery, deliveryModeConsumer)
+	}
+	if records := <-reaped; records != 1 {
+		t.Fatalf("the pass deleted %d records, want the one it judged gone", records)
+	}
+	rig.requireConsumer(t, "ses_back", "after the pass that deleted the record it was registering over")
+	if _, state := rig.sessions.Lookup("ses_back"); state != session.Live {
+		t.Fatalf("ses_back is %s after the registration that raced the pass, want %s", state, session.Live)
+	}
 }

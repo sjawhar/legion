@@ -221,8 +221,8 @@ deletes the entry as before. The answer says whether the entry stayed, and the c
 `void` because no caller acts on it: a deregistering client has nothing to retry either way.
 
 `subscribe`'s answer carries the registration's `delivery` field; a registration the listener can
-give no consumer is refused by name, and its reason (`no_grant`, `consumer_error`,
-`not_requested`, `invalid_session_id`) is on `EnvoyApiError`.
+give no consumer is refused by name, and its reason is on `EnvoyApiError`, under the one canonical
+list of them (`ErrorWireSchema.reason` in `src/transport.ts`).
 
 ## envoy.json
 

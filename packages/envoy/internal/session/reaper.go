@@ -21,8 +21,7 @@ import (
 )
 
 // reapStoredMessageCap bounds the reads one reaped session's stored-message count makes, and
-// reapStoredReadBudget bounds the time a whole pass spends on those counts, as replayMaxMessages
-// and replayReadBudget bound one /v1/replay answer (cmd/listener/replay.go). A pass holds no
+// reapStoredReadBudget bounds the time a whole pass spends on those counts. A pass holds no
 // caller's deadline, but it shares one bus with every delivery this listener makes, and counts
 // that read a whole retention window per record would take that bus away from them. Each read is
 // held to the pass's own deadline as well, since a stored-message read waits 10 s of its own
@@ -120,7 +119,10 @@ func (r *SessionRegistry) StartSessionReaper(ctx context.Context, interval time.
 // The consumer of each record the pass deleted is deleted with it (SessionReaper.DeleteConsumer),
 // so a session's consumer lives as long as its session: a record kept, whether because the delete
 // was refused or because the session is live or unresponsive, keeps its consumer and the position
-// it holds.
+// it holds. A session that registered again between this pass's record delete and that consumer
+// delete keeps one too: the deleter re-reads the record and gives back the consumer of a session
+// whose record is there again (cmd/listener's sessionDelivery.deleteConsumer), since the pass
+// deleted the record of the session it judged gone and not of the one that registered after it.
 //
 // Nothing here fails the pass: an age it could not write, a bucket that did not answer a delete,
 // a consumer it could not delete and a stored-message count that failed are each logged and the
@@ -316,10 +318,10 @@ func (reaper SessionReaper) streamState(ctx context.Context) nats.StreamState {
 // had nothing stored for it when hundreds were waiting.
 //
 // It is the messages stored after the session's last registration and nothing more. The listener
-// keeps no read receipt, so it cannot say which of them the session read: a self-subscribed
-// session takes its messages over its own NATS subscription, and one that stalled after taking
-// them leaves exactly the same stream behind as one that took none. The number says how much a
-// replacement would have to replay, not how much was lost.
+// keeps no read receipt, so it cannot say which of them the session read: a session takes its
+// messages from its own consumer, whose acknowledgements this count does not read, and one that
+// stalled after taking them leaves exactly the same stream behind as one that took none. The
+// number says how much is stored for a session that stopped answering, not how much was lost.
 //
 // bounded reports a count that stopped at reapStoredMessageCap, at the pass's read deadline, at
 // the end of ctx or at a read that failed, so a partial count is never read as the whole of what

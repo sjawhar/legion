@@ -229,11 +229,11 @@ func TestLookupsAndAReaperPassLeaveAStalledHoldersRoleClaimExactlyAsItWas(t *tes
 	}
 }
 
-// A send to a session that stopped answering but receives on its own NATS subscription is taken
-// and stored for it, naming the state it was taken for, because that is exactly what the session
-// reads back when it comes round (POST /v1/replay). A send to a session past the gone horizon is
-// refused, keeping the "no live session " prefix a sender routes around the pane on, and names
-// the state and the registration the refusal was decided on.
+// A send to a session that stopped answering is taken and stored for it, naming the state it was
+// taken for, because that is exactly what the session's own consumer hands it when it registers
+// again. A send to a session past the gone horizon is refused, keeping the "no live session "
+// prefix a sender routes around the pane on, and names the state and the registration the
+// refusal was decided on.
 func TestASendIsStoredForAStalledSessionAndRefusedForAGoneOne(t *testing.T) {
 	d, now := stalledSessionsRig(t)
 	const sessionID = "ses_stalled_recipient"

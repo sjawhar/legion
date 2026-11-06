@@ -4296,7 +4296,7 @@ The merge-forward head of #2228 (`926040d9`) recovers agent and issue events thr
 `--plugins-from <rev>` builds pi-envoy and claude-envoy from `<rev>`, as `--build-from` builds them, and leaves the listeners, natsd, Dispatch and the bridge this checkout's:
 the mixed rollout, a hub already updated serving a session that still runs the plugins of the release before it.
 `--build-from` and `--plugins-from` each name the tree the plugins come from, so the run takes one or the other.
-The listener this checkout builds refuses a registration it can give no session consumer before it writes anything (`409 not_requested` or `409 invalid_session_id`, `503 no_grant` or `503 consumer_error`), so `--plugins-from` names a tree whose plugins ask for one;
+The listener this checkout builds refuses a registration it can give no session consumer before it writes anything, by the reason the canonical list holds (`ErrorWireSchema.reason`, `packages/envoy-client/src/transport.ts`), so `--plugins-from` names a tree whose plugins ask for one;
 a tree from before they did is run with `--build-from`, which serves it the listener of its own revision.
 
 `--disruptions a,c` runs only the windows named, any subset of `a` to `g`.

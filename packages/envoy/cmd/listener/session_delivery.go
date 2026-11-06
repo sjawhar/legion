@@ -55,9 +55,10 @@ const (
 	consumerPluginMinimumVersion = "14.1.0"
 )
 
-// sessionConsumerCallTimeout bounds the consumer calls a registration makes before it answers, and
+// sessionConsumerCallTimeout bounds the consumer calls a registration makes before it answers,
 // those of one relay restart, timed from when it holds its turn and the session's lock
-// (sessionRelays.restart).
+// (sessionRelays.restart), and the delete the session reaper or a clean stop makes, with the
+// record read and the create that may follow it (deleteConsumer).
 const sessionConsumerCallTimeout = 5 * time.Second
 
 // noGrantBackoff is how long, after a consumer call the server refused for want of a grant, every
@@ -169,11 +170,16 @@ type sessionDelivery struct {
 	// to release it, so a test drives such a call from a goroutine of its own.
 	afterRegisterFilter func()
 	// locks keeps the consumer calls made for one session one at a time: a registration's create or
-	// filter update, an unsubscribe's filter update and the relay's restart at the ack floor, which
-	// deletes the consumer and creates it again when a message awaits an ack. An unsubscribe and a
-	// restart read the session's stored topics under the lock; a registration filters on the plan
-	// it is about to store and holds the lock from that filter through the plan's write
-	// (registerSession). So no call reads the row between a registration's filter and that
+	// filter update, an unsubscribe's filter update, the relay's restart at the ack floor, which
+	// deletes the consumer and creates it again when a message awaits an ack, and the delete the
+	// session reaper or a clean stop makes, which reads the session's record again under the lock
+	// and gives the consumer back to a session that registered meanwhile (deleteConsumer,
+	// restoreRegistered). An unsubscribe and a restart read the session's stored topics under the
+	// lock; a registration filters on the plan it is about to store and holds the lock from that
+	// filter through the plan's write (registerSession) and on through the write of its session
+	// entry (subscribeHandler), so a delete runs wholly before such a registration or wholly after
+	// it and never between its consumer and the entry that says the session is registered. So no
+	// call reads the row between a registration's filter and that
 	// registration's write: a restart that did would set the filter back to a row without the topic
 	// the registration is answered 200 for, and every message published on that topic until the
 	// session's next heartbeat would be skipped. The lock does not order a registration's plan,
@@ -191,6 +197,14 @@ type sessionDelivery struct {
 	// create the consumer in that window at the session's resume point, or at what the stream holds
 	// for the session, or run its own restart's calls between this one's.
 	locks sessionLocks
+	// deps is the listener's stores, which a consumer delete reads to tell a session that
+	// registered while it ran from one that is gone (deleteConsumer): the session bucket it
+	// re-reads the record from, and the interest rows it restores a filter from. The /v1 routes
+	// are what lets a registration race a delete at all, so they publish it (registerV1Routes),
+	// and a pointer carries it because the session reaper's loop reads it from a goroutine of
+	// its own. A delete made before /v1 opens, and one on a listener whose routes are never
+	// registered, which only a test is, is raced by no registration and restores nothing.
+	deps atomic.Pointer[listenerDeps]
 	// grantMu guards the refusal episode below.
 	grantMu sync.Mutex
 	// noGrantUntil is when the registrations' calls may probe the grant again after a refusal for
@@ -219,18 +233,97 @@ func (m *sessionDelivery) close() {
 	}
 }
 
+// attachStores publishes the listener's stores to the delete path (the deps field). It is called
+// where the routes a registration arrives on are built (registerV1Routes), since those
+// registrations are what a delete races.
+func (m *sessionDelivery) attachStores(d *listenerDeps) {
+	if m == nil {
+		return
+	}
+	m.deps.Store(d)
+}
+
 // deleteConsumer deletes sessionID's session consumer, bounded as every other consumer call this
 // listener makes (sessionConsumerCallTimeout). It is what the session reaper deletes a reaped
-// session's consumer through (session.SessionReaper.DeleteConsumer), so a consumer lives as long
-// as the session it delivers to; a listener without the session-consumer connection, which only a
-// test builds, deletes nothing.
+// session's consumer through (session.SessionReaper.DeleteConsumer) and what a clean stop
+// deletes through (deleteSessionConsumer), so a consumer lives as long as the session it
+// delivers to; a listener without the session-consumer connection, which only a test builds,
+// deletes nothing.
+//
+// The delete holds the session's lock and the record is read again under it (restoreRegistered),
+// so the consumer is taken away only from a session whose record is still deleted. A
+// registration holds that same lock from the consumer call that sets its filter through the
+// write of its session entry (registerSession, subscribeHandler), so this delete runs wholly
+// before such a registration, whose consumer call then creates the consumer again, or wholly
+// after it, and then reads the entry it wrote. Either way a session whose registration was
+// answered 200 with consumer delivery holds a consumer, whatever delete raced it.
+//
+// One budget covers the delete and the read and create that may follow it, as one budget covers
+// a registration's whole pass: the wait for the lock is outside it, so a delete that waited out
+// a registration still has its calls' time.
 func (m *sessionDelivery) deleteConsumer(ctx context.Context, sessionID string) error {
 	if m == nil || m.consumers == nil {
 		return nil
 	}
+	unlock := m.locks.lock(sessionID)
+	defer unlock()
 	ctx, cancel := context.WithTimeout(ctx, sessionConsumerCallTimeout)
 	defer cancel()
-	return m.consumers.Delete(ctx, sessionID)
+	if err := m.consumers.Delete(ctx, sessionID); err != nil {
+		return err
+	}
+	m.restoreRegistered(ctx, sessionID)
+	return nil
+}
+
+// restoreRegistered gives sessionID its consumer back when the bucket holds a record for it
+// again: every delete of a consumer is the delete of a session's record (the reaper's pass, a
+// clean stop), so a record that is there once the consumer is gone was written by a registration
+// that landed in between, and that registration was answered 200 with consumer delivery. The
+// read is of the bucket and not of the cache (session.SessionRegistry.Refresh), since the watch
+// that fills the cache may not have delivered that write yet, and a cache that has not is
+// exactly the reader that would leave the session with no consumer.
+//
+// The consumer is created again at the start the record names (session.SessionEntry.ConsumerStart),
+// which is the sequence that registration's own answer promised it: the session is held every
+// message at or after it, so nothing the answer named is skipped, and a few it has already taken
+// may be delivered again. A record naming no start, an entry that records no consumer delivery,
+// is left alone, and so is a listener that holds no stores yet (deps): neither names a consumer
+// to restore.
+//
+// A failure is logged, not returned: the record is deleted or not whatever this call did, the
+// caller's answer does not change, and the session's next registration creates the consumer at
+// its own resume point. The line names the session, which is what an operator reading a pause in
+// its delivery has to go on.
+func (m *sessionDelivery) restoreRegistered(ctx context.Context, sessionID string) {
+	d := m.deps.Load()
+	if d == nil || d.sessions == nil || d.registry == nil {
+		return
+	}
+	entry, err := d.sessions.Refresh(ctx, sessionID)
+	switch {
+	case errors.Is(err, nats.ErrKeyNotFound):
+		return
+	case err != nil:
+		m.logger.Warn("listener could not read the record of a session whose consumer it deleted",
+			slog.String("session_id", sessionID), slog.String("error", err.Error()))
+		return
+	case entry.Delivery != session.DeliveryConsumer:
+		return
+	}
+	topics, err := storedInterestTopics(ctx, d.registry, sessionID)
+	if err != nil {
+		m.logger.Warn("listener could not read the topics of a session that registered while its consumer was deleted",
+			slog.String("session_id", sessionID), slog.String("error", err.Error()))
+		return
+	}
+	if _, err := m.consumers.Ensure(ctx, sessionID, sessionConsumerFilter(sessionID, topics), entry.ConsumerStart); err != nil {
+		m.logger.Warn("listener could not restore the consumer of a session that registered while its consumer was deleted",
+			slog.String("session_id", sessionID), slog.Uint64("consumer_start", entry.ConsumerStart), slog.String("error", err.Error()))
+		return
+	}
+	m.logger.Warn("listener restored the consumer of a session that registered while its consumer was deleted",
+		slog.String("session_id", sessionID), slog.Uint64("consumer_start", entry.ConsumerStart))
 }
 
 // mark returns the next of the marks that order registrations against the relay's restarts: a

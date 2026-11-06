@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/bus"
 )
 
 // arrivals runs openLoop over times in the past, so it never sleeps, and records each arrival:
@@ -238,6 +240,51 @@ func TestStepFailsWhenItsCommitRowsWereNotRead(t *testing.T) {
 	}
 	if err := stepFailure(otherReads); err != nil {
 		t.Fatalf("failed reads that feed no committed, receipt or delivery column fail the step: %v", err)
+	}
+}
+
+// TestTheReportCarriesTheStreamsConsumersAndRefusesAStepAboveTwiceItsSessions: the step's report
+// holds ENVOY_NOTIFICATIONS's own consumer_count at the step's start and at its end, beside the
+// sessions the step registered; a step whose end count is above twice those sessions fails and
+// names both numbers, one at the bound passes, and a step whose read failed is neither failed on
+// a count it does not have nor read as a stream that held none.
+func TestTheReportCarriesTheStreamsConsumersAndRefusesAStepAboveTwiceItsSessions(t *testing.T) {
+	count := func(n int) *int { return &n }
+	report := func(name string, c streamConsumers) summary {
+		return summary{Config: summaryConfig{Step: name, Sessions: 1000},
+			Sessions: sessionsSummary{Registered: 1000, StreamConsumers: c}}
+	}
+	churn := report("churn", streamConsumers{Start: count(2), End: count(2001)})
+	err := stepFailure(churn)
+	if err == nil {
+		t.Fatal("a step that ended with 2,001 consumers against the 1,000 sessions it registered does not fail")
+	}
+	for _, want := range []string{bus.Stream, "2001", "2000", "1000", "sessions.stream_consumers.end"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the failure %q does not name %q: the count, the bound it passed, the sessions and the key that holds it", err, want)
+		}
+	}
+	if err := stepFailure(report("fleet", streamConsumers{Start: count(2), End: count(2000)})); err != nil {
+		t.Errorf("a step that ended at twice the sessions it registered fails: %v", err)
+	}
+
+	unread := report("unread", streamConsumers{Start: count(2), EndError: "stream info ENVOY_NOTIFICATIONS: nats: timeout"})
+	if err := stepFailure(unread); err != nil {
+		t.Errorf("a step whose end read failed fails on a count the run does not have: %v", err)
+	}
+	none := summary{Config: summaryConfig{Step: "none"}, Sessions: sessionsSummary{StreamConsumers: streamConsumers{End: count(3)}}}
+	if err := stepFailure(none); err != nil {
+		t.Errorf("a step that registered no session, and so gives the rule no denominator, fails: %v", err)
+	}
+
+	text := section(renderTables([]stepData{{name: "churn", sum: churn}, {name: "unread", sum: unread}}), "Session delivery, listener and NATS")
+	// The stream's own consumers, before the server-wide /jsz count in the next column.
+	const streamConsumersCol = 10
+	if cells := rowCells(text, "churn"); cells == nil || cells[streamConsumersCol] != "2 / 2,001 (1,000)" {
+		t.Errorf("the churning step's row holds no start and end count beside its sessions: %q\n%s", cells, text)
+	}
+	if cells := rowCells(text, "unread"); cells == nil || cells[streamConsumersCol] != "2 / ? (1,000)" {
+		t.Errorf("the step whose end read failed shows a count it never read: %q\n%s", cells, text)
 	}
 }
 
