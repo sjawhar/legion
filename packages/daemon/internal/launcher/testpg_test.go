@@ -5,9 +5,12 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
 // stubTestPG puts a `legion-testpg` on PATH that appends one line per call — the subcommand, the
@@ -27,6 +30,61 @@ func stubTestPG(t *testing.T) (calls string) {
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return calls
+}
+
+// toldDSN starts generation with env as its start command's own Env, answers what TestPGVariable
+// held in the child's environment, and stops the generation. A child that held no such variable
+// answers "unset": the shell's `${name-unset}` answers the value for a name set to anything,
+// including the empty string, and "unset" only for a name its environment does not hold.
+func (g *rig) toldDSN(generation uint64, env []string) string {
+	g.t.Helper()
+	told := filepath.Join(g.t.TempDir(), "told")
+	command := shimwire.LauncherStart{
+		ID: "start-" + strconv.FormatUint(generation, 10), Generation: generation,
+		Argv: []string{"/bin/sh", "-c", `printf '%s' "${` + TestPGVariable + `-unset}" > "$TOLD.tmp" && mv "$TOLD.tmp" "$TOLD"; exec sleep 600`},
+		Env:  append([]string{"TOLD=" + told}, env...),
+	}
+	if got := g.start(command); !got.OK {
+		g.t.Fatalf("start of generation %d = %#v", generation, got)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if body, err := os.ReadFile(told); err == nil {
+			g.stop(generation)
+			return string(body)
+		}
+		if time.Now().After(deadline) {
+			g.t.Fatalf("generation %d's child never said what it was told", generation)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// The launcher that serves the pod's test database names it to every generation it starts, over
+// whatever DSN the daemon's start command carried, and a launcher that serves none takes the
+// variable out of the generation's environment. The daemon and the worker image are deployed
+// from two separately pinned builds and this launcher comes from the image, so the process that
+// creates the database is the one that names it: a role is told a database its own pod's server
+// holds whichever of the two builds is older. It reads whether this launcher was told to serve a
+// database, never whether a server answers: the first `ensure` runs before any role and its
+// failure is logged rather than thrown, so neither rig here runs a server at all.
+func TestEveryGenerationIsToldTheDSNItsOwnLauncherServes(t *testing.T) {
+	// What a daemon of another build sends: the database every image's server serves.
+	const fromTheDaemon = "postgres://legion_test@127.0.0.1:5433/postgres?sslmode=disable"
+	serving := newSessionRig(t, Config{TestPostgres: true})
+	if got := serving.toldDSN(1, []string{TestPGVariable + "=" + fromTheDaemon}); got != TestPGDSN {
+		t.Errorf("a generation whose start command carried %s=%q ran with %q, want this launcher's own %q",
+			TestPGVariable, fromTheDaemon, got, TestPGDSN)
+	}
+	if got := serving.toldDSN(2, nil); got != TestPGDSN {
+		t.Errorf("a generation whose start command named no DSN ran with %s=%q, want this launcher's own %q",
+			TestPGVariable, got, TestPGDSN)
+	}
+	none := newSessionRig(t, Config{})
+	if got := none.toldDSN(1, []string{TestPGVariable + "=" + fromTheDaemon}); got != "unset" {
+		t.Errorf("a generation of a launcher that serves no test database ran with %s=%q, want no such variable",
+			TestPGVariable, got)
+	}
 }
 
 // The launcher serves the pod's test database before it accepts a role start: serveTestPG's first

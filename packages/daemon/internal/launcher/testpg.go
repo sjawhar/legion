@@ -13,17 +13,16 @@ import (
 
 // The pod's own PostgreSQL for tests, which an issue pod's launcher serves when the deployment
 // sets `runtime.kubernetes.test_postgres` (Config.TestPostgres). TestPGVariable is the variable
-// every role of such a pod is told, and TestPGDSN its value: a loopback server with no password,
-// whose user is a `createdb createrole nosuperuser` role of the cluster rather than its superuser,
-// so a test that reaches it can make the roles its own suite needs and still cannot run programs
-// as the server's process. The database the DSN names is that login's own, which `legion-testpg
-// ensure` creates with the login as its owner, so a test may create a schema or a trusted
-// extension in it; an untrusted one still needs the superuser, which is why `ensure` puts
-// `vector` in template1, where every database made from it carries it.
-// TestPGDirName is the directory
-// the server's data and admin socket live in, under the roles directory, which every role's
-// namespace covers (role-init), so no role can edit the cluster's configuration and have the
-// launcher load it at the next start.
+// this launcher puts into every generation it starts (testPGEnv), and TestPGDSN its value: a
+// loopback server with no password, whose user is a `createdb createrole nosuperuser` role of the
+// cluster rather than its superuser, so a test that reaches it can make the roles its own suite
+// needs and still cannot run programs as the server's process. The database the DSN names is that
+// login's own, which `legion-testpg ensure` creates with the login as its owner, so a test may
+// create a schema or a trusted extension in it; an untrusted one still needs the superuser, which
+// is why `ensure` puts `vector` in template1, where every database made from it carries it.
+// TestPGDirName is the directory the server's data and admin socket live in, under the roles
+// directory, which every role's namespace covers (role-init), so no role can edit the cluster's
+// configuration and have the launcher load it at the next start.
 //
 // The launcher owns the server and no role does: a role's generation runs as the init of its own
 // PID namespace, and the kernel kills every process in a PID namespace when its init exits, so a
@@ -49,6 +48,29 @@ var testPGInterval = 15 * time.Second
 
 // testPGDir is where the server's data and admin socket live for this launcher's roles directory.
 func testPGDir(rolesDir string) string { return filepath.Join(rolesDir, TestPGDirName) }
+
+// testPGEnv is what a generation of this launcher is told about the pod's test database: when
+// this launcher serves one (serves, from Config.TestPostgres), TestPGVariable is TestPGDSN of
+// this binary, over whatever value the daemon's start command carried; when it serves none — a
+// deployment with no test database, and the controller's own pod — the variable is taken out of
+// that environment, so a role is never told of a server its pod does not run.
+//
+// It overrides the start command because the daemon and the worker image are deployed from two
+// separately pinned builds, and this launcher, which comes from the image, is the process that
+// runs `legion-testpg ensure` and so decides which database the server holds. The process that
+// serves the database is therefore the one that names it: a role in a pod whose image predates a
+// change of the DSN is told that image's own DSN, rather than a database nothing in its pod
+// creates.
+//
+// It reads whether this launcher was told to serve a database, never whether the server answers:
+// the first `ensure` runs before any role starts and a failure of it is logged rather than thrown
+// (serveTestPG), so a role whose server is late or dead is still told where that server is.
+func testPGEnv(env []string, serves bool) []string {
+	if !serves {
+		return withoutEnv(env, TestPGVariable)
+	}
+	return mergeEnv(env, []string{TestPGVariable + "=" + TestPGDSN})
+}
 
 // serveTestPG starts the pod's test database and keeps it running until ctx ends, and answers a
 // channel closed once its ticker goroutine has returned, so a caller that ends ctx can wait for
