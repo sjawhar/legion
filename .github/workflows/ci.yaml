@@ -2406,19 +2406,24 @@ jobs:
     # steps' `env:` drops run-server.sh's `go build` out of check-ci-filters.sh's reduction, which
     # then counts it as reading every Go file of the repository.
     #
-    # The budgets below, this one and the two on steps, are measured: GitHub's jobs API over the
+    # The job budget below and the browser step's are measured: GitHub's jobs API over the
     # 397 of the newest 400 ci.yaml runs that could be read, created between 2026-11-05T04:52:45Z
     # and 2026-11-05T21:06:27Z (268 pull_request, 120 merge_group, 12 push), over the 217 jobs of
     # this name that concluded success. Three runs could not be read, 41995538189, 42034266338 and
     # 42087689355, whose jobs endpoint answered HTTP 502 on four attempts. The whole window is
     # after the commit that moved this job to four lanes, 9689e2c54 of 2026-11-05T04:09:18Z, so no
-    # run is left out for being older than it.
+    # run is left out for being older than it. Those 217 jobs ran a smaller package list than this
+    # head's, so the install step is out of the table below, and its budget is its own retry
+    # arithmetic rather than a reading of that window.
     #
-    #   step                                             median    95th     max
-    #   Install Playwright Chromium, WebKit and Firefox     38 s   102 s   634 s
-    #   Browser-test dispatch dashboard                   1475 s  1582 s  1671 s
-    #   every other step summed                            199 s   221 s   232 s
-    #   the whole job                                     1715 s  1875 s  2348 s
+    #   step                               median    95th     max
+    #   Browser-test dispatch dashboard    1475 s  1582 s  1671 s
+    #   every other step summed             199 s   221 s   232 s
+    #   the whole job                      1715 s  1875 s  2348 s
+    #
+    # The install step has one reading at this head's package set, not a distribution: 33 s, in
+    # job 128196725293 of this pull request. A distribution at the restored set can only be read
+    # on main after the merge, when jobs of this name run that list.
     #
     # The rule: a step budget is that step's measured maximum plus 15 per cent, rounded up to the
     # next whole minute, with a floor of two minutes; an install step's budget comes from its own
@@ -2569,11 +2574,12 @@ jobs:
       # --with-deps`, which runs its apt calls with no bound, no retry and no second origin. The
       # pinned list below is Playwright's ubuntu24.04-x64 list exactly: the union of the `tools`,
       # `chromium`, `firefox` and `webkit` entries of that table in playwright-core's
-      # lib/coreBundle.js. Measured on this image: Playwright's whole list resolves to 181
-      # packages and 114 MB; without the four that carry playback - gstreamer1.0-libav,
-      # gstreamer1.0-plugins-bad, gstreamer1.0-plugins-good and libavcodec60 - it is 60 packages
-      # and 51.4 MB. Those four carry 121 of the 181 packages and 62.8 of the 114.2 MB, through
-      # the ffmpeg stack and the GStreamer plugin trees.
+      # lib/coreBundle.js. Measured in job 128196725293 of this pull request: Playwright's 79
+      # names and gstreamer1.0-tools resolve, with their dependencies, to 182 packages and 114 MB
+      # of archives (`0 upgraded, 182 newly installed, 0 to remove and 27 not upgraded.` and
+      # `Need to get 114 MB of archives.`), and the `apt-get update` before them fetched 13.0 MB
+      # of indexes (`Fetched 13.0 MB in 1s (9291 kB/s)`). Nothing is left out of the list, so
+      # there is no reduced set beside it and no split to measure.
       #
       # `step_tools` below is the one package this step installs that Playwright's list does not
       # name: gstreamer1.0-tools, for the `gst-inspect-1.0` the decoder guard runs. It is a
@@ -2601,29 +2607,46 @@ jobs:
       # The 22-minute budget is the step's own retry arithmetic, not its measured maximum, which
       # the bounds make unreachable: two bounded attempts of `apt-get update` at 90 s, two of the
       # download at 300 s, then, where both of those time out, one 90 s read of the fallback
-      # origin's indexes and a third 300 s download attempt, then the unpack, the browser
-      # download and the one apt simulation of the list check, none of which touch the Ubuntu
-      # mirror. So the arithmetic is 2 x 90 + 2 x 300 + 90 + 300 s of bounded apt, about 20 s of
-      # unpack, about 90 s for the browsers and about 30 s for the list check: 1310 s, rounded up
-      # to 22 min. The budget has to carry the fallback's own update, because the path that
-      # needs every one of those bounds is the path on which the step still succeeds. Healthy
-      # today is a 38 s median and a 102 s 95th percentile for the whole step.
+      # origin's indexes and a third 300 s download attempt, then the unpack, the decoder guard,
+      # the browser download and the one apt simulation of the list check, none of which touch
+      # the Ubuntu mirror. So the arithmetic is 2 x 90 + 2 x 300 + 90 + 300 = 1170 s of bounded
+      # apt, 17.4 s of unpack, 2.1 s of decoder guard, about 90 s for the browsers and 1.6 s for
+      # the list check: 1170 + 17.4 + 2.1 + 90 + 1.6 = 1281.1 s, rounded up to 22 min. The budget
+      # has to carry the fallback's own update, because the path that needs every one of those
+      # bounds is the path on which the step still succeeds.
+      #
+      # The four readings after the bounded apt are job 128196725293's, this pull request's own,
+      # at this head's 182 packages. The unpack is the 17.4 s from `Download complete and in
+      # download only mode` at 22:43:13.177 to the last line of the unbounded install at
+      # 22:43:30.528. The decoder guard is the 2.1 s from there to `the decoders WebKit plays
+      # through are in the registry: ...` at 22:43:32.595. The browsers and the list check
+      # together are the 1.6 s from there to `The pinned list is current: ...` at 22:43:34.152 -
+      # but that job restored its browsers from the Actions cache (`Cache hit for:
+      # playwright-Linux-7f68fc...`, 482 MB, at 22:42:58), so that 1.6 s is no reading of the
+      # cold browser download and the budget has to carry the cold case. That is what the 90 s
+      # term is: the step's existing derivation for the cold browsers, which this change does
+      # not invalidate, because the package set does not reach the browser download. The list
+      # check, which this block used to put at about 30 s, is measured inside that 1.6 s, so
+      # 1.6 s is the term the reading supports for it. The whole step took 33 s in that job,
+      # 22:43:01 to 22:43:34: one reading at this head's package set, not a distribution.
       #
       # Each bound is derived from its own phase: each job's two apt rates, as apt logged them,
-      # scaled onto the head's smaller fetch of 12.9 MB of indexes and 51.4 MB of packages. The
-      # population is the 205 green dispatch jobs of the tester's window (2026-11-05T08:51:42Z
+      # scaled onto the head's fetch of 13.0 MB of indexes and 114 MB of packages. The population
+      # is the 205 green dispatch jobs of the tester's window (2026-11-05T08:51:42Z
       # to 23:07:42Z, a different window from the table above, which is why its count differs),
-      # read in full for the 26 whose install step ran over 73 s. No shorter step can reach
-      # either bound: an update need over 90 s means a merge-base index fetch of 10.5 MB taking
-      # over 73 s, and a download need over 300 s means a merge-base fetch of 114 MB taking over
-      # 665 s.
+      # read in full for the 26 whose install step ran over 73 s.
       #
       # Two jobs bind the two bounds. Job 127238648049 binds the download: apt logged
-      # `Fetched 114 MB in 10min 13s (186 kB/s)` for its packages, so the head's 51.4 MB need
-      # 276.3 s there, and 300 s leaves 8.6 per cent of headroom. Job 127357441704 binds the
-      # update: apt logged `Fetched 10.5 MB in 45s (233 kB/s)` for its `apt-get update`, so the
-      # head's 12.9 MB need 55.4 s there, and 90 s leaves 63 per cent. On this model the two
-      # bounds fail none of the 205.
+      # `Fetched 114 MB in 10min 13s (186 kB/s)` for its packages, so the head's 114 MB need
+      # 613 s there, which the two 300 s attempts on the primary do not reach. Job 127357441704
+      # binds the update: apt logged `Fetched 10.5 MB in 45s (233 kB/s)` for its `apt-get
+      # update`, so the head's 13.0 MB need 55.8 s there, and 90 s leaves 61 per cent over that
+      # need. Neither the index figure nor its 90 s bound moves with the package set.
+      #
+      # So at 186 kB/s, the slowest mirror a green job of that window met, the restored bytes
+      # need more than the 600 s of the two attempts on the primary, and the origin switch
+      # fires. That is the trade this change accepts: Playwright's whole list, against a
+      # download phase that reaches the fallback origin on that mirror.
       #
       # One blended rate per job is the wrong model, as job 127238648049's own log shows:
       # `Fetched 10.5 MB in 1s (9797 kB/s)` for its update and the 186 kB/s above for its
@@ -2631,27 +2654,34 @@ jobs:
       # understates the download. The model assumes a retry meets the same mirror rate, and
       # azure.archive.ubuntu.com is a pool, so a retry may meet a faster mirror or a slower one.
       # Both bounds come from the slowest mirror a green job of that window met, and are read
-      # again when a green job meets a slower one. Under about 143 kB/s the indexes do not
-      # arrive inside one bound, and under about 171 kB/s the packages do not: job 127274913129
-      # met 62.5 kB/s for its packages, and its job budget cancelled it.
+      # again when a green job meets a slower one. Under 13.0 MB / 90 s = 144 kB/s the indexes
+      # do not arrive inside one bound, and under 114 MB / 300 s = 380 kB/s the packages do not:
+      # job 127274913129 met 62.5 kB/s for its packages, and its job budget cancelled it. The
+      # head's 114 MB need 1824 s at that rate, which neither 600 s nor 900 s of download
+      # reaches, so the step fails by its own name there.
       #
-      # What the three attempts complete, which is the threshold the step carries: three bounds
-      # of 300 s are 900 s of download, so the step completes above about 57 kB/s, and under
-      # that it fails by its own name - in about 900 s where both `apt-get update` phases were
-      # fast, and in at most 1170 s where each was retried to its bound. Two attempts would have
-      # completed only above about 86 kB/s, which is why there are three: at 62.5 kB/s the
-      # head's 51.4 MB need 822 s, which 600 s of download does not reach and 900 s does, and
-      # job 127274913129 above met exactly that rate.
+      # What the attempts complete is the threshold the step carries, and it is three bands
+      # rather than one number, because the third attempt is on another origin and the partial
+      # may not be reused across that switch. With B the 114 MB this head fetches:
+      #   above B / 600 s = 190 kB/s the two attempts on the primary complete the download;
+      #   between B / 900 s = 127 kB/s and 190 kB/s the origin switch fires on every run and
+      #     completion rests on the fallback resuming the partial; where it does not, that one
+      #     attempt carries all 114 MB and needs B / 300 s = 380 kB/s, which nothing in this
+      #     band meets, so that class fails by its own name;
+      #   below 127 kB/s the step fails by its own name whatever the fallback does - in about
+      #     900 s where both `apt-get update` phases were fast, and in at most 1170 s where each
+      #     was retried to its bound.
       #
       # The attempts accumulate, which is measured and not assumed: `apt-get ... -d` resumes. An
       # attempt the bound kills leaves its bytes in apt's partial directory, and the attempt
-      # after it asks only for the rest, which that attempt logs as
-      # `Need to get 42.1 MB/51.4 MB of archives` after a first attempt that had asked for
-      # 51.4 MB. Measured separately, the partial is resumed across the origin switch too, since
-      # the two mirrors serve the same file and the server answers a byte-range request. Where
-      # the fallback's snapshot holds a different version the filename differs, the partial is
-      # not reused and that attempt carries the full 51.4 MB, which at any healthy rate is
-      # seconds.
+      # after it asks only for the rest. Job 128196725293 measured that at this head: after the
+      # download phase had fetched all 114 MB, the install call after it asked for
+      # `Need to get 0 B/114 MB of archives.`, so what the download put on disk the install does
+      # not fetch again. Measured separately, the partial is resumed across the origin switch
+      # too, since the two mirrors serve the same file and the server answers a byte-range
+      # request. Where the fallback's snapshot holds a different version the filename differs,
+      # the partial is not reused and that attempt carries the full 114 MB, which that job
+      # fetched in 4 s at 28.5 MB/s.
       #
       # Why the third attempt changes origin rather than the bound being raised: a longer bound
       # buys a longer hang and hides the mirror. One step's log holds both of the rates the one
@@ -2660,9 +2690,9 @@ jobs:
       # that answers that. A single bad pool member is the case no attempt count on one origin
       # reaches.
       #
-      # The slowest reading this repository holds is that 31 kB/s: 9.3 MB fetched in a 300 s
-      # attempt. No attempt count worth having completes 51.4 MB at that rate - it needs
-      # 1658 s - so the step fails by its own name there, which is the intended outcome.
+      # The slowest reading this repository holds is that 31 kB/s: the head's 114 MB need 3677 s
+      # at it, which no attempt count worth having completes, so the step fails by its own name
+      # there, which is the intended outcome.
       #
       # The worst case the step now carries: if both `apt-get update` attempts fail, the step
       # stops after about 180 s, so the longest the bounded apt phases can run is one update
