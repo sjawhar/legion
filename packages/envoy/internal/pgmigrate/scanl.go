@@ -744,35 +744,53 @@ func (l *lexer) opRunAt(i int) opRun {
 	return l.op
 }
 
+// opRunScanned, where a test has set it, is given the bytes each measureOpRun examined. It is nil
+// in every process but a test of this package, where the call costs one comparison per run
+// measured; TestOperatorRunLexingIsLinear sets it and holds the bytes this reading examines over
+// a text to a multiple of the text's own length. That is the property stated as a count of work
+// rather than as a time, and a time would be a statement about the machine rather than about the
+// code: measured on this pod, a bound on the ratio between two sizes that linear code keeps near
+// 10 was passed by linear code 4 times in 80 readings under three busy loops.
+var opRunScanned func(bytes int)
+
 // measureOpRun reads the run from i on. Each of its three searches stops at what it is looking
 // for, and the run's end is taken from the run last measured where that one holds i, so reading
 // a run again after a comment inside it costs the bytes up to the next comment rather than the
 // bytes of the whole run.
 func (l *lexer) measureOpRun(i int) opRun {
 	run := opRun{from: i, to: i, qualify: -1}
+	scanned := 0
 	if i >= l.op.from && i < l.op.to {
 		run.to = l.op.to
 	} else {
 		for run.to < len(l.text) && isOpChar(l.text[run.to]) {
 			run.to++
 		}
+		scanned += run.to - i
 	}
 	run.stop = run.to
 	if at := strings.Index(l.text[i:run.to], "/*"); at >= 0 {
 		run.stop = i + at
 	}
+	scanned += run.to - i
 	if at := strings.Index(l.text[i:run.stop], "--"); at >= 0 {
 		run.stop = i + at
 	}
+	scanned += run.stop - i
 	run.plus = run.stop
 	for run.plus > i && (l.text[run.plus-1] == '+' || l.text[run.plus-1] == '-') {
 		run.plus--
 	}
+	scanned += run.stop - run.plus
 	for at := run.stop - 2; at >= i; at-- {
+		scanned++
 		if strings.IndexByte("~!@#^&|`?%", l.text[at]) >= 0 {
 			run.qualify = at
 			break
 		}
+	}
+	if opRunScanned != nil {
+		opRunScanned(scanned)
 	}
 	return run
 }

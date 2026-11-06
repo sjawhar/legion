@@ -29,9 +29,9 @@ package pgmigrate
 // refusal and not its spans, and asks only that redactedQuery covered the marker from the byte
 // the server's lexer stopped on, so no fault in the reading can quiet it. Measured on
 // 2026-11-06 with actParam's int32 check taken out of scanl.go, which loses the refusal
-// {param}'s number too large makes: of 158,356 (text, setting) pairs, the comparison of
-// refusals failed on 1,250 and the coverage clause on 982. Both of them need the server's
-// message to be read as its lexer's own, which is what scanlErrors decides.
+// {param}'s number too large makes: over the sample that leg runs, the comparison of refusals
+// failed on 1,250 (text, setting) pairs and the coverage clause on 982. Both of them need the
+// server's message to be read as its lexer's own, which is what scanlErrors decides.
 //
 // TestRedactionAgainstServerOutcomes is the oracle, and it holds the transcription itself to a
 // real PostgreSQL by comparing OUTCOMES rather than parsing messages. For each text it asks the
@@ -90,11 +90,14 @@ import (
 // parameter number no int32 holds; and a run of {op_chars} four of which are the NAMEDATALEN
 // bytes {operator} refuses.
 //
-// A search whose alphabet cannot build a refusal says nothing about it, which is how a
-// transcription missing five of them was read as green here, and how this alphabet could form
-// neither {hexfail}, {octfail}, {binfail} nor a closing surrogate half until this round. What
-// holds it to them is the per-class tally of TestRedactionAgainstServerOutcomes, which fails the
-// test for a refusal class no text of its sample reached.
+// A search whose alphabet cannot build a refusal says nothing about it: a transcription missing
+// five of them was read as green here, and this alphabet could form neither {hexfail},
+// {octfail}, {binfail} nor a closing surrogate half. What holds the alphabet to them is the
+// per-class tally of TestRedactionAgainstServerOutcomes, which counts the hits a text the corpus
+// built won apart from the hits the class's own fixed statement won, and fails the test for a
+// class no text of the corpus reached. Where the corpus forms a class in too few texts for the
+// sample's stride to land on one, the sample takes one of them by name rather than excusing the
+// class.
 //
 // No piece is a byte that is not valid UTF-8 on its own. A query text PostgreSQL has is a string
 // in its server encoding, so a text holding one of those is refused before the lexer sees it and
@@ -114,6 +117,11 @@ var (
 	// is the length {operator} refuses with "operator too long" and a text of fewer is a run it
 	// reads.
 	opCharRun = strings.Repeat("@", 16)
+	// longOperator is four of those pieces: NAMEDATALEN bytes of {op_chars}, the length
+	// {operator} refuses, and the only run of that length a text of corpusDepth pieces can
+	// hold, since every other piece of the alphabet is shorter than this one or holds a byte
+	// that is no {op_chars}.
+	longOperator = strings.Repeat(opCharRun, 4)
 )
 
 const (
@@ -276,12 +284,11 @@ func TestRedactionPrintsNoHiddenByte(t *testing.T) {
 	// The floor the two checks below stand on: they can only fail over texts the corpus still
 	// builds, and a corpus that stops building them fails nothing at all. It is taken on
 	// hiddenTexts+agreedTexts, the texts this leg checks in one direction or the other.
-	// Measured on 2026-11-06: at 19ed86b72fcb, before this file widened its alphabet,
-	// 2,046,970 texts held the marker hidden and 1,080,387 held it as shape, 3,127,357 of
-	// 4,160,760 texts; with the pieces the alphabet holds now, 4,080,589 and 1,721,811,
-	// 5,802,400 of 7,678,370 texts. The floor is about the corpus still forming those two
-	// classes rather than about its size, so a round that deliberately shrinks the corpus moves
-	// this number in the same commit and measures the two counts again.
+	// Measured on 2026-11-06 with the alphabet as it stands: 4,080,589 texts hold the marker
+	// hidden and 1,721,811 hold it as shape, 5,802,400 of 7,678,370 texts. The floor is about
+	// the corpus still forming those two classes rather than about its size, so a round that
+	// deliberately shrinks the corpus moves this number in the same commit and measures the
+	// two counts again.
 	if hiddenTexts+agreedTexts < 500_000 {
 		t.Fatalf("the corpus holds the marker hidden in %d texts and as shape in %d, %d together of %d: it has collapsed and these checks have nothing left to fail on", hiddenTexts, agreedTexts, hiddenTexts+agreedTexts, n)
 	}
@@ -364,9 +371,8 @@ type verdict struct {
 	// redactedQuery must have covered the marker rather than printed it. This clause asks our
 	// own reading nothing at all - not its refusal, not its spans - so no fault in that reading
 	// can quiet it. What it is not is the clause that catches most of a refusal the
-	// transcription does not make: that is the comparison of the two refusals, which failed on
-	// 1,250 of the 158,356 pairs with actParam's int32 check taken out of scanl.go on
-	// 2026-11-06, against this clause's 982. The two are not one set either way: this clause
+	// transcription does not make: that is the comparison of the two refusals, by the
+	// measurement this file's header records. The two are not one set either way: this clause
 	// needs the server's stop byte to reach the marker, the comparison needs only that the
 	// server's lexer refused where our reading did not.
 	coversFrom int
@@ -377,9 +383,10 @@ type verdict struct {
 	// one scan.l's own error rules make rather than the parser's, which scanlErrors decides by
 	// the words of the message and by the suffix scanner_yyerror gives them; and class is the
 	// refusal class those words name, or empty where the server did not refuse the text or
-	// refused it in words no rule of scan.l raises. The tally over the sample counts the
-	// classes, and a class no text of the sample reached fails the test, since a search that
-	// cannot form a refusal says nothing about it.
+	// refused it in words no rule of scan.l raises. The tally over the sample counts a hit for
+	// a class only where lexical is true, since a grammar refusal in the lexer's words is not
+	// the lexer's hit; the exception is a shared class, where no message tells the two apart
+	// and the count holds both.
 	failed, lexical bool
 	class           string
 }
@@ -421,14 +428,27 @@ type scanlError struct {
 	shared bool
 
 	// sample is a statement holding the marker that makes the server raise this class. It is in
-	// the oracle's sample beside the generated corpus, so that the tally of a class the
-	// generator happens to miss is not empty and the alphabet is held to forming each class
-	// rather than trusted to.
+	// the oracle's sample beside the generated corpus, and the tally counts its hits apart from
+	// theirs: a generated hit is what says the alphabet reaches the class, a fixed hit only that
+	// the class is still raised in these words. Each sample is also held to raising its own
+	// class - from the lexer, except for a shared class, where raising it at all is all a
+	// message can show - since a fixed text that raises something else stands for nothing and
+	// the tally would count it all the same.
 	sample string
 
 	// unformable, where it is set, says why no statement this leg sends can make the server
 	// raise this class, and the tally asks nothing of it.
 	unformable string
+
+	// reaches, where it is set, recognises a text of the corpus that makes the server raise this
+	// class, and the sample takes the first text of the enumeration it recognises, beside the
+	// stride's own picks. It is for a class the corpus forms in too few texts for a stride of
+	// one in sampleStride to land on one of them - "operator too long" is two texts of the
+	// corpus's millions - so that the class has a hit of the search's own and the tally can
+	// still fail on it. A class the stride already covers needs none, and no test here is
+	// trusted: the server decides what the text it picked raised, and a pick that raises
+	// nothing leaves the class's generated count at zero and reddens the test.
+	reaches func(text string) bool
 }
 
 var scanlErrors = []scanlError{
@@ -449,7 +469,8 @@ var scanlErrors = []scanlError{
 	{message: "invalid hexadecimal integer", yyerror: true, sample: "select 0x," + marker},
 	{message: "invalid octal integer", yyerror: true, sample: "select 0o," + marker},
 	{message: "invalid binary integer", yyerror: true, sample: "select 0b," + marker},
-	{message: "operator too long", yyerror: true, sample: "select " + strings.Repeat(opCharRun, 4) + " " + marker},
+	{message: "operator too long", yyerror: true, sample: "select " + longOperator + " " + marker,
+		reaches: func(text string) bool { return strings.Contains(text, longOperator) }},
 	{message: "parameter number too large", yyerror: true, sample: "select " + bigParameter + "," + marker},
 	// A text whose own bytes are not a string in the server encoding is refused with this
 	// message before the lexer runs, but every piece of the alphabet is valid UTF-8 and so is
@@ -462,7 +483,8 @@ var scanlErrors = []scanlError{
 	// together and the quote that ends it, so that a reading which does not refuse at the
 	// carriage return reads one whole literal and hands the marker after it to the report,
 	// while the server's lexer stopped at that byte. It is a fixed text because the corpus
-	// builds exactly one of its shape, which a stride of 97 keeps for one run in 97.
+	// builds exactly one text of that shape, and the sample keeps one text in sampleStride, so
+	// whether that one is kept turns on where it falls in the enumeration.
 	{message: "invalid Unicode surrogate pair", yyerror: true, sample: "select E'\\ud83d\r\\udc00'" + marker},
 	{message: "invalid Unicode escape value", yyerror: true, sample: `select E'\U00110000',` + marker},
 	{message: "invalid Unicode escape", shared: true, sample: `select E'\u12',` + marker},
@@ -502,6 +524,23 @@ func (e scanlError) raisedByLexer(message string) bool {
 		(strings.Contains(message, " at or near \"") && strings.HasSuffix(message, "\""))
 }
 
+// byteOffset turns a position PostgreSQL raised an error at into a byte offset into the text it
+// was raised for. POSITION is a 1-based count of characters, not of bytes, while every offset
+// this leg compares it against - the marker's, and the spans of our own reading - is a byte
+// offset, so one multi-byte character before the error would put the comparison out by the
+// bytes that character carries beyond its first. A position past the text's last character is
+// the text's length in bytes.
+func byteOffset(text string, position int32) int {
+	left := int(position) - 1
+	for at := range text {
+		if left == 0 {
+			return at
+		}
+		left--
+	}
+	return len(text)
+}
+
 func probe(ctx context.Context, conn *pgconn.PgConn, text string, ours reading) verdict {
 	at := strings.Index(text, marker)
 	answered := ask(ctx, conn, text)
@@ -511,7 +550,7 @@ func probe(ctx context.Context, conn *pgconn.PgConn, text string, ours reading) 
 	}
 	refusedAt := -1
 	if answered.failed && answered.position > 0 {
-		refusedAt = int(answered.position) - 1
+		refusedAt = byteOffset(text, answered.position)
 	}
 	if out.lexical && refusedAt >= 0 && refusedAt < at+len(marker) {
 		// The server's own lexer stopped on a byte of the marker or before it, so Postgres read
@@ -556,13 +595,11 @@ func probe(ctx context.Context, conn *pgconn.PgConn, text string, ours reading) 
 // so what the server says is where its lexer stopped and what this leg checks is that
 // redactedQuery covered the marker from there. That clause reads nothing of our own reading -
 // not its refusal, not its spans - so no fault in the reading can quiet it; it is not, though,
-// the clause that catches most of a refusal missing from the transcription. With actParam's
-// int32 check taken out of scanl.go on 2026-11-06, the comparison of the two refusals failed on
-// 1,250 of the 158,356 pairs and this clause on 982. What both of them rest on is the suffix
-// rule of scanlErrors: with scan.l's "invalid Unicode surrogate pair" kept out of the lexical
-// set, as it was until this round, a reading that recovers from a carriage return inside
-// E'\ud83d…\udc00' rather than refusing printed the marker that followed the literal, and both
-// clauses stayed silent on it.
+// the clause that catches most of a refusal missing from the transcription, as the measurement
+// this file's header records. What both of them rest on is the suffix rule of scanlErrors: take
+// scan.l's "invalid Unicode surrogate pair" out of the lexical set and a reading that recovers
+// from a carriage return inside E'\ud83d…\udc00' rather than refusing prints the marker that
+// follows the literal, with both clauses silent on it.
 func TestRedactionAgainstServerOutcomes(t *testing.T) {
 	if testing.Short() {
 		t.Skip("asks a server about thousands of statements")
@@ -600,8 +637,19 @@ func TestRedactionAgainstServerOutcomes(t *testing.T) {
 	leaks := map[string]bool{}
 	losses := map[string]bool{}
 	refusals := map[string]bool{}
-	classHits := map[string]int{}
-	for _, text := range sample {
+	// The tally, counted apart: generatedHits per class from the texts the corpus built,
+	// fixedHits from the fixed statements of scanlErrors, fixedRaised for a fixed statement
+	// seen to raise its own class, and fixedSaw for what it raised instead when it did not.
+	generatedHits := map[string]int{}
+	fixedHits := map[string]int{}
+	fixedRaised := map[string]bool{}
+	fixedSaw := map[string][]string{}
+	sharedClass := map[string]bool{}
+	for _, class := range scanlErrors {
+		sharedClass[class.message] = class.shared
+	}
+	for _, entry := range sample {
+		text := entry.text
 		printed := strings.Contains(redactedQuery(text), marker)
 		var verdicts [2]verdict
 		for i, setting := range settings {
@@ -622,8 +670,18 @@ func TestRedactionAgainstServerOutcomes(t *testing.T) {
 			if ours.failure >= 0 {
 				refusedByUs++
 			}
-			if verdicts[i].class != "" {
-				classHits[verdicts[i].class]++
+			if class := verdicts[i].class; class != "" && (verdicts[i].lexical || sharedClass[class]) {
+				if entry.class == "" {
+					generatedHits[class]++
+				} else {
+					fixedHits[class]++
+					if class == entry.class {
+						fixedRaised[class] = true
+					}
+				}
+			}
+			if entry.class != "" {
+				fixedSaw[entry.class] = append(fixedSaw[entry.class], "scs="+setting+": "+raisedWhat(verdicts[i]))
 			}
 			switch {
 			case verdicts[i].coversFrom >= 0:
@@ -670,30 +728,49 @@ func TestRedactionAgainstServerOutcomes(t *testing.T) {
 	}
 	t.Logf("server: %d of %d (text, setting) pairs settled by outcome, %d settled by the byte the server's own lexer stopped on, %d inconclusive (refused at a byte of the marker or before it with its lexer unnamed, or refused with no position), %d where the marker is inside a quoted identifier", asked, len(settings)*len(sample), covered, inconclusive, named)
 	// The floor the tally below stands on, and no replacement for it: the tally fails a class
-	// no text of the sample reached, and this fails a sample that reached almost nothing at
+	// no text of the corpus reached, and this fails a sample that reached almost nothing at
 	// all, where the tally of a corpus that no longer builds texts would have nothing left to
 	// count. It is taken on asked+covered, the pairs this leg settles - by outcome, and by the
-	// byte the server's own lexer stopped on. Measured on 2026-11-06: at 19ed86b72fcb, before
-	// this file widened its alphabet, 25,049 pairs settled by outcome and 19,597 by the stop
-	// byte, 44,646 of 85,790 pairs; with the pieces the alphabet holds now, 43,916 and 48,730,
-	// 92,646 of 158,356 pairs. The floor is about the corpus still forming the refusal classes
-	// rather than about its size, so a round that deliberately shrinks the corpus moves this
-	// number in the same commit and measures the two counts again.
+	// byte the server's own lexer stopped on. Measured on 2026-11-06 with the alphabet as it
+	// stands: 43,918 pairs settled by outcome and 48,730 by the stop byte, 92,648 of 158,358
+	// pairs. The floor is about the corpus still forming the refusal classes rather than about
+	// its size, so a round that deliberately shrinks the corpus moves this number in the same
+	// commit and measures the two counts again.
 	if asked+covered < 10_000 {
 		t.Fatalf("the sample settled %d (text, setting) pairs by outcome and %d by the byte the server's own lexer stopped on, %d together: the corpus has collapsed and this leg has nothing left to fail on", asked, covered, asked+covered)
 	}
-	var unformed []string
-	t.Logf("refusals the server raised, by the class of scan.l that raises them:")
+	var unformed, unraised, byName, byStride []string
+	t.Logf("a fixed statement is asked under both settings, so it contributes exactly two hits where it raises its class under both and one where only one setting raises it; a class whose hits are its fixed statement's alone is a class the corpus never formed, which is its generated count below reading 0")
+	t.Logf("refusals the server raised, by class, counting the hits of the texts the corpus built apart from the hits of the class's own fixed statement. A hit is one the lexer raised; a row marked shared is one the grammar raises in the same words in the same form, where no message tells the two apart and the count holds both:")
 	for _, class := range scanlErrors {
+		label := class.message
+		if class.shared {
+			label += " (shared with the grammar)"
+		}
 		if class.unformable != "" {
-			t.Logf("  %-50s not formed here: %s", class.message, class.unformable)
+			t.Logf("  %-62s not formed here: %s", label, class.unformable)
 			continue
 		}
-		t.Logf("  %-50s %d", class.message, classHits[class.message])
-		if classHits[class.message] == 0 {
+		t.Logf("  %-62s generated %d, fixed %d", label, generatedHits[class.message], fixedHits[class.message])
+		switch {
+		case generatedHits[class.message] == 0:
+			// Said of the run rather than of the table: a class carrying a reaches test is one
+			// the stride was known to miss, but a class the stride covered today can stop being
+			// covered tomorrow, and reading these two lists off the table rather than off the
+			// hits would say the stride covers a class it no longer reaches.
+			t.Logf("  %-62s rests on its fixed text, not on the search", "")
 			unformed = append(unformed, class.message)
+		case class.reaches != nil:
+			byName = append(byName, class.message)
+		default:
+			byStride = append(byStride, class.message)
+		}
+		if class.sample != "" && !fixedRaised[class.message] {
+			unraised = append(unraised, fmt.Sprintf("%q, for %q: %s", class.sample, class.message, strings.Join(fixedSaw[class.message], "; ")))
 		}
 	}
+	t.Logf("%d classes the sample takes a text of the corpus for by name, the corpus forming too few of them for the stride to land on one: %s", len(byName), strings.Join(byName, "; "))
+	t.Logf("%d classes the stride's own picks cover: %s", len(byStride), strings.Join(byStride, "; "))
 	t.Logf("%d (text, setting) pairs our reading refuses; %d the server ran anyway, %d the server's own lexer refused and ours did not", refusedByUs, refusalSpurious, refusalMissing)
 	for e := range refusals {
 		t.Logf("  refusal: %s", e)
@@ -718,42 +795,86 @@ func TestRedactionAgainstServerOutcomes(t *testing.T) {
 	if refusalSpurious > 0 || refusalMissing > 0 {
 		t.Errorf("%d refusals our reading invented, %d the server's own lexer raised and our reading did not", refusalSpurious, refusalMissing)
 	}
+	if len(unraised) > 0 {
+		t.Errorf("%d of scanlErrors' fixed texts did not raise their own class, so they stand for nothing the tally counts: %s", len(unraised), strings.Join(unraised, "; "))
+	}
 	if len(unformed) > 0 {
-		t.Errorf("no text of the sample made the server raise %d of scan.l's refusals, so this search says nothing about them: %s", len(unformed), strings.Join(unformed, "; "))
+		t.Errorf("no text the corpus built made the server raise %d of scan.l's refusals, so nothing but their fixed texts stands for them and this search says nothing about them: %s", len(unformed), strings.Join(unformed, "; "))
 	}
 }
 
-// serverSample picks the texts the oracle runs: one fixed text for each refusal class scanlErrors
-// names, so that a class the corpus happens to miss is asked about all the same and the per-class
-// tally checks the search rather than asserting it; and then every sampleStride'th text of the
-// corpus whose marker our reading holds hidden, and every sampleStride'th one it holds as shape,
-// so that both answers the server can give are asked for and a reading that hides too little is
-// as reachable as one that hides too much. The enumeration is deterministic, so the sample is the
-// same on every run.
-func serverSample() []string {
+// raisedWhat says what the server made of one text, for the report of a fixed statement that did
+// not raise the class it stands for.
+func raisedWhat(v verdict) string {
+	switch {
+	case !v.failed:
+		return "ran without error"
+	case v.class == "":
+		return "refused in words no rule of scan.l raises"
+	case v.lexical:
+		return fmt.Sprintf("refused with %q from the lexer", v.class)
+	default:
+		return fmt.Sprintf("refused with %q, which this message does not show the lexer raised", v.class)
+	}
+}
+
+// sampleText is one statement the oracle asks the server about, and where it came from: class
+// names the refusal class whose fixed statement this is, and is empty for a text the corpus
+// built. The tally counts the two apart, since only a generated hit says the alphabet reaches
+// the class.
+type sampleText struct {
+	text  string
+	class string
+}
+
+// serverSample picks the statements the oracle runs: the fixed statement of each refusal class
+// scanlErrors names, so that a class the corpus happens to miss is asked about all the same; the
+// first text of the corpus each class's reaches test recognises, so that a class the corpus
+// forms in too few texts for the stride to land on one still has a text of the search's own
+// here; and then every sampleStride'th text of the corpus whose marker our reading holds hidden,
+// and every sampleStride'th one it holds as shape, so that both answers the server can give are
+// asked for and a reading that hides too little is as reachable as one that hides too much. The
+// enumeration is deterministic, so the sample is the same on every run.
+func serverSample() []sampleText {
 	const sampleStride = 97
-	var sample []string
+	var sample []sampleText
 	for _, class := range scanlErrors {
 		if class.sample != "" {
-			sample = append(sample, class.sample)
+			sample = append(sample, sampleText{text: class.sample, class: class.message})
 		}
 	}
+	// strided holds the statements the stride took, so that a statement a reaches test asks
+	// for is not asked twice and counted twice where the stride took it anyway.
+	strided := map[string]bool{}
+	reached := make([]string, len(scanlErrors))
 	hidden, shape := 0, 0
 	eachText(corpusDepth, true, func(text string) {
 		statement := "select " + text
+		for i := range scanlErrors {
+			if scanlErrors[i].reaches != nil && reached[i] == "" && scanlErrors[i].reaches(statement) {
+				reached[i] = statement
+			}
+		}
 		at := strings.Index(statement, marker)
 		on, off := readingOf(statement, true), readingOf(statement, false)
 		if on.hides(at, at+len(marker)) || off.hides(at, at+len(marker)) {
 			if hidden%sampleStride == 0 {
-				sample = append(sample, statement)
+				sample = append(sample, sampleText{text: statement})
+				strided[statement] = true
 			}
 			hidden++
 			return
 		}
 		if shape%sampleStride == 0 {
-			sample = append(sample, statement)
+			sample = append(sample, sampleText{text: statement})
+			strided[statement] = true
 		}
 		shape++
 	})
+	for _, statement := range reached {
+		if statement != "" && !strided[statement] {
+			sample = append(sample, sampleText{text: statement})
+		}
+	}
 	return sample
 }
