@@ -84,6 +84,15 @@ func TestTheFanoutReportsItsOwnRefusalsForTheSessionsItDeliversTo(t *testing.T) 
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			harness := newListenerDeliveryHarness(t)
+			// Each copy refills from its bucket on a goroutine its registry starts
+			// (kvwatch.Watcher.Start), and a write that lands after that read's watch is opened
+			// and before the read itself begins carries no mark of it, so the sweep ending the
+			// read takes it back out of the copy (kvwatch.Copy.CompleteRead). The fan-out judges
+			// this message against the copies alone - the interest it matches (registry.Match)
+			// and the entry judgeFollowedTopic reads (sessions.Get) - so both reads are waited
+			// out here, before the two writes below.
+			waitForRegistry(t, harness.registry)
+			waitForSessions(t, harness.sessions)
 			sessionID := "ses_fanout_refusal_" + id.New()
 			topic := "notifications.github.acme.fanout-refusal-" + id.New() + ".mention"
 			if _, err := harness.registry.Upsert(store.Interest{SessionID: sessionID, MachineID: "test-machine"}, []string{topic}); err != nil {

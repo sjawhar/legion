@@ -2,6 +2,7 @@ package pgmigrate
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"reflect"
 	"strings"
@@ -196,6 +197,81 @@ func TestLoadRefusesASetARunnerWouldApplyOtherThanAsWritten(t *testing.T) {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("Load error = %q, want it to contain %q", err, want)
 				}
+			}
+		})
+	}
+}
+
+// A collision must not send a numbered set to a timestamp its guard refuses. A recorded closing
+// file still requires timestamps before the first timestamp exists, even when that file collides.
+func TestLoadCollisionRemedyMatchesTheSet(t *testing.T) {
+	cutover := fstest.MapFS{}
+	for version := 1; version < 161; version++ {
+		cutover[fmt.Sprintf("migrations/%04d_numbered.up.sql", version)] = file("select 1")
+	}
+	cutover["migrations/0161_delivery_run_warnings.up.sql"] = file("select 1")
+	cutover["migrations/0161_z_collision.up.sql"] = file("select 2")
+	for _, tc := range []struct {
+		name string
+		set  fstest.MapFS
+		want string
+	}{
+		{
+			name: "broker numbered throughout",
+			set: fstest.MapFS{
+				"migrations/0001_first.up.sql":   file("select 1"),
+				"migrations/0001_first.down.sql": file("select -1"),
+				"migrations/0002_a.up.sql":       file("select 2"),
+				"migrations/0002_b.up.sql":       file("select 2"),
+				"migrations/0003_later.up.sql":   file("select 3"),
+			},
+			want: "the next number in this set, starting at 4, so the versions stay numbered 1 to N with no gap (pgmigratetest.CheckNumberedOneToN)",
+		},
+		{
+			name: "Dispatch numbers then timestamps",
+			set: fstest.MapFS{
+				"migrations/0001_first.up.sql":                 file("select 1"),
+				"migrations/0161_delivery_run_warnings.up.sql": file("select 161"),
+				"migrations/20261104120000_a.up.sql":           file("select 2"),
+				"migrations/20261104120000_b.up.sql":           file("select 2"),
+			},
+			want: "the UTC moment it was created, 14 digits YYYYMMDDHHMMSS (date -u +%Y%m%d%H%M%S)",
+		},
+		{
+			name: "Dispatch closing file collides before its first timestamp",
+			set:  cutover,
+			want: "the UTC moment it was created, 14 digits YYYYMMDDHHMMSS (date -u +%Y%m%d%H%M%S)",
+		},
+		{
+			name: "timestamp set without a recorded closing file",
+			set: fstest.MapFS{
+				"migrations/0001_first.up.sql":       file("select 1"),
+				"migrations/20261104120000_a.up.sql": file("select 2"),
+				"migrations/20261104120000_b.up.sql": file("select 2"),
+			},
+			want: "the UTC moment it was created, 14 digits YYYYMMDDHHMMSS (date -u +%Y%m%d%H%M%S)",
+		},
+		{
+			name: "a gap leaves the naming rule uncertain",
+			set: fstest.MapFS{
+				"migrations/0001_first.up.sql": file("select 1"),
+				"migrations/0003_a.up.sql":     file("select 3"),
+				"migrations/0003_b.up.sql":     file("select 3"),
+			},
+			want: "a version under this set's naming guard: pgmigratetest.CheckNumberedOneToN requires the next free number on main, keeping 1 to N with no gap; migrationid.Check requires the UTC moment it was created, 14 digits YYYYMMDDHHMMSS (date -u +%Y%m%d%H%M%S)",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Load(tc.set, "migrations")
+			if err == nil {
+				t.Fatalf("Load accepted the collision and returned %+v", got)
+			}
+			if got != nil {
+				t.Errorf("Load refused the set but returned %+v; want no migration", got)
+			}
+			_, remedy, found := strings.Cut(err.Error(), "and give each of the rest ")
+			if !found || remedy != tc.want {
+				t.Errorf("Load error = %q, want the remedy %q", err, tc.want)
 			}
 		})
 	}
