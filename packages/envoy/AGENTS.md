@@ -2979,14 +2979,19 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   — the role lane stays core, and a holder's stored forward is its own session consumer's to deliver.
 
 - Role ownership is durable in the `envoy_roles` JetStream KV bucket.
-  Each role key records `holder_session_id`, `claimed_at`, and `previous_session_id`;
+  Each role key records `holder_session_id`, `claimed_at` and `previous_session_id`, and, where the claimant named them, `client_instance_id`, the process that holds the claim, and `renewed_at`, the moment that process last answered for it.
+  Both of those are optional, and a record carrying neither — one an earlier build wrote — is read rather than refused, at its `claimed_at` (`store.RoleClaim.LastAnsweredAt`, the one reading of a claim's renewal).
+  A holder renews its claim by registering, so `renewed_at` is the holder's heartbeat and not the instant the role was taken (`store.Registry.RenewRoleClaims`, called from `/v1/interests/subscribe`);
   listener restart restores the claim from that record, but a message reaches the holder only while the holder's own record reads live (`session.Live`, judged from that record's last registration and from nothing else).
   Reaping stale interests never releases a role, and neither does a lookup, a role send, a role delivery nor a forward that failed:
-  the role claim reaper is the one place a claim is taken away, and it takes one only from a holder its own session read puts in `session.Gone` (`roleHolderMayBeLive`, `sessionMayBeLive` with `notGone`), which is a record past the gone horizon or no record at all.
+  the role claim reaper is the one place a claim is taken away, and it takes one only from a holder that has not answered for the claim inside the live window and whose own session read puts it in `session.Gone` (`roleHolderMayBeLive`, `sessionMayBeLive` with `notGone`), which is a record past the gone horizon or no record at all.
+  The claim's own renewal is read first, and a claim renewed inside that window is kept whatever the holder's session record says, reported as its own outcome (`ExpiredRoleClaimRenewed`, which a caller can tell from the restart grace's `ExpiredRoleClaimRetained`):
+  a second process that resumes the holder's session id and then deregisters it leaves the record gone and the holder running, and the holder's renewals keep its role.
   A holder that is `unresponsive` — past the live window, inside the gone horizon — keeps its claim and its `claimed_at` through any number of resolutions, and the paths that need a live holder report it instead:
   the publish route's and the lookup's 404 `holder_lapsed`, which carries `holder_state`, `last_seen` and `claim_released: false`, and a `delivery_failed` exception on the role lane.
   What still moves such a role is a successor's soft claim, which replaces the holder rather than releasing the claim (`roleSupersessionVerdict`; `/v1/roles/set` in the Listener API below).
   A claim restored at a listener restart gets one live window from that listener's own start before its reaper may release it (the grace `store.Registry.ReapRoleClaims` holds a restored claim for, which `main.go` passes as the registry's live window), so a holder that registers again in time keeps its role.
+  Every claim, restored or not, gets a second grant of that same window, measured against its own renewal rather than against the listener's start, and `main.go` passes the one live window for both.
   A listener reads a claim from the role bucket itself
   — the role lane's first read of each message is the registry's watched copy of that bucket (`store.Registry.CachedRoleHolder`, the resolution's `firstHolder`), and every later read is the bucket's own
   — but a holder's liveness from its cache of `envoy_sessions`, which trails that bucket, so a holder another listener registered and gave the role a moment ago is in both buckets before it is in this cache;
@@ -3858,8 +3863,9 @@ Each item below names an endpoint and its method, then its contract, and an item
 
   Returns the live role holder, with `holder_state` (`live` on this answer, the same field the 404 of a lapsed holder carries), its capabilities, `machine_id` (the listener it registered through, which owns its delivery unless its stored subscription names another, as `/v1/interests/subscribe` below says), `host` (the machine it actually runs on, as its own plugin reported it, which no delivery reads;
   falls back to `machine_id` for a session whose plugin predates the field) and `last_seen`.
+  It also answers `client_instance_id`, the process the holder's claim names (`store.RoleClaim.ClientInstanceID`): it is how a client sees that a role is held under its own session id by another process, which is what `/v1/roles/set` refuses such a claimant for, and a claim that names no process — one an earlier build wrote, or one whose claimant stated none — answers an empty instance.
   A 404 has `reason: "unclaimed"` when no role claim exists;
-  for a holder whose own record does not read live it has `reason: "holder_lapsed"` with that holder's id, its `holder_state` (`unresponsive` or `gone`), `claim_released: false`, since the lookup takes nothing from a holder in either state, and the last registration the listener still keeps (`session.LastSeenMemory`, 2 hours).
+  for a holder whose own record does not read live it has `reason: "holder_lapsed"` with that holder's id, that holder's `client_instance_id` on the same terms as the 200's, its `holder_state` (`unresponsive` or `gone`), `claim_released: false`, since the lookup takes nothing from a holder in either state, and the last registration the listener still keeps (`session.LastSeenMemory`, 2 hours).
   The holder is resolved as a role send's first resolution through the publish route resolves it (`roles.ResolveHolder`, live only), within 3.5 s (`sendRequestBudget`) of the request's own context, and writes nothing to the role bucket.
   A role store call that did not answer within its cap or that budget (the claim read or the holder's session read) is, as on the publish route, `503 {"error":"envoy: the message bus did not answer: <reason>"}` with `Retry-After: 1`, naming the call that did not answer (`writeBusUnavailable`;
   a key NATS refuses keeps the 413 or 400 `writeNATSError` gives);
@@ -3871,12 +3877,14 @@ Each item below names an endpoint and its method, then its contract, and an item
 
   Claims a role for a live session; the claim alone makes it the holder, and the route also adds the role's topic to its interest record.
   Last-claim-wins by default.
-  With `"soft": true` the claim lands only if the role is unheld, already this session's, held by a session that is no longer live, or held by the declared `previous_session_id` (the id a fork/branch continues) in one of three cases:
+  A claim states the process making it, `client_instance_id`, the same id that process's registrations carry, and the claim record names it as the process holding the role.
+  With `"soft": true` the claim lands only if the role is unheld, held by a session that is no longer live, held under the claimant's own session id on the terms below, or held by the declared `previous_session_id` (the id a fork/branch continues) in one of three cases:
   that predecessor has no live registry entry, its live entry carries the claimant's own `client_instance_id`, or either side carries no instance id.
   The third case is the one this route cannot tell from another client instance's, so it logs that takeover with both session ids.
   A predecessor still live under another client instance keeps the role, and the claim answers `409 {error, role, holder}` naming it, as any other live holder does.
+  The predecessor rule reads the claimant's instance from the request and falls back to the claimant's stored entry when the request states none, which is the route's one remaining use of the session record to tell one process from another.
   The predecessor's entry is read from the `envoy_sessions` bucket itself, never from this listener's trailing cache of it, and a predecessor read that did not answer is the bus-unavailable 503 with nothing changed.
-  The claimant's own entry is read from the bucket too, and a claimant read that does not answer falls back to the cached entry, so a cache that trails without the claimant's id decides that claim as the third case.
+  The claimant's own entry is read from the bucket too, and a claimant read that does not answer falls back to the cached entry, so a cache that trails without the claimant's id decides a claim that states no instance as the third case.
   A claim carrying `if_claim_revision` is conditional: it lands only while the role's claim record is still at that revision, the one a `/v1/roles/<role>` lookup reported as `claim_revision`, and `0` names a role with no claim record at all, so such a claim lands only while none exists.
   Any other revision in the bucket, a record where the claim names none, or none where it names one is `409 {error, role, holder, claim_revision}`, where `claim_revision` is the revision the bucket does hold (`0` for no record) and `holder` the session its claim names (empty for none), and so is a claim that passed that check and then lost its conditional write to a claim that landed in between.
   **No claim record is written**, so the role keeps the holder the standing claim gave it: the precondition is weighed before the claimant's interest record is touched, and a claim that lost the conditional write rolls that record's topic back unless the winning claim names that same session, whose record then keeps the lane topic of the role it now holds (`store.Registry.SetRoleWithPrevious`, `store.ErrRoleClaimRevisionMismatch`).
@@ -3884,6 +3892,12 @@ Each item below names an endpoint and its method, then its contract, and an item
   A claim with no `if_claim_revision` is weighed by the soft and last-claim-wins rules alone, exactly as before the field.
   It is how a scheduler turns a lookup of a role and the claim that follows into one decision, which neither last-claim-wins nor a soft claim can do: a claim that landed in between refuses this one rather than being overwritten by it.
   A write route (below the list).
+
+- A soft claim of a role already held under the claimant's **own** session id is decided on the standing claim and never on the session record, which names whichever process registered that id last.
+  The claim is granted where that claim names this very process, granted where nobody has answered for the claim inside the listener's configured live window (`store.RoleClaimRenewedWithin`, the window the role claim reaper weighs a renewal against too), and otherwise refused `409 {error, role, holder}` naming that session, logged once with the role, the session id, the holder's client instance and the claimant's.
+  A request that states no instance, and a claim record that names none, reach that renewal test rather than a case of their own, since an absent instance matches nothing.
+  So a second process that resumed a live session's id cannot take the role that session holds, and reads `/v1/roles/<role>`'s `client_instance_id` to see which process does.
+  A hard claim is unchanged: it reads no holder and lands last-claim-wins.
 
 - `/v1/interests/subscribe` (POST)
 
@@ -3898,7 +3912,7 @@ Each item below names an endpoint and its method, then its contract, and an item
   a registration from an older plugin sends neither, and the entry keeps neither.
   It stores `client_instance_id` the same way: the client instance driving the session, which is one Oh My Pi Envoy extension instance or one Claude Code channel-server process, each minting a random id when it starts.
   Every registration replaces the stored id with the one it carries, or with none when it carries none, and `/v1/roles/set`'s refresh of the claimant's entry keeps the stored id.
-  That id is what decides a soft claim naming a predecessor and a deregistration that carries one, as those two entries say.
+  That id is what decides a deregistration that carries one, and a soft claim naming a predecessor only where the claim itself states no instance, as those two entries say: a claim and a release each state their own process now, and the stored id no longer stands in for it.
   A topic reaching a private stream subject (`bus.privateStreamSubjects`:
   each session's inbox `notifications.agent.>`, the failed-delivery lane `notifications.envoy.exceptions.notifications.agent.>`, the Legion controller lane `notifications.legion.>`) other than the session's own literal `notifications.agent.<id>` — another session's agent subject, any failed-delivery lane (its own included), a controller lane, or a wildcard overlapping one (`notifications.agent.*`, `notifications.envoy.>`, `notifications.>`, `notifications.*.<x>`;
   `bus.ReachesPrivateStreamSubject`) — is not stored, since `/v1/replay` answers the stored topics and the stored topics drive the listener's fan-out, and such a topic would hand the session messages meant for another session or for the controller's role holder:
@@ -3907,6 +3921,11 @@ Each item below names an endpoint and its method, then its contract, and an item
   A row an earlier build stored with such a topic is cleaned at the session's next registration:
   the registry drops every such topic from the merged row, not only from the incoming topics (`store.Registry.Upsert`, which `/v1/roles/set` writes through too;
   `/v1/interests/unsubscribe` drops them from the row it rewrites as well), so `Match` stops fanning those messages out to the session after its next heartbeat.
+
+- The registration is also the holder's heartbeat for the role claims it holds: it stamps `renewed_at` on every claim this session holds that names this same `client_instance_id`, and the first such registration adopts a claim that names no process (`store.Registry.RenewRoleClaims`), which is what `/v1/roles/set` and the role claim reaper weigh against the live window.
+  A registration carrying no instance renews nothing, since an absent instance names no process to match.
+  The renewal runs last, after the records this route owns are written, and can never fail the registration: a claim view that cannot answer yet, a bucket call that did not answer and a renewal that lost its compare-and-swap are each logged and passed over, since a heartbeat refused for any of them would take down the very sessions whose claims it keeps alive.
+  It costs one role-bucket write per heartbeat per role the session holds.
 
 - The stored subscription records the `machine_id` and `dir` of the registration that last wrote it, and a registration through another listener moves both (`store.mergeForUpsert`;
   a field the request leaves empty keeps the stored value, so `/v1/roles/set`, which sends no directory, keeps the stored one).
@@ -3936,7 +3955,11 @@ Each item below names an endpoint and its method, then its contract, and an item
 - `/v1/interests/unsubscribe` (POST)
 
   Removes the supplied topics and returns them in `removed`.
-  A stored subscription this build cannot decode (`store.ErrMalformedInterest`) routes none of its topics, so it is left as it is, logged at WARN naming the session, and the route still releases the role claims the topics name and answers 200.
+  It carries `client_instance_id`, the process handing the interests back, and that is what decides the role claims it frees: the claims naming that same process and no others (`store.RoleReleaseAuthority`).
+  A release that names no process frees no claim at all, and neither does any instance against a claim that names none — an absent instance is no match on either side — while the topics named are removed either way.
+  So a second process that resumed this session's id hands back a role it does not hold, and the process that holds it keeps it.
+  This route never forces a release; `DELETE /v1/interests/<session_id>` is the only caller that does.
+  A stored subscription this build cannot decode (`store.ErrMalformedInterest`) routes none of its topics, so it is left as it is, logged at WARN naming the session, and the route still releases the role claims it is authorised to and answers 200.
   A write route (below the list).
   The row it rewrites also drops any stored topic reaching a private stream subject other than the session's own agent subject, as `/v1/interests/subscribe` says.
   A session whose entry records consumer delivery has its consumer's filter set to the topics left before the call answers (`sessionDelivery.refollow`);
@@ -3973,7 +3996,9 @@ Each item below names an endpoint and its method, then its contract, and an item
   A GET the cache misses reads the bucket within 3.5 s:
   `404` only when the bucket holds no key for the session, a 413 or 400 for an id NATS refuses as a key, `500 {"error":"envoy: the interest record of session <id> is unreadable: <reason>"}` with no `Retry-After` for a record this build cannot decode (`store.ErrMalformedInterest`;
   the bus answered, and a retry reads the same record), and `503 {"error":"envoy: the message bus did not answer: <reason>"}` with `Retry-After: 1` for a read that did not answer.
-  A DELETE removes a record this build cannot decode as it removes one it can, releasing every role claim the session holds, and answers 204; it is a write route (below the list).
+  A DELETE removes a record this build cannot decode as it removes one it can, forcing the release of every role claim the session holds whichever process holds it (`store.RoleReleaseAuthority.Force`), and answers 204; it is a write route (below the list).
+  It is the one caller that forces: an operator clearing a session's interests states no process, and a release naming none frees nothing, so without the force this route could no longer free the roles of a client that has gone away.
+  Its remaining limit, decided and left as it stands: a second process that resumed the session's id reaches this route too, since the binding above refuses only a token acting as another session, and closing that needs a credential naming the process rather than the session.
   A DELETE also sets the consumer filter of a session on consumer delivery to its agent subject alone, as `/v1/interests/unsubscribe` does.
 
 - `/v1/registry/<session_id>` (GET)

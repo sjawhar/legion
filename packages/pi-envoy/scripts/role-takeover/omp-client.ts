@@ -21,18 +21,16 @@
  *
  *   {"id":"1","op":"start","session":"ses_a","roles":["reviewer"]}
  *   {"id":"2","op":"tool","name":"envoy_role_set","args":{"role":"reviewer"}}
- *   {"id":"3","op":"switch","session":"ses_b","reason":"fork","detach":true}
+ *   {"id":"3","op":"switch","session":"ses_b","reason":"fork"}
  *   {"id":"4","op":"heartbeat"}
- *   {"id":"5","op":"join"}
  *
  * `roles` replaces the session's branch with one `envoy-role-claim` entry per element (a string
  * is a claim, null a release), which is what a resumed or forked transcript carries; omitted, the
- * branch carries on as it is. `detach` answers before the handler settles, for a step the smoke
- * holds at the proxy; `join` then waits for every detached handler. `heartbeat` runs the pass the
- * extension's own interval would have run: it re-registers the session, which is how a holder
- * says it still answers for the role claims it made, and it is the one pass that asks again about
- * a claim the listener refused (`reconsiderRefusal`). It answers as soon as the pass is under
- * way, as a timer tick does; the smoke reads the pass's own calls at the proxy.
+ * branch carries on as it is. `heartbeat` runs the pass the extension's own interval would have
+ * run: it re-registers the session, which is how a holder says it still answers for the role
+ * claims it made, and it is the one pass that asks again about a claim the listener refused
+ * (`reconsiderRefusal`). It answers as soon as the pass is under way, as a timer tick does; the
+ * smoke reads the pass's own calls at the proxy.
  */
 import { appendFileSync } from "node:fs";
 import type { PiApi } from "@legion/pi-shared/pi-types";
@@ -49,7 +47,6 @@ interface Command {
   readonly roles?: readonly (string | null)[];
   readonly name?: string;
   readonly args?: Record<string, unknown>;
-  readonly detach?: boolean;
 }
 
 const { ROLE_TAKEOVER_CWD, ROLE_TAKEOVER_CLIENT_LOG, ENVOY_HEARTBEAT_MS } = process.env;
@@ -65,8 +62,6 @@ let heartbeatPass: (() => void) | undefined;
 // the extension's `pi.appendEntry` writes into.
 const { entries, handlers, pi, tools } = createStandInHost();
 const notices: string[] = [];
-/** Handlers a `detach` command left running, awaited by `join`. */
-const detached: Promise<unknown>[] = [];
 
 const sessionManager = {
   getSessionId: () => sessionID,
@@ -160,11 +155,6 @@ async function run(command: Command): Promise<Record<string, unknown>> {
       heartbeatPass();
       return { session: sessionID };
     }
-    case "join": {
-      const waiting = detached.splice(0);
-      await Promise.allSettled(waiting);
-      return { joined: waiting.length };
-    }
     default:
       throw new Error(`unknown op ${command.op}`);
   }
@@ -187,15 +177,6 @@ for await (const line of console) {
   if (text === "") continue;
   const command = JSON.parse(text) as Command;
   const id = command.id ?? "";
-  if (command.detach === true) {
-    answer({ id, ok: true, started: true });
-    detached.push(
-      run(command).catch((error: unknown) => {
-        notices.push(`detached ${command.op} failed: ${String(error)}`);
-      })
-    );
-    continue;
-  }
   try {
     answer({ id, ok: true, ...(await run(command)) });
   } catch (error) {

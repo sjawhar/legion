@@ -32,12 +32,23 @@ soft: it names the session it continues, which is a fork's or branch's parent, o
 this process last held the role under. The listener moves the role off that predecessor only
 when the predecessor has no live registration, when its live registration carries this extension
 instance's own client instance id, or when either side carries no instance id. A predecessor
-another process still runs keeps the role, and the claim is refused naming that holder. A refused
-session keeps running and stays registered, without the role: it does not claim again at each
-heartbeat, and it takes the role on its next session event once the holder is gone. Each
-extension instance mints its client instance id when it starts and sends it on every registration
-and on the deregistration at shutdown, where the listener removes the registration only while it
-carries the same id or none. The queues, deadlines and shared role state behind all of this are
+another process still runs keeps the role, and the claim is refused naming that holder. A claim
+of a role already held under this session's own id is decided on the standing claim rather than
+on the registration: the listener grants it to the process that claim names, grants it once
+nobody renewed the claim inside its live window, and otherwise refuses it naming this very
+session. A refused session keeps running and stays registered, without the role: it does not
+claim again at each heartbeat, and it takes the role on its next session event once the holder is
+gone. The one refusal a heartbeat does ask about again is that last one — the lookup naming this
+session as the holder under another process — which the listener grants as soon as that process
+stops renewing its claim. Each extension instance mints its client instance id when it starts and
+sends it on every registration, on every claim and release, and on the deregistration at
+shutdown, where the listener removes the registration only while it carries the same id or none.
+A registration also renews every role claim this session holds that names this same instance,
+and a release frees only the claims naming it, so a second process that resumed this session's
+id neither ends this one's role nor outlasts it. The transcript's `envoy-role-claim` entry names
+the session claimed for and this process too: a release another process wrote on the same
+transcript ends no role here, and a claim another process wrote is pressed only while this
+process holds none. The queues, deadlines and shared role state behind all of this are
 `src/registration-state.ts`, beside the extension's other `src/` modules: a queued task acts
 through a handle that refuses every step past the task's deadline, or once its session is no
 longer the open session.

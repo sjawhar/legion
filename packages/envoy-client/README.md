@@ -243,13 +243,24 @@ no event in the configured stream. It sends the client instance driving the sess
 (`clientInstanceID`: one Oh My Pi Envoy extension instance, one Claude Code channel-server
 process, minted once when that instance starts) as `client_instance_id`, omitted when the host
 has none so an older listener sees an unchanged body; the listener stores it on the session's
-registry entry. `getRole` returns a role holder with its last-seen timestamp,
-and `listSessions` accepts optional directory and title filters; its rows carry `plugin` and
-`plugin_version` when the session registered them.
+registry entry and renews with it every role claim this session holds that names that same
+process, so each registration is the holder's answer for the roles it holds. `getRole` returns a
+role holder with its last-seen timestamp and the `client_instance_id` of the process its claim
+names, and `listSessions` accepts optional directory and title filters; its rows carry `plugin`
+and `plugin_version` when the session registered them.
 
-A `setRole` soft claim (`soft`) naming a predecessor (`previousSessionID`) takes the role from it
-only when that predecessor has no live registry entry, when its live entry carries this client
-instance's own instance id, or when either side carries no instance id; any other live holder
+`setRole` and `unsubscribe` take a `clientInstanceID` of their own, sent as `client_instance_id`
+and omitted from the wire when the caller states none: the listener records the claim's as the
+process holding the role, and frees on a release only the role claims naming the release's own,
+so a second process that resumed this session id can neither take the role nor hand it back, and
+a release naming no process frees no claim at all. A `setRole` soft claim (`soft`) naming a
+predecessor (`previousSessionID`) takes the role from it only when that predecessor has no live
+registry entry, when its live entry carries this client instance's own instance id, or when
+either side carries no instance id. A soft claim of a role already held under the claimant's own
+session id is decided on the standing claim rather than on the session record: granted when that
+claim names this very process, granted when nobody renewed it inside the listener's live window,
+and otherwise `{claimed: false, holder}` naming that same session — which `getRole`'s
+`client_instance_id` tells apart from a different session holding the role. Any other live holder
 keeps the role and is answered as `{claimed: false, holder}`. `unregisterSession({sessionID,
 clientInstanceID?})` deletes the session's registry entry: with an instance id the listener
 deletes it only when the entry carries the same id or none, so a departing client instance never

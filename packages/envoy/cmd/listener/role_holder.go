@@ -192,6 +192,12 @@ func bucketSessionEntry(ctx context.Context, sessions *session.SessionRegistry, 
 // the issue's R6): take the role from that holder, leave it where it is, or neither, because a
 // session read did not answer. roleSupersessionVerdict answers one of these, so the route states
 // the rule that decides it nowhere and words only the answers.
+//
+// A holder that is the claimant's own session id never reaches this type. That one the route
+// decides on the standing claim itself - the process the claim names and the renewal it carries
+// (store.RoleClaimRenewedWithin) - because a session id names no process and the session record
+// a verdict here would read names whichever process registered that id last, not the one holding
+// the role.
 type roleSupersession uint8
 
 const (

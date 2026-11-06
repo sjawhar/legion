@@ -1,0 +1,12 @@
+kind: Added
+body: |-
+  `SetRoleInput` and `UnsubscribeInput` carry `clientInstanceID`, the process making the claim or
+  the release, sent as `client_instance_id` and omitted from the wire when the caller states none,
+  so an older listener sees an unchanged body. The listener records a claim's instance as the
+  role's holder and frees on a release only the role claims naming the releasing process, so a
+  second process that resumed a session's id can neither take that session's role nor hand it
+  back. `RoleInfo` exposes the holder's `client_instance_id`, which is how a refused claimant
+  tells its own session id held by another process from a different session holding the role.
+time: 2026-11-06T17:29:51.000000000Z
+custom:
+    Issue: pr2875

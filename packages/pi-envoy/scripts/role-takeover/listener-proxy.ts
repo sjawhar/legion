@@ -11,13 +11,6 @@
  *   {"seq":1,"label":"omp-a","at":1761,"method":"POST","path":"/v1/roles/set","status":409,
  *    "request":{...},"response":{...},"ms":3}
  *
- * The proxy also holds a request where the smoke needs one held: `POST /__smoke/hold?path=<p>`
- * parks every later request whose path is `<p>` before it reaches the listener, which is how
- * A5's first scenario holds a fork's role claim back until another process has resumed and
- * registered its predecessor. `GET /__smoke/held?path=<p>` answers how many are parked,
- * `POST /__smoke/release?path=<p>` lets them through and disarms the hold. These three paths are
- * the proxy's own and never reach the listener.
- *
  * Usage: bun listener-proxy.ts --port <n> --upstream <url> --log <file> --label <name>
  */
 import { appendFileSync } from "node:fs";
@@ -52,8 +45,6 @@ function parseOptions(argv: readonly string[]): Options {
 
 const options = parseOptions(process.argv.slice(2));
 
-/** Paths whose requests are parked, each with the parked requests' releases. */
-const holds = new Map<string, (() => void)[]>();
 let seq = 0;
 
 /** The body as the log should carry it: parsed JSON where it is JSON, else the text, else null. */
@@ -70,44 +61,13 @@ function record(entry: Record<string, unknown>): void {
   appendFileSync(options.log, `${JSON.stringify(entry)}\n`);
 }
 
-function controlAnswer(path: string, url: URL): Response | undefined {
-  const target = url.searchParams.get("path") ?? "";
-  switch (path) {
-    case "/__smoke/hold":
-      if (!holds.has(target)) holds.set(target, []);
-      return Response.json({ holding: target });
-    case "/__smoke/held":
-      return Response.json({ held: holds.get(target)?.length ?? 0 });
-    case "/__smoke/release": {
-      const parked = holds.get(target) ?? [];
-      holds.delete(target);
-      for (const release of parked) release();
-      return Response.json({ released: parked.length });
-    }
-    default:
-      return undefined;
-  }
-}
-
-/** Parks the request until its hold is released, when its path is held. */
-async function waitWhileHeld(path: string): Promise<void> {
-  const parked = holds.get(path);
-  if (parked === undefined) return;
-  const gate = Promise.withResolvers<void>();
-  parked.push(gate.resolve);
-  await gate.promise;
-}
-
 const server = Bun.serve({
   hostname: "127.0.0.1",
   port: options.port,
   idleTimeout: 0,
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    const control = controlAnswer(url.pathname, url);
-    if (control !== undefined) return control;
     const body = request.method === "GET" || request.method === "HEAD" ? "" : await request.text();
-    await waitWhileHeld(url.pathname);
     const headers = new Headers(request.headers);
     headers.delete("host");
     headers.delete("content-length");

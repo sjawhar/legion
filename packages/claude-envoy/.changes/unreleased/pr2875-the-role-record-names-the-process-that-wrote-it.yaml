@@ -1,0 +1,18 @@
+kind: Fixed
+body: |-
+  The role file at `${CLAUDE_PLUGIN_DATA}/roles/<session-id>.json` now carries the writing
+  process's client instance beside the session id and the role, since two `claude` processes of
+  one user read one state directory and a record keyed by session id alone names no writer. A
+  record another process wrote is pressed only while this process holds no role; one written
+  before the field is pressed as it always was.
+
+  A refusal that names this session under another process keeps the role and its record and asks
+  again on each heartbeat, so a relaunched role is no longer stranded by a stale claim, and the
+  record's mtime is refreshed as it is on a confirmed holder, so the age sweep never expires a
+  record a process is still claiming for. Only a refusal naming a different session ends the
+  role. The heartbeat's re-assertion confirms the role only when the lookup names this session
+  *and* this process, and every claim and every topic hand-back states this process's instance,
+  so a release frees only the role claims this process holds.
+time: 2026-11-06T17:29:51.000000000Z
+custom:
+    Issue: pr2875

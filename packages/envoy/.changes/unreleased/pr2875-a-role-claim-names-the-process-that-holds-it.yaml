@@ -1,0 +1,24 @@
+kind: Fixed
+body: |-
+  A role claim now names the process that holds it and the moment that process last answered for
+  it (`client_instance_id` and `renewed_at`, both optional, so a claim an earlier build wrote is
+  read at its `claimed_at` and is never unreadable), so a second process that resumed a live
+  session's id can no longer take, release or outlast the role that session holds.
+
+  `POST /v1/roles/set` takes `client_instance_id`, and where the role is already held under the
+  claimant's own session id it decides on the standing claim rather than on the session record:
+  granted where the claim names that very process, granted where nobody renewed the claim inside
+  the listener's live window, and otherwise refused `409` naming the holder. A hard claim is
+  unchanged, and the predecessor rule is unchanged, still reading the claimant's stored instance
+  where the request states none. `POST /v1/interests/subscribe` renews every claim the
+  registering session holds that names the registering process, and the first such registration
+  adopts a claim that names none; a renewal that cannot run never fails the registration, and the
+  cost is one role-bucket write per heartbeat per role held. `POST /v1/interests/unsubscribe`
+  takes `client_instance_id` and frees only the claims naming that process, a release naming none
+  freeing none, while `DELETE /v1/interests/<session_id>` keeps its force and is the one caller
+  that forces. The role claim reaper frees no claim renewed inside the live window, whatever the
+  holder's session record says, and reports that outcome as its own. `GET /v1/roles/<role>`
+  answers the holder's `client_instance_id` on the 200 and on a lapsed holder's 404.
+time: 2026-11-06T17:29:51.000000000Z
+custom:
+    Issue: pr2875
