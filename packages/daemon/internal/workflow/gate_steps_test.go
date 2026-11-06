@@ -194,8 +194,17 @@ func reconcileAwaiting(t *testing.T, pool *pgxpool.Pool, engine *Engine) []strin
 
 // admissionPass runs what admission's pass over a project's live records runs of the engine, in
 // its order (Admission.promoteHolds): the children a blocker or a gate held, then the trees a
-// step that left gates.design released.
+// step that left gates.design released. It holds no root back.
 func admissionPass(t *testing.T, pool *pgxpool.Pool, engine *Engine) {
+	t.Helper()
+	admissionPassHolding(t, pool, engine, nil)
+}
+
+// admissionPassHolding is admissionPass with the pass's own held predicate, the one a boot gives
+// it for every root whose catch-up has not applied Dispatch's window yet: the engine decides no
+// tree whose root it holds, and the pass after the catch-up's release decides that tree on the
+// record as it stands then. A nil predicate holds none.
+func admissionPassHolding(t *testing.T, pool *pgxpool.Pool, engine *Engine, held func(string) bool) {
 	t.Helper()
 	startUnblockedChildren(t, pool, engine)
 	store := record.NewStore()
@@ -205,7 +214,7 @@ func admissionPass(t *testing.T, pool *pgxpool.Pool, engine *Engine) {
 		if err != nil {
 			return err
 		}
-		return engine.AdvanceOpenTrees(scoped, tx, issues)
+		return engine.AdvanceOpenTrees(scoped, tx, issues, held)
 	})
 }
 
@@ -619,9 +628,22 @@ func TestChangedStepListTakesHoldAtTheNextBoot(t *testing.T) {
 		t.Fatalf("the merger's issue after the approval of the spec = %s, want it merging: the added step refused its READY", got)
 	}
 
-	// The boot after it gates no step, and the spec row the tree holds is open, so its admission
-	// pass starts the root and the child the added step held and posts the READY it refused.
+	// A boot reads its list before the catch-up applies what Dispatch recorded while the daemon
+	// was down, so the pass decides no tree whose root the catch-up still holds: a spec version
+	// written during the outage would close the gate this pass reads as open, and nothing moves a
+	// phase back once it has started.
 	off := stepsEngine(config.DesignGateOff.Steps(), nil)
+	admissionPassHolding(t, pool, off, func(key string) bool { return key == gatedRoot })
+	if got := phaseOf(t, pool, gatedRoot); got != phase.Admitted {
+		t.Fatalf("the root after a boot that gates no step while its catch-up holds it = %s, want it admitted", got)
+	}
+	if got := phaseOf(t, pool, "LEGION-210"); got != phase.Merging {
+		t.Fatalf("the merger's issue while its root's catch-up holds it = %s, want it merging: the held READY waits for the catch-up", got)
+	}
+
+	// The pass after the catch-up's release decides the tree on the record as it stands: the spec
+	// row it holds is open, so it starts the root and the child the added step held and posts the
+	// READY it refused.
 	admissionPass(t, pool, off)
 	for _, released := range []string{gatedRoot, "LEGION-209"} {
 		if got := phaseOf(t, pool, released); got != phase.Planning {

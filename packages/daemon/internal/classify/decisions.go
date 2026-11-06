@@ -1387,7 +1387,7 @@ func DesignGatesOpen(configured []record.DesignStep, gates map[record.DesignStep
 // It answers which step holds the work now, and so which step a refusal or a hold is about: a
 // step nobody has registered holds it, because nobody has said the document exists. Which step a
 // person is being asked about is another question, since nobody can be asked about a document
-// the record does not know, and the wait reads its own rule for it (workflow's standingGate).
+// the record does not know, and the wait reads its own rule for it (StandingGate).
 func FirstClosedStep(configured []record.DesignStep, gates map[record.DesignStep]record.DesignGate) (record.DesignStep, record.DesignGate, bool) {
 	for _, step := range RequiredSteps(configured) {
 		if gate, ok := gates[step]; !ok || !DesignGateOpen(gate) {
@@ -1395,4 +1395,31 @@ func FirstClosedStep(configured []record.DesignStep, gates map[record.DesignStep
 		}
 	}
 	return "", record.DesignGate{}, false
+}
+
+// StandingGate is the gate a person is being asked about: the row of the first required step
+// (RequiredSteps), in the configured order, that is closed and has a row. That is a different
+// question from which step holds the tree's work (FirstClosedStep), which a step nobody has
+// registered also holds: such a step names no document, so nobody can be asked about it, and the
+// wait it raised would be a wait on nothing. So the wait skips it and names the first registered
+// unapproved step after it, while the work stays held. ok is false when no required step holds a
+// closed row, which is every required step open or every closed one unregistered.
+//
+// A deployment that gates no step asks no person about anything, so the empty list stands on no
+// gate: ok is false whatever rows the root holds. The empty list still holds the tree's work
+// until the spec step is registered, which is FirstClosedStep's answer, not this one.
+//
+// Everything a root's wait is built from reads this one rule: the document its approval requests
+// are counted on (workflow's gateRequestArtifact), the wait it records (waitSubject) and the step
+// its resume speaks of (gateInQuestion).
+func StandingGate(configured []record.DesignStep, gates map[record.DesignStep]record.DesignGate) (record.DesignGate, bool) {
+	if len(configured) == 0 {
+		return record.DesignGate{}, false
+	}
+	for _, step := range RequiredSteps(configured) {
+		if gate, ok := gates[step]; ok && !DesignGateOpen(gate) {
+			return gate, true
+		}
+	}
+	return record.DesignGate{}, false
 }

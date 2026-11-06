@@ -137,11 +137,12 @@ type DecisionMark struct {
 // (Store.KeepReadmittedApproval): the design-gate step whose document a person approved, the
 // version they approved, and the version that document has reached since. The zero value is no
 // kept approval. The step is what says which document the task names, since a deployment that
-// gates more than one step can keep a pair of any of them.
+// gates more than one step can keep a pair of any of them. KeptDecisions embeds it, so the pair
+// travels to the architect as it was kept, with nothing copied field by field.
 type KeptApproval struct {
-	Step     DesignStep
-	Approved int
-	Latest   int
+	Step     DesignStep `json:"step,omitempty"`
+	Approved int        `json:"approved,omitempty"`
+	Latest   int        `json:"latest,omitempty"`
 }
 
 // KeptDecisions is what one architect start task or catch-up named of what its tree is owed
@@ -155,13 +156,15 @@ type KeptApproval struct {
 // is owed to has an architect to tell, and otherwise they wait, KEPT, for the next start or
 // ready to name them.
 //
+// The approval it names is the kept approval itself (KeptApproval), embedded: encoding/json
+// writes an embedded struct's own fields as fields of this one, so the stored shape is the
+// decisions and the three fields of the pair, as it has always been.
+//
 // A record written before a deployment could gate more than one step carries no step, and the
 // task it is written again from reads it as the spec step, the one step that release gated.
 type KeptDecisions struct {
 	Decisions []DecisionMark `json:"decisions,omitempty"`
-	Step      DesignStep     `json:"step,omitempty"`
-	Approved  int            `json:"approved,omitempty"`
-	Latest    int            `json:"latest,omitempty"`
+	KeptApproval
 }
 
 // KeptToldSource is the processed-event source a catch-up marks, under the dedupe key its publish

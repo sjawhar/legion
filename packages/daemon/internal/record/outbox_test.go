@@ -459,9 +459,7 @@ func TestGatedStepsPublishAtBoot(t *testing.T) {
 	boot := func(project string, steps []DesignStep) {
 		t.Helper()
 		inTx(t, st, func(tx pgx.Tx) {
-			row, err := NewOutboxRow(project, GatedStepsPublish{Project: project, Steps: steps}, now)
-			must(t, err)
-			must(t, records.EnqueueGatedSteps(ctx, tx, row))
+			must(t, records.EnqueueGatedSteps(ctx, tx, GatedStepsPublish{Project: project, Steps: steps}, now))
 		})
 	}
 	// queued is the one publish the outbox holds for project, by row id and by what it carries.

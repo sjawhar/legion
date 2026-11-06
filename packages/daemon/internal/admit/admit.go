@@ -1382,8 +1382,11 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 	// A step leaving gates.design releases work no gate fact will ever reach: the root of a tree
 	// whose remaining steps are all open, and a merger's READY the dropped step refused. This
 	// pass is where both move (workflow.AdvanceOpenTrees), and it runs after the held children so
-	// that no child starts twice.
-	if err := a.engine.AdvanceOpenTrees(ctx, tx, issues); err != nil {
+	// that no child starts twice. It is handed the same predicate as ReconcileAwaiting above, for
+	// the same reason: a held root's record may still miss what Dispatch recorded, and a tree
+	// started from it could be moved on at a document version a waiting event supersedes, which
+	// nothing takes back. The pass after the hold's release decides that tree.
+	if err := a.engine.AdvanceOpenTrees(ctx, tx, issues, heldKeys); err != nil {
 		return admitted, returned, err
 	}
 	return admitted, returned, nil

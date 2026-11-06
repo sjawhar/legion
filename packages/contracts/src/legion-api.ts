@@ -1,6 +1,5 @@
 import { z } from "zod";
-import { GATED_STEPS } from "./dispatch-api";
-import { DISPATCH_KEY_PATTERN, LEGION_ROLES } from "./legion-roles";
+import { DISPATCH_KEY_PATTERN, GATED_STEPS, LEGION_ROLES } from "./legion-roles";
 
 /**
  * The Legion daemon's HTTP API, as its readers see it.
@@ -193,12 +192,7 @@ const legionGateView = z.object({
 
 /** `record.DesignStep` — one step of a deployment's design gate, each naming one document of the
  * root issue: `decisions` its decisions document, `criteria` its Verification document, `spec`
- * its primary document.
- *
- * The words are `GATED_STEPS`, the one tuple Dispatch's contract holds them in: the daemon
- * answers a step here and publishes the same word onto its Dispatch project row, so the two
- * services' wire contracts name the step the same by construction rather than by two lists kept
- * in step by hand. */
+ * its primary document. */
 const legionDesignStep = z.enum(GATED_STEPS);
 
 /** `api.GatedStepView` — one step of the deployment's design gate as one issue stands in it

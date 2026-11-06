@@ -17,3 +17,12 @@ alter table outbox add constraint outbox_kind_check check (kind in (
   'linger_close', 'workspace_remove', 'merge_queue_publish', 'issue_branch', 'issue_suspend',
   'auto_merge_disable', 'ready_merge', 'check_compare', 'check_look', 'check_bound',
   'phase_ended', 'issue_bundle', 'issue_release', 'gated_steps_publish'));
+
+-- One publish row per project, which is what lets the enqueue be an upsert
+-- (record.Postgres.EnqueueGatedSteps): the row waits on its lane until Dispatch takes it, and a
+-- boot inside that window replaces the list it carries rather than queueing beside it. The
+-- index holds gated_steps_publish rows alone, so no other kind's insert conflicts on it, and
+-- the kind is new in this migration, so there is nothing to collapse first.
+create unique index outbox_gated_steps_publish_project_unique
+  on outbox (issue)
+  where kind = 'gated_steps_publish';

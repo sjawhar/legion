@@ -97,7 +97,7 @@ func ParkedDecisionTask(ctx context.Context, tx pgx.Tx, store record.Store, step
 			Decision: d.Decision, Actor: d.Actor})
 	}
 	if approval.Approved > 0 && len(steps) > 0 {
-		kept.Step, kept.Approved, kept.Latest = approval.Step, approval.Approved, approval.Latest
+		kept.KeptApproval = approval
 	}
 	task := KeptDecisionsTask(root.Key, kept)
 	if task == "" {

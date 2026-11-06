@@ -10,6 +10,8 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/classify"
+	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -210,5 +212,71 @@ func TestGatedStepsKeepTheStaleApprovalOfItsOwnDocument(t *testing.T) {
 	}
 	if kept := starts[0].Kept; kept == nil || kept.Step != record.DesignStepDecisions || kept.Approved != 2 || kept.Latest != 3 {
 		t.Fatalf("the start's kept record %#v, want the decisions step's own pair", kept)
+	}
+}
+
+// The deployment's step list is read at the boot, before the catch-up applies what Dispatch
+// recorded while the daemon was down, so the pass that advances the trees a dropped step
+// released decides no tree whose root a hold holds. Such a root's spec stands at the version the
+// record still shows, which the architect has revised since: started there, the tree would run
+// on a version nobody approved, and nothing moves a running phase back. Held, it waits for the
+// pass after its catch-up's release, which reads what the catch-up applied and leaves it where
+// it stands. With nothing held — the same boot, the same record — that pass is what starts the
+// root, which is what it is for.
+func TestABootOnAShorterListHoldsARootItsCatchUpHasNotReached(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// catchUp is whether the boot holds the root for the catch-up of its event window.
+		catchUp bool
+		// boots is where the boot's own pass leaves the root.
+		boots phase.Phase
+	}{
+		{name: "the boot's catch-up holds the root", catchUp: true, boots: phase.Admitted},
+		{name: "nothing holds the root", boots: phase.Planning},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			// This boot gates the spec alone. The tree was admitted under the decisions step as
+			// well, whose row it still holds closed and which this deployment no longer reads,
+			// so the spec row the record shows open is all that holds its work now.
+			admission := newAdmissionWithSteps(t, 1, []record.DesignStep{record.DesignStepSpec},
+				slog.New(slog.NewTextHandler(io.Discard, nil)))
+			seedSlotted(t, pool, "LEGION-100", "A")
+			seedGate(t, pool, record.DesignGate{Issue: "LEGION-100", Step: record.DesignStepDecisions,
+				ArtifactID: decisionsDoc, LatestVersion: 1})
+			seedGate(t, pool, record.DesignGate{Issue: "LEGION-100", Step: record.DesignStepSpec,
+				ArtifactID: "artifact-root", LatestVersion: 4, ApprovedVersion: new(4)})
+			if tc.catchUp {
+				admission.HoldForCatchUp("LEGION-100")
+			}
+
+			// The boot's own pass, with the Dispatch consumer already at the position it
+			// measured, so the catch-up hold is the only hold in it.
+			reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
+				{Key: "LEGION-100", ResolvedRepo: "acme/widgets", Title: "LEGION-100", Status: "in_progress",
+					Rank: "A", HandedOver: handed, LastSeq: 1},
+			}, 1, 1, false)
+			if got := issue(t, pool, "LEGION-100").Phase; got != tc.boots {
+				t.Fatalf("the root after a boot that drops a step = %s, want %s", got, tc.boots)
+			}
+			if !tc.catchUp {
+				return
+			}
+
+			// The catch-up applies the window: version 5 of the spec, written while the daemon
+			// was down, closes the gate the boot's pass read as open. Then the hold goes and the
+			// pass intake.CatchUpApplied drives decides the tree on the record as it now stands.
+			applyFact(t, pool, admission, "spec-v5", intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root",
+				Kind: intake.DispatchArtifactVersion, Version: 5, Mark: seqMark(7)})
+			admission.ReleaseCatchUp("LEGION-100")
+			applyFact(t, pool, admission, "catch-up-applied", intake.CatchUpApplied{Issue: "LEGION-100", Through: 7})
+
+			if got := issue(t, pool, "LEGION-100").Phase; got != phase.Admitted {
+				t.Fatalf("the root once its catch-up applied version 5 = %s, want it still admitted: no person has approved that version", got)
+			}
+			if gate := storedGate(t, pool, "LEGION-100"); gate.LatestVersion != 5 || classify.DesignGateOpen(*gate) {
+				t.Fatalf("the spec gate after the catch-up = %#v, want it at version 5 and closed", gate)
+			}
+		})
 	}
 }

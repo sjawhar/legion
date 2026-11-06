@@ -388,12 +388,9 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 // have waited there since a boot on a list the operator has changed since, and a restart loop
 // still queues no second row.
 func (w *workflowRuntime) queueGatedStepsPublish(ctx context.Context) error {
-	row, err := record.NewOutboxRow(w.dispatchProject, record.GatedStepsPublish{Project: w.dispatchProject, Steps: w.gatedSteps}, time.Now().UTC())
-	if err != nil {
-		return fmt.Errorf("queue the gated-steps publish of %s: %w", w.dispatchProject, err)
-	}
+	publish := record.GatedStepsPublish{Project: w.dispatchProject, Steps: w.gatedSteps}
 	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
-		return w.records.EnqueueGatedSteps(ctx, tx, row)
+		return w.records.EnqueueGatedSteps(ctx, tx, publish, time.Now().UTC())
 	}); err != nil {
 		return fmt.Errorf("queue the gated-steps publish of %s: %w", w.dispatchProject, err)
 	}
@@ -571,7 +568,7 @@ func (w *workflowRuntime) rootTask(ctx context.Context, c supervise.Claim, d sup
 	if err := json.Unmarshal(d.Kept, &named); err != nil {
 		return "", nil, fmt.Errorf("decode what the task held for %s names: %w", c.Token, err)
 	}
-	stays := record.KeptDecisions{Step: named.Step, Approved: named.Approved, Latest: named.Latest}
+	stays := record.KeptDecisions{KeptApproval: named.KeptApproval}
 	var left []record.DecisionMark
 	scoped, committed := intake.WithCommitHooks(ctx)
 	if err := pgx.BeginFunc(scoped, w.pool, func(tx pgx.Tx) error {

@@ -1044,8 +1044,8 @@ func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record
 // trees of those children are read with is one read each, not one per tree: a project whose trees
 // each hold such a child would otherwise cost a root, a slot list, a record list and a gate per
 // tree on every fact, under the one fact lock (intake.ApplyFact). The roots come from issues,
-// which the caller read; the slots are read once (their own read, since promotion has just
-// written to them); and the gates of the candidate trees come in one read (record.Store.Gates).
+// which the caller read; the slots and the gates of the candidate trees are one read each, the
+// read AdvanceOpenTrees makes from the same snapshot (openTreeGates).
 func (e *Engine) StartUnblockedChildren(ctx context.Context, tx pgx.Tx, issues []record.Issue, rows map[string]blockers.Row) error {
 	var candidates []record.Issue
 	trees := map[string]struct{}{}
@@ -1095,6 +1095,43 @@ func (e *Engine) StartUnblockedChildren(ctx context.Context, tx pgx.Tx, issues [
 // records, which holds every root of those trees; a tree whose root it does not hold starts
 // nothing, as one with no record does.
 func (e *Engine) treesStartingChildren(ctx context.Context, tx pgx.Tx, issues []record.Issue, trees []string) (map[string]bool, error) {
+	// A root waiting on a person starts no child of its own: it gives its slot back while it
+	// waits and its tree stays live, so liveness alone would read it as a tree that starts its
+	// children. Its children start with its resume (advanceAdmittedTree).
+	waits := map[string]bool{}
+	for _, issue := range issues {
+		waits[issue.Key] = issue.AwaitingPerson()
+	}
+	candidates := make([]string, 0, len(trees))
+	for _, tree := range trees {
+		if held, recorded := waits[tree]; recorded && !held {
+			candidates = append(candidates, tree)
+		}
+	}
+	open, err := e.openTreeGates(ctx, tx, issues, candidates)
+	if err != nil {
+		return nil, err
+	}
+	starts := make(map[string]bool, len(open))
+	for tree := range open {
+		starts[tree] = true
+	}
+	return starts, nil
+}
+
+// openTreeGates is the read the two admission passes share: the slots, which of trees are live
+// (record.LiveRoots over the records the caller already holds), and the design gates of those,
+// one read each however many trees there are. It answers the gates of every live tree whose
+// required steps are all open (classify.DesignGatesOpen), by tree, which is the condition both
+// passes stand on; a tree it leaves out starts nothing now.
+//
+// Each caller filters trees before it calls, and keeps its own rule for what belongs there:
+// treesStartingChildren leaves out a root waiting on a person, and AdvanceOpenTrees one the
+// boot's catch-up still holds. A caller with no candidate left makes no read at all.
+func (e *Engine) openTreeGates(ctx context.Context, tx pgx.Tx, issues []record.Issue, trees []string) (map[string]map[record.DesignStep]record.DesignGate, error) {
+	if len(trees) == 0 {
+		return nil, nil
+	}
 	slots, err := e.store.Slots(ctx, tx)
 	if err != nil {
 		return nil, fmt.Errorf("list admission slots: %w", err)
@@ -1103,29 +1140,23 @@ func (e *Engine) treesStartingChildren(ctx context.Context, tx pgx.Tx, issues []
 	// line holds under an unreleased child (the ancestry hold) is live there and so is live here,
 	// and a lingering root is live in neither.
 	live := record.LiveRoots(issues, slots)
-	// A root waiting on a person starts no child of its own: it gives its slot back while it
-	// waits and its tree stays live, so liveness alone would read it as a tree that starts its
-	// children. Its children start with its resume (advanceAdmittedTree).
-	waits := map[string]bool{}
-	for _, issue := range issues {
-		waits[issue.Key] = issue.AwaitingPerson()
-	}
-	open := make([]string, 0, len(trees))
+	running := make([]string, 0, len(trees))
 	for _, tree := range trees {
-		held, recorded := waits[tree]
-		if _, running := live[tree]; recorded && !held && running {
-			open = append(open, tree)
+		if _, ok := live[tree]; ok {
+			running = append(running, tree)
 		}
 	}
-	gates, err := e.store.Gates(ctx, tx, open)
+	gates, err := e.store.Gates(ctx, tx, running)
 	if err != nil {
 		return nil, err
 	}
-	starts := make(map[string]bool, len(trees))
-	for _, tree := range open {
-		starts[tree] = classify.DesignGatesOpen(e.cfg.Steps, gates[tree])
+	open := make(map[string]map[record.DesignStep]record.DesignGate, len(running))
+	for _, tree := range running {
+		if classify.DesignGatesOpen(e.cfg.Steps, gates[tree]) {
+			open[tree] = gates[tree]
+		}
 	}
-	return starts, nil
+	return open, nil
 }
 
 // AdvanceOpenTrees starts the work a shorter step list released and nothing else can: the root of
@@ -1142,54 +1173,60 @@ func (e *Engine) treesStartingChildren(ctx context.Context, tx pgx.Tx, issues []
 // advanceAdmittedTree reads the tree's members here, so no child starts twice, and a child it
 // held for an unfinished blocker is held here too (blockers.Holds).
 //
+// held names each root the caller still holds (nil holds none), the predicate it hands
+// ReconcileAwaiting in the same pass, and a tree whose root it holds is left for a later pass.
+// The boot reads its step list before its catch-up applies what Dispatch recorded while the
+// daemon was down, so a tree decided here on a held root's record could be started at a document
+// version a waiting event supersedes, and nothing moves a running phase back. The pass the
+// catch-up's release drives (intake.CatchUpApplied) decides that tree on the record as it then
+// stands.
+//
 // issues is the caller's snapshot of the project's records, which names every candidate without a
-// read: a tree whose root stands at admitted, and one with a member in merging, which is where a
-// refused READY waits. A refusal by an unregistered step records no version on the issue
-// (Engine.handoff), so the merging member alone is what says a tree may hold one. The slots and
-// the gates of those trees are one read each, as treesStartingChildren takes them, and a project
-// with no such tree takes neither.
-func (e *Engine) AdvanceOpenTrees(ctx context.Context, tx pgx.Tx, issues []record.Issue) error {
+// read, and says which of the two each tree is: a root standing at admitted is advanceAdmittedTree's,
+// and a member in merging, which is where a refused READY waits, is advancePendingReady's. A tree
+// that is only one of them pays for only that one — the members and their blockers for the first,
+// the tree's lingers, its issues and a phase row per merging member for the second — since this
+// runs under the one fact lock on every fact (intake.ApplyFact). A refusal by an unregistered step
+// records no version on the issue (Engine.handoff), so the merging member alone is what says a tree
+// may hold one. The slots and the gates come from the read treesStartingChildren shares
+// (openTreeGates), and a project with no candidate tree makes neither.
+func (e *Engine) AdvanceOpenTrees(ctx context.Context, tx pgx.Tx, issues []record.Issue, held func(string) bool) error {
 	roots := make(map[string]record.Issue, len(issues))
 	for _, issue := range issues {
 		if claim.IsTreeRoot(issue.Key, issue.Tree) {
 			roots[issue.Key] = issue
 		}
 	}
-	trees := map[string]struct{}{}
+	admitted, merging := map[string]struct{}{}, map[string]struct{}{}
 	for _, issue := range issues {
 		root, recorded := roots[issue.Tree]
-		if !recorded || issue.Phase != phase.Merging && !(issue.Phase == phase.Admitted && issue.Key == root.Key) {
+		if !recorded || held != nil && held(root.Key) {
 			continue
 		}
-		trees[issue.Tree] = struct{}{}
-	}
-	if len(trees) == 0 {
-		return nil
-	}
-	slots, err := e.store.Slots(ctx, tx)
-	if err != nil {
-		return fmt.Errorf("list admission slots: %w", err)
-	}
-	live := record.LiveRoots(issues, slots)
-	candidates := make([]string, 0, len(trees))
-	for _, tree := range slices.Sorted(maps.Keys(trees)) {
-		if _, running := live[tree]; running {
-			candidates = append(candidates, tree)
+		switch {
+		case issue.Phase == phase.Merging:
+			merging[issue.Tree] = struct{}{}
+		case issue.Key == root.Key && issue.Phase == phase.Admitted:
+			admitted[issue.Tree] = struct{}{}
 		}
 	}
-	gates, err := e.store.Gates(ctx, tx, candidates)
+	trees := make(map[string]struct{}, len(admitted)+len(merging))
+	maps.Copy(trees, admitted)
+	maps.Copy(trees, merging)
+	open, err := e.openTreeGates(ctx, tx, issues, slices.Sorted(maps.Keys(trees)))
 	if err != nil {
 		return err
 	}
-	for _, tree := range candidates {
-		if !classify.DesignGatesOpen(e.cfg.Steps, gates[tree]) {
-			continue
+	for _, tree := range slices.Sorted(maps.Keys(open)) {
+		if _, at := admitted[tree]; at {
+			if err := e.advanceAdmittedTree(ctx, tx, roots[tree], open[tree]); err != nil {
+				return err
+			}
 		}
-		if err := e.advanceAdmittedTree(ctx, tx, roots[tree], gates[tree]); err != nil {
-			return err
-		}
-		if err := e.advancePendingReady(ctx, tx, tree, gates[tree]); err != nil {
-			return err
+		if _, waits := merging[tree]; waits {
+			if err := e.advancePendingReady(ctx, tx, tree, open[tree]); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

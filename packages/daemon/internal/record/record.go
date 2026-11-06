@@ -1345,13 +1345,14 @@ type Store interface {
 	// triage wake, for the issue while one is pending; the issue's other status rows, a hand-over
 	// row among them, are not counted.
 	PersonHandoverPending(ctx context.Context, tx pgx.Tx, issue string) (bool, error)
-	// EnqueueGatedSteps writes the one gated_steps_publish row of the Dispatch project key the
-	// row's issue carries. The boot publishes its configured list through the outbox and keeps
-	// no record of what it last published, so the row the outbox holds is replaced rather than
-	// left standing: a pending row can carry the list of the boot before this one, and that is
-	// the list Dispatch would be shown. A restart queues no second row, and a row that already
-	// says this boot's list is left as it is.
-	EnqueueGatedSteps(ctx context.Context, tx pgx.Tx, row OutboxRow) error
+	// EnqueueGatedSteps writes the one gated_steps_publish row of publish's Dispatch project, due
+	// at nextAt, with the project key as its issue. The boot publishes its configured list through
+	// the outbox and keeps no record of what it last published, so the row the outbox holds is
+	// replaced rather than left standing: a pending row can carry the list of the boot before this
+	// one, and that is the list Dispatch would be shown. The table holds one such row per project
+	// (20261106041346_gated_steps_publish), so a restart queues no second row, and a row that
+	// already says this boot's list is left as it is.
+	EnqueueGatedSteps(ctx context.Context, tx pgx.Tx, publish GatedStepsPublish, nextAt time.Time) error
 	Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error
 	// EnqueueID enqueues row as Enqueue does and returns its id, for a row that claims what it names
 	// (ClaimKeptDecisions). It refuses a ready_merge row, whose insert may update another.

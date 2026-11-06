@@ -1622,10 +1622,12 @@ func (s *Postgres) PersonHandoverPending(ctx context.Context, tx pgx.Tx, issue s
 	return pending, nil
 }
 
-// EnqueueGatedSteps writes the one gated_steps_publish row of row's project, whose issue is the
-// bare project key: it replaces the payload of the row the outbox still holds for that project,
-// and inserts row when it holds none. The whole of it is one statement, so a boot never reads a
-// pending row and then queues beside it.
+// EnqueueGatedSteps writes the one gated_steps_publish row of publish's project, whose issue
+// column is the bare project key: it replaces the payload of the row the outbox still holds for
+// that project, and inserts one when it holds none. The unique partial index of
+// 20261106041346_gated_steps_publish makes that rule the table's, so no path can leave a project
+// with two, and the upsert is one statement, so a boot never reads a pending row and then queues
+// beside it.
 //
 // A replacement is what keeps the queued list the booting daemon's own. The row waits on its
 // lane until Dispatch takes it, and an operator can change gates.design and restart inside that
@@ -1633,24 +1635,16 @@ func (s *Postgres) PersonHandoverPending(ctx context.Context, tx pgx.Tx, issue s
 // to be written. Replacing the payload keeps the row's attempts and its next_at, because the row
 // is the same publish waiting on the same lane and only the list it carries is newer, and a
 // payload that already says this list is left alone.
-func (s *Postgres) EnqueueGatedSteps(ctx context.Context, tx pgx.Tx, row OutboxRow) error {
-	if row.Kind != OutboxKindGatedStepsPublish {
-		return fmt.Errorf("enqueue %s for %s as a gated-steps publish: the kind is not %s", row.Kind, row.Issue, OutboxKindGatedStepsPublish)
+func (s *Postgres) EnqueueGatedSteps(ctx context.Context, tx pgx.Tx, publish GatedStepsPublish, nextAt time.Time) error {
+	row, err := NewOutboxRow(publish.Project, publish, nextAt)
+	if err != nil {
+		return fmt.Errorf("enqueue the gated-steps publish of %s: %w", publish.Project, err)
 	}
-	if !json.Valid(row.Payload) {
-		return fmt.Errorf("enqueue %s for %s: payload is not JSON", row.Kind, row.Issue)
-	}
-	// Every arm of the statement reads the same snapshot, so `held` answers what stood there
-	// before the update: a project with a row is replaced, one without gets the insert.
-	if _, err := tx.Exec(ctx, `with held as (
-			select id from outbox where kind = $1 and issue = $2
-		), replaced as (
-			update outbox set payload = $3::jsonb
-			where kind = $1 and issue = $2 and payload is distinct from $3::jsonb
-		)
-		insert into outbox (kind, issue, payload, attempts, next_at, last_error, lease_token, lease_until)
-		select $1, $2, $3::jsonb, $4, $5, $6, $7, $8 where not exists (select 1 from held)`,
-		string(row.Kind), row.Issue, string(row.Payload), row.Attempts, row.NextAt, row.LastError, row.LeaseToken, row.LeaseUntil); err != nil {
+	if _, err := tx.Exec(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error)
+		values ($1, $2, $3::jsonb, 0, $4, '')
+		on conflict (issue) where kind = 'gated_steps_publish'
+		do update set payload = excluded.payload where outbox.payload is distinct from excluded.payload`,
+		string(row.Kind), row.Issue, string(row.Payload), row.NextAt); err != nil {
 		return fmt.Errorf("enqueue %s for %s: %w", row.Kind, row.Issue, err)
 	}
 	return nil
