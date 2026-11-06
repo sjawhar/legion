@@ -11,6 +11,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 )
 
@@ -71,6 +72,7 @@ func TestLoadForValidationSettlesEveryMemberOfTheKubernetesBlock(t *testing.T) {
     kubeconfig: kube/legion-daemon
     context: legion-daemon@example
     setup: [/bin/sh, -c, 'omp plugin marketplace add acme/agent-skills']
+    skills_repository: acme/agent-skills
     idle_release: {idle_minutes: 20, backstop_minutes: 120}
     repository_cache:
       volume: 50Gi
@@ -129,8 +131,9 @@ provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 		Context:      "legion-daemon@example",
 		// A store that keeps sessions in a database is required under this runtime, so the one
 		// kubernetesFile names settles on every load of the block.
-		SessionStore: ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: "SESSION_DSN"},
-		Setup:        []string{"/bin/sh", "-c", "omp plugin marketplace add acme/agent-skills"},
+		SessionStore:     ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: "SESSION_DSN"},
+		Setup:            []string{"/bin/sh", "-c", "omp plugin marketplace add acme/agent-skills"},
+		SkillsRepository: ghrepo.MustParse("acme/agent-skills"),
 		Scheduling: Scheduling{
 			NodeSelector: map[string]string{"karpenter.k8s.aws/instance-family": "m7i", "zone": "4"},
 			Tolerations: []Toleration{
@@ -319,6 +322,7 @@ func TestLoadForValidationDefaultsTheKubernetesBlock(t *testing.T) {
 		{"pod", block.Pod, PodConfig{}},
 		{"session_store", block.SessionStore, ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: "SESSION_DSN"}},
 		{"setup", block.Setup, []string(nil)},
+		{"skills_repository", block.SkillsRepository, ghrepo.Repository{}},
 		{"test_postgres", block.TestPostgres, false},
 		{"repository_cache", block.RepositoryCache, RepositoryCacheConfig{
 			Volume: "20Gi", RefreshMinutes: 10, RetainHours: 168,
@@ -825,6 +829,11 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			name: "the TypeScript role_profiles",
 			body: kubernetesFile + "    role_profiles: {tester: large}\n",
 			want: "unknown key runtime.kubernetes.role_profiles: an issue pod's reservation is runtime.kubernetes.resources.issue, its cpu and memory limits with optional lower cpu_request and memory_request, and a field absent there takes the daemon's default",
+		},
+		{
+			name: "skills_repository that is no owner/name",
+			body: kubernetesFile + "    skills_repository: agent-skills\n",
+			want: `runtime.kubernetes.skills_repository must be "owner/name" (got "agent-skills")`,
 		},
 		{
 			name: "session_store omitted",
