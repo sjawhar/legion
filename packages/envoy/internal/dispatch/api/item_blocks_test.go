@@ -721,7 +721,10 @@ func TestABlockOfACommentIsAddressable(t *testing.T) {
 		t.Fatalf("?to= block b2 lists the replies %#v, want the reply", replies)
 	}
 	if all := readGraph(t, handler, url.Values{"to": {xRef}}).Edges; len(all) != 2 {
-		t.Fatalf("?to= comment X lists %d edges, want the mention and the reply, each once: %#v", len(all), all)
+		t.Fatalf("?to= comment X lists %d edges, want the mention and the reply once: %#v", len(all), all)
+	}
+	if answers := readGraph(t, handler, url.Values{"to": {xRef}, "kind": {"answers"}}).Edges; len(answers) != 1 || answers[0].Node.ID != reply {
+		t.Fatalf("?to= comment X lists the answers %#v, want the reply once", answers)
 	}
 
 	// A message reply naming a block keeps the message it answers in in_reply_to.

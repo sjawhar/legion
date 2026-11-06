@@ -325,7 +325,7 @@ DISPLAY_SERVER="$(printf '%s' "$POSTGRES_SERVER" | sed -E 's#^(postgres(ql)?://[
 echo "dev-stack: building broker, dev-oidc-issuer, dispatch, listener, natsd, agent-secrets and agent-secrets-helper..." >&2
 (
   cd "$ENVOY_DIR"
-  GOTOOLCHAIN=go1.27.1 go build -o "$BIN_DIR/" \
+  GOTOOLCHAIN=go1.27.3 go build -o "$BIN_DIR/" \
     ./cmd/broker ./cmd/dev-oidc-issuer ./cmd/dispatch ./cmd/listener \
     ./cmd/agent-secrets ./cmd/agent-secrets-helper ./internal/testnats/cmd/natsd
 )

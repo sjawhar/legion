@@ -666,3 +666,96 @@ func TestPublishRouteStoresOneCopyOfARoleMessageItForwardsTwice(t *testing.T) {
 		t.Fatalf("the stream holds %d copies on %s after two forwards of one role message, want 1", got, subject)
 	}
 }
+
+// stalledTopicRig is the publish route over a session registry whose live window a test crosses
+// with its own clock (stateClock), so an ad-hoc topic send meets a recipient that stopped
+// answering. The gone horizon stays an hour off and the bucket keeps its records that long, so
+// the recipient reads unresponsive - the one state this send treats differently - rather than
+// gone.
+func stalledTopicRig(t *testing.T) (*listenerDeps, *stateClock) {
+	t.Helper()
+	client := setupPublishTestClient(t)
+	registry, err := store.Open(client.Conn, store.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("open the interest registry: %v", err)
+	}
+	waitForRegistry(t, registry)
+	now := &stateClock{}
+	sessions, err := session.OpenSessionRegistry(
+		client.Conn,
+		session.WithSessionReplicas(1),
+		session.WithSessionTTL(time.Hour),
+		session.WithSessionClock(now.Now),
+		session.WithSessionLiveWindow(time.Minute),
+		session.WithSessionGoneHorizon(time.Hour),
+	)
+	if err != nil {
+		t.Fatalf("open the session registry: %v", err)
+	}
+	t.Cleanup(sessions.StopWatch)
+	waitForSessions(t, sessions)
+	return withPublishRoute(t, &listenerDeps{client: client, registry: registry, sessions: sessions}), now
+}
+
+// A topic send with receipts to a topic that a stalled session and a live session both follow is
+// confirmed by the live one, has its copy stored for the stalled one, names that one in the 200
+// and fails because of neither (dispatch://INFRA-392, R3's last sentence and A3). The topic is a
+// core one, which no stream subject captures and nothing stores, so the forward to the stalled
+// session's agent subject is the only copy kept for it and the only thing it can read back when
+// it answers again.
+//
+// Before the fix the send skipped an unresponsive recipient before any forward: the stream held
+// no copy on its agent subject (0, not 1) and the 200 named it nowhere, so both of the checks
+// below failed.
+func TestPublishRouteStoresAnAdHocTopicCopyForAnUnresponsiveRecipientAndNamesIt(t *testing.T) {
+	d, now := stalledTopicRig(t)
+	const (
+		topic   = "notifications.team.stalled-squad"
+		stalled = "ses_stalled_subscriber"
+		live    = "ses_live_subscriber"
+	)
+	register := func(sessionID string) {
+		t.Helper()
+		if _, err := d.registry.Upsert(store.Interest{SessionID: sessionID, MachineID: "test-machine"}, []string{"notifications.team.>"}); err != nil {
+			t.Fatalf("register %s's interest: %v", sessionID, err)
+		}
+		if err := d.sessions.Put(sessionID, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
+			t.Fatalf("register %s: %v", sessionID, err)
+		}
+	}
+	register(stalled)
+	// Past the live window: the stalled session's record stands and reads unresponsive, while
+	// the session registered after the move is live.
+	now.advance(90 * time.Second)
+	register(live)
+	if _, state := d.sessions.Lookup(stalled); state != session.Unresponsive {
+		t.Fatalf("%s reads %s, want unresponsive: the send below would prove nothing", stalled, state)
+	}
+	// No stand-in for the stalled session: a session that stopped answering answers no receipt,
+	// and the forward to it must count on the stream's acknowledgement alone.
+	confirming := startStandIn(t, testnats.URL(t), live, always)
+
+	recorder, elapsed := publishThrough(d, `{"topic":"`+topic+`","message":"deploy done","idempotency_key":"stalled-1"}`)
+	if recorder.Code != http.StatusOK || elapsed > 4500*time.Millisecond {
+		t.Fatalf("status %d after %s, want 200 inside 4.5s; body %s", recorder.Code, elapsed, recorder.Body.String())
+	}
+	var answer publishResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &answer); err != nil {
+		t.Fatalf("decode the answer %s: %v", recorder.Body.String(), err)
+	}
+	if len(answer.Unresponsive) != 1 || answer.Unresponsive[0] != stalled {
+		t.Fatalf("the 200 names unresponsive %v, want only %s: the sender must be told which session the message was kept for", answer.Unresponsive, stalled)
+	}
+	frame := expectFrames(t, confirming, 1, 300*time.Millisecond)[0]
+	if frame.EventID != answer.EventID || frame.Topic != topic || frame.DedupeKey != "publish.stalled-1" {
+		t.Fatalf("%s received event %s topic %s dedupe key %s, want the answered event unchanged", live, frame.EventID, frame.Topic, frame.DedupeKey)
+	}
+	subject := contracts.AgentSubject(stalled)
+	info, err := d.client.JS().StreamInfo(bus.Stream, &natsgo.StreamInfoRequest{SubjectsFilter: subject})
+	if err != nil {
+		t.Fatalf("read the stream: %v", err)
+	}
+	if got := info.State.Subjects[subject]; got != 1 {
+		t.Fatalf("the stream holds %d copies on %s, want the one the send stored for a session that will read it back", got, subject)
+	}
+}

@@ -186,7 +186,7 @@ function ConversationReply({
   replyDisabled,
   root,
 }: {
-  agents: readonly Agent[];
+  agents: readonly Agent[] | undefined;
   currentReplyId: string | undefined;
   isClosed: boolean;
   issueKey: string;
@@ -263,7 +263,7 @@ function Thread({
   replyDisabled,
   root,
 }: {
-  agents: readonly Agent[];
+  agents: readonly Agent[] | undefined;
   currentReplyId: string | undefined;
   isClosed: boolean;
   issueKey: string;
@@ -318,7 +318,7 @@ function MessageTurn({
   register,
   replyDisabled,
 }: {
-  agents: readonly Agent[];
+  agents: readonly Agent[] | undefined;
   current: boolean;
   currentReplyId: string | undefined;
   isClosed: boolean;
@@ -522,7 +522,7 @@ function CommentDeliveryList({
   onRetry,
   retrying,
 }: {
-  agents: readonly Agent[];
+  agents: readonly Agent[] | undefined;
   deliveries: readonly CommentDeliveryAttempt[];
   disabled: boolean;
   onRetry: (delivery: CommentDeliveryAttempt) => void;
@@ -616,7 +616,9 @@ function CommentTurn({
   viewerLogin,
 }: {
   actionFailure: CommentActionFailure | undefined;
-  agents: readonly Agent[];
+  /** The roster delivery capabilities are judged against; `undefined` while the agent list's
+   *  read is not current, when every capability is unknown (`capabilitiesForTarget`). */
+  agents: readonly Agent[] | undefined;
   issueArtifacts: ConversationTabProps["issueArtifacts"];
   composerClassName?: string;
   current: boolean;
@@ -806,7 +808,7 @@ function TargetedMessageTurn({
   register,
   replyDisabled,
 }: {
-  agents: readonly Agent[];
+  agents: readonly Agent[] | undefined;
   current: boolean;
   currentReplyId: string | undefined;
   isClosed: boolean;
@@ -1057,7 +1059,10 @@ export function ConversationTab({
     onFirstPlacement,
     ownSendCount,
   });
-  const { agents } = useAgents(visible);
+  const { agents: listedAgents, current: agentsCurrent } = useAgents(visible);
+  // Delivery capabilities come only from a current list: one that is refilling or unreachable
+  // leaves every mode unknown, never "not supported".
+  const agents = agentsCurrent ? listedAgents : undefined;
   const scrolledToFocus = useRef<string | undefined>(undefined);
 
   useEffect(() => {
