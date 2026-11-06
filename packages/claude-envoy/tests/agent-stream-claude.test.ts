@@ -394,6 +394,48 @@ test("the echo of a command this session ran shows nothing, and one typed at the
   ])
 })
 
+// The rule above tells a person's own terminal command from the echo of a run this session
+// asked for by `origin.kind`, taking `unclassified` for the person's. Driven on a real Claude
+// Code 2.1.310 terminal session, that value never appears: a `/config` the person typed while a
+// Dispatch `/cost` was outstanding carried `{"kind":"engine"}`, the same as the `/usage` echo of
+// the run itself, and so did a `/config` typed at an idle terminal and a plugin-run `/context`
+// echo (read at the mod event, the one place the value exists, with one logging line added to a
+// copy of the built plugin; the view's consequences reproduced on the untouched build). So the
+// person's command is hidden and the run's echo is drawn in its place, which is the defect the
+// rule set out to remove, and the person's `/cost` reply carries the other command's output.
+// Whatever tells the two apart, the person's own command must reach the view (INFRA-1026).
+test("a command typed at the terminal shows although its origin is the run's own", async () => {
+  const ran = Promise.withResolvers<ModCallResults["command.run"]>()
+  const session = modSession({
+    commandOutputMs: 500,
+    link: {
+      connected: () => true,
+      request: <N extends ModCallName>(call: N): Promise<ModCallResults[N]> =>
+        call === "command.run"
+          ? (ran.promise as unknown as Promise<ModCallResults[N]>)
+          : Promise.reject(new Error(`no answer for ${call}`)),
+    },
+    warn: () => undefined,
+  })
+  const live = harness(1_000, undefined, false, (origin) => session.runsCommandRow(origin))
+  const feed = (event: ModEvent): void => {
+    session.observe(event)
+    live.feed(event)
+  }
+
+  const printed = session.runCommand("cost", "")
+  ran.resolve({ text: "Total cost:            $0.0993" })
+  expect(await printed).toBe("Total cost:            $0.0993")
+
+  // Both rows carry the origin a 2.1.310 terminal really writes.
+  feed(commandEcho("usage", "", "row-usage", { kind: "engine" }))
+  feed(commandEcho("config", "", "row-config", { kind: "engine" }))
+
+  expect(messages(live.replay()).map((message) => [message.role, textOf(message)])).toEqual([
+    ["user", "/config"],
+  ])
+})
+
 // A Legion pane is named before anything else happens in it: the daemon's bridge writes
 // `/rename <title>` to the session's input (`packages/daemon/internal/claudebridge/bridge.go`,
 // lines 210-213), so the prompt row it leaves and the echo Claude Code answers it with are the
