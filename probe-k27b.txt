@@ -1,0 +1,1 @@
+k27 probe: ci-ok as a job
