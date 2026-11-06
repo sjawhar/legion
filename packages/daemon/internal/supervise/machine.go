@@ -455,10 +455,30 @@ type Timeouts struct {
 // built, so a change of `launch_failure_limit`, `prompt_failure_limit`, `prompt_retire_limit`,
 // `worker_boot_timeout_seconds`, `worker_rpc_timeout_seconds` or `pod_update_retask_hours`
 // reaches the next decision with no machine rebuilt.
+//
+// It is the one source of both: a Deps that carried copies beside it would read them wherever it
+// was built without one, which is how a production reader of such a copy came to read zero
+// (dispatch://INFRA-1077, round 5). A caller whose budgets never change — every test's — hands
+// FixedSettings.
 type Settings interface {
 	Limits() Limits
 	Timeouts() Timeouts
 }
+
+// FixedSettings is a Settings that answers limits and timeouts that never move: what a caller
+// with no settings holder hands Deps. The daemon hands its own holder instead (liveBudgets), so
+// a change of one of those keys reaches the next decision.
+func FixedSettings(limits Limits, timeouts Timeouts) Settings {
+	return fixedSettings{limits: limits, timeouts: timeouts}
+}
+
+type fixedSettings struct {
+	limits   Limits
+	timeouts Timeouts
+}
+
+func (f fixedSettings) Limits() Limits     { return f.limits }
+func (f fixedSettings) Timeouts() Timeouts { return f.timeouts }
 
 // Deps is what a machine is built from.
 type Deps struct {
@@ -468,15 +488,12 @@ type Deps struct {
 	Specs   Specs
 	Clock   Clock
 	Log     *slog.Logger
-	// Limits and Timeouts are the budgets of a caller whose own never change — a test's, and the
-	// daemon's before it has a settings holder. Settings, when set, replaces both: every decision
-	// reads it instead, and these two are then read by nothing.
-	Limits   Limits
-	Timeouts Timeouts
-	// Settings, when set, is where every decision reads its limits and its waits, in place of the
-	// Limits and Timeouts above: the daemon hands its settings holder, so a change of one of
-	// those settings takes effect at once. nil reads the two copies, which is what a caller that
-	// states fixed ones means.
+	// Settings is where every decision reads the limits it is held to and the waits it times,
+	// and the one place it does: the daemon hands its settings holder, so a change of one of
+	// those settings takes effect at once, and a caller whose budgets never change hands
+	// FixedSettings. It is required (check), because a Deps that could also carry copies of
+	// them read the copies wherever it was built without a holder, and outside this package
+	// those copies were always zero.
 	Settings Settings
 	// Secrets is the secrets broker's enrollment routes for the runtime's pods. nil
 	// deploys with no broker: no identity is kept, and nothing is enrolled or revoked.
@@ -564,25 +581,20 @@ type Deps struct {
 	SessionGone func(session string)
 }
 
-// limits is the limits this decision is held to, and timeouts the waits it times: the holder's
-// when the caller set one, else the copies Deps carries. Every read of either goes through them,
-// so a decision is never held to a budget settled before the machine was built. The re-task bound
-// a pod-update round asks a claim again after is one of the timeouts, so it is read live too.
-func (d Deps) limits() Limits {
-	if d.Settings != nil {
-		return d.Settings.Limits()
-	}
-	return d.Limits
-}
+// limits is the limits this decision is held to, and timeouts the waits it times, both read from
+// the settings holder as the decision is made. Every read of either goes through them, so a
+// decision is never held to a budget settled before the machine was built. The re-task bound a
+// pod-update round asks a claim again after is one of the timeouts, so it is read live too.
+//
+// check refuses a Deps with no holder, so neither can be reached with nothing to read.
+func (d Deps) limits() Limits { return d.Settings.Limits() }
 
-func (d Deps) timeouts() Timeouts {
-	if d.Settings != nil {
-		return d.Settings.Timeouts()
-	}
-	return d.Timeouts
-}
+func (d Deps) timeouts() Timeouts { return d.Settings.Timeouts() }
 
 func (d Deps) check() error {
+	if d.Settings == nil {
+		return errors.New("supervise: Deps.Settings is required: it is where every decision reads its limits and its waits (FixedSettings for budgets that never change)")
+	}
 	limits, timeouts := d.limits(), d.timeouts()
 	for _, bound := range []struct {
 		name  string

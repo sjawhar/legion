@@ -240,10 +240,11 @@ func newHarnessDeps(t *testing.T, relaunchable bool) *harness {
 		ctx: ctx,
 		deps: supervise.Deps{
 			Runtime: rt, Conns: conns, Store: tokens.Recording(st), Specs: fixedSpecs{}, Clock: stillClock{}, Log: quiet,
-			Limits: supervise.Limits{LaunchFailures: 3, PromptFailures: 3, PromptRetires: 2},
-			Timeouts: supervise.Timeouts{
-				Boot: time.Minute, RegistrationIntervals: 3, RPC: 5 * time.Second, Probe: 30 * time.Second, Stop: 10 * time.Second, LaunchBackoff: time.Millisecond,
-			},
+			Settings: supervise.FixedSettings(
+				supervise.Limits{LaunchFailures: 3, PromptFailures: 3, PromptRetires: 2},
+				supervise.Timeouts{
+					Boot: time.Minute, RegistrationIntervals: 3, RPC: 5 * time.Second, Probe: 30 * time.Second, Stop: 10 * time.Second, LaunchBackoff: time.Millisecond,
+				}),
 			PluginContract:     DaemonAPIVersion,
 			PluginRelaunchable: relaunchable,
 			// The daemon's own wiring: a tree a workflow issue backs does not close here.

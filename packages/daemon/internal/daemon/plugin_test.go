@@ -53,8 +53,9 @@ func newPluginSupervisor(t *testing.T, contract int, relaunchable bool) (*superv
 	sup := newSupervisor(context.Background(), nil, "legion", t.TempDir(), quietLogger())
 	sup.deps = supervise.Deps{
 		Runtime: rt, Conns: fake.NewConns(), Store: &outboxClaimStore{}, Specs: outboxSpecs{}, Clock: stillClock{}, Log: quietLogger(),
-		Limits:             supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
-		Timeouts:           supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond},
+		Settings: supervise.FixedSettings(
+			supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
+			supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond}),
 		PluginContract:     contract,
 		PluginRelaunchable: relaunchable,
 	}
@@ -524,7 +525,7 @@ func TestARelaunchedProcessStillStaleIsChargedUntilWorkerDied(t *testing.T) {
 	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 	sup.deps.PluginContract = 24
 	sup.deps.PluginRelaunchable = true
-	sup.deps.Limits.LaunchFailures = 2
+	moveBudgets(sup, func(l *supervise.Limits, _ *supervise.Timeouts) { l.LaunchFailures = 2 })
 	sup.deps.PhaseHolds = (&workflowRuntime{pool: pool, records: records}).phaseHolds
 	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
 	sup.OnDurableState((&workflowRuntime{pool: pool, records: records, handlers: []intake.Handler{engine}, log: quietLogger()}).claimDurableState)

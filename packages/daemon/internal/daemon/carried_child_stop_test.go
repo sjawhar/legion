@@ -122,17 +122,16 @@ func carriedChildStops(t *testing.T, rootKey, childKey string, carry func(apply 
 	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 	machineClock := &heldClock{at: start}
 	// The machines read every budget and every wait from the daemon's settings holder, as
-	// production builds them (openSupervision's Settings: liveBudgets): the Limits and Timeouts
-	// copies of that Deps are the zero value and nothing reads them, so the stop bound this
-	// test is about is named where the daemon names it, `worker_stop_timeout_seconds`. The
-	// outbox reads the same holder for it (workerStopTimeout), so a deadline the rig proves is
-	// the deadline the daemon arms.
+	// production builds them (openSupervision's Settings: liveBudgets), and from nothing else:
+	// the stop bound this test is about is named where the daemon names it,
+	// `worker_stop_timeout_seconds`. The outbox reads the same holder for it
+	// (workerStopTimeout), so a deadline the rig proves is the deadline the daemon arms.
 	live := config.Settled(config.Config{
 		Project: "LEGION", LaunchFailureLimit: 2, PromptFailureLimit: 2, PromptRetireLimit: 2,
 		WorkerBootTimeout: time.Second, WorkerBootRegistrationDeadlineIntervals: 2, WorkerRPCTimeout: time.Second,
 		ProbeInterval: time.Second, WorkerStopTimeout: stopTimeout,
 	})
-	sup.deps.Limits, sup.deps.Timeouts, sup.deps.Settings = supervise.Limits{}, supervise.Timeouts{}, liveBudgets{live: live}
+	sup.deps.Settings = liveBudgets{live: live}
 	sup.deps.Clock, sup.deps.Store = machineClock, trees
 	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Linger: time.Hour}, quietLogger())
 	admission := admit.New(records, engine, 2, "legion", quietLogger())
@@ -372,7 +371,7 @@ func TestACarriedRolesStopDeadlineIsTheStopTimeoutTheDaemonRunsOn(t *testing.T) 
 		WorkerBootTimeout: time.Second, WorkerBootRegistrationDeadlineIntervals: 2, WorkerRPCTimeout: time.Second,
 		ProbeInterval: time.Second, WorkerStopTimeout: stopTimeout,
 	})
-	sup.deps.Limits, sup.deps.Timeouts, sup.deps.Settings = supervise.Limits{}, supervise.Timeouts{}, liveBudgets{live: live}
+	sup.deps.Settings = liveBudgets{live: live}
 	sup.deps.Clock = machineClock
 	implementer := launchedClaim(t, sup, oldRoot, childKey, claim.RoleImplementer)
 	machine, _ := sup.Machine(implementer)

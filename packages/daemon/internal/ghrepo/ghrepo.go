@@ -50,6 +50,24 @@ func (r Repository) String() string {
 	return r.owner + "/" + r.name
 }
 
+// MarshalText is the repository as GitHub names it, `<owner>/<name>`, and the empty text for the
+// zero Repository, no repository, whose String is the bare separator.
+//
+// It is here because a Repository's names are unexported: without it encoding/json writes every
+// repository as `{}`, the zero one and two different ones alike, and everything that renders a
+// composite value through JSON would report two repositories as one value. Two readers do:
+// config.Render, which the settings diff compares a change by and so would see no change where a
+// repository moved, and sandbox.LaunchSettings, the launch keys a pod's template records.
+//
+// There is no UnmarshalText to match: nothing reads a Repository back out of JSON, and a
+// Repository is built by Parse alone, so no caller can hold one Parse would refuse.
+func (r Repository) MarshalText() ([]byte, error) {
+	if r.IsZero() {
+		return nil, nil
+	}
+	return []byte(r.String()), nil
+}
+
 // MustParse is Parse of a repository the caller wrote as a literal, a test's fixture: it panics on
 // one Parse refuses.
 func MustParse(repository string) Repository {

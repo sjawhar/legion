@@ -261,7 +261,7 @@ func TestAStaleRegistrationRelaunchesOnceUnchargedThenChargesUntilFailed(t *test
 	h.launch()
 	h.m.deps.PluginContract = 24
 	h.m.deps.PluginRelaunchable = true
-	h.m.deps.Limits.LaunchFailures = 2
+	moveBudgets(&h.m.deps, func(l *Limits, _ *Timeouts) { l.LaunchFailures = 2 })
 
 	register := func() error {
 		return h.handle(RequestRegister{

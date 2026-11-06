@@ -1,6 +1,7 @@
 package ghrepo
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -103,5 +104,37 @@ func TestRepositoryExportsNoField(t *testing.T) {
 	}
 	if !(Repository{}).IsZero() || MustParse("acme/widgets").IsZero() {
 		t.Errorf("IsZero: the zero Repository must be zero and a parsed one must not")
+	}
+}
+
+// A Repository exports no field, so every reader that renders a composite value through JSON
+// would write them all as `{}` without a marshaller of its own: the settings diff would report a
+// moved repository as no change, and a pod's recorded launch keys would hold none. Each renders
+// as GitHub names it, the zero one as the empty string, and two repositories never alike.
+func TestARepositoryMarshalsAsGitHubNamesIt(t *testing.T) {
+	for _, tc := range []struct{ repository, want string }{
+		{"acme/widgets", `"acme/widgets"`},
+		{"sjawhar/legion", `"sjawhar/legion"`},
+	} {
+		encoded, err := json.Marshal(MustParse(tc.repository))
+		if err != nil || string(encoded) != tc.want {
+			t.Errorf("json.Marshal(%s) = %s, %v, want %s", tc.repository, encoded, err, tc.want)
+		}
+	}
+	encoded, err := json.Marshal(Repository{})
+	if err != nil || string(encoded) != `""` {
+		t.Errorf(`json.Marshal(the zero Repository) = %s, %v, want ""`, encoded, err)
+	}
+	text, err := (Repository{}).MarshalText()
+	if err != nil || len(text) != 0 {
+		t.Errorf("the zero Repository's MarshalText = %q, %v, want the empty text", text, err)
+	}
+	// The one field a repository lands in whose change nothing else would see: a pod's launch
+	// keys hold the skills marketplace, and a struct carrying a Repository encodes it too.
+	type carrier struct{ Skills Repository }
+	first, _ := json.Marshal(carrier{Skills: MustParse("sjawhar/legion-skills")})
+	second, _ := json.Marshal(carrier{Skills: MustParse("sjawhar/other-skills")})
+	if string(first) == string(second) {
+		t.Errorf("two repositories encode alike inside a struct: %s", first)
 	}
 }

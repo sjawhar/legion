@@ -361,9 +361,13 @@ func TestAChangedNatsSeedRebuildsTheNatsClient(t *testing.T) {
 	live.OnChange(rebuild.observe)
 	// The daemon's own open reads what the consumers hear as the rebuild starts
 	// (workflowRuntime.connect); this one, whose consumers hear the boot's set and whose
-	// rebuild is what the test is about, opens with it. The handover runs under the lock every
-	// fact applies under, the daemon's own hold of it.
-	w.nats = newNATSHolder(conn, consumers, w.log, open, func(held func(context.Context) error) error {
+	// rebuild is what the test is about, opens with it. The open and the swap run under the
+	// mapping's own lock, and the handover under the lock every fact applies under, both the
+	// daemon's own holds of them.
+	w.nats = newNATSHolder(conn, consumers, w.log, open, func() func() {
+		w.mappingMu.Lock()
+		return w.mappingMu.Unlock
+	}, func(held func(context.Context) error) error {
 		return w.serializeFacts(t.Context(), held)
 	})
 	rebuild.register(w.nats)
@@ -507,6 +511,84 @@ func TestANatsRebuildWaitsForAMappingReadHoldingTheFactLock(t *testing.T) {
 
 	if heard := w.nats.intake().Repositories(); !slices.Contains(heard, mapped) {
 		t.Fatalf("after the rebuild GitHub intake hears %v, want the repository the mapping read mapped while the rebuild waited among them", heard)
+	}
+}
+
+// The fact lock alone does not close the window, because opening the new consumers is itself an
+// UpdateConsumer on the very GitHub durable the old intake is still pulling from, and that open
+// runs outside the fact lock. So: the rebuild reads set A; a mapping read then widens the
+// durable to B and serves the new mapping; the rebuild's open writes A back over B; and until
+// the swap sets B again the old intake pulls under A. The pinned nats-server keeps a consumer's
+// position across a filter update and steps past what the filter does not match, so a GitHub
+// event of a repository in B and not in A that lands in that window is delivered to nothing,
+// ever.
+//
+// The rebuild therefore holds the lock a mapping read is made under (mappingMu) from before it
+// reads that set to after the swap: while a mapping read holds it the rebuild has not opened
+// anything, and the set it opens with is the one that read left.
+func TestANatsRebuildOpensNoConsumerWhileAMappingReadHoldsTheMappingLock(t *testing.T) {
+	url := testnats.URL(t)
+	probe, err := nats.Connect(url, nats.Timeout(5*time.Second))
+	if err != nil {
+		t.Fatalf("connect to the test NATS server: %v", err)
+	}
+	t.Cleanup(probe.Close)
+	js, err := jetstream.New(probe)
+	if err != nil {
+		t.Fatalf("open JetStream: %v", err)
+	}
+	testnats.CreateStream(t, js, jetstream.StreamConfig{Name: "ENVOY_NOTIFICATIONS", Subjects: []string{"notifications.>"}})
+	w := grantWorkflow(t, &syncBuffer{})
+	cfg := daemonGrantConfig(url)
+	if err := w.connect(t.Context(), cfg, newRebuilder(w.log, config.Settled(cfg)), func(string) (string, bool) { return "", false }); err != nil {
+		t.Fatalf("connect the workflow's NATS: %v", err)
+	}
+	t.Cleanup(w.stop)
+
+	// A mapping read in flight, holding the lock it is made under (refreshMapping): it has not
+	// widened the durable's filter yet.
+	w.mappingMu.Lock()
+	unlocked := false
+	defer func() {
+		if !unlocked {
+			w.mappingMu.Unlock()
+		}
+	}()
+
+	rebuilt := make(chan error, 1)
+	go func() { rebuilt <- w.nats.rebuild(&cfg) }()
+	select {
+	case err := <-rebuilt:
+		t.Fatalf("the rebuild opened its consumers, and so wrote the GitHub durable's filter, while a mapping read held the mapping lock: %v", err)
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	// The mapping read widens the durable to the set it serves, then lets the lock go.
+	mapped := ghrepo.MustParse("acme/widgets")
+	if err := w.nats.intake().SetRepositories(t.Context(), append(w.nats.intake().Repositories(), mapped)); err != nil {
+		t.Fatalf("hear the repository the mapping read mapped: %v", err)
+	}
+	w.mappingMu.Unlock()
+	unlocked = true
+
+	select {
+	case err := <-rebuilt:
+		if err != nil {
+			t.Fatalf("rebuild the NATS holder: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the rebuild did not return once the mapping read had let the mapping lock go")
+	}
+
+	if heard := w.nats.intake().Repositories(); !slices.Contains(heard, mapped) {
+		t.Fatalf("after the rebuild GitHub intake hears %v, want the repository the mapping read mapped while the rebuild waited among them", heard)
+	}
+	stream, err := js.Stream(t.Context(), "ENVOY_NOTIFICATIONS")
+	if err != nil {
+		t.Fatalf("open the notification stream: %v", err)
+	}
+	if filters := githubFiltersOf(t, stream, cfg.Project); !slices.Contains(filters, "notifications.github.acme.widgets.>") {
+		t.Fatalf("the GitHub durable consumer filters on %v, want the subject of the repository the mapping read mapped among them", filters)
 	}
 }
 

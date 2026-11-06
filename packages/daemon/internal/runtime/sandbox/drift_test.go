@@ -2,7 +2,6 @@ package sandbox
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"maps"
 	"slices"
@@ -720,6 +719,10 @@ func launchFixture() *config.Config {
 				SessionStore: ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: "SESSION_DSN"},
 				Setup:        []string{"/bin/sh", "-c", "echo setup"},
 				TestPostgres: true,
+				// The skills marketplace an issue pod's init container clones: a launch key of
+				// an issue pod's own, set here as every other launch key of the fixture is, so
+				// the move that proves its drift is one repository for another.
+				SkillsRepository: ghrepo.MustParse("sjawhar/legion-skills"),
 				Scheduling: config.Scheduling{
 					NodeSelector:  map[string]string{"cloud.google.com/compute-class": "Performance"},
 					Tolerations:   []config.Toleration{{Key: "legion", Operator: "Equal", Value: "true", Effect: "NoSchedule"}},
@@ -959,7 +962,9 @@ var movedIssueLaunchKeys = map[string]func() string{
 	"runtime.kubernetes.resources.issue": movedBy(func(cfg *config.Config) {
 		cfg.Runtime.Kubernetes.Resources.Issue.CPURequest = "2"
 	}),
-	"runtime.kubernetes.skills_repository": movedSkillsRepositoryRecord,
+	"runtime.kubernetes.skills_repository": movedBy(func(cfg *config.Config) {
+		cfg.Runtime.Kubernetes.SkillsRepository = ghrepo.MustParse("sjawhar/other-skills")
+	}),
 	"runtime.kubernetes.test_postgres": movedBy(func(cfg *config.Config) {
 		cfg.Runtime.Kubernetes.TestPostgres = false
 	}),
@@ -975,27 +980,6 @@ func movedBy(move func(*config.Config)) func() string {
 		move(cfg)
 		return LaunchSettings(cfg)
 	}
-}
-
-// movedSkillsRepositoryRecord moves `runtime.kubernetes.skills_repository` in the record itself
-// and not in the configuration it is read from, which is the one key of the four that cannot be
-// moved there: a ghrepo.Repository keeps its owner and name unexported, so config.Render marshals
-// every repository, the zero one included, as `{}`, and no change of that key moves what
-// LaunchSettings records. What replaces an issue pod whose skills repository moved is the pod's
-// recorded shape, which carries it as a string of its own (podShapeRecord.SkillsRepository), and
-// the controller's shape carries none (controllerPod.skillsRepository). The record is moved here
-// so the filter and the drift read are held to the same rule for this key as for the other three.
-func movedSkillsRepositoryRecord() string {
-	settings, err := launchSettingsOf(LaunchSettings(launchFixture()))
-	if err != nil {
-		panic("the launch fixture's record cannot be read: " + err.Error())
-	}
-	settings["runtime.kubernetes.skills_repository"] = ghrepo.MustParse("sjawhar/legion-skills").String()
-	encoded, err := json.Marshal(settings)
-	if err != nil {
-		panic("the moved record cannot be encoded: " + err.Error())
-	}
-	return string(encoded)
 }
 
 // A launch key only an issue pod's launch reads is drift of every issue pod and of no controller

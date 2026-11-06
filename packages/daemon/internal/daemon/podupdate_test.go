@@ -192,7 +192,9 @@ func newPodUpdateRigOn(t *testing.T, live *config.Live, roles ...podUpdateRole) 
 	// them; a rig no test moves a setting under keeps the fixed budgets below and settles its
 	// own configuration into a holder, because every supervision reads the bounds a change must
 	// reach at once from one (supervision.live).
-	var settings supervise.Settings
+	settings := supervise.FixedSettings(
+		supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
+		supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond, PodUpdateRetask: podUpdateRetask})
 	if live != nil {
 		settings = liveBudgets{live: live}
 	} else {
@@ -207,8 +209,6 @@ func newPodUpdateRigOn(t *testing.T, live *config.Live, roles ...podUpdateRole) 
 	}
 	sup.deps = supervise.Deps{
 		Runtime: rt, Conns: conns, Store: st, Specs: outboxSpecs{}, Clock: clock, Log: quietLogger(),
-		Limits:         supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
-		Timeouts:       supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond, PodUpdateRetask: podUpdateRetask},
 		Settings:       settings,
 		PluginContract: api.DaemonAPIVersion,
 		// This daemon can relaunch a stale process onto a plugin, as the supervision's own plan

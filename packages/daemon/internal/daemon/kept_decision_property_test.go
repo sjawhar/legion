@@ -1073,10 +1073,11 @@ func (r *keptRun) restart() {
 		// reads the design gate through the settings holder as it decides, as the daemon's does
 		// (config.Live.Snapshot), so the run gives it one: the shipped policy, which is the gate
 		// this run's engine is built on.
-		RootHears:      (&workflowRuntime{pool: r.pool, records: r.records, live: config.Settled(config.Config{})}).rootHears,
-		RootTask:       (&workflowRuntime{pool: r.pool, records: r.records, live: config.Settled(config.Config{})}).rootTask,
-		Limits:         supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
-		Timeouts:       supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond},
+		RootHears: (&workflowRuntime{pool: r.pool, records: r.records, live: config.Settled(config.Config{})}).rootHears,
+		RootTask:  (&workflowRuntime{pool: r.pool, records: r.records, live: config.Settled(config.Config{})}).rootTask,
+		Settings: supervise.FixedSettings(
+			supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
+			supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond}),
 		PluginContract: 24,
 	}
 	r.t.Cleanup(sup.stop)
@@ -2641,7 +2642,7 @@ func (r *keptRun) deathEnabled(tree *keptTree) bool {
 		return false
 	}
 	held := machine.Claim()
-	return held.Locator != nil && held.Budgets.Deaths+1 < r.sup.deps.Limits.LaunchFailures
+	return held.Locator != nil && held.Budgets.Deaths+1 < r.sup.deps.Settings.Limits().LaunchFailures
 }
 
 // deathInTheTasksTurn is the architect's process dying in the turn on its task, reported by the

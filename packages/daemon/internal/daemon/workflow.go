@@ -468,10 +468,23 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, rebuil
 	// SetRepositories (refreshMapping). One that landed between that read and the swap would
 	// set its repositories on the consumers being replaced, and they would go with them: the
 	// repository it mapped would be unheard until something else moved the mapping again.
+	//
+	// The rebuild's own read of that set, and the open it hands the set to, run under the
+	// mapping's lock (mappingMu), because opening the consumers updates the very GitHub durable
+	// the old intake still pulls from: a mapping read that widened its filter while the rebuild
+	// dialled would see it written back to the rebuild's older set, and the events of a
+	// repository mapped in that window would be stepped past and never delivered
+	// (natsHolder.rebuild). A mapping read is the only other writer of that filter and takes
+	// this lock before the fact lock, so the rebuild taking the two in that same order adds no
+	// cycle and leaves no fact waiting on a dial.
 	rebuildOpen := func(c config.Config) (*nats.Conn, *intake.Consumers, error) {
 		return open(c, w.nats.intake().Repositories())
 	}
-	w.nats = newNATSHolder(conn, consumers, w.log, rebuildOpen, func(held func(ctx context.Context) error) error {
+	holdMapping := func() func() {
+		w.mappingMu.Lock()
+		return w.mappingMu.Unlock
+	}
+	w.nats = newNATSHolder(conn, consumers, w.log, rebuildOpen, holdMapping, func(held func(ctx context.Context) error) error {
 		return w.serializeFacts(ctx, held)
 	})
 	rebuild.register(w.nats)

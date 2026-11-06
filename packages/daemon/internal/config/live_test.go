@@ -2,9 +2,12 @@ package config
 
 import (
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 // newLive is a holder over a fresh copy of the smallest file that loads, with the route overlay
@@ -345,6 +348,139 @@ func TestEveryCensusPathHasARow(t *testing.T) {
 	for path := range settingsOf(live.Snapshot()) {
 		if _, known := ClassOf(path); !known {
 			t.Errorf("the census holds %s, which the class table does not", path)
+		}
+	}
+}
+
+// distinctByType is two different values of each type the walk below cannot build a pair of
+// itself: a type whose fields are unexported, so only its own package can make one. Each is a
+// type a `legion.yaml` key is read into, and each pair is two values an operator could write.
+var distinctByType = map[reflect.Type][2]any{
+	reflect.TypeFor[ghrepo.Repository](): {
+		ghrepo.MustParse("sjawhar/legion-skills"),
+		ghrepo.MustParse("acme/other-skills"),
+	},
+	reflect.TypeFor[ghrepo.Renames](): {
+		ghrepo.MustRenames(ghrepo.MustRename("sjawhar/legion", "cybermonklabs/legion")),
+		ghrepo.MustRenames(ghrepo.MustRename("acme/widgets", "acme/gadgets")),
+	},
+}
+
+// distinctValues is two values of typ that are not the same setting: the zero value with one
+// leaf of it filled differently in each, which is the smallest move an operator can make in that
+// key. A struct is varied in the first exported field a pair can be built of, a slice and a map
+// in their one entry's value, and a pointer in what it points at; a type whose own fields are
+// unexported is built only from distinctByType, since nothing outside its package can make one.
+// seen holds the types the walk is already inside, so a type that reaches itself ends the walk
+// rather than running forever.
+func distinctValues(typ reflect.Type, seen []reflect.Type) (first, second reflect.Value, built bool) {
+	if pair, named := distinctByType[typ]; named {
+		return reflect.ValueOf(pair[0]), reflect.ValueOf(pair[1]), true
+	}
+	if slices.Contains(seen, typ) {
+		return reflect.Value{}, reflect.Value{}, false
+	}
+	seen = append(seen, typ)
+	scalar := func(a, b any) (reflect.Value, reflect.Value, bool) {
+		return reflect.ValueOf(a).Convert(typ), reflect.ValueOf(b).Convert(typ), true
+	}
+	switch typ.Kind() {
+	case reflect.Bool:
+		return scalar(false, true)
+	case reflect.String:
+		return scalar("one", "two")
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return scalar(int64(1), int64(2))
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return scalar(uint64(1), uint64(2))
+	case reflect.Float32, reflect.Float64:
+		return scalar(1.0, 2.0)
+	case reflect.Pointer:
+		elemFirst, elemSecond, ok := distinctValues(typ.Elem(), seen)
+		if !ok {
+			break
+		}
+		first, second = reflect.New(typ.Elem()), reflect.New(typ.Elem())
+		first.Elem().Set(elemFirst)
+		second.Elem().Set(elemSecond)
+		return first, second, true
+	case reflect.Slice:
+		elemFirst, elemSecond, ok := distinctValues(typ.Elem(), seen)
+		if !ok {
+			break
+		}
+		first, second = reflect.MakeSlice(typ, 1, 1), reflect.MakeSlice(typ, 1, 1)
+		first.Index(0).Set(elemFirst)
+		second.Index(0).Set(elemSecond)
+		return first, second, true
+	case reflect.Map:
+		key, _, keyed := distinctValues(typ.Key(), seen)
+		elemFirst, elemSecond, ok := distinctValues(typ.Elem(), seen)
+		if !keyed || !ok {
+			break
+		}
+		first, second = reflect.MakeMap(typ), reflect.MakeMap(typ)
+		first.SetMapIndex(key, elemFirst)
+		second.SetMapIndex(key, elemSecond)
+		return first, second, true
+	case reflect.Struct:
+		for i := range typ.NumField() {
+			field := typ.Field(i)
+			if !field.IsExported() {
+				continue
+			}
+			fieldFirst, fieldSecond, ok := distinctValues(field.Type, seen)
+			if !ok {
+				continue
+			}
+			first, second = reflect.New(typ).Elem(), reflect.New(typ).Elem()
+			first.Field(i).Set(fieldFirst)
+			second.Field(i).Set(fieldSecond)
+			return first, second, true
+		}
+	}
+	return reflect.Value{}, reflect.Value{}, false
+}
+
+// Every value the class table names renders differently for two different values. Render is the
+// whole of what the daemon compares two readings of the settings by (settingsOf, diff) and the
+// whole of what a pod's template records its launch keys as (sandbox.LaunchSettings), so a type
+// it renders the same for two values is a key whose change is invisible: the route answers that
+// nothing moved, no holder of the row is built again, and no pod reads as drifted. That is what
+// a composite type with unexported fields did until ghrepo.Repository and ghrepo.Renames carried
+// marshallers of their own — every repository, the zero one included, rendered as `{}`.
+//
+// A block row is left out: the diff descends into it and compares its members, so nothing ever
+// renders the block itself.
+func TestEveryRowRendersTwoDifferentValuesDifferently(t *testing.T) {
+	named := map[reflect.Type]bool{}
+	for _, typ := range settingsConfigTypes() {
+		for i := range typ.NumField() {
+			field := typ.Field(i)
+			if !field.IsExported() {
+				continue
+			}
+			row, classed := rowOf(typ.Name() + "." + field.Name)
+			if !classed || row.Block {
+				continue
+			}
+			if _, held := distinctByType[field.Type]; held {
+				named[field.Type] = true
+			}
+			first, second, built := distinctValues(field.Type, nil)
+			if !built {
+				t.Errorf("%s (%s) is a setting this test cannot write two different values of: add the pair to distinctByType", row.Path, field.Type)
+				continue
+			}
+			if rendered := Render(first); rendered == Render(second) {
+				t.Errorf("%s renders %s for two different values (%s), so a change of it alone is no Change at all: give %s a marshaller that tells its values apart",
+					row.Path, rendered, field.Type, field.Type)
+			}
+		}
+	}
+	for typ := range distinctByType {
+		if !named[typ] {
+			t.Errorf("distinctByType holds %s, which no settings row is read into: drop the pair", typ)
 		}
 	}
 }

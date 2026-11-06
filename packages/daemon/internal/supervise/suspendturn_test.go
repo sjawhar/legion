@@ -375,7 +375,7 @@ func TestAProcessThatDiesWhileItsSuspensionWaitsIsSuspendedNotRelaunched(t *test
 // its way when a turn began, and the agent refuses it at the prompt-failure limit.
 func TestAPromptRetirementWhileASuspensionIsHeldRunsTheHeldStop(t *testing.T) {
 	h := newBareHarness(t)
-	h.deps.Limits = Limits{LaunchFailures: 3, PromptFailures: 1, PromptRetires: 1}
+	h.budget(func(l *Limits, _ *Timeouts) { *l = Limits{LaunchFailures: 3, PromptFailures: 1, PromptRetires: 1} })
 	if err := h.store.PutClaim(h.ctx, queuedClaim()); err != nil {
 		t.Fatal(err)
 	}

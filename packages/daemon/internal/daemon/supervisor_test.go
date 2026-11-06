@@ -360,8 +360,9 @@ func TestARegistrationInFlightWhenTheStopCutsItsLaunchShortIsRestoredAsAnUnfinis
 		sup := newSupervisor(context.Background(), nil, "legion", t.TempDir(), quietLogger())
 		sup.deps = supervise.Deps{
 			Runtime: rt, Conns: fake.NewConns(), Store: store, Specs: outboxSpecs{}, Clock: stillClock{}, Log: quietLogger(),
-			Limits:         supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
-			Timeouts:       supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond},
+			Settings: supervise.FixedSettings(
+				supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
+				supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond}),
 			PluginContract: api.DaemonAPIVersion,
 		}
 		if launches != nil {
@@ -442,8 +443,9 @@ func TestALiveClaimStoredWithNoProcessIsRestoredAsAnUnfinishedLaunchAndRelaunche
 			rt := fake.NewRuntime()
 			sup.deps = supervise.Deps{
 				Runtime: rt, Conns: fake.NewConns(), Store: store, Specs: outboxSpecs{}, Clock: stillClock{}, Log: quietLogger(),
-				Limits:         supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
-				Timeouts:       supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond},
+				Settings: supervise.FixedSettings(
+					supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
+					supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond}),
 				PluginContract: api.DaemonAPIVersion,
 				Secrets:        enroller,
 			}

@@ -111,7 +111,7 @@ func TestABootRuleResumeThatSpendsTheLaunchBudgetFinishes(t *testing.T) {
 		machine.Wait()
 		clock = clock.Add(2 * time.Minute)
 	}
-	limit := sup.deps.Limits.LaunchFailures
+	limit := sup.deps.Settings.Limits().LaunchFailures
 	if got := machine.Claim().State; got != supervise.StateFailed || len(resumesOf(rt, tester)) != limit || outboxRows(t, pool) != 0 {
 		t.Fatalf("after six ticks the tester is %s after %d launches with %d rows left; want failed after its budget of %d launches and the row finished",
 			got, len(resumesOf(rt, tester)), outboxRows(t, pool), limit)
@@ -145,7 +145,7 @@ func TestTheLingersSuspensionWaitsForTheArchitectsTurnToEnd(t *testing.T) {
 	if err := runner.RunOnce(ctx); err != nil {
 		t.Fatalf("run the linger's suspend: %v", err)
 	}
-	time.Sleep(3 * sup.deps.Timeouts.Stop)
+	time.Sleep(3 * sup.deps.Settings.Timeouts().Stop)
 	if got := machine.Claim().State; got != supervise.StateWorking || len(rt.CallsOf("Suspend")) != 0 {
 		t.Fatalf("three stop timeouts into the turn the architect is %s after %d suspensions, want its turn still running",
 			got, len(rt.CallsOf("Suspend")))
