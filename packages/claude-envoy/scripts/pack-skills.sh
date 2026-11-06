@@ -36,12 +36,27 @@ refuse() {
 # link_back <name>...: make each skills/<name> the tracked link again, whatever is there now.
 # Each link is rebuilt from the name alone, so a restore needs nothing a prepack left behind and
 # a postpack that runs without a prepack writes the same links the checkout already holds.
+#
+# It rm -rf's each entry and judges none, so only a caller that has already judged them may call
+# it: the swap loop's EXIT trap below, which puts back the links that loop itself replaced — the
+# half-written cp -R among them, which a check here would keep and leave the working copy broken
+# — and --restore, which judges every entry before it calls this at all.
 link_back() {
   local name
   for name in "$@"; do
     rm -rf "skills/$name"
     ln -s "../../../skills/$name" "skills/$name"
   done
+}
+
+# staged_copy <name>: true where skills/<name> is the repository's own skill copied into place,
+# which a pack staged and which holds nothing of its own, so replacing it deletes no work. The
+# directory under $repo_skills must be there for the comparison to say anything, so a missing one
+# is refused for what it is rather than left to `diff`, which exits 2 over it as it does over a
+# difference.
+staged_copy() {
+  [ -d "$repo_skills/$1" ] || refuse "skills/$1 names no directory under $repo_skills"
+  diff -r -q "$repo_skills/$1" "skills/$1" > /dev/null 2>&1
 }
 
 restore=false
@@ -61,27 +76,60 @@ entries=(skills/*)
 names=("${entries[@]#skills/}")
 
 if $restore; then
+  # link_back rm -rf's every entry, so every entry is judged here, before the first deletion: a
+  # directory a developer wrote themselves is their own work, which this script deletes none of,
+  # and a refusal partway through the rebuild would have deleted the entries before it already.
+  # A link is safe whatever it points at, since it holds nothing of its own.
+  own=()
+  for name in "${names[@]}"; do
+    [ -L "skills/$name" ] || staged_copy "$name" || own+=("$name")
+  done
+  if [ ${#own[@]} -gt 0 ]; then
+    for name in "${own[@]}"; do
+      echo "$me: skills/$name is neither a link nor a staged copy of $repo_skills/$name, so it holds work of its own: move it out of skills/ and then run 'ln -s ../../../skills/$name skills/$name', which writes its tracked link back" >&2
+    done
+    refuse \
+      "--restore writes the tracked link over every entry of skills/, so it would delete the work named above and has written none of them: a name moved out of skills/ is out of the list this script reads, which is why each one above names the link to write by hand; then bash scripts/pack-skills.sh --restore puts back the entries that are left"
+  fi
   link_back "${names[@]}"
   exit 0
 fi
 
 # Every entry's conditions, all of them before the first swap below: a refusal on a later entry
-# would otherwise leave the entries before it staged as copied directories.
+# would otherwise leave the entries before it staged as copied directories. Every entry that is
+# no link is classified here too, and only then refused, because --restore rebuilds every entry:
+# it is advice only where each of them is a staged copy of the repository's skill and holds
+# nothing of its own. A directory a developer wrote themselves is their own work, which --restore
+# would delete, so one of those anywhere in the list is refused on its own terms and the refusal
+# names no --restore at all.
+staged=()
+own=()
 for name in "${names[@]}"; do
   if [ ! -L "skills/$name" ]; then
-    # --restore rm -rf's the entry, so it is advice only where the entry is a staged copy of the
-    # repository's skill and holds nothing of its own. A directory a developer wrote themselves is
-    # their own work, and the refusal for it says what the entry must be instead.
-    diff -r -q "$repo_skills/$name" "skills/$name" > /dev/null 2>&1 || refuse \
-      "skills/$name is neither a link nor a staged copy of $repo_skills/$name: it must be the link ../../../skills/$name, which is how this package names the skills it ships"
-    refuse \
-      "skills/$name is a staged copy of $repo_skills/$name rather than a link: an earlier pack staged it and its postpack never put the link back: bash scripts/pack-skills.sh --restore puts the links back"
+    if staged_copy "$name"; then
+      staged+=("$name")
+    else
+      own+=("$name")
+    fi
+    continue
   fi
   target=$(readlink "skills/$name")
   [ "$target" = "../../../skills/$name" ] || refuse \
     "skills/$name points at $target, not ../../../skills/$name: this package ships the repository's skills"
   [ -d "$repo_skills/$name" ] || refuse "skills/$name names no directory under $repo_skills"
 done
+if [ ${#own[@]} -gt 0 ]; then
+  for name in "${own[@]}"; do
+    echo "$me: skills/$name is neither a link nor a staged copy of $repo_skills/$name: it must be the link ../../../skills/$name, which is how this package names the skills it ships" >&2
+  done
+  exit 1
+fi
+if [ ${#staged[@]} -gt 0 ]; then
+  for name in "${staged[@]}"; do
+    echo "$me: skills/$name is a staged copy of $repo_skills/$name rather than a link: an earlier pack staged it and its postpack never put the link back" >&2
+  done
+  refuse "bash scripts/pack-skills.sh --restore puts those links back"
+fi
 
 # The swap, under a trap that puts back every link it has replaced. What is left to fail here is
 # the filesystem rather than an entry, and a failure between the first swap and the last would

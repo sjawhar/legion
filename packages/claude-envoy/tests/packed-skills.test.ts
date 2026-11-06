@@ -190,34 +190,48 @@ test("a pack that fails after its prepack is repaired by --restore, which the re
   expect(await links(copy)).toEqual(Object.fromEntries(skillNames.map((name) => [name, null])))
   const again = await run(["bash", join(copy, "scripts", "pack-skills.sh")], copy)
   expect(again.exitCode).toBe(1)
+  for (const name of skillNames) {
+    expect(again.stderr).toContain(`skills/${name} is a staged copy of`)
+  }
   expect(again.stderr).toContain("bash scripts/pack-skills.sh --restore")
   await ran(["bash", join(copy, "scripts", "pack-skills.sh"), "--restore"], copy)
   expect(await links(copy)).toEqual(tracked())
 })
 
-// Which entry that is no link the refusal may send to --restore, and which it may not: --restore
-// rm -rf's the entry, so the advice puts back a staged copy of the repository's skill and would
-// delete anything else, a directory a developer wrote among it.
-test("an entry that is a staged copy of the repository's skill is refused with --restore", async () => {
-  const copy = await copyPackage("staged-copy")
-  const name = skillNames[0] as string
-  await rm(join(copy, "skills", name))
-  await cp(join(repoRoot, "skills", name), join(copy, "skills", name), { recursive: true })
-  const refused = await run(["bash", join(copy, "scripts", "pack-skills.sh")], copy)
-  expect(refused.exitCode).toBe(1)
-  expect(refused.stderr).toContain(`skills/${name} is a staged copy of`)
-  expect(refused.stderr).toContain("bash scripts/pack-skills.sh --restore")
-})
+// What the advice must judge before it gives itself: --restore rm -rf's every entry, so it puts
+// back a skills/ whose entries are all staged copies of the repository's skills and holds
+// nothing of its own, and would delete anything else among them. The reviewer's reproduction is
+// the case: a prepack, an edit to one staged entry, and a second prepack. The edited entry is
+// the last by name — agent-secrets sorts ahead of it — so a judgement that stopped at the first
+// entry that is no link would call the whole of skills/ a staged copy and send the person to
+// --restore, which would take the edit with it.
+test("an edited staged entry is refused by the prepack and by --restore, neither touching it", async () => {
+  const copy = await copyPackage("edited-staged-copy")
+  await ran(["bash", join(copy, "scripts", "pack-skills.sh")], copy)
+  const staged = Object.fromEntries(skillNames.map((name) => [name, null]))
+  expect(await links(copy)).toEqual(staged)
+  const name = skillNames[skillNames.length - 1] as string
+  expect(skillNames[0]).not.toBe(name)
+  const edited = join(copy, "skills", name, "SKILL.md")
+  const mine = `${await Bun.file(edited).text()}\nthe line a developer wrote into the staged copy\n`
+  await Bun.write(edited, mine)
 
-test("an entry a developer wrote is refused without --restore, naming the link it must be", async () => {
-  const copy = await copyPackage("own-directory")
-  const name = skillNames[0] as string
-  await rm(join(copy, "skills", name))
-  await Bun.write(join(copy, "skills", name, "SKILL.md"), "---\nname: mine\n---\n")
-  const refused = await run(["bash", join(copy, "scripts", "pack-skills.sh")], copy)
-  expect(refused.exitCode).toBe(1)
-  expect(refused.stderr).toContain(`skills/${name} is neither a link nor a staged copy of`)
-  expect(refused.stderr).toContain(`it must be the link ../../../skills/${name}`)
-  expect(refused.stderr).not.toContain("--restore")
-  expect(await links(copy)).toEqual({ ...tracked(), [name]: null })
+  const again = await run(["bash", join(copy, "scripts", "pack-skills.sh")], copy)
+  expect(again.exitCode).toBe(1)
+  expect(again.stderr).toContain(`skills/${name} is neither a link nor a staged copy of`)
+  expect(again.stderr).toContain(`it must be the link ../../../skills/${name}`)
+  expect(again.stderr).not.toContain("--restore")
+
+  const restore = await run(["bash", join(copy, "scripts", "pack-skills.sh"), "--restore"], copy)
+  expect(restore.exitCode).toBe(1)
+  expect(restore.stderr).toContain(`skills/${name} is neither a link nor a staged copy of`)
+  expect(await Bun.file(edited).text()).toBe(mine)
+  expect(await links(copy)).toEqual(staged)
+  for (const other of skillNames.filter((entry) => entry !== name)) {
+    const same = await run(
+      ["diff", "-r", join(repoRoot, "skills", other), join(copy, "skills", other)],
+      scratch,
+    )
+    expect({ name: other, ...same }).toEqual({ name: other, exitCode: 0, stdout: "", stderr: "" })
+  }
 })

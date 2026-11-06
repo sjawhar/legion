@@ -432,8 +432,10 @@ test("the marketplace entry installs the plugin from npm, by name, above the pla
   // is that placeholder until the first release, and it holds no plugin, so an install before
   // then must fail by name rather than install nothing. 1.0.0 is what the version step computes
   // for the first release (release-bump.sh over CLAUDE_ENVOY_VERSION_ARGS from the placeholder's
-  // 0.0.0). Those two are what the range is for, so they are what is asserted, rather than the
-  // string that happens to hold them.
+  // 0.0.0). 99.0.0 is every release after it: a range that pinned the major, `^1.0.0` or `1.x`,
+  // would take the placeholder out and the first release in just as well, and then hold every
+  // install at the last 1.x while the releases carried on. Those three are what the range is
+  // for, so they are what is asserted, rather than the string that happens to hold them.
   expect(marketplaceEntries).toHaveLength(1)
   const source = marketplaceEntries[0]?.source
   expect(source?.source).toBe("npm")
@@ -441,6 +443,7 @@ test("the marketplace entry installs the plugin from npm, by name, above the pla
   const range = source?.version ?? ""
   expect(Bun.semver.satisfies("0.0.0", range)).toBe(false)
   expect(Bun.semver.satisfies("1.0.0", range)).toBe(true)
+  expect(Bun.semver.satisfies("99.0.0", range)).toBe(true)
 })
 
 test("the Oh My Pi manifest declares no MCP server", () => {

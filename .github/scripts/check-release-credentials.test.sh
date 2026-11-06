@@ -514,38 +514,22 @@ check "names the value" "$(contains "$out" "must set 'persist-credentials: false
 # the three paths that name the one script, and twice in one job. The script it runs is in the
 # checkout, so before it the step exits 127, which is what left every legion release's
 # "## Worker image" section unwritten.
-echo "case: a step runs release-push.sh before its job's checkout"
-root=$(fixture release-push-before-checkout)
-mutate "$root/$RELEASE" "      - uses: actions/checkout@$SHA"$'\n' $'      - name: Read the tag\n        run: .github/scripts/release-push.sh tagged pi-envoy-v\n'"      - uses: actions/checkout@$SHA"$'\n' 2
-run_check "$root"
-check "exits 1" "$(is "$status" 1)"
-check "names the job and the step at its line" \
-  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^      - name: Read the tag$'): job 'pi_envoy_publish' step 'Read the tag' runs .github/scripts/release-push.sh, but no actions/checkout before it puts the script in the workspace, so the step would exit 127 and the job would carry on\$")"
-check "reports that one problem only" "$(contains "$out" '^1 release credential problem(s)$')"
+for cmd in '.github/scripts/release-push.sh' './release-push.sh' 'release-push.sh'; do
+  echo "case: a step runs $cmd before its job's checkout"
+  root=$(fixture "release-push-before-checkout-$(printf %s "$cmd" | tr -c '[:alnum:]' -)")
+  mutate "$root/$RELEASE" "      - uses: actions/checkout@$SHA"$'\n' $'      - name: Read the tag\n        run: '"$cmd"$' tagged pi-envoy-v\n'"      - uses: actions/checkout@$SHA"$'\n' 2
+  run_check "$root"
+  check "exits 1" "$(is "$status" 1)"
+  check "names the job and the step at its line" \
+    "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^      - name: Read the tag$'): job 'pi_envoy_publish' step 'Read the tag' runs .github/scripts/release-push.sh, but no actions/checkout before it puts the script in the workspace, so the step would exit 127 and the job would carry on\$")"
+  check "reports that one problem only" "$(contains "$out" '^1 release credential problem(s)$')"
+done
 
 echo "case: the same step after its job's checkout"
 root=$(fixture release-push-after-checkout)
 add_publish_step "$root" $'      - name: Read the tag\n        run: .github/scripts/release-push.sh tagged pi-envoy-v\n'
 run_check "$root"
 check "exits 0" "$(is "$status" 0)"
-
-echo "case: a step runs ./release-push.sh before its job's checkout"
-root=$(fixture dot-slash-release-push-before-checkout)
-mutate "$root/$RELEASE" "      - uses: actions/checkout@$SHA"$'\n' $'      - name: Read the tag\n        run: ./release-push.sh tagged pi-envoy-v\n'"      - uses: actions/checkout@$SHA"$'\n' 2
-run_check "$root"
-check "exits 1" "$(is "$status" 1)"
-check "names the job and the step at its line" \
-  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^      - name: Read the tag$'): job 'pi_envoy_publish' step 'Read the tag' runs .github/scripts/release-push.sh, but no actions/checkout before it puts the script in the workspace, so the step would exit 127 and the job would carry on\$")"
-check "reports that one problem only" "$(contains "$out" '^1 release credential problem(s)$')"
-
-echo "case: a step runs a bare release-push.sh before its job's checkout"
-root=$(fixture bare-release-push-before-checkout)
-mutate "$root/$RELEASE" "      - uses: actions/checkout@$SHA"$'\n' $'      - name: Read the tag\n        run: release-push.sh tagged pi-envoy-v\n'"      - uses: actions/checkout@$SHA"$'\n' 2
-run_check "$root"
-check "exits 1" "$(is "$status" 1)"
-check "names the job and the step at its line" \
-  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^      - name: Read the tag$'): job 'pi_envoy_publish' step 'Read the tag' runs .github/scripts/release-push.sh, but no actions/checkout before it puts the script in the workspace, so the step would exit 127 and the job would carry on\$")"
-check "reports that one problem only" "$(contains "$out" '^1 release credential problem(s)$')"
 
 echo "case: two steps run release-push.sh before their job's checkout"
 root=$(fixture two-release-push-before-checkout)
