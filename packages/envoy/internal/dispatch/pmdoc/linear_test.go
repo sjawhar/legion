@@ -75,9 +75,14 @@ func TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText(t *testing.T) {
 	// blank line inside such a block as the item's walked the whole block once for each of them,
 	// and the list again for each node of it, which is quadratic in a block of blank lines; the
 	// reading is taken once over the document now (readSpreads). A write is
-	// what reads it, so this one is timed through ParseForWrite.
+	// what reads it, so this one is timed through ParseForWrite. The unit is one item and 200
+	// blank lines, so the items and the lines grow together and a mebibyte of them stays under
+	// MaxDocumentElements: the write is accepted at every size here, and any refusal - of the
+	// elements above all, which would stop the read before the cost - fails the case rather than
+	// passing it.
 	{
-		open, repeat, closer := "- a\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n", "  - p\n\n", "  :::\n"
+		open, closer := "- a\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n", "  :::\n"
+		repeat := "  - p\n" + strings.Repeat("\n", 200)
 		full := parseFullTarget / len(repeat)
 		small := full / growthStep
 		name := "a typed block of spaced items in a list item"
@@ -85,7 +90,7 @@ func TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText(t *testing.T) {
 			growsLinearly(t, name, []int{small * len(repeat), full * len(repeat)}, linearSlack, func(size int) (time.Duration, error) {
 				text := open + strings.Repeat(repeat, size/len(repeat)) + closer
 				return cpuTimeOf(again(func() {
-					if _, err := ParseForWrite(text, nil); err != nil && !refusedForItsMarks(err) && !errors.Is(err, ErrSchema) {
+					if _, err := ParseForWrite(text, nil); err != nil {
 						t.Fatalf("%s at %d bytes: %v", name, size, err)
 					}
 				}))
