@@ -121,13 +121,10 @@ func reopenWithoutRestoring(t *testing.T, f repairFixture, issue, status string,
 //
 // The ten seconds are a hang guard, not a race against an eviction: the close is asked for before
 // this poll starts, and a notified close closes the room whatever the room's record holds, so the
-// deadline is reached only by a close that never ran, or one that never finished, which is a defect
-// rather than a slow machine. One such defect reached it before: a load that read the issue after
-// it closed wrote the record's closed flag itself (onLoadDocument), the notified close then found
-// the record already matching and returned having closed nothing, and the room stayed resident for
-// the 60 to 90 s until the idle sweep took it. The bound stays so that a close that never comes
-// fails this test by name, printing the issue's documents and what is still resident, rather than
-// hanging the package's run.
+// deadline is reached only by a close that never ran, or one that never finished, which is a
+// defect rather than a slow machine. The bound stays so that such a defect fails this test by
+// name, printing the issue's documents and what is still resident, rather than hanging the
+// package's run.
 func awaitIssueRoomsClosed(t *testing.T, f repairFixture, issue string) {
 	t.Helper()
 	rows, err := f.database.Pool.Query(store.WithTransactionTracking(context.Background()),

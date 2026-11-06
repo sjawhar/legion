@@ -2770,14 +2770,12 @@ func (s *Service) recheckResidentIssues(ctx context.Context) {
 // here. The issue closed without this process hearing it - its listener redialing, which outlasts
 // the margin - and the room is closed for its issue here, as the notification would close it
 // (setRoomIssueOpen), so it stops taking edits and its browsers reconnect read-only. That runs on
-// a goroutine of its own: this is ygo's persistence worker, which the close waits for. A record
-// that already reads closed is no proof that a close is under way: a load that read the issue
-// after it closed writes that flag itself, with no close behind it (onLoadDocument, websocket.go),
-// and that room admits writers until a close runs. So this close is a notified one
-// (setRoomIssueOpen's notified), which closes the room whatever the record holds; one made behind
-// a close already under way, which hands the room's last updates here, waits for that close and
-// then finds the room gone (closeRoomForIssue). A record that read the issue open is the only one
-// that is news, so it is the only one logged.
+// a goroutine of its own: this is ygo's persistence worker, which the close waits for. This close
+// is a notified one (setRoomIssueOpen's notified), so it closes the room whatever the record
+// holds, for the reason setRoomIssueOpen gives. One made behind a close already under way, which
+// hands the room's last updates here, waits for that close and then finds the room gone
+// (closeRoomForIssue). A record that read the issue open is the only one that is news, so it is
+// the only one logged.
 func (s *Service) refuseClosedIssueAppend(room string) {
 	state := s.lockExistingState(room)
 	if state == nil {
@@ -2845,9 +2843,11 @@ func (s *Service) closeRoomOnReplacedHistory(room string, instance *roomInstance
 // setRoomIssueOpen gives room's record open, its issue's state, and closes the room, so every
 // browser reconnects with the scope the issue now allows: ygo fixes a connection's read-only flag
 // when it connects (sjawhar/ygo provider/websocket/peer.go), so a connected browser's scope can
-// change only by reconnecting. The close removes this process's browsers' awareness first,
-// relayed to the other processes (roomServer.beforeClose). A room a caller is inside - a write's
-// publish, a read, a browser's join - is closed once that caller has left (roomServer.closeRoom).
+// change only by reconnecting. Every notified call closes the room, whatever the record held; a
+// recheck closes it only when the record held the other state (notified, below). The close
+// removes this process's browsers' awareness first, relayed to the other processes
+// (roomServer.beforeClose). A room a caller is inside - a write's publish, a read, a browser's
+// join - is closed once that caller has left (roomServer.closeRoom).
 //
 // Closing also ends what the record has armed - the generation bump ends a settlement whose timer
 // already fired, the timer's stop the one still armed - since a closed issue's rooms settle nothing
@@ -2857,20 +2857,23 @@ func (s *Service) closeRoomOnReplacedHistory(room string, instance *roomInstance
 // the room: the room that loads next reads the issue open and settles what the document owes
 // (onLoadDocument).
 //
-// notified is whether this process has just been told of the change (issueOpenChanged), rather
-// than rechecking after a LISTEN (recheckResidentIssues). A notified change closes a room with no
-// record all the same: a room still loading has no record yet, and may have read the issue's state
-// from before the change; ygo closes it once its load is done, and the next load reads the issue
-// again. A notified reopen also closes a room whose record already reads open: a record a
+// notified is whether this process has just been told of the change - by the issue-open lane
+// (issueOpenChanged), or by the append gate's refusal, which hears of the close from the store's
+// ErrIssueClosed and not from that lane (refuseClosedIssueAppend) - rather than rechecking after
+// a LISTEN (recheckResidentIssues). A notified change closes a room with no record all the same:
+// a room still loading has no record yet, and may have read the issue's state from before the
+// change; ygo closes it once its load is done, and the next load reads the issue again. A
+// notified reopen also closes a room whose record already reads open: a record a
 // connection's own registration (addConnection) or a load after the reopen committed made holds
 // the default open flag while a browser on the room was admitted read-only before the reopen, and
 // only a reconnect gives that browser the writable scope. A notified close likewise closes a room
 // whose record already reads closed: that flag is no proof that a close is under way, since a load
 // that read the issue after it closed writes it itself, with no close behind it (onLoadDocument,
-// websocket.go), so the room admits writers until a close runs. Only the close runs again: the
-// bookkeeping below - the generation bump, the settle timer's stop, the latest edit source moved
-// to the pending-settlement row, restoreLastActor - ran when the record took the state it holds,
-// and a repeat notification must not run it twice. A recheck reads only rooms that hold a
+// websocket.go), so the room admits writers until a close runs. Such a call runs the close alone:
+// the bookkeeping a close does below - the generation bump, the settle failures reset, the settle
+// timer's stop, and the move of the latest edit source to the pending-settlement row
+// (persistLastActor, lastActorPersisted) - ran when the record took the closed state it already
+// holds, and a repeat notification must not run it twice. A recheck reads only rooms that hold a
 // record and closes only those whose record holds the other state, so a LISTEN that stands again
 // closes no room the issue's state already matches. Its ctx is the room-sync lane's or a close's
 // own, holding no transaction, so the rooms are recorded and closed one at a time.

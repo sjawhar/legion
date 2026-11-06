@@ -42,6 +42,18 @@ func writeIssueClosed(t *testing.T, database *store.Store, issueKey string, clos
 	}
 }
 
+// writeIssueClosedAgo sets issueKey's closed_at in database to closedAgo before now, the row a
+// close that far back leaves: the append gate weighs a browser's update against the close's age
+// (closeMargin), and back-dating the row puts the close that far behind without the test waiting
+// there in real time (waitPastCloseMargin waits instead, where the close must be a real one).
+func writeIssueClosedAgo(t *testing.T, database *store.Store, issueKey string, closedAgo time.Duration) {
+	t.Helper()
+	if _, err := database.Pool.Exec(context.Background(),
+		`update issues set closed_at = now() - make_interval(secs => $2) where key = $1`, issueKey, closedAgo.Seconds()); err != nil {
+		t.Fatalf("close issue %s %v ago: %v", issueKey, closedAgo, err)
+	}
+}
+
 // waitPastCloseMargin waits on the database's clock until it stands more than closeMargin past
 // the moment issueKey closed (issues.closed_at), and fails the test unless it does. Inside the
 // margin the gate admits a browser's update whatever its age (observedBeforeClose), so a test of
@@ -384,11 +396,7 @@ func TestABrowserAppendOnAClosedIssueIsRefusedWithoutItsNotification(t *testing.
 	service.beforeFailedEviction = func(string) { failed.Store(true) }
 	alice := connectWithScope(t, server.URL, artifactID, "alice", "read-write", "before\n")
 
-	closedAgo := closeMargin + 30*time.Second
-	if _, err := database.Pool.Exec(context.Background(),
-		`update issues set closed_at = now() - make_interval(secs => $2) where key = $1`, "DOC-1", closedAgo.Seconds()); err != nil {
-		t.Fatalf("close issue DOC-1 %v ago: %v", closedAgo, err)
-	}
+	writeIssueClosedAgo(t, database, "DOC-1", closeMargin+30*time.Second)
 	// The connect stored nothing: alice's copy held nothing her room lacked, and a transaction
 	// that changes nothing commits no update, so this head stands still unless the gate stores
 	// her keystroke.
@@ -441,6 +449,17 @@ func TestAnIssueClosedWhileTheListenerWasDownClosesItsRoomsOnTheReconnect(t *tes
 // roomResident is whether service holds a room of artifactID now (ResidentRooms).
 func roomResident(service *Service, artifactID string) bool {
 	return slices.Contains(service.ResidentRooms(), artifactID)
+}
+
+// waitForRoomGone waits for service to hold no room of artifactID, which the close of its issue
+// issueKey takes from it (closeRoomForIssue). The close may run on a goroutine of its own - the
+// append gate's refusal starts one (refuseClosedIssueAppend) - and ygo waits inside it for a
+// caller in the room to leave, so the room can go after the call that closed it returns.
+func waitForRoomGone(t *testing.T, service *Service, artifactID, issueKey string) {
+	t.Helper()
+	waitFor(t, roomWait(t), "the room of "+artifactID+", whose issue "+issueKey+" closed, to stop being resident", func() bool {
+		return !roomResident(service, artifactID)
+	})
 }
 
 // requireRecordClosed fails unless service's record of artifactID's room reads its issue closed,
@@ -498,9 +517,7 @@ func TestAnIssuesCloseClosesARoomWhoseLoadAlreadyMarkedItsRecordClosed(t *testin
 	requireRecordClosed(t, service, artifactID)
 
 	service.issueOpenChanged(store.WithTransactionTracking(context.Background()), "DOC-1")
-	waitFor(t, roomWait(t), "the room of "+artifactID+", whose issue DOC-1 closed, to stop being resident", func() bool {
-		return !roomResident(service, artifactID)
-	})
+	waitForRoomGone(t, service, artifactID, "DOC-1")
 	requireEnds(t, alice, "the close of issue DOC-1 left alice's browser on the room of "+artifactID+" connected")
 }
 
@@ -546,11 +563,7 @@ func TestTheAppendGateClosesARoomWhoseLoadAlreadyMarkedItsRecordClosed(t *testin
 
 	// Closed far enough back that the gate judges alice's keystroke by its age alone: inside the
 	// margin it stores a browser's update whatever its age (observedBeforeClose).
-	closedAgo := closeMargin + 30*time.Second
-	if _, err := database.Pool.Exec(context.Background(),
-		`update issues set closed_at = now() - make_interval(secs => $2) where key = $1`, "DOC-1", closedAgo.Seconds()); err != nil {
-		t.Fatalf("close issue DOC-1 %v ago: %v", closedAgo, err)
-	}
+	writeIssueClosedAgo(t, database, "DOC-1", closeMargin+30*time.Second)
 	// Alice's connect stored nothing that changed the document, and the gate stores nothing from
 	// here on, so this head stands still unless it takes her keystroke.
 	head := storedHead(t, database, artifactID)
@@ -558,9 +571,7 @@ func TestTheAppendGateClosesARoomWhoseLoadAlreadyMarkedItsRecordClosed(t *testin
 	typeOver(t, alice, "before", "typed after the second close")
 	requireEnds(t, alice, "the gate refused alice's keystroke on the room whose load marked its record closed and left her browser connected")
 	requireEnds(t, bob, "the gate's close of the room whose load marked its record closed left bob's read-only browser connected")
-	waitFor(t, roomWait(t), "the room of "+artifactID+", whose issue DOC-1 closed, to stop being resident", func() bool {
-		return !roomResident(service, artifactID)
-	})
+	waitForRoomGone(t, service, artifactID, "DOC-1")
 	if moved := storedHead(t, database, artifactID); moved != head {
 		t.Fatalf("the document moved from update %d to %d: the gate stored a browser's update on a closed issue", head, moved)
 	}
