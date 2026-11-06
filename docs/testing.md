@@ -81,10 +81,12 @@ Go's own detector finds a closure that reaches its object:
 
 ```sh
 cd packages/envoy
-GODEBUG=checkfinalizers=1 go test -count=1 -timeout 26m ./internal/dispatch/docs/
+GODEBUG=checkfinalizers=1 go test -count=1 -timeout 27m ./internal/dispatch/docs/
 ```
 
 It prints `WARNING: LIKELY CLEANUP/FINALIZER ISSUES`, then one `is reachable from cleanup or cleanup argument` line per site naming that site's file and line, and ends the run with `fatal error: detected possible issues with cleanups and/or finalizers`.
+The rule covers the cleanup's argument as well as its closure, so an argument that reaches the object is the same defect: the room load this package passed its cleanup reached its document through the instance's unstored classifications and the service each of their credits carries, which is the finding this job made on a head where the closure itself was already weak (dispatch://INFRA-1085).
+A run that reports nothing is no proof on its own: the check runs at a garbage collection, so a short run can pass with the path present, and `GOGC=10` beside the detector is what makes a single test fire it.
 CI runs that command in `envoy-go-docs-finalizers` (`.github/workflows/ci.yaml`), on every change the `envoy_go_race_docs` filter selects.
 
 That job runs the command with `-v` for a second check Go's detector does not make:
