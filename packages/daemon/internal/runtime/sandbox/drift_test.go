@@ -916,11 +916,11 @@ func TestLaunchSettingsDriftReadsAnUnreadableAndAnAbsentRecord(t *testing.T) {
 }
 
 // Each kind of pod records the launch keys its own launch reads and no other kind's: the record
-// an issue pod carries holds `runtime.kubernetes.resources.issue` and not the controller pod's
-// reservation, and the controller pod's the other way round. So a change of the controller's
-// reservation is no drift of an issue pod, and no update round is opened over every issue pod
-// of the fleet for a key none of their launches read (spec A5: a round opens for each issue pod
-// whose launch reads the key and for no other).
+// an issue pod carries holds every key only an issue pod's launch reads (issueLaunchPaths) and
+// none of the controller pod's own (controllerLaunchPaths), and the controller pod's the other
+// way round. So a change of the controller's reservation is no drift of an issue pod, and no
+// update round is opened over every issue pod of the fleet for a key none of their launches read
+// (spec A5: a round opens for each issue pod whose launch reads the key and for no other).
 func TestEachKindRecordsOnlyTheLaunchKeysItsOwnLaunchReads(t *testing.T) {
 	built := LaunchSettings(launchFixture())
 	moved := launchFixture()
@@ -929,19 +929,23 @@ func TestEachKindRecordsOnlyTheLaunchKeysItsOwnLaunchReads(t *testing.T) {
 	if built == shifted {
 		t.Fatal("the whole record did not move with the controller's reservation, so this proves nothing")
 	}
-	for kind, other := range map[podKind]string{
-		issuePod{}:      "runtime.kubernetes.resources.controller",
-		controllerPod{}: "runtime.kubernetes.resources.issue",
+	for kind, paths := range map[podKind]struct{ own, other []string }{
+		issuePod{}:      {own: issueLaunchPaths, other: controllerLaunchPaths},
+		controllerPod{}: {own: controllerLaunchPaths, other: issueLaunchPaths},
 	} {
 		record, err := launchSettingsOf(launchSettingsFor(built, kind))
 		if err != nil {
 			t.Fatalf("the record of %T cannot be read: %v", kind, err)
 		}
-		if _, held := record[kind.resourcesPath()]; !held {
-			t.Errorf("the record of %T holds no %s, which its own launch reads", kind, kind.resourcesPath())
+		for _, path := range paths.own {
+			if _, held := record[path]; !held {
+				t.Errorf("the record of %T holds no %s, which its own launch reads", kind, path)
+			}
 		}
-		if _, held := record[other]; held {
-			t.Errorf("the record of %T holds %s, which no launch of its reads", kind, other)
+		for _, path := range paths.other {
+			if _, held := record[path]; held {
+				t.Errorf("the record of %T holds %s, which no launch of its reads", kind, path)
+			}
 		}
 	}
 	// The issue pod's own record does not move with the controller's reservation, so no issue

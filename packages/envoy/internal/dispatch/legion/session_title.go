@@ -60,18 +60,20 @@ func ParseSessionTitle(title string) (SessionTitle, bool) {
 	return SessionTitle{}, false
 }
 
-// Works is whether the session works issue: a phase worker or a root architect of that very
-// issue, never a controller, whose subject is a project.
+// Works is whether the session works issue. Every caller asks it of a WorkerTitle, which has
+// already refused a controller, so the issue alone decides: a controller's is empty and matches
+// no issue key.
 func (t SessionTitle) Works(issue string) bool {
-	return !t.Controller && t.Issue == issue
+	return t.Issue == issue
 }
 
 // WorkerTitle is the parsed title of a session that works an issue, and whether title is one: a
 // phase worker or a root architect, never the project's controller, whose subject is a project
-// and no issue. It is the one statement of that rule, which three readers of it ask: the
+// and no issue. It is the one statement of that rule, and every reader of it asks it: the
 // project-wide read, which records every such session's newest title (PhaseWorkKeys); the board's
-// index of which sessions can move that read's answer (api/legion_phase_work.go's observe); and
-// the issue half below. So the index and the read can never disagree about which sessions count.
+// index of which sessions can move that read's answer (api/legion_phase_work.go's observe); the
+// metrics' own window read (metrics.readRoleEvents); and the issue half below. So no two of them
+// can disagree about which sessions count.
 func WorkerTitle(title string) (SessionTitle, bool) {
 	parsed, ok := ParseSessionTitle(title)
 	if !ok || parsed.Controller {
@@ -82,8 +84,7 @@ func WorkerTitle(title string) (SessionTitle, bool) {
 
 // RoleSessionWorks is whether a session titled title is a Legion role working issue. It is the
 // title half of what makes an issue carry Legion phase work, which the project-wide read asks
-// for every (issue, session) pair it finds (PhaseWorkKeys) and the metrics' own window read asks
-// for the pairs of its scope (metrics.readRoleEvents).
+// for every (issue, session) pair it finds (PhaseWorkKeys).
 func RoleSessionWorks(title, issue string) bool {
 	parsed, ok := WorkerTitle(title)
 	return ok && parsed.Works(issue)

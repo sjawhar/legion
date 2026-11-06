@@ -385,7 +385,7 @@ func (p *Population) readRoleEvents(ctx context.Context, pool *store.Pool, keys 
 		return err
 	}
 	for _, one := range found {
-		parsed, ok := legion.ParseSessionTitle(titles[one.session])
+		parsed, ok := legion.WorkerTitle(titles[one.session])
 		if !ok || !parsed.Works(one.issue) {
 			continue
 		}

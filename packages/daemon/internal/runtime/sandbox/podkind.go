@@ -45,10 +45,10 @@ type podKind interface {
 	// secretAnnotations are the annotations each of the pod's Secrets carries.
 	secretAnnotations(l launch) map[string]string
 	// resources are the reservation every container of the pod carries, its init containers'
-	// included (Options.Resources), and resourcesPath the dotted `legion.yaml` key it is read
-	// from, one key per kind.
+	// included (Options.Resources). The dotted `legion.yaml` key each kind's reservation is read
+	// from is named with the kinds' own launch keys, one key per kind (issueLaunchPaths,
+	// controllerLaunchPaths).
 	resources(r *Runtime) corev1.ResourceRequirements
-	resourcesPath() string
 	// readsLaunchPath is whether a launch of this kind reads the launch key path, one of the keys
 	// a pod's template records (LaunchSettings). It is the whole rule the record a pod of this
 	// kind carries is filtered by (launchSettingsFor), so a pod is replaced for a change of a key
@@ -126,12 +126,12 @@ func podKindOf(labels map[string]string) (podKind, error) {
 // reservation.
 var (
 	issueLaunchPaths = []string{
-		issuePod{}.resourcesPath(),
+		"runtime.kubernetes.resources.issue",
 		"runtime.kubernetes.skills_repository",
 		"runtime.kubernetes.test_postgres",
 		"worker_backends",
 	}
-	controllerLaunchPaths = []string{controllerPod{}.resourcesPath()}
+	controllerLaunchPaths = []string{"runtime.kubernetes.resources.controller"}
 )
 
 // issuePod is an issue's pod: every workflow role of the issue, working in the issue's workspace
@@ -153,8 +153,6 @@ func (issuePod) resources(r *Runtime) corev1.ResourceRequirements { return r.res
 func (issuePod) claimToken(project, issue string, role claim.Role) (claim.Token, error) {
 	return claim.NewToken(project, issue, role)
 }
-
-func (issuePod) resourcesPath() string { return "runtime.kubernetes.resources.issue" }
 
 // readsLaunchPath: an issue pod's launch reads every launch key a pod's template records but the
 // controller pod's own (controllerLaunchPaths).
@@ -500,8 +498,6 @@ func (controllerPod) resources(r *Runtime) corev1.ResourceRequirements { return 
 func (controllerPod) claimToken(project, _ string, _ claim.Role) (claim.Token, error) {
 	return claim.ControllerToken(project), nil
 }
-
-func (controllerPod) resourcesPath() string { return "runtime.kubernetes.resources.controller" }
 
 // readsLaunchPath: the controller pod's launch reads every launch key a pod's template records
 // but the four an issue pod's launch alone reads (issueLaunchPaths), so a change of the skills

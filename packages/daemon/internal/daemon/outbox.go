@@ -208,12 +208,11 @@ func (r *outbox) designGate() config.DesignGate {
 
 // workerStopTimeout is how long a stop this runner asks for leaves the process to end
 // (`worker_stop_timeout_seconds`), as the daemon is running on it now: the very bound the
-// machines hold themselves to, read from the same holder they read it through (liveBudgets,
-// supervise.Deps.Settings). The machines' own Timeouts copy is not it: production builds that
-// Deps with Settings alone, so the copy is the zero value and a deadline named from it would
-// interrupt a running turn at once.
+// machines hold themselves to, which they read from this same holder at every decision
+// (liveBudgets, supervise.Deps.Settings). It is read at the stop rather than held from the boot,
+// as the gate above it is, so a change of it reaches the next stop with nothing rebuilt.
 func (r *outbox) workerStopTimeout() time.Duration {
-	return liveBudgets{live: r.live}.Timeouts().Stop
+	return r.live.Snapshot().WorkerStopTimeout
 }
 
 // RunOnce drains every row of the project due now, in the order the lanes would run them within
