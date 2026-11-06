@@ -299,6 +299,21 @@ func awaitAckPending(t *testing.T, publisher *bus.Client, want int) {
 	})
 }
 
+// awaitEverythingAcknowledged waits for the delivery durable to have nothing left to hand anybody:
+// no message outstanding with its subscriber, none waiting to be delivered, and its ack floor
+// level with what it has delivered (consumer sequences, which a take-over's recreate starts afresh
+// from, rather than stream sequences). Past that point no redelivery is still on its way, so what
+// each process has handled no longer changes.
+func awaitEverythingAcknowledged(t *testing.T, publisher *bus.Client) {
+	t.Helper()
+	waitFor(t, 20*time.Second, func() bool {
+		info, err := publisher.JS().ConsumerInfo(bus.Stream, bus.DispatchDeliveryDurable)
+		return err == nil && info.NumAckPending == 0 && info.NumPending == 0 && info.AckFloor.Consumer == info.Delivered.Consumer
+	}, func() string {
+		return "the durable still has messages to hand out or to be acknowledged: " + consumerState(publisher)
+	})
+}
+
 // A holder stopped gracefully, as a rolling release stops the old process, hands the messages it
 // had been delivered and not yet handled back at once, and lets the standby take over at once: the
 // standby handles every one of them within seconds, not after the ack wait. The messages it holds
@@ -350,6 +365,20 @@ func TestAGracefulStopHandsTheBufferedMessagesToTheStandby(t *testing.T) {
 	t.Logf("the standby handled the queued messages %s after the holder's stop", time.Since(stopped))
 	if got := holder.fetches(inFlight); got != 1 {
 		t.Errorf("the stopping holder fetched pull request %d %d times; want the one its handler held, the rest handed back", inFlight, got)
+	}
+	// Nothing is left with the durable: no message outstanding with a subscriber, none waiting to
+	// be delivered, and its ack floor level with what it has delivered. Only then are the counts
+	// final. A message a process handed back rather than acknowledged -- the one the holder's
+	// handler held among them -- has by then been redelivered and handled, so it is in the count
+	// below rather than still on its way while the counts are read.
+	awaitEverythingAcknowledged(t, publisher)
+	if got := standby.fetches(inFlight); got != queued {
+		t.Errorf("with nothing left with the durable, the standby fetched pull request %d %d times; want the %d queued messages and no more: standby %d, holder %d; %s",
+			inFlight, got, queued, got, holder.fetches(inFlight), consumerState(publisher))
+	}
+	if got := holder.fetches(inFlight); got != 1 {
+		t.Errorf("with nothing left with the durable, the stopping holder fetched pull request %d %d times; want the one its handler held and no more: standby %d, holder %d; %s",
+			inFlight, got, standby.fetches(inFlight), got, consumerState(publisher))
 	}
 }
 
