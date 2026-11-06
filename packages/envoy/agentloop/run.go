@@ -492,7 +492,6 @@ func priced(usage provider.Usage, price Price) Usage {
 		input = max(value(usage.InputTokens.Total)-read-write, 0)
 	}
 	output := value(usage.OutputTokens.Total)
-	const perToken = 1e-6
 	counted := []*int{
 		usage.InputTokens.Total, usage.InputTokens.NoCache, usage.InputTokens.CacheRead, usage.InputTokens.CacheWrite,
 		usage.OutputTokens.Total, usage.OutputTokens.Text, usage.OutputTokens.Reasoning,
@@ -500,8 +499,8 @@ func priced(usage provider.Usage, price Price) Usage {
 	return Usage{
 		Input: input, Output: output, CacheWrite: write, CacheRead: read,
 		Reasoning: value(usage.OutputTokens.Reasoning),
-		CostUSD: float64(input)*price.Input*perToken + float64(output)*price.Output*perToken +
-			float64(write)*price.CacheWrite*perToken + float64(read)*price.CacheRead*perToken,
+		CostUSD: perMillion(input, price.Input) + perMillion(output, price.Output) +
+			perMillion(write, price.CacheWrite) + perMillion(read, price.CacheRead),
 		Metered: slices.ContainsFunc(counted, func(n *int) bool { return n != nil }),
 	}
 }
