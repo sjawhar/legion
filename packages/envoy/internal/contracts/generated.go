@@ -145,6 +145,14 @@ const GithubTopicPrefix = "notifications.github."
 // this window bounds, so the stream, the hosts and the dashboard read one number.
 const DeliveryDuplicateWindow = 259200000 * time.Millisecond
 
+// IssueClaimUnresponsiveGrace is how long an issue claim is held for a holder the Envoy registry
+// calls unresponsive: a session that missed its heartbeats keeps the issue it is working until it
+// was last seen longer ago than this, and only then may another agent take or release the claim
+// without a person's force. Generated from ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS in
+// packages/contracts, whose doc comment states the rule, so the server's refusal and the wait a
+// client predicts are one number.
+const IssueClaimUnresponsiveGrace = 1200000 * time.Millisecond
+
 // MintedDedupeKeyPattern is the shape of a dedupe key minted once for its message, by the listener
 // or by the shared transport's idempotency key, which DedupeKeyNamesTheUpstreamEvent counts as
 // naming its event. Generated from MINTED_DEDUPE_KEY_PATTERN in packages/contracts, which the
@@ -208,16 +216,21 @@ const DefaultIssuePageLimit = 50
 // server's refusal and the dashboard's title fields cannot drift apart.
 const IssueTitleMax = 1000
 
-// DispatchBodyMax is the longest comment, comment-edit, message and broadcast body the server
-// accepts, in UTF-16 units. Generated from DISPATCH_BODY_MAX in packages/contracts so the server's
-// refusal, the agent tools' pre-send refusal and the dashboard composer cannot drift apart.
-const DispatchBodyMax = 32000
+// DispatchBlockUnits is the longest one block of a comment, comment edit, message, broadcast or
+// ask part may be, in UTF-16 units. Generated from DISPATCH_BLOCK_UNITS in packages/contracts;
+// the server enforces it, names it in its refusal, and publishes it through GET /api/v1/limits.
+const DispatchBlockUnits = 32000
 
-// AskQuestionMax is the longest ask question the server accepts, in UTF-16 units; an approval
-// request's summary gets what its question leaves of it. Generated from ASK_QUESTION_MAX in
-// packages/contracts so the server's refusal, the agent tools' pre-send refusal and the dashboard
-// ask composer cannot drift apart.
-const AskQuestionMax = 2000
+// DispatchItemBlocks is the most blocks one body may hold. Generated from DISPATCH_ITEM_BLOCKS in
+// packages/contracts; the server enforces it, names it in its refusal, and publishes it through
+// GET /api/v1/limits.
+const DispatchItemBlocks = 32768
+
+// DispatchEventBodyMax is the longest body an event carries whole, in UTF-16 units, and the bound
+// on an ask's question and its options together. Generated from DISPATCH_EVENT_BODY_MAX in
+// packages/contracts; the server enforces it, names it in its refusal, and publishes it through
+// GET /api/v1/limits.
+const DispatchEventBodyMax = 32000
 
 // DispatchHandoffBodyMax is the longest phase handoff body, in UTF-8 bytes, that
 // POST /api/v1/issues/{key}/handoffs/{phase} accepts. Generated from DISPATCH_HANDOFF_BODY_MAX in

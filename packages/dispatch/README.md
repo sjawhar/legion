@@ -257,7 +257,13 @@ a comment or message reply that names a block (`--reply-to <comment>#b-b2`,
 (A7); the facts of a comment's and a message's block (A11); a block's id kept through a person's
 move, reword, split, deletion and restore over `PATCH /api/v1/comments/{id}` with carried ids, and
 a body holding block HTML read back byte for byte (A13); and a link pinned to a comment's block that
-reads `changed`, then `removed` (A15). Each passing check prints `PASS: <section> <what>`; the first
+reads `changed`, then `removed` (A15). It also reads the bounds the server owns and no client
+carries: a comment and a message of 48,000 characters taken and read back whole, a paragraph of
+32,001 characters refused by name, and `dispatch limits` (A8); a passage only at the end of a block
+longer than 32,000 characters found by meaning and a one-line ask option found by its text, each
+hit naming the block (A9, skipped with one `SKIP:` line on a server with no embedder); and a
+question of 2,001 characters taken by `dispatch ask` and by a document's decision block (A14).
+Each passing check prints `PASS: <section> <what>`; the first
 failure prints `FAIL: <section> <what>: <observed>` and exits 1. Its inputs:
 
 - `DISPATCH_URL`, the server;
@@ -289,7 +295,14 @@ It writes two issues in `PROJECT`: the first holds the spec, comments, messages 
 `cites.md`, `decisions.md`, `changes.md` and `list.md`; the second is its child, retitled, holding an
 ask the script rewords, a comment on a quote of its spec and a reply, a message and a reply, and the
 uploads `notes.txt` and `pixel.png`. It resolves the ask and closes both issues, also when a check
-fails. Against `bun run dispatch:local`:
+fails.
+
+Its `A9` section needs a server with an embedder, so the harness is started with
+`DISPATCH_E2E_EMBEDDER=1`, which gives it the development embedder beside its dev sign-in
+(`e2e/run-server.sh`); without one that section prints its `SKIP:` line and every other section
+runs. The harness leaves the embedder off by default, so that a suite whose assertions count
+search hits counts the keyword answers Dispatch gives a deployment with no embedder.
+Against `bun run dispatch:local`:
 
 ```bash
 DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token PROJECT=CORE \

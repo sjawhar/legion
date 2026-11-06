@@ -353,10 +353,28 @@ export function isAnchorMissing(error: unknown): boolean {
   return error instanceof ApiError && error.status === 409 && error.code === "ANCHOR_MISSING";
 }
 
+// The server refusing a write because its text passes a bound Dispatch holds it to: one block
+// too long, too many blocks, or an ask's question and options too long together. The refusal
+// names what passed which bound, so a page shows those words rather than wording of its own.
+export function isCapExceeded(error: unknown): error is ApiError {
+  return error instanceof ApiError && error.code === "CAP_EXCEEDED";
+}
+
 // A document whose stored history cannot load at all: the state a rebuild from its latest saved
 // version repairs, and retrying the read cannot.
 export function isDocumentUnloadable(error: unknown): boolean {
   return error instanceof ApiError && error.status === 409 && error.code === "DOCUMENT_UNLOADABLE";
+}
+
+/** What every view says while Envoy's agent list refills: the server's own `ENVOY_REFILLING`
+ *  message, shown wherever a view would otherwise say an agent is absent. */
+export const AGENT_LIST_REFILLING = "The agent list is refilling. Try again in a moment.";
+
+// The agents list and the subscriber reads answer this 503 while the Envoy listener refills its
+// copy of the session registry: the list is not known yet, so nothing on it may be read as gone.
+// It is transient, so the shared retry policy keeps retrying it like any other 5xx.
+export function isAgentListRefilling(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 503 && error.code === "ENVOY_REFILLING";
 }
 
 // The retry policy every query in the app shares: an auth outcome (401), a missing architecture

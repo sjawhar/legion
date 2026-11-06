@@ -163,7 +163,7 @@ func benchmarkStoreRewatch(b *testing.B, keys int) {
 		b.Fatalf("jetstream: %v", err)
 	}
 	// The bucket as Open makes it, so Open finds it already filled.
-	kv, err := bus.EnsureKeyValue(js, &natsgo.KeyValueConfig{
+	kv, err := bus.EnsureKeyValue(conn, js, &natsgo.KeyValueConfig{
 		Bucket:   bus.CIStateBucket,
 		Replicas: 1,
 		Storage:  natsgo.FileStorage,
