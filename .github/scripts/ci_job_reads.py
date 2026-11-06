@@ -339,6 +339,10 @@ UNIT_TEST_STEP = "Unit test envoy Go package"
 UNIT_TEST_SCRIPT = """\
 go test -count=1 -timeout 20m ./internal/dispatch/api
 go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -count=1 -timeout 20m"""
+NATSLIVE_STEP = "Test the container-backed NATS matrix (natslive)"
+NATSLIVE_SCRIPT = """\
+go test -count=1 -tags natslive ./internal/testnats/
+go test -count=1 -timeout 5m -tags natslive -run '^TestAStartCapsAnUncappedStreamOnTheHubsServerAndIsRefusedOnTheOlderOne$' -v ./internal/bus/"""
 PACK_STEP = "Pack envoy binaries"
 PACK_SCRIPT = """\
 for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
@@ -635,8 +639,6 @@ GATES = [
     gate("envoy_go", "envoy-go", runs=[
         step_run("envoy-go", "Integration test envoy (a real NATS server, in the test process)",
                  "go test ./internal/integration/ -timeout 300s -count=1", ENVOY, ["./internal/integration/"]),
-        step_run("envoy-go", "Test the container-backed NATS matrix (natslive)", "go test -count=1 -tags natslive ./internal/testnats/", ENVOY,
-                 ["./internal/testnats/"], tags="natslive"),
         step_run("envoy-go", "Build envoy services", "go build ./cmd/dispatch ./cmd/listener", ENVOY, ["./cmd/dispatch", "./cmd/listener"],
                  mode="build"),
     ], exact=[
@@ -652,6 +654,13 @@ GATES = [
             (ENVOY, ["./cmd/listener"], f"GOOS=linux GOARCH={arch} go build ./cmd/listener",
              {"mode": "build", "env": {"GOOS": "linux", "GOARCH": arch}})
             for arch in targets(GO_TARGETS, "envoy")
+        ]),
+        # Two commands: the rig's own matrix, and the one test of internal/bus that needs a real
+        # server image, named so the tag pulls in nothing else of that package.
+        pinned_step("envoy-go", NATSLIVE_STEP, ENVOY, NATSLIVE_SCRIPT, [
+            (ENVOY, ["./internal/testnats/"], "go test -count=1 -tags natslive ./internal/testnats/", {"tags": "natslive"}),
+            (ENVOY, ["./internal/bus/"], "go test -count=1 -timeout 5m -tags natslive -run the consumer-cap matrix ./internal/bus/",
+             {"tags": "natslive"}),
         ]),
     ], reads=reads(
         (f"{ENVOY}/**", f"{at('envoy-go', 'Check Go formatting')}: gofmt -l . in packages/envoy reads every .go file under it, infra included; the script tests below live here too"),
