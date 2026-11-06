@@ -13,7 +13,8 @@ import type {
   CreateArtifactInput,
   Event,
 } from "@legion/contracts";
-import { overCapMessage, SESSION_ID_PATTERN } from "@legion/contracts";
+import { SESSION_ID_PATTERN } from "@legion/contracts";
+import { bodyWasCut, carriedItem, wholeCarriedBody } from "./delivery";
 import { type DispatchClient, DispatchGatewayError, DispatchServiceError } from "./dispatch-http";
 import { parseDispatchRef } from "./dispatch-owner";
 import {
@@ -32,7 +33,6 @@ import {
   withPictureLines,
 } from "./dispatch-pictures";
 import { messageFor } from "./errors";
-import { ToolInputError } from "./tool-input-errors";
 
 const PICTURE_TYPE_NAMES = "a PNG, JPEG, GIF or WebP";
 
@@ -96,59 +96,22 @@ async function localPicture(
   return { path, name: basename(absolute), file: Bun.file(absolute, { type }) };
 }
 
-/** The slug Dispatch gives a new upload named `name` that no other artifact of its owner holds
- *  (the server's `artifactSlug`): lowercased, its ASCII letters and digits kept and each other run
- *  one dash, the slug every reference grammar reads. */
-function uploadSlug(name: string): string {
-  const slug = name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "");
-  return slug === "" ? "artifact" : slug;
-}
-
-/** How a call's text is limited, and how a refusal names that text and what else shortens it. */
-export interface PictureTextLimit {
-  readonly cap: number;
-  /** The text without its pictures: `body`, or `question plus ref`. */
-  readonly text: string;
-  /** The fix besides sending fewer pictures: `shorten the body`. */
-  readonly shorten: string;
-}
-
 /**
  * `text` with `pictures` appended as the lines that show them (`withPictureLines`), each picture
  * uploaded first, in order, through `upload` to the owner `owner` names in an address (`KEY`,
- * `PROJECT`, or `agent/<session id>`). The cap is judged before anything is uploaded, on the
- * lines each picture gets as a new upload of its name (that name's slug, version 1). Dispatch can
- * address an upload longer than that - a later version of a name the owner already holds, or a
- * slug another file took first - so the text is judged again once the uploads named it, and
- * refused with nothing posted. An upload Dispatch refuses fails the call naming its path, with
- * nothing posted.
+ * `PROJECT`, or `agent/<session id>`). Nothing here holds the text to a length: Dispatch holds
+ * the whole text, picture lines included, to the bounds it publishes, and refuses it naming the
+ * block that passed one. An upload Dispatch refuses fails the call naming its path, with nothing
+ * posted.
  */
 export async function textWithPictures(
-  tool: string,
   text: string,
   pictures: readonly LocalPicture[],
-  limit: PictureTextLimit,
   owner: string,
   upload: (input: CreateArtifactInput) => Promise<ArtifactUploadResponse>,
   actor: Actor
 ): Promise<string> {
   if (pictures.length === 0) return text;
-  const counted = `${limit.text} plus ${pictures.length} ${pictures.length === 1 ? "picture" : "pictures"}`;
-  const fix = `${limit.shorten} or send fewer pictures`;
-  const predicted = withPictureLines(
-    text,
-    pictures.map((picture) =>
-      pictureLine(picture.name, `dispatch://${owner}/artifact/${uploadSlug(picture.name)}@v1`)
-    )
-  );
-  if (predicted.length > limit.cap) {
-    throw new ToolInputError(tool, [
-      `${counted} ${overCapMessage(predicted.length, limit.cap)}; ${fix}`,
-    ]);
-  }
   const lines: string[] = [];
   const addresses: string[] = [];
   for (const picture of pictures) {
@@ -177,14 +140,7 @@ export async function textWithPictures(
     addresses.push(address);
     lines.push(pictureLine(picture.name, address));
   }
-  const posted = withPictureLines(text, lines);
-  if (posted.length > limit.cap) {
-    throw new Error(
-      `${counted} ${overCapMessage(posted.length, limit.cap)} with the addresses Dispatch gave ` +
-        `the uploads (${addresses.join(", ")}), so nothing was posted; ${fix}.`
-    );
-  }
-  return posted;
+  return withPictureLines(text, lines);
 }
 
 /** An upload an agent's conversation on the Agents page owns, as its reference names it. */
@@ -273,6 +229,35 @@ export function eventTexts(event: Event): DatedText[] {
   return texts
     .filter((text): text is string => typeof text === "string" && text !== "")
     .map((text) => ({ text, at: event.created_at }));
+}
+
+/** The texts the events of a read carry, dated, with a body the event carried only in part
+ *  (`body_truncated`) read whole from the server first. A picture an author embedded past the
+ *  cut is named nowhere in the event, so listing an issue's pictures off the events alone would
+ *  lose it. A read that fails leaves that event the part it carried. */
+export async function eventTextsWhole(
+  client: DispatchClient,
+  events: readonly Event[]
+): Promise<DatedText[]> {
+  // Several events of one page can name the same comment or message, and every read of it
+  // answers the same current body, so one read serves them all. The map is written before the
+  // first await, so callbacks running together share the read rather than each starting one.
+  const reads = new Map<string, Promise<string | undefined>>();
+  const whole = await Promise.all(
+    events.map(async (event) => {
+      const item = bodyWasCut(event.payload) ? carriedItem(event) : undefined;
+      if (item === undefined) return eventTexts(event);
+      const key = `${item.resource}:${item.id}`;
+      let read = reads.get(key);
+      if (read === undefined) {
+        read = wholeCarriedBody(client, item);
+        reads.set(key, read);
+      }
+      const body = await read;
+      return body === undefined ? eventTexts(event) : [{ text: body, at: event.created_at }];
+    })
+  );
+  return whole.flat();
 }
 
 /** Each picture a read shows, `PICTURES_SHOWN_MAX` and `PICTURES_SHOWN_MAX_BYTES` at most. */

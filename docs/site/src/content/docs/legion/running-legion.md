@@ -182,7 +182,9 @@ an installation that Dispatch searches.
 `--webhook-url` becomes the Envoy App's webhook. That App's webhook secret is the listener's
 `ENVOY_GITHUB_WEBHOOK_SECRET`, its client id is Dispatch's `DISPATCH_APP_CLIENT_ID`, and its
 private key, as the PEM GitHub gives or its base64, is `DISPATCH_APP_PEM_B64`. The review App's id
-is the listener's `ENVOY_REVIEWER_APP_ID`. Store the private keys where `github_apps.<role>` and
+is the listener's `ENVOY_REVIEWER_APP_ID` and Dispatch's `DISPATCH_REVIEWER_APP_ID`; set both,
+because with `DISPATCH_REVIEWER_APP_ID` unset Dispatch's CI reconcile pass records no `tester` or
+`architect` check run. Store the private keys where `github_apps.<role>` and
 Dispatch read them, delete the files, then install every App from
 `https://github.com/apps/<slug>/installations/new` on the same repositories.
 
@@ -464,10 +466,20 @@ What each part is for:
   `BROKER_SERVICE_LOGINS` names the daemon's ServiceAccount.
 - **`runtime.kubernetes.setup`** (optional) is a command, as an argv, that every role, in its own
   namespaces,
-  runs before each start of its Oh My Pi, such as installing an Oh My Pi plugin from a marketplace
-  repository. It runs in the role's working directory with the role's environment, and its `git`
+  runs before each start of its Oh My Pi. It runs in the role's working directory with the role's
+  environment, and its `git`
   answers `https://github.com` for your project's owners with the role's App token. Oh My Pi starts
-  only once it exits 0; a failure is a failed launch, and its output is in the role's log.
+  only once it exits 0; a failure is a failed launch, and its output is in the role's log. Under
+  this runtime it must fetch nothing: a clone in a role's launch context ends the pod's gVisor
+  sandbox a few seconds in, so install skills with `skills_repository` below and leave `setup` to
+  check that they are there.
+- **`runtime.kubernetes.skills_repository`** (optional) is the Oh My Pi plugin marketplace your
+  pods' roles load their skills from, as `owner/name`. Each issue pod clones its default branch
+  shallow in an init container of its own, with the project's App token, and every role installs
+  from that clone before Oh My Pi starts — so a pod's skills are that branch as of the pod's start,
+  with no image rebuild and no fetch in any role's launch. Each role then checks that the files Oh
+  My Pi installed are the ones that commit holds, and fails its launch if they are not, so a pod
+  can always say which commit its agents' skills came from.
 - **`controller`** (optional) is who runs the project's controller: `operator` (the default), you,
   with `legion controller start`, or `daemon`, a pod the daemon launches and keeps running
   ([Start the controller](#start-the-controller)).
@@ -476,12 +488,14 @@ What each part is for:
   decimals allowed), `pod_update_retask_hours` (1: how long an update round waits before it asks
   a worker that has not answered again, decimals allowed), `pod_update_notice_hours` (4: how long
   an update round runs before the controller is told it is not finishing, decimals allowed),
-  `review_round_cap` (3), `max_fix_attempts` (3), `controller_wake_interval_seconds` (3600), and
-  the supervision budgets `launch_failure_limit` (3), `prompt_failure_limit` (3) and
-  `prompt_retire_limit` (2). `controller_wake_interval_seconds` also sets the period of the
-  daemon's status repair, which puts back the Dispatch status of every issue it works whose status
-  is not the status of the phase that issue stands in, so raising it to quiet the controller slows
-  that repair with it.
+  `pod_update_max_open_rounds` (how many issues may hold an open pod-update round at once) and
+  `pod_update_rounds_per_minute` (how many rounds one sweep opens), each a positive integer whose
+  absent key is no limit at all, `review_round_cap` (3), `max_fix_attempts` (3),
+  `controller_wake_interval_seconds` (3600), and the supervision budgets `launch_failure_limit`
+  (3), `prompt_failure_limit` (3) and `prompt_retire_limit` (2).
+  `controller_wake_interval_seconds` also sets the period of the daemon's status repair, which
+  puts back the Dispatch status of every issue it works whose status is not the status of the
+  phase that issue stands in, so raising it to quiet the controller slows that repair with it.
 - **`worker_backends`** (optional) runs a role on Claude Code instead of Oh My Pi:
   `worker_backends: {implementer: claude}`. Each key is an issue role, each value `omp` (the
   default) or `claude`. Claude Code runs the phase workers (`planner`, `implementer`, `tester`,

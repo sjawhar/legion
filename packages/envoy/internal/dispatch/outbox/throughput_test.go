@@ -585,7 +585,7 @@ func runOutbox(t *testing.T, database *store.Store, client *bus.Client, broker *
 	if err != nil {
 		t.Fatalf("open the outbox's pool: %v", err)
 	}
-	holders := roles.NewBuckets(client)
+	holders := roles.NewBuckets(client, roles.Windows{})
 	return runDeps(t, Deps{Store: &store.Store{Pool: pool}, Publisher: client, Broker: broker, Listen: database.Pool.Listener,
 		RoleClaims: holders, Sessions: holders}, 10*time.Second)
 }
