@@ -1264,6 +1264,55 @@ describe("reassertRole", () => {
     expect(harness.state.heldRole()).toBe("alpha");
   });
 
+  // dispatch://INFRA-783: a second process that resumed this session's id can hold the role
+  // under this very session id, and the lookup says so by naming another client instance. The
+  // Claude Code channel server weighs both (`reassertRole` in envoy-channel-server.ts, which
+  // confirms the role only when the holder is this session AND this process); this side must
+  // too, or a lane whose role a continuation took reads "holder is me" for ever, never claims
+  // again and never renews the claim, which is the state the incident left behind.
+  test("a tick that names this session's own id under another process claims the role again", async () => {
+    const harness = createHarness();
+    await harness.hold("alpha", "ses_a");
+    harness.control.getRole = async (role) => ({
+      role,
+      holder: "ses_a",
+      client_instance_id: "another-process",
+      last_seen: 2,
+      state: "live",
+    });
+    harness.claims.length = 0;
+    expect(await reassert(harness, false)).toEqual({ decided: true, regain: "reclaimed" });
+    expect(harness.claims).toEqual([
+      {
+        sessionID: "ses_a",
+        role: "alpha",
+        soft: true,
+        clientInstanceID: harness.state.clientInstanceID,
+      },
+    ]);
+    expect(harness.state.heldRole()).toBe("alpha");
+  });
+
+  // The other half of the same rule: the listener refuses that claim while the other process
+  // still renews it, and the refusal names this session's own id. That says nothing about
+  // another session taking the role, so the role stays here and the next heartbeat asks again.
+  test("a re-assertion refused by this session's own id keeps the role and tells the pane nothing", async () => {
+    const harness = createHarness();
+    await harness.hold("alpha", "ses_a");
+    harness.control.getRole = async (role) => ({
+      role,
+      holder: "ses_a",
+      client_instance_id: "another-process",
+      last_seen: 2,
+      state: "live",
+    });
+    harness.control.setRole = async () => ({ claimed: false, holder: "ses_a" });
+    harness.notices.length = 0;
+    expect(await reassert(harness, false)).toEqual({ decided: true });
+    expect(harness.state.heldRole()).toBe("alpha");
+    expect(harness.notices).toEqual([]);
+  });
+
   test("the first healthy tick after an outage asks for a reregistered regain", async () => {
     const harness = createHarness();
     await harness.hold("alpha", "ses_a");
