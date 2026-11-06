@@ -138,16 +138,26 @@ const providerErroredMessage = "supervise: the turn this task's prompt ran ended
 // report ready.
 const paneReady = 3 * time.Minute
 
-// providerErrorLive is one run of the proof: the booted daemon, the local runtime that started
-// each pane, the daemon's own log as this driver reads it back, and the three issues it drives.
-type providerErrorLive struct {
+// liveAgentProof is what a live proof that drives real Oh My Pi panes holds beyond liveProof, and
+// the reads such a proof makes: the runtime that started each pane, the daemon's own log as a
+// step reads it back, and the `legion` binary this checkout built, which is both the panes' shim
+// and the operator's command line. providerErrorLive and claimCompactionLive
+// (claim_compaction_live_test.go) are both one, so the two proofs read a claim, wait for a pane
+// and run `legion claims` the same way.
+type liveAgentProof struct {
 	liveProof
 	rt     *localRuntime
-	built  *built
-	clock  *ladderClock
 	daemon *recordingLog
 	legion string
 	omp    string
+}
+
+// providerErrorLive is one run of the proof: the booted daemon, the local runtime that started
+// each pane, the daemon's own log as this driver reads it back, and the three issues it drives.
+type providerErrorLive struct {
+	liveAgentProof
+	built *built
+	clock *ladderClock
 	// ladder, refused and failing are the three issues, each in the phase its one worker works.
 	ladder, refused, failing string
 	// stands is each stand-in by its provider name.
@@ -184,7 +194,8 @@ func newProviderErrorLive(t *testing.T) *providerErrorLive {
 	takeOwnDatabase(t)
 	proof := newLiveProof(t, "scripts/e2e/provider-error-retry.sh")
 	r := &providerErrorLive{
-		liveProof: proof, built: &built{}, clock: &ladderClock{}, omp: omp,
+		liveAgentProof: liveAgentProof{liveProof: proof, omp: omp},
+		built:          &built{}, clock: &ladderClock{},
 		ladder: proof.cfg.Project + "-1", refused: proof.cfg.Project + "-2", failing: proof.cfg.Project + "-3",
 		stands: map[string]*modelStandin{},
 	}
@@ -626,10 +637,10 @@ func (r *providerErrorLive) awaitFreshSession(token claim.Token, old string) str
 	return sent
 }
 
-// ---- reads the steps make ------------------------------------------------------------------------
+// ---- reads a proof that drives real panes makes ---------------------------------------------------
 
 // claim is token as the operator's claim listing shows it now.
-func (r *providerErrorLive) claim(token claim.Token) api.OperatorClaim {
+func (r *liveAgentProof) claim(token claim.Token) api.OperatorClaim {
 	r.t.Helper()
 	status, body := r.d.request(http.MethodGet, "/legion/v1/operator/claims", nil, true)
 	if status != http.StatusOK {
@@ -651,7 +662,7 @@ func (r *providerErrorLive) claim(token claim.Token) api.OperatorClaim {
 // awaitReady waits for the claim's real pane to start Oh My Pi, register and report ready. A claim
 // that fails meanwhile ends the wait at once, naming the log the worker's own output is in: a pane
 // that cannot start is read from there and nowhere else.
-func (r *providerErrorLive) awaitReady(token claim.Token) {
+func (r *liveAgentProof) awaitReady(token claim.Token) {
 	r.t.Helper()
 	var held api.OperatorClaim
 	r.await(string(token)+"'s pane to register and report ready", paneReady, func() bool {
@@ -668,7 +679,7 @@ func (r *providerErrorLive) awaitReady(token claim.Token) {
 
 // await polls until want holds, failing with what it waited for. testwait.Eventually bounds its
 // own wait at a minute, which is shorter than the ladder's own gaps.
-func (r *providerErrorLive) await(what string, within time.Duration, want func() bool) {
+func (r *liveAgentProof) await(what string, within time.Duration, want func() bool) {
 	r.t.Helper()
 	deadline := time.Now().Add(within)
 	for {
@@ -684,7 +695,7 @@ func (r *providerErrorLive) await(what string, within time.Duration, want func()
 
 // awaitLog waits for the daemon to write a log record matching want, and answers the first one it
 // wrote after the wait began.
-func (r *providerErrorLive) awaitLog(what string, within time.Duration, want func(loggedRecord) bool) *loggedRecord {
+func (r *liveAgentProof) awaitLog(what string, within time.Duration, want func(loggedRecord) bool) *loggedRecord {
 	r.t.Helper()
 	return r.awaitLogFrom(what, r.daemon.count(), within, want)
 }
@@ -692,7 +703,7 @@ func (r *providerErrorLive) awaitLog(what string, within time.Duration, want fun
 // awaitLogFrom is awaitLog from a mark the step took itself, before whatever it drove: the daemon
 // errors and decides inside milliseconds of each other, so a step that must read both takes one
 // mark ahead of the act rather than a mark per read.
-func (r *providerErrorLive) awaitLogFrom(what string, from int, within time.Duration, want func(loggedRecord) bool) *loggedRecord {
+func (r *liveAgentProof) awaitLogFrom(what string, from int, within time.Duration, want func(loggedRecord) bool) *loggedRecord {
 	r.t.Helper()
 	var found *loggedRecord
 	r.await(what, within, func() bool {
@@ -703,12 +714,12 @@ func (r *providerErrorLive) awaitLogFrom(what string, from int, within time.Dura
 }
 
 // logs is every record the daemon has written that matches want, oldest first.
-func (r *providerErrorLive) logs(want func(loggedRecord) bool) []loggedRecord {
+func (r *liveAgentProof) logs(want func(loggedRecord) bool) []loggedRecord {
 	return r.daemon.matching(want)
 }
 
 // lastLog is the newest record matching want, and nil when there is none.
-func (r *providerErrorLive) lastLog(want func(loggedRecord) bool) *loggedRecord {
+func (r *liveAgentProof) lastLog(want func(loggedRecord) bool) *loggedRecord {
 	matched := r.daemon.matching(want)
 	if len(matched) == 0 {
 		return nil
@@ -718,17 +729,26 @@ func (r *providerErrorLive) lastLog(want func(loggedRecord) bool) *loggedRecord 
 
 // legionClaims runs `legion claims <args>` — the binary this checkout built — against the booted
 // daemon, and answers its output. A non-zero exit fails the step with both streams.
-func (r *providerErrorLive) legionClaims(args ...string) string {
+func (r *liveAgentProof) legionClaims(args ...string) string {
+	r.t.Helper()
+	out, err := r.legionClaimsTry(args...)
+	if err != nil {
+		r.t.Fatalf("legion claims %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return out
+}
+
+// legionClaimsTry is legionClaims for a command a step expects the daemon to refuse: it answers
+// both streams and the exit error rather than ending the step, since the refusal is what the
+// step reads (claim_compaction_live_test.go).
+func (r *liveAgentProof) legionClaimsTry(args ...string) (string, error) {
 	r.t.Helper()
 	full := append([]string{"claims", args[0], "--port", strconv.Itoa(r.cfg.Port),
 		"--operator-token-file", r.cfg.OperatorTokenFile}, args[1:]...)
 	cmd := exec.Command(r.legion, full...)
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + r.t.TempDir()}
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		r.t.Fatalf("legion %s: %v\n%s", strings.Join(full, " "), err, out)
-	}
-	return strings.TrimRight(string(out), "\n")
+	return strings.TrimRight(string(out), "\n"), err
 }
 
 // indent puts each line of a command's output under a step's own note.
@@ -995,6 +1015,11 @@ type modelStandin struct {
 	t    *testing.T
 	name string
 	url  string
+	// answer, when set, is what this stand-in does with a model request instead of the behaviour
+	// its name names. The compaction proof's stand-ins (claim_compaction_live_test.go) differ by
+	// what each does to a compaction's summary request rather than by provider, so each carries
+	// its own answer; this proof's three carry none and are their names.
+	answer func(w http.ResponseWriter, req *http.Request, body string)
 
 	mu       sync.Mutex
 	requests []string
@@ -1019,6 +1044,10 @@ func (s *modelStandin) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	s.mu.Lock()
 	s.requests = append(s.requests, string(body))
 	s.mu.Unlock()
+	if s.answer != nil {
+		s.answer(w, req, string(body))
+		return
+	}
 	switch s.name {
 	case overloadedProvider:
 		// `retry-after` over the client's own 60 s cap declines the retry and surfaces the 529

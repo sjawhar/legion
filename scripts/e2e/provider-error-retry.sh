@@ -17,6 +17,11 @@
 # starts a pane with no tmux). Each check prints `== <name>`, what it observed and `ok <name>`; the
 # first that fails ends the run non-zero, naming it.
 #
+# R3's other two operations — the compaction `legion claims compact` and the controller's
+# `compact` run, and the fresh session the controller's `fresh_session` runs — are
+# scripts/e2e/claim-compaction.sh's, a proof of the same shape with four panes of its own: the
+# two runs would otherwise share a wall clock.
+#
 # The whole run took 351 s measured in a Legion worker pod (omp/18.16.0), the driver 301 s of it:
 # the ladder's first three gaps are waited out where they are real (30 s, 60 s and 120 s of wall
 # clock between the daemon's sends), its fourth and fifth are driven on the daemon's own clock, and
