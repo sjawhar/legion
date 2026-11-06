@@ -270,7 +270,8 @@ reaches a person outside the company; `plain-words` the empty verb phrases to de
 person reads, and `agent-secrets` the secrets broker's client, which gives a credential to one command
 in that command's environment, so no value reaches your shell or your transcript.
 `skills/` holds one relative symlink per skill into the repository-root `skills/`, which
-stays their only source; Claude Code copies each target into the plugin cache at install. With
+stays their only source; the pack resolves each link into the skill's own files, since a published
+package carries no link of this kind (`package.json`'s `prepack`, `scripts/pack-skills.sh`). With
 Dispatch configured, the `dispatch-first` hook also puts `dispatch-first` into the model's context
 on every `SessionStart` (startup, resume, clear, compact, fork) and `SubagentStart`, as the
 `hooks/hooks.json` bullet above describes; it sends a spec, or an ask, comment or message a person

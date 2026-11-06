@@ -711,25 +711,29 @@ jobs:
         run: .github/scripts/release-push.sh extract-built "$RUNNER_TEMP/claude-envoy-built.tar"
 
       # package.json's "files" decides what is packed, not git, so the build's two directories go
-      # in even though .gitignore names them.
+      # in even though .gitignore names them. The pack runs the package's prepack and postpack
+      # (packages/claude-envoy/scripts/pack-skills.sh): skills/<name> is a link into the
+      # repository's skills/, which bun packs as nothing at all, so the prepack replaces each
+      # link with the skill's files and the postpack puts the links back.
       - name: Pack plugin
         if: steps.version.outputs.skip != 'true'
         run: rm -f ./*.tgz && bun pm pack
         working-directory: packages/claude-envoy
 
-      - name: Check the packed tarball names the publishing repository, the release and the build
+      - name: Check the packed tarball names the publishing repository and the release, and holds the build and the skills
         if: steps.version.outputs.skip != 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          # pi_envoy_build's check, over this package's tarball, and three more: the version
+          # pi_envoy_build's check, over this package's tarball, and four more: the version
           # Claude Code reads off .claude-plugin/plugin.json, without which every install is
           # `unknown` and no update is ever seen; the version Oh My Pi reads off
           # .omp-plugin/plugin.json, which tests/envoy-channel-server.test.ts holds equal to
-          # package.json's; and the two generated directories, which the plugin runs from and
+          # package.json's; the two generated directories, which the plugin runs from and
           # .gitignore names, so a packer that started honouring git would publish a plugin that
-          # cannot start. All of them are read out of the tarball the publish job will hand npm,
-          # never out of the working tree.
+          # cannot start; and the skills, which only the pack's prepack turns into files. All of
+          # them are read out of the tarball the publish job will hand npm, never out of the
+          # working tree.
           url=$(.github/scripts/repo-paths.sh repository_url)
           tar -xzOf packages/claude-envoy/*.tgz package/package.json \
             | jq -e --arg u "$url" '.repository.url == $u'
@@ -745,6 +749,11 @@ jobs:
               exit 1
             fi
           done
+          # The skills, read back out of the same tarball: the rules are in
+          # packages/claude-envoy/scripts/check-packed-skills.sh, which tests/packed-skills.test.ts
+          # runs over tarballs of its own. Without them every install loses all eight skills and
+          # the dispatch-first hook hooks/hooks.json runs on every session throws.
+          packages/claude-envoy/scripts/check-packed-skills.sh packages/claude-envoy/*.tgz
 
       # The tarball, exactly as packed, for publish.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

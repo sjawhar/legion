@@ -421,6 +421,18 @@ check "no tag, --first-npm: asked npm for the package's version" "$(is "$npm_cal
 check "no tag, --first-npm: logs the bump from npm's version" "$(contains "$err" '^Bumping v2\.3\.4 -> pkg-v2\.3\.5$')"
 NPM_TEST_FAIL=1 version_run "$work/v/c" pkg-v --first-npm @example/pkg -- packages/pkg/
 check "no tag, npm has no such package: starts from 0.0.0" "$(is "$rc $out" "0 $(outputs 0.0.1 pkg-v0.0.1 false)")"
+# @sjawhar/claude-envoy's own case, which release.yaml's claude_envoy_build runs: npm carries a
+# 0.0.0 placeholder of the package, so npm answers and the fallback above is never reached, and
+# no claude-envoy-v tag exists yet. The first release comes from the whole history of the paths,
+# not from the newest commit alone: the fix: above and the feat: below are both in the range, so
+# it bumps the minor rather than failing for the missing tag or skipping for an empty range.
+change "$work/v/c" packages/pkg/index.js "feat: an export before the first release"
+NPM_TEST_VERSION=0.0.0 version_run "$work/v/c" pkg-v --first-npm @example/pkg -- packages/pkg/
+check "no tag, npm's 0.0.0 placeholder: exits 0" "$(is "$rc" 0)"
+check "no tag, npm's 0.0.0 placeholder: the first release reads the whole history" \
+  "$(is "$out" "$(outputs 0.1.0 pkg-v0.1.0 false)")"
+check "no tag, npm's 0.0.0 placeholder: asked npm for the package's version" "$(is "$npm_calls" '[view][@example/pkg][version]')"
+check "no tag, npm's 0.0.0 placeholder: logs the bump from the placeholder" "$(contains "$err" '^Bumping v0\.0\.0 -> pkg-v0\.1\.0$')"
 version_run "$work/v/c" pkg-v -- packages/pkg/
 check "no tag, no --first-npm: exits 1 printing nothing" "$(is "$rc|$out" "1|")"
 check "no tag, no --first-npm: the error says a release line starts from a tag" \

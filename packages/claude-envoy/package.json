@@ -13,6 +13,7 @@
     "hooks/**",
     "legion/**",
     "scripts/**",
+    "skills/**",
     "src/**",
     "README.md",
     "AGENTS.md"
@@ -27,6 +28,8 @@
   "scripts": {
     "channel": "bun bin/envoy-channel.ts",
     "verify-build": "bash scripts/verify-build.sh",
+    "prepack": "bash scripts/pack-skills.sh",
+    "postpack": "bash scripts/pack-skills.sh --restore",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test --timeout=60000",
     "lint": "bunx biome check src/ hooks/ scripts/"
