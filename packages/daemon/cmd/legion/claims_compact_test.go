@@ -10,7 +10,7 @@ import (
 
 // `legion claims compact --claim <token>` posts to the claim's compact route with the operator's
 // bearer and no body at all, and prints what the daemon answered: the session was compacted, and
-// the task the claim owed went to it again.
+// whatever task the claim owed went to it again.
 func TestClaimsCompactPostsToTheClaimsCompactRoute(t *testing.T) {
 	d := newOperatorDaemon(t)
 	if code, _, _ := d.claims(d.spawnArgs()...); code != 0 {
@@ -26,14 +26,14 @@ func TestClaimsCompactPostsToTheClaimsCompactRoute(t *testing.T) {
 	if len(seen.body) != 0 {
 		t.Fatalf("compact sent the body %q, want none", seen.body)
 	}
-	if want := "compacted; the owed task was sent again"; !strings.Contains(out, want) {
+	if want := "compacted; whatever task the claim owed has gone again"; !strings.Contains(out, want) {
 		t.Fatalf("compact stdout = %q, want it to say %q", out, want)
 	}
 }
 
 // A compaction Oh My Pi refused or skipped is printed with its reason and the command succeeds:
-// the daemon did the whole of what the command asks — it tried, and it sent the owed task again
-// — so a session too small to compact is news rather than a failure.
+// the daemon did the whole of what the command asks — it tried, and whatever task the claim
+// owed went again — so a session too small to compact is news rather than a failure.
 func TestClaimsCompactPrintsWhyASessionWasNotCompacted(t *testing.T) {
 	d := newOperatorDaemon(t)
 	if code, _, _ := d.claims(d.spawnArgs()...); code != 0 {
@@ -46,7 +46,7 @@ func TestClaimsCompactPrintsWhyASessionWasNotCompacted(t *testing.T) {
 
 	out := d.succeed(append(append([]string{"compact"}, d.reach()...), "--claim", string(architectClaim))...)
 
-	if want := "not compacted: Nothing to compact (session too small); the owed task was sent again"; !strings.Contains(out, want) {
+	if want := "not compacted: Nothing to compact (session too small); whatever task the claim owed has gone again"; !strings.Contains(out, want) {
 		t.Fatalf("compact stdout = %q, want it to say %q", out, want)
 	}
 }
