@@ -520,10 +520,11 @@ func (r streamReconciliation) log() {
 //     and the deployed one when cfg sets none: a start never writes a lower limit than it read, so
 //     an operator's raise stands, and lowering or removing one is an operator step that needs
 //     every program's setting lowered or removed first;
-//   - the consumer cap, the deployed cap or cfg's when that is more, and cfg's on a stream whose
-//     cap is unset, a deployed -1 or 0 alike, which nats-server reads as its own default of 1000
-//     (StreamMaxConsumers): a start never writes a lower cap than it read, so an operator's raise
-//     stands, and lowering one is an operator step that needs every program's binary lowered first;
+//   - the consumer cap, the deployed cap or cfg's (StreamMaxConsumers) when that is more, and cfg's
+//     on a stream whose cap is unset, a deployed -1 or 0 alike, which nats-server reads as its own
+//     default of 1000 (JSDefaultMaxConsumersPerStream): a start never writes a lower cap than it
+//     read, so an operator's raise stands, and lowering one is an operator step that needs every
+//     program's binary lowered first;
 //   - the metadata, the deployed metadata kept as it is, its StreamIDMetadataKey included; a stream
 //     without that key gets one (identifiedMetadata).
 //
@@ -627,8 +628,9 @@ func keptStream(info *nats.StreamInfo, cfg *nats.StreamConfig) nats.StreamConfig
 // put their own value back every period while both run.
 //
 // A deployed cap of -1 or 0 is one nats-server reads as unset, applying its own default of 1000
-// (StreamMaxConsumers), so it is raised as a smaller cap is. The update that carries the raise
-// needs streamMaxConsumersFloor or later on a stream that already exists (refusedSettings).
+// (JSDefaultMaxConsumersPerStream), so it is raised to StreamMaxConsumers as a smaller cap is. The
+// update that carries the raise needs streamMaxConsumersFloor or later on a stream that already
+// exists (refusedSettings).
 func ownedStream(info *nats.StreamInfo, cfg *nats.StreamConfig) nats.StreamConfig {
 	owned := info.Config
 	owned.Replicas = max(info.Config.Replicas, cfg.Replicas)
