@@ -68,10 +68,11 @@ const (
 	serverChangeHeartbeat = 30 * time.Second
 
 	// serverChangeAttemptTimeout and serverChangeRetryDelay are envoy-client's publish attempt and
-	// the wait before its one retry (DEFAULT_TIMEOUT_MS and RETRY_DELAY_MS in
-	// packages/envoy-client/src/transport.ts).
-	serverChangeAttemptTimeout = 5 * time.Second
-	serverChangeRetryDelay     = 250 * time.Millisecond
+	// the wait before its one retry (contracts.ListenerCallTimeout and
+	// contracts.ListenerCallRetryDelay, generated from LISTENER_CALL_TIMEOUT_MS and
+	// LISTENER_CALL_RETRY_DELAY_MS in packages/contracts).
+	serverChangeAttemptTimeout = contracts.ListenerCallTimeout
+	serverChangeRetryDelay     = contracts.ListenerCallRetryDelay
 	// serverChangeReplayTimeout is envoy-client's replay call timeout (REPLAY_TIMEOUT_MS).
 	serverChangeReplayTimeout = 10 * time.Second
 	// serverChangeReplayMaxMessages is the most messages the stand-in asks one replay call for, the
@@ -805,7 +806,15 @@ func drain[T any](signal chan T) {
 
 // awaitReplicated waits until the notification stream and every KV bucket's stream, the three the
 // listener cannot run without among them, are at three replicas with a leader and both other
-// replicas current and online (testnats.AwaitStreamCopies).
+// replicas current and online (testnats.AwaitStreamCopiesWithin).
+//
+// Each wait is the run's own serverChangeRecovery, not testnats' connect bound: what it waits for
+// is a member that was killed or lame-ducked mid-write rejoining and catching its streams up
+// while the three senders keep publishing, which is the work serverChangeRecovery is the bound
+// for. The thirteen disruptions that passed in the merge-queue run that reported this (job
+// 127449806190) came 6.0 s to 9.1 s apart, the 3 s quiet window between them included, so this
+// wait over every stream took seconds there; on the fourteenth the notification stream was still
+// short of its third settled copy at testnats' 30 s, and the run was thrown out of the queue.
 func (s *serverChangeSoak) awaitReplicated(t *testing.T) {
 	t.Helper()
 	names := []string{bus.Stream}
@@ -820,7 +829,7 @@ func (s *serverChangeSoak) awaitReplicated(t *testing.T) {
 		}
 	}
 	for _, name := range names {
-		testnats.AwaitStreamCopies(t, s.js, name, serverChangeReplicas)
+		testnats.AwaitStreamCopiesWithin(t, s.js, name, serverChangeReplicas, serverChangeRecovery)
 	}
 }
 

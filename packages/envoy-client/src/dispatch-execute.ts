@@ -61,6 +61,7 @@ import {
   dispatchToolSchema,
   dispatchToolSpecs,
   encodeBlockId,
+  isIdPrefix,
   itemFromSearch,
   PROJECT_KEY_PATTERN,
   PROJECT_KEY_RULE,
@@ -775,9 +776,6 @@ function replyBlockProblem(
   return undefined;
 }
 
-/** A short id: 8+ hex characters (hyphens allowed) that is not a full uuid. */
-const idPrefixPattern = /^[0-9a-f][0-9a-f-]{7,}$/i;
-
 /** How a refusal names the owner whose asks or comments a prefix was matched against. */
 function refOwnerName(ref: ParsedDispatchRef): string {
   return ref.owner.kind === "issue"
@@ -845,7 +843,7 @@ async function resolveIdPrefix(
 ): Promise<string> {
   const fullID = normalizeUUID(id);
   if (fullID !== undefined) return fullID;
-  if (!idPrefixPattern.test(id)) {
+  if (!isIdPrefix(id)) {
     throw new ToolInputError(tool, [
       `${kind} id ${id} must be a full uuid or a prefix of at least 8 hex characters`,
     ]);
@@ -889,7 +887,7 @@ async function readAskRef(
   const asks = await list();
   let matches = asks.filter((ask) => ask.block_id === id);
   if (matches.length === 0) {
-    if (!idPrefixPattern.test(id)) {
+    if (!isIdPrefix(id)) {
       throw new ToolInputError(tool, [
         `ask id ${id} must be a full uuid, a prefix of at least 8 hex characters, or the id of an :::ask block on ${ownerName}`,
       ]);
@@ -942,7 +940,7 @@ async function resolveAskArgument(
   sessionId: string | undefined
 ): Promise<{ readonly id: string; readonly read?: AskRead }> {
   const id = askId(args);
-  if (normalizeUUID(id) === undefined && !idPrefixPattern.test(id)) {
+  if (normalizeUUID(id) === undefined && !isIdPrefix(id)) {
     const asks = await sessionOpenAsks(client, sessionId).catch(() => undefined);
     throw new ToolInputError(tool, [
       asks === undefined ? askIdShapeProblem : `${askIdShapeProblem}; ${openAskHints(asks)}`,

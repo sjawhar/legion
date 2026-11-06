@@ -60,12 +60,13 @@ const dispatchServer = {
 // DATABASE_URL, with B on DISPATCH_E2E_WEB_DIST_B's build when it is set (run-server.sh reads that
 // path from packages/envoy, as the server reads DISPATCH_WEB_DIST). Both serve the proxy's origin,
 // so they start after it, on ports held for them before it started (`heldAhead`). B runs the
-// envoy-dispatch DISPATCH_E2E_BINARY_B names when it is set (a path from packages/envoy too), in
-// place of the one run-server.sh builds from this tree: a previous release's build, so a browser
-// drives two builds of the server at once (e2e/cross-build.multiprocess.e2e.ts). That build must
-// be legion-envoy-v20.1.0 or later (packages/envoy/scripts/build-dispatch-build.sh refuses an
-// older one): it serves on the socket held for it, as this tree's build does, and knows the
-// shared key below, so B starts exactly as A does and no run names a port.
+// envoy-dispatch DISPATCH_E2E_BINARY_B names when it is set (a path from packages/envoy too,
+// handed to run-server.sh as its DISPATCH_E2E_SERVER_BIN), in place of the one run-server.sh
+// builds from this tree: a previous release's build, so a browser drives two builds of the
+// server at once (e2e/cross-build.multiprocess.e2e.ts). That build must be legion-envoy-v20.1.0
+// or later (packages/envoy/scripts/build-dispatch-build.sh refuses an older one): it serves on
+// the socket held for it, as this tree's build does, and knows the shared key below, so B starts
+// exactly as A does and no run names a port.
 // Both sign cookies with one key, so a person signed in through whichever answered stays signed
 // in on the other: under dev sign-in the key their one shared value derives, under
 // DISPATCH_E2E_SIGNIN=oidc (e2e/harness-signin.ts) one DISPATCH_SIGNING_KEY, beside the dev OIDC
@@ -93,10 +94,14 @@ function dispatchListeners(): HarnessListener[] {
           DISPATCH_E2E_SIGNING_KEY: sharedKey,
         }
       : { DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY: sharedKey };
+  // What one server gets of its own: B's web dist and B's prebuilt binary, each left out where
+  // the caller named none, so B runs this checkout's build as A does. A DISPATCH_E2E_SERVER_BIN
+  // in the harness's own environment reaches both, since each row's environment is the
+  // harness's with these on top.
   const inputs = (webDist: string | undefined, binary: string | undefined) => ({
     ...signInInputs,
     ...(webDist ? { DISPATCH_E2E_SERVER_WEB_DIST: webDist } : {}),
-    ...(binary ? { DISPATCH_E2E_SERVER_BINARY: binary } : {}),
+    ...(binary ? { DISPATCH_E2E_SERVER_BIN: binary } : {}),
   });
   return [
     {

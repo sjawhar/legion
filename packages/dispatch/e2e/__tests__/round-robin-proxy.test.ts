@@ -424,7 +424,7 @@ describe("DISPATCH_E2E_PROCESSES", () => {
     expect(keyless.stderr).toContain("DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY must give both processes");
   });
 
-  test("run-server.sh runs DISPATCH_E2E_SERVER_BINARY, when set, as it runs the one it builds", async () => {
+  test("run-server.sh runs DISPATCH_E2E_SERVER_BIN, when set, as it runs the one it builds", async () => {
     const directory = mkdtempSync(join(tmpdir(), "run-server-binary-"));
     try {
       const binary = join(directory, "envoy-dispatch");
@@ -452,7 +452,7 @@ describe("DISPATCH_E2E_PROCESSES", () => {
       const environment = {
         DATABASE_URL: "postgres://postgres@127.0.0.1:1/never-opened",
         DISPATCH_E2E_PORT: "8777",
-        DISPATCH_E2E_SERVER_BINARY: binary,
+        DISPATCH_E2E_SERVER_BIN: binary,
         DISPATCH_E2E_SERVER_WEB_DIST: "/given/web",
         FAKE_BROKER_PORT: "9024",
         FAKE_ENVOY_PORT: "9021",
@@ -468,11 +468,11 @@ describe("DISPATCH_E2E_PROCESSES", () => {
 
       const missing = await run(["bash", runServer], {
         ...environment,
-        DISPATCH_E2E_SERVER_BINARY: join(directory, "absent"),
+        DISPATCH_E2E_SERVER_BIN: join(directory, "absent"),
       });
       expect(missing.code).not.toBe(0);
       expect(missing.stderr).toContain(
-        `DISPATCH_E2E_SERVER_BINARY names ${join(directory, "absent")}, which is not an executable file`
+        `DISPATCH_E2E_SERVER_BIN=${join(directory, "absent")} is not an executable file`
       );
 
       // With no port of its own the given binary serves on the socket held for it, as a build

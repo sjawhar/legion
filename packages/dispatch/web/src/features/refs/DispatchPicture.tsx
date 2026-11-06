@@ -125,7 +125,7 @@ export function DispatchPicture({
         ? latest
         : artifactVersionPath(named.owner, named.slug, pinned);
   if (src === undefined || src === failedSrc) {
-    return <RefLink route={route} />;
+    return <RefLink route={route} text={caption} />;
   }
   return variant === "inline" ? (
     <>

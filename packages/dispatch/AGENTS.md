@@ -562,7 +562,7 @@ A body longer than `markdownWorkerThreshold` (2,000 characters, `features/refs/m
 
 Until the worker answers, the element holds the body's own literal text - selectable, under nothing - and carries `data-markdown-pending`; where it already holds a paint of an earlier source it keeps that paint and is marked pending instead, so a streaming turn never flips back to its source between frames. A paint still filling the element across tasks counts as such a paint: nothing but the paint that replaces it, or the unmount, stops one, so a frame arriving mid-paint writes no text of its own and leaves the element to the batches still landing - text written there would stand in front of them until that frame's own answer and whole paint arrived. The marker also covers a paint the hook builds across tasks whether or not the worker was ever waited for: a body the engine answers from its cache on a fresh mount is sliced all the same, and between those tasks the element holds part of a body. `data-markdown-pending` is interim and says nothing about whether the body can be formatted. `data-markdown-fallback` keeps exactly the meaning it had: the parser refused this body (or the engine could not load), which is a body's one final failure, so a row that reads it still reads "this body is never formatted". Only the parser's refusal ends there. A worker that cannot be created (the constructor threw, as it does where a page forbids one), whose chunk does not load, that crashes, or that holds a body past `PARSE_TIME_LIMIT_MS` (10 s, counted from the moment the worker could start on that body, never while its chunk is still downloading) leaves that body - and, bar the deadline's own queue, every later one - to the page's own thread: the reader waits for a parse of their own and then reads the body formatted. That page parse runs only while an element is still waiting on the body: a deadline that fires for a body only places kept on a posted parse (below) still hold runs no parse at all, so a body its reader has left costs that reader's thread nothing, where it used to park a whole parse on it. The worker is not terminated for a body the page has moved on from, where the diagram renderer's is: a fresh parse worker costs more than the one stale parse letting it finish costs, so a turn streaming into the live view hands it exactly one stale frame and the frame the reader waits for is posted the moment that answer lands. Every element drawn through `useRenderedMarkdown` is still given the answer to a frame it has moved on from, and paints it, since that is the newest parse a streaming turn can be shown before the stream pauses; it stays marked pending through that older frame's paint, because the frame it is on is still owed, and the answer to that newer frame paints over it when it lands. Both queues are the one in `features/refs/worker-queue.ts`, which holds the ready handshake, the single job in flight, the deadline, the terminate-and-replace, the drop of what nobody waits for and the stale-answer rule for each of them; what each supplies is what differs - a refusal for the diagram, the page's own thread for the parse.
 
-A fenced `mermaid` code block in a `MarkdownBody` of the block form (a comment, a reply, a message, an ask's question and answer, a live-view turn, every other full body) draws as the diagram the document editor draws (`features/refs/mermaid-diagrams.ts`, INFRA-528): `useRenderedMarkdown` runs it last, after the reference, decorate and picture passes, so a `dispatch://` in a node label is never linkified or collected. The renderer is `renderMermaidMarkup` from `@legion/proof-editor/mermaid-render` (upstream's `renderProofMermaidSvg`: its validation, beautiful-mermaid and ELK), and it never runs on the page's main thread: ELK's layout time grows faster than the diagram (on a 2-CPU issue pod, a flowchart of 400 nodes with 2 edges each took 10.7 s on that thread), any comment, ask or message reaches readers who did not choose it, and a document is where diagrams get edited. It runs in one shared Web Worker, `features/refs/mermaid-render.worker.ts`, created with Vite's `new Worker(new URL(…), { type: "module" })` once a body or a document holds a mermaid block not drawn before, so the entry, the headless engine's chunks and the editor's chunk carry none of the renderer (only the worker's bundle does; `web/vite.config.ts` adds each worker bundle's inputs to `THIRD_PARTY_NOTICES.txt`). A document's mermaid blocks (the live editor, a read-only document, a past version in `VersionView`) draw through the same worker, queue, time limit and cache (INFRA-532): the editor's `drawMermaid` (`features/doc/editor.ts`) is `requestMermaidDrawing`, which the editor's code-block view asks once when a block opens and again 300 ms after the last edit of its source, keeping its last drawing until the answer replaces it; with no worker (one that failed to start or load, before the block asked or while it waited) the answer is `{ unavailable: true }` and the block shows its source, dropping any drawing of an earlier source. Every focus in a document runs again once no source is waiting (`mermaidDrawsSettled`, in `features/doc/refocus-after-diagrams.ts`), unless the reader pressed, scrolled, touched or typed since, so it lands on its target whether or not a diagram above it had drawn: in the live document `ProofDocument`'s `focusInEditor` runs a block link (`#b-<id>`), the margin bridge's `focusMark` and `focusBlock` (a comment or ask link's quote, a selected card's mark or block) and the open-decision link and block references badge, a newer focus replacing an older one's re-run; `VersionView` does the same for a past version's highlighted mark. The worker draws one source at a time, in the order they were asked for, and the page turns its markup into an element with `mermaidSvgElement` from `@legion/proof-editor/mermaid` (a stricter allowlist sanitizer, `packages/proof-editor/AGENTS.md`). A source the worker has not answered 5 seconds (`RENDER_TIME_LIMIT_MS`) after it started on it is refused with `Unable to render Mermaid diagram: it did not finish within 5 seconds`, and the worker is terminated, which is the only way to stop a layout already running, and a fresh one takes the sources still waiting; how large a diagram meets that limit depends on the reader's machine. The two time-limit browser rows (`e2e/mermaid.e2e.ts`, a comment's and a document's) hold the worker so it never answers, so their refusal depends on no machine's speed. The worker clock starts once its module has loaded (it posts `{ ready: true }`), never while its chunk downloads. A worker that fails to start or load (its `error` event, or a constructor that throws) leaves every block as code (each waiting draw, and each later request for an uncached source, gets `{ unavailable: true }`) and logs one `console.error`, and no worker is started again until the window's next `online` event, so a live-view turn re-painted every frame does not retry or log on each paint. Inside the worker, `self` reads as undefined while a source draws: ELK's bundled engine, finding `self` and no `document`, would take the worker for an ELK worker of its own and refuse every flowchart, and beautiful-mermaid's own `delete globalThis.self` does not reach a browser's `WorkerGlobalScope.prototype` accessor. The block becomes a `figure.dispatch-mermaid`: the SVG, mounted by `showMermaidSvg` (`@legion/proof-editor/mermaid`, which the editor's code-block view uses too) in an open shadow root, so the diagram's own `<style>` reaches only that diagram and its marker ids resolve inside it, then on a refusal a `role="status"` line `Unable to render Mermaid diagram: <reason>`, then the original code block in a `Mermaid source` disclosure, closed the first time a diagram draws, open again on a later paint of a source the reader opened, remembered under the same entry limit as the drawings, closed again once its source changes, and open on a refusal. `.dispatch-mermaid` in `styles.css` gives the SVG `--bg-color: transparent` and `--text-color: currentColor`, on the figure rather than `.dispatch-markdown`, which also sits inside documents. What stays code: `MarkdownPreview` and the `inline` variant, which write no `<pre>`, and a mermaid block whose fence the parser still reads as open (checked by re-parsing the body with a probe line after it, inside the last line's quote or list item), which is still being streamed (the live view re-parses every frame, and drawing each frame would run the renderer and flash a refusal). Drawn results (the sanitized SVG, cloned per use, or the refusal) are cached by source, the newest 32. A cached source draws in the layout effect that painted its body; every other one shows as code and is drawn when the worker answers, after the layout effect, so the content below a diagram moves once when it first draws. `drawMermaidDiagrams` returns the cancel for those late draws, which the layout effect's cleanup runs: it takes that call's own draws off each source's waiting list, so a body that re-painted or unmounted is never drawn into and holds none of its DOM while the worker works. A source no body waits for any more is then dropped and never sent, and one the worker is drawing is stopped (the worker terminated, nothing cached for it, a fresh worker taking the sources still waiting), so a reader who leaves a page of slow diagrams does not wait for them on the next; that check runs on a microtask, so a body re-painted with the same block in one commit (the live view, every frame while text after a finished diagram streams) keeps its source's place and the draw in flight.
+A fenced `mermaid` code block in a `MarkdownBody` of the block form (a comment, a reply, a message, an ask's question and answer, a live-view turn, every other full body) draws as the diagram the document editor draws (`features/refs/mermaid-diagrams.ts`, INFRA-528): `useRenderedMarkdown` runs it last, after the reference, decorate and picture passes, so a `dispatch://` in a node label is never linkified or collected. The renderer is `renderMermaidMarkup` from `@legion/proof-editor/mermaid-render` (upstream's `renderProofMermaidSvg`: its validation, beautiful-mermaid and ELK), and it never runs on the page's main thread: ELK's layout time grows faster than the diagram (on a 2-CPU issue pod, a flowchart of 400 nodes with 2 edges each took 10.7 s on that thread), any comment, ask or message reaches readers who did not choose it, and a document is where diagrams get edited. It runs in one shared Web Worker, `features/refs/mermaid-render.worker.ts`, created with Vite's `new Worker(new URL(…), { type: "module" })` once a body or a document holds a mermaid block not drawn before, so the entry, the headless engine's chunks and the editor's chunk carry none of the renderer (only the worker's bundle does; `web/vite.config.ts` adds each worker bundle's inputs to `THIRD_PARTY_NOTICES.txt`). A document's mermaid blocks (the live editor, a read-only document, a past version in `VersionView`) draw through the same worker, queue, time limit and cache (INFRA-532): the editor's `drawMermaid` (`features/doc/editor.ts`) is `requestMermaidDrawing`, which the editor's code-block view asks once when a block opens and again 300 ms after the last edit of its source, keeping its last drawing until the answer replaces it; with no worker (one that failed to start or load, before the block asked or while it waited) the answer is `{ unavailable: true }` and the block shows its source, dropping any drawing of an earlier source. Every focus in a document runs again once the drawing around its target has settled (`refocusWhenSettled`, in `features/doc/refocus-when-settled.ts`): no source waiting (`mermaidDrawsSettled`) and the editor's own drawn root, which a hosted decision card or a picture drawing after the editor opened grows, quiet for 200 ms. It is dropped if the reader pressed, scrolled, touched or typed since, so the focus lands on its target whether or not a diagram or a card above it had drawn: in the live document `ProofDocument`'s `focusInEditor` runs a block link (`#b-<id>`), the margin bridge's `focusMark` and `focusBlock` (a comment or ask link's quote, a selected card's mark or block) and the open-decision link and block references badge, a newer focus replacing an older one's re-run; `VersionView` does the same for a past version's highlighted mark. The worker draws one source at a time, in the order they were asked for, and the page turns its markup into an element with `mermaidSvgElement` from `@legion/proof-editor/mermaid` (a stricter allowlist sanitizer, `packages/proof-editor/AGENTS.md`). A source the worker has not answered 5 seconds (`RENDER_TIME_LIMIT_MS`) after it started on it is refused with `Unable to render Mermaid diagram: it did not finish within 5 seconds`, and the worker is terminated, which is the only way to stop a layout already running, and a fresh one takes the sources still waiting; how large a diagram meets that limit depends on the reader's machine. The two time-limit browser rows (`e2e/mermaid.e2e.ts`, a comment's and a document's) hold the worker so it never answers, so their refusal depends on no machine's speed. The worker clock starts once its module has loaded (it posts `{ ready: true }`), never while its chunk downloads. A worker that fails to start or load (its `error` event, or a constructor that throws) leaves every block as code (each waiting draw, and each later request for an uncached source, gets `{ unavailable: true }`) and logs one `console.error`, and no worker is started again until the window's next `online` event, so a live-view turn re-painted every frame does not retry or log on each paint. Inside the worker, `self` reads as undefined while a source draws: ELK's bundled engine, finding `self` and no `document`, would take the worker for an ELK worker of its own and refuse every flowchart, and beautiful-mermaid's own `delete globalThis.self` does not reach a browser's `WorkerGlobalScope.prototype` accessor. The block becomes a `figure.dispatch-mermaid`: the SVG, mounted by `showMermaidSvg` (`@legion/proof-editor/mermaid`, which the editor's code-block view uses too) in an open shadow root, so the diagram's own `<style>` reaches only that diagram and its marker ids resolve inside it, then on a refusal a `role="status"` line `Unable to render Mermaid diagram: <reason>`, then the original code block in a `Mermaid source` disclosure, closed the first time a diagram draws, open again on a later paint of a source the reader opened, remembered under the same entry limit as the drawings, closed again once its source changes, and open on a refusal. `.dispatch-mermaid` in `styles.css` gives the SVG `--bg-color: transparent` and `--text-color: currentColor`, on the figure rather than `.dispatch-markdown`, which also sits inside documents. What stays code: `MarkdownPreview` and the `inline` variant, which write no `<pre>`, and a mermaid block whose fence the parser still reads as open (checked by re-parsing the body with a probe line after it, inside the last line's quote or list item), which is still being streamed (the live view re-parses every frame, and drawing each frame would run the renderer and flash a refusal). Drawn results (the sanitized SVG, cloned per use, or the refusal) are cached by source, the newest 32. A cached source draws in the layout effect that painted its body; every other one shows as code and is drawn when the worker answers, after the layout effect, so the content below a diagram moves once when it first draws. `drawMermaidDiagrams` returns the cancel for those late draws, which the layout effect's cleanup runs: it takes that call's own draws off each source's waiting list, so a body that re-painted or unmounted is never drawn into and holds none of its DOM while the worker works. A source no body waits for any more is then dropped and never sent, and one the worker is drawing is stopped (the worker terminated, nothing cached for it, a fresh worker taking the sources still waiting), so a reader who leaves a page of slow diagrams does not wait for them on the next; that check runs on a microtask, so a body re-painted with the same block in one commit (the live view, every frame while text after a finished diagram streams) keeps its source's place and the draw in flight.
 
 A typed block in a body is drawn as a document draws it (INFRA-526). `markdown-engine.ts` hands the headless engine a `renderBlock` (`features/doc/typed-block-drawing.ts`, below), which becomes each typed block's `toDOM`: a callout gets `renderTypedBlock`'s header (the block's name, its `kind` badge and its `title`), and an `ask` block gets the decision shell (`renderAskBlockShell`). `useRenderedMarkdown` mounts the read-only decision card into the shell's slots. That is `TextAskBlockCard`, `AskBlockCard` with `readOnly` and `detached`, which the app provides through the `TextAskCard` context (`features/refs/markdown-cards.ts`). It is a context because `AskBlockCard` → `AskOptionRow` → `MarkdownBody` → `useRenderedMarkdown` would be an import cycle. The hook finds each shell's slots with `askShellSlots` and writes the shell through `applyAskBlockShell`, which folds the source option list (`data-dispatch-ask-options="rows"`), only on a shell where it mounted a card, so a body with no provider keeps the options as a list (INFRA-612). `detached` drops the malformed card's "re-activates once it parses" line, since no server reads a body. The read-only parse (`remarkReadOnlyDirectives` in `@legion/proof-editor`) drops every attribute the block schema marks `server` from a typed block it keeps, so each reads at its default: no server wrote one in a body, so a body never shows an answer, a choice or a copy source that its author typed. The header and card rules in `styles.css` apply under `.dispatch-markdown` as under `.dispatch-doc`. The `inline` variant, `MarkdownPreview` and `useMarkdownHeadline` draw no header or card and stay one line of text.
 
@@ -1513,8 +1513,8 @@ comment covers, and on a comment whose every row came in well under that. Run it
 over a one-worker report of the files you changed, since four workers inflate a
 row by the contention of its neighbours rather than by its own work. A marker is
 earned by a row that reached three quarters of the threshold, not only by one
-that crossed it: four of the eight rows of `coverage.e2e.ts`, `plan-tab.e2e.ts`
-and `verification.e2e.ts` sit between 1.5 and 2.7 seconds, where the machine
+that crossed it: rows of `coverage.e2e.ts`, `plan-tab.e2e.ts` and
+`verification.e2e.ts` sit between 1.5 and 2.7 seconds, where the machine
 decides which side of the bar they land, and without that band such a row fails
 the check bare on a slow run and marked on a fast one. A row's own cost is what
 it proves: most of a short row is the floor every row pays, measured in an issue
@@ -1531,7 +1531,10 @@ clear-on-send check). Second, when something other than the assertion decides wh
 a login's casing - make that selector an assertion too, then lapse the property once and confirm the assertion
 fires, since a selector check that cannot fire only looks like a guard. The one exception is a Playwright
 project's `grep`: `webkit-iphone`'s title `grep` falls back on the one-time manual check beside that project
-below, and `iphone`'s `@phone` tag `grep` on the `--list` check under "Phone acceptance".
+below, and the `@phone`, `@webkit` and `@firefox` tag `grep`s of `iphone`, `webkit` and `firefox` on the
+`--list` check under "Phone acceptance", on the comment beside each tagged row naming the behaviour it
+exercises, and on `e2e/__tests__/row-configurations.test.ts`, which refuses a row that runs twice in one
+engine, viewport, origin and server-process count.
 
 `run-server.sh` builds the server with the caller's `go`, in the caller's
 environment, and execs the binary with every server
@@ -1914,20 +1917,25 @@ harness stops (the row's `heldAhead`), and the port is in every row's environmen
 takes each server's own inputs: its port as `DISPATCH_E2E_SERVER_PORT` when A's or B's variable is
 set, or else `DISPATCH_E2E_LISTEN_FROM`, the keeper's socket, which it serves on; then
 `DISPATCH_E2E_SERVER_WEB_DIST` (default `../dispatch/web/dist`, a path from `packages/envoy`, as
-`DISPATCH_WEB_DIST` is), `DISPATCH_E2E_SERVER_BINARY` (an envoy-dispatch to run in place of the one
-it builds from this tree, also a path from `packages/envoy`; it refuses one that is not an
-executable file), and `DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY`, which it passes on as the server's
-`DISPATCH_DEV_SIGNIN_SHARED_KEY`. It requires the key and `DISPATCH_E2E_PORT` in two-process mode,
-and sets both servers' `DISPATCH_SERVER_URL` to the proxy's origin. The harness generates that key
-once per run and hands it to both, so a person signed in through one process is signed in on the
-other, and points B at `DISPATCH_E2E_WEB_DIST_B` when it is set (default: A's dist) and at
-`DISPATCH_E2E_BINARY_B` when it is set (`binaryB` in `e2e/harness-processes.ts`): a previous
-release's build, which gets the same environment, since a release ignores a setting it does not
-know. Such a B must be `legion-envoy-v20.1.0` or later
-(`packages/envoy/scripts/build-dispatch-build.sh` refuses an older commit): that release serves on
-the socket the harness holds for it and knows the shared key, so it starts exactly as A does, no
-run names a port for it, and `e2e/preflight.ts` checks it for the one cookie key as it checks any
-other B. The proxy alternates each HTTP
+`DISPATCH_WEB_DIST` is), `DISPATCH_E2E_SERVER_BIN` (a prebuilt `envoy-dispatch` to run in place of
+the one it builds from this tree, taken from the caller's own directory when it is relative, read
+before its environment sweep as `scripts/e2e/dispatch-claimant-delivery.sh` reads `DISPATCH_BIN`,
+and refused when it is not an executable file), and `DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY`, which it
+passes on as the server's `DISPATCH_DEV_SIGNIN_SHARED_KEY`. It requires the key and
+`DISPATCH_E2E_PORT` in two-process mode, and sets both servers' `DISPATCH_SERVER_URL` to the
+proxy's origin. The harness generates that key once per run and hands it to both, so a person
+signed in through one process is signed in on the other, and points B at
+`DISPATCH_E2E_WEB_DIST_B` when it is set (default: A's dist) and at `DISPATCH_E2E_BINARY_B` when
+it is set (`binaryB` in `e2e/harness-processes.ts`, handed to B's `run-server.sh` as its
+`DISPATCH_E2E_SERVER_BIN`): a previous release's build, so a run puts two builds of the server
+against one database the way `DISPATCH_E2E_WEB_DIST_B` puts two builds of the dashboard there.
+That build gets the same environment, since a release ignores a setting it does not know. Such a
+B must be `legion-envoy-v20.1.0` or later (`packages/envoy/scripts/build-dispatch-build.sh`
+refuses an older commit): that release serves on the socket the harness holds for it and knows
+the shared key, so it starts exactly as A does, no run names a port for it, and
+`e2e/preflight.ts` checks it for the one cookie key as it checks any other B.
+`scripts/e2e/dispatch-two-builds.sh` gives `DISPATCH_E2E_SERVER_BIN` itself, outside the harness.
+The proxy alternates each HTTP
 request and each websocket upgrade between A and B (two turns, each starting at A), streams each
 response back as it arrives, and forwards `Host` and `Origin` unchanged.
 `X-Dispatch-E2E-Process: a|b` on any request
@@ -2035,18 +2043,19 @@ and holds the body it applies to `after.json`. It also checks that the probe reo
 after a 4001, its second subscribe arriving within 500 ms of the close, and within the first
 attempt's spread after a 1012 (`RECONNECT_SPREAD_MS`, two seconds).
 
-The `webkit` Playwright project runs `e2e/collab-cursor.e2e.ts`, `e2e/deep-links.e2e.ts`,
-`e2e/keyboard-agents-picker.e2e.ts`, `e2e/keyboard-session-pickers.e2e.ts`, `e2e/keyed-send.e2e.ts`,
-`e2e/keyed-writes.e2e.ts`, `e2e/live-socket.e2e.ts`, and `e2e/offline-edits.e2e.ts`. Every row of
-the live-socket spec runs in every project that lists
-the spec - `chromium`, `iphone`, `firefox` and, in CI, `webkit`: the APIs its rows need
-(`routeWebSocket`, the request events it counts navigations with, `page.clock`) exist in all three
-engines, and what they prove - one socket per tab, an idle page holding no request, a rotation that
-loses no event, a resume from the sign-in check's event head, and a live view keeping the reader's
-place - is each engine's own connection and timer behaviour, so it is proven in each rather than
-once. A reload is counted as a navigation request of the main frame, not a `load` event, since
-Playwright's Firefox fires one for the page's initial `about:blank` and Chromium none. The
-`webkit-iphone` project still takes the one-socket row alone, by title. Where a caret lands beside
+The `webkit` Playwright project runs the rows tagged `@webkit` (`webkitTagged` in
+`e2e/playwright.config.ts`) of `e2e/collab-cursor.e2e.ts`, `e2e/deep-links.e2e.ts`,
+`e2e/heavy-streamed-turn.e2e.ts`, `e2e/keyboard-agents-picker.e2e.ts`,
+`e2e/keyboard-session-pickers.e2e.ts`, `e2e/keyed-send.e2e.ts`, `e2e/keyed-writes.e2e.ts`,
+`e2e/live-socket.e2e.ts`, `e2e/mermaid.e2e.ts` and `e2e/offline-edits.e2e.ts`, 33 rows; the comment
+above the project names each engine behaviour and the rows that exercise it, and a comment above
+each tagged row names which. Every row of the live-socket spec runs in `chromium`, and its one-socket
+row also runs in `firefox`, `webkit` and `webkit-iphone`: a tab holds one live socket in every
+engine, which is the one live-socket behaviour the config documents per engine. The APIs its rows
+need (`routeWebSocket`, the request events it counts navigations with, `page.clock`) exist in all
+three engines. A reload is counted as a navigation request of the main frame, not a `load` event,
+since Playwright's Firefox fires one for the page's initial `about:blank` and Chromium none. The
+`webkit-iphone` project takes the one-socket row alone, by title. Where a caret lands beside
 a collaborator's cursor differs by engine: Chromium drops typing there and WebKit misplaces it,
 while Firefox is unaffected, so that spec is the one that needs a second engine. The picker spec guards the Agents
 issue picker's keyboard-step rule (`markKeyStep` in `AgentMessageComposer.tsx`), which holds only because every engine
@@ -2055,27 +2064,30 @@ its arrows and type-ahead rows, each committed by Enter and driven through `page
 step commit at once in an engine that moved to the queued task, so it runs here and in `firefox` as well as in
 Chromium. Its rows that step and then leave the select by Tab, Shift+Tab or a click run in the same engines,
 since each engine takes focus out of a select its own way, and they assert that the select, the toggle and the
-send still name one issue. So do its rows on a message in flight (the picker and Reply held, no sent text back in
-the composer, and a refusal shown beside the draft that was sent) and on an issue closed after its pick (still
-named, marked closed). `e2e/keyboard-session-pickers.e2e.ts` runs here and in `firefox` for the same
+send still name one issue. Its rows on a message in flight (the picker and Reply held, no sent text back in the
+composer, and a refusal shown beside the draft that was sent) and on an issue closed after its pick (still named,
+marked closed) carry no engine tag and run in Chromium alone: the config's clause names only the rows that step a
+select from the keyboard or leave one without Enter. All five rows of `e2e/keyboard-session-pickers.e2e.ts` run
+here and in `firefox` for the same
 reason: the live view's header model and thinking pickers keep the same rule (`useKeySteps` in
 `SessionSettings.tsx`), and its arrows, type-ahead, Tab, click and held-picker rows would see a step
 switch the session at once in an engine that moved `change` to the queued task. The project selects
-every listed spec by file name, not title, so renaming
-a row cannot drop it. The offline-edits rows exercise browser-held IndexedDB updates and the
+by the tag in the title, so a row that loses the tag drops out with no failure: after writing or
+renaming one, run `bunx playwright test --config e2e/playwright.config.ts --project=webkit --list`
+and check that it is listed. The three tagged offline-edits rows exercise browser-held IndexedDB updates and the
 WebSocket acknowledgement flow in WebKit as they do in Firefox and Chromium. The keyed write path
-(`e2e/keyed-writes.e2e.ts`, `e2e/keyed-send.e2e.ts`) runs here and in `firefox` as well: each engine
-fails a request whose network is down, aborts one the page gives up on, reads an upload's answer (an
-answer Dispatch wrote with the body still coming, then closed on, reached WebKit as `Error sending
-data: Broken pipe` and Firefox as `NS_ERROR_NET_RESET` until Dispatch drained the body first, which
-the 20 MB in-flight upload row holds), keeps a tab's `sessionStorage` across a reload, asks before it
-unloads and tells its other tabs of a sign-out in its own way, and a write has to land once through
-every one of them. Its throttled-upload row skips outside Chromium, the one engine whose DevTools
-protocol paces a page's own upload; the in-flight upload row runs everywhere and is throttled only
-there.
+(five rows of `e2e/keyed-writes.e2e.ts`, two of `e2e/keyed-send.e2e.ts`) runs here and in `firefox`
+as well: each engine fails a request whose network is down, aborts one the page gives up on, reads an
+upload's answer (an answer Dispatch wrote with the body still coming, then closed on, reached WebKit
+as `Error sending data: Broken pipe` and Firefox as `NS_ERROR_NET_RESET` until Dispatch drained the
+body first, which the 20 MB in-flight upload row holds), keeps a tab's `sessionStorage` across a
+reload and asks before it unloads in its own way, and a write has to land once through every one of
+them. Its throttled-upload row carries no engine tag and skips outside Chromium, the one engine
+whose DevTools protocol paces a page's own upload; the in-flight upload row runs in all three
+engines and is throttled only in Chromium.
 CI installs WebKit beside Chromium for them (`bun run e2e:install` does the same locally).
 
-The `webkit` and `firefox` projects run the whole of `e2e/deep-links.e2e.ts` for two
+The `webkit` and `firefox` projects run six rows of `e2e/deep-links.e2e.ts`, tagged for two
 reasons. Both engines cancel the chunk downloads in flight when a navigation starts: a deep link followed while the page
 before it is still loading its document has to open the link rather than reload that page
 (`installChunkFailureRecovery`); the row that holds the first page's `yjs` chunk makes that case deterministic in
@@ -2085,8 +2097,9 @@ events and Suspense reveals. It reads a press in the document as the reader only
 margin shows has reported a visible layout: the previous route's editor stays mounted, hidden behind the next page's
 loading view, with its own layout reported, until that page's code arrives; and an issue's Spec editor or live editor
 stays registered while Conversation or a historical version hides it, but withdraws its report until it is shown
-again. The cross-document row runs once with `IssuePage`'s chunk held and once with the issue page shown while the
-document transport is held, so each state is pinned rather than raced. The hold tells a relayout's own scroll from the
+again. The cross-document row, which runs in Chromium alone, runs once with `IssuePage`'s chunk held and once with the
+issue page shown while the document transport is held, so each state is pinned rather than raced. The hold tells a
+relayout's own scroll from the
 reader's by counting rendering frames, not milliseconds, since a busy page can deliver a clamp's scroll after a long
 task (CI's WebKit did), and a text change in the margin opens that window too: a `dispatch://` reference resolving to
 its title can resize an ask card and make Firefox or WebKit anchor the margin's scroll.
@@ -2095,17 +2108,17 @@ The `webkit-iphone` project runs, in WebKit with the iPhone 13 profile, four row
 
 No Playwright hook asserts what a project's title `grep` selected, so that guard is a one-time manual check: rename one selected test in a scratch copy and confirm `bunx playwright test --config e2e/playwright.config.ts --project=webkit-iphone --list` drops it (the count falls by one, with no error), then restore it. Repeat it whenever the `grep` or the titles change.
 
-The `firefox` Playwright project runs `e2e/code-line-replace.e2e.ts`, `e2e/deep-links.e2e.ts`,
-`e2e/keyboard-agents-picker.e2e.ts`, `e2e/keyboard-session-pickers.e2e.ts`, `e2e/keyed-send.e2e.ts`,
-`e2e/keyed-writes.e2e.ts`, `e2e/live-socket.e2e.ts`, `e2e/offline-edits.e2e.ts`, and
-`e2e/picture-link-click.e2e.ts`: Firefox's native editing puts text
+The `firefox` Playwright project runs the rows tagged `@firefox` (`firefoxTagged` in
+`e2e/playwright.config.ts`), 33 rows: the same rows of the same specs as `webkit` but
+`e2e/collab-cursor.e2e.ts`'s, and the rows of `e2e/code-line-replace.e2e.ts` and
+`e2e/picture-link-click.e2e.ts`. Firefox's native editing puts text
 typed over a code block's last line before that line's newline, and deletes a paragraph's hard break
 along with the text after it, which Chromium and WebKit never do, so that spec is the one that needs
-a second engine; the two picker specs, the deep-links spec, the two keyed specs and the live-socket
-spec run for the reasons given under `webkit` above; and a click on a link inside the editor meets
-the engine's focus rule — Firefox focuses the editing host, not the link — so the picture view's
-fallback link is clicked there too. CI installs Firefox beside Chromium for them (`bun run
-e2e:install` does the same locally).
+a second engine; the picker, deep-link, keyed, live-socket, offline-edits, mermaid and streamed-turn
+rows run for the reasons given under `webkit` above and in the comment above the project; and a
+click on a link inside the editor meets the engine's focus rule — Firefox focuses the editing host,
+not the link — so the picture view's fallback link is clicked there too. CI installs Firefox beside
+Chromium for them (`bun run e2e:install` does the same locally).
 
 The `chromium-plain-http` project runs `e2e/plain-http-origin.e2e.ts` and
 `e2e/plain-http-proxy.e2e.ts`, selected by file name: Chromium maps `dispatch-e2e.test` to
@@ -2177,63 +2190,82 @@ review panel, and answer an open ask in Waiting on you.
 
 A phone width here is one under 768 px, where `PHONE_VIEWPORT_QUERY`
 (`(max-width: 767px)`, `web/src/features/shell/useDialog.ts`) matches; a desktop
-width is 768 px or wider, the compact layout below 1280 px included. The rules
-below apply only to a test that `iphone` can run at its own viewport. A test
-stays untagged, whatever its title says, when it:
+width is 768 px or wider, the compact layout below 1280 px included.
+
+**The tag follows the assertion, not the branch.** A test takes `@phone` when
+the phone viewport can change what the test asserts. A test that only reaches
+the same control by another route under `iphone` — opening the drawer to click
+a link the desktop layout shows outright — asserts the same thing in both
+projects, so the second run proves nothing and the tag goes. The tag costs a
+whole second execution of the row: 291 of the suite's 1,609 executions were
+`iphone` repeats, 932 of its 5,362 row-seconds, measured in run 42109191535.
+An untagged row that should carry the tag costs the one claim the phone
+viewport would have broken. So where the two readings differ, write the row
+that asserts the phone claim rather than tagging the row that does not.
+
+A test takes the tag when it:
+
+- **R1** asserts a layout, overflow or wrap claim the viewport decides:
+  `assertPageFits`, a `scrollWidth`/`clientWidth` overflow check,
+  `viewportSize()`, `innerWidth`/`innerHeight`, a width or a count of lines it
+  reads off the page — unless it first sets a fixed viewport for every project,
+  where `iphone` would only repeat that same width.
+- **R2** asserts a touch claim: `tap()`, `page.touchscreen`, `e2e/touch.ts`,
+  `hasTouch`, `isMobile`, or a 44 px touch target.
+- **R3** asserts a phone-only surface as the thing it checks — the navigation
+  drawer, the margin's bottom sheet, the phone Thread dialog — rather than
+  passing through it to reach a control.
+- **R4** runs only on the phone (it skips every project but `iphone`), or is in
+  a file named for the phone (`phone*.e2e.ts`).
+
+A test stays untagged, whatever its title says, when it:
 
 - skips every project but `chromium`
   (`test.skip(project.name !== "chromium", …)`) or every project but
   `webkit-iphone`;
-- sets a desktop width for every project before it checks anything and never
-  reaches a phone width, so `iphone` would only repeat the desktop run, and a
-  phone branch (`setSheet`, `openedThreadCard`) would find no phone layout; or
+- sets a desktop width, or any fixed width, for every project before it checks
+  anything, so `iphone` would only repeat that run;
 - starts at the project's own width expecting a desktop one and then narrows
-  the window itself, so under `iphone` it would start from the wrong layout.
+  the window itself, so under `iphone` it would start from the wrong layout; or
+- branches on the project only to reach a control — `setSheet`,
+  `openedThreadCard` (`e2e/editor.ts`), a drawer opened on the way to a link —
+  and then asserts what both layouts assert.
 
 Such a test passes `"chromium"` rather than the project name to a helper that
-branches on it. A test that skips every project but `iphone` is always tagged
-(R5), whatever widths it sets. Any other test takes the tag when, under
-`iphone`, it takes a phone-only path. That is, it:
+branches on it.
 
-- **R1** chooses what to do by which project runs it, and `iphone` takes
-  another branch than `chromium`, directly, in a hook, or in a helper it calls:
-  `=== "iphone"`, `!== "iphone"`, a `"chromium"` test used as a layout switch
-  (an empty desktop-only block included), `PHONE_PROJECTS` or
-  `READING_PROJECTS` membership, a project-dependent value (`1280 : 390`,
-  `44 : 32`), `setSheet` and `openedThreadCard` (`e2e/editor.ts`), or a
-  file-local helper that takes the project or `isPhone`. The project name used
-  only in a file name, attachment name or seed namespace does not count.
-- **R2** branches on what the page shows where the phone layout decides it: the
-  Thread dialog or the margin card, a drawer menu button's visibility.
-- **R3** reads the window's size or checks the page against it
-  (`viewportSize()`, `innerWidth`/`innerHeight`, a `scrollWidth`/`clientWidth`
-  overflow check, `assertPageFits`), unless it first sets a fixed viewport for
-  every project.
-- **R4** uses touch: `tap()`, `page.touchscreen`, `e2e/touch.ts`, `hasTouch`,
-  `isMobile`.
-- **R5** runs only on the phone (it skips `chromium`), or is in a file named for
-  the phone (`phone*.e2e.ts`).
-- **R6** says in its title or its own comments that it covers the phone layout
-  (a phone, the drawer, the bottom sheet, 390 px).
+When a row walks a data table and makes one narrow-screen claim at the end,
+split that claim into a row of its own and tag that row, rather than tagging
+the walk: the walk is the same work in both projects.
 
-Once the exceptions above are ruled out, when unsure, tag it: an extra phone
-test costs CI minutes, and a missing one loses the phone coverage. Write the
-tag at the end of the title,
-`test("a reply opens the Thread dialog @phone", …)`, or at the end of a
+When unsure, do not tag: read what the row asserts, and write the phone claim
+as its own row where the phone can break it. Write the tag at the end of the
+title, `test("a reply opens the Thread dialog @phone", …)`, or at the end of a
 `test.describe` title when every test inside it qualifies. Playwright reads an
 `@word` in a title as a tag; the title form keeps the call at two arguments, so
 Biome does not re-indent the body as it does for a `{ tag }` details argument.
-A user-agent path (the Mac keymap that the iPhone user agent also takes) is not
-a phone-only path. An untagged test needs no
-`test.skip(project.name === "iphone", …)`, since `iphone` no longer runs it:
-drop the skip. A `!== "chromium"` skip stays: it marks a test that one project
-covers (it sets its own viewport, or does not depend on the layout), and it
-keeps that test out of the tag under the first exception above.
+
+A user-agent path is not a phone path. The Mac keymap that the iPhone user
+agent also takes is one: `web/src/features/shell/keymap.ts` reads
+`navigator.userAgent`, so such a row runs in `chromium` with
+`test.use({ userAgent: devices["iPhone 13"].userAgent })` and carries neither
+the tag nor a project skip (`e2e/keyboard-document.e2e.ts`).
+
+An untagged test needs no `test.skip(project.name === "iphone", …)`, since
+`iphone` no longer runs it: drop the skip. Dropping a tag while leaving a
+`test.skip(project.name !== "iphone", …)` leaves a row that runs in no project
+at all — green, and proving nothing — so when a tag goes, every `iphone` branch
+of that row goes with it: the project tests, `PHONE_PROJECTS` and
+`READING_PROJECTS` membership, project-dependent values (`1280 : 390`,
+`44 : 32`), `setSheet` and `openedThreadCard`, and both skips. A `!== "chromium"`
+skip stays: it marks a test that one project covers.
 
 Nothing fails when a phone test lacks the tag: it silently drops out of
 `iphone` and runs only on `chromium`. So after writing or renaming one, run
 `bunx playwright test --config e2e/playwright.config.ts --project=iphone --list`
-and check that it is listed.
+and check that it is listed. `e2e/__tests__/row-configurations.test.ts` is the
+other half: it refuses a row that runs twice in one engine, viewport, origin
+and server-process count.
 
 A retracted ask is withdrawn history: the Inbox and the open-ask badges drop it, and the margin folds it into the `Resolved (N)` toggle beside resolved comment threads. The Conversation lists it like every other conversation, under `All` and under `Closed`; the tab has no `Show retracted` or `Show activity` control of its own. Ask event payloads carry `options` as an array (the server never emits `null`), so the Activity tab and the margin's Pinned tab render `event.payload` as the `Ask` it is.
 

@@ -139,17 +139,6 @@ case "${DISPATCH_E2E_SIGNIN:-}" in
     ;;
 esac
 
-# DISPATCH_E2E_SERVER_BINARY, when set, is the envoy-dispatch this run starts in place of the one
-# it builds from this tree, also a path from packages/envoy: the harness sets it for B from
-# DISPATCH_E2E_BINARY_B, a previous release's build (packages/envoy/scripts/build-dispatch-build.sh),
-# so a browser drives two builds at once. That build gets the same environment: a release ignores
-# a setting it does not know and refuses only the ones it removed, none of which is set here. It
-# must be legion-envoy-v20.1.0 or later (packages/envoy/scripts/build-dispatch-build.sh refuses an
-# older one): that release adopts the held socket (DISPATCH_LISTEN_FD) and knows
-# DISPATCH_DEV_SIGNIN_SHARED_KEY, so it starts on the port the caller holds for it and signs
-# cookies with the run's shared key, exactly as a build from this tree does.
-server_binary="${DISPATCH_E2E_SERVER_BINARY:-}"
-
 # The secrets broker the server relays credential requests to, read before
 # the sweep below drops every DISPATCH_* variable. DISPATCH_E2E_AGENT_SECRETS_URL
 # is the harness's one switch, which e2e/harness-broker.ts reads the same way
@@ -197,6 +186,29 @@ if [ -n "${DISPATCH_E2E_FILE_STORE_ENDPOINT:-}" ]; then
     AWS_SECRET_ACCESS_KEY=e2e
     AWS_EC2_METADATA_DISABLED=true
   )
+fi
+
+# The server binary, read before the sweep below: DISPATCH_E2E_SERVER_BIN names a prebuilt
+# envoy-dispatch this run executes instead of building one from this checkout
+# (scripts/e2e/dispatch-claimant-delivery.sh's DISPATCH_BIN is the precedent), which
+# scripts/e2e/dispatch-two-builds.sh gives the build of an older commit so a base build and this
+# one run against one database, and which the browser harness gives B from DISPATCH_E2E_BINARY_B,
+# a previous release's build (packages/envoy/scripts/build-dispatch-build.sh), so a browser drives
+# two builds at once. That build gets the same environment: a release ignores a setting it does
+# not know and refuses only the ones it removed, none of which is set here. A build the harness
+# gives must be legion-envoy-v20.1.0 or later (build-dispatch-build.sh refuses an older one):
+# that release adopts the held socket (DISPATCH_LISTEN_FD) and knows
+# DISPATCH_DEV_SIGNIN_SHARED_KEY, so it starts on the port the caller holds for it and signs
+# cookies with the run's shared key, exactly as a build from this tree does. Unset, the build
+# below is this checkout's, as it always was. The path is made absolute here, against the
+# caller's directory, since this script changes to packages/envoy before it runs it.
+server_bin="${DISPATCH_E2E_SERVER_BIN:-}"
+if [ -n "$server_bin" ]; then
+  [[ "$server_bin" == /* ]] || server_bin="$PWD/$server_bin"
+  if [ ! -x "$server_bin" ]; then
+    echo "run-server.sh: DISPATCH_E2E_SERVER_BIN=$DISPATCH_E2E_SERVER_BIN is not an executable file" >&2
+    exit 2
+  fi
 fi
 
 # How long a document room waits after its last live update before it settles, read before the
@@ -311,7 +323,8 @@ done
 app_pem="$(openssl genrsa 2048 2>/dev/null)"
 
 cd "$(dirname "$0")/../../envoy"
-# Build first, in the caller's toolchain environment, and exec the binary itself. A server
+# Build first, in the caller's toolchain environment, and exec the binary itself - or exec the
+# one DISPATCH_E2E_SERVER_BIN named, which is already built and is not this checkout's. A server
 # started as `go run` is the go command's child; the go command ignores only SIGINT and SIGQUIT,
 # so a SIGTERM to it ends the go command and leaves the server listening. Playwright kills the
 # whole process group and the skill-scenarios rig the whole process tree, but a caller that
@@ -319,16 +332,10 @@ cd "$(dirname "$0")/../../envoy"
 # checkout, built under a lock so two harnesses, or two-process mode's two servers, starting at
 # once serialise: Go rewrites it only when the source changed, and a running server keeps the
 # inode it started from. The port is chosen only after the build, and held-port.py execs `env`,
-# which execs the server, so the pid a caller started is still the server's. A given binary
-# (DISPATCH_E2E_SERVER_BINARY) is run as it is.
-if [ -n "$server_binary" ]; then
-  if [ ! -f "$server_binary" ] || [ ! -x "$server_binary" ]; then
-    echo "run-server.sh: DISPATCH_E2E_SERVER_BINARY names $server_binary, which is not an executable file" >&2
-    exit 2
-  fi
-else
+# which execs the server, so the pid a caller started is still the server's.
+if [ -z "$server_bin" ]; then
   flock ./.dispatch-e2e.lock go build -o ./dispatch-e2e ./cmd/dispatch
-  server_binary=./dispatch-e2e
+  server_bin=./dispatch-e2e
 fi
 exec "${listen[@]}" env \
   "${broker_env[@]}" \
@@ -358,4 +365,4 @@ exec "${listen[@]}" env \
   XDG_CACHE_HOME=/nonexistent \
   XDG_CONFIG_HOME=/nonexistent \
   XDG_DATA_HOME=/nonexistent \
-  "$server_binary"
+  "$server_bin"

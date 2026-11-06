@@ -582,7 +582,7 @@ func TestARateLimited422DoesNotDropActions(t *testing.T) {
 			if lease.Token != "" || !errors.As(err, &trouble) {
 				t.Fatalf("read token under a rate limit = %q, %v; want no lease and a TransientError", lease.Token, err)
 			}
-			if errors.Is(err, errPermissionsRefused) {
+			if errors.Is(err, ErrPermissionsRefused) {
 				t.Errorf("a rate limit = %v, want it never read as the permissions the installation holds", err)
 			}
 			mu.Lock()
