@@ -200,19 +200,21 @@ export function keptRefusal(error: Error): KeptRefusal {
 }
 
 /** The refusal `kept` names, rebuilt as the error the write was refused with. `key` is the key of
- *  the write it refused, `request` the one it was kept as, and `now` the time it is read back: a
- *  write that ended without Dispatch's verdict under a key Dispatch has forgotten since comes
- *  back expired, since a Retry of it is now a new write rather than the same one asked again.
- *  Which writes those are is `keySpent`'s to say, the same question the retry loop asks before
- *  each attempt: a `PUT` or a `DELETE` sends no key, and one kept with no request at all sent
- *  nothing, so Dispatch has never seen its key. */
+ *  the write it refused, `request` the one that went out under that key - `null` where nothing
+ *  went out, which is what `KeptWrite.sent` says and not what a kept request says, since a write
+ *  waiting its turn is kept with the request it is planned as - and `now` the time it is read
+ *  back: a write that ended without Dispatch's verdict under a key Dispatch has forgotten since
+ *  comes back expired, since a Retry of it is now a new write rather than the same one asked
+ *  again. Which writes those are is `keySpent`'s to say, the same question the retry loop asks
+ *  before each attempt: a `PUT` or a `DELETE` sends no key, and a key nothing went out under has
+ *  never been seen by Dispatch. */
 export function refusalFrom(
   kept: KeptRefusal,
   key: string,
   request: KeptRequest | null,
   now: number
 ): Error {
-  const spent = keySpent(request, key, now);
+  const spent = keySpent(request === null ? null : request.method, key, now);
   switch (kept.kind) {
     case "interrupted":
       return spent ? new SendExpiredError() : new SendInterruptedError();

@@ -21,7 +21,12 @@ import { ApiError, api, NetworkError } from "../../api/client";
 import { agentMessagesQuery } from "../../api/queries";
 import type { Comment, Message } from "../../api/types";
 import { useSending } from "../../hooks/useSending";
-import { SEND_DEADLINE_MS, SendExpiredError, SendStoppedError } from "../writes/keyed-write";
+import {
+  FIRST_BACKOFF_MS,
+  SEND_DEADLINE_MS,
+  SendExpiredError,
+  SendStoppedError,
+} from "../writes/keyed-write";
 import { KEPT_SEND_RESUME_MS } from "../writes/write-storage";
 import { Writes } from "../writes/write-store";
 import { type HeldSend, HeldSends, heldSends, stoppable } from "./held-sends";
@@ -588,34 +593,46 @@ test("a send held for a sign-out in another tab says so, and goes on once releas
 // words - a Retry of it is a new message, which can be delivered a second time - and offers
 // Retry and Discard, as a stopped send's turn does.
 test("a send whose key has run out says so on its turn, with Retry and Discard", async () => {
-  const createAgentMessage = spyOn(api, "createAgentMessage").mockImplementation(
-    (sessionID, input, bounds) => {
-      bounds.sent?.({
-        body: input,
-        method: "POST",
-        path: `/api/v1/agents/${sessionID}/messages`,
-      });
-      return Promise.reject(new ApiError(503, { code: "UNAVAILABLE", error: "down" }));
-    }
-  );
-  const { held } = heldOf();
-  const sends = { discard: () => {}, retry: () => {}, stop: () => {} };
-  try {
-    held.send(agentKey, { ...agentSend, sendKey: keyMinted(Date.now() - IDEMPOTENCY_KEY_TTL_MS) });
-    await waitFor(() => expect(held.get(agentKey)?.status).toBe("refused"), { timeout: 5_000 });
-    expect(createAgentMessage).toHaveBeenCalledTimes(1);
-    const spent = held.get(agentKey);
-    expect(spent?.status === "refused" && spent.refusal).toBeInstanceOf(SendExpiredError);
-
-    const turn = render(createElement(PendingSendTurn, { held: spent as HeldSend, sends }));
+  await onFakeClock(async () => {
+    const createAgentMessage = spyOn(api, "createAgentMessage").mockImplementation(
+      (sessionID, input, bounds) => {
+        bounds.sent?.({
+          body: input,
+          method: "POST",
+          path: `/api/v1/agents/${sessionID}/messages`,
+        });
+        return Promise.reject(new ApiError(503, { code: "UNAVAILABLE", error: "down" }));
+      }
+    );
+    const { held } = heldOf();
+    const sends = { discard: () => {}, retry: () => {}, stop: () => {} };
     try {
-      expect(turn.getByTestId("agent-send-error").textContent).toBe(new SendExpiredError().message);
-      expect(turn.getByRole("button", { name: "Retry" })).toBeTruthy();
-      expect(turn.getByRole("button", { name: "Discard" })).toBeTruthy();
+      held.send(agentKey, {
+        ...agentSend,
+        sendKey: keyMinted(Date.now() - IDEMPOTENCY_KEY_TTL_MS),
+      });
+      await settle();
+      // The first attempt ended without Dispatch's verdict, so the send waits its first backoff;
+      // the attempt the spent key stops is the one after that wait.
+      jest.advanceTimersByTime(FIRST_BACKOFF_MS);
+      await settle();
+      expect(held.get(agentKey)?.status).toBe("refused");
+      expect(createAgentMessage).toHaveBeenCalledTimes(1);
+      const spent = held.get(agentKey);
+      expect(spent?.status === "refused" && spent.refusal).toBeInstanceOf(SendExpiredError);
+
+      const turn = render(createElement(PendingSendTurn, { held: spent as HeldSend, sends }));
+      try {
+        expect(turn.getByTestId("agent-send-error").textContent).toBe(
+          new SendExpiredError().message
+        );
+        expect(turn.getByRole("button", { name: "Retry" })).toBeTruthy();
+        expect(turn.getByRole("button", { name: "Discard" })).toBeTruthy();
+      } finally {
+        turn.unmount();
+      }
     } finally {
-      turn.unmount();
+      createAgentMessage.mockRestore();
     }
-  } finally {
-    createAgentMessage.mockRestore();
-  }
+  });
 });

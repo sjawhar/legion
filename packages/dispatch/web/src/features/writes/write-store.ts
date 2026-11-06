@@ -301,9 +301,10 @@ export class Writes {
    *  that for its key: a composer's Retry is a press of its own, under the refused send's key,
    *  in an entry that has sent nothing yet, and the entry it replaces is gone. So the store
    *  keeps the fact under the key it belongs to - set as each attempt goes out, and read again
-   *  from the kept records a reload takes up, each of which holds the request its write last
-   *  went out as - and tells the retry loop (`writeUnderKey`'s `carried`). A key is kept for as
-   *  long as the page lives, since what went out under it never stops having gone out. */
+   *  from the kept records a reload takes up, each of which says whether its write ever went out
+   *  (`KeptWrite.sent`) and holds the request it went out as - and tells the retry loop
+   *  (`writeUnderKey`'s `carried`). A key is kept for as long as the page lives, since what went
+   *  out under it never stops having gone out. */
   readonly #carried = new Map<string, WriteMethod>();
   readonly #client: QueryClient;
   readonly #kept: WriteStorage;
@@ -679,10 +680,12 @@ export class Writes {
     this.#resumed = true;
     const now = Date.now();
     for (const kept of this.#kept.load(login)) {
-      // The record holds the request its write last went out as, so one holding a request is a
-      // key something has gone out under; one holding none is a write that sent nothing, and
-      // its key is as good as the day it was minted.
-      if (kept.request !== null) this.#carried.set(kept.key, kept.request.method);
+      // `sent` is the record of whether a request went out under this key: the store sets it
+      // only as `writeUnderKey` tells it an attempt's request has gone out, while a write's
+      // request is kept from the press, before its turn comes. So a kept request says only what
+      // the write would go out as, and a key nothing went out under is as good as the day it
+      // was minted however old it is.
+      if (kept.sent && kept.request !== null) this.#carried.set(kept.key, kept.request.method);
       const kind = kinds.get(kept.kind);
       if (kind === undefined || !kind.kept(kept.detail)) {
         this.#kept.forget(kept.key);
@@ -746,9 +749,11 @@ export class Writes {
     const refusal = refusalFrom(
       kept.state.status === "refused" ? kept.state.refusal : { kind: "interrupted" },
       kept.key,
-      // What it was kept as, not what the file it needs made of it: a missing file leaves the
-      // write nothing to make again, and its method is still the one it would have gone as.
-      kept.request,
+      // What went out under the key, which `sent` says and a kept request does not: a write
+      // that never left the page is kept with the request it is planned as. Not what the file
+      // it needs made of it either: a missing file leaves the write nothing to make again, and
+      // its method is still the one it would have gone as.
+      kept.sent ? kept.request : null,
       now
     );
     this.#entries.set(entry.write.id, entry);
@@ -822,9 +827,8 @@ export class Writes {
             }
           }, SEND_DEADLINE_MS)
         : undefined;
-    const carried = this.#carried.get(entry.write.key);
     writeUnderKey(entry.attempt, entry.write.key, {
-      carried: carried === undefined ? null : { method: carried },
+      carried: this.#carried.get(entry.write.key) ?? null,
       login: entry.write.login,
       planned: entry.request ?? undefined,
       sent: (request) => {

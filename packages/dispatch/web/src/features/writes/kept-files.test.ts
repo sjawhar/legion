@@ -199,3 +199,30 @@ test("a file let go while its put is reading the bytes is not written back", asy
   expect(await rowOf("k6")).toBeUndefined();
   expect(await files.get("k6")).toBeUndefined();
 });
+
+// The sweep ends every row but the signed-in person's, and a put still reading its bytes has no
+// row yet to be found by: it is marked by what it is for - whose it is, and when it began - so
+// another person's upload cannot land behind the sweep that was clearing them.
+test("a put of another person's file, still reading its bytes, is not written back", async () => {
+  const { file, release } = slowUpload();
+  const kept = files.put("k7", "bob", file);
+
+  await files.keepOnly("alice");
+  release();
+  await kept;
+
+  expect(await rowOf("k7")).toBeUndefined();
+  expect(await files.get("k7")).toBeUndefined();
+});
+
+// The same put, of the person the sweep keeps: the sweep's rule does not cover it, so it lands.
+test("a put of the signed-in person's file is kept across the sweep", async () => {
+  const { file, release } = slowUpload();
+  const kept = files.put("k8", "alice", file);
+
+  await files.keepOnly("alice");
+  release();
+  await kept;
+
+  expect(await files.get("k8")).toBeInstanceOf(File);
+});

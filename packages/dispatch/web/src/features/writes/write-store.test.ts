@@ -1402,6 +1402,80 @@ test("a resumed write whose key Dispatch has forgotten makes no attempt", async 
   });
 });
 
+/** A tab holding one write of alice's that never left the page: it is kept with the request it
+ *  was planned as, as every write waiting its turn is, and `sent` says nothing has gone out
+ *  under its key. */
+function neverSent(tab: KeptTab, key: string, pressedAt: number): Writes {
+  tab.storage.setItem(
+    `dispatch.write:${key}`,
+    JSON.stringify({
+      detail: null,
+      key,
+      kind: "write",
+      label: "CORE-1 set to done",
+      login: "alice",
+      presentation: "indicator",
+      pressedAt,
+      request: patch,
+      sent: false,
+      state: { status: "queued" },
+      target: null,
+      version: 1,
+    })
+  );
+  const writes = new Writes(signedIn(), tab.page(), memoryFiles());
+  writes.resume("alice");
+  return writes;
+}
+
+// What a key has carried is what `sent` says, not what the kept request says: a write kept while
+// it waited its turn holds the request it would go out as, and nothing of it has left the page.
+// So a tab that slept past the key's lifetime holding one makes it, under that same key, as the
+// same write in a page that never reloaded would be made.
+test("a resumed write that never left the page goes out under a key older than the lifetime", async () => {
+  await onFakeClock(async () => {
+    const tab = keptTab();
+    const send = spyOn(api, "send").mockResolvedValue({ key: "CORE-1" } as never);
+    try {
+      const spent = keyMinted(Date.now() - IDEMPOTENCY_KEY_TTL_MS);
+      const writes = neverSent(tab, spent, Date.now());
+      await tick(60_000);
+      expect(send).toHaveBeenCalledTimes(1);
+      expect((send.mock.calls[0]?.[1] as WriteBounds).key).toBe(spent);
+      expect(writes.rows()).toEqual([]);
+    } finally {
+      send.mockRestore();
+      tab.close();
+    }
+  });
+});
+
+// The same write, pressed longer ago than a page makes one again on its own: it comes back
+// interrupted rather than expired, and its Retry goes out under that same key, since the key has
+// carried nothing for its age to spend.
+test("a resumed write that never left the page comes back interrupted, not expired", async () => {
+  await onFakeClock(async () => {
+    const tab = keptTab();
+    const send = spyOn(api, "send").mockResolvedValue({ key: "CORE-1" } as never);
+    try {
+      const spent = keyMinted(Date.now() - IDEMPOTENCY_KEY_TTL_MS);
+      const writes = neverSent(tab, spent, Date.now() - KEPT_SEND_RESUME_MS - 1);
+      await settle();
+      const resumed = row(writes);
+      expect(resumed?.status === "refused" && resumed.refusal).toBeInstanceOf(SendInterruptedError);
+      expect(send).not.toHaveBeenCalled();
+
+      writes.retry(resumed?.id ?? 0);
+      await settle();
+      expect(send).toHaveBeenCalledTimes(1);
+      expect((send.mock.calls[0]?.[1] as WriteBounds).key).toBe(spent);
+    } finally {
+      send.mockRestore();
+      tab.close();
+    }
+  });
+});
+
 /** A write that builds its own request at each attempt, as a composer's send does: a reload
  *  takes it up whether or not a request ever went out under its key. */
 let composedAttempts = 0;

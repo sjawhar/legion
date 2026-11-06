@@ -135,15 +135,22 @@ export function indexedDbFiles(): KeptFiles {
       database.close();
     }
   };
-  // The puts whose row is not written yet, each with the key it is for. A `put` must read its
-  // file's bytes before it can open a transaction - the await of `File.arrayBuffer()` would end
-  // one - so a `delete` of that key, and the sweep that ends a person's rows, mark every put of
-  // theirs on the way past, and a marked put writes nothing. The mark is read inside the put's
-  // own transaction, so a removal made before that moment is seen here and one made after opens
-  // its transaction later and takes the row out again: either way the row is gone. It answers
-  // for this page's removals, the only ones ordered against its puts at all; another tab's rows
-  // are `keepOnly`'s to reap, as they were.
-  const putting = new Set<{ readonly key: string; discarded: boolean }>();
+  // The puts whose row is not written yet, each with the key, the person and the time its row
+  // would hold. A `put` must read its file's bytes before it can open a transaction - the await
+  // of `File.arrayBuffer()` would end one - so a `delete` of that key, and the sweep that ends
+  // a person's rows, mark every put of theirs on the way past, and a marked put writes nothing.
+  // The sweep reads the person and the time off the put itself, since a put that has written no
+  // row has none to be found by. The mark is read inside the put's own transaction, so a
+  // removal made before that moment is seen here and one made after opens its transaction later
+  // and takes the row out again: either way the row is gone. It answers for this page's
+  // removals, the only ones ordered against its puts at all; another tab's rows are
+  // `keepOnly`'s to reap, as they were.
+  const putting = new Set<{
+    readonly at: number;
+    readonly key: string;
+    readonly login: string;
+    discarded: boolean;
+  }>();
   return {
     delete: async (key) => {
       for (const pending of putting) {
@@ -160,10 +167,13 @@ export function indexedDbFiles(): KeptFiles {
           (row) => row.login !== login || now - row.at > IDEMPOTENCY_KEY_TTL_MS
         );
         // A put still reading its bytes would write its row back behind the sweep, as it would
-        // behind a `delete`, so the sweep marks those puts the same way.
-        const gone = new Set(swept.map((row) => row.key));
+        // behind a `delete`, so the sweep marks every put its own rule covers: one of another
+        // person, or one older than the day. A pending put has no row here to be swept, so the
+        // rule is read off the put rather than off the rows going out.
         for (const pending of putting) {
-          if (gone.has(pending.key) || login === undefined) pending.discarded = true;
+          if (pending.login !== login || now - pending.at > IDEMPOTENCY_KEY_TTL_MS) {
+            pending.discarded = true;
+          }
         }
         await Promise.all(swept.map((row) => settled(store.delete(row.key))));
       });
@@ -177,7 +187,7 @@ export function indexedDbFiles(): KeptFiles {
     // go like any other IndexedDB failure.
     put: async (key, login, file) => {
       const at = Date.now();
-      const pending = { discarded: false, key };
+      const pending = { at, discarded: false, key, login };
       putting.add(pending);
       try {
         let bytes: ArrayBuffer;

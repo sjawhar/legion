@@ -84,7 +84,7 @@ export function keyExpired(key: string, now: number): boolean {
  * Another request under a spent key would be a second write of the person's action rather than
  * a repeat of the first, which is why no attempt may go out under one.
  *
- * `carried` is what the key has carried: the request of an attempt that went out under it, or
+ * `carried` is what the key has carried: the method of an attempt that went out under it, or
  * `null` where none has. A key that has carried nothing is never spent however old it is -
  * Dispatch has never seen it, so there is nothing under it a request now would repeat - and a
  * key whose request was a `PUT` or a `DELETE` is never spent either, since neither sends a key
@@ -92,16 +92,12 @@ export function keyExpired(key: string, now: number): boolean {
  *
  * This is the one place that question is answered: the retry loop asks it before each attempt
  * (`writeUnderKey`, from what it is told the key has carried and from its own attempts) and a
- * kept refusal asks it of the request kept with the write (`refusalFrom`, `null` where the write
- * sent nothing, since a write's request is kept as its first attempt goes out). Neither decides
- * on its own, so the two cannot answer the same write differently.
+ * kept refusal asks it of the write's own record (`refusalFrom`, `null` where the write sent
+ * nothing, which is what `KeptWrite.sent` says). Neither decides on its own, so the two cannot
+ * answer the same write differently.
  */
-export function keySpent(
-  carried: { readonly method: WriteMethod } | null,
-  key: string,
-  now: number
-): boolean {
-  return carried !== null && goesUnderKey(carried.method) && keyExpired(key, now);
+export function keySpent(carried: WriteMethod | null, key: string, now: number): boolean {
+  return carried !== null && goesUnderKey(carried) && keyExpired(key, now);
 }
 
 /** A write that stopped trying before Dispatch confirmed it: the reader pressed Stop trying. Not
@@ -239,16 +235,18 @@ function pause(
 }
 
 /** How one keyed write is tried: `login` is the person who pressed it, sent on every attempt so
- *  Dispatch refuses it under anyone else's session; `carried` is the request that has already
- *  gone out under this write's key, which whoever holds the page's writes knows and this loop
- *  cannot (`Writes`), `null` where the key has carried none; `planned` is the request it was
- *  kept as before any attempt of it went out, which every attempt must make; `signal` stops the
- *  trying; `sent` is told each attempt's request as it goes out; `uploading` is told how much of
- *  an upload's body each attempt has sent; `failed` is told each attempt that ended without
- *  Dispatch's verdict; `unauthorized` is told each attempt Dispatch answers `401`, and answers
- *  whether the page's sign-in check, read again, still names the person who pressed it. */
+ *  Dispatch refuses it under anyone else's session; `carried` is the method of the request that
+ *  has already gone out under this write's key, which whoever holds the page's writes knows and
+ *  this loop cannot (`Writes`), and is required so that every caller says which it means:
+ *  `null` is the answer that the key has carried nothing, not one reached by leaving it out.
+ *  `planned` is the request the write was kept as before any attempt of it went out, which
+ *  every attempt must make; `signal` stops the trying; `sent` is told each attempt's request as
+ *  it goes out; `uploading` is told how much of an upload's body each attempt has sent;
+ *  `failed` is told each attempt that ended without Dispatch's verdict; `unauthorized` is told
+ *  each attempt Dispatch answers `401`, and answers whether the page's sign-in check, read
+ *  again, still names the person who pressed it. */
 export interface KeyedWriteOptions {
-  readonly carried?: { readonly method: WriteMethod } | null;
+  readonly carried: WriteMethod | null;
   readonly failed?: () => void;
   readonly login?: string;
   readonly planned?: WriteRequest;
@@ -296,7 +294,7 @@ export class OneRequestPerWriteError extends Error {
  * `SendStoppedError`. A write whose key is spent (`keySpent`) ends with `SendExpiredError`
  * before the attempt that would go under it - its first, or the one after a wait - since that
  * attempt would be a new write to Dispatch rather than a repeat of the first. The key is spent
- * by what it has carried: `carried`, the request that went out under it before this call, and
+ * by what it has carried: `carried`, the method that went out under it before this call, and
  * then the request of this call's own first attempt, told as it goes out. A key that has
  * carried nothing stops nothing, however old it is, and neither does one a `PUT` or a `DELETE`
  * went under, since those send no key at all.
@@ -304,7 +302,7 @@ export class OneRequestPerWriteError extends Error {
 export async function writeUnderKey<T>(
   attempt: (bounds: WriteBounds) => Promise<T>,
   key: string,
-  { carried, failed, login, planned, sent, signal, unauthorized, uploading }: KeyedWriteOptions = {}
+  { carried, failed, login, planned, sent, signal, unauthorized, uploading }: KeyedWriteOptions
 ): Promise<T | null> {
   let backoff = FIRST_BACKOFF_MS;
   let first: WriteRequest | undefined = planned;
@@ -312,7 +310,7 @@ export async function writeUnderKey<T>(
   // and then this call's own attempts, each told as it goes out. A request told here may not
   // have reached Dispatch - the connection can fail after it leaves - which is the point: from
   // then on the key may name something there, and its age decides the write.
-  let underKey: { readonly method: WriteMethod } | null = carried ?? null;
+  let underKey: WriteMethod | null = carried;
   // Whether an attempt went out that the page has no answer to: a resent `DELETE` then finds the
   // thing already gone.
   let unanswered = false;
@@ -321,7 +319,7 @@ export async function writeUnderKey<T>(
     else if (request.method !== first.method || request.path !== first.path) {
       throw new OneRequestPerWriteError(first, request);
     }
-    underKey = request;
+    underKey = request.method;
     sent?.(request);
   };
   // Whether Dispatch became reachable again on this write's route - its method and path - since

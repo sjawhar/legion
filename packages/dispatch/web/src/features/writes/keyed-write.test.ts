@@ -27,19 +27,19 @@ test("a key with no mint time is never spent", () => {
   expect(keyExpired(key, MINTED_AT + 10 * IDEMPOTENCY_KEY_TTL_MS)).toBe(false);
 });
 
-// One question, asked in one place, of what the key has already carried: the request that went
-// out under it, or `null` where none did. `refusalFrom` asks it of the request kept with a
-// write, which is `null` for a write that sent nothing, and the retry loop asks it of what the
+// One question, asked in one place, of what the key has already carried: the method that went
+// out under it, or `null` where nothing did. `refusalFrom` asks it of what the write's record
+// says went out (`KeptWrite.sent`), and the retry loop asks it of what the
 // store says the key carried and of its own attempts, so the two cannot answer the same write
 // differently.
 test("a key is spent for what went out under it, never for a key that carried nothing", () => {
   const spent = keyMinted(MINTED_AT);
   const now = MINTED_AT + IDEMPOTENCY_KEY_TTL_MS;
-  expect(keySpent({ method: "POST" }, spent, now)).toBe(true);
-  expect(keySpent({ method: "PATCH" }, spent, now)).toBe(true);
-  expect(keySpent({ method: "PUT" }, spent, now)).toBe(false);
-  expect(keySpent({ method: "DELETE" }, spent, now)).toBe(false);
-  expect(keySpent({ method: "POST" }, spent, now - 1)).toBe(false);
+  expect(keySpent("POST", spent, now)).toBe(true);
+  expect(keySpent("PATCH", spent, now)).toBe(true);
+  expect(keySpent("PUT", spent, now)).toBe(false);
+  expect(keySpent("DELETE", spent, now)).toBe(false);
+  expect(keySpent("POST", spent, now - 1)).toBe(false);
   // Nothing went out under it: Dispatch has never seen the key, so there is nothing under it
   // that a request now would write a second time.
   expect(keySpent(null, spent, now)).toBe(false);
@@ -57,7 +57,7 @@ test("a write whose key is older than the key's lifetime sends no attempt", asyn
       return Promise.resolve({ key: "CORE-1" });
     },
     keyMinted(Date.now() - IDEMPOTENCY_KEY_TTL_MS),
-    { carried: { method: "POST" } }
+    { carried: "POST" }
   ).catch((error: unknown) => error);
   expect(attempts).toBe(0);
   expect(refusal).toBeInstanceOf(SendExpiredError);
@@ -114,7 +114,7 @@ test("a spent key stops a write that sends it and lets one that does not through
     },
     spent,
     {
-      carried: { method: "PUT" },
+      carried: "PUT",
       planned: { body: { seq: 2 }, method: "PUT", path: "/api/v1/me/state/CORE-1" },
     }
   );
@@ -122,7 +122,7 @@ test("a spent key stops a write that sends it and lets one that does not through
   expect(answer).toEqual({ seq: 2 });
 
   const refusal = await writeUnderKey(() => Promise.resolve({}), spent, {
-    carried: { method: "POST" },
+    carried: "POST",
     planned: { body: { body: "hello" }, method: "POST", path: "/api/v1/issues/CORE-1/comments" },
   }).catch((error: unknown) => error);
   expect(refusal).toBeInstanceOf(SendExpiredError);

@@ -1,4 +1,4 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, jest, spyOn, test } from "bun:test";
 import { IDEMPOTENCY_KEY_TTL_MS } from "@legion/contracts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
@@ -13,7 +13,7 @@ import type {
   Message,
   MessageDelivery,
 } from "../../api/types";
-import { SendExpiredError } from "../writes/keyed-write";
+import { FIRST_BACKOFF_MS, SendExpiredError } from "../writes/keyed-write";
 import { Writes } from "../writes/write-store";
 import { BroadcastSends } from "./BroadcastSends";
 import { type BroadcastSend, broadcastRows, enqueueBroadcast } from "./broadcast-queue";
@@ -82,6 +82,17 @@ function signedIn(login = "alice"): QueryClient {
 
 async function settle(): Promise<void> {
   for (let turn = 0; turn < 30; turn += 1) await Promise.resolve();
+}
+
+/** Runs `body` on a fake clock, so a row that waits out a backoff waits no real time. */
+async function onFakeClock(body: () => Promise<void>): Promise<void> {
+  jest.useFakeTimers();
+  try {
+    await body();
+  } finally {
+    jest.advanceTimersByTime(1);
+    jest.useRealTimers();
+  }
 }
 
 // Broadcasts go one request at a time in press order, each under its key, so a reload that
@@ -292,47 +303,53 @@ test("a broadcast held for a sign-out in another tab says so, and goes on once r
 // own words, that a Retry is a new broadcast which can be delivered a second time, and it
 // offers Retry and Discard as a stopped row does.
 test("a broadcast whose key has run out says so, with Retry and Discard", async () => {
-  const client = signedIn();
-  const createBroadcast = spyOn(api, "createBroadcast").mockImplementation((input, bounds) => {
-    bounds.sent?.({ body: input, method: "POST", path: "/api/v1/broadcasts" });
-    return Promise.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
-  });
-  const writes = new Writes(client, keptTab().page(), memoryFiles());
-  try {
-    enqueueBroadcast(writes, press("Ship it.", keyMinted(Date.now() - IDEMPOTENCY_KEY_TTL_MS)));
-    await waitFor(
-      () => expect(broadcastRows(writes.rows()).map((row) => row.status)).toEqual(["failed"]),
-      { timeout: 5_000 }
-    );
-    expect(createBroadcast).toHaveBeenCalledTimes(1);
-    const view = render(
-      createElement(
-        QueryClientProvider,
-        { client },
-        createElement(
-          MemoryRouter,
-          null,
-          createElement(BroadcastSends, {
-            onDiscard: () => {},
-            onRestore: () => {},
-            onRetry: () => {},
-            onStop: () => {},
-            restoreRefusal: null,
-            rows: broadcastRows(writes.rows()),
-          })
-        )
-      )
-    );
-    try {
-      expect(screen.getByRole("status").textContent).toBe(
-        `Sending to 1 agent ended: ${new SendExpiredError().message}`
+  await onFakeClock(async () => {
+    const client = signedIn();
+    const createBroadcast = spyOn(api, "createBroadcast").mockImplementation((input, bounds) => {
+      bounds.sent?.({ body: input, method: "POST", path: "/api/v1/broadcasts" });
+      return Promise.reject(
+        new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" })
       );
-      expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
-      expect(screen.getByRole("button", { name: "Discard" })).toBeTruthy();
+    });
+    const writes = new Writes(client, keptTab().page(), memoryFiles());
+    try {
+      enqueueBroadcast(writes, press("Ship it.", keyMinted(Date.now() - IDEMPOTENCY_KEY_TTL_MS)));
+      await settle();
+      // The first attempt ended without Dispatch's verdict, so the broadcast waits its first
+      // backoff; the attempt the spent key stops is the one after that wait.
+      jest.advanceTimersByTime(FIRST_BACKOFF_MS);
+      await settle();
+      expect(broadcastRows(writes.rows()).map((row) => row.status)).toEqual(["failed"]);
+      expect(createBroadcast).toHaveBeenCalledTimes(1);
+      const view = render(
+        createElement(
+          QueryClientProvider,
+          { client },
+          createElement(
+            MemoryRouter,
+            null,
+            createElement(BroadcastSends, {
+              onDiscard: () => {},
+              onRestore: () => {},
+              onRetry: () => {},
+              onStop: () => {},
+              restoreRefusal: null,
+              rows: broadcastRows(writes.rows()),
+            })
+          )
+        )
+      );
+      try {
+        expect(screen.getByRole("status").textContent).toBe(
+          `Sending to 1 agent ended: ${new SendExpiredError().message}`
+        );
+        expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+        expect(screen.getByRole("button", { name: "Discard" })).toBeTruthy();
+      } finally {
+        view.unmount();
+      }
     } finally {
-      view.unmount();
+      createBroadcast.mockRestore();
     }
-  } finally {
-    createBroadcast.mockRestore();
-  }
+  });
 });

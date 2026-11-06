@@ -473,7 +473,8 @@ test("a 2xx whose body read fails is a NetworkError, retried under its key", asy
 
     const made = writeUnderKey(
       (bounds) => api.createIssue({ project: "CORE", title: "x" }, bounds),
-      "k"
+      "k",
+      { carried: null }
     );
     await settle();
     expect(attempts).toBe(1);
