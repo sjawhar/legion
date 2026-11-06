@@ -267,14 +267,14 @@ func appLoginsAtBoot(ctx context.Context, apps appauth.Logins, log *slog.Logger)
 	return logins[appauth.Review], nil
 }
 
-// mintAtBoot mints the implement and then the review App token for owner, as one attempt run again
+// mintAtBoot mints the implement and then the review App token for repo, as one attempt run again
 // after a failure GitHub reports as its own trouble (appauth.TransientError); any other failure is
 // refused at once. The token manager keeps a lease it minted, so an attempt after the implement
 // token passed asks GitHub only for the review token.
-func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *slog.Logger) error {
+func mintAtBoot(ctx context.Context, tokens appauth.Tokens, repo ghrepo.Repository, log *slog.Logger) error {
 	return bootprobe.Run(ctx, "GitHub App tokens mint", appMintRetry, log, appAttempt(func(ctx context.Context) error {
 		for _, role := range appauth.Roles {
-			if _, err := tokens.Token(ctx, role, owner); err != nil {
+			if _, err := tokens.Token(ctx, role, repo); err != nil {
 				return fmt.Errorf("mint %s GitHub App token at boot: %w", role, err)
 			}
 		}
@@ -332,8 +332,11 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	if err != nil {
 		return nil, err
 	}
-	for _, owner := range w.repositories.Owners() {
-		if err := mintAtBoot(ctx, tokens, owner, log); err != nil {
+	// INFRA-513 t4: a token now names the repository it acts on, so the boot proves each App's
+	// key on every repository the mapping serves rather than once per owner; the next commit of
+	// this pull request decides what the boot proof is narrowed to.
+	for _, repo := range w.repositories.Accepted() {
+		if err := mintAtBoot(ctx, tokens, repo, log); err != nil {
 			return nil, err
 		}
 	}
@@ -760,10 +763,10 @@ func (w *workflowRuntime) reconcileListing(ctx context.Context, issues []dispatc
 // adoption (adoptIdentity) — so neither can mint on an owner the repository has left and fail
 // every launch of a tree open at the transfer.
 func (w *workflowRuntime) identity(ctx context.Context, role claim.Role, recorded ghrepo.Repository) (runtime.GitIdentity, error) {
-	owner := w.repositories.serving(recorded).Owner()
-	lease, err := w.tokens.Token(ctx, appauth.AppRoleFor(role), owner)
+	served := w.repositories.serving(recorded)
+	lease, err := w.tokens.Token(ctx, appauth.AppRoleFor(role), served)
 	if err != nil {
-		return runtime.GitIdentity{}, fmt.Errorf("mint the %s App lease for %s on %s: %w", appauth.AppRoleFor(role), role, owner, err)
+		return runtime.GitIdentity{}, fmt.Errorf("mint the %s App lease for %s on %s: %w", appauth.AppRoleFor(role), role, served, err)
 	}
 	return lease.Identity, nil
 }

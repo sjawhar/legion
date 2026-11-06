@@ -393,12 +393,11 @@ func ghAgentEnv(l launch) []corev1.EnvVar {
 // mounts. A cache that cannot be made, or whose Service is not its own by the boot timeout, fails
 // the launch, with nothing written: the fetch could fill no fresh feed without it.
 func (issuePod) provision(ctx context.Context, r *Runtime, l *launch, s *sandbox) error {
-	owner := l.spec.Repository.Owner()
 	minting, cancel := call(ctx)
-	token, err := r.tokens.Token(minting, owner)
+	token, err := r.tokens.Token(minting, l.spec.Repository)
 	cancel()
 	if err != nil {
-		return fmt.Errorf("mint the provisioning token for %s: %w", owner, err)
+		return fmt.Errorf("mint the provisioning token for %s: %w", l.spec.Repository, err)
 	}
 	cache, err := r.ensureRepositoryCache(ctx, l.spec.Repository)
 	if err != nil {

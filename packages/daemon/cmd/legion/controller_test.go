@@ -30,6 +30,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/daemon"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
@@ -1422,7 +1423,17 @@ func (c *controllerCredentialTokens) failWith(err error) {
 	c.err = err
 }
 
-func (c *controllerCredentialTokens) Token(_ context.Context, _ appauth.AppRole, owner string) (appauth.Lease, error) {
+func (c *controllerCredentialTokens) Token(_ context.Context, _ appauth.AppRole, repo ghrepo.Repository) (appauth.Lease, error) {
+	return c.lease(repo.Owner())
+}
+
+func (c *controllerCredentialTokens) ReadToken(_ context.Context, _ appauth.AppRole, owner string, _ []string) (appauth.Lease, error) {
+	lease, err := c.lease(owner)
+	lease.Token += "-read"
+	return lease, err
+}
+
+func (c *controllerCredentialTokens) lease(owner string) (appauth.Lease, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.err != nil {
@@ -1433,12 +1444,6 @@ func (c *controllerCredentialTokens) Token(_ context.Context, _ appauth.AppRole,
 		token = own
 	}
 	return appauth.Lease{Token: token, ExpiresAt: time.Now().Add(time.Hour)}, nil
-}
-
-func (c *controllerCredentialTokens) ReadToken(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
-	lease, err := c.Token(ctx, role, owner)
-	lease.Token += "-read"
-	return lease, err
 }
 
 // requestsTo answers how many of d's recorded requests were to path.

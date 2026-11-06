@@ -15,6 +15,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -135,11 +136,11 @@ func (h *harness) controllerGitHubCredential(secret string) *httptest.ResponseRe
 // failingTokens is a Tokens whose every mint fails, for the credential routes' 502.
 type failingTokens struct{}
 
-func (failingTokens) Token(context.Context, appauth.AppRole, string) (appauth.Lease, error) {
+func (failingTokens) Token(context.Context, appauth.AppRole, ghrepo.Repository) (appauth.Lease, error) {
 	return appauth.Lease{}, errors.New("github is down")
 }
 
-func (failingTokens) ReadToken(context.Context, appauth.AppRole, string) (appauth.Lease, error) {
+func (failingTokens) ReadToken(context.Context, appauth.AppRole, string, []string) (appauth.Lease, error) {
 	return appauth.Lease{}, errors.New("github is down")
 }
 

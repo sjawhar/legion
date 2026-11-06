@@ -202,11 +202,11 @@ func TestGitCredentialOperationsAnswerHelp(t *testing.T) {
 // daemon's own token source answers one.
 type namedTokens struct{}
 
-func (namedTokens) Token(_ context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
-	return appauth.Lease{Token: "ghs_" + string(role) + "_write_" + owner, ExpiresAt: time.Now().Add(time.Hour)}, nil
+func (namedTokens) Token(_ context.Context, role appauth.AppRole, repo ghrepo.Repository) (appauth.Lease, error) {
+	return appauth.Lease{Token: "ghs_" + string(role) + "_write_" + repo.Owner(), ExpiresAt: time.Now().Add(time.Hour)}, nil
 }
 
-func (namedTokens) ReadToken(_ context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
+func (namedTokens) ReadToken(_ context.Context, role appauth.AppRole, owner string, _ []string) (appauth.Lease, error) {
 	return appauth.Lease{Token: "ghs_" + string(role) + "_read_" + owner, ExpiresAt: time.Now().Add(time.Hour)}, nil
 }
 

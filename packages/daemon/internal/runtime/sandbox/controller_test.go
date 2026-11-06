@@ -745,6 +745,6 @@ func fenceSandboxDeletes(g *rig) k8stesting.ReactionFunc {
 // refusingTokens refuses every installation token, as a GitHub outage would.
 type refusingTokens struct{}
 
-func (refusingTokens) Token(context.Context, string) (string, error) {
+func (refusingTokens) Token(context.Context, ghrepo.Repository) (string, error) {
 	return "", errors.New("no installation token: GitHub is down")
 }

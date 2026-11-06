@@ -442,7 +442,7 @@ func (r *liveRig) fetchLog(name string) (string, error) {
 
 // github is the run's repository's REST API under the implement App's installation token.
 func (r *liveRig) github() (githubrest.Client, error) {
-	token, err := r.tokens.Token(r.ctx, r.env.repo.Owner())
+	token, err := r.tokens.Token(r.ctx, r.env.repo)
 	if err != nil {
 		return githubrest.Client{}, err
 	}

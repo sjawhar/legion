@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
@@ -52,7 +53,7 @@ func TestRealGitHubCredentialSurface(t *testing.T) {
 	// Each App's lease, rendered as the role's gh files, is whose login the real gh reports.
 	dirs := map[appauth.AppRole]string{}
 	for _, role := range appauth.Roles {
-		lease, err := tokens.Token(h.ctx, role, "sjawhar")
+		lease, err := tokens.Token(h.ctx, role, ghrepo.MustParse("sjawhar/legion-smoke"))
 		if err != nil {
 			t.Fatalf("mint the %s App's lease: %v", role, err)
 		}

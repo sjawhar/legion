@@ -19,14 +19,14 @@ import (
 // reads which mint answered for which owner.
 type ownerTokens struct{ refuse string }
 
-func (t ownerTokens) Token(_ context.Context, role AppRole, owner string) (Lease, error) {
-	if owner == t.refuse {
-		return Lease{}, errors.New("no installation on " + owner)
+func (t ownerTokens) Token(_ context.Context, role AppRole, repo ghrepo.Repository) (Lease, error) {
+	if repo.Owner() == t.refuse {
+		return Lease{}, errors.New("no installation on " + repo.Owner())
 	}
-	return Lease{Token: string(role) + "-token-for-" + owner, ExpiresAt: time.Now().Add(time.Hour)}, nil
+	return Lease{Token: string(role) + "-token-for-" + repo.Owner(), ExpiresAt: time.Now().Add(time.Hour)}, nil
 }
 
-func (t ownerTokens) ReadToken(_ context.Context, role AppRole, owner string) (Lease, error) {
+func (t ownerTokens) ReadToken(_ context.Context, role AppRole, owner string, _ []string) (Lease, error) {
 	if owner == t.refuse {
 		return Lease{}, errors.New("no installation on " + owner)
 	}
@@ -238,12 +238,12 @@ func TestGitHubCredentialBundlesARenamedPairAsOneOwner(t *testing.T) {
 // countingTokens records every owner it is asked to mint for.
 type countingTokens struct{ minted *[]string }
 
-func (t countingTokens) Token(ctx context.Context, role AppRole, owner string) (Lease, error) {
-	*t.minted = append(*t.minted, owner)
-	return ownerTokens{}.Token(ctx, role, owner)
+func (t countingTokens) Token(ctx context.Context, role AppRole, repo ghrepo.Repository) (Lease, error) {
+	*t.minted = append(*t.minted, repo.Owner())
+	return ownerTokens{}.Token(ctx, role, repo)
 }
 
-func (t countingTokens) ReadToken(ctx context.Context, role AppRole, owner string) (Lease, error) {
+func (t countingTokens) ReadToken(ctx context.Context, role AppRole, owner string, repos []string) (Lease, error) {
 	*t.minted = append(*t.minted, owner)
-	return ownerTokens{}.ReadToken(ctx, role, owner)
+	return ownerTokens{}.ReadToken(ctx, role, owner, repos)
 }

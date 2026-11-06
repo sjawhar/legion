@@ -453,7 +453,7 @@ func (m *Manager) viewerLogin(ctx context.Context, role AppRole, token string) (
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		return "", transient(response, refusalBody(response), fmt.Errorf("read %s failed (%d)", what, response.StatusCode))
 	}
-	body, err := readBody(response, "read "+what)
+	body, err := readBody(response, "read "+what, responseBound)
 	if err != nil {
 		return "", err
 	}
@@ -485,7 +485,7 @@ func (m *Manager) checkAppID(ctx context.Context, role AppRole, slug, appID, tok
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		return transient(response, refusalBody(response), fmt.Errorf("read %s failed (%d)", what, response.StatusCode))
 	}
-	body, err := readBody(response, "read "+what)
+	body, err := readBody(response, "read "+what, responseBound)
 	if err != nil {
 		return err
 	}
@@ -524,7 +524,7 @@ func (m *Manager) installedFromCommand(ctx context.Context, role AppRole, repo g
 // listInstallation reads whether repo is among the repositories of its owner's installation under
 // the owner's read lease; refused reports a 401, a token GitHub no longer honours.
 func (m *Manager) listInstallation(ctx context.Context, role AppRole, repo ghrepo.Repository) (installed, refused bool, err error) {
-	lease, err := m.ReadToken(ctx, role, repo.Owner())
+	lease, err := m.ReadToken(ctx, role, repo.Owner(), []string{repo.Name()})
 	if errors.Is(err, ErrNotInstalled) {
 		return false, false, nil
 	}
@@ -550,7 +550,7 @@ func (m *Manager) listInstallation(ctx context.Context, role AppRole, repo ghrep
 		if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 			return false, false, transient(response, refusalBody(response), fmt.Errorf("%s failed (%d)", what, response.StatusCode))
 		}
-		body, err := readBody(response, what)
+		body, err := readBody(response, what, responseBound)
 		if err != nil {
 			return false, false, err
 		}

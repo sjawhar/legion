@@ -50,10 +50,10 @@ type Pod struct {
 }
 
 // ProvisionTokens mints the installation token a pod's workspace-fetch container clones the
-// repository with, for a repository owner.
+// repository with, for the repository it clones, which the token names and reaches alone.
 // The daemon's is appauth; a harness's may be a token file read on every call.
 type ProvisionTokens interface {
-	Token(ctx context.Context, owner string) (string, error)
+	Token(ctx context.Context, repo ghrepo.Repository) (string, error)
 }
 
 // Store is the durable state the runtime reads: the daemon's store (store.Store), or a test's

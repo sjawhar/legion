@@ -59,9 +59,9 @@ const removalAttempts = 3
 // HandoffPath of that release) as handoffs alone, and every other push as code.
 const recordsSchema = 20261101144900
 
-// Tokens mints the implement App's installation token for a repository owner (appauth.Manager).
+// Tokens mints the implement App's installation token for one repository (appauth.Manager).
 type Tokens interface {
-	Token(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error)
+	Token(ctx context.Context, role appauth.AppRole, repo ghrepo.Repository) (appauth.Lease, error)
 }
 
 // Dispatch is the handoff surface of Dispatch the import reads and writes (dispatch.HTTPClient):
@@ -243,9 +243,9 @@ func (r *runner) issue(ctx context.Context, issue workflowIssue) error {
 		r.print(issue.key, "", failure(err))
 		return nil
 	}
-	lease, err := r.Tokens.Token(ctx, appauth.Implement, repo.Owner())
+	lease, err := r.Tokens.Token(ctx, appauth.Implement, repo)
 	if err != nil {
-		r.print(issue.key, "", result{failed, fmt.Sprintf("failed: mint the implement App's token for %s: %v", repo.Owner(), err)})
+		r.print(issue.key, "", result{failed, fmt.Sprintf("failed: mint the implement App's token for %s: %v", repo, err)})
 		return nil
 	}
 	b := branch{key: issue.key, repo: repo, github: githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(r.GitHubAPI, repo)}}

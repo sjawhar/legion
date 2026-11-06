@@ -109,6 +109,18 @@ func split(value string, sep byte) []string {
 	return append(parts, value[start:])
 }
 
+// mintedFor is GitHub's answer to a token exchange narrowed to repos: the token, its expiry and
+// the repositories GitHub says the token reaches, which every narrowed mint holds its answer to
+// (narrowedTo).
+func mintedFor(token string, expires time.Time, repos ...string) string {
+	named := make([]string, 0, len(repos))
+	for _, repo := range repos {
+		named = append(named, fmt.Sprintf(`{"name":%q}`, repo))
+	}
+	return fmt.Sprintf(`{"token":%q,"expires_at":%q,"repository_selection":"selected","repositories":[%s]}`,
+		token, expires.Format(time.RFC3339), strings.Join(named, ","))
+}
+
 func TestGenerateJWTSignsShippedClaims(t *testing.T) {
 	key, privatePEM := testAppKey(t)
 	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
@@ -188,7 +200,7 @@ func TestTokensMintsRefreshesAndCachesIdentity(t *testing.T) {
 			exchanges++
 			exchange := exchanges
 			mu.Unlock()
-			fmt.Fprintf(w, `{"token":"installation-%d","expires_at":%q}`, exchange, now.Add(time.Hour).Format(time.RFC3339))
+			fmt.Fprint(w, mintedFor(fmt.Sprintf("installation-%d", exchange), now.Add(time.Hour), "legion"))
 		case "/app":
 			verifyAppJWT(t, jwt[len("Bearer "):], &key.PublicKey, now, "12345")
 			fmt.Fprint(w, `{"slug":"legion-implementer"}`)
@@ -211,20 +223,20 @@ func TestTokensMintsRefreshesAndCachesIdentity(t *testing.T) {
 		Review:    config.GitHubApp{AppID: "67890", PrivateKey: privatePEM},
 	}, Options{BaseURL: server.URL, HTTPClient: server.Client(), Now: func() time.Time { return now }})
 
-	first, err := tokens.Token(context.Background(), Implement, "sjawhar")
+	first, err := tokens.Token(context.Background(), Implement, ghrepo.MustParse("sjawhar/legion"))
 	if err != nil {
 		t.Fatalf("first token: %v", err)
 	}
 	if first.Token != "installation-1" || first.Identity.Name != "legion-implementer[bot]" || first.Identity.Email != "271566630+legion-implementer[bot]@users.noreply.github.com" {
 		t.Fatalf("first lease = %+v", first)
 	}
-	if _, err := tokens.Token(context.Background(), Implement, "SJAWHAR"); err != nil {
+	if _, err := tokens.Token(context.Background(), Implement, ghrepo.MustParse("SJAWHAR/legion")); err != nil {
 		t.Fatalf("cached token: %v", err)
 	}
 
 	// The hour-long lease has fewer than refreshWindow's twenty minutes left: the next call mints.
 	now = now.Add(40*time.Minute + time.Second)
-	refreshed, err := tokens.Token(context.Background(), Implement, "sjawhar")
+	refreshed, err := tokens.Token(context.Background(), Implement, ghrepo.MustParse("sjawhar/legion"))
 	if err != nil {
 		t.Fatalf("refreshed token: %v", err)
 	}
@@ -267,7 +279,7 @@ func TestAnInstallationRemovedAfterItWasFoundIsAnsweredNotInstalled(t *testing.T
 				fmt.Fprint(w, `{"message":"Not Found"}`)
 				return
 			}
-			fmt.Fprintf(w, `{"token":"installation-%s","expires_at":%q}`, current, now.Add(time.Hour).Format(time.RFC3339))
+			fmt.Fprint(w, mintedFor("installation-"+current, now.Add(time.Hour), "legion"))
 		case "/app":
 			fmt.Fprint(w, `{"slug":"legion-reviewer"}`)
 		case "/users/legion-reviewer[bot]":
@@ -281,7 +293,7 @@ func TestAnInstallationRemovedAfterItWasFoundIsAnsweredNotInstalled(t *testing.T
 		Implement: config.GitHubApp{AppID: "12345", PrivateKey: privatePEM},
 		Review:    config.GitHubApp{AppID: "67890", PrivateKey: privatePEM},
 	}, Options{BaseURL: server.URL, HTTPClient: server.Client(), Now: func() time.Time { return now }})
-	if _, err := tokens.Token(context.Background(), Review, "acme"); err != nil {
+	if _, err := tokens.Token(context.Background(), Review, ghrepo.MustParse("acme/legion")); err != nil {
 		t.Fatalf("first token: %v", err)
 	}
 
@@ -289,7 +301,7 @@ func TestAnInstallationRemovedAfterItWasFoundIsAnsweredNotInstalled(t *testing.T
 	installation = ""
 	mu.Unlock()
 	now = now.Add(time.Hour)
-	_, err := tokens.Token(context.Background(), Review, "acme")
+	_, err := tokens.Token(context.Background(), Review, ghrepo.MustParse("acme/legion"))
 	if !errors.Is(err, ErrNotInstalled) {
 		t.Fatalf("a mint after the App was removed = %v, want ErrNotInstalled", err)
 	}
@@ -297,7 +309,7 @@ func TestAnInstallationRemovedAfterItWasFoundIsAnsweredNotInstalled(t *testing.T
 	mu.Lock()
 	installation = "88"
 	mu.Unlock()
-	lease, err := tokens.Token(context.Background(), Review, "acme")
+	lease, err := tokens.Token(context.Background(), Review, ghrepo.MustParse("acme/legion"))
 	if err != nil || lease.Token != "installation-88" {
 		t.Fatalf("a mint after the App was installed again = %+v, %v; want the new installation's token", lease, err)
 	}
@@ -325,7 +337,7 @@ func TestForgetMakesTheNextTokenAndReadTokenMintAgain(t *testing.T) {
 			exchanges++
 			n := exchanges
 			mu.Unlock()
-			fmt.Fprintf(w, `{"token":"installation-%d","expires_at":%q}`, n, now.Add(time.Hour).Format(time.RFC3339))
+			fmt.Fprint(w, mintedFor(fmt.Sprintf("installation-%d", n), now.Add(time.Hour), "legion"))
 		case "/app":
 			fmt.Fprint(w, `{"slug":"legion-reviewer"}`)
 		case "/users/legion-reviewer[bot]":
@@ -342,11 +354,10 @@ func TestForgetMakesTheNextTokenAndReadTokenMintAgain(t *testing.T) {
 	ctx := context.Background()
 	mint := func(read bool) Lease {
 		t.Helper()
-		get := tokens.Token
+		lease, err := tokens.Token(ctx, Review, ghrepo.MustParse("acme/legion"))
 		if read {
-			get = tokens.ReadToken
+			lease, err = tokens.ReadToken(ctx, Review, "acme", []string{"legion"})
 		}
-		lease, err := get(ctx, Review, "acme")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -396,7 +407,7 @@ func TestReadTokenMintsANarrowedTokenCachedApartFromToken(t *testing.T) {
 			bodies = append(bodies, string(body))
 			exchange := len(bodies)
 			mu.Unlock()
-			fmt.Fprintf(w, `{"token":"installation-%d","expires_at":%q}`, exchange, now.Add(time.Hour).Format(time.RFC3339))
+			fmt.Fprint(w, mintedFor(fmt.Sprintf("installation-%d", exchange), now.Add(time.Hour), "legion"))
 		case "/app":
 			fmt.Fprint(w, `{"slug":"legion-implementer"}`)
 		case "/users/legion-implementer[bot]":
@@ -412,15 +423,15 @@ func TestReadTokenMintsANarrowedTokenCachedApartFromToken(t *testing.T) {
 		Review:    config.GitHubApp{AppID: "67890", PrivateKey: privatePEM},
 	}, Options{BaseURL: server.URL, HTTPClient: server.Client(), Now: func() time.Time { return now }})
 
-	read, err := tokens.ReadToken(context.Background(), Implement, "acme")
+	read, err := tokens.ReadToken(context.Background(), Implement, "acme", []string{"legion"})
 	if err != nil {
 		t.Fatalf("read token: %v", err)
 	}
-	write, err := tokens.Token(context.Background(), Implement, "Acme")
+	write, err := tokens.Token(context.Background(), Implement, ghrepo.MustParse("Acme/legion"))
 	if err != nil {
 		t.Fatalf("write token: %v", err)
 	}
-	again, err := tokens.ReadToken(context.Background(), Implement, "ACME")
+	again, err := tokens.ReadToken(context.Background(), Implement, "ACME", []string{"Legion"})
 	if err != nil {
 		t.Fatalf("cached read token: %v", err)
 	}
@@ -432,9 +443,13 @@ func TestReadTokenMintsANarrowedTokenCachedApartFromToken(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	// json.Marshal of a map sorts its keys, so the body is this exact text: the four read
-	// permissions a narrowed lease carries, actions among them, and nothing writable.
-	want := []string{`{"permissions":{"actions":"read","contents":"read","metadata":"read","pull_requests":"read"}}`, ""}
+	// json.Marshal of a map sorts its keys, so each body is this exact text: the one repository
+	// the lease reaches, then the permissions — the four read ones a narrowed lease carries,
+	// actions among them and nothing writable, and the implement App's write set.
+	want := []string{
+		`{"repositories":["legion"],"permissions":{"actions":"read","contents":"read","metadata":"read","pull_requests":"read"}}`,
+		`{"repositories":["legion"],"permissions":{"actions":"write","checks":"read","contents":"write","metadata":"read","pull_requests":"write","statuses":"write","workflows":"write"}}`,
+	}
 	if len(bodies) != len(want) || bodies[0] != want[0] || bodies[1] != want[1] {
 		t.Fatalf("exchange bodies = %q, want %q", bodies, want)
 	}
@@ -443,8 +458,8 @@ func TestReadTokenMintsANarrowedTokenCachedApartFromToken(t *testing.T) {
 // An App holds Actions only once each installation's account approves that grant, and GitHub
 // answers 422 to a token request naming a permission the installation does not hold, minting
 // nothing. The read token is then asked for again without actions: the lease is served with
-// contents, pull requests and metadata, a controller's whole gh bundle mints rather than failing
-// on the first such owner, and the daemon writes what that lease cannot read once per owner.
+// contents, pull requests and metadata, every owner's read token is served rather than the first
+// such owner failing, and the daemon writes what that lease cannot read once per owner.
 func TestReadTokenDropsActionsWhereTheInstallationDoesNotHoldThem(t *testing.T) {
 	_, privatePEM := testAppKey(t)
 	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
@@ -472,7 +487,7 @@ func TestReadTokenDropsActionsWhereTheInstallationDoesNotHoldThem(t *testing.T) 
 				fmt.Fprint(w, `{"message":"The permissions requested are not granted to this installation."}`)
 				return
 			}
-			fmt.Fprintf(w, `{"token":"installation-%s-%d","expires_at":%q}`, installation, exchanges, now.Add(time.Hour).Format(time.RFC3339))
+			fmt.Fprint(w, mintedFor(fmt.Sprintf("installation-%s-%d", installation, exchanges), now.Add(time.Hour), "legion"))
 		case r.URL.Path == "/app":
 			fmt.Fprint(w, `{"slug":"legion-reviewer"}`)
 		case r.URL.Path == "/users/legion-reviewer[bot]":
@@ -489,24 +504,28 @@ func TestReadTokenDropsActionsWhereTheInstallationDoesNotHoldThem(t *testing.T) 
 	}, Options{BaseURL: server.URL, HTTPClient: server.Client(), Now: func() time.Time { return now }, Stderr: &stderr})
 	defer tokens.Close()
 
-	read, err := tokens.ReadToken(context.Background(), Review, "acme")
+	read, err := tokens.ReadToken(context.Background(), Review, "acme", []string{"legion"})
 	if err != nil {
 		t.Fatalf("read token for an installation that holds no actions: %v", err)
 	}
 	if read.Token != "installation-77-2" {
 		t.Fatalf("read token = %q, want installation-77-2, the exchange that named no actions", read.Token)
 	}
-	credential := GitHubCredential(tokens, func() []string { return []string{"acme", "sjawhar"} }, ghrepo.Renames{})
-	bundle, err := credential(context.Background(), claim.RoleController, "")
+	// INFRA-513 t4: the controller's whole bundle was minted here, through GitHubCredential,
+	// which names no repository until the next commit of this pull request gives it the project's
+	// mapped repositories. The second owner's read token is asked for directly meanwhile, which
+	// is what the bundle did for it: one mint per owner, each refused its actions and served
+	// without them.
+	second, err := tokens.ReadToken(context.Background(), Review, "sjawhar", []string{"legion"})
 	if err != nil {
-		t.Fatalf("the controller's bundle: %v", err)
+		t.Fatalf("read token for the second installation that holds no actions: %v", err)
 	}
-	if got := bundleTokens(t, bundle); !maps.Equal(got, map[string]string{"acme": "installation-77-2", "sjawhar": "installation-88-2"}) {
-		t.Fatalf("bundle tokens = %v, want every owner's token minted without actions", got)
+	if second.Token != "installation-88-2" {
+		t.Fatalf("the second read token = %q, want installation-88-2, the exchange that named no actions", second.Token)
 	}
 	asked := []string{
-		`{"permissions":{"actions":"read","contents":"read","metadata":"read","pull_requests":"read"}}`,
-		`{"permissions":{"contents":"read","metadata":"read","pull_requests":"read"}}`,
+		`{"repositories":["legion"],"permissions":{"actions":"read","contents":"read","metadata":"read","pull_requests":"read"}}`,
+		`{"repositories":["legion"],"permissions":{"contents":"read","metadata":"read","pull_requests":"read"}}`,
 	}
 	mu.Lock()
 	if !maps.EqualFunc(bodies, map[string][]string{"77": asked, "88": asked}, slices.Equal) {
@@ -515,10 +534,10 @@ func TestReadTokenDropsActionsWhereTheInstallationDoesNotHoldThem(t *testing.T) 
 	}
 	mu.Unlock()
 
-	// Each owner's lease is cached, so the line is not written again for a bundle served from the
+	// Each owner's lease is cached, so the line is not written again for a lease served from the
 	// cache, nor for the fresh mint a Forget makes the next read token do.
 	tokens.Forget(Review, "acme")
-	if _, err := tokens.ReadToken(context.Background(), Review, "acme"); err != nil {
+	if _, err := tokens.ReadToken(context.Background(), Review, "acme", []string{"legion"}); err != nil {
 		t.Fatalf("read token after Forget: %v", err)
 	}
 	for _, line := range []string{
@@ -577,12 +596,12 @@ func TestARateLimited422DoesNotDropActions(t *testing.T) {
 				Options{BaseURL: server.URL, HTTPClient: server.Client(), Now: func() time.Time { return now }, Stderr: &stderr})
 			defer tokens.Close()
 
-			lease, err := tokens.ReadToken(context.Background(), Review, "acme")
+			lease, err := tokens.ReadToken(context.Background(), Review, "acme", []string{"legion"})
 			var trouble *TransientError
 			if lease.Token != "" || !errors.As(err, &trouble) {
 				t.Fatalf("read token under a rate limit = %q, %v; want no lease and a TransientError", lease.Token, err)
 			}
-			if errors.Is(err, errPermissionsRefused) {
+			if errors.Is(err, errNarrowingRefused) {
 				t.Errorf("a rate limit = %v, want it never read as the permissions the installation holds", err)
 			}
 			mu.Lock()
@@ -613,7 +632,7 @@ func TestTokensDeduplicatesConcurrentRequests(t *testing.T) {
 			mu.Unlock()
 			close(exchangeStarted)
 			<-releaseExchange
-			fmt.Fprintf(w, `{"token":"installation","expires_at":%q}`, now.Add(time.Hour).Format(time.RFC3339))
+			fmt.Fprint(w, mintedFor("installation", now.Add(time.Hour), "legion"))
 			return
 		}
 		switch r.URL.Path {
@@ -637,7 +656,7 @@ func TestTokensDeduplicatesConcurrentRequests(t *testing.T) {
 	errs := make(chan error, 2)
 	for range 2 {
 		go func() {
-			lease, err := tokens.Token(context.Background(), Implement, "sjawhar")
+			lease, err := tokens.Token(context.Background(), Implement, ghrepo.MustParse("sjawhar/legion"))
 			if err != nil {
 				errs <- err
 				return
@@ -727,7 +746,7 @@ func TestGitHubsTroubleIsTransientAndItsAnswersAreNot(t *testing.T) {
 						tc.exchange(w, r)
 						return
 					}
-					fmt.Fprintf(w, `{"token":"installation-1","expires_at":%q}`, time.Now().Add(time.Hour).Format(time.RFC3339))
+					fmt.Fprint(w, mintedFor("installation-1", time.Now().Add(time.Hour), "legion"))
 				default:
 					t.Errorf("unexpected GitHub path %s", r.URL.Path)
 				}
@@ -738,7 +757,7 @@ func TestGitHubsTroubleIsTransientAndItsAnswersAreNot(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 			defer cancel()
 
-			_, err := tokens.Token(ctx, Implement, "acme")
+			_, err := tokens.Token(ctx, Implement, ghrepo.MustParse("acme/legion"))
 			if err == nil {
 				t.Fatal("Token succeeded, want a failure")
 			}

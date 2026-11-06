@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
@@ -152,9 +153,9 @@ func TestLaunchBoundSumsTheTrysWaitsAndCalls(t *testing.T) {
 // countingTokens counts the provisioning-token mints of staticTokens.
 type countingTokens struct{ mints *atomic.Int32 }
 
-func (c countingTokens) Token(ctx context.Context, owner string) (string, error) {
+func (c countingTokens) Token(ctx context.Context, repo ghrepo.Repository) (string, error) {
 	c.mints.Add(1)
-	return staticTokens{}.Token(ctx, owner)
+	return staticTokens{}.Token(ctx, repo)
 }
 
 // countingStore counts the store reads a launch makes (ensureSandbox, provision) over the rig's

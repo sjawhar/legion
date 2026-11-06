@@ -21,41 +21,41 @@ import (
 
 // implementTokens is the harness's ProvisionTokens: the implement App's installation token, from
 // the token command the script hands the harness (resolveApp), so the harness holds no App key.
-// owners are the owners of the run's repositories, the first the run's repository's owner.
+// repos are the run's repositories, the first the run's own; a token names the one it is minted
+// for, as every mint of the daemon's does.
 type implementTokens struct {
-	apps   *appauth.Manager
-	owners []string
+	apps  *appauth.Manager
+	repos []ghrepo.Repository
 }
 
-func (t implementTokens) Token(ctx context.Context, owner string) (string, error) {
-	lease, err := t.apps.Token(ctx, appauth.Implement, owner)
+func (t implementTokens) Token(ctx context.Context, repo ghrepo.Repository) (string, error) {
+	lease, err := t.apps.Token(ctx, appauth.Implement, repo)
 	return lease.Token, err
 }
 
 // Credential is the harness's GitHubCredential: every role's gh bundle renders the implement App's
-// tokens, the one App the harness holds — its full lease for owner (the run's repository's owner
-// when owner is empty, the controller's launch), and its read-only lease for every other owner of
-// the run's repositories. Stage 4a proves the files reach each role, follow the lease
-// and pick the owner a command names, not which App a role writes as; Stage 4b's daemon hands each
-// role its own.
+// tokens, the one App the harness holds — its full lease for the repository of owner (the run's
+// repository's owner when owner is empty, the controller's launch), and its read-only lease,
+// narrowed to that owner's repository, for every other owner of the run's repositories. Stage 4a
+// proves the files reach each role, follow the lease and pick the owner a command names, not which
+// App a role writes as; Stage 4b's daemon hands each role its own.
 func (t implementTokens) Credential(ctx context.Context, _ claim.Role, owner string) (ghconfig.Bundle, error) {
 	owner = strings.ToLower(owner)
 	if owner == "" {
-		owner = strings.ToLower(t.owners[0])
+		owner = strings.ToLower(t.repos[0].Owner())
 	}
 	bundle := ghconfig.Bundle{Default: owner, Owners: map[string]ghconfig.Rendered{}}
-	for _, name := range append([]string{owner}, t.owners...) {
-		name = strings.ToLower(name)
+	for _, repo := range t.repos {
+		name := strings.ToLower(repo.Owner())
 		if _, done := bundle.Owners[name]; done {
 			continue
 		}
-		mint := t.apps.ReadToken
+		lease, err := t.apps.ReadToken(ctx, appauth.Implement, name, []string{repo.Name()})
 		if name == owner {
-			mint = t.apps.Token
+			lease, err = t.apps.Token(ctx, appauth.Implement, repo)
 		}
-		lease, err := mint(ctx, appauth.Implement, name)
 		if err != nil {
-			return ghconfig.Bundle{}, fmt.Errorf("mint the implement App's lease for %s: %w", name, err)
+			return ghconfig.Bundle{}, fmt.Errorf("mint the implement App's lease for %s: %w", repo, err)
 		}
 		bundle.Owners[name] = ghconfig.Render(lease.Token, string(appauth.Implement), lease.ExpiresAt)
 	}
@@ -66,7 +66,13 @@ func (t implementTokens) Credential(ctx context.Context, _ claim.Role, owner str
 // repositories as appauth.GitHubOwners reads them for a deployment that configures no rename,
 // lowercased and sorted, which is the set every bundle Credential renders holds a directory for.
 func (t implementTokens) ProjectOwners() []string {
-	return appauth.GitHubOwners(func() []string { return t.owners }, ghrepo.Renames{})
+	return appauth.GitHubOwners(func() []string {
+		owners := make([]string, 0, len(t.repos))
+		for _, repo := range t.repos {
+			owners = append(owners, repo.Owner())
+		}
+		return owners
+	}, ghrepo.Renames{})
 }
 
 // resolveApp mints the implement App's tokens through the token command the script hands the
@@ -88,7 +94,7 @@ func (r *liveRig) resolveApp() (err error) {
 	branches := make([]string, 2)
 	var identity runtime.GitIdentity
 	for i, repo := range []ghrepo.Repository{r.env.repo, r.env.repoSecondOwner} {
-		lease, err := apps.Token(r.ctx, appauth.Implement, repo.Owner())
+		lease, err := apps.Token(r.ctx, appauth.Implement, repo)
 		if err != nil {
 			return fmt.Errorf("minting the implement App's installation token for %s: %w", repo.Owner(), err)
 		}
@@ -99,7 +105,7 @@ func (r *liveRig) resolveApp() (err error) {
 			identity = lease.Identity
 		}
 	}
-	r.tokens = implementTokens{apps: apps, owners: []string{r.env.repo.Owner(), r.env.repoSecondOwner.Owner()}}
+	r.tokens = implementTokens{apps: apps, repos: []ghrepo.Repository{r.env.repo, r.env.repoSecondOwner}}
 	r.identity, r.defaultBranch, r.secondDefaultBranch = identity, branches[0], branches[1]
 	return nil
 }

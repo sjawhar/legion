@@ -89,13 +89,25 @@ func GitHubCredential(tokens Tokens, owners func() []string, renames ghrepo.Rena
 		entries := map[string]ghconfig.Rendered{}
 		for _, name := range names {
 			target := mintFor(name)
-			mint, how := tokens.ReadToken, "read-only "
-			if target == write {
-				mint, how = tokens.Token, ""
-			}
 			entry, held := entries[target]
 			if !held {
-				lease, err := mint(ctx, appRole, target)
+				// INFRA-513 t4: a bundle is still one directory per owner and carries no
+				// repository, so neither mint below can name one, and every mint through
+				// GitHubCredential is refused by Token's and ReadToken's own argument checks
+				// until the next commit of this pull request replaces this. That commit gives
+				// the bundle the issue's ghrepo.Repository and the project's mapped
+				// repositories, and mints the write token for the issue's repository alone, a
+				// read token for each other owner naming the repositories that owner serves, and
+				// a read token for each other served repository of the issue's own owner. Nothing
+				// is narrowed by halves here: a guess at the repositories would mint a token
+				// wider than the one that replaces it.
+				how := "read-only "
+				mint := func() (Lease, error) { return tokens.ReadToken(ctx, appRole, target, nil) }
+				if target == write {
+					how = ""
+					mint = func() (Lease, error) { return tokens.Token(ctx, appRole, ghrepo.Repository{}) }
+				}
+				lease, err := mint()
 				if err != nil {
 					return ghconfig.Bundle{}, fmt.Errorf("mint the %s%s App lease for %s on %s: %w", how, appRole, role, target, err)
 				}

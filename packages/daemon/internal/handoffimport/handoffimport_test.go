@@ -16,6 +16,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/store/migrations"
 )
 
@@ -462,12 +463,12 @@ func writeJSON(rw http.ResponseWriter, status int, body any) {
 	_ = json.NewEncoder(rw).Encode(body)
 }
 
-// fakeTokens mints the implement App's token for the repository's owner and nothing else.
+// fakeTokens mints the implement App's token for the repository it names and nothing else.
 type fakeTokens struct{ t *testing.T }
 
-func (f fakeTokens) Token(_ context.Context, role appauth.AppRole, tokenOwner string) (appauth.Lease, error) {
-	if role != appauth.Implement || tokenOwner != owner {
-		f.t.Errorf("token for %s on %s, want the implement App on %s", role, tokenOwner, owner)
+func (f fakeTokens) Token(_ context.Context, role appauth.AppRole, repo ghrepo.Repository) (appauth.Lease, error) {
+	if role != appauth.Implement || repo.Owner() != owner {
+		f.t.Errorf("token for %s on %s, want the implement App on %s", role, repo, owner)
 	}
 	return appauth.Lease{Token: implementToken}, nil
 }

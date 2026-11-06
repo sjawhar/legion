@@ -26,6 +26,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -41,14 +42,13 @@ const headSHA = "c0de0000000000000000000000000000000000ff"
 // token, minted for which owner, reached GitHub.
 type handoffTokens struct{}
 
-func (handoffTokens) Token(_ context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
-	return appauth.Lease{Token: string(role) + "-token-for-" + owner, ExpiresAt: time.Now().Add(time.Hour)}, nil
+func (handoffTokens) Token(_ context.Context, role appauth.AppRole, repo ghrepo.Repository) (appauth.Lease, error) {
+	return appauth.Lease{Token: string(role) + "-token-for-" + repo.Owner(), ExpiresAt: time.Now().Add(time.Hour)}, nil
 }
 
-func (t handoffTokens) ReadToken(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
-	lease, err := t.Token(ctx, role, owner)
-	lease.Token += "-read"
-	return lease, err
+func (t handoffTokens) ReadToken(_ context.Context, role appauth.AppRole, owner string, _ []string) (appauth.Lease, error) {
+	lease := appauth.Lease{Token: string(role) + "-token-for-" + owner + "-read", ExpiresAt: time.Now().Add(time.Hour)}
+	return lease, nil
 }
 
 // handoffGitHub is GitHub's REST API for one repository, acme/widgets unless a test names another

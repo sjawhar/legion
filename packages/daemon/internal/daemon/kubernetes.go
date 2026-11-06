@@ -499,7 +499,7 @@ func sandboxRuntime(rc *rest.Config, opts sandbox.Options, owners func() []strin
 		// answered for that bundle again.
 		opts.SavedWorkspaceBundle, opts.WorkspaceBundleRestored = st.TakeWorkspaceBundleForRestore, st.DeleteRestoredWorkspaceBundle
 		if apps != nil {
-			opts.Tokens = implementTokens{apps: apps, serving: servingOwner(owners, renames)}
+			opts.Tokens = implementTokens{apps: apps, serving: servingRepository(owners, renames)}
 			opts.GitHubCredential = appauth.GitHubCredential(apps, owners, renames)
 			opts.GitHubOwners = func() []string { return appauth.GitHubOwners(owners, renames) }
 		}
@@ -512,29 +512,26 @@ func sandboxRuntime(rc *rest.Config, opts sandbox.Options, owners func() []strin
 	}
 }
 
-// servingOwner is the owner whose installation holds the repositories of owner now: the owner a
-// configured rename moved them to, where the project owns that one and not owner itself
-// (ghrepo.Renames.OwnerAliases, the daemon's one rule for it), and owner unchanged otherwise,
-// which is every owner of a deployment that configures no rename. The owners it reads are the
-// mapping's, which changes as Dispatch's mapping does, so it is read per mint rather than once.
-func servingOwner(owners func() []string, renames ghrepo.Renames) func(owner string) string {
-	return func(owner string) string {
-		aliases, _ := renames.OwnerAliases(func(name string) bool {
+// servingRepository is the repository GitHub holds a recorded one under now, as the mapping's own
+// rule reads it (ghrepo.Renames.Serving, repositories.serving): the other name of its configured
+// pair where the project owns that name's owner and not the recorded one's, and the recorded
+// repository otherwise, which is every repository of a deployment that configures no rename. The
+// owners it reads are the mapping's, which changes as Dispatch's mapping does, so it is read per
+// mint rather than once.
+func servingRepository(owners func() []string, renames ghrepo.Renames) func(ghrepo.Repository) ghrepo.Repository {
+	return func(repo ghrepo.Repository) ghrepo.Repository {
+		return renames.Serving(repo, func(name string) bool {
 			return slices.ContainsFunc(owners(), func(o string) bool { return strings.EqualFold(o, name) })
 		})
-		if to, alias := aliases[strings.ToLower(owner)]; alias {
-			return to
-		}
-		return owner
 	}
 }
 
 // implementTokens is the workflow's implement App as a sandbox's provisioning token source: every
-// pod's workspace-fetch clones with an installation token minted for the repository's owner. It
-// is the one token source the Sandbox runtime's three mint sites share (runtime/sandbox's
-// provision, its gh credential refresh and its repository cache Secret), so the owner a
-// configured rename moved a repository away from is mapped here, once, to the owner whose
-// installation holds it now (serving): nothing under runtime/sandbox knows of a rename.
+// pod's workspace-fetch clones with an installation token minted for the repository it fetches.
+// It is the one token source the Sandbox runtime's three mint sites share (runtime/sandbox's
+// provision, its gh credential refresh and its repository cache Secret), so the repository a
+// configured rename moved to another owner is mapped here, once, to the name whose installation
+// holds it now (serving): nothing under runtime/sandbox knows of a rename.
 //
 // Only the token follows the rename. Every address those three sites build — the pod's feed, its
 // clone, and the repository cache's volume and Service — stays the repository the record names,
@@ -545,14 +542,14 @@ func servingOwner(owners func() []string, renames ghrepo.Renames) func(owner str
 // the record keeps reaches the repository GitHub holds today.
 type implementTokens struct {
 	apps    appauth.Tokens
-	serving func(owner string) string
+	serving func(ghrepo.Repository) ghrepo.Repository
 }
 
-func (t implementTokens) Token(ctx context.Context, owner string) (string, error) {
+func (t implementTokens) Token(ctx context.Context, repo ghrepo.Repository) (string, error) {
 	if t.serving != nil {
-		owner = t.serving(owner)
+		repo = t.serving(repo)
 	}
-	lease, err := t.apps.Token(ctx, appauth.Implement, owner)
+	lease, err := t.apps.Token(ctx, appauth.Implement, repo)
 	if err != nil {
 		return "", err
 	}

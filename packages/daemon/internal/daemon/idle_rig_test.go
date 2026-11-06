@@ -538,8 +538,8 @@ func (r *idleWakeRig) toolsDir() string {
 // (appauth.GitIdentity).
 type idleRigAppTokens struct{ *workflowTokenRecorder }
 
-func (t idleRigAppTokens) Token(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
-	lease, err := t.workflowTokenRecorder.Token(ctx, role, owner)
+func (t idleRigAppTokens) Token(ctx context.Context, role appauth.AppRole, repo ghrepo.Repository) (appauth.Lease, error) {
+	lease, err := t.workflowTokenRecorder.Token(ctx, role, repo)
 	if err != nil {
 		return lease, err
 	}
@@ -551,7 +551,7 @@ func (t idleRigAppTokens) Token(ctx context.Context, role appauth.AppRole, owner
 // repository needs none, and no pod of this rig clones anything.
 type idleRigTokens struct{}
 
-func (idleRigTokens) Token(context.Context, string) (string, error) { return "idle-rig-provision", nil }
+func (idleRigTokens) Token(context.Context, ghrepo.Repository) (string, error) { return "idle-rig-provision", nil }
 
 // launch waits until the issue's pod runs its role, registered, ready and having told the daemon
 // it runs no background work: the state the idle rule releases. The daemon starts the implementer

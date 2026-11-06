@@ -84,7 +84,21 @@ func appTokens(t *testing.T, discover func(w http.ResponseWriter, r *http.Reques
 		case strings.HasSuffix(r.URL.Path, "/installation"):
 			fmt.Fprint(w, `{"id":77}`)
 		case strings.HasSuffix(r.URL.Path, "/access_tokens"):
-			fmt.Fprintf(w, `{"token":"installation-token","expires_at":%q}`, time.Now().Add(time.Hour).Format(time.RFC3339))
+			// A mint names the repositories its token may reach and refuses an answer wider than
+			// it asked for (appauth), so the stand-in answers with the repositories the request
+			// named, as GitHub does for a narrowed token.
+			var asked struct {
+				Repositories []string `json:"repositories"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&asked); err != nil {
+				t.Errorf("decode the token request: %v", err)
+			}
+			named := make([]string, 0, len(asked.Repositories))
+			for _, repo := range asked.Repositories {
+				named = append(named, fmt.Sprintf(`{"name":%q}`, repo))
+			}
+			fmt.Fprintf(w, `{"token":"installation-token","expires_at":%q,"repository_selection":"selected","repositories":[%s]}`,
+				time.Now().Add(time.Hour).Format(time.RFC3339), strings.Join(named, ","))
 		case r.URL.Path == "/app":
 			fmt.Fprintf(w, `{"slug":"legion-test-%s"}`, jwtIssuer(t, r))
 		case strings.HasPrefix(r.URL.Path, "/users/"):

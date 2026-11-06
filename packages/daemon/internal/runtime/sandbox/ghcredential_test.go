@@ -19,6 +19,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 // secretUpdates are the Secret updates among writes, by name.
@@ -264,8 +265,8 @@ func TestTheRefresherLeavesAPodThatIsNotLiveAlone(t *testing.T) {
 // lease's name and the owner's.
 type leaseTokens struct{ lease atomic.Pointer[string] }
 
-func (l *leaseTokens) Token(_ context.Context, owner string) (string, error) {
-	return "ghs_" + *l.lease.Load() + "_" + owner, nil
+func (l *leaseTokens) Token(_ context.Context, repo ghrepo.Repository) (string, error) {
+	return "ghs_" + *l.lease.Load() + "_" + repo.Owner(), nil
 }
 
 // A re-minted lease reaches the provisioning Secret of every issue pod whose workspace-fetch has yet

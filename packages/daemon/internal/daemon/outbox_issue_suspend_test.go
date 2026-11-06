@@ -35,7 +35,7 @@ import (
 
 type issueProvisionTokens struct{}
 
-func (issueProvisionTokens) Token(context.Context, string) (string, error) {
+func (issueProvisionTokens) Token(context.Context, ghrepo.Repository) (string, error) {
 	return "fixture-provision-token", nil
 }
 

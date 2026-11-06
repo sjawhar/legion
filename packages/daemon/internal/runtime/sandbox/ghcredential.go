@@ -112,7 +112,7 @@ func (r *Runtime) refreshProvisioningToken(ctx context.Context, pod *corev1.Pod,
 		r.log.Warn("sandbox runtime: provisioning token refresh failed", "sandbox", pod.Name, "repo", repo.String(), "err", err)
 	}
 	minting, cancel := call(ctx)
-	token, err := r.tokens.Token(minting, repo.Owner())
+	token, err := r.tokens.Token(minting, repo)
 	cancel()
 	if err != nil {
 		failed(err)

@@ -105,11 +105,11 @@ func testOptions() Options {
 	}
 }
 
-// staticTokens mints the same installation token for every owner.
+// staticTokens mints the same installation token for every repository.
 type staticTokens struct{}
 
-func (staticTokens) Token(_ context.Context, owner string) (string, error) {
-	return "ghs_provision_" + owner, nil
+func (staticTokens) Token(_ context.Context, repo ghrepo.Repository) (string, error) {
+	return "ghs_provision_" + repo.Owner(), nil
 }
 
 // staticCredentialExpiry is the lease expiry every rendered test credential carries.

@@ -186,7 +186,7 @@ func (firstLaunchStore) Claims(context.Context) ([]supervise.Claim, error)      
 // git for.
 type publicCloneTokens struct{}
 
-func (publicCloneTokens) Token(context.Context, string) (string, error) {
+func (publicCloneTokens) Token(context.Context, ghrepo.Repository) (string, error) {
 	return "public-repository-needs-no-token", nil
 }
 
