@@ -63,6 +63,7 @@
         "pullRequest": 1239,
         "mergeCommit": "3e9c0a7b5d2f4e8a1c6b9d0f2a4e7c5b8d1f3a60",
         "openedAt": "2026-09-22T08:40:12Z",
+        "role": "tester",
         "looks": 2,
         "lookOpen": true,
         "lastWake": {

@@ -509,15 +509,23 @@ type SlotView struct {
 
 // CheckView is an issue's open production check as the state shows it: the repository, pull
 // request and merge commit the check looks for in production (MergeCommit is empty for a pull
-// request merged before the daemon recorded merge commits), when it opened, how many looks the
-// implementer has taken and whether the latest is still open, what woke the latest look
-// (LastWake, absent before the first look wakes), the check's bound (NextWakeAt: the moment its
-// last look starts), and whether the last look has started.
+// request merged before the daemon recorded merge commits), when it opened, the role that works
+// it (Role, the one the check recorded from the project's `production_check` when it opened), how
+// many looks that role has taken and whether the latest is still open, what woke the latest look
+// (LastWake, absent before the first look wakes), when the next look is due (NextWakeAt), and
+// whether the last look has started.
+//
+// NextWakeAt is the next look's time, whichever names it: the moment the checking agent named for
+// itself on a pending report, the retry of a look nobody reported, or — where neither stands —
+// the check's own bound, the moment its last look starts. The bound stays readable without a
+// field of its own: NextWakeAt is the bound whenever no agent's time is set, OpenedAt is here,
+// and `production_check_hours` is in the state's settings.
 type CheckView struct {
 	Repo        string         `json:"repo"`
 	PullRequest int            `json:"pullRequest"`
 	MergeCommit string         `json:"mergeCommit"`
 	OpenedAt    time.Time      `json:"openedAt"`
+	Role        string         `json:"role"`
 	Looks       int            `json:"looks"`
 	LookOpen    bool           `json:"lookOpen"`
 	LastWake    *CheckWakeView `json:"lastWake,omitempty"`

@@ -353,11 +353,14 @@ func populatedState(t *testing.T) State {
 					State:          "merged",
 					ReviewDecision: "approved",
 				},
+				// LEGION's `production_check` is `tester`, so its checks record that role; look 2
+				// is open, so no agent's wake stands and the next look is the check's bound.
 				Check: &CheckView{
 					Repo:        "acme/widgets",
 					PullRequest: 1239,
 					MergeCommit: "3e9c0a7b5d2f4e8a1c6b9d0f2a4e7c5b8d1f3a60",
 					OpenedAt:    time.Date(2026, 9, 22, 8, 40, 12, 0, time.UTC),
+					Role:        string(claim.RoleTester),
 					Looks:       2,
 					LookOpen:    true,
 					LastWake:    &CheckWakeView{Kind: "issue.deployed", Detail: "run 38230245571 completed 2026-09-22T09:10:44Z", At: time.Date(2026, 9, 22, 9, 10, 51, 0, time.UTC)},

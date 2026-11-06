@@ -542,4 +542,22 @@ package api
 // (20261104153554_issue_memory_carried). (This branch took 47 while main's idle-release change
 // was unmerged; main landed it as 48, so this branch takes the number above it, as the collision
 // note says.)
-const DaemonAPIVersion = 49
+//
+// 50: INFRA-809 -- the project decides whether a merge that closes an issue opens a production
+// check and who works it (`projects.<KEY>.production_check`, `off` or `tester`), and the checking
+// agent names its own next look. `api.CheckView` gains `role`, the role the check records as the
+// one that works it, always emitted; its `nextWakeAt` is now the time the **next look** is due —
+// the moment the checking agent named for itself on a pending report, the retry of a look nobody
+// reported, or the check's own bound where neither stands — where before it was always the bound.
+// The bound needs no field of its own: `nextWakeAt` is the bound whenever no agent's time is set,
+// `openedAt` is on the view and `production_check_hours` is in the settings body.
+// `api.HandoffCompleteRequest` gains `wakeAt`, which a pending check report on a look that is not
+// the check's last must carry and no other report may (`CHECK_WAKE_REQUIRED`,
+// `CHECK_WAKE_UNEXPECTED`), and a report by a role the check does not record is refused
+// (`CHECK_ROLE_MISMATCH`). The settings body loses its `projects.<KEY>.deploys` block, with every
+// path by which the daemon guessed that production carried a merge; a plugin reads the settings
+// loosely, so that loss alone changes no strictly parsed shape. A 49 plugin's strict reader
+// refuses a state whose check views carry `role`, and its `handoff_complete` sends no `wakeAt`,
+// which this daemon requires of a pending report, so the boot gate and `legion probe-image`
+// refuse the mixed pair.
+const DaemonAPIVersion = 50

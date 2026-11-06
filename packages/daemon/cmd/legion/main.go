@@ -739,7 +739,7 @@ func openChecks(issues map[string]api.Issue) []issueCheck {
 
 // checksSummary is the one line an operator reads for the production checks still open: how many,
 // and the oldest — its issue, pull request and merge commit, which look it is on, what woke that
-// look and when, and when the check is bound.
+// look and when, and when its next look is due.
 func checksSummary(checks []issueCheck) string {
 	if len(checks) == 0 {
 		return "open production checks: none"
@@ -756,7 +756,7 @@ func checksSummary(checks []issueCheck) string {
 	if wake := oldest.check.LastWake; wake != nil {
 		look += fmt.Sprintf(" woken by %s at %s", wake.Kind, wake.At.UTC().Format(time.RFC3339))
 	}
-	return fmt.Sprintf("open production checks: %d; the oldest, %s #%d at %s, %s, bound %s",
+	return fmt.Sprintf("open production checks: %d; the oldest, %s #%d at %s, %s, next look %s",
 		len(checks), oldest.issue, oldest.check.PullRequest, merge, look, oldest.check.NextWakeAt.UTC().Format(time.RFC3339))
 }
 

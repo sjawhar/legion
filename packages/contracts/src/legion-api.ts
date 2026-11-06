@@ -206,19 +206,25 @@ const legionCheckWakeView = z.object({
   at: timestamp,
 });
 
-/** `api.CheckView` — an issue's open production check, the implementer's work after the merge
- * closed the issue (contract 33): the repository, pull request and merge commit the check looks
- * for in production (`mergeCommit` is empty for a pull request merged before the daemon recorded
- * merge commits), when it opened, how many looks the implementer has taken and whether the latest
- * is still open, what woke the latest look (`lastWake`, absent before the first look wakes), the
- * check's bound (`nextWakeAt`: when its last look starts), and whether the last look has started.
- * Present on the issue record only while the check is open; absent once it closed or while none
- * was opened. */
+/** `api.CheckView` — an issue's open production check, the work the project's `production_check`
+ * role takes after the merge closed the issue (contract 33, contract 50): the repository, pull
+ * request and merge commit the check looks for in production (`mergeCommit` is empty for a pull
+ * request merged before the daemon recorded merge commits), when it opened, the role the check
+ * records as the one that works it (`role`), how many looks that role has taken and whether the
+ * latest is still open, what woke the latest look (`lastWake`, absent before the first look
+ * wakes), when the next look is due (`nextWakeAt`), and whether the last look has started.
+ * `nextWakeAt` is whichever names that look: the moment the checking agent named for itself on a
+ * pending report, the retry of a look nobody reported, or the check's own bound — the moment its
+ * last look starts — where neither stands. The bound has no field of its own: `nextWakeAt` is the
+ * bound whenever no agent's time is set, `openedAt` is here, and `production_check_hours` is in
+ * the settings. Present on the issue record only while the check is open; absent once it closed
+ * or while none was opened. */
 const legionCheckView = z.object({
   repo: nonEmptyString,
   pullRequest: z.number().int().positive(),
   mergeCommit: z.string(),
   openedAt: timestamp,
+  role: nonEmptyString,
   looks: z.number().int().nonnegative(),
   lookOpen: z.boolean(),
   lastWake: legionCheckWakeView.optional(),
@@ -853,7 +859,7 @@ export const LegionControllerGrantRequest = z.strictObject({
 });
 
 /** `api.HandoffCompleteRequest`, the observation one worker reports to the workflow: a phase
- * completion, or the implementer's report on a look of its closed issue's production check.
+ * completion, or the checking role's report on a look of its closed issue's production check.
  * A file-backed phase (planning, implementing, testing, reviewing) ends with a handoff record on
  * the Dispatch issue, which the worker writes with `dispatch handoff-write` under its own session;
  * its completion names it, `handoffId` and `handoffVersion`, which the daemon reads back from
@@ -866,7 +872,10 @@ export const LegionControllerGrantRequest = z.strictObject({
  * all three are optional here, and the daemon requires each where it applies. `verdict` is `pass`
  * or `fail` for the tester's completion, `pass`, `pending` or `fail` for a check report
  * (`CHECK_VERDICT_REQUIRED`), and the empty string for every other completion; it stays a string
- * on the wire, as the Go field is. */
+ * on the wire, as the Go field is. `wakeAt` is the check report's alone (contract 50): when the
+ * checking agent asks to be woken for its next look, which a pending report on a look that is not
+ * the check's last must name (`CHECK_WAKE_REQUIRED`) and which no other verdict and no phase
+ * completion may carry (`CHECK_WAKE_UNEXPECTED`). */
 export const LegionHandoffCompleteRequest = z.strictObject({
   grantId: nonEmptyString,
   summary: nonEmptyString,
@@ -875,6 +884,7 @@ export const LegionHandoffCompleteRequest = z.strictObject({
   commit: nonEmptyString.optional(),
   handoffId: nonEmptyString.optional(),
   handoffVersion: z.number().int().positive().optional(),
+  wakeAt: timestamp.optional(),
 });
 
 /** `api.IssueStatusRequest`, the controller's explicit board-status write. */

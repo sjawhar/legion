@@ -603,9 +603,10 @@ test("the state golden carries each issue's tree memory draw", () => {
 });
 
 // The state golden carries LEGION-207, closed by its merge, with its production check open: the
-// repository, pull request and merge commit the check looks for, its looks, the wake that started
-// the latest and the bound. The check is present only while open, so an issue without one parses,
-// and a wake with no kind is refused.
+// repository, pull request and merge commit the check looks for, the role that works it, its
+// looks, the wake that started the latest and when the next look is due. The check is present
+// only while open, so an issue without one parses, and a wake with no kind, or a check with no
+// role, is refused.
 test("the state golden carries a done issue's open production check", () => {
   const state = fixture("state.json") as {
     issues: Record<string, { phase: string; check?: Record<string, unknown> }>;
@@ -620,6 +621,7 @@ test("the state golden carries a done issue's open production check", () => {
     pullRequest: 1239,
     mergeCommit: "3e9c0a7b5d2f4e8a1c6b9d0f2a4e7c5b8d1f3a60",
     openedAt: "2026-09-22T08:40:12Z",
+    role: "tester",
     looks: 2,
     lookOpen: true,
     lastWake: {
@@ -642,10 +644,14 @@ test("the state golden carries a done issue's open production check", () => {
 
   closed.check = { ...unwoken, lastWake: { kind: "", detail: "", at: "2026-09-22T09:10:51Z" } };
   expect(LegionStateResponse.safeParse(state).success).toBeFalse();
+
+  closed.check = { ...unwoken, role: "" };
+  expect(LegionStateResponse.safeParse(state).success).toBeFalse();
 });
 
-// The implementer's check report carries no commit (the look pushed nothing) and a verdict the
-// daemon holds to pass, pending or fail; a phase completion keeps its commit.
+// The checking role's report carries no commit (the look pushed nothing) and a verdict the
+// daemon holds to pass, pending or fail; a phase completion keeps its commit. A pending report
+// names when the agent asks to be woken for its next look, an offset timestamp.
 test("a check report is a completion without a commit", () => {
   const report = { grantId: "grant-207", summary: "Driven in production.", ready: false };
   for (const verdict of ["pass", "pending", "fail"]) {
@@ -653,6 +659,24 @@ test("a check report is a completion without a commit", () => {
   }
   expect(
     LegionHandoffCompleteRequest.safeParse({ ...report, verdict: "pass", commit: "" }).success
+  ).toBeFalse();
+  expect(
+    LegionHandoffCompleteRequest.safeParse({
+      ...report,
+      verdict: "pending",
+      wakeAt: "2026-10-19T09:00:00Z",
+    }).success
+  ).toBeTrue();
+  expect(
+    LegionHandoffCompleteRequest.safeParse({ ...report, verdict: "pending", wakeAt: "tomorrow" })
+      .success
+  ).toBeFalse();
+  expect(
+    LegionHandoffCompleteRequest.safeParse({
+      ...report,
+      verdict: "pending",
+      wake_at: "2026-10-19T09:00:00Z",
+    }).success
   ).toBeFalse();
 });
 
