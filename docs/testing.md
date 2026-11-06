@@ -77,6 +77,22 @@ hundredth of its template's size, and each module's `internal/testpg` test
 `TestEveryCreatedDatabaseIsAFileCopy` fails on any line of the module's Go files that opens a
 database's creation in a string without `strategy file_copy` on the same line.
 
+A test that needs the schema takes a clone of a template its package migrated once, rather than
+running the migrations itself: `packages/daemon/internal/testpg`'s `Clone` answers the clone's
+URL and `CloneStore` the opened store, both dropped when the test ends, and the package's
+`TestMain` is `testpg.Main("<prefix>", m.Run)`, which drops the template when the run ends and
+composes with the `TestMain` a package already has
+(`testpg.Main(prefix, func() int { return testnats.Main(m) })`).
+`packages/envoy/internal/dispatch/store/storetest`'s `Open` is the same fixture for Dispatch's
+schema.
+`Database` is still there for a test that wants an empty database: `internal/store`'s and
+`internal/record`'s own tests apply part of the migration set by hand and assert what `Migrate`
+then returns, which a migrated clone would not let them do.
+
+A test that needs one of envoy's binaries takes it from
+`packages/daemon/internal/testbuild`'s `EnvoyBinary`, which builds each command once per test
+process and removes the directory when `testbuild.Main` ends the run.
+
 A test changes no server setting (`fsync`, `full_page_writes`, `max_wal_size`): the server
 `DISPATCH_TEST_DATABASE_URL` names can hold other databases, such as the local Dispatch's on
 `packages/envoy/scripts/dev-postgres.sh`'s container.
