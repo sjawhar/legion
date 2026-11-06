@@ -49,6 +49,9 @@ func (s *server) createArtifactAsk(w http.ResponseWriter, r *http.Request) {
 	s.createAskFor(w, r, owner)
 }
 
+// listArtifactComments answers an unlinked document's comment list: the same list as an issue's,
+// under the same validator and keeping the same answer (answerCommentList), scoped to the one
+// document the route names rather than to an issue.
 func (s *server) listArtifactComments(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
@@ -57,18 +60,7 @@ func (s *server) listArtifactComments(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	comments, err := s.loadOwnerComments(r.Context(), s.deps.Store.Pool, owner, "")
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	trees := wantsDisplayTrees(r)
-	var texts []string
-	if trees {
-		texts = commentDisplayTexts(nil, comments...)
-	}
-	defer s.readDisplayTrees(r.Context(), trees, r.PathValue("id"), texts)()
-	WriteJSON(w, http.StatusOK, commentReads(comments, trees))
+	s.answerCommentList(w, r, owner, "", r.PathValue("id"))
 }
 
 func (s *server) createArtifactComment(w http.ResponseWriter, r *http.Request) {

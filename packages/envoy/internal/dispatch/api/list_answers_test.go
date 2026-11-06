@@ -323,11 +323,10 @@ func TestAnEmptyCommentListAnswersOneETagPerReading(t *testing.T) {
 	}
 }
 
-// A second read of an unchanged list is written from what the first read kept. The feed's warm
-// read is answered before its page is read at all, so no statement of it touches the event log;
-// the comment list's reads its comments either way, because its validator is the hash of the
-// answer those comments make (listComments), and both are written without encoding or compressing
-// anything again.
+// A second read of an unchanged list is written from what the first read kept. Each is answered
+// before its rows are read at all - the feed from the issue's event sequence, the comment list
+// from its watermark (answerCommentList) - so no statement of either touches the table its answer
+// is built from, and both are written without encoding or compressing anything again.
 func TestASecondReadOfEachListIsAnsweredFromTheKeptBytes(t *testing.T) {
 	database := storetest.Open(t)
 	counter := &roundTrips{}
@@ -343,7 +342,7 @@ func TestASecondReadOfEachListIsAnsweredFromTheKeptBytes(t *testing.T) {
 	})
 	_, comments, feed := listTargets(t, handler, "WARML", 5)
 	for _, list := range []struct{ name, target, forbidden string }{
-		{"the comment list", comments, ""},
+		{"the comment list", comments, "from comments"},
 		{"the activity feed", feed, "from events"},
 	} {
 		t.Run(list.name, func(t *testing.T) {
