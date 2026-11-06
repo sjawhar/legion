@@ -142,6 +142,19 @@
 #      then does not read the POST - pull request #2847 was refused with `Required status check
 #      "ci-ok" is expected` while a green ci-ok sat in PR Title's suite. Work that must run on a
 #      merge group belongs in ci.yaml.
+#  15. a tag step of ci.yaml that passes `-run` and whose pairing in ci_job_reads.py's TAG_RUNS
+#      is missing or no longer holds. A step that runs a package under a build tag and passes
+#      `-run` runs only the tests the tag adds, so the package's untagged tests must run
+#      elsewhere in every run that step runs. The job that runs them is declared, and its filter
+#      must cover every file the tag step's filter covers; otherwise a change to a file only the
+#      tag step's filter matches runs the tagged tests alone and the untagged ones nowhere. It
+#      fails naming both jobs, the step and those paths (up to 20, with how many more there
+#      are). The table is no entry's to opt into: every `go test` step of ci.yaml that passes
+#      both `-tags` and `-run` must be named by an entry, matched by its job and step name, and
+#      one no entry names fails naming the job and the step, so a tag step added without an
+#      entry, or an entry deleted while its step stays, is held too. Nor can the table go stale:
+#      an entry naming a filter the changes job does not have, a job ci.yaml does not have, a
+#      step that job does not have, or a step whose run: holds no -run is a failure of its own.
 #
 # A claimed go command is reduced only in its simple form, never parsed further: one line of
 # `go test|vet|build`, then relative package paths and only -v, -race, -count=N, -timeout D,

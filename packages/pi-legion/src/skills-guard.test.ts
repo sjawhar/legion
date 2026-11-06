@@ -15,8 +15,8 @@ import {
 } from "@legion/pi-shared/test/skills-guard";
 
 // The Claude Code plugin is generated from this repository's skills/ and this package's agents/,
-// and only main's Rebuild Claude Envoy plugin workflow commits packages/claude-envoy/legion/, so
-// a check of what a Claude Code role loads builds a fresh one, as
+// and nothing commits packages/claude-envoy/legion/, so a check of what a Claude Code role loads
+// builds a fresh one, as
 // packages/claude-envoy/tests/legion-plugin-fresh.test.ts does. The build runs as its own command,
 // the way stageSkills runs the prepack script: imported, that package's sources would be
 // typechecked under this package's `tsc`, whose `lib` is older than the one they are written
@@ -250,8 +250,9 @@ test("no staged skill or daemon prompt says what a pull request body `CI` line h
 // Three of the four trees that carry this text are read here — the repository's skills/, the
 // plugin's agents/, and a
 // fresh `buildLegionPlugin` output, which is generated from those two and so is the only copy of
-// `packages/claude-envoy/legion/` a pull request can check (that tree is committed by main's
-// Rebuild Claude Envoy plugin workflow alone). The daemon's prompts are the fourth, read by
+// `packages/claude-envoy/legion/` there is (nothing commits that tree; the release that
+// publishes the plugin builds it in its own build job). The daemon's prompts are the fourth,
+// read by
 // packages/daemon/internal/prompts/roles_test.go, which walks both of its embed trees and so
 // reaches go/claude-mechanics.md, a part `Compose` never joins.
 //

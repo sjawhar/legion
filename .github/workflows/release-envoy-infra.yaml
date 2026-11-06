@@ -316,14 +316,11 @@ jobs:
       # of its own, pushes the tag over SSH to GitHub's pinned host keys, and removes the key again.
       - name: Tag release
         env:
+          VERSION: ${{ needs.build.outputs.version }}
           TAG: ${{ steps.assets.outputs.tag }}
           DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
         run: |
-          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-            test "$(git rev-list -n 1 "$TAG")" = "$GITHUB_SHA"
-            exit 0
-          fi
-          git tag "$TAG"
+          .github/scripts/release-push.sh tag "$VERSION" "$TAG"
           .github/scripts/release-push.sh push-tag "$TAG"
       # Build provenance for both kinds of archive the check above lists: the plugin's, which Pulumi
       # installs, and the command's, which writes seeds under its operator's credentials. The release
