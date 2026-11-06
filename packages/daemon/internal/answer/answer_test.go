@@ -22,6 +22,12 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/store"
 )
 
+// The provider-level proofs of the loop — the cache marks, the effort and the thinking options on
+// the wire, the retry, the tool choice of the last call, the reply read back against its schema —
+// are agentloop's own (packages/envoy/agentloop). What is proved here is the daemon's half: the
+// conversation and the prompt as the request agentloop is given, the gh tool and its numbering,
+// the faults under the daemon's own names, the turns to append and the cost line.
+
 // stubGH is the gh tool's stand-in: it records each call and answers each with output naming it.
 type stubGH struct {
 	mu     sync.Mutex
@@ -118,7 +124,7 @@ func threeStepAnthropic() []reply {
 	return []reply{
 		anthropicStream("tool_use", anthropicUsage{Input: 10, Output: 20, CacheWrite: 1000}, anthropicThinking("Check the PR.", "sig-step-1+/=="), anthropicGH("toolu_1", "pr", "view", "7")),
 		anthropicStream("tool_use", anthropicUsage{Input: 3, Output: 15, CacheWrite: 50, CacheRead: 1000}, anthropicGH("toolu_2", "pr", "checks", "7")),
-		anthropicStream("end_turn", anthropicUsage{Input: 2, Output: 30, CacheWrite: 40, CacheRead: 1050}, anthropicText(`{"kind":"answered","text":"PR 7 is green.","needs":null}`)),
+		anthropicStream("end_turn", anthropicUsage{Input: 2, Output: 30, CacheWrite: 40, CacheRead: 1050}, anthropicText(`{"kind":"answered","text":"PR 7 is green.","needs":""}`)),
 	}
 }
 
@@ -144,44 +150,10 @@ func blocks(m map[string]any) []map[string]any {
 	return out
 }
 
-// countKey counts the objects holding key anywhere in v.
-func countKey(v any, key string) int {
-	n := 0
-	switch v := v.(type) {
-	case map[string]any:
-		if _, ok := v[key]; ok {
-			n++
-		}
-		for _, child := range v {
-			n += countKey(child, key)
-		}
-	case []any:
-		for _, child := range v {
-			n += countKey(child, key)
-		}
-	}
-	return n
-}
-
-// marked are the indexes of the messages whose last block carries a cache mark.
-func marked(t *testing.T, r recorded) []int {
-	t.Helper()
-	var out []int
-	for i, m := range messages(t, r) {
-		b := blocks(m)
-		if len(b) > 0 && b[len(b)-1]["cache_control"] != nil {
-			out = append(out, i)
-		}
-	}
-	return out
-}
-
-// Across a three-call Anthropic answer every request carries two cache marks, never above four:
-// one on the end of the replayed history, kept on every call, and one on the newest message,
-// moved there from the one before; the last call offers no tool; the conversation's effort and
-// adaptive thinking reach every call; the history's signed thinking goes as it was stored, and the
-// first call's thinking goes back with its signature in the second.
-func TestAnthropicAnswerMarksTheCacheMovesTheNewestMarkAndForcesTheReplyOnTheLastCall(t *testing.T) {
+// An Anthropic answer sends the conversation's signed thinking as the session stored it, sends
+// each call's own turn back to the next call, and appends the model's turns with their
+// signatures, their gh calls and each call's result, under the question the loop asked.
+func TestAnAnthropicAnswerReplaysItsSignaturesAndAppendsEveryTurn(t *testing.T) {
 	s := newStandIn(t, threeStepAnthropic()...)
 	gh := &stubGH{}
 	reply, err := Answer(context.Background(), anthropicRequest(t, s, gh, 3))
@@ -195,31 +167,13 @@ func TestAnthropicAnswerMarksTheCacheMovesTheNewestMarkAndForcesTheReplyOnTheLas
 	if len(got) != 3 {
 		t.Fatalf("%d model calls, want 3", len(got))
 	}
-	// The wire's messages: the history's request and answer (0, 1), the question (2), then each
-	// call's turn and its tool result.
-	wantMarks := [][]int{{1, 2}, {1, 4}, {1, 6}}
 	for i, r := range got {
-		body := r.decoded(t)
-		if n := countKey(body, "cache_control"); n > 4 || n != 2 {
-			t.Errorf("call %d carries %d cache marks, want 2 (never above 4)", i+1, n)
-		}
-		if marks := marked(t, r); !reflect.DeepEqual(marks, wantMarks[i]) {
-			t.Errorf("call %d marks messages %v, want %v (the history's end and the newest message)", i+1, marks, wantMarks[i])
-		}
-		choice, _ := body["tool_choice"].(map[string]any)
-		if last := i == 2; (choice["type"] == "none") != last {
-			t.Errorf("call %d's tool_choice %v; want none on the last call only", i+1, body["tool_choice"])
-		}
-		if thinking := body["thinking"]; !reflect.DeepEqual(thinking, map[string]any{"type": "adaptive", "display": "summarized"}) {
-			t.Errorf("call %d's thinking %v, want adaptive and summarized", i+1, thinking)
-		}
-		if config, _ := body["output_config"].(map[string]any); config["effort"] != "high" {
-			t.Errorf("call %d's output_config %v, want effort high, the conversation's level", i+1, body["output_config"])
-		}
 		if !bytes.Contains(r.body, []byte(`"signature":"`+historySignature+`"`)) {
 			t.Errorf("call %d does not carry the history's signature byte for byte", i+1)
 		}
 	}
+	// The wire's messages: the history's request and answer (0, 1), the question (2), then each
+	// call's turn and its tool result.
 	history := blocks(messages(t, got[0])[1])
 	if history[0]["type"] != "thinking" || history[0]["signature"] != historySignature || history[0]["thinking"] != "The plan needs a migration." {
 		t.Errorf("the history's thinking went as %v", history[0])
@@ -238,6 +192,9 @@ func TestAnthropicAnswerMarksTheCacheMovesTheNewestMarkAndForcesTheReplyOnTheLas
 	}
 	if first := turns[0].Content[0]; first.Type != conversation.Thinking || first.Signature != "sig-step-1+/==" || first.Text != "Check the PR." {
 		t.Errorf("the first turn's thinking %+v", first)
+	}
+	if call := turns[0].Content[1]; call.Type != conversation.ToolCall || call.ToolCallID != "toolu_1" || call.ToolName != "gh" {
+		t.Errorf("the first turn's call %+v", call)
 	}
 	if result := turns[1].Results[0]; result.ToolCallID != "toolu_2" || result.Content[0].Text != `output of ["pr","checks","7"]` || result.IsError {
 		t.Errorf("the second turn's result %+v", result)
@@ -266,6 +223,10 @@ func TestTheCostSumsEveryCallCacheWritesIncludedAndOneLineLogsIt(t *testing.T) {
 	}
 	if u := reply.Usage; u.InputTokens != 15 || u.OutputTokens != 65 || u.CacheWriteTokens != 1090 || u.CacheReadTokens != 2050 || reply.Calls != 3 {
 		t.Errorf("usage %+v over %d calls", u, reply.Calls)
+	}
+	// Each turn carries its own call's cost, which the appender writes beside it.
+	if first := reply.Append.Turns[0].Usage; first.InputTokens != 10 || math.Abs(first.CacheWriteCost-1000*6.25/1e6) > 1e-12 {
+		t.Errorf("the first turn's usage %+v", first)
 	}
 	var lines []map[string]any
 	for _, line := range bytes.Split(bytes.TrimSpace(logged.Bytes()), []byte("\n")) {
@@ -300,7 +261,7 @@ func TestTheLoopsToolListHoldsGh(t *testing.T) {
 	if !slices.ContainsFunc(tools, func(t tool) bool { return t.name == "gh" }) {
 		t.Fatalf("the loop's tools %v hold no gh", tools)
 	}
-	s := newStandIn(t, anthropicStream("end_turn", anthropicUsage{Input: 1, Output: 1}, anthropicText(`{"kind":"answered","text":"Yes.","needs":null}`)))
+	s := newStandIn(t, anthropicStream("end_turn", anthropicUsage{Input: 1, Output: 1}, anthropicText(`{"kind":"answered","text":"Yes.","needs":""}`)))
 	if _, err := Answer(context.Background(), anthropicRequest(t, s, &stubGH{}, 1)); err != nil {
 		t.Fatal(err)
 	}
@@ -390,14 +351,13 @@ func input(t *testing.T, r recorded) []map[string]any {
 	return body.Input
 }
 
-// An OpenAI Responses answer replays every reasoning item of the conversation with its id and
-// encrypted content as stored, sends messages and calls without the item ids and statuses Oh My
-// Pi's replay drops, marks the end of the history for the cache, runs stateless at the
-// conversation's effort, sends the first call's reasoning back in the second, offers no tool on
-// the last call, and returns each turn's output items byte for byte for the append.
-func TestOpenAIAnswerReplaysReasoningItemsByteForByteAndSendsTheStepsReasoningBack(t *testing.T) {
+// An OpenAI Responses answer sends every reasoning item of the conversation with its id and
+// encrypted content as the session stored them, sends messages and calls without the item ids and
+// statuses Oh My Pi's replay drops, and gives the append each turn's own output items byte for
+// byte, which is what the appender writes the turn from.
+func TestAnOpenAIAnswerReplaysTheSessionsNativeItemsAndAppendsTheCallsOwn(t *testing.T) {
 	stepOne := []string{openaiReasoning("rs_s1", "gAAAAstep+/one==", "Checking the PR"), openaiGH("fc_s1", "call_s1", "pr", "view", "7")}
-	stepTwo := []string{openaiMessage("msg_s2", `{"kind":"answered","text":"It said plum.","needs":null}`)}
+	stepTwo := []string{openaiMessage("msg_s2", `{"kind":"answered","text":"It said plum.","needs":""}`)}
 	s := newStandIn(t,
 		openaiStream(openaiUsage{Input: 1000, CacheWrite: 900, Output: 50, Reasoning: 20}, "", stepOne...),
 		openaiStream(openaiUsage{Input: 1100, Cached: 900, Output: 30, Reasoning: 0}, "", stepTwo...),
@@ -418,25 +378,12 @@ func TestOpenAIAnswerReplaysReasoningItemsByteForByteAndSendsTheStepsReasoningBa
 		if r.path != "/v1/responses" {
 			t.Errorf("call %d went to %s", i+1, r.path)
 		}
-		body := r.decoded(t)
-		if body["store"] != false || !reflect.DeepEqual(body["include"], []any{"reasoning.encrypted_content"}) {
-			t.Errorf("call %d: store %v, include %v; want a stateless call returning the encrypted reasoning", i+1, body["store"], body["include"])
-		}
-		if reasoning, _ := body["reasoning"].(map[string]any); reasoning["effort"] != "high" {
-			t.Errorf("call %d's reasoning %v, want effort high", i+1, body["reasoning"])
-		}
-		if body["max_output_tokens"] != 4000.0 {
-			t.Errorf("call %d's max_output_tokens %v", i+1, body["max_output_tokens"])
-		}
-		if last := i == 1; (body["tool_choice"] == "none") != last {
-			t.Errorf("call %d's tool_choice %v; want none on the last call only", i+1, body["tool_choice"])
-		}
 		for _, encrypted := range []string{openaiHistoryOne, openaiHistoryTwo} {
 			if !bytes.Contains(r.body, []byte(`"encrypted_content":`+quote(encrypted))) {
 				t.Errorf("call %d does not carry %s byte for byte", i+1, encrypted)
 			}
 		}
-		var ids, breakpoints []string
+		var ids []string
 		for _, item := range input(t, r) {
 			switch item["type"] {
 			case "reasoning":
@@ -449,9 +396,6 @@ func TestOpenAIAnswerReplaysReasoningItemsByteForByteAndSendsTheStepsReasoningBa
 					t.Errorf("call %d sends %s with its status: %v", i+1, item["type"], item)
 				}
 			}
-			if countKey(item, "prompt_cache_breakpoint") > 0 {
-				breakpoints = append(breakpoints, item["type"].(string)+":"+item["call_id"].(string))
-			}
 		}
 		wantIDs := []string{"rs_h1", "rs_h2"}
 		if i == 1 {
@@ -460,12 +404,6 @@ func TestOpenAIAnswerReplaysReasoningItemsByteForByteAndSendsTheStepsReasoningBa
 		if !reflect.DeepEqual(ids, wantIDs) {
 			t.Errorf("call %d's reasoning items %v, want %v", i+1, ids, wantIDs)
 		}
-		if !reflect.DeepEqual(breakpoints, []string{"function_call_output:call_h1"}) {
-			t.Errorf("call %d's cache breakpoints %v, want one on the history's last tool result", i+1, breakpoints)
-		}
-	}
-	if !bytes.Contains(got[1].body, []byte(`"encrypted_content":"gAAAAstep+/one=="`)) {
-		t.Error("the second call does not carry the first call's reasoning")
 	}
 
 	turns := reply.Append.Turns
@@ -486,93 +424,54 @@ func TestOpenAIAnswerReplaysReasoningItemsByteForByteAndSendsTheStepsReasoningBa
 	}
 }
 
-// The configured base URL is the only one the loop calls, whatever OPENAI_BASE_URL and
-// ANTHROPIC_BASE_URL say.
-func TestTheBaseURLComesFromTheConfigurationNotTheEnvironment(t *testing.T) {
+// Every call goes to the base URL `answers.providers` names, never one the environment names, and
+// carries the key that provider's key file holds when the call is made.
+func TestEveryCallCarriesTheConfiguredEndpointAndTheKeyFilesKey(t *testing.T) {
 	elsewhere := newStandIn(t)
 	t.Setenv("OPENAI_BASE_URL", elsewhere.server.URL+"/v1")
 	t.Setenv("ANTHROPIC_BASE_URL", elsewhere.server.URL)
 	t.Setenv("OPENAI_API_KEY", "sk-from-the-environment")
 
-	openaiEndpoint := newStandIn(t, openaiStream(openaiUsage{Input: 1, Output: 1}, "", openaiMessage("m", `{"kind":"answered","text":"Plum.","needs":null}`)))
+	openaiEndpoint := newStandIn(t, openaiStream(openaiUsage{Input: 1, Output: 1}, "", openaiMessage("m", `{"kind":"answered","text":"Plum.","needs":""}`)))
 	if reply, err := Answer(context.Background(), openaiRequest(t, openaiEndpoint, &stubGH{}, 1)); err != nil || reply.Kind != Answered {
 		t.Fatalf("openai reply %+v, %v", reply, err)
-	}
-	anthropicEndpoint := newStandIn(t, anthropicStream("end_turn", anthropicUsage{Input: 1, Output: 1}, anthropicText(`{"kind":"answered","text":"Yes.","needs":null}`)))
-	if reply, err := Answer(context.Background(), anthropicRequest(t, anthropicEndpoint, &stubGH{}, 1)); err != nil || reply.Kind != Answered {
-		t.Fatalf("anthropic reply %+v, %v", reply, err)
-	}
-	if n := len(elsewhere.requests()); n != 0 {
-		t.Errorf("the environment's base URL got %d requests", n)
 	}
 	if got := openaiEndpoint.requests()[0].header.Get("Authorization"); got != "Bearer sk-openai-standin" {
 		t.Errorf("the OpenAI call's Authorization %q, want the configured key's", got)
 	}
-}
 
-// Each model call carries the key as its file holds it when the call is made.
-func TestTheKeyIsReadAgainForEveryModelCall(t *testing.T) {
 	s := newStandIn(t,
 		anthropicStream("tool_use", anthropicUsage{Input: 1, Output: 1}, anthropicGH("toolu_1", "pr", "view", "7")),
-		anthropicStream("end_turn", anthropicUsage{Input: 1, Output: 1}, anthropicText(`{"kind":"answered","text":"Yes.","needs":null}`)),
+		anthropicStream("end_turn", anthropicUsage{Input: 1, Output: 1}, anthropicText(`{"kind":"answered","text":"Yes.","needs":""}`)),
 	)
 	gh := &stubGH{}
 	req := anthropicRequest(t, s, gh, 2)
 	path := req.Providers[config.AnswerAnthropic].Credential.File
-	if err := os.WriteFile(path, []byte("sk-ant-first\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	gh.onCall = func(int) {
 		if err := os.WriteFile(path, []byte("sk-ant-rotated\n"), 0o600); err != nil {
 			t.Error(err)
 		}
 	}
 	if reply, err := Answer(context.Background(), req); err != nil || reply.Kind != Answered {
-		t.Fatalf("reply %+v, %v", reply, err)
+		t.Fatalf("anthropic reply %+v, %v", reply, err)
 	}
 	var keys []string
 	for _, r := range s.requests() {
 		keys = append(keys, r.header.Get("X-Api-Key"))
 	}
-	if !reflect.DeepEqual(keys, []string{"sk-ant-first", "sk-ant-rotated"}) {
-		t.Errorf("the calls carried keys %v, want the file's at each call", keys)
+	if !reflect.DeepEqual(keys, []string{"sk-ant-standin", "sk-ant-rotated"}) {
+		t.Errorf("the calls carried keys %v, want the key file's at each call", keys)
+	}
+	if n := len(elsewhere.requests()); n != 0 {
+		t.Errorf("the environment's base URL got %d requests", n)
 	}
 }
 
-// A 500 is retried once and the retry's reply is the answer; a 400 is not retried.
-func TestAServerErrorIsRetriedOnceAndARequestErrorIsNot(t *testing.T) {
-	overloaded := reply{status: http.StatusInternalServerError, headers: map[string]string{"Retry-After": "0"}, body: []byte(`{"type":"error","error":{"type":"api_error","message":"overloaded"}}`)}
-	s := newStandIn(t, overloaded, anthropicStream("end_turn", anthropicUsage{Input: 1, Output: 1}, anthropicText(`{"kind":"answered","text":"Yes.","needs":null}`)))
-	got, err := Answer(context.Background(), anthropicRequest(t, s, &stubGH{}, 1))
-	if err != nil || got.Kind != Answered || got.Fault != "" {
-		t.Fatalf("after a 500: reply %+v, %v", got, err)
-	}
-	if n := len(s.requests()); n != 2 {
-		t.Errorf("a 500 then a reply took %d requests, want 2", n)
-	}
-
-	twice := newStandIn(t, overloaded, overloaded, anthropicStream("end_turn", anthropicUsage{}, anthropicText(`{"kind":"answered","text":"Yes.","needs":null}`)))
-	if got, _ := Answer(context.Background(), anthropicRequest(t, twice, &stubGH{}, 1)); got.Fault != ProviderError {
-		t.Errorf("after two 500s: reply %+v, want a provider error", got)
-	}
-	if n := len(twice.requests()); n != 2 {
-		t.Errorf("two 500s took %d requests, want 2: one retry only", n)
-	}
-
-	bad := newStandIn(t, reply{status: http.StatusBadRequest, body: []byte(`{"type":"error","error":{"type":"invalid_request_error","message":"bad"}}`)})
-	got, err = Answer(context.Background(), anthropicRequest(t, bad, &stubGH{}, 1))
-	if err != nil || got.Fault != ProviderError || got.Kind != NotAnswered {
-		t.Errorf("after a 400: reply %+v, %v; want no answer with a provider error", got, err)
-	}
-	if n := len(bad.requests()); n != 1 {
-		t.Errorf("a 400 took %d requests, want 1", n)
-	}
-}
-
-// A last reply cut off, refused, not in the form or past the time bound is no answer, with its
-// fault, and nothing to append.
-func TestAReplyCutOffRefusedMalformedOrLateIsNoAnswer(t *testing.T) {
-	answered := `{"kind":"answered","text":"Yes.","needs":null}`
+// Each way a run ends short of an answer is no answer under the daemon's own name for it, which
+// is the reason the controller reads and the daemon's reply to the asker names, and nothing is
+// appended.
+func TestEveryAgentloopFaultIsNoAnswerUnderTheDaemonsOwnName(t *testing.T) {
+	answered := `{"kind":"answered","text":"Yes.","needs":""}`
 	for _, c := range []struct {
 		name    string
 		replies []reply
@@ -588,9 +487,12 @@ func TestAReplyCutOffRefusedMalformedOrLateIsNoAnswer(t *testing.T) {
 		{name: "prose", replies: []reply{anthropicStream("end_turn", anthropicUsage{Output: 1}, anthropicText("PR 7 is green."))}, want: Malformed},
 		{name: "fenced", replies: []reply{anthropicStream("end_turn", anthropicUsage{Output: 1}, anthropicText("```json\n"+answered+"\n```"))}, want: Malformed},
 		{name: "two objects", replies: []reply{anthropicStream("end_turn", anthropicUsage{Output: 1}, anthropicText(answered+answered))}, want: Malformed},
-		{name: "unknown kind", replies: []reply{anthropicStream("end_turn", anthropicUsage{Output: 1}, anthropicText(`{"kind":"maybe","text":"Yes.","needs":null}`))}, want: Malformed},
-		{name: "none not offered", replies: []reply{anthropicStream("end_turn", anthropicUsage{Output: 1}, anthropicText(`{"kind":"none","text":"","needs":null}`))}, want: Malformed},
-		{name: "not answered naming no need", replies: []reply{anthropicStream("end_turn", anthropicUsage{Output: 1}, anthropicText(`{"kind":"not_answered","text":"I cannot tell.","needs":null}`))}, want: Malformed},
+		{name: "a field the form does not hold", replies: []reply{anthropicStream("end_turn", anthropicUsage{Output: 1}, anthropicText(`{"kind":"answered","text":"Yes.","needs":"","aside":"and a pear"}`))}, want: Malformed},
+		{name: "unknown kind", replies: []reply{anthropicStream("end_turn", anthropicUsage{Output: 1}, anthropicText(`{"kind":"maybe","text":"Yes.","needs":""}`))}, want: Malformed},
+		{name: "none not offered", replies: []reply{anthropicStream("end_turn", anthropicUsage{Output: 1}, anthropicText(`{"kind":"none","text":"","needs":""}`))}, want: Malformed},
+		{name: "not answered naming no need", replies: []reply{anthropicStream("end_turn", anthropicUsage{Output: 1}, anthropicText(`{"kind":"not_answered","text":"I cannot tell.","needs":""}`))}, want: Malformed},
+		{name: "answered with no text", replies: []reply{anthropicStream("end_turn", anthropicUsage{Output: 1}, anthropicText(`{"kind":"answered","text":"  ","needs":""}`))}, want: Malformed},
+		{name: "the provider failed", replies: []reply{{status: http.StatusBadRequest, body: []byte(`{"type":"error","error":{"type":"invalid_request_error","message":"bad"}}`)}}, want: ProviderError},
 		{name: "past the time bound", replies: []reply{{delay: 5 * time.Second, body: anthropicStream("end_turn", anthropicUsage{}, anthropicText(answered)).body}}, answer: time.Second, want: AnswerSeconds},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -652,9 +554,10 @@ func TestNoProviderNoPriceAndAnUnknownFormatMakeNoModelCall(t *testing.T) {
 	}
 }
 
-// None is offered only for a message that may ask nothing, and is then a reply.
+// None is offered only for a message that may ask nothing, in the prompt and in the reply form
+// the model is held to, and is then a reply.
 func TestNoneIsOfferedOnlyForAMessageThatMayAskNothing(t *testing.T) {
-	s := newStandIn(t, anthropicStream("end_turn", anthropicUsage{Output: 1}, anthropicText(`{"kind":"none","text":"","needs":null}`)))
+	s := newStandIn(t, anthropicStream("end_turn", anthropicUsage{Output: 1}, anthropicText(`{"kind":"none","text":"","needs":""}`)))
 	req := anthropicRequest(t, s, &stubGH{}, 1)
 	req.MayAskNothing = true
 	got, err := Answer(context.Background(), req)
@@ -672,8 +575,14 @@ func TestNoneIsOfferedOnlyForAMessageThatMayAskNothing(t *testing.T) {
 	if !strings.Contains(body.System[0].Text, `"none"`) {
 		t.Errorf("the system prompt offers no none: %s", body.System[0].Text)
 	}
+	if !bytes.Contains(s.requests()[0].body, []byte(`\"none\"`)) && !bytes.Contains(s.requests()[0].body, []byte(`"none"`)) {
+		t.Error("the call carries no reply form offering none")
+	}
 	if strings.Contains(systemPrompt(anthropicRequest(t, s, &stubGH{}, 1)), `"none"`) {
 		t.Error("the system prompt offers none to a message that asks something")
+	}
+	if strings.Contains(string(finalSchema(false)), `"none"`) {
+		t.Errorf("the reply form of a message that asks something offers none: %s", finalSchema(false))
 	}
 }
 
@@ -682,7 +591,7 @@ func TestNoneIsOfferedOnlyForAMessageThatMayAskNothing(t *testing.T) {
 func TestARerunCarriesTheEarlierCallsAndNumbersNewCallsAfterThem(t *testing.T) {
 	s := newStandIn(t,
 		anthropicStream("tool_use", anthropicUsage{Output: 1}, anthropicGH("toolu_1", "pr", "view", "7")),
-		anthropicStream("end_turn", anthropicUsage{Output: 1}, anthropicText(`{"kind":"answered","text":"Done.","needs":null}`)),
+		anthropicStream("end_turn", anthropicUsage{Output: 1}, anthropicText(`{"kind":"answered","text":"Done.","needs":""}`)),
 	)
 	gh := &stubGH{}
 	req := anthropicRequest(t, s, gh, 2)
@@ -704,4 +613,36 @@ func TestARerunCarriesTheEarlierCallsAndNumbersNewCallsAfterThem(t *testing.T) {
 	if calls := gh.made(); len(calls) != 1 || calls[0].seq != 3 {
 		t.Errorf("the new calls %+v, want one numbered 3", calls)
 	}
+}
+
+// A gh call that failed or never ran goes back to the model as an error result, with gh's exit
+// status, and the append records it as the call's result.
+func TestAFailedGhCallGoesBackAsAnErrorResult(t *testing.T) {
+	s := newStandIn(t,
+		anthropicStream("tool_use", anthropicUsage{Output: 1}, anthropicGH("toolu_1", "pr", "view", "7")),
+		anthropicStream("end_turn", anthropicUsage{Output: 1}, anthropicText(`{"kind":"answered","text":"Done.","needs":""}`)),
+	)
+	req := anthropicRequest(t, s, failingGH{}, 2)
+	got, err := Answer(context.Background(), req)
+	if err != nil || got.Kind != Answered {
+		t.Fatalf("reply %+v, %v", got, err)
+	}
+	result := got.Append.Turns[0].Results[0]
+	if !result.IsError || !strings.Contains(result.Content[0].Text, "gh exited 1") {
+		t.Errorf("the appended result %+v, want an error result naming the exit status", result)
+	}
+	sent := blocks(messages(t, s.requests()[1])[4])
+	if len(sent) != 1 || sent[0]["is_error"] != true {
+		t.Fatalf("the result the model was given %v, want one error result", sent)
+	}
+	if text, _ := json.Marshal(sent[0]["content"]); !strings.Contains(string(text), "gh exited 1") {
+		t.Errorf("the result the model was given %s, want it naming the exit status", text)
+	}
+}
+
+// failingGH is a gh tool whose call runs and fails.
+type failingGH struct{}
+
+func (failingGH) Run(context.Context, int, string) ghtool.Result {
+	return ghtool.Result{Output: "could not resolve to a PullRequest", Exit: 1, Ran: true}
 }

@@ -1,11 +1,9 @@
 package answer
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 )
 
@@ -26,12 +24,12 @@ func systemPrompt(req Request) string {
 	b.WriteString("The other tools your conversation used (reading and editing files, running commands, your Legion and Envoy tools) are not available now: do not call them. ")
 	fmt.Fprintf(&b, "This answer may make at most %d gh calls and %d model calls; your last model call offers no tool and must be your reply.\n\n", req.Bounds.GHCalls, req.Bounds.ModelCalls)
 	b.WriteString("Decline work your tools cannot do, such as work that needs your working copy or a run of your phase: say plainly that you cannot do it now and what it needs, and do not promise to do it later. Say plainly when you do not know.\n\n")
-	b.WriteString("Your reply is exactly one JSON object and nothing else, no code fence: {\"kind\": ..., \"text\": ..., \"needs\": ...}. The kinds:\n")
-	b.WriteString("- \"answered\": text is your answer to the message; needs is null.\n")
+	b.WriteString("Your reply is exactly one JSON object and nothing else, no code fence: {\"kind\": ..., \"text\": ..., \"needs\": ...}, all three always there. The kinds:\n")
+	b.WriteString("- \"answered\": text is your answer to the message; needs is \"\".\n")
 	b.WriteString("- \"not_answered\": you cannot answer from your conversation or what your tools read; text says so to the asker, and needs says what you would need, such as your working copy.\n")
 	b.WriteString("- \"needs_work\": the message asks for work your tools cannot do; text tells the asker you cannot do it now, and needs names the work.\n")
 	if req.MayAskNothing {
-		b.WriteString("- \"none\": the message asks nothing of you; text is \"\" and needs is null.\n")
+		b.WriteString("- \"none\": the message asks nothing of you; text is \"\" and needs is \"\".\n")
 	}
 	return b.String()
 }
@@ -69,26 +67,44 @@ type form struct {
 	needs string
 }
 
-// parseReply reads the last model call's text: exactly one JSON object {"kind", "text", "needs"},
-// its kind one the request offers, its text a string (non-empty but for none), its needs a string
-// or null, non-empty for not_answered and needs_work.
-func parseReply(text string, mayAskNothing bool) (form, error) {
-	trimmed := bytes.TrimSpace([]byte(text))
-	if len(trimmed) == 0 || trimmed[0] != '{' {
-		return form{}, errors.New("the reply is not a JSON object")
+// finalSchema is the JSON schema of the reply, which agentloop sends to the provider and checks
+// the last reply against: exactly one object of the form, its kind one of those this message
+// offers (none only for a message that may ask nothing), and its text and needs strings.
+//
+// Every property is required and none takes more than one type, because that is the shape a
+// provider constrains its own generation to: measured against Anthropic's Messages API on
+// 2026-11-07, a form whose needs was `["string","null"]` and left out of required was carried in
+// output_config.format and then not enforced, and the model ran a one-sentence answer to the
+// whole output token bound; with this shape the same question stopped at 77 output tokens with
+// the object. What the schema cannot say — a not_answered or needs_work reply must name a need,
+// and every kind but none must carry text — parseReply checks after.
+func finalSchema(mayAskNothing bool) json.RawMessage {
+	kinds := []Kind{Answered, NotAnswered, NeedsWork}
+	if mayAskNothing {
+		kinds = append(kinds, None)
 	}
-	decoder := json.NewDecoder(bytes.NewReader(trimmed))
-	decoder.DisallowUnknownFields()
+	quoted := make([]string, len(kinds))
+	for i, kind := range kinds {
+		quoted[i] = `"` + string(kind) + `"`
+	}
+	return json.RawMessage(`{"type":"object","properties":` +
+		`{"kind":{"type":"string","enum":[` + strings.Join(quoted, ",") + `]},` +
+		`"text":{"type":"string"},` +
+		`"needs":{"type":"string"}},` +
+		`"required":["kind","text","needs"],"additionalProperties":false}`)
+}
+
+// parseReply reads the reply agentloop checked against finalSchema: its kind one the request
+// offers, its text non-empty but for none, and its needs non-empty for not_answered and
+// needs_work.
+func parseReply(value json.RawMessage, mayAskNothing bool) (form, error) {
 	var reply struct {
 		Kind  *string `json:"kind"`
 		Text  *string `json:"text"`
 		Needs *string `json:"needs"`
 	}
-	if err := decoder.Decode(&reply); err != nil {
+	if err := json.Unmarshal(value, &reply); err != nil {
 		return form{}, fmt.Errorf("the reply is not the reply form: %w", err)
-	}
-	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
-		return form{}, errors.New("the reply holds more than one JSON object")
 	}
 	if reply.Kind == nil || reply.Text == nil {
 		return form{}, errors.New("the reply has no kind or no text")

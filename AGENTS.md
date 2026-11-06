@@ -444,7 +444,7 @@ Each item below names a task and where its code is, then notes on it.
 - Make a model call, or a tool-using model loop — `packages/envoy/agentloop`
 
   The one shared model loop, which the Legion daemon and Dispatch's server both import.
-  It and the daemon's own answer loop (`packages/daemon/internal/answer/`, which dispatch://INFRA-1311 makes a caller of this package) are this repository's only imports of Grafana's AI SDK for Go.
+  It is this repository's only import of Grafana's AI SDK for Go; the daemon's own answer loop (`packages/daemon/internal/answer/`) calls it rather than the SDK.
   Two entry points:
   `Run` makes one bounded run of a model and the tools it calls, on `anthropic-messages`, `openai-responses`, `openai-chat` or `azure-anthropic`, and `Decide` makes one System One call for a typed decision.
   The caller supplies the endpoint, the credential, the prices, the tools and the reply's JSON schema, and the package reads nothing from the environment.
@@ -456,7 +456,7 @@ Each item below names a task and where its code is, then notes on it.
 - Answer loop (a stopped agent answers questions) — `packages/daemon/internal/answerloop/` (the question pipeline), `packages/daemon/internal/answer/` (the model loop), `packages/daemon/internal/conversation/` (`omp`, `claude`: read and append), `packages/daemon/internal/ghtool/` (its `gh` tool), `packages/daemon/internal/agenthistory/` (the conversation record and its registry mirror)
 
   Configured by `legion.yaml` `answers:` (`internal/config/answers.go`), off when unset;
-  inside the daemon only `internal/answer` imports Grafana's AI SDK;
+  the model calls are `packages/envoy/agentloop`'s, which `internal/answer` calls, so no package of the daemon imports Grafana's AI SDK;
   the listener's hand-off is `packages/contracts/src/legion-handoff.ts`;
   see `docs/kubernetes.md` "The answer loop"
 

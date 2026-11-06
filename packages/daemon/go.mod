@@ -4,20 +4,15 @@ go 1.27.3
 
 require (
 	cloud.google.com/go/cloudsqlconn v1.25.4
-	github.com/anthropics/anthropic-sdk-go v1.84.0
 	github.com/aws/aws-sdk-go-v2 v1.47.4
 	github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider v1.75.0
 	github.com/aws/smithy-go v1.28.6
 	github.com/docker/docker v28.5.2+incompatible
 	github.com/go-jose/go-jose/v4 v4.1.5
 	github.com/google/uuid v1.6.0
-	github.com/grafana/ai-sdk v0.1.0-alpha.5
-	github.com/grafana/ai-sdk/providers/anthropic v0.1.0-alpha.3
-	github.com/grafana/ai-sdk/providers/openai v0.1.0-alpha.2
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/nats-io/nats.go v1.50.0
 	github.com/nats-io/nkeys v0.4.15
-	github.com/openai/openai-go/v3 v3.96.0
 	github.com/sjawhar/envoy v0.0.0
 	github.com/testcontainers/testcontainers-go v0.41.0
 	github.com/testcontainers/testcontainers-go/modules/nats v0.41.0
@@ -41,6 +36,7 @@ require (
 	dario.cat/mergo v1.0.2 // indirect
 	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
+	github.com/anthropics/anthropic-sdk-go v1.84.0 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.5.7 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.8.7 // indirect
 	github.com/aws/aws-sdk-go-v2/service/kms v1.61.1 // indirect
@@ -88,6 +84,11 @@ require (
 	github.com/google/s2a-go v0.1.11 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.24 // indirect
 	github.com/googleapis/gax-go/v2 v2.26.2 // indirect
+	github.com/grafana/ai-sdk v0.1.0-alpha.5 // indirect
+	github.com/grafana/ai-sdk/providers/anthropic v0.1.0-alpha.3 // indirect
+	github.com/grafana/ai-sdk/providers/azure v0.1.0-alpha.1 // indirect
+	github.com/grafana/ai-sdk/providers/openai v0.1.0-alpha.2 // indirect
+	github.com/grafana/ai-sdk/providers/openai-compatible v0.1.0-alpha.2 // indirect
 	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
 	github.com/hashicorp/go-retryablehttp v0.7.8 // indirect
 	github.com/invopop/jsonschema v0.14.0 // indirect
@@ -113,6 +114,7 @@ require (
 	github.com/nats-io/jwt/v2 v2.7.4 // indirect
 	github.com/nats-io/nats-server/v2 v2.10.29 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
+	github.com/openai/openai-go/v3 v3.96.0 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/pb33f/go-yaml v0.1.1 // indirect

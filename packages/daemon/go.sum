@@ -237,8 +237,12 @@ github.com/grafana/ai-sdk v0.1.0-alpha.5 h1:VUXyW001rp067opDGFfnxJSGzr1Nboon/A6z
 github.com/grafana/ai-sdk v0.1.0-alpha.5/go.mod h1:2D9ae2gO9kFiNY21V+4g3/+dQtVIkDXvY7dlKr8Cn1Y=
 github.com/grafana/ai-sdk/providers/anthropic v0.1.0-alpha.3 h1:y4gYfTy/hZcuWrzPAMQ/l9RB+JiTcH9HMLsqp48PSIk=
 github.com/grafana/ai-sdk/providers/anthropic v0.1.0-alpha.3/go.mod h1:fw8j4gpcdfiESGcWUidnKWAjTXPZbq78ArAujGj6Ewo=
+github.com/grafana/ai-sdk/providers/azure v0.1.0-alpha.1 h1:KTTDnuy95KhuhP3UYYs07IzpIoVbTCydfMeYEAjUwHg=
+github.com/grafana/ai-sdk/providers/azure v0.1.0-alpha.1/go.mod h1:McD16AzA18n22XabdV/KverhhG1UIC1R5ViWB+QjfLs=
 github.com/grafana/ai-sdk/providers/openai v0.1.0-alpha.2 h1:UceJTvHRN/1BT2Bg0xSgK6ETW9JGxfQWLQ0r83jzE3Q=
 github.com/grafana/ai-sdk/providers/openai v0.1.0-alpha.2/go.mod h1:PzhPCcfeGjLhXPRta7uB3HJamJpLUbAlgd69cTF1TP8=
+github.com/grafana/ai-sdk/providers/openai-compatible v0.1.0-alpha.2 h1:Y0itM5K33BMLH3m4Neb18c8yEK+G7W79CxutCgK3eKY=
+github.com/grafana/ai-sdk/providers/openai-compatible v0.1.0-alpha.2/go.mod h1:xshQwiiXrDfm9F1JQCVnFVGmTemqyJ2wlCCn/Dodf2s=
 github.com/grpc-ecosystem/grpc-gateway/v2 v2.28.0 h1:HWRh5R2+9EifMyIHV7ZV+MIZqgz+PMpZ14Jynv3O2Zs=
 github.com/grpc-ecosystem/grpc-gateway/v2 v2.28.0/go.mod h1:JfhWUomR1baixubs02l85lZYYOm7LV6om4ceouMv45c=
 github.com/hashicorp/go-cleanhttp v0.5.2 h1:035FKYIWjmULyFRBKPs8TBQoi0x6d9G4xc9neXJWAZQ=

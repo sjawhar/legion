@@ -5,18 +5,17 @@ import (
 	"encoding/json"
 	"fmt"
 
-	aisdk "github.com/grafana/ai-sdk"
-	"github.com/grafana/ai-sdk/provider"
-	"github.com/grafana/ai-sdk/schema"
+	"github.com/sjawhar/envoy/agentloop"
 )
 
 // tool is one of the loop's tools: its name, what the model reads of it, the JSON schema of its
-// input, and what a call runs.
+// input, and what a call runs. A call answers with what the model is told and whether the tool
+// refused or failed.
 type tool struct {
 	name        string
 	description string
 	schema      string
-	run         func(ctx context.Context, l *loop, input json.RawMessage) ghOutput
+	run         func(ctx context.Context, req Request, call agentloop.ToolCall) (output string, isError bool)
 }
 
 // tools are the loop's tools, which the system prompt names and every model call offers.
@@ -34,66 +33,42 @@ var tools = []tool{{
 	run: runGH,
 }}
 
-// toolSet is the loop's tools as the SDK offers and runs them.
-func (l *loop) toolSet() aisdk.ToolSet {
-	set := make(aisdk.ToolSet, len(tools))
-	for _, t := range tools {
-		input, err := schema.SchemaFromJSON(json.RawMessage(t.schema))
-		if err != nil {
-			panic(fmt.Sprintf("answer: tool %s's schema: %v", t.name, err))
-		}
-		set[t.name] = aisdk.Tool{
+// toolSet is the loop's tools as agentloop offers and runs them for req.
+func toolSet(req Request) []agentloop.Tool {
+	set := make([]agentloop.Tool, len(tools))
+	for i, t := range tools {
+		set[i] = agentloop.Tool{
+			Name:        t.name,
 			Description: t.description,
-			InputSchema: input,
-			Execute: func(ctx context.Context, raw json.RawMessage, _ aisdk.ToolExecutionOptions) (json.RawMessage, error) {
-				return json.Marshal(t.run(ctx, l, raw))
-			},
-			ToModelOutput: func(out aisdk.ToolOutputContext) (*provider.ToolResultOutput, error) {
-				return modelOutput(out.Output), nil
+			Schema:      json.RawMessage(t.schema),
+			Run: func(ctx context.Context, call agentloop.ToolCall) (string, bool) {
+				return t.run(ctx, req, call)
 			},
 		}
 	}
 	return set
 }
 
-// ghOutput is what a gh call returned: ghtool.Result as the tool's output.
-type ghOutput struct {
-	Output string `json:"output"`
-	Exit   int    `json:"exit"`
-	Ran    bool   `json:"ran"`
-}
-
-// runGH runs one gh call through the request's GH, numbered after every call before it (the
-// earlier run's included). Calls run one at a time, so their numbers follow the order they ran.
-func runGH(ctx context.Context, l *loop, input json.RawMessage) ghOutput {
-	l.gh.Lock()
-	defer l.gh.Unlock()
-	seq := l.nextSeq
-	l.nextSeq++
-	var call struct {
+// runGH runs one gh call through the request's GH, numbered as agentloop numbered the call: the
+// calls of the run counted on from the last one an earlier run of the question made
+// (Request.Earlier), which is the seq the call is recorded and the gh_calls bound is read
+// against. What the model reads is gh's output, with its exit status when it failed; a call gh
+// never ran, or one that failed, is an error result.
+func runGH(ctx context.Context, req Request, call agentloop.ToolCall) (string, bool) {
+	var input struct {
 		Args json.RawMessage `json:"args"`
 	}
-	args := string(input)
-	if json.Unmarshal(input, &call) == nil && len(call.Args) > 0 {
-		args = string(call.Args)
+	args := string(call.Input)
+	if json.Unmarshal(call.Input, &input) == nil && len(input.Args) > 0 {
+		args = string(input.Args)
 	}
-	result := l.req.GH.Run(ctx, seq, args)
-	return ghOutput{Output: result.Output, Exit: result.Exit, Ran: result.Ran}
-}
-
-// modelOutput is what the model reads of a gh call: gh's output, and its exit status when it
-// failed; an error result when gh failed or never ran.
-func modelOutput(raw json.RawMessage) *provider.ToolResultOutput {
-	var out ghOutput
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return &provider.ToolResultOutput{Type: provider.ToolOutputErrorText, Text: fmt.Sprintf("the tool's output could not be read: %v", err)}
-	}
+	result := req.GH.Run(ctx, call.Index, args)
 	switch {
-	case !out.Ran:
-		return &provider.ToolResultOutput{Type: provider.ToolOutputErrorText, Text: out.Output}
-	case out.Exit != 0:
-		return &provider.ToolResultOutput{Type: provider.ToolOutputErrorText, Text: fmt.Sprintf("%s\n[gh exited %d]", out.Output, out.Exit)}
+	case !result.Ran:
+		return result.Output, true
+	case result.Exit != 0:
+		return fmt.Sprintf("%s\n[gh exited %d]", result.Output, result.Exit), true
 	default:
-		return &provider.ToolResultOutput{Type: provider.ToolOutputText, Text: out.Output}
+		return result.Output, false
 	}
 }

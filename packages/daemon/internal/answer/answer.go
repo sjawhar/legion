@@ -2,36 +2,28 @@
 // running, as that agent, by resuming the agent's own conversation on the model the conversation
 // last ran on, with the loop's tools (the slice in tools.go, holding gh), and returns the agent's
 // reply in its structured form, the turns to append to the conversation, and what the answer
-// cost. It is the only package that imports Grafana's SDK (github.com/grafana/ai-sdk) and the
-// vendor SDKs under it.
+// cost.
 //
-// What the SDK leaves to its caller, the loop sets: the step bound (model_calls) with no tool on
-// the last allowed step; no retry in the SDK or the vendor clients, and one of its own on a 429, a
-// 5xx or a transport error; the provider's base URL from the configuration, never the
-// environment; the provider's key read again for every call; the thinking the conversation ran at;
-// stateless OpenAI reasoning with its encrypted content; the cache marks; and the time bound over
-// the whole answer. A reply cut off, refused, past a bound or not in the form is no answer, with
-// the fault named (Fault).
+// The model calls themselves are agentloop's (github.com/sjawhar/envoy/agentloop), the one model
+// loop the daemon and Dispatch share and the only import of Grafana's SDK: the providers, the
+// retry, the step bound with no tool on the last allowed call, the thinking and reasoning
+// options, the cache marks and the check of the reply against its schema are all its. This
+// package is its caller: it builds the request (the conversation as agentloop's messages, the
+// system prompt, the reply form as the request's Final schema, the gh tool, the bounds and the
+// endpoint `answers.providers` names, whose key is read again for every call), decides the faults
+// that need no model call (no_provider, no_price, unknown_format), maps agentloop's faults onto
+// the daemon's own reasons, and reads the run back as the agent's reply, the turns to append and
+// what the answer cost.
 package answer
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
-	"maps"
-	"net/http"
-	"slices"
 	"strings"
-	"sync"
 
-	anthropicopt "github.com/anthropics/anthropic-sdk-go/option"
-	aisdk "github.com/grafana/ai-sdk"
-	"github.com/grafana/ai-sdk/provider"
-	"github.com/grafana/ai-sdk/providers/anthropic"
-	"github.com/grafana/ai-sdk/providers/openai"
-	openaiopt "github.com/openai/openai-go/v3/option"
+	"github.com/sjawhar/envoy/agentloop"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
@@ -59,6 +51,8 @@ const (
 )
 
 // Fault is why a question got no answer from the model: a bound it passed, or what was wrong.
+// The first six are agentloop's own faults under the daemon's names (faultOf); the last three the
+// daemon decides itself, before any model call.
 type Fault string
 
 const (
@@ -70,10 +64,13 @@ const (
 	Length Fault = "length"
 	// Refusal is a last reply the provider refused or filtered.
 	Refusal Fault = "refusal"
-	// Malformed is a last reply that is not exactly one JSON object of the reply form.
+	// Malformed is a last reply that is not exactly one JSON object of the reply form, or one the
+	// form takes but the daemon's own rules refuse (a kind the message does not offer, a reply
+	// naming no need), or turns no appender could write.
 	Malformed Fault = "malformed"
-	// ProviderError is a model call that failed: an error status after the loop's one retry, a
-	// stream that broke, or a key that could not be read.
+	// ProviderError is a model call that failed: an error status after agentloop's one retry, a
+	// stream that broke, or a key that could not be read; and a request agentloop refused to run
+	// at all, which is the daemon's own bug and is logged with its detail.
 	ProviderError Fault = "provider_error"
 	// NoProvider is a conversation whose model's provider `answers.providers` does not name, or
 	// whose provider API the loop does not call; no model call is made.
@@ -87,9 +84,28 @@ const (
 	UnknownFormat Fault = "unknown_format"
 )
 
+// faultOf is agentloop's fault under the daemon's own name, which is what the controller reads as
+// an agent-question's reason and what the daemon's reply to the asker names.
+func faultOf(fault agentloop.Fault) Fault {
+	switch fault {
+	case agentloop.FaultTime:
+		return AnswerSeconds
+	case agentloop.FaultCalls:
+		return ModelCalls
+	case agentloop.FaultLength:
+		return Length
+	case agentloop.FaultRefusal:
+		return Refusal
+	case agentloop.FaultMalformed:
+		return Malformed
+	default:
+		return ProviderError
+	}
+}
+
 // GH runs one gh call the model makes: its seq among the answer's calls, from 1, and its
 // arguments, a JSON array of strings, gh's arguments without `gh`. The daemon's runs ghtool.Run
-// with the answer's ghtool.Answer and bounds.
+// with the answer's ghtool.Answer and bounds, which refuses a call past the gh_calls bound.
 type GH interface {
 	Run(ctx context.Context, seq int, args string) ghtool.Result
 }
@@ -161,10 +177,11 @@ type Reply struct {
 	CostUSD float64
 }
 
-// The provider APIs the loop calls.
+// The provider APIs the loop calls, as a conversation names them; each is the protocol agentloop
+// speaks to that API.
 const (
-	anthropicMessages = "anthropic-messages"
-	openaiResponses   = "openai-responses"
+	anthropicMessages = string(agentloop.AnthropicMessages)
+	openaiResponses   = string(agentloop.OpenAIResponses)
 )
 
 // Answer answers req's question. Every outcome the question has is a Reply: an answer, the
@@ -213,6 +230,8 @@ func (req Request) validate() error {
 type route struct {
 	provider config.AnswerProvider
 	api      string
+	// kind is the protocol agentloop speaks to that API.
+	kind agentloop.Kind
 	// model is the model's id at its provider ("claude-opus-5-5").
 	model    string
 	endpoint config.AnswerEndpoint
@@ -231,7 +250,9 @@ func routeOf(req Request) (route, Fault, string) {
 	r := route{provider: config.AnswerProvider(name), api: conv.API, model: model}
 	switch {
 	case r.provider == config.AnswerAnthropic && r.api == anthropicMessages:
+		r.kind = agentloop.AnthropicMessages
 	case r.provider == config.AnswerOpenAI && r.api == openaiResponses:
+		r.kind = agentloop.OpenAIResponses
 	default:
 		return route{}, NoProvider, fmt.Sprintf("the loop calls no provider %s on API %q", name, conv.API)
 	}
@@ -247,335 +268,151 @@ func routeOf(req Request) (route, Fault, string) {
 	return r, "", ""
 }
 
-// placeholderKey is the key each vendor client is built with; the loop's transport puts the key
-// it reads for the call in its place on every request.
-const placeholderKey = "read-per-call"
+// agentModel is the route as agentloop's model: its protocol and base URL from
+// `answers.providers`, its token the provider's key read again for every HTTP attempt
+// (config.AnswerCredential.Read, so a rotated key or a minted token is the one each call
+// carries), its effort the level the conversation last ran at, and its price `answers.prices`'.
+func (r route) agentModel(level string) agentloop.Model {
+	return agentloop.Model{
+		Endpoint: agentloop.Endpoint{Kind: r.kind, BaseURL: r.endpoint.BaseURL, Token: r.endpoint.Credential.Read},
+		ID:       r.model,
+		Effort:   level,
+		Price: agentloop.Price{
+			Input: r.price.Input, Output: r.price.Output,
+			CacheWrite: r.price.CacheWrite, CacheRead: r.price.CacheRead,
+		},
+	}
+}
 
 func answer(ctx context.Context, req Request) (Reply, error) {
 	r, fault, detail := routeOf(req)
 	if fault != "" {
 		return Reply{Fault: fault, Detail: detail}, nil
 	}
-	history, err := toProvider(req.Conversation.Messages, r.provider)
+	history, err := toAgentloop(req.Conversation.Messages, r)
 	if err != nil {
 		return Reply{Fault: UnknownFormat, Detail: err.Error()}, nil
 	}
 	question := userMessage(req)
-	messages := append(history, provider.NewUserMessage(provider.TextPart(question)))
-
-	transport := &modelTransport{base: http.DefaultTransport, credential: r.endpoint.Credential, provider: r.provider}
-	client := &http.Client{Transport: transport}
-	var model provider.LanguageModel
-	var options provider.ProviderOption
-	switch r.provider {
-	case config.AnswerAnthropic:
-		markAnthropicHistory(messages, len(history))
-		model = anthropic.New(placeholderKey, r.model, anthropic.WithRequestOptions(
-			anthropicopt.WithHTTPClient(client), anthropicopt.WithMaxRetries(0), anthropicopt.WithBaseURL(r.endpoint.BaseURL)))
-		options = anthropicOptions(req.Conversation.ThinkingLevel)
-	case config.AnswerOpenAI:
-		markOpenAIHistory(messages, len(history))
-		model = openai.NewResponses(placeholderKey, r.model, openai.WithRequestOptions(
-			openaiopt.WithHTTPClient(client), openaiopt.WithMaxRetries(0), openaiopt.WithBaseURL(r.endpoint.BaseURL)))
-		options = openaiOptions(req.Conversation.ThinkingLevel)
-	}
-
-	run := &loop{req: req, route: r, transport: transport, nextSeq: nextSeq(req.Earlier)}
-	answerCtx, cancel := context.WithTimeout(ctx, req.Bounds.Answer)
-	defer cancel()
-	_, genErr := aisdk.GenerateText(answerCtx, model,
-		aisdk.WithSystem(systemPrompt(req)),
-		aisdk.WithModelMessages(messages...),
-		aisdk.WithTools(run.toolSet()),
-		aisdk.WithMaxOutputTokens(req.Bounds.OutputTokens),
-		aisdk.WithStopWhen(aisdk.StepCountIs(req.Bounds.ModelCalls)),
-		aisdk.WithProviderOptions(options),
-		aisdk.WithMaxRetries(0),
-		aisdk.WithPrepareStep(run.prepareStep),
-		aisdk.OnStepFinish(run.stepFinished),
-	)
-	reply := run.reply()
+	result, runErr := agentloop.Run(ctx, agentloop.Request{
+		Model:   r.agentModel(req.Conversation.ThinkingLevel),
+		System:  systemPrompt(req),
+		History: history,
+		Input:   []agentloop.Message{{Role: agentloop.User, Blocks: []agentloop.Block{{Kind: agentloop.TextBlock, Text: question}}}},
+		Tools:   toolSet(req),
+		Bounds: agentloop.Bounds{
+			Time: req.Bounds.Answer, Calls: req.Bounds.ModelCalls, OutputTokens: req.Bounds.OutputTokens,
+		},
+		FirstToolIndex: firstToolIndex(req.Earlier),
+		Final:          finalSchema(req.MayAskNothing),
+	})
+	reply := Reply{Calls: len(result.Steps), Usage: usageOf(result.Usage, r.price), CostUSD: result.Usage.CostUSD}
 	switch {
-	case genErr == nil:
-	case ctx.Err() != nil:
+	case runErr != nil && ctx.Err() != nil:
 		return reply, fmt.Errorf("answer: %w", ctx.Err())
-	case errors.Is(answerCtx.Err(), context.DeadlineExceeded):
-		reply.Fault, reply.Detail = AnswerSeconds, fmt.Sprintf("the answer ran past %s", req.Bounds.Answer)
+	case runErr != nil:
+		reply.Fault, reply.Detail = ProviderError, runErr.Error()
 		return reply, nil
-	default:
-		reply.Fault, reply.Detail = ProviderError, genErr.Error()
+	case result.Fault != "":
+		reply.Fault, reply.Detail = faultOf(result.Fault), result.Detail
 		return reply, nil
 	}
-	run.finish(&reply, question)
+	finish(&reply, req, r, result, question)
 	return reply, nil
 }
 
-// loop is one answer's state across its model calls.
-type loop struct {
-	req       Request
-	route     route
-	transport *modelTransport
-
-	// question is the question message's index in the step's messages, set on the first step.
-	question int
-
-	mu sync.Mutex
-	// steps are the model calls that finished, in order.
-	steps []aisdk.StepResult
-
-	// gh holds one gh call at a time; nextSeq is the seq the next one gets.
-	gh      sync.Mutex
-	nextSeq int
-}
-
-// nextSeq is the seq after the earlier run's last call.
-func nextSeq(earlier []store.AnswerToolCall) int {
-	next := 1
+// firstToolIndex is how many gh calls an earlier run of the question already made, which
+// agentloop numbers this run's calls on from, so a re-run's first call takes the seq after the
+// recorded ones.
+func firstToolIndex(earlier []store.AnswerToolCall) int {
+	first := 0
 	for _, call := range earlier {
-		next = max(next, call.Seq+1)
+		first = max(first, call.Seq)
 	}
-	return next
+	return first
 }
 
-// prepareStep offers no tool on the last allowed step, so the model must reply, and on Anthropic
-// moves the newest message's cache mark: the history's end keeps the one Answer put there, the
-// newest message gets one, and the one an earlier step put on its newest message is taken off
-// (the SDK carries a step's message overrides into later steps; Anthropic allows four marks).
-func (l *loop) prepareStep(state aisdk.PrepareStepState) (*aisdk.PrepareStepResult, error) {
-	result := &aisdk.PrepareStepResult{}
-	if state.StepNumber == l.req.Bounds.ModelCalls-1 {
-		result.ToolChoice = &provider.ToolChoice{Type: provider.ToolChoiceNone}
-	}
-	if l.route.provider != config.AnswerAnthropic || len(state.Messages) == 0 {
-		return result, nil
-	}
-	if state.StepNumber == 0 {
-		l.question = len(state.Messages) - 1
-	}
-	messages := slices.Clone(state.Messages)
-	for i := l.question; i < len(messages); i++ {
-		if _, marked := messages[i].ProviderOptions["anthropic"].(anthropic.AnthropicCacheControl); marked {
-			options := maps.Clone(messages[i].ProviderOptions)
-			delete(options, "anthropic")
-			messages[i].ProviderOptions = options
-		}
-	}
-	last := len(messages) - 1
-	messages[last].ProviderOptions = withCacheMark(messages[last].ProviderOptions)
-	result.Messages = messages
-	return result, nil
-}
-
-// withCacheMark is options with Anthropic's ephemeral cache mark added.
-func withCacheMark(options provider.ProviderOptions) provider.ProviderOptions {
-	marked := maps.Clone(options)
-	if marked == nil {
-		marked = provider.ProviderOptions{}
-	}
-	marked["anthropic"] = anthropic.CacheControl("ephemeral")
-	return marked
-}
-
-func (l *loop) stepFinished(state aisdk.OnStepFinishState) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.steps = append(l.steps, state.StepResult)
-}
-
-// reply is the Reply's usage and cost over every model call that finished.
-func (l *loop) reply() Reply {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	reply := Reply{Calls: len(l.steps)}
-	for _, step := range l.steps {
-		reply.Usage = sum(reply.Usage, priced(step.Usage, l.route.price))
-	}
-	reply.CostUSD = reply.Usage.InputCost + reply.Usage.OutputCost + reply.Usage.CacheReadCost + reply.Usage.CacheWriteCost
-	return reply
-}
-
-// finish reads the last model call's reply into reply: no answer when it was cut off, refused,
-// still calling a tool or not in the form; otherwise the reply and the turns to append.
-func (l *loop) finish(reply *Reply, question string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if len(l.steps) == 0 {
-		reply.Fault, reply.Detail = ProviderError, "the model made no reply"
-		return
-	}
-	last := l.steps[len(l.steps)-1]
-	var natives [][]json.RawMessage
-	if l.route.provider == config.AnswerOpenAI {
-		var err error
-		if natives, err = l.transport.outputItems(len(l.steps)); err != nil {
-			reply.Fault, reply.Detail = ProviderError, err.Error()
-			return
-		}
-		if refused(natives[len(natives)-1]) {
-			reply.Fault, reply.Detail = Refusal, "the last reply is a refusal"
-			return
-		}
-	}
-	switch last.FinishReason.Unified {
-	case provider.FinishReasonLength:
-		reply.Fault, reply.Detail = Length, fmt.Sprintf("the last reply was cut off at %d output tokens", l.req.Bounds.OutputTokens)
-		return
-	case provider.FinishReasonContentFilter:
-		reply.Fault, reply.Detail = Refusal, fmt.Sprintf("the provider stopped the last reply: %s", last.FinishReason.Raw)
-		return
-	case provider.FinishReasonError:
-		reply.Fault, reply.Detail = ProviderError, fmt.Sprintf("the last reply ended in an error: %s", last.FinishReason.Raw)
-		return
-	case provider.FinishReasonToolCalls:
-		reply.Fault, reply.Detail = ModelCalls, fmt.Sprintf("the last of %d model calls still called a tool", l.req.Bounds.ModelCalls)
-		return
-	}
-	form, err := parseReply(last.Text, l.req.MayAskNothing)
+// finish reads the run's last reply into reply: the agent's reply in the form, or no answer when
+// the form's own rules refuse it; and, with it, the turns to append.
+func finish(reply *Reply, req Request, r route, result agentloop.Result, question string) {
+	form, err := parseReply(result.Value, req.MayAskNothing)
 	if err != nil {
-		reply.Fault, reply.Detail = Malformed, fmt.Sprintf("%v: %.500q", err, last.Text)
+		reply.Fault, reply.Detail = Malformed, fmt.Sprintf("%v: %.500q", err, result.Text)
 		return
 	}
 	reply.Kind, reply.Text, reply.Needs = form.kind, form.text, form.needs
 	reply.Append = conversation.Append{
-		QuestionID: l.req.Question.ID, Question: question,
-		Provider: string(l.route.provider), API: l.route.api, Model: l.route.model,
+		QuestionID: req.Question.ID, Question: question,
+		Provider: string(r.provider), API: r.api, Model: r.model,
 	}
-	for i, step := range l.steps {
-		turn := turnOf(step, l.route.price)
-		if natives != nil {
-			turn.Native = natives[i]
-		}
-		reply.Append.Turns = append(reply.Append.Turns, turn)
+	for _, step := range result.Steps {
+		reply.Append.Turns = append(reply.Append.Turns, turnOf(step, r.price))
 	}
 	if err := reply.Append.Validate(); err != nil {
 		*reply = Reply{Calls: reply.Calls, Usage: reply.Usage, CostUSD: reply.CostUSD, Fault: Malformed, Detail: err.Error()}
 	}
 }
 
-// refused is whether a turn's output items hold a refusal.
-func refused(items []json.RawMessage) bool {
-	for _, raw := range items {
-		var item struct {
-			Type    string `json:"type"`
-			Content []struct {
-				Type string `json:"type"`
-			} `json:"content"`
-		}
-		if json.Unmarshal(raw, &item) != nil || item.Type != "message" {
-			continue
-		}
-		for _, part := range item.Content {
-			if part.Type == "refusal" {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// turnOf is a model call as a turn of the append: its thinking (with its signature), redacted
-// thinking, text and tool calls in order, each call's result, and what the call used and cost.
-func turnOf(step aisdk.StepResult, price config.AnswerPrice) conversation.Turn {
-	turn := conversation.Turn{Usage: priced(step.Usage, price)}
-	for _, part := range step.Content {
-		switch part := part.(type) {
-		case aisdk.ReasoningContent:
-			var meta struct {
-				Signature    string  `json:"signature"`
-				RedactedData *string `json:"redactedData"`
-			}
-			if raw, ok := part.ProviderMetadata["anthropic"]; ok {
-				_ = json.Unmarshal(raw, &meta)
-			}
-			if meta.RedactedData != nil {
-				turn.Content = append(turn.Content, conversation.Block{Type: conversation.RedactedThinking, Data: *meta.RedactedData})
+// turnOf is one model call as a turn of the append: its thinking (with its signature), redacted
+// thinking, text and tool calls in order, each call's result, the provider's own output items for
+// a turn that has them (an OpenAI Responses turn, which the appender writes from them), and what
+// the call used and cost.
+func turnOf(step agentloop.Step, price config.AnswerPrice) conversation.Turn {
+	turn := conversation.Turn{Native: step.Native, Usage: usageOf(step.Usage, price)}
+	for _, block := range step.Blocks {
+		switch block.Kind {
+		case agentloop.ThinkingBlock:
+			if block.Redacted != "" {
+				turn.Content = append(turn.Content, conversation.Block{Type: conversation.RedactedThinking, Data: block.Redacted})
 				continue
 			}
-			turn.Content = append(turn.Content, conversation.Block{Type: conversation.Thinking, Text: part.Text, Signature: meta.Signature})
-		case aisdk.TextContent:
-			if part.Text != "" {
-				turn.Content = append(turn.Content, conversation.Block{Type: conversation.Text, Text: part.Text})
+			turn.Content = append(turn.Content, conversation.Block{Type: conversation.Thinking, Text: block.Text, Signature: block.Signature})
+		case agentloop.ReasoningBlock:
+			// An OpenAI reasoning item's id and encrypted content are in the turn's native
+			// items, which the appender writes the turn from; the block keeps its summary.
+			turn.Content = append(turn.Content, conversation.Block{Type: conversation.Thinking, Text: block.Text})
+		case agentloop.TextBlock:
+			if block.Text != "" {
+				turn.Content = append(turn.Content, conversation.Block{Type: conversation.Text, Text: block.Text})
 			}
-		case aisdk.ToolCallContent:
-			turn.Content = append(turn.Content, conversation.Block{Type: conversation.ToolCall, ToolCallID: part.ToolCallID, ToolName: part.ToolName, Arguments: part.Input})
-		case aisdk.ToolResultContent:
-			output := modelOutput(part.Output)
-			turn.Results = append(turn.Results, conversation.Block{
-				Type: conversation.ToolResult, ToolCallID: part.ToolCallID, ToolName: part.ToolName,
-				Content: []conversation.Block{{Type: conversation.Text, Text: output.Text}}, IsError: output.Type == provider.ToolOutputErrorText,
+		case agentloop.ToolCallBlock:
+			turn.Content = append(turn.Content, conversation.Block{
+				Type: conversation.ToolCall, ToolCallID: block.ToolCallID, ToolName: block.Name, Arguments: block.Input,
 			})
-		case aisdk.ToolErrorContent:
+		case agentloop.ToolResultBlock:
 			turn.Results = append(turn.Results, conversation.Block{
-				Type: conversation.ToolResult, ToolCallID: part.ToolCallID, ToolName: part.ToolName,
-				Content: []conversation.Block{{Type: conversation.Text, Text: fmt.Sprint(part.Error)}}, IsError: true,
+				Type: conversation.ToolResult, ToolCallID: block.ToolCallID, ToolName: block.Name,
+				Content: []conversation.Block{{Type: conversation.Text, Text: resultText(block)}}, IsError: block.IsError,
 			})
 		}
 	}
 	return turn
 }
 
-// priced is a model call's usage and its cost at price, USD per million tokens: input not read
-// from the cache, output (reasoning included), cache writes and cache reads.
-func priced(usage provider.Usage, price config.AnswerPrice) conversation.Usage {
-	value := func(n *int) int64 {
-		if n == nil {
-			return 0
-		}
-		return int64(*n)
+// resultText is a tool result's output as one text, which is how the loop's tools answer.
+func resultText(block agentloop.Block) string {
+	if len(block.Content) == 0 {
+		return block.Text
 	}
-	read, write := value(usage.InputTokens.CacheRead), value(usage.InputTokens.CacheWrite)
-	input := value(usage.InputTokens.NoCache)
-	if usage.InputTokens.NoCache == nil {
-		input = max(value(usage.InputTokens.Total)-read-write, 0)
+	texts := make([]string, 0, len(block.Content))
+	for _, part := range block.Content {
+		texts = append(texts, part.Text)
 	}
-	output := value(usage.OutputTokens.Total)
+	return strings.Join(texts, "\n")
+}
+
+// usageOf is agentloop's usage as the conversation's: its token counts, and its cost split by
+// what each count cost at the model's price (USD per million tokens), which is the breakdown the
+// appender writes into the agent's own session beside the turn.
+func usageOf(usage agentloop.Usage, price config.AnswerPrice) conversation.Usage {
 	const perToken = 1e-6
 	return conversation.Usage{
-		InputTokens: input, OutputTokens: output, CacheReadTokens: read, CacheWriteTokens: write,
-		ReasoningTokens: value(usage.OutputTokens.Reasoning),
-		InputCost:       float64(input) * price.Input * perToken,
-		OutputCost:      float64(output) * price.Output * perToken,
-		CacheReadCost:   float64(read) * price.CacheRead * perToken,
-		CacheWriteCost:  float64(write) * price.CacheWrite * perToken,
-	}
-}
-
-func sum(a, b conversation.Usage) conversation.Usage {
-	return conversation.Usage{
-		InputTokens: a.InputTokens + b.InputTokens, OutputTokens: a.OutputTokens + b.OutputTokens,
-		CacheReadTokens: a.CacheReadTokens + b.CacheReadTokens, CacheWriteTokens: a.CacheWriteTokens + b.CacheWriteTokens,
-		ReasoningTokens: a.ReasoningTokens + b.ReasoningTokens,
-		InputCost:       a.InputCost + b.InputCost, OutputCost: a.OutputCost + b.OutputCost,
-		CacheReadCost: a.CacheReadCost + b.CacheReadCost, CacheWriteCost: a.CacheWriteCost + b.CacheWriteCost,
-	}
-}
-
-// anthropicOptions is Anthropic's adaptive thinking with summarized display, at the effort of the
-// conversation's thinking level; thinking off where the conversation ran with it off.
-func anthropicOptions(level string) anthropic.AnthropicOptions {
-	switch level {
-	case "off":
-		return anthropic.AnthropicOptions{Thinking: &anthropic.ThinkingConfig{Type: anthropic.ThinkingDisabled}}
-	case "minimal":
-		level = "low"
-	}
-	return anthropic.AnthropicOptions{
-		Effort:   level,
-		Thinking: &anthropic.ThinkingConfig{Type: anthropic.ThinkingAdaptive, Display: anthropic.ThinkingDisplaySummarized},
-	}
-}
-
-// openaiOptions is a stateless Responses call (store false, the reasoning's encrypted content
-// returned so the next call can carry it) at the reasoning effort of the conversation's thinking
-// level.
-func openaiOptions(level string) openai.OpenAIResponsesOptions {
-	if level == "off" {
-		level = "none"
-	}
-	store := false
-	return openai.OpenAIResponsesOptions{
-		ReasoningEffort: level,
-		Store:           &store,
-		Include:         []string{"reasoning.encrypted_content"},
+		InputTokens: int64(usage.Input), OutputTokens: int64(usage.Output),
+		CacheReadTokens: int64(usage.CacheRead), CacheWriteTokens: int64(usage.CacheWrite),
+		ReasoningTokens: int64(usage.Reasoning),
+		InputCost:       float64(usage.Input) * price.Input * perToken,
+		OutputCost:      float64(usage.Output) * price.Output * perToken,
+		CacheReadCost:   float64(usage.CacheRead) * price.CacheRead * perToken,
+		CacheWriteCost:  float64(usage.CacheWrite) * price.CacheWrite * perToken,
 	}
 }

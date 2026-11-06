@@ -1177,8 +1177,10 @@ stopped agent instead of recording `no live session`, land with their own change
 no question reaches the loop. It runs under either runtime.
 
 The code: `packages/daemon/internal/answerloop` (the question pipeline: intake, classification, one
-writer per conversation, posting, passing on), `internal/answer` (the model loop on Grafana's AI
-SDK for Go, the only package that imports it), `internal/conversation` (`omp` and `claude`: each
+writer per conversation, posting, passing on), `internal/answer` (the model loop, which builds the
+request and reads the reply but makes its model calls through `packages/envoy/agentloop`, the loop
+the daemon and Dispatch share and this repository's only import of Grafana's AI SDK for Go),
+`internal/conversation` (`omp` and `claude`: each
 harness's conversation read as it rebuilds it on resume, and appended to in its own format),
 `internal/ghtool` (the loop's `gh` tool) and `internal/agenthistory` (the record of conversations
 the loop answers from, and its mirror in the Envoy listener's agent registry).

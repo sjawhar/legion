@@ -85,16 +85,6 @@ func (s *standIn) requests() []recorded {
 	return append([]recorded(nil), s.got...)
 }
 
-// decoded is a recorded request's JSON body.
-func (r recorded) decoded(t *testing.T) map[string]any {
-	t.Helper()
-	var body map[string]any
-	if err := json.Unmarshal(r.body, &body); err != nil {
-		t.Fatalf("the request body is no JSON object: %v\n%s", err, r.body)
-	}
-	return body
-}
-
 type sseWriter struct{ bytes.Buffer }
 
 func (w *sseWriter) event(name string, v any) {
