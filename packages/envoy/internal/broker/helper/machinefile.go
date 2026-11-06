@@ -37,6 +37,32 @@ type machineFileJSON struct {
 	RefreshToken string    `json:"refresh_token"`
 }
 
+// decodeKeyDER reads the shape both of this package's files keep a key in: PKCS#8 DER, base64
+// (standard, padded) — machine.json's key, and the records file's Record.Key. It answers
+// whatever kind of key the DER held, so each caller refuses one that is not an ECDSA key in its
+// own words (Record.PrivateKey says so itself; LoadMachineFile leaves it to validate, which
+// names the curve too), and it wraps nothing: the error reaches the caller bare, for the caller
+// to name its own file in.
+func decodeKeyDER(encoded string) (any, error) {
+	der, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, err
+	}
+	return x509.ParsePKCS8PrivateKey(der)
+}
+
+// encodeKeyDER is decodeKeyDER's inverse: key as PKCS#8 DER, base64 (standard, padded). The
+// marshal error reaches the caller bare as well — the machine file's save returns it, and so
+// does encodeKey, whose caller keeps the record it was making without the key and returns the
+// error for the session's own caller to log (Registry.record).
+func encodeKeyDER(key *ecdsa.PrivateKey) (string, error) {
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(der), nil
+}
+
 // LoadMachineFile reads the machine login at path. A file that is not there is an error matching
 // os.ErrNotExist; one whose mode grants its group or anyone else any access, or that this user
 // does not own, is refused, naming path and the fix, since it holds the machine's key and refresh
@@ -67,11 +93,7 @@ func LoadMachineFile(path string) (*MachineFile, error) {
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("machine file %s: data after its one JSON object", path)
 	}
-	der, err := base64.StdEncoding.DecodeString(raw.Key)
-	if err != nil {
-		return nil, fmt.Errorf("machine file %s: key: %w", path, err)
-	}
-	parsed, err := x509.ParsePKCS8PrivateKey(der)
+	parsed, err := decodeKeyDER(raw.Key)
 	if err != nil {
 		return nil, fmt.Errorf("machine file %s: key: %w", path, err)
 	}
@@ -111,12 +133,12 @@ func (f *MachineFile) save(path string, write func(*os.File, []byte) (int, error
 	if err := f.validate(); err != nil {
 		return fmt.Errorf("machine file %s: %w", path, err)
 	}
-	der, err := x509.MarshalPKCS8PrivateKey(f.Key)
+	encoded, err := encodeKeyDER(f.Key)
 	if err != nil {
 		return err
 	}
 	data, err := json.Marshal(machineFileJSON{
-		Key: base64.StdEncoding.EncodeToString(der), CredentialID: f.CredentialID,
+		Key: encoded, CredentialID: f.CredentialID,
 		ExpiresAt: f.ExpiresAt.UTC(), RefreshToken: f.RefreshToken,
 	})
 	if err != nil {

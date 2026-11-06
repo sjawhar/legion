@@ -11,7 +11,8 @@
 # back when that check is deleted, with the missing plan task named only once a plan document
 # exists; the gap an approval request names and the covered spec that earns none; `dispatch
 # plan-approve`, refused on a spec, and `dispatch request-approval`, refused on a plan; and the one
-# request that names a spec and its Verification document together.
+# request that names a spec and its Verification document together; a person's review and the CLI
+# pin the fetched version's UTF-8 bytes, even after the latest version changes.
 #
 # Inputs: DISPATCH_URL (the server), DISPATCH_TOKEN or DISPATCH_TOKEN_FILE (an agent bearer, read
 # here and never printed), PROJECT (an existing project key), and optionally FAKE_GITHUB_PORT (the
@@ -67,7 +68,7 @@ if [[ -n "$fake_github_port" ]]; then
   }
 fi
 readonly dev_login="${DEV_SIGNIN_LOGIN-}"
-require_commands bun curl jq
+require_commands bun curl jq sha256sum cut
 read_bearer
 # No child process inherits the bearer from here: read_bearer has unset it from the environment,
 # curl reads it from a header file, and the CLI gets it in an environment this script builds.
@@ -679,11 +680,44 @@ else
   pass review "$dev_login approved $both's spec, answering the request that named both"
   for document in spec.md verification.md; do
     artifact_id review "$both" "$document"
-    get "/api/v1/artifacts/$artifact/reviews"
+    get "/api/v1/artifacts/$artifact/versions/1"
+    want_status 200 review "$both's $document version 1 answers"
+    jq -j .markdown "$work/body" >"$work/approved-$document"
+    h1="$(sha256sum "$work/approved-$document" | cut -d' ' -f1)"
+    expect review "$document version read names its own bytes" "\"$h1\"" '.sha256'
+    person_send GET "/api/v1/artifacts/$artifact/reviews"
     want_status 200 review "$both's $document reviews answer"
     expect review "$both's $document carries one approved person's review" \
       '[["approved","person",1]]' '[.[] | [.state, .kind, .version]]'
+    expect review "$both's $document review names the sha256 of the bytes approved" \
+      "\"$h1\"" '.[0].content_sha256'
+    expect review "$both's $document review was hashed at approval" '"insert"' '.[0].content_sha256_source'
   done
+
+  artifact_id review "$both" spec.md
+  h1="$(sha256sum "$work/approved-spec.md" | cut -d' ' -f1)"
+  cp "$work/approved-spec.md" "$work/revised-spec.md"
+  printf '\nA new line the person has not approved.\n' >>"$work/revised-spec.md"
+  upload review "$both" spec.md "$work/revised-spec.md"
+  get "/api/v1/artifacts/$artifact/versions/2"
+  want_status 200 review "$both's spec version 2 answers"
+  h2="$(jq -j .markdown "$work/body" | sha256sum | cut -d' ' -f1)"
+  [[ "$h2" != "$h1" ]] || fail review "different version bytes have different hashes" "$h1 = $h2"
+  expect review "version 2 read names its own bytes" "\"$h2\"" '.sha256'
+  person_send GET "/api/v1/artifacts/$artifact/reviews"
+  want_status 200 review "the person's review still answers after the edit"
+  expect review "the review does not follow the latest bytes" "\"$h1\"" '.[0].content_sha256'
+  get "/api/v1/artifacts/$artifact"
+  want_status 200 review "the changed document answers"
+  expect review "an unapproved edit leaves the approval stale" '"stale"' '.approval.state'
+  expect review "the stale approval still names the approved bytes" "\"$h1\"" '.approval.content_sha256'
+  run review "read the approved spec version through the CLI" doc-read --issue "$both" --version 1
+  grep -qF "Content: sha256:$h1" "$work/out" || fail review "the CLI names version 1's bytes" "$(<"$work/out")"
+  grep -qF "content sha256:$h1" "$work/out" || fail review "the CLI names the approval's bytes" "$(<"$work/out")"
+  pass review "the CLI's approved-version content and approval hashes match"
+  run review "read the changed spec version through the CLI" doc-read --issue "$both" --version 2
+  grep -qF "Content: sha256:$h2" "$work/out" || fail review "the CLI names version 2's bytes" "$(<"$work/out")"
+  pass review "the CLI's latest-version content differs from its stale approval"
 
   artifact_id review "$other" spec.md
   person_send POST "/api/v1/artifacts/$artifact/reviews" '{"state":"approved"}'

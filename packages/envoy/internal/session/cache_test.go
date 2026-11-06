@@ -8,6 +8,7 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/kvwatch"
 )
 
 // --- Unit tests (no NATS — operate on a pre-populated cache) ---
@@ -40,18 +41,45 @@ func TestExpiryFor_ZeroTTLNeverExpires(t *testing.T) {
 	}
 }
 
+// followingRegistry opens a registry on the test's own session bucket and waits for its first read
+// to complete, so the copy follows the bucket and its rows expire at their deadlines (expireDue).
+// The bucket is empty, so a test puts rows in the cache itself.
+func followingRegistry(t *testing.T) *SessionRegistry {
+	t.Helper()
+	client := setupNATS(t)
+	r, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(5*time.Minute))
+	if err != nil {
+		t.Fatalf("open session registry: %v", err)
+	}
+	t.Cleanup(r.StopWatch)
+	waitFor(t, 5*time.Second, r.watcher.Following)
+	return r
+}
+
+// hold puts rows in r's cache as a read delivers them (sessionCache.Apply), each at revision 1 and
+// created one ttl before its expiresAt, so the cache computes that expiry for it (expiryFor).
+func hold(t *testing.T, r *SessionRegistry, rows map[string]cachedSession) {
+	t.Helper()
+	r.mu.RLock()
+	ttl := r.ttl
+	r.mu.RUnlock()
+	for sessionID, row := range rows {
+		value, err := json.Marshal(row.entry)
+		if err != nil {
+			t.Fatalf("encode %s: %v", sessionID, err)
+		}
+		sessionCache{r}.Apply(kvwatch.Entry{Key: sessionID, Value: value, Revision: 1, Created: row.expiresAt.Add(-ttl)}, kvwatch.Read{})
+	}
+}
+
 func TestList_ExpiredEntryReadsAbsentAndLeavesAtItsDeadline(t *testing.T) {
 	now := time.Now()
 	updated := now.Add(-6 * time.Minute).UnixMilli()
-	r := &SessionRegistry{
-		ttl: 5 * time.Minute,
-		cache: map[string]cachedSession{
-			"ses_live":    {entry: SessionEntry{Port: 1}, expiresAt: now.Add(time.Minute)},
-			"ses_expired": {entry: SessionEntry{Port: 2, UpdatedAt: updated}, expiresAt: now.Add(-time.Minute)},
-		},
-		cacheRevisions: map[string]uint64{"ses_live": 1, "ses_expired": 2},
-		lastSeen:       map[string]lastSeenSession{},
-	}
+	r := newTestRegistry(5 * time.Minute)
+	hold(t, r, map[string]cachedSession{
+		"ses_live":    {entry: SessionEntry{Port: 1, UpdatedAt: now.UnixMilli()}, expiresAt: now.Add(time.Minute)},
+		"ses_expired": {entry: SessionEntry{Port: 2, UpdatedAt: updated}, expiresAt: now.Add(-time.Minute)},
+	})
 	entries, err := r.List()
 	if err != nil {
 		t.Fatalf("List failed: %v", err)
@@ -59,20 +87,13 @@ func TestList_ExpiredEntryReadsAbsentAndLeavesAtItsDeadline(t *testing.T) {
 	if len(entries) != 1 || entries[0].SessionID != "ses_live" {
 		t.Fatalf("expected only ses_live, got %v", entries)
 	}
-	// A read changes nothing: the expired entry stays cached until its deadline is processed.
-	if r.CacheSize() != 2 {
-		t.Fatalf("cache size after List = %d, want 2", r.CacheSize())
-	}
 	before := r.LastSeen("ses_expired")
 	if before != updated {
 		t.Fatalf("LastSeen before removal = %d, want the expired entry's UpdatedAt %d", before, updated)
 	}
 
-	// The entry went into the cache directly, so nothing scheduled its deadline yet. Schedule it as
-	// cacheSessionLocked does; the expiry timer then removes it with no read.
-	r.mu.Lock()
-	r.scheduleLocked("ses_expired", expireLive, r.cache["ses_expired"].expiresAt)
-	r.mu.Unlock()
+	// The copy schedules each row's deadline as it stores it (storedLocked), so the expiry timer
+	// removes the expired one with no read of any kind.
 	waitForCacheSize(t, r, 1)
 	if after := r.LastSeen("ses_expired"); after != before {
 		t.Fatalf("LastSeen after removal = %d, want %d as before it", after, before)
@@ -85,22 +106,23 @@ func TestList_ExpiredEntryReadsAbsentAndLeavesAtItsDeadline(t *testing.T) {
 func TestGet_ExpiredEntryReadsAbsentAndLeavesAtItsDeadline(t *testing.T) {
 	const ttl = 300 * time.Millisecond
 	r := newTestRegistry(ttl)
-	r.cache["ses_expired"] = cachedSession{entry: SessionEntry{Port: 2}, expiresAt: time.Now().Add(-time.Second)}
+	hold(t, r, map[string]cachedSession{
+		"ses_expired": {entry: SessionEntry{Port: 2}, expiresAt: time.Now().Add(-time.Second)},
+	})
 	if _, err := r.Get("ses_expired"); !errors.Is(err, natsgo.ErrKeyNotFound) {
 		t.Fatalf("expected ErrKeyNotFound for expired entry, got %v", err)
 	}
-	if r.CacheSize() != 1 {
-		t.Fatalf("cache size after Get = %d, want 1: a read removes nothing", r.CacheSize())
-	}
+	// The copy schedules each row's deadline as it stores it (storedLocked), so the expired one
+	// leaves with no read of any kind.
+	waitForCacheSize(t, r, 0)
 
-	// An entry the watcher delivers leaves at its deadline, one TTL after it was written, with no
-	// read; the expired entry nothing scheduled stays.
+	// An entry the watcher delivers leaves at its deadline too, one TTL after it was written.
 	created := time.Now()
 	r.applyWatched(watchedPut(t, "ses_short", 1, created, SessionEntry{Port: 3, UpdatedAt: created.UnixMilli()}))
 	if _, err := r.Get("ses_short"); err != nil {
 		t.Fatalf("Get(ses_short) before its deadline: %v", err)
 	}
-	waitForCacheSize(t, r, 1)
+	waitForCacheSize(t, r, 0)
 	if _, err := r.Get("ses_short"); !errors.Is(err, natsgo.ErrKeyNotFound) {
 		t.Fatalf("Get(ses_short) after its deadline = %v, want ErrKeyNotFound", err)
 	}
@@ -111,12 +133,10 @@ func TestGet_ExpiredEntryReadsAbsentAndLeavesAtItsDeadline(t *testing.T) {
 
 func TestGet_ValidReturnsEntry(t *testing.T) {
 	now := time.Now()
-	r := &SessionRegistry{
-		ttl: 5 * time.Minute,
-		cache: map[string]cachedSession{
-			"ses_ok": {entry: SessionEntry{Port: 99, MachineID: "m1"}, expiresAt: now.Add(time.Minute)},
-		},
-	}
+	r := followingRegistry(t)
+	hold(t, r, map[string]cachedSession{
+		"ses_ok": {entry: SessionEntry{Port: 99, MachineID: "m1"}, expiresAt: now.Add(time.Minute)},
+	})
 	got, err := r.Get("ses_ok")
 	if err != nil {
 		t.Fatalf("Get failed: %v", err)
@@ -156,17 +176,13 @@ func TestExpiredLastSeenReadsZeroAndLeavesAtItsDeadline(t *testing.T) {
 
 func TestLastSeenRetentionDoesNotRestoreLiveSession(t *testing.T) {
 	now := time.Now()
-	r := &SessionRegistry{
-		ttl:            5 * time.Minute,
-		cache:          map[string]cachedSession{},
-		cacheRevisions: map[string]uint64{},
-		lastSeen: map[string]lastSeenSession{
-			"ses_lapsed": {
-				lastSeen:  now.Add(-time.Minute).UnixMilli(),
-				expiresAt: now.Add(time.Minute),
-			},
-		},
+	r := followingRegistry(t)
+	r.mu.Lock()
+	r.lastSeen["ses_lapsed"] = lastSeenSession{
+		lastSeen:  now.Add(-time.Minute).UnixMilli(),
+		expiresAt: now.Add(time.Minute),
 	}
+	r.mu.Unlock()
 
 	if _, err := r.Get("ses_lapsed"); !errors.Is(err, natsgo.ErrKeyNotFound) {
 		t.Fatalf("Get(lapsed) error = %v, want key not found", err)
@@ -182,9 +198,9 @@ func TestLastSeenRetentionDoesNotRestoreLiveSession(t *testing.T) {
 		t.Fatal("last seen timestamp was lost before its retention TTL")
 	}
 
-	r.mu.Lock()
-	r.cacheSessionLocked("ses_lapsed", SessionEntry{Port: 1, UpdatedAt: now.UnixMilli()}, now.Add(time.Minute), 1)
-	r.mu.Unlock()
+	hold(t, r, map[string]cachedSession{
+		"ses_lapsed": {entry: SessionEntry{Port: 1, UpdatedAt: now.UnixMilli()}, expiresAt: now.Add(time.Minute)},
+	})
 	if _, err := r.Get("ses_lapsed"); err != nil {
 		t.Fatalf("Get(reregistered): %v", err)
 	}
@@ -401,19 +417,21 @@ func TestOpenSessionRegistry_PrunesUsingBucketTTL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if reg.ttl != 2*time.Minute {
-		t.Fatalf("expected registry to adopt bucket TTL 2m, got %v", reg.ttl)
+	if ttl := reg.TTL(); ttl != 2*time.Minute {
+		t.Fatalf("expected registry to adopt bucket TTL 2m, got %v", ttl)
 	}
+	// Rows are pruned for their age only once the copy follows the bucket (pruneLocked).
+	waitFor(t, 5*time.Second, reg.watcher.Following)
 	// An entry created 3 minutes ago is past the real 2-minute TTL but still
 	// within the 5-minute default. Pruning against the bucket TTL drops it;
 	// pruning against the default would wrongly keep it live.
 	created := time.Now().Add(-3 * time.Minute)
-	reg.mu.Lock()
-	reg.cache["ses_old"] = cachedSession{
-		entry:     SessionEntry{Port: 1},
-		expiresAt: reg.expiryFor(created, 0),
-	}
-	reg.mu.Unlock()
+	reg.mu.RLock()
+	expiresAt := reg.expiryFor(created, 0)
+	reg.mu.RUnlock()
+	hold(t, reg, map[string]cachedSession{
+		"ses_old": {entry: SessionEntry{Port: 1}, expiresAt: expiresAt},
+	})
 	entries, err := reg.List()
 	if err != nil {
 		t.Fatalf("List: %v", err)

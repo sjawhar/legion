@@ -1,5 +1,343 @@
 # Changelog
 
+This file is history: every entry after the last release below is in the package's GitHub
+releases, one per `legion-envoy-v*` tag.
+
+## [29.17.0] - 2026-11-06
+
+### Added
+
+- `agent-secrets register --session-id <id>` names the session the machine's helper registers. The
+  helper keeps that name across its own restart and a reboot of the box, and states it as the
+  enrollment's `session_id`, so a session a person runs on a machine keeps its grants when it
+  moves box, as a container enrolled with `agent-secrets enroll --helper --session-id` and a
+  Legion role's pod already do.
+
+- The `envoy-infra` `gcp:NatsHub` component's `listener` takes the settings its Envoy listener
+  checks broker tokens with: `agentSecretsUrl`, `agentSecretsAudience` and `publicUrl`, rendered
+  into the hub's cloud-config as `ENVOY_AGENT_SECRETS_URL`, `ENVOY_AGENT_SECRETS_GOOGLE_AUDIENCE`
+  and `ENVOY_PUBLIC_URL`. A hub that sets none renders what it rendered before; a hub that sets
+  some but not all is refused at preview, naming the input it is missing, since the listener
+  refuses a partial set when it boots.
+
+- `github.com/sjawhar/envoy/sessiontiming` is the one public door onto the generated Envoy
+  session-registration timings — `Heartbeat`, `LiveWindow`, `ClaimStale`, `CallTimeout`,
+  `CallRetryDelay` and `CallAttempts` — for a caller in another Go module, which Go's internal
+  rule bars from `internal/contracts`. The listener's own uses read `internal/contracts`
+  directly: `session.LiveWindow`, the window every reader of the session registry judges a
+  record's age against, and `session.ClaimStaleAfter` each read the declaration rather than a
+  literal of their own. No value changed.
+
+### Fixed
+
+- A grant now follows its session to a new box. A grant, the request it is still waiting on a
+  person for, and the names its operator withheld from it belong to a session name under one
+  principal — the person for a box of theirs or their sign-in, the Google account for a machine's
+  own session, the service account for a pod — and the next enrollment of that name under that
+  principal takes them, writing `enrollment.adopted` and one `grant.moved` row per grant to the
+  audit record. Before this, each of them was bound to the enrollment the box made, so a helper
+  restart, a rebuilt machine, a person's second sign-in or a replaced pod lost the grant a person
+  had approved and left an approval given after the move with nothing to grant.
+
+  Ending the box no longer ends what the session holds: an enrollment that names a session,
+  records the principal that session belongs to, and still holds a live grant or a pending
+  request is left dormant, proving nothing, and the new `BROKER_SESSION_CARRY_SECONDS` (43200,
+  12 hours, 0 to 86400; 0 turns the carry off) bounds how long it waits before the broker's sweep
+  revokes it. An enrollment that records no principal can be taken by no later one, so it ends as
+  every end did before the carry, its grants revoked and its pending requests cancelled — among
+  them every enrollment made before the broker recorded principals, which is every enrollment
+  live on the day this ships. An approval given while the box is gone now mints a grant too: the
+  broker hangs it off the row the carry is keeping for that session, and the session's next
+  enrollment takes it with the rest. A person's revoke — of the grant, of the machine login, of
+  the sign-in — stays terminal and takes it at once. A session name another principal holds is
+  refused `403 SESSION_HELD`, and another session on either box is still refused the grant.
+
+- A migration collision is refused with the remedy the set that refused it takes: the next number
+  for a set numbered 1 to N, such as the broker's, and a 14-digit UTC timestamp for a set whose
+  numbered series has closed, such as Dispatch's and the daemon's. The message told every caller
+  to use a timestamp, which the broker's own guard then rejected.
+
+## [29.16.0] - 2026-11-06
+
+### Changed
+
+- The comment delivery audit's two psql runs open one read-only transaction on the command line (`--single-transaction -q -c 'SET TRANSACTION READ ONLY'`) in place of a read-only setting made for the whole session, which a server that pools in transaction mode keeps on the backend after the connection goes back to the pool. The SQL files and the Go code that embeds them are unchanged.
+
+## [29.15.1] - 2026-11-05
+
+### Added
+
+- Every answer that the document socket's handler sends carries `X-Dispatch-Process: <host name>`,
+  the pod's name in production. That includes the `101` upgrade and the handler's `401`, `404` and
+  `503` answers, so a check that opens sockets through a load balancer can record which
+  `envoy-dispatch` process served each one. A host name the process cannot read, or one that holds
+  bytes a header cannot carry, sends no header. The `400` answers sent before that handler carry no
+  header: they refuse a room id or a query parameter that holds U+0000 or bytes that are not UTF-8.
+
+### Changed
+
+- Two people on one Dispatch document, each connected to a different `envoy-dispatch` process on
+  one Postgres, now see each other's edits live. Every durable change notifies `dispatch_doc_head`,
+  and `dispatch_doc_changed` for the earlier build, from the transaction that wrote it. Every other
+  process that holds a room of the document reads the rows its room lacks from `doc_updates` and
+  applies them as one batch. A room stays open while another process writes. The service closes a
+  room, and its browsers reconnect, only in these cases: its stored history is replaced (a rebuild,
+  a prune, a delete, or a compaction that folds rows the room has not taken in yet), its issue
+  closes or reopens, the room fails and its eviction closes it, or the process shuts down with an
+  editor connected. A browser's edit from a room that is behind is stored at the head, and a
+  settlement catches its room up under the document's lock and continues. Editors on two processes
+  who type in turn get one version per burst, and it names the last typist whichever process
+  settles it. Before, another process's write closed the room, and every browser in it
+  reconnected.
+
+  While a process's listener connection redials, its rooms do not catch up. The wait between
+  attempts doubles from 1 s to 30 s, plus up to half again, so one wait can last 45 s. Its reads
+  and appends stay correct meanwhile. During the roll that releases this, processes of the earlier
+  build still close their rooms that fall behind.
+- Cursors and presence cross processes. Each process relays its rooms' awareness on
+  `dispatch_doc_awareness`, at most once per 50 ms per room, and a flush carries every reader who
+  moved within that window, so readers moving at the same moment all reach the other process
+  rather than the last of them. A reader who opens a document second sees the first reader's
+  cursor at once, and a reader who leaves on one process leaves on the other. A room forgets a
+  client it hears nothing from for 30 s, so a cursor relayed from a process that stopped without
+  a word goes away. A document socket may hold at most four awareness clients at once. A browser
+  tab sends its own client first, and then echoes the room's other readers back on the same
+  socket, so the other three places hold echoes. The clients a frame names past the four are
+  dropped before the room applies it, and a dropped echo tells the room nothing it does not hold
+  already. So one tab claiming thousands of client ids neither grows a room's memory, nor shows
+  the document's other readers thousands of cursors, nor fans out into thousands of
+  notifications. A socket's clients go when it does, and a client that leaves gives its entry
+  back at once, so a reader who joins after such a frame is seen on every process at once. A
+  socket whose message names neither a document nor a message type, a three-byte message as much
+  as one that has said nothing by 512 bytes, is closed rather than read on. A room holds about
+  31 MB of its readers' states at most. Its own last-resort bound on client entries is 4,000,
+  derived from the sockets that fill it - every connection a process admits, each holding its
+  four clients, which is what another process's relayed clients passed too - so no reader is
+  ever refused a place in a room, on their own process or another. Processes of the earlier
+  build relay none, and show no other process's cursors.
+- Closing or reopening an issue changes the document rooms of every process of this build, the
+  patching one included, and reopening now does too. Migration `20261101181500`'s trigger notifies
+  `dispatch_issue_open_changed` when `closed_at` changes, whoever wrote it. Each process then closes
+  its rooms of the issue's documents, so their browsers reconnect read-only or editable to match. A
+  browser's append also reads the issue's state in its own transaction. An edit that the room took
+  before the close, or up to 2 s after the close committed, is stored even when its append reaches
+  the database after the close, and is settled when the issue reopens. An edit taken later is
+  refused. A close now stamps `closed_at` again as its last statement before it commits, so the
+  2 s count from the commit. An edit typed while the close runs is stored, however long the close
+  takes to withdraw the issue's asks. The stored `closed_at` is that much later than the one the
+  `issue.closed` event carries. Before, only the process that took the `PATCH` changed its rooms,
+  and only on a close.
+  During the roll that releases this, processes of the earlier build do not listen on the channel,
+  so they do not act on a close or reopen made through this build. Their open rooms of the issue's
+  documents keep the scope their browsers connected with. A document that the close or reopen
+  writes is the exception. A close writes the resolved state of the issue's open asks into the
+  blocks that show them, and a reopen writes them open again. That write moves the document's
+  head, so an earlier-build room of it closes as a room that falls behind, and its browsers
+  reconnect with the scope the issue now allows.
+- An ask block keeps its author when another process settles it, or when the process that saw the
+  edit stops first: the author is stored in `doc_ask_block_authors` (migration `20261101181501`) in
+  the transaction that makes the block durable. Before, a settlement on another process named its
+  own actor.
+- An agent's document write sees the edits a person on another process made before it. Before the
+  write forks, every other member process that holds the document's room stores its room's
+  updates, and an open write's fork follows the stored head. A
+  `409 EDIT_LOST_TO_CONCURRENT_CHANGE` names the people connected on this process and on every
+  member that answered, and the `200`'s `lost_ops` is judged on the document at the stored head.
+  The members are the processes whose listener connection is named
+  `dispatch-listener <process id>` in `pg_stat_activity`. A process asks them on
+  `dispatch_doc_query` and, for each question, waits 500 ms at most for their answers on
+  `dispatch_doc_answer`. A write asks up to three questions, so it can wait up to 1.5 s in all.
+  After each wait it continues, and logs a WARN that names the members that did not answer.
+- A document read is never older than the stored head, nor older than this process's room. A read
+  whose room is behind the head reads the stored document merged with the updates only that room
+  holds - a keystroke whose append is still in flight - and waits for no catch-up, so it answers
+  with both what another process has committed and what the room has already sent its browsers.
+  Before, a read on one process could return a room's text from before another process's write.
+- Rebuild, settlement resumption and the conditional-edit queue hold across processes. A rebuild
+  answers `409 DOCUMENT_LIVE` when this process holds a room of the document, or when another
+  member that answers within 500 ms holds one. Of two rebuilds of one document at once, one
+  answers `409 DOCUMENT_LIVE`. The settlement resumption runs once per minute across the
+  processes, under the lease `settlement-resumption`, not once per process. The cap of 32 queued
+  conditional edits of one document counts the queue of every member
+  (`doc_conditional_edit_queue`, migration `20261101181502`), so the 33rd answers
+  `429 EDIT_QUEUE_FULL` whichever process takes it. Each process first queues a document's
+  conditional edits in memory and admits them one at a time, and the admitted edits take turns. On
+  each process, at most three of a document's conditional edits hold a database connection at
+  once: the edit being admitted, for its short admission transaction, the edit whose turn it is,
+  for its write transaction, and the edit that has just left, which writes this process's count
+  after it hands the turn on. An edit that waits for its admission, or for its turn, holds none.
+  An agent's write to a document that no room holds on its process loads no room there. The
+  write's settlement loads one a settle delay later. One case remains: a room that retires between
+  the write's check for a room and its publish is loaded again by the publish, from a store that
+  holds the write.
+- Each `envoy-dispatch` process opens one more Postgres connection. The lease pool grows from 13
+  to 14 for the settlement resumption. A dedicated NOTIFY connection sends the document rooms'
+  cursors and their questions and answers to the other processes. A document edit's own
+  notifications go out in the transaction that writes it. The process's shared listener
+  connection, which already carried the background loops' wakes, now carries the document rooms'
+  room sync as well and is named `dispatch-listener <process id>`, replacing the stale-room
+  listener. The processes read that name in `pg_stat_activity` to know which processes are
+  members. One process holds up to 95 connections at its ceiling
+  (`store.ConnectionsPerProcess`), up from 94, and `infra/gcp`'s `dispatchConnectionsPerPod` is
+  95 to match.
+- Migrations `20261101181500`–`20261101181502` are additive, and each census answers `0`.
+  `20261101181500` adds a trigger on `issues`, which takes `SHARE ROW EXCLUSIVE` on `issues` for
+  milliseconds: a write to `issues` waits behind it, and a read does not. `20261101181501` creates
+  `doc_ask_block_authors` and `20261101181502` creates `doc_conditional_edit_queue`. Each takes
+  `ACCESS EXCLUSIVE` on its new table and `SHARE ROW EXCLUSIVE` on `artifacts` for its foreign key.
+  The earlier release runs over the new schema unchanged.
+- A document room a process holds is copied once for its reads rather than once per read. A read
+  of a room that has taken no edit yet - the room a settlement loads for an agent's write, or one
+  opened only to be read - copied the whole document under the room's lock and threw the copy
+  away; that copy now becomes the room's rendered copy, which every later read of the room walks
+  and the room's next edit moves, instead of a second document built beside it.
+- The Envoy listener and the held-port wrapper build on Go 1.27.3.
+
+## [29.15.0] - 2026-11-05
+
+### Added
+
+- `DELETE /v1/sessions/<session_id>` takes an `if_not_registered_after` query parameter, a unix
+  timestamp in milliseconds naming the moment the delete belongs to: the registration is removed
+  only while it was last written at or before that moment, under the same compare-and-swap the
+  route's `client_instance_id` condition deletes with, and a request may name both. A deletion
+  that happened answers `200 {"deleted":true}` and one the condition refused
+  `200 {"deleted":false,"reason":…}`, as a conditional delete already answered; a value that is
+  not a positive whole number of milliseconds is a `400` naming the parameter, never a delete.
+  The Legion daemon's clean stop of a role whose agent process is gone carries that moment, so a
+  stop that lands after the daemon relaunched the claim under the same session id leaves the new
+  process's live registration alone. Without either parameter the route is exactly as it was: the
+  registration is removed whoever wrote it, answered 200 with no body.
+- Dispatch no longer reads a session's absence from the listener's list as proof that it ended.
+  The route roster keeps every registered session with its state, so a stalled holder's route
+  reads `holder_unresponsive` rather than `no_holder`, a role route whose holder is unresponsive
+  resolves to that holder and the message is stored for it, and a broadcast still counts it a
+  recipient. A claim take or release is refused while the holder is `live`, or `unresponsive`
+  with its last registration no older than `ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS` (twenty minutes);
+  the refusal names the state and since when, and a person still forces it. The issue read
+  carries `holder_state`, `last_seen` and `takeable_at` beside the claim, never inside the claim
+  itself, which is an event payload and must hold no read-time state. An issue read answers
+  `holder_state: unknown` and never fails while the listener is unreachable or refilling, where a
+  claim write still refuses `ENVOY_UNAVAILABLE`.
+- An Envoy session is now `live`, `unresponsive` or `gone`, judged by how long ago its
+  registration record was written rather than by whether the listener's cache holds it. A session
+  that has not registered since the live window (`ENVOY_SESSION_LIVE_WINDOW`, five minutes) is
+  `unresponsive`, and stays so until the gone horizon (`ENVOY_SESSION_GONE_HORIZON`, one hour).
+  An unresponsive session is not a dead one: nothing a lookup, a publish, a role-lane delivery or
+  a reaper pass does releases its role claim, a send to it is accepted and stored with
+  `recipient_state: unresponsive`, topic fan-out skips it with a status of its own rather than a
+  failure, and its interests are kept. The listener's role routes, its role lane and Dispatch's
+  outbox resolve a holder through one package (`internal/roles`) that writes nothing to the role
+  bucket, so a role-routed event whose holder is unresponsive stays pending for that session to
+  answer rather than being published with nothing sent. Only the role-claim reaper releases a
+  claim, and only once the holder is `gone`. Every list, lookup and refusal carries `state` and
+  `last_seen`, a role
+  lookup answers `holder_state` and `claim_released`, a publish answers `holder_state` for the
+  role it reached and lists under `unresponsive` each topic recipient whose copy was stored
+  without waiting for a receipt, and `GET /v1/sessions` and
+  `GET /v1/registry/<id>` take `include=unresponsive`; without it an unresponsive session is not
+  answered for, and the 404 keeps the `no live session <id>` prefix it had, saying in its own
+  text when this listener remembers no registration to name. A session reaper
+  deletes a record past the gone horizon at exactly the revision its pass judged, so a
+  registration that lands between the decision and the delete survives, and counts the messages
+  stored on the session's subject after its last registration — bounded, and not a count of
+  unread messages, since the listener keeps no read receipt. The bucket's maximum age is
+  `ENVOY_SESSION_MAX_AGE`, reported in `/healthz` as `session_max_age` and re-read on each reaper
+  pass, so a change made by another process reaches a running listener with no restart.
+  A publish to a role whose claim has lapsed is refused `404 holder_lapsed` with nothing kept,
+  where 29.4.0 answered `202` with `kept_reason: holder_lapsed`: the claim stands, so a copy kept
+  for it would wait for a claim that never comes, and the sender publishes again once the holder
+  reads `live`. Dispatch's outbox does keep a role-routed event for a holder past the gone
+  horizon, whose claim the role-claim reaper releases, so the session that claims the role next is
+  handed it.
+
+### Changed
+
+- A role-routed event Dispatch's outbox holds because its holder stopped answering is counted
+  and logged as the wait it is. It has a counter of its own,
+  `envoy_dispatch_outbox_role_forwards_held_total`, labelled with the state its holder was in
+  (`unresponsive`, `undated` for a holder nothing dates, `unresolved` for a read that did not
+  answer), where it used to be a `holder` reason of
+  `envoy_dispatch_outbox_publish_failures_total`, and its event's back-off is logged at INFO
+  (`dispatch outbox: event waits for its role's holder`, naming the holder and its state)
+  rather than at ERROR. Nothing was sent and nothing failed: the holder keeps its claim and the
+  event is retried until that session answers, so an operator can alert on publish failures
+  without being paged for an agent that stopped typing. An event that reaches the dead-letter
+  threshold still logs at ERROR, and an event held by one holder while another destination
+  really failed is still a failure.
+
+### Fixed
+
+- Dispatch judges a role route's holder by the session windows its own deployment sets,
+  `ENVOY_SESSION_LIVE_WINDOW` and `ENVOY_SESSION_GONE_HORIZON`, read with the listener's rules:
+  their compiled defaults when unset, a warning and the default for a value no Go duration can
+  be read from, and a refusal to start for one that is not positive. It used to judge every
+  holder by the compiled windows alone, so an operator who raised a listener's gone horizon —
+  the answer to a stall longer than an hour — left Dispatch calling a holder gone whose role
+  that listener still kept: the event was marked published with nothing sent and reached its
+  holder never. Give every listener of a deployment and Dispatch's server the same two values.
+- A listener no longer serves a short agent list while it is reading its bucket again. Each KV
+  cache now follows its bucket by reading the whole bucket and sweeping at the end of the read,
+  so a row stays listed until a complete read gives evidence that the bucket no longer holds it,
+  and a row renewed mid-read is kept. While a copy cannot be stood behind — before its first
+  complete read, or once a re-read has been outstanding longer than its bound —
+  `GET /v1/sessions` and `GET /v1/interests/` answer `503` with `Retry-After` and the code
+  `refilling` instead of a partial list, and `envoy_active_sessions` publishes no sample at all
+  rather than a low one. Dispatch shows that state as refilling in every view that reads the
+  list, and never turns a list it could not read into an absent agent.
+- The role claim reaper runs on a period of its own, `ENVOY_ROLE_CLAIM_REAP_INTERVAL`, instead of
+  a fixed five minutes no operator could move. Its default is those same five minutes, so a
+  deployment keeps the release it had: a session whose record the bucket expires reads `gone` as
+  surely as one past the gone horizon, and the session bucket ships with a five-minute maximum
+  age, so judging claims every minute — the session reaper's period — would have taken a merely
+  stalled holder's role up to five times sooner than before. The session reaper keeps
+  `ENVOY_SESSION_REAP_INTERVAL`, a minute by default, and the startup line that resolves the
+  session windows now reports both periods. A restored claim's grace is measured from the
+  listener's start against the live window, not counted in passes, so no period changes it.
+
+## [29.14.0] - 2026-11-05
+
+### Changed
+
+- Dispatch holds a body block by block rather than as a whole: each block of a comment, comment
+  edit, message, broadcast or delivery reply to `contracts.DispatchBlockUnits` and a body to
+  `contracts.DispatchItemBlocks` blocks, each refusal naming the block that passed the bound,
+  and an ask's question and its options together to `contracts.DispatchEventBodyMax` wherever
+  the ask is written, a document's decision block included. `GET /api/v1/limits` publishes every
+  bound. An event carries at most `contracts.DispatchEventBodyMax` of a body and says
+  `body_truncated` when it carried a part. An envelope NATS refuses as too large goes out as a
+  stand-in on the same topic, under the same event id, carrying the payload's short top-level
+  fields and `payload_omitted: true`, so a reader learns which event it is and reads the item
+  itself where it learnt nothing before. Meaning search embeds windows of
+  neighbouring blocks (`document_block`, `comment_block`, `message_block` and `ask_part`, each
+  row carrying `covers`) rather than one vector per item cut at 32,000 runes, so a passage at
+  the end of a long document is found, and a hit names the block that matched. A local harness
+  embeds with no model service under `DISPATCH_DEV_EMBEDDER=1`, beside dev sign-in alone.
+
+## [29.12.0] - 2026-11-05
+
+### Added
+
+- Reviews retain the SHA-256 of the stored UTF-8 version they approved, with insert or backfill provenance. Startup fills legacy reviews without changing approval decisions, and review, approval, event and document-version reads expose the hashes.
+
+### Changed
+
+- Dispatch's document server runs on sjawhar/ygo v1.55.1-sami.2. A keystroke no longer scans
+  every distinct missing client in the waiting queue. Default document UUIDs use two allocations
+  instead of eight. Room closure cannot evict a room while an apply writes it, failed joins
+  reclaim eligible rooms, and cancelled applies can stop waiting for a room load. The library
+  also offers context-aware room closure; Dispatch retains its existing close wrapper. Logical
+  content lengths and splice offsets use uint64 without changing the wire format; Dispatch
+  needs no consumer API adaptation. Cloning a document with emptied waiting-queue slots no
+  longer panics, protecting current Dispatch's warm write forks. Three repeated library
+  microbenchmark slowdowns remain, but their percentages do not measure whole-update cost.
+
+## [29.11.0] - 2026-11-05
+
+### Added
+
+- Envoy records a CI check run or check suite that names no pull request under pull request n when its check suite's head branch is `refs/pull/<n>/head`, and Dispatch reconciles each open pull request's head with GitHub every 5 minutes, recording every completed check run and check suite the listener's record of that head lacks. One new setting, `DISPATCH_REVIEWER_APP_ID`, the review App's id, which the pass checks a `tester` or `architect` check run against.
+
 ## [29.9.0] - 2026-11-05
 
 ### Added
