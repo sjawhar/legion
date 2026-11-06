@@ -626,8 +626,8 @@ jobs:
               - '.github/actions/pull-test-images/**'
               # The fold-check step renders every fragment of every package
               # .github/changelog-packages lists, each with its own changie configuration;
-              # release-push.test.sh's shipped-config fold-notes case copies pi-legion's
-              # configuration and renders it (its line 1883).
+              # release-push.test.sh's "Case: fold-notes renders a package with the shipped
+              # packages/pi-legion/.changie.yaml" copies that configuration and renders it.
               - '.github/changelog-packages'
               - 'packages/*/.changie.yaml'
               - 'packages/*/.changes/unreleased/**'

@@ -88,10 +88,12 @@
 # fragment renamed with git mv or named with a glob character keeps the release
 # that first shipped it. Stdout holds the `notes=` line alone, which each build
 # job appends to $GITHUB_OUTPUT. An entry that is no .yaml file is refused by
-# name, by fold-notes and `fold-check` alike. The `fold-check` cases render the
+# name, by fold-notes and `fold-check` alike, and `fold-check` with no changie
+# on PATH refuses once, naming the tool. The `fold-check` cases render the
 # shipped packages/pi-legion/.changie.yaml's own fragments and a kind it does
 # not list, which it names with what changie said. The cases that render print
-# a SKIP line where changie is not on PATH; the refusals above need none.
+# a SKIP line where changie is not on PATH; the refusals above need none, and
+# run with a stub changie that fails if anything reaches it.
 #
 # Run from anywhere: .github/scripts/release-push.test.sh
 # CI runs it in ci.yaml's test job.
@@ -1779,12 +1781,22 @@ printf 'not a fragment\n' > "$rt/packages/two/$u/README.md"
 git -C "$rt" add -A
 git -C "$rt" commit -q -m "feat: odd entries"
 refuse_notes="$work/fold-refuse.md"
+# A changie that fails if it is ever run, first on PATH for the refusals below: neither command
+# reaches changie to make them, and fold-check looks for one before it reads anything, so the
+# cases say the same thing whether or not the real changie is installed.
+mkdir -p "$work/stub-bin"
+cat > "$work/stub-bin/changie" <<'STUB'
+#!/usr/bin/env bash
+echo "the stub changie was run" >&2
+exit 1
+STUB
+chmod +x "$work/stub-bin/changie"
 # refuse_run <command> <arg>...: runs that command of the script under test in the refusal
-# repository; leaves rc, out and err.
+# repository, with the stub changie on PATH; leaves rc, out and err.
 refuse_run() {
   rm -f "$refuse_notes"
   set +e
-  out=$(cd "$rt" && "$release_push" "$@" 2>"$work/fold-refuse.err")
+  out=$(cd "$rt" && PATH="$work/stub-bin:$PATH" "$release_push" "$@" 2>"$work/fold-refuse.err")
   rc=$?
   set -e
   err=$(<"$work/fold-refuse.err")
@@ -1806,6 +1818,19 @@ check "fold-notes: that refusal says to move or rename a fragment in one commit 
 refuse_run fold-check
 check "fold-check: no package directory is refused" \
   "$(is "$rc|$out|$(contains "$err" '^::error::release-push\.sh fold-check: no package directory given')" "1||true")"
+
+# fold-check without changie: one refusal naming the tool, where rendering each fragment to find
+# the refusals would report every one of them refused with `changie: command not found` inside
+# the message. The command refuses before it runs anything, so an empty PATH costs it nothing;
+# $BASH runs the script, which its `/usr/bin/env bash` could not find there.
+mkdir -p "$work/no-tools"
+set +e
+out=$(cd "$rt" && env PATH="$work/no-tools" "$BASH" "$release_push" fold-check packages/sub 2>&1)
+rc=$?
+set -e
+check "fold-check: with no changie on PATH it refuses once, naming the tool and how to install it" \
+  "$(is "$rc|$(grep -c '^::error::' <<<"$out")|$(contains "$out" '^::error::release-push\.sh fold-check: changie is not on PATH,.*install-changie')" "1|1|true")"
+check "fold-check: that refusal names no fragment" "$(is "$(contains "$out" 'INFRA-1-fine')" false)"
 
 # The rendering cases need the real changie, which the release build jobs install with
 # .github/actions/install-changie. Without it on PATH they are skipped, not counted.

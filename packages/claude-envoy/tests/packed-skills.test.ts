@@ -35,21 +35,23 @@ async function ran(command: string[], cwd: string): Promise<Run> {
 }
 
 let scratch = ""
-/** The packed package: the committed package.json and prepack, the eight links as the checkout
- *  holds them, and a skills/ of the repository's own, so the pack under test is the release's. */
+/** The packed package, as <scratch>/packed/…/claude-envoy: what the release's pack runs over. */
 let packageCopy = ""
 let tarball = ""
 let skillNames: string[] = []
 
-beforeAll(async () => {
-  scratch = await mkdtemp(join(tmpdir(), "claude-envoy-packed-skills-"))
-  // The pack runs in a copy, never in the checkout: the prepack writes into skills/, and jj
-  // records whatever a test writes into the working copy. The copy keeps the layout the links
-  // need — <repository>/packages/claude-envoy — with the repository's own skills/ behind the
-  // links, so what they resolve to is what a release packs.
-  packageCopy = join(scratch, "repository", "packages", "claude-envoy")
-  await mkdir(join(packageCopy, "scripts"), { recursive: true })
-  await symlink(join(repoRoot, "skills"), join(scratch, "repository", "skills"))
+/** A copy of this package at <scratch>/<name>/repository/packages/claude-envoy: the committed
+ *  package.json and prepack, the eight links as the checkout holds them, and a skills/ of the
+ *  repository's own, so a pack over it is the release's.
+ *
+ *  A pack runs in a copy, never in the checkout: the prepack writes into skills/, and jj records
+ *  whatever a test writes into the working copy. The copy keeps the layout the links need —
+ *  <repository>/packages/claude-envoy — with the repository's own skills/ behind them, so what
+ *  they resolve to is what a release packs. */
+async function copyPackage(name: string): Promise<string> {
+  const copy = join(scratch, name, "repository", "packages", "claude-envoy")
+  await mkdir(join(copy, "scripts"), { recursive: true })
+  await symlink(join(repoRoot, "skills"), join(scratch, name, "repository", "skills"))
   // The committed manifest, its `files` and its prepack as they are, less the devDependencies:
   // a pack outside the workspace cannot resolve their `workspace:*`, and nothing about them
   // decides what is packed.
@@ -58,16 +60,34 @@ beforeAll(async () => {
     unknown
   >
   delete manifest["devDependencies"]
-  await Bun.write(join(packageCopy, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`)
-  await cp(
-    join(packageRoot, "scripts", "pack-skills.sh"),
-    join(packageCopy, "scripts", "pack-skills.sh"),
-  )
-  await mkdir(join(packageCopy, "skills"))
-  skillNames = (await readdir(join(packageRoot, "skills"))).sort()
-  for (const name of skillNames) {
-    await symlink(join("..", "..", "..", "skills", name), join(packageCopy, "skills", name))
+  await Bun.write(join(copy, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`)
+  await cp(join(packageRoot, "scripts", "pack-skills.sh"), join(copy, "scripts", "pack-skills.sh"))
+  await mkdir(join(copy, "skills"))
+  for (const skill of skillNames) {
+    await symlink(join("..", "..", "..", "skills", skill), join(copy, "skills", skill))
   }
+  return copy
+}
+
+/** Every entry of <copy>/skills by name, each with what it links to, and null where it is no
+ *  link but the directory a prepack staged. */
+async function links(copy: string): Promise<Record<string, string | null>> {
+  const found: Record<string, string | null> = {}
+  for (const name of (await readdir(join(copy, "skills"))).sort()) {
+    found[name] = await readlink(join(copy, "skills", name)).catch(() => null)
+  }
+  return found
+}
+
+/** What every entry of a checkout's skills/ links to: the tracked links, as they stand there. */
+function tracked(): Record<string, string> {
+  return Object.fromEntries(skillNames.map((name) => [name, `../../../skills/${name}`]))
+}
+
+beforeAll(async () => {
+  scratch = await mkdtemp(join(tmpdir(), "claude-envoy-packed-skills-"))
+  skillNames = (await readdir(join(packageRoot, "skills"))).sort()
+  packageCopy = await copyPackage("packed")
   await ran([process.execPath, "pm", "pack"], packageCopy)
   const packed = (await readdir(packageCopy)).filter((entry) => entry.endsWith(".tgz"))
   expect(packed).toHaveLength(1)
@@ -78,7 +98,7 @@ afterAll(async () => {
   await rm(scratch, { recursive: true, force: true })
 })
 
-/** The tarball's members, and its listing with each member's type in the first column. */
+/** The tarball's members, one name a line. */
 async function members(tar: string): Promise<string[]> {
   const listed = await ran(["tar", "-tzf", tar], scratch)
   return listed.stdout.split("\n").filter((line) => line.length > 0)
@@ -91,24 +111,19 @@ async function packDirectory(name: string): Promise<string> {
   return tar
 }
 
+// What the check below cannot make of a tarball on its own: that every one of the links the
+// package tracks is in it. The check reads the tarball's own members, and a pack that resolved
+// none of them would carry no skills/<name> for it to find fault with.
 test("the pack resolves every skills link into the skill's own files", async () => {
   expect(skillNames).toContain("dispatch-first")
   const packed = await members(tarball)
   expect(skillNames.filter((name) => !packed.includes(`package/skills/${name}/SKILL.md`))).toEqual(
     [],
   )
-  const listing = await ran(["tar", "-tvzf", tarball], scratch)
-  const links = listing.stdout.split("\n").filter((line) => /^[lh]/.test(line))
-  expect(links).toEqual([])
 })
 
 test("the pack puts the links back, leaving the package as it found it", async () => {
-  const entries = (await readdir(join(packageCopy, "skills"))).sort()
-  expect(entries).toEqual(skillNames)
-  const targets = await Promise.all(
-    entries.map((name) => readlink(join(packageCopy, "skills", name))),
-  )
-  expect(targets).toEqual(skillNames.map((name) => `../../../skills/${name}`))
+  expect(await links(packageCopy)).toEqual(tracked())
 })
 
 test("the check passes a tarball the pack made, naming what it carries", async () => {
@@ -146,4 +161,36 @@ test("the check refuses a skill packed without its SKILL.md", async () => {
   const result = await run(["bash", checkScript, await packDirectory("half-staged")], scratch)
   expect(result.exitCode).toBe(1)
   expect(result.stderr).toContain("packs package/skills/envoy with no SKILL.md")
+})
+
+// The two ways a pack can stop with the links already swapped. The links are tracked files, so
+// what the prepack leaves behind is what the working copy holds: jj's next command would record
+// eight deleted links and eight copied skill trees.
+test("a prepack refused by one entry leaves every link as it found it", async () => {
+  const copy = await copyPackage("wrong-target")
+  // The last name, so the entries before it are the ones a loop that swapped as it checked would
+  // have left staged.
+  const last = skillNames[skillNames.length - 1] as string
+  await rm(join(copy, "skills", last))
+  await symlink(join("..", "..", "..", "skills", "nowhere"), join(copy, "skills", last))
+  const packed = await run([process.execPath, "pm", "pack"], copy)
+  expect(packed.exitCode).not.toBe(0)
+  expect(packed.stderr).toContain(`skills/${last} points at ../../../skills/nowhere`)
+  expect(await links(copy)).toEqual({ ...tracked(), [last]: "../../../skills/nowhere" })
+})
+
+test("a pack that fails after its prepack is repaired by --restore, which the refusal names", async () => {
+  const copy = await copyPackage("pack-fails")
+  // A destination that is a file, not a directory: bun runs the prepack, then fails writing the
+  // tarball, and runs no postpack — which is what leaves the staged directories behind.
+  const destination = join(scratch, "pack-fails-destination")
+  await Bun.write(destination, "")
+  const packed = await run([process.execPath, "pm", "pack", "--destination", destination], copy)
+  expect(packed.exitCode).not.toBe(0)
+  expect(await links(copy)).toEqual(Object.fromEntries(skillNames.map((name) => [name, null])))
+  const again = await run(["bash", join(copy, "scripts", "pack-skills.sh")], copy)
+  expect(again.exitCode).toBe(1)
+  expect(again.stderr).toContain("bash scripts/pack-skills.sh --restore")
+  await ran(["bash", join(copy, "scripts", "pack-skills.sh"), "--restore"], copy)
+  expect(await links(copy)).toEqual(tracked())
 })

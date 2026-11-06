@@ -52,12 +52,12 @@
 #    38822866387, the first on the build/publish split: its `if:` read legion_build's outputs
 #    behind an implicit `success()` that envoy_plugin_publish, four jobs upstream, had already
 #    made false.
-# 6. A job with a step whose `run:` calls `.github/scripts/release-push.sh` has an
+# 6. A job with a step whose `run:` calls `release-push.sh`, at any path or none, has an
 #    `actions/checkout` before that step. The script is in the checkout and nowhere else, so
 #    without one the step exits 127 and the job carries on: that is what left every legion
 #    release's "## Worker image" section unwritten until release.yaml's worker_image_release,
-#    a job that checked nothing out, got its checkout. Only the first such step of a job is
-#    named, since a checkout before it is a checkout before every later one.
+#    a job that checked nothing out, got its checkout. It is read in rule 3's walk of the steps,
+#    which is where a step learns whether a checkout came before it.
 #
 # "Runs dependency code" is a tripwire over named patterns, not a proof that no other code runs: a
 # step runs dependency code when its `uses:` starts with one of DEPENDENCY_USES, when the shell its
@@ -387,6 +387,13 @@ def command_of(words: list[str]) -> list[list[str]]:
     return command_of(words)
 
 
+def is_release_push(command: str) -> bool:
+    """Whether the command word runs release-push.sh: its name after what a path relative to the
+    checkout sheds, so `.github/scripts/release-push.sh`, `./release-push.sh` and a bare
+    `release-push.sh` all read as the one script. Rules 3 and 6 and dependency_command ask it."""
+    return PATH_PREFIX.sub("", command).rsplit("/", 1)[-1] == "release-push.sh"
+
+
 def dependency_command(words: list[str]) -> str | None:
     """How the message names the command when it is dependency code (`'bun'`, `'npm ci'`, `'docker
     container run'`, `'npm publish' without a tarball right after it (…)`), else None."""
@@ -414,7 +421,7 @@ def dependency_command(words: list[str]) -> str | None:
             return f"'docker {rest[0]} {rest[1]}'"
         return None
     path = PATH_PREFIX.sub("", command)
-    if path.rsplit("/", 1)[-1] == "release-push.sh" and words[1:2] == ["fold-notes"]:
+    if is_release_push(command) and words[1:2] == ["fold-notes"]:
         return f"'{command} fold-notes' (it runs changie)"
     if DEPENDENCY_PATH.search(path) and path != RELEASE_PUSH:
         return f"'{command}'"
@@ -562,51 +569,45 @@ def check_job(
         if (found := dependency_code(step, job, workflow))
     ]
 
-    # 3. Every checkout leaves no token behind, whatever the job holds.
+    # 3. Every checkout leaves no token behind, whatever the job holds, and 6. release-push.sh
+    # is in the checkout, so a checkout comes before the step that runs it. One walk of the
+    # steps, since what rule 6 asks of a step is which checkouts came before it. For rule 6 only
+    # the steps the tokeniser reads are looked at: another shell's body is not its to parse.
+    checked_out = False
     for index, step in enumerate(steps):
         uses = step.get("uses")
-        if not (isinstance(uses, str) and uses.lower().startswith("actions/checkout@")):
+        if isinstance(uses, str) and uses.lower().startswith("actions/checkout@"):
+            checked_out = True
+            with_ = step.get("with")
+            if isinstance(with_, Mapping) and "persist-credentials" in with_:
+                value = with_["persist-credentials"]
+                if value is False:
+                    continue
+                line = with_.lines.get("persist-credentials", line_of(step, job_line))
+                found = f"found {json.dumps(value)}"
+                if isinstance(value, str):
+                    found += ", a string"
+            else:
+                line = line_of(step, job_line)
+                found = "it is not set"
+            problem(
+                path, line,
+                f"job '{name}' {describe(step, index)} must set 'persist-credentials: false', the "
+                f"boolean, so no token is left in the checkout ({found})",
+            )
             continue
-        with_ = step.get("with")
-        if isinstance(with_, Mapping) and "persist-credentials" in with_:
-            value = with_["persist-credentials"]
-            if value is False:
-                continue
-            line = with_.lines.get("persist-credentials", line_of(step, job_line))
-            found = f"found {json.dumps(value)}"
-            if isinstance(value, str):
-                found += ", a string"
-        else:
-            line = line_of(step, job_line)
-            found = "it is not set"
-        problem(
-            path, line,
-            f"job '{name}' {describe(step, index)} must set 'persist-credentials: false', the "
-            f"boolean, so no token is left in the checkout ({found})",
-        )
-
-    # 6. release-push.sh is in the checkout, so a checkout comes before the step that runs it.
-    # Only steps the tokeniser reads are looked at: another shell's body is not its to parse.
-    checkouts = [
-        index
-        for index, step in enumerate(steps)
-        if isinstance(step.get("uses"), str)
-        and step["uses"].lower().startswith("actions/checkout@")
-    ]
-    for index, step in enumerate(steps):
         run = step.get("run")
-        if not isinstance(run, str) or shell_of(step, job, workflow)[0] not in SHELLS:
+        if checked_out or not isinstance(run, str):
             continue
-        if not any(PATH_PREFIX.sub("", words[0]) == RELEASE_PUSH for words in commands_of(run)):
+        if shell_of(step, job, workflow)[0] not in SHELLS:
             continue
-        if not any(checkout < index for checkout in checkouts):
+        if any(is_release_push(words[0]) for words in commands_of(run)):
             problem(
                 path, line_of(step, job_line),
                 f"job '{name}' {describe(step, index)} runs {RELEASE_PUSH}, but no "
                 f"actions/checkout before it puts the script in the workspace, so the step would "
                 f"exit 127 and the job would carry on",
             )
-        break
 
     if scopes or key_sites:
         credentialed_jobs += 1

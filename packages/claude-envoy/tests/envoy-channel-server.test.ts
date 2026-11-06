@@ -414,7 +414,7 @@ test("the committed manifests declare no version the release would have to bump;
   // release.yaml's claude_envoy_build writes the release's version into the manifest it packs,
   // and the committed one declares none — a string committed here would hold every install at it
   // until someone changed it, and the release writes it anyway. The marketplace entry declares
-  // none either, so the npm source fetches `latest`.
+  // none either, so an install takes the newest release the source's range allows.
   expect(plugin).not.toHaveProperty("version")
   expect(marketplaceEntries).toHaveLength(1)
   expect(marketplaceEntries[0]).not.toHaveProperty("version")
@@ -422,12 +422,21 @@ test("the committed manifests declare no version the release would have to bump;
   expect(MCP_SERVER_INFO).toEqual({ name: "envoy", version: pkg.version })
 })
 
-test("the marketplace entry installs the plugin from npm, by this package's own name", () => {
+test("the marketplace entry installs the plugin from npm, by name, above the placeholder", () => {
   // release.yaml's claude_envoy_build packs this package and its publish job uploads that tarball
-  // to npm, so the registry name is package.json's own, read here rather than written twice. With
-  // no version in the entry, the user's npm client fetches `latest`, which is the newest release.
+  // to npm, so the registry name is package.json's own, read here rather than written twice. The
+  // range leaves out 0.0.0, the placeholder a person published so that trusted publishing could
+  // attach to the package at all: npm's `latest` is that placeholder until the first release, and
+  // it holds no plugin, so an install before then must fail by name rather than install nothing.
+  // 1.0.0 is what the version step computes for the first release (release-bump.sh over
+  // CLAUDE_ENVOY_VERSION_ARGS from the placeholder's 0.0.0), so the range admits every release
+  // and nothing else.
   expect(marketplaceEntries).toHaveLength(1)
-  expect(marketplaceEntries[0]?.source).toEqual({ source: "npm", package: pkg.name })
+  expect(marketplaceEntries[0]?.source).toEqual({
+    source: "npm",
+    package: pkg.name,
+    version: ">=1.0.0",
+  })
 })
 
 test("the Oh My Pi manifest declares no MCP server", () => {

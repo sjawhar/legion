@@ -450,7 +450,7 @@ GATES = [
         (".github/actions/install-uv/**", at("test", "./.github/actions/install-uv")),
         (f"{DAEMON}/docker/worker.Dockerfile", ".github/actions/install-uv/action.yml:16-17 ARG UV_VERSION/UV_SHA256"),
         (".github/actions/install-changie/**", at("test", "./.github/actions/install-changie")),
-        ("packages/pi-legion/.changie.yaml", ".github/scripts/release-push.test.sh:1883 copies it"),
+        ("packages/pi-legion/.changie.yaml", ".github/scripts/release-push.test.sh's \"Case: fold-notes renders a package with the shipped packages/pi-legion/.changie.yaml\" copies it"),
         (".github/changelog-packages", f"{at('test', FOLD_CHECK_STEP)}: the step reads it as the package list"),
         ("packages/*/.changie.yaml", f"{at('test', FOLD_CHECK_STEP)}: fold-check renders each listed package's fragments with that package's own changie configuration"),
         ("packages/*/.changes/unreleased/**", f"{at('test', FOLD_CHECK_STEP)}: fold-check renders every fragment a listed package holds"),

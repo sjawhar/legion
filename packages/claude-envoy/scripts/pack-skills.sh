@@ -17,6 +17,13 @@
 # rather than deleting them, and the list of skills is read off the links rather than written out
 # a second time here.
 #
+# The links are tracked, so a prepack that stops halfway is a working copy with deleted links and
+# copied directories in their place, which the next pack refuses: every entry is checked before
+# any of them is swapped, and a trap puts back every link this run swapped on any exit. The trap
+# is disarmed where the swap loop finishes, since the pack that follows a prepack needs the real
+# directories; from there the postpack is what puts the links back, and where no postpack runs —
+# bun runs none when the pack itself fails — `--restore` puts them back by hand.
+#
 # npm and bun both run these with the package root as the working directory, as that script's
 # header says, so the package is $PWD and the repository $PWD/../..:
 #
@@ -29,6 +36,17 @@ me=pack-skills
 refuse() {
   echo "$me: $*" >&2
   exit 1
+}
+
+# link_back <name>...: make each skills/<name> the tracked link again, whatever is there now.
+# Each link is rebuilt from the name alone, so a restore needs nothing a prepack left behind and
+# a postpack that runs without a prepack writes the same links the checkout already holds.
+link_back() {
+  local name
+  for name in "$@"; do
+    rm -rf "skills/$name"
+    ln -s "../../../skills/$name" "skills/$name"
+  done
 }
 
 restore=false
@@ -45,22 +63,37 @@ repo_skills=$(cd ../../skills && pwd -P)
 shopt -s nullglob
 entries=(skills/*)
 [ ${#entries[@]} -gt 0 ] || refuse "skills/ is empty; the links in it are what this package ships"
-
+names=()
 for entry in "${entries[@]}"; do
-  name=${entry#skills/}
-  if $restore; then
-    # Rebuilt from the name alone, so postpack needs nothing prepack left behind and a postpack
-    # that runs without a prepack writes the same link the checkout already holds.
-    rm -rf "$entry"
-    ln -s "../../../skills/$name" "$entry"
-    continue
-  fi
-  [ -L "$entry" ] || refuse \
-    "skills/$name is not a link; an earlier pack staged it and its postpack never put the link back"
-  target=$(readlink "$entry")
+  names+=("${entry#skills/}")
+done
+
+if $restore; then
+  link_back "${names[@]}"
+  exit 0
+fi
+
+# Every entry's three conditions, all of them before the first swap below: a refusal on a later
+# entry would otherwise leave the entries before it staged as copied directories.
+for name in "${names[@]}"; do
+  [ -L "skills/$name" ] || refuse \
+    "skills/$name is not a link; an earlier pack staged it and its postpack never put the link back: bash scripts/pack-skills.sh --restore puts the links back"
+  target=$(readlink "skills/$name")
   [ "$target" = "../../../skills/$name" ] || refuse \
     "skills/$name points at $target, not ../../../skills/$name: this package ships the repository's skills"
   [ -d "$repo_skills/$name" ] || refuse "skills/$name names no directory under $repo_skills"
-  rm "$entry"
-  cp -R "$repo_skills/$name" "$entry"
 done
+
+# The swap, under a trap that puts back every link it has replaced. What is left to fail here is
+# the filesystem rather than an entry, and a failure between the first swap and the last would
+# leave tracked links as copied directories. The trap is disarmed the moment the loop finishes,
+# and nowhere earlier: the pack this prepack runs for needs the real directories, and the
+# postpack puts the links back after it.
+swapped=()
+trap '[ ${#swapped[@]} -eq 0 ] || link_back "${swapped[@]}"' EXIT
+for name in "${names[@]}"; do
+  rm "skills/$name"
+  swapped+=("$name")
+  cp -R "$repo_skills/$name" "skills/$name"
+done
+trap - EXIT

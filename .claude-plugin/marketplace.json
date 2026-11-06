@@ -9,7 +9,8 @@
       "name": "claude-envoy",
       "source": {
         "source": "npm",
-        "package": "@sjawhar/claude-envoy"
+        "package": "@sjawhar/claude-envoy",
+        "version": ">=1.0.0"
       },
       "description": "Delivers Envoy NATS notifications into Claude Code."
     }

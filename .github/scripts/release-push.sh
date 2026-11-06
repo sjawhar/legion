@@ -252,7 +252,9 @@
 #            release's build job, and through the publish job's pair check the
 #            legion release and the image attestation, on every run until a
 #            fix merges. The fragments and their refusals are fold-notes', and
-#            each <package-dir> is one of fold-orphans'. ci.yaml's test job
+#            each <package-dir> is one of fold-orphans'. changie is what
+#            renders them, so the command looks for it before anything else
+#            and refuses naming it where it is not on PATH. ci.yaml's test job
 #            runs it over .github/changelog-packages, beside the changie its
 #            release-push.test.sh cases need.
 set -euo pipefail
@@ -530,6 +532,11 @@ first_added() {
 # call given one reads it literally.
 package_dir_re='^[A-Za-z0-9_-][A-Za-z0-9._-]*(/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$'
 
+# A tag prefix, which `version` and fold-notes both take. It names the tags to
+# list and becomes part of the tag a release is given, so it is letters,
+# digits, '.', '_' and '-' and nothing else.
+tag_prefix_re='^[A-Za-z0-9._-]+$'
+
 # check_package_dirs <package-dir>...: fail unless at least one <package-dir>
 # is given and each is a relative path of letters, digits, '.', '_' and '-'.
 check_package_dirs() {
@@ -679,14 +686,13 @@ case "$command" in
       fail_error "usage: release-push.sh pair-version <tag-prefix> [<released version>]"
     prefix=$2
     released=${3:-}
-    # The version the caller says this run released, which wins. A value that
-    # is not X.Y.Z is refused rather than falling through to the newest tag:
-    # the caller means a release it just made, and the fall-through would link
-    # the previous plugin with no word said.
-    if [ -n "$released" ] && ! is_plain_version "$released"; then
-      fail_error "the released version $(quote_all "$released") is not X.Y.Z, each field a number without leading zeros; refusing it"
-    fi
     if [ -n "$released" ]; then
+      # The version the caller says this run released, which wins. A value
+      # that is not X.Y.Z is refused rather than falling through to the newest
+      # tag: the caller means a release it just made, and the fall-through
+      # would link the previous plugin with no word said.
+      is_plain_version "$released" ||
+        fail_error "the released version $(quote_all "$released") is not X.Y.Z, each field a number without leading zeros; refusing it"
       printf '%s\n' "$released"
     else
       # A package that released nothing in the run hands over nothing, and
@@ -709,8 +715,7 @@ case "$command" in
     fi
     prefix=$1
     shift
-    # The prefix names the tags to list and becomes part of the tag printed.
-    if ! [[ $prefix =~ ^[A-Za-z0-9._-]+$ ]]; then
+    if ! [[ $prefix =~ $tag_prefix_re ]]; then
       echo "::error::release-push.sh version: tag prefix $(quote_all "$prefix") holds more than letters, digits, '.', '_' and '-'; refusing it" >&2
       exit 2
     fi
@@ -1016,7 +1021,7 @@ case "$command" in
     is_plain_version "$version" ||
       fail_error "the release version $(quote_all "$version") is not X.Y.Z, each field a number without leading zeros; refusing it"
     check_package_dirs "$dir"
-    [[ $prefix =~ ^[A-Za-z0-9._-]+$ ]] ||
+    [[ $prefix =~ $tag_prefix_re ]] ||
       fail_error "tag prefix $(quote_all "$prefix") holds more than letters, digits, '.', '_' and '-'; refusing it"
     fragments_of "$dir"
     group_commits "$prefix" "$version"
@@ -1054,6 +1059,11 @@ case "$command" in
     ;;
   fold-check)
     shift
+    # Every fragment below is rendered with changie, so a missing changie is
+    # one refusal naming it: rendering without it would report each fragment
+    # refused, with `changie: command not found` inside the message.
+    command -v changie >/dev/null ||
+      fail_error "changie is not on PATH, and this command renders every fragment with it; .github/actions/install-changie installs the version the packages' .changie.yaml files are written for"
     check_package_dirs "$@"
     refused=()
     for dir in "$@"; do
