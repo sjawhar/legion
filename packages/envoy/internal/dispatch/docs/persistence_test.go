@@ -16,12 +16,25 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
+// TestMain runs the package's tests and then reports the services they left alive
+// (service_leak_test.go): the memory a test that never shuts its service down holds for the rest
+// of the binary's run. A service still alive fails the run - the exit code stays storetest.Main's
+// when that is already non-zero, and becomes non-zero when the tests passed and a service is
+// still alive. The fix such a run asks for is a t.Cleanup on the test the report names, shutting
+// down the service that test built.
+//
 // The package runs at go test's own parallelism, one test per core, and not above it: a document
 // test waits on Postgres and on its own rooms, and those waits are work a core is doing
 // elsewhere, not idle time. Eight at once on a two-core machine was measured at three times the
 // package's elapsed, with tests failing their own deadlines under the contention
 // (dispatch://INFRA-1075).
-func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
+func TestMain(m *testing.M) {
+	code := storetest.Main(m)
+	if reportLeakedServices() && code == 0 {
+		code = 1
+	}
+	os.Exit(code)
+}
 
 func createDocument(t *testing.T, database *store.Store, markdown string) string {
 	t.Helper()

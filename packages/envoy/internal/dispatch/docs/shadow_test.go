@@ -1,13 +1,18 @@
 package docs
 
 import (
+	"context"
 	"errors"
+	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/reearth/ygo/crdt"
 
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // residentShadow is the shadow room's current state holds, nil for none.
@@ -16,6 +21,109 @@ func residentShadow(service *Service, room string) *roomShadow {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	return state.shadow
+}
+
+// retypeBlockID is a browser edit that writes id as the block id of the paragraph whose text is
+// find: a change the document's markdown does not carry, so the room's update observer measures
+// it as no content change (updateChangesMarkdown) and records the peers connected for the room's
+// shadow instead (unchangedCredit).
+func retypeBlockID(find, id string) func(*pmdoc.Node) *pmdoc.Node {
+	return func(tree *pmdoc.Node) *pmdoc.Node {
+		pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
+			if node.Type != "paragraph" || pmdoc.TextContent(node) != find {
+				return true
+			}
+			if node.Attrs == nil {
+				node.Attrs = pmdoc.Attrs{}
+			}
+			node.Attrs[pmdoc.BlockIDAttr] = id
+			return true
+		})
+		return tree
+	}
+}
+
+// storedContentChanges is, in version order, whether each of the document's stored updates was
+// stored as a change to its content.
+func storedContentChanges(t *testing.T, database *store.Store, artifactID string) []bool {
+	t.Helper()
+	rows, err := database.Pool.Query(context.Background(), `
+		select content_changed from doc_updates where artifact_id = $1 order by version
+	`, artifactID)
+	if err != nil {
+		t.Fatalf("read the stored updates' classes: %v", err)
+	}
+	defer rows.Close()
+	var changes []bool
+	for rows.Next() {
+		var changed bool
+		if err := rows.Scan(&changed); err != nil {
+			t.Fatalf("read a stored update's class: %v", err)
+		}
+		changes = append(changes, changed)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the stored updates' classes: %v", err)
+	}
+	return changes
+}
+
+// A flush measures its classes once it has let the state's lock go, so the shadow it copied the
+// window of can be dropped and released under it (closeShadow, when the write's publish returns;
+// reachShadow, when the publish reached another instance). A measure on the document that drop
+// let go of renders nothing and counts every class a content change, which would store an update
+// the room measured as no change as one - with the peers connected as the room took it written as
+// its pending authors. Bob retypes a block's id while the agent's write is open: the room measures
+// no change and records those peers for the shadow (unchangedCredit), and the flush of that update
+// drops and releases the shadow between its window copy and its measure (beforeFlushMeasure). The
+// update is stored as the room measured it, and credits nobody.
+func TestAFlushStoresTheRoomsOwnClassWhenTheShadowIsReleasedUnderIt(t *testing.T) {
+	service, artifactID := storedOrderService(t)
+	if residentShadow(service, artifactID) != nil {
+		t.Fatal("a shadow is resident before the write under test, so the drop below is not its")
+	}
+	service.addConnection(artifactID, 1, storedOrderBob)
+	defer service.removeConnection(artifactID, 1)
+	service.afterForkRead = onFirst(artifactID, func() {
+		editAsPeer(t, service, artifactID, retypeBlockID("Second.", "bob-retyped-second"))
+	})
+	defer func() { service.afterForkRead = nil }()
+	var released atomic.Int64
+	service.beforeFlushMeasure = func(room string) {
+		if room != artifactID {
+			return
+		}
+		state := service.room(artifactID)
+		state.mu.Lock()
+		dropped := state.shadow
+		state.shadow = nil
+		service.unlockState(artifactID, state)
+		if dropped != nil {
+			released.Add(1)
+			dropped.release()
+		}
+	}
+	defer func() { service.beforeFlushMeasure = nil }()
+
+	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{
+		{Op: "replace", Find: "First.", With: "First, agent."},
+	}, storedOrderAgent, nil); err != nil {
+		t.Fatalf("the agent's edit: %v", err)
+	}
+	report := assertStoredOrder(t, service, artifactID)
+	if released.Load() == 0 {
+		t.Fatal("no flush measured a class while a shadow was resident, so nothing here is tested")
+	}
+	if report.UpdatesChecked < 2 {
+		t.Fatalf("the stored history holds %d updates to check, want the agent's and Bob's", report.UpdatesChecked)
+	}
+	changes := storedContentChanges(t, service.store, artifactID)
+	if last := changes[len(changes)-1]; last {
+		t.Errorf("Bob's update, which the room measured as no change, is stored as a content change: the stored classes are %v", changes)
+	}
+	if authors := pendingAuthorRows(t, service.store, artifactID); slices.Contains(authors, storedOrderBob) {
+		t.Errorf("the document's pending authors are %v, want Bob uncredited: his update changed no content", authors)
+	}
 }
 
 // A live write leaves its room a shadow at its commit, and the room frees it once nothing it
