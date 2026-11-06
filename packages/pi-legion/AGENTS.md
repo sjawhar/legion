@@ -508,8 +508,9 @@ the same three (`CHECK_ROLE_MISMATCH`, `CHECK_WAKE_REQUIRED`, `CHECK_WAKE_UNEXPE
 also answers a phase completion carrying a `wake_at`) beside
 `CHECK_NOT_OPEN`, `CHECK_LOOK_NOT_OPEN` and `CHECK_VERDICT_REQUIRED`. Which of the two a call is,
 is the daemon's to say, from the caller's own live assignment: a session working a look reports
-on that look, and every other session's completion is its phase's
-(`packages/daemon/internal/api/handoff.go`). The daemon reads the named record back from Dispatch
+on that look, and every other session's completion is its phase's, which it refuses on a `done`
+issue, whose phases are over, with `CHECK_LOOK_NOT_SERVED` — report when the look's own task
+reaches the session (`packages/daemon/internal/api/handoff.go`). The daemon reads the named record back from Dispatch
 and refuses, recording nothing, a completion that names no record (`HANDOFF_RECORD_REQUIRED`), a
 record Dispatch does not have (`HANDOFF_RECORD_NOT_FOUND`), a read Dispatch did not answer
 (`DISPATCH_READ_FAILED`), a record of another issue, phase or version (`HANDOFF_RECORD_MISMATCH`),

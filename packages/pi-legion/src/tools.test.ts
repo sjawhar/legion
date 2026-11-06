@@ -1122,7 +1122,7 @@ test("a report on its closed issue's production check carries a verdict and no c
   // The implementer's completion on a done issue carries what a check report carries whatever the
   // record shows: once the check closed, or when none opened, no commit is looked up and the
   // report is posted as given, for the daemon to answer (api/handoff.go): CHECK_NOT_OPEN for a
-  // session working a look, and the phase path's refusal for one that works none.
+  // session working a look, and CHECK_LOOK_NOT_SERVED for one that works none.
   const { calls: closedCalls, daemon: closedDaemon } = recordingDaemon({
     state: { issues: { "LEGION-208": { key: "LEGION-208", phase: "done" } } },
   });

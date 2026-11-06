@@ -1315,6 +1315,17 @@ test("the release records are read with the claim credential in the body", () =>
   expect(
     LegionReleaseRecordsRequest.safeParse({ ...request, since: "yesterday" }).success
   ).toBeFalse();
+  // The session sends `since`, and the daemon decodes it with Go's `time.Parse(time.RFC3339, …)`,
+  // which refuses a time with no seconds: the field is a `LegionInstant`, so the plugin refuses
+  // the same string by the field's name rather than taking the daemon's generic invalid-body
+  // answer for it.
+  expect(
+    LegionReleaseRecordsRequest.safeParse({ ...request, since: "2026-11-01T12:00Z" }).success
+  ).toBeFalse();
+  expect(
+    LegionReleaseRecordsRequest.safeParse({ ...request, since: "2026-11-01T12:00:00.5+02:00" })
+      .success
+  ).toBeTrue();
   expect(
     LegionReleaseRecordsRequest.safeParse({ ...request, sessionId: "ses" }).success
   ).toBeFalse();

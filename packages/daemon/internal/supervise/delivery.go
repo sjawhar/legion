@@ -495,9 +495,11 @@ func (m *Machine) phaseHolds(ctx context.Context, d Delivery) (bool, error) {
 // generation, no assignment and no look, a resume and a production check's look no assignment,
 // and a phase task no look, and each leaves what the claim is serving alone. Every retire of a
 // confirmed task of a run writes the row, the second task of one run included: the write is
-// unconditional on the value, not a diff. Which value each takes is serving's own rule, read here
-// for a delivery whose turn ran, so what the claim is left serving cannot drift from what
-// ServingRun, ServingAssignment and ServingCheck answered while that delivery was pending.
+// unconditional on the value, not a diff. Which value each takes is the claim's own accessors,
+// read here off the claim this delivery is still pending on, so what the claim is left serving
+// is by construction what ServingRun, ServingAssignment and ServingCheck answered while that
+// delivery was pending — including the look, whose fallback reads the run and the assignment
+// this write is about to replace (Claim.servedAnything).
 //
 // The claim goes with the delete, in the store's one transaction, and is durable there rather
 // than left for the claim's next write: the wait that follows can be hours long — a tester on CI,
@@ -508,9 +510,8 @@ func (m *Machine) retirePending(ctx context.Context) error {
 	p := m.claim.Pending
 	retired := m.stored()
 	if !p.ConfirmedAt.IsZero() {
-		retired.ServingGeneration = serving(p, deliveredRun, retired.ServingGeneration)
-		retired.ServingAssignmentID = serving(p, deliveredAssignment, retired.ServingAssignmentID)
-		retired.ServingCheckLook = servedCheck(p, retired.ServingCheckLook)
+		retired.ServingGeneration, retired.ServingAssignmentID, retired.ServingCheckLook =
+			m.claim.ServingRun(), m.claim.ServingAssignment(), m.claim.ServingCheck()
 	}
 	// The deaths were charged against this task, so they end with it, in the same write.
 	retired.Budgets.Deaths = 0

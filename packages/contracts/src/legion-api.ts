@@ -25,7 +25,8 @@ const timestamp = z.iso.datetime({ offset: true });
  * refuses a few strings that decode takes (`+24:00`, a comma before the fraction). `timestamp`
  * above takes `2026-11-06T10:00Z`, which that decode rejects, so a plugin that validated a request
  * field against it would send a body the daemon answers with its generic invalid-body error rather
- * than the field's own guidance. The plugin's `wake_at` reads this same schema
+ * than the field's own guidance. The plugin reads this same schema for both fields a session
+ * sends — `wake_at` and `read_release_records`' `since`
  * (`packages/pi-shared/src/legion-phase-ops.ts`). Only a field a session sends reads it: every
  * other field here is the daemon's own output, which Go always writes with seconds. */
 export const LegionInstant = timestamp.regex(
@@ -689,11 +690,13 @@ const legionHoldRecord = z.object({
  * an issue pod, which holds its claim credential and no operator token, so the claim secret
  * authenticates it as `claims/ready` is authenticated — and it is a POST rather than a GET with a
  * query because that secret is a credential, which a URL carries into every proxy and access log
- * between the pod and the daemon. */
+ * between the pod and the daemon. `since` is a `LegionInstant`, not a `timestamp`: the session
+ * sends it, the daemon decodes it with `time.Parse(time.RFC3339, …)`
+ * (`internal/api/claims.go`), which refuses a time with no seconds, and so does this. */
 export const LegionReleaseRecordsRequest = z.strictObject({
   claimToken: nonEmptyString,
   secret: nonEmptyString,
-  since: timestamp,
+  since: LegionInstant,
 });
 
 export type LegionReleaseRecordsRequestBody = z.output<typeof LegionReleaseRecordsRequest>;

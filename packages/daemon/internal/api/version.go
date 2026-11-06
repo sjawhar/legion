@@ -557,7 +557,9 @@ package api
 // and a report by a role the check does not record is refused (`CHECK_ROLE_MISMATCH`). Which of
 // the two a `handoff_complete` is, is the caller's own live assignment: a session whose task is a
 // look of its issue's production check reports on that look, and every other session's completion
-// is its phase's. The settings body loses its `projects.<KEY>.deploys` block, with every
+// is its phase's. A completion of a `done` issue, which runs no phase, from a session working no
+// look is neither, and is refused `CHECK_LOOK_NOT_SERVED` rather than being read as a phase
+// completion missing its commit. The settings body loses its `projects.<KEY>.deploys` block, with every
 // path by which the daemon guessed that production carried a merge; a plugin reads the settings
 // loosely, so that loss alone changes no strictly parsed shape. A 49 plugin's strict reader
 // refuses a state whose check views carry `role`, and its `handoff_complete` sends no `wakeAt`,

@@ -1067,11 +1067,18 @@ func TestACheckReportNamingAWakeWhereNoLookFollowsIsRefused(t *testing.T) {
 // issue. Another role's report is refused CHECK_ROLE_MISMATCH, naming both roles, with nothing
 // recorded and the record unchanged, and the same look's report from the check's own role is
 // taken.
+//
+// The implementer holds its look by the one path that reaches this refusal: a start row queued
+// before start rows carried the check instance, whose zero instance names no check
+// (record.ProductionCheck.NamedBy), so the look is not refused as a replaced check's and the
+// role is what catches it. Every look this daemon starts is the check's own role's and names
+// its instance (workflow's startLook).
 func TestACheckReportFromAnotherRoleIsRefusedAndTheChecksOwnRolesIsRecorded(t *testing.T) {
 	h, facts := newHandoffHarness(t, newHandoffGitHub(t), nil, nil)
 	seedIssueAt(t, h, "LEGION-208", phase.Done)
 	seedCheck(t, h, "LEGION-208", claim.RoleTester, false, false)
-	implementer := newCheckLookClaim(t, h, "LEGION-208", claim.RoleImplementer, 2)
+	implementer := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
+	implementer.worksLook(t, 2, time.Time{})
 	tester := newCheckLookClaim(t, h, "LEGION-208", claim.RoleTester, 2)
 	before := recordedCheck(t, h, "LEGION-208")
 

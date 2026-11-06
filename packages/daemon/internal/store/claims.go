@@ -470,17 +470,13 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		c.Enrollment = &supervise.Enrollment{ID: *enrollmentID, Incarnation: *enrollmentIC}
 	}
 	if deliveryID != nil {
-		look := supervise.CheckLook{OpenedAt: orZero(deliveryCheckOpened)}
-		if deliveryCheckLook != nil {
-			look.Look = *deliveryCheckLook
-		}
 		c.Pending = &supervise.Delivery{
 			ID:          *deliveryID,
 			Task:        *task,
 			Phase:       phase.Phase(*deliveryPhase),
 			Generation:  uint64(orZeroInt(deliveryGeneration)),
 			Assignment:  *deliveryAssignment,
-			CheckLook:   look,
+			CheckLook:   supervise.CheckLook{Look: *deliveryCheckLook, OpenedAt: orZero(deliveryCheckOpened)},
 			QueuedAt:    *queuedAt,
 			DeliveredAt: orZero(delivered),
 			MarkedBy:    *markedBy,

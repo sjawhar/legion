@@ -80,7 +80,8 @@ type HandoffCompleteResponse struct {
 // role's verdict rule, the wake no phase carries (CHECK_WAKE_UNEXPECTED), the run and the
 // assignment its claim serves, the implementer's in implementing to an open pull request on its
 // branch or a merged one recorded (implementationPullRequest), and the engine refuses one of a
-// phase its role does not run (HANDOFF_NOT_CURRENT_PHASE).
+// phase its role does not run (HANDOFF_NOT_CURRENT_PHASE). A completion of a done issue, which
+// runs no phase, by a session working no look is neither of the two: CHECK_LOOK_NOT_SERVED.
 func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	var req HandoffCompleteRequest
 	if !s.readBody(w, r, &req, s.redeemIdentityCheck) || !requireFailureFields(w, field{"grantId", req.GrantID}, field{"summary", req.Summary}) {
@@ -126,13 +127,23 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	// the assignment that confirmation left.
 	c := machine.Claim()
 	// A completion is a check report when the caller's own live assignment is a look of its
-	// issue's production check, and a phase completion otherwise. The look is the claim's, not the
-	// issue's phase: under `production_check: tester` a merged close spares the tester's claim and
-	// opens a look behind its running testing turn, and that turn's verdict — pass or fail, which
-	// a check report also names — would otherwise be recorded as a report on production nobody
-	// made.
+	// issue's production check (the doc above), and a phase completion otherwise.
 	if look := c.ServingCheck(); look.Look > 0 {
 		s.checkReport(w, r, grant, position.check, look, req)
+		return
+	}
+	// A done issue runs no phase, so a completion from a session working no look of its
+	// production check is neither of the two, and the cause is named here rather than left to
+	// the phase path below: that path holds an implementer's and a merger's completion to a
+	// commit (MISSING_FIELD), which the plugin's done branch never sends, since it sends what a
+	// check report sends (pi-shared's legion-phase-ops.ts, completeHandoff). A late implementer
+	// or merger turn after the close lands here, and so does a look a restart of the daemon left
+	// unrecorded on its claim. Nothing of this call is recorded either way, so the answer is the
+	// whole of it, and it says what the agent does instead: the look's own task.
+	if issue.Phase == phase.Done {
+		writeFailure(w, http.StatusConflict, "CHECK_LOOK_NOT_SERVED", fmt.Sprintf(
+			"%s is done: no phase of it is open, and this session works no look of its production check. This completion reports on nothing and recorded nothing. Report in the turn of a look's own task, which names the look and asks for a verdict of pass, pending or fail.",
+			grant.Issue))
 		return
 	}
 	if (grant.Role == claim.RoleImplementer || grant.Role == claim.RoleMerger) && !requireFailureFields(w, field{"commit", req.Commit}) {
@@ -503,7 +514,14 @@ func (s *server) implementationPullRequest(w http.ResponseWriter, r *http.Reques
 //   - CHECK_ROLE_MISMATCH: the grant is not the check's own role (record.ProductionCheck.Role,
 //     the role the check opened with). The API is the only layer that holds the caller's role —
 //     intake.CheckReport carries a claim token, not a role — so this is the one place that can
-//     hold a report to the role the check records.
+//     hold a report to the role the check records. What it guards is one path: a start row
+//     queued before start rows carried the check instance (record.SuperviseRequest.CheckOpenedAt,
+//     written by workflow's startLook), whose zero instance NamedBy takes for whatever check the
+//     issue holds now. That row's look is the earlier check's, worked by the role that check
+//     opened with, and the check open now — a later merge's, under a project whose
+//     `production_check` names another role — records the other. Every look the running daemon
+//     starts is the check's own role's (startLook starts check.Role) and names its instance, so
+//     the two checks above answer every other claim that holds a look of another role.
 //   - CHECK_VERDICT_REQUIRED: the verdict is not one of pass, pending or fail.
 //   - CHECK_WAKE_REQUIRED: a pending on a look that is not the check's last (Last) names no
 //     wakeAt. The checking agent names its own next look, and nothing else would start one.
