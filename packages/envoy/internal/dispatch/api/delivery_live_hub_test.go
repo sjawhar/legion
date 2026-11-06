@@ -850,13 +850,35 @@ func TestResumeWithRevsGetsOnlyWhatChanged(t *testing.T) {
 	requireLandsOnGET(t, handler, deliveryLiveTimeline, snapshot.Body, delta, "")
 }
 
+// The hub's cursor decides where the first subscribe's snapshot stands, so this test places that
+// cursor itself instead of racing the intake for it (INFRA-1077). A catch-up that finds its own
+// cursor row gone reads the log as reset (catchUpChanges); a recompute that read across a reset
+// keeps no change position (recompute); and the snapshot then stands at 0, before the oldest kept
+// change, so the second resume below is answered with a snapshot of its own rather than with the
+// nothing this test is about. Only a test can leave the cursor on a deleted row: a prune deletes
+// rows older than the retention alone, and the cursor check skips a row that old, while the aging
+// below deletes rows the hub read moments earlier. So the listener here hears nothing, every
+// catch-up is this test's own, and one of them runs inside the first recompute's read, which is
+// the order CI took.
 func TestResumeFromBeforeTheKeptDayGetsASnapshot(t *testing.T) {
-	rig := newHubRig(t, nil)
+	var drove sync.Once
+	rig := newHubRig(t, func(hub *deliveryHub) {
+		hub.dial = func(context.Context) (*pgx.Conn, error) { return nil, context.DeadlineExceeded }
+		observe := hub.observe
+		hub.observe = func(note deliveryHubNote) {
+			observe(note)
+			if note.what == "recompute position" {
+				drove.Do(hub.catchUpNow)
+			}
+		}
+	})
 	seedHubSettings(t, rig.database)
 	now := rig.clock.Now()
 	for n := 1; n <= 3; n++ {
 		upsertPR(t, rig.database, hubPR(n, now.Add(-time.Duration(n)*time.Hour)))
 	}
+	// The cursor stands on the newest change, which the prune below keeps.
+	rig.hub.catchUpNow()
 	// The change log keeps a day: rows older than that are pruned, so the oldest kept is past seq 2.
 	if _, err := rig.database.Pool.Exec(t.Context(), `update delivery_changes set at = now() - interval '2 days' where seq <= 2`); err != nil {
 		t.Fatalf("age the first changes: %v", err)
@@ -875,7 +897,16 @@ func TestResumeFromBeforeTheKeptDayGetsASnapshot(t *testing.T) {
 	requireSameBody(t, "a resume from before the kept day", snapshot.Body, getBody(t, rig.handler, windowTarget(t, deliveryLiveTimeline, snapshot.Body, "")))
 
 	// A resume from a kept change answers the delta, here none, since the view's body reflects that
-	// change; the verdict the hub knows follows all the same.
+	// change; the verdict the hub knows follows all the same. The snapshot stands on a kept change,
+	// or the resume from it is the case above once more and says nothing about this one.
+	oldest, err := delivery.OldestChangeSeq(t.Context(), rig.database.Pool)
+	if err != nil {
+		t.Fatalf("read the oldest kept change: %v", err)
+	}
+	if seq, err := strconv.ParseInt(snapshot.Seq, 10, 64); err != nil || seq < oldest {
+		t.Fatalf("the snapshot stands at change %q, want one the log still keeps (from %d)", snapshot.Seq, oldest)
+	}
+
 	kept := newFakeLiveConn()
 	frame.Sub, frame.Resume = "u", &DeliveryLiveResume{Seq: snapshot.Seq, Revs: snapshot.Revs}
 	rig.hub.Subscribe(kept, frame)
