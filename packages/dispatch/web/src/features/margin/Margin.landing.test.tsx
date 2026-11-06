@@ -103,6 +103,12 @@ async function settled(): Promise<void> {
   }
 }
 
+/** Lets whatever the margin is still doing happen. This one stays on the real clock
+ *  (INFRA-1505): the margin corrects a card in an animation frame, and under
+ *  `jest.useFakeTimers()` one `tick` runs exactly one frame where 50 ms of real time runs many,
+ *  so every "and nothing more moved" below would hold for want of frames rather than because
+ *  the margin left the card alone. The fake clock also freezes `performance.now()`, which the
+ *  long-task row spins on. */
 async function quiet(): Promise<void> {
   const settled = Promise.withResolvers<void>();
   setTimeout(settled.resolve, 50);

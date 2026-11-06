@@ -1,8 +1,9 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, jest, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 
+import { realClock, tick } from "../../__tests__/fake-clock";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { ApiError, api } from "../../api/client";
 import { GrantsSection } from "./GrantsSection";
@@ -104,11 +105,9 @@ async function renderSection(section: Section): Promise<HTMLElement> {
 }
 
 /** Lets a mutation reach its function: it calls it a few microtasks after the click, and a timer
- *  runs after them all. */
+ *  runs after them all. The test installs the fake clock this moves. */
 async function afterMicrotasks(): Promise<void> {
-  const settled = Promise.withResolvers<void>();
-  setTimeout(settled.resolve, 0);
-  await settled.promise;
+  await tick(0);
 }
 
 for (const section of sections) {
@@ -137,6 +136,7 @@ for (const section of sections) {
   });
 
   test(`${section.heading}: a double press before the button disables sends one revoke`, async () => {
+    jest.useFakeTimers();
     const out = Promise.withResolvers<void>();
     const stubs = section.stub(() => out.promise);
     const confirm = spyOn(window, "confirm").mockReturnValue(true);
@@ -152,6 +152,7 @@ for (const section of sections) {
       expect(stubs.revokeCalls()).toEqual([[section.rowId, keyedAttempt]]);
       out.resolve();
     } finally {
+      realClock();
       cleanup();
       confirm.mockRestore();
       stubs.restore();

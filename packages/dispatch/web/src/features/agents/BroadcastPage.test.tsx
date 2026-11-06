@@ -1,8 +1,9 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, jest, spyOn, test } from "bun:test";
 import { DELIVERY_DUPLICATE_WINDOW_MS } from "@legion/contracts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { realClock, tick } from "../../__tests__/fake-clock";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { answerAgentStates } from "../../__tests__/send-answers";
 import { wholeText } from "../../__tests__/whole-text";
@@ -177,6 +178,7 @@ test("opening a broadcast marks the recipient's answers read by id, and only the
 // the row waits for the unread count or the replies it shows to change. A refetch of the broadcast
 // renders the same replies in a new array, as every render does, and sends nothing more.
 test("a refused mark is sent once and then left alone, however often the row re-renders", async () => {
+  jest.useFakeTimers();
   const page = renderBroadcast(
     answeredBroadcast(),
     undefined,
@@ -186,11 +188,10 @@ test("a refused mark is sent once and then left alone, however often the row re-
   try {
     await waitFor(() => expect(page.putAgentState).toHaveBeenCalledTimes(1));
     await page.queryClient.invalidateQueries({ queryKey: ["broadcast"] });
-    const quiet = Promise.withResolvers<void>();
-    setTimeout(quiet.resolve, 500);
-    await quiet.promise;
+    await tick(500);
     expect(page.putAgentState).toHaveBeenCalledTimes(1);
   } finally {
+    realClock();
     page.view.unmount();
     page.restore();
   }

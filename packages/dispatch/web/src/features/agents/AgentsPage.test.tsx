@@ -8,6 +8,7 @@ import {
 } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
+import { realClock, tick } from "../../__tests__/fake-clock";
 import { answerAgentStates } from "../../__tests__/send-answers";
 import { wholeText } from "../../__tests__/whole-text";
 import {
@@ -3294,6 +3295,7 @@ test("a refused send's row shows its message formatted on one line, with its who
 // in there. Nobody can see it, so a reply that arrives then must stay unread - in the navigation
 // and on the row - until the fold opens and puts the conversation back on screen.
 test("an open row a closed fold hides marks nothing read, and opening the fold reads what it shows", async () => {
+  jest.useFakeTimers();
   const asked = exchange("m1", "Still there?", "2026-09-14T01:00:00Z");
   const page = renderAgents({ listedAgents: [stale, ...agents], messages: [asked] });
 
@@ -3326,9 +3328,7 @@ test("an open row a closed fold hides marks nothing read, and opening the fold r
     await within(staleCard).findByText("Yes, still here.");
     // A mark the hidden row sent would go out from an effect a few microtasks on; give it a
     // task, so the assertion below is not merely early.
-    const settled = Promise.withResolvers<void>();
-    setTimeout(settled.resolve, 20);
-    await settled.promise;
+    await tick(20);
     expect(page.putAgentState).not.toHaveBeenCalled();
     expect(screen.getByRole("link", { name: "New reply 1" })).toBeTruthy();
 
@@ -3341,6 +3341,7 @@ test("an open row a closed fold hides marks nothing read, and opening the fold r
       )
     );
   } finally {
+    realClock();
     page.view.unmount();
     page.restore();
   }
@@ -3650,14 +3651,6 @@ test("/ falls through to the Dispatch-wide search dialog when no agents are conn
     page.restore();
   }
 });
-
-/** Moves the fake clock `ms` on and lets every promise the move released run. */
-async function tick(ms: number): Promise<void> {
-  await act(async () => {
-    jest.advanceTimersByTime(ms);
-    for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
-  });
-}
 
 const keyedStopped = new SendStoppedError().message;
 

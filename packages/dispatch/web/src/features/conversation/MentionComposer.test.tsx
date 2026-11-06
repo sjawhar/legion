@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { type ReactNode, useState } from "react";
 import { MemoryRouter } from "react-router-dom";
 
+import { realClock, tick } from "../../__tests__/fake-clock";
 import { AGENT_LIST_REFILLING, ApiError, api } from "../../api/client";
 import type { Agent, Comment, ItemBlock, ItemBlocks, Message } from "../../api/types";
 import { useSending } from "../../hooks/useSending";
@@ -327,18 +328,18 @@ function sendRefusal(): SendRefusal {
   };
 }
 
-/** Presses Send both ways a reader can - the button, and Ctrl+Enter in the box - then waits a
- *  task. TanStack awaits `onMutate` before it calls the mutation function, so an API spy read
- *  straight after the press shows no call whether or not Send refused. */
+/** Presses Send both ways a reader can - the button, and Ctrl+Enter in the box - then moves the
+ *  fake clock a task on. TanStack awaits `onMutate` before it calls the mutation function, so an
+ *  API spy read straight after the press shows no call whether or not Send refused. Each test
+ *  that presses this way installs the fake clock before it renders. */
 async function pressSend(field: HTMLElement): Promise<void> {
   fireEvent.click(screen.getByRole("button", { name: "Send" }));
   fireEvent.keyDown(field, { ctrlKey: true, key: "Enter" });
-  const { promise, resolve } = Promise.withResolvers<void>();
-  setTimeout(resolve, 20);
-  await promise;
+  await tick(20);
 }
 
 test("a token-only direct-session draft cannot submit an empty message, and Send says why", async () => {
+  jest.useFakeTimers();
   const createAgentMessage = spyOn(api, "createAgentMessage").mockResolvedValue(createdMessage);
   const { view } = renderComposer({ owner: { kind: "session", sessionId: "A" } });
 
@@ -355,6 +356,7 @@ test("a token-only direct-session draft cannot submit an empty message, and Send
     fireEvent.change(field, { target: { value: "/btw status?" } });
     expect(sendRefusal()).toEqual({ description: null, disabled: null, title: null });
   } finally {
+    realClock();
     view.unmount();
     createAgentMessage.mockRestore();
   }
@@ -492,6 +494,7 @@ test("a command on a plain legacy reply stays verbatim and sends no delivery", a
 });
 
 test("a token-only targeted legacy reply cannot submit, and Send says why", async () => {
+  jest.useFakeTimers();
   const createMessage = spyOn(api, "createMessage").mockResolvedValue({} as never);
   const { view } = renderComposer({
     replyTo: {
@@ -512,6 +515,7 @@ test("a token-only targeted legacy reply cannot submit, and Send says why", asyn
     expect(createMessage).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "Sending…" })).toBeNull();
   } finally {
+    realClock();
     view.unmount();
     createMessage.mockRestore();
   }
@@ -2177,14 +2181,6 @@ test("a send to one session past its deadline says it keeps trying, and lands on
   }
 });
 
-/** Moves the fake clock `ms` on and lets every promise the move released run. */
-async function tick(ms: number): Promise<void> {
-  await act(async () => {
-    jest.advanceTimersByTime(ms);
-    for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
-  });
-}
-
 /** A send that keeps failing, from its press to its 30 s deadline: five attempts, at 0, 1, 3, 7
  *  and 15 s. */
 async function failToTheDeadline(): Promise<void> {
@@ -2386,6 +2382,7 @@ test("a pasted picture is written as an inline picture of its version", async ()
 // names the upload and takes no press, Ctrl+Enter sends nothing, and the send once it lands
 // carries the picture.
 test("a send waits for a pasted picture still uploading, by Send and by Ctrl+Enter", async () => {
+  jest.useFakeTimers();
   const { promise: landed, resolve: land } = Promise.withResolvers<void>();
   const uploadArtifact = spyOn(api, "uploadArtifact").mockImplementation(async () => {
     await landed;
@@ -2405,9 +2402,7 @@ test("a send waits for a pasted picture still uploading, by Send and by Ctrl+Ent
     fireEvent.click(send);
     fireEvent.keyDown(field, { ctrlKey: true, key: "Enter" });
     // A send's mutation function runs a task after the press (`pressSend`).
-    const { promise: settled, resolve: settle } = Promise.withResolvers<void>();
-    setTimeout(settle, 20);
-    await settled;
+    await tick(20);
     expect(createComment).not.toHaveBeenCalled();
 
     land();
@@ -2418,6 +2413,7 @@ test("a send waits for a pasted picture still uploading, by Send and by Ctrl+Ent
       expect(createComment).toHaveBeenCalledWith("CORE-1", { body }, keyedAttempt)
     );
   } finally {
+    realClock();
     view.unmount();
     uploadArtifact.mockRestore();
     createComment.mockRestore();

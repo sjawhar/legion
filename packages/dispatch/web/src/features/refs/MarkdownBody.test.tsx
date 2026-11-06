@@ -1231,7 +1231,15 @@ function looseText(container: HTMLElement): string {
 }
 
 /** The next task, so a row reads what one slice of a paint left in the element: the task that
- *  slice queued is ahead of this one, so exactly one of them has run when it resolves. */
+ *  slice queued is ahead of this one, so exactly one of them has run when it resolves.
+ *
+ *  This one stays on the real clock (INFRA-1505). A paint fills one task until its budget runs
+ *  out, and that budget is read from `performance.now()` (`useRenderedMarkdown`,
+ *  `paintAcrossTasks`), which `jest.useFakeTimers()` freezes: under a fake clock one task
+ *  paints the whole body, so the rows below - which read what a single slice left in the
+ *  element - would have nothing to read. The rows also drive the parse worker through
+ *  `parse-worker-fixture.ts`, whose own `tick` is a zero-delay `setTimeout` that a fake clock
+ *  leaves waiting for an advance nothing makes. */
 function nextTask(): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>();
   setTimeout(resolve, 0);
@@ -1777,10 +1785,10 @@ describe("A long body parsed in the worker", () => {
     } finally {
       left.unmount();
     }
-    // Well past the deadline, which fires with the element gone and its place still on the job.
-    const pastTheDeadline = Promise.withResolvers<void>();
-    setTimeout(pastTheDeadline.resolve, 300);
-    await pastTheDeadline.promise;
+    // The deadline fires with the element gone and its place still on the job, and stopping the
+    // worker it was holding is what it does: that, rather than a wait of the test's, is what
+    // says it has passed.
+    await waitFor(() => expect(worker.workers[0]?.terminated).toBe(true));
 
     const back = render(<MarkdownBody markdown={markdown} />);
     try {
