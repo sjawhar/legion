@@ -28,14 +28,11 @@ const bootProbeDialDelay = 3 * time.Second
 const bootProbeDeadline = `msg="dispatch: register this server process" ` +
 	`error="probe the database: context deadline exceeded"`
 
-// The boot's one probe of the database outlasts the bound /healthz's probe reads within. That
-// probe is the only read of the process that is always cold: Healthy opens the health pool on its
-// first call (store.Pool.separate), so the boot pays a fresh dial inside it, where a serving
-// process reads on a connection the pool already holds. store.healthProbeTimeout's two seconds
-// are argued for that warm process - the probers that read a slow /healthz as a dead process are
-// tighter still - so they are no bound at all for a dial, and the boot takes a bound of its own
-// (bootProbeTimeout). Here every connection reaches Postgres bootProbeDialDelay late, which is
-// past the warm bound, and the process must still register and serve.
+// The boot's one probe of the database outlasts the bound /healthz's probe reads within. Why that
+// read is the one that is always cold, and why the warm bound is no bound for it, is on
+// store.Pool.HealthyWithin; the boot's own bound is bootProbeTimeout. Here every connection
+// reaches Postgres bootProbeDialDelay late, which is past the warm bound, and the process must
+// still register and serve.
 //
 // The registration line is what keeps this row honest: a boot that died at any step before the
 // probe - and every one of them dials through the same slow proxy - serves nothing and logs
@@ -54,12 +51,15 @@ func TestTheBootProbeOutlastsTheWarmProbesBound(t *testing.T) {
 	// other step it takes is as slow as the machine is. So the row waits on a hang guard instead,
 	// far from the 11 s the boot took here, which fails only a process that never serves at all.
 	if err := process.healthyWithin(2 * time.Minute); err != nil {
+		// A probe that ran out of its bound exits the process with 1 before it serves anything, so
+		// this is where that failure arrives: name it, rather than leaving the reader to find the
+		// line in the output.
+		if strings.Contains(process.Output.String(), bootProbeDeadline) {
+			t.Fatalf("the boot probe ran out of its bound at a dial of %s: %v", bootProbeDialDelay, err)
+		}
 		t.Fatal(err)
 	}
 	process.WaitForOutput(t, "dispatch: registered this server process")
-	if output := process.Output.String(); strings.Contains(output, bootProbeDeadline) {
-		t.Fatalf("the boot probe ran out of its bound at a dial of %s:\n%s", bootProbeDialDelay, output)
-	}
 }
 
 // A process refused by a live peer waits, before it serves anything, for the peer's heartbeat to

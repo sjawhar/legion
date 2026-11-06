@@ -18,11 +18,10 @@ import (
 // has stopped, which drops out of the live window (processes.LiveWindow) on its own.
 const deregisterTimeout = 5 * time.Second
 
-// bootProbeTimeout bounds the one probe that this process's boot makes of the database, below.
-// That read is always cold: the health pool opens on its first use (store.Pool.separate), so the
-// probe pays a fresh dial every time, where store's healthProbeTimeout - two seconds - is argued
-// for the warm connection a serving process's /healthz reads on. This bound covers the dial, at
-// fifteen times that warm one.
+// bootProbeTimeout bounds the one probe that this process's boot makes of the database, below. It
+// is the cold-read bound store.Pool.HealthyWithin exists to take, where store's
+// healthProbeTimeout - two seconds - is the warm one /healthz reads within, and it is fifteen
+// times that.
 //
 // Thirty seconds fits under both deployment clocks. deploy/scripts/autodeploy.sh's
 // wait_for_health gives a new image 90 s to answer /healthz before it rolls the image back, and

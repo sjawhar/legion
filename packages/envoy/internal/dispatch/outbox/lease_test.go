@@ -3,6 +3,7 @@ package outbox
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -196,7 +197,7 @@ func TestTheOutboxDoesNotScanWhileIdle(t *testing.T) {
 	armedWaits := func() []armedWait {
 		armedMu.Lock()
 		defer armedMu.Unlock()
-		return append([]armedWait(nil), armed...)
+		return slices.Clone(armed)
 	}
 	go func() { outbox.Run(ctx); close(done) }()
 	t.Cleanup(func() { cancel(); <-done })
@@ -240,6 +241,8 @@ func TestTheOutboxDoesNotScanWhileIdle(t *testing.T) {
 	// finds nothing due and arms its one retry timer to the back-off's own moment, and the timer's
 	// scan is the one that publishes it. The waits armed earlier in this row are not this one's.
 	armedBefore := len(armedWaits())
+	// The waits this back-off's own scan armed, read afresh each time: the slice only grows.
+	waitsSince := func() []armedWait { return armedWaits()[armedBefore:] }
 	backedOff := appendBackedOffEvent(t, other, 3*time.Second)
 	inserted := time.Now()
 	for publishedAt(t, database, backedOff.ID) == nil {
@@ -247,11 +250,11 @@ func TestTheOutboxDoesNotScanWhileIdle(t *testing.T) {
 		// no load reaches it: it fires only when nothing was published at all.
 		if time.Since(inserted) > 60*time.Second {
 			t.Fatalf("the back-off due in 3 s was never published: %s after its insert the outbox had armed %v",
-				time.Since(inserted).Round(time.Millisecond), armedWaits()[armedBefore:])
+				time.Since(inserted).Round(time.Millisecond), waitsSince())
 		}
 		// Nothing else wakes the outbox until the timer fires: no claim since the wait was armed,
 		// while the back-off is not yet due. Load can only delay a claim, never bring one forward.
-		if since := armedWaits()[armedBefore:]; len(since) > 0 && time.Since(inserted) < 2500*time.Millisecond {
+		if since := waitsSince(); len(since) > 0 && time.Since(inserted) < 2500*time.Millisecond {
 			if claims := outbox.claims.Load() - since[0].claims; claims != 0 {
 				t.Fatalf("the outbox made %d claims in the %s since it armed a %s wait for the back-off, %s after the insert and before the back-off fell due, want none",
 					claims, time.Since(since[0].at).Round(time.Millisecond), since[0].wait.Round(time.Millisecond),
@@ -261,7 +264,7 @@ func TestTheOutboxDoesNotScanWhileIdle(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	published := time.Since(inserted)
-	since := armedWaits()[armedBefore:]
+	since := waitsSince()
 	if len(since) != 1 {
 		t.Fatalf("the outbox armed %d waits between the back-off's insert and its publish, want 1: %v", len(since), since)
 	}

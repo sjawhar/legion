@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -68,7 +69,7 @@ func (s *server) slowedByTestHook(handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		route := r.Method + " " + r.URL.Path
 		if delay, armed := s.slowWrites.Load(route); armed {
-			if !s.waitSlowWrite(r, route, delay.(time.Duration)) {
+			if !s.waitSlowWrite(r.Context(), route, delay.(time.Duration)) {
 				writeError(w, "SLOW_WRITE_CUT_OFF", http.StatusServiceUnavailable,
 					"the slow-write test hook's wait was cut off before the handler ran")
 				return
@@ -78,23 +79,16 @@ func (s *server) slowedByTestHook(handler http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// waitSlowWrite waits delay on the request's own context and counts this run against route,
-// answering whether the wait ran out. False is a context that ended inside the delay, whose run
-// never reaches its handler. The run is counted either way, and the time it spent waiting is added
-// either way too: a run cut off inside the delay entered the branch just as one that waited it out
-// did, and a test that drove the hook into that branch should see it.
-func (s *server) waitSlowWrite(r *http.Request, route string, delay time.Duration) bool {
+// waitSlowWrite waits delay out on ctx - the handler's own context - and counts this run against
+// route, answering whether the wait ran out. False is a context that ended inside the delay, whose
+// run never reaches its handler. The run is counted either way, and the time it spent waiting is
+// added either way too: a run cut off inside the delay entered the branch just as one that waited
+// it out did, and a test that drove the hook into that branch should see it.
+func (s *server) waitSlowWrite(ctx context.Context, route string, delay time.Duration) bool {
 	held, _ := s.slowWriteRuns.LoadOrStore(route, &slowWriteRecord{})
 	record := held.(*slowWriteRecord)
 	entered := time.Now()
-	timer := time.NewTimer(delay)
-	waited := false
-	select {
-	case <-timer.C:
-		waited = true
-	case <-r.Context().Done():
-		timer.Stop()
-	}
+	waited := waitFor(ctx, delay)
 	record.runs.Add(1)
 	record.waited.Add(int64(time.Since(entered)))
 	return waited
