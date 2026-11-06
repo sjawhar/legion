@@ -173,15 +173,21 @@ func TestAClaimRenewedInsideTheLiveWindowIsKeptThoughItsHoldersSessionRecordIsGo
 	advance(liveWindow - time.Second)
 	gone := func(string) bool { return false }
 
-	release, err := reg.ReleaseExpiredRoleClaim(context.Background(), role, holder, 0, liveWindow)
+	// The release is handed the claim its caller read, as the reaper's pass hands it the claim
+	// it read to find the holder gone (ReapRoleClaims).
+	claim, err := reg.RoleClaim(context.Background(), role)
+	if err != nil {
+		t.Fatalf("read %s's claim to release: %v", role, err)
+	}
+	release, err := reg.releaseReadExpiredRoleClaim(context.Background(), role, claim, 0, liveWindow)
 	if err != nil || release != ExpiredRoleClaimRenewed {
 		t.Fatalf("release a claim renewed inside the live window = %v, %v; want it kept as renewed", release, err)
 	}
 	assertRoleHolder(t, reg, role, holder)
 
-	reaped, err := reg.ReapRoleClaims(gone, 0, liveWindow)
-	if err != nil || reaped != 0 {
-		t.Fatalf("the sweep freed %d claims, %v; want none: the holder still renews its claim", reaped, err)
+	sweep, err := reg.ReapRoleClaims(context.Background(), gone, 0, liveWindow)
+	if err != nil || sweep.Reaped != 0 {
+		t.Fatalf("the sweep freed %+v, %v; want none: the holder still renews its claim", sweep, err)
 	}
 	assertRoleHolder(t, reg, role, holder)
 }
@@ -198,7 +204,11 @@ func TestAClaimWhoseRenewalIsOlderThanTheLiveWindowIsFreed(t *testing.T) {
 		const holder = "ses_lapsed_holder"
 		reg, advance := renewedRoleClaim(t, role, holder)
 		advance(liveWindow)
-		release, err := reg.ReleaseExpiredRoleClaim(context.Background(), role, holder, 0, liveWindow)
+		claim, err := reg.RoleClaim(context.Background(), role)
+		if err != nil {
+			t.Fatalf("read %s's claim to release: %v", role, err)
+		}
+		release, err := reg.releaseReadExpiredRoleClaim(context.Background(), role, claim, 0, liveWindow)
 		if err != nil || release != ExpiredRoleClaimReleased {
 			t.Fatalf("release a claim renewed one live window ago = %v, %v; want it released", release, err)
 		}
@@ -208,9 +218,9 @@ func TestAClaimWhoseRenewalIsOlderThanTheLiveWindowIsFreed(t *testing.T) {
 		const holder = "ses_lapsed_sweep"
 		reg, advance := renewedRoleClaim(t, role, holder)
 		advance(liveWindow + time.Second)
-		reaped, err := reg.ReapRoleClaims(func(string) bool { return false }, 0, liveWindow)
-		if err != nil || reaped != 1 {
-			t.Fatalf("the sweep freed %d claims, %v; want the one whose holder stopped answering", reaped, err)
+		sweep, err := reg.ReapRoleClaims(context.Background(), func(string) bool { return false }, 0, liveWindow)
+		if err != nil || sweep.Reaped != 1 {
+			t.Fatalf("the sweep freed %+v, %v; want the one claim whose holder stopped answering", sweep, err)
 		}
 		assertRoleHolder(t, reg, role, "")
 	})

@@ -283,7 +283,8 @@ async function aPaintOfTheTurnIsPartWayThrough(page: Page, waitMs: number): Prom
 // is 4.8 s of real time on top of that wait; the row's own two guards red it where the window
 // was never reached, so a shorter stream or a smaller turn would leave it green while proving
 // nothing (the comments above each number say so).
-test("a reader who opens the live view while a long turn streams is never shown a frame's text in front of the body", async ({
+// @webkit @firefox: a Web Worker's chunk, its deadline and a paint that arrives after it.
+test("a reader who opens the live view while a long turn streams is never shown a frame's text in front of the body @webkit @firefox", async ({
   browser,
 }) => {
   // What this row spends is the page's own work, three times over: the first parse and paint of

@@ -198,10 +198,10 @@ func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, 
 // Remove releases the role claims of sessionID that release authorises (RoleReleaseAuthority)
 // and removes topics from its interest record, or deletes the record when topics is empty, each
 // bucket call waiting no longer than ctx (bus.Bounded): an HTTP route passes its request's own
-// context. A write or delete ctx abandoned may still land after this answer; releaseRoleClaim,
-// deleteInterest and removeInterestTopics each say why that is safe. A record this build cannot
-// decode (ErrMalformedInterest) is deleted all the same; removing some topics leaves it as it is
-// (removeInterestTopics).
+// context. A write or delete ctx abandoned may still land after this answer;
+// releaseReadRoleClaim, deleteInterest and removeInterestTopics each say why that is safe. A
+// record this build cannot decode (ErrMalformedInterest) is deleted all the same; removing some
+// topics leaves it as it is (removeInterestTopics).
 //
 // How the release is authorised is the caller's to state and is never inferred from the topics:
 // the interest half runs the same way whatever release says, so a release that frees no claim
@@ -211,10 +211,11 @@ func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, 
 // that cannot say which process it is, and neither may take a role from the process that holds
 // it.
 //
-// An empty topics is the whole of the session's interests, so the claims released are read from
-// the role bucket itself (releaseAllRoleClaims) as well as from the record's own topics: a role
-// the session holds whose topic the record has lost is released by the same authority as the
-// rest.
+// An empty topics is the whole of the session's interests, so the claims a deregistration
+// releases come from two sources: the role topics of the session's own interest record
+// (releaseRoleClaims), which runs first, and then the roles the role claim view names it the
+// holder of (releaseAllRoleClaims). A role the session holds whose topic the record has lost is
+// therefore released too, by the same authority as the rest.
 func (r *Registry) Remove(ctx context.Context, sessionID string, topics []string, release RoleReleaseAuthority) error {
 	if len(topics) == 0 {
 		item, err := r.Get(ctx, sessionID)

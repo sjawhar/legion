@@ -71,7 +71,7 @@ func (p *typedDirectiveParser) Open(_ ast.Node, reader gmtext.Reader, pc parser.
 	if indent >= 4 || offset >= len(line) {
 		return nil, parser.NoChildren
 	}
-	name, attrs, ok := parseTypedDirectiveOpen(strings.TrimRight(string(line[offset:]), "\n"))
+	name, attrs, ok := ParseTypedDirectiveOpen(strings.TrimRight(string(line[offset:]), "\n"))
 	if !ok {
 		return nil, parser.NoChildren
 	}
@@ -241,7 +241,15 @@ func (p *unsupportedDirectiveParser) CanAcceptIndentedLine() bool {
 	return false
 }
 
-func parseTypedDirectiveOpen(line string) (string, Attrs, bool) {
+// ParseTypedDirectiveOpen reads one line as the opening line of a typed block: its name and its
+// attributes, with the block's id under BlockIDAttr whichever way the line writes it (`#id` or
+// `id="…"`, TypedBlockIDAttribute). ok is false for a line that opens none, the whole line
+// refused where its attributes are, since the browser editor's parser refuses it too. The line
+// is passed past its indentation and its containers' markers and without its line ending, as
+// the parser passes it (typedDirectiveParser.Open), and this is the one reader of the grammar:
+// a caller outside the document parser - refs.questionBlocks, which scans a stored version's
+// lines for its question blocks - reads a line with it rather than with a grammar of its own.
+func ParseTypedDirectiveOpen(line string) (string, Attrs, bool) {
 	colons := colonRun([]byte(line))
 	if colons < 3 {
 		return "", nil, false
@@ -512,7 +520,7 @@ func unsupportedDirectiveReason(line string) (string, bool) {
 		if line == ":::" {
 			return "", false
 		}
-		if _, _, ok := parseTypedDirectiveOpen(line); !ok {
+		if _, _, ok := ParseTypedDirectiveOpen(line); !ok {
 			return malformedDirectiveReason, true
 		}
 		return "", false

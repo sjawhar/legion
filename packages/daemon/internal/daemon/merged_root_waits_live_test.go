@@ -2,9 +2,12 @@
 
 // The live proof's driver for the rule that a merged root's close waits for the rest of its tree
 // (closeMerged's openBeside, closeAwaitingRoot, and the boot's sweepMerged), with the acceptance
-// that comes before it: nothing beneath the root holds its sign-off, since the close keeps the
-// tree's order. scripts/e2e/merged-root-waits.sh builds this driver with `-tags e2e` and owns the
-// nats-server and the PostgreSQL it runs against.
+// that comes before it: a parent is accepted only once nothing beneath it is in the workflow, so
+// a sign-off sent while the child is still in it is refused SIGNOFF_CHILD_IN_WORKFLOW, naming
+// the child, and the sign-off lands once the child has left. That refusal is also why the wait
+// itself is driven from a seeded state rather than reached through the workflow; the test's own
+// doc comment says why. scripts/e2e/merged-root-waits.sh builds this driver with `-tags e2e` and
+// owns the nats-server and the PostgreSQL it runs against.
 //
 // The daemon is the whole daemon: run, the function `legion start` calls, through this package's
 // own whole-daemon harness (startDaemon), so the proof exercises the real configuration load, the
@@ -15,7 +18,7 @@
 // the daemon posted to the Dispatch stand-in or published to the Envoy listener stand-in, or of what
 // the fake worker runtime was asked to launch and suspend. Nothing reads the store to judge a step,
 // and nothing calls into the workflow package. The one read of the store outside the seeding is
-// step 7's wait for the daemon's record that it took the event the step drove, which no route
+// step 6's wait for the daemon's record that it took the event the step drove, which no route
 // shows; what the step holds is still read from GET /legion/v1/state.
 //
 // What the proof stands in for lies outside the two rules. The broker is a native nats-server the
@@ -47,6 +50,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -69,14 +73,16 @@ type mergedRootWaitsLive struct {
 	liveProof
 	rt    *fake.Runtime
 	built *built
-	// parent is the tree's root, the issue that is accepted and whose merge waits; child is the
-	// one issue beneath it.
-	parent, child string
-	// parentPR and childPR are their pull requests' numbers, and openedPR the pull request step 7
-	// opens from the root's branch, all this run's own: the store a pod re-runs the proof against
-	// holds every earlier run's pull requests, and a fact names a pull request by its repository
-	// and number.
-	parentPR, childPR, openedPR int
+	// parent is the tree's root, the issue that is accepted and whose merge waits. parked is the
+	// child beneath it that holds its sign-off until the architect takes it out of the workflow,
+	// and child the issue of the tree that the seeded migrated shape leaves in a phase, whose
+	// run holds the merged root open.
+	parent, parked, child string
+	// parentPR, parkedPR and childPR are their pull requests' numbers, and openedPR the pull
+	// request step 6 opens from the root's branch, all this run's own: the store a pod re-runs
+	// the proof against holds every earlier run's pull requests, and a fact names a pull request
+	// by its repository and number.
+	parentPR, parkedPR, childPR, openedPR int
 	// github is the REST and GraphQL root the daemon's workflow reads (mergedRootWaitsGitHub).
 	github string
 	// arch is the root's architect, the session step 1 accepts the root as (architect).
@@ -85,26 +91,42 @@ type mergedRootWaitsLive struct {
 	seq int64
 }
 
-// TestAMergedRootsCloseWaitsForTheRestOfItsTreeLive drives the six steps of the proof against one
-// booted daemon, in the order each step's state follows from the last: the root accepted while its
-// child runs, then the root's merge and its wait, the restart that must leave that wait as it was,
-// the child's completion in the wait — as the session the restart's own relaunch gave it — then a
-// pull request opened from the waiting root's branch, which must leave the merge the root waits
-// on, and last the child's merge, which closes the root on that merge.
+// TestAMergedRootsCloseWaitsForTheRestOfItsTreeLive drives the seven steps of the proof against
+// one booted daemon, in the order each step's state follows from the last: the root's sign-off
+// refused while the child is in the workflow, the child's park and the sign-off accepted behind
+// it, then the merged root's wait, the restart that must leave that wait as it was, the child's
+// completion in the wait — as the session the restart's own relaunch gave it — then a pull
+// request opened from the waiting root's branch, which must leave the merge the root waits on,
+// and last the child's merge, which closes the root on that merge.
+//
+// The wait's own four steps stand on a seeded state, and the refusal of step 1 is why. A tree
+// that starts after dispatch://INFRA-980 cannot reach a merged root with an issue of its tree in
+// a phase: the sign-off step 1 drives is refused while anything beneath the root is in the
+// workflow, so at the moment a root is accepted nothing beneath it is, and every route that
+// could put work there afterwards is refused CHILD_UNDER_ACCEPTED_PARENT or held at admitted and
+// left out of the set the wait reads (record.OpenBeneath). The wait is still the daemon's, for
+// the states this release does not create but a deploy meets: a root the migration finds already
+// in awaiting_merge with an issue of its tree in a phase, a carried child whose hand-over brings
+// a run into a tree past acceptance, and a close delivered late. The first of those is the shape
+// seedArcTwo writes — the root in awaiting_merge with its child implementing beneath it — and
+// writing it is the only way a live run reaches the wait at all.
 func TestAMergedRootsCloseWaitsForTheRestOfItsTreeLive(t *testing.T) {
 	fixtureenv.Live(t)
 	r := newMergedRootWaitsLive(t)
-	r.step("step1-the-acceptance-lands-while-the-child-runs", r.acceptanceAccepted)
-	r.step("step2-the-merged-root-waits-for-its-child", r.rootMergeWaits)
-	r.step("step5-a-restart-leaves-the-wait-and-tells-no-one-again", r.restartLeavesTheWait)
-	r.step("step3-the-waiting-roots-child-completes-its-phase", r.childCompletesItsPhase)
-	r.step("step7-a-pull-request-opened-from-the-waiting-roots-branch-leaves-its-merge", r.openedLeavesTheMerge)
-	r.step("step4-the-childs-merge-closes-the-root", r.childMergeClosesTheRoot)
+	r.step("step1-the-sign-off-is-refused-while-the-child-is-in-the-workflow", r.signOffRefused)
+	r.step("step2-the-child-leaves-and-the-sign-off-is-accepted", r.acceptanceAccepted)
+	r.step("step3-the-merged-root-waits-for-the-issue-beneath-it", r.rootMergeWaits)
+	r.step("step4-a-restart-leaves-the-wait-and-tells-no-one-again", r.restartLeavesTheWait)
+	r.step("step5-the-waiting-roots-child-completes-its-phase", r.childCompletesItsPhase)
+	r.step("step6-a-pull-request-opened-from-the-waiting-roots-branch-leaves-its-merge", r.openedLeavesTheMerge)
+	r.step("step7-the-childs-merge-closes-the-root", r.childMergeClosesTheRoot)
 }
 
 // newMergedRootWaitsLive boots the daemon over the script's broker with the tree already recorded:
-// the root in accepting on its reviewed, open pull request, holding its tree's admission slot, and
-// the one child beneath it implementing on an open pull request of its own.
+// the root in accepting on its reviewed, open pull request, holding no admission slot, since an
+// issue that only waits holds none, and the one child beneath it implementing on an open pull
+// request of its own, holding the one slot the tree's work takes. The issue the merged root's
+// wait is proven on comes later, with the shape seedArcTwo writes.
 func newMergedRootWaitsLive(t *testing.T) *mergedRootWaitsLive {
 	t.Helper()
 	proof := newLiveProof(t, "scripts/e2e/merged-root-waits.sh")
@@ -112,12 +134,12 @@ func newMergedRootWaitsLive(t *testing.T) *mergedRootWaitsLive {
 	if err != nil {
 		t.Fatal(err)
 	}
-	parent, child := proof.cfg.Project+"-1", proof.cfg.Project+"-2"
-	childPR := int(number) + 2
+	parent, parked, child := proof.cfg.Project+"-1", proof.cfg.Project+"-2", proof.cfg.Project+"-3"
+	childPR := int(number) + 3
 	r := &mergedRootWaitsLive{
 		liveProof: proof, rt: newRuntime(), built: &built{},
-		parent: parent, child: child,
-		parentPR: int(number) + 1, childPR: childPR, openedPR: int(number) + 3,
+		parent: parent, parked: parked, child: child,
+		parentPR: int(number) + 1, parkedPR: int(number) + 2, childPR: childPR, openedPR: int(number) + 4,
 		github: mergedRootWaitsGitHub(t, "legion/"+child, childPR), seq: 1,
 	}
 	r.seedTree()
@@ -163,17 +185,19 @@ func mergedRootWaitsGitHub(t *testing.T, branch string, number int) string {
 }
 
 // seedTree records the tree as the daemon would hold it at the moment the reviewer approved the
-// root: the root in accepting with its reviewer's handoff and its open pull request, the slot its
-// tree holds, its lifecycle open under the workflow, the child implementing beneath it on a pull
-// request of its own, and the root's architect claim as a launch a previous daemon began and never
-// recorded, which this boot relaunches. That last one is how the proof reaches a live architect
-// session without the operator's spawn, which would take the tree's lifecycle from the workflow.
+// root: the root in accepting with its reviewer's handoff and its open pull request, its
+// lifecycle open under the workflow, the one child beneath it implementing on a pull request of
+// its own and holding the admission slot that work takes — the root in accepting holds none,
+// since the cap counts the issues at work — and the root's architect claim as a launch a
+// previous daemon began and never recorded, which this boot relaunches. That last one is how the
+// proof reaches a live architect session without the operator's spawn, which would take the
+// tree's lifecycle from the workflow.
 func (r *mergedRootWaitsLive) seedTree() {
 	t := r.t
 	t.Helper()
 	ctx := context.Background()
 	r.board.show(r.parent, "needs_review")
-	r.board.show(r.child, "in_progress")
+	r.board.show(r.parked, "in_progress")
 	r.write("the tree", func(tx pgx.Tx) error {
 		if err := r.records.PutIssue(ctx, tx, record.Issue{
 			Key: r.parent, Repo: liveRepo, DefaultBranch: "main", GitHubRepo: liveRepo, Tree: r.parent, Project: r.cfg.Project,
@@ -184,7 +208,7 @@ func (r *mergedRootWaitsLive) seedTree() {
 		}
 		parent := r.parent
 		if err := r.records.PutIssue(ctx, tx, record.Issue{
-			Key: r.child, Repo: liveRepo, DefaultBranch: "main", GitHubRepo: liveRepo, Tree: r.parent, Project: r.cfg.Project,
+			Key: r.parked, Repo: liveRepo, DefaultBranch: "main", GitHubRepo: liveRepo, Tree: r.parent, Project: r.cfg.Project,
 			Title: "the child beneath it", Parent: &parent, Phase: phase.Implementing, Generation: 1, Status: "in_progress", DispatchStatus: "in_progress",
 			Rank: "V", LastDispatchSeq: r.seq,
 		}); err != nil {
@@ -195,13 +219,13 @@ func (r *mergedRootWaitsLive) seedTree() {
 		}
 		for _, pr := range []record.PullRequest{
 			{State: record.PullRequestOpen, Issue: r.parent, Repo: liveRepo, Number: r.parentPR, Branch: "legion/" + r.parent, HeadSHA: "head-parent", Failing: []string{}},
-			{State: record.PullRequestOpen, Issue: r.child, Repo: liveRepo, Number: r.childPR, Branch: "legion/" + r.child, HeadSHA: "head-child", Failing: []string{}},
+			{State: record.PullRequestOpen, Issue: r.parked, Repo: liveRepo, Number: r.parkedPR, Branch: "legion/" + r.parked, HeadSHA: "head-parked", Failing: []string{}},
 		} {
 			if err := r.records.PutPullRequest(ctx, tx, pr); err != nil {
 				return err
 			}
 		}
-		return r.admit(ctx, tx, r.parent)
+		return r.admit(ctx, tx, r.parked)
 	})
 	if _, err := r.st.OpenTreeLifecycle(ctx, r.project, r.parent, treelifecycle.AuthorityWorkflow); err != nil {
 		t.Fatalf("open the lifecycle of %s: %v", r.parent, err)
@@ -371,30 +395,69 @@ func (r *mergedRootWaitsLive) waitFor(what, key string, want func(api.Issue) boo
 	return last
 }
 
-// Step 1. The architect accepts the root while the child is still in the workflow: nothing beneath
-// the root holds its acceptance, so the sign-off answers 200 and the root reaches retro.
-func (r *mergedRootWaitsLive) acceptanceAccepted() {
+// Step 1. The architect signs the root off while the child beneath it is still in the workflow:
+// a parent's head proves its children's merged work, so the sign-off is refused 409
+// SIGNOFF_CHILD_IN_WORKFLOW, naming the child it waits for, and nothing of the tree moves.
+func (r *mergedRootWaitsLive) signOffRefused() {
 	t := r.t
 	architect := r.architect()
 	status, body := r.d.request(http.MethodPost, "/legion/v1/signoff", api.SignOffRequest{GrantID: architect.grant(), Issue: r.parent}, false)
-	if status != http.StatusOK {
-		t.Fatalf("the sign-off while %s implements = %d %s, want 200", r.child, status, body)
+	if status != http.StatusConflict {
+		t.Fatalf("the sign-off while %s implements = %d %s, want 409: nothing beneath the root may be in the workflow", r.parked, status, body)
 	}
-	r.note("drove POST /legion/v1/signoff of %s with the architect's grant while %s implements: %d", r.parent, r.child, status)
+	refusal := string(body)
+	if !strings.Contains(refusal, "SIGNOFF_CHILD_IN_WORKFLOW") || !strings.Contains(refusal, r.parked) {
+		t.Fatalf("the sign-off was refused %s, want SIGNOFF_CHILD_IN_WORKFLOW naming %s", refusal, r.parked)
+	}
+	r.note("drove POST /legion/v1/signoff of %s with the architect's grant while %s implements: %d %s", r.parent, r.parked, status, refusal)
+	// The refusal moved nothing: the root stands where its reviewer's approval left it, and the
+	// child runs on.
+	deadline := time.Now().Add(liveSettle)
+	for time.Now().Before(deadline) {
+		if got := r.issue(r.parent); got.Phase != phase.Accepting {
+			t.Fatalf("%s is in %s after the refused sign-off, want it still accepting", r.parent, got.Phase)
+		}
+		if got := r.issue(r.parked); got.Phase != phase.Implementing {
+			t.Fatalf("%s is in %s after its root's refused sign-off, want it still implementing", r.parked, got.Phase)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	r.note("read back over %s: %s is still in accepting and %s still implements", liveSettle, r.parent, r.parked)
+}
+
+// Step 2. The architect takes the child out of the workflow with park_child, the remedy the
+// refusal itself names, and signs the root off again: with nothing beneath it in the workflow the
+// sign-off answers 200 and the root reaches retro.
+func (r *mergedRootWaitsLive) acceptanceAccepted() {
+	t := r.t
+	architect := r.architect()
+	status, body := r.d.request(http.MethodPost, "/legion/v1/children/park", api.ChildRequest{GrantID: architect.grant(), Issue: r.parked}, false)
+	if status != http.StatusOK {
+		t.Fatalf("park_child of %s by %s's architect = %d %s, want 200", r.parked, r.parent, status, body)
+	}
+	r.note("drove POST /legion/v1/children/park of %s with the architect's grant: %d", r.parked, status)
+	r.publishParkedChild()
+	parked := r.waitFor("the parked child out of the workflow", r.parked, func(got api.Issue) bool {
+		return got.Phase == phase.Done && got.Slot == nil
+	})
+	r.note("read back: %s is in %s, status %s, holding no slot", r.parked, parked.Phase, parked.Status)
+
+	status, body = r.d.request(http.MethodPost, "/legion/v1/signoff", api.SignOffRequest{GrantID: architect.grant(), Issue: r.parent}, false)
+	if status != http.StatusOK {
+		t.Fatalf("the sign-off once %s left the workflow = %d %s, want 200", r.parked, status, body)
+	}
+	r.note("drove POST /legion/v1/signoff of %s once %s had left the workflow: %d", r.parent, r.parked, status)
 	got := r.waitFor("the accepted root in retro", r.parent, func(got api.Issue) bool { return got.Phase == phase.Retro })
-	// The move's own Dispatch write is waited for here, so step 2's baseline of what the board has
+	// The move's own Dispatch write is waited for here, so step 3's baseline of what the board has
 	// taken is not raced by the write this sign-off enqueued.
 	testwait.Eventually(t, "the sign-off's own retro status on the Dispatch stand-in", func() bool { return r.board.wrote(r.parent, "retro") })
 	r.note("read back: %s is in %s, status %s, and the Dispatch stand-in took its retro write", r.parent, got.Phase, got.Status)
-	if child := r.issue(r.child); child.Phase != phase.Implementing {
-		t.Fatalf("%s is in %s after its root's sign-off, want implementing: the acceptance changes nothing beneath it", r.child, child.Phase)
-	}
-	r.note("read back: %s still implements in GET /legion/v1/state", r.child)
 }
 
-// Step 2. The root's pull request merges while the child runs: the merge is recorded, the close
-// waits, and the architect is told once, by name, which issue it waits for. Nothing of the close
-// happened — no Dispatch done, no suspension, and the tree keeps its slot.
+// Step 3. The root's pull request merges while an issue of its tree is in a phase: the merge is
+// recorded, the close waits, and the architect is told once, by name, which issue it waits for.
+// Nothing of the close happened — no Dispatch done, no suspension — and the root holds no slot
+// in the wait, while the child at work holds one of its own.
 func (r *mergedRootWaitsLive) rootMergeWaits() {
 	t := r.t
 	r.seedArcTwo()
@@ -413,14 +476,18 @@ func (r *mergedRootWaitsLive) rootMergeWaits() {
 	if got.Status == "done" {
 		t.Fatalf("%s is done on Dispatch after its merge, want the status its wait leaves", r.parent)
 	}
-	if got.Slot == nil {
-		t.Fatalf("%s holds no admission slot after its merge, want the slot its tree still holds", r.parent)
-	}
 	if got.Check != nil {
 		t.Fatalf("%s has a production check after its merge, want none until it closes", r.parent)
 	}
-	r.note("read back: %s is in %s, pullRequest.state %s, status %s, slot %d, no production check",
-		r.parent, got.Phase, got.PullRequest.State, got.Status, got.Slot.Index)
+	r.note("read back: %s is in %s, pullRequest.state %s, status %s, no production check",
+		r.parent, got.Phase, got.PullRequest.State, got.Status)
+	// The cap counts the issues at work: the merge's own admission pass takes the root's slot,
+	// since a root waiting in awaiting_merge is at work no longer, and leaves the slot of the
+	// child whose phase holds that close open.
+	r.waitFor("the merged root holding no slot", r.parent, func(got api.Issue) bool { return got.Slot == nil })
+	child := r.waitFor("the child at work keeping the tree's one slot", r.child, func(got api.Issue) bool { return got.Slot != nil })
+	r.note("read back: %s holds no admission slot in its wait, and %s, implementing beneath it, keeps slot %d",
+		r.parent, r.child, child.Slot.Index)
 	if suspends := r.rt.CallsOf("Suspend"); len(suspends) != suspendsBefore {
 		t.Fatalf("the merge suspended %d claims, want none: no member of the tree is stopped while the close waits", len(suspends)-suspendsBefore)
 	}
@@ -438,21 +505,53 @@ func (r *mergedRootWaitsLive) rootMergeWaits() {
 	r.note("read back: one pr-merged notice on the architect's topic — %s", told[0].Payload)
 }
 
-// seedArcTwo puts the tree at the step the merge is driven from: the root through retro and
-// merging to awaiting_merge on its open pull request, the child back in the workflow under it and
-// implementing, as its architect's release left it, and the child's implementer claim as a launch
-// a previous daemon began and never recorded, serving the run of the task it took. The restart of
-// step 5 relaunches that claim, which is where step 3's session comes from.
+// seedArcTwo writes the one state the wait is still reached from, the shape a deploy of this
+// release meets: a root already in awaiting_merge with an issue of its tree in a phase — here
+// the root through retro and merging to awaiting_merge on its open pull request, and the child
+// implementing beneath it again. It is written rather than driven because no route of this
+// daemon leads here: step 1's refusal keeps the root from being accepted while anything beneath
+// it is in the workflow, and release_children and rerun_child refuse an issue under an ancestor
+// in retro, merging or awaiting_merge (CHILD_UNDER_ACCEPTED_PARENT), while a person's own move
+// to todo is held at admitted and left out of the set the wait reads. What the migration finds
+// in a store, and a carried child's hand-over, put a tree here; the proof seeds it, as every
+// daemon test seeds its fixture, and drives the merge.
+//
+// The issue is one of its own, not the child step 2 parked: the park's suspension of that
+// child's workers is the daemon's to finish, and an issue written back into a phase under it
+// would be stopped by it. Its slot is seeded with it, as the release's own migration gives one
+// to every issue of a live tree that is in a worker phase: the waiting line starts an issue at
+// phase.Admitted, so nothing in a running daemon hands a slot to an issue already mid-phase,
+// and a shape written without one would be a state no deployment has.
+//
+// It also seeds that issue's implementer claim as a launch a previous daemon began and never
+// recorded, serving the run of the task it took. The restart of step 4 relaunches that claim,
+// which is where step 5's session comes from.
 func (r *mergedRootWaitsLive) seedArcTwo() {
 	t := r.t
 	t.Helper()
 	r.seedIssue("the root in awaiting_merge, as its retro and its merger's READY left it", r.parent, func(issue *record.Issue) {
 		issue.Phase = phase.AwaitingMerge
 	})
-	r.seedIssue("the child implementing and back in the workflow", r.child, func(issue *record.Issue) {
-		issue.Phase, issue.Status = phase.Implementing, "in_progress"
+	parent := r.parent
+	r.write("the issue of the tree the migration finds in a phase, on an open pull request of its own", func(tx pgx.Tx) error {
+		ctx := context.Background()
+		if err := r.records.PutIssue(ctx, tx, record.Issue{
+			Key: r.child, Repo: liveRepo, DefaultBranch: "main", GitHubRepo: liveRepo, Tree: r.parent, Project: r.cfg.Project,
+			Title: "the issue of the tree still in a phase", Parent: &parent, Phase: phase.Implementing, Generation: 1,
+			Status: "in_progress", DispatchStatus: "in_progress", Rank: "W", LastDispatchSeq: r.seq,
+		}); err != nil {
+			return err
+		}
+		if err := r.records.PutPullRequest(ctx, tx, record.PullRequest{
+			State: record.PullRequestOpen, Issue: r.child, Repo: liveRepo, Number: r.childPR,
+			Branch: "legion/" + r.child, HeadSHA: "head-child", Failing: []string{},
+		}); err != nil {
+			return err
+		}
+		return r.admit(ctx, tx, r.child)
 	})
 	r.board.show(r.child, "in_progress")
+	r.note("seeded: %s implementing beneath the root on an open pull request and a slot of its own, the shape the release's migration leaves", r.child)
 	implementer, err := claim.NewToken(r.project, r.child, claim.RoleImplementer)
 	if err != nil {
 		t.Fatal(err)
@@ -468,7 +567,7 @@ func (r *mergedRootWaitsLive) seedArcTwo() {
 	r.note("seeded: the child's implementer serving run 1, its launch unfinished")
 }
 
-// Step 3. The child's implementer completes its phase while its root's close waits. The tree is
+// Step 5. The child's implementer completes its phase while its root's close waits. The tree is
 // not lingering, so the completion is accepted and the child moves on; before this change the
 // root's merge lingered the tree mid-turn and that completion was refused 409 TREE_LINGERING.
 func (r *mergedRootWaitsLive) childCompletesItsPhase() {
@@ -494,10 +593,10 @@ func (r *mergedRootWaitsLive) childCompletesItsPhase() {
 	r.note("read back: %s still waits in %s", r.parent, parent.Phase)
 }
 
-// Step 7. A pull request opens from the waiting root's branch: GitHub's opened, for a pull request
+// Step 6. A pull request opens from the waiting root's branch: GitHub's opened, for a pull request
 // of this run's own that is neither the root's nor the child's, from legion/<root>. GitHub never
 // sends the root's merge again, so the opened must leave the merge the root waits on standing: the
-// root stays in awaiting_merge on its merged pull request, and step 4 closes it on that merge.
+// root stays in awaiting_merge on its merged pull request, and step 7 closes it on that merge.
 // Before this change the opened replaced the merged pull request and the root never closed. The
 // workflow only logs the opened it leaves, so the state shows nothing new to wait for; the step
 // instead waits for the daemon's processed_events row for the envelope, which the intake writes in
@@ -524,7 +623,7 @@ func (r *mergedRootWaitsLive) openedLeavesTheMerge() {
 		liveSettle, r.parent, got.Phase, got.PullRequest.Number, got.PullRequest.State, r.openedPR)
 }
 
-// Step 5. The daemon is restarted at the waiting root's state. The boot's sweep of merged pull
+// Step 4. The daemon is restarted at the waiting root's state. The boot's sweep of merged pull
 // requests finds the root awaiting a merge GitHub already reported and leaves it there, and tells
 // nobody: a restart must not repeat the architect's notice, and a root can wait across many boots.
 func (r *mergedRootWaitsLive) restartLeavesTheWait() {
@@ -532,7 +631,7 @@ func (r *mergedRootWaitsLive) restartLeavesTheWait() {
 	before := len(r.waitArchitectNotices(r.parent, "pr-merged", 1))
 	r.restart()
 	// The boot's work is under way: this boot relaunched the claim the fixture left unfinished,
-	// which its reconciliation does. The window below then watches the wait, and step 4 reads the
+	// which its reconciliation does. The window below then watches the wait, and step 7 reads the
 	// notice count once more at the end of the run, past every retry a slow boot fact can take.
 	r.awaitLaunch(r.token(r.child, claim.RoleImplementer))
 	r.note("drove a restart of the daemon at the waiting root's state; boot %d, its reconciliation run", r.d.state().Daemon.Boots)
@@ -551,10 +650,10 @@ func (r *mergedRootWaitsLive) restartLeavesTheWait() {
 		liveSettle, r.parent, got.Phase, got.PullRequest.State, before)
 }
 
-// Step 4. The child's own pull request merges, which closes it and takes the last open member out
-// of the tree: the root's close, waiting since step 2, runs as the merge's own close would have —
-// done on Dispatch, the tree suspended by its linger, the slot freed and the production check open
-// on the root's merged pull request, the one step 7's opened left standing.
+// Step 7. The child's own pull request merges, which closes it and takes the last open member out
+// of the tree: the root's close, waiting since step 3, runs as the merge's own close would have —
+// done on Dispatch, the tree suspended by its linger, the slots its issues held released and the
+// production check open on the root's merged pull request, the one step 6's opened left standing.
 func (r *mergedRootWaitsLive) childMergeClosesTheRoot() {
 	t := r.t
 	r.seedIssue("the child in awaiting_merge, as its testing, review, acceptance, retro and merger left it", r.child, func(issue *record.Issue) {
@@ -565,8 +664,8 @@ func (r *mergedRootWaitsLive) childMergeClosesTheRoot() {
 	r.note("drove the child's merge: a notifications.github.%s.pr.%d envelope, merged at %s",
 		r.subjectRepo(), r.childPR, mergedRootWaitsChildMerge)
 
-	child := r.waitFor("the child closed", r.child, func(got api.Issue) bool { return got.Phase == phase.Done })
-	r.note("read back: %s is in %s, status %s", r.child, child.Phase, child.Status)
+	child := r.waitFor("the child closed", r.child, func(got api.Issue) bool { return got.Phase == phase.Done && got.Slot == nil })
+	r.note("read back: %s is in %s, status %s, and the slot its work held is released", r.child, child.Phase, child.Status)
 	parent := r.waitFor("the root closed behind it", r.parent, func(got api.Issue) bool {
 		return got.Phase == phase.Done && got.Status == "done" && got.Slot == nil && got.Check != nil
 	})
@@ -593,6 +692,33 @@ func (r *mergedRootWaitsLive) childMergeClosesTheRoot() {
 	r.note("read back: one pr-merged notice over the whole run")
 	testwait.Eventually(t, "the close's own done status on the Dispatch stand-in", func() bool { return r.board.wrote(r.parent, "done") })
 	r.note("read back: the Dispatch stand-in took the close's done write for %s", r.parent)
+}
+
+// publishParkedChild publishes Dispatch's own event of the backlog that the architect's
+// park_child wrote, which the daemon's consumer reads as it reads any issue event, and moves the
+// board with it, as Dispatch's board moves. The route's answer alone does not park the record
+// here: the Dispatch stand-in answers a write no sequence, and without one the route applies
+// nothing of its own write (api's recordOwnStatusWrite), leaving the park to the event, which is
+// the path a deployment whose consumer is current also takes.
+func (r *mergedRootWaitsLive) publishParkedChild() {
+	r.t.Helper()
+	r.board.place(r.parked, "backlog", r.parent, false)
+	r.seq++
+	payload, err := json.Marshal(map[string]any{
+		"id": r.seq, "issue_key": r.parked, "project": r.cfg.Project, "seq": r.seq, "type": "issue.updated",
+		"actor":  map[string]string{"kind": "session", "id": dispatch.DaemonSession(r.parked)},
+		"notify": true, "created_at": time.Now().UTC().Format(time.RFC3339Nano),
+		"payload": map[string]any{
+			"key": r.parked, "status": "backlog", "title": r.parked, "parent": r.parent, "rank": "V",
+			"labels": liveDispatchLabels(false), "last_seq": r.seq, "project": r.cfg.Project, "resolved_repo": liveRepo,
+		},
+	})
+	if err != nil {
+		r.t.Fatalf("encode the Dispatch event of the park: %v", err)
+	}
+	r.publish("notifications.dispatch.issue."+r.parked+".issue.updated", "dispatch",
+		fmt.Sprintf("%s-backlog-%d", r.parked, r.seq), string(payload))
+	r.note("drove Dispatch's own event of that write: %s is backlog under %s", r.parked, r.parent)
 }
 
 // publishMerge publishes GitHub's merge of number on the tree's repository, as Envoy relays a

@@ -31,13 +31,16 @@ func azureEmbedEnvironment(overrides map[string]string) map[string]string {
 	return signInEnvironment(values)
 }
 
-// azureKeyless is the keyless form of Azure credential, in place of azureEmbedEnvironment's key.
-var azureKeyless = map[string]string{
-	"DISPATCH_AZURE_EMBED_KEY":            "",
+// azureFederated is the Azure sign-in the embedder and the answerer share, which whichever of
+// them is azure reads.
+var azureFederated = map[string]string{
 	"DISPATCH_AZURE_TENANT_ID":            "tenant-id",
 	"DISPATCH_AZURE_CLIENT_ID":            "client-id",
 	"DISPATCH_AZURE_FEDERATED_TOKEN_FILE": "/var/run/secrets/azure-federation/token",
 }
+
+// azureKeyless is the keyless form of Azure credential, in place of azureEmbedEnvironment's key.
+var azureKeyless = withOverrides(azureFederated, map[string]string{"DISPATCH_AZURE_EMBED_KEY": ""})
 
 // withOverrides is base with overrides applied over it, base itself unchanged.
 func withOverrides(base, overrides map[string]string) map[string]string {
@@ -127,18 +130,29 @@ func TestResolveBootConfigRefusesEveryEmbedderShapeItCannotUse(t *testing.T) {
 		{"a blank key file beside a bare key", azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_KEY_FILE": blank}),
 			[]string{"DISPATCH_AZURE_EMBED_KEY_FILE names " + blank + ", which is empty, and DISPATCH_AZURE_EMBED_KEY is not read in its place"}},
 	}
-	// Every DISPATCH_AZURE_* variable, a _FILE form included, is refused under Bedrock, whether
-	// DISPATCH_EMBEDDER says so or is unset.
+	// Every DISPATCH_AZURE_EMBED_ variable, a _FILE form included, is refused under Bedrock,
+	// whether DISPATCH_EMBEDDER says so or is unset.
 	for _, variable := range []string{
 		"DISPATCH_AZURE_EMBED_ENDPOINT", "DISPATCH_AZURE_EMBED_DEPLOYMENT", "DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE",
-		"DISPATCH_AZURE_EMBED_KEY", "DISPATCH_AZURE_EMBED_KEY_FILE", "DISPATCH_AZURE_TENANT_ID", "DISPATCH_AZURE_CLIENT_ID",
-		"DISPATCH_AZURE_FEDERATED_TOKEN_FILE",
+		"DISPATCH_AZURE_EMBED_KEY", "DISPATCH_AZURE_EMBED_KEY_FILE",
 	} {
 		cases = append(cases,
 			refusal{variable + " under the default", signInEnvironment(map[string]string{variable: "x"}),
-				[]string{variable + " set, but DISPATCH_EMBEDDER is unset, which is bedrock: the DISPATCH_AZURE_* settings are read only with DISPATCH_EMBEDDER=azure"}},
+				[]string{variable + " set, but DISPATCH_EMBEDDER is unset, which is bedrock: the DISPATCH_AZURE_EMBED_* settings are read only with DISPATCH_EMBEDDER=azure"}},
 			refusal{variable + " under bedrock", signInEnvironment(map[string]string{"DISPATCH_EMBEDDER": "bedrock", variable: "x"}),
 				[]string{variable + " set, but DISPATCH_EMBEDDER is bedrock"}},
+		)
+	}
+	// The shared sign-in is refused only where neither model service is on Azure: a Bedrock
+	// embedder beside an Azure answerer reads all three. The three are the reader's own rows,
+	// in table order, which an empty environment leaves wholly missing, so no list here can
+	// drift from the one the resolvers walk.
+	for _, variable := range readAzureSignIn(envGetter(nil)).missing {
+		cases = append(cases,
+			refusal{variable + " with neither place azure", signInEnvironment(map[string]string{variable: "x"}),
+				[]string{variable + " set, but neither DISPATCH_EMBEDDER nor DISPATCH_ANSWERER is azure: the shared Azure sign-in is read by whichever of them is azure"}},
+			refusal{variable + " under bedrock", signInEnvironment(map[string]string{"DISPATCH_EMBEDDER": "bedrock", variable: "x"}),
+				[]string{variable + " set, but neither DISPATCH_EMBEDDER nor DISPATCH_ANSWERER is azure"}},
 		)
 	}
 	cases = append(cases, refusal{"the whole Azure configuration under bedrock", azureEmbedEnvironment(map[string]string{"DISPATCH_EMBEDDER": "bedrock"}),

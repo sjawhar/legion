@@ -27,6 +27,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/helper"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/redact"
+	"github.com/sjawhar/envoy/internal/testtmp"
 )
 
 // registerEnv names the helper socket a child of this test binary registers with as a session
@@ -55,16 +56,15 @@ func registerAndWait(sock string) {
 
 func env(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
 
-// shortTempDir is a temporary directory short enough to hold a unix socket: a socket path is
-// bounded at 108 bytes, and t.TempDir()'s path includes the test name, cut to 64 bytes.
+// shortTempDir is a directory of the test's own, removed when the test ends, with room under it
+// for the longest path these tests put there: the systemd unit `install` writes under the rig's
+// XDG_CONFIG_HOME, cfg/systemd/user/agent-secrets-helper.service (install_test.go), which is
+// longer than the h.sock every other caller binds. TMPDIR places it, and the helper falls back
+// to /tmp for that length alone, where t.TempDir()'s path carries the whole of the test's name
+// and passes the 107 bytes a unix socket path holds (docs/testing.md).
 func shortTempDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "ash")
-	if err != nil {
-		t.Fatalf("make a temporary directory: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	return dir
+	return testtmp.Dir(t, filepath.Join("cfg", "systemd", "user", "agent-secrets-helper.service"))
 }
 
 func TestConfigDerivesDefaultsAndServeRequiresURL(t *testing.T) {

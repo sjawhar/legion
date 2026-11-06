@@ -119,20 +119,20 @@ func TestAReleaseFreesNoClaimOfAnotherSession(t *testing.T) {
 }
 
 // A claim that names no process - one an earlier build wrote, before its holder's registration
-// adopts it (RenewRoleClaims) - is matched by no instance at all, so only the administrator's
-// forced release frees it. That is the release DELETE /v1/interests/<session_id> makes, and the
-// reason it still forces one.
-func TestOnlyAForcedReleaseFreesAClaimThatNamesNoProcess(t *testing.T) {
+// adopts it (RenewRoleClaims) - keeps the rule it was written under: its holder's own session
+// deregistration frees it, on the session match alone. That is the carve-out
+// (RoleReleaseAuthority.frees) that keeps every claim standing at the deploy from waiting out
+// the role claim reaper, and it closes nothing, since no claim written before this build named
+// a process for a release to be weighed against.
+func TestAClaimThatNamesNoProcessIsFreedByItsSessionsOwnRelease(t *testing.T) {
 	const (
 		role   = "legion-controller"
 		holder = "ses_releasing_unnamed_process"
 	)
-	for name, tc := range map[string]struct {
-		authority RoleReleaseAuthority
-		frees     bool
-	}{
-		"a release naming a process":         {authority: releasedByItsProcess},
-		"the administrator's forced release": {authority: RoleReleaseAuthority{Force: true}, frees: true},
+	for name, authority := range map[string]RoleReleaseAuthority{
+		"a release naming a process":         releasedByItsProcess,
+		"a release that names none":          {},
+		"the administrator's forced release": {Force: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			reg := releasableRoleClaim(t, role, holder, "")
@@ -140,24 +140,21 @@ func TestOnlyAForcedReleaseFreesAClaimThatNamesNoProcess(t *testing.T) {
 				t.Fatalf("the seeded claim names the process %q, want none", claim.ClientInstanceID)
 			}
 
-			if err := reg.Remove(context.Background(), holder, nil, tc.authority); err != nil {
+			if err := reg.Remove(context.Background(), holder, nil, authority); err != nil {
 				t.Fatalf("release every interest of %s: %v", holder, err)
 			}
 
-			wantHolder := holder
-			if tc.frees {
-				wantHolder = ""
-			}
-			assertRoleHolder(t, reg, role, wantHolder)
+			assertRoleHolder(t, reg, role, "")
 			assertInterestMissing(t, reg, holder)
 		})
 	}
 }
 
-// RoleReleaseAuthority.frees is the whole rule, and it is asked here record by record: an absent
-// instance is no match on either side, where session.InstanceMatches, written for a soft claim's
-// predecessor, admits one; a force frees whatever the session holds; and no release reaches a
-// claim of another session.
+// RoleReleaseAuthority.frees is the whole rule, and it is asked here record by record: against a
+// claim that names the process holding it an absent instance is no match, where
+// session.InstanceMatches, written for a soft claim's predecessor, admits one; a claim that
+// names no process is freed by its own session's release, whatever process asks; a force frees
+// whatever the session holds; and no release reaches a claim of another session.
 func TestWhichClaimsAReleaseAuthorityFrees(t *testing.T) {
 	const (
 		holder = "ses_frees_holder"
@@ -174,8 +171,8 @@ func TestWhichClaimsAReleaseAuthorityFrees(t *testing.T) {
 		"the process the claim names":                     {authority: releasedByItsProcess, claim: named, sessionID: holder, want: true},
 		"another process of the claim's session":          {authority: RoleReleaseAuthority{ClientInstanceID: roleClaimSecondInstance}, claim: named, sessionID: holder},
 		"a release that names no process":                 {authority: RoleReleaseAuthority{}, claim: named, sessionID: holder},
-		"a named process against a claim that names none": {authority: releasedByItsProcess, claim: unnamed, sessionID: holder},
-		"no process against a claim that names none":      {authority: RoleReleaseAuthority{}, claim: unnamed, sessionID: holder},
+		"a named process against a claim that names none": {authority: releasedByItsProcess, claim: unnamed, sessionID: holder, want: true},
+		"no process against a claim that names none":      {authority: RoleReleaseAuthority{}, claim: unnamed, sessionID: holder, want: true},
 		"a force against the claim's session":             {authority: RoleReleaseAuthority{Force: true}, claim: named, sessionID: holder, want: true},
 		"a force against a claim that names no process":   {authority: RoleReleaseAuthority{Force: true}, claim: unnamed, sessionID: holder, want: true},
 		"a force against another session's claim":         {authority: RoleReleaseAuthority{Force: true}, claim: named, sessionID: other},

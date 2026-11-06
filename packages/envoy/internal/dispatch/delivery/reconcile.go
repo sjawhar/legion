@@ -102,10 +102,11 @@ func (r *Reconcile) leasedPass(ctx context.Context, leases duty.Leases, due time
 	duty.Exclusive(ctx, leases, deliveryReconcileLease, due, ReconcileInterval, r.runOnce)
 }
 
-// runOnce performs one reconcile pass: a permission check (so a missing Actions or Pull-requests
-// grant is named, never confused with a transient failure), the population pull-request search,
-// the deploy and PR-checks workflows' runs and jobs, and any partial row left over from a
-// completing fetch that failed earlier. Each windowed step keeps its own progress
+// runOnce performs one reconcile pass: the pull-request head refresh, then — where delivery is
+// configured — a permission check (so a missing Actions or Pull-requests grant is named, never
+// confused with a transient failure), the population pull-request search, the deploy and
+// PR-checks workflows' runs and jobs, and any partial row left over from a completing fetch that
+// failed earlier. Each windowed step keeps its own progress
 // (delivery_reconcile_progress), so a step that fails part way through resumes where it stopped
 // rather than restarting its whole window: a 28-day backfill of a busy deploy repository is tens
 // of thousands of GitHub requests, well past one installation's hourly rate limit, so no single
@@ -114,12 +115,46 @@ func (r *Reconcile) leasedPass(ctx context.Context, leases duty.Leases, due time
 // limit, any other GitHub or store error) is recorded by name in last_error instead, and the
 // previous last_reconcile_at is left untouched -- so the freshness row can never report a healthy
 // timestamp for a pass that silently did nothing.
+//
+// The head pass (reconcilePullRequestHeads) runs first and whatever the settings say.
+// pull_request_heads is not delivery's own table: it is what a recorded check result's currency
+// is measured against (api/results_currency.go), and that reader is served in every deployment,
+// delivery configured or not, so a deployment with no delivery settings refreshes its heads and
+// a result recorded at a head a later push replaced reads `older` there too. It is outside the
+// deploy repository's permission check for the same reason: that check asks about the deploy
+// repository's Actions and Pull-requests grants, while the head pass reads each row's own
+// repository with that row's own token.
+//
+// Every other step stays gated on the settings and on that check, in that order: the merged
+// pull-request search, the partial rows, both workflows' runs, the runs backfills, the
+// attribution of stored pull requests and RecordDeployedEvents all read a setting (the
+// population, the deploy repository, its workflow paths) or run against the deploy repository's
+// own grants.
+//
+// The intake's NATS consumer is gated on the settings for a reason of its own, not for the one
+// above: it binds its durable only once the settings cache holds settings (Intake.Run), and the
+// durable is created with no start policy (deliveryConsumerConfig, so JetStream's DeliverAll), so
+// a first bind in a deployment that never had settings would deliver the stream's whole 72-hour
+// backlog
+// (docs/solutions/envoy/a-fresh-jetstream-consumer-reports-ack-floor-0-so-create-it-at-a-start-sequence-INFRA-594.md).
 func (r *Reconcile) runOnce(ctx context.Context) {
 	now := time.Now()
+	headErr := r.reconcilePullRequestHeads(ctx, now)
+	// Where the pass returns before record() below exists, the head pass's failure can only be
+	// logged. At the GetSettings arm there is no delivery_settings row to write it in, or none
+	// that could be read; at the splitRepo and permission arms below, r.fail does write
+	// last_error into that row, but last_error holds the one failure that ended the pass and the
+	// step list that would carry a second one (failures, record) does not exist yet.
+	logHeadFailure := func() {
+		if headErr != nil {
+			slog.Error("dispatch delivery: reconcile pull request heads", "error", headErr)
+		}
+	}
 	settings, err := GetSettings(ctx, r.pool)
 	if err != nil {
+		logHeadFailure()
 		if errors.Is(err, ErrNoSettings) {
-			slog.Info("dispatch delivery: delivery is not configured — the reconcile is idle")
+			slog.Info("dispatch delivery: delivery is not configured — its steps are idle and the pull request head pass has run")
 			return
 		}
 		slog.Error("dispatch delivery: read settings for reconcile", "error", err)
@@ -128,16 +163,19 @@ func (r *Reconcile) runOnce(ctx context.Context) {
 	production := settings.Production()
 	owner, repo, err := splitRepo(settings.DeployRepo)
 	if err != nil {
+		logHeadFailure()
 		slog.Error("dispatch delivery: deploy_repo setting", "error", err)
 		r.fail(ctx, err)
 		return
 	}
 
-	// Checked first and named distinctly from every other failure below: a missing Actions or
-	// Pull-requests permission would otherwise fail every GitHub call this pass makes in exactly
-	// the same shape as a transient 5xx, which this slice's acceptance bar (LEGION-567) requires
-	// surfacing loudly and by name, not folding into a generic fetch failure.
+	// Checked first among the steps the settings gate and named distinctly from every other
+	// failure below: a missing Actions or Pull-requests permission would otherwise fail every
+	// GitHub call those steps make in exactly the same shape as a transient 5xx, which this
+	// slice's acceptance bar (LEGION-567) requires surfacing loudly and by name, not folding into
+	// a generic fetch failure.
 	if _, err := r.github.DeliveryPermissions(ctx, owner, repo); err != nil {
+		logHeadFailure()
 		slog.Error("dispatch delivery: GitHub App permission check", "error", err)
 		r.fail(ctx, err)
 		return
@@ -156,7 +194,9 @@ func (r *Reconcile) runOnce(ctx context.Context) {
 
 	record("reconcile merged pull requests", r.reconcileMergedPullRequests(ctx, settings, searchScope, now))
 	record("reconcile partial pull requests", r.reconcilePartialPullRequests(ctx))
-	record("reconcile pull request heads", r.reconcilePullRequestHeads(ctx, now))
+	// The head pass ran at the top of the pass, before the settings were read; its failure is
+	// recorded here, so last_error names the steps in this list's order.
+	record("reconcile pull request heads", headErr)
 	record("reconcile deploy workflow runs", r.reconcileWorkflow(ctx, owner, repo, settings.DeployRepo, settings.DeployWorkflowPath, DeliveryRunKindDeploy, production, now))
 	if settings.PRChecksWorkflowPath != settings.DeployWorkflowPath {
 		record("reconcile PR-checks workflow runs", r.reconcileWorkflow(ctx, owner, repo, settings.DeployRepo, settings.PRChecksWorkflowPath, DeliveryRunKindPRChecks, production, now))
@@ -457,14 +497,16 @@ func (r *Reconcile) reconcilePartialPullRequests(ctx context.Context) error {
 
 // reconcilePullRequestHeads re-reads the pull request heads ListStalePullRequestHeads hands it,
 // at most PullRequestHeadBatch of them a pass, the longest unread first: the open rows Dispatch
-// last checked over PullRequestHeadStaleAfter ago, and the merged rows no read of GitHub has
-// ever reached that are attributed to nobody, each of those taken once. GitHub's `pull_request`
-// events carry every head move, so this is the backstop for an event that never arrived — a
-// delivery Dispatch was down for, a repository whose webhook was installed late — and the one
-// way a merge that happened while Dispatch was not listening reaches the head row at all. The
-// merged arm is the backstop for an envelope that arrived but said too little: one naming no
-// head repository attributes nobody, and only GitHub's own answer, which always names
-// `head.repo`, can attribute that row before a result at the merged head reads `older` for
+// last checked over PullRequestHeadStaleAfter ago, and every merged row credited to nobody that
+// the rule this build judges by has not judged yet, each of those taken once per rule version
+// (AttributionRuleVersion). GitHub's `pull_request` events carry every head move, so this is
+// the backstop for an event that never arrived — a delivery Dispatch was down for, a
+// repository whose webhook was installed late — and the one way a merge that happened while
+// Dispatch was not listening reaches the head row at all. The
+// merged arm is the backstop for an envelope that arrived but said too little, and for a rule
+// that has changed since: an envelope naming no head repository attributes nobody, only
+// GitHub's own answer, which always names `head.repo`, can attribute that row, and a merged row
+// is the one row no other writer ever revisits before a result at its head reads `older` for
 // good. A rate limit stops the batch and fails the pass, as every other GitHub step's does; any
 // other per-row failure is logged and leaves the row for the next pass.
 func (r *Reconcile) reconcilePullRequestHeads(ctx context.Context, now time.Time) error {
@@ -616,7 +658,7 @@ func (r *Reconcile) readAttributionInputs(ctx context.Context, pr DeliveryPullRe
 		return nil
 	}
 	inputs := attributionInputsFrom(facts)
-	issueKey, _, err := resolveStoredIssueKey(ctx, r.pool, pr.URL, inputs)
+	issueKey, _, err := resolveStoredIssueKey(ctx, r.pool, pr.Repo, pr.URL, inputs)
 	if err != nil {
 		slog.Warn("dispatch delivery: resolve the issue of a backfilled pull request", "repo", pr.Repo, "number", pr.Number, "error", err)
 		return nil
