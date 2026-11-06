@@ -81,7 +81,7 @@ Wake details: `skill://legion-controller/references/wakes.md`.
 ## Trees waiting on a root claim
 
 A root architect whose claim on its root was refused waits, holding its slot, and nothing tells it
-when the holder lets go. `dispatch read` each root in `admission.active` whose `phase` is still
+when the holder lets go. `dispatch read` each root in `admission.trees` whose `phase` is still
 `admitted`. When `Claimed by:` is `nobody` or ends `· not running`, `envoy_publish` `<KEY>: the
 claim is free; claim it again.` to `notifications.role.<issues.<KEY>.architect.locator.claim>`.
 
@@ -112,9 +112,12 @@ you label at a person's request or file yourself.
 A free slot is no reason to take an issue: a labelled root in `todo` takes the next slot through
 `admission.waiting` without you, and a parked issue (status `backlog` or `icebox`) means "do not
 run now". Move an issue out of `backlog` or `icebox` only on a request or a plan ruling that names
-it, and cite that request. The free slots are `admission.cap` minus the roots in
-`admission.active` and the roots in `admission.waiting` that are not in `admission.blocked`, since
-a blocked root takes no slot until its blockers are done. Every move to `todo` you make is one of
+it, and cite that request. A slot is one issue with work, a root or a child, not one tree: a tree
+of four working issues holds four slots, and a tree whose root only waits holds none of its own,
+so `admission.trees` is what names the roots of the live trees. The free slots are
+`admission.cap` minus the issues in `admission.active` and the issues in `admission.waiting` that
+are not in `admission.blocked`, since an issue its blockers or its own open children hold takes no
+slot until they are done. Every move to `todo` you make is one of
 these:
 
 - a root you labelled at a person's request or filed for a clear defect no tree owns, at triage (a

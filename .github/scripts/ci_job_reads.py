@@ -97,11 +97,14 @@ def envoy_top_level_but_infra():
 
 
 # ---------------------------------------------------------------- shared step reads
-WORKSPACES = [
-    "packages/contracts", "packages/envoy-client", "packages/pi-envoy", "packages/pi-legion",
-    "packages/pi-shared", "packages/claude-envoy", "packages/proof-editor",
-    "packages/dispatch", "packages/envoy/internal/dispatch/pmdoc/gen", "docs/site",
-]
+def root_workspaces():
+    """Every workspace the root manifest's `workspaces` lists, relative to the repository root."""
+    return [workspace.removesuffix("/") for workspace in targets("package.json", "workspaces")]
+
+
+# The root manifest's own list: a workspace added to or deleted from package.json's workspaces
+# needs no edit here.
+WORKSPACES = root_workspaces()
 
 
 def bun_job(job, workflow=CI):
@@ -111,9 +114,9 @@ def bun_job(job, workflow=CI):
     return reads(
         (".github/actions/setup-bun/**", at(job, "./.github/actions/setup-bun", workflow)),
         (".bun-version", ".github/actions/setup-bun/action.yml:22 bun-version-file: .bun-version"),
-        ("package.json", f"{install} reads the root manifest (workspaces package.json:19-31, patchedDependencies :45-49)"),
-        ("bun.lock", f"{install} refuses a lock that disagrees with the manifests"),
-        ("patches/**", f"{install} applies package.json:45-49 patchedDependencies"),
+        ("package.json", f"{install} reads the root manifest (workspaces package.json:19-31, patchedDependencies :50-59)"),
+        ("bun.lock", f"{install} reads the lockfile to install the versions it records"),
+        ("patches/**", f"{install} applies package.json:50-59 patchedDependencies"),
         *[(f"{w}/package.json", f"{install}: package.json:19-31 lists {w}; a frozen install reads every workspace manifest")
           for w in WORKSPACES],
     )
@@ -871,6 +874,7 @@ GATES = [
         (ENVOY_CLIENT_SRC, "imported by packages/envoy-client/bin/dispatch.ts, which cli-body-cap.e2e.ts:17 runs"),
         (f"{ENVOY}/internal/dispatch/pmdoc/schema/blocks.json", "packages/dispatch/web/src/__tests__/setup.ts:7, features/refs/markdown-engine.test.ts:3, e2e/engine-reading.ts:10"),
         (f"{ENVOY}/scripts/fixtures/shell-quote.json", "packages/dispatch/e2e/__tests__/local-instance-support.test.ts:154-155"),
+        (f"{ENVOY}/going/testdata/**", "packages/proof-editor/tests/going-answer-no-link.test.ts:111-112"),
         (f"{ENVOY}/internal/tests3/seaweedfs.go", f"{at('dispatch', 'Pull the file store image')} names it to the action, and "
          f"{at('dispatch', 'Start an S3-compatible server for uploaded files')} reads const Image; "
          f"{at('dispatch', 'Wait for the S3-compatible server')} waits for the container it started"),
@@ -1086,6 +1090,7 @@ GATES = [
         (".github/scripts/ci_filter_coverage.py", "check-ci-filters.sh's engine"),
         (".github/scripts/ci_job_reads.py", "check-ci-filters.sh's data"),
         (".github/scripts/workflow_paths.py", "ci_filter_coverage.py reads filters through it"),
+        ("package.json", "ci_job_reads.py reads the workspace list from the root manifest"),
         (GO_TARGETS, "ci_job_reads.py expands the notices and pack runs over it"),
         (CLIENT_TARGETS, "ci_job_reads.py expands the notices runs over it"),
         (INFRA_TARGETS, "ci_job_reads.py expands the notices runs over it"),
