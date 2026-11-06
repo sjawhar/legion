@@ -186,6 +186,12 @@ type Options struct {
 	// working directory and with the environment Oh My Pi gets — through the start wrapper
 	// (startArgv); Oh My Pi starts only once it exits 0. Nil runs none.
 	Setup []string
+	// SkillsRepository is the deployment's skills marketplace (runtime.kubernetes.skills_repository):
+	// the GitHub repository an issue pod's third init container, skills-fetch, clones shallow into
+	// the pod's skills volume at SkillsDir, and which every role's start wrapper then installs from
+	// before Oh My Pi starts. The zero repository runs no such container and installs nothing,
+	// which is every deployment that names no skills repository.
+	SkillsRepository ghrepo.Repository
 	// TestPostgres is runtime.kubernetes.test_postgres: every issue pod serves its own PostgreSQL
 	// for tests, started by the roles container's launcher before it accepts a role start and
 	// started again whenever the postmaster exits (launcher.Config.TestPostgres), and every role

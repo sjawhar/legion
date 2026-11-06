@@ -16,9 +16,8 @@ import (
 // (TestLauncherTermDialer) and as role-init in a role's namespaces (TestRoleInitHelper and the
 // helpers of roleinit_test.go, which register their own markers here). Each reads its
 // instructions from a LEGION_ variable its test hands it, and Guard takes every LEGION_ variable
-// out, so a process that is one of these children runs no Guard of its own and unsets nothing of
-// its own: it was started by a test process this TestMain had already cleaned, whose environment
-// it inherits, so it holds neither the pod's workspace nor the pod's session database.
+// out, so a process that is one of these children runs no Guard of its own: it was started by a
+// guarded test process, whose environment it inherits, so it holds nothing of the pod's either.
 var helperChildVariables = []string{
 	launcherChildEnv, launcherProcessEnv, launcherTermDialerEnv, namespaceHelperEnv,
 	roleInitEnv, roleProbeEnv,
@@ -35,15 +34,13 @@ var helperChildVariables = []string{
 // the working copy back to a saved head, over the work the pod's own roles have done
 // (docs/testing.md, "A test that starts jj or git inherits no pod's environment").
 //
-// It then takes out Oh My Pi's two session variables, OMP_SESSION_STORAGE and
-// OMP_SESSION_SQL_DSN_FILE, which Guard leaves alone because neither leads git or jj anywhere. In
-// a Legion issue pod they name the deployment's live sessions database, which holds a row for
-// every agent session of the deployment, and the same mergeEnv puts them in every generation a
-// test starts. A resume then looks the session up in that database (newSessionDial in claude.go)
-// rather than in the one the test handed the start, so the tests both read a database no test
-// made and fail here while they pass in CI. Every test of this package that uses SQL session
-// storage sets both variables in the start's own Env (session_store_test.go), so none of them
-// needs the values the test process was started with.
+// It takes out the two variables that name a session store as well, which Guard leaves: Guard
+// takes out the LEGION_, GIT_, JJ_, GH_ and GITHUB_ variables and not these. A start's
+// environment is mergeEnv(os.Environ(), command.Env) and a resume looks its session up through
+// newSessionDial on that environment, so in a Legion issue pod, where OMP_SESSION_SQL_DSN_FILE
+// and OMP_SESSION_STORAGE name the deployment's shared sessions database, a test of this package
+// would connect to and query the store every agent of the deployment reads and writes. Each test
+// here that needs a session database names its own (testpg.DSNFile).
 func TestMain(m *testing.M) {
 	for _, name := range helperChildVariables {
 		if os.Getenv(name) != "" {
@@ -54,9 +51,9 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "TestMain:", err)
 		os.Exit(1)
 	}
-	for _, name := range []string{ompsessions.StorageVariable, ompsessions.DSNFileVariable} {
+	for _, name := range []string{ompsessions.DSNFileVariable, ompsessions.StorageVariable} {
 		if err := os.Unsetenv(name); err != nil {
-			fmt.Fprintf(os.Stderr, "TestMain: unset %s: %v\n", name, err)
+			fmt.Fprintln(os.Stderr, "TestMain:", err)
 			os.Exit(1)
 		}
 	}
@@ -105,6 +102,34 @@ func TestNoTestOfThisPackageCanReachThePodsWorkspace(t *testing.T) {
 		}
 		if dir := envValue(fixtureenv.Isolated(t.TempDir()), "LEGION_WORKSPACE"); dir != "" {
 			t.Errorf("a fixture of this package would run its git and jj under LEGION_WORKSPACE=%s", dir)
+		}
+	})
+}
+
+// No test of this package can reach the session store of the pod it runs in. Both cases fail
+// without TestMain's unset in a Legion issue pod, where OMP_SESSION_SQL_DSN_FILE and
+// OMP_SESSION_STORAGE name the deployment's shared sessions database, and name the store a
+// resume of this package's tests would have queried. A test that wants a session database names
+// its own with testpg.DSNFile, in the start's own environment.
+func TestNoTestOfThisPackageCanReachThePodsSessionStore(t *testing.T) {
+	// The test process: TestMain unset both, so neither this package's code under test nor a
+	// child it starts with no environment of its own can read the pod's store.
+	t.Run("the test process holds no session store of the pod's", func(t *testing.T) {
+		for _, name := range []string{ompsessions.DSNFileVariable, ompsessions.StorageVariable} {
+			if value := os.Getenv(name); value != "" {
+				t.Errorf("the test process holds %s=%s, the session store a resume would query", name, value)
+			}
+		}
+	})
+	// The environment a generation is started under, which is where a resume reads the store it
+	// looks its session up in (newSessionDial): a start that names no store of its own must reach
+	// a lookup that has none at all.
+	t.Run("a generation a start names no session store in reaches none", func(t *testing.T) {
+		started := mergeEnv(os.Environ(), []string{"TOLD=" + t.TempDir()})
+		for _, name := range []string{ompsessions.DSNFileVariable, ompsessions.StorageVariable} {
+			if value := envValue(started, name); value != "" {
+				t.Errorf("a generation started by a test here would resume against %s=%s, the session store of the deployment the test process runs in", name, value)
+			}
 		}
 	})
 }
