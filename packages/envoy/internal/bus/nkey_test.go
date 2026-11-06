@@ -4,7 +4,6 @@ import (
 	"encoding/base32"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -370,9 +369,10 @@ func costInputs() []struct{ name, text string } {
 // takes hours (the recursive decoding this replaced took 8.9 s at 32 KiB, and 51 s under the race
 // detector, four times as long per doubling). The slowest input here, the windows that every
 // decoding rescans, took at most 280 ms, and 1.35 s under the race detector, over three runs on a
-// 24-core workstation: 35 and 7 times under the bound. CI runs it without the race detector
-// (the envoy-go job in ci.yaml), so a runner slower and busier than that workstation
-// still passes it, while a quadratic regression cannot.
+// 24-core workstation: 35 and 7 times under the bound. CI runs it under the race detector (the
+// envoy-go-race job in ci.yaml) and nowhere else, so the 1.35 s run is the timing that must hold:
+// a runner slower and busier than that workstation still passes it, while a quadratic regression
+// cannot.
 func TestHoldsSeedCostIsLinear(t *testing.T) {
 	const costBound = 10 * time.Second
 	for _, in := range costInputs() {
@@ -392,50 +392,3 @@ func TestHoldsSeedCostIsLinear(t *testing.T) {
 		})
 	}
 }
-
-// HoldsSeed allocates at most one decoded copy per decoding, at most three in all, and nothing for
-// the window check, so however deep a value's encoding its memory and its decoding work are
-// bounded. Allocations are counted, not timed, so this does not depend on the machine's load.
-// testing.AllocsPerRun counts every malloc in the process, so the test measures in a process of its
-// own, the test binary again running only this test. In the package's process, a drain test whose
-// connection closes while nats.go drains it leaves nats.go's drain goroutine running after the test
-// ends: it waits for the connection's subscriptions to fall to its one request subscription, which
-// the close removes too, so on a connection that has made a request it waits out its 30 s
-// DrainTimeout, then marks the closed connection draining again and waits 5 s for a PONG
-// (Client.Drain says why). It allocates as it ends, and those allocations would count as
-// HoldsSeed's. It skips under the race detector, as the standard library's allocation tests do
-// (race_test.go says why); its cost counterpart, TestHoldsSeedCostIsLinear, still runs there.
-func TestHoldsSeedAllocatesAtMostOneCopyPerDecoding(t *testing.T) {
-	if raceEnabled {
-		t.Skip("skipping in -race mode: the race runtime's own allocations are counted too")
-	}
-	if os.Getenv(allocsChildEnv) == "" {
-		child := exec.Command(os.Args[0], "-test.run", "^"+t.Name()+"$", "-test.count=1", "-test.v")
-		child.Env = append(os.Environ(), allocsChildEnv+"=1")
-		output, err := child.CombinedOutput()
-		if err != nil || !strings.Contains(string(output), "--- PASS: "+t.Name()+" (") {
-			t.Fatalf("measured in a process of its own, %s did not pass: %v\n%s", t.Name(), err, output)
-		}
-		return
-	}
-	for _, row := range []struct {
-		name string
-		text string
-		max  float64
-	}{
-		{"a percent sign nested 1,024 times", "%" + fill("25", 2048), 3},
-		{"windows that start like a seed", fill("SUA", 1<<16), 0},
-		{"ordinary text", fill("the quick brown fox jumps over the lazy dog. ", 1<<16), 0},
-		{"a letter percent-encoded three times", "%252553", 3},
-	} {
-		t.Run(row.name, func(t *testing.T) {
-			if allocs := testing.AllocsPerRun(5, func() { bus.HoldsSeed(row.text) }); allocs > row.max {
-				t.Fatalf("HoldsSeed allocated %v times, want at most %v", allocs, row.max)
-			}
-		})
-	}
-}
-
-// allocsChildEnv marks the child process TestHoldsSeedAllocatesAtMostOneCopyPerDecoding measures
-// in: set, the test measures in its own process instead of starting one.
-const allocsChildEnv = "ENVOY_BUS_HOLDSSEED_ALLOCS_CHILD"

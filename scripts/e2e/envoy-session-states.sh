@@ -66,9 +66,10 @@
 #                                     pass of it; at that default each wait would cost five minutes
 # and every plugin heartbeats at ENVOY_HEARTBEAT_MS=5000, so a live session refreshes six times
 # inside the live window: the shipping margin — three refreshes inside five minutes
-# (.github/scripts/check-heartbeat-margin.sh) — kept at this scale. Check 6 runs a listener of its
-# own at a 90s gone horizon, because the one thing that check measures is the latency from a
-# SIGKILL to `gone`, and ten minutes of waiting would measure the same boundary no better.
+# (SESSION_HEARTBEAT_MS and SESSION_LIVE_WINDOW_MS, packages/contracts/src/envoy-session.ts) —
+# kept at this scale. Check 6 runs a listener of its own at a 90s gone horizon, because the one
+# thing that check measures is the latency from a SIGKILL to `gone`, and ten minutes of waiting
+# would measure the same boundary no better.
 #
 # The session bucket's maximum age is 2h for the whole run but check 8. At the shipping five
 # minutes JetStream removes a stalled session's key at five minutes — before the gone horizon can

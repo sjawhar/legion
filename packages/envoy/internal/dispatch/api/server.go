@@ -85,6 +85,11 @@ type Deps struct {
 	// embedder, and search answers keyword-only on every request, always setting
 	// SearchResponse.Degraded.
 	Embedder embed.Embedder
+	// Answerer answers one question from what Dispatch holds (INFRA-1279), for the three going
+	// routes; nil means the deployment configured no model, where a run is still recorded and
+	// its stream carries the error frame contracts.GoingErrorNoModelConfigured, and the
+	// capability route says no model is configured.
+	Answerer Answerer
 	Envoy    *envoy.Client
 	Events   *events.Broker
 	// GitHub calls the GitHub App API for architecture-source access checks and the web app's
@@ -174,6 +179,9 @@ type DepsInput struct {
 	Docs         docs.API
 	// Embedder embeds a search request's query for meaning search (LEGION-549); nil turns it off.
 	Embedder embed.Embedder
+	// Answerer answers a going request's question (INFRA-1279); nil means no model is
+	// configured. See Deps.Answerer; cmd/dispatch builds it (newAnswerer).
+	Answerer Answerer
 	Events   *events.Broker
 
 	// App is the loaded GitHub App credentials (nil when unconfigured);
@@ -265,6 +273,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 		ServerURL:              strings.TrimSuffix(input.ServerURL, "/"),
 		Docs:                   input.Docs,
 		Embedder:               input.Embedder,
+		Answerer:               input.Answerer,
 		Envoy:                  envoyClient,
 		Events:                 input.Events,
 		GitHub:                 github,

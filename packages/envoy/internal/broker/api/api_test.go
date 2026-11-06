@@ -30,6 +30,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/brokertest"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
+	"github.com/sjawhar/envoy/internal/broker/oauthstore"
 	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
@@ -126,6 +127,9 @@ func newTestServerWith(t *testing.T, adjust func(*api.Deps)) *testServer {
 	serviceLogins := map[string]string{daemonAccount: "legion-daemon", otherDaemonAccount: "legion-daemon"}
 	enr := &enroll.Service{Store: st, Lease: time.Hour, Pod: enroll.K8sPodVerifier{Verifier: podVerifier}, ServiceLogins: serviceLogins}
 	enr.Chain = enroll.NewChainVerifier(st, srv.URL, time.Minute)
+	// Wired as cmd/broker/main.go wires it, so a session name belongs to one principal on this
+	// server too: the enrollment route refuses a name another principal holds.
+	enr.Sessions = oauthstore.New(st.Pool)
 
 	reqMachine := &requests.Machine{
 		Store: st, Policy: cur, Secrets: policytest.Store(local),
