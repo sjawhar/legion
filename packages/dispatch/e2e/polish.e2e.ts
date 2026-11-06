@@ -14,7 +14,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("project filters stay collapsed until needed and margin asks use the compact composer @phone", async ({
+test("project filters stay collapsed until needed and margin asks use the compact composer", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -28,10 +28,7 @@ test("project filters stay collapsed until needed and margin asks use the compac
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
-  if (testInfo.project.name === "chromium") {
-    await page.setViewportSize({ height: 800, width: 1280 });
-  }
-  const viewport = testInfo.project.name === "chromium" ? "1280" : "390";
+  await page.setViewportSize({ height: 800, width: 1280 });
 
   try {
     await page.goto("/projects/CORE");
@@ -39,7 +36,7 @@ test("project filters stay collapsed until needed and margin asks use the compac
     await expect(filters).toHaveAttribute("aria-expanded", "false");
     await expect(filterPicker(page, "Status")).toHaveCount(0);
     await page.screenshot({
-      path: testInfo.outputPath(`polish-project-list-${viewport}.png`),
+      path: testInfo.outputPath("polish-project-list-1280.png"),
       fullPage: true,
     });
 
@@ -55,15 +52,8 @@ test("project filters stay collapsed until needed and margin asks use the compac
     const boardCard = page.getByRole("article", { name: `${issue.key} Polish the queue` });
     await boardCard.scrollIntoViewIfNeeded();
     await expect(boardCard).toBeVisible();
-    if (testInfo.project.name === "iphone") {
-      expect(
-        await page.evaluate(
-          () => document.documentElement.scrollWidth <= document.documentElement.clientWidth
-        )
-      ).toBe(true);
-    }
     await page.screenshot({
-      path: testInfo.outputPath(`polish-project-board-${viewport}.png`),
+      path: testInfo.outputPath("polish-project-board-1280.png"),
       fullPage: true,
     });
 
@@ -72,27 +62,56 @@ test("project filters stay collapsed until needed and margin asks use the compac
     await expect(inboxCard.getByRole("radio", { name: "Ship" })).toBeVisible();
     await expect(inboxCard.getByLabel("Your answer")).toBeVisible();
     await page.screenshot({
-      path: testInfo.outputPath(`polish-inbox-${viewport}.png`),
+      path: testInfo.outputPath("polish-inbox-1280.png"),
       fullPage: true,
     });
 
     await navigateInApp(page, `/issues/${issue.key}`);
-    if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: "Open review panel (1 open ask)" }).click();
-    }
     const marginCard = needsYouCards(page).getByTestId(`ask-${ask.id}`);
     await expect(marginCard.getByRole("radio", { name: "Ship" })).toBeVisible();
     await expect(marginCard.getByLabel("Your answer")).toBeHidden();
     await marginCard.getByText("Add a note or answer in your own words", { exact: true }).click();
     await expect(marginCard.getByLabel("Your answer")).toBeVisible();
     await page.screenshot({
-      path: testInfo.outputPath(`polish-margin-${viewport}.png`),
+      path: testInfo.outputPath("polish-margin-1280.png"),
       fullPage: true,
     });
     await navigateInApp(page, "/agents");
     await expect(page.getByRole("region", { name: "Agents empty state" })).toBeVisible();
     await page.screenshot({
-      path: testInfo.outputPath(`polish-agents-${viewport}.png`),
+      path: testInfo.outputPath("polish-agents-1280.png"),
+      fullPage: true,
+    });
+  } finally {
+    await context.close();
+  }
+});
+
+// The narrow-screen half of the row above. The board lays its columns out side by side, so it is
+// the page a phone's width can push sideways; the row above walks the same board at 1280 px,
+// where there is room for them.
+test("the project board's columns stay inside the screen @phone", async ({ browser }, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "only a phone screen is narrower than the columns");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Polish the queue" });
+  await patchIssue(issue.key, { status: "todo" });
+
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    await page.goto("/projects/CORE");
+    await page.getByRole("button", { name: "Board" }).click();
+    await expect(page.getByRole("region", { name: "Project board" })).toBeVisible();
+    const boardCard = page.getByRole("article", { name: `${issue.key} Polish the queue` });
+    await boardCard.scrollIntoViewIfNeeded();
+    await expect(boardCard).toBeVisible();
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= document.documentElement.clientWidth
+      )
+    ).toBe(true);
+    await page.screenshot({
+      path: testInfo.outputPath("polish-project-board.png"),
       fullPage: true,
     });
   } finally {

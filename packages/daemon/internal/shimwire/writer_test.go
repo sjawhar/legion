@@ -7,25 +7,13 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-)
 
-// shortTempDir is a temporary directory short enough to hold a unix socket: a socket path is
-// bounded at 108 bytes, and t.TempDir()'s path includes the test name, cut to 64 bytes.
-func shortTempDir(t *testing.T) string {
-	t.Helper()
-	dir, err := os.MkdirTemp("", "sw")
-	if err != nil {
-		t.Fatalf("make a temporary directory: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	return dir
-}
+	"github.com/sjawhar/legion/daemon/internal/testtmp"
+)
 
 // The bug socket-writer.ts exists for (socket-writer.ts:19-25): an ~350 KiB rpc_chunk line
 // against a unix socket buffer of roughly 200 KiB. A writer that let the transport take only
@@ -33,7 +21,7 @@ func shortTempDir(t *testing.T) string {
 // until the buffer is full before it starts draining.
 func TestALineLargerThanTheSocketBufferIsDeliveredWhole(t *testing.T) {
 	line := chunkLine(t)
-	listener, err := net.Listen("unix", filepath.Join(shortTempDir(t), "w.sock"))
+	listener, err := net.Listen("unix", testtmp.Socket(t, "w.sock"))
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
