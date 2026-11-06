@@ -488,12 +488,44 @@ func (a *AWSStand) Answer(w http.ResponseWriter, _ *http.Request, seen Request) 
 		http.Error(w, "the stand-in service refused this call: "+err.Error(), http.StatusForbidden)
 		return true
 	}
-	body := a.options.Body
-	if body == "" {
-		body = "the stand-in service verified the signature"
+	if body := a.options.Body; body != "" {
+		fmt.Fprint(w, body)
+		return true
 	}
-	fmt.Fprint(w, body)
+	if body, parsed := awsAnswerFor(seen); parsed {
+		w.Header().Set("Content-Type", "application/xml")
+		fmt.Fprint(w, body)
+		return true
+	}
+	fmt.Fprint(w, "the stand-in service verified the signature")
 	return true
+}
+
+// awsAnswerFor is the answer its client parses for the calls a check drives through this
+// stand-in, and whether there is one. A correctly signed call answered with a line of prose is
+// a call the AWS CLI reports as a 500, which hides whether it worked: the signature verified
+// and the call still reads as broken. So a list and an identity answer the service's own XML,
+// empty, and every other call keeps the line. AWSOptions.Body, where a row sets one, wins over
+// both.
+func awsAnswerFor(seen Request) (string, bool) {
+	const header = `<?xml version="1.0" encoding="UTF-8"?>`
+	switch {
+	case seen.Method == http.MethodPost && strings.Contains(seen.Body, "Action=GetCallerIdentity"):
+		return header + `<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">` +
+			`<GetCallerIdentityResult><Arn>arn:aws:iam::123456789012:user/airlock-stand-in</Arn>` +
+			`<UserId>AIDAAIRLOCKSTANDIN00</UserId><Account>123456789012</Account></GetCallerIdentityResult>` +
+			`<ResponseMetadata><RequestId>airlock-stand-in</RequestId></ResponseMetadata>` +
+			`</GetCallerIdentityResponse>`, true
+	case seen.Method == http.MethodGet && (seen.Path == "" || seen.Path == "/"):
+		return header + `<ListAllMyBucketsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">` +
+			`<Owner><ID>airlock-stand-in</ID><DisplayName>airlock-stand-in</DisplayName></Owner>` +
+			`<Buckets></Buckets></ListAllMyBucketsResult>`, true
+	case seen.Method == http.MethodGet:
+		return header + `<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">` +
+			`<Name>` + strings.Trim(seen.Path, "/") + `</Name><Prefix></Prefix><KeyCount>0</KeyCount>` +
+			`<MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated></ListBucketResult>`, true
+	}
+	return "", false
 }
 
 // Refusals is why each call this stand-in refused did not verify, in order.

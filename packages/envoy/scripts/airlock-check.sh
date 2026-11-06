@@ -28,7 +28,7 @@
 #     therefore a small Python program (written into this run's work directory) that starts
 #     `agent-secrets` itself and scans the descendant it started.
 #   - k15 needs no stack at all: it builds the Lean model, prints its theorem statements and
-#     their axioms, runs the comparison fuzz test for ten minutes, and runs the six mutants
+#     their axioms, runs the comparison fuzz test for ten minutes, and runs every mutant
 #     through scripts/airlock-mutants.sh.
 #
 # Where a check needs a secret the stack does not hold, this script extends the stack's own
@@ -1381,7 +1381,9 @@ out=$d/aws-out
 export AWS_DEFAULT_REGION=us-east-1
 say() { printf '%s\n' "\$1" >>"\$out"; }
 say "sts=\$(aws --endpoint-url $AIRLOCK_AWS_URL sts get-caller-identity 2>&1 | tail -n 1 | tr -d '\r')"
-say "ls=\$(aws --endpoint-url $AIRLOCK_AWS_URL s3 ls 2>&1 | tail -n 1 | tr -d '\r')"
+ls_out=\$(aws --endpoint-url $AIRLOCK_AWS_URL s3 ls 2>&1); ls_exit=\$?
+say "ls=\$(printf '%s' "\$ls_out" | tail -n 1 | tr -d '\r')"
+say "ls_exit=\$ls_exit"
 say "cp=\$(aws --endpoint-url $AIRLOCK_AWS_URL s3 cp $d/100k.bin s3://airlock-bucket/k6-100k.bin 2>&1 | tail -n 1 | tr -d '\r')"
 $AIRLOCK_BOTO3_PYTHON $d/aws-boto3.py $AIRLOCK_AWS_URL $d/boto3.json >$d/boto3.log 2>&1
 echo "boto3 exit \$?" >>$d/boto3.log
@@ -1408,6 +1410,7 @@ check_k6() {
 	expect "az gets a placeholder access token"
 	expect "the stand-in Resource Manager gets a real access token in Authorization on all five runs, whichever process served each call"
 	expect "the stand-in AWS service accepts each signature of the STS call, the list and the upload, with the real session token, and finds no placeholder in them"
+	expect "the list is answered, not only signed: aws s3 ls exits 0 through the airlock"
 	expect "the chunk-signed upload and the presigned URL get an error that names them"
 	expect "the negative control, with the exchange and the signing turned off (dev-airlock.sh --no-kind), gives the token endpoint the placeholder and makes the stand-in AWS service reject every signature"
 
@@ -1447,7 +1450,7 @@ check_k6() {
 	local aws_secret aws_session
 	aws_secret="$(stored_value "${STACK_SECRETS_PREFIX}airlock-aws-key")"
 	aws_session="$(printf '%s' "$aws_secret" | jq -r .session_token)"
-	observe "the AWS CLI: sts said '${K6AWS[sts]}'; s3 ls said '${K6AWS[ls]}'; s3 cp said '${K6AWS[cp]}'"
+	observe "the AWS CLI: sts said '${K6AWS[sts]}'; s3 ls said '${K6AWS[ls]}' and exited ${K6AWS[ls_exit]}; s3 cp said '${K6AWS[cp]}'"
 	observe "the stand-in AWS service recorded $K6_AWS_CALLS calls on $K6_AWS_REFUSED; the Credential of each named the key id '$K6_AWS_KEYIDS' and the real key id is '$AIRLOCK_AWS_KEY_ID'; $K6_AWS_PLACEHOLDERS of them carried a placeholder in a header or the query"
 	observe "boto3: $K6_AWS_BOTO3 (its own last lines: $K6_AWS_BOTO3_LOG)"
 	observe "the chunk-signed upload got: $K6_AWS_CHUNK"
@@ -1458,6 +1461,14 @@ check_k6() {
 	judge "$([ "$K6_AWS_PLACEHOLDERS" = 0 ] && [ "$accepted" -ge 3 ] && contains "$AIRLOCK_AWS_KEY_ID" "$K6_AWS_KEYIDS" && ! contains "403" "${K6AWS[sts]}" && echo 0 || echo 1)" \
 		"the stand-in AWS service accepts each signature of the STS call, the list and the upload, with the real session token, and finds no placeholder in them" \
 		"$accepted calls were verified against the real key id $K6_AWS_KEYIDS and the stack's own session token ($(shape "$aws_session")), with $K6_AWS_PLACEHOLDERS placeholders among them; the three calls said '${K6AWS[sts]}' / '${K6AWS[ls]}' / '${K6AWS[cp]}'"
+
+	# The list is read for its own answer as well as its signature. A stand-in that verifies a
+	# signature and then answers a line of prose makes the AWS CLI report a 500, and a check that
+	# reads the signature alone would pass on a call its own client calls broken: the stand-in
+	# answers an empty ListAllMyBuckets now, and this is what holds it to that.
+	judge "$([ "${K6AWS[ls_exit]}" = 0 ] && ! contains "error" "${K6AWS[ls]}" && echo 0 || echo 1)" \
+		"the list is answered, not only signed: aws s3 ls exits 0 through the airlock" \
+		"aws s3 ls exited ${K6AWS[ls_exit]} and its last line was '${K6AWS[ls]}'"
 
 	judge "$(contains "refusing a chunk-signed upload" "$K6_AWS_CHUNK" && contains "refusing a presigned URL" "$K6_AWS_PRESIGNED" && echo 0 || echo 1)" \
 		"the chunk-signed upload and the presigned URL get an error that names them" \
@@ -2644,7 +2655,7 @@ EOF
 		"the comparison fuzz test passes for ten minutes" \
 		"the seed corpus exited $seed_status and -fuzztime=600s exited $fuzz_status"
 
-	echo "airlock-check: running the six mutants..." >&2
+	echo "airlock-check: running the mutants..." >&2
 	set +e
 	(cd "$ENVOY_DIR" && AIRLOCK_MODEL="$model" bash "$SCRIPT_DIR/airlock-mutants.sh") >"$WORK_DIR/mutants.log" 2>&1
 	local mutants_status=$?
@@ -2652,11 +2663,20 @@ EOF
 	echo
 	echo "the mutants:"
 	grep -E '^(PASS|FAIL):' "$WORK_DIR/mutants.log" | sed 's/^/  /'
-	control "scripts/airlock-mutants.sh exited $mutants_status: $(grep -cE '^PASS:' "$WORK_DIR/mutants.log" || true) of 6 mutants were caught"
+	# The check's words name six mutants, which is a floor and not a count: the tree holds every
+	# mutant of the decision anyone has written, and each must be caught. So this reads two
+	# things — that airlock-mutants.sh caught every mutant it found, and that the six the check
+	# names are among them.
+	local caught named missing=""
+	caught=$(grep -cE '^PASS:' "$WORK_DIR/mutants.log" || true)
+	for named in go-extra-header go-no-host-check go-judge-over-900 go-carries-value lean-all-headers lean-carries-value; do
+		grep -qE "^PASS: $named " "$WORK_DIR/mutants.log" || missing="$missing $named"
+	done
+	control "scripts/airlock-mutants.sh exited $mutants_status: $caught mutant(s) caught, the check's six among them"
 	control "$(grep -E '^(PASS|FAIL):' "$WORK_DIR/mutants.log" | tr '\n' ' ')"
-	judge "$([ "$mutants_status" = 0 ] && [ "$(grep -cE '^PASS:' "$WORK_DIR/mutants.log" || true)" = 6 ] && echo 0 || echo 1)" \
+	judge "$([ "$mutants_status" = 0 ] && [ -z "$missing" ] && echo 0 || echo 1)" \
 		"negative control: each of the six mutants is caught" \
-		"airlock-mutants.sh exited $mutants_status with $(grep -cE '^PASS:' "$WORK_DIR/mutants.log" || true) of 6 caught"
+		"airlock-mutants.sh exited $mutants_status with $caught caught and none of the six missing${missing:+; missing:$missing}"
 }
 
 ###############################################################################################
