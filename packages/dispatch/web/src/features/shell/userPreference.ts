@@ -4,6 +4,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { whoAmIQuery } from "../../api/queries";
 
 export type UserPreference =
+  | "agents.open"
+  | "agents.pane-share"
   | "agents.pinned"
   | "project.board-edges"
   | "project.board-lanes"
