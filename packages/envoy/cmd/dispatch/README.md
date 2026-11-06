@@ -338,10 +338,11 @@ It runs under the lease `ci-reconcile` with that 5 minutes as its period, so one
   It writes through the listener's own CI bucket, `envoy_ci_state`, which every pass binds afresh and none creates:
   the listener stays the one owner of that bucket's TTL and its copies, and a pass that finds no bucket says so and reads GitHub nothing.
 
-- A pass reads every row of `repo_projects`, resolves each against GitHub (`GET /repos/{owner}/{repo}`) for the name and id GitHub itself gives it, and deduplicates by that id, so a repository mapped under both an old and a new name is read once.
-  Every record it writes is keyed by GitHub's own owner and name, never the row's, which is stored lower-cased:
-  a record keyed from the row would be a second record of the same head on a second settlement subject.
-  A row GitHub does not answer, or the App is not installed on, is named at WARN, counted and passed over.
+- A pass reads every repository `repo_projects` maps, each under the name it is called today — the row's own name, or, where the row names a rename, its `renamed_to` (`refs.CanonicalRepoSQL`) — so a repository mapped under both an old and a new name is read once and a name it was renamed away from is never asked of GitHub, which answers 404 for that name's installation.
+  It resolves each against GitHub (`GET /repos/{owner}/{repo}`) for the name and id GitHub itself gives it, and deduplicates by that id as well.
+  Every record it writes is keyed by GitHub's own owner and name, never the mapping's, which is stored lower-cased:
+  a record keyed from the mapping would be a second record of the same head on a second settlement subject.
+  A repository GitHub does not answer, or the App is not installed on, is named at WARN under the name the pass read it by, counted and passed over, so mappings renamed onto one repository are skipped once between them.
 
 - For each head it reads the commit's check runs (`filter=all`) and its check suites, page by page, and records each completed one through the mapping a webhook's own body goes through, so a pass over a run the listener already recorded changes no record and publishes no settlement.
   Only a completed run and a completed suite are recorded:

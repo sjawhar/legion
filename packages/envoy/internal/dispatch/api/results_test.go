@@ -1125,7 +1125,7 @@ func TestAPullRequestOpenedAtASettledCommitIsSeenOnceTheSpanEnds(t *testing.T) {
 		t.Fatalf("the read inside the span = %q, want older: no call is spent, so the stored answer stands", got)
 	}
 	if asked := fake.asks("acme/widgets") - spent; asked != 0 {
-		t.Fatalf("the read inside the settled span asked GitHub %d times, want none", asked)
+		t.Fatalf("the read inside the span asked GitHub %d times, want none", asked)
 	}
 
 	// 4. Past the span. The cache's moments are its only clock, and the public way to move one

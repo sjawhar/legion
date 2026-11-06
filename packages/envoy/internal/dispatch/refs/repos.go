@@ -43,9 +43,21 @@ import (
 // expects — and a plain scalar subquery over both would fail every statement this expression is
 // spliced into with `more than one row returned by a subquery`. It reads only the mappings that
 // name a rename, so a repository mapped with no rename coalesces to its own name.
+//
+// That read goes through a derived table that renames both columns it keeps, because repo is
+// the caller's own expression spliced into this one and SQL resolves an unqualified name
+// against the innermost query's columns first. Reading repo_projects directly here would put a
+// column named `repo` in scope, so a caller splicing a bare `repo` would compare that column
+// with itself — true for every row, which answers the whole table's greatest renamed_to for
+// every row of every caller rather than each row's own canonical name. No caller's column is
+// named rename_source or rename_target, so a caller's bare `repo` reaches the caller's own
+// table, and a caller whose statement has no such column fails loudly with `column "repo" does
+// not exist` rather than silently answering some other repository's name.
 func CanonicalRepoSQL(repo string) string {
-	return `coalesce((select max(renamed.renamed_to) from repo_projects renamed
-		where lower(renamed.repo) = lower(` + repo + `) and renamed.renamed_to is not null), ` + repo + `)`
+	return `coalesce((select max(rename.rename_target) from (
+			select renamed.repo as rename_source, renamed.renamed_to as rename_target
+			from repo_projects renamed where renamed.renamed_to is not null
+		) rename where lower(rename.rename_source) = lower(` + repo + `)), ` + repo + `)`
 }
 
 // CanonicalRepo is that rule read through q for one full `owner/name`: the expression above,
