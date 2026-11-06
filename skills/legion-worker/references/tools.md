@@ -16,7 +16,8 @@ your issue drives (`go build ./cmd/legion`), vet the module you changed (`go vet
 which compiles and runs no test), and, in a package whose tests need Postgres, run only the tests
 your change touches by name (`go test -run`). Go's race detector needs cgo, which the image turns
 off, so prefix it: `CGO_ENABLED=1 go test -race -count=1 -run '<TestName>' ./internal/<package>/`
-(`CGO_ENABLED=0`, and gcc, `packages/daemon/docker/worker.Dockerfile:976-977`).
+(the worker image sets `CGO_ENABLED=0` and installs gcc, in
+`packages/daemon/docker/worker.Dockerfile`).
 
 A whole module's or whole package's test run goes to CI on the pull request, where a job of that
 pull request runs it: `go test ./...`, a whole Postgres-backed package such as
@@ -36,7 +37,7 @@ heavy run goes where your deployment's instructions say.
   migrate the database their URL names, and take one of their own from the next bullet:
   `packages/envoy/internal/broker/store` (`store_test.go` opens what `BROKER_TEST_DATABASE_URL`
   names and migrates it; one run left 24 tables) and `packages/envoy/internal/dispatch/store`
-  (`openTestStore`, `store_test.go:36-44`; one whole run left 99), each measured on 2026-11-06 in
+  (`openTestStore` in its `store_test.go`; one whole run left 99), each measured on 2026-11-06 in
   an empty database.
 - Anything that migrates into the database its DSN names, rather than making one per test, needs
   a database of your own, because a sibling role writing the same one collides with you: the
