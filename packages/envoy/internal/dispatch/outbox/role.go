@@ -116,24 +116,36 @@ func resolveRole(ctx context.Context, deps Deps, role string) (roles.Resolution,
 // its claim. Events that are not due are resolved too: their unreached role destinations hold
 // later events back from the holder's agent subject.
 //
-// A destination whose forward would keep the copy for a role nobody holds, while an attempt of
-// one of the comment's mentions is still live (destination.liveMention), is left out of the
-// event's list and the event marked mentionPending instead, exactly as the mention rule leaves a
-// mentioned session's own copy out (destinations.leftTo): settleEvent blocks the event for
-// mentionPendingDelay and it is read again, by which time the attempt has settled or its lease
-// has lapsed. The copy a keep stores carries every settled mention of the comment, and the
-// session that claims the role next is keyed by that map wherever the copy reaches it from
-// (roleForward.keep, contracts.Envelope.MentionDedupeKeys), so a keep made in the instant the
-// comment was written - before its mentions have settled - stores a map naming none of them and
-// shows the comment twice to the mentioned session that claims the role. Only the keep waits: a
-// role with a live holder is forwarded to at once, that holder's own key being known already
-// (roleFallbackKey), and a keep has no holder waiting on it, its copy waiting on the role's next
-// claim in any case.
+// A destination whose copy would be given to the comment's mentioned sessions out of order waits
+// for the mention that decides its key, rather than being sent under a key that mention has not
+// claimed yet. Two copies wait, each on the mention its own key comes from
+// (roleCopyWaitsForAMention):
+//
+//   - a keep of the copy for a role nobody holds, while an attempt of any of the comment's
+//     mentions is live (destination.liveMention), since the session that claims the role next is
+//     keyed by the map the keep stores and any mentioned session may be that session;
+//   - a forward to a live holder, while that holder's own mention of the comment is live
+//     (destination.mentionStates, mentionOutcomes.live), since the key of a mention whose only
+//     attempt is live is in no settled map (mentionDeliveries.settledKeys) and the forward would
+//     go under contracts.RoleForwardDedupePrefix and the event's key - one that host never
+//     claimed - beside the mention landing after it. The wait is that one holder's mention and
+//     no other: a holder with no live mention of its own is forwarded to at once, as the
+//     fallback pass's own forward of a held copy is (decideFallbackCopy, mentionDeliveries.liveFor).
+//
+// A destination that waits keeps its place in the event's list, marked waiting
+// (destination.waiting): it makes no send this read and holds its key against the owner's later
+// events instead (planChains), and the event is marked mentionPending, so settleEvent blocks it
+// for mentionPendingDelay and it is read again, by which time the attempt has settled or its
+// lease has lapsed. Nothing else delivers a role copy - a keep waits for the role's next claim
+// and a forward is the holder's one copy - so a copy dropped from the list would let the owner's
+// next event of the same role reach that holder first, which is why this differs from the
+// mention rule's own hold of a mentioned session's copy (destinations.leftTo), left out of the
+// list because the mention delivers that comment to that very session.
 //
 // The wait is the attempt's own lease and nothing longer (model.DeliveryClaimLapse): past it the
-// attempt reads resumed or abandoned rather than live, no mention is live any more, and the keep
-// proceeds with whatever settledKeys holds then - a partial map, or an empty one. That edge is
-// deliberate. The keep is held for no destination the event already reached: that copy was kept
+// attempt reads resumed or abandoned rather than live, no mention is live any more, and the copy
+// goes with whatever settledKeys holds then - a partial map, or an empty one. That edge is
+// deliberate. Nothing waits for a destination the event already reached: that copy was kept
 // or forwarded under an earlier read and this one sends nothing.
 func resolveRoleHolders(ctx context.Context, deps Deps, events []*batchEvent) {
 	var routed []string
@@ -166,40 +178,53 @@ func resolveRoleHolders(ctx context.Context, deps Deps, events []*batchEvent) {
 	}
 	wg.Wait()
 	for _, event := range events {
-		// The destinations the keeps wait on are dropped from the event's own list, which is
-		// rewritten in place: a copy left out is no destination of the event at all, as a copy
-		// the mention rule left out is none (batchEvent.mentionPending).
-		list := event.destinationsOf[:0]
-		for _, dest := range event.destinationsOf {
-			if result, ok := resolved[dest.role]; ok {
-				dest.forward = forwardOf(dest.role, event.item, result.resolution, result.err)
-				dest.forward.mentionKeys = dest.mentionKeys
-				dest.forward.settledKeys = dest.settledKeys
-				if keepWaitsForAMention(event, dest) {
-					event.mentionPending = true
-					continue
-				}
-				if dest.dedupeKey == "" {
-					dest.dedupeKey = roleFallbackKey(dest.mentionKeys, dest.settledKeys, dest.forward)
-				}
+		// Written into the event's own list: a destination that waits stays in it, marked, so
+		// that it holds its key against the owner's later events (destination.waiting,
+		// planChains).
+		for index := range event.destinationsOf {
+			dest := &event.destinationsOf[index]
+			result, ok := resolved[dest.role]
+			if !ok {
+				continue
 			}
-			list = append(list, dest)
+			dest.forward = forwardOf(dest.role, event.item, result.resolution, result.err)
+			dest.forward.mentionKeys = dest.mentionKeys
+			dest.forward.settledKeys = dest.settledKeys
+			if roleCopyWaitsForAMention(event, *dest) {
+				dest.waiting = true
+				event.mentionPending = true
+				continue
+			}
+			if dest.dedupeKey == "" {
+				dest.dedupeKey = roleFallbackKey(dest.mentionKeys, dest.settledKeys, dest.forward)
+			}
 		}
-		event.destinationsOf = list
 	}
 }
 
-// keepWaitsForAMention reports whether dest's keep of the comment's copy waits for a mention of
-// that comment to settle: a forward that keeps the copy for a role nobody holds
-// (roleForward.keptFor), an attempt of one of the comment's mentions still live when the batch
-// read them (destination.liveMention), and a destination this event has not reached already.
-// What that wait is for, and what bounds it, is on resolveRoleHolders.
-func keepWaitsForAMention(event *batchEvent, dest destination) bool {
-	if dest.forward.keptFor == "" || !dest.liveMention {
+// roleCopyWaitsForAMention reports whether dest's copy of the comment waits for a mention of that
+// comment to settle, which is the mention its own dedupe key comes from: for a copy kept for a
+// role nobody holds (roleForward.keptFor), any mention of the comment still live when the batch
+// read them (destination.liveMention), since the session that claims the role next is keyed by
+// the map the keep stores; for a forward, the holder's own mention alone
+// (destination.mentionStates), since that is the one key this copy is chosen by
+// (roleFallbackKey). A destination this event has reached already waits for nothing, and
+// neither does one that sends nothing whatever its key - a role route reached with nothing to
+// send (roleForward.skip) and one its holder's resolution held pending (roleForward.err), which
+// is backed off for the holder rather than waited out for a mention. What each wait is for, and
+// what bounds it, is on resolveRoleHolders.
+func roleCopyWaitsForAMention(event *batchEvent, dest destination) bool {
+	if _, reached := event.delivered[dest.subject]; reached {
 		return false
 	}
-	_, reached := event.delivered[dest.subject]
-	return !reached
+	switch forward := dest.forward; {
+	case forward.keptFor != "":
+		return dest.liveMention
+	case forward.skip != "" || forward.err != nil:
+		return false
+	default:
+		return dest.mentionStates.live(forward.holder)
+	}
 }
 
 // roleFallbackKey is the dedupe key a role route's copy of a new comment carries in place of the

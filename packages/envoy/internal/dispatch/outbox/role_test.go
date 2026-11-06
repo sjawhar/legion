@@ -9,6 +9,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1462,6 +1463,199 @@ func TestACopyKeptForARoleWaitsForTheCommentsLiveMentions(t *testing.T) {
 		if publishedAt(t, database, event.ID) == nil {
 			attempts, failure, _ := eventState(t, database, event.ID)
 			t.Fatalf("the event whose only route is the unheld role was not published though no attempt of its mentions is live: attempt_count %d, publish_error %v",
+				attempts, failure)
+		}
+	})
+}
+
+// A copy that waits on a mention still holds its destination's place in its owner's order. Two
+// events of one issue are routed to a role nobody holds: a comment whose mention is still being
+// sent, whose copy waits for it (TestACopyKeptForARoleWaitsForTheCommentsLiveMentions), and the
+// issue update written after it. Were the waiting copy simply dropped from the comment's
+// destinations, the update's copy would be kept first, and the kept lane is drained to the
+// role's next holder in stream order (walkKeptRole in cmd/listener/role_keep.go), so that holder
+// would be shown the update before the comment it updates - the issue's own events out of order
+// at the one session that takes them, which is what planChains holds shut for every other
+// destination.
+//
+// So the waiting copy stays in the event's list, marked (destination.waiting), and holds its
+// role topic's key: the update is held behind it and kept only once the comment's copy is
+// (planChains, batchEvent.held). Nothing is kept while the mention is live, and once it settles
+// both copies are kept in the order they were written. The mentioned session's own copy is the
+// other case and is left out of the list entirely: the mention delivers that comment to that
+// very session, so it holds none of the owner's later events back (destinations.leftTo).
+func TestALaterEventIsNotKeptBeforeACopyWaitingOnACommentsMentions(t *testing.T) {
+	ctx := store.WithTransactionTracking(context.Background())
+	const mentioned = "ses_mentioned_before_the_update"
+	database := storetest.Open(t)
+	broker := events.NewBroker()
+	publisher := &keepRecorder{}
+	deps := Deps{Store: database, Publisher: publisher, Broker: broker,
+		RoleClaims: unclaimedRoles, Sessions: unclaimedRoles}
+	_, comment := roleRoutedMentioningComment(t, database, broker, "unheld-ordered", "pending", mentioned)
+	update := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"), Type: "issue.updated", Actor: model.Actor{Kind: "user", ID: "alice"},
+		Payload: map[string]any{"title": "Renamed while the mention was in flight"},
+	})
+	if !update.Notify {
+		t.Fatalf("the later event does not notify, so it takes no role route and proves nothing: %#v", update)
+	}
+
+	holding(t, deps).scan(ctx, unfenced{})
+
+	if kept := publisher.keeps(); len(kept) > 0 {
+		t.Fatalf("the outbox kept %d copies while the comment's copy waited on its mention, the first of event %s under %q, want none: the role's next holder would be handed the issue's later event first",
+			len(kept), kept[0].item.EventID, kept[0].msgID)
+	}
+	for _, event := range []model.Event{comment, update} {
+		if at := publishedAt(t, database, event.ID); at != nil {
+			t.Fatalf("event %d (%s) is published at %v while the comment's role copy waits on its mention", event.ID, event.Type, at)
+		}
+		attempts, due := nextAttempt(t, database, event.ID)
+		if attempts != 0 {
+			t.Fatalf("event %d (%s) counts attempt_count = %d while a copy waits on a mention, want 0: a wait is no failure",
+				event.ID, event.Type, attempts)
+		}
+		if due == nil || !due.After(time.Now()) || due.After(time.Now().Add(mentionPendingDelay+time.Second)) {
+			t.Fatalf("event %d (%s) is due at %v, want about %v from now, the wait a blocked event takes",
+				event.ID, event.Type, due, mentionPendingDelay)
+		}
+	}
+
+	// The mention's send lands and its sender settles the attempt, as one does within the lease.
+	if _, err := database.Pool.Exec(ctx,
+		`update comment_deliveries set state = 'sent'`); err != nil {
+		t.Fatalf("settle the comment's mention: %v", err)
+	}
+	dueNow(t, database, comment.ID)
+	dueNow(t, database, update.ID)
+
+	holding(t, deps).scan(ctx, unfenced{})
+
+	kept := publisher.keeps()
+	eventIDs := make([]string, 0, len(kept))
+	for _, copy := range kept {
+		eventIDs = append(eventIDs, copy.item.EventID)
+	}
+	want := []string{fmt.Sprintf("dispatch-%d", comment.ID), fmt.Sprintf("dispatch-%d", update.ID)}
+	if !slices.Equal(eventIDs, want) {
+		t.Fatalf("the outbox kept %v once the mention settled, want %v: the issue's events reach the role's next holder in the order they were written",
+			eventIDs, want)
+	}
+	for _, event := range []model.Event{comment, update} {
+		if publishedAt(t, database, event.ID) == nil {
+			attempts, failure, _ := eventState(t, database, event.ID)
+			t.Fatalf("event %d (%s) was not published once the mention settled: attempt_count %d, publish_error %v",
+				event.ID, event.Type, attempts, failure)
+		}
+	}
+}
+
+// A copy the batch forwards to a role's live holder waits for that holder's own mention of the
+// comment, while its send is still in flight (resolveRoleHolders, roleCopyWaitsForAMention). It
+// is TestAFallbackCopyForwardedToALiveHolderWaitsForThatHoldersOwnMention on the event's own
+// role route, and the same duplicate: the mention is on its way to that session under its own
+// key, which no settled map names while its only attempt is live
+// (mentionDeliveries.settledKeys), so the forward would go under the event's key with
+// contracts.RoleForwardDedupePrefix in front - a key that host never claimed - and the host
+// would show the comment twice, once for the copy and once for the mention landing after it.
+//
+// Nothing else protects it: the route is a role no mention suppressed - the comment's own
+// suppressed_route_session_id names whoever the route resolved to when it was written, not this
+// holder - and an attempt the sender has not settled is live for the whole of its lease. So the
+// forward waits, the destination holding its key and the event read again, and once the mention
+// settles the copy goes under that mention's own key, which the host drops (roleFallbackKey).
+//
+// The wait is the holder's own mention and no other, as the fallback pass's is, and the
+// attempt's own lease and nothing longer - the second case here: an attempt still pending past
+// model.DeliveryClaimLapse reads resumed rather than live, and the forward goes with whatever
+// settled by then, under the prefixed event key.
+func TestAForwardToALiveHolderWaitsForThatHoldersOwnMention(t *testing.T) {
+	const role = "forwarded-to-a-live-mentioned-holder"
+	const holder = "ses_holds_the_role_and_is_mentioned"
+	roleTopic := contracts.RoleTopicPrefix + role
+	mentionKey := func(commentID string) string {
+		return contracts.AgentSendDedupeKey(holder,
+			model.CommentMentionIdempotencyKey(commentID, "session:"+holder, "steer"))
+	}
+	// The holder claimed the role before the comment was published and is mentioned by it, which
+	// is the normal shape in the seconds after a comment commits: its own attempt is still live.
+	heldBy := func(t *testing.T, outcome string) (*roleRig, *receiver, Deps, string, model.Event) {
+		t.Helper()
+		rig := newRoleRig(t)
+		rig.claim(t, role, holder, session.SessionEntry{SelfSubscribed: true})
+		rig.silent(t, roleTopic)
+		recv := rig.receiver(t, holder, true)
+		commentID, event := roleRoutedMentioningComment(t, rig.database, rig.broker, role, outcome, holder)
+		return rig, recv, rig.deps(), commentID, event
+	}
+
+	t.Run("the holder's live mention holds the forward until it settles", func(t *testing.T) {
+		ctx := store.WithTransactionTracking(context.Background())
+		rig, recv, deps, commentID, event := heldBy(t, "pending")
+
+		holding(t, deps).scan(ctx, unfenced{})
+
+		if forwards := recv.received(); len(forwards) > 0 {
+			t.Fatalf("the batch sent %s %d copies while that holder's own mention of the comment was still being sent, the first under %q, want none yet: a copy under a key its host never claimed shows it the comment a second time beside the mention",
+				holder, len(forwards), forwards[0].DedupeKey)
+		}
+		if at := publishedAt(t, rig.database, event.ID); at != nil {
+			t.Fatalf("published_at = %v while the forward waits on the holder's own mention", at)
+		}
+		attempts, due := nextAttempt(t, rig.database, event.ID)
+		if attempts != 0 {
+			t.Fatalf("attempt_count = %d while the forward waits on a mention, want 0: a wait is no failure", attempts)
+		}
+		if due == nil || !due.After(time.Now()) || due.After(time.Now().Add(mentionPendingDelay+time.Second)) {
+			t.Fatalf("next_attempt_at = %v, want about %v from now, the wait a blocked event takes", due, mentionPendingDelay)
+		}
+
+		// The holder's send lands and its sender settles the attempt, as one does within the
+		// lease.
+		if _, err := rig.database.Pool.Exec(ctx, `
+			update comment_deliveries set state = 'sent' where comment_id = $1 and target = $2
+		`, commentID, "session:"+holder); err != nil {
+			t.Fatalf("settle the holder's mention: %v", err)
+		}
+		dueNow(t, rig.database, event.ID)
+
+		holding(t, deps).scan(ctx, unfenced{})
+
+		if publishedAt(t, rig.database, event.ID) == nil {
+			attempts, failure, _ := eventState(t, rig.database, event.ID)
+			t.Fatalf("the comment was not published once the holder's mention settled: attempt_count %d, publish_error %v",
+				attempts, failure)
+		}
+		forwards := recv.received()
+		if len(forwards) != 1 {
+			t.Fatalf("%s was sent %d copies, want the role route's once its own mention settled: %+v", holder, len(forwards), forwards)
+		}
+		if want := mentionKey(commentID); forwards[0].DedupeKey != want {
+			t.Fatalf("the copy forwarded to %s, whose own mention of the comment settled while the event waited, is keyed %q, want that mention's own key %q, which its host drops",
+				holder, forwards[0].DedupeKey, want)
+		}
+	})
+
+	t.Run("an attempt live past its lease lets the forward proceed", func(t *testing.T) {
+		ctx := store.WithTransactionTracking(context.Background())
+		rig, recv, deps, _, event := heldBy(t, "resumed")
+
+		holding(t, deps).scan(ctx, unfenced{})
+
+		forwards := recv.received()
+		if len(forwards) != 1 {
+			attempts, failure, _ := eventState(t, rig.database, event.ID)
+			t.Fatalf("%s was sent %d copies though its own mention is pending past model.DeliveryClaimLapse = %v, want the role route's: attempt_count %d, publish_error %v",
+				holder, len(forwards), model.DeliveryClaimLapse, attempts, failure)
+		}
+		if !strings.HasPrefix(forwards[0].DedupeKey, contracts.RoleForwardDedupePrefix) {
+			t.Fatalf("the copy forwarded past the holder's own attempt's lease is keyed %q, want a role forward's prefixed key: no mention of this comment settled for that holder, and the forward waits for no attempt past its lease",
+				forwards[0].DedupeKey)
+		}
+		if publishedAt(t, rig.database, event.ID) == nil {
+			attempts, failure, _ := eventState(t, rig.database, event.ID)
+			t.Fatalf("the comment was not published though no attempt of its mention is live: attempt_count %d, publish_error %v",
 				attempts, failure)
 		}
 	})

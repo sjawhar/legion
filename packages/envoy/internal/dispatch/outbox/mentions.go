@@ -70,7 +70,10 @@ type mentionDeliveries struct {
 	// dropped and its mode - a steer among them - lost with it. A keep, whose copy carries the
 	// whole map and whose holder is unknown, is therefore held back while an attempt of the
 	// comment is still live, so that the map it stores names every mention that settled within
-	// the attempt's own lease (anyLive, resolveRoleHolders).
+	// the attempt's own lease (anyLive, resolveRoleHolders). A forward is held back the same way
+	// while the holder it reaches has a mention of its own in flight, so that the key chosen for
+	// it here is that mention's rather than none (mentionOutcomes.live,
+	// roleCopyWaitsForAMention).
 	//
 	// A session mentioned under several targets keys by a delivered mention of it, the lowest
 	// such target, and by the lowest failed target only when no mention of it delivered: the key
@@ -140,8 +143,13 @@ func (d mentionDeliveries) anyLive() bool {
 // twice, once for the copy and once for the mention that lands after it. The wait is narrow on
 // purpose: a holder with no live mention of its own takes the copy at once, and the wait is the
 // attempt's own lease and no longer, past which the forward goes with whatever has settled.
+//
+// A batch's own forward of a role route waits on the same rule, asked of the states its role
+// destination carries rather than of this reading (destination.mentionStates,
+// roleCopyWaitsForAMention): the batch holds one reading of the mentions for every event of the
+// batch, and a destination carries the maps it is keyed from already.
 func (d mentionDeliveries) liveFor(sessionID string) bool {
-	return d.sessions.state(sessionID) == mentionSending
+	return d.sessions.live(sessionID)
 }
 
 // mentionComment is the comment whose mention attempts a mentionDeliveries read, the
@@ -231,6 +239,15 @@ func (o mentionOutcomes) state(key string) mentionState {
 	return mentionFailed
 }
 
+// live reports whether key's attempts are still being sent (mentionSending): the one rule every
+// copy that waits for a mention of its own key asks, of a session's attempts here
+// (mentionDeliveries.liveFor, roleCopyWaitsForAMention). A key with no attempt at all is
+// mentionFailed and never live, as is one whose attempts are past the lease the outbox waits a
+// send out for.
+func (o mentionOutcomes) live(key string) bool {
+	return o.state(key) == mentionSending
+}
+
 // record adds what the attempts of one row of mentionDeliveryQuery came to under key: the first
 // state of those key's rows came to.
 func (o mentionOutcomes) record(key string, state mentionState) {
@@ -268,10 +285,14 @@ func (d *destinations) leftToMention(sessionID string) bool {
 // carries that attempt's dedupe key (destinations.addSession): a send that landed before its
 // attempt failed has given the host the comment already, and the host drops the copy.
 //
-// This is the one copy of the comment keyed by its own session. A role route's copy kept for a
-// role nobody holds reaches a session no key of it is known by, so it waits on every mention of
-// the comment rather than on one key's, and is held back with this same mark
-// (mentionDeliveries.anyLive, resolveRoleHolders).
+// This is the one copy of the comment keyed by its own session, and the one copy left out of the
+// event's destinations while it waits: the mention delivers the comment to that very session, so
+// a copy so left out holds none of the owner's later events back. A role route's copy waits with
+// this same mark and stays in the list instead, holding its key, nothing else delivering it
+// (destination.waiting, resolveRoleHolders, planChains): a keep for a role nobody holds waits on
+// every mention of the comment, no key of the session it reaches being known yet
+// (mentionDeliveries.anyLive), and a forward on the one mention of the holder it reaches
+// (mentionOutcomes.live).
 func (d *destinations) leftTo(outcomes mentionOutcomes, key, destination string) bool {
 	if _, ok := d.mentions.held[destination]; ok {
 		return true
@@ -922,7 +943,7 @@ func decideFallbackCopy(
 				// it would go under the row's key prefixed, which that host never claimed, and
 				// the mention would land beside it. The row waits, bounded by that attempt's
 				// own lease, and a holder with no live mention of its own takes the copy at
-				// once (mentionDeliveries.liveFor).
+				// once, as a batch's own forward does (roleCopyWaitsForAMention).
 				return fallbackWaits, fallbackSend{}, nil
 			}
 			if key := roleFallbackKey(forward.mentionKeys, forward.settledKeys, forward); key != "" {
@@ -930,10 +951,10 @@ func decideFallbackCopy(
 			}
 		} else if deliveries.anyLive() {
 			// A keep of this pass waits on every mention of the comment, as a batch's own keep
-			// does (keepWaitsForAMention): the row's own key has lapsed past its lease, which is
-			// what made the row, but another session's mention of the same comment can still be
-			// live - a Retry opens a fresh attempt at any time - and a copy kept while it is
-			// shows that session the comment a second time when it claims the role. The row
+			// does (roleCopyWaitsForAMention): the row's own key has lapsed past its lease,
+			// which is what made the row, but another session's mention of the same comment can
+			// still be live - a Retry opens a fresh attempt at any time - and a copy kept while
+			// it is shows that session the comment a second time when it claims the role. The row
 			// waits, bounded by that attempt's own lease, and is decided again when it is due.
 			return fallbackWaits, fallbackSend{}, nil
 		}
