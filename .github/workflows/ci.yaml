@@ -287,7 +287,8 @@ jobs:
               - 'packages/envoy/testnatsimages/*'
             # The Dispatch server, `go list -deps ./cmd/dispatch` in packages/envoy (its embedded
             # migrations and pmdoc schema included): what the daemon's outbox test builds
-            # (internal/dispatch/outbox_scratch_dispatch_test.go:187), the browser tests' and the
+            # (internal/testbuild/testbuild.go:112, called from
+            # internal/daemon/outbox_scratch_dispatch_test.go:353), the browser tests' and the
             # docs screenshots' run-server.sh builds (packages/dispatch/e2e/run-server.sh:135), and
             # envoy-infra's permissions live test builds (infra/core/permissions_live_test.go:298).
             # packages/envoy/listenfd serves on the socket a test or harness holds (#2229).
@@ -515,10 +516,10 @@ jobs:
               # install-jj reads the mise version and checksum it installs from here.
               - 'packages/daemon/docker/worker.Dockerfile'
             # What the test job's two Go steps read together — the plain step, which tests every
-            # package of packages/daemon but the four concurrent ones, and the race step, which
-            # tests those four — so the filter still covers the whole module's closure. The
-            # packages they compile, the Dispatch server
-            # internal/daemon/outbox_scratch_dispatch_test.go:187 builds, and what their tests read
+            # package of packages/daemon but the three concurrent ones, and the race step, which
+            # tests those three — so the filter still covers the whole module's closure. The
+            # packages they compile, the Dispatch server internal/testbuild/testbuild.go:112 builds
+            # for internal/daemon/outbox_scratch_dispatch_test.go:353, and what their tests read
             # outside the daemon: contracts' fixtures
             # (internal/api/state_golden_test.go:27, internal/intake/intake_test.go:698), the two
             # Oh My Pi plugins internal/daemon/promptreferences_omp_test.go:132 packs, whose prepack
@@ -592,7 +593,7 @@ jobs:
               # tests/build-inputs.test.ts holds the rebuild's on.push.paths to the files
               # scripts/build-inputs.txt matches.
               - '.github/workflows/claude-envoy-rebuild.yaml'
-            # The daemon's tests (every package once: the four concurrent packages under the race
+            # The daemon's tests (every package once: the three concurrent packages under the race
             # detector, the rest in the plain step, and the daemon
             # scripts/e2e/stage1-skeleton.sh builds) and every file the job's other steps read.
             test:
@@ -1794,10 +1795,11 @@ jobs:
       TESTCONTAINERS_RYUK_DISABLED: "true"
       # The fuzz and property counts follow the lane. A pull-request run takes the reduced counts
       # below; every other lane — a merge group, a push to main — takes the empty string, which
-      # both readers treat as unset (classify's run_fuzz_test.go, the daemon's keptPropertyEnv),
-      # so the full counts live in the Go source alone and the queue still runs them. The number
-      # of seeds falls rather than each seed's depth: a seed that stops early stops reaching the
-      # states the property is about.
+      # every reader treats as unset (classify's run_fuzz_test.go and sender_fuzz_test.go, the
+      # daemon's keptPropertyEnv), so the full counts live in the Go source alone and the queue
+      # still runs them. sender_fuzz_test.go's own count is 2,000 histories of each order already,
+      # so the pull-request value leaves it as it is. The number of seeds falls rather than each
+      # seed's depth: a seed that stops early stops reaching the states the property is about.
       LEGION_RUN_FUZZ_ITERS: ${{ github.event_name == 'pull_request' && '2000' || '' }}
       LEGION_KEPT_PROPERTY_RUNS: ${{ github.event_name == 'pull_request' && '8' || '' }}
 

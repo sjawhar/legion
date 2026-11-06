@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -29,22 +30,34 @@ type routeIndex struct {
 // `go test ./internal/dispatch/api -run TestRouteIndexLists -update`.
 const routeIndexGolden = "testdata/routes.txt"
 
-// routeIndexLines renders the table as routeIndexGolden holds it. Descriptions are left out: they
-// are prose that changes with every wording pass, and the test below already holds every row to
-// having one.
+// routeIndexLines renders the table as routeIndexGolden holds it: the rows sorted by path, then
+// method, and rendered after that, so two methods of one path with different auth classes are
+// still ordered by their methods. Descriptions are left out: they are prose that changes with
+// every wording pass, and the test below already holds every row to having one.
 func routeIndexLines(routes []apiRoute) string {
-	lines := make([]string, 0, len(routes))
-	for _, route := range routes {
+	sorted := slices.Clone(routes)
+	slices.SortFunc(sorted, func(left, right apiRoute) int {
+		return cmp.Or(strings.Compare(left.Pattern, right.Pattern), strings.Compare(left.Method, right.Method))
+	})
+	lines := make([]string, 0, len(sorted))
+	for _, route := range sorted {
 		lines = append(lines, route.Method+" "+route.Pattern+" "+string(route.Auth))
 	}
-	slices.SortFunc(lines, func(left, right string) int {
-		leftFields, rightFields := strings.SplitN(left, " ", 2), strings.SplitN(right, " ", 2)
-		if by := strings.Compare(leftFields[1], rightFields[1]); by != 0 {
-			return by
-		}
-		return strings.Compare(leftFields[0], rightFields[0])
-	})
 	return strings.Join(lines, "\n") + "\n"
+}
+
+// The rendered index's own order, which the committed file can prove only for the pairs the
+// table happens to hold: two methods of one path whose auth classes sort the other way round are
+// ordered by their methods, not by their auth.
+func TestRouteIndexLinesOrderTwoMethodsOfOnePathByMethod(t *testing.T) {
+	got := routeIndexLines([]apiRoute{
+		{routeRow: routeRow{Method: http.MethodGet, Pattern: "/api/v1/things/{id}", Auth: authAny}},
+		{routeRow: routeRow{Method: http.MethodDelete, Pattern: "/api/v1/things/{id}", Auth: authPublic}},
+	})
+	want := "DELETE /api/v1/things/{id} public\nGET /api/v1/things/{id} any\n"
+	if got != want {
+		t.Fatalf("routeIndexLines = %q, want %q", got, want)
+	}
 }
 
 func TestRouteIndexListsEveryRouteSortedByPathThenMethod(t *testing.T) {
