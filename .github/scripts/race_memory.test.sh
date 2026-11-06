@@ -111,6 +111,8 @@ print("%d %s" % (peak_kb, field))
 print(race_memory.decision_line(peak_kb, field, 1, walk))
 ')
 check "takes the highest sampled VmRSS" "$(contains "$rss" '^3000 VmRSS$')"
+check "its decision line gives the peak and the highest sample it came from" \
+  "$(contains "$rss" 'the peak of 3000 kB passed the limit of 1 kB; the highest sampled VmRSS, 3000 kB')"
 check "its decision line leaves the between-samples warning off a VmRSS peak" \
   "$(is "$(contains "$rss" 'may belong to another moment')" false)"
 

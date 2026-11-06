@@ -3243,13 +3243,14 @@ jobs:
           job-status: ${{ job.status }}
 
   # The same package under Go's cleanup detector, which names what the memory above went to:
-  # GODEBUG=checkfinalizers=1 makes the runtime report a cleanup or a finalizer whose closure
-  # reaches the object it is attached to, a cycle that keeps that object alive for the life of the
-  # process, and that is the defect that held this package's memory (dispatch://INFRA-1085). This
-  # is the only package of the repository that registers a cleanup, so no other job needs it. It
-  # runs without -race: the detector is the runtime's own bookkeeping, and a plain binary leaves
-  # the runner room the race binary does not. It reads the same closure as envoy-go-race-docs, so
-  # it reuses that filter and that `changes` output rather than taking one of its own.
+  # GODEBUG=checkfinalizers=1 makes the runtime report a cleanup or a finalizer whose closure or
+  # argument reaches the object it is attached to, a cycle that keeps that object alive for the
+  # life of the process, and that is the defect that held this package's memory
+  # (dispatch://INFRA-1085). This is the only package of the repository that registers a cleanup,
+  # so no other job needs it. It runs without -race: the detector is the runtime's own
+  # bookkeeping, and a plain binary leaves the runner room the race binary does not. It reads the
+  # same closure as envoy-go-race-docs, so it reuses that filter and that `changes` output rather
+  # than taking one of its own.
   envoy-go-docs-finalizers:
     needs: changes
     if: needs.changes.outputs.envoy_go_race_docs == 'true'

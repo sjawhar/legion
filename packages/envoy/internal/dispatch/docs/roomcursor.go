@@ -171,13 +171,14 @@ func (s *Service) keepInstance(room string, live *crdt.Doc) *roomInstance {
 	// would be a cycle through live, which would then never be collected, and nor would anything
 	// it holds. The rule covers the cleanup's argument alike, and the load reaches a document of
 	// its own: through the instance it holds, the updates that instance has classified and not
-	// yet stored, and the service each of their credits carries (roomInstance.unstored,
-	// UpdateCredit.service). So the load is held weakly beside the service and the argument is an
-	// empty struct, which reaches nothing. The nil checks skip the delete only where the service
-	// or the load went first, and neither leaves anything to do: a service that is gone has no
-	// map to delete from, and a load that is gone is one no entry of s.roomLoads holds, since the
-	// map holds a load strongly for as long as the entry this cleanup would delete exists - a
-	// load stored for the room since would not match CompareAndDelete anyway
+	// yet stored, and the service and the room state each of their credits carries
+	// (roomInstance.unstored, UpdateCredit.service, and UpdateCredit.state, whose
+	// roomState.reservedFor is a *crdt.Doc). So the load is held weakly beside the service and
+	// the argument is an empty struct, which reaches nothing. The nil checks skip the delete only
+	// where the service or the load went first, and neither leaves anything to do: a service that
+	// is gone has no map to delete from, and a load that is gone is one no entry of s.roomLoads
+	// holds, since the map holds a load strongly for as long as the entry this cleanup would
+	// delete exists - a load stored for the room since would not match CompareAndDelete anyway
 	// (dispatch://INFRA-1085).
 	owner, record := weak.Make(s), weak.Make(load)
 	runtime.AddCleanup(live, func(struct{}) {
