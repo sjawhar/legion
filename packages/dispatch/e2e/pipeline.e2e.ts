@@ -9,9 +9,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("the Pipeline rail entry opens the Delivery page's Pipeline section", async ({
-  browser,
-}) => {
+test("the Pipeline rail entry opens the Delivery page's Pipeline section", async ({ browser }) => {
   await seedPipelineFixture();
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
