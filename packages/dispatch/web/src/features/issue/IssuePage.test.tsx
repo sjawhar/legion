@@ -5,7 +5,9 @@ import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router-dom
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
-import { ApiError, api } from "../../api/client";
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
+import { answerIssuePatches } from "../../__tests__/send-answers";
+import { AGENT_LIST_REFILLING, ApiError, api } from "../../api/client";
 import type {
   Agent,
   Ask,
@@ -22,6 +24,10 @@ import { IssuePage } from "./IssuePage";
 const issue: IssueDetails = {
   route_status: null,
   route_holder: null,
+  route_status_reason: null,
+  holder_state: null,
+  last_seen: null,
+  takeable_at: null,
   artifacts: [
     {
       created_at: "2026-09-09T00:00:00Z",
@@ -153,6 +159,7 @@ function stubIssuePage(
   const originalListIssueAskThreads = api.listIssueAskThreads;
   const originalListComments = api.listComments;
   const originalListIssueMessages = api.listIssueMessages;
+  const originalListHandoffs = api.listHandoffs;
   const originalGetInbox = api.getInbox;
   const originalGetMyState = api.getMyState;
   const originalListAgents = api.listAgents;
@@ -161,12 +168,13 @@ function stubIssuePage(
   api.getInbox = async () => inbox;
   api.getMyState = async () => ({ "CORE-1": state });
   api.getIssueEvents = async () => [];
-  // The Conversation builds its list from the issue's own asks, comments and messages; it asks
-  // the ask list for each thread, where the margin reads the same route without one.
+  // The Conversation builds its list from the issue's own asks, comments, messages and handoffs;
+  // it asks the ask list for each thread, where the margin reads the same route without one.
   api.listIssueAsks = async () => [];
   api.listIssueAskThreads = async () => [];
   api.listComments = async () => [];
   api.listIssueMessages = async () => [];
+  api.listHandoffs = async () => [];
   api.listAgents = async () => agents;
   api.getIssueSubscribers = async () => subscribers;
   return () => {
@@ -178,6 +186,7 @@ function stubIssuePage(
     api.listIssueAskThreads = originalListIssueAskThreads;
     api.listComments = originalListComments;
     api.listIssueMessages = originalListIssueMessages;
+    api.listHandoffs = originalListHandoffs;
     api.listAgents = originalListAgents;
     api.getIssueSubscribers = originalGetIssueSubscribers;
   };
@@ -344,15 +353,90 @@ test("IssuePage's header warns when nobody holds the route, and adds nothing whe
     live();
   }
 
-  const unjudged = stubIssuePage({ ...issue, route: "role:sre", route_status: "unknown" });
+  const unjudged = stubIssuePage({
+    ...issue,
+    route: "role:sre",
+    route_status: "unknown",
+    route_status_reason: "unreachable",
+  });
   const unjudgedView = renderIssuePage();
   try {
     const row = await stateRow();
     expect(within(row).getByTestId("issue-route-unknown").textContent).toBe("Route reach unknown");
+    expect(within(row).queryByTestId("issue-route-refilling")).toBeNull();
     expect(within(row).queryByTestId("issue-route-unreachable")).toBeNull();
   } finally {
     unjudgedView.unmount();
     unjudged();
+  }
+
+  // A listener that is refilling its agent list says so: the route is unknown for that reason,
+  // never unheld.
+  const refilling = stubIssuePage({
+    ...issue,
+    route: "role:sre",
+    route_status: "unknown",
+    route_status_reason: "refilling",
+  });
+  const refillingView = renderIssuePage();
+  try {
+    const row = await stateRow();
+    expect(within(row).getByTestId("issue-route-refilling").textContent).toBe(
+      `Route reach unknown: ${AGENT_LIST_REFILLING}`
+    );
+    expect(within(row).queryByTestId("issue-route-unknown")).toBeNull();
+    expect(within(row).queryByTestId("issue-route-unreachable")).toBeNull();
+  } finally {
+    refillingView.unmount();
+    refilling();
+  }
+});
+
+// A route whose holder has missed its heartbeats is neither unreachable nor unjudged: the
+// listener judged it and said the session is stalled, and what is sent to the issue waits for
+// it. Folding that into either of the other two markers tells a reader to re-staff a role that
+// is still held, or hides that anything is wrong at all (dispatch://INFRA-392).
+test("IssuePage's header marks an unresponsive route holder apart from an unheld and a refilling route", async () => {
+  const stateRow = async () => {
+    const rail = await screen.findByTestId("issue-metadata-rail");
+    await within(rail).findByRole("button", { name: "Messages default to role:sre" });
+    return screen.getByTestId("issue-state-actions");
+  };
+
+  const stalled = stubIssuePage({
+    ...issue,
+    route: "role:sre",
+    route_status: "holder_unresponsive",
+    route_holder: "ses-sre",
+  });
+  const stalledView = renderIssuePage();
+  try {
+    const row = await stateRow();
+    const marker = within(row).getByTestId("issue-route-unresponsive");
+    expect(marker.textContent).toContain("role:sre:");
+    expect(marker.textContent).toContain("Unresponsive, still reached");
+    expect(marker.getAttribute("title")).toContain("waits until it answers");
+    expect(within(row).queryByTestId("issue-route-unreachable")).toBeNull();
+    expect(within(row).queryByTestId("issue-route-unknown")).toBeNull();
+    expect(within(row).queryByTestId("issue-route-refilling")).toBeNull();
+  } finally {
+    stalledView.unmount();
+    stalled();
+  }
+
+  // The other two states leave this marker off, so the three never read as one another.
+  for (const reach of [
+    { route_status: "no_holder" } as const,
+    { route_status: "unknown", route_status_reason: "refilling" } as const,
+  ]) {
+    const other = stubIssuePage({ ...issue, route: "role:sre", ...reach });
+    const otherView = renderIssuePage();
+    try {
+      expect(within(await stateRow()).queryByTestId("issue-route-unresponsive")).toBeNull();
+    } finally {
+      otherView.unmount();
+      other();
+    }
   }
 });
 
@@ -506,7 +590,7 @@ test("IssuePage creates a label from the multi-select and saves the final draft 
     { ...labeledIssue, open_asks: 0 },
     { ...issue, key: "CORE-2", labels: ["frontend"], open_asks: 0 },
   ]);
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue({
+  const patchIssue = answerIssuePatches().mockResolvedValue({
     ...labeledIssue,
     labels: ["bug", "urgent"],
   });
@@ -524,7 +608,7 @@ test("IssuePage creates a label from the multi-select and saves the final draft 
     fireEvent.click(screen.getByRole("button", { name: "Edit labels" }));
 
     await waitFor(() =>
-      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { labels: ["bug", "urgent"] })
+      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { labels: ["bug", "urgent"] }, keyedAttempt)
     );
     expect(patchIssue).toHaveBeenCalledTimes(1);
   } finally {
@@ -541,7 +625,7 @@ test("IssuePage does not save after a label is toggled off and back on", async (
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([
     { ...labeledIssue, open_asks: 0 },
   ]);
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue(labeledIssue);
+  const patchIssue = answerIssuePatches().mockResolvedValue(labeledIssue);
   const view = renderIssuePage();
 
   try {
@@ -573,7 +657,7 @@ test("IssuePage returns focus to the label trigger when Escape closes an unchang
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([
     { ...labeledIssue, open_asks: 0 },
   ]);
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue(labeledIssue);
+  const patchIssue = answerIssuePatches().mockResolvedValue(labeledIssue);
   const view = renderIssuePage();
 
   try {
@@ -606,6 +690,30 @@ test("IssuePage shows a retryable error and hides the section when the subscribe
       expect(screen.queryByRole("region", { name: "Subscribed agents" })).toBeNull()
     );
     await screen.findByText("Subscribed agents unavailable — Envoy listener unreachable.");
+  } finally {
+    view.unmount();
+    restore();
+  }
+});
+
+// A refilling agent list is not an unreachable listener, and a failed read counts nobody: the
+// header's toggle drops its number rather than say the issue has no subscribers.
+test("IssuePage says the agent list is refilling and counts no subscribers from a failed read", async () => {
+  const restore = stubIssuePage(issue);
+  api.getIssueSubscribers = async () => {
+    throw new ApiError(503, { code: "ENVOY_REFILLING", error: AGENT_LIST_REFILLING });
+  };
+  const view = renderIssuePage();
+
+  try {
+    await screen.findByText(issue.title);
+    const notice = await screen.findByTestId("agent-list-refilling");
+    expect(notice.textContent).toBe(AGENT_LIST_REFILLING);
+    expect(
+      screen.queryByText("Subscribed agents unavailable — Envoy listener unreachable.")
+    ).toBeNull();
+    expect(screen.getByRole("button", { name: "Subscribers" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Subscribers: / })).toBeNull();
   } finally {
     view.unmount();
     restore();
@@ -909,6 +1017,7 @@ test("IssuePage opens the Spec tab and leaves open asks out of the main column",
         route: null,
         route_status: null,
         route_holder: null,
+        route_status_reason: null,
       },
     },
   ]);
@@ -941,6 +1050,30 @@ test("IssuePage opens the Activity tab with the t v chord", async () => {
     expect(screen.getByTestId("current-route").textContent).toBe("/issues/CORE-1/activity");
   } finally {
     view.unmount();
+    restore();
+  }
+});
+
+test("IssuePage opens the Decisions tab with the t d chord", async () => {
+  const restore = stubIssuePage(issue);
+  const decisions = spyOn(api, "getIssueDecisions").mockResolvedValue({
+    decisions: [],
+    document: null,
+    open_questions: [],
+  });
+  const view = renderIssuePage("/issues/CORE-1/spec");
+
+  try {
+    await screen.findByRole("tab", { name: "Spec", selected: true });
+    fireEvent.keyDown(document.body, { key: "t" });
+    fireEvent.keyDown(document.body, { key: "d" });
+
+    await screen.findByRole("tab", { name: "Decisions", selected: true });
+    expect(screen.getByTestId("current-route").textContent).toBe("/issues/CORE-1/decisions");
+    await waitFor(() => expect(decisions).toHaveBeenCalledWith("CORE-1"));
+  } finally {
+    view.unmount();
+    decisions.mockRestore();
     restore();
   }
 });
@@ -1746,7 +1879,12 @@ test("IssuePage's pin refreshes the sidebar's pinned list once the pin is saved"
     await waitFor(() =>
       expect(queryClient.getQueryState(["issues", "pinned"])?.isInvalidated).toBe(true)
     );
-    expect(putIssueState).toHaveBeenCalledWith("CORE-1", { pinned: true });
+    // The pin is a keyed write of the page's store, so its bounds name the key it goes under.
+    expect(putIssueState).toHaveBeenCalledWith(
+      "CORE-1",
+      { pinned: true },
+      expect.objectContaining({ key: expect.any(String) })
+    );
   } finally {
     view.unmount();
     putIssueState.mockRestore();
@@ -1816,7 +1954,7 @@ test("IssuePage closes an issue and reopens it into Backlog", async () => {
   });
   const closeSave = Promise.withResolvers<IssueDetails>();
   const reopenSave = Promise.withResolvers<IssueDetails>();
-  const patchIssue = spyOn(api, "patchIssue").mockImplementation(async (_key, input) => {
+  const patchIssue = answerIssuePatches().mockImplementation(async (_key, input) => {
     if (input.status === "done") return closeSave.promise;
     if (input.status === "backlog") return reopenSave.promise;
     throw new Error(`Unexpected issue update: ${JSON.stringify(input)}`);
@@ -1828,7 +1966,9 @@ test("IssuePage closes an issue and reopens it into Backlog", async () => {
     expect([...openStatus.options].map((option) => option.value)).not.toContain("done");
 
     fireEvent.click(screen.getByRole("button", { name: "Close issue" }));
-    await waitFor(() => expect(patchIssue).toHaveBeenCalledWith("CORE-1", { status: "done" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { status: "done" }, keyedAttempt)
+    );
     // While the write is in flight the control is disabled: no second close can be queued.
     expect(
       (screen.getByRole("button", { name: "Close issue" }) as HTMLButtonElement).disabled
@@ -1845,7 +1985,7 @@ test("IssuePage closes an issue and reopens it into Backlog", async () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Reopen issue" }));
     await waitFor(() =>
-      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "backlog" })
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "backlog" }, keyedAttempt)
     );
     expect(
       (screen.getByRole("button", { name: "Reopen issue" }) as HTMLButtonElement).disabled
@@ -1868,7 +2008,7 @@ test("IssuePage closes an issue and reopens it into Backlog", async () => {
 
 test("IssuePage lets a human move a Todo issue to In progress", async () => {
   const restore = stubIssuePage(issue);
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue({
+  const patchIssue = answerIssuePatches().mockResolvedValue({
     ...issue,
     status: "in_progress",
   });
@@ -1892,7 +2032,7 @@ test("IssuePage lets a human move a Todo issue to In progress", async () => {
 
     fireEvent.change(status, { target: { value: "in_progress" } });
     await waitFor(() =>
-      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { status: "in_progress" })
+      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { status: "in_progress" }, keyedAttempt)
     );
   } finally {
     view.unmount();

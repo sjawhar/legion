@@ -5,10 +5,9 @@ package core_test
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -22,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sjawhar/envoy/infra/core"
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/testnats"
@@ -29,16 +29,13 @@ import (
 
 // The live tests of the host grant: one nkey user holding HostPermissions, on the 2.10 image and on
 // the hub's, each run with the hub's own server arguments. This branch's listener connects as that
-// user with the environment host:Listener gives it, subscribeAllTopics on, since this is the one
-// grant that allows it, and a session connects as the same user, as every session on a host does.
+// user with the environment host:Listener gives it, and a session connects as the same user, as
+// every session on a host does.
 
 const (
 	liveMachineID = "example-host-a"
 	liveSession   = "s1"
-	// liveServingSession is a session the listener reaches on its serving port, as the OpenCode
-	// plugin's sessions are reached, rather than over NATS.
-	liveServingSession = "s-serving"
-	liveRole           = "example-role"
+	liveRole      = "example-role"
 	// liveHealthWindow is how long the listener has to answer "healthy" (its durable bound under
 	// the grant), and how long a negative control watches one that must not.
 	liveHealthWindow = 60 * time.Second
@@ -66,11 +63,8 @@ func TestHostPermissionsOnRealServers(t *testing.T) {
 				seed, server, uri := startGrantServer(t, image.Ref, core.HostPermissions(liveMachineID))
 				held := cmdtest.HoldPort(t)
 				port := held.Port
-				// The opt-in has the listener also subscribe to notifications.>, which this grant
-				// allows: the check below that the server refused nothing it was not provoked to
-				// covers that subscription too.
 				process := startListenerConfig(t, listener, uri, seed, held, core.ListenerConfig{
-					MachineID: liveMachineID, HostBridge: "127.0.0.1", SubscribeAllTopics: true,
+					MachineID: liveMachineID,
 				})
 				t.Logf("healthy /healthz body: %s", requireHealthy(t, process, port, liveHealthWindow, listenerHealthy))
 
@@ -88,14 +82,11 @@ func TestHostPermissionsOnRealServers(t *testing.T) {
 				require.Equal(t, contracts.AgentSubject(liveSession), sent.Topic)
 				require.Equal(t, "example message", sent.PayloadSummary)
 
-				// A role message reaches its holder through the listener's queue subscription, and the
-				// session answers it with the receipt the listener waits for.
+				// A role message reaches its holder from the listener's publish route, which answers
+				// once the session returned the receipt the route waits for.
 				postListener(t, process, port, "/v1/roles/set", `{"session_id":"`+liveSession+`","role":"`+liveRole+`"}`)
-				postListener(t, process, port, "/v1/messages/publish", `{"topic":"`+contracts.RoleTopicPrefix+liveRole+`","message":"example role message"}`)
-				forwarded, msg := nextEnvelope(t, process, received)
+				forwarded := sendRoleMessage(t, process, port, received, `{"topic":"`+contracts.RoleTopicPrefix+liveRole+`","message":"example role message"}`)
 				require.Equal(t, contracts.RoleTopicPrefix+liveRole, forwarded.Topic)
-				require.NotEmpty(t, msg.Reply, "the role forward carries no subject for its receipt")
-				require.NoError(t, msg.Respond(nil))
 
 				// A topic outside every stream subject reaches the session subscribed to it.
 				adhoc, err := conn.SubscribeSync("notifications.team.>")
@@ -105,42 +96,24 @@ func TestHostPermissionsOnRealServers(t *testing.T) {
 				team, _ := nextEnvelope(t, process, adhoc)
 				require.Equal(t, "notifications.team.deploy-squad", team.Topic)
 
-				// The same topic, published by a session over its own connection, which the listener's
-				// /v1 never sees, reaches a session served on this machine through the listener's
-				// subscription to every notification topic.
-				serving := startServingPort(t, liveServingSession)
-				postListener(t, process, port, "/v1/interests/subscribe", `{"session_id":"`+liveServingSession+
-					`","topics":["notifications.team.deploy-squad"],"port":`+strconv.Itoa(serving.port)+`,"host":"127.0.0.1"}`)
-				item := contracts.Envelope{
-					EventID:        "evt-live-topics",
-					Source:         "agent",
-					SourceEventID:  "evt-live-topics",
-					SourceSession:  liveSession,
-					Topic:          "notifications.team.deploy-squad",
-					DedupeKey:      "permissions-live-test.evt-live-topics",
-					IssuedAt:       contracts.NowMillis(),
-					PayloadSummary: "example message from another session",
-					Payload:        "example message from another session",
-					TraceID:        "trace-evt-live-topics",
-				}
-				data, err := json.Marshal(item)
-				require.NoError(t, err)
-				require.NoError(t, conn.Publish(item.Topic, data))
-				require.NoError(t, conn.Flush())
-				serving.requirePrompt(t, process, item)
-
 				// Every allowed operation came first, so a violation for one would be the first error.
 				require.NoError(t, conn.Publish("outside.example", nil))
 				requireViolation(t, conn, errs, `Publish to "outside.example"`)
-				// The server refused nothing else either, the listener's own operations included. Its
-				// log names the refusal just made before that reading counts: one that found no
-				// violation at all would pass for the wrong reason.
+				// The server refused nothing else either, the listener's own operations included,
+				// beside the session consumers' calls this set does not hold, which the listener
+				// probes once an episode (its consumer list when it gains the durable, and the
+				// registration's consumer info). Its log names the refusal just made before that
+				// reading counts: one that found no violation at all would pass for the wrong
+				// reason.
 				for _, v := range violationsOnceLogged(t, server, "outside.example") {
-					require.Equal(t, "outside.example", v[2], "the server refused what the grant should allow: %s", v[0])
+					require.True(t, v[2] == "outside.example" || sessionConsumerCall(v[2]),
+						"the server refused what the grant should allow: %s", v[0])
 				}
 			})
 			t.Run("without its durable's consumer create the listener never reaches healthy", func(t *testing.T) {
 				t.Parallel()
+				// The host's set holds the durable's own create and no session consumer's
+				// wildcard, so removing that one entry leaves the durable uncreatable.
 				const removed = "$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.listener-example-host-a"
 				grant := core.HostPermissions(liveMachineID)
 				held := len(grant.Publish.Allow)
@@ -193,11 +166,8 @@ func TestListenerAndCredentialFreeSessionsOnRealServers(t *testing.T) {
 			require.Equal(t, "example message", sent.PayloadSummary)
 
 			postListener(t, process, port, "/v1/roles/set", `{"session_id":"`+liveSession+`","role":"`+liveRole+`"}`)
-			postListener(t, process, port, "/v1/messages/publish", `{"topic":"`+contracts.RoleTopicPrefix+liveRole+`","message":"example role message"}`)
-			forwarded, msg := nextEnvelope(t, process, received)
+			forwarded := sendRoleMessage(t, process, port, received, `{"topic":"`+contracts.RoleTopicPrefix+liveRole+`","message":"example role message"}`)
 			require.Equal(t, contracts.RoleTopicPrefix+liveRole, forwarded.Topic)
-			require.NotEmpty(t, msg.Reply, "the role forward carries no subject for its receipt")
-			require.NoError(t, msg.Respond(nil))
 
 			// A topic outside every stream subject, as an agent names one for its team, reaches the
 			// session subscribed to it: the listener publishes it over core NATS, under its grant.
@@ -241,34 +211,52 @@ func TestListenerAndCredentialFreeSessionsOnRealServers(t *testing.T) {
 	}
 }
 
-// The hub's grants with the opt-in on: the listener, holding ListenerPermissions, may subscribe
-// only to the role lanes and the reply inboxes, so the server refuses its subscription to
-// notifications.>, and the listener ends its start, exit 1, with an ERROR naming
-// ENVOY_SUBSCRIBE_ALL_TOPICS, rather than run delivering none of the topics it was told to. That
-// subscription is all the server refused. This is why gcp:NatsHub's and gcp:Dispatch's listeners,
-// whose grants are this one and one built on it, never set the opt-in.
-func TestListenerPermissionsRefuseTheSubscriptionToEveryTopicOnRealServers(t *testing.T) {
+// The grant of a listener's own NATS user, which no session shares (ListenerHostPermissions, a
+// gcp:NatsHub user with listenerMachineId): the set that keeps a listener's sessions' consumers
+// under a user no session holds. The listener reaches healthy, answers a registration consumer
+// rather than core, and relays a stored send to the session on its relay subject. The server
+// refused nothing but the publish provoked at the end: under this set, unlike the host's, no
+// session consumer's call is refused.
+func TestListenerHostPermissionsOnRealServers(t *testing.T) {
 	listener := buildEnvoyCommand(t, "listener")
 	for _, image := range testnats.Images {
 		t.Run(image.Name, func(t *testing.T) {
 			t.Parallel()
-			seed, server, uri := startSplitServer(t, image.Ref)
+			seed, server, uri := startSplitGrantServer(t, image.Ref, core.ListenerHostPermissions(liveMachineID))
 			held := cmdtest.HoldPort(t)
+			port := held.Port
 			process := startListenerConfig(t, listener, uri, seed, held, core.ListenerConfig{
-				MachineID: liveMachineID, SubscribeAllTopics: true,
+				MachineID: liveMachineID,
 			})
-			process.WaitExit(t, "its start")
-			output := process.Output.String()
-			require.Equal(t, 1, process.Cmd.ProcessState.ExitCode(), output)
-			require.True(t, slices.ContainsFunc(strings.Split(output, "\n"), func(line string) bool {
-				var record map[string]any
-				return json.Unmarshal([]byte(line), &record) == nil && record["level"] == "ERROR" &&
-					strings.Contains(fmt.Sprint(record["msg"]), "ENVOY_SUBSCRIBE_ALL_TOPICS")
-			}), "no ERROR names ENVOY_SUBSCRIBE_ALL_TOPICS:\n%s", output)
+			t.Logf("healthy /healthz body: %s", requireHealthy(t, process, port, liveHealthWindow, listenerHealthy))
 
-			logged := violationsOnceLogged(t, server, "notifications.>")
-			require.Len(t, logged, 1, "the server refused more than the subscription: %q", logged)
-			require.Equal(t, []string{"Subscription", "notifications.>"}, logged[0][1:], logged[0][0])
+			// The session connects as the credential-free session user, as a session on another
+			// machine does, and reads its relay subject, which consumer delivery sends it on.
+			conn, errs := connect(t, uri, "")
+			relayed, err := conn.SubscribeSync(bus.DeliverSubject(liveSession))
+			require.NoError(t, err)
+			require.NoError(t, conn.Flush())
+
+			answer := postListener(t, process, port, "/v1/interests/subscribe", `{"session_id":"`+liveSession+
+				`","topics":[],"self_subscribed":true,"delivery":{"consumer":true,"epoch":"live-epoch"}}`)
+			require.Contains(t, answer, `"mode":"consumer"`, "the registration's answer: %s", answer)
+			require.Contains(t, answer, `"subject":"`+bus.DeliverSubject(liveSession)+`"`, "the registration's answer: %s", answer)
+
+			postListener(t, process, port, "/v1/messages/send", `{"target_session":"`+liveSession+`","message":"example message"}`)
+			sent, frame := nextEnvelope(t, process, relayed)
+			require.NotEmpty(t, frame.Reply, "the relay frame carries no subject for its receipt")
+			require.NoError(t, frame.Respond(nil))
+			require.Equal(t, contracts.AgentSubject(liveSession), sent.Topic)
+			require.Equal(t, "example message", sent.PayloadSummary)
+
+			// Every allowed operation came first, so a violation for one would be the first error.
+			// A session may not publish to another session's inbox directly.
+			other := contracts.AgentSubject("s2")
+			require.NoError(t, conn.Publish(other, nil))
+			requireViolation(t, conn, errs, `Publish to "`+other+`"`)
+			for _, v := range violationsOnceLogged(t, server, other) {
+				require.Equal(t, other, v[2], "the server refused what the grant should allow: %s", v[0])
+			}
 		})
 	}
 }
@@ -312,11 +300,20 @@ func TestSessionPermissionsOnRealServers(t *testing.T) {
 // server's no_auth_user. It returns the listener's seed, the server and its client URL.
 func startSplitServer(t *testing.T, image string) (string, natsServer, string) {
 	t.Helper()
+	return startSplitGrantServer(t, image, core.ListenerPermissions(liveMachineID))
+}
+
+// startSplitGrantServer runs image with two users: the listener's, holding grant with a seed, and
+// the session user, holding SessionPermissions with no seed, as the server's no_auth_user, as a
+// hub renders them. grant is the set the hub's user carries: ListenerPermissions for its own
+// listener, ListenerHostPermissions for a listener's own user elsewhere.
+func startSplitGrantServer(t *testing.T, image string, grant core.Permissions) (string, natsServer, string) {
+	t.Helper()
 	seed, public := testnats.User(t)
 	_, sessionKey := testnats.User(t)
-	listener, session := core.ListenerPermissions(liveMachineID), core.SessionPermissions()
+	session := core.SessionPermissions()
 	config, err := core.Authorization{Users: []core.User{
-		{Name: liveMachineID, NKey: public, Publish: &listener.Publish, Subscribe: &listener.Subscribe, HasSeed: true},
+		{Name: liveMachineID, NKey: public, Publish: &grant.Publish, Subscribe: &grant.Subscribe, HasSeed: true},
 		{Name: "example-sessions", NKey: sessionKey, Publish: &session.Publish, Subscribe: &session.Subscribe},
 	}, NoAuthUser: "example-sessions"}.Render(nil)
 	require.NoError(t, err)
@@ -351,68 +348,6 @@ func startGrantServer(t *testing.T, image string, grant core.Permissions) (strin
 	require.NoError(t, err)
 	server, uri := testnats.StartImageConfig(t, image, config, hubServerArgs, false)
 	return seed, server, uri
-}
-
-// servingPort is a session's fake serve process: an httptest server on 127.0.0.1 that records the
-// text of each prompt the listener POSTs to /session/<id>/prompt_async and answers 204.
-type servingPort struct {
-	port    int
-	prompts chan string
-}
-
-// startServingPort serves sessionID's prompt_async route until the test ends. A request to any
-// other method or path fails the test: the listener reached the port with something other than a
-// prompt for this session.
-func startServingPort(t *testing.T, sessionID string) *servingPort {
-	t.Helper()
-	serving := &servingPort{prompts: make(chan string, 16)}
-	path := "/session/" + sessionID + "/prompt_async"
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != path {
-			t.Errorf("%s's serving port was sent %s %s, want POST %s", sessionID, r.Method, r.URL.Path, path)
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		var body struct {
-			Parts []struct {
-				Text string `json:"text"`
-			} `json:"parts"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Errorf("decode the prompt sent to %s: %v", sessionID, err)
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		var text strings.Builder
-		for _, part := range body.Parts {
-			text.WriteString(part.Text)
-		}
-		serving.prompts <- text.String()
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	t.Cleanup(server.Close)
-	port, err := strconv.Atoi(server.URL[strings.LastIndex(server.URL, ":")+1:])
-	require.NoError(t, err)
-	serving.port = port
-	return serving
-}
-
-// requirePrompt waits up to 10 s for a prompt that names item's topic and carries its message.
-func (p *servingPort) requirePrompt(t *testing.T, process *cmdtest.Process, item contracts.Envelope) {
-	t.Helper()
-	deadline := time.After(10 * time.Second)
-	for {
-		select {
-		case text := <-p.prompts:
-			if strings.Contains(text, "Topic: "+item.Topic) && strings.Contains(text, item.Payload) {
-				return
-			}
-			t.Logf("a prompt other than the one awaited: %s", text)
-		case <-deadline:
-			t.Fatalf("no prompt naming %s and carrying %q reached the serving port within 10s:\n%s",
-				item.Topic, item.Payload, process.Output.String())
-		}
-	}
 }
 
 // startListener runs the listener binary as machine liveMachineID against uri, with the environment
@@ -537,6 +472,41 @@ func replaySubject(t *testing.T, process *cmdtest.Process, port int, session, su
 	return replay.Subjects[0]
 }
 
+// sendRoleMessage publishes body, a role message, through the listener's publish route and answers
+// its forward as the holder's session does: the route answers only once the receipt arrived, so the
+// forward is read on received and receipted while the publish waits. It requires the 200 and
+// returns the forward.
+func sendRoleMessage(t *testing.T, process *cmdtest.Process, port int, received *natsgo.Subscription, body string) contracts.Envelope {
+	t.Helper()
+	type answer struct {
+		status int
+		body   string
+		err    error
+	}
+	answered := make(chan answer, 1)
+	go func() {
+		resp, err := http.Post("http://127.0.0.1:"+strconv.Itoa(port)+"/v1/messages/publish", "application/json", strings.NewReader(body))
+		if err != nil {
+			answered <- answer{err: err}
+			return
+		}
+		defer resp.Body.Close()
+		text, err := io.ReadAll(resp.Body)
+		answered <- answer{status: resp.StatusCode, body: string(text), err: err}
+	}()
+	forwarded, msg := nextEnvelope(t, process, received)
+	require.NotEmpty(t, msg.Reply, "the role forward carries no subject for its receipt")
+	require.NoError(t, msg.Respond(nil))
+	select {
+	case got := <-answered:
+		require.NoError(t, got.err)
+		require.Equal(t, http.StatusOK, got.status, "POST /v1/messages/publish: %s\n%s", got.body, process.Output.String())
+	case <-time.After(10 * time.Second):
+		t.Fatalf("the publish route did not answer within 10s after the receipt:\n%s", process.Output.String())
+	}
+	return forwarded
+}
+
 // postListenerHost posts body to one of the listener's routes over loopback under the request Host
 // host, and returns the status and the body it answered, requiring nothing: it is for the checks
 // that read the answer itself, which the listener's host guard decides.
@@ -597,5 +567,132 @@ func violationsOnceLogged(t *testing.T, server natsServer, subject string) [][]s
 			t.Fatalf("the server logged no violation naming %s within 10s:\n%s", subject, serverLog(t, server))
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// sessionConsumerCall reports whether a refused subject is one of the session consumers' calls
+// (core.ListenerPermissions holds them; the host and Dispatch sets do not): a consumer API call on
+// the stream naming a consumer other than this machine's durable, the stream's consumer list, or
+// an acknowledgement on such a consumer. A listener under a set without them probes once an
+// episode and serves its sessions over core NATS.
+func sessionConsumerCall(subject string) bool {
+	durable := bus.ListenerDurable(liveMachineID)
+	for _, call := range []string{"CREATE", "INFO", "DELETE", "MSG.NEXT"} {
+		if rest, ok := strings.CutPrefix(subject, "$JS.API.CONSUMER."+call+"."+bus.Stream+"."); ok {
+			return rest != durable && !strings.HasPrefix(rest, durable+".")
+		}
+	}
+	if subject == "$JS.API.CONSUMER.LIST."+bus.Stream {
+		return true
+	}
+	rest, ok := strings.CutPrefix(subject, "$JS.ACK."+bus.Stream+".")
+	return ok && !strings.HasPrefix(rest, durable+".")
+}
+
+// The hub's grants for session consumers, as the listener's bus client manages them: the listener's
+// user creates a session's consumer, pulls a stored message from it and acks it, restarts it at its
+// floor with nothing awaiting an ack (its info and an update in place) and restarts it again with a
+// message awaiting one (its info, delete and create); the credential-free session user is refused a
+// consumer create; and the listener's user still subscribes its role lanes in its machine's queue
+// group, as a listener of an earlier release does, beside the group every listener shares. Those
+// refusals are all the server refused.
+func TestListenerPermissionsManageSessionConsumersOnRealServers(t *testing.T) {
+	for _, image := range testnats.Images {
+		t.Run(image.Name, func(t *testing.T) {
+			t.Parallel()
+			seed, server, uri := startSplitServer(t, image.Ref)
+			// The listener's user, as its bus clients read it from their environment.
+			environment := bus.WithEnvironment(func(name string) (string, bool) {
+				switch name {
+				case "NATS_NKEY_SEED":
+					return seed, true
+				case "NATS_NKEY_SEED_FILE":
+					return "", false
+				}
+				return os.LookupEnv(name)
+			})
+			owner, err := bus.ConnectOwningStream([]string{uri}, environment)
+			require.NoError(t, err)
+			t.Cleanup(owner.Close)
+			consumers, err := bus.ConnectSessionConsumers([]string{uri}, environment)
+			require.NoError(t, err)
+			t.Cleanup(consumers.Close)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			agent := contracts.AgentSubject(liveSession)
+			filters := []string{agent, "notifications.github.example.repo.>"}
+			start, err := consumers.Ensure(ctx, liveSession, filters, 0)
+			require.NoError(t, err)
+			require.True(t, start.Created)
+			item := contracts.Envelope{
+				EventID:        "evt-session-consumer",
+				Source:         "agent",
+				SourceEventID:  "evt-session-consumer",
+				Topic:          agent,
+				DedupeKey:      "permissions-live-test.evt-session-consumer",
+				IssuedAt:       contracts.NowMillis(),
+				PayloadSummary: "example stored message",
+				TraceID:        "trace-evt-session-consumer",
+			}
+			require.NoError(t, owner.Publish(item))
+			pull, err := consumers.Pull(ctx, liveSession)
+			require.NoError(t, err)
+			msg, err := pull.Next(ctx)
+			require.NoError(t, err)
+			require.Equal(t, agent, msg.Subject)
+			require.NoError(t, msg.Ack())
+			pull.Stop()
+			// An ack is a publish the server answers nothing to; the floor shows it was taken.
+			require.Eventually(t, func() bool {
+				info, err := consumers.Info(ctx, liveSession)
+				return err == nil && info.AckFloor.Stream == msg.StreamSeq
+			}, 10*time.Second, 50*time.Millisecond, "the ack of %d never reached the consumer", msg.StreamSeq)
+			restarted, err := consumers.RestartAtFloor(ctx, liveSession, filters)
+			require.NoError(t, err)
+			require.Equal(t, msg.StreamSeq+1, restarted.StartSeq)
+			// A restart with a message awaiting an ack deletes the consumer and creates it again at
+			// the floor, which is the one call of the set that needs the delete grant.
+			unacked := item
+			unacked.EventID = "evt-session-consumer-unacked"
+			unacked.SourceEventID = unacked.EventID
+			unacked.DedupeKey = "permissions-live-test." + unacked.EventID
+			require.NoError(t, owner.Publish(unacked))
+			pull, err = consumers.Pull(ctx, liveSession)
+			require.NoError(t, err)
+			held, err := pull.Next(ctx)
+			require.NoError(t, err)
+			require.Equal(t, msg.StreamSeq+1, held.StreamSeq)
+			pull.Stop()
+			recreated, err := consumers.RestartAtFloor(ctx, liveSession, filters)
+			require.NoError(t, err)
+			require.True(t, recreated.Created)
+			require.Equal(t, msg.StreamSeq+1, recreated.StartSeq)
+
+			// The listener's role lanes: the shared queue group, and its machine's, which a listener of
+			// an earlier release subscribes in.
+			lane, queue, err := bus.ConnectRoleLane([]string{uri}, liveMachineID, func(*natsgo.Msg) {}, environment)
+			require.NoError(t, err)
+			t.Cleanup(lane.Close)
+			require.Equal(t, bus.RoleLaneQueue, queue)
+			listenerConn, listenerErrs := connect(t, uri, seed)
+			_, err = listenerConn.QueueSubscribe(contracts.RoleTopicPrefix+">", bus.ListenerQueue(liveMachineID), func(*natsgo.Msg) {})
+			require.NoError(t, err)
+			require.NoError(t, listenerConn.Flush())
+			select {
+			case err := <-listenerErrs:
+				t.Fatalf("the server refused the listener's user something: %v", err)
+			default:
+			}
+
+			// The session user may not create a consumer.
+			sessionConn, sessionErrs := connect(t, uri, "")
+			const create = "$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.s-s2"
+			require.NoError(t, sessionConn.Publish(create, []byte(`{}`)))
+			requireViolation(t, sessionConn, sessionErrs, `Publish to "`+create+`"`)
+			for _, v := range violationsOnceLogged(t, server, create) {
+				require.Equal(t, []string{"Publish", create}, v[1:], "the server refused what a grant should allow: %s", v[0])
+			}
+		})
 	}
 }

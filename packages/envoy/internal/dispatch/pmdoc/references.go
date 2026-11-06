@@ -14,12 +14,28 @@ import (
 // escaped `&` opens no reference, and a character reference (characterReferenceAt) is the
 // characters it names. Everything else is kept as written.
 func decodeMarkdownText(value []byte) string {
+	decoded, _ := decodeMarkdown(value, false)
+	return decoded
+}
+
+// decodeMarkdown is decodeMarkdownText's text of value, and where withOffsets the offset in value
+// each of its offsets, and its end, begins at, -1 inside what one escape or character reference
+// decodes to; the offsets are nil where value holds no backslash and no `&`, so that each is its
+// own.
+func decodeMarkdown(value []byte, withOffsets bool) (string, []int32) {
 	if !bytes.ContainsAny(value, "\\&") {
-		return string(value)
+		return string(value), nil
 	}
 	var decoded strings.Builder
 	decoded.Grow(len(value))
+	var offsets []int32
+	if withOffsets {
+		offsets = make([]int32, 0, len(value)+1)
+	}
 	for index := 0; index < len(value); index++ {
+		if withOffsets {
+			offsets = append(offsets, int32(index))
+		}
 		switch value[index] {
 		case '\\':
 			if index+1 < len(value) && util.IsPunct(value[index+1]) {
@@ -28,13 +44,21 @@ func decodeMarkdownText(value []byte) string {
 		case '&':
 			if length, characters, ok := characterReferenceAt(value, index); ok {
 				decoded.WriteString(characters)
+				if withOffsets {
+					for range len(characters) - 1 {
+						offsets = append(offsets, -1)
+					}
+				}
 				index += length - 1
 				continue
 			}
 		}
 		decoded.WriteByte(value[index])
 	}
-	return decoded.String()
+	if withOffsets {
+		offsets = append(offsets, int32(len(value)))
+	}
+	return decoded.String(), offsets
 }
 
 // characterReferenceAt reports whether the `&` at offset at opens a character reference the

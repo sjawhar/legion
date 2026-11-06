@@ -78,8 +78,13 @@ func TestBlockedIssuesAreNotStartedAgainstScratchDispatch(t *testing.T) {
 	cfg.Project = "B" + randomSuffix(t)[:9]
 	cfg.Projects = map[string]config.Project{cfg.Project: {}}
 	cfg.PostgresDSN = blockersDatabase(t)
-	// Three slots for three roots, so the slot the blocked root does not take stands visibly free.
-	cfg.AdmissionCap = 3
+	// The cap counts the issues at work, not the trees (dispatch://INFRA-980), and this run puts
+	// ten issues of one project through the workflow, a tree's children among them. It is set
+	// above every count this run reaches so that no step here is ever the cap's doing: the slot
+	// the blocked root of step 1 does not take stands free because its link holds it, and the
+	// child of step 4 starts at its release because it reaches the front of a line nothing is
+	// waiting in. Each step that needs a free slot says so against the cap itself.
+	cfg.AdmissionCap = 16
 	// The controller tick admits a root whose blocker is done whatever the event did, so it must
 	// not be what step 6 sees: an hour before the runtime's first tick (o.controllerFirstWake,
 	// below) and an hour between ticks mean this run applies no tick at all.
@@ -617,7 +622,7 @@ func TestBlockedIssuesAreNotStartedAgainstScratchDispatch(t *testing.T) {
 	}
 	notices = childStatusNotices(t, pool, unlinked)
 	t.Logf("the child-status notices the daemon queued on %s for its tree's architect: %q", unlinked, notices)
-	wantNotice = fmt.Sprintf("%s starts planning under %s: its blocked-by links were taken off, so it waits on nothing", unlinked, free)
+	wantNotice = fmt.Sprintf("%s starts planning under %s: it reached the front of the waiting line and took an admission slot", unlinked, free)
 	if !slices.Equal(notices, []string{wantNotice}) {
 		t.Fatalf("Legion started the held child %s once a person took its links off and queued its tree's architect the child-status "+
 			"notices %q; want the one reading %q: a start nobody hears of is the silence the hold's report exists to remove\nstate %s",
@@ -912,7 +917,8 @@ func blockersDatabase(t *testing.T) string {
 	}
 	t.Cleanup(admin.Close)
 	name := "legion_blockers_test_" + outboxSuffix(t)
-	if _, err := admin.Exec(context.Background(), "create database "+name); err != nil {
+	// A file copy of template1 (docs/testing.md, "A database a Go test creates").
+	if _, err := admin.Exec(context.Background(), "create database "+name+" strategy file_copy"); err != nil {
 		t.Fatalf("create %s: %v", name, err)
 	}
 	t.Cleanup(func() {
@@ -1007,7 +1013,9 @@ func dispatchCall(t *testing.T, baseURL, method, path string, body, into any) {
 
 // createBlockersIssue creates one issue of project through Dispatch's own API, carrying the legion
 // label that hands it to Legion, optionally under parent, and waiting on waits. It is created in
-// triage, where every Dispatch issue starts; the test moves it on with its own write.
+// triage, where every Dispatch issue starts, by a session (createDispatchIssue): the label is a
+// session's, so the root is the controller's triage wake and never a person's handover the daemon
+// would queue as todo itself (LEGION-755) ahead of the test's own write, which moves it on.
 func createBlockersIssue(t *testing.T, baseURL, project, title, parent string, waits []string) string {
 	t.Helper()
 	body := map[string]any{"project": project, "title": title, "labels": []string{"legion"}}
@@ -1017,23 +1025,25 @@ func createBlockersIssue(t *testing.T, baseURL, project, title, parent string, w
 	if len(waits) > 0 {
 		body["blocked_by"] = waits
 	}
-	return createDispatchIssue(t, baseURL, title, body)
+	return createDispatchIssue(t, baseURL, title, body, asSession)
 }
 
 // createUnhandedIssue creates one issue of project through Dispatch's own API without the legion
-// label: someone else's work, which nobody hands to Legion. It is created in triage.
+// label, as the person: someone else's work, which nobody hands to Legion. It is created in triage.
 func createUnhandedIssue(t *testing.T, baseURL, project, title string) string {
 	t.Helper()
-	return createDispatchIssue(t, baseURL, title, map[string]any{"project": project, "title": title})
+	return createDispatchIssue(t, baseURL, title, map[string]any{"project": project, "title": title}, asPerson)
 }
 
-// createDispatchIssue posts body as a new issue to Dispatch and answers the key Dispatch gave it.
-func createDispatchIssue(t *testing.T, baseURL, title string, body map[string]any) string {
+// createDispatchIssue posts body as a new issue to Dispatch as identity — the person `smoke`, or a
+// session through the server's agent bearer with the session named in the body's actor
+// (dispatchCallAs) — and answers the key Dispatch gave it.
+func createDispatchIssue(t *testing.T, baseURL, title string, body map[string]any, identity scratchIdentity) string {
 	t.Helper()
 	var created struct {
 		Key string `json:"key"`
 	}
-	dispatchCall(t, baseURL, http.MethodPost, "/api/v1/issues", body, &created)
+	dispatchCallAs(t, baseURL, http.MethodPost, "/api/v1/issues", body, &created, identity)
 	if created.Key == "" {
 		t.Fatalf("Dispatch created %q without a key", title)
 	}

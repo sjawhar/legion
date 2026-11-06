@@ -11,20 +11,26 @@ import (
 )
 
 // inlineParsers is goldmark's default inline parsers, each found by its type as blockParsers finds
-// the block parsers it wraps: its emphasis parser replaced by emphasisParser, and its link parser
-// measuring the images it makes and pairing their labels' runs (imageNesting), with tildeParser
-// added at the priority goldmark's strikethrough extension gives its own (500), every delimiter
-// run read by rules.
+// the block parsers it wraps: its emphasis parser replaced by emphasisParser, its link parser
+// measuring the images it makes and pairing their labels' runs (imageNesting), and its raw HTML
+// parser wrapped by the package's own (inlineRawHTMLParser), where that parser stands (400), so
+// every kind of inline raw HTML is read by one parser and every declaration by the one rule
+// (opensDeclaration), which opens one at any ASCII letter where goldmark's parser opens one only
+// after an uppercase letter. tildeParser is added at the priority goldmark's strikethrough
+// extension gives its own (500), and every delimiter run is read by rules.
 func inlineParsers(rules delimiterRules) []util.PrioritizedValue {
 	parsers := parser.DefaultInlineParsers()
 	emphasisType := reflect.TypeOf(parser.NewEmphasisParser())
 	linkType := reflect.TypeOf(parser.NewLinkParser())
+	rawHTMLType := reflect.TypeOf(parser.NewRawHTMLParser())
 	for index, prioritized := range parsers {
 		switch reflect.TypeOf(prioritized.Value) {
 		case emphasisType:
 			parsers[index].Value = emphasisParser{rules: rules}
 		case linkType:
 			parsers[index].Value = imageNesting{prioritized.Value.(goldmarkLinkParser)}
+		case rawHTMLType:
+			parsers[index].Value = inlineRawHTMLParser{prioritized.Value.(parser.InlineParser)}
 		}
 	}
 	return append(parsers, util.Prioritized(tildeParser{rules: rules}, 500))
@@ -71,9 +77,23 @@ const (
 // loop over them in order (delimiterList.advance). The renderer keeps first a spelling that reads
 // back under all three (inlineWithEscapes), so the bytes it wrote while Dispatch read by the stored
 // rules stay where they still read back.
+//
+// storedRules and flankingRules differ only in that widening by a `*` or `_` beside a run: the `~`
+// runs, their pairing and every other parser read both alike. So a parse under storedRules or
+// editorRules in which every `*` and `_` run can open and close exactly as it could under
+// flankingRules is, step for step, the parse flankingRules makes of the same source. Under either
+// of those rules the parser sets flankingDivergenceKey in its parse's context at any run whose
+// pair under storedRules (no `~` widening, even under editorRules) differs from its pair under
+// flankingRules, so the renderer reads a run back under flankingMarkdown only where that read can
+// differ (parseInlineWithDefinitions).
 type emphasisParser struct {
 	rules delimiterRules
 }
+
+// flankingDivergenceKey is set, in the context of a parse under editorRules or storedRules, once a
+// `*` or `_` run could open or close otherwise under flankingRules than under storedRules
+// (emphasisParser).
+var flankingDivergenceKey = parser.NewContextKey()
 
 func (emphasisParser) Trigger() []byte {
 	return []byte{'*', '_'}
@@ -97,19 +117,22 @@ func (p emphasisParser) Parse(_ ast.Node, block text.Reader, pc parser.Context) 
 	}
 	beforeIsSpace, beforeIsPunct := util.IsSpaceRune(before), util.IsPunctRune(before)
 	afterIsSpace, afterIsPunct := util.IsSpaceRune(after), util.IsPunctRune(after)
-	canOpen := !afterIsSpace && (!afterIsPunct || beforeIsSpace || beforeIsPunct)
-	canClose := !beforeIsSpace && (!beforeIsPunct || afterIsSpace || afterIsPunct)
+	beforeIsNeutral, afterIsNeutral := beforeIsSpace || beforeIsPunct, afterIsSpace || afterIsPunct
+	canOpen := !afterIsSpace && (!afterIsPunct || beforeIsNeutral)
+	canClose := !beforeIsSpace && (!beforeIsPunct || afterIsNeutral)
 	if p.rules != flankingRules {
+		flankingOpen, flankingClose := underscoreRule(char, canOpen, canClose, beforeIsNeutral, afterIsNeutral)
 		canOpen = canOpen || after == '*' || after == '_'
 		canClose = canClose || before == '*' || before == '_'
+		if storedOpen, storedClose := underscoreRule(char, canOpen, canClose, beforeIsNeutral, afterIsNeutral); storedOpen != flankingOpen || storedClose != flankingClose {
+			pc.Set(flankingDivergenceKey, true)
+		}
 	}
 	if p.rules == editorRules {
 		canOpen = canOpen || after == '~'
 		canClose = canClose || before == '~'
 	}
-	if char == '_' {
-		canOpen, canClose = canOpen && (beforeIsSpace || beforeIsPunct || !canClose), canClose && (afterIsSpace || afterIsPunct || !canOpen)
-	}
+	canOpen, canClose = underscoreRule(char, canOpen, canClose, beforeIsNeutral, afterIsNeutral)
 	if !canOpen && !canClose {
 		// A run that can neither open nor close pairs with nothing. goldmark's ProcessDelimiters
 		// walked every delimiter still on its list when a closer looked for its opener and never
@@ -125,6 +148,17 @@ func (p emphasisParser) Parse(_ ast.Node, block text.Reader, pc parser.Context) 
 	block.Advance(node.OriginalLength)
 	delimiters.push(node, p.rules)
 	return node
+}
+
+// underscoreRule is whether a run of char that its flanking leaves able to open and close as
+// canOpen and canClose can: an `_` run opens only where whitespace or punctuation precedes it or it
+// cannot close, and closes only where one follows it or it cannot open, so `_` inside a word pairs
+// with nothing; a `*` run as its flanking leaves it.
+func underscoreRule(char byte, canOpen, canClose, beforeIsNeutral, afterIsNeutral bool) (bool, bool) {
+	if char != '_' {
+		return canOpen, canClose
+	}
+	return canOpen && (beforeIsNeutral || !canClose), canClose && (afterIsNeutral || !canOpen)
 }
 
 // CloseBlock pairs the runs a textblock leaves once its inline markdown is all read, where

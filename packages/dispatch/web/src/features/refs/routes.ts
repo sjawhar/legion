@@ -11,21 +11,30 @@ import { matchPath } from "react-router-dom";
 import type { ArtifactOwner } from "../../api/client";
 import type { Artifact } from "../../api/types";
 import { EVERYONE_FILTER_VALUE } from "../inbox/sections";
-import { type BlockTarget, blockFragment, parseBlockReference, withBlock } from "./block-reference";
+import {
+  type BlockTarget,
+  blockFragment,
+  itemOfBlock,
+  parseBlockReference,
+  withBlock,
+} from "./block-reference";
 import { referenceSpans } from "./reference-spans";
 import { pageInBound, routeInBound } from "./target-id";
 
 export type IssueRoute =
   | { key: string; kind: "issue" }
   | ({ key: string; kind: "spec" } & BlockTarget)
+  | { key: string; kind: "verification" }
+  | { key: string; kind: "plan" }
   | { key: string; kind: "conversation" }
   | { key: string; kind: "activity" }
+  | { key: string; kind: "decisions" }
   | { key: string; kind: "children" }
   | { key: string; kind: "artifacts" }
   | ({ key: string; kind: "artifact"; slug: string; version?: number } & BlockTarget)
-  | { key: string; kind: "ask"; id: string }
-  | { key: string; kind: "comment"; id: string }
-  | { key: string; kind: "message"; id: string };
+  | ({ key: string; kind: "ask"; id: string } & BlockTarget)
+  | ({ key: string; kind: "comment"; id: string } & BlockTarget)
+  | ({ key: string; kind: "message"; id: string } & BlockTarget);
 
 /** `project` is the bare `/projects/:key`, which opens on `architecture` when the project has
  *  an architecture source and on `issues` otherwise (`ProjectPage`'s open-on rule); the Issues
@@ -58,13 +67,56 @@ export type DispatchReferenceRoute = IssueRoute | ProjectDocumentRoute | AgentAr
  *  `section=needs-you` only the asks waiting on the viewer are shown. */
 export interface InboxRoute {
   agent?: string;
+  /** The ask the Inbox has selected, the one its reading pane shows: an ask id. The address is
+   *  the whole memory of that selection, so a link carries the reader's place in the list. */
+  item?: string;
   section?: "needs-you";
+  /** The text the Inbox's search box narrows the list by, as typed. It is a field of the route
+   *  rather than a search parameter of its own because `buildInboxPath` rebuilds the whole query
+   *  string from this type and `usePaneSelection` navigates with it on every selection change, so
+   *  a parameter outside the type would be dropped by the next `j`. */
+  q?: string;
   /** Who the listed asks are for. Absent is the page's default, the reader's own work; an empty
    *  array is the cleared filter, every question; a value is a person's lowercase email or the
    *  literal `unassigned`. */
   assignees?: readonly string[];
 }
-export type IssueTab = "spec" | "conversation" | "children" | "artifacts" | "activity";
+export type IssueTab =
+  | "spec"
+  | "verification"
+  | "plan"
+  | "conversation"
+  | "children"
+  | "artifacts"
+  | "activity"
+  | "decisions";
+
+/** The slug of an issue's `decisions.md`, the document its Decisions tab is a view of. */
+export const DECISIONS_DOCUMENT_SLUG = "decisions-md";
+
+/** The issue tabs whose whole route is the tab itself: no block, no slug, no id. Each one is
+ *  parsed from the segment of its own name, built as `<issue>/<kind>`, shown as `<KEY> <kind>`
+ *  and is the tab of its own name, so the chains below hold the five in one arm rather than one
+ *  apiece and a sixth tab is this list. The spec, the conversation and the decisions stay out of
+ *  it: a spec route carries a block, the conversation is written `log` in a reference and
+ *  `conversation` in a path, and the Decisions tab is a view of the issue's `decisions.md`, which
+ *  a reference names as that document. */
+const PLAIN_ISSUE_TABS = ["verification", "plan", "activity", "children", "artifacts"] as const;
+
+type PlainIssueTab = (typeof PLAIN_ISSUE_TABS)[number];
+
+/** The plain tab a path segment names, or `undefined` for anything else. */
+function plainIssueTab(value: string): PlainIssueTab | undefined {
+  return PLAIN_ISSUE_TABS.find((tab) => tab === value);
+}
+
+type PlainIssueRoute = Extract<IssueRoute, { kind: PlainIssueTab }>;
+
+/** Whether the route is one of those tabs, narrowing it for the builders below and leaving the
+ *  rest of the union to the arms that follow. */
+function isPlainIssueRoute(route: DispatchRoute | AgentArtifactRoute): route is PlainIssueRoute {
+  return PLAIN_ISSUE_TABS.some((tab) => tab === route.kind);
+}
 
 const projectKeyPattern = "[A-Z][A-Z0-9]{1,9}";
 const issueKeyPattern = `${projectKeyPattern}-[1-9]\\d*`;
@@ -116,17 +168,14 @@ export function issueTabForRoute(
   route: IssueRoute,
   artifact: Pick<Artifact, "kind" | "primary"> | undefined
 ): IssueTab {
-  if (route.kind === "children") {
-    return "children";
+  if (isPlainIssueRoute(route)) {
+    return route.kind;
   }
   if (route.kind === "conversation") {
     return "conversation";
   }
-  if (route.kind === "activity") {
-    return "activity";
-  }
-  if (route.kind === "artifacts") {
-    return "artifacts";
+  if (route.kind === "decisions") {
+    return "decisions";
   }
   if (route.kind === "artifact") {
     return isPrimaryDocumentArtifactRoute(route, artifact) ? "spec" : "artifacts";
@@ -220,17 +269,12 @@ function parseIssueReference(key: string, target: string | undefined): IssueRout
   if (target === "spec") {
     return { key, kind: "spec" };
   }
+  const plain = plainIssueTab(target);
+  if (plain !== undefined) {
+    return { key, kind: plain };
+  }
   if (legacyLogReferencePattern.test(target) || target === "conversation") {
     return { key, kind: "conversation" };
-  }
-  if (target === "activity") {
-    return { key, kind: "activity" };
-  }
-  if (target === "children") {
-    return { key, kind: "children" };
-  }
-  if (target === "artifacts") {
-    return { key, kind: "artifacts" };
   }
   const artifact = target.match(issueArtifactReferencePattern);
   if (artifact !== null) {
@@ -328,17 +372,15 @@ export function parseIssuePath(pathname: string, search = ""): IssueRoute | unde
   if (target === "spec") {
     return { key, kind: "spec" };
   }
+  const plain = plainIssueTab(target);
+  if (plain !== undefined) {
+    return { key, kind: plain };
+  }
   if (target === "conversation") {
     return { key, kind: "conversation" };
   }
-  if (target === "activity") {
-    return { key, kind: "activity" };
-  }
-  if (target === "children") {
-    return { key, kind: "children" };
-  }
-  if (target === "artifacts") {
-    return { key, kind: "artifacts" };
+  if (target === "decisions") {
+    return { key, kind: "decisions" };
   }
   const artifact = target.match(/^artifacts?\/([^/?#\s]+)$/);
   if (artifact !== null) {
@@ -449,11 +491,13 @@ export function nodeRouteFromHref(
 /** What a same-origin dashboard path names, as the server's `text` reads the page: `page`, and
  * `block`, the block of it its `#b-<block id>` fragment names, of any length. A path holding a
  * control character, naming a slug Dispatch never gives a document, or that is no issue/document
- * reference names nothing. A document page carrying `?comment=`/`?ask=` names that item, and a
- * version of the spec (`?v=N`) the spec's artifact at N, as `dispatch read` reads the page; no
- * fragment names a block of either, nor of any version page, whose stored text holds no block
- * ids. A raw `@` in a fragment is no pin, since pins are written only in `dispatch://`
- * references; any other fragment leaves the page. */
+ * reference names nothing. A document page carrying `?comment=`/`?ask=` names that item whatever
+ * its fragment, at any version of the document: the dashboard writes a document block's fragment
+ * beside it, never a block of the item. A version of the spec (`?v=N`) is the spec's artifact at
+ * N, as `dispatch read` reads the page. The fragment names a block of a live document, or of the
+ * issue ask, comment or message its own page shows; no block of a document's version page, whose
+ * stored text holds no block ids (`withBlock`). A raw `@` in a fragment is no pin, since pins are
+ * written only in `dispatch://` references; any other fragment leaves the page. */
 function pageRoutes(
   href: string,
   appOrigin: string
@@ -477,13 +521,24 @@ function pageRoutes(
   if (route === undefined || (isProjectRoute(route) && route.kind !== "document")) {
     return undefined;
   }
+  // The Decisions tab is a view of the issue's decisions.md, so its page names that document,
+  // whatever its fragment, as the server's `text` and the agent client read the page.
+  if (route.kind === "decisions") {
+    return {
+      block: undefined,
+      page: { key: route.key, kind: "artifact", slug: DECISIONS_DOCUMENT_SLUG },
+    };
+  }
   if ("slug" in route && !artifactSlugOnlyPattern.test(route.slug)) {
     return undefined;
   }
-  // An issue document path carrying `?comment=`/`?ask=` names that item, the same rule
-  // `parseProjectPath` already applies to a project document. Without it a search hit's hover
-  // card previewed the document instead of the comment the reader is about to open.
-  let page: DispatchReferenceRoute = route;
+  // A document page carrying `?comment=`/`?ask=` names that item whatever its fragment, on an
+  // issue's document as `parseProjectPath` already reads a project document's. Without it a
+  // search hit's hover card previewed the document instead of the comment the reader is about to
+  // open.
+  if (route.kind === "document" && route.item !== undefined) {
+    return { block: undefined, page: route };
+  }
   if (!isProjectRoute(route) && (route.kind === "spec" || route.kind === "artifact")) {
     const item = itemFromSearch(url.search);
     const version = url.searchParams.get("v") ?? "";
@@ -491,14 +546,15 @@ function pageRoutes(
       return undefined;
     }
     if (item !== undefined) {
-      page = { id: item.id, key: route.key, kind: item.kind };
-    } else if (route.kind === "spec" && version !== "") {
+      return { block: undefined, page: { id: item.id, key: route.key, kind: item.kind } };
+    }
+    if (route.kind === "spec" && version !== "") {
       // `parseIssuePath` leaves the version to the spec's own page; a malformed one is the spec.
       return { block: undefined, page: artifactRoute(route.key, "spec", version) ?? route };
     }
   }
   const id = url.hash.startsWith("#b-") ? decodeBlockId(url.hash.slice(3)) : undefined;
-  return { block: id === undefined ? undefined : withBlock(page, id), page };
+  return { block: id === undefined ? undefined : withBlock(route, id), page: route };
 }
 
 /** A reference a text cites: the `dispatch://` form and the dashboard path it opens. */
@@ -556,26 +612,23 @@ export function buildDispatchReference(route: DispatchReferenceRoute): string {
   if (route.kind === "spec") {
     return `${issue}/spec${block}`;
   }
+  if (isPlainIssueRoute(route)) {
+    return `${issue}/${route.kind}`;
+  }
   // The conversation keeps the `log` spelling every reference written before the Activity tab
   // existed used; activity, newer, is spelled as its own path is.
   if (route.kind === "conversation") {
     return `${issue}/log`;
   }
-  if (route.kind === "activity") {
-    return `${issue}/activity`;
-  }
-  if (route.kind === "children") {
-    return `${issue}/children`;
-  }
-  if (route.kind === "artifacts") {
-    return `${issue}/artifacts`;
+  if (route.kind === "decisions") {
+    return `${issue}/artifact/${DECISIONS_DOCUMENT_SLUG}`;
   }
   if (route.kind === "artifact") {
     return `${issue}/artifact/${encodeURIComponent(route.slug)}${
       route.version === undefined ? "" : `@v${route.version}`
     }${block}`;
   }
-  return `${issue}/${route.kind}/${encodeURIComponent(route.id)}`;
+  return `${issue}/${route.kind}/${encodeURIComponent(route.id)}${block}`;
 }
 
 /** Whether `artifact` belongs to an agent's conversation (its `session_id` is set, its
@@ -731,7 +784,10 @@ export function shortForm(route: DispatchReferenceRoute): string {
     target === undefined ? "" : ` block${target.pin === undefined ? "" : ` v${target.pin}`}`;
   if (isProjectRoute(route)) {
     const base = `${route.project}/${route.slug}`;
-    return route.item === undefined ? `${base}${block}` : `${base} ${route.item.kind}`;
+    return route.item === undefined ? `${base}${block}` : `${base} ${route.item.kind}${block}`;
+  }
+  if (isPlainIssueRoute(route)) {
+    return `${route.key} ${route.kind}`;
   }
   switch (route.kind) {
     case "issue":
@@ -740,30 +796,29 @@ export function shortForm(route: DispatchReferenceRoute): string {
       return `${route.key} spec${block}`;
     case "conversation":
       return `${route.key} log`;
-    case "activity":
-      return `${route.key} activity`;
-    case "children":
-      return `${route.key} children`;
-    case "artifacts":
-      return `${route.key} artifacts`;
+    case "decisions":
+      return `${route.key} decisions`;
     case "artifact":
       return `${route.key} ${route.slug}${block}`;
     case "ask":
-      return `${route.key} ask`;
+      return `${route.key} ask${block}`;
     case "comment":
-      return `${route.key} comment`;
+      return `${route.key} comment${block}`;
     case "message":
-      return `${route.key} message`;
+      return `${route.key} message${block}`;
   }
 }
 
 /** The SPA path a reference navigates to, whichever side of the issue/project split it is on. A
- *  block opens its document at the block (`#b-`); a pinned block opens the version of its document
- *  it pins, since a version's stored text holds no block ids to land on, the pin's digits written
- *  as the reference holds them. An issue's spec keeps its versions under its own slug, which a
- *  spec route does not carry: `specSlug` names it once the issue's summary is read
- *  (`useReferencePath`), and until then a pinned block of the spec opens the live spec at the
- *  block. */
+ *  block opens its document, issue comment or message at the block (`#b-`); a pinned block of a
+ *  document opens the version of its document it pins, since a version's stored text holds no
+ *  block ids to land on, the pin's digits written as the reference holds them, and a pinned block
+ *  of a comment opens the live comment at the block, a comment's revisions having no page of
+ *  their own. A block of a project document's comment opens the comment (`?comment=<id>`) with no
+ *  fragment: that page's `#b-` names a block of the document. An issue's spec keeps its versions
+ *  under its own slug, which a spec route does not carry: `specSlug` names it once the issue's
+ *  summary is read (`useReferencePath`), and until then a pinned block of the spec opens the live
+ *  spec at the block. */
 export function buildReferencePath(route: DispatchReferenceRoute, specSlug?: string): string {
   if (route.kind === "agent-artifact") {
     const artifact = `/agents/${encodeURIComponent(route.session)}/artifacts/${encodeURIComponent(route.slug)}`;
@@ -771,11 +826,11 @@ export function buildReferencePath(route: DispatchReferenceRoute, specSlug?: str
   }
   const path = isProjectRoute(route) ? buildProjectPath(route) : buildIssuePath(route);
   const target = "block" in route ? route.block : undefined;
-  if (target === undefined) {
+  if (target === undefined || (route.kind === "document" && route.item !== undefined)) {
     return path;
   }
   const live = `${path}${blockFragment(target.id)}`;
-  if (target.pin === undefined) {
+  if (target.pin === undefined || itemOfBlock(route) !== undefined) {
     return live;
   }
   if (route.kind === "document") {
@@ -800,17 +855,14 @@ export function buildIssuePath(route: IssueRoute): string {
   if (route.kind === "spec") {
     return `${issue}/spec`;
   }
+  if (isPlainIssueRoute(route)) {
+    return `${issue}/${route.kind}`;
+  }
   if (route.kind === "conversation") {
     return `${issue}/conversation`;
   }
-  if (route.kind === "activity") {
-    return `${issue}/activity`;
-  }
-  if (route.kind === "children") {
-    return `${issue}/children`;
-  }
-  if (route.kind === "artifacts") {
-    return `${issue}/artifacts`;
+  if (route.kind === "decisions") {
+    return `${issue}/decisions`;
   }
   if (route.kind === "artifact") {
     const artifact = `${issue}/artifacts/${encodeURIComponent(route.slug)}`;
@@ -855,8 +907,18 @@ export function parseInboxSearch(search: string): InboxRoute {
   if (agent !== null && agent !== "") {
     route.agent = agent;
   }
+  const item = params.get("item")?.trim() ?? "";
+  if (item !== "") {
+    route.item = item;
+  }
   if (params.get("section") === "needs-you") {
     route.section = "needs-you";
+  }
+  // Neither trimmed nor cut: a reader mid-word has a trailing space that is part of what they
+  // typed, and the box rewrites no address a link arrived with.
+  const q = params.get("q");
+  if (q !== null && q !== "") {
+    route.q = q;
   }
   // Nothing refuses an email the page has never heard of: the filter is a client-side split of
   // one inbox response, so an unlisted or misspelled person simply matches no row.
@@ -882,8 +944,14 @@ export function buildInboxPath(route: InboxRoute = {}): string {
   if (route.agent !== undefined) {
     query.set("agent", route.agent);
   }
+  if (route.item !== undefined) {
+    query.set("item", route.item);
+  }
   if (route.section !== undefined) {
     query.set("section", route.section);
+  }
+  if (route.q !== undefined) {
+    query.set("q", route.q);
   }
   if (route.assignees !== undefined) {
     if (route.assignees.length === 0) {
@@ -911,9 +979,16 @@ export function routeHasMargin(pathname: string, search = ""): boolean {
   );
 }
 
-/** Whether this route is the Inbox page itself, the one place a peek at it has nothing to add. */
+/** Whether this route is the Inbox page itself, the one place a peek at it has nothing to add.
+ *  `app.tsx` renders `InboxPage` at `/credentials/*` as well, for an address kept from before
+ *  Dispatch's credential record page was deleted, and ranks `/credentials/machine`, a page of its
+ *  own, above that splat, as this does. */
 export function routeIsInbox(pathname: string): boolean {
-  return pathname === "/";
+  return (
+    pathname === "/" ||
+    (matchPath("/credentials/*", pathname) !== null &&
+      matchPath("/credentials/machine", pathname) === null)
+  );
 }
 
 /** The signed-in person's answers and ask replies (`AnswersPage`), linked from the Inbox page. */
@@ -927,9 +1002,11 @@ export const REPLIES_PATH = "/replies";
 export const AGENT_LIVE_PATH = "/agents/:sessionId/live";
 
 /**
- * Whether this route's page owns its scroller and so gets exactly the viewport from the shell:
- * the live agent view, whose thread scrolls while its header and composer stay put. Every other
- * page scrolls the document, which `ViewportAnchor` and the sticky composers depend on.
+ * Whether this route's page owns its scroller whatever the viewport, and so gets exactly the
+ * viewport from the shell: the live agent view, whose thread scrolls while its header and
+ * composer stay put. The Inbox joins it only while its reading pane shows (`app.tsx` pairs this
+ * with `READING_PANE_QUERY`); every other page scrolls the document, which `ViewportAnchor` and
+ * the sticky composers depend on.
  */
 export function routeFillsViewport(pathname: string): boolean {
   return matchPath(AGENT_LIVE_PATH, pathname) !== null;

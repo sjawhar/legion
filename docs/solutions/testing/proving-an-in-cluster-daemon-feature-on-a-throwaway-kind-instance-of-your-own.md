@@ -67,7 +67,7 @@ clusters.
 
 **The image is the branch's, by digest.** `legion gh -- workflow run worker-image.yaml --ref
 legion/<KEY>` builds the branch head; off `main` the workflow publishes
-`ghcr.io/sjawhar/legion-worker:sha-<short>` **only**, and it never edits a release (the
+`ghcr.io/cybermonklabs/legion-worker:sha-<short>` **only**, and it never edits a release (the
 `worker_image_release_note` job in `release.yaml` does that, after a `legion` release). Read the
 digest from the run's summary and pin it in *both*
 places — the overlay's kustomize `images:` and `runtime.kubernetes.image` in the overlay's

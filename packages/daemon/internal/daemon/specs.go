@@ -33,6 +33,14 @@ type specs struct {
 	instructions string
 	secrets      map[string]string
 	prompts      *prompts.Composer
+	// memoryInstructions is the daemon's copy of the block's instructions file
+	// (config.WriteMemoryInstructions), the last fragment of a memory-group launch's system
+	// prompt; "" when the block names none, which `mode: on` may, and nothing is then appended.
+	memoryInstructions string
+	// memoryGroup is whether tree's root record carries the memory group (treeMemoryGroup, over
+	// the daemon's own store). Boot always sets it; it is nil only in a test whose specs literal
+	// leaves it out, and such a specs launches nothing with memory.
+	memoryGroup func(ctx context.Context, tree string) (bool, error)
 	// designGate is the project's design gate policy (gates.design), which a tree's root architect
 	// is told after its addressing (DesignGateFragment).
 	designGate config.DesignGate
@@ -41,9 +49,11 @@ type specs struct {
 	slackChannels []string
 	// mergeRules is the project's merge policy, which a merger is told after its addressing.
 	mergeRules config.MergeRules
-	// identity is the role's App bot identity every pane commits as, minted for the owner of the
-	// repository the launch works; nil for a daemon with no GitHub Apps.
-	identity func(ctx context.Context, role claim.Role, owner string) (runtime.GitIdentity, error)
+	// identity is the role's App bot identity every pane commits as, minted for the owner whose
+	// installation holds the repository the launch works — the record's name over a transfer, the
+	// mint's owner its serving one (workflowRuntime.identity); nil for a daemon with no GitHub
+	// Apps.
+	identity func(ctx context.Context, role claim.Role, repository ghrepo.Repository) (runtime.GitIdentity, error)
 	// repository is the repository an issue works and its default branch
 	// (workflowRuntime.issueRepository: its record's, or the project's default for an issue the
 	// workflow does not record); nil for a daemon with no workflow, whose launches work no
@@ -79,9 +89,10 @@ func rolePromptPath(stateDir string, token claim.Token) string {
 }
 
 // SpawnSpec is the launch's secrets (launchSecrets: the Envoy bearer and the NATS nkey seed, each
-// when the daemon has one), its prompt — the role prompt parts, the addressing sentence, and the
-// deployment instructions — and its repository with that repository's default branch, whose
-// workspace is on the daemon's host by then when the runtime leaves workspaces to the daemon
+// when the daemon has one), its prompt — the role prompt parts, the addressing sentence, the
+// deployment instructions and, for a tree in the project's memory group, the memory instructions
+// — and its repository with that repository's default branch, whose workspace is on the daemon's
+// host by then when the runtime leaves workspaces to the daemon
 // (ensureWorkspace). The controller's launch (controllerSpawnSpec) is its own. Both name the
 // backend the role runs on and are told its prompt part after the role's parts (launchBackend).
 // Plugins carries the plugin pair a stale-plugin relaunch installs (stalePluginInstall), set the
@@ -105,7 +116,7 @@ func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnS
 	if part != "" {
 		spec.Prompt.RolePromptPaths = append(spec.Prompt.RolePromptPaths, part)
 	}
-	spec.Plugins = s.stalePluginInstall(c)
+	spec.Plugins = s.stalePluginInstall(c, spec.Backend)
 	return spec, nil
 }
 
@@ -129,7 +140,10 @@ func (s specs) launchBackend(role claim.Role) (runtime.Backend, string, error) {
 	return backend, s.prompts.Part(info.PromptPart), nil
 }
 
-// workerSpawnSpec is SpawnSpec's own build for every claim but the controller's.
+// workerSpawnSpec is SpawnSpec's own build for every claim but the controller's. It is the one
+// launch that may carry memory: whether the claim's tree is in the project's memory group
+// (memoryGroup), which decides both the overlays each runtime names last in PI_CONFIG_FILES
+// (runtime.SpawnSpec.Memory) and the memory instructions its prompt ends with.
 func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnSpec, error) {
 	promptPaths, err := s.rolePromptPaths(c)
 	if err != nil {
@@ -168,23 +182,73 @@ func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.
 		Addressing:                 addressing,
 		DeploymentInstructionsPath: s.instructions,
 	}
+	// The memory group is the tree's, read from its root's record alone: a tree the daemon drew
+	// into the memory group keeps its overlays and its instructions while the block names them,
+	// whatever the project's mode is now — the mode decides which new trees are drawn, and only
+	// removing the keys takes the files away. A specs with no reader (memoryGroup nil, a test's)
+	// asks nothing, so none of its launches carries memory, and a project whose block names no
+	// instructions file appends nothing, its memory-group panes being the overlays alone.
+	if s.memoryGroup != nil {
+		memory, err := s.memoryGroup(ctx, c.Tree)
+		if err != nil {
+			return runtime.SpawnSpec{}, fmt.Errorf("the memory group of tree %s: %w", c.Tree, err)
+		}
+		if memory {
+			spec.Memory = true
+			spec.Prompt.MemoryInstructionsPath = s.memoryInstructions
+		}
+	}
 	if s.identity != nil {
-		id, err := s.identity(ctx, c.Role, spec.Repository.Owner())
+		id, err := s.identity(ctx, c.Role, spec.Repository)
 		if err != nil {
 			return runtime.SpawnSpec{}, fmt.Errorf("the git identity of %s: %w", c.Token, err)
 		}
 		spec.Env = id.Env()
 	}
+	// After the git identity, which replaces spec.Env rather than merging into it: the stall
+	// limits are merged into whatever map the launch holds by then (stallLimitVariables).
+	for _, name := range stallLimitVariables {
+		if value, ok := os.LookupEnv(name); ok {
+			spec.Env[name] = value
+		}
+	}
 	return spec, nil
 }
 
+// stallLimitVariables are the four numbers a phase worker's end-of-turn reminder runs on, in name
+// order: how many delivered reminders in a row change nothing before the architect is told, how
+// long the worker waits for a reminder after a settle, how long after a resume on an open phase,
+// and how long a reply that said what it waits on buys. A worker told none of them runs on the
+// defaults its plugin holds (packages/pi-shared/src/stall-limits.ts), so the daemon passes exactly
+// the ones its own environment holds and no more. Both runtimes forward spec.Env verbatim — a
+// pane's -e pairs (runtime/tmux's panePairs) and a pod launcher's start command (runtime/sandbox's
+// mainEnvironment) — so workerSpawnSpec is the one seam that serves both.
+var stallLimitVariables = []string{
+	"LEGION_STALL_ARCHITECT_AFTER",
+	"LEGION_STALL_REMINDER_MS",
+	"LEGION_STALL_RESUME_MS",
+	"LEGION_STALL_WAITING_MS",
+}
+
 // stalePluginInstall is spec.Plugins for c's launch (LEGION-164): the daemon's resolved pair,
-// with Contract already api.DaemonAPIVersion, iff the runtime is Kubernetes, c has registered a
-// session, and its recorded contract differs from this daemon's — never for a launch that is not
-// replacing a process on another plugin contract, and never when the daemon knows no pair
-// (s.plugins nil, the degraded mode). A fresh copy, so a caller mutating one launch's spec never
-// reaches another's.
-func (s specs) stalePluginInstall(c supervise.Claim) *runtime.PluginInstall {
+// with Contract already api.DaemonAPIVersion, iff the launch runs on Oh My Pi, the runtime is
+// Kubernetes, c has registered a session, and its recorded contract differs from this daemon's —
+// never for a launch that is not replacing a process on another plugin contract, and never when
+// the daemon knows no pair (s.plugins nil, the degraded mode). A fresh copy, so a caller mutating
+// one launch's spec never reaches another's.
+//
+// backend is the launch's, as SpawnSpec resolved it (launchBackend). A Claude Code launch gets
+// nothing: that install is `@sjawhar/pi-legion` and `@sjawhar/pi-envoy` from npm
+// (runtime/sandbox's plugins.go), no workflow releases claude-envoy, and a Claude worker's plugin
+// is the image's — so a plugin-contract change for such a role is answered by a new image, not by
+// an install. Such a claim whose recorded contract differs still relaunches: it is the image's
+// plugin that decides, and the image probe is what refuses a wrong one. The daemon-launched
+// controller runs on Oh My Pi (runtime.Backends runs Claude Code for phase workers alone), so its
+// launch is covered here exactly as before.
+func (s specs) stalePluginInstall(c supervise.Claim, backend runtime.Backend) *runtime.PluginInstall {
+	if runtime.Of(backend) == runtime.BackendClaude {
+		return nil
+	}
 	if s.runtimeName != "kubernetes" || c.Session == "" || c.PluginContract == api.DaemonAPIVersion || s.plugins == nil {
 		return nil
 	}
@@ -202,7 +266,8 @@ func (s specs) stalePluginInstall(c supervise.Claim) *runtime.PluginInstall {
 // runtime (sandbox.Options.ControllerSlackChannels), which compares them with the list a running
 // controller was launched under and relaunches it when they change; a spec cannot set that variable.
 // It has no repository and no git identity: the controller works Dispatch, never a checkout, and
-// commits nothing.
+// commits nothing. It is in no memory group and is told no memory instructions whatever the
+// project's mode is: a memory group is a tree's, and the controller runs in none.
 func (s specs) controllerSpawnSpec() (runtime.SpawnSpec, error) {
 	if s.prompts == nil {
 		return runtime.SpawnSpec{}, errors.New("the daemon prompt bundle was not constructed at boot")

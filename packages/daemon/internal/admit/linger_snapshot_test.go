@@ -155,6 +155,9 @@ func TestReconcileLeavesSlotStateUnchangedWhenALevelSnapshotEchoesAnAgentsOutOfW
 		if err := record.NewStore().PutSlot(context.Background(), tx, record.Slot{Issue: "LEGION-AGENT", Index: 0, AdmittedAt: fixedNow}); err != nil {
 			t.Fatalf("seed slot: %v", err)
 		}
+		// The tree's lifecycle is what says it runs (record.TreeLive); a root at a running
+		// status in no live tree is one the INFRA-129 net takes out of the workflow.
+		seedLifecycleTx(t, tx, "LEGION-AGENT")
 	})
 	seedWaiting(t, pool, "LEGION-NEXT", "B")
 
@@ -198,6 +201,7 @@ func TestABootListingOfASetBackBacklogLeavesTheTreeRunning(t *testing.T) {
 				if err := record.NewStore().PutSlot(context.Background(), tx, record.Slot{Issue: "LEGION-RUN", Index: 0, AdmittedAt: fixedNow}); err != nil {
 					t.Fatalf("seed slot: %v", err)
 				}
+				seedLifecycleTx(t, tx, "LEGION-RUN")
 			})
 			seedWaiting(t, pool, "LEGION-NEXT", "B")
 

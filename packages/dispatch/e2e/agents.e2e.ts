@@ -1,9 +1,14 @@
+import { setTimeout as sleep } from "node:timers/promises";
+
 import { expect, type Locator, type Page, test } from "@playwright/test";
-import type { Message } from "../web/src/api/types";
+import type { CreateBroadcastInput, Message } from "../web/src/api/types";
 import {
   agentRow,
+  BROADCAST_REFUSED,
+  broadcastSends,
   type FakeSession,
   getSentMessages,
+  isBroadcastInput,
   postedBroadcasts,
   refuseBroadcasts,
   setLiveSessions,
@@ -17,7 +22,7 @@ import {
   createIssue,
   createMessage,
   createProject,
-  disconnectAllStreams,
+  disconnectLiveSockets,
   getAgentStates,
   listAgentMessages,
   putAgentState,
@@ -25,9 +30,17 @@ import {
 } from "./api";
 import { recordClipboard } from "./clipboard";
 import { holdFirstRequest } from "./editor";
+import { inboxList } from "./inbox-pane";
+import { type KeyedWrite, keyedWrite } from "./keyed-writes";
 import { resetDatabase, setCreatedAt } from "./seed";
+import { sessionIds } from "./session-ids";
 import { assertPageFits, assertWhole } from "./unclipped";
 import { asUser } from "./users";
+
+/** The margin an absence - a request the page must not make, a navigation it must not take - is
+ *  read after. Each is the work of the click's own task, so a margin in Node, which the page's
+ *  own clock cannot skip, covers one deferred a task or two past it. */
+const ABSENCE_MARGIN_MS = 150;
 
 const planner: FakeSession = {
   capabilities: ["aside", "btw"],
@@ -35,7 +48,7 @@ const planner: FakeSession = {
   last_seen: Date.now() - 30_000,
   machine_id: "planner-host",
   roles: ["planner"],
-  session_id: "planner-session",
+  session_id: sessionIds.planner,
   title: "Planner",
 };
 const reviewer: FakeSession = {
@@ -44,7 +57,7 @@ const reviewer: FakeSession = {
   last_seen: Date.now() - 5 * 60_000,
   machine_id: "reviewer-host",
   roles: ["reviewer"],
-  session_id: "reviewer-session",
+  session_id: sessionIds.reviewer,
   title: "Reviewer",
 };
 const silent: FakeSession = {
@@ -53,7 +66,7 @@ const silent: FakeSession = {
   last_seen: Date.now() - 10_000,
   machine_id: "silent-host",
   roles: [],
-  session_id: "silent-session",
+  session_id: sessionIds.silent,
   title: "Silent",
 };
 const archivist: FakeSession = {
@@ -62,7 +75,7 @@ const archivist: FakeSession = {
   last_seen: Date.now() - 45 * 60_000,
   machine_id: "archivist-host",
   roles: [],
-  session_id: "archivist-session",
+  session_id: sessionIds.archivist,
   title: "Archivist",
 };
 
@@ -70,7 +83,10 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("Agents puts who needs you first, folds silent and inactive sessions, shows one whose-turn pill per side, pins a card, copies identifiers, and holds an issue-less BTW conversation @phone", async ({
+// SLOW(>=2s): one page tour over four sessions - order, folds, pills, pin, clipboard and an
+// issue-less BTW conversation. Every second is a step the row asserts, and the seed's order is
+// what "who needs you first" is read against, so its writes keep theirs.
+test("Agents puts who needs you first, folds silent and inactive sessions, shows one whose-turn pill per side, pins a card, copies identifiers, and holds an issue-less BTW conversation", async ({
   browser,
 }, testInfo) => {
   await setLiveSessions([planner, reviewer, silent, archivist]);
@@ -111,12 +127,10 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     const page = await alice.newPage();
     const copied = await recordClipboard(page);
     await page.goto("/agents");
-    const width = testInfo.project.name === "iphone" ? "390" : "1280";
+    const width = "1280";
 
     const agents = page.getByRole("region", { name: "Agents" });
-    if (testInfo.project.name === "chromium") {
-      await expect(page.getByRole("link", { name: "Agents", exact: true })).toBeVisible();
-    }
+    await expect(page.getByRole("link", { name: "Agents", exact: true })).toBeVisible();
     // Each card is its row by session, shown or hidden, so every assertion below says which.
     const plannerCard = agentRow(page, planner.session_id);
     const reviewerCard = agentRow(page, reviewer.session_id);
@@ -139,8 +153,7 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     await expect(archivistCard).toBeHidden();
     const shownTitles = shownAgentRows(page).locator("h2");
     await expect(shownTitles).toHaveText(["Planner", "Reviewer"]);
-    // Each collapsed fold owns its own row: the second toggle starts below the first one, even
-    // on the phone where the global inline-flex button rule would otherwise line them up.
+    // Each collapsed fold owns its own row: the second toggle starts below the first one.
     const quietBox = await quietToggle.boundingBox();
     const inactiveBox = await inactiveToggle.boundingBox();
     if (quietBox === null || inactiveBox === null) throw new Error("fold toggles not laid out");
@@ -212,23 +225,28 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     await expect(reviewerComposer).toBeHidden();
 
     // The identifiers copy from the collapsed row.
-    await plannerCard.getByRole("button", { name: "Copy session ID planner-session" }).click();
+    await plannerCard
+      .getByRole("button", { name: `Copy session ID ${planner.session_id}` })
+      .click();
     await expect(plannerCard.getByText("Copied", { exact: true })).toBeVisible();
     await plannerCard.getByRole("button", { name: "Copy session title Planner" }).click();
-    await expect.poll(copied).toEqual(["planner-session", "Planner"]);
+    await expect.poll(copied).toEqual([planner.session_id, "Planner"]);
 
     // One pill per side of the turn, each counted in its own right: what waits on the reader
     // themselves - a question whose next move is a person's, on an issue assigned to them - and
     // what waits on the session, on anybody's issue. A card with no open asks shows neither.
     const needsYou = plannerCard.getByRole("link", { name: "Needs you 1" });
-    await expect(needsYou).toHaveAttribute("href", "/?agent=planner-session&section=needs-you");
+    await expect(needsYou).toHaveAttribute(
+      "href",
+      `/?agent=${planner.session_id}&section=needs-you`
+    );
     const waitingOnAgent = plannerCard.getByRole("link", { name: "Waiting on agent 2" });
     // The Inbox opens on the reader's own work, and these two questions are on two people's
     // issues, so the link clears the filter: nothing it counted is left out of the list it
     // opens (the rows are counted below, where it is followed).
     await expect(waitingOnAgent).toHaveAttribute(
       "href",
-      "/?agent=planner-session&assignee=everyone"
+      `/?agent=${planner.session_id}&assignee=everyone`
     );
     await expect(plannerCard.getByText(/^Open asks/)).toHaveCount(0);
     // Every card carries the Open action; what this card must not carry is a whose-turn pill.
@@ -264,7 +282,10 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     await expect(composer).toHaveValue(`/btw ${sentBody}`);
     await composer.press("Control+Enter");
     const request = await sent;
-    expect(request.request().postDataJSON()).toEqual({ body: sentBody, delivery: "btw" });
+    expect(keyedWrite(request.request())).toEqual({
+      input: { body: sentBody, delivery: "btw" },
+      key: expect.any(String),
+    });
     const message = (await request.json()) as { id: string };
     expect(await getSentMessages()).toMatchObject([{ target_session: planner.session_id }]);
 
@@ -283,39 +304,48 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     });
 
     // Each pill's number is the number of rows the list its link opens holds. Needs you opens
-    // the reader's own questions waiting on them, from this session: its one row.
+    // the reader's own questions waiting on them, from this session: its one row. The Inbox's
+    // reading column writes the row it selects into that address as `?item=` (INFRA-575), so
+    // each list here carries the selection beside the filter its link named, and a question's
+    // text is read in the list column, which the column beside it repeats for the selected row.
+    const selected = "(?:item=[^&]+&)?";
+    const list = inboxList(page);
     await needsYou.click();
-    await expect(page).toHaveURL(/\/\?agent=planner-session&section=needs-you$/);
+    await expect(page).toHaveURL(
+      new RegExp(`\\?agent=${planner.session_id}&${selected}section=needs-you$`, "u")
+    );
     await expect(page.locator("[data-inbox-row]")).toHaveCount(1);
-    await expect(page.getByText("First", { exact: true })).toBeVisible();
+    await expect(list.getByText("First", { exact: true })).toBeVisible();
     await page.goBack();
     await expect(plannerCard.getByRole("link", { name: "Needs you 1" })).toBeVisible();
 
     // Waiting on agent opens this session's questions with the filter cleared, where the two it
     // counted are both listed - Bob's included - under the band it named.
     await waitingOnAgent.click();
-    await expect(page).toHaveURL(/\/\?agent=planner-session&assignee=everyone$/);
+    await expect(page).toHaveURL(
+      new RegExp(`\\?agent=${planner.session_id}&${selected}assignee=everyone$`, "u")
+    );
     const inbox = page.locator("main");
     const chip = inbox.getByRole("link", { name: "Clear agent filter" });
     await expect(chip).toHaveText("Asks from Planner · clear");
     await expect(inbox.locator('[data-inbox-section="agent"]')).toHaveCount(2);
-    await expect(inbox.getByText("Second", { exact: true })).toBeVisible();
-    await expect(inbox.getByText("Fourth", { exact: true })).toBeVisible();
-    await expect(inbox.getByText("First", { exact: true })).toBeVisible();
+    await expect(list.getByText("Second", { exact: true })).toBeVisible();
+    await expect(list.getByText("Fourth", { exact: true })).toBeVisible();
+    await expect(list.getByText("First", { exact: true })).toBeVisible();
     await page.screenshot({
       fullPage: true,
       path: testInfo.outputPath(`inbox-agent-filter-${width}.png`),
     });
-    // Clearing the agent keeps the filter the pill arrived with.
+    // Clearing the agent keeps the filter the pill arrived with, and the row it was reading.
     await chip.click();
-    await expect(page).toHaveURL(/\/\?assignee=everyone$/);
+    await expect(page).toHaveURL(new RegExp(`/\\?${selected}assignee=everyone$`, "u"));
     await expect(inbox.getByRole("link", { name: "Clear agent filter" })).toHaveCount(0);
   } finally {
     await alice.close();
   }
 });
 
-test("Agents shows the newest exchange, folds the older ones, and lets the viewer clear the conversation @phone", async ({
+test("Agents shows the newest exchange, folds the older ones, and lets the viewer clear the conversation", async ({
   browser,
 }, testInfo) => {
   await setLiveSessions([planner]);
@@ -338,7 +368,7 @@ test("Agents shows the newest exchange, folds the older ones, and lets the viewe
   try {
     const page = await alice.newPage();
     await page.goto("/agents");
-    const width = testInfo.project.name === "iphone" ? "390" : "1280";
+    const width = "1280";
     const plannerCard = agentRow(page, planner.session_id);
     const conversation = plannerCard.getByRole("list", { name: "Conversation with Planner" });
     const expand = async () => {
@@ -364,10 +394,6 @@ test("Agents shows the newest exchange, folds the older ones, and lets the viewe
 
     // Clear hides everything so far for this viewer and keeps the cutoff on the server.
     const clearButton = plannerCard.getByRole("button", { name: "Clear conversation" });
-    if (testInfo.project.name === "iphone") {
-      const box = await clearButton.boundingBox();
-      expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
-    }
     const saved = page.waitForResponse(
       (response) =>
         response.request().method() === "PUT" &&
@@ -457,6 +483,8 @@ test("a session's untargeted reply lands in the open conversation", async ({ bro
   }
 });
 
+// SLOW(>=2s): a seed, one page load and the live delivery the row observes; the disconnect hook
+// already stands in for every wait a reconnect would otherwise cost.
 test("a reconnect picks up a Clear made from another device", async ({ browser }) => {
   await setLiveSessions([planner]);
   await createProject({ key: "CORE", name: "Core" });
@@ -481,11 +509,12 @@ test("a reconnect picks up a Clear made from another device", async ({ browser }
     const conversation = plannerCard.getByRole("list", { name: "Conversation with Planner" });
     await expect(conversation).toContainText("Can this ship?");
 
-    // Another of alice's devices clears the conversation. No event describes her own per-agent
-    // state, so this tab learns it only when the stream reopens - and a reconnect has to
-    // refresh every query the app holds, not the ones some hand-written list remembered.
+    // Another of alice's devices clears the conversation. The Clear appends her
+    // `user_agent_state.updated`, which refreshes her per-agent state in this tab
+    // (`api/event-refresh.ts`), whether the feed carries it live or replays it after the socket
+    // drops: a resume Dispatch replays in full refreshes nothing else.
     await putAgentState(planner.session_id, { cleared_before: new Date().toISOString() });
-    await disconnectAllStreams();
+    await disconnectLiveSockets();
     await expect(plannerCard.getByRole("button", { name: "Show anyway" })).toBeVisible();
     await expect(conversation).toHaveCount(0);
   } finally {
@@ -813,21 +842,22 @@ function planners(count: number, capable: number): FakeSession[] {
   });
 }
 
-/** Types lines into the message box until two consecutive heights agree: the composer at its
- *  tallest, the way it is while someone writes a long message. A box that is not there is the
- *  degenerate case, and it throws: defaulting its height to 0 would agree with the next 0 and
- *  report stability, leaving every caller to measure an unfilled composer and pass. */
+/** Fills the message box past the line count its height caps at, so the composer is measured at
+ *  its tallest, the way it is while someone writes a long message. The box's height is a CSS
+ *  maximum, so it is reached by filling the most lines any caller's box takes and shown by one
+ *  more line leaving the height where it was - two fills rather than a line-by-line climb. A box
+ *  that is not there is the degenerate case, and it throws: defaulting its height to 0 would
+ *  agree with the next 0 and report stability, leaving every caller to measure an unfilled
+ *  composer and pass. */
 async function fillUntilStable(textarea: Locator): Promise<void> {
-  let previous = -1;
-  // From three lines, past the two rows the empty box already holds.
-  for (let lines = 3; lines <= 40; lines += 1) {
+  const height = async (lines: number) => {
     await textarea.fill(Array.from({ length: lines }, (_, line) => `Line ${line + 1}`).join("\n"));
     const box = await textarea.boundingBox();
     if (box === null) throw new Error("the message box is not on screen to measure");
-    if (box.height === previous) return;
-    previous = box.height;
-  }
-  throw new Error("the message box never stopped growing");
+    return box.height;
+  };
+  const capped = await height(40);
+  if ((await height(41)) !== capped) throw new Error("the message box never stopped growing");
 }
 
 /** Whether a box sits wholly above the composer: top >= 0 and bottom <= the composer's top edge. */
@@ -844,6 +874,8 @@ async function wholeCardsAbove(agents: Locator, composer: Locator): Promise<numb
   return boxes.filter((box) => wholeAbove(box, composerTop)).length;
 }
 
+// SLOW(>=2s): 40 recipient chips rendered for real, the fold opened, and the composer measured
+// empty and filled at each compact size; the layout under measurement is what the row proves.
 test("on a phone the open composer keeps its height budget at forty recipients, empty or filled, keeps its message box steady, and keeps every chip reachable", async ({
   browser,
 }, testInfo) => {
@@ -1206,6 +1238,8 @@ test.describe("the composer's notices share one slot, highest first, within budg
     }
   });
 
+  // SLOW(>=2s): 111 recipient chips rendered for real at each of three compact sizes, twice over
+  // the boundary; the layout under measurement is what the row proves.
   test("the boundary with exclusions: 101 recipients show the limit, exactly 100 the Excluded line", async ({
     browser,
   }, testInfo) => {
@@ -1272,7 +1306,7 @@ test("a typed broadcast survives clearing the selection and picking again, and a
     await expect(composer).toHaveCount(0);
     const failed = sends.getByRole("listitem").filter({ hasText: "Keep this draft." });
     await expect(failed.getByRole("status")).toHaveText(
-      "Could not send to 2 agents: Envoy listener unreachable"
+      `Could not send to 2 agents: ${BROADCAST_REFUSED}`
     );
     // A message or a selection started since that press would be lost to Restore draft, so it
     // refuses, and says why under its row, until both are cleared. Playwright waits out a click
@@ -1327,13 +1361,19 @@ test("a second broadcast pressed while the first is on the wire waits its turn, 
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    // Each POST waits until the test lets it through, so each row's states can be read in turn
-    // and the second press lands while the first is still on the wire.
+    // Each send's first POST waits until the test lets it through, so each row's states can be
+    // read in turn and the second press lands while the first is still on the wire. A repeat under
+    // a key already let through goes straight on: the page asks again while Dispatch's answer
+    // shows a recipient still pending (`broadcastSends`).
     const held = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
-    const posted: unknown[] = [];
+    const posted: KeyedWrite<CreateBroadcastInput>[] = [];
     await page.route("**/api/v1/broadcasts", async (route) => {
       if (route.request().method() !== "POST") return route.fallback();
-      const index = posted.push(route.request().postDataJSON()) - 1;
+      const send = keyedWrite(route.request(), isBroadcastInput);
+      if (posted.some(({ key }) => key === send.key)) {
+        return route.fallback();
+      }
+      const index = posted.push(send) - 1;
       await held[index]?.promise;
       return route.fallback();
     });
@@ -1363,7 +1403,7 @@ test("a second broadcast pressed while the first is on the wire waits its turn, 
     await composer.getByRole("button", { name: "Send to 2" }).click();
     await expect(row("Second.").getByRole("status")).toHaveText("Queued: to 2 agents");
     // One at a time: the second has not left the browser while the first is unanswered.
-    expect(posted).toMatchObject([{ body: "First." }]);
+    expect(posted).toMatchObject([{ input: { body: "First." } }]);
     // The reader switches to another tab while the first is on the wire. The second still goes
     // the moment the first is answered: a hidden tab holds nothing back. This sets the two inputs
     // TanStack's `focusManager` reads.
@@ -1376,7 +1416,9 @@ test("a second broadcast pressed while the first is on the wire waits its turn, 
     held[0]?.resolve();
     await expect(row("First.").getByRole("link", { name: "Sent to 2 agents" })).toBeVisible();
     await expect(row("Second.").getByRole("status")).toHaveText("Sending to 2 agents…");
-    await expect.poll(() => posted).toMatchObject([{ body: "First." }, { body: "Second." }]);
+    await expect
+      .poll(() => posted)
+      .toMatchObject([{ input: { body: "First." } }, { input: { body: "Second." } }]);
     // Nothing navigates while a send is still out.
     await expect(page).toHaveURL(/\/agents$/);
     await setVisibility("visible");
@@ -1384,7 +1426,7 @@ test("a second broadcast pressed while the first is on the wire waits its turn, 
     held[1]?.resolve();
     await expect(row("Second.").getByRole("link", { name: "Sent to 2 agents" })).toBeVisible();
     // After more than one send the page stays, and each row links its own broadcast.
-    await page.waitForTimeout(500);
+    await sleep(ABSENCE_MARGIN_MS);
     await expect(page).toHaveURL(/\/agents$/);
     await row("First.").getByRole("link", { name: "Sent to 2 agents" }).click();
     await page.waitForURL(/\/agents\/broadcasts\/[0-9a-f-]+$/);
@@ -1406,7 +1448,7 @@ test("a send the server refuses keeps its row after a later send succeeds, and R
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    const posted = postedBroadcasts(page);
+    const posted = broadcastSends(page);
     await page.goto("/agents");
     const agents = page.getByRole("region", { name: "Agents" });
     const header = agents.getByRole("checkbox", { name: "Select all matching agents" });
@@ -1422,7 +1464,7 @@ test("a send the server refuses keeps its row after a later send succeeds, and R
     await composer.getByRole("button", { name: "Send to 2" }).click();
     const failed = row("Refused first.");
     await expect(failed.getByRole("status")).toHaveText(
-      "Could not send to 2 agents: Envoy listener unreachable"
+      `Could not send to 2 agents: ${BROADCAST_REFUSED}`
     );
 
     refusal.allow();
@@ -1431,25 +1473,29 @@ test("a send the server refuses keeps its row after a later send succeeds, and R
     await composer.getByRole("button", { name: "Send to 2" }).click();
     await expect(row("Second.").getByRole("link", { name: "Sent to 2 agents" })).toBeVisible();
     // A later success neither hides the failure nor navigates away from it.
-    await page.waitForTimeout(500);
+    await sleep(ABSENCE_MARGIN_MS);
     await expect(page).toHaveURL(/\/agents$/);
     await expect(failed.getByRole("status")).toHaveText(/^Could not send to 2 agents: /);
     await expect(failed.getByRole("button", { name: "Restore draft" })).toBeVisible();
 
-    // Retry sends the very message again: the same body, mode and recipients.
+    // Retry sends the very message again: the same body, mode and recipients, under a new key,
+    // since Dispatch keeps the answer it gave the refused one and would only refuse it again.
     await failed.getByRole("button", { name: "Retry" }).click();
     await expect(
       row("Refused first.").getByRole("link", { name: "Sent to 2 agents" })
     ).toBeVisible();
     await expect(sends.getByText(/^Could not send/)).toHaveCount(0);
     expect(posted).toHaveLength(3);
-    expect(posted[2]).toEqual(posted[0]);
     expect(posted[0]).toEqual({
-      body: "Refused first.",
-      delivery: "aside",
-      idempotency_key: expect.any(String),
-      session_ids: pair.map((session) => session.session_id),
+      input: {
+        body: "Refused first.",
+        delivery: "aside",
+        session_ids: pair.map((session) => session.session_id),
+      },
+      key: expect.any(String),
     });
+    expect(posted[2]).toEqual({ input: posted[0]?.input, key: expect.any(String) });
+    expect(posted[2]?.key).not.toBe(posted[0]?.key);
   } finally {
     await alice.close();
   }
@@ -1465,7 +1511,7 @@ test("a human-paced double click on one Retry sends that message once, and never
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    const posted = postedBroadcasts(page);
+    const posted = broadcastSends(page);
     await page.goto("/agents");
     const agents = page.getByRole("region", { name: "Agents" });
     const header = agents.getByRole("checkbox", { name: "Select all matching agents" });
@@ -1498,12 +1544,13 @@ test("a human-paced double click on one Retry sends that message once, and never
     await expect(
       row("Retried once.").getByRole("link", { name: "Sent to 2 agents" })
     ).toBeVisible();
-    await page.waitForTimeout(500);
-    expect(posted.map((request) => request.body)).toEqual([
+    await sleep(ABSENCE_MARGIN_MS);
+    expect(posted.map((request) => request.input.body)).toEqual([
       "Retried once.",
       "Never retried.",
       "Retried once.",
     ]);
+    await expect(sends.getByRole("listitem")).toHaveCount(2);
     await expect(sends.getByRole("listitem").last()).toContainText("Retried once.");
     await expect(row("Never retried.").getByRole("status")).toHaveText(
       /^Could not send to 2 agents: /
@@ -1534,7 +1581,7 @@ test("a selection over the broadcast limit says so and never asks the server", a
     const send = composer.getByRole("button", { name: "Send to 101" });
     await expect(send).toBeDisabled();
     await send.click({ force: true });
-    await page.waitForTimeout(500);
+    await sleep(ABSENCE_MARGIN_MS);
     expect(posts).toEqual([]);
     expect(await getSentMessages()).toEqual([]);
     await expect(
@@ -1606,7 +1653,7 @@ test("a mode no selected agent advertises leaves Send dead, and Send says so and
     // Refused, not merely grey: pressing it anyway asks nothing of the server.
     await dead.click({ force: true });
     await dead.press("Enter");
-    await page.waitForTimeout(500);
+    await sleep(ABSENCE_MARGIN_MS);
     expect(posts).toEqual([]);
     expect(await getSentMessages()).toEqual([]);
 
@@ -1625,14 +1672,16 @@ test("with one of two selected agents gone from the registry, Send reaches the l
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium", "one browser proves the reason");
-  // The page learns of a departure on its 15 s agent poll, which this row waits out.
-  test.setTimeout(60_000);
+  // The page learns of a departure only on its 15 s agent poll, which the page clock fires: the
+  // jump also trips the live socket's own 15 s silence check, so the tab reconnects mid-row,
+  // which nothing here reads.
   const [alpha, bravo] = [builder("alpha", ["btw"]), builder("bravo", ["btw"])];
   await setLiveSessions([alpha, bravo]);
 
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
+    await page.clock.install();
     await page.goto("/agents");
     const agents = page.getByRole("region", { name: "Agents" });
     const composer = page.getByRole("region", { name: "Broadcast" });
@@ -1643,8 +1692,11 @@ test("with one of two selected agents gone from the registry, Send reaches the l
     // Bravo leaves; the page learns of it on its next agent poll, and names it by its ID since
     // the registry no longer holds its title, with its state - not running - before the name.
     await setSessionLive(bravo.session_id, false);
+    await page.clock.fastForward(15_000);
+    // TanStack's notifyManager batches its delivery on a zero-delay page timer.
+    await page.clock.runFor(1);
     const send = composer.getByRole("button", { name: "Send to 1" });
-    await expect(send).toBeEnabled({ timeout: 30_000 });
+    await expect(send).toBeEnabled();
     await expect(send).toHaveAccessibleDescription(
       "Excluded: Not running session:bravo-se… (no live session). Nothing is sent to them, and no other mode is substituted."
     );
@@ -1673,6 +1725,7 @@ test("a session that registers under the filter after select-all is not swept in
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
+    await page.clock.install();
     await page.goto("/agents");
     const agents = page.getByRole("region", { name: "Agents" });
     const header = agents.getByRole("checkbox", { name: "Select all matching agents" });
@@ -1681,11 +1734,15 @@ test("a session that registers under the filter after select-all is not swept in
     await header.click();
     await expect(header).toHaveAccessibleDescription("2 of 2 matching selected");
 
-    // A third planner registers; the page learns of it on its next agent poll.
+    // A third planner registers; the page learns of it on its next agent poll, which the clock
+    // fires once the two already selected are selected - the select-all above must run against a
+    // registry of two, or the row proves nothing. The jump also trips the live socket's own 15 s
+    // silence check, so the tab reconnects mid-row, which nothing here reads.
     await setLiveSessions([planner("a"), planner("b"), planner("c")]);
-    await expect(header).toHaveAccessibleDescription("2 of 3 matching selected", {
-      timeout: 30_000,
-    });
+    await page.clock.fastForward(15_000);
+    // TanStack's notifyManager batches its delivery on a zero-delay page timer.
+    await page.clock.runFor(1);
+    await expect(header).toHaveAccessibleDescription("2 of 3 matching selected");
     await expect(header).toBeChecked({ indeterminate: true });
     await expect(
       composer.getByRole("heading", { name: "Broadcast to 2 of 2 selected" })

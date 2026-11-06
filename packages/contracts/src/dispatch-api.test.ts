@@ -1,4 +1,5 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
+import type { BlockTypeSchema } from "./block-schema.generated";
 import {
   type Actor,
   type Agent,
@@ -6,6 +7,7 @@ import {
   type AnchorInput,
   type AnswerAskInput,
   type ArtifactBlock,
+  ArtifactReviewEventPayloadSchema,
   type ArtifactText,
   type Ask,
   type AskAnsweredEventPayload,
@@ -13,11 +15,13 @@ import {
   AskEventPayloadSchema,
   type AskRead,
   type AskThread,
-  type BlockTypeSchema,
+  answerNotKept,
   type ChangedReference,
   type Comment,
   CommentEventPayloadSchema,
+  type CreateAgentMessageInput,
   type CreateCommentInput,
+  type CreateMessageInput,
   type CreateProjectInput,
   DELIVERY_CAPABILITIES,
   type DeliveryCapability,
@@ -28,18 +32,51 @@ import {
   DispatchTargetedCommentPayloadSchema,
   DispatchTargetedMessagePayloadSchema,
   type EditCommentInput,
+  type Handoff,
+  HandoffRecordedPayloadSchema,
+  type HandoffSummary,
+  IDEMPOTENCY_ANSWER_NOT_KEPT,
+  IDEMPOTENCY_KEY_COMMITTED,
+  IDEMPOTENCY_KEY_IN_FLIGHT,
+  IDEMPOTENCY_KEY_MAX,
+  IDEMPOTENCY_KEY_PATTERN,
+  IDEMPOTENCY_KEY_REUSED,
+  type IdempotencyLandedCode,
   IssueDeployedEventPayloadSchema,
   IssueEventPayloadSchema,
+  type ItemBlocks,
+  type Message,
   MessageDeliveryEventPayloadSchema,
   type MessageDeliveryMode,
   MessageEventPayloadSchema,
+  type MessageReplyInput,
   type MyAnswersResponse,
   type MyRepliesResponse,
   type ReferenceChangesPayload,
+  type ReplyBlock,
+  ReplyBlockSchema,
+  retriesUnderKey,
   serviceSubjectLabel,
   type UserStateUpdatedEventPayload,
   type UserThreadStateUpdatedEventPayload,
 } from "./dispatch-api";
+
+test("review event validation preserves approved byte hashes and their provenance", () => {
+  for (const source of ["insert", "backfill"] as const) {
+    expect(
+      ArtifactReviewEventPayloadSchema.parse({
+        artifact_id: "doc-1",
+        version: 3,
+        content_sha256: "a".repeat(64),
+        content_sha256_source: source,
+      })
+    ).toMatchObject({ content_sha256: "a".repeat(64), content_sha256_source: source });
+  }
+  expect(ArtifactReviewEventPayloadSchema.parse({ artifact_id: "doc-1", version: 2 })).toEqual({
+    artifact_id: "doc-1",
+    version: 2,
+  });
+});
 
 test("delivery modes are exactly the closed capability list", () => {
   expect([...DELIVERY_CAPABILITIES]).toEqual(["aside", "btw", "steer"]);
@@ -52,6 +89,65 @@ test("delivery modes are exactly the closed capability list", () => {
   const asCapability: DeliveryCapability = "steer" satisfies MessageDeliveryMode;
   const asMode: MessageDeliveryMode = asCapability satisfies DeliveryCapability;
   expect(asMode).toBe("steer");
+});
+
+// A page mints a v4 UUID per press; a script may mint its own key in the same alphabet. The
+// pattern is the whole header value, so a key with another character or one too long is refused
+// before Dispatch looks it up.
+test("an idempotency key is letters, digits, '.', '_', ':' and '-', at most 128 of them", () => {
+  for (const key of ["0b9c1e7a-55f4-4d2e-9a6b-3c2f1d0e8a71", "cli:run-7.a_b", "k".repeat(128)]) {
+    expect(IDEMPOTENCY_KEY_PATTERN.test(key)).toBe(true);
+  }
+  for (const key of ["", "k".repeat(IDEMPOTENCY_KEY_MAX + 1), "with space", "slash/key", "é"]) {
+    expect(IDEMPOTENCY_KEY_PATTERN.test(key)).toBe(false);
+  }
+});
+
+// The page and the `dispatch` command retry by this one rule, so a gateway's 408 is asked again
+// under the key by both (the server stores no 408) and a 422 or a KEY_COMMITTED by neither.
+describe("retriesUnderKey", () => {
+  test("asks again after every answer Dispatch does not store, and after a key still in flight", () => {
+    for (const status of [500, 502, 503, 504, 599, 408, 429]) {
+      expect(retriesUnderKey(status, undefined)).toBe(true);
+    }
+    expect(retriesUnderKey(409, IDEMPOTENCY_KEY_IN_FLIGHT)).toBe(true);
+  });
+
+  test("takes every other answer as Dispatch's verdict", () => {
+    for (const status of [200, 201, 204, 400, 401, 403, 404, 410, 413]) {
+      expect(retriesUnderKey(status, undefined)).toBe(false);
+    }
+    expect(retriesUnderKey(409, IDEMPOTENCY_KEY_COMMITTED)).toBe(false);
+    expect(retriesUnderKey(409, undefined)).toBe(false);
+    expect(retriesUnderKey(422, IDEMPOTENCY_KEY_REUSED)).toBe(false);
+  });
+});
+
+describe("answerNotKept", () => {
+  const notKept = { code: IDEMPOTENCY_ANSWER_NOT_KEPT, error: "answer too large to keep" };
+
+  test("is a replayed 2xx whose body names ANSWER_NOT_KEPT, with or without its reason", () => {
+    expect(answerNotKept(201, true, notKept)).toBe(true);
+    expect(answerNotKept(200, true, { code: IDEMPOTENCY_ANSWER_NOT_KEPT })).toBe(true);
+  });
+
+  test("is never an answer that was not replayed, a non-2xx, or another body", () => {
+    // An answer run afresh is the resource itself, whatever its fields say.
+    expect(answerNotKept(201, false, notKept)).toBe(false);
+    expect(answerNotKept(409, true, notKept)).toBe(false);
+    expect(answerNotKept(201, true, { code: "SOMETHING_ELSE" })).toBe(false);
+    for (const body of [undefined, null, "ANSWER_NOT_KEPT", [IDEMPOTENCY_ANSWER_NOT_KEPT]]) {
+      expect(answerNotKept(201, true, body)).toBe(false);
+    }
+  });
+
+  test("names the two landed codes in one type", () => {
+    const landed: readonly IdempotencyLandedCode[] = [
+      IDEMPOTENCY_KEY_COMMITTED,
+      IDEMPOTENCY_ANSWER_NOT_KEPT,
+    ];
+    expect(landed).toEqual(["KEY_COMMITTED", "ANSWER_NOT_KEPT"]);
+  });
 });
 
 test("models Agent activity and open-ask aggregates", () => {
@@ -157,6 +253,39 @@ test("models the deployed event exactly as the delivery timeline writes it", () 
     IssueDeployedEventPayloadSchema.safeParse({ ...payload, completed_at: "yesterday" }).success
   ).toBe(false);
   expect(IssueDeployedEventPayloadSchema.safeParse({ ...payload, number: 0 }).success).toBe(false);
+});
+
+test("models a handoff record and its event, which never carries the body", () => {
+  const summary = {
+    author: { id: "implementer-session", kind: "session" },
+    created_at: "2026-10-26T12:00:00Z",
+    id: "6f1d2c3b-4a5e-4f60-8b7c-9d0e1f2a3b4c",
+    issue_key: "DSP-1",
+    phase: "implement",
+    version: 2,
+  } satisfies HandoffSummary;
+  const handoff = { ...summary, body: '{\n  "schemaVersion": 1\n}' } satisfies Handoff;
+  expect(handoff.body).toBe('{\n  "schemaVersion": 1\n}');
+
+  const payload = { handoff_id: summary.id, phase: "implement", version: 2 };
+  expect(HandoffRecordedPayloadSchema.parse(payload)).toEqual(payload);
+  const event: DispatchEvent = {
+    actor: summary.author,
+    created_at: summary.created_at,
+    id: 92,
+    issue_key: "DSP-1",
+    notify: false,
+    payload,
+    seq: 5,
+    type: "handoff.recorded",
+  };
+  expect(event.type).toBe("handoff.recorded");
+  // Strict: a body (or any field the Go writer does not emit) is refused, as is a version below 1.
+  expect(HandoffRecordedPayloadSchema.safeParse({ ...payload, body: "{}" }).success).toBe(false);
+  expect(HandoffRecordedPayloadSchema.safeParse({ ...payload, version: 0 }).success).toBe(false);
+  expect(
+    HandoffRecordedPayloadSchema.safeParse({ ...payload, handoff_id: undefined }).success
+  ).toBe(false);
 });
 
 test("models Dispatch's announcement of its fleet's build and the subject it is published on", () => {
@@ -300,6 +429,7 @@ test("models answer changes, ask answer history, and the answers page", () => {
     route: "role:reviewer",
     route_status: "live",
     route_holder: "session-reviewer",
+    route_status_reason: null,
   } satisfies AskRead;
   const thread = {
     replies: [],
@@ -310,6 +440,7 @@ test("models answer changes, ask answer history, and the answers page", () => {
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
   } satisfies AskThread;
   const page = {
     rows: [
@@ -414,7 +545,7 @@ test("models the Replies page and the read mark's event", () => {
 });
 
 test("models a snooze's state event and a document named in references_changed", () => {
-  // A snooze's event reaches every signed-in stream, so it carries the writer and the field alone.
+  // A snooze's event reaches every signed-in feed, so it carries the writer and the field alone.
   const snoozed = {
     login: "alice",
     changed: ["snoozed"],
@@ -859,6 +990,98 @@ test("parses a message reply's in_reply_to, reply_body preview, and thread targe
   ).toBeUndefined();
 });
 
+test("a reply names the block it answers, and an event recorded before reads no block", () => {
+  const actor: Actor = { id: "bob", kind: "user" };
+  const commentInput: CreateCommentInput = {
+    body: "On the second paragraph.",
+    reply_to: "comment-1",
+    reply_to_block: "b2",
+  };
+  const messageInput: CreateMessageInput = {
+    body: "On two.",
+    in_reply_to: "message-1",
+    in_reply_to_block: "b2",
+  };
+  const agentInput: CreateAgentMessageInput = {
+    body: "On two.",
+    delivery: "steer",
+    in_reply_to: "message-1",
+    in_reply_to_block: "b2",
+  };
+  const replyInput: MessageReplyInput = {
+    actor: { id: "s1", kind: "session" },
+    attempt: 1,
+    body: "On two.",
+    in_reply_to_block: "b2",
+  };
+  expect([
+    commentInput.reply_to_block,
+    messageInput.in_reply_to_block,
+    agentInput.in_reply_to_block,
+    replyInput.in_reply_to_block,
+  ]).toEqual(["b2", "b2", "b2", "b2"]);
+
+  const block: ReplyBlock = {
+    block_id: "b2",
+    node: "comment/comment-1#b2",
+    ref: "dispatch://DSP-1/comment/comment-1#b-b2",
+    removed: false,
+    text: "Beta.",
+  };
+  // A direct message's block has no address, so it carries no ref.
+  const directBlock: ReplyBlock = {
+    block_id: "b2",
+    node: "message/message-1#b2",
+    removed: true,
+    text: "Two.",
+  };
+  const reply: Message = {
+    author: actor,
+    body: "On two.",
+    created_at: "2026-09-10T00:00:01Z",
+    deliveries: [],
+    id: "message-2",
+    in_reply_to: "message-1",
+    issue_key: null,
+    reply_block: directBlock,
+    target: null,
+  };
+  const comment: Comment = {
+    anchor: null,
+    ask_id: null,
+    author: actor,
+    body: "On the second paragraph.",
+    created_at: "2026-09-10T00:00:01Z",
+    deliveries: [],
+    edited_at: null,
+    id: "comment-2",
+    issue_key: "DSP-1",
+    mentions: [],
+    reply_block: block,
+    reply_to: "comment-1",
+    resolved: false,
+    resolved_at: null,
+    resolved_by: null,
+    suggestion: null,
+    turn: null,
+  };
+  expect(ReplyBlockSchema.parse(block)).toEqual(block);
+  expect(ReplyBlockSchema.parse(directBlock)).toEqual(directBlock);
+  expect(ReplyBlockSchema.safeParse({ block_id: "b2", node: "comment/c#b2" }).success).toBe(false);
+
+  expect(CommentEventPayloadSchema.parse(comment).reply_block).toEqual(block);
+  expect(MessageEventPayloadSchema.parse(reply).reply_block).toEqual(directBlock);
+  expect(MessageEventPayloadSchema.parse({ ...reply, reply_block: null }).reply_block).toBeNull();
+
+  // An event recorded before replies named blocks carries no reply_block at all.
+  const before = { id: "comment-3", author: actor, body: "Older.", reply_to: "comment-1" };
+  expect(CommentEventPayloadSchema.parse(before).reply_block).toBeUndefined();
+  expect(
+    MessageEventPayloadSchema.parse({ id: "message-3", author: actor, in_reply_to: "message-1" })
+      .reply_block
+  ).toBeUndefined();
+});
+
 test("accepts complete targeted-message payloads while ignoring future fields", () => {
   const payload = {
     id: "11111111-1111-4111-8111-111111111111",
@@ -973,6 +1196,45 @@ test("keeps document read tokens optional for older Dispatch servers", () => {
 
   expect(block.token).toBeUndefined();
   expect(text.token).toBeUndefined();
+});
+
+test("models a comment's and a direct message's blocks", () => {
+  const comment = "11111111-1111-4111-8111-111111111111";
+  const commentBlocks: ItemBlocks = {
+    item: {
+      kind: "comment",
+      id: comment,
+      issue_key: "CORE-1",
+      ref: `dispatch://CORE-1/comment/${comment}`,
+    },
+    revision: 2,
+    indexed: true,
+    blocks: [
+      {
+        id: "b1",
+        type: "paragraph",
+        text: "Alpha 😀.",
+        ref: `dispatch://CORE-1/comment/${comment}#b-b1`,
+        from: 0,
+        to: "Alpha 😀.".length,
+        changed_revision: 1,
+        changed_at: "2026-10-28T00:00:00Z",
+      },
+    ],
+  };
+  // A direct message has no address and no revision; neither has any of its blocks.
+  const directBlocks: ItemBlocks = {
+    item: { kind: "message", id: "33333333-3333-4333-8333-333333333333" },
+    indexed: true,
+    blocks: [{ id: "b1", type: "paragraph", text: "Where?", from: 0, to: 6 }],
+  };
+  // An item owed an index lists no block.
+  const owed: ItemBlocks = { ...commentBlocks, indexed: false, blocks: [] };
+
+  expect(commentBlocks.blocks[0]?.to).toBe(9);
+  expect(directBlocks.revision).toBeUndefined();
+  expect(directBlocks.blocks[0]?.ref).toBeUndefined();
+  expect(owed.blocks).toEqual([]);
 });
 
 test("a Kubernetes service subject renders as namespace/name, and anything else renders whole", () => {

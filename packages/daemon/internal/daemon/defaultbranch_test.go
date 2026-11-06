@@ -72,7 +72,7 @@ func (g *repositoryGitHub) answer(status int) {
 func TestDefaultBranchesReadsGitHubOncePerTTL(t *testing.T) {
 	github := newRepositoryGitHub(t, "release/v7.1")
 	clock := time.Now()
-	branches := newDefaultBranches(roleTokens{}, github.url, 10*time.Minute, func() time.Time { return clock })
+	branches := newDefaultBranches(roleTokens{}, nil, github.url, 10*time.Minute, func() time.Time { return clock })
 	widgets := ghrepo.MustParse("acme/widgets")
 
 	for range 2 {
@@ -105,7 +105,7 @@ func TestDefaultBranchesReadsGitHubOncePerTTL(t *testing.T) {
 func TestDefaultBranchesKeepsNoRefusal(t *testing.T) {
 	github := newRepositoryGitHub(t, "main")
 	github.answer(http.StatusInternalServerError)
-	branches := newDefaultBranches(roleTokens{}, github.url, 10*time.Minute, time.Now)
+	branches := newDefaultBranches(roleTokens{}, nil, github.url, 10*time.Minute, time.Now)
 	widgets := ghrepo.MustParse("acme/widgets")
 
 	if _, err := branches.Named(context.Background(), widgets); err == nil || !strings.Contains(err.Error(), "read the default branch of acme/widgets") || !strings.Contains(err.Error(), "500") {
@@ -128,7 +128,7 @@ func TestDefaultBranchesNamesTheRepositoryAndKeepsTheLastRead(t *testing.T) {
 	github := newRepositoryGitHub(t, "release/v7.1")
 	github.fullName = "Acme/Widgets"
 	clock := time.Now()
-	branches := newDefaultBranches(roleTokens{}, github.url, 10*time.Minute, func() time.Time { return clock })
+	branches := newDefaultBranches(roleTokens{}, nil, github.url, 10*time.Minute, func() time.Time { return clock })
 
 	if _, ok := branches.Kept("acme/widgets"); ok {
 		t.Fatal("Kept answered before any read")
@@ -156,7 +156,7 @@ func TestDefaultBranchesNamesTheRepositoryAndKeepsTheLastRead(t *testing.T) {
 func TestDefaultBranchesSharesOneReadInFlight(t *testing.T) {
 	github := newRepositoryGitHub(t, "develop")
 	github.release = make(chan struct{})
-	branches := newDefaultBranches(roleTokens{}, github.url, 10*time.Minute, time.Now)
+	branches := newDefaultBranches(roleTokens{}, nil, github.url, 10*time.Minute, time.Now)
 	widgets := ghrepo.MustParse("acme/widgets")
 
 	const readers = 5

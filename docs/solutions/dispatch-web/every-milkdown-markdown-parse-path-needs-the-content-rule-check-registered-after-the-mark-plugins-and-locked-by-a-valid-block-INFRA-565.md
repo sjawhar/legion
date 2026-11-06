@@ -50,15 +50,25 @@ a parse that never threw for content (the editor's default mode) drops the block
 
 ## Evidence
 
-- `packages/proof-editor/src/lib.ts` registers `unfitTypedBlocksRemarkPlugin` right after
+- `packages/proof-editor/src/lib.ts` registered `unfitTypedBlocksRemarkPlugin` right after
   `remarkDispatchMarksPlugin`; `buildParser` in `packages/proof-editor/src/lib-headless.ts` chains
   `remarkUnfitTypedBlocks` after `remarkTypedBlocks` in its default-mode branch.
 - `remarkDecideTypedBlocks` and `unfitTypedBlocksRemarkPlugin` (the `$remark` wrapper reading
-  `schemaCtx` per parse) in `packages/proof-editor/src/typed-block-drawing.ts`.
-- The ordering lock is the test "the live editor checks an ask's content after the mark plugins
+  `schemaCtx` per parse) were in `packages/proof-editor/src/typed-block-drawing.ts`.
+- The ordering lock was the test "the live editor checks an ask's content after the mark plugins
   have run" in `packages/proof-editor/tests/typed-block-drawing.test.ts`, on `MARK_SPAN_VALID_ASK`.
   With the step moved before the mark plugins, it is the one row that fails (15 pass, 1 fail); the
   row that pastes an ask whose heading sits in a block-level mark span passes either way.
 - At the base `b08a56bc`, pasting `:::ask{#a1}` / `# Heading words` / `:::` left the live editor
   holding only `Intro text.` and an empty paragraph
   (`packages/dispatch/e2e/typed-block-content-rule.e2e.ts`, run against a tree of the base).
+
+**Note 2026-10-27 (sjawhar/legion#2433):** `unfitTypedBlocksRemarkPlugin` is gone. The live editor's step is
+now `liveTypedBlocksRemarkPlugin` in `packages/proof-editor/src/read-only-directives.ts`,
+which makes the read-only parse's drawing decision (`remarkDecideTypedBlocks` with the shared
+`acceptedTypedBlock`) against the editor's schema (read on the first parse) and keeps the `server`
+attributes, which `remarkReadOnlyDirectives` drops. It is still registered in
+`src/lib.ts` right after `remarkDispatchMarksPlugin`, and in place of `typedBlockRemarkPlugin` too,
+so the live editor also draws a container directive the block schema refuses as its lines rather
+than throwing. The ordering lock is now the test "the live editor decides typed blocks after the
+mark plugins have run". The headless default-mode branch is unchanged.

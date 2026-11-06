@@ -3,6 +3,7 @@ package docs
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 
@@ -28,13 +29,17 @@ import (
 //
 // Two windows need the answer, both on the same write:
 //
-//   - Before the version is rendered, on the transaction's fork, once captureLiveTextAndAuthors
-//     has brought it up to date with the room. A loss there refuses the whole batch
-//     (ErrEditLost), and the transaction's rollback leaves no version, durable update, room
-//     update or broadcast behind.
-//   - After the committed write is published to the room, where a deletion that landed between
-//     the version render and the publish shows up. Nothing can be undone by then, so the write
-//     reports the loss on its 200 instead (Ledger.LostOps).
+//   - Before the version is rendered, on a scratch merge of the transaction's fork with what the
+//     room committed since the transaction read it (mergedSinceRead), and on a scratch copy of
+//     that holding what the other processes' rooms have not stored yet (refuseLostWrite): the
+//     version records the fork itself, which takes nothing in after that read, but the write still
+//     has to survive the room it is published into. A loss there refuses the whole batch
+//     (ErrEditLost), and the transaction's rollback leaves no version, durable update, room update
+//     or broadcast behind.
+//   - After the committed write is published, on the document at its stored head once every
+//     process has stored its rooms' updates (recordPublishedLoss), where a deletion that landed
+//     between the version render and the publish shows up. Nothing can be undone by then, so the
+//     write reports the loss on its 200 instead (Ledger.LostOps).
 type lossCheck struct {
 	// client authors every item the write's transaction inserts (liveWrite.clientID), and since
 	// is the clock it had reached before this batch, so its own earlier writes are not read as
@@ -125,34 +130,113 @@ func recordInsertedText(
 	return nil
 }
 
-// refuseLostWrite refuses the calling transaction's write to room when the room's concurrent
-// changes have already removed the text it inserted, before any version records it: LEGION-269's
-// first window. fork is the transaction's document brought up to date with the room (joinRead);
-// a caller with no write of its own, or whose write inserted nothing, has nothing to lose.
-func (s *Service) refuseLostWrite(ctx context.Context, room string, fork *crdt.Doc, actor *model.Actor) error {
-	write := joinedLiveWrite(ctx, room)
-	if write == nil || write.loss == nil || fork == nil {
+// refuseLostWrite refuses write, the calling transaction's write to room, when the room's
+// concurrent changes have already removed the text it inserted, before any version records it:
+// the lost write's first window. It reads a scratch merge of the write's fork with what the room
+// committed after the transaction read it (mergedSinceRead), and only when the room committed
+// something since: otherwise there is nothing the write could have lost here. A write that
+// inserted nothing has nothing to lose.
+//
+// A person on another envoy-dispatch process can make that change too, in a room this process
+// never holds, and while the write holds the document's advisory lock - from its fork read to its
+// end - that change cannot reach the store: its append waits for the lock. So every other process
+// is asked to share what its room holds that the store does not (a share query, room_query.go; the
+// member takes no lock to answer, so it cannot wait on this one), and the loss is judged again on
+// a scratch copy with those updates merged in. The copy serves the judgement alone, never the
+// version or the commit: those updates are not durable, and their credits live on the process that
+// holds them. A member's unstored updates depend only on stored rows and its own earlier updates,
+// and the write's fork stands at the stored head (readFork), so the copy is a state the document
+// held plus the write. The refusal names everyone connected to the document on every process who
+// answered, but the writer (lostWriteParticipants).
+func (s *Service) refuseLostWrite(ctx context.Context, room string, write *liveWrite, actor *model.Actor) error {
+	if write.loss == nil {
 		return nil
 	}
-	lost, err := write.loss.lost(fork)
+	merged, err := s.mergedSinceRead(write)
+	if err != nil {
+		return err
+	}
+	var lost []int
+	if merged != nil {
+		if lost, err = write.loss.lost(merged); err != nil {
+			return err
+		}
+	}
+	answers, _, err := s.roomQueries.ask(ctx, s.queryFrom(ctx), room, roomQueryShare)
 	if err != nil {
 		return err
 	}
 	if len(lost) == 0 {
+		judged := merged
+		if judged == nil {
+			judged = write.fork
+		}
+		if lost, err = lostWithSharedUpdates(room, write.loss, judged, answers); err != nil {
+			return err
+		}
+	}
+	if len(lost) == 0 {
 		return nil
 	}
-	credited := model.Actor{}
-	if actor != nil {
-		credited = *actor
-	}
-	state := s.lockState(room)
-	participants := otherParticipants(state, credited)
-	s.unlockState(room, state)
-	refusal := &ErrEditLost{Suggestion: write.loss.suggestion, Participants: participants}
+	refusal := &ErrEditLost{Suggestion: write.loss.suggestion, Participants: s.lostWriteParticipants(room, actor, answers)}
 	if refusal.Suggestion == "" {
 		refusal.Ops = lost
 	}
 	return refusal
+}
+
+// lostWithSharedUpdates is check's lost operations on a scratch copy of base with the updates the
+// other processes shared merged in, nil when none shared any. An update that does not apply is
+// logged and left out.
+func lostWithSharedUpdates(room string, check *lossCheck, base *crdt.Doc, answers []roomAnswer) ([]int, error) {
+	var scratch *crdt.Doc
+	for _, answer := range answers {
+		if len(answer.updates) == 0 {
+			continue
+		}
+		if scratch == nil {
+			scratch = newDocumentCopy()
+			if err := crdt.ApplyUpdateV1(scratch, crdt.EncodeStateAsUpdateV1(base, nil), nil); err != nil {
+				return nil, fmt.Errorf("copy a write's fork to judge it against the other processes' rooms: %w", err)
+			}
+		}
+		if err := crdt.ApplyUpdateV1(scratch, answer.updates, nil); err != nil {
+			slog.Warn("dispatch: apply another process's not-yet-stored updates to judge a write's loss; judging without them",
+				"room", room, "process", answer.process, "error", err)
+		}
+	}
+	if scratch == nil {
+		return nil, nil
+	}
+	return check.lost(scratch)
+}
+
+// mergedSinceRead is write's fork merged, on a scratch copy, with the room document resident for
+// its document as it stands now: the document the room holds once the write is published, as far
+// as the room has gone. The fork itself takes nothing in after the transaction's read (forkLive),
+// so the version the write records is its own state; this copy is read for the lost-write check
+// and dropped. It is nil when no room holds the document, or when the room has committed nothing
+// since the read (committedSince): the fork is then that document already. A cold fork has no
+// read point, so any room that holds the document is merged.
+func (s *Service) mergedSinceRead(write *liveWrite) (*crdt.Doc, error) {
+	live := s.srv.GetDoc(write.artifactID)
+	if live == nil || !s.committedSince(write.artifactID, live, write.point) {
+		return nil, nil
+	}
+	state, _, _, err := s.readPoint(write.artifactID, live)
+	if err != nil {
+		return nil, err
+	}
+	merged := newDocumentCopy()
+	if err := crdt.ApplyUpdateV1(merged, state, nil); err != nil {
+		return nil, fmt.Errorf("read the room for the lost-write check: %w", err)
+	}
+	// What the fork holds and the room does not: the write's own updates, and for a fork read
+	// from the store, whatever the store held that this room never took.
+	if err := crdt.ApplyUpdateV1(merged, crdt.EncodeStateAsUpdateV1(write.fork, merged.StateVector()), nil); err != nil {
+		return nil, fmt.Errorf("merge the write with the room for the lost-write check: %w", err)
+	}
+	return merged, nil
 }
 
 // lost names the operations whose inserted text doc no longer holds in the block it was written
@@ -198,8 +282,9 @@ type ErrEditLost struct {
 	// Suggestion names the accepted comment when the refused write is an accept, which has no
 	// operation index.
 	Suggestion string
-	// Participants are the room's other connected browsers at the moment of the check. The room
-	// tracks a set, so a loss names every peer that could have caused it rather than a culprit.
+	// Participants are the document's other connected actors at the moment of the check, on
+	// this process and on every other one that answered (lostWriteParticipants). Rooms track a
+	// set, so a loss names everyone who could have caused it rather than a culprit.
 	Participants []model.Actor
 }
 
@@ -237,15 +322,21 @@ func participantList(participants []model.Actor) string {
 	return " (the document's other participants: " + strings.Join(names, ", ") + ")"
 }
 
-// otherParticipants are the room's connected peers other than actor, whom a lost write names.
-// The caller holds state.mu.
-func otherParticipants(state *roomState, actor model.Actor) []model.Actor {
-	participants := make([]model.Actor, 0, len(state.connected))
-	for _, connected := range state.connected {
-		if connected == actor {
-			continue
-		}
-		participants = append(participants, connected)
+// lostWriteParticipants is whom a lost write names: the union of the actors connected to room on
+// this process and those every other process answered with, each once, but the writer, actor (nil
+// for none).
+func (s *Service) lostWriteParticipants(room string, actor *model.Actor, answers []roomAnswer) []model.Actor {
+	participants := make(map[string]model.Actor)
+	for _, connected := range s.connectedActors(room) {
+		participants[actorKey(connected)] = connected
 	}
-	return participants
+	for _, answer := range answers {
+		for _, connected := range answer.actors {
+			participants[actorKey(connected)] = connected
+		}
+	}
+	if actor != nil {
+		delete(participants, actorKey(*actor))
+	}
+	return actorSlice(participants)
 }

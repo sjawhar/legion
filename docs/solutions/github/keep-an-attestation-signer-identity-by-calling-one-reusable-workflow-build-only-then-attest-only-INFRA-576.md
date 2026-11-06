@@ -46,8 +46,9 @@ related_issues:
   attest job and the cross-repository note), 123-126 (the replaced-call case);
   `.github/workflows/release.yaml` lines 993-1039 (the two calls).
 - Branch dispatches of `release.yaml` on sjawhar/legion#2358, runs 40451569882 and 40538213611:
-  the attest-only call attested the build-only call's digest, and the certificate's SAN was
-  `https://github.com/sjawhar/legion/.github/workflows/worker-image.yaml@refs/heads/legion/INFRA-576`.
+  the attest-only call attested the build-only call's digest, and the certificate's SAN named
+  `/.github/workflows/worker-image.yaml@refs/heads/legion/INFRA-576` under this repository's
+  address on github.com before its transfer to cybermonklabs on 2026-11-03.
 - `release.yaml` lines 1078-1093 (`worker_image_release`). Probe run 40451765371 on the runner's
   buildx v0.38.0: with `--prefer-index=false` the tag named the source digest
   `sha256:8354eb26…`; without it, `sha256:de61b6c7…`.

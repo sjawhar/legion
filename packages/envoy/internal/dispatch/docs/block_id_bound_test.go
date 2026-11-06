@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // boundSpec is a spec of two callouts and a paragraph. A browser edit gives the first callout and
@@ -157,9 +158,7 @@ func TestADocumentAlreadyHoldingABlockIDPastTheBoundIsIndexedAndLeavesOwed(t *te
 // and opens none. No settlement fails on an index key past its limit (SQLSTATE 54000).
 func TestAnAskBlockWhoseIDIsPastTheBoundSettles(t *testing.T) {
 	logs := &storetest.LockedLog{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(logs, nil))
 	service, original := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, original, "Context\n\n"+shipBlock)
@@ -172,7 +171,7 @@ func TestAnAskBlockWhoseIDIsPastTheBoundSettles(t *testing.T) {
 		return tree
 	})
 	settleCurrentGeneration(t, service, original)
-	if line := logs.Lines("54000"); line != "" {
+	if line := logs.Lines("SQLSTATE 54000"); line != "" {
 		t.Fatalf("the settlement of the long-id ask block failed: %.400s", line)
 	}
 	if ask := blockAskOn(t, service, original, long); ask.State != "open" || ask.Question != "Ship on Monday?" {
@@ -198,7 +197,7 @@ func TestAnAskBlockWhoseIDIsPastTheBoundSettles(t *testing.T) {
 		t.Fatalf("the copy opened %d asks, want none", count)
 	}
 	requireCopiedStates(t, service, copied, copiedFrom(t, service, ask.ID, original))
-	if line := logs.Lines("54000"); line != "" {
+	if line := logs.Lines("SQLSTATE 54000"); line != "" {
 		t.Fatalf("a settlement failed on an index key past its limit: %.400s", line)
 	}
 }

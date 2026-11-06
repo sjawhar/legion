@@ -109,6 +109,54 @@ func TestACatchUpMarksAHandedOverRootInEveryPhase(t *testing.T) {
 	}
 }
 
+// A decision kept while nobody in a running tree could hear it (its architect's claim had ended)
+// reaches the architect's next launch, a `legion claims retry` relaunch among them, in that
+// launch's catch-up: a catch-up that was never delivered leaves the decision kept, so the relaunch
+// whose ready drops it names it again, and only the forget of what a delivered catch-up named (the
+// outbox's notice) leaves nothing for the launch after.
+func TestARelaunchedArchitectsCatchUpNamesTheDecisionsKeptForIt(t *testing.T) {
+	ctx := context.Background()
+	pool := migratedPool(t)
+	seedAdmittedTree(t, pool, 1)
+	engine := testEngine(config.DesignGateRootIssues, nil)
+	at := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		return record.NewStore().AddParkedDecision(ctx, tx, record.ParkedDecision{Issue: "LEGION-1", Ref: "dispatch://LEGION-1/spec",
+			Decision: record.DecisionDesignApproved, Actor: "user:alice", At: at})
+	}); err != nil {
+		t.Fatalf("keep a decision: %v", err)
+	}
+	want := "While nobody in LEGION-1's tree could hear it, a person decided on the tree: dispatch://LEGION-1/spec (design-approved by user:alice). Read each before you continue."
+	claimReady(t, pool, engine, "LEGION-1", claim.RoleArchitect, 1)
+	first := lastCatchUp(t, pool)
+	if first.Decided != want {
+		t.Fatalf("the relaunch's catch-up names %q, want %q", first.Decided, want)
+	}
+	if first.Kept == nil || len(first.Kept.Decisions) != 1 || first.Kept.Decisions[0].Ref != "dispatch://LEGION-1/spec" ||
+		!first.Kept.Decisions[0].At.Equal(at) {
+		t.Fatalf("the catch-up's kept record %#v, want the decision it named, at %s", first.Kept, at)
+	}
+	claimReady(t, pool, engine, "LEGION-1", claim.RoleArchitect, 2)
+	if got := lastCatchUp(t, pool); got.Decided != want || len(catchUps(t, pool)) != 1 {
+		t.Fatalf("after a relaunch dropped that catch-up undelivered, catch-ups %v naming %q; want one naming %q", catchUps(t, pool), got.Decided, want)
+	}
+	// The delivery of a catch-up forgets exactly what it named and its row claims, and nothing else
+	// does.
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		var row int64
+		if err := tx.QueryRow(ctx, "select id from outbox where kind = 'notice' and payload->>'kind' = 'catch-up' order by id desc limit 1").Scan(&row); err != nil {
+			return err
+		}
+		return record.NewStore().ForgetKeptDecisions(ctx, tx, "LEGION-1", *lastCatchUp(t, pool).Kept, row)
+	}); err != nil {
+		t.Fatalf("forget what the delivered catch-up named: %v", err)
+	}
+	claimReady(t, pool, engine, "LEGION-1", claim.RoleArchitect, 3)
+	if got := lastCatchUp(t, pool); got.Decided != "" || got.Kept != nil {
+		t.Fatalf("the launch after a delivered catch-up is told %q (kept %#v), want nothing", got.Decided, got.Kept)
+	}
+}
+
 func lastCatchUp(t *testing.T, pool *pgxpool.Pool) record.CatchUp {
 	t.Helper()
 	var got *record.CatchUp

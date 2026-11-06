@@ -120,11 +120,11 @@ func TestRenderBoundsAbsurdTableSpans(t *testing.T) {
 	}
 }
 
-// The checks that read one document-level block at a time (BlockReadError, BlockShapeError) run
-// once for each block a write changed, and a suggestion accepted across many tables changes each of
-// them, so a check writes a table spanless: were each of its renders to spend a budget of span
-// cells, the checks over four tables of 100 one-character rows under a cell spanning 1,000 columns
-// and every row would allocate some 1,500 MiB, where the document's own render spends one budget.
+// The read-back that reads one document-level block at a time (ReadBackBlock) runs once for each
+// block a write changed, and a suggestion accepted across many tables changes each of them, so it
+// writes a table spanless: were each of its renders to spend a budget of span cells, the
+// read-backs of four tables of 100 one-character rows under a cell spanning 1,000 columns and
+// every row would allocate some 1,500 MiB, where the document's own render spends one budget.
 func TestBlockChecksSpendNoSpanBudgetForEachBlock(t *testing.T) {
 	var blocks []*Node
 	for range 4 {
@@ -137,11 +137,12 @@ func TestBlockChecksSpendNoSpanBudgetForEachBlock(t *testing.T) {
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
 	for _, block := range blocks {
-		if err := BlockReadError(block); err != nil {
-			t.Fatal(err)
+		back := ReadBackBlock(block)
+		if back.Read != nil {
+			t.Fatal(back.Read)
 		}
-		if err := BlockShapeError(block); err != nil && !errors.Is(err, ErrSchema) {
-			t.Fatal(err)
+		if back.Shape != nil && !errors.Is(back.Shape, ErrSchema) {
+			t.Fatal(back.Shape)
 		}
 	}
 	runtime.ReadMemStats(&after)
@@ -150,15 +151,15 @@ func TestBlockChecksSpendNoSpanBudgetForEachBlock(t *testing.T) {
 	}
 }
 
-// BlockShapeError writes a table spanless, so a table reads back in its shape exactly when every
+// A read-back writes a table spanless, so a table reads back in its shape exactly when every
 // row holds as many cells: a header cell spanning two columns over a body cell spanning two, a cell
 // in each row, does, where written with its spans each row would read back two cells wide; a
 // two-cell header over one body cell spanning both does not.
-func TestBlockShapeErrorReadsATableInItsShapeWhenItsRowsHoldAsManyCells(t *testing.T) {
-	if err := BlockShapeError(spanTable([][2]int{{2, 1}}, [][2]int{{2, 1}})); err != nil {
+func TestAReadBackReadsATableInItsShapeWhenItsRowsHoldAsManyCells(t *testing.T) {
+	if err := ReadBackBlock(spanTable([][2]int{{2, 1}}, [][2]int{{2, 1}})).Shape; err != nil {
 		t.Errorf("a header cell over a body cell, each spanning two columns: %v, want the table's shape", err)
 	}
-	if err := BlockShapeError(spanTable([][2]int{{1, 1}, {1, 1}}, [][2]int{{2, 1}})); !errors.Is(err, ErrSchema) {
+	if err := ReadBackBlock(spanTable([][2]int{{1, 1}, {1, 1}}, [][2]int{{2, 1}})).Shape; !errors.Is(err, ErrSchema) {
 		t.Errorf("a two-cell header over one body cell spanning both: %v, want it read back as another shape", err)
 	}
 }

@@ -16,17 +16,17 @@ import type { LegionRoleClaimBridge } from "./role-claim-bridge";
  * `task` subagent, so a per-instance callback stored here would be the last instance's, not the
  * pane's (docs/solutions/envoy/heartbeat-role-reassertion-and-regain-hooks.md).
  */
-export const ENVOY_PLUGIN_INTERFACE_VERSION = 4;
+export const ENVOY_PLUGIN_INTERFACE_VERSION = 5;
 export const ENVOY_PLUGIN_INTERFACE_KEY = Symbol.for("legion.pi-shared.envoy-plugin-interface");
 /** Set by the Legion entry's factory to `{ from: import.meta.url, envoyInterface: <version> }`;
  * the daemon's boot gate reads it from `globalThis` to prove the Legion plugin loaded. */
 export const LEGION_PLUGIN_LOADED_KEY = Symbol.for("legion.pi-legion.loaded");
 /** The pre-split package's Legion marker; its presence means @sjawhar/pi-legion-envoy is loaded. */
 export const LEGACY_LEGION_LOADED_KEY = Symbol.for("legion.pi-envoy.legion-loaded");
-/** The `details` of an `envoy-message` the Envoy extension writes into its own session (the
- * session-id-changed notice): the session's own doing, never an event from outside, so Legion's
- * phase-stall check does not re-arm a quiet stall on it. */
-export const LOCAL_ENVOY_NOTICE = { localNotice: true } as const;
+/** The marker an `envoy-message` the Envoy extension wrote into its own session carries; it is
+ * defined in a leaf module (`./envoy-notice`) because the phase-stall check reads it and is
+ * bundled by a host with no Oh My Pi, which this module's logger would drag in. */
+export { LOCAL_ENVOY_NOTICE } from "./envoy-notice";
 
 export interface EnvoyPluginInterface {
   readonly version: number;
@@ -40,16 +40,22 @@ export interface EnvoyPluginInterface {
   readonly bootstrappedSession: { file: string | undefined };
   /**
    * The session whose first turn is the Legion controller's start turn, and when its start was
-   * sent (ms since epoch); undefined while there is none. Any claim that sends the operator's
-   * controller its start message to an idle session sets it right before the send, and the
-   * daemon-launched controller sets it right before `claims/ready`, after which the daemon sends
-   * its start prompt. A start message queued as a follow-up behind a turn the operator already
-   * started sets nothing, since that session's first run has already started. It is cleared once
-   * that session's first run starts or the session shuts down. Nothing in the Envoy entry reads it
-   * yet; it is the Envoy entry's signal to keep a card that arrived during startup from taking that
-   * first turn.
+   * sent (ms since epoch), `sentAt` undefined while the start is due but not sent yet; undefined
+   * while there is none. The operator-launched controller marks its session with the start unsent
+   * at `session_start`, since it claims and sends only from `/legion-controller-start`, which Oh My
+   * Pi runs after its startup. Any claim that sends the operator's controller its start message to
+   * an idle session marks it sent right before the send, and the daemon-launched controller marks
+   * it sent right before `claims/ready`, after which the daemon sends its start prompt. A start
+   * message queued as a follow-up behind a turn the operator already started marks nothing, since
+   * that session's first run has already started and its `agent_start` cleared an unsent mark. It
+   * is cleared once that session's first run starts or the session shuts down, and an unsent mark
+   * once the start command's claim fails before the send or hands over to a new session. The Envoy
+   * entry reads it (`packages/pi-envoy/src/card-wake.ts`): while it names the Envoy entry's own
+   * live session, sent less than 30 s ago, or unsent and first read by that entry less than 30 s
+   * ago, a card that arrived while that session started takes no turn, and its wake waits for the
+   * start turn.
    */
-  startupTurn: { readonly session: string; readonly sentAt: number } | undefined;
+  startupTurn: { readonly session: string; readonly sentAt: number | undefined } | undefined;
 }
 
 type EnvoyPluginInterfaceReading =

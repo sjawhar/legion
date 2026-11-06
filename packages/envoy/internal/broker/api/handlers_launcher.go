@@ -35,10 +35,10 @@ type tokenLoginResponse struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
-// tokenLogin is POST /v1/launcher-credentials/token: public. A service (the Legion daemon) logs in
-// with its own projected ServiceAccount token, and no person approves it (machine.Service's
-// VerifyServiceToken, then TokenLogin). The account's one launcher credential moves to the
-// request's key and the token's expiry. Every token login spends its source address's bucket before
+// tokenLogin is POST /v1/launcher-credentials/token: public. A service (the Legion daemon) logs
+// in with its own projected Kubernetes ServiceAccount token, and no person approves it
+// (machine.Service's VerifyServiceToken, then TokenLogin). The account's one launcher credential
+// moves to the request's key and the token's expiry. Every token login spends its source address's bucket before
 // the token is verified (refuseAddress), so no flood of tokens, forged or real, costs the broker a
 // verification (and a fetch of the issuer's keys) past that bucket; a verified account then spends a
 // bucket of its own too (refuseAccount). The pair is the device-code route's, address then login.
@@ -52,11 +52,10 @@ type tokenLoginResponse struct {
 // keys.
 // A token that has expired is 401 TOKEN_EXPIRED, one that does not verify 401 TOKEN_INVALID, one
 // that lives longer than an hour from its issue 401 TOKEN_TOO_LONG_LIVED, one whose account
-// BROKER_SERVICE_LOGINS does not name
-// for the requested service 403 ACCOUNT_NOT_LISTED, a request object that does not verify or
-// repeats a jti 400 REQUEST_INVALID, a key another live credential holds 409
-// KEY_HOLDS_LIVE_CREDENTIAL, and a broker that trusts no Kubernetes token issuer answers 404
-// TOKEN_LOGIN_OFF.
+// BROKER_SERVICE_LOGINS does not name for the requested service 403 ACCOUNT_NOT_LISTED, a request
+// object that does not verify or repeats a jti 400 REQUEST_INVALID, a key another live credential
+// holds 409 KEY_HOLDS_LIVE_CREDENTIAL, and a broker that trusts no Kubernetes token issuer
+// answers 404 TOKEN_LOGIN_OFF.
 func (s *server) tokenLogin(w http.ResponseWriter, r *http.Request) {
 	var body tokenLoginBody
 	if !readJSON(w, r, &body, "INVALID_REQUEST") {

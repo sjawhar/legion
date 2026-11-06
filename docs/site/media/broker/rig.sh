@@ -9,7 +9,8 @@
 #     alice@example.com at the human tier, whose value is made up, in a database of its own beside
 #     DATABASE_URL's, created and dropped by this run, trusting the ServiceAccount tokens of
 #     packages/envoy/cmd/dev-oidc-issuer, the local stand-in for a cluster's issuer, which keeps
-#     Dispatch's own token in a file and rewrites it before it lapses;
+#     Dispatch's own token in a file and rewrites it before it lapses, and trusting that same
+#     issuer to sign a person in to its approval page, where a secret request is approved;
 #   - the Dispatch e2e harness (packages/dispatch/e2e: fake Envoy, fake GitHub, run-server.sh) on
 #     DATABASE_URL, emptied, pointed at that broker; its signed-in human is `alice@example.com`;
 #   - an agent machine whose hostname is example-host-build: agent-secrets-helper (the host side of
@@ -174,11 +175,24 @@ chmod 600 "$work/fake-secrets.json"
 # Dispatch calls the broker as its own ServiceAccount, whose token dev-oidc-issuer keeps in a file
 # Dispatch's server reads, never an argv; the broker lists that account as the caller "dispatch".
 # The issuer writes the file before it logs its URL, the issuer the broker discovers at boot.
+#
+# The same issuer is the provider the broker signs a person in at (BROKER_SIGNIN_*, required):
+# --code-flow serves the broker's own client, whose secret this run generates under umask 077 so
+# no one else can read it even for a moment and neither process takes it on a command line, and
+# --sign-in-as signs every authorization in as the operator with no page to fill in. The issuer
+# takes no domain: it puts a person's own email domain in their hd claim, so the domain the
+# broker holds them to is the operator's.
 dispatch_account="system:serviceaccount:example-ns:example-dispatch"
 broker_audience="legion-broker-pod"
+signin_client="docs-broker"
+signin_secret_file="$work/signin-client-secret"
+signin_domain="${OPERATOR#*@}"
+(umask 077 && openssl rand -hex 32 >"$signin_secret_file")
 note "starting dev-oidc-issuer"
 start_process issuer setsid "$work/bin/dev-oidc-issuer" \
-  --token "$broker_audience=$dispatch_account=$work/dispatch-account-token"
+  --token "$broker_audience=$dispatch_account=$work/dispatch-account-token" \
+  --code-flow "$signin_client=$signin_secret_file" \
+  --sign-in-as "$OPERATOR"
 await_start issuer "$issuer_pid" 60 "dev-oidc-issuer to report its URL" \
   grep -q 'issuer listening url=' "$work/logs/issuer.log"
 issuer_url="$(sed -n 's/.*issuer listening url=\([^ ]*\).*/\1/p' "$work/logs/issuer.log" | head -n1)"
@@ -200,6 +214,10 @@ start_process broker setsid env -i PATH="$PATH" \
   BROKER_SECRETS_PREFIX="$secrets_prefix" \
   BROKER_SECRETS_KMS_KEY_ARN="$secrets_key" \
   BROKER_FAKE_SECRETS_FILE="$work/fake-secrets.json" \
+  BROKER_SIGNIN_ISSUER="$issuer_url" \
+  BROKER_SIGNIN_CLIENT_ID="$signin_client" \
+  BROKER_SIGNIN_CLIENT_SECRET_FILE="$signin_secret_file" \
+  BROKER_SIGNIN_DOMAIN="$signin_domain" \
   "$work/bin/broker"
 await_start broker "$broker_pid" 60 "the broker to report its address" \
   grep -q 'broker listening addr=' "$work/logs/broker.log"
@@ -275,13 +293,14 @@ cat >&2 <<EOF
 rig: ready.
 
   Dispatch    $dispatch_url  (sign in as $OPERATOR at $dispatch_url/auth/_dev/signin?login=$OPERATOR)
-  broker      $broker_url
+  broker      $broker_url  (its approval page signs $OPERATOR in at dev-oidc-issuer, client $signin_client)
   agent       $agent_exec bash   (hostname $AGENT_HOST; agent-secrets-helper for $OPERATOR)
   logs        $work/logs
 
   On the agent machine: agent-secrets machine login, type its code at $dispatch_url/credentials/machine,
   then agent-secrets register --wait 10 --exec -- bash, then
-  agent-secrets DEMO_API_KEY --reason "<why>" -- ./check-demo-key.sh
+  agent-secrets DEMO_API_KEY --reason "<why>" -- ./check-demo-key.sh, and approve that request
+  at the approve_url it prints, $broker_url/approve/<record>.
 EOF
 
 if [ "$#" -gt 0 ]; then

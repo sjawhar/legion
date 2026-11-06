@@ -1,4 +1,4 @@
-import type { MessageDeliveryMode } from "@legion/contracts";
+import type { MessageDeliveryMode, ReplyBlock } from "@legion/contracts";
 import type { ReactNode } from "react";
 
 import type { Actor } from "../../api/types";
@@ -78,7 +78,14 @@ export function ReplyTurn({
   /** The Replies page's read mark, on the newest reply of a thread: the element it watches. */
   markRef?: DwellRef;
   onReply?: () => void;
-  quote?: { readonly author: Actor | undefined; readonly excerpt: string; readonly to?: string };
+  /** The parent the reply quotes: its author, its body, the block of it the reply answers (its
+   *  `reply_block`), and its turn's path. */
+  quote?: {
+    readonly author: Actor | undefined;
+    readonly block?: ReplyBlock | null;
+    readonly excerpt: string;
+    readonly to?: string;
+  };
   /** Holds the Reply button while the composer it would address is busy with a send. */
   replyDisabled?: boolean;
   turnID: string;
@@ -107,6 +114,7 @@ export function ReplyTurn({
         {quote === undefined ? null : (
           <ReplyQuote
             author={quote.author}
+            block={quote.block}
             className="mb-1"
             excerpt={quote.excerpt}
             to={quote.to}

@@ -4,16 +4,8 @@ import type { ReactNode } from "react";
 import { ApiError, api } from "../../api/client";
 import type { ExternalLink } from "../../api/types";
 import { TruncatedText } from "../../components/TruncatedText";
+import { safeExternalHref } from "../../lib/external-href";
 import { badgeLow, linkHoverText, linkText, textMutedOnSurface } from "../../theme/classes";
-
-function safeExternalHref(value: string): string | undefined {
-  try {
-    const protocol = new URL(value).protocol;
-    return protocol === "http:" || protocol === "https:" ? value : undefined;
-  } catch {
-    return undefined;
-  }
-}
 
 interface GitHubReference {
   head?: { sha?: string };
@@ -152,7 +144,7 @@ export function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
     retry: false,
   });
 
-  if (href === undefined) {
+  if (href === null) {
     return (
       <span
         className={`inline-block max-w-[18ch] truncate text-sm sm:max-w-[32ch] ${textMutedOnSurface}`}

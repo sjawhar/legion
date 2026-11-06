@@ -7,8 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"os"
-	"path/filepath"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -17,6 +15,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/testtmp"
 )
 
 // testClaim is the claim the default resolver hands out for testToken.
@@ -315,16 +314,13 @@ func awaitResult(t *testing.T, result <-chan error) error {
 	}
 }
 
-// shortSocketPath is a unix socket path under the kernel's 108-byte sun_path limit, which a
-// test's own TempDir can exceed.
+// shortSocketPath is this package's socket path: a socket named worker-stream.sock in a
+// directory of the test's own, placed by TMPDIR and falling back to /tmp for the socket path's
+// length alone, so that the bind holds within the 107 bytes a unix socket path takes
+// (docs/testing.md).
 func shortSocketPath(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "ws")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	return filepath.Join(dir, "worker-stream.sock")
+	return testtmp.Socket(t, "worker-stream.sock")
 }
 
 func mustJSON(t *testing.T, value any) json.RawMessage {

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"runtime"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -14,10 +16,13 @@ import (
 	"weak"
 
 	"github.com/reearth/ygo/crdt"
+	ygws "github.com/reearth/ygo/provider/websocket"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // The tests here hold the reuse of renderings (renderedReplica.changedBy, warmFork's forkMarkdown,
@@ -56,31 +61,57 @@ func renderReuseDocument() string {
 
 // renderPaths is a reading of the service's renderPathCounts.
 type renderPaths struct {
-	observerReused, observerInRoom, observerRendered   uint64
+	observerReused, observerRendered                   uint64
+	observerIncremental, observerUntouched             uint64
+	observerMarginOnly                                 uint64
 	beforeFromReplica, beforeFromWrite, beforeRendered uint64
+	catchUpFromLoad, catchUpRendered                   uint64
 }
 
 func readRenderPaths(service *Service) renderPaths {
 	counts := &service.renderPaths
 	return renderPaths{
-		observerReused:    counts.observerReused.Load(),
-		observerInRoom:    counts.observerInRoom.Load(),
-		observerRendered:  counts.observerRendered.Load(),
-		beforeFromReplica: counts.beforeFromReplica.Load(),
-		beforeFromWrite:   counts.beforeFromWrite.Load(),
-		beforeRendered:    counts.beforeRendered.Load(),
+		observerReused:      counts.observerReused.Load(),
+		observerRendered:    counts.observerRendered.Load(),
+		observerIncremental: counts.observerIncremental.Load(),
+		observerUntouched:   counts.observerUntouched.Load(),
+		observerMarginOnly:  counts.observerMarginOnly.Load(),
+		beforeFromReplica:   counts.beforeFromReplica.Load(),
+		beforeFromWrite:     counts.beforeFromWrite.Load(),
+		beforeRendered:      counts.beforeRendered.Load(),
+		catchUpFromLoad:     counts.catchUpFromLoad.Load(),
+		catchUpRendered:     counts.catchUpRendered.Load(),
 	}
 }
 
 func (p renderPaths) minus(base renderPaths) renderPaths {
 	return renderPaths{
-		observerReused:    p.observerReused - base.observerReused,
-		observerInRoom:    p.observerInRoom - base.observerInRoom,
-		observerRendered:  p.observerRendered - base.observerRendered,
-		beforeFromReplica: p.beforeFromReplica - base.beforeFromReplica,
-		beforeFromWrite:   p.beforeFromWrite - base.beforeFromWrite,
-		beforeRendered:    p.beforeRendered - base.beforeRendered,
+		observerReused:      p.observerReused - base.observerReused,
+		observerRendered:    p.observerRendered - base.observerRendered,
+		observerIncremental: p.observerIncremental - base.observerIncremental,
+		observerUntouched:   p.observerUntouched - base.observerUntouched,
+		observerMarginOnly:  p.observerMarginOnly - base.observerMarginOnly,
+		beforeFromReplica:   p.beforeFromReplica - base.beforeFromReplica,
+		beforeFromWrite:     p.beforeFromWrite - base.beforeFromWrite,
+		beforeRendered:      p.beforeRendered - base.beforeRendered,
+		catchUpFromLoad:     p.catchUpFromLoad - base.catchUpFromLoad,
+		catchUpRendered:     p.catchUpRendered - base.catchUpRendered,
 	}
+}
+
+// observed is how many logged updates the update observer classified on any of its paths. A
+// replica's start is no such path: it classifies no update.
+func (p renderPaths) observed() int {
+	return int(p.observerReused + p.observerRendered + p.observerIncremental + p.observerUntouched + p.observerMarginOnly)
+}
+
+// withoutCatchUps is p without the counts of the replica's starts (catchUpFromLoad,
+// catchUpRendered): which of the two a first start counts turns on whether a collection ran
+// between the room's load and its first commit, which a test that does not control the collector
+// cannot say.
+func (p renderPaths) withoutCatchUps() renderPaths {
+	p.catchUpFromLoad, p.catchUpRendered = 0, 0
+	return p
 }
 
 // renderShadow follows every room instance the service loads for one document (watchRenders).
@@ -132,6 +163,9 @@ type shadowUpdate struct {
 	// contentChanged.
 	classes int
 	class   bool
+	// parkedOnly says the commit only parked what waits for an edit the room lacks: ygo calls no
+	// update observer for it, and hands the room's persistence nothing of it.
+	parkedOnly bool
 }
 
 type shadowRead struct {
@@ -146,7 +180,7 @@ type shadowOp struct {
 // watchRenders shadows every room service loads for artifactID from now on. Its observer is
 // registered after the service's own (onLoadDocument) and before ygo's persistence observer, so it
 // runs once the service's observer has classified the update, and while the class it recorded is
-// still there to read (recordUpdateClass, consumeUpdateClass).
+// still there to read (queueUpdateClass, consumeUpdateClass).
 func watchRenders(t *testing.T, service *Service, artifactID string) *renderShadow {
 	t.Helper()
 	sh := &renderShadow{service: service, artifactID: artifactID, byDoc: make(map[weak.Pointer[crdt.Doc]]*shadowRoom)}
@@ -167,6 +201,13 @@ func watchRenders(t *testing.T, service *Service, artifactID string) *renderShad
 		sh.mu.Unlock()
 		doc.OnUpdate(func(update []byte, origin any) {
 			sh.observed(shadow, log, replica, update, origin)
+		})
+		// As the service's own after-transaction drain does, only for a transaction that changed
+		// no shared type while the log holds an update: a commit that only parked.
+		doc.OnAfterTransaction(func(txn *crdt.Transaction) {
+			if log.Pending() > 0 && len(txn.ChangedTypes()) == 0 {
+				sh.observedWithoutUpdate(shadow, log, replica)
+			}
 		})
 		return nil
 	}
@@ -202,11 +243,28 @@ func shadowRender(doc *crdt.Doc) (*string, map[string]struct{}, error) {
 	return &markdown, askBlockIDs(tree), nil
 }
 
+// sameUpdate reports whether logged, an update the room's update log handed over, is update, the
+// one an observer was called with: ygo hands both the very slice it encoded at the commit
+// (crdt.LoggedUpdate), so the same backing array is the same commit, where equal bytes need not be
+// - two commits that change nothing encode alike.
+func sameUpdate(logged, update []byte) bool {
+	return len(logged) > 0 && len(logged) == len(update) && &logged[0] == &update[0]
+}
+
 func sameRendering(a, b *string) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
 	}
 	return *a == *b
+}
+
+// replicaMarkdown is the markdown of the rendering the replica keeps, or nil for a replica that
+// keeps none. The caller holds the replica's lock.
+func replicaMarkdown(replica *renderedReplica) *string {
+	if replica.rendering == nil {
+		return nil
+	}
+	return &replica.rendering.markdown
 }
 
 func describeRendering(markdown *string) string {
@@ -235,14 +293,25 @@ func (room *shadowRoom) take(sh *renderShadow, log *crdt.UpdateLog) {
 		if err := crdt.ApplyUpdateV1(room.doc, logged.Update, nil); err != nil {
 			sh.failf("the shadow could not apply a logged update: %v", err)
 		}
+		// What the commit parked follows its update, as the replica applies it, so the shadow
+		// holds what the room holds (crdt.LoggedUpdate).
+		if len(logged.Parked) > 0 {
+			if err := crdt.ApplyUpdateV1(room.doc, logged.Parked, nil); err != nil {
+				sh.failf("the shadow could not apply a logged update's parked bytes: %v", err)
+			}
+		}
 		markdown, _, _ := shadowRender(room.doc)
 		changed := markdown == nil || room.markdown == nil || *markdown != *room.markdown
 		room.markdown = markdown
-		room.updates = append(room.updates, &shadowUpdate{update: logged.Update, origin: logged.Origin, changed: changed})
+		room.updates = append(room.updates, &shadowUpdate{
+			update: logged.Update, origin: logged.Origin, changed: changed,
+			parkedOnly: len(logged.Parked) > 0 && bytes.Equal(logged.Update, emptyUpdateV1),
+		})
 	}
 }
 
-// observed runs after the service's own update observer for each commit of room.
+// observed runs after the service's own update observer for each commit of room that changed the
+// document.
 func (sh *renderShadow) observed(room *shadowRoom, log *crdt.UpdateLog, replica *renderedReplica, update []byte, origin any) {
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
@@ -273,9 +342,77 @@ func (sh *renderShadow) observed(room *shadowRoom, log *crdt.UpdateLog, replica 
 			sh.service.unlockState(sh.artifactID, state)
 		}
 	}
-	// The replica as this commit's observer left it, against the shadow at the same commit: under
-	// the replica's lock, holding every commit its log handed over, and with no commit landing
-	// while the shadow catches up (the replica's log is opened first, so a commit reaches it first).
+	sh.alignLocked(room, log, replica)
+}
+
+// observedWithoutUpdate runs after the service's own after-transaction drain for each transaction
+// of room that changed no shared type (onLoadDocument). A commit that only parked is logged but
+// has no update observer, so this is where it counts as observed - once, by the transaction that
+// made it, which is the one that logged it; a transaction that logged nothing compares nothing.
+func (sh *renderShadow) observedWithoutUpdate(room *shadowRoom, log *crdt.UpdateLog, replica *renderedReplica) {
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	if sh.closed {
+		log.Drain()
+		return
+	}
+	room.take(sh, log)
+	observed := false
+	for _, candidate := range room.updates {
+		if candidate.parkedOnly && candidate.observed == 0 {
+			candidate.observed++
+			if state := sh.service.lockExistingState(sh.artifactID); state != nil {
+				for _, class := range state.updateClasses {
+					if bytes.Equal(class.update, candidate.update) {
+						candidate.classes++
+						candidate.class = class.contentChanged
+					}
+				}
+				sh.service.unlockState(sh.artifactID, state)
+			}
+			observed = true
+		}
+	}
+	if observed {
+		sh.alignLocked(room, log, replica)
+	}
+}
+
+func TestTheRenderShadowReadsClassesForAParkedOnlyCommit(t *testing.T) {
+	writer := crdt.New(crdt.WithClientID(7))
+	text := writer.GetText("pending")
+	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "base", nil) })
+	before := writer.StateVector()
+	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 4, " later", nil) })
+	roomDoc := newDocumentCopy()
+	log := roomDoc.OpenUpdateLog()
+	if err := crdt.ApplyUpdateV1(roomDoc, crdt.EncodeStateAsUpdateV1(writer, before), nil); err != nil {
+		t.Fatal(err)
+	}
+	if roomDoc.PendingStats().Items == 0 {
+		t.Fatal("the fixture did not park an update")
+	}
+	service := &Service{srv: newRoomServer(ygws.NewServer())}
+	state := newRoomState()
+	state.unsettled = true
+	state.updateClasses = append(state.updateClasses, &queuedClass{documentUpdateClass: documentUpdateClass{update: emptyUpdateV1}})
+	service.rooms.Store("r", state)
+	shadow := &renderShadow{service: service, artifactID: "r"}
+	room := &shadowRoom{}
+	shadow.observedWithoutUpdate(room, log, &renderedReplica{})
+	if len(room.updates) != 1 || !room.updates[0].parkedOnly {
+		t.Fatalf("shadow updates = %+v, want one parked-only commit", room.updates)
+	}
+	if got := room.updates[0].classes; got != 1 {
+		t.Fatalf("shadow observed %d classes, want the deliberately queued class", got)
+	}
+}
+
+// alignLocked compares the replica as this commit's drain left it with the shadow at the same
+// commit: under the replica's lock, holding every commit its log handed over, and with no commit
+// landing while the shadow catches up (the replica's log is opened first, so a commit reaches it
+// first). The caller holds sh.mu.
+func (sh *renderShadow) alignLocked(room *shadowRoom, log *crdt.UpdateLog, replica *renderedReplica) {
 	replica.mu.Lock()
 	defer replica.mu.Unlock()
 	if replica.doc == nil || replica.log.Pending() > 0 {
@@ -286,8 +423,8 @@ func (sh *renderShadow) observed(room *shadowRoom, log *crdt.UpdateLog, replica 
 		return
 	}
 	sh.aligned++
-	if !sameRendering(replica.markdown, room.markdown) {
-		sh.failf("after commit %d the replica renders %s and the shadow %s", len(room.updates), describeRendering(replica.markdown), describeRendering(room.markdown))
+	if !sameRendering(replicaMarkdown(replica), room.markdown) {
+		sh.failf("after commit %d the replica renders %s and the shadow %s", len(room.updates), describeRendering(replicaMarkdown(replica)), describeRendering(room.markdown))
 	}
 }
 
@@ -394,6 +531,37 @@ func (sh *renderShadow) write(t *testing.T, ops ...func(ctx context.Context) err
 	return write
 }
 
+// writeThenLoad runs ops as one transaction, as write does, but loads the document's room between
+// the commit and the publish: a cold write's publish loads no room (publishLiveWrite), so a room
+// whose load read the head after the commit is how a cold write's updates meet a room that holds
+// them already.
+func (sh *renderShadow) writeThenLoad(t *testing.T, ops ...func(ctx context.Context) error) *liveWrite {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := sh.service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := sh.service.Join(ctx, tx)
+	defer ledger.Discard()
+	var write *liveWrite
+	for _, run := range ops {
+		write = sh.op(t, joined, run)
+	}
+	if !write.cold {
+		t.Fatal("the write forked a room, so nothing here is tested")
+	}
+	if err := ledger.commit(ctx); err != nil {
+		t.Fatalf("commit the write: %v", err)
+	}
+	if err := sh.service.warmLiveDocument(ctx, sh.artifactID); err != nil {
+		t.Fatalf("load the room: %v", err)
+	}
+	ledger.publish()
+	return write
+}
+
 // versions checks the content_changed of every version write appended against the renders of its
 // operations' forks, and returns them.
 func (sh *renderShadow) versions(t *testing.T, write *liveWrite) []bool {
@@ -441,22 +609,29 @@ func (sh *renderShadow) loggedLocked() int {
 
 // expect asserts that each path ran exactly as often as want says since m, that the room
 // observers classified every update logged since m once, recovered of them by recover, which
-// takes no path, and that the replica was compared with the shadow after every other one.
+// takes no path, and that the replica was compared with the shadow after every other one. It
+// leaves out the replica's starts (withoutCatchUps), so want names none; a test that controls the
+// collector asserts them itself (since).
 func (m renderMeasure) expect(t *testing.T, want renderPaths, recovered int) {
 	t.Helper()
-	got := readRenderPaths(m.sh.service).minus(m.paths)
+	got := m.since().withoutCatchUps()
 	if got != want {
 		t.Errorf("render paths = %+v, want %+v", got, want)
 	}
 	m.sh.mu.Lock()
 	logged, aligned := m.sh.loggedLocked()-m.updates, m.sh.aligned-m.aligned
 	m.sh.mu.Unlock()
-	if observed := int(got.observerReused + got.observerInRoom + got.observerRendered); observed+recovered != logged {
+	if observed := got.observed(); observed+recovered != logged {
 		t.Errorf("the observers classified %d updates and recovered %d, of %d logged", observed, recovered, logged)
 	}
 	if aligned != logged-recovered {
 		t.Errorf("the replica was compared with the shadow after %d of %d commits", aligned, logged-recovered)
 	}
+}
+
+// since is the service's path counts since m.
+func (m renderMeasure) since() renderPaths {
+	return readRenderPaths(m.sh.service).minus(m.paths)
 }
 
 // check compares, for the resident room, the replica's rendering, the shadow's and a render of the
@@ -476,11 +651,19 @@ func (sh *renderShadow) check(t *testing.T) {
 				t.Errorf("room %d commit %d: observed %d times", roomIndex, index, update.observed)
 			}
 			if published, ok := update.origin.(*liveWriteOrigin); ok {
-				if rendering := published.rendering; rendering.markdown != "" || rendering.askBlocks != nil || rendering.forkReadMark != (forkReadMark{}) {
+				if rendering := published.rendering; rendering.rendered != nil || rendering.askBlocks != nil || rendering.forkReadMark != (forkReadMark{}) {
 					t.Errorf("room %d commit %d: the published update kept its rendering", roomIndex, index)
 				}
 			}
 			if _, repair := update.origin.(*identityClosureOrigin); repair {
+				continue
+			}
+			// A commit that only parked hands the room's persistence nothing, so no class is
+			// recorded for it (classifyDrained).
+			if update.parkedOnly {
+				if update.classes != 0 {
+					t.Errorf("room %d commit %d: %d classes recorded for a commit that only parked", roomIndex, index, update.classes)
+				}
 				continue
 			}
 			if update.classes != 1 {
@@ -503,7 +686,13 @@ func (sh *renderShadow) check(t *testing.T) {
 		t.Fatalf("copy the room: %v", err)
 	}
 	rendered, asks, _ := shadowRender(snapshot)
-	if !sameRendering(rendered, room.markdown) {
+	if room.doc == nil {
+		// A room that has committed nothing since its load logs no base, so its shadow holds no
+		// document to compare: a publish the loaded room already held is no commit.
+		if len(room.updates) != 0 {
+			t.Errorf("the room logged %d commits and no base", len(room.updates))
+		}
+	} else if !sameRendering(rendered, room.markdown) {
 		t.Errorf("the room renders %s and its shadow %s", describeRendering(rendered), describeRendering(room.markdown))
 	}
 	if room.doc != nil {
@@ -518,8 +707,8 @@ func (sh *renderShadow) check(t *testing.T) {
 			}
 			time.Sleep(time.Millisecond)
 		}
-		if !sameRendering(replica.markdown, room.markdown) {
-			t.Errorf("the replica renders %s and the shadow %s", describeRendering(replica.markdown), describeRendering(room.markdown))
+		if !sameRendering(replicaMarkdown(replica), room.markdown) {
+			t.Errorf("the replica renders %s and the shadow %s", describeRendering(replicaMarkdown(replica)), describeRendering(room.markdown))
 		}
 		replica.mu.Unlock()
 	}
@@ -613,9 +802,12 @@ func TestRenderReuseAWarmReplaceRendersOnlyItsResult(t *testing.T) {
 	}
 }
 
-// E2. An anchored root comment is MarkQuote then ProjectMark in one transaction: the first takes
-// the replica's rendering, the second its predecessor's, and the observer reuses both, which
-// change no content.
+// E2. An anchored root comment is MarkQuote then ProjectMark in one transaction. MarkQuote takes
+// the replica's rendering as its before-rendering, and the observer reuses the rendering it
+// published. ProjectMark is a margin write (applyMargin), which renders nothing before it writes,
+// so it takes no before-rendering at all, not even its predecessor's (no beforeFromWrite), and its
+// publish into the room its fork was warm-built from is classified by the margin-only path. Neither
+// changes content.
 func TestRenderReuseAnAnchoredCommentRendersNothingTwice(t *testing.T) {
 	service, artifactID, sh := newWarmRenderReuseRoom(t)
 	m := sh.measure()
@@ -631,7 +823,7 @@ func TestRenderReuseAnAnchoredCommentRendersNothingTwice(t *testing.T) {
 		},
 	)
 	sh.check(t)
-	m.expect(t, renderPaths{beforeFromReplica: 1, beforeFromWrite: 1, observerReused: 2}, 0)
+	m.expect(t, renderPaths{beforeFromReplica: 1, observerReused: 1, observerMarginOnly: 1}, 0)
 	if stored := sh.versions(t, write); len(stored) != 2 || stored[0] || stored[1] {
 		t.Errorf("content_changed = %v, want [false false]", stored)
 	}
@@ -669,9 +861,11 @@ func TestRenderReuseAWarmAskKeepsItsAuthor(t *testing.T) {
 }
 
 // E4, E5. A browser edit committed into the room once the write's fork has read it moves the
-// replica past that read: the write's update is rendered, and so is the browser's. A delete-only
-// edit, which advances no clock of the room's state vector, is told by the foreign count all the
-// same.
+// replica past that read: the write's update is measured by the observer, and so is the browser's.
+// The browser's adds or drops a top-level block, which changes the document's fragment, so it is
+// rendered whole; the write's changes one paragraph, which is rendered alone and spliced in. A
+// delete-only edit, which advances no clock of the room's state vector, is told by the foreign
+// count all the same.
 func TestRenderReuseABrowserEditAfterTheForkReadIsRendered(t *testing.T) {
 	for _, test := range []struct {
 		name       string
@@ -709,7 +903,7 @@ func TestRenderReuseABrowserEditAfterTheForkReadIsRendered(t *testing.T) {
 			}
 			waitForLandedAppends(t, service, artifactID)
 			sh.check(t)
-			m.expect(t, renderPaths{beforeFromReplica: 1, observerRendered: 2}, 0)
+			m.expect(t, renderPaths{beforeFromReplica: 1, observerRendered: 1, observerIncremental: 1}, 0)
 			sh.versions(t, write)
 		})
 	}
@@ -738,7 +932,9 @@ func serviceEdit(t *testing.T, service *Service, artifactID string, edit func(*p
 
 // E6. A commit of the service's own into the room while the write holds its slot moves the replica
 // past the write's fork read just as a browser's does. So does an identity repair: the block-id
-// backfill re-minting the id a browser's block repeats.
+// backfill re-minting the id a browser's block repeats. Each update that changes inside one block
+// - the repair's paragraph, the backfill's re-minted id, the write's paragraph - is spliced in; the
+// browser's appended block is rendered whole.
 func TestRenderReuseAServiceCommitAfterTheForkReadIsRendered(t *testing.T) {
 	t.Run("service repair", func(t *testing.T) {
 		service, artifactID, sh := newWarmRenderReuseRoom(t)
@@ -756,7 +952,7 @@ func TestRenderReuseAServiceCommitAfterTheForkReadIsRendered(t *testing.T) {
 			t.Fatal("the write never read its fork")
 		}
 		sh.check(t)
-		m.expect(t, renderPaths{beforeFromReplica: 1, observerRendered: 2}, 0)
+		m.expect(t, renderPaths{beforeFromReplica: 1, observerIncremental: 2}, 0)
 		sh.versions(t, write)
 	})
 	t.Run("identity repair", func(t *testing.T) {
@@ -765,38 +961,51 @@ func TestRenderReuseAServiceCommitAfterTheForkReadIsRendered(t *testing.T) {
 		if first == "" {
 			t.Fatal("the document's first block has no id to repeat")
 		}
-		repaired := false
+		read := false
 		sh.onForkRead = func() {
-			if repaired {
+			if read {
+				return
+			}
+			read = true
+			editAsConnectedPeer(t, service, artifactID, 2, reuseBob, appendBlockWithCraftedID(t, "A paragraph repeating the first block's id.\n", first))
+			awaitAppendLandedOrQueued(t, service, artifactID)
+		}
+		// The repair appends in its own transaction, under the document's advisory lock the write
+		// holds from its fork read until it commits, so it runs in the window after that commit and
+		// before the publish: its commit still reaches the room after the write's fork read, which
+		// is what moves the replica past that read.
+		repaired := false
+		service.afterLiveCommit = onFirst(artifactID, func() {
+			report := service.backfillBlockIDs(context.Background(), artifactID)
+			if report.Err != nil || report.Stamped == 0 {
+				t.Errorf("the backfill repaired nothing: %+v", report)
 				return
 			}
 			repaired = true
-			editAsConnectedPeer(t, service, artifactID, 2, reuseBob, appendBlockWithCraftedID(t, "A paragraph repeating the first block's id.\n", first))
-			awaitAppendLandedOrQueued(t, service, artifactID)
-			report := service.backfillBlockIDs(context.Background(), artifactID)
-			if report.Err != nil || report.Stamped == 0 {
-				t.Fatalf("the backfill repaired nothing: %+v", report)
-			}
-		}
+		})
+		defer func() { service.afterLiveCommit = nil }()
 		m := sh.measure()
 		write := sh.write(t, applyOps(service, artifactID, reuseAgent, model.EditOp{Op: "replace", Find: "Paragraph 13 opens", With: "Paragraph 13 now opens"}))
 		sh.onForkRead = nil
-		if !repaired {
+		if !read {
 			t.Fatal("the write never read its fork")
+		}
+		if !repaired {
+			t.Fatal("the backfill never repaired the repeated block id")
 		}
 		waitForLandedAppends(t, service, artifactID)
 		sh.check(t)
-		m.expect(t, renderPaths{beforeFromReplica: 1, observerRendered: 3}, 0)
+		m.expect(t, renderPaths{beforeFromReplica: 1, observerRendered: 1, observerIncremental: 2}, 0)
 		sh.versions(t, write)
 	})
 }
 
 // E7. A room evicted and reloaded between the write's fork read and its publish has a replica of
-// its own, at another epoch, so the write's rendering is never taken there, though the write's
-// update, which deletes text, carries the old instance's whole delete set. Reloaded before the
-// write's append, the room renders the update; reloaded after its commit, the room's load already
-// holds it - and with a browser's edit the new replica's foreign count is the fork read's, so only
-// the epoch tells the two apart.
+// its own, at another epoch, so the write's rendering is never taken there. Reloaded before the
+// write's append, the room measures the update, which changes one paragraph, so it is spliced in;
+// reloaded after its commit, the room's load already holds it, so its publish is no commit and
+// nothing classifies it - and with a browser's edit, which appends a block and so is rendered
+// whole, the new replica's foreign count is the fork read's, so only the epoch tells the two apart.
 func TestRenderReuseAReloadedRoomNeverTakesTheWritesRendering(t *testing.T) {
 	for _, afterCommit := range []bool{false, true} {
 		name := "before the append"
@@ -857,9 +1066,9 @@ func TestRenderReuseAReloadedRoomNeverTakesTheWritesRendering(t *testing.T) {
 			ledger.publish()
 			sh.check(t)
 			if afterCommit {
-				m.expect(t, renderPaths{beforeFromReplica: 1, observerRendered: 1, observerInRoom: 1}, 0)
-			} else {
 				m.expect(t, renderPaths{beforeFromReplica: 1, observerRendered: 1}, 0)
+			} else {
+				m.expect(t, renderPaths{beforeFromReplica: 1, observerIncremental: 1}, 0)
 			}
 			sh.versions(t, write)
 		})
@@ -867,7 +1076,7 @@ func TestRenderReuseAReloadedRoomNeverTakesTheWritesRendering(t *testing.T) {
 }
 
 // E8. A replica that recovers between the write's fork read and its publish starts again at a
-// fresh epoch, so the write's rendering is not taken: the publish is rendered.
+// fresh epoch, so the write's rendering is not taken: the publish is measured, and spliced in.
 func TestRenderReuseARecoveredReplicaRendersThePublish(t *testing.T) {
 	service, artifactID, sh := newWarmRenderReuseRoom(t)
 	recovered := false
@@ -880,9 +1089,7 @@ func TestRenderReuseARecoveredReplicaRendersThePublish(t *testing.T) {
 		write := joinedLiveWriteOf(t, service, artifactID)
 		readEpoch = write.forkRead.epoch
 		replica := service.replicaOf(service.srv.GetDoc(artifactID))
-		replica.mu.Lock()
-		replica.doc = nil
-		replica.mu.Unlock()
+		forceRecover(replica)
 		editAsConnectedPeer(t, service, artifactID, 2, reuseBob, appendBlocks(t, "A paragraph the recovering replica could not place.\n"))
 		awaitAppendLandedOrQueued(t, service, artifactID)
 		if replica.epoch.Load() == readEpoch {
@@ -897,7 +1104,7 @@ func TestRenderReuseARecoveredReplicaRendersThePublish(t *testing.T) {
 	}
 	waitForLandedAppends(t, service, artifactID)
 	sh.check(t)
-	m.expect(t, renderPaths{beforeFromReplica: 1, observerRendered: 1}, 1)
+	m.expect(t, renderPaths{beforeFromReplica: 1, observerIncremental: 1}, 1)
 	sh.versions(t, write)
 }
 
@@ -914,9 +1121,11 @@ func joinedLiveWriteOf(t *testing.T, service *Service, artifactID string) *liveW
 	return write
 }
 
-// E9. A browser commit F between a transaction's two operations: the first operation's counters
-// predate F, so its update renders; the second's fork moved, so its before-rendering renders; and
-// its update takes the write's rendering exactly when F was consumed before its fork read.
+// E9. A browser commit F between a transaction's two operations: the transaction reads the
+// document once, so F never moves its fork - the second operation takes the rendering the first
+// left - and F moves the replica past that read, so the observer measures both of the write's
+// updates, whether the room consumed F before the second operation or after it. Every update
+// measured changes one paragraph, so each is spliced in.
 func TestRenderReuseAForeignCommitBetweenOperations(t *testing.T) {
 	for _, consumedFirst := range []bool{true, false} {
 		name := "F consumed later"
@@ -944,18 +1153,19 @@ func TestRenderReuseAForeignCommitBetweenOperations(t *testing.T) {
 			service.beforeObserveUpdate = nil
 			waitForLandedAppends(t, service, artifactID)
 			sh.check(t)
-			if consumedFirst {
-				m.expect(t, renderPaths{beforeFromReplica: 1, beforeRendered: 1, observerRendered: 2, observerReused: 1}, 0)
-			} else {
-				m.expect(t, renderPaths{beforeFromReplica: 1, beforeRendered: 1, observerRendered: 3}, 0)
-			}
+			// The transaction reads the document once, so F never reaches its fork: the second
+			// operation takes the rendering the first left, and both published updates are
+			// measured by the observer, since F moved the replica's foreign count past the mark
+			// that one fork read took. When the room consumes F makes no difference to either.
+			// Each update changed one paragraph, so each is spliced into the replica's markdown.
+			m.expect(t, renderPaths{beforeFromReplica: 1, beforeFromWrite: 1, observerIncremental: 3}, 0)
 			sh.versions(t, write)
 		})
 	}
 }
 
-// E10. A cold write's publish loads the room from the store, which holds the write, so every one
-// of its updates is already in the room and nothing renders it; each is no content change.
+// E10. A cold write's room loads after the write committed, from the store, which holds the
+// write, so nothing of the write reaches that room as a commit and no observer classifies it.
 func TestRenderReuseAColdWriteIsAlreadyInTheRoom(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -965,7 +1175,7 @@ func TestRenderReuseAColdWriteIsAlreadyInTheRoom(t *testing.T) {
 		{
 			name: "one operation",
 			ops:  []model.EditOp{{Op: "replace", Find: "Paragraph 18 opens", With: "Paragraph 18 now opens"}},
-			want: renderPaths{beforeRendered: 1, observerInRoom: 1},
+			want: renderPaths{beforeRendered: 1},
 		},
 		{
 			name: "two operations",
@@ -973,7 +1183,7 @@ func TestRenderReuseAColdWriteIsAlreadyInTheRoom(t *testing.T) {
 				{Op: "replace", Find: "Paragraph 18 opens", With: "Paragraph 18 now opens"},
 				{Op: "replace", Find: "Paragraph 19 opens", With: "Paragraph 19 now opens"},
 			},
-			want: renderPaths{beforeRendered: 1, beforeFromWrite: 1, observerInRoom: 2},
+			want: renderPaths{beforeRendered: 1, beforeFromWrite: 1},
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -983,7 +1193,7 @@ func TestRenderReuseAColdWriteIsAlreadyInTheRoom(t *testing.T) {
 			for _, op := range test.ops {
 				ops = append(ops, applyOps(service, artifactID, reuseAgent, op))
 			}
-			write := sh.write(t, ops...)
+			write := sh.writeThenLoad(t, ops...)
 			sh.check(t)
 			m.expect(t, test.want, 0)
 			sh.versions(t, write)
@@ -1001,7 +1211,8 @@ func TestRenderReuseAColdWriteIsAlreadyInTheRoom(t *testing.T) {
 }
 
 // E11. A cold write whose version is appended while a room load is under way meets a room whose
-// load read the head before it (roomLoad.took): its update is not in that room, so it renders.
+// load read the head before it (roomLoad.took): its update is not in that room, so it is measured,
+// and spliced in, since it changes one paragraph.
 func TestRenderReuseAColdWriteAppendedDuringALoadIsRendered(t *testing.T) {
 	service, artifactID, sh := newRenderReuseService(t)
 	entered, release := make(chan struct{}), make(chan struct{})
@@ -1047,25 +1258,23 @@ func TestRenderReuseAColdWriteAppendedDuringALoadIsRendered(t *testing.T) {
 		t.Fatalf("load the room: %v", err)
 	}
 	instance := service.instanceOf(service.srv.GetDoc(artifactID))
-	if instance == nil || instance.loadedHead >= int64(write.versions[0]) {
+	if instance == nil || instance.hold.snapshot().through >= int64(write.versions[0]) {
 		t.Fatalf("the room's load holds the write's version %d (loaded head %+v)", write.versions[0], instance)
 	}
 	ledger.publish()
 	sh.check(t)
-	m.expect(t, renderPaths{beforeRendered: 1, observerRendered: 1}, 0)
+	m.expect(t, renderPaths{beforeRendered: 1, observerIncremental: 1}, 0)
 	sh.versions(t, write)
 }
 
 // E12. A document outside the schema: a warm repair's rendering is taken and counted a change; a
 // document pushed outside the schema after the fork read renders, and WARNs, as before; a cold
-// repair is already in the room it loads.
+// repair is already in the room that loads after it committed, so nothing of it is classified.
 func TestRenderReuseADocumentOutsideTheSchema(t *testing.T) {
 	const updatedOutside = "updated document outside Proof schema"
 	captureWarnings := func(t *testing.T) *storetest.LockedLog {
 		logs := &storetest.LockedLog{}
-		previous := slog.Default()
-		slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
-		t.Cleanup(func() { slog.SetDefault(previous) })
+		logtest.SetDefault(t, slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
 		return logs
 	}
 	replaceWhole := func(service *Service, artifactID string) func(ctx context.Context) error {
@@ -1118,9 +1327,9 @@ func TestRenderReuseADocumentOutsideTheSchema(t *testing.T) {
 		closeDocumentRoom(t, service, artifactID)
 		logs := captureWarnings(t)
 		m := sh.measure()
-		write := sh.write(t, replaceWhole(service, artifactID))
+		write := sh.writeThenLoad(t, replaceWhole(service, artifactID))
 		sh.check(t)
-		m.expect(t, renderPaths{observerInRoom: 1}, 0)
+		m.expect(t, renderPaths{}, 0)
 		if stored := sh.versions(t, write); len(stored) != 1 || !stored[0] {
 			t.Errorf("content_changed = %v, want [true]", stored)
 		}
@@ -1131,8 +1340,7 @@ func TestRenderReuseADocumentOutsideTheSchema(t *testing.T) {
 }
 
 // E13. A committed warm write keeps no fork, rendering, update or published rendering: each goes
-// with the publish (finishLiveWrite). TestAColdWriteLoadsNoRoomUntilItCommits holds a cold write to
-// the same.
+// with the publish (finishLiveWrite). TestAColdWriteLoadsNoRoom holds a cold write to the same.
 func TestRenderReuseACommittedWriteKeepsNoRendering(t *testing.T) {
 	service, artifactID, sh := newWarmRenderReuseRoom(t)
 	m := sh.measure()
@@ -1140,9 +1348,9 @@ func TestRenderReuseACommittedWriteKeepsNoRendering(t *testing.T) {
 		applyOps(service, artifactID, reuseAgent, model.EditOp{Op: "replace", Find: "Paragraph 24 opens", With: "Paragraph 24 now opens"}),
 		applyOps(service, artifactID, reuseAgent, model.EditOp{Op: "replace", Find: "Paragraph 25 opens", With: "Paragraph 25 now opens"}),
 	)
-	if write.fork != nil || write.tree != nil || write.updates != nil || write.renderings != nil || write.forkMarkdown != nil {
-		t.Errorf("the committed write kept fork=%t tree=%t updates=%d renderings=%d forkMarkdown=%t",
-			write.fork != nil, write.tree != nil, len(write.updates), len(write.renderings), write.forkMarkdown != nil)
+	if write.fork != nil || write.tree != nil || write.updates != nil || write.renderings != nil || write.marginRooms != nil || write.forkMarkdown != nil {
+		t.Errorf("the committed write kept fork=%t tree=%t updates=%d renderings=%d marginRooms=%d forkMarkdown=%t",
+			write.fork != nil, write.tree != nil, len(write.updates), len(write.renderings), len(write.marginRooms), write.forkMarkdown != nil)
 	}
 	sh.check(t)
 	m.expect(t, renderPaths{beforeFromReplica: 1, beforeFromWrite: 1, observerReused: 2}, 0)
@@ -1151,8 +1359,8 @@ func TestRenderReuseACommittedWriteKeepsNoRendering(t *testing.T) {
 
 // E14. A room resident but behind the durable head (another process appended) makes the write
 // fork cold, from the store, and the publish goes into that room: a cold fork carries no
-// rendering, and the version is above the room's loaded head, so the update, which deletes text,
-// renders.
+// rendering, and the version is above the room's loaded head, so the update, which deletes text
+// in one paragraph, is measured, and spliced in.
 func TestRenderReuseARoomBehindTheHeadRendersThePublish(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "# First")
@@ -1181,6 +1389,585 @@ func TestRenderReuseARoomBehindTheHeadRendersThePublish(t *testing.T) {
 		t.Fatal("the write forked the room behind the head, so nothing here is tested")
 	}
 	sh.check(t)
-	m.expect(t, renderPaths{beforeRendered: 1, observerRendered: 1}, 0)
+	m.expect(t, renderPaths{beforeRendered: 1, observerIncremental: 1}, 0)
 	sh.versions(t, write)
+}
+
+// E15. A peer sends the room the second of its two transactions first: its structs wait for the
+// first transaction's, which the room lacks, so the room parks them and the commit integrates
+// nothing. ygo calls no update observer for that commit, but logs it with what it parked
+// (crdt.LoggedUpdate.Parked), and the room drains it right after the transaction
+// (onLoadDocument's after-transaction drain), so the replica holds what the room holds parked
+// while it waits, and the peer's update hook stores those parked bytes (onPeerUpdate). When the
+// first transaction arrives both integrate what waited behind it: the room, the replica and a
+// render of the room all hold the text of both transactions, and the commit that brought them is
+// a content change.
+func TestRenderReuseAReplicaRebuiltFromTheLogHoldsWhatTheRoomParked(t *testing.T) {
+	service, artifactID, sh := newWarmRenderReuseRoom(t)
+	live := service.srv.GetDoc(artifactID)
+	replica := service.replicaOf(live)
+	if replica == nil {
+		t.Fatal("the warm room has no replica")
+	}
+	// A log of the test's own, opened before the peer's commits, to read what each one parked:
+	// the replica's log hands its updates to the observer, which drains it.
+	parked := live.OpenUpdateLog()
+	t.Cleanup(parked.Close)
+
+	const firstText = "A paragraph the peer's first transaction wrote."
+	const secondText = "A paragraph the peer's second transaction wrote."
+	peer := newRoomPeer(t, service, artifactID, 2, reuseBob, nil)
+	before := peer.doc.StateVector()
+	peerAppendsBlock(t, peer, firstText)
+	between := peer.doc.StateVector()
+	peerAppendsBlock(t, peer, secondText)
+	first := crdt.EncodeStateAsUpdateV1(peer.doc, before)
+	second := crdt.EncodeStateAsUpdateV1(peer.doc, between)
+
+	m := sh.measure()
+	sendPeerUpdate(t, service, artifactID, live, second)
+	logged := drainOneLoggedUpdate(t, parked, "the peer's second transaction")
+	if logged.Parked == nil {
+		t.Fatal("the room logged nothing parked for an update whose structs wait for an earlier one of the same peer")
+	}
+	if waiting := live.PendingStats(); waiting.Items == 0 {
+		t.Fatal("the room parked nothing, so nothing here is tested")
+	}
+	replicaHoldsTheRoom(t, live, replica, "the peer's second transaction")
+	if rendered := roomMarkdown(t, service, artifactID); strings.Contains(rendered, firstText) || strings.Contains(rendered, secondText) {
+		t.Error("the room renders a paragraph of the peer's while the transaction that holds its place is missing")
+	}
+
+	sendPeerUpdate(t, service, artifactID, live, first)
+	integrated := drainOneLoggedUpdate(t, parked, "the peer's first transaction")
+	if integrated.Parked != nil {
+		t.Error("the commit that fills the gap parked something of its own, so nothing here is tested")
+	}
+	if waiting := live.PendingStats(); waiting.Items != 0 {
+		t.Fatalf("the room still holds %d structs parked once the first transaction arrived", waiting.Items)
+	}
+	replicaHoldsTheRoom(t, live, replica, "the peer's first transaction")
+	waitForLandedAppends(t, service, artifactID)
+	sh.check(t)
+	rendered := roomMarkdown(t, service, artifactID)
+	if !strings.Contains(rendered, firstText) || !strings.Contains(rendered, secondText) {
+		t.Error("the room's rendering is missing the text one of the peer's transactions wrote")
+	}
+	if markdown := heldReplicaMarkdown(t, replica); markdown == nil || *markdown != rendered {
+		t.Errorf("the replica renders %s and the room %d bytes", describeRendering(markdown), len(rendered))
+	}
+	// The commit that integrated what the room parked rendered two blocks more, so it changed the
+	// room's markdown; the commit that only parked changed nothing of it. ygo hands the room's
+	// persistence no update for that commit, so what is stored of it is the bytes it parked, which
+	// the peer's update hook stored as no content change.
+	if changed := storedClassOf(t, service, artifactID, integrated.Update); !changed {
+		t.Error("the commit that integrated what the room parked was not recorded as a content change")
+	}
+	if changed := storedClassOf(t, service, artifactID, logged.Parked); changed {
+		t.Error("the bytes the commit that only parked kept were recorded as a content change")
+	}
+	m.expect(t, renderPaths{observerUntouched: 1, observerRendered: 1}, 0)
+}
+
+// peerAppendsBlock writes markdown as a paragraph at the end of the peer's document, in one
+// transaction of its own, and sends the room nothing: the test sends the transactions itself, out
+// of the order they were made (sendPeerUpdate).
+func peerAppendsBlock(t *testing.T, peer *roomPeer, markdown string) {
+	t.Helper()
+	tree, err := treeOf(peer.doc)
+	if err != nil {
+		t.Fatalf("read the peer's document: %v", err)
+	}
+	want := appendBlocks(t, markdown+"\n")(tree)
+	var updateErr error
+	peer.doc.Transact(func(txn *crdt.Transaction) { updateErr = pmdoc.Update(txn, peer.fragment, want) })
+	if updateErr != nil {
+		t.Fatalf("write the peer's paragraph: %v", updateErr)
+	}
+}
+
+// sendPeerUpdate applies one of the peer's updates to the room as its connection does - through
+// the service's peer update hook (onPeerUpdate) - and returns once the room's update observer, or
+// its after-transaction drain for a commit that changed nothing, has run for it.
+func sendPeerUpdate(t *testing.T, service *Service, artifactID string, live *crdt.Doc, update []byte) {
+	t.Helper()
+	if err := service.onPeerUpdate(ygws.PeerUpdateInfo{Room: artifactID, Doc: live, Update: update, Origin: "peer"}, func() error {
+		return crdt.ApplyUpdateV1(live, update, "peer")
+	}); err != nil {
+		t.Fatalf("apply the peer's update to the room: %v", err)
+	}
+}
+
+// drainOneLoggedUpdate is the one commit log has taken since the last drain, named by what made
+// it.
+func drainOneLoggedUpdate(t *testing.T, log *crdt.UpdateLog, made string) crdt.LoggedUpdate {
+	t.Helper()
+	_, updates := log.Drain()
+	if len(updates) != 1 {
+		t.Fatalf("the room logged %d commits for %s, want 1", len(updates), made)
+	}
+	return updates[0]
+}
+
+// replicaHoldsTheRoom asserts that the replica, once it holds every logged commit, is the room,
+// read every way a drift shows in: the same state vector, the same structs and deletions parked
+// (crdt.Doc.PendingStats), the same delete set - a format cleanup the replica ran alone
+// tombstones markers the room keeps - the same tree, the same runs and marks for every text node
+// of the fragment, walked in order, and the same whole state, which carries what is parked
+// (crdt.EncodeStateAsUpdateV1). The room is read first, with nothing else writing it, so neither
+// read walks a document another holds. It stops the test at the first commit that diverges,
+// since every later one compares a replica that has already drifted.
+func replicaHoldsTheRoom(t *testing.T, live *crdt.Doc, replica *renderedReplica, after string) {
+	t.Helper()
+	if replica == nil {
+		t.Fatalf("after %s the room has no replica", after)
+	}
+	clocks, waiting, tree := live.StateVector(), live.PendingStats(), live.GetXmlFragment(fragmentName).ToXML()
+	deletes, state, want := crdt.DeleteSetFromDoc(live), crdt.EncodeStateAsUpdateV1(live, nil), allTextRuns(live)
+	doc := heldReplica(t, replica)
+	defer replica.mu.Unlock()
+	if got := doc.StateVector(); !maps.Equal(got, clocks) {
+		t.Fatalf("after %s the replica stands at state vector %v and the room at %v", after, got, clocks)
+	}
+	if got := doc.PendingStats(); got.Items != waiting.Items || got.DeleteRanges != waiting.DeleteRanges || !slices.Equal(got.MissingFor, waiting.MissingFor) {
+		t.Fatalf("after %s the replica holds %+v parked and the room %+v", after, got, waiting)
+	}
+	if got := crdt.DeleteSetFromDoc(doc); !sameDeletes(deletes, got) {
+		t.Fatalf("after %s the replica tombstones what the room does not: %s", after, deleteDifference(got, deletes))
+	}
+	if got := doc.GetXmlFragment(fragmentName).ToXML(); got != tree {
+		t.Fatalf("after %s the replica holds a tree of %d bytes and the room one of %d", after, len(got), len(tree))
+	}
+	got := allTextRuns(doc)
+	if len(got) != len(want) {
+		t.Fatalf("after %s the replica holds %d text nodes and the room %d", after, len(got), len(want))
+	}
+	for index, runs := range got {
+		if runs != want[index] {
+			t.Fatalf("after %s the replica's text node %d reads %s and the room's %s", after, index, runs, want[index])
+		}
+	}
+	if encoded := crdt.EncodeStateAsUpdateV1(doc, nil); !bytes.Equal(encoded, state) {
+		t.Fatalf("after %s the replica's whole state is %d bytes and the room's %d", after, len(encoded), len(state))
+	}
+}
+
+// forceRecover leaves the replica holding no document, so it hands the next update it is given to
+// recover (renderedReplica.recover) and starts again at the room's next commit. It clears the
+// fragment with the document, which the field's own rule asks for (renderedReplica.fragment is
+// nil with doc).
+func forceRecover(replica *renderedReplica) {
+	replica.mu.Lock()
+	defer replica.mu.Unlock()
+	replica.doc, replica.fragment = nil, nil
+}
+
+// heldReplica is the replica's document once it holds every commit the room has logged, with the
+// replica's lock held for the caller to release (renderedReplica.hold).
+func heldReplica(t *testing.T, replica *renderedReplica) *crdt.Doc {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if doc := replica.hold(); doc != nil {
+			return doc
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the replica never stood at the room's latest commit")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// heldReplicaMarkdown is the markdown of the rendering the replica keeps once it holds every
+// logged commit, or nil where it keeps none.
+func heldReplicaMarkdown(t *testing.T, replica *renderedReplica) *string {
+	t.Helper()
+	heldReplica(t, replica)
+	defer replica.mu.Unlock()
+	return replicaMarkdown(replica)
+}
+
+// storedClassOf is the content_changed the room's persistence stored for update, the very bytes
+// its commit was logged and observed with (sameUpdate).
+func storedClassOf(t *testing.T, service *Service, artifactID string, update []byte) bool {
+	t.Helper()
+	var changed bool
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select content_changed from doc_updates where artifact_id = $1 and update = $2
+	`, artifactID, update).Scan(&changed); err != nil {
+		t.Fatalf("read the stored class of a %d-byte update: %v", len(update), err)
+	}
+	return changed
+}
+
+// typingDocument is renderReuseDocument behind a section a browser types into - a paragraph, a
+// nested list, a code block, and paragraphs it splits, deletes and leaves to an agent - and ahead
+// of appendices holding deeper nested lists and more code blocks.
+func typingDocument() string {
+	var b strings.Builder
+	b.WriteString("# Typing specification\n\n")
+	b.WriteString("The typed paragraph opens the document with words a browser types into.\n\n")
+	b.WriteString("- Outer item one\n  - Nested item one holds the typing.\n  - Nested item two waits.\n- Outer item two\n\n")
+	b.WriteString("```go\nfunc typed() {}\n```\n\n")
+	b.WriteString("The split paragraph keeps its words together until the browser presses Enter in it twice.\n\n")
+	b.WriteString("The doomed paragraph is deleted by the browser.\n\n")
+	b.WriteString("The agent paragraph is rewritten by an agent.\n\n")
+	b.WriteString(renderReuseDocument())
+	for section := range 20 {
+		fmt.Fprintf(&b, "## Appendix %d\n\n- Appendix %d outer\n  - Appendix %d nested\n    - Appendix %d deeper\n\n```text\nappendix %d code\n```\n\n", section, section, section, section, section)
+	}
+	return b.String()
+}
+
+// splitParagraph is the edit Enter makes in the top-level paragraph whose text starts with
+// prefix, typed just before the word at: the words from at on move into a new paragraph after it,
+// which the browser editor stamps with a block id of its own.
+func splitParagraph(t *testing.T, prefix, at string) func(*pmdoc.Node) *pmdoc.Node {
+	t.Helper()
+	return func(tree *pmdoc.Node) *pmdoc.Node {
+		for index, block := range tree.Children {
+			if block.Type != "paragraph" || len(block.Children) != 1 || !strings.HasPrefix(block.Children[0].Text, prefix) {
+				continue
+			}
+			text := block.Children[0].Text
+			cut := strings.Index(text, " "+at)
+			if cut < 0 {
+				t.Fatalf("the paragraph %q has no word %q to split before", text, at)
+			}
+			parsed, err := pmdoc.Parse(text[cut+1:] + "\n")
+			if err != nil {
+				t.Fatalf("parse the split paragraph's tail: %v", err)
+			}
+			pmdoc.EnsureBlockIDs(parsed)
+			block.Children[0].Text = text[:cut]
+			tree.Children = slices.Insert(tree.Children, index+1, parsed.Children...)
+			return tree
+		}
+		t.Fatalf("no top-level paragraph starts %q", prefix)
+		return tree
+	}
+}
+
+// insertBlocksAfter is the edit that inserts the blocks parsed from markdown, stamped with block
+// ids as the browser editor would, after the top-level paragraph whose text starts with prefix.
+func insertBlocksAfter(t *testing.T, prefix, markdown string) func(*pmdoc.Node) *pmdoc.Node {
+	t.Helper()
+	parsed, err := pmdoc.Parse(markdown)
+	if err != nil {
+		t.Fatalf("parse inserted blocks: %v", err)
+	}
+	pmdoc.EnsureBlockIDs(parsed)
+	return func(tree *pmdoc.Node) *pmdoc.Node {
+		for index, block := range tree.Children {
+			var text strings.Builder
+			for _, run := range block.Children {
+				text.WriteString(run.Text)
+			}
+			if block.Type == "paragraph" && strings.HasPrefix(text.String(), prefix) {
+				tree.Children = slices.Insert(tree.Children, index+1, parsed.Children...)
+				return tree
+			}
+		}
+		t.Fatalf("no top-level paragraph starts %q", prefix)
+		return tree
+	}
+}
+
+// A2. A browser typing into a live room on a real-size document: words, spaces and backspaces in
+// a top-level paragraph and in a nested list item, a bold mark, two Enters, an ask block the
+// browser inserts and then types into, a block delete and a margin record, interleaved with an
+// agent's write and a forced recover. Every update's class, the room's ask blocks and their
+// authors, and the replica's markdown after every commit equal the shadow's independent whole
+// render; and the observer renders the document whole only for the edits that insert, delete or
+// split a top-level block, splicing every keystroke's block in and reading nothing for the
+// margin record.
+func TestRenderReuseABrowserTypingScript(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	sh := watchRenders(t, service, artifactID)
+	document := typingDocument()
+	if len(document) < 390<<10 {
+		t.Fatalf("the typing document is %d bytes, short of a real-size document", len(document))
+	}
+	seedServiceText(t, service, artifactID, document)
+	browser := newRoomPeer(t, service, artifactID, 1, reuseBob, nil)
+	m := sh.measure()
+
+	var spliced, untouched, enters, blockEdits, agentWrites, recovered int
+	typeAt := func(prefix string, at int, typed string) {
+		t.Helper()
+		for offset, char := range typed {
+			text := browser.text(prefix)
+			browser.send(func(txn *crdt.Transaction) { text.Insert(txn, at+offset, string(char), nil) })
+			spliced++
+		}
+	}
+	backspace := func(prefix string, at, count int) {
+		t.Helper()
+		for typed := range count {
+			text := browser.text(prefix)
+			browser.send(func(txn *crdt.Transaction) { text.Delete(txn, at-1-typed, 1) })
+			spliced++
+		}
+	}
+	const typedParagraph, nestedItem, question = "The typed paragraph", "Nested item one", "Which store backs the typing"
+
+	// Words, a space and backspaces in a top-level paragraph, then in a nested list item.
+	typeAt(typedParagraph, len(typedParagraph), " quickly")
+	backspace(typedParagraph, len(typedParagraph+" quickly"), 2)
+	typeAt(typedParagraph, len(typedParagraph+" quick"), "ly")
+	typeAt(nestedItem, len(nestedItem), " now")
+	backspace(nestedItem, len(nestedItem+" now"), 1)
+	typeAt(nestedItem, len(nestedItem+" no"), "w")
+	// A bold mark over one word.
+	text := browser.text(typedParagraph)
+	browser.send(func(txn *crdt.Transaction) {
+		text.Format(txn, len("The "), len("typed"), crdt.Attributes{"strong": map[string]any{}})
+	})
+	spliced++
+	// Enter, twice, splitting a paragraph.
+	browser.editTree(splitParagraph(t, "The split paragraph", "until"))
+	browser.editTree(splitParagraph(t, "until the browser", "presses"))
+	enters += 2
+	// An ask block the browser inserts, then types into.
+	browser.editTree(insertBlocksAfter(t, typedParagraph, ":::ask{#typed-ask urgency=\"high\" multiple=\"false\"}\n"+question+"?\n:::\n"))
+	blockEdits++
+	typeAt(question, len(question), " now")
+	// A block delete.
+	browser.editTree(dropBlock(t, "The doomed paragraph"))
+	blockEdits++
+	// An agent's write, which the browser takes in, then types after.
+	waitForLandedAppends(t, service, artifactID)
+	write := sh.write(t, applyOps(service, artifactID, reuseAgent, model.EditOp{Op: "replace", Find: "The agent paragraph is rewritten", With: "The agent paragraph was rewritten"}))
+	agentWrites++
+	if stored := sh.versions(t, write); len(stored) != 1 || !stored[0] {
+		t.Errorf("the agent's content_changed = %v, want [true]", stored)
+	}
+	browser.sync()
+	typeAt(typedParagraph, len(typedParagraph+" quickly"), ",")
+	// A margin record, which changes nothing the rendering reads.
+	marks := browser.doc.GetMap(marksMapName)
+	browser.send(func(txn *crdt.Transaction) {
+		marks.Set(txn, "c-typing", map[string]any{"kind": "comment", "by": "user:bob", "text": "a margin note"})
+	})
+	untouched++
+	// A forced recover: the replica cannot place the next keystroke, and starts again at the one
+	// after it.
+	replica := service.replicaOf(service.srv.GetDoc(artifactID))
+	forceRecover(replica)
+	text = browser.text(typedParagraph)
+	browser.send(func(txn *crdt.Transaction) { text.Insert(txn, len(typedParagraph+" quickly,"), "!", nil) })
+	recovered++
+	typeAt(nestedItem, len(nestedItem+" now"), " yes")
+
+	waitForLandedAppends(t, service, artifactID)
+	sh.check(t)
+	m.expect(t, renderPaths{
+		observerRendered:    uint64(enters + blockEdits),
+		observerIncremental: uint64(spliced),
+		observerUntouched:   uint64(untouched),
+		observerReused:      uint64(agentWrites),
+		beforeFromReplica:   uint64(agentWrites),
+	}, recovered)
+	state := service.room(artifactID)
+	state.mu.Lock()
+	author, authored := state.askAuthors["typed-ask"]
+	state.mu.Unlock()
+	if !authored || author != reuseBob {
+		t.Errorf("the room owes the browser's ask block to %#v (recorded %t), want %#v", author, authored, reuseBob)
+	}
+}
+
+// A3. A splice's walk of the ask blocks the layout flags reads each of those blocks; one it
+// cannot read leaves the room's ask blocks and their authors as they are, as an update whose own
+// render failed does, rather than taking an empty set for the room's record and forgetting every
+// author. No update can leave the room an unreadable flagged block - a change that broke one
+// would touch it, so the update carrying it is rendered whole and the layout recorded afresh -
+// so the test breaks the block in the replica's own copy, the one the walk reads, after the
+// layout that flags it was recorded.
+func TestRenderReuseAnUnreadableAskBlockKeepsTheRoomsAskAuthors(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "The typed paragraph opens the document.\n\nThe last paragraph closes it.\n")
+	browser := newRoomPeer(t, service, artifactID, 1, reuseBob, nil)
+	browser.editTree(insertBlocksAfter(t, "The typed paragraph",
+		":::ask{#unreadable-ask urgency=\"high\" multiple=\"false\"}\nWhich option does the room take?\n:::\n"))
+	waitForLandedAppends(t, service, artifactID)
+	state := service.room(artifactID)
+	state.mu.Lock()
+	blocks, authors := maps.Clone(state.askBlocks), maps.Clone(state.askAuthors)
+	state.mu.Unlock()
+	if _, recorded := blocks["unreadable-ask"]; !recorded || authors["unreadable-ask"] != reuseBob {
+		t.Fatalf("the room records ask blocks %v with authors %v, want the browser's ask block credited to it", sortedIDs(blocks), authors)
+	}
+
+	// The replica's own ask block is given a chain deeper than a document in the schema nests, so
+	// pmdoc.ReadBlockForRendering refuses it. The replica's next update resets what
+	// noteChangedTypes recorded for this transaction (renderedReplica.observe), so the keystroke
+	// below is still measured as touching its own block alone.
+	replica := service.replicaOf(service.srv.GetDoc(artifactID))
+	replica.mu.Lock()
+	ask := topLevelAskElement(t, replica.fragment)
+	replica.doc.Transact(func(txn *crdt.Transaction) {
+		docstest.WriteDeepChain(txn, &ask.YXmlFragment, pmdoc.MaxTreeDepth+1, "deeper than the schema nests")
+	})
+	replica.mu.Unlock()
+
+	before := readRenderPaths(service)
+	text := browser.text("The last paragraph")
+	browser.send(func(txn *crdt.Transaction) { text.Insert(txn, len("The last paragraph"), " still", nil) })
+	waitForLandedAppends(t, service, artifactID)
+	if paths := readRenderPaths(service).minus(before).withoutCatchUps(); paths != (renderPaths{observerIncremental: 1}) {
+		t.Fatalf("the keystroke took the paths %+v, want one incremental render", paths)
+	}
+	state.mu.Lock()
+	keptBlocks, keptAuthors := maps.Clone(state.askBlocks), maps.Clone(state.askAuthors)
+	state.mu.Unlock()
+	if !maps.Equal(keptBlocks, blocks) || !maps.Equal(keptAuthors, authors) {
+		t.Errorf("after the keystroke the room records ask blocks %v with authors %v, want %v with %v",
+			sortedIDs(keptBlocks), keptAuthors, sortedIDs(blocks), authors)
+	}
+}
+
+// topLevelAskElement is the one ask block among fragment's top-level blocks.
+func topLevelAskElement(t *testing.T, fragment *crdt.YXmlFragment) *crdt.YXmlElement {
+	t.Helper()
+	for _, child := range fragment.Children() {
+		if element, isElement := child.(*crdt.YXmlElement); isElement && element.NodeName == "ask" {
+			return element
+		}
+	}
+	t.Fatal("the document holds no top-level ask block")
+	return nil
+}
+
+// A4. A room's replica takes, as its base's, the rendering the room's load made of the state the
+// replica starts from, in place of rendering that base again, when its first run starts while the
+// rendering is still there; a collection since the load, or a recover, leaves the run to render its
+// base. Either way the replica equals the shadow's independent render after every commit. Each case
+// that needs the load's rendering alive turns the collector off from just before the load until the
+// replica has started (pauseCollections), since the replica holds the rendering only weakly and a
+// collection in between would otherwise decide the counts; the collector runs again before the
+// shadow renders, so a race build's memory does not grow through the whole test.
+func TestRenderReuseACatchUpTakesTheLoadsRendering(t *testing.T) {
+	t.Run("the first commit takes the load's rendering", func(t *testing.T) {
+		service, artifactID, sh := newRenderReuseService(t)
+		m := sh.measure()
+		resume := pauseCollections(t)
+		replica := loadRoomForCatchUp(t, service, artifactID)
+		if heldLoadRendering(replica) == nil {
+			t.Fatal("the replica holds no rendering of the load before its first commit")
+		}
+		firstCatchUpCommit(t, service, artifactID, sh, m, resume)
+		expectCatchUps(t, m, 1, 0)
+		if heldLoadRendering(replica) != nil {
+			t.Error("the replica still holds the load's rendering after its first run")
+		}
+	})
+	t.Run("a collection before the first commit leaves it to render", func(t *testing.T) {
+		service, artifactID, sh := newRenderReuseService(t)
+		m := sh.measure()
+		replica := loadRoomForCatchUp(t, service, artifactID)
+		runtime.GC()
+		if heldLoadRendering(replica) != nil {
+			t.Fatal("the load's rendering outlived a collection, so something holds it strongly")
+		}
+		firstCatchUpCommit(t, service, artifactID, sh, m, func() {})
+		expectCatchUps(t, m, 0, 1)
+	})
+	t.Run("a run after a recover renders", func(t *testing.T) {
+		service, artifactID, sh := newRenderReuseService(t)
+		m := sh.measure()
+		resume := pauseCollections(t)
+		replica := loadRoomForCatchUp(t, service, artifactID)
+		firstCatchUpCommit(t, service, artifactID, sh, m, resume)
+		expectCatchUps(t, m, 1, 0)
+		m = sh.measure()
+		// As E8 does: a replica that holds no document hands the next update to recover.
+		forceRecover(replica)
+		editAsConnectedPeer(t, service, artifactID, 2, reuseBob, appendBlocks(t, "A paragraph the recovering replica could not place.\n"))
+		waitForLandedAppends(t, service, artifactID)
+		editAsConnectedPeer(t, service, artifactID, 3, reuseBob, replaceRun("Paragraph 1 opens", "Paragraph 1 first opens"))
+		waitForLandedAppends(t, service, artifactID)
+		sh.check(t)
+		m.expect(t, renderPaths{observerIncremental: 1}, 1)
+		expectCatchUps(t, m, 0, 1)
+	})
+	t.Run("a recover before the first run drops the load's rendering", func(t *testing.T) {
+		service, artifactID, sh := newRenderReuseService(t)
+		m := sh.measure()
+		resume := pauseCollections(t)
+		replica := loadRoomForCatchUp(t, service, artifactID)
+		if heldLoadRendering(replica) == nil {
+			t.Fatal("the replica holds no rendering of the load before its first commit")
+		}
+		replica.mu.Lock()
+		replica.recover(artifactID, nil, nil)
+		replica.mu.Unlock()
+		resume()
+		if heldLoadRendering(replica) != nil {
+			t.Fatal("the recovered replica still holds the load's rendering")
+		}
+		firstCatchUpCommit(t, service, artifactID, sh, m, func() {})
+		expectCatchUps(t, m, 0, 1)
+	})
+}
+
+// pauseCollections turns the garbage collector off until the answered resume is called, or t
+// ends, so nothing collects the load's rendering, which the replica holds only weakly, before the
+// test's first commit has started the replica.
+func pauseCollections(t *testing.T) (resume func()) {
+	t.Helper()
+	previous := debug.SetGCPercent(-1)
+	var once sync.Once
+	resume = func() { once.Do(func() { debug.SetGCPercent(previous) }) }
+	t.Cleanup(resume)
+	return resume
+}
+
+// loadRoomForCatchUp loads artifactID's room, committing nothing, and answers its replica, which
+// has not started.
+func loadRoomForCatchUp(t *testing.T, service *Service, artifactID string) *renderedReplica {
+	t.Helper()
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load the room: %v", err)
+	}
+	replica := service.replicaOf(service.srv.GetDoc(artifactID))
+	if replica == nil {
+		t.Fatal("the loaded room has no replica")
+	}
+	replica.mu.Lock()
+	defer replica.mu.Unlock()
+	if replica.doc != nil {
+		t.Fatal("the room committed during its load, so its replica has started")
+	}
+	return replica
+}
+
+// heldLoadRendering is the load's rendering replica still holds, or nil.
+func heldLoadRendering(replica *renderedReplica) *replicaRendering {
+	replica.mu.Lock()
+	defer replica.mu.Unlock()
+	return replica.loaded.Value()
+}
+
+// firstCatchUpCommit makes the loaded room's first commit, a browser's edit of one paragraph,
+// which starts the replica and is spliced in, calls resume once that commit has landed, and checks
+// the replica against the shadow.
+func firstCatchUpCommit(t *testing.T, service *Service, artifactID string, sh *renderShadow, m renderMeasure, resume func()) {
+	t.Helper()
+	editAsConnectedPeer(t, service, artifactID, 1, reuseBob, replaceRun("Paragraph 0 opens", "Paragraph 0 first opens"))
+	waitForLandedAppends(t, service, artifactID)
+	resume()
+	sh.check(t)
+	m.expect(t, renderPaths{observerIncremental: 1}, 0)
+}
+
+// expectCatchUps asserts how many replica runs took the load's rendering and how many rendered
+// their base since m.
+func expectCatchUps(t *testing.T, m renderMeasure, fromLoad, rendered uint64) {
+	t.Helper()
+	if got := m.since(); got.catchUpFromLoad != fromLoad || got.catchUpRendered != rendered {
+		t.Errorf("catch-ups: %d from the load, %d rendered; want %d and %d", got.catchUpFromLoad, got.catchUpRendered, fromLoad, rendered)
+	}
 }

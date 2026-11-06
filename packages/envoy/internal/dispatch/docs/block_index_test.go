@@ -95,10 +95,11 @@ func blockIndexAt(t *testing.T, database *store.Store, artifactID string) *int {
 	return version
 }
 
-// reconcileBlockIndex runs one tick of a loop that has found no document live ahead before.
+// reconcileBlockIndex runs one tick of a loop that has found no document live ahead before,
+// from cursor over the owed documents and from the start for every other of the tick's reads.
 func reconcileBlockIndex(t *testing.T, service *Service, cursor string) BlockIndexTick {
 	t.Helper()
-	tick, err := service.ReconcileBlockIndex(context.Background(), cursor, liveAheadDocuments{})
+	tick, err := service.ReconcileBlockIndex(context.Background(), BlockIndexCursors{Documents: cursor}, liveAheadDocuments{})
 	if err != nil {
 		t.Fatalf("block index tick: %v", err)
 	}
@@ -203,7 +204,7 @@ func TestBlockIndexIndexesAnOwedDocument(t *testing.T) {
 	}
 
 	tick := reconcileBlockIndex(t, service, "")
-	if tick.Documents != 1 || tick.LiveAhead != 0 || tick.OwedDocuments != 0 || tick.Full || tick.Cursor != "" {
+	if tick.Documents != 1 || tick.LiveAhead != 0 || tick.OwedDocuments != 0 || tick.Full || tick.Cursor.Documents != "" {
 		t.Fatalf("tick = %#v, want the one document indexed and nothing owed", tick)
 	}
 	if version := blockIndexAt(t, database, spec); version == nil || *version != 1 {
@@ -1299,11 +1300,11 @@ func TestBlockIndexIsNotHeldByDocumentsItSkips(t *testing.T) {
 	settle(t, database, last)
 
 	first := reconcileBlockIndex(t, service, "")
-	if first.Documents != 0 || first.LiveAhead != blockIndexDocumentBatch || !first.Full || first.Cursor != skipped[blockIndexDocumentBatch-1] {
+	if first.Documents != 0 || first.LiveAhead != blockIndexDocumentBatch || !first.Full || first.Cursor.Documents != skipped[blockIndexDocumentBatch-1] {
 		t.Fatalf("first tick = %#v, want a full batch of skipped documents and the cursor past them", first)
 	}
-	second := reconcileBlockIndex(t, service, first.Cursor)
-	if second.Documents != 1 || second.LiveAhead != len(skipped)-blockIndexDocumentBatch || second.Full || second.Cursor != "" || second.OwedDocuments != len(skipped) {
+	second := reconcileBlockIndex(t, service, first.Cursor.Documents)
+	if second.Documents != 1 || second.LiveAhead != len(skipped)-blockIndexDocumentBatch || second.Full || second.Cursor.Documents != "" || second.OwedDocuments != len(skipped) {
 		t.Fatalf("second tick = %#v, want the last document indexed past the skipped ones, which stay owed", second)
 	}
 	if version := blockIndexAt(t, database, last); version == nil || *version != 1 {
@@ -1314,7 +1315,7 @@ func TestBlockIndexIsNotHeldByDocumentsItSkips(t *testing.T) {
 			t.Fatalf("skipped document %s indexed at %d, want it owed", id, *version)
 		}
 	}
-	if again := reconcileBlockIndex(t, service, second.Cursor); again.LiveAhead != blockIndexDocumentBatch || again.Documents != 0 {
+	if again := reconcileBlockIndex(t, service, second.Cursor.Documents); again.LiveAhead != blockIndexDocumentBatch || again.Documents != 0 {
 		t.Fatalf("third tick = %#v, want the batch to start over at the skipped documents", again)
 	}
 }
@@ -1338,7 +1339,7 @@ func TestBlockIndexDoesNotRereadALiveAheadDocumentUntilItMoves(t *testing.T) {
 	liveAhead := liveAheadDocuments{}
 	tick := func() BlockIndexTick {
 		t.Helper()
-		tick, err := service.ReconcileBlockIndex(ctx, "", liveAhead)
+		tick, err := service.ReconcileBlockIndex(ctx, BlockIndexCursors{}, liveAhead)
 		if err != nil {
 			t.Fatalf("block index tick: %v", err)
 		}
@@ -1424,7 +1425,7 @@ func TestBlockIndexRereadsALiveAheadDocumentWhoseIssueCloses(t *testing.T) {
 	spec := createOwedDocument(t, database, service, "", "spec", "Live text.\n", "Earlier text.\n")
 	closeDocumentRoom(t, service, spec)
 	liveAhead := liveAheadDocuments{}
-	first, err := service.ReconcileBlockIndex(ctx, "", liveAhead)
+	first, err := service.ReconcileBlockIndex(ctx, BlockIndexCursors{}, liveAhead)
 	if err != nil {
 		t.Fatalf("block index tick: %v", err)
 	}
@@ -1434,7 +1435,7 @@ func TestBlockIndexRereadsALiveAheadDocumentWhoseIssueCloses(t *testing.T) {
 	if _, err := database.Pool.Exec(ctx, `update issues set closed_at = now() where key = 'CORE-1'`); err != nil {
 		t.Fatalf("close CORE-1: %v", err)
 	}
-	second, err := service.ReconcileBlockIndex(ctx, "", liveAhead)
+	second, err := service.ReconcileBlockIndex(ctx, BlockIndexCursors{}, liveAhead)
 	if err != nil {
 		t.Fatalf("block index tick: %v", err)
 	}
@@ -1467,7 +1468,7 @@ func TestBlockIndexRemembersNoLiveAheadDocumentItListedClosed(t *testing.T) {
 	setClosed(true)
 	service.afterBlockIndexListed = func() { setClosed(false) }
 	liveAhead := liveAheadDocuments{}
-	first, err := service.ReconcileBlockIndex(ctx, "", liveAhead)
+	first, err := service.ReconcileBlockIndex(ctx, BlockIndexCursors{}, liveAhead)
 	service.afterBlockIndexListed = nil
 	if err != nil {
 		t.Fatalf("block index tick: %v", err)
@@ -1479,7 +1480,7 @@ func TestBlockIndexRemembersNoLiveAheadDocumentItListedClosed(t *testing.T) {
 		t.Errorf("the loop remembers %#v, which it listed with its issue closed, want nothing", found)
 	}
 	setClosed(true)
-	second, err := service.ReconcileBlockIndex(ctx, "", liveAhead)
+	second, err := service.ReconcileBlockIndex(ctx, BlockIndexCursors{}, liveAhead)
 	if err != nil {
 		t.Fatalf("block index tick: %v", err)
 	}
@@ -1718,7 +1719,7 @@ func TestADrainedItemKeepsAConcurrentEdit(t *testing.T) {
 	var tick BlockIndexTick
 	go func() {
 		var err error
-		tick, err = service.ReconcileBlockIndex(ctx, "", liveAheadDocuments{})
+		tick, err = service.ReconcileBlockIndex(ctx, BlockIndexCursors{}, liveAheadDocuments{})
 		ticked <- err
 	}()
 	waitForLockWait(t, ctx, database, "%from comments where id%", ticked)
@@ -1736,7 +1737,7 @@ func TestADrainedItemKeepsAConcurrentEdit(t *testing.T) {
 	if tick.Items != 1 || tick.OwedItems != 1 {
 		t.Fatalf("tick beside the edit = %#v, want the comment indexed and still owed for the edit", tick)
 	}
-	next, err := service.ReconcileBlockIndex(ctx, "", liveAheadDocuments{})
+	next, err := service.ReconcileBlockIndex(ctx, BlockIndexCursors{}, liveAheadDocuments{})
 	if err != nil {
 		t.Fatalf("second tick: %v", err)
 	}
@@ -1750,5 +1751,477 @@ func TestADrainedItemKeepsAConcurrentEdit(t *testing.T) {
 	err = database.Pool.QueryRow(ctx, `select true from block_grammar_owed where id = $1::uuid`, comment).Scan(&stillOwed)
 	if !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("the comment is still owed (%v), want its owed row gone", err)
+	}
+}
+
+// itemBlockRow is one block of a comment or message as stored: a message's has changed revision 0.
+type itemBlockRow struct {
+	ID              string
+	Position        *int
+	ChangedRevision int
+	ChangedAt       time.Time
+	MadeAt          *time.Time
+	RemovedAt       *time.Time
+}
+
+// itemBlocksOf is every block comment or message id ever held, by block id.
+func itemBlocksOf(t *testing.T, database *store.Store, kind, id string) map[string]itemBlockRow {
+	t.Helper()
+	query := `select block_id, position, changed_revision, changed_at, made_at, removed_at
+		from comment_blocks where comment_id = $1::uuid`
+	if kind == "message" {
+		query = `select block_id, position, 0, changed_at, made_at, removed_at
+			from message_blocks where message_id = $1::uuid`
+	}
+	rows, err := database.Pool.Query(context.Background(), query, id)
+	if err != nil {
+		t.Fatalf("read the blocks of %s %s: %v", kind, id, err)
+	}
+	found, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (itemBlockRow, error) {
+		var block itemBlockRow
+		err := row.Scan(&block.ID, &block.Position, &block.ChangedRevision, &block.ChangedAt, &block.MadeAt, &block.RemovedAt)
+		return block, err
+	})
+	if err != nil {
+		t.Fatalf("scan the blocks of %s %s: %v", kind, id, err)
+	}
+	blocks := make(map[string]itemBlockRow, len(found))
+	for _, block := range found {
+		blocks[block.ID] = block
+	}
+	return blocks
+}
+
+// itemBlockRefsOf is each link a block of comment or message id holds, as "<block id> <to kind>
+// <to id>", with its created_at.
+func itemBlockRefsOf(t *testing.T, database *store.Store, kind, id string) map[string]time.Time {
+	t.Helper()
+	rows, err := database.Pool.Query(context.Background(), `
+		select block_id || ' ' || to_kind || ' ' || to_id, created_at from `+kind+`_block_refs where `+kind+`_id = $1::uuid
+	`, id)
+	if err != nil {
+		t.Fatalf("read the block links of %s %s: %v", kind, id, err)
+	}
+	defer rows.Close()
+	links := map[string]time.Time{}
+	for rows.Next() {
+		var link string
+		var at time.Time
+		if err := rows.Scan(&link, &at); err != nil {
+			t.Fatalf("scan a block link of %s %s: %v", kind, id, err)
+		}
+		links[link] = at
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the block links of %s %s: %v", kind, id, err)
+	}
+	return links
+}
+
+// checkItemBlock fails unless the block is current at position, last changed at revision and at,
+// and made at madeAt.
+func checkItemBlock(t *testing.T, label string, blocks map[string]itemBlockRow, id string, position, revision int, at, madeAt time.Time) {
+	t.Helper()
+	block, ok := blocks[id]
+	if !ok || block.Position == nil || *block.Position != position || block.ChangedRevision != revision ||
+		!block.ChangedAt.Equal(at) || block.MadeAt == nil || !block.MadeAt.Equal(madeAt) || block.RemovedAt != nil {
+		t.Fatalf("%s block %s = %#v (found %v), want current at position %d, changed at revision %d at %s, made at %s",
+			label, id, block, ok, position, revision, at, madeAt)
+	}
+}
+
+// A comment, an issue message and a direct message a build without item blocks inserted, and a
+// comment it edited after this build indexed it, are owed their blocks by the triggers, which no
+// write of theirs cleared. One tick indexes each, at the time its body was written (a comment's
+// coalesce(edited_at, created_at), a message's created_at): its blocks, the links each holds, and
+// for the comment and the issue message their own references; the direct message holds no link.
+// The edit is indexed at the comment's next revision under ids aligned with the ones it held: the
+// moved blocks keep theirs and their changed revision, the reworded block keeps its id at the new
+// revision, and the new block takes the next id. Nothing is left owed.
+func TestTheBlockIndexIndexesItemsAnOlderBuildWrote(t *testing.T) {
+	database, service := blockIndexService(t)
+	ctx := context.Background()
+	commentAt := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	messageAt := time.Date(2026, 3, 5, 6, 7, 8, 0, time.UTC)
+	directAt := time.Date(2026, 3, 6, 7, 8, 9, 0, time.UTC)
+	editedFirstAt := time.Date(2026, 3, 7, 8, 9, 10, 0, time.UTC)
+	editedAt := time.Date(2026, 3, 8, 9, 10, 11, 0, time.UTC)
+	insert := func(label, query string, args ...any) string {
+		t.Helper()
+		var id string
+		if err := database.Pool.QueryRow(ctx, query, args...).Scan(&id); err != nil {
+			t.Fatalf("write the %s: %v", label, err)
+		}
+		return id
+	}
+	comment := insert("comment", `
+		insert into comments (issue_key, author, body, created_at)
+		values ('CORE-1', '{"kind":"user","id":"alice"}', E'First paragraph.\n\nSecond cites dispatch://CORE-2.', $1)
+		returning id::text`, commentAt)
+	message := insert("issue message", `
+		insert into messages (issue_key, author, body, created_at)
+		values ('CORE-1', '{"kind":"user","id":"alice"}', 'Read dispatch://CORE-2 now.', $1)
+		returning id::text`, messageAt)
+	direct := insert("direct message", `
+		insert into messages (author, body, target, created_at)
+		values ('{"kind":"user","id":"alice"}', E'Hello there.\n\nSee dispatch://CORE-2.', 'session:s1', $1)
+		returning id::text`, directAt)
+	edited := insert("comment to edit", `
+		insert into comments (issue_key, author, body, created_at)
+		values ('CORE-1', '{"kind":"user","id":"alice"}', E'Alpha.\n\nBeta.\n\nGamma.', $1)
+		returning id::text`, editedFirstAt)
+
+	if tick := reconcileBlockIndex(t, service, ""); tick.ItemBlocks != 4 || tick.OwedItemBlocks != 0 || tick.Items != 0 {
+		t.Fatalf("first tick = %#v, want the four items' blocks indexed and none owed", tick)
+	}
+	blocks := itemBlocksOf(t, database, "comment", comment)
+	if len(blocks) != 2 {
+		t.Fatalf("comment blocks = %#v, want two", blocks)
+	}
+	checkItemBlock(t, "comment", blocks, "b1", 0, 1, commentAt, commentAt)
+	checkItemBlock(t, "comment", blocks, "b2", 1, 1, commentAt, commentAt)
+	if links := itemBlockRefsOf(t, database, "comment", comment); len(links) != 1 || !links["b2 issue CORE-2"].Equal(commentAt) {
+		t.Fatalf("comment block links = %#v, want b2's link to CORE-2 at %s", links, commentAt)
+	}
+	if got := refsFrom(t, database, "comment", comment); len(got) != 1 || got[0].ToID != "CORE-2" || !got[0].CreatedAt.Equal(commentAt) || got[0].SourceSeq != nil {
+		t.Fatalf("refs from the comment = %#v, want one edge to CORE-2 at %s by no event", got, commentAt)
+	}
+	blocks = itemBlocksOf(t, database, "message", message)
+	if len(blocks) != 1 {
+		t.Fatalf("message blocks = %#v, want one", blocks)
+	}
+	checkItemBlock(t, "message", blocks, "b1", 0, 0, messageAt, messageAt)
+	if links := itemBlockRefsOf(t, database, "message", message); len(links) != 1 || !links["b1 issue CORE-2"].Equal(messageAt) {
+		t.Fatalf("message block links = %#v, want b1's link to CORE-2 at %s", links, messageAt)
+	}
+	if got := refsFrom(t, database, "message", message); len(got) != 1 || got[0].ToID != "CORE-2" || !got[0].CreatedAt.Equal(messageAt) {
+		t.Fatalf("refs from the message = %#v, want one edge to CORE-2 at %s", got, messageAt)
+	}
+	blocks = itemBlocksOf(t, database, "message", direct)
+	if len(blocks) != 2 {
+		t.Fatalf("direct message blocks = %#v, want two", blocks)
+	}
+	checkItemBlock(t, "direct message", blocks, "b1", 0, 0, directAt, directAt)
+	checkItemBlock(t, "direct message", blocks, "b2", 1, 0, directAt, directAt)
+	if links := itemBlockRefsOf(t, database, "message", direct); len(links) != 0 {
+		t.Fatalf("direct message block links = %#v, want none", links)
+	}
+	if got := refsFrom(t, database, "message", direct); len(got) != 0 {
+		t.Fatalf("refs from the direct message = %#v, want none", got)
+	}
+	blocks = itemBlocksOf(t, database, "comment", edited)
+	if len(blocks) != 3 {
+		t.Fatalf("blocks of the comment to edit = %#v, want three", blocks)
+	}
+	for position, id := range []string{"b1", "b2", "b3"} {
+		checkItemBlock(t, "comment to edit", blocks, id, position, 1, editedFirstAt, editedFirstAt)
+	}
+
+	// The older build's edit moves Gamma first, rewords Beta and adds Delta.
+	if _, err := database.Pool.Exec(ctx, `
+		update comments set body = E'Gamma.\n\nAlpha.\n\nBeta, reworded, cites dispatch://CORE-2.\n\nDelta.', edited_at = $2
+		where id = $1::uuid
+	`, edited, editedAt); err != nil {
+		t.Fatalf("edit the comment: %v", err)
+	}
+	if tick := reconcileBlockIndex(t, service, ""); tick.ItemBlocks != 1 || tick.OwedItemBlocks != 0 {
+		t.Fatalf("tick after the edit = %#v, want the edited comment's blocks indexed and none owed", tick)
+	}
+	blocks = itemBlocksOf(t, database, "comment", edited)
+	if len(blocks) != 4 {
+		t.Fatalf("blocks of the edited comment = %#v, want four", blocks)
+	}
+	checkItemBlock(t, "edited comment", blocks, "b3", 0, 1, editedFirstAt, editedFirstAt)
+	checkItemBlock(t, "edited comment", blocks, "b1", 1, 1, editedFirstAt, editedFirstAt)
+	checkItemBlock(t, "edited comment", blocks, "b2", 2, 2, editedAt, editedFirstAt)
+	checkItemBlock(t, "edited comment", blocks, "b4", 3, 2, editedAt, editedAt)
+	var revision, next int
+	var owedAt *time.Time
+	if err := database.Pool.QueryRow(ctx, `
+		select revision, next_block, owed_at from comment_block_state where comment_id = $1::uuid
+	`, edited).Scan(&revision, &next, &owedAt); err != nil {
+		t.Fatalf("read the edited comment's block state: %v", err)
+	}
+	if revision != 2 || next != 5 || owedAt != nil {
+		t.Fatalf("edited comment's state = revision %d, next block %d, owed at %v; want revision 2, next block 5, not owed", revision, next, owedAt)
+	}
+	if links := itemBlockRefsOf(t, database, "comment", edited); len(links) != 1 || !links["b2 issue CORE-2"].Equal(editedAt) {
+		t.Fatalf("edited comment block links = %#v, want b2's link to CORE-2 at %s", links, editedAt)
+	}
+	if got := refsFrom(t, database, "comment", edited); len(got) != 1 || got[0].ToID != "CORE-2" || !got[0].CreatedAt.Equal(editedAt) {
+		t.Fatalf("refs from the edited comment = %#v, want one edge to CORE-2 at %s", got, editedAt)
+	}
+
+	if again := reconcileBlockIndex(t, service, ""); again.ItemBlocks != 0 || again.OwedItemBlocks != 0 {
+		t.Fatalf("third tick = %#v, want nothing owed", again)
+	}
+}
+
+// A comment or message rebuild-refs marks owed, already indexed, is re-indexed by the next tick
+// with nothing about its blocks changed: the same ids at the same revision.
+func TestTheBlockIndexReindexesItemsRebuildRefsOwed(t *testing.T) {
+	database, service := blockIndexService(t)
+	ctx := context.Background()
+	var comment string
+	if err := database.Pool.QueryRow(ctx, `
+		insert into comments (issue_key, author, body)
+		values ('CORE-1', '{"kind":"user","id":"alice"}', E'One.\n\nTwo cites dispatch://CORE-2.')
+		returning id::text
+	`).Scan(&comment); err != nil {
+		t.Fatalf("write the comment: %v", err)
+	}
+	if tick := reconcileBlockIndex(t, service, ""); tick.ItemBlocks != 1 {
+		t.Fatalf("first tick = %#v, want the comment indexed", tick)
+	}
+	before := itemBlocksOf(t, database, "comment", comment)
+	report, err := refs.RebuildAll(ctx, database.Pool, "https://dispatch.example")
+	if err != nil {
+		t.Fatalf("rebuild refs: %v", err)
+	}
+	if report.ItemsOwed != 1 {
+		t.Fatalf("rebuild report = %#v, want the one comment owed", report)
+	}
+	if tick := reconcileBlockIndex(t, service, ""); tick.ItemBlocks != 1 || tick.OwedItemBlocks != 0 {
+		t.Fatalf("tick after rebuild-refs = %#v, want the comment indexed and none owed", tick)
+	}
+	if after := itemBlocksOf(t, database, "comment", comment); !reflect.DeepEqual(after, before) {
+		t.Fatalf("re-indexing changed the comment's blocks: %#v -> %#v", before, after)
+	}
+	var revision int
+	if err := database.Pool.QueryRow(ctx, `select revision from comment_block_state where comment_id = $1::uuid`, comment).Scan(&revision); err != nil || revision != 1 {
+		t.Fatalf("revision after the re-index = %d (%v), want 1", revision, err)
+	}
+}
+
+// windowsOf is each embeddings window row of owner ownerKey of kind kind, by id, with the
+// blocks it covers.
+func windowsOf(t *testing.T, database *store.Store, kind, ownerKey string) map[string][]string {
+	t.Helper()
+	rows, err := database.Pool.Query(context.Background(), `
+		select id, covers from embeddings where kind = $1 and split_part(id, '#', 1) = $2
+	`, kind, ownerKey)
+	if err != nil {
+		t.Fatalf("read the windows of %s %s: %v", kind, ownerKey, err)
+	}
+	defer rows.Close()
+	windows := map[string][]string{}
+	for rows.Next() {
+		var id string
+		var covers []string
+		if err := rows.Scan(&id, &covers); err != nil {
+			t.Fatalf("scan a window of %s %s: %v", kind, ownerKey, err)
+		}
+		windows[id] = covers
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the windows of %s %s: %v", kind, ownerKey, err)
+	}
+	return windows
+}
+
+// seedItemsWithBlocks writes one comment, one issue message and one ask of CORE-1 and returns
+// their ids, in that order.
+func seedItemsWithBlocks(t *testing.T, database *store.Store) (comment, message, ask string) {
+	t.Helper()
+	ctx := context.Background()
+	for _, item := range []struct {
+		into *string
+		sql  string
+	}{
+		{&comment, `insert into comments (issue_key, author, body)
+			values ('CORE-1', '{"kind":"user","id":"alice"}', E'The first paragraph.\n\nThe second paragraph.') returning id::text`},
+		{&message, `insert into messages (issue_key, author, body)
+			values ('CORE-1', '{"kind":"user","id":"alice"}', 'A message of one block.') returning id::text`},
+		{&ask, `insert into asks (issue_key, author, question, options)
+			values ('CORE-1', '{"kind":"session","id":"asker"}', 'Which region?', '[{"label":"eu"}]') returning id::text`},
+	} {
+		if err := database.Pool.QueryRow(ctx, item.sql).Scan(item.into); err != nil {
+			t.Fatalf("seed an item: %v", err)
+		}
+	}
+	return comment, message, ask
+}
+
+// A document, a comment, a message and an ask whose blocks are indexed and whose windows are
+// not - every item written before meaning search moved to windows - take their windows from one
+// tick, and a tick after it rewrites none of them.
+func TestAnItemWrittenBeforeThisChangeGetsWindowsFromOnePass(t *testing.T) {
+	database, service := blockIndexService(t)
+	ctx := context.Background()
+	document := createOwedDocument(t, database, service, "", "notes", "# Notes\n\nA paragraph of the document.\n", "")
+	settle(t, database, document)
+	comment, message, ask := seedItemsWithBlocks(t, database)
+	if tick := reconcileBlockIndex(t, service, ""); tick.Documents != 1 || tick.ItemBlocks != 3 {
+		t.Fatalf("first tick = %#v, want the document and the three items indexed", tick)
+	}
+	owners := map[string]string{
+		refs.DocumentWindowKind: document,
+		"comment_block":         "comment/" + comment,
+		"message_block":         "message/" + message,
+		"ask_part":              "ask/" + ask,
+	}
+	for kind, owner := range owners {
+		if windows := windowsOf(t, database, kind, owner); len(windows) == 0 {
+			t.Fatalf("%s %s holds no window after its own index", kind, owner)
+		}
+	}
+	// Every window row as a build before this change left it: none.
+	if _, err := database.Pool.Exec(ctx, `
+		delete from embeddings where kind in ('document_block', 'comment_block', 'message_block', 'ask_part')
+	`); err != nil {
+		t.Fatalf("delete the windows: %v", err)
+	}
+
+	tick := reconcileBlockIndex(t, service, "")
+	if tick.Windows != 4 {
+		t.Fatalf("the window arm gave windows to %d owners (%#v), want the document, the comment, the message and the ask", tick.Windows, tick)
+	}
+	windows := map[string]map[string][]string{}
+	for kind, owner := range owners {
+		windows[kind] = windowsOf(t, database, kind, owner)
+		if len(windows[kind]) == 0 {
+			t.Errorf("%s %s holds no window after one drift pass", kind, owner)
+		}
+		for id, covers := range windows[kind] {
+			if len(covers) == 0 {
+				t.Errorf("window %s covers no block", id)
+			}
+		}
+	}
+	if next := reconcileBlockIndex(t, service, ""); next.Windows != 0 {
+		t.Fatalf("the next tick windowed %d owners (%#v), want none left", next.Windows, next)
+	}
+	for kind, owner := range owners {
+		if got := windowsOf(t, database, kind, owner); !reflect.DeepEqual(got, windows[kind]) {
+			t.Errorf("the windows of %s %s moved: %v -> %v", kind, owner, windows[kind], got)
+		}
+	}
+}
+
+// An edit a build without the window path makes during the deploy re-indexes an item's blocks
+// and writes no window, and the migrations have dropped the trigger that would have noticed.
+// The windows left behind hold the old text and cover blocks the item may no longer have, and
+// the tick would delete the whole-text row standing behind them. The drift arm therefore lists
+// an owner whose blocks moved on from the state its windows were written from, not only one
+// holding no window at all, and one tick rewrites them. Skipping the window path is how that
+// older build is driven here: the item is re-indexed with the stamp of its windows put back as
+// it was, which is the row the arm reads.
+func TestABuildThatWritesNoWindowLeavesWindowsTheTickRewrites(t *testing.T) {
+	database, service := blockIndexService(t)
+	ctx := context.Background()
+	comment, _, _ := seedItemsWithBlocks(t, database)
+	if tick := reconcileBlockIndex(t, service, ""); tick.ItemBlocks != 3 {
+		t.Fatalf("first tick = %#v, want the three items indexed", tick)
+	}
+	owner := "comment/" + comment
+	before := windowsOf(t, database, "comment_block", owner)
+	if len(before) == 0 {
+		t.Fatalf("the comment holds no window after its own index")
+	}
+	var stamped string
+	if err := database.Pool.QueryRow(ctx, `
+		select block_state from embedding_window_states where kind = 'comment_block' and owner_key = $1
+	`, owner).Scan(&stamped); err != nil {
+		t.Fatalf("read the block state the comment's windows were written from: %v", err)
+	}
+
+	// The edit the older build makes: a new body, its blocks indexed again, and its windows and
+	// their stamp left as they were.
+	if _, err := database.Pool.Exec(ctx, `
+		update comments set body = E'One paragraph only, rewritten.', edited_at = now() where id = $1::uuid
+	`, comment); err != nil {
+		t.Fatalf("edit the comment: %v", err)
+	}
+	if tick := reconcileBlockIndex(t, service, ""); tick.ItemBlocks != 1 {
+		t.Fatalf("the tick that indexed the edit = %#v, want the comment's blocks indexed", tick)
+	}
+	if _, err := database.Pool.Exec(ctx, `
+		update embedding_window_states set block_state = $2 where kind = 'comment_block' and owner_key = $1
+	`, owner, stamped); err != nil {
+		t.Fatalf("put the comment's window stamp back as the older build leaves it: %v", err)
+	}
+	if _, err := database.Pool.Exec(ctx, `
+		update embeddings set text_snapshot = $2, content_hash = encode(sha256(convert_to($2, 'UTF8')), 'hex')
+		where kind = 'comment_block' and split_part(id, '#', 1) = $1
+	`, owner, "The first paragraph.\n\nThe second paragraph."); err != nil {
+		t.Fatalf("leave the comment's windows holding its old text: %v", err)
+	}
+
+	tick := reconcileBlockIndex(t, service, "")
+	if tick.Windows != 1 {
+		t.Fatalf("the window arm gave windows to %d owners (%#v), want the comment whose blocks moved on", tick.Windows, tick)
+	}
+	var text string
+	if err := database.Pool.QueryRow(ctx, `
+		select string_agg(text_snapshot, '\n' order by id) from embeddings
+		where kind = 'comment_block' and split_part(id, '#', 1) = $1
+	`, owner).Scan(&text); err != nil {
+		t.Fatalf("read the comment's windows: %v", err)
+	}
+	if !strings.Contains(text, "One paragraph only, rewritten.") || strings.Contains(text, "The second paragraph.") {
+		t.Fatalf("the comment's windows hold %q, want the text the edit left", text)
+	}
+	if next := reconcileBlockIndex(t, service, ""); next.Windows != 0 {
+		t.Fatalf("the next tick windowed %d owners (%#v), want none left", next.Windows, next)
+	}
+}
+
+// A whole-text row stays while its owner's window holds no vector of its current text, and is
+// deleted once it holds one: the release before this one keeps finding the item until this one
+// can. A window the queue settled as nothing to embed (embedqueue's settledNothingToEmbed: its
+// embedded_hash set, its embedding null) is current and stands for nothing, so it retires no
+// row either. An issue's row is never retired, its trigger and its kind both standing.
+func TestRetirementWaitsForACurrentWindow(t *testing.T) {
+	database, service := blockIndexService(t)
+	ctx := context.Background()
+	comment, _, _ := seedItemsWithBlocks(t, database)
+	if tick := reconcileBlockIndex(t, service, ""); tick.ItemBlocks != 3 {
+		t.Fatalf("first tick = %#v, want the three items indexed", tick)
+	}
+	// The row the release before this one's trigger wrote for the comment, which it still reads.
+	// The two issues' rows are their own trigger's, which this release keeps.
+	if _, err := database.Pool.Exec(ctx, `select embeddings_enqueue('comment', $1, 'The first paragraph.')`, comment); err != nil {
+		t.Fatalf("write the whole-text row of the comment: %v", err)
+	}
+	countWholeText := func(stage string, want int) {
+		t.Helper()
+		var left int
+		if err := database.Pool.QueryRow(ctx, `select count(*) from embeddings where kind = 'comment'`).Scan(&left); err != nil || left != want {
+			t.Fatalf("%s: whole-text comment rows = %d (%v), want %d", stage, left, err, want)
+		}
+	}
+
+	if tick := reconcileBlockIndex(t, service, ""); tick.Retired != 0 {
+		t.Fatalf("tick with no embedded window retired %d rows (%#v), want none", tick.Retired, tick)
+	}
+	countWholeText("no embedded window", 1)
+
+	// The window settled with no vector, as the queue settles one whose text has nothing to
+	// embed: embedded at its current text, and standing for nothing in a meaning search.
+	if _, err := database.Pool.Exec(ctx, `
+		update embeddings set embedding = null, embedded_hash = content_hash, model = 'dev:words-v1', embedded_at = now()
+		where kind = 'comment_block'
+	`); err != nil {
+		t.Fatalf("settle the comment's windows with no vector: %v", err)
+	}
+	if tick := reconcileBlockIndex(t, service, ""); tick.Retired != 0 {
+		t.Fatalf("tick behind a window settled with no vector retired %d rows (%#v), want none", tick.Retired, tick)
+	}
+	countWholeText("a window settled with no vector", 1)
+
+	if _, err := database.Pool.Exec(ctx, `
+		update embeddings set embedding = array_fill(0.1::real, array[1536])::vector,
+		       embedded_hash = content_hash, model = 'dev:words-v1', embedded_at = now()
+		where kind = 'comment_block'
+	`); err != nil {
+		t.Fatalf("embed the comment's windows: %v", err)
+	}
+	if tick := reconcileBlockIndex(t, service, ""); tick.Retired != 1 {
+		t.Fatalf("tick after the window was embedded retired %d rows (%#v), want the comment's one", tick.Retired, tick)
+	}
+	countWholeText("a window embedded at its text", 0)
+	var issues int
+	if err := database.Pool.QueryRow(ctx, `select count(*) from embeddings where kind = 'issue'`).Scan(&issues); err != nil || issues != 2 {
+		t.Fatalf("issue rows = %d (%v), want CORE-1's and CORE-2's, which no window replaces", issues, err)
 	}
 }

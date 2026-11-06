@@ -34,7 +34,7 @@ related_issues:
 
 ## Evidence
 
-- sjawhar/legion run 39304834688. Attempt 2's `run_started_at` is 2026-10-19T19:00:02Z. Its job
+- cybermonklabs/legion run 39304834688. Attempt 2's `run_started_at` is 2026-10-19T19:00:02Z. Its job
   `changes` is id 118247428626, with `run_attempt: 2` and started 18:42:59Z, the same times as
   attempt 1's job 118239084369. Only `worker_image / build` really ran again (19:00:08Z).
 - INFRA-388's plan held that `run_attempt` equality drops an earlier attempt's jobs. The

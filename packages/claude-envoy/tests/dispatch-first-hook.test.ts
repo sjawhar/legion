@@ -115,7 +115,7 @@ test("a mode hooks.json does not name fails the hook naming the modes", async ()
 
     expect(result.exitCode).not.toBe(0)
     expect(result.stdout).toBe("")
-    expect(result.stderr).toContain("open-asks or dispatch-first")
+    expect(result.stderr).toContain("open-asks, dispatch-first or answers")
   } finally {
     await rm(home, { recursive: true, force: true })
   }

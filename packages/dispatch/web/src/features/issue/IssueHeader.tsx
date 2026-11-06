@@ -1,5 +1,5 @@
 import { ISSUE_TITLE_MAX } from "@legion/contracts";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type FormEvent,
   type KeyboardEvent,
@@ -12,7 +12,13 @@ import {
 } from "react";
 import { Link } from "react-router-dom";
 
-import { api, apiErrorCodeIn, apiErrorMessage } from "../../api/client";
+import {
+  AGENT_LIST_REFILLING,
+  api,
+  apiErrorCodeIn,
+  apiErrorMessage,
+  issuePatchRequest,
+} from "../../api/client";
 import { mergeIssue } from "../../api/issue-cache";
 import { userStateQuery } from "../../api/queries";
 import type { Artifact, IssueDetails, UserIssueState, UserState } from "../../api/types";
@@ -58,6 +64,7 @@ import { CopyRefButton } from "../refs/CopyRefButton";
 import { ReferencedBy, ReferencedByToggle } from "../refs/ReferencedBy";
 import { buildDispatchReference, buildIssuePath, sessionOfAddress } from "../refs/routes";
 import { useKeymap } from "../shell/keymap";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { AssigneeControl } from "./AssigneeControl";
 import { ClaimChip } from "./ClaimChip";
 import { GitHubLink } from "./GitHubLink";
@@ -67,7 +74,11 @@ import { PriorityEditor } from "./PriorityControl";
 import { ProgressChips } from "./ProgressChips";
 import { stateForIssue } from "./pins";
 import { RepoControl } from "./RepoControl";
-import { RouteReachUnknownMarker, UnreachableRouteMarker } from "./RouteReach";
+import {
+  RouteReachUnknownMarker,
+  UnreachableRouteMarker,
+  UnresponsiveRouteMarker,
+} from "./RouteReach";
 import { SubscribedAgents } from "./SubscribedAgents";
 import { type IssueUpdateInput, useIssueDrafts } from "./useIssueDrafts";
 import type { IssuePriorityWrite } from "./useIssuePriority";
@@ -76,6 +87,19 @@ const routeHint =
   "New asks, comments, and messages on this issue wake this agent or role; replies inside a thread reach their participants directly. It is where messages go, not who is working the issue — that is the claim.";
 
 const titleRefusals = new Set(["CAP_EXCEEDED", "ISSUE_CLOSED"]);
+
+/** Whether `input` is the Status pill's pick alone: that control shows its write in the shell's
+ *  indicator and rolls back on a refusal, where every other header field holds its draft and
+ *  says why itself. */
+function statusPickOnly(input: IssueUpdateInput | undefined): boolean {
+  return input !== undefined && Object.keys(input).length === 1 && input.status !== undefined;
+}
+
+/** What the shell's indicator names one header write of `key`. */
+function issueUpdateLabel(key: string, input: IssueUpdateInput): string {
+  const field = Object.keys(input)[0] ?? "field";
+  return input.status === undefined ? `${key}: ${field} saved` : `${key} set to ${input.status}`;
+}
 
 export function IssueHeader({
   documentArtifact,
@@ -156,34 +180,57 @@ export function IssueHeader({
     queryFn: () => api.getIssueSubscribers(issue.key),
   });
   const subscriberList = subscribers.isError ? [] : (subscribers.data ?? []);
-  const unsubscribe = useMutation({
-    mutationFn: (sessionId: string) => api.unsubscribeIssueSession(issue.key, sessionId),
+  // The count is a claim about who is subscribed, so only a read that answered makes it.
+  const subscribersCounted = !subscribers.isError && subscribers.data !== undefined;
+  // Every write here names `write` first: its answer and its variables are what the callbacks
+  // below read.
+  const unsubscribe = useKeyedWrite({
+    write: (sessionId: string, bounds) => api.unsubscribeIssueSession(issue.key, sessionId, bounds),
+    inline: true,
+    label: (sessionId) =>
+      `${agentText.sessionText(sessionId, subscriberList.find((row) => row.session_id === sessionId)?.title)} unsubscribed from ${issue.key}`,
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["subscribers", issue.key] });
     },
   });
-  const releaseClaim = useMutation({
-    mutationFn: () => api.releaseIssueClaim(issue.key),
+  const releaseClaim = useKeyedWrite({
+    write: (_variables, bounds) => api.releaseIssueClaim(issue.key, bounds),
+    inline: true,
+    label: () => `Claim on ${issue.key} released`,
     onSuccess: (next) => {
-      mergeIssue(queryClient, next);
+      if (next !== null) mergeIssue(queryClient, next);
       void queryClient.invalidateQueries({ queryKey: ["issues"] });
     },
   });
-  const updateIssue = useMutation({
-    mutationFn: (input: IssueUpdateInput) => api.patchIssue(issue.key, input),
+  // A title, route, parent or close the header shows refused itself, beside its draft; a status
+  // pick is a control, so its refusal is the shell's (`PendingWritesIndicator`), and the pick
+  // rolls back. Every field write goes in the issue's line (`issue:<key>`), so an older one still
+  // being tried never lands after a newer one, whatever left the page meanwhile. A landing with no
+  // answer to give is merged by reading the issue again.
+  const updateIssue = useKeyedWrite({
+    inline: (input) => !statusPickOnly(input),
+    label: (input) => issueUpdateLabel(issue.key, input),
+    target: () => `issue:${issue.key}`,
+    request: (input: IssueUpdateInput) => issuePatchRequest(issue.key, input),
     onSettled: (_data, error) => {
       drafts.onIssueSettled(error);
     },
     onSuccess: (next, input) => {
-      mergeIssue(queryClient, next);
-      drafts.onIssueSuccess(next, input);
+      if (next === null) {
+        void queryClient.invalidateQueries({ queryKey: ["issue", issue.key] });
+      } else {
+        mergeIssue(queryClient, next);
+      }
+      drafts.onIssueSuccess(next ?? issue, input);
       void queryClient.invalidateQueries({ queryKey: ["issues"] });
     },
   });
-  const labelsMutation = useMutation({
-    mutationFn: (labels: string[]) => api.patchIssue(issue.key, { labels }),
+  const labelsMutation = useKeyedWrite({
+    label: () => `Labels of ${issue.key}`,
+    target: () => `issue:${issue.key}`,
+    request: (labels: string[]) => issuePatchRequest(issue.key, { labels }),
     onSuccess: (next) => {
-      mergeIssue(queryClient, next);
+      if (next !== null) mergeIssue(queryClient, next);
       void queryClient.invalidateQueries({ queryKey: ["issues"] });
     },
   });
@@ -237,11 +284,15 @@ export function IssueHeader({
     documentArtifact?.approval !== undefined &&
     (documentArtifact.approval.state !== "draft" || approvalRequestOpen);
   const pinGuard = useSubmitGuard();
-  const updateState = useMutation({
-    mutationFn: (pinned: boolean) => api.putIssueState(issue.key, { pinned }),
+  const updateState = useKeyedWrite({
+    label: (pinned: boolean) => `${issue.key} ${pinned ? "pinned" : "unpinned"}`,
+    write: (pinned: boolean, bounds) => api.putIssueState(issue.key, { pinned }, bounds),
     onSettled: () => {
       pinGuard.release();
       void queryClient.invalidateQueries({ queryKey: userStateQuery().queryKey });
+      // The sidebar lists the pinned issues from their own read, which follows the pin however
+      // its write settled: with an answer, landed with none (`null`), or refused.
+      void queryClient.invalidateQueries({ exact: true, queryKey: ["issues", "pinned"] });
     },
     onMutate: async (pinned) => {
       await queryClient.cancelQueries({ queryKey: userStateQuery().queryKey });
@@ -259,12 +310,11 @@ export function IssueHeader({
       }));
     },
     onSuccess: (next) => {
+      if (next === null) return;
       queryClient.setQueryData<UserState>(userStateQuery().queryKey, (current) => ({
         ...current,
         [issue.key]: next,
       }));
-      // The sidebar lists the pinned issues from their own read.
-      void queryClient.invalidateQueries({ exact: true, queryKey: ["issues", "pinned"] });
     },
   });
   const saveTitleOnEnter = (event: KeyboardEvent<HTMLInputElement>) => {
@@ -442,7 +492,7 @@ export function IssueHeader({
               className={`min-w-0 appearance-none font-inherit outline-none disabled:cursor-not-allowed disabled:opacity-50 ${bgTransparent} ${statusPill.text}`}
               disabled={isClosed || updateIssue.isPending}
               onChange={(event) => drafts.requestStatusSubmit(event.target.value)}
-              value={issue.status}
+              value={pendingStatus ?? issue.status}
             >
               {selectableStatuses.map((status) => (
                 <option key={status} value={status}>
@@ -480,8 +530,19 @@ export function IssueHeader({
           {drafts.route === (issue.route ?? "") ? (
             <>
               <UnreachableRouteMarker issue={issue} showRoute />
+              <UnresponsiveRouteMarker issue={issue} showRoute />
               {issue.route !== null && issue.route_status === "unknown" ? (
-                <RouteReachUnknownMarker className="shrink-0" testId="issue-route-unknown" />
+                issue.route_status_reason === "refilling" ? (
+                  <span
+                    className={`shrink-0 text-xs ${textMutedOnSurface}`}
+                    data-testid="issue-route-refilling"
+                    title="The Envoy listener is refilling its agent list, so Dispatch cannot tell yet whether anyone receives this route."
+                  >
+                    Route reach unknown: {AGENT_LIST_REFILLING}
+                  </span>
+                ) : (
+                  <RouteReachUnknownMarker className="shrink-0" testId="issue-route-unknown" />
+                )
               ) : null}
             </>
           ) : null}
@@ -491,7 +552,7 @@ export function IssueHeader({
                   status, priority and assignee, and Release is an action beside Close. This
                   row wraps, so both stay visible and tappable at 390px; the metadata rail
                   below never wraps (#1211) and would clip them. */}
-              <ClaimChip claim={issue.claim} />
+              <ClaimChip claim={issue.claim} liveness={issue} />
               <button
                 aria-label={`Release the claim on ${issue.key}`}
                 className={`min-h-11 shrink-0 rounded-lg px-2 py-2 text-sm font-medium sm:px-3 md:min-h-8 md:py-1 xl:px-2 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText}`}
@@ -558,7 +619,6 @@ export function IssueHeader({
               labels={issue.labels}
               onSave={(labels) => labelsMutation.mutateAsync(labels)}
               project={issue.project}
-              saveError={labelsMutation.isError}
               saving={labelsMutation.isPending}
               variant="rail"
             />
@@ -587,8 +647,8 @@ export function IssueHeader({
             onClick={() => setSubscribersOpen((open) => !open)}
             type="button"
           >
-            <span>Subscribers:</span>
-            <span>{subscriberList.length}</span>
+            <span>{subscribersCounted ? "Subscribers:" : "Subscribers"}</span>
+            {subscribersCounted ? <span>{subscriberList.length}</span> : null}
           </button>
           <ReferencedByToggle
             controls={referencesPanelId}
@@ -768,6 +828,7 @@ export function IssueHeader({
       ) : null}
       {subscribers.isError ? (
         <QueryError
+          error={subscribers.error}
           message="Subscribed agents unavailable — Envoy listener unreachable."
           onRetry={() => subscribers.refetch()}
           retrying={subscribers.isFetching}
@@ -794,7 +855,7 @@ export function IssueHeader({
           retrying={releaseClaim.isPending}
         />
       ) : null}
-      {updateIssue.isError ? (
+      {updateIssue.isError && !statusPickOnly(updateIssue.variables) ? (
         parentSaveFailed ? (
           <p className={`mt-1 text-sm ${dangerText}`} id="issue-parent-error">
             {parentError}

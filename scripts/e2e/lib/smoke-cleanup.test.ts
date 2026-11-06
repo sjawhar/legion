@@ -143,6 +143,8 @@ check=setup check_started=2026-10-08T00:00:00Z
 ok= was_blocked= until=\${UNTIL:-} locked=1 compared= snapshotted= audited= prod_baseline=
 tree1=LEGSMOKE-101 tree2=LEGSMOKE-102 tree3=LEGSMOKE-103 tree4=LEGSMOKE-104
 pair_session= shape_pid= daemon_pid= watch_pid= events_pid= leaks_pid= sampler_pid= interests_pid= pg_container=none session_db_container=none run_label=legsmoke smoke_main_cleaning=
+run_container_label=legion.dev/e2e-run run_container_id=smoke-cleanup-run signalled=
+session_db_ready=1 daemon_started=1
 negative_config_pod= negative_config_workspace= block_tree=
 project=LEGSMOKE repo=sjawhar/legion-smoke
 mkdir -p "$work" "$evidence/model-gateway"
@@ -159,6 +161,7 @@ collect_transcripts() { :; }; record_pair() { :; }; op() { :; }
 teardown() { :; }; namespace_clean() { :; }; delete_consumers() { :; }
 ${fn4b("remove_run_branches")}
 ${fn4b("remove_negative_config")}
+${fn4b("remove_run_container")}
 ${fn4b("cleanup")}
 ${shell4b.traps}
 ${tail}
@@ -213,6 +216,9 @@ interface RunResult {
   branches: string[];
   pr: (n: number) => PullRequest["state"] | undefined;
 }
+// What a merged proof pull request leaves on the smoke main: its retro learning, and a `.legion/`
+// handoff only a merge from before handoffs moved to the Dispatch issue carries, which the cleanup
+// still removes (smoke_main_leftovers).
 const leftovers = [".legion/LEGION-1/plan.json", "docs/solutions/testing/smoke.md"];
 
 let runs = 0;

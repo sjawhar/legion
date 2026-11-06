@@ -40,15 +40,18 @@ moved on it answers 409 and publishes nothing. So the sequence
 2. architect `spawn_worker(implementer, …)` — the assignment lands, `phases[KEY]` now names the implementer,
 3. planner `legion handoff complete`
 
-makes step 3 a 409 by construction. It is not LEGION-37's respawn case and not a multi-round tree
+made step 3 a 409 by construction. Since sjawhar/legion#2354 step 1 is `dispatch handoff-write`,
+which writes the handoff record on the Dispatch issue, and the race is unchanged. It is not
+LEGION-37's respawn case and not a multi-round tree
 (`worker-pane-shell-gotchas` §11 covers those); the worker did nothing wrong and nothing was
 restarted. The architect simply treated "the artifact exists" as "the phase is complete".
 
 ## The rule
 
 **The artifact appearing is not completion. The `phase-complete` wake is.** An architect that
-sees a handoff land — a push or `ci-green` envelope, a `jj log` that shows `plan: record handoff`,
-a Dispatch status echo — waits for the `{type: "phase-complete", issue, role, summary}` payload on
+sees a handoff land — the record in the issue's Conversation, a push or `ci-green` envelope, a
+Dispatch status echo, and before sjawhar/legion#2354 a `jj log` that showed `plan: record
+handoff` — waits for the `{type: "phase-complete", issue, role, summary}` payload on
 its role topic before spawning the next role. The worker's two-sentence summary is part of the
 contract the next assignment is built from, and the completion write is what clears the phase
 record so the next assignment does not collide with it.

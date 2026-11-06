@@ -6,7 +6,11 @@ import (
 	"net/url"
 )
 
-// ChangedFile is one file GitHub lists in a change, a pull request's or a comparison's.
+// ChangedFile is one file GitHub lists in a change, a pull request's or a comparison's: the name
+// it has after the change, and the name it had before, which GitHub fills for a rename alone.
+// What the change did to the file (GitHub's "status": added, removed, modified, renamed) is read
+// nowhere, so it is not decoded: READY judges a compare entry by its paths alone
+// (packages/daemon/internal/api/ready.go, underLegion).
 type ChangedFile struct {
 	Filename         string `json:"filename"`
 	PreviousFilename string `json:"previous_filename"`

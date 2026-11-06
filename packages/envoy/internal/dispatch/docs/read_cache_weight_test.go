@@ -74,15 +74,14 @@ func buildTestDocumentRead(t *testing.T, markdown string) *documentRead {
 	if err := crdt.ApplyUpdateV1(doc, state, nil); err != nil {
 		t.Fatalf("decode the stored state: %v", err)
 	}
-	tree, err := treeOf(doc)
-	if err != nil {
-		t.Fatalf("read the tree: %v", err)
+	fold, err := foldLoaded("artifact", LoadedDocument{Doc: doc, Stamp: DocumentStamp{Version: 1, Row: "1"}})
+	if fold.treeErr != nil {
+		t.Fatalf("read the tree: %v", fold.treeErr)
 	}
-	read, err := buildDocumentRead("artifact", DocumentStamp{Version: 1, Row: "1"}, tree)
 	if err != nil {
 		t.Fatalf("build the read: %v", err)
 	}
-	return read
+	return fold.read
 }
 
 // longHeaderTable is a table of eight columns whose header cells hold about 28 KiB of text each.

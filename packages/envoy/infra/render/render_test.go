@@ -208,7 +208,6 @@ func listenerArgs() *envoyaws.WebhookListenerArgs {
 		Memory:           "512",
 
 		ListenHost:     "0.0.0.0",
-		HostBridge:     "127.0.0.1",
 		NatsReplicas:   1,
 		MentionTrigger: pulumi.StringRef("@legion"),
 
@@ -289,35 +288,33 @@ func TestNatsStartScriptIsTheScriptNatsServiceLaunches(t *testing.T) {
 // printed.
 func TestWebhookListenerEnvIsTheEnvironmentWebhookListenerRegisters(t *testing.T) {
 	for _, c := range []struct {
-		name                   string
-		natsUrls               []string
-		listenHost, hostBridge string
-		replicas               int
-		webhooks               []string
-		trigger, appID         string // given with github
-		subscribeAllTopics     bool   // given as --subscribe-all-topics
-		want                   string // derived by hand from the listener's environment rules
+		name           string
+		natsUrls       []string
+		listenHost     string
+		replicas       int
+		webhooks       []string
+		trigger, appID string // given with github
+		want           string // derived by hand from the listener's environment rules
 	}{
 		{
-			name:       "a remote NATS server and a host bridge",
+			name:       "a remote NATS server",
 			natsUrls:   []string{"nats://example-bus.example-namespace.internal.example:4222"},
-			listenHost: "0.0.0.0", hostBridge: "127.0.0.1", replicas: 1,
+			listenHost: "0.0.0.0", replicas: 1,
 			webhooks: []string{"github", "slack"}, trigger: "@legion", appID: "1234567",
 			want: "PORT=9020\n" +
 				"ENVOY_LISTEN_HOST=0.0.0.0\n" +
 				"ENVOY_MACHINE_ID=example-machine\n" +
 				"NATS_URLS=nats://example-bus.example-namespace.internal.example:4222\n" +
 				"ENVOY_ALLOW_REMOTE_NATS=1\n" +
-				"ENVOY_HOST_BRIDGE=127.0.0.1\n" +
 				"ENVOY_NATS_REPLICAS=1\n" +
 				"ENVOY_WEBHOOKS=github,slack\n" +
 				"ENVOY_GITHUB_MENTION_TRIGGER=@legion\n" +
 				"ENVOY_REVIEWER_APP_ID=1234567\n",
 		},
 		{
-			name:       "two loopback NATS servers and no host bridge",
+			name:       "two loopback NATS servers",
 			natsUrls:   []string{"nats://127.0.0.1:4222", "nats://localhost:4223"},
-			listenHost: "::", hostBridge: "", replicas: 3,
+			listenHost: "::", replicas: 3,
 			webhooks: []string{"github", "slack"}, trigger: "@example-bot", appID: "7654321",
 			want: "PORT=9020\n" +
 				"ENVOY_LISTEN_HOST=::\n" +
@@ -331,28 +328,13 @@ func TestWebhookListenerEnvIsTheEnvironmentWebhookListenerRegisters(t *testing.T
 		{
 			name:       "no webhook",
 			natsUrls:   []string{"nats://example-bus.example-namespace.internal.example:4222"},
-			listenHost: "0.0.0.0", hostBridge: "127.0.0.1", replicas: 1,
+			listenHost: "0.0.0.0", replicas: 1,
 			webhooks: []string{},
 			want: "PORT=9020\n" +
 				"ENVOY_LISTEN_HOST=0.0.0.0\n" +
 				"ENVOY_MACHINE_ID=example-machine\n" +
 				"NATS_URLS=nats://example-bus.example-namespace.internal.example:4222\n" +
 				"ENVOY_ALLOW_REMOTE_NATS=1\n" +
-				"ENVOY_HOST_BRIDGE=127.0.0.1\n" +
-				"ENVOY_NATS_REPLICAS=1\n",
-		},
-		{
-			name:       "the opt-in to every notification topic",
-			natsUrls:   []string{"nats://example-bus.example-namespace.internal.example:4222"},
-			listenHost: "0.0.0.0", hostBridge: "127.0.0.1", replicas: 1,
-			webhooks: []string{}, subscribeAllTopics: true,
-			want: "PORT=9020\n" +
-				"ENVOY_LISTEN_HOST=0.0.0.0\n" +
-				"ENVOY_MACHINE_ID=example-machine\n" +
-				"NATS_URLS=nats://example-bus.example-namespace.internal.example:4222\n" +
-				"ENVOY_ALLOW_REMOTE_NATS=1\n" +
-				"ENVOY_HOST_BRIDGE=127.0.0.1\n" +
-				"ENVOY_SUBSCRIBE_ALL_TOPICS=1\n" +
 				"ENVOY_NATS_REPLICAS=1\n",
 		},
 	} {
@@ -363,11 +345,8 @@ func TestWebhookListenerEnvIsTheEnvironmentWebhookListenerRegisters(t *testing.T
 			if github {
 				args = append(args, "--reviewer-app-id", c.appID, "--mention-trigger", c.trigger)
 			}
-			args = append(args, "--listen-host", c.listenHost, "--host-bridge", c.hostBridge,
+			args = append(args, "--listen-host", c.listenHost,
 				"--nats-replicas", strconv.Itoa(c.replicas))
-			if c.subscribeAllTopics {
-				args = append(args, "--subscribe-all-topics")
-			}
 			stdout, stderr, code := run(args...)
 			require.Equal(t, 0, code, stderr)
 			require.Empty(t, stderr)
@@ -375,9 +354,8 @@ func TestWebhookListenerEnvIsTheEnvironmentWebhookListenerRegisters(t *testing.T
 
 			in := listenerArgs()
 			in.NatsUrls = pulumi.ToStringArray(c.natsUrls)
-			in.ListenHost, in.HostBridge, in.NatsReplicas = c.listenHost, c.hostBridge, c.replicas
+			in.ListenHost, in.NatsReplicas = c.listenHost, c.replicas
 			in.Webhooks = c.webhooks
-			in.SubscribeAllTopics = c.subscribeAllTopics
 			in.MentionTrigger, in.ReviewerAppId = pulumi.StringRef(c.trigger), pulumi.StringRef(c.appID)
 			if !github {
 				in.GitHubWebhookSecretArn, in.MentionTrigger, in.ReviewerAppId = nil, nil, nil
@@ -426,7 +404,7 @@ func TestMetricFiltersAreTheFiltersEachComponentRegisters(t *testing.T) {
 			},
 		},
 		{
-			component: "webhook-listener", prefix: "example-hooks", namespace: "example/EnvoyListener", count: 8,
+			component: "webhook-listener", prefix: "example-hooks", namespace: "example/EnvoyListener", count: 9,
 			construct: func(ctx *pulumi.Context, opts pulumi.ResourceOption) error {
 				in := listenerArgs()
 				in.MetricNamespace = "example/EnvoyListener"
@@ -585,11 +563,10 @@ func listenerFlags(drop []string, set ...string) []string {
 		"reviewer-app-id": {"1234567"},
 		"mention-trigger": {"@legion"},
 		"listen-host":     {"0.0.0.0"},
-		"host-bridge":     {"127.0.0.1"},
 		"nats-replicas":   {"1"},
 	}
 	args := []string{"webhook-listener-env"}
-	for _, name := range []string{"machine-id", "nats-url", "webhook", "reviewer-app-id", "mention-trigger", "listen-host", "host-bridge", "nats-replicas"} {
+	for _, name := range []string{"machine-id", "nats-url", "webhook", "reviewer-app-id", "mention-trigger", "listen-host", "nats-replicas"} {
 		if !slices.Contains(drop, name) {
 			args = append(args, flags(name, given[name]...)...)
 		}
@@ -623,11 +600,6 @@ func TestWebhookListenerEnvRefusals(t *testing.T) {
 			want: "refused: --machine-id: machineId contains '.', which the listener's NATS names or the hub's grant entries cannot carry",
 		},
 		{
-			name: "a line break in --host-bridge",
-			args: listenerFlags([]string{"host-bridge"}, "--host-bridge", "127.0\n.0.1"),
-			want: `refused: --host-bridge: hostBridge contains a control character: "127.0\n.0.1"`,
-		},
-		{
 			name: "a blank second --nats-url",
 			args: listenerFlags(nil, "--nats-url", " "),
 			want: "refused: --nats-url: natsUrls[1] is empty",
@@ -641,6 +613,11 @@ func TestWebhookListenerEnvRefusals(t *testing.T) {
 			name: "--nats-replicas 0",
 			args: listenerFlags([]string{"nats-replicas"}, "--nats-replicas", "0"),
 			want: "refused: --nats-replicas: natsReplicas 0 is below 1",
+		},
+		{
+			name: "--nats-replicas 6",
+			args: listenerFlags([]string{"nats-replicas"}, "--nats-replicas", "6"),
+			want: "refused: --nats-replicas: natsReplicas 6 is above 5, the most copies NATS keeps",
 		},
 		{
 			name: "a line break in --listen-host, refused by core.ListenerConfig.Check",
@@ -670,11 +647,6 @@ func TestWebhookListenerEnvRefusals(t *testing.T) {
 			want: "envoy-infra render webhook-listener-env: --listen-host is required",
 		},
 		{
-			name: "no --host-bridge", usage: true,
-			args: listenerFlags([]string{"host-bridge"}),
-			want: "envoy-infra render webhook-listener-env: --host-bridge is required",
-		},
-		{
 			name: "no --nats-replicas", usage: true,
 			args: listenerFlags([]string{"nats-replicas"}),
 			want: "envoy-infra render webhook-listener-env: --nats-replicas is required",
@@ -683,11 +655,6 @@ func TestWebhookListenerEnvRefusals(t *testing.T) {
 			name: "a --nats-replicas that is not a number", usage: true,
 			args: listenerFlags([]string{"nats-replicas"}, "--nats-replicas", "two"),
 			want: "envoy-infra render webhook-listener-env: --nats-replicas: a malformed value (not echoed: a seed may have been pasted there)",
-		},
-		{
-			name: "a --subscribe-all-topics value that is not a boolean", usage: true,
-			args: listenerFlags(nil, "--subscribe-all-topics=yes"),
-			want: "envoy-infra render webhook-listener-env: --subscribe-all-topics: a malformed value (not echoed: a seed may have been pasted there)",
 		},
 		{
 			name: "an argument after the flags", usage: true,
@@ -864,9 +831,9 @@ func TestRenderNeverEchoesASeed(t *testing.T) {
 		// A refusal of core or rendering, which quotes the value it refuses.
 		{name: "--webhook, which webhooks quotes", args: listenerFlags([]string{"webhook"}, "--webhook", testSeed), want: "refused: --webhook" + seedFlag},
 		{
-			name: "--host-bridge, which its whitespace refusal quotes",
-			args: listenerFlags([]string{"host-bridge"}, "--host-bridge", " "+testSeed),
-			want: "refused: --host-bridge" + seedFlag,
+			name: "--listen-host, which its control-character refusal quotes",
+			args: listenerFlags([]string{"listen-host"}, "--listen-host", testSeed+"\n"),
+			want: "refused: --listen-host" + seedFlag,
 		},
 		{
 			name: "a user's name in --authorization-file",

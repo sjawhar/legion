@@ -1,5 +1,0 @@
-kind: Changed
-body: 'A write to a Dispatch document no longer renders the whole document before the write when that rendering is already known: the first operation of a write to a resident room takes the room replica''s rendering when nothing but the write''s own updates reached the replica since its fork was read, and a later operation of the same transaction takes the previous operation''s. The room''s update observer no longer renders the document again after a published write''s update: it takes the write''s own rendering on the same condition, and it classifies an update the room already held when it loaded (a write published into a room that its publish loaded) as unchanged. Every rendering, change record and ask-block record is the same as before. On a replay of a production write load (GOMAXPROCS = 2) the server used 31.5 s less CPU in an 8-minute step, 427.0 s against 458.6 s (6.9%, about 0.065 cores).'
-time: 2026-10-28T14:15:51.679441004Z
-custom:
-    Issue: pr2453

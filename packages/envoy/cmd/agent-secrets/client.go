@@ -1,7 +1,7 @@
 // packages/envoy/cmd/agent-secrets/client.go
 //
 // client is agent-secrets's own thin HTTP client for the broker routes it needs, as the broker's
-// HTTP API reference (https://sjawhar.github.io/legion/broker/reference/api/) defines them. Session routes
+// HTTP API reference (https://cybermonklabs.github.io/legion/broker/reference/api/) defines them. Session routes
 // — everything but enrollment issuance/revocation and launcher-credential issuance — are signed
 // per call through a Signer (proofsource.go: an agent box or pod's own key, or a machine session's
 // agent-secrets-helper), producing exactly the Proof header internal/broker/proof.Verifier
@@ -37,6 +37,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/broker/leasetime"
 	"github.com/sjawhar/envoy/internal/redact"
 )
 
@@ -48,8 +49,9 @@ type client struct {
 // terminalRenewal is the closed set of renewal refusals `agent-secrets renew` stops on, exiting
 // exitRenewRefused (76) so the worker shim does not restart it; every other refusal keeps the retry
 // backoff. Each member is an answer no retry can change: POD_TOKEN_REQUIRED is a pod enrollment's
-// renewal that carried no token, and ENROLLMENT_NOT_LIVE an enrollment that has ended, lapsed or
-// never existed. A broker that predates ENROLLMENT_NOT_LIVE answers an ended enrollment
+// renewal that carried no token, and
+// ENROLLMENT_NOT_LIVE an enrollment that has ended, lapsed or never existed. A broker that predates
+// ENROLLMENT_NOT_LIVE answers an ended enrollment
 // PROOF_INVALID with a message saying "not live" (its renew handler's "enrollment is not live" and
 // its proof check's "proof invalid: not live"), which no recoverable proof failure says.
 // POD_IDENTITY_MISMATCH is not a member: the broker also answers it for a token it could not
@@ -59,13 +61,21 @@ var terminalRenewal = struct {
 	Codes                     []string
 	LegacyCode, LegacyMessage string
 }{
-	Codes:         []string{"POD_TOKEN_REQUIRED", "ENROLLMENT_NOT_LIVE"},
+	Codes:         []string{"POD_TOKEN_REQUIRED", enrollmentEndedCode},
 	LegacyCode:    "PROOF_INVALID",
 	LegacyMessage: "not live",
 }
 
+// enrollmentEndedCode is the renew route's own answer to a proof naming an enrollment the broker
+// no longer holds, written once here and read by terminalRenewal and by enrollmentEnded.
+const enrollmentEndedCode = "ENROLLMENT_NOT_LIVE"
+
+// newClient is the HTTP client every agent-secrets call goes out on, renewals among them. Its
+// whole-call timeout is leasetime.RenewClientTimeout, the same figure the broker's lease bound
+// charges a renewal an outage black-holes: a connection a front door accepts with nothing
+// behind it costs this renewer the whole of it.
 func newClient(baseURL string) *client {
-	return &client{baseURL: baseURL, http: &http.Client{Timeout: 30 * time.Second}}
+	return &client{baseURL: baseURL, http: &http.Client{Timeout: leasetime.RenewClientTimeout}}
 }
 
 // apiError is the broker's {"code":...,"error":...} error envelope, plus the HTTP status it came
@@ -83,13 +93,19 @@ func (e *apiError) Error() string {
 	return fmt.Sprintf("%s (%s)", e.Message, e.Code)
 }
 
-// Permanent reports whether this refusal is one of terminalRenewal's: a code it lists, or its
-// legacy code with a message naming the ended enrollment.
+// enrollmentEnded reports whether this refusal is the broker's answer to a proof naming an
+// enrollment it no longer holds: the lease lapsed, or it was revoked. Only the renew route
+// answers ENROLLMENT_NOT_LIVE; every other session route says PROOF_INVALID with "not live" in
+// its message, which no recoverable proof failure (iat skew, key, URL) says.
+func (e *apiError) enrollmentEnded() bool {
+	return e.Code == enrollmentEndedCode ||
+		(e.Code == terminalRenewal.LegacyCode && strings.Contains(e.Message, terminalRenewal.LegacyMessage))
+}
+
+// Permanent reports whether this refusal is one of terminalRenewal's: a code it lists, or the
+// ended enrollment its legacy code spells (enrollmentEnded).
 func (e *apiError) Permanent() bool {
-	if slices.Contains(terminalRenewal.Codes, e.Code) {
-		return true
-	}
-	return e.Code == terminalRenewal.LegacyCode && strings.Contains(e.Message, terminalRenewal.LegacyMessage)
+	return slices.Contains(terminalRenewal.Codes, e.Code) || e.enrollmentEnded()
 }
 
 // unreachableError is a broker call that did not complete. Its host might not resolve, nothing
@@ -171,6 +187,14 @@ func peerAnswered(err error) bool {
 // do sends the request and, on a 2xx response, returns its raw body; any other status decodes
 // the broker's error envelope into an *apiError.
 func (c *client) do(ctx context.Context, method, url string, body []byte, headers map[string]string) ([]byte, error) {
+	_, data, err := c.doStatus(ctx, method, url, body, headers)
+	return data, err
+}
+
+// doStatus is do, also answering the 2xx status itself, which tells apart the two answers a
+// route gives for success — POST /v1/enrollments's 201 for a new enrollment and 200 for the one
+// this key already holds.
+func (c *client) doStatus(ctx context.Context, method, url string, body []byte, headers map[string]string) (int, []byte, error) {
 	var reader io.Reader
 	if body != nil {
 		reader = bytes.NewReader(body)
@@ -182,9 +206,9 @@ func (c *client) do(ctx context.Context, method, url string, body []byte, header
 		// only where that is clean). With any other base, the parser's own text could quote a bad
 		// escape in a password, so the message says only that the address is not valid.
 		if redact.Clean(c.baseURL) {
-			return nil, fmt.Errorf("the request could not be built: %w", redact.Error(err, c.baseURL))
+			return 0, nil, fmt.Errorf("the request could not be built: %w", redact.Error(err, c.baseURL))
 		}
-		return nil, &unreachableError{"the broker's address is not a valid URL", c.baseURL, method, url, errNothingSent}
+		return 0, nil, &unreachableError{"the broker's address is not a valid URL", c.baseURL, method, url, errNothingSent}
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -194,12 +218,12 @@ func (c *client) do(ctx context.Context, method, url string, body []byte, header
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, unreachable(c.baseURL, method, url, err)
+		return 0, nil, unreachable(c.baseURL, method, url, err)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("%s %s: read response: %w", method, redact.Call(c.baseURL, url), redact.Error(err, c.baseURL))
+		return 0, nil, fmt.Errorf("%s %s: read response: %w", method, redact.Call(c.baseURL, url), redact.Error(err, c.baseURL))
 	}
 	if resp.StatusCode/100 != 2 {
 		var envelope struct {
@@ -210,23 +234,66 @@ func (c *client) do(ctx context.Context, method, url string, body []byte, header
 		if envelope.Error == "" {
 			envelope.Error = string(data)
 		}
-		return nil, &apiError{Status: resp.StatusCode, Code: envelope.Code, Message: envelope.Error}
+		return resp.StatusCode, nil, &apiError{Status: resp.StatusCode, Code: envelope.Code, Message: envelope.Error}
 	}
-	return data, nil
+	return resp.StatusCode, data, nil
 }
 
 // errNothingSent is the cause of a call this client could not even build a request for.
 var errNothingSent = errors.New("nothing was sent")
 
+// reenroller is a signer that can replace an enrollment the broker no longer holds: a person's
+// sign-in on this box, and a machine that registered its own session here (proofsource.go).
+// Nothing else is one — a box or pod its launcher enrolled is the launcher's to enrol again,
+// and a launcher proof names no enrollment at all.
+type reenroller interface {
+	Reenroll(ctx context.Context) error
+}
+
+// enrollmentNotLive reports whether err is a refusal (*apiError) naming an enrollment the broker
+// no longer holds, which is enrollmentEnded's question asked of an error.
+func enrollmentNotLive(err error) bool {
+	var refusal *apiError
+	return errors.As(err, &refusal) && refusal.enrollmentEnded()
+}
+
 // doProof signs the request with signer.Sign against exactly this method and URL (no query
 // string appended after signing), the shape proof.Verifier.Verify compares htm/htu against.
 func (c *client) doProof(ctx context.Context, signer proofSigner, method, path string, body []byte) ([]byte, error) {
+	_, data, err := c.doProofStatus(ctx, signer, method, path, body)
+	return data, err
+}
+
+// doProofStatus is doProof, also answering the 2xx status (doStatus).
+//
+// A signer that can register itself again (reenroller) gets exactly one retry when the broker
+// says the enrollment its proof named is not live. Nothing renews a sign-in's or a machine's own
+// session enrollment otherwise, so after BROKER_LEASE_SECONDS every call on that box would fail
+// with the dead id still in its record, and only signing in again would cure it — making a
+// second box key and a second sign-in on the person's list. One retry, because a second refusal
+// is the broker saying no to the enrollment this call just made, which no further retry changes.
+func (c *client) doProofStatus(ctx context.Context, signer proofSigner, method, path string, body []byte) (int, []byte, error) {
+	status, data, err := c.proofCall(ctx, signer, method, path, body)
+	again, ok := signer.(reenroller)
+	if !ok || !enrollmentNotLive(err) {
+		return status, data, err
+	}
+	if reErr := again.Reenroll(ctx); reErr != nil {
+		return status, data, fmt.Errorf("%w; registering this session again: %v", err, reErr)
+	}
+	return c.proofCall(ctx, signer, method, path, body)
+}
+
+// proofCall is one signed call, which is all `renew` may make: its whole contract is to report
+// the enrollment the broker no longer holds (terminalRenewal, exit 76) rather than quietly
+// register another.
+func (c *client) proofCall(ctx context.Context, signer proofSigner, method, path string, body []byte) (int, []byte, error) {
 	url := c.baseURL + path
 	token, err := signer.Sign(method, url)
 	if err != nil {
-		return nil, fmt.Errorf("sign proof: %w", err)
+		return 0, nil, fmt.Errorf("sign proof: %w", err)
 	}
-	return c.do(ctx, method, url, body, map[string]string{"Proof": token})
+	return c.doStatus(ctx, method, url, body, map[string]string{"Proof": token})
 }
 
 // --- POST /v1/requests, GET /v1/requests/{id}, POST /v1/requests/{id}/cancel ---
@@ -239,7 +306,9 @@ type SecretDecision struct {
 
 // RequestResult is POST /v1/requests's exact response shape. LifetimeSeconds is the lifetime the
 // broker gave the request's grant, nil for until its session ends; a broker from before
-// lifetime_seconds sends no such field, and it decodes as nil.
+// lifetime_seconds sends no such field, and it decodes as nil. ApproveURL is the record's page on
+// the broker, where its approver signs in and decides it, while the request is pending; empty
+// once it is not, and from a broker from before that page.
 type RequestResult struct {
 	RequestID       string           `json:"request_id"`
 	State           string           `json:"state"`
@@ -249,6 +318,7 @@ type RequestResult struct {
 	Approver        *string          `json:"approver"`
 	LifetimeSeconds *int             `json:"lifetime_seconds"`
 	Coalesced       bool             `json:"coalesced,omitempty"`
+	ApproveURL      string           `json:"approve_url"`
 }
 
 // createRequestBody is POST /v1/requests's exact shape in the broker's HTTP API: a signed
@@ -294,14 +364,15 @@ type requestDecision struct {
 	At time.Time `json:"at"`
 }
 
-// RequestStatus is GET /v1/requests/{id}'s exact response shape.
+// RequestStatus is GET /v1/requests/{id}'s exact response shape. ApproveURL is as RequestResult's.
 type RequestStatus struct {
-	State     string           `json:"state"`
-	GrantID   *string          `json:"grant_id"`
-	RecordID  *string          `json:"record_id"`
-	Approver  *string          `json:"approver"`
-	DecidedAt *time.Time       `json:"decided_at"`
-	Decision  *requestDecision `json:"decision"`
+	State      string           `json:"state"`
+	GrantID    *string          `json:"grant_id"`
+	RecordID   *string          `json:"record_id"`
+	Approver   *string          `json:"approver"`
+	DecidedAt  *time.Time       `json:"decided_at"`
+	Decision   *requestDecision `json:"decision"`
+	ApproveURL string           `json:"approve_url"`
 }
 
 // refusedBeforeCall is a refusal this client made before it sent anything, so refusalText adds
@@ -430,8 +501,8 @@ func (c *client) Self(ctx context.Context, signer Signer) (SelfResult, []byte, e
 
 // RenewEnrollment is the one Signer-taking method that still needs enrollmentID explicitly: the
 // broker route is /v1/enrollments/{id}/renew, so the id is in the URL path, not just the signed
-// payload. A pod's renewal carries its current projected token as pod_token; podToken "" sends no
-// body at all, a box's renewal.
+// payload. A pod's renewal carries its current projected token as pod_token; an empty podToken
+// sends no body at all, which is every other session's renewal.
 func (c *client) RenewEnrollment(ctx context.Context, signer Signer, enrollmentID, podToken string) (time.Time, error) {
 	if err := pathID("an enrollment id", enrollmentID); err != nil {
 		return time.Time{}, err
@@ -443,7 +514,7 @@ func (c *client) RenewEnrollment(ctx context.Context, signer Signer, enrollmentI
 			return time.Time{}, err
 		}
 	}
-	raw, err := c.doProof(ctx, signer, http.MethodPost, "/v1/enrollments/"+enrollmentID+"/renew", body)
+	_, raw, err := c.proofCall(ctx, signer, http.MethodPost, "/v1/enrollments/"+enrollmentID+"/renew", body)
 	if err != nil {
 		return time.Time{}, err
 	}

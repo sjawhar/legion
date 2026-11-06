@@ -65,8 +65,9 @@ func (r *IssueAskRepair) add(other IssueAskRepair) {
 //     attributed to the actor of the event that reopened it last: the first issue.updated after its
 //     latest issue.closed whose status is not done;
 //   - a closed issue one of whose documents owes a settlement marked after markedSince (any, when
-//     it is nil) - a write from another process's room, which SetIssueClosed never reached, leaves
-//     one, and no settlement runs while the issue is closed - gets the close's final sweep: its
+//     it is nil) - a write a room stored after the close's sweep, before its process heard of the
+//     close, or a room of a process of an older build, which never hears of it, leaves one, and no
+//     settlement runs while the issue is closed - gets the close's final sweep: its
 //     resolved block asks' blocks and copies, and its answered block asks' copies, the answer left
 //     out, are written again from their rows, and every readable ask block with no ask row and no
 //     source is marked resolved, each one logged, attributed to its latest closer.
@@ -89,9 +90,11 @@ func RepairIssueAsks(ctx context.Context, deps Deps, markedSince *time.Time) (Is
 
 // RunIssueAskRepair runs RepairIssueAsks every IssueAskRepairInterval until ctx ends, each pass
 // under issueAskRepairLease for one interval, so one process repairs per interval however many
-// serve the database; leases is required, as it is of every leased loop. A pass that fails or runs
-// out of time is logged, and the next interval's pass repairs what it left. The boot runs its own
-// pass before this starts (cmd/dispatch).
+// serve the database; leases is required, as it is of every leased loop. The ticks are
+// duty.RunLeased's, a ticker's: the first one interval after the call, then one each interval;
+// the first tick a pass overran comes at once with the moment it was due, and only the ones after
+// it are dropped. A pass that fails or runs out of time is logged, and the next interval's pass
+// repairs what it left. The boot runs its own pass before this starts (cmd/dispatch).
 //
 // The sweeps are bounded the same way: a closed issue's document keeps owing the settlement its
 // close's own write left for as long as the issue stays closed, so a pass that swept every such
@@ -111,18 +114,9 @@ func RunIssueAskRepair(ctx context.Context, deps Deps, leases duty.Leases) {
 	s := &server{deps: deps}
 	var markedSince *time.Time
 	var unrepaired []string
-	ticker := time.NewTicker(IssueAskRepairInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			duty.Exclusive(ctx, leases, issueAskRepairLease, IssueAskRepairInterval, func(ctx context.Context) {
-				markedSince, unrepaired = s.repairIssueAsksOnTick(ctx, markedSince, unrepaired)
-			})
-		}
-	}
+	duty.RunLeased(ctx, leases, issueAskRepairLease, IssueAskRepairInterval, duty.TickAfterInterval, func(ctx context.Context) {
+		markedSince, unrepaired = s.repairIssueAsksOnTick(ctx, markedSince, unrepaired)
+	})
 }
 
 // repairIssueAsksOnTick is one interval pass of RunIssueAskRepair, bounded by

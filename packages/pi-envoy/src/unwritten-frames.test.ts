@@ -149,8 +149,8 @@ describe("a card handed to the host", () => {
     const { claim, became } = notingClaim();
 
     expect(unwrittenCardKeys({})).toEqual([]);
-    expect(frames.sendCard("card", "steer", frame, claim)).toBe("shown");
-    expect(frames.sendCard("notice", "steer", undefined, undefined)).toBe("shown");
+    expect(frames.sendCard("card", "card", frame, claim)).toBe("shown");
+    expect(frames.sendCard("notice", "card", undefined, undefined)).toBe("shown");
     expect(handed).toHaveLength(2);
     expect(frames.waitsOnCard(frame)).toBe(false);
     expect(became).toEqual(["settled"]);
@@ -163,11 +163,11 @@ describe("a card handed to the host", () => {
     const unkept = notingClaim();
     state.refuseHand = true;
 
-    expect(() => frames.sendCard("card", "steer", frame, claim(frame))).toThrow(
+    expect(() => frames.sendCard("card", "card", frame, claim(frame))).toThrow(
       "the host refused the card"
     );
     expect(() =>
-      frames.sendCard("card", "steer", { dedupe_key: "content-hash" }, unkept.claim)
+      frames.sendCard("card", "card", { dedupe_key: "content-hash" }, unkept.claim)
     ).toThrow("the host refused the card");
     expect(frames.waitsOnCard(frame)).toBe(false);
     // Claimable again: a re-send, or a sweep, shows the frame.
@@ -178,7 +178,7 @@ describe("a card handed to the host", () => {
   test("written once the host is on another session settles its claim and records nothing", async () => {
     const { frames, state, recorded, claim, claimState } = harness();
     const frame = dispatchFrame(1);
-    frames.sendCard("card", "steer", frame, claim(frame));
+    frames.sendCard("card", "card", frame, claim(frame));
 
     state.session = "s2";
     await frames.written(writtenCard({ event_id: "event-1" }));
@@ -218,7 +218,7 @@ describe("a card the host withdrew unwritten", () => {
   test("is handed again after a run that ended aborted", () => {
     const { frames, handed, claim } = harness();
     const frame = dispatchFrame(1);
-    frames.sendCard("card", "steer", frame, claim(frame));
+    frames.sendCard("card", "card", frame, claim(frame));
 
     frames.runAborted();
     frames.handBackWithdrawn();
@@ -229,7 +229,7 @@ describe("a card the host withdrew unwritten", () => {
   test("of another session is not handed back", () => {
     const { frames, state, handed, claim } = harness();
     const frame = dispatchFrame(1);
-    frames.sendCard("card", "steer", frame, claim(frame));
+    frames.sendCard("card", "card", frame, claim(frame));
 
     state.session = "s2";
     frames.runAborted();
@@ -241,7 +241,7 @@ describe("a card the host withdrew unwritten", () => {
   test("that cannot be handed again is reported and still waits, to be handed at the next moment", () => {
     const { frames, state, handed, handBackFailures, claim, claimState } = harness();
     const frame = dispatchFrame(1);
-    frames.sendCard("card", "steer", frame, claim(frame));
+    frames.sendCard("card", "card", frame, claim(frame));
     frames.runAborted();
 
     state.refuseHand = true;
@@ -671,7 +671,7 @@ describe("a session change", () => {
     const leftCard = dispatchFrame(1);
     const leftTurn = dispatchFrame(2);
     const keptCard = dispatchFrame(3);
-    frames.sendCard("card", "steer", leftCard, claim(leftCard));
+    frames.sendCard("card", "card", leftCard, claim(leftCard));
     frames.awaitTurn("m-2", {
       sessionID: "s1",
       identity: leftTurn,
@@ -679,7 +679,7 @@ describe("a session change", () => {
       via: "typed",
     });
     state.session = "s2";
-    frames.sendCard("card", "steer", keptCard, claim(keptCard));
+    frames.sendCard("card", "card", keptCard, claim(keptCard));
 
     frames.releaseOtherSessions("s2");
 

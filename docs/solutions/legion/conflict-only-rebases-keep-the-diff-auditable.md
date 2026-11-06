@@ -72,11 +72,11 @@ moved before deciding a conflict is new.
 **Superseded 2026-09-27 (LEGION-118):** `jj rebase -s 'roots(main@origin..@)' -d main@origin`
 rewrites every descendant of the chain's fork point, including another tree's branch when one is
 stacked on it. Resolve with a forward merge instead — `jj new legion/<KEY> main@origin -m
-"<message>"`, merging from the bookmark rather than `@` (a handoff split leaves `@` empty and
-undescribed, and `jj git push` refuses a commit with no description) — and resolve the conflict
-directly in that one merge commit: there are no descendants to re-apply, so there is nothing to
-squash, and nothing was rewritten, so the push is the ordinary push procedure in
-`skills/legion-worker/SKILL.md`, never *Rewriting pushed commits*. The rules for what the
+"<message>"`, merging from the bookmark rather than `@`, which is often an empty, undescribed
+commit that `jj git push` refuses (before sjawhar/legion#2354 a handoff split left it so) — and
+resolve the conflict directly in that one merge commit: there are no descendants to re-apply, so
+there is nothing to squash, and nothing was rewritten, so the push is the ordinary push procedure
+in `skills/legion-worker/SKILL.md`, never *Rewriting pushed commits*. The rules for what the
 resolution may contain:
 
 1. **Executable lines: none.** If `main` moved code around the block, the block goes where
@@ -162,7 +162,8 @@ this pattern until proven a flake.
 - `unchanged-diff-fingerprint-one-fileset-verified-by-a-pair.md` — the `legion-worker` skill's
   hashed form of this identity check (LEGION-59), the jj fileset-union trap in it, and the case
   where a merged-prose resolution changes the hash with no code change.
-- `handoff-file-conflicts-during-rebases.md` — the bottom-up edit-and-squash procedure for
-  `.legion/` files.
+- `handoff-file-conflicts-during-rebases.md` — the bottom-up edit-and-squash procedure the
+  `.legion/` files once needed. That note is superseded: a handoff is a Dispatch record, and a
+  rebase meets no handoff file.
 - `../daemon/api-read-by-closure-before-assignment-boot-order-audit.md` — the change these
   rebases carried, and why the block's final position was forced.

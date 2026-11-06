@@ -13,12 +13,12 @@ import (
 )
 
 // A publish whose context has already ended sends nothing and says so: never a message on the wire
-// behind an answer of failure. The core transport put it there before - publishCoreTo kept the
+// behind an answer of failure. The core transport put it there before - its publish kept the
 // caller's spent deadline, ensureConnWithContext returned at once on a healthy connection, and
 // publishConfirmed published before it found the window gone - so a role lane's holder received a
 // message its sender was told failed, and the sender's retry (the HTTP client retries every 5xx)
 // delivered it again over a subject with no duplicate window. The route that reaches it is
-// publishHandler, whose holder lookup can spend the route's context before the publish begins.
+// publishHandler, whose reads before the publish can spend the route's deadline before it begins.
 //
 // The JetStream transport is pinned beside it. It has no fix of its own: nats.go refuses an ended
 // context before sending the publish request (publishJetStream says where), and this is what
@@ -40,8 +40,8 @@ func TestAPublishWithAnEndedContextSendsNothing(t *testing.T) {
 		{"a topic the stream captures", contracts.AgentSubject("ses_ended_context"), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := usesCoreTransport(tc.topic); got != tc.core {
-				t.Fatalf("usesCoreTransport(%q) = %t, want %t: the case would not exercise the transport it names", tc.topic, got, tc.core)
+			if got := UsesCoreTransport(tc.topic); got != tc.core {
+				t.Fatalf("UsesCoreTransport(%q) = %t, want %t: the case would not exercise the transport it names", tc.topic, got, tc.core)
 			}
 			uri := testnats.URL(t)
 			client, err := ConnectOwningStream([]string{uri})
@@ -122,7 +122,7 @@ func TestAPublishWithAnEndedContextSendsNothing(t *testing.T) {
 
 // publishConfirmed refuses an ended context before it calls publish, a deadline already spent or a
 // cancel with the deadline still ahead, and answers it with the spent-window text wrapping the
-// context's error. It is the only check of the context on the core path (publishCoreTo reads it
+// context's error. It is the only check of the context on the core path (PublishCoreContext reads it
 // nowhere, and ensureConnWithContext returns on a healthy connection without consulting it), so it
 // is pinned on its own, both causes driven directly: publish must not be called at all. The text is
 // pinned because a deployed filter may match it.

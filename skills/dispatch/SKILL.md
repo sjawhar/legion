@@ -8,31 +8,29 @@ description: "Use before your first dispatch command in a session: a message, co
 Dispatch is a record for the people who decide, never a log of your work.
 
 - Use the `dispatch` command; the HTTP API only for what no command does. `dispatch <command> --help` gives its rules and an example.
-- Put long text on stdin: `--<field>-file -` with a quoted here-document (`<<'EOF'`). Give object and list fields as JSON.
+- Put long text on stdin: `--<field>-file -` with a quoted here-document (`<<'EOF'`); give object and list fields as JSON.
 - Exit 1 is a refusal, 2 a usage error. A refusal lists each problem: fix them all, then call once.
-- `DOC_SERVICE_UNAVAILABLE`: the document is reloading, nothing was written; retry in a few seconds.
 
 ## Asks and ask blocks
 
-- A design question a document records is an ask block (a decision block) at the end of its section, at each phase:
+- A design question a document records is an ask block (a decision block) at the end of its section:
 
 ```md
 :::ask{urgency="med"}
-Which machines, files or people, the numbers, then "A happens to X, or B to Y?" Recommendation: the option and its reason.
+The question and the recommendation, as `skill://dispatch-writing-specs` writes them.
 
 - Option one: what it costs.
 - Option two: what it costs.
 :::
 ```
 
-- A to-do or permission only a person can give, or a decision with no document, is a `dispatch ask`.
-- In Legion, fix a clear defect in code your tree uses, hand others to the controller, and ask about decisions (`skill://legion-worker/references/findings.md`).
-- An open ask is the request. Do not raise it again in each message.
+- An ask is short and asks one thing; its reasoning goes in the document.
+- An open ask is the request; never repeat it per message.
 - Change an open ask's block with `dispatch edit-ask`, or `doc-edit`'s `replace` or `move`. An answered ask is fixed: ask anew.
-- Answer a person's reply to an open ask with `dispatch comment --reply-to-ask`; `--turn agent` for a note that needs nothing from them.
+- Reply on an open ask with `dispatch comment --reply-to-ask`; `--turn agent` (a progress note) needs it. An approval request a newer version moved needs `request-approval` again.
 - When an answer's option and text disagree, the text wins.
 - An ask block has a block id, for `doc-edit`, and an ask id, for the ask commands. `dispatch read --ref dispatch://KEY/ask/<id>` takes either.
-- An ask reaches the issue's assignee. On an unassigned issue, name who must answer.
+- An ask reaches the issue's assignee; if none, name who answers.
 
 ## Choosing what to work on
 
@@ -43,18 +41,19 @@ Which machines, files or people, the numbers, then "A happens to X, or B to Y?" 
 
 ## Issue status is yours to move
 
-Outside Legion, claim your issue (`dispatch claim`) and move it and your children: `in_progress` at implementation, `testing` on a production-like surface, `needs_review` while its PR waits, `done` with `--reason` once driven in production. An issue with the `legion` label, or under one: never write its status or route it, and claim it only as a Legion role of its tree, even when its claim reads `· not running`, as a suspended architect's does: taking it removes the tree from the workflow.
+Outside Legion, claim your issue (`dispatch claim`) and move it and your children: `in_progress` at implementation, `testing` on a production-like surface, `needs_review` while its PR waits, `done` with `--reason` once driven in production. Never write or route the status of an issue with the `legion` label or under one, and claim one only as a role of its tree: an outside claim can take the tree out of the workflow. A status write is set back or stands.
 
-A claim, or `dispatch issue-update --route session:<your id>` (`--route ''` on release), brings a person's answers, comments and messages; for agents' activity, `envoy_subscribe notifications.dispatch.issue.<KEY>.>`.
+`unresponsive` holders keep their claims 20 minutes (`skill://envoy`).
+
+A claim, or `dispatch issue-update --route session:<your id>` (`--route ''` on release), brings a person's answers, comments and messages; for agents' activity, `envoy_subscribe notifications.dispatch.issue.<KEY>.>`, which shows no quiet event.
 
 ## Close what you opened
 
-- An ask you opened is yours until answered or resolved. If it is answered another way or made moot, `dispatch resolve-ask` it that turn.
-- Resolve each open ask a later write names that is no longer needed; retract one a new ask replaces.
+- Resolve your open ask (`dispatch resolve-ask`) the turn it turns needless: another answer, a later write, dropped work, a replacement. If a person said keep it open, say why in its thread; they close it.
 
 ## Structure over stream
 
-- One issue per deliverable, its content the issue's document. Decisions are asks.
+- One issue per deliverable, its content the issue's document.
 - A message replies to a person or tells them what they must know now.
 - Text a person must read to decide belongs in the spec. An artifact is a real file.
 
@@ -69,17 +68,22 @@ Link each item you name:
 ```text
 dispatch://KEY
 dispatch://KEY/spec
+dispatch://KEY/spec#b-<block>[@vN]
 dispatch://KEY/artifact/<slug>[@vN]
 dispatch://KEY/ask/<id>
+dispatch://KEY/ask/<id>#b-<part>[@vN]
 dispatch://KEY/comment/<id>
+dispatch://KEY/comment/<id>#b-<block>[@vN]
 dispatch://KEY/message/<id>
+dispatch://KEY/message/<id>#b-<block>
 dispatch://PROJECT/artifact/<slug>[@vN]
 dispatch://PROJECT/artifact/<slug>/ask/<id>
+dispatch://PROJECT/artifact/<slug>/comment/<id>#b-<block>[@vN]
 ```
 
-A bare id or filename is not a reference. An ask or comment id can be an 8-hex prefix.
+A bare id, filename or path is not a reference, and outside Dispatch neither is `dispatch://`: give the `https://` link `dispatch` printed. Write each id whole.
 
 ## Setup and the HTTP API
 
-- Use a personal token from Dispatch **Settings → Agent tokens**, as `DISPATCH_TOKEN` or `dispatch.token` in the session's `envoy.json`.
+- Use a personal token from **Settings → Agent tokens**, as `DISPATCH_TOKEN` or `dispatch.token` in the session's `envoy.json`.
 - `GET /api/v1` lists every route; never guess one. Branch on an error's `code`, not its text.

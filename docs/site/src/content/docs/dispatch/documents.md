@@ -18,7 +18,10 @@ see each other's changes as they happen. There is no save button. Dispatch saves
 you go.
 
 A dot at the end of the tab row shows the document's connection: connecting, connected, offline,
-or failed. Point at it to read which.
+or failed. Point at it to read which. A document left open stays connected while nobody types in
+it: the page renews its presence every 15 to 18 seconds and Dispatch answers each renewal (a page
+that can only read gets an empty answer, since it cannot change who is shown present), so neither
+the page nor a proxy in front of Dispatch takes the quiet connection for a dead one.
 
 ## Versions
 
@@ -146,8 +149,9 @@ messages. In a document or a comment, a reference shows as a link titled with wh
 Rest the pointer on a link, or focus it with the keyboard, to see a preview card.
 
 A reference names what it points to only while the id Dispatch records the link under comes to at
-most 2048 bytes: an issue's key, a document's `<KEY>/<name>`, a block's `<KEY>/<name>#<id>`, or an
-ask's, comment's or message's id. A longer one is no link: your text is posted as written. The
+most 2048 bytes: an issue's key, a document's `<KEY>/<name>`, a block's `<KEY>/<name>#<id>`, a
+comment's or message's block's `comment/<id>#<block>` or `message/<id>#<block>`, or an ask's,
+comment's or message's id. A longer one is no link: your text is posted as written. The
 bound decides only what links: a document with a longer name is still read, edited and opened as
 any other.
 

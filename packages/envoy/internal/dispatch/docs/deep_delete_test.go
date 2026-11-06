@@ -41,7 +41,9 @@ func TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel(t *testing.T) {
 		peer := connectPeer(t, httpServer.URL, artifactID, "alice")
 		// The peer writes on the room's document, as a browser does once the room has sent it, so
 		// the chain's root always lands beside the seeded paragraph.
-		waitForPeerDocument(t, peer, "before\n")
+		if err := peer.WaitForText(peerMarkdown, "before\n", 10*time.Second); err != nil {
+			t.Fatal(err)
+		}
 		fragment := peer.Doc.GetXmlFragment(fragmentName)
 		root := crdt.NewYXmlElement("blockquote")
 		if _, err := peer.Send(func(txn *crdt.Transaction) { fragment.InsertElement(txn, 0, root) }); err != nil {
@@ -88,8 +90,8 @@ func TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel(t *testing.T) {
 		if held := deleterFragment.Len(); held != 2 {
 			t.Fatalf("the deleting document holds %d blocks, want the chain's root and the paragraph", held)
 		}
-		// ygo hands an observer an update for every transaction, one that changed nothing
-		// included, so the delete is checked by what it left.
+		// The delete is checked by what it left: one that deleted nothing would make no update,
+		// and the room would be sent nothing to test.
 		deletion := docstest.Transact(deleter, func(txn *crdt.Transaction) {
 			deleterFragment.Delete(txn, 0, 1)
 		})

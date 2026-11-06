@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
@@ -10,6 +11,27 @@ import {
   viteRuntimeGeneratedCode,
 } from "../../../scripts/third-party-notices";
 
+/**
+ * `decode-named-character-reference`'s DOM-free implementation, which micromark decodes every
+ * named character reference through in every bundle this config builds. The package's `browser`
+ * export condition is a module whose body is `document.createElement('i')`, and Vite resolves a
+ * Web Worker's bundle with the client's conditions, so the parse worker
+ * (features/refs/markdown-parse.worker.ts) would throw before its first message. Its default
+ * condition answers from the `character-entities` table instead - the table Bun, Node, the unit
+ * suites and the pmdoc fixture generator already run - so a body reads the same above and below
+ * the parse worker's threshold, and the same as the generator that pins Go's fixtures
+ * (sjawhar/legion#2519), for 11.6 KB gzipped on the page's bundle.
+ *
+ * The package publishes no `./index.js` subpath, so the file is resolved rather than named: from
+ * the editor, which `micromark-core-commonmark` is a dependency of, and from that package, which
+ * decodes references with it. `require`'s own conditions hold no `browser`, so this is `index.js`.
+ */
+const proofEditor = createRequire(
+  fileURLToPath(new URL("../../proof-editor/src/lib-headless.ts", import.meta.url))
+);
+const characterReferenceDecoder = createRequire(
+  proofEditor.resolve("micromark-core-commonmark")
+).resolve("decode-named-character-reference");
 const vite = packageRoot("vite", fileURLToPath(new URL(".", import.meta.url)));
 /**
  * The code the build emits from no source file it records: Vite's own helpers (module preload,
@@ -79,8 +101,10 @@ export default defineConfig({
   worker: { format: "es", plugins: () => [notices.worker()] },
   define: {
     // Keep the entry chunk distinct across deployments, including no-source-change image rebuilds.
+    // DISPATCH_BUILD wins over GITHUB_SHA, which CI sets on every step, so one job can build two
+    // distinct dashboards of one commit (`bun run e2e:multiprocess`'s second build).
     __DISPATCH_BUILD__: JSON.stringify(
-      process.env.GITHUB_SHA ?? process.env.DISPATCH_BUILD ?? Date.now().toString()
+      process.env.DISPATCH_BUILD ?? process.env.GITHUB_SHA ?? Date.now().toString()
     ),
   },
   resolve: {
@@ -89,6 +113,7 @@ export default defineConfig({
     // module identity rather than one per workspace import path.
     dedupe: ["prosemirror-model"],
     alias: {
+      "decode-named-character-reference": characterReferenceDecoder,
       "@legion/contracts/repo": fileURLToPath(
         new URL("../../contracts/src/repo.ts", import.meta.url)
       ),
@@ -124,11 +149,13 @@ export default defineConfig({
   },
   build: {
     outDir: "dist",
-    // The editor (Milkdown) is a lazy chunk loaded only on the document tab, and it carries
-    // beautiful-mermaid and ELK (~1.9 MB raw). A body's diagrams draw in the Mermaid worker
-    // (features/refs/mermaid-render.worker.ts), a bundle of its own with the same renderer,
-    // fetched only once a body holds a mermaid block.
-    chunkSizeWarningLimit: 3000,
+    // The largest chunk is ECharts (an `index-*.js` of 1,134,772 bytes raw), which only the
+    // Delivery page loads, and the entry is 781,007 bytes, both past Vite's 500 kB default.
+    // beautiful-mermaid and ELK live only in the Mermaid worker's bundle
+    // (features/refs/mermaid-render.worker.ts, 1,565,608 bytes), fetched once a body or a
+    // document holds a mermaid block; Vite emits it as an asset and holds it to no chunk limit.
+    // The editor's lazy chunk (`lib-*.js`, 204,492 bytes) carries none of the renderer.
+    chunkSizeWarningLimit: 1200,
     emptyOutDir: true,
   },
   server: {

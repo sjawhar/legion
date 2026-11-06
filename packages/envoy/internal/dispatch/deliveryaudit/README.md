@@ -9,18 +9,21 @@ sessions they were owed to (sjawhar/legion#2366):
   `tq receipts` (theorem-labs/agent-infra `transcript-store/`).
 - `trace.sql` shows everything Dispatch recorded about one comment's delivery.
 
-Neither script writes. Run both in a read-only transaction anyway, so a mistake cannot write. The
-package's test (`deliveryaudit_test.go`) runs the same embedded bytes through pgx, binding each psql
-variable as a parameter (`bind`), over records the real API handlers and outbox wrote.
+Neither script writes. Each run below is one read-only transaction anyway, so a mistake cannot
+write, and `-q` keeps psql's `SET` line out of the CSV. The package's test
+(`deliveryaudit_test.go`) runs the same embedded bytes through pgx, binding each psql variable as a
+parameter (`bind`), over records the real API handlers and outbox wrote.
 
 ## Running
 
 ```bash
-PGOPTIONS='-c default_transaction_read_only=on' psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 --csv \
+psql "$DATABASE_URL" --single-transaction -q -X -v ON_ERROR_STOP=1 --csv \
+  -c 'SET TRANSACTION READ ONLY' \
   -v from=2026-10-01T00:00:00Z -v to=2026-11-01T00:00:00Z \
   -f comments.sql > comments.csv
 
-PGOPTIONS='-c default_transaction_read_only=on' psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 --csv \
+psql "$DATABASE_URL" --single-transaction -q -X -v ON_ERROR_STOP=1 --csv \
+  -c 'SET TRANSACTION READ ONLY' \
   -v comment=<comment uuid> \
   -f trace.sql > trace.csv
 ```
@@ -66,7 +69,7 @@ A target is one row however many reasons it has. For example, when a comment men
 that claims its issue, that session has one row with `owed_reasons` `claimant;mention`. A role
 mention and a session target are different rows, also when the role resolved to that session.
 
-A target's subject is the subject the outbox's `publishRoute` uses for it: `session:<id>` is
+A target's subject is the subject the outbox's `addRoute` uses for it: `session:<id>` is
 `notifications.agent.<id>`, and `role:<token>` is `notifications.role.<token>`.
 
 ## `comments.csv` columns

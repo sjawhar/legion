@@ -15,7 +15,7 @@ import (
 
 // The tests in this file start nats-server containers through testnats, so they run only under the
 // natslive tag: a plain `go test ./...`, as a release job runs it, needs no Docker. The
-// envoy-infra-go job runs them with `go test -tags natslive ./core/ ./seed/`.
+// envoy-infra-go job runs them with `go test -timeout 30m -tags natslive ./core/ ./seed/ ./gcp/`.
 
 // liveUsers is an authorization in the placeholder's shape with fresh keys, whose seeds the
 // real-server tests connect with; the fallback is grantable apart from everything else.

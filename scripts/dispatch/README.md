@@ -21,19 +21,22 @@ bun scripts/dispatch/ask-census.ts \
 
 The script resolves Dispatch as every command does, with `sessionDispatchSettings`
 (`packages/envoy-client/src/session-settings.ts`) over the envoy.json harness `command` reads: the
-file `ENVOY_CONFIG_FILE` names, else the omp profile's, `CLAUDE_CONFIG_DIR`'s (only under
-`CLAUDE_CODE_CHILD_SESSION=1`, as in a Claude Code shell) or `OPENCODE_CONFIG_DIR`'s, else
-`~/.config/legion/envoy.json`: the URL from `DISPATCH_URL`, else
-`dispatch.serverUrl` with `dispatch.enabled`; the token from `DISPATCH_TOKEN_FILE`, else
-`DISPATCH_TOKEN`, else `dispatch.token`. A checkout's `.opencode/envoy.json`, which is not read, is
-named on stderr with its rename while the checkout has no `.envoy/envoy.json`. With Dispatch off it
-stops with `Dispatch is not configured: <notice>`, the notice saying which file and why, or
-`dispatch config: <error>`. It prints total asks, decision
+file `ENVOY_CONFIG_FILE` names, else the omp profile's or `CLAUDE_CONFIG_DIR`'s (only under
+`CLAUDE_CODE_CHILD_SESSION=1`, as in a Claude Code shell), else `~/.config/legion/envoy.json`: the
+URL from `DISPATCH_URL`, else `dispatch.serverUrl` with `dispatch.enabled`; the token from
+`DISPATCH_TOKEN_FILE`, else `DISPATCH_TOKEN`, else `dispatch.token`. A checkout's
+`.opencode/envoy.json`, which is not read, is named on stderr with its rename while the checkout
+has no `.envoy/envoy.json`. With Dispatch off it stops with `Dispatch is not configured: <notice>`,
+the notice saying which file and why, or `dispatch config: <error>`. It prints total asks, decision
 blocks, standalone question asks, approval requests, per-issue counts, approval rounds, every
 standalone question with a blank `code` column, and a per-session table.
 
 A session still running an old plugin can be removed from the measurement with a repeated
 `--exclude-session <id>`. The summary prints how many asks were excluded.
+
+`--json` prints the same numbers as one JSON object on stdout and nothing else — the ask totals,
+the per-issue counts, the approval rounds, the coded standalone questions, the coding totals, the
+excluded-ask count and the per-session rows — so one day's numbers can be compared with another's.
 
 Classify each standalone question in a CSV passed with `--codes`:
 
@@ -83,19 +86,22 @@ reaches both Dispatch's database and the transcript store.
 ### The run
 
 Use one window for both steps. That run chooses `TO`. Both times are UTC, in the form
-`2026-10-01T00:00:00Z`.
+`2026-10-01T00:00:00Z`. Each psql run is one read-only transaction, so a mistake cannot write, and
+`-q` keeps psql's `SET` line out of the CSV.
 
 ```bash
 FROM=2026-10-01T00:00:00Z
 TO=2026-10-27T05:00:00Z
 
 # 1. Dispatch: every person's comment in the window, one row per pair.
-PGOPTIONS='-c default_transaction_read_only=on' psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 --csv \
+psql "$DATABASE_URL" --single-transaction -q -X -v ON_ERROR_STOP=1 --csv \
+  -c 'SET TRANSACTION READ ONLY' \
   -v from="$FROM" -v to="$TO" \
   -f packages/envoy/internal/dispatch/deliveryaudit/comments.sql > comments.csv
 
 # Optional: Dispatch's whole record of one comment, once for each comment to show.
-PGOPTIONS='-c default_transaction_read_only=on' psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 --csv \
+psql "$DATABASE_URL" --single-transaction -q -X -v ON_ERROR_STOP=1 --csv \
+  -c 'SET TRANSACTION READ ONLY' \
   -v comment=03207432-749f-4211-9607-e378dc636807 \
   -f packages/envoy/internal/dispatch/deliveryaudit/trace.sql > trace-03207432.csv
 
@@ -279,7 +285,7 @@ above (`sessionDispatchSettings` over the envoy.json `command` reads, `DISPATCH_
 - **Build**, always: `GET /healthz`, sent no token, read on 200 and on 503. It prints
   `build commit=<sha|null> schema=<n|null> ok=<true|false>`. Whether that commit carries a given
   merge is checked outside the script, with
-  `gh api repos/sjawhar/legion/compare/<merge>...<commit> --jq .status` (`ahead` or `identical`).
+  `gh api repos/cybermonklabs/legion/compare/<merge>...<commit> --jq .status` (`ahead` or `identical`).
   An unreadable `/healthz` makes the run unavailable.
 - **A1** (`--a1-query`): `GET /api/v1/search?q=<query>` fails when the answer has a `degraded`
   field, and passes when it has none and at least one result:
@@ -325,19 +331,59 @@ carries the private host while an issue title can carry a private name.
 ### Lexeme database
 
 `--lexeme-database` takes a Postgres URL (`postgres://` or `postgresql://`) or the path of a
-server's `.s.PGSQL.5432` socket. Any Postgres 16 works, as production runs 16: the check uses only
+server's `.s.PGSQL.5432` socket. Any Postgres 18 works, as production and CI run 18: the check uses only
 the built-in `english` configuration, in one statement per pair with every value bound, and
 reads or writes no table. The statement mirrors the issue row's vector
 (`migrations/0088_issues_title_lexemes.up.sql`, with `search_text` from
 `migrations/0056_search_text.up.sql`) and search's own `websearch_to_tsquery('english', q)`. A
-throwaway server that listens only on a unix socket:
+throwaway PostgreSQL 18.6, the version production runs, that listens only on a unix socket in
+`$TMPDIR/pg`, from zonky's pinned Linux x86-64 binaries on Maven Central. The block is safe to run
+again, also from a second shell at the same time: it holds a lock while it works, prints the socket
+path and starts nothing when a server answers on the socket, refuses when none answers but
+`$TMPDIR/pg/data/postmaster.pid` is left, downloads the server only when `$TMPDIR/pg/server` is
+absent, creates the cluster only when `$TMPDIR/pg/data` is absent, then starts it and prints the
+socket path:
 
 ```bash
-uvx --python 3.12 --from pgserver==0.1.4 python -c 'import pgserver; print(pgserver.get_server("<dir under $TMPDIR>", cleanup_mode=None).get_uri())'
+pg="$TMPDIR/pg" v=18.6.0 && mkdir -p "$pg" && (
+  flock 9 && cd "$pg" || exit 1
+  # Ask the socket, never pg_ctl status: each role of an issue pod has its own PID namespace, so
+  # postmaster.pid names a process only in the role that started the server.
+  if python3 -c 'import socket, sys; s = socket.socket(socket.AF_UNIX); s.settimeout(5); s.connect(sys.argv[1])' "$pg/.s.PGSQL.5432" 2>/dev/null; then
+    echo "$pg/.s.PGSQL.5432"
+    exit 0
+  fi
+  if [ -e data/postmaster.pid ]; then
+    echo "no server answers on $pg, but data/postmaster.pid is left: stop the server from the shell that started it, or remove $pg" >&2
+    exit 1
+  fi
+  if [ ! -d server ]; then
+    rm -rf server.new &&
+      curl -fsSL -o pg.jar "https://repo1.maven.org/maven2/io/zonky/test/postgres/embedded-postgres-binaries-linux-amd64/$v/embedded-postgres-binaries-linux-amd64-$v.jar" &&
+      python3 -c 'import zipfile; zipfile.ZipFile("pg.jar").extract("postgres-linux-x86_64.txz")' &&
+      python3 -c 'import lzma, tarfile; tarfile.open(fileobj=lzma.open("postgres-linux-x86_64.txz")).extractall("server.new", filter="data")' &&
+      mv server.new server ||
+      exit 1
+  fi
+  if [ ! -d data ]; then
+    rm -rf data.new &&
+      server/bin/initdb -D data.new -U postgres --auth=trust -E UTF8 -c listen_addresses= -c "unix_socket_directories=$pg" &&
+      mv data.new data ||
+      exit 1
+  fi
+  # 9>&-: the server must not inherit the lock, or every later run waits on it.
+  server/bin/pg_ctl -D data -l pg.log start 9>&- || exit 1
+  echo "$pg/.s.PGSQL.5432"
+) 9>"$pg/setup.lock"
 ```
 
-Pass it as `--lexeme-database <dir>/.s.PGSQL.5432`: Bun's `SQL` refuses the printed URL's
-`?host=<dir>` form.
+If a run fails, run `rm -rf "$TMPDIR/pg"` and run the block again.
+
+Pass it as `--lexeme-database "$TMPDIR/pg/.s.PGSQL.5432"`; the check connects as `postgres` to the
+`postgres` database. Stop it with `server/bin/pg_ctl -D data stop` from `$TMPDIR/pg`, only in the
+shell that started it: `pg_ctl` signals the PID in `postmaster.pid`, which in any other role of an
+issue pod is another process or none. When no server answers and the block refuses, remove
+`$TMPDIR/pg` and run the block again.
 
 ### The pre-registered pairs
 

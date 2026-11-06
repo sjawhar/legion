@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
 
@@ -34,6 +34,7 @@ import { useAgents } from "../conversation/useAgents";
 import { AgentName, type AgentPart, AgentParts, useAgentText } from "../refs/AgentName";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 
 import { deliveryAttempts } from "./attempts";
 import { excludedParts } from "./broadcast-plan";
@@ -66,23 +67,25 @@ function BroadcastRecipientRow({
   recipient,
 }: {
   delivery: MessageDeliveryMode;
-  liveAgents: readonly Agent[];
+  /** `undefined` while the agent list's read is not current: every capability is then unknown
+   *  (`capabilitiesForTarget`), never "not supported". */
+  liveAgents: readonly Agent[] | undefined;
   recipient: BroadcastRecipient;
 }): ReactNode {
   const text = useAgentText();
   const queryClient = useQueryClient();
-  const retry = useMutation({
-    mutationFn: (mode: MessageDeliveryMode) =>
-      api.createMessageDelivery(recipient.message.id, mode),
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["broadcast"] }),
-  });
-  // The row shows the recipient's whole thread, so its replies are read. Only these: the
-  // session's replies anywhere else, older or newer, stay unread until a view shows them.
-  useMarkShownRepliesRead(recipient.session_id, recipient.replies);
   // The recipient is the session the broadcast addressed: `AgentName` draws it wherever the row
   // names it, and the row's accessible name is the same name as text.
   const recipientAgent: AgentPart = { sessionId: recipient.session_id, storedTitle: undefined };
   const label = text.sessionText(recipient.session_id, undefined);
+  const retry = useKeyedWrite({
+    label: (mode: MessageDeliveryMode) => `Delivery to ${label} again, as ${MODE_LABELS[mode]}`,
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["broadcast"] }),
+    write: (mode, bounds) => api.createMessageDelivery(recipient.message.id, mode, bounds),
+  });
+  // The row shows the recipient's whole thread, so its replies are read. Only these: the
+  // session's replies anywhere else, older or newer, stay unread until a view shows them.
+  useMarkShownRepliesRead(recipient.session_id, recipient.replies);
   const answer = recipient.replies.find((reply) => reply.author.kind === "session");
   const answeredBy = answer?.author;
   const attempts = deliveryAttempts(recipient.message.deliveries, recipientAgent);
@@ -168,7 +171,7 @@ export function BroadcastPage(): ReactNode {
   const { id = "" } = useParams<{ id: string }>();
   const location = useLocation();
   const excluded = exclusionsFromState(location.state);
-  const { agents } = useAgents(true, true);
+  const { agents, current } = useAgents(true, true);
   const broadcast = useQuery({
     queryFn: () => api.getBroadcast(id),
     // Keyed under ["broadcast"], the prefix every issue-less message event invalidates, so a
@@ -231,7 +234,7 @@ export function BroadcastPage(): ReactNode {
             <BroadcastRecipientRow
               delivery={sent.delivery}
               key={recipient.session_id}
-              liveAgents={agents}
+              liveAgents={current ? agents : undefined}
               recipient={recipient}
             />
           ))}

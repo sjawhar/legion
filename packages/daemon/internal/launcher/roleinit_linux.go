@@ -248,9 +248,9 @@ func privateHome(cfg RoleInitConfig, homes, work string) error {
 		return fmt.Errorf("the home %s carries mounts (%s): the container mounts what belongs under the home under %s instead",
 			cfg.Home, strings.Join(carried, ", "), cfg.HomeMounts)
 	}
-	options := "lowerdir=" + cfg.Home + ",upperdir=" + filepath.Join(homes, "upper") + ",workdir=" + work
+	options := homeOverlayOptions(cfg.Home, filepath.Join(homes, "upper"), work)
 	if err := unix.Mount("overlay", cfg.Home, "overlay", 0, options); err != nil {
-		return fmt.Errorf("give the role its own layer over %s: %w", cfg.Home, err)
+		return fmt.Errorf("give the role its own layer over %s with %s: %w", cfg.Home, options, err)
 	}
 	// The image reaches the home mounts directory through a link (its /var/run is /run), and
 	// mountinfo names each mount by the path the link resolves to, so each is placed relative to
@@ -288,6 +288,17 @@ func privateHome(cfg RoleInitConfig, homes, work string) error {
 		}
 	}
 	return nil
+}
+
+// homeOverlayOptions is the option string for the role's own layer over its home. userxattr is
+// there because gVisor marks a renamed directory opaque by writing the extended attribute
+// trusted.overlay.opaque, which a task in a nested user namespace may not write, and gVisor panics
+// when that write is refused, which ends the pod's whole sandbox. userxattr puts the mark in the
+// user.overlay. namespace instead, which the role's own upper layer keeps and its owner may write.
+// gVisor turns the option on by itself only when the upper layer is a gofer mount, and a role's
+// upper layer is a sandbox tmpfs.
+func homeOverlayOptions(home, upper, work string) string {
+	return "lowerdir=" + home + ",upperdir=" + upper + ",workdir=" + work + ",userxattr"
 }
 
 // ownConfigHome is the role's own config home, own, made the first time a generation of the role
@@ -649,6 +660,18 @@ func mountPointBeneath(root, target string, dir bool, replaced func(link string)
 		case stat.Mode&unix.S_IFMT != unix.S_IFDIR:
 			return fmt.Errorf("%s is neither a directory nor a link, where a mount point's directory goes", path)
 		}
+		// O_PATH is load-bearing in these flags. Measured 2026-11-01 against 4.19.0-gvisor
+		// and Linux 7.0, on a container filesystem and on a mounted volume alike: an openat
+		// of a symlink to a directory with O_PATH|O_DIRECTORY|O_NOFOLLOW refuses ENOTDIR on
+		// both, while the same open as O_RDONLY|O_DIRECTORY|O_NOFOLLOW refuses ENOTDIR on
+		// the ordinary kernel and opens what the link names under the gVisor an issue pod
+		// runs on. So an edit that dropped O_PATH here — to read the directory, say — would
+		// still be refused wherever this is tested and would follow the link in a pod. The
+		// Fstatat above is the component's other check, and it is honoured on both kernels
+		// (its AT_SYMLINK_NOFOLLOW reports the link, where fstatat without that flag and
+		// os.Stat report the directory); this open is what is left for a component the
+		// Mkdirat above made, or one that changed after that Fstatat read it. A final
+		// component that is a file never reaches this open: it returns above.
 		next, err := unix.Openat(parent, name, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 		if err != nil {
 			return fmt.Errorf("open %s: %w", path, err)

@@ -163,8 +163,7 @@ test("a search term lists marked document, comment, ask, and issue-title results
 
 test("an ask hit says whether it is answered, and an answered one shows its latest answer, who gave it and the options chosen", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "ask hit states are independent of viewport");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Planetarium" });
   const answered = await createAsk(
@@ -241,6 +240,8 @@ test("an ask hit says whether it is answered, and an answered one shows its late
   }
 });
 
+// SLOW(>=2s): a seeded project document, issue and message, and the two routes the palette's
+// hits open - a Conversation turn and the document, which mounts its editor.
 test("a project-document hit is grouped under the document and opens it; a message hit opens its Conversation turn", async ({
   browser,
 }) => {
@@ -285,7 +286,8 @@ test("a project-document hit is grouped under the document and opens it; a messa
       page.getByRole("list", { name: "Conversation turns" }).locator('li[aria-current="true"]')
     ).toContainText("Sextant calibration done.");
 
-    await openSearchFromRail(page, false);
+    // The palette opens on the page the reader is already on: Ctrl+K, not another load.
+    await page.keyboard.press("Control+k");
     await page.getByRole("combobox", { name: "Search" }).fill("sextant");
     await dialog.getByRole("option", { name: /^doc / }).click();
     await expect(page).toHaveURL(
@@ -297,7 +299,7 @@ test("a project-document hit is grouped under the document and opens it; a messa
   }
 });
 
-test("the rail Search control opens the palette and Escape returns focus to it @phone", async ({
+test("the rail Search control opens the palette and Escape returns focus to it", async ({
   browser,
 }, testInfo) => {
   await seedSearchFixture();
@@ -305,8 +307,7 @@ test("the rail Search control opens the palette and Escape returns focus to it @
 
   try {
     const page = await context.newPage();
-    const isPhone = testInfo.project.name === "iphone";
-    await openSearchFromRail(page, isPhone);
+    await openSearchFromRail(page, false);
 
     const dialog = page.getByRole("dialog", { name: "Search" });
     const search = page.getByRole("combobox", { name: "Search" });
@@ -321,9 +322,7 @@ test("the rail Search control opens the palette and Escape returns focus to it @
 
     await page.keyboard.press("Escape");
     await expect(dialog).toHaveCount(0);
-    if (!isPhone) {
-      await expect(page.getByRole("button", { name: /^search/i })).toBeFocused();
-    }
+    await expect(page.getByRole("button", { name: /^search/i })).toBeFocused();
   } finally {
     await context.close();
   }
@@ -400,15 +399,13 @@ test("phone search rows are at least 44px, do not overflow, and a comment result
   }
 });
 
-test("no results and short queries are stated, not silent @phone", async ({
-  browser,
-}, testInfo) => {
+test("no results and short queries are stated, not silent", async ({ browser }) => {
   await seedSearchFixture();
   const context = await asUser(browser, "alice");
 
   try {
     const page = await context.newPage();
-    await openSearchFromRail(page, testInfo.project.name === "iphone");
+    await openSearchFromRail(page, false);
     const search = page.getByRole("combobox", { name: "Search" });
 
     await search.fill("a");

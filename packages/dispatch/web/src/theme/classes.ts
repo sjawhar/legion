@@ -284,6 +284,12 @@ registerText("success callout timestamp text", CALLOUT_SUCCESS_TIMESTAMP_TEXT, C
 registerText("quote body text on surface", QUOTE_BODY_TEXT, SURFACE);
 registerText("info callout title text", CALLOUT_INFO_TITLE_TEXT, CALLOUT_INFO_BG);
 registerText("inline warning text on surface", INLINE_WARNING_TEXT, SURFACE);
+/** The marks a pill paints over `SURFACE_MUTED`: a result's Pass and Fail, a check's state and
+ *  a requirement's gap each draw the pill's shape in their own colour (`pillShapeClassName`),
+ *  rather than stacking a colour after the pill's own muted one. */
+registerText("success text on surface-muted", SUCCESS_TEXT, SURFACE_MUTED);
+registerText("danger text on surface-muted", DANGER_TEXT, SURFACE_MUTED);
+registerText("inline warning text on surface-muted", INLINE_WARNING_TEXT, SURFACE_MUTED);
 /** `CALLOUT_INFO_BG` also backs the composer form and a selected margin card (`selectedCardBg`
  * reuses its exact shades under its own name), so primary, secondary, and stronger muted text
  * roles need contrast checks.
@@ -330,6 +336,19 @@ registerText("progress fill on its track", PROGRESS_FILL, PROGRESS_TRACK, 3);
 registerText("finished progress bar on surface", PROGRESS_FILL_DONE, SURFACE, 3);
 registerText("trust warning outline on surface", TRUST_WARNING_BORDER, SURFACE, 3);
 registerText("trust warning outline on canvas", TRUST_WARNING_BORDER, CANVAS, 3);
+
+/** A decision its maker was unsure of: amber text and an amber rule on the leading edge, on the
+ * Decisions tab's `Unsure:` paragraph and on the margin card beside a spec block it shaped, so a
+ * reader sees which of the agent's choices it was not sure of. The text is a 4.5:1 pair on the
+ * panel's surface and the rule a 3:1 boundary against it. */
+export const DECISION_UNSURE_TEXT = pair(P.AMBER_800, P.AMBER_300);
+export const DECISION_UNSURE_BORDER = pair(P.AMBER_700, P.AMBER_400);
+export const decisionUnsureText = "text-amber-800 dark:text-amber-300";
+export const decisionUnsureBorder = "border-l-amber-700 dark:border-l-amber-400";
+export const decisionUnsureAccent = `${decisionUnsureBorder} ${decisionUnsureText}`;
+
+registerText("decision unsure text on surface", DECISION_UNSURE_TEXT, SURFACE);
+registerText("decision unsure rule on surface", DECISION_UNSURE_BORDER, SURFACE, 3);
 
 // ---------------------------------------------------------------------------------------------
 // Suggestion and version diffs
@@ -540,10 +559,12 @@ export const connectionDotFailed = "bg-rose-500 dark:bg-rose-400";
  * stay legible at that size. Purely decorative — no contrast check applies. */
 export const liveDotBg = "bg-emerald-500 dark:bg-emerald-400";
 /** The agent state mark's rings (`features/refs/AgentName.tsx`), beside `liveDotBg`'s filled dot
- * for a running session: a session the registry no longer lists is a hollow slate ring, and one
- * whose state is unknown (no successful registry read yet, or the latest failed) a dashed
- * neutral ring. Filled, hollow and dashed are the distinction that does not rest on colour.
+ * for a running session: a session that has missed its heartbeats without ending is a solid
+ * amber ring, one the registry no longer lists a hollow slate ring, and one whose state is
+ * unknown (no successful registry read yet, or the latest failed) a dashed neutral ring. Filled,
+ * amber, hollow and dashed are the distinction that does not rest on colour alone.
  * Decorative — the mark's own `aria-label` names the state, so no contrast check applies. */
+export const stalledDotBorder = "border-amber-500 dark:border-amber-400";
 export const offlineDotBorder = "border-slate-400 dark:border-slate-600";
 export const unknownDotBorder = "border-slate-400 dark:border-slate-500";
 // ---------------------------------------------------------------------------------------------
@@ -664,6 +685,8 @@ registerText(
  * backdrop is never itself read as text or a surface color — no contrast check applies). */
 export const backdrop40 = "bg-slate-950/40";
 export const backdrop50 = "bg-slate-950/50";
+/** The darker backdrop a picture opened at full size sits on (`picture-lightbox.ts`). */
+export const backdrop80 = "bg-slate-950/80";
 
 /** A layout-preserving invisible border: reserves the border's width so a hover/focus state
  * that adds a real border doesn't shift the element, or so a loading skeleton matches its live
@@ -752,3 +775,24 @@ export const canvasText = "bg-slate-50 dark:bg-slate-950 text-slate-900 dark:tex
  */
 export const scrollFadeTrailing =
   "[mask-image:linear-gradient(to_right,#000_calc(100%-32px),#0000)]";
+
+// ---------------------------------------------------------------------------------------------
+// Spec block marks: editor decorations (`ProofEditorHandle.setBlockMarks`), never classes written
+// into the editor's DOM
+// ---------------------------------------------------------------------------------------------
+
+/** A spec block a decision shaped that the decision has changed since: a dashed amber rule down
+ *  its leading edge. The rule identifies the state, so it is registered as a UI boundary against
+ *  the document's surface and canvas; the block's `title` says what it means. */
+export const STALE_BLOCK_BORDER = pair(P.AMBER_700, P.AMBER_400);
+export const staleBlockMark =
+  "border-l-2 border-dashed border-l-amber-700 dark:border-l-amber-400 pl-2";
+registerText("stale block rule on surface", STALE_BLOCK_BORDER, SURFACE, 3);
+registerText("stale block rule on canvas", STALE_BLOCK_BORDER, CANVAS, 3);
+
+/** A spec block that changed since the version the person last read: a faint accent fill behind
+ *  the document's own text. */
+export const CHANGED_SINCE_READ_BG = pair(P.SKY_50, P.SKY_950);
+export const changedSinceReadMark = "bg-sky-50 dark:bg-sky-950";
+registerText("primary text on a changed-since-read block", TEXT_PRIMARY, CHANGED_SINCE_READ_BG);
+registerText("secondary text on a changed-since-read block", TEXT_SECONDARY, CHANGED_SINCE_READ_BG);

@@ -64,6 +64,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
@@ -106,6 +107,7 @@ type childAdoptionLive struct {
 // TestAQueuedRootUnderALiveTreeJoinsItLive drives the eleven steps of the proof against one booted
 // daemon.
 func TestAQueuedRootUnderALiveTreeJoinsItLive(t *testing.T) {
+	fixtureenv.Live(t)
 	r := newChildAdoptionLive(t)
 	r.step("queued-root-leaves-the-line", r.queuedRootLeavesTheLine)
 	r.step("release-adopts-from-todo", r.releaseAdoptsFromTodo)

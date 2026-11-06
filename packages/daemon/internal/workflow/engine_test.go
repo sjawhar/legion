@@ -44,6 +44,7 @@ func TestGateRegistrationWithDesignGateOffStartsPlanningAndSeedsApprovalRead(t *
 		Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "Workflow table", Phase: phase.Admitted,
 		Generation: 1, Status: "in_progress", Rank: "U",
 	})
+	seedTreeLifecycle(t, pool, "LEGION-208")
 
 	engine := New(store, Config{
 		Project:        "LEGION",
@@ -58,6 +59,9 @@ func TestGateRegistrationWithDesignGateOffStartsPlanningAndSeedsApprovalRead(t *
 	}, engine, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact: %v", err)
 	}
+	// The registration opens the gate and releases the root; the waiting line starts its first
+	// phase, at the slot that phase needs.
+	startUnblockedChildren(t, pool, engine)
 
 	var gotPhase string
 	if err := pool.QueryRow(ctx, "select phase from issues where key = $1", "LEGION-208").Scan(&gotPhase); err != nil {
@@ -76,7 +80,12 @@ func TestGateRegistrationWithDesignGateOffStartsPlanningAndSeedsApprovalRead(t *
 		t.Fatalf("gate = latest %d approved %v, want version 4 open", latest, approved)
 	}
 
-	rows, err := pool.Query(ctx, "select kind, payload from outbox order by id")
+	// The relaunch half of the planner's start is left out, as every other assertion of the
+	// outbox's shape leaves it out (assertOutboxKinds): a start is two rows now, and this is
+	// about the one that carries the task.
+	rows, err := pool.Query(ctx, `select kind, payload from outbox
+		where not (kind = 'supervise' and payload->>'op' = 'start' and coalesce(payload->>'task', '') = '')
+		order by id`)
 	if err != nil {
 		t.Fatalf("read outbox: %v", err)
 	}
@@ -98,9 +107,11 @@ func TestGateRegistrationWithDesignGateOffStartsPlanningAndSeedsApprovalRead(t *
 	}
 }
 
-// A child entering an open gate is recorded and its planning started in one fact, its planner's
-// start queued behind the row creating the child's branch, which the start waits for.
-func TestRegisteredOpenGateRecordsChildAndStartsPlanningInTheSameFact(t *testing.T) {
+// A child entering an open gate is recorded by its own fact and starts planning when the waiting
+// line reaches it, its planner's start queued behind the row creating the child's branch, which
+// the start waits for, and the in_progress of the phase it enters written over the todo Dispatch
+// shows.
+func TestRegisteredOpenGateRecordsChildAndStartsPlanningAtItsSlot(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Planning, Generation: 4, Status: "in_progress", Rank: "U"})
@@ -113,6 +124,7 @@ func TestRegisteredOpenGateRecordsChildAndStartsPlanningInTheSameFact(t *testing
 	}, engine, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact: %v", err)
 	}
+	startUnblockedChildren(t, pool, engine)
 
 	var tree, gotPhase string
 	if err := pool.QueryRow(ctx, "select tree, phase from issues where key = $1", "LEGION-209").Scan(&tree, &gotPhase); err != nil {
@@ -121,7 +133,9 @@ func TestRegisteredOpenGateRecordsChildAndStartsPlanningInTheSameFact(t *testing
 	if tree != "LEGION-208" || gotPhase != string(phase.Planning) {
 		t.Fatalf("child tree/phase = %q/%q, want LEGION-208/planning", tree, gotPhase)
 	}
-	assertOutboxKinds(t, pool, []string{"issue_branch", "supervise", "notice"})
+	// The second notice is the architect's: every child the line starts tells it so
+	// (ChildStartedNotice).
+	assertOutboxKinds(t, pool, []string{"issue_branch", "dispatch_status", "supervise", "notice", "notice"})
 	var branchIssue string
 	var generation int
 	if err := pool.QueryRow(ctx, "select issue, (payload->>'generation')::int from outbox where kind = 'issue_branch'").Scan(&branchIssue, &generation); err != nil {
@@ -258,6 +272,40 @@ func TestRefusedReadyAdvancesWhenTheGateReopensAtALaterVersion(t *testing.T) {
 	}
 }
 
+// A spec's decisions live in a document of their own beside the spec. That document gets versions
+// of its own as the agents write decisions into it, and none of them is a change to the design a
+// person approved: the design gate is the spec's, and only the spec's own versions and reviews
+// move it. The decisions version here is above the gate's own, the one shape that would close an
+// open gate if the gate took another document's events, so the test holds the behaviour rather
+// than the arithmetic of a version too old to matter.
+func TestDecisionsDocumentLeavesDesignGateOpen(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "U"})
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 4})
+	engine := testEngine(config.DesignGateRootIssues, nil)
+
+	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "approval-4", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 4}, engine, admissionStub{}); err != nil {
+		t.Fatalf("ApplyFact approval 4: %v", err)
+	}
+	approved := recordedGate(t, pool)
+	if approved == nil || approved.ApprovedVersion == nil || *approved.ApprovedVersion != 4 {
+		t.Fatalf("gate after the approval = %#v, want the spec approved at version 4", approved)
+	}
+
+	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "decisions-version-5", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "decisions-208", Kind: intake.DispatchArtifactVersion, Version: 5}, engine, admissionStub{}); err != nil {
+		t.Fatalf("ApplyFact the decisions document's version: %v", err)
+	}
+
+	gate := recordedGate(t, pool)
+	if gate == nil || gate.ApprovedVersion == nil || *gate.ApprovedVersion != 4 || gate.LatestVersion != 4 {
+		t.Fatalf("gate after the decisions document's version = %#v, want it open at the spec's approved version 4", gate)
+	}
+	if gate.ArtifactID != "artifact-208" {
+		t.Fatalf("gate document = %q, want the spec's", gate.ArtifactID)
+	}
+}
+
 func TestImplementationReachesTestingWhenHandoffAndPullRequestArriveInEitherOrder(t *testing.T) {
 	for _, handoffFirst := range []bool{true, false} {
 		name := "pull-request-first"
@@ -271,7 +319,7 @@ func TestImplementationReachesTestingWhenHandoffAndPullRequestArriveInEitherOrde
 			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
 			engine := testEngine(config.DesignGateRootIssues, nil)
 			handoff := func() {
-				if _, err := intake.ApplyFact(ctx, pool, "api", "handoff", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "abc123", Verdict: "pass"}, engine, admissionStub{}); err != nil {
+				if _, err := intake.ApplyFact(ctx, pool, "api", "handoff", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "abc123", HandoffRecord: "implement-1", HandoffVersion: 1, Verdict: "pass"}, engine, admissionStub{}); err != nil {
 					t.Fatalf("ApplyFact handoff: %v", err)
 				}
 			}
@@ -441,19 +489,20 @@ func TestTheMergerPromptReadsTheApprovedHeadLabel(t *testing.T) {
 
 // A reviewer started on the tester's pass is told the tester's verdict as the tester's, never as a
 // bare "Handoff verdict" it could take for a field of its own completion, which the daemon refuses
-// from a reviewer (VERDICT_ROLE_FORBIDDEN).
+// from a reviewer (VERDICT_ROLE_FORBIDDEN), and the tester's handoff as the Dispatch record it reads
+// with `dispatch handoff-read`, with no commit, since the tester reports none.
 func TestAReviewerIsToldTheTestersVerdictAsTheTesters(t *testing.T) {
 	pool := migratedPool(t)
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{}, Required: []string{}})
 	if _, err := intake.ApplyFact(context.Background(), pool, "api", "tester-passed", intake.HandoffComplete{
-		Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Summary: "passed", Verdict: "pass", Commit: "test-handoff",
+		Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Summary: "passed", Verdict: "pass", HandoffRecord: "test-handoff", HandoffVersion: 3,
 	}, testEngine(config.DesignGateRootIssues, nil), admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact tester completion: %v", err)
 	}
 	task := startTask(t, pool, claim.RoleReviewer)
-	if want := "Phase: reviewing. Handoff commit: test-handoff. Tester's verdict: pass. Pull request: #42."; !strings.HasSuffix(task, want) {
+	if want := "Phase: reviewing. Handoff: test version 3 (dispatch handoff-read --issue LEGION-208 --phase test --version 3). Tester's verdict: pass. Pull request: #42."; !strings.HasSuffix(task, want) {
 		t.Fatalf("reviewer task %q, want it to end with %q", task, want)
 	}
 	if strings.Contains(task, "Handoff verdict") {
@@ -497,7 +546,7 @@ func TestAPhaseFinishedNoticeCarriesTheWorkersSummaryAndItsVerdict(t *testing.T)
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim"})
 
 	if _, err := intake.ApplyFact(ctx, pool, "api", "tester-passed", intake.HandoffComplete{
-		Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Generation: 1, Summary: "twelve scenarios pass against the head", Verdict: "pass", Commit: "test-handoff",
+		Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Generation: 1, Summary: "twelve scenarios pass against the head", Verdict: "pass", HandoffRecord: "test-handoff", HandoffVersion: 1,
 	}, testEngine(config.DesignGateRootIssues, nil), admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact tester completion: %v", err)
 	}
@@ -601,10 +650,14 @@ func TestTheCloseLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testin
 	}
 }
 
-// superviseRequests counts the enqueued supervise requests of one operation by issue/role.
+// superviseRequests counts the enqueued supervise requests of one operation by issue/role, with
+// the relaunch half of a phase-worker start left out: a start is two rows (StartOrOwe), and the
+// one these counts are about is the row that carries the task.
 func superviseRequests(t *testing.T, pool *pgxpool.Pool, op string) map[string]int {
 	t.Helper()
-	rows, err := pool.Query(t.Context(), "select issue, payload->>'role' from outbox where kind = 'supervise' and payload->>'op' = $1", op)
+	rows, err := pool.Query(t.Context(), `select issue, payload->>'role' from outbox
+		where kind = 'supervise' and payload->>'op' = $1
+			and not (payload->>'op' = 'start' and coalesce(payload->>'task', '') = '')`, op)
 	if err != nil {
 		t.Fatalf("read %s requests: %v", op, err)
 	}
@@ -637,10 +690,14 @@ func sameCounts(got, want map[string]int) bool {
 	return true
 }
 
+// assertOutboxCount counts the rows of one kind, with the relaunch half of a phase-worker start
+// left out: a start is two rows (StartOrOwe) and the one these counts are about is the row that
+// carries the task.
 func assertOutboxCount(t *testing.T, pool *pgxpool.Pool, kind string, want int) {
 	t.Helper()
 	var got int
-	if err := pool.QueryRow(t.Context(), "select count(*) from outbox where kind = $1", kind).Scan(&got); err != nil {
+	if err := pool.QueryRow(t.Context(), `select count(*) from outbox where kind = $1
+		and not (kind = 'supervise' and payload->>'op' = 'start' and coalesce(payload->>'task', '') = '')`, kind).Scan(&got); err != nil {
 		t.Fatalf("count %s rows: %v", kind, err)
 	}
 	if got != want {
@@ -666,21 +723,21 @@ func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 		{
 			name: "planner completion", current: phase.Planning, role: claim.RolePlanner,
 			fact: func() intake.Fact {
-				return intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RolePlanner, Claim: "claim", Commit: "plan"}
+				return intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RolePlanner, Claim: "claim", HandoffRecord: "plan", HandoffVersion: 1}
 			},
 			wantPhase: phase.Implementing, wantStatus: "in_progress", wantOutbox: []string{"supervise", "notice"},
 		},
 		{
 			name: "tester pass", current: phase.Testing, role: claim.RoleTester,
 			fact: func() intake.Fact {
-				return intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "claim", Verdict: "pass", Commit: "test"}
+				return intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "claim", Verdict: "pass", HandoffRecord: "test", HandoffVersion: 1}
 			},
 			wantPhase: phase.Reviewing, wantStatus: "needs_review", wantOutbox: []string{"dispatch_status", "supervise", "notice"},
 		},
 		{
 			name: "tester fail", current: phase.Testing, role: claim.RoleTester,
 			fact: func() intake.Fact {
-				return intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "claim", Verdict: "fail", Commit: "test"}
+				return intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "claim", Verdict: "fail", HandoffRecord: "test", HandoffVersion: 1}
 			},
 			wantPhase: phase.Implementing, wantStatus: "in_progress", wantOutbox: []string{"dispatch_status", "supervise", "notice"},
 		},
@@ -689,7 +746,7 @@ func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 			setup: func(t *testing.T, pool *pgxpool.Pool) {
 				// The reviewer has completed its round, so GitHub's approval on a green head is the
 				// review's second half and ends it.
-				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "claim", HandoffCommit: "review-1"})
+				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "claim", HandoffRecord: "review-1", HandoffVersion: 1})
 				seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", CheckedHead: "head", Failing: []string{}, Required: []string{}})
 			},
 			fact: func() intake.Fact {
@@ -756,7 +813,7 @@ func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 // resumed implementer which one it is in.
 func assertStartTasksNamePhase(t *testing.T, pool *pgxpool.Pool, want phase.Phase) {
 	t.Helper()
-	rows, err := pool.Query(t.Context(), "select payload->>'task' from outbox where kind = 'supervise' and payload->>'op' = 'start'")
+	rows, err := pool.Query(t.Context(), "select payload->>'task' from outbox where kind = 'supervise' and payload->>'op' = 'start' and coalesce(payload->>'task', '') <> ''")
 	if err != nil {
 		t.Fatalf("read start requests: %v", err)
 	}
@@ -881,9 +938,14 @@ func seedGate(t *testing.T, pool *pgxpool.Pool, gate record.DesignGate) {
 	seedRecord(t, pool, func(tx pgx.Tx) error { return record.NewStore().PutGate(t.Context(), tx, gate) })
 }
 
+// seedSlot grants the slot and opens the tree lifecycle of the issue holding it under the
+// workflow's authority, as promotion's own admission does in one transaction. The lifecycle, not
+// the slot row, is what says a tree runs (record.TreeLive), so a fixture that granted a slot and
+// nothing else would describe a tree the daemon reads as never opened.
 func seedSlot(t *testing.T, pool *pgxpool.Pool, slot record.Slot) {
 	t.Helper()
 	seedRecord(t, pool, func(tx pgx.Tx) error { return record.NewStore().PutSlot(t.Context(), tx, slot) })
+	seedTreeLifecycle(t, pool, slot.Issue)
 }
 
 func seedPhase(t *testing.T, pool *pgxpool.Pool, row record.PhaseRow) {
@@ -926,9 +988,16 @@ func testEngine(policy config.DesignGate, log *slog.Logger) *Engine {
 	}, log)
 }
 
+// assertOutboxKinds is every row the transition left, by kind and in the order it wrote them,
+// with the relaunch half of each phase-worker start left out: a start is two rows now
+// (StartOrOwe), one that brings the role's session back carrying no task and one that carries
+// the task and waits for the issue's slot, and it is the second that every one of these
+// assertions is about. A test that is about the relaunch row itself reads it by name.
 func assertOutboxKinds(t *testing.T, pool *pgxpool.Pool, want []string) {
 	t.Helper()
-	rows, err := pool.Query(t.Context(), "select kind from outbox order by id")
+	rows, err := pool.Query(t.Context(), `select kind from outbox
+		where not (kind = 'supervise' and payload->>'op' = 'start' and coalesce(payload->>'task', '') = '')
+		order by id`)
 	if err != nil {
 		t.Fatalf("read outbox: %v", err)
 	}
@@ -974,7 +1043,7 @@ func testJetStream(t *testing.T) jetstream.JetStream {
 // consumer's ReviewPermission (nil reads none).
 func startConsume(t *testing.T, js jetstream.JetStream, pool *pgxpool.Pool, engine *Engine, permission func(context.Context, intake.PullRequestReview) (bool, error)) func() {
 	t.Helper()
-	consumers, err := intake.OpenConsumers(t.Context(), js, intake.ConsumerSpec{
+	consumers, err := intake.OpenConsumers(t.Context(), js, pool, intake.ConsumerSpec{
 		Project: "CAPTURE", Repositories: []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion")}, AckWait: time.Second, NakDelay: time.Millisecond,
 		Logger: slog.Default(), ReviewPermission: permission,
 	})
@@ -983,7 +1052,7 @@ func startConsume(t *testing.T, js jetstream.JetStream, pool *pgxpool.Pool, engi
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- consumers.Run(ctx, pool, engine, admissionStub{}) }()
+	go func() { done <- consumers.Run(ctx, engine, admissionStub{}) }()
 	return func() {
 		cancel()
 		if err := <-done; err != nil {
@@ -1033,7 +1102,8 @@ func migratedPool(t *testing.T) *pgxpool.Pool {
 	}
 	t.Cleanup(admin.Close)
 	name := "legion_workflow_test_" + randomSuffix(t)
-	if _, err := admin.Exec(t.Context(), "create database "+name); err != nil {
+	// A file copy of template1 (docs/testing.md, "A database a Go test creates").
+	if _, err := admin.Exec(t.Context(), "create database "+name+" strategy file_copy"); err != nil {
 		t.Fatalf("create test database: %v", err)
 	}
 	t.Cleanup(func() {

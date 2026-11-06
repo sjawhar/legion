@@ -27,6 +27,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testpg"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
@@ -54,7 +55,7 @@ func testStore(t *testing.T) *store.Store {
 	dsn := os.Getenv("LEGION_TEST_PG_DSN")
 	if dsn == "" {
 		t.Skip("LEGION_TEST_PG_DSN is unset, so there is no Postgres to test the claim routes against. Start one and set it:\n" +
-			"  docker run -d --name legion-pg --cpus 2 --memory 2g -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 postgres:16\n" +
+			"  docker run -d --name legion-pg --cpus 2 --memory 2g -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 " + testpg.Image + "\n" +
 			"  port=$(docker port legion-pg 5432/tcp | head -1 | sed 's/.*://')\n" +
 			"  LEGION_TEST_PG_DSN=postgres://legion:legion@127.0.0.1:$port/legion go test ./internal/api/")
 	}
@@ -75,7 +76,8 @@ func testStore(t *testing.T) *store.Store {
 		t.Fatalf("random suffix: %v", err)
 	}
 	name := "legion_api_test_" + hex.EncodeToString(suffix[:])
-	if _, err := admin.Exec(ctx, "create database "+name); err != nil {
+	// A file copy of template1 (docs/testing.md, "A database a Go test creates").
+	if _, err := admin.Exec(ctx, "create database "+name+" strategy file_copy"); err != nil {
 		t.Fatalf("create %s: %v", name, err)
 	}
 	t.Cleanup(func() {
@@ -200,6 +202,13 @@ type harness struct {
 	// context was the agent's request's or one that outlives its connection.
 	reported           *[]capabilities.Report
 	reportedContextErr *[]error
+	// podUpdateRounds is what Options.PodUpdateRounds answers, which a test writes before it lists
+	// the claims: the sweep that fills it in production is the daemon's, which this package has
+	// none of.
+	podUpdateRounds *PodUpdateRounds
+	// handoffs is the Dispatch a completion route's harness reads handoff records from
+	// (newHandoffHarness), which writeHandoff fills; nil for a harness serving no completion.
+	handoffs *statusRecorder
 }
 
 func newHarness(t *testing.T) *harness {
@@ -256,20 +265,28 @@ func newHarnessDeps(t *testing.T, relaunchable bool) *harness {
 	}
 	readied := &[]supervise.Claim{}
 	reported, reportedContextErr := &[]capabilities.Report{}, &[]error{}
+	rounds := &PodUpdateRounds{}
+	h := &harness{
+		t: t, ctx: ctx, store: st, runtime: rt, conns: conns, tokens: tokens, supervisor: sup,
+		readied:            readied,
+		reported:           reported,
+		reportedContextErr: reportedContextErr,
+		podUpdateRounds:    rounds,
+	}
 	server := NewServer("127.0.0.1", 8437, Options{
 		Supervisor: sup, BootTokens: tokens, Project: testProject, OperatorToken: testOperatorToken, Controller: st, Log: quiet,
-		Pool: st.Pool(), Record: record.NewStore(), Releaser: rt, Trees: st, PluginRelaunchable: relaunchable,
-		ClaimReady:   func(c supervise.Claim) { *readied = append(*readied, c) },
-		PromptAgents: testPromptAgents,
+		Pool: st.Pool(), Record: record.NewStore(), Releaser: rt, Trees: st, ReleaseRecords: st, ClaimActivity: st,
+		PluginRelaunchable: relaunchable,
+		ClaimReady:         func(c supervise.Claim) { *readied = append(*readied, c) },
+		PromptAgents:       testPromptAgents,
+		PodUpdateRounds:    func() PodUpdateRounds { return *rounds },
 		CapabilityReported: func(ctx context.Context, _ supervise.Claim, report capabilities.Report) {
 			*reported = append(*reported, report)
 			*reportedContextErr = append(*reportedContextErr, ctx.Err())
 		},
 	})
-	return &harness{
-		t: t, ctx: ctx, store: st, runtime: rt, conns: conns, tokens: tokens, supervisor: sup, handler: server.Handler,
-		readied: readied, reported: reported, reportedContextErr: reportedContextErr,
-	}
+	h.handler = server.Handler
+	return h
 }
 
 // request sends one request through the server's own handler. A nil body sends none; a string is
@@ -320,14 +337,17 @@ func (h *harness) launch(issue string, role claim.Role) (claim.Token, string) {
 }
 
 // launchIn is launch for an issue of tree: a sub-architect or a worker on a child. The tree's
-// lifecycle is opened first, as the operator's root spawn or the workflow's admission opens it.
+// lifecycle is opened first under the workflow's own authority, as admission's promotion of the
+// root opens it: that row is what says the tree runs (record.TreeLive), so a fixture whose tree
+// must be live opens it the way the daemon does. A test about a tree the operator holds opens
+// its own row under that authority instead.
 func (h *harness) launchIn(tree, issue string, role claim.Role) (claim.Token, string) {
 	h.t.Helper()
 	token, err := claim.NewToken(testProject, issue, role)
 	if err != nil {
 		h.t.Fatalf("token: %v", err)
 	}
-	if _, err := h.store.OpenTreeLifecycle(h.ctx, testProject, tree, treelifecycle.AuthorityOperator); err != nil {
+	if _, err := h.store.OpenTreeLifecycle(h.ctx, testProject, tree, treelifecycle.AuthorityWorkflow); err != nil {
 		h.t.Fatalf("open the lifecycle of %s: %v", tree, err)
 	}
 	m, _, err := h.supervisor.Create(h.ctx, supervise.Claim{
@@ -511,4 +531,22 @@ func sortedTokens(claims []OperatorClaim) []string {
 	}
 	sort.Strings(tokens)
 	return tokens
+}
+
+// openTree opens tree's lifecycle under the workflow's authority, as admission's promotion of a
+// root does. That row, and not a slot, is what says a tree runs (record.TreeLive) now that a
+// slot counts one issue at work, so every fixture that seeds a running tree opens it. project is
+// the Dispatch project key the tree's issues are recorded under.
+func (h *harness) openTree(t *testing.T, project, tree string) {
+	t.Helper()
+	token, err := claim.ProjectToken(project)
+	if err != nil {
+		t.Fatalf("project token of %s: %v", project, err)
+	}
+	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
+		_, err := record.NewStore().OpenTreeLifecycle(context.Background(), tx, token, tree, treelifecycle.AuthorityWorkflow)
+		return err
+	}); err != nil {
+		t.Fatalf("open the tree lifecycle of %s: %v", tree, err)
+	}
 }

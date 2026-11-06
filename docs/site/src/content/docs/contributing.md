@@ -4,7 +4,7 @@ description: How pages are laid out, how to add one, how generated reference pag
 ---
 
 This site is an [Astro Starlight](https://starlight.astro.build/) project in `docs/site/` of the
-[Legion repository](https://github.com/sjawhar/legion). Every push to `main` publishes it to GitHub
+[Legion repository](https://github.com/cybermonklabs/legion). Every push to `main` publishes it to GitHub
 Pages, and every pull request that touches it builds it, so a broken page or link fails the pull
 request before it can merge.
 
@@ -56,8 +56,9 @@ group in the sidebar.
 
 ### Linking between pages
 
-Every link to another page on this site is root-absolute and starts with the site's `/legion` base,
-because the site is served under `/legion/` and nothing adds the base for you:
+Every link to another page on this site is root-absolute and starts with the site's base, `/legion`
+today: the base is the repository's name, which `astro.config.mjs` takes from the repository the
+build runs in, and nothing adds it for you:
 
 - a page linking a sibling in its section: `[Documents](/legion/dispatch/documents/)`;
 - a page linking its section's generated reference: `[Tools](/legion/dispatch/reference/tools/)`;

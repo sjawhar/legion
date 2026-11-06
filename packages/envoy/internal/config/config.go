@@ -7,14 +7,26 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/listenfd"
 )
 
 type Service struct {
-	MachineID    string
-	NATSURLs     []string
+	MachineID string
+	NATSURLs  []string
+	// NATSReplicas is ENVOY_NATS_REPLICAS (bus.ParseNATSReplicas): the deployment's replica count
+	// for the stream and every bucket the listener opens, which the listener raises them to at
+	// start and every keeper period after (bus.ConnectOwningStream).
 	NATSReplicas int
+	// StreamMaxBytes is ENVOY_STREAM_MAX_BYTES (bus.ParseStreamMaxBytes): the stream's byte limit,
+	// or 0 when unset, which sets none and keeps a deployed one.
+	StreamMaxBytes int64
+	// SessionMaxAge is ENVOY_SESSION_MAX_AGE (bus.ParseSessionMaxAge): how long the session
+	// bucket keeps a registration record, or 0 when unset, which leaves the deployed bucket's own
+	// maximum age alone. The listener applies it at open and on every pass of its session reaper.
+	SessionMaxAge time.Duration
 	// ListenHost and Port are the address the listener serves on: the inherited socket's own
 	// address with ENVOY_LISTEN_FD, else the one main binds, from ENVOY_LISTEN_HOST (127.0.0.1 when
 	// unset) and PORT (Load's default when unset). The API auth fence judges ListenHost, so what it
@@ -27,9 +39,6 @@ type Service struct {
 	// AllowedHosts are the ENVOY_ALLOWED_HOSTS names, each as HostName writes it, that an
 	// unauthenticated listener serves /v1 to beside loopback.
 	AllowedHosts []string
-	// SubscribeAllTopics is ENVOY_SUBSCRIBE_ALL_TOPICS: whether the listener also subscribes every
-	// notifications topic over core NATS, which only a grant that allows `notifications.>` permits.
-	SubscribeAllTopics bool
 }
 
 func (s Service) ListenAddress() string {
@@ -84,45 +93,33 @@ func Load(defaultPort int) (Service, error) {
 		}
 		listenHost, port, listenSocket = socket.Addr().IP.String(), socket.Addr().Port, &socket
 	}
-	replicas := 1
-	if value := strings.TrimSpace(os.Getenv("ENVOY_NATS_REPLICAS")); value != "" {
-		next, err := strconv.Atoi(value)
-		if err != nil {
-			return Service{}, fmt.Errorf("invalid ENVOY_NATS_REPLICAS: %w", err)
-		}
-		replicas = next
+	replicas, err := bus.ParseNATSReplicas(os.Getenv(bus.ReplicasEnvVar))
+	if err != nil {
+		return Service{}, err
+	}
+	streamMaxBytes, err := bus.ParseStreamMaxBytes(os.Getenv(bus.StreamMaxBytesEnvVar))
+	if err != nil {
+		return Service{}, err
+	}
+	sessionMaxAge, err := bus.ParseSessionMaxAge(os.Getenv(bus.SessionMaxAgeEnvVar))
+	if err != nil {
+		return Service{}, err
 	}
 	allowedHosts, err := parseAllowedHosts(os.Getenv("ENVOY_ALLOWED_HOSTS"))
 	if err != nil {
 		return Service{}, err
 	}
-	subscribeAllTopics, err := parseSubscribeAllTopics(os.Getenv("ENVOY_SUBSCRIBE_ALL_TOPICS"))
-	if err != nil {
-		return Service{}, err
-	}
 	return Service{
-		AllowedHosts:       allowedHosts,
-		MachineID:          machine,
-		NATSURLs:           urls,
-		NATSReplicas:       replicas,
-		ListenHost:         listenHost,
-		Port:               port,
-		ListenSocket:       listenSocket,
-		SubscribeAllTopics: subscribeAllTopics,
+		AllowedHosts:   allowedHosts,
+		MachineID:      machine,
+		NATSURLs:       urls,
+		NATSReplicas:   replicas,
+		StreamMaxBytes: streamMaxBytes,
+		SessionMaxAge:  sessionMaxAge,
+		ListenHost:     listenHost,
+		Port:           port,
+		ListenSocket:   listenSocket,
 	}, nil
-}
-
-// parseSubscribeAllTopics reads ENVOY_SUBSCRIBE_ALL_TOPICS: unset, empty or "0" off, "1" on. Any
-// other value, a padded "1" among them, is refused rather than read as off, so a typo such as
-// "true" never leaves the opt-in silently off.
-func parseSubscribeAllTopics(raw string) (bool, error) {
-	switch raw {
-	case "", "0":
-		return false, nil
-	case "1":
-		return true, nil
-	}
-	return false, fmt.Errorf("invalid ENVOY_SUBSCRIBE_ALL_TOPICS %q: want 1 to subscribe every notifications topic, or 0 or unset not to", raw)
 }
 
 // hostEntry is an ENVOY_ALLOWED_HOSTS entry's shape: a name or an IPv4 address, or an IPv6

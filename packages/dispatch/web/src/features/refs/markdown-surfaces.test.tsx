@@ -23,6 +23,7 @@ import { AgentThread } from "../agent-view/AgentThread";
 import { dispatchMetadata, type KeyedMessage, turnKey } from "../agent-view/dispatch-marks";
 import { BroadcastsPage } from "../agents/BroadcastsPage";
 import { ReplyQuote } from "../conversation/ReplyQuote";
+import { NO_SESSION_SENDS } from "../conversation/useSessionSends";
 import { ThreadCard } from "../margin/ThreadCard";
 import type { Thread } from "../margin/useMarginItems";
 import { SearchPalette } from "../search/SearchPalette";
@@ -110,7 +111,7 @@ function Transcript({ messages }: { messages: KeyedMessage[] }): ReactNode {
         placeholder="Message the session…"
         replayCount={0}
         resetKey="session-1"
-        sending={false}
+        sends={NO_SESSION_SENDS}
         sessionId="session-1"
       />
     </AssistantRuntimeProvider>
@@ -567,13 +568,14 @@ function words(element: HTMLElement): string {
   return (element.textContent ?? "").replace(/\s+/g, " ").trim();
 }
 
-/** A full body's picture: an `<img>` named by its caption, at the column's width and capped in
- *  height (`DispatchPicture`'s `block`), never the preview's thumbnail. */
+/** A full body's picture: an `<img>` named by its caption, at its own size scaled down to the
+ *  column with no cap on its height (`DispatchPicture`'s `block`), never the preview's thumbnail. */
 async function expectBlockPicture(element: HTMLElement): Promise<void> {
   const picture = await within(element).findByRole("img", { name: "shot.png" });
   expect(picture.getAttribute("src")).toBe(PICTURE_SRC);
   const classes = picture.className.split(" ");
-  expect(classes).toEqual(expect.arrayContaining(["max-h-96", "max-w-full", "object-contain"]));
+  expect(classes).toEqual(expect.arrayContaining(["max-w-full", "object-contain"]));
+  expect(classes.some((name) => name.startsWith("max-h-"))).toBe(false);
   expect(classes).not.toContain("h-10");
   for (const syntax of PICTURE_SYNTAX) {
     expect(element.textContent).not.toContain(syntax);

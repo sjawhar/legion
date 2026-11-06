@@ -1,13 +1,15 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useMemo, useState } from "react";
 import { useLocation } from "react-router-dom";
 
-import { api } from "../../api/client";
+import { api, type WriteBounds } from "../../api/client";
 import { inboxQuery, userStateQuery } from "../../api/queries";
-import type { Actor, Anchor, Artifact, Ask, Comment, Event } from "../../api/types";
+import type { Actor, Anchor, Artifact, Ask, Comment, Decision, Event } from "../../api/types";
 import { compareTimestamps } from "../../lib/timestamps";
 import type { ComposerOwner } from "../conversation/composer-model";
 import { rootOf } from "../conversation/conversation-model";
+import type { CarriedBlockIds } from "../conversation/send-request";
+import { issueDecisionsQuery } from "../doc/spec-marks";
 import { useProjectArtifact } from "../document/useProjectArtifact";
 import {
   type ConversationPinKind,
@@ -56,9 +58,19 @@ export function useMarginOwner(): MarginOwner | undefined {
   }, [artifactId, issueKey, project, slug]);
 }
 export type MarginItemAction = CommentAction;
+/** One decision of the issue's `decisions.md` beside one block of the spec it shaped: a decision
+ *  that links several blocks is one item at each. */
+export interface DecisionMarginItem {
+  readonly blockId: string;
+  readonly decision: Decision;
+  /** `decision:<decision heading block>:<spec block>`. */
+  readonly id: string;
+  readonly kind: "decision";
+}
 export type MarginItem =
   | { ask: Ask; kind: "ask" }
-  | { comment: ThreadComment; kind: "comment"; threadRootId: string };
+  | { comment: ThreadComment; kind: "comment"; threadRootId: string }
+  | DecisionMarginItem;
 
 export interface MarkPlacement {
   pos: number;
@@ -184,16 +196,26 @@ function commentThreads(comments: Comment[]): Thread[] {
 }
 
 /** The ask or comment a card shows. */
-export function marginItemRecord(item: MarginItem): Ask | ThreadComment {
+export function marginItemRecord(
+  item: Exclude<MarginItem, DecisionMarginItem>
+): Ask | ThreadComment {
   return item.kind === "ask" ? item.ask : item.comment;
 }
 
 export function marginItemId(item: MarginItem): string {
-  return marginItemRecord(item).id;
+  return item.kind === "decision" ? item.id : marginItemRecord(item).id;
 }
 
 export function marginItemMarkId(item: MarginItem): string | undefined {
-  return marginItemRecord(item).anchor?.mark_id;
+  return item.kind === "decision" ? undefined : marginItemRecord(item).anchor?.mark_id;
+}
+
+/** The block a card stands at and lights up when selected: the spec block a decision shaped, or
+ *  the block of an anchor whose mark is gone. */
+export function marginItemBlockId(item: MarginItem): string | undefined {
+  if (item.kind === "decision") return item.blockId;
+  const anchor = marginItemRecord(item).anchor;
+  return anchor?.orphaned && typeof anchor.block_id === "string" ? anchor.block_id : undefined;
 }
 
 export function threadMarkId(thread: Thread): string | undefined {
@@ -218,23 +240,49 @@ function isInBlock(anchor: Anchor | null, blockFilterId: string | undefined): bo
   return blockFilterId === undefined || anchor?.block_id === blockFilterId;
 }
 
-/** Document order for anchored cards: placed ones by position, unplaced ones after them, and
- *  among the unplaced the newest first, by time and then by id. */
-function byPlacementThenNewest(
-  left: Ask | ThreadComment,
-  right: Ask | ThreadComment,
+/** What orders a card: where it stands in the document, if it is placed, and when it was made. */
+interface Placed {
+  readonly at: string | null;
+  readonly id: string;
+  readonly placement: MarkPlacement | undefined;
+}
+
+function placedRecord(
+  record: Ask | ThreadComment,
   markPlacements: ReadonlyMap<string, MarkPlacement>,
   blockPlacements: ReadonlyMap<string, MarkPlacement>
-): number {
-  const leftPlacement = anchorPlacement(left.anchor, markPlacements, blockPlacements);
-  const rightPlacement = anchorPlacement(right.anchor, markPlacements, blockPlacements);
-  if (leftPlacement !== undefined && rightPlacement !== undefined) {
-    return leftPlacement.pos - rightPlacement.pos;
+): Placed {
+  return {
+    at: record.created_at,
+    id: record.id,
+    placement: anchorPlacement(record.anchor, markPlacements, blockPlacements),
+  };
+}
+
+function placedItem(
+  item: MarginItem,
+  markPlacements: ReadonlyMap<string, MarkPlacement>,
+  blockPlacements: ReadonlyMap<string, MarkPlacement>
+): Placed {
+  return item.kind === "decision"
+    ? { at: item.decision.changed_at, id: item.id, placement: blockPlacements.get(item.blockId) }
+    : placedRecord(marginItemRecord(item), markPlacements, blockPlacements);
+}
+
+/** Document order for anchored cards: placed ones by position, unplaced ones after them, and
+ *  among the unplaced the newest first, by time and then by id; one with no time is the oldest.
+ *  Cards at one position keep the order they came in. */
+function byPlacementThenNewest(left: Placed, right: Placed): number {
+  if (left.placement !== undefined && right.placement !== undefined) {
+    return left.placement.pos - right.placement.pos;
   }
-  if (leftPlacement !== undefined || rightPlacement !== undefined) {
-    return leftPlacement === undefined ? 1 : -1;
+  if (left.placement !== undefined || right.placement !== undefined) {
+    return left.placement === undefined ? 1 : -1;
   }
-  return compareTimestamps(right.created_at, left.created_at) || left.id.localeCompare(right.id);
+  if (left.at === null || right.at === null) {
+    return Number(left.at === null) - Number(right.at === null) || left.id.localeCompare(right.id);
+  }
+  return compareTimestamps(right.at, left.at) || left.id.localeCompare(right.id);
 }
 
 const NO_THREADS: ReadonlySet<string> = new Set();
@@ -248,8 +296,13 @@ export function useMarginItems(
   blockPlacements: ReadonlyMap<string, MarkPlacement>,
   blockFilterId: string | undefined,
   {
+    documentShown = false,
     held = NO_THREADS,
   }: {
+    /** Whether the document whose margin this is has reported its layout: the issue page keeps
+     *  its Spec editor mounted while the Conversation covers it, so without this the decisions
+     *  of every issue page would be read where nothing shows them. */
+    readonly documentShown?: boolean;
     /** Threads whose card's reply holds a send of its own - out, or refused - each of which stays
      *  in the list it was in, open or resolved, whoever resolves or reopens it meanwhile: moving
      *  it between them would remount its card, and the composer and what it holds with it. */
@@ -378,7 +431,10 @@ export function useMarginItems(
   }, [blockFilterId, comments.data, ownerKind, visibleArtifact?.id]);
   const compareThreads = useCallback(
     (left: Thread, right: Thread) =>
-      byPlacementThenNewest(left.root.comment, right.root.comment, markPlacements, blockPlacements),
+      byPlacementThenNewest(
+        placedRecord(left.root.comment, markPlacements, blockPlacements),
+        placedRecord(right.root.comment, markPlacements, blockPlacements)
+      ),
     [blockPlacements, markPlacements]
   );
   const sortedThreads = useMemo(
@@ -412,22 +468,53 @@ export function useMarginItems(
     () => sortedThreads.filter((thread) => placement.get(thread.key) ?? thread.resolved),
     [placement, sortedThreads]
   );
+  // The decisions that shaped the issue's spec, beside it alone: each one at every spec block it
+  // links (a replaced decision shaped nothing the spec says now), in the spec's order. Read only
+  // once that spec is on screen, since the issue page keeps it mounted under the Conversation.
+  const showsDecisions =
+    owner?.kind === "issue" && visibleArtifact?.primary === true && documentShown;
+  const decisionsView = useQuery(issueDecisionsQuery(issueKey ?? "", showsDecisions));
+  const decisions = useMemo<DecisionMarginItem[]>(() => {
+    if (!showsDecisions) return [];
+    const decisionItems = (decisionsView.data?.decisions ?? []).flatMap((decision) => {
+      if (decision.replaced) return [];
+      const blockIds = new Set(
+        decision.links.flatMap((link) => (link.to.block_id === undefined ? [] : [link.to.block_id]))
+      );
+      return [...blockIds]
+        .filter((blockId) => blockFilterId === undefined || blockId === blockFilterId)
+        .map((blockId) => ({
+          blockId,
+          decision,
+          id: `decision:${decision.block_id}:${blockId}`,
+          kind: "decision" as const,
+        }));
+    });
+    return decisionItems.sort((left, right) =>
+      byPlacementThenNewest(
+        placedItem(left, markPlacements, blockPlacements),
+        placedItem(right, markPlacements, blockPlacements)
+      )
+    );
+  }, [blockFilterId, blockPlacements, decisionsView.data, markPlacements, showsDecisions]);
   const items = useMemo<MarginItem[]>(() => {
     const commentItems = sortedThreads.map(({ root }) => ({
       comment: root.comment,
       kind: "comment" as const,
       threadRootId: root.comment.id,
     }));
-    return [...anchoredAsks.map((ask) => ({ ask, kind: "ask" as const })), ...commentItems].sort(
-      (left, right) =>
-        byPlacementThenNewest(
-          marginItemRecord(left),
-          marginItemRecord(right),
-          markPlacements,
-          blockPlacements
-        )
+    const anchored: MarginItem[] = [
+      ...anchoredAsks.map((ask) => ({ ask, kind: "ask" as const })),
+      ...commentItems,
+      ...decisions,
+    ];
+    return anchored.sort((left, right) =>
+      byPlacementThenNewest(
+        placedItem(left, markPlacements, blockPlacements),
+        placedItem(right, markPlacements, blockPlacements)
+      )
     );
-  }, [anchoredAsks, blockPlacements, markPlacements, sortedThreads]);
+  }, [anchoredAsks, blockPlacements, decisions, markPlacements, sortedThreads]);
   const marginItems = useMemo<MarginItem[]>(
     () => [...needsYou.map((ask) => ({ ask, kind: "ask" as const })), ...items],
     [items, needsYou]
@@ -473,12 +560,6 @@ export function useMarginItems(
       }
     },
   });
-  const edit = useMutation({
-    mutationFn: ({ body, id }: { body: string; id: string }) => api.editComment(id, { body }),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: commentsQueryKey });
-    },
-  });
 
   const answeredAskError = answeredAsks.error;
   const retryAnsweredAsk =
@@ -491,7 +572,21 @@ export function useMarginItems(
     commentsError: comments.isError,
     commentsPending: comments.isPending,
     commentRecords: comments.data ?? [],
-    editComment: (id: string, body: string) => edit.mutateAsync({ body, id }),
+    /** The decisions beside the spec's blocks, in the spec's order. */
+    decisions,
+    /** One attempt of an edit's save, under the composer's key (`sendRequest`), carrying the
+     *  block ids the editor followed through the edit: what it saved is read again once it
+     *  lands. */
+    editComment: async (
+      id: string,
+      body: string,
+      carried: CarriedBlockIds | undefined,
+      bounds: WriteBounds
+    ) => {
+      const saved = await api.editComment(id, { body, ...carried }, bounds);
+      void queryClient.invalidateQueries({ queryKey: commentsQueryKey });
+      return saved;
+    },
     items,
     marginItems,
     needsYou,

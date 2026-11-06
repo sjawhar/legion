@@ -55,19 +55,25 @@ func (ts *testServer) requestAs(t *testing.T, key *ecdsa.PrivateKey, enrollmentI
 	return decode[wireCreateRequestResponse](t, body)
 }
 
-// approveAs approves a pending agent_secret request's record through the UI route as approver and
-// returns the grant it made.
+// approveAs approves a pending agent_secret request on the broker's own approval page as approver
+// and returns the grant it made.
 func (ts *testServer) approveAs(t *testing.T, req wireCreateRequestResponse, approver string) string {
 	t.Helper()
 	if req.State != "pending" || req.RecordID == nil {
 		t.Fatalf("request = %+v, want pending on a record", req)
 	}
-	status, body := ts.ui(t, http.MethodPost, "/v1/credential-requests/"+*req.RecordID+"/approve", map[string]any{"approver": approver})
-	approved := decode[wireCreateRequestResponse](t, body)
-	if status != http.StatusOK || approved.GrantID == nil {
-		t.Fatalf("approve %s as %s = %d %s, want a grant", *req.RecordID, approver, status, body)
+	ts.decide(t, approver, *req.RecordID, true)
+	return ts.grantOf(t, req.RequestID)
+}
+
+// grantOf is the one grant request requestID made, failing t when it made none or several.
+func (ts *testServer) grantOf(t *testing.T, requestID string) string {
+	t.Helper()
+	grants := ts.column(t, `select id::text from grants where request_id=$1`, requestID)
+	if len(grants) != 1 {
+		t.Fatalf("grants of request %s = %v, want one", requestID, grants)
 	}
-	return *approved.GrantID
+	return grants[0]
 }
 
 // column reads one text column of every row query selects, in the order Postgres returns them,

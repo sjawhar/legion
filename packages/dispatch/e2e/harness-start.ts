@@ -7,12 +7,21 @@
  *  use". Each row starts in the environment the rows before it reported, so the server's names the
  *  fakes' ports and the proxy's the server's.
  *
+ *  In two-process mode the round-robin proxy starts before Dispatch A and B, whose ports it
+ *  forwards to, since both serve its origin. Their ports are held first (`heldAhead` in
+ *  e2e/harness-listeners.ts): a `held-port.py keep` per server holds a port the OS chose from
+ *  before the first row starts until the harness stops, its port is in the environment of every
+ *  row, and the server serves on it through the keeper's socket.
+ *
  *  This is the harness's one starter: `e2e/run.ts` (Playwright), `e2e/local-instance.ts`
  *  (`bun run dispatch:local`) and the docs media harness (`docs/site/media/harness.ts`) call it,
  *  then set the ports it returns in the environment of whatever addresses the harness. A run with
  *  `PLAYWRIGHT_BASE_URL` starts only the rows marked `deployed`, the fakes a deployed server is
- *  tested with. */
-import { createWriteStream, mkdirSync } from "node:fs";
+ *  tested with. `e2e/run.ts` calls it once per lane, each call with that lane's database and
+ *  file-store bucket in `options.env` (`e2e/harness-ports.ts`), so one process starts a whole
+ *  harness per Playwright worker. */
+import { createWriteStream, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Subprocess } from "bun";
@@ -22,8 +31,13 @@ import { harnessPorts, harnessVariables } from "./harness-ports";
 import { type PipedRunning, Supervisor } from "./local-instance-support";
 
 const dispatchPackage = fileURLToPath(new URL("..", import.meta.url));
+const heldPortScript = fileURLToPath(
+  new URL("../../../scripts/e2e/lib/held-port.py", import.meta.url)
+);
 /** How many of a process's last lines a refusal quotes. */
 const tailLines = 20;
+/** How long a port keeper may take to hold its port. */
+const keeperBootMs = 30_000;
 
 export interface HarnessProcess {
   readonly listener: HarnessListener;
@@ -38,8 +52,9 @@ export interface HarnessProcess {
 
 export interface Harness {
   /** The port each started listener serves on, by its variable (`DISPATCH_E2E_PORT`,
-   *  `FAKE_ENVOY_PORT`, `FAKE_GITHUB_PORT`, `FAKE_BROKER_PORT`, `PLAIN_HTTP_PORT`): the
-   *  environment a process that addresses the harness needs. */
+   *  `FAKE_ENVOY_PORT`, `FAKE_GITHUB_PORT`, `FAKE_BROKER_PORT`, `PLAIN_HTTP_PORT`, and in
+   *  two-process mode `DISPATCH_E2E_PORT_A` and `DISPATCH_E2E_PORT_B`): the environment a process
+   *  that addresses the harness needs. */
   readonly env: Readonly<Record<string, string>>;
   readonly processes: readonly HarnessProcess[];
   /** Rejects as soon as one of the processes exits by itself, naming it. */
@@ -50,6 +65,11 @@ export interface Harness {
 }
 
 export interface HarnessOptions {
+  /** Variables every process this harness starts gets on top of this process's own, and which
+   *  its ports resolve through: one lane's database and file-store bucket (`e2e/run.ts`), so one
+   *  process can start a harness per lane. Absent, the harness is this process's environment,
+   *  which is what every other starter gives it. */
+  readonly env?: Readonly<Record<string, string>>;
   /** A directory for each process's output, as `<id>.log`; unset, it goes to this process's
    *  stderr. */
   readonly logDir?: string;
@@ -155,24 +175,98 @@ async function serving(watched: Watched, given: number, supervisor: Supervisor):
   }
 }
 
+/** A port held for a `heldAhead` row, and the unix socket its keeper hands it out on. */
+interface Kept {
+  readonly port: number;
+  readonly socket: string;
+}
+
+/** Starts a `held-port.py keep` in `dir` that holds a port the OS chose for `listener` until the
+ *  harness stops, and returns once the keeper has written the port. */
+async function keepPort(
+  listener: HarnessListener,
+  dir: string,
+  supervisor: Supervisor,
+  environment: NodeJS.ProcessEnv
+): Promise<Kept> {
+  const name = `the port keeper for ${listener.name}`;
+  const portFile = join(dir, `${listener.id}.port`);
+  const socket = join(dir, `${listener.id}.sock`);
+  const { child } = supervisor.startPiped(
+    name,
+    ["python3", heldPortScript, "keep", "--port-file", portFile, "--socket", socket],
+    dispatchPackage,
+    environment
+  );
+  // Both streams are read to their end, so a full pipe never stops the keeper; its stderr is the
+  // reason it failed.
+  const stderr = new Response(child.stderr).text().catch(() => "");
+  new Response(child.stdout).text().catch(() => "");
+  const deadline = Date.now() + keeperBootMs;
+  // The keeper writes the file through a rename once it serves its socket, so a file that exists
+  // holds the whole port.
+  while (!(await Bun.file(portFile).exists())) {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error(
+        `The Dispatch e2e harness cannot start: ${name} exited ` +
+          `${child.exitCode ?? child.signalCode}: ${(await stderr).trim()}`
+      );
+    }
+    if (Date.now() > deadline) {
+      throw new Error(
+        `The Dispatch e2e harness cannot start: ${name} did not hold a port within ` +
+          `${keeperBootMs / 1000} s`
+      );
+    }
+    await supervisor.untilInterrupted(Bun.sleep(100));
+  }
+  return { port: Number((await Bun.file(portFile).text()).trim()), socket };
+}
+
 /** Starts the harness (see the module comment) and returns once every listener serves. A failure
  *  stops every process it started before it throws. */
 export async function startHarness(options: HarnessOptions = {}): Promise<Harness> {
+  // This harness's environment: this process's, under the lane's own variables when a caller
+  // starts more than one harness (`options.env`). Every port below resolves through it, and
+  // every process started inherits it.
+  const environment: NodeJS.ProcessEnv = { ...process.env, ...options.env };
   // Refuses a malformed or duplicated port before anything starts.
-  const given = harnessPorts();
+  const given = harnessPorts(environment);
   const listeners = targetedListeners();
   if (options.logDir !== undefined) mkdirSync(options.logDir, { recursive: true });
   const supervisor = new Supervisor();
   const interrupt = () => supervisor.interrupt();
   options.signal?.addEventListener("abort", interrupt, { once: true });
   if (options.signal?.aborted) interrupt();
+  let keeperDir: string | undefined;
+  const stop = async () => {
+    await supervisor.stop();
+    if (keeperDir !== undefined) rmSync(keeperDir, { force: true, recursive: true });
+  };
   const env: Record<string, string> = {};
+  const kept = new Map<HarnessListener, Kept>();
   const processes: Watched[] = [];
   try {
     for (const listener of listeners) {
+      if (listener.heldAhead === undefined || given[listener.key].port !== 0) continue;
+      keeperDir ??= mkdtempSync(join(tmpdir(), "dispatch-e2e-held-"));
+      const held = await keepPort(listener, keeperDir, supervisor, environment);
+      kept.set(listener, held);
+      env[harnessVariables[listener.key]] = String(held.port);
+    }
+    for (const listener of listeners) {
+      const held = kept.get(listener);
+      const heldInputs =
+        listener.heldAhead === undefined
+          ? {}
+          : held === undefined
+            ? { [listener.heldAhead.portEnv]: String(given[listener.key].port) }
+            : { [listener.heldAhead.keeperEnv]: held.socket };
       const running = supervisor.startPiped(listener.name, listener.argv, dispatchPackage, {
-        ...process.env,
+        ...environment,
         ...env,
+        ...listener.env,
+        ...heldInputs,
       });
       const watched = watch(running, listener, options.logDir);
       processes.push(watched);
@@ -181,7 +275,7 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
       );
     }
   } catch (error) {
-    await supervisor.stop();
+    await stop();
     throw error;
   } finally {
     options.signal?.removeEventListener("abort", interrupt);
@@ -190,6 +284,6 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
     env,
     firstExit: () => supervisor.firstExit(),
     processes,
-    stop: () => supervisor.stop(),
+    stop,
   };
 }

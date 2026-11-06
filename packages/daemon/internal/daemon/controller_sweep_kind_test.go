@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/stream"
@@ -101,7 +102,7 @@ func controllerSweepKindRuntime(ctx context.Context, cfg config.Config, listener
 	}
 	opts.Agent = controllerSweepKindStub
 	owners := func() []string { return nil }
-	return sandboxRuntime(rc, opts, owners)(ctx, listener, listener.Addr(), outboxTokens{}, nil, st, noRepositories)
+	return sandboxRuntime(rc, opts, owners, ghrepo.Renames{})(ctx, listener, listener.Addr(), outboxTokens{}, nil, st, noRepositories)
 }
 
 // controllerSweepKindSpec is the project controller's launch as the proof makes it: the
@@ -125,7 +126,7 @@ func TestTheControllerSweepKindProofBuildsItsRuntimeFromItsConfiguration(t *test
 	t.Cleanup(func() { cancel(); server.Close() })
 	dir := t.TempDir()
 	path := writeControllerSweepKindConfig(t, dir, testDSN(t), "192.0.2.10",
-		"ghcr.io/sjawhar/legion-worker@sha256:"+strings.Repeat("a", 64), writeKubeconfig(t, server.URL, ""), "test")
+		"ghcr.io/cybermonklabs/legion-worker@sha256:"+strings.Repeat("a", 64), writeKubeconfig(t, server.URL, ""), "test")
 	cfg, err := config.LoadForValidation(path, nil)
 	if err != nil {
 		t.Fatalf("load %s: %v", path, err)

@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // logBuffer is a log sink the server's goroutines may write while the test reads it.
@@ -38,9 +39,7 @@ func (l *logBuffer) String() string {
 func captureLog(t *testing.T) *logBuffer {
 	t.Helper()
 	logged := &logBuffer{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logged, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(logged, nil))
 	return logged
 }
 
@@ -161,12 +160,12 @@ func TestARefusedRequestIsLoggedWithNoCaller(t *testing.T) {
 func TestASocketsHeartbeatLeavesTheSessionItWasAdmittedAs(t *testing.T) {
 	_, _, deps := newTestServer(t, testServerOptions{streamHeartbeat: 10 * time.Millisecond})
 	logged := captureLog(t)
-	socket := accesslog.Handler("/ws/doc/{room}", directServer(deps).whileCallerResolves(func(w http.ResponseWriter, r *http.Request) {
+	socket := accesslog.Handler("/ws/live", directServer(deps).whileCallerResolves(func(w http.ResponseWriter, r *http.Request) {
 		accesslog.Note(r.Context(), accesslog.KindSharedToken, "")
 		accesslog.Note(r.Context(), accesslog.KindSession, "session-0123456789abcdef")
 		time.Sleep(100 * time.Millisecond) // ten heartbeats
 	}))
-	request := httptest.NewRequest(http.MethodGet, "/ws/doc/room", nil)
+	request := httptest.NewRequest(http.MethodGet, "/ws/live", nil)
 	request.Header.Set("Authorization", "Bearer agent-token")
 	socket.ServeHTTP(httptest.NewRecorder(), request)
 

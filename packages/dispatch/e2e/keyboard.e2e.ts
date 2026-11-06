@@ -20,9 +20,12 @@ async function seedInbox(): Promise<{ issueKey: string }> {
   return { issueKey: issue.key };
 }
 
+// This spec runs in `chromium` alone, at its 1280 px viewport, so the Inbox always draws its
+// reading column: the questions are short rows, and the selected one's card is in the column
+// beside them (`e2e/inbox-pane.ts`).
 async function openInbox(page: Page): Promise<void> {
   await page.goto("/");
-  await expect(page.locator("[data-testid^=ask-]")).toHaveCount(2);
+  await expect(page.locator("[data-inbox-row]")).toHaveCount(2);
   await page.locator("body").focus();
 }
 
@@ -85,18 +88,21 @@ test("? lists the registry with unavailable rows greyed, filters live, and Escap
     await openInbox(page);
     const rows = page.locator("[data-inbox-row]");
 
-    // With no row focused, row-bound shortcuts are registered but unavailable (`when()` is
-    // false), so ? lists them greyed.
+    // With the focus outside the list, the shortcut bound to the row holding it is registered
+    // but unavailable (`when()` is false), so ? lists it greyed.
     await page.keyboard.press("?");
     const dialog = page.getByRole("dialog", { name: "Keyboard shortcuts" });
     await expect(dialog).toBeVisible();
-    const answerRow = dialog.getByRole("listitem").filter({ hasText: "Answer the focused ask" });
-    await expect(answerRow).toHaveAttribute("data-enabled", "false");
-    await expect(answerRow.locator("kbd")).toHaveText(["Enter"]);
+    const backRow = dialog.getByRole("listitem").filter({ hasText: "Back to the ask row" });
+    await expect(backRow).toHaveAttribute("data-enabled", "false");
+    await expect(backRow.locator("kbd")).toHaveText(["Esc"]);
     await page.keyboard.press("Escape");
     await expect(dialog).toHaveCount(0);
 
-    await page.keyboard.press("j");
+    // The keyboard's way into the list: Enter puts the focus in the reading column's answer
+    // box, and Escape hands it back to the row the column is showing.
+    await page.keyboard.press("Enter");
+    await page.keyboard.press("Escape");
     await expect(rows.nth(0)).toBeFocused();
     await page.keyboard.press("?");
     await expect(dialog).toBeVisible();
@@ -107,7 +113,7 @@ test("? lists the registry with unavailable rows greyed, filters live, and Escap
     await expect(goToInbox.locator("kbd")).toHaveText(["g", "i"]);
     await expect(goToInbox).toHaveAttribute("data-enabled", "true");
     // Row-bound shortcuts describe the row that was focused when ? was pressed.
-    await expect(answerRow).toHaveAttribute("data-enabled", "true");
+    await expect(backRow).toHaveAttribute("data-enabled", "true");
     await expect(dialog.getByRole("region", { name: "Global" })).toBeVisible();
     await expect(dialog.getByRole("region", { name: "Inbox" })).toBeVisible();
     await page.screenshot({
@@ -126,7 +132,7 @@ test("? lists the registry with unavailable rows greyed, filters live, and Escap
   }
 });
 
-test("Inbox rows rove with j/k, digits pick options, Enter and Escape move between row and answer, y copies the ask's reference, o opens the issue", async ({
+test("j/k move the reading column's selection, digits pick its options, Enter and Escape move between row and answer, y copies the ask's reference, o opens the issue", async ({
   browser,
 }, testInfo) => {
   const { issueKey } = await seedInbox();
@@ -137,36 +143,39 @@ test("Inbox rows rove with j/k, digits pick options, Enter and Escape move betwe
     await openInbox(page);
     const rows = page.locator("[data-inbox-row]");
     const first = rows.nth(0);
+    const pane = page.getByTestId("inbox-pane");
 
+    // The Inbox selects its first row when it opens; j and k walk that selection, and the
+    // column follows it.
+    await expect(first).toHaveAttribute("data-inbox-selected", "true");
     await page.keyboard.press("j");
-    await page.keyboard.press("j");
-    await expect(rows.nth(1)).toBeFocused();
+    await expect(rows.nth(1)).toHaveAttribute("data-inbox-selected", "true");
     await page.keyboard.press("k");
-    await expect(first).toBeFocused();
+    await expect(first).toHaveAttribute("data-inbox-selected", "true");
 
-    // y copies the focused row's ask reference through the card's own control, so the card
-    // confirms it.
-    const firstAskId = (
-      await first.locator("[data-testid^=ask-]").getAttribute("data-testid")
-    )?.replace(/^ask-/, "");
+    // y copies the selected ask's reference through the column head's own control, so the
+    // column confirms it.
+    const firstAskId = await first.getAttribute("data-inbox-row");
     await page.keyboard.press("y");
-    await expect(first.getByText("Copied", { exact: true })).toBeVisible();
+    await expect(pane.getByText("Copied", { exact: true })).toBeVisible();
     await expect.poll(copied).toEqual([`dispatch://${issueKey}/ask/${firstAskId}`]);
     await page.screenshot({
       fullPage: true,
-      path: testInfo.outputPath(`inbox-focused-row-${testInfo.project.name}.png`),
+      path: testInfo.outputPath(`inbox-selected-row-${testInfo.project.name}.png`),
     });
 
     await page.keyboard.press("2");
-    await expect(first.getByRole("radio", { name: "Hold" })).toBeChecked();
-    await expect(first.getByRole("radio", { name: "Ship" })).not.toBeChecked();
+    await expect(pane.getByRole("radio", { name: "Hold" })).toBeChecked();
+    await expect(pane.getByRole("radio", { name: "Ship" })).not.toBeChecked();
 
     await page.keyboard.press("Enter");
-    const answer = first.getByRole("textbox", { name: "Your answer" });
+    const answer = pane.getByRole("textbox", { name: "Your answer" });
     await expect(answer).toBeFocused();
     await page.keyboard.type("j?");
     await expect(answer).toHaveValue("j?");
-    await expect(page).toHaveURL(/\/$/);
+    // Typing followed nothing and opened nothing: the address is still the Inbox, carrying the
+    // row the column is showing.
+    await expect(page).toHaveURL(`/?item=${firstAskId}`);
     await expect(page.getByRole("dialog")).toHaveCount(0);
 
     // The search toggle is the one shortcut that still works while typing.
@@ -217,7 +226,11 @@ test("c opens the create dialog; project and title create an issue the API retur
 
     await expect(page).toHaveURL(/\/issues\/OPS-1(\/|$)/);
     await expect(dialog).toHaveCount(0);
-    await expect(page.getByRole("heading", { name: "Keyboard-created issue" })).toBeVisible();
+    await expect(
+      page
+        .getByTestId("issue-header")
+        .getByRole("heading", { level: 1, name: "Keyboard-created issue" })
+    ).toBeVisible();
     await expect
       .poll(() => getIssue("OPS-1"))
       .toMatchObject({

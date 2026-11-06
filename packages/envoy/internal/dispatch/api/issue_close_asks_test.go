@@ -492,23 +492,23 @@ func otherProcessHandler(t *testing.T, database *store.Store) http.Handler {
 		ServerURL:   "https://dispatch.example",
 		Docs:        documentService,
 		Events:      broker,
-		Lifetime:    t.Context(),
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies for the other process: %v", err)
 	}
 	mux := http.NewServeMux()
-	t.Cleanup(Register(mux, deps))
+	t.Cleanup(Register(mux, t.Context(), deps).Wait)
 	return mux
 }
 
 // A decision block written a moment before the close is withdrawn by it, with a record naming the
 // closer, even when the agent's next edit landed on another envoy-dispatch process and left this
-// process's room behind the document's durable head. The close's settlement is refused on that
-// room, which can never settle; the close reloads the room at the head and settles again, so the
-// block is an ask, credited to the session that wrote it, before the close withdraws it. Settled
-// once and given up on, the block would only be marked resolved by the close's sweep, with no ask
-// and no record of who closed it.
+// process's room behind the document's durable head (no room sync runs here, so the room hears of
+// nothing). A read is never older than the stored head all the same, and the close's settlement
+// catches the room up under the document's lock and settles, so the block is an ask, credited to
+// the session that wrote it, before the close withdraws it. Settled once and given up on, the
+// block would only be marked resolved by the close's sweep, with no ask and no record of who
+// closed it.
 func TestClosingAnIssueWithdrawsADecisionBlockWhoseRoomAnotherProcessLeftBehind(t *testing.T) {
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService := docs.New(docs.Deps{Store: database, Settle: time.Hour})
@@ -529,8 +529,8 @@ func TestClosingAnIssueWithdrawsADecisionBlockWhoseRoomAnotherProcessLeftBehind(
 	}
 	insert(handler, ":::ask{#late-decision urgency=\"high\" multiple=\"false\"}\nShip late?\n:::\n")
 	insert(other, "Written on the other process.\n")
-	if live, _ := documentTexts(t, handler, issue.PrimaryArtifactID); strings.Contains(live, "Written on the other process.") {
-		t.Fatalf("this process's room holds the other process's edit, so it is not behind the head:\n%s", live)
+	if live, _ := documentTexts(t, handler, issue.PrimaryArtifactID); !strings.Contains(live, "Written on the other process.") {
+		t.Fatalf("this process's read of the document is older than the other process's stored edit:\n%s", live)
 	}
 	if id := findBlockAsk(t, handler, issue.Key, issue.PrimaryArtifactID, "late-decision"); id != "" {
 		t.Fatalf("the decision block is ask %s before any settlement", id)

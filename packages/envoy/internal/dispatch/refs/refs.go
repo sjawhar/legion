@@ -38,11 +38,12 @@ type Target struct {
 
 // ReplaceCounted reconciles one source's references and resolves the counted targets the event
 // that source appends has to name. Every write that indexes a body goes through it or one of its
-// two variants below, so no producer can reconcile the graph without holding what moved:
-// replaceRefs itself is unexported. It names the targets whose edges it inserted or deleted, which
-// is all a first write of a body moves; an edit whose event names what it moved goes through
-// ReplaceCountedEdit, and a document's version through ReplaceDocumentCounted, since a kept edge's
-// excerpt can move too.
+// variants, so no producer can reconcile the graph without holding what moved: replaceRefs itself
+// is unexported. It names the targets whose edges it inserted or deleted, which is all a first
+// write of a body moves; an edit whose event names what it moved goes through ReplaceCountedEdit
+// (ReplaceCountedItemEdit for a comment), and a document's version through
+// ReplaceDocumentCounted, since a kept edge's excerpt can move too. A comment's or an issue
+// message's first write goes through ReplaceCountedItem, which indexes its blocks as well.
 func ReplaceCounted(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -55,11 +56,9 @@ func ReplaceCounted(
 	return CountedChanges(ctx, tx, changed)
 }
 
-// ReplaceCountedEdit is ReplaceCounted for an edit of an ask's question or a comment's body from
-// previous to body. Every edge such a source writes shows the head of its text as its excerpt
-// (Edges, excerptRunes), so when the edit moves that head, the panel of every target the source
-// still cites changes although its edge stays: those targets are named too, beside the ones whose
-// edges the edit inserted or deleted.
+// ReplaceCountedEdit is ReplaceCounted for an edit of an ask's question from previous to body. It
+// names the targets whose edges the edit inserted or deleted and those whose excerpt it moved
+// (editedHeadTargets).
 func ReplaceCountedEdit(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -70,13 +69,23 @@ func ReplaceCountedEdit(
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}
-	if text.HeadRunes(previous, excerptRunes) != text.HeadRunes(body, excerptRunes) {
-		kinds, ids := refTargets(found)
-		for index := range kinds {
-			changed = append(changed, Target{Kind: kinds[index], ID: ids[index]})
-		}
+	return CountedChanges(ctx, tx, append(changed, editedHeadTargets(previous, body, found)...))
+}
+
+// editedHeadTargets is what an edit of an ask's question or a comment's body from previous to body,
+// which cites found, moves although its edges stay. Every edge such a source writes shows the head
+// of its text as its excerpt (Edges, excerptRunes), so when the edit moves that head, the panel of
+// every target the source still cites changes: each of found is returned then, and none otherwise.
+func editedHeadTargets(previous, body string, found []text.Ref) []Target {
+	if text.HeadRunes(previous, excerptRunes) == text.HeadRunes(body, excerptRunes) {
+		return nil
 	}
-	return CountedChanges(ctx, tx, changed)
+	kinds, ids := refTargets(found)
+	targets := make([]Target, len(kinds))
+	for index := range kinds {
+		targets[index] = Target{Kind: kinds[index], ID: ids[index]}
+	}
+	return targets
 }
 
 // ReplaceDocumentCounted is ReplaceCounted for a document's version, written at versionAt, whose
@@ -166,12 +175,21 @@ func scanTargets(rows pgx.Rows, err error) ([]Target, error) {
 	return changed, rows.Err()
 }
 
-// targetOf is the graph target a parsed reference names; an external URL names none.
-func targetOf(ref text.Ref) (Target, bool) {
+// TargetOf is the graph target a parsed reference names, the kind and id refs and graph_edges
+// store an edge to it under; an external URL names none. A block of a comment, of a message or
+// of an ask — a part of its question, its options and its answer — is stored under its item's
+// block kind, comment_block, message_block or ask_block (ItemKind.BlockKind), not block: a build
+// that predates item blocks skips a kind it does not know (resolveNodes), where it would count a
+// block row and resolve it through document_blocks.
+func TargetOf(ref text.Ref) (Target, bool) {
 	if ref.Kind == "url" {
 		return Target{}, false
 	}
-	return Target{Kind: ref.Kind, ID: text.TargetID(ref)}, true
+	kind := ref.Kind
+	if kind == "block" && ref.Item != "" {
+		kind = ItemKind(ref.Item).BlockKind()
+	}
+	return Target{Kind: kind, ID: text.TargetID(ref)}, true
 }
 
 // refTargets is the deduplicated (to_kind, to_id) set found names, as parallel arrays.
@@ -179,7 +197,7 @@ func refTargets(found []text.Ref) ([]string, []string) {
 	kinds, ids := []string{}, []string{}
 	seen := make(map[Target]struct{})
 	for _, ref := range found {
-		target, ok := targetOf(ref)
+		target, ok := TargetOf(ref)
 		if !ok {
 			continue
 		}
@@ -194,9 +212,9 @@ func refTargets(found []text.Ref) ([]string, []string) {
 }
 
 // Stamp records eventID as the write that introduced every edge of one source that has no
-// provenance yet: the source's own refs and, for a document, the mentions its blocks hold. It runs
-// after the source's event is appended, in the same transaction, and leaves edges that survived a
-// reconcile untouched.
+// provenance yet: the source's own refs and, for a document, a comment, a message or an ask, the
+// mentions its blocks hold, an ask's parts included. It runs after the source's event is
+// appended, in the same transaction, and leaves edges that survived a reconcile untouched.
 func Stamp(ctx context.Context, tx pgx.Tx, fromKind, fromID string, eventID int64) error {
 	if _, err := tx.Exec(ctx, `
 		update refs set source_seq = $3
@@ -204,13 +222,22 @@ func Stamp(ctx context.Context, tx pgx.Tx, fromKind, fromID string, eventID int6
 	`, fromKind, fromID, eventID); err != nil {
 		return fmt.Errorf("stamp references: %w", err)
 	}
-	if fromKind != "artifact" {
+	var blockRefs string
+	switch fromKind {
+	case "artifact":
+		blockRefs = `update block_refs set source_seq = $2 where artifact_id = $1 and source_seq is null`
+	case string(ItemComment), string(ItemMessage), string(ItemAsk):
+		// An item's blocks are keyed by its uuid; an id that is none names no item and holds no
+		// block mention.
+		if uuid.Validate(fromID) != nil {
+			return nil
+		}
+		tables, _ := ItemKind(fromKind).tables()
+		blockRefs = `update ` + tables.refs + ` set source_seq = $2 where ` + tables.item + ` = $1::uuid and source_seq is null`
+	default:
 		return nil
 	}
-	if _, err := tx.Exec(ctx, `
-		update block_refs set source_seq = $2
-		where artifact_id = $1 and source_seq is null
-	`, fromID, eventID); err != nil {
+	if _, err := tx.Exec(ctx, blockRefs, fromID, eventID); err != nil {
 		return fmt.Errorf("stamp block references: %w", err)
 	}
 	return nil
@@ -221,10 +248,10 @@ func Stamp(ctx context.Context, tx pgx.Tx, fromKind, fromID string, eventID int6
 // one paragraph cites forty documents still names every one and every issue beside them, and a
 // reader falls back only for the kind it was not told about. A hundred entries of the longest
 // kind, a block (its node id, its reference and its document's uuid, about 200 bytes), is some
-// 20 KB, so a full event of four kinds stays under 100 KB: about what a comment at
-// contracts.DispatchBodyMax already carries, and far under NATS's 1 MiB maximum payload that the
-// outbox publishes it through. A body citing more is rare enough that carrying an unbounded array
-// on every event is the wrong trade.
+// 20 KB, so a full event of four kinds stays under 100 KB: about what an event at
+// contracts.DispatchEventBodyMax already carries, and far under NATS's 1 MiB maximum payload
+// that the outbox publishes it through. A body citing more is rare enough that carrying an
+// unbounded array on every event is the wrong trade.
 const CountedChangeLimit = 100
 
 // countedKinds is the order CountedChanges lists the kinds it truncated in.
@@ -234,14 +261,21 @@ var countedKinds = [...]string{"issue", "ask", "artifact", "block"}
 // its count), an ask (every list that carries the ask row, plus the human Inbox), a document or
 // file (its Referenced by panel) and a block of a document (its own panel and every link to it,
 // which read one graph read, and its document's panel, which lists the edges at its blocks) — in
-// the shape those readers are keyed by. Comments, messages and components are dropped: nothing
-// counts them, and their panels refresh on the graph itself. A kind with more than
-// CountedChangeLimit named targets names none of them and is listed in TruncatedKinds, and the
-// reader falls back to refreshing every read of that kind; the other kinds are still named.
+// the shape those readers are keyed by. A part of an ask is named as its ask, whose cards and
+// panel are what a link to one of its parts moves. Comments, messages, their blocks and
+// components are dropped: nothing counts them, and their panels refresh on the graph itself. A
+// kind with more than CountedChangeLimit named targets names none of them and is listed in
+// TruncatedKinds, and the reader falls back to refreshing every read of that kind; the other
+// kinds are still named.
 //
 // A reference the grammar accepts need not address anything: `dispatch://CORE-1/ask/hello`
 // parses and is stored, so every lookup here compares text and a target that resolves to no
-// row is simply not named. A write must never fail because of what its body cites.
+// row is simply not named. A write must never fail because of what its body cites, with one
+// exception: a typed block's `block[]` attribute is a schema field, not prose, and an agent's or
+// API write introducing a pointer is refused when it names a block of a type the attribute's
+// targets do not allow, a block no document holds, or a block outside the issues and documents
+// the attribute may point into (pmdoc.CheckBlockPointers). A browser's edit is never refused, so
+// a pointer it leaves at a block no document holds stays unresolved.
 func CountedChanges(ctx context.Context, q Queryer, changed []Target) (model.ReferenceChanges, error) {
 	issueKeys := []string{}
 	askIDs := []string{}
@@ -249,6 +283,13 @@ func CountedChanges(ctx context.Context, q Queryer, changed []Target) (model.Ref
 	ordered := make([]Target, 0, len(changed))
 	seen := make(map[[2]string]struct{}, len(changed))
 	for _, target := range changed {
+		if target.Kind == ItemAsk.BlockKind() {
+			// A part is counted as its ask, the item its node id names, so two parts of one ask,
+			// or a part and the ask's own row, name that ask once.
+			if kind, askID, _, ok := ParseItemBlockNode(target.ID); ok && kind == ItemAsk {
+				target = Target{Kind: string(ItemAsk), ID: askID}
+			}
+		}
 		if _, duplicate := seen[[2]string{target.Kind, target.ID}]; duplicate {
 			continue
 		}
@@ -454,7 +495,9 @@ func resolveArtifactTargets(ctx context.Context, q Queryer, refKeys []string) (m
 
 // ReferencedBy lists Dispatch items and artifacts that mention an artifact reference key or one
 // of its current blocks, once per source, in the shape the document surfaces read (kind, id
-// order). A citing document is listed itself, not by the block holding its link.
+// order). A citing document, comment, message or ask is listed itself, not by the block holding
+// its link: an ask that cites the document from one of its parts alone — an option, or the
+// answer it was given — is listed as that ask, once.
 func ReferencedBy(ctx context.Context, q Queryer, refKey string) ([]model.ReferencedBy, error) {
 	edges, err := resolveEdges(ctx, q, Query{Direction: "in", Kind: "artifact", ID: refKey, Kinds: []string{"mentions"}, WholeDocuments: true})
 	if err != nil {
@@ -494,7 +537,8 @@ func ReferencedBy(ctx context.Context, q Queryer, refKey string) ([]model.Refere
 // Outgoing lists Dispatch mentions written by an artifact, resolving artifact targets. A block
 // target keeps its own kind and id and carries its document as the artifact, while a current
 // version holds the block; a block none holds is omitted, as is a target of a node kind this
-// build does not know. Any other unresolved target is listed.
+// build does not know. A block of an ask, a comment or a message, which this shape has no field
+// for, is listed by the graph read (Edges) alone. Any other unresolved target is listed.
 func Outgoing(ctx context.Context, q Queryer, artifactID string) ([]model.OutgoingReference, error) {
 	rows, err := q.Query(ctx, `
 		select e.to_kind, e.to_id,
@@ -506,6 +550,7 @@ func Outgoing(ctx context.Context, q Queryer, artifactID string) ([]model.Outgoi
 		left join artifacts a on a.ref_key = case e.to_kind when 'artifact' then e.to_id when 'block' then split_part(d.node_id, '#', 1) end
 		left join artifact_versions v on v.artifact_id = a.id
 		where e.from_kind = 'artifact' and e.from_id = $1 and e.kind = 'mentions' and e.to_kind = any($2)
+		  and e.to_kind not in `+itemBlockKinds+`
 		  and (e.to_kind <> 'block' or d.node_id is not null)
 		order by e.to_kind, e.to_id, v.number
 	`, artifactID, nodeKinds)

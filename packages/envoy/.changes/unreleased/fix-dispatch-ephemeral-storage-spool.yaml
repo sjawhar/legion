@@ -1,9 +1,0 @@
-kind: Fixed
-body: |-
-  An artifact file upload no longer leaves its spooled part on the pod's disk. The multipart
-  parser spools a file part past a megabyte to a temporary file; `net/http` removes the files of
-  the request it hands a handler, but the upload parses a copy the access log and the transaction
-  tracking made with `WithContext`, so the server never saw them, and every such upload left its
-  file behind until the pod's `ephemeral-storage` limit was reached and the kubelet evicted the
-  pod, taking Dispatch down until a replacement pod was ready. The upload removes the files itself
-  when it returns, whether it stored the file or refused the request after parsing it.

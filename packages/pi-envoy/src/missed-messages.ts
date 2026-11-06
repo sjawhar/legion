@@ -1,4 +1,8 @@
 import {
+  type ConsumerDeliverySnapshot,
+  ConsumerDeliverySnapshotSchema,
+} from "@legion/envoy-client/consumer-delivery";
+import {
   type ReplayLedgerEntry,
   ReplayLedgerEntrySchema,
   type ReplayLedgerIdentity,
@@ -35,6 +39,19 @@ export const REPLAY_STATE_ENTRY = "envoy-replay-state";
  * restore (`heldReplayNotices`), since the replay state that raised it no longer shows its cause.
  */
 export const REPLAY_NOTICE_ENTRY = "envoy-replay-notice";
+
+/**
+ * Transcript entry holding a session's consumer delivery snapshot (`ConsumerDeliverySnapshot`: the
+ * resume point, and when each followed topic was first followed) beside the session id it is for,
+ * written whenever it changed after a frame was written or the followed topics changed; a session
+ * restores the newest resume point and the newest follows map its entries hold. The follows map
+ * goes with an entry only when it changed, so a frame costs an entry of a resume point alone, not
+ * one of every topic the session follows. A restart restores it before it registers, so its first
+ * registration names where the session was up to and frames stored before a follow stay dropped.
+ * A fork's transcript copies its parent's, whose consumer is not the fork's, so only an entry for
+ * the session restoring it counts.
+ */
+export const CONSUMER_STATE_ENTRY = "envoy-consumer-state";
 
 /** A replay notice recorded as held (`REPLAY_NOTICE_ENTRY`), by the id its records share. */
 export interface HeldReplayNotice {
@@ -212,4 +229,31 @@ export function heldReplayNotices(entries: readonly unknown[]): HeldReplayNotice
     if (!handed.has(id)) notices.push({ id, content });
   }
   return notices;
+}
+
+/** What a session's entries record for `sessionID` to restore its consumer delivery with
+ *  (`CONSUMER_STATE_ENTRY`): the newest resume point they hold, and the newest follows map, which
+ *  an entry carries only when it changed. An entry that does not parse, or is another session's,
+ *  is passed over; a session with no entry of its own restores nothing. */
+export function consumerSnapshot(
+  entries: readonly unknown[],
+  sessionID: string
+): ConsumerDeliverySnapshot | undefined {
+  const states = customEntries(entries, CONSUMER_STATE_ENTRY);
+  let found = false;
+  let resume: ConsumerDeliverySnapshot["resume"];
+  let follows: ConsumerDeliverySnapshot["follows"] | undefined;
+  for (let index = states.length - 1; index >= 0; index -= 1) {
+    const state = states[index];
+    if (typeof state !== "object" || state === null) continue;
+    if (stringField(state, "session_id") !== sessionID) continue;
+    const parsed = ConsumerDeliverySnapshotSchema.safeParse(state);
+    if (!parsed.success) continue;
+    found = true;
+    if (resume === undefined) resume = parsed.data.resume;
+    if (follows === undefined && "follows" in state) follows = parsed.data.follows;
+    if (resume !== undefined && follows !== undefined) break;
+  }
+  if (!found) return undefined;
+  return { ...(resume === undefined ? {} : { resume }), follows: follows ?? {} };
 }

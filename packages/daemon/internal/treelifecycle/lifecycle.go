@@ -31,6 +31,11 @@ type Lifecycle struct {
 	Authority          Authority
 	CleanupStarted     bool
 	CleanupConfirmedAt time.Time
+	// Created is this call's own insert of the tree's row: true only where Open created the
+	// lifecycle, false for every read of one and for every later epoch of it. The draw of the
+	// tree's memory group (internal/memorygroup) is made exactly once, when the row is first
+	// created, so it is the one caller that asks; Read answers false, since it creates nothing.
+	Created bool
 }
 
 var (
@@ -92,11 +97,48 @@ func Read(ctx context.Context, tx pgx.Tx, project, tree string) (Lifecycle, bool
 	return lifecycle, true, nil
 }
 
+// ReadMany is the lifecycle of each of trees under project, by tree, in one read: the lifecycles a
+// look over many trees takes at once, rather than a Read per tree. A tree with no row has no
+// entry, and no trees reads nothing. Like Read it opens, reserves and confirms nothing, and it
+// takes no row lock: the caller is judging, not writing.
+func ReadMany(ctx context.Context, tx pgx.Tx, project string, trees []string) (map[string]Lifecycle, error) {
+	lifecycles := make(map[string]Lifecycle, len(trees))
+	if len(trees) == 0 {
+		return lifecycles, nil
+	}
+	rows, err := tx.Query(ctx, `select project, tree, epoch, authority, cleanup_started,
+		cleanup_confirmed_at from tree_lifecycles where project = $1 and tree = any($2) order by tree`, project, trees)
+	if err != nil {
+		return nil, fmt.Errorf("read the tree lifecycles of %d trees: %w", len(trees), err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		lifecycle, err := scan(rows)
+		if err != nil {
+			return nil, fmt.Errorf("read the tree lifecycles of %d trees: %w", len(trees), err)
+		}
+		lifecycles[lifecycle.Tree] = lifecycle
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read the tree lifecycles of %d trees: %w", len(trees), err)
+	}
+	return lifecycles, nil
+}
+
 // HeldByOperator says whether the operator owns this lifetime of the tree: it opened it and its
 // cleanup has not confirmed, so the workflow may record nothing that acts on the tree's claims or
 // its pod.
 func (l Lifecycle) HeldByOperator() bool {
 	return l.Authority == AuthorityOperator && l.CleanupConfirmedAt.IsZero()
+}
+
+// OpenUnderWorkflow says whether the workflow owns this lifetime of the tree and it is still
+// running: an admission fact opened it, and no cleanup has been reserved on it. A tree leaves by
+// reserving its cleanup (ReserveCleanup), and only a fresh Open clears that reservation, so
+// CleanupStarted is the mark of a lifetime that has ended whether or not its release has confirmed
+// yet.
+func (l Lifecycle) OpenUnderWorkflow() bool {
+	return l.Authority == AuthorityWorkflow && !l.CleanupStarted
 }
 
 // Open starts a fresh authorized lifetime or returns its current open epoch. It is called in the
@@ -115,7 +157,7 @@ func Open(ctx context.Context, tx pgx.Tx, project, tree string, authority Author
 		if err != nil {
 			return Lifecycle{}, fmt.Errorf("create tree lifecycle %s: %w", tree, err)
 		}
-		return Lifecycle{Project: project, Tree: tree, Epoch: 1, Authority: authority}, nil
+		return Lifecycle{Project: project, Tree: tree, Epoch: 1, Authority: authority, Created: true}, nil
 	}
 	if err != nil {
 		return Lifecycle{}, fmt.Errorf("read tree lifecycle %s: %w", tree, err)

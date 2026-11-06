@@ -16,7 +16,19 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
-func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
+// TestMain runs the package's tests and then reports the services they left alive
+// (service_leak_test.go): the memory a test that never shuts its service down holds for the rest
+// of the binary's run. A service still alive fails the run - the exit code stays storetest.Main's
+// when that is already non-zero, and becomes non-zero when the tests passed and a service is
+// still alive. The fix such a run asks for is a t.Cleanup on the test the report names, shutting
+// down the service that test built.
+func TestMain(m *testing.M) {
+	code := storetest.Main(m)
+	if reportLeakedServices() && code == 0 {
+		code = 1
+	}
+	os.Exit(code)
+}
 
 func createDocument(t *testing.T, database *store.Store, markdown string) string {
 	t.Helper()
@@ -24,7 +36,7 @@ func createDocument(t *testing.T, database *store.Store, markdown string) string
 }
 
 // createIssueDocument creates a document on issue DOC-<number>, creating the issue if need be.
-func createIssueDocument(t *testing.T, database *store.Store, number int, markdown string) string {
+func createIssueDocument(t testing.TB, database *store.Store, number int, markdown string) string {
 	t.Helper()
 	tree, err := pmdoc.Parse(markdown)
 	if err != nil {
@@ -116,7 +128,7 @@ func createProjectDocument(t *testing.T, database *store.Store, markdown string)
 	return artifactID
 }
 
-func genRandomSuffix(t *testing.T) string {
+func genRandomSuffix(t testing.TB) string {
 	t.Helper()
 	var value [4]byte
 	if _, err := rand.Read(value[:]); err != nil {

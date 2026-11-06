@@ -24,6 +24,14 @@ import (
 
 func newInteractionHandler(t *testing.T, makeDocs func(*store.Store) docs.API) (http.Handler, *store.Store) {
 	t.Helper()
+	handler, database, _ := newInteractionDeps(t, makeDocs)
+	return handler, database
+}
+
+// newInteractionDeps is newInteractionHandler, answering also the Deps it registered, for a test
+// that must run one request on a connection of its own (oneConnectionHandler).
+func newInteractionDeps(t *testing.T, makeDocs func(*store.Store) docs.API) (http.Handler, *store.Store, Deps) {
+	t.Helper()
 	database := storetest.Open(t)
 	var docsAPI docs.API
 	if makeDocs != nil {
@@ -41,8 +49,8 @@ func newInteractionHandler(t *testing.T, makeDocs func(*store.Store) docs.API) (
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	Register(mux, deps)
-	return mux, database
+	t.Cleanup(Register(mux, t.Context(), deps).Wait)
+	return mux, database, deps
 }
 
 // replaceDocumentText replaces a document's text as an upload of a new version does: inside a
@@ -226,8 +234,8 @@ func TestAnchoredAskAnswerAndInbox(t *testing.T) {
 	forbidden := sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/answer", map[string]any{
 		"selected": []string{"brown"}, "actor": sessionActor(),
 	})
-	if forbidden.Code != http.StatusForbidden || !strings.Contains(forbidden.Body.String(), `"code":"HUMAN_ONLY"`) {
-		t.Fatalf("session answer: status=%d body=%s", forbidden.Code, forbidden.Body.String())
+	if forbidden.Code != http.StatusForbidden || !strings.Contains(forbidden.Body.String(), `"code":"`+codeScopeRequired+`"`) {
+		t.Fatalf("the shared token's answer: status=%d body=%s, want 403 %s", forbidden.Code, forbidden.Body.String(), codeScopeRequired)
 	}
 
 	answered := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/answer", map[string]any{
@@ -462,21 +470,22 @@ func TestAskAnchorAmbiguityAndOccurrence(t *testing.T) {
 func TestInteractionCapsAndAnswerValidation(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Caps", "A spec")
-	// A whole-cap question is accepted, since a question names its concrete case; one past it is
-	// refused by name.
-	atCap := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
-		"question": strings.Repeat("a", contracts.AskQuestionMax), "actor": sessionActor(),
+	// A question of several paragraphs is accepted; a question and options that together pass
+	// the ask bound are refused by name, whichever part carries the text.
+	twoParagraphs := strings.Repeat("a", 1000) + "\n\n" + strings.Repeat("b", 1000)
+	atBound := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": twoParagraphs, "actor": sessionActor(),
 	})
-	if atCap.Code != http.StatusCreated {
-		t.Fatalf("question at the cap: status=%d body=%s", atCap.Code, atCap.Body.String())
+	if atBound.Code != http.StatusCreated {
+		t.Fatalf("question of two 1,000-unit paragraphs: status=%d body=%s", atBound.Code, atBound.Body.String())
 	}
+	const label = "Ship"
 	tooLong := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
-		"question": strings.Repeat("a", contracts.AskQuestionMax+1), "actor": sessionActor(),
+		"question": strings.Repeat("a", contracts.DispatchEventBodyMax+1-len(label)),
+		"options":  []map[string]string{{"label": label}},
+		"actor":    sessionActor(),
 	})
-	overCap := fmt.Sprintf("question is 1 characters over the %d-character limit (%d/%d)", contracts.AskQuestionMax, contracts.AskQuestionMax+1, contracts.AskQuestionMax)
-	if tooLong.Code != http.StatusBadRequest || !strings.Contains(tooLong.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(tooLong.Body.String(), overCap) {
-		t.Fatalf("question cap: status=%d body=%s", tooLong.Code, tooLong.Body.String())
-	}
+	assertCapExceeded(t, "ask wording", tooLong, "question and options", contracts.DispatchEventBodyMax+1, contracts.DispatchEventBodyMax, "")
 	tooManyOptions := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
 		"question": "Options", "options": []map[string]string{{"label": "1"}, {"label": "2"}, {"label": "3"}, {"label": "4"}, {"label": "5"}, {"label": "6"}, {"label": "7"}, {"label": "8"}, {"label": "9"}}, "actor": sessionActor(),
 	})
@@ -537,15 +546,17 @@ func TestInteractionCapsAndAnswerValidation(t *testing.T) {
 		t.Fatalf("blank text answer: status=%d body=%s", blankTextAnswer.Code, blankTextAnswer.Body.String())
 	}
 
-	overCapBody := strings.Repeat("a", contracts.DispatchBodyMax+1)
+	// A body is bounded block by block now, so one 32,001-unit paragraph is refused for its
+	// block and a body of many blocks far longer than the old cap is not.
+	overCapBody := strings.Repeat("a", contracts.DispatchBlockUnits+1)
 	tooLongComment := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
 		"body": overCapBody, "actor": sessionActor(),
 	})
-	assertCapExceeded(t, "comment cap", tooLongComment, "body", contracts.DispatchBodyMax+1, contracts.DispatchBodyMax, "")
+	assertBlockCapExceeded(t, "comment block", tooLongComment, "body", 1, "paragraph", contracts.DispatchBlockUnits+1)
 	tooLongMessage := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
 		"body": overCapBody, "actor": sessionActor(),
 	})
-	assertCapExceeded(t, "message cap", tooLongMessage, "body", contracts.DispatchBodyMax+1, contracts.DispatchBodyMax, "")
+	assertBlockCapExceeded(t, "message block", tooLongMessage, "body", 1, "paragraph", contracts.DispatchBlockUnits+1)
 }
 
 func TestAskAnswerAcceptsFreeTextAloneOrWithSelection(t *testing.T) {
@@ -929,8 +940,8 @@ func TestSuggestionAcceptAppliesLiveDocument(t *testing.T) {
 	})
 	comment := decodeBody[model.Comment](t, suggestion)
 	forbidden := sessionRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{"actor": sessionActor()})
-	if forbidden.Code != http.StatusForbidden || !strings.Contains(forbidden.Body.String(), `"code":"HUMAN_ONLY"`) {
-		t.Fatalf("session accepts suggestion: status=%d body=%s", forbidden.Code, forbidden.Body.String())
+	if forbidden.Code != http.StatusForbidden || !strings.Contains(forbidden.Body.String(), `"code":"`+codeScopeRequired+`"`) {
+		t.Fatalf("the shared token accepts a suggestion: status=%d body=%s, want 403 %s", forbidden.Code, forbidden.Body.String(), codeScopeRequired)
 	}
 	accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
 	if accepted.Code != http.StatusOK || !strings.Contains(accepted.Body.String(), `"resolved":true`) || !strings.Contains(accepted.Body.String(), `"accepted":true`) {

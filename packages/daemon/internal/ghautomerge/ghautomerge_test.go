@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -57,8 +58,65 @@ type github struct {
 	mutations                      []string
 }
 
-// updatedAt is the fake pull request's default last change on GitHub.
-const updatedAt = "2026-10-16T05:00:00Z"
+// updatedAt is the fake pull request's default last change on GitHub, and absent is how the fake
+// records an input the mutation it serves does not pass.
+const (
+	updatedAt = "2026-10-16T05:00:00Z"
+	absent    = "<absent>"
+)
+
+// submitted is the enable or merge the fake records for #42 at head. Both inputs of the squash
+// commit's message are absent: the mutations pass neither, so each repository's own squash
+// settings decide the message (why is on the enable and merge mutations in ghautomerge.go).
+func submitted(verb string) string {
+	return fmt.Sprintf("%s PR_42 head SQUASH headline=%q body=%q", verb, absent, absent)
+}
+
+// operationHeader is the start of a GraphQL document's operation signature: the operation's name
+// and the "(" that opens the variables it declares. variableName is every $name a document names,
+// in that signature or in the selection set after it.
+var (
+	operationHeader = regexp.MustCompile(`^\s*(?:query|mutation)\s+(\w+)\s*\(`)
+	variableName    = regexp.MustCompile(`\$\w+`)
+)
+
+// refusedVariables is GitHub's validation message for the first variable document declares and
+// never uses, or uses and never declares, and "" when every variable it names is both. GraphQL's
+// validator refuses either document before GitHub reads an input of it (its "All Variables Used"
+// and "All Variable Uses Defined" rules, sections 5.8.4 and 5.8.3), so a mutation that loses an
+// input while its declaration stands merges nothing.
+func refusedVariables(document string) string {
+	name, body := "the operation", document
+	var declared []string
+	if header := operationHeader.FindStringSubmatchIndex(document); header != nil {
+		name = document[header[2]:header[3]]
+		depth := 0
+		for i := header[1] - 1; i < len(document); i++ {
+			switch document[i] {
+			case '(':
+				depth++
+			case ')':
+				depth--
+			}
+			if depth == 0 {
+				declared, body = variableName.FindAllString(document[header[1]:i], -1), document[i+1:]
+				break
+			}
+		}
+	}
+	used := variableName.FindAllString(body, -1)
+	for _, variable := range declared {
+		if !slices.Contains(used, variable) {
+			return fmt.Sprintf("Variable %s is declared by %s but not used", variable, name)
+		}
+	}
+	for _, variable := range used {
+		if !slices.Contains(declared, variable) {
+			return fmt.Sprintf("Variable %s is not defined by %s", variable, name)
+		}
+	}
+	return ""
+}
 
 func (g *github) serve(t *testing.T) string {
 	t.Helper()
@@ -75,6 +133,12 @@ func (g *github) serve(t *testing.T) string {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		// GitHub validates the document before it reads anything of it, so a document whose
+		// variables and inputs disagree is an answer with errors and no change at all.
+		if message := refusedVariables(request.Query); message != "" {
+			_, _ = fmt.Fprintf(w, `{"data":null,"errors":[{"message":%q,"type":"VALIDATION"}]}`, message)
+			return
+		}
 		switch {
 		case strings.Contains(request.Query, "disablePullRequestAutoMerge"):
 			g.mutations = append(g.mutations, fmt.Sprintf("disable %v", request.Variables["id"]))
@@ -93,7 +157,16 @@ func (g *github) serve(t *testing.T) string {
 			if strings.Contains(request.Query, "enablePullRequestAutoMerge") {
 				verb = "enable"
 			}
-			g.mutations = append(g.mutations, fmt.Sprintf("%s %v %v %v", verb, request.Variables["id"], request.Variables["head"], request.Variables["method"]))
+			// GitHub reads only what the mutation's input passes, so a field the mutation leaves out
+			// is recorded as absent rather than as the value of the variable it never reads.
+			passed := func(field, variable string) any {
+				if !strings.Contains(request.Query, field+": $"+variable) {
+					return absent
+				}
+				return request.Variables[variable]
+			}
+			g.mutations = append(g.mutations, fmt.Sprintf("%s %v %v %v headline=%q body=%q", verb, request.Variables["id"], request.Variables["head"], request.Variables["method"],
+				passed("commitHeadline", "headline"), passed("commitBody", "body")))
 			if g.submitStatus != 0 {
 				http.Error(w, `{"message":"Server Error"}`, g.submitStatus)
 				return
@@ -173,6 +246,40 @@ func (g *github) serve(t *testing.T) string {
 	}))
 	t.Cleanup(server.Close)
 	return server.URL
+}
+
+// The fake answers a document that declares a variable it never uses, or uses one it never
+// declares, as GitHub's validator does: an error, and no mutation made. Every document this
+// package sends passes that check, so each case of this file proves its document valid too.
+func TestTheFakeRefusesAGraphQLDocumentGitHubsValidatorWouldRefuse(t *testing.T) {
+	for _, document := range []string{read, enable, merge, disable, dequeue, removals, moreChecks} {
+		if message := refusedVariables(document); message != "" {
+			t.Errorf("a document this package sends is refused: %s", message)
+		}
+	}
+	for _, tc := range []struct{ name, document string }{
+		{name: "a variable declared and never used", document: `mutation EnableAutoMerge($id: ID!, $headline: String!) {
+  enablePullRequestAutoMerge(input: {pullRequestId: $id}) { clientMutationId }
+}`},
+		{name: "a variable used and never declared", document: `mutation EnableAutoMerge($id: ID!) {
+  enablePullRequestAutoMerge(input: {pullRequestId: $id, commitHeadline: $headline}) { clientMutationId }
+}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := &github{}
+			client := githubrest.Client{Token: "token", API: githubrest.GraphQLAPI(g.serve(t))}
+			err := client.GraphQL(context.Background(), tc.document, map[string]any{"id": "PR_42", "headline": "a headline"}, nil)
+			var refusal *githubrest.GraphQLError
+			if !errors.As(err, &refusal) {
+				t.Fatalf("the fake answered %v, want GitHub's validation error", err)
+			}
+			g.mu.Lock()
+			defer g.mu.Unlock()
+			if len(g.mutations) != 0 {
+				t.Fatalf("the fake recorded %v, want no mutation for a document GitHub refuses", g.mutations)
+			}
+		})
+	}
 }
 
 // Disarm turns off what would merge the pull request without a person, by the pull request's state
@@ -296,15 +403,15 @@ func TestSubmitUsesGitHubsAnswerForTheREADYHead(t *testing.T) {
 		wait                          string
 	}{
 		{name: "a merge queue enqueues a pull request GitHub reports mergeable and waits for the merge", head: "head", keep: "head", mergeState: "CLEAN", queueRequired: true,
-			want: []string{"enable PR_42 head SQUASH"}, wait: "armed"},
+			want: []string{submitted("enable")}, wait: "armed"},
 		{name: "a merge queue waits while a required check runs", head: "head", keep: "head", mergeState: "BLOCKED", queueRequired: true, autoMergeOK: true, wait: "unmergeable"},
 		{name: "a merge queue waits while GitHub computes", head: "head", keep: "head", mergeState: "UNKNOWN", queueRequired: true, autoMergeOK: true, wait: "unmergeable"},
 		{name: "auto-merge allowed arms it and waits for the merge", head: "head", keep: "head", mergeState: "BLOCKED", autoMergeOK: true,
-			want: []string{"enable PR_42 head SQUASH"}, wait: "armed"},
+			want: []string{submitted("enable")}, wait: "armed"},
 		{name: "a clean pull request merges at once", head: "head", keep: "head", mergeState: "CLEAN",
-			want: []string{"merge PR_42 head SQUASH"}, outcome: Merged},
+			want: []string{submitted("merge")}, outcome: Merged},
 		{name: "an unstable pull request merges at once", head: "head", keep: "head", mergeState: "UNSTABLE",
-			want: []string{"merge PR_42 head SQUASH"}, outcome: Merged},
+			want: []string{submitted("merge")}, outcome: Merged},
 		{name: "auto-merge disallowed waits while blocked", head: "head", keep: "head", mergeState: "BLOCKED", wait: "unmergeable"},
 		{name: "auto-merge disallowed waits while GitHub computes", head: "head", keep: "head", mergeState: "UNKNOWN", wait: "unmergeable"},
 		{name: "auto-merge disallowed waits while behind", head: "head", keep: "head", mergeState: "BEHIND", wait: "unmergeable"},
@@ -563,7 +670,7 @@ func TestSubmitReadsARemovalItDidNotMakeInsteadOfSubmittingAgain(t *testing.T) {
 			defer g.mu.Unlock()
 			var want []string
 			if tc.resubmit {
-				want = []string{"enable PR_42 head SQUASH"}
+				want = []string{submitted("enable")}
 			}
 			if !slices.Equal(g.mutations, want) {
 				t.Fatalf("mutations %v, want %v", g.mutations, want)

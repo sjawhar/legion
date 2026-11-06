@@ -17,13 +17,12 @@ const (
 	// it: their pace is the daemon's and the inbox's, and a reply is never refused.
 	framesHighWater = 64
 	// claudeQueueLength is how many lines may wait for Claude Code before the bridge counts it as
-	// having stopped reading and ends it. A Claude Code that reads its stdin has at most two of the
-	// bridge's lines waiting: a user message, which the bridge writes only to start a turn or, in
-	// one, once the last step's result is in, and at most one interrupt in that step; and one
-	// refusal for each control request Claude Code has made and not had its answer to, a request
-	// it waits on. While the shim holds Claude Code's output back, none of it is read, so nothing
-	// that answers it (a next step, a refusal) is written either. 1000 waiting lines is a Claude
-	// Code that has stopped reading.
+	// having stopped reading and ends it. A Claude Code that reads its stdin has few of the
+	// bridge's lines waiting: one user message, which the bridge writes only to start a turn or,
+	// in one, once the last step's result is in; and one refusal for each control request Claude
+	// Code has made and not had its answer to, a request it waits on. While the shim holds Claude
+	// Code's output back, none of it is read, so nothing that answers it (a next step, a refusal)
+	// is written either. 1000 waiting lines is a Claude Code that has stopped reading.
 	claudeQueueLength = 1000
 )
 

@@ -76,13 +76,94 @@ test.each([
   // A versioned document: a version's stored text holds no block ids.
   "dispatch://CORE-1/artifact/spec@v2#b-x",
   "dispatch://CORE/artifact/handbook-md@v2#b-x",
-  // Nothing but a document holds blocks.
+  // Nothing but a document, an ask, a comment or an issue's message holds blocks.
   "dispatch://CORE-1#b-x",
   "dispatch://CORE-1/log#b-x",
-  "dispatch://CORE-1/comment/cccccccc-0000-4000-8000-000000000042#b-x",
-  "dispatch://CORE/artifact/handbook-md/ask/aaaaaaaa-0000-4000-8000-000000000042#b-x",
+  "dispatch://CORE/artifact/handbook-md/message/33333333-3333-4333-8333-333333333333#b-x",
+  // A message never changes, so a pinned message block names nothing.
+  "dispatch://CORE-1/message/33333333-3333-4333-8333-333333333333#b-b2@v1",
+  // An ask or a comment has no document version.
+  "dispatch://CORE/artifact/handbook-md@v3/comment/88888888-8888-4888-8888-888888888888#b-b2",
+  "dispatch://CORE/artifact/handbook-md@v3/ask/22222222-2222-4222-8222-222222222222#b-b3",
 ])("%s names nothing", (ref) => {
   expect(parseDispatchRef(ref)).toBeNull();
+});
+
+// A block of a comment or an issue message names the block and its item: an issue's comment and a
+// project document's, pinned to a revision of the comment or not, and an issue's message unpinned.
+test("a block of a comment or a message names the block and the item it is in", () => {
+  const comment = "11111111-1111-4111-8111-111111111111";
+  const message = "33333333-3333-4333-8333-333333333333";
+  const commentBlock: ParsedDispatchRef = {
+    owner: { kind: "issue", issue: "CORE-1" },
+    kind: "block",
+    id: comment,
+    block: "b2",
+    item: { kind: "comment", id: comment },
+  };
+  expect(parseDispatchRef(`dispatch://CORE-1/comment/${comment}#b-b2`)).toEqual(commentBlock);
+  expect(parseDispatchRef(`dispatch://CORE-1/comment/${comment}#b-b2@v1`)).toEqual({
+    ...commentBlock,
+    pin: "1",
+  });
+  expect(parseDispatchRef(`dispatch://CORE-1/message/${message}#b-b2`)).toEqual({
+    owner: { kind: "issue", issue: "CORE-1" },
+    kind: "block",
+    id: message,
+    block: "b2",
+    item: { kind: "message", id: message },
+  });
+  const projectBlock: ParsedDispatchRef = {
+    owner: { kind: "project", project: "CORE" },
+    kind: "block",
+    id: comment,
+    artifact: "handbook-md",
+    block: "b2",
+    item: { kind: "comment", id: comment },
+  };
+  const projectReference = `dispatch://CORE/artifact/handbook-md/comment/${comment}#b-b2`;
+  expect(parseDispatchRef(projectReference)).toEqual(projectBlock);
+  expect(parseDispatchRef(`${projectReference}@v3`)).toEqual({ ...projectBlock, pin: "3" });
+  // The item's page names the same block.
+  const server = "http://dispatch.test";
+  expect(dispatchRefFromUrl(`${server}/issues/CORE-1/comments/${comment}#b-b2`, server)).toBe(
+    `dispatch://CORE-1/comment/${comment}#b-b2`
+  );
+  expect(dispatchRefFromUrl(`${server}/issues/CORE-1/messages/${message}#b-b2`, server)).toBe(
+    `dispatch://CORE-1/message/${message}#b-b2`
+  );
+});
+
+// A part of an ask - its question, one of its options or its answer - names the part and the ask
+// it is in: an issue's ask and a project document's, pinned to a revision of the ask's parts or
+// not.
+test("a part of an ask names the part and the ask it is in", () => {
+  const ask = "22222222-2222-4222-8222-222222222222";
+  const askBlock: ParsedDispatchRef = {
+    owner: { kind: "issue", issue: "CORE-1" },
+    kind: "block",
+    id: ask,
+    block: "b3",
+    item: { kind: "ask", id: ask },
+  };
+  expect(parseDispatchRef(`dispatch://CORE-1/ask/${ask}#b-b3`)).toEqual(askBlock);
+  expect(parseDispatchRef(`dispatch://CORE-1/ask/${ask}#b-b3@v2`)).toEqual({
+    ...askBlock,
+    pin: "2",
+  });
+  expect(parseDispatchRef(`dispatch://CORE/artifact/handbook-md/ask/${ask}#b-b3`)).toEqual({
+    owner: { kind: "project", project: "CORE" },
+    kind: "block",
+    id: ask,
+    artifact: "handbook-md",
+    block: "b3",
+    item: { kind: "ask", id: ask },
+  });
+  // The ask's page names the same part.
+  const server = "http://dispatch.test";
+  expect(dispatchRefFromUrl(`${server}/issues/CORE-1/asks/${ask}#b-b3`, server)).toBe(
+    `dispatch://CORE-1/ask/${ask}#b-b3`
+  );
 });
 
 // `dispatch read --ref` is a read request, so a reference names its target whatever the length of

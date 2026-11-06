@@ -1,7 +1,10 @@
 import { expect, type Locator, type Page, type Response, test } from "@playwright/test";
 
 import type { ArtifactUploadResponse } from "../web/src/api/types";
-import { REF_PREVIEW_OPEN_DELAY_MS } from "../web/src/features/refs/ref-preview-timing";
+import {
+  REF_PREVIEW_CLOSE_DELAY_MS,
+  REF_PREVIEW_OPEN_DELAY_MS,
+} from "../web/src/features/refs/ref-preview-timing";
 import { agentRow, setLiveSessions } from "./agents";
 import {
   createAsk,
@@ -17,6 +20,7 @@ import {
 import { documentEditor, openSpec, typeAtEnd } from "./editor";
 import { resetDatabase } from "./seed";
 import { ONE_PIXEL_PNG, pastePicture } from "./sends";
+import { sessionIds } from "./session-ids";
 import { asUser } from "./users";
 
 // A picture pasted into a message, an ask's answer or a direct message is uploaded and written as
@@ -43,6 +47,19 @@ async function expectDrawn(picture: Locator, src: string): Promise<void> {
   await expect
     .poll(() => picture.evaluate((image: HTMLImageElement) => image.naturalWidth))
     .toBeGreaterThan(0);
+}
+
+/** Waits for the full-size layer a click on a picture opened to show that picture's real pixels,
+ *  and answers the layer. */
+async function expectFullSize(page: Page, caption: string, src: string): Promise<Locator> {
+  const lightbox = page.getByRole("dialog", { name: caption });
+  const picture = lightbox.getByRole("img", { name: caption });
+  await expect(picture).toBeVisible();
+  await expect(picture).toHaveAttribute("src", src);
+  await expect
+    .poll(() => picture.evaluate((image: HTMLImageElement) => image.naturalWidth))
+    .toBeGreaterThan(0);
+  return lightbox;
 }
 
 /** The server's answer to the next `POST` to `path`; a row checks it is a success with
@@ -115,7 +132,7 @@ test("a picture pasted into an ask's answer shows inline in the answer", async (
   const ask = await createAsk(
     issue.key,
     { question: "Which screen is wrong?" },
-    { actor: { id: "planner-session", kind: "session" }, as: "agent" }
+    { actor: { id: sessionIds.planner, kind: "session" }, as: "agent" }
   );
   const alice = await asUser(browser, "alice");
   try {
@@ -155,7 +172,7 @@ test("a picture pasted into a direct message on the Agents page shows inline and
     dir: "/workspaces/planner",
     machine_id: "planner-host",
     roles: ["planner"],
-    session_id: "planner-session",
+    session_id: sessionIds.planner,
     title: "Planner",
   };
   await setLiveSessions([planner]);
@@ -189,9 +206,21 @@ test("a picture pasted into a direct message on the Agents page shows inline and
       `/api/v1/agents/${planner.session_id}/artifacts/shot-png/versions/1`
     );
 
-    // The picture opens its own page, which shows it and its versions.
+    // A click opens the picture at full size over the page, and a click on it closes it.
     await picture.click();
-    await expect(page).toHaveURL(`/agents/${planner.session_id}/artifacts/shot-png?v=1`);
+    const lightbox = await expectFullSize(
+      page,
+      "shot.png",
+      `/api/v1/agents/${planner.session_id}/artifacts/shot-png/versions/1`
+    );
+    await lightbox.click();
+    await expect(lightbox).toHaveCount(0);
+    await expect(page).not.toHaveURL(/\/artifacts\//);
+
+    // The picture's link still names its own page, which shows it and its versions.
+    const pagePath = await picture.locator("xpath=ancestor::a[1]").getAttribute("href");
+    expect(pagePath).toBe(`/agents/${planner.session_id}/artifacts/shot-png?v=1`);
+    await page.goto(pagePath ?? "");
     await expect(page.getByRole("heading", { name: "shot.png" })).toBeVisible();
     await expect(page.getByRole("img", { name: "shot.png version 1" })).toBeVisible();
     await expect(page.getByRole("region", { name: "Versions for shot.png" })).toBeVisible();
@@ -201,7 +230,7 @@ test("a picture pasted into a direct message on the Agents page shows inline and
   }
 });
 
-test("a picture written into a spec draws in the editor and in a past version, and its markdown is kept", async ({
+test("a picture written into a spec draws in the editor and in a past version, with or without a version, and its markdown is kept", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -230,10 +259,20 @@ test("a picture written into a spec draws in the editor and in a past version, a
     await expectSucceeded(sent);
 
     // An agent writes the line into the spec, as `dispatch doc-edit` does: a new version, whose
-    // number the server assigns. The paragraph after it is where the caret lands in a moment.
+    // number the server assigns. Beside it, the same picture written without `@vN`, which draws
+    // its latest version. The paragraph after them is where the caret lands in a moment.
+    const latestSyntax = `![latest shot](dispatch://${issue.key}/artifact/shot-png)`;
     await editArtifact(
       issue.primary_artifact_id,
-      { ops: [{ after: "end", markdown: `${syntax}\n\nBelow the picture.`, op: "insert" }] },
+      {
+        ops: [
+          {
+            after: "end",
+            markdown: `${syntax}\n\n${latestSyntax}\n\nBelow the picture.`,
+            op: "insert",
+          },
+        ],
+      },
       agentSession
     );
     const newestVersion = async () =>
@@ -245,6 +284,13 @@ test("a picture written into a spec draws in the editor and in a past version, a
 
     await openSpec(page, issue.key, "Below the picture.");
     await expectDrawn(documentEditor(page).getByRole("img", { name: "shot.png" }), src);
+    await expectDrawn(documentEditor(page).getByRole("img", { name: "latest shot" }), src);
+
+    // A click on a picture in the editor opens it at full size; a click on it closes it.
+    await documentEditor(page).getByRole("img", { name: "shot.png" }).click();
+    const lightbox = await expectFullSize(page, "shot.png", src);
+    await lightbox.click();
+    await expect(lightbox).toHaveCount(0);
 
     // Editing around the picture keeps its line as it was written.
     await typeAtEnd(page, "Typed in the editor.");
@@ -252,11 +298,13 @@ test("a picture written into a spec draws in the editor and in a past version, a
       .poll(async () => (await getIssueArtifactText(issue.key, "spec")).markdown)
       .toContain("Typed in the editor.");
     expect((await getIssueArtifactText(issue.key, "spec")).markdown).toContain(syntax);
+    expect((await getIssueArtifactText(issue.key, "spec")).markdown).toContain(latestSyntax);
 
     // The past version draws it through the read-only view.
     await page.getByRole("combobox", { name: "Version" }).selectOption(String(pictured));
     const versionView = page.getByTestId("version-view");
     await expectDrawn(versionView.getByRole("img", { name: "shot.png" }), src);
+    await expectDrawn(versionView.getByRole("img", { name: "latest shot" }), src);
     await expect(versionView.getByRole("textbox", { name: "Document editor" })).toHaveAttribute(
       "contenteditable",
       "false"
@@ -266,7 +314,7 @@ test("a picture written into a spec draws in the editor and in a past version, a
   }
 });
 
-test("a picture line the browser cannot draw, or that pins no version, shows a link; a web picture stays an <img>", async ({
+test("a picture line the browser cannot draw, at a version or not, shows a link; a web picture stays an <img>", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -364,9 +412,9 @@ test("a picture line the browser cannot draw, or that pins no version, shows a l
 // version's bytes and opens its document's dashboard page. The same document's page URL or
 // `dispatch://` reference left as text (bare, in angle brackets, or a link whose words are its
 // target) is text, which the server cites only within those bytes, so it stays the plain link it is.
-test("a long-named picture in a comment draws, its link to a long-named document opens it, and the bare page URL stays a plain link @phone", async ({
+test("a long-named picture in a comment draws, its link to a long-named document opens it, and the bare page URL stays a plain link", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Long names" });
   const alice = await asUser(browser, "alice");
@@ -406,11 +454,12 @@ test("a long-named picture in a comment draws, its link to a long-named document
       body: `![shot](dispatch://${issue.key}/artifact/${pictureSlug}@v1)\n\nSee [design](${designTarget}).\n\nBare: ${bareUrl}\n\nAngle: <${designTarget}>\n\nSelf: [${designTarget}](${designTarget})\n\nBlock: <${blockTarget}>`,
     });
 
+    // The hover card's open delay below is a page timer (`REF_PREVIEW_OPEN_DELAY_MS`), so the
+    // page's own clock is what spends it.
+    await page.clock.install();
     await page.goto(`/issues/${issue.key}/conversation`);
-    const turn = page.locator(`[data-turn="comment:${comment.id}"]`);
-    await turn.getByRole("button", { name: "Expand thread" }).click();
-    const thread =
-      testInfo.project.name === "iphone" ? page.getByRole("dialog", { name: "Thread" }) : turn;
+    const thread = page.locator(`[data-turn="comment:${comment.id}"]`);
+    await thread.getByRole("button", { name: "Expand thread" }).click();
 
     // The source is asserted before the picture is waited on: one the browser cannot fetch
     // (`dispatch://…`) would fail as an image that never loads rather than naming its source.
@@ -424,6 +473,10 @@ test("a long-named picture in a comment draws, its link to a long-named document
       .locator("p", { hasText: "See" })
       .locator(`a[data-dispatch-href="${designTarget}"]`);
     await expect(link).toHaveAttribute("href", path);
+    // The link's words are the document's name, which a portal fills in after the body painted.
+    // Waited for before the loop: that late growth slides the link under a pointer resting on a
+    // paragraph, which opens a card over the paragraph hovered next.
+    await expect(link).toContainText("design design");
     // Asserted once the author's link is drawn, in the same pass: the bare URL's words are the URL
     // and it keeps its href, never the document's name and route a reference link would show.
     const bare = thread.locator("p", { hasText: "Bare:" }).getByRole("link");
@@ -441,13 +494,18 @@ test("a long-named picture in a comment draws, its link to a long-named document
       await expect(paragraph).toHaveText(`${label} ${words}`);
       await expect(paragraph.getByRole("link")).toHaveCount(0);
       await expect(paragraph.locator("[data-dispatch-href],[data-dispatch-ref]")).toHaveCount(0);
-      if (testInfo.project.name !== "iphone") {
-        await paragraph.hover();
-        await page.waitForTimeout(2 * REF_PREVIEW_OPEN_DELAY_MS);
-        await expect(page.getByRole("tooltip")).toHaveCount(0);
-      }
+      // `RefPreview` keeps an open card under a pointer that has not moved
+      // (`keptUnderAStillPointer`): it arms no close while the page moves beneath it, so only
+      // this park arms one, and the clock run after it is what spends the close delay. A clock
+      // run before the park spends nothing.
+      await page.mouse.move(0, 0);
+      await page.clock.runFor(2 * REF_PREVIEW_CLOSE_DELAY_MS);
+      await paragraph.hover();
+      await page.clock.runFor(2 * REF_PREVIEW_OPEN_DELAY_MS);
+      await expect(page.getByRole("tooltip")).toHaveCount(0);
     }
     await page.mouse.move(0, 0);
+    await page.clock.runFor(2 * REF_PREVIEW_CLOSE_DELAY_MS);
     // The link reads as the document's name, so it wraps past the window's height; the click lands
     // on its last line, clear of the composer pinned above the conversation.
     const lastLine = await link.evaluate((anchor) => {

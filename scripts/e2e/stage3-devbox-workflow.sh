@@ -30,12 +30,12 @@
 # to start otherwise (require_proof_human, lib/workflow.sh).
 # Legion's two role Apps are this deployment's own by default, and four inputs for another
 # deployment's: LEGION_E2E_IMPLEMENT_APP_ID and LEGION_E2E_REVIEW_APP_ID, each App's numeric id, and
-# LEGION_E2E_IMPLEMENT_APP_KEY_NAME and LEGION_E2E_REVIEW_APP_KEY_NAME, the secrets broker keys holding
-# their private keys (lib/github-apps.sh). `prerequisites` proves each key is its id's App before the
-# run writes anything, whichever pair it took. The App private keys are resolved through
-# private_key_command by the daemon, and by lib/app-logins.ts once to prove each App and read its bot
-# login from GitHub (read_app_logins, lib/workflow.sh); they never enter this shell, a pane, an argv,
-# or this transcript.
+# LEGION_E2E_IMPLEMENT_APP_SECRET and LEGION_E2E_REVIEW_APP_SECRET, the secrets broker github-app
+# secrets that release their installation tokens (lib/github-apps.sh). `prerequisites` proves each
+# App from its token before the run writes anything, whichever pair it took. The tokens are
+# released through each App's token_command to the daemon, and once to lib/app-logins.ts to prove
+# each App and read its bot login from GitHub (read_app_logins, lib/workflow.sh); they never enter
+# this shell, a pane, an argv, or this transcript.
 set -Eeuo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -349,12 +349,21 @@ stop_dispatch() {
 issue_worker_pane() {
   daemon_state | jq -er --arg issue "$1" --arg role "$2" '.issues[$issue].workers[$role].claim.locator.tmux.pane'
 }
-# The state projection intentionally omits the internal tree key; the record itself is the
-# observable source for this admission invariant.
-child_is_slotless() {
+# A slot is one issue with work, not one tree (dispatch://INFRA-980), so a child takes a slot of
+# its own once its first phase starts. This child cannot start yet: its tree's design gate has
+# never opened, so it stands at admitted, holds no slot and is in no line, while the cap's two
+# slots stay with the two roots whose architects write their specs. admission.trees names its
+# tree, never the child, and the state's own `tree` field puts the child in that tree; the
+# daemon's record is read too, as the durable source of the same fact.
+child_waits_in_its_tree_without_a_slot() {
   local child=$1 root_issue_key=$2 tree
-  daemon_state | jq -e --arg child "$child" \
-    '(.admission.active | length) == 2 and .issues[$child].key == $child and .issues[$child].phase == "admitted" and .issues[$child].slot == null' >/dev/null || return 1
+  daemon_state | jq -e --arg child "$child" --arg root "$root_issue_key" \
+    '(.admission.active | length) == 2 and ((.admission.active | index($child)) == null)
+       and ((.admission.waiting | index($child)) == null)
+       and ((.admission.trees | index($root)) != null)
+       and ((.admission.trees | index($child)) == null)
+       and .issues[$child].key == $child and .issues[$child].phase == "admitted"
+       and .issues[$child].slot == null and .issues[$child].tree == $root' >/dev/null || return 1
   tree=$(docker exec "$pg_container" psql -U legion -d legion -tAc "select tree from issues where key = '$child'")
   [ "$tree" = "$root_issue_key" ]
 }
@@ -492,11 +501,14 @@ rig_sessions_json() {
 # rig session authored, any event naming this rig's project key, and any rig session on the
 # production Envoy listener. The baseline event itself is the positive control that the replay ran.
 production_audit() {
-  local sessions header events envoy found=0
+  local sessions bearer events envoy found=0
   audited=1
   sessions=$(rig_sessions_json)
   printf '%s\n' "$sessions" >"$evidence/rig-sessions.json"
-  envoy=$(curl -fsS --max-time 10 "$prod_envoy_url/v1/sessions") || { printf 'could not read %s/v1/sessions\n' "$prod_envoy_url"; return 1; }
+  # include=unresponsive, because the default answers live sessions alone (dispatch://INFRA-392):
+  # a rig session that leaked and then stopped answering is the one this audit most needs to find,
+  # and without the parameter it would be absent from the list and the audit would pass over it.
+  envoy=$(curl -fsS --max-time 10 "$prod_envoy_url/v1/sessions?include=unresponsive") || { printf 'could not read %s/v1/sessions\n' "$prod_envoy_url"; return 1; }
   envoy=$(jq -c --argjson ids "$sessions" --arg work "$work" '[.[] | select((.session_id as $s | $ids | index($s)) or ((.dir // "") | startswith($work)))]' <<<"$envoy")
   printf '%s\n' "$envoy" >"$evidence/production-envoy-rig-sessions.json"
   if [ "$envoy" != "[]" ]; then
@@ -507,14 +519,21 @@ production_audit() {
     printf 'no user-level Dispatch configuration exists, so no production Dispatch fallback was possible\n'
     return "$found"
   fi
-  header=$(prod_header_file)
-  curl -sS -N --max-time 25 -H "@$header" "$prod_dispatch_url/api/v1/events?since=$((prod_baseline - 1))" \
-    >"$work/production-events.sse" 2>/dev/null || true
-  rm -f "$header"
-  events=$(sed -n 's/^data: //p' "$work/production-events.sse" | jq -s -c --argjson ids "$sessions" --arg project "$project" --argjson baseline "$prod_baseline" '
+  bearer=$work/production-dispatch-bearer
+  (umask 077 && printf '%s\n' "$prod_token" >"$bearer")
+  # A refusal of the feed is printed on stderr; the replay's close, resubscribe and duplicate lines
+  # carry no event and are not counted, so an event a redial repeats counts once. The probe takes
+  # its cursor from Dispatch's own events_start, so a --since the server clamps to its head leaves
+  # the events after that head counted, not written off as duplicates.
+  bun "$root/scripts/e2e/lib/dispatch-live-events.ts" \
+    --url "$prod_dispatch_url" --bearer-file "$bearer" --since "$((prod_baseline - 1))" --timeout 25 \
+    >"$work/production-events.jsonl" || true
+  rm -f "$bearer"
+  events=$(jq -s -c --argjson ids "$sessions" --arg project "$project" --argjson baseline "$prod_baseline" '
+    [.[] | .event | select(. != null)] |
     {control: any(.[]; .id == $baseline), count: length,
      rig: [.[] | select((.actor.id as $a | $ids | index($a)) or (tostring | contains($project)))
-       | {id, issue_key, type, actor: .actor.id, created_at}]}')
+       | {id, issue_key, type, actor: .actor.id, created_at}]}' "$work/production-events.jsonl")
   printf '%s\n' "$events" >"$evidence/production-dispatch-audit.json"
   if ! jq -e '.control' >/dev/null <<<"$events"; then
     printf 'production Dispatch replay did not return its baseline event %s\n' "$prod_baseline"
@@ -801,13 +820,14 @@ until_true 180 "two roots admitted and two waiting in Dispatch rank order" sh -c
 child_issue=$(new_issue "Dependent admission leaf" "$root_issue")
 set_status "$child_issue" todo
 timeout_hook=admission_diagnostics
-until_true 120 "the child to join its first tree without taking a slot" child_is_slotless "$child_issue" "$root_issue"
+until_true 120 "the child to join its first tree and wait there with no slot of its own" child_waits_in_its_tree_without_a_slot "$child_issue" "$root_issue"
 timeout_hook=
 state_file admission
-note "active roots: $(jq -c .admission.active "$evidence/admission.json"); waiting: $(jq -c .admission.waiting "$evidence/admission.json"); child $child_issue remains slotless under $root_issue"
-# The slotless check is everything this child was filed for, so the proof human takes it out of
-# the workflow at once: a child still in the workflow would keep the first root's close waiting
-# after its merge, and the first root is accepted below, in retro-handoff.
+note "issues holding a slot: $(jq -c .admission.active "$evidence/admission.json"); waiting: $(jq -c .admission.waiting "$evidence/admission.json"); live trees: $(jq -c .admission.trees "$evidence/admission.json"); child $child_issue stands in $root_issue's tree with no slot of its own"
+# This child was filed for the slot check alone, so the proof human takes it out of the workflow
+# at once: an open child under the first root would hold that root's own first phase
+# (children-first), refuse its sign-off while the child is in the workflow, and keep its close
+# waiting after its merge. The first root is accepted below, in retro-handoff.
 set_status "$child_issue" backlog
 until_true 300 "$child_issue to leave the workflow" issue_phase "$child_issue" "done"
 note "the proof human parked $child_issue (backlog): it takes no further turns and holds no issue above it"
@@ -817,7 +837,7 @@ begin panes-pinned-to-the-rig-before-any-agent-turn
 # The two admitted architects are the only panes before any phase worker: each takes its first turn
 # from the daemon's catch-up notice, not from the proof. Every later pane is checked when it
 # registers and again before each instruction. An architect whose root already waits on a person
-# (it registered its closed gate and was suspended) was checked by the pane watcher at its launch.
+# (it registered its closed gate and stays live) was checked by the pane watcher at its launch.
 wait_for_architect "$root_issue"
 wait_for_architect "$held_issue"
 note "$(wc -l <"$evidence/pane-endpoints-checked.txt") pane checks: DISPATCH_URL=http://127.0.0.1:$port_dispatch, DISPATCH_TOKEN_FILE=$state/secrets/dispatch-token, ENVOY_URL=http://127.0.0.1:$port_listener, ENVOY_NATS_URL=nats://127.0.0.1:$port_nats"
@@ -832,7 +852,7 @@ primary_issue() {
   # the root left at registration went to a waiting root (no-change, restart), and the approved root
   # takes one back only once one of those registers its own gate in turn: the bound is twice
   # architect_registers_gate's 900 s for that registration. admission_cap stays 2: admission order
-  # and the slotless child above are proved against it, and every root of the run gives its slot
+  # and the child that stands in its tree with no slot of its own are proved against it, and every root of the run gives its slot
   # back at its registration, so the slot always comes back within that bound.
   drive_gate "$root_issue" "Stage 3 proof gate operation" 1800
   artifact_id=$gate_artifact
@@ -842,7 +862,7 @@ primary_issue() {
   begin primary-planner-handoff
   send_agent "$root_issue" planner "Stage 3 proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
   wait_for_phase "$root_issue" implementing
-  assert_handoff_committer "$root_issue" planner planning 0
+  assert_handoff_record "$root_issue" planner planning 0
   wait_for_worker "$root_issue" implementer
   pass
 
@@ -851,29 +871,29 @@ primary_issue() {
   until_true 900 "implementer pull request on legion/$root_issue" sh -c \
     "gh -R '$repo' pr list --head 'legion/$root_issue' --state open --json number | jq -e 'length == 1' >/dev/null"
   pr_number=$(gh -R "$repo" pr list --head "legion/$root_issue" --state open --json number --jq '.[0].number')
-  # Each pane commits as its role's App: the planner's handoff as the review App's bot, the
-  # implementer's change as the implement App's (role_app), author and committer alike.
+  # The planner's handoff is a record on the Dispatch issue, so the pull request's commits are the
+  # implementer's alone, authored and committed by the implement App's bot (role_app); no commit is
+  # a handoff, and none changes only .legion/.
   authors=$(gh api "repos/$repo/pulls/$pr_number/commits" --jq '[.[] | .commit.author.name + "|" + .commit.committer.name] | unique | join(",")')
-  want_authors=$(jq -nr --arg implementer "$(role_app implementer)" --arg planner "$(role_app planner)" \
-    '[$implementer + "|" + $implementer, $planner + "|" + $planner] | unique | join(",")')
+  want_authors="$(role_app implementer)|$(role_app implementer)"
   [ "$authors" = "$want_authors" ] ||
-    fail "$repo#$pr_number commits are authored|committed by $authors, want the implementer's and planner's App bots for both: $want_authors"
+    fail "$repo#$pr_number commits are authored|committed by $authors, want the implementer's App bot for both: $want_authors"
   wait_for_phase "$root_issue" testing
   assert_round_handoff "$root_issue" 0
-  assert_handoff_committer "$root_issue" implementer implementing 0
+  assert_handoff_record "$root_issue" implementer implementing 0
   # The spec's one-file change: the file every review round's correction must land in.
   smoke_file=$(pull_request_product_files)
   if [ -z "$smoke_file" ] || [ "$(wc -l <<<"$smoke_file")" != 1 ]; then
     fail "$repo#$pr_number changes product files '$(tr '\n' ' ' <<<"$smoke_file")', want the spec's one file"
   fi
   wait_for_worker "$root_issue" tester
-  note "implementer opened $repo#$pr_number on legion/$root_issue changing $smoke_file, its commits authored and committed by the implementer and planner App bots, and its handoff advanced the daemon to testing"
+  note "implementer opened $repo#$pr_number on legion/$root_issue changing $smoke_file, its commits authored and committed by the implementer App bot alone, and its completion naming its Dispatch handoff record advanced the daemon to testing"
   pass
 
   begin primary-tester-pass
   send_agent "$root_issue" tester "Stage 3 proof test operation: inspect the implementer's actual one-file change and pull request #$pr_number, run a focused observable check, record the required test handoff with verdict pass, then call the legion tool's handoff_complete with verdict pass."
   wait_for_phase "$root_issue" reviewing
-  assert_handoff_committer "$root_issue" tester testing 0
+  assert_handoff_record "$root_issue" tester testing 0
   wait_for_worker "$root_issue" reviewer
   pass
 
@@ -893,10 +913,10 @@ primary_issue() {
       review_note="A bot's review thread on the pull request asks whether the file change is needed, and the implementer answered it: judge the answer, reply on that thread in your own words, and name its thread id to the implementer as accepted, as your role says for a bot's thread (the change is needed: the spec asks for it)."
     fi
     request_changes_as_reviewer "$root_issue" "$round" "Stage 3 proof review, round $round: append the line \`$(round_line "$round")\` to the end of the same file this pull request changes, below the lines already there, and change nothing else. The spec permits one more line in that file for a review round, so this correction is in scope." "$review_note"
-    # The round ends when the reviewer completes it: its review, its handoff commit, its completion.
+    # The round ends when the reviewer completes it: its review, its handoff record, its completion.
     wait_for_phase "$root_issue" implementing 1200
-    assert_handoff_committer "$root_issue" reviewer reviewing "$round"
-    assert_review_of_own_handoff "$root_issue" "$round" CHANGES_REQUESTED
+    assert_handoff_record "$root_issue" reviewer reviewing "$round"
+    assert_review_of_head "$root_issue" "$round" CHANGES_REQUESTED
     until_true 180 "round $round to write in_progress on the Dispatch board" dispatch_status_is "$root_issue" in_progress
     wait_for_worker "$root_issue" implementer
     if [ "$round" = 3 ]; then
@@ -917,7 +937,7 @@ primary_issue() {
       bot_note=" A bot also left one review thread on the pull request asking whether the file change is needed: answer it and resolve it as your role says for a thread you answer (it is needed: the spec asks for it), before you complete."
     fi
     send_agent "$root_issue" implementer "Stage 3 proof correction round $round: make the correction the review names (append the line \`$(round_line "$round")\` to the file this pull request changes), push it to the existing pull request #$pr_number, write the implementation handoff, then call the legion tool's handoff_complete: a push alone does not finish this round.$bot_note"
-    # A correction round runs the implementer's whole loop (the edit, the push, the handoff commit,
+    # A correction round runs the implementer's whole loop (the edit, the push, the handoff record,
     # the completion) as the retro does, and took past 600 s in acceptance runs: 1200 s.
     wait_for_phase "$root_issue" testing 1200
     until_true 120 "round $round's correction on pull request #$pr_number" round_correction_pushed "$round"
@@ -930,11 +950,11 @@ primary_issue() {
       note "the bot's review thread $bot_thread carries the Legion reviewer's reply and is resolved: the reviewer adjudicated it and named it to the implementer"
     fi
     assert_round_handoff "$root_issue" "$round"
-    assert_handoff_committer "$root_issue" implementer implementing "$round"
+    assert_handoff_record "$root_issue" implementer implementing "$round"
     wait_for_worker "$root_issue" tester
     send_agent "$root_issue" tester "Stage 3 proof retest round $round: verify the correction on pull request #$pr_number, write the tester handoff with verdict pass, and complete the phase."
     wait_for_phase "$root_issue" reviewing
-    assert_handoff_committer "$root_issue" tester testing "$round"
+    assert_handoff_record "$root_issue" tester testing "$round"
     wait_for_worker "$root_issue" reviewer
     pass
   done
@@ -945,11 +965,11 @@ primary_issue() {
   wait_for_phase "$root_issue" testing 1200
   until_true 120 "round 3's correction on pull request #$pr_number" round_correction_pushed 3
   assert_round_handoff "$root_issue" 3
-  assert_handoff_committer "$root_issue" implementer implementing 3
+  assert_handoff_record "$root_issue" implementer implementing 3
   wait_for_worker "$root_issue" tester
   send_agent "$root_issue" tester "Stage 3 proof final test: verify pull request #$pr_number, record the tester pass handoff, then complete it."
   wait_for_phase "$root_issue" reviewing
-  assert_handoff_committer "$root_issue" tester testing 3
+  assert_handoff_record "$root_issue" tester testing 3
   wait_for_worker "$root_issue" reviewer
   # The acceptance's negative control, at the one point the issue stands still in reviewing: the
   # tester's completion started the reviewer, which waits for the proof's instruction, so a sign_off
@@ -978,8 +998,8 @@ primary_issue() {
     fail "a status write is pending for $root_issue at accepting, which writes none: $(jq -c --arg issue "$root_issue" '[.pendingStatusWrites[]? | select(.issue == $issue)]' "$evidence/accepting.json")"
   dispatch_status_is "$root_issue" needs_review >/dev/null ||
     fail "the board shows $root_issue $(dispatch_get "issues/$root_issue" | jq -r .status) at accepting, want needs_review, which the move to accepting leaves alone"
-  assert_handoff_committer "$root_issue" reviewer reviewing 3
-  assert_review_of_own_handoff "$root_issue" 3 APPROVED
+  assert_handoff_record "$root_issue" reviewer reviewing 3
+  assert_review_of_head "$root_issue" 3 APPROVED
   note "the reviewer's approval moved $root_issue to accepting: no worker started (the implementer's claim holds ${pending_phase:+a $pending_phase task, }no retro task), the board still needs_review with no status write pending, and the architect holds the reviewer's phase-finished notice"
   pass
   [ "$until" != rework ] || return 0
@@ -1123,10 +1143,17 @@ primary_issue() {
   pass
 
   begin smoke-main-clean
+  # The merged pull request carried no handoff (A2): no commit of it changes only .legion/, and no
+  # file it merged is under .legion/, since every phase's handoff is a record on the Dispatch issue.
+  handoff_pushes=$(pull_request_legion_only_commits) || fail "could not read the commits of $repo#$pr_number"
+  [ -z "$handoff_pushes" ] || fail "$repo#$pr_number carries commits that change only .legion/: $(tr '\n' ' ' <<<"$handoff_pushes")"
+  merged_files=$(pull_request_product_files) || fail "could not read the files of $repo#$pr_number"
+  handoff_files=$(grep '^\.legion/' <<<"$merged_files" || true)
+  [ -z "$handoff_files" ] || fail "$repo#$pr_number merged handoff files: $(tr '\n' ' ' <<<"$handoff_files")"
   clean_smoke_main
   leftovers=$(smoke_main_leftovers)
   [ -z "$leftovers" ] || fail "$repo main still carries proof leftovers: $(tr '\n' ' ' <<<"$leftovers")"
-  note "$repo main carries no .legion/ handoff and no docs/solutions/ learning"
+  note "$repo#$pr_number merged no commit that changes only .legion/ and no file under .legion/; $repo main carries no .legion/ path and no docs/solutions/ learning"
   release_smoke_main
   pass
 
@@ -1221,13 +1248,13 @@ fi
 # no_change_close: a root whose human decides at the design gate that no change is needed. The
 # no-change root took the slot the first or held root gave back at its registration early in the
 # run, its architect registered its own closed gate, and it has waited on a person since, without a
-# slot and with its architect suspended. The human requests changes saying no change is needed: that
+# slot while its architect stays live. The human requests changes saying no change is needed: that
 # answers the wait, and the root takes a slot back at admitted (the held root holds the other one),
-# its architect's session resumed with a task naming the changes request. close_root is refused
-# while a root is not at admitted holding its slot, so the proof waits for both before it tells the
-# architect to end the tree itself. The daemon posts the architect's reason on the issue before it
-# writes done, and the freed slot goes to the next answered or waiting root with no human status
-# write. Each step of the tree's close is one journal line.
+# its architect receives a task naming the changes request. close_root is refused while a root is
+# not at admitted holding its slot, so the proof waits for both before it tells the architect to end
+# the tree itself. The daemon posts the architect's reason on the issue before it writes done, and
+# the freed slot goes to the next answered or waiting root with no human status write. Each step of
+# the tree's close is one journal line.
 no_change_close() {
   begin architect-closes-a-no-change-root
   local artifact reason token
@@ -1238,7 +1265,7 @@ no_change_close() {
   dispatch_human POST "artifacts/$artifact/reviews" "$(jq -cn --arg reason "$reason" '{state: "changes_requested", reason: $reason}')" >/dev/null
   await_answered_slot "$nochange_issue" "Stage 3 no-change proof"
   wait_for_phase "$nochange_issue" admitted 60
-  until_true 300 "the no-change architect's session to resume once its root holds its slot" issue_worker_live "$nochange_issue" architect
+  until_true 300 "the live no-change architect to receive its task once its root holds its slot" issue_worker_live "$nochange_issue" architect
   send_agent "$nochange_issue" architect "Stage 3 no-change proof: the human reviewing your spec requested changes: \"$reason\" End your tree as your role says, and change nothing else."
   until_true 600 "the no-change root to be done in Dispatch" dispatch_status_is "$nochange_issue" "done"
   dispatch_events "$nochange_issue" >"$evidence/nochange-events.json"

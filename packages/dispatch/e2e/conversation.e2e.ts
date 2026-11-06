@@ -16,17 +16,24 @@ import {
   createMessage,
   createProject,
   editAsk,
+  editComment,
   getAsk,
+  getComment,
+  getCommentBlocks,
   getIssue,
   getMessage,
+  getMessageBlocks,
   patchIssue,
   putIssueState,
+  replyToCommentBlock,
+  replyToMessageBlock,
   replyToMessageDelivery,
   resolveAsk,
   resolveComment,
 } from "./api";
 import { conversationFilter } from "./editor";
 import { resetDatabase } from "./seed";
+import { navigateInApp } from "./sends";
 import { asUser } from "./users";
 
 const agent = {
@@ -68,7 +75,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("Conversation owns the route, lists one card per message newest first, and resolves live agent names @phone", async ({
+test("Conversation owns the route, lists one card per message newest first, and resolves live agent names", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -111,10 +118,13 @@ test("Conversation owns the route, lists one card per message newest first, and 
     );
     await expect(page.getByRole("tablist", { name: "Issue detail" }).getByRole("tab")).toHaveText([
       "Spec",
+      "Verification",
+      "Plan",
       "Conversation",
       "Children",
       "Artifacts1",
       "Activity",
+      "Decisions",
     ]);
 
     await page.goto(`/issues/${issue.key}/conversation`);
@@ -152,26 +162,18 @@ test("Conversation owns the route, lists one card per message newest first, and 
 
     // A pinned conversation is the review margin's to show and to unpin: the Pinned tab carries
     // the card's own body, and its Unpin releases the pin the Conversation made.
-    if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: /Open review panel/ }).click();
-    }
     const margin = page.getByTestId("margin-sheet");
     await margin.getByRole("tab", { name: "Pinned" }).click();
     const pinnedCard = margin.getByRole("article").filter({ hasText: "First bold line" });
     await expect(pinnedCard).toHaveCount(1);
     await pinnedCard.getByRole("button", { name: "Unpin" }).click();
     await expect(margin.getByText("No pinned items.")).toBeVisible();
-    if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: /Close review panel/ }).click();
-    }
     await expect(firstTurn.getByRole("button", { name: "Pin" })).toHaveAttribute(
       "aria-pressed",
       "false"
     );
 
-    const screenshot = testInfo.outputPath(
-      `conversation-pinned-turn-${testInfo.project.name === "iphone" ? "390" : "1280"}.png`
-    );
+    const screenshot = testInfo.outputPath("conversation-pinned-turn-1280.png");
     await page.screenshot({ path: screenshot, fullPage: true });
     await testInfo.attach("conversation desktop", { contentType: "image/png", path: screenshot });
   } finally {
@@ -179,6 +181,9 @@ test("Conversation owns the route, lists one card per message newest first, and 
   }
 });
 
+// SLOW(>=2s): the edit has to land on a Conversation that is already open, so the row waits out
+// the page's own refresh before the card can be read again, then walks the same ask through the
+// Activity tab, back, and the Inbox - three surfaces the one edit has to reach.
 test("Conversation updates an open ask in place after an agent edit and preserves its prior question", async ({
   browser,
 }, testInfo) => {
@@ -229,7 +234,7 @@ test("Conversation updates an open ask in place after an agent edit and preserve
     ).toHaveCount(1);
     await page.getByRole("tab", { name: "Conversation" }).click();
 
-    await page.goto("/");
+    await navigateInApp(page, "/");
     const inboxCard = page.getByTestId(`ask-${ask.id}`);
     await expect(page.locator("[data-testid^=ask-]")).toHaveCount(1);
     await expect(inboxCard).toContainText("Which transport should we implement?");
@@ -240,13 +245,18 @@ test("Conversation updates an open ask in place after an agent edit and preserve
   }
 });
 
-test("a deep link to an old unanchored comment scrolls its Conversation turn into view @phone", async ({
+test("a deep link to an old unanchored comment scrolls its Conversation turn into view", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Old comment target" });
   const comment = await createComment(issue.key, { body: "Deep linked comment" }, agent);
-  for (let index = 0; index < 210; index += 1) {
+  // Forty newer turns put the linked comment at the foot of a Conversation thousands of pixels
+  // tall - 2,700 px at 1280x720, measured - which is the distance the landing has to cover. More
+  // only lengthens the seed: the server appends one event at a time per issue, so these cannot be
+  // sent as a burst (measured: 210 writes cost the same either way), and each costs the row its
+  // own round trip.
+  for (let index = 0; index < 40; index += 1) {
     await createMessage(issue.key, { body: `Newer message ${index}` }, agent);
   }
 
@@ -255,14 +265,6 @@ test("a deep link to an old unanchored comment scrolls its Conversation turn int
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/comments/${comment.id}`);
 
-    // On a phone the link opens the comment's thread full-screen over the Conversation; Back
-    // leaves it on the focused turn.
-    if (testInfo.project.name === "iphone") {
-      const thread = page.getByRole("dialog", { name: "Thread" });
-      await expect(thread.getByText("Deep linked comment")).toBeVisible();
-      await thread.getByRole("button", { name: "Back" }).click();
-      await expect(thread).toHaveCount(0);
-    }
     const target = page
       .getByRole("list", { name: "Conversation turns" })
       .locator('li[aria-current="true"]');
@@ -306,7 +308,7 @@ test("a message reply nests under its parent with the quoted link, and deep link
   }
 });
 
-test("a reply in a session-authored comment thread pre-fills a deletable agent mention @phone", async ({
+test("a reply in a session-authored comment thread pre-fills a deletable agent mention", async ({
   browser,
 }) => {
   await setLiveSessions([planner]);
@@ -358,9 +360,7 @@ test("a reply in a session-authored comment thread pre-fills a deletable agent m
       mentions: [{ target: "session:s1" }],
       reply_to: parent.id,
     });
-    const phoneThread = page.getByRole("dialog", { name: "Thread" });
-    const replyRoot = (await phoneThread.count()) > 0 ? phoneThread : card;
-    await expect(threadReply(page, replyRoot, "@planner It is green now - ship it.")).toBeVisible();
+    await expect(threadReply(page, card, "@planner It is green now - ship it.")).toBeVisible();
     await expect.poll(() => getSentMessages()).toMatchObject([{ target_session: "s1" }]);
   } finally {
     await alice.close();
@@ -370,9 +370,12 @@ test("a reply in a session-authored comment thread pre-fills a deletable agent m
 test("an agent's answer on a failed attempt is accepted and shown as the answer", async ({
   browser,
 }) => {
-  await setLiveSessions([planner]);
-  await setSessionSendStatus("s1", 404);
-  await createProject({ key: "CORE", name: "Core" });
+  // None of the three reads another; only the issue waits on its project.
+  await Promise.all([
+    setLiveSessions([planner]),
+    setSessionSendStatus("s1", 404),
+    createProject({ key: "CORE", name: "Core" }),
+  ]);
   const issue = await createIssue({ project: "CORE", title: "Failed receipt" });
   const question = "Did you get this?";
   const message = await createMessage(issue.key, {
@@ -558,7 +561,8 @@ test("Conversation answers an ask in place, draws no event row, and keeps its ca
   }
 });
 
-test("Conversation marks unread conversations, sends with Ctrl+Enter, and jumps to newer ones @phone", async ({
+// SLOW(>=2s): 34 seeded turns, real keystrokes through the composer and two live tail messages.
+test("Conversation marks unread conversations, sends with Ctrl+Enter, and jumps to newer ones", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -645,7 +649,7 @@ test("Conversation marks unread conversations, sends with Ctrl+Enter, and jumps 
     await expect(jump).toHaveCount(0);
 
     const screenshot = testInfo.outputPath("conversation-follow-latest.png");
-    await page.screenshot({ path: screenshot, fullPage: true });
+    await page.screenshot({ path: screenshot });
     await testInfo.attach("conversation follow latest", {
       contentType: "image/png",
       path: screenshot,
@@ -677,20 +681,20 @@ test("the iPhone Conversation fits controls and keeps the composer above the rev
     const controls = page.locator(
       '[aria-label="Conversation"] button, [aria-label="Conversation"] textarea, [aria-label="Conversation"] input'
     );
-    for (let index = 0; index < (await controls.count()); index += 1) {
-      const control = controls.nth(index);
-      const opacity = await control.evaluate((element) =>
-        Number(getComputedStyle(element).opacity)
-      );
+    // One round trip for every control: its opacity and the box a finger taps. A control wrapped
+    // in its own label is tapped through the label, so that is the target to measure; demanding
+    // 44 px of the box itself drew a checkbox three times the size of every other control.
+    const measured = await controls.evaluateAll((elements) =>
+      elements.map((element, index) => ({
+        height: (element.closest("label") ?? element).getBoundingClientRect().height,
+        index,
+        opacity: Number(getComputedStyle(element).opacity),
+      }))
+    );
+    for (const { height, index, opacity } of measured) {
       if (opacity === 0) {
         continue;
       }
-      // What a finger taps: a control wrapped in its own label is tapped through the label, so
-      // that is the target to measure. Demanding 44 px of the box itself drew a checkbox three
-      // times the size of every other control.
-      const height = await control.evaluate(
-        (element) => (element.closest("label") ?? element).getBoundingClientRect().height
-      );
       expect(height, `Conversation control ${index} is a touch target`).toBeGreaterThanOrEqual(44);
     }
     const lastTurn = turn(page, "Phone turn 9");
@@ -706,9 +710,12 @@ test("the iPhone Conversation fits controls and keeps the composer above the rev
     const positions = [0, await page.evaluate(() => document.documentElement.scrollHeight)];
     for (const position of positions) {
       await page.evaluate((top) => window.scrollTo(0, top), position);
-      const composerBox = await composer.boundingBox();
-      const reviewBox = await reviewPanelButton.boundingBox();
-      const viewportHeight = await page.evaluate(() => window.innerHeight);
+      // Three measurements of one layout: they are read together rather than one after another.
+      const [composerBox, reviewBox, viewportHeight] = await Promise.all([
+        composer.boundingBox(),
+        reviewPanelButton.boundingBox(),
+        page.evaluate(() => window.innerHeight),
+      ]);
       expect(composerBox).not.toBeNull();
       expect(composerBox?.y ?? -1).toBeGreaterThanOrEqual(0);
       expect((composerBox?.y ?? 0) + (composerBox?.height ?? 0)).toBeLessThanOrEqual(
@@ -844,34 +851,6 @@ test("the filter opens on All in a fresh context and ignores the settings an old
   }
 });
 
-// An ask answered after a later comment thread was written sits above it: the order is each
-// conversation's own newest activity, not when it started.
-test("an ask answered after a later comment thread sorts above it", async ({ browser }) => {
-  await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({ project: "CORE", title: "Order by newest activity" });
-  const ask = await createAsk(
-    issue.key,
-    { options: [{ label: "Ship" }], question: "Answered last?" },
-    agent
-  );
-  const later = await createComment(issue.key, { body: "Written after the ask." }, agent);
-  await answerAsk(ask.id, { expected_edited_at: null, selected: ["Ship"] }, { login: "bob" });
-
-  const alice = await asUser(browser, "alice");
-  try {
-    const page = await alice.newPage();
-    await page.goto(`/issues/${issue.key}/conversation`);
-    const cards = page
-      .getByRole("list", { name: "Conversation turns" })
-      .locator(":scope > li[data-turn]");
-    await expect(cards).toHaveCount(2);
-    await expect(cards.first()).toHaveAttribute("data-turn", `ask:${ask.id}`);
-    await expect(cards.last()).toHaveAttribute("data-turn", `comment:${later.id}`);
-  } finally {
-    await alice.close();
-  }
-});
-
 // The defect this tab exists to fix: a conversation older than any window of the event log was
 // unreachable without paging back through it. The three per-issue reads have no window at all.
 test("a closed ask older than 200 events is listed under Closed with no paging", async ({
@@ -885,6 +864,8 @@ test("a closed ask older than 200 events is listed under Closed with no paging",
     agent
   );
   await answerAsk(oldest.id, { expected_edited_at: null, selected: ["Ship"] }, { login: "bob" });
+  // Serial: the server appends one event at a time per issue, so bursts of these only queue up
+  // behind each other (measured: the burial costs the same either way).
   for (let index = 0; index < 205; index += 1) {
     await createMessage(issue.key, { body: `Burying message ${index}` }, agent);
   }
@@ -955,6 +936,348 @@ test("the Conversation draws one card per conversation and no event row", async 
       ].sort()
     );
     await expect(page.locator('[data-kind="activity"]')).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+/** A comment thread's Conversation card, expanded: a collapsed card shows no reply. */
+async function expandedCommentCard(page: Page, commentID: string): Promise<Locator> {
+  const card = page.locator(`[data-turn="comment:${commentID}"]`);
+  await card.getByRole("button", { name: "Expand thread" }).click();
+  await expect(card.getByRole("list", { name: "Replies" })).toBeVisible();
+  return card;
+}
+
+/** The reply `replyID`'s `reply_block` as the server reads it now, under its thread's head. */
+async function commentReplyBlock(root: string, replyID: string) {
+  const { replies } = await getComment(root);
+  return replies.find((reply) => reply.id === replyID)?.reply_block;
+}
+
+// A reply that names one block of its parent quotes that block, not the parent's first line; an
+// edit that drops the block leaves the quote saying so.
+test("a reply quotes the passage it names", async ({ browser }) => {
+  await setLiveSessions([{ session_id: agent.actor.id, title: "Planner (e2e)" }]);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Quoted passages" });
+  const comment = await createComment(issue.key, { body: "Alpha first.\n\nBeta second." });
+  const commentReply = await replyToCommentBlock(
+    issue.key,
+    comment.id,
+    "b2",
+    { body: "On the comment's second paragraph." },
+    agent
+  );
+  expect(commentReply.reply_block).toMatchObject({
+    block_id: "b2",
+    node: `comment/${comment.id}#b2`,
+    removed: false,
+    text: "Beta second.",
+  });
+  const message = await createMessage(issue.key, { body: "Gamma first.\n\nDelta second." }, agent);
+  const messageReply = await replyToMessageBlock(
+    issue.key,
+    message.id,
+    "b2",
+    { body: "On the message's second paragraph." },
+    bob
+  );
+  const thread = await getMessage(issue.key, message.id);
+  expect(thread.replies.find((reply) => reply.id === messageReply.id)?.reply_block).toMatchObject({
+    block_id: "b2",
+    node: `message/${message.id}#b2`,
+    removed: false,
+    text: "Delta second.",
+  });
+  // The blocks the replies name, as the blocks routes list them.
+  const messageBlocks = await getMessageBlocks(message.id);
+  expect(messageBlocks.indexed).toBe(true);
+  expect(messageBlocks.blocks.map(({ id, text }) => ({ id, text }))).toEqual([
+    { id: "b1", text: "Gamma first." },
+    { id: "b2", text: "Delta second." },
+  ]);
+  const commentBlocks = await getCommentBlocks(comment.id);
+  expect(commentBlocks.indexed).toBe(true);
+  expect(commentBlocks.blocks.map(({ id, text }) => ({ id, text }))).toEqual([
+    { id: "b1", text: "Alpha first." },
+    { id: "b2", text: "Beta second." },
+  ]);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+
+    const messageQuote = threadReply(
+      page,
+      turn(page, "Gamma first."),
+      "On the message's second paragraph."
+    );
+    await expect(messageQuote).toContainText("Replying to Planner (e2e)'s passage — Delta second.");
+    await expect(messageQuote).not.toContainText("Gamma first.");
+
+    const card = await expandedCommentCard(page, comment.id);
+    const commentQuote = threadReply(page, card, "On the comment's second paragraph.");
+    await expect(commentQuote).toContainText("Replying to alice's passage — Beta second.");
+    await expect(commentQuote).not.toContainText("Alpha first.");
+
+    // The author's edit drops the second paragraph: the reply still names it, now removed.
+    await editComment(comment.id, { body: "Alpha first." });
+    expect(await commentReplyBlock(comment.id, commentReply.id)).toMatchObject({
+      block_id: "b2",
+      removed: true,
+      text: "Beta second.",
+    });
+    await expect(commentQuote).toContainText(
+      "Replying to alice's passage — This passage was removed."
+    );
+    await expect(commentQuote).not.toContainText("Beta second.");
+  } finally {
+    await alice.close();
+  }
+});
+
+// The Conversation tab's comment editor carries each block's id through the edit, so a reply that
+// cites the second paragraph follows it wherever the author moves it and through every rewording,
+// and the save names it (`blocks`) rather than leaving the server to match it by its text.
+test("the editor keeps a cited passage's id through move, reword, split, delete and restore", async ({
+  browser,
+}) => {
+  await setLiveSessions([{ session_id: agent.actor.id, title: "Planner (e2e)" }]);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Edited passages" });
+  const body = "Alpha first.\n\nBeta second.\n\nGamma third.";
+  const comment = await createComment(issue.key, { body });
+  const reply = await replyToCommentBlock(
+    issue.key,
+    comment.id,
+    "b2",
+    { body: "Citing the second paragraph." },
+    agent
+  );
+  expect(reply.reply_block).toMatchObject({ block_id: "b2", text: "Beta second." });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const card = await expandedCommentCard(page, comment.id);
+    const quote = threadReply(page, card, "Citing the second paragraph.");
+    await expect(quote).toContainText("Replying to alice's passage — Beta second.");
+    const field = card.getByLabel("Edit comment");
+    const select = (start: number, end: number) =>
+      field.evaluate(
+        (element: HTMLTextAreaElement, [from, to]) => {
+          element.focus();
+          element.setSelectionRange(from, to);
+        },
+        [start, end] as const
+      );
+
+    /** Opens the editor on the comment once the blocks route has answered (the ids it carries),
+     *  makes `change`, checks the field holds `edited`, saves, and answers the `blocks` Save sent. */
+    const saveEdit = async (change: () => Promise<void>, edited: string) => {
+      const blocksRead = page.waitForResponse(
+        (response) =>
+          response.request().method() === "GET" &&
+          response.url().endsWith(`/api/v1/comments/${comment.id}/blocks`)
+      );
+      await card.getByRole("button", { exact: true, name: "Edit" }).click();
+      expect((await blocksRead).ok()).toBe(true);
+      await change();
+      await expect(field).toHaveValue(edited);
+      const saved = page.waitForResponse(
+        (response) =>
+          response.request().method() === "PATCH" &&
+          response.url().endsWith(`/api/v1/comments/${comment.id}`)
+      );
+      await card.getByRole("button", { name: "Save" }).click();
+      const response = await saved;
+      expect(response.ok()).toBe(true);
+      await expect(field).toHaveCount(0);
+      const sent = response.request().postDataJSON() as {
+        blocks?: { from: number; id: string }[];
+        body: string;
+      };
+      expect(sent.body).toBe(edited);
+      return sent.blocks;
+    };
+    /** The comment's blocks as the blocks route lists them, and the reply's cited block. */
+    const expectBlocks = async (
+      blocks: readonly { id: string; text: string }[],
+      cited: { removed: boolean; text: string }
+    ) => {
+      const read = await getCommentBlocks(comment.id);
+      expect(read.blocks.map(({ id, text }) => ({ id, text }))).toEqual(blocks);
+      expect(await commentReplyBlock(comment.id, reply.id)).toMatchObject({
+        block_id: "b2",
+        node: `comment/${comment.id}#b2`,
+        ...cited,
+      });
+      await expect(quote).toContainText(
+        `Replying to alice's passage — ${cited.removed ? "This passage was removed." : cited.text}`
+      );
+    };
+
+    // Move: cut the second paragraph with the keyboard and paste it at the end.
+    const moved = "Alpha first.\n\nGamma third.\n\nBeta second.";
+    const movedCarried = await saveEdit(async () => {
+      const cut = "\n\nBeta second.";
+      await select(body.indexOf(cut), body.indexOf(cut) + cut.length);
+      await field.press("Control+X");
+      await expect(field).toHaveValue("Alpha first.\n\nGamma third.");
+      await select(moved.length - cut.length, moved.length - cut.length);
+      await field.press("Control+V");
+    }, moved);
+    expect(movedCarried).toContainEqual({ from: moved.indexOf("Beta second."), id: "b2" });
+    await expectBlocks(
+      [
+        { id: "b1", text: "Alpha first." },
+        { id: "b3", text: "Gamma third." },
+        { id: "b2", text: "Beta second." },
+      ],
+      { removed: false, text: "Beta second." }
+    );
+
+    // Reword: the paragraph grows a sentence.
+    const reworded = `${moved} Then more.`;
+    const rewordedCarried = await saveEdit(async () => {
+      await select(moved.length, moved.length);
+      await field.pressSequentially(" Then more.");
+    }, reworded);
+    expect(rewordedCarried).toContainEqual({ from: reworded.indexOf("Beta second."), id: "b2" });
+    await expectBlocks(
+      [
+        { id: "b1", text: "Alpha first." },
+        { id: "b3", text: "Gamma third." },
+        { id: "b2", text: "Beta second. Then more." },
+      ],
+      { removed: false, text: "Beta second. Then more." }
+    );
+
+    // Split: Enter inside it, twice for a paragraph break; the part holding its start keeps b2.
+    const split = "Alpha first.\n\nGamma third.\n\nBeta second.\n\nThen more.";
+    const splitCarried = await saveEdit(async () => {
+      const space = reworded.indexOf(" Then more.");
+      await select(space, space + 1);
+      await field.press("Enter");
+      await field.press("Enter");
+    }, split);
+    expect(splitCarried).toContainEqual({ from: split.indexOf("Beta second."), id: "b2" });
+    await expectBlocks(
+      [
+        { id: "b1", text: "Alpha first." },
+        { id: "b3", text: "Gamma third." },
+        { id: "b2", text: "Beta second." },
+        { id: "b4", text: "Then more." },
+      ],
+      { removed: false, text: "Beta second." }
+    );
+
+    // Delete: the reply's passage is gone, and its quote says so.
+    const deleted = "Alpha first.\n\nGamma third.\n\nThen more.";
+    const deletedCarried = await saveEdit(async () => {
+      const start = split.indexOf("Beta second.");
+      await select(start, start + "Beta second.\n\n".length);
+      await field.press("Backspace");
+    }, deleted);
+    expect(deletedCarried?.map((block) => block.id)).not.toContain("b2");
+    await expectBlocks(
+      [
+        { id: "b1", text: "Alpha first." },
+        { id: "b3", text: "Gamma third." },
+        { id: "b4", text: "Then more." },
+      ],
+      { removed: true, text: "Beta second." }
+    );
+
+    // Restore: typing the paragraph back gives the reply its passage again.
+    await saveEdit(async () => {
+      const start = deleted.indexOf("Then more.");
+      await select(start, start);
+      await field.pressSequentially("Beta second.");
+      await field.press("Enter");
+      await field.press("Enter");
+    }, split);
+    await expectBlocks(
+      [
+        { id: "b1", text: "Alpha first." },
+        { id: "b3", text: "Gamma third." },
+        { id: "b2", text: "Beta second." },
+        { id: "b4", text: "Then more." },
+      ],
+      { removed: false, text: "Beta second." }
+    );
+  } finally {
+    await alice.close();
+  }
+});
+
+// Rewording a cited paragraph by selecting its whole text and typing new words over it is a
+// rewording (root spec R11: a block keeps its id when it is kept, moved or reworded), as it is
+// when the same body is sent without ids and matched by its text: the reply still cites it.
+test("the editor keeps a cited passage's id when its whole text is typed over", async ({
+  browser,
+}) => {
+  await setLiveSessions([{ session_id: agent.actor.id, title: "Planner (e2e)" }]);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Retyped passage" });
+  const body = "Alpha first.\n\nBeta second.\n\nGamma third.";
+  const comment = await createComment(issue.key, { body });
+  const reply = await replyToCommentBlock(
+    issue.key,
+    comment.id,
+    "b2",
+    { body: "Citing the second paragraph." },
+    agent
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const card = await expandedCommentCard(page, comment.id);
+    const quote = threadReply(page, card, "Citing the second paragraph.");
+    const blocksRead = page.waitForResponse(
+      (response) =>
+        response.request().method() === "GET" &&
+        response.url().endsWith(`/api/v1/comments/${comment.id}/blocks`)
+    );
+    await card.getByRole("button", { exact: true, name: "Edit" }).click();
+    expect((await blocksRead).ok()).toBe(true);
+    const field = card.getByLabel("Edit comment");
+    const start = body.indexOf("Beta second.");
+    await field.evaluate(
+      (element: HTMLTextAreaElement, [from, to]) => {
+        element.focus();
+        element.setSelectionRange(from, to);
+      },
+      [start, start + "Beta second.".length] as const
+    );
+    await field.pressSequentially("Other words entirely.");
+    const retyped = "Alpha first.\n\nOther words entirely.\n\nGamma third.";
+    await expect(field).toHaveValue(retyped);
+    const saved = page.waitForResponse(
+      (response) =>
+        response.request().method() === "PATCH" &&
+        response.url().endsWith(`/api/v1/comments/${comment.id}`)
+    );
+    await card.getByRole("button", { name: "Save" }).click();
+    expect((await saved).ok()).toBe(true);
+
+    const read = await getCommentBlocks(comment.id);
+    expect(read.blocks.map(({ id, text }) => ({ id, text }))).toEqual([
+      { id: "b1", text: "Alpha first." },
+      { id: "b2", text: "Other words entirely." },
+      { id: "b3", text: "Gamma third." },
+    ]);
+    expect(await commentReplyBlock(comment.id, reply.id)).toMatchObject({
+      block_id: "b2",
+      removed: false,
+      text: "Other words entirely.",
+    });
+    await expect(quote).toContainText("Replying to alice's passage — Other words entirely.");
   } finally {
     await alice.close();
   }

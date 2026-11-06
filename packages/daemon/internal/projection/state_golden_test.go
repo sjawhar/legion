@@ -25,11 +25,12 @@ var updateGolden = flag.Bool("update", false, "rewrite the golden fixtures this 
 
 // The daemon's own controller (`controller: daemon`) holds a claim on no issue and no tree. It is
 // the project's controller, which the state shows as controllerLocator, and no issue's worker: an
-// issue keyed "" with a `controller` worker refuses the whole document at every strict client,
-// among them the daemon-launched controller's own claim, which reads the state before it
-// registers, and every agent's read_record. The document is what Project emits for that claim
-// beside a tree's architect, completed as the state route completes it (internal/daemon's
-// source.State), and it is packages/contracts' state-controller-claim fixture: the contract's own
+// issue keyed "" with a `controller` worker refuses the whole document at every client, which
+// reads an issue's `key` as a non-empty string — among them the daemon-launched controller's own
+// claim, which reads the state before it registers, and every agent's read_record. The document
+// is what Project emits for that claim beside a tree's architect, completed as the state route
+// completes it (internal/daemon's source.State), and it is packages/contracts'
+// state-controller-claim fixture: the contract's own
 // schema parses it (packages/contracts/src/legion-api.test.ts), and the plugin's daemon-launched
 // controller reads it as its daemon's state (packages/pi-legion/extensions/legion.test.ts).
 //
@@ -38,6 +39,11 @@ var updateGolden = flag.Bool("update", false, "rewrite the golden fixtures this 
 // LEGION-210, behind one the daemon has never observed and so cannot call finished. LEGION-211
 // waits in the same line on an issue of its own, and is in neither `blocked` nor any judgement:
 // a root carrying a run is work already under way.
+//
+// It carries the trees too (dispatch://INFRA-980): LEGION-208's lifecycle stands open under the
+// workflow, and the two roots waiting in the line are live trees of their own, so `trees` names
+// three roots while one issue alone holds a slot — which is the reading `active` can no longer
+// give. Each issue's `tree` names its root, so the child LEGION-209 is told from the three roots.
 func TestTheStateWithTheControllersClaimGolden(t *testing.T) {
 	const issue = "LEGION-208"
 	architect, err := claim.NewToken("legion", issue, claim.RoleArchitect)
@@ -48,13 +54,16 @@ func TestTheStateWithTheControllersClaimGolden(t *testing.T) {
 	admitted := time.Date(2026, 10, 6, 18, 2, 11, 0, time.UTC)
 	store := projectionStore{
 		issues: []record.Issue{
-			{Key: issue, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: issue, Status: "in_progress", Phase: phase.Admitted, Generation: 1, HandedOver: true},
-			{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: issue, Status: "todo", Phase: phase.Admitted, Generation: 1},
-			{Key: "LEGION-210", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-210", Status: "todo", Phase: phase.Admitted, Generation: 1, Rank: "00010", HandedOver: true},
-			{Key: "LEGION-211", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-211", Status: "todo", Phase: phase.Implementing, Generation: 2, Rank: "00011", HandedOver: true},
+			{Key: issue, Project: "LEGION", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: issue, Status: "in_progress", Phase: phase.Admitted, Generation: 1, HandedOver: true},
+			{Key: "LEGION-209", Project: "LEGION", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: issue, Status: "todo", Phase: phase.Admitted, Generation: 1},
+			{Key: "LEGION-210", Project: "LEGION", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-210", Status: "todo", Phase: phase.Admitted, Generation: 1, Rank: "00010", HandedOver: true},
+			{Key: "LEGION-211", Project: "LEGION", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-211", Status: "todo", Phase: phase.Implementing, Generation: 2, Rank: "00011", HandedOver: true, HandedOverFrom: "LEGION-200"},
 		},
 		phases: map[string][]record.PhaseRow{issue: {{Issue: issue, Role: claim.RoleArchitect, Claim: architect}}},
 		slots:  []record.Slot{{Issue: issue, Index: 0, AdmittedAt: admitted}},
+		// The tree the architect runs stands open under the workflow, which is what makes it a
+		// live tree now that its slot no longer says so.
+		lifecycles: []string{issue},
 		mirror: []record.DispatchIssueRow{
 			{Key: issue, Project: "LEGION", Status: "in_progress", Blockers: []string{}, Seq: 4},
 			{Key: "LEGION-209", Project: "LEGION", Status: "todo", Blockers: []string{"LEGION-300"}, Seq: 5},
@@ -146,11 +155,12 @@ func sandboxLocator(token claim.Token, sandbox, podUID string, generation uint64
 }
 
 // golden pins the state document Project's caller serves: Go writes it (`-update`), and
-// `packages/contracts/src/legion-api.test.ts` parses it through the strict schema the plugin reads
-// the state with. A fixture that differs from what Go now writes is stale. It is internal/api's
-// golden helper with this package's command in its message: the daemon-api fixtures are written
-// from two packages, so a state-shape change takes both `-update` runs whether or not the helper is
-// shared. Once a third package writes one, the helper moves into an internal/testgolden package.
+// `packages/contracts/src/legion-api.test.ts` parses it through the schema the plugin reads the
+// state with and holds the parse equal to the file. A fixture that differs from what Go now
+// writes is stale. It is internal/api's golden helper with this package's command in its message:
+// the daemon-api fixtures are written from two packages, so a state-shape change takes both
+// `-update` runs whether or not the helper is shared. Once a third package writes one, the
+// helper moves into an internal/testgolden package.
 func golden(t *testing.T, name string, value any) {
 	t.Helper()
 	encoded, err := json.MarshalIndent(value, "", "  ")

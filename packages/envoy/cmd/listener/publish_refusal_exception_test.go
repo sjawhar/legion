@@ -2,15 +2,20 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	natsgo "github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/logging"
+	"github.com/sjawhar/envoy/internal/roles"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -63,7 +68,7 @@ func TestARefusalExceptionCarriesThePayloadOnlyWhileItFitsItsBound(t *testing.T)
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			item := refusedPublish(tc.payload)
-			exception, err := deliveryExceptionEnvelope(item, string(roleHolderUnclaimed), "", tc.bound)
+			exception, err := deliveryExceptionEnvelope(item, string(roles.Unclaimed), "", tc.bound)
 			if err != nil {
 				t.Fatalf("build the exception: %v", err)
 			}
@@ -72,7 +77,7 @@ func TestARefusalExceptionCarriesThePayloadOnlyWhileItFitsItsBound(t *testing.T)
 				t.Fatalf("the exception carries %d bytes of payload, want %d", len(payload.Payload), len(tc.carried))
 			}
 			if payload.OriginalTopic != item.Topic || payload.EventID != item.EventID ||
-				payload.Reason != string(roleHolderUnclaimed) || payload.DedupeKey != item.DedupeKey ||
+				payload.Reason != string(roles.Unclaimed) || payload.DedupeKey != item.DedupeKey ||
 				payload.PayloadSummary != item.PayloadSummary || payload.Source != item.Source {
 				t.Fatalf("the exception payload = %+v, want the refused publish's own fields whatever the payload's size", payload)
 			}
@@ -92,7 +97,7 @@ func TestARefusalExceptionThatCannotBePublishedIsOnlyLogged(t *testing.T) {
 	logger := logging.NewWithWriter("test", logs)
 	client.Close()
 
-	publishRefusalException(client, logger, refusedPublish(""), roleHolderResult{state: roleHolderUnclaimed})
+	publishRefusalException(client, logger, refusedPublish(""), roles.Resolution{State: roles.Unclaimed})
 
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -130,7 +135,7 @@ func TestARefusalExceptionDoesNotWaitForTheBus(t *testing.T) {
 	}
 
 	started := time.Now()
-	publishRefusalException(client, logging.NewWithWriter("test", &cmdtest.LockedBuffer{}), refusedPublish(""), roleHolderResult{state: roleHolderUnclaimed})
+	publishRefusalException(client, logging.NewWithWriter("test", &cmdtest.LockedBuffer{}), refusedPublish(""), roles.Resolution{State: roles.Unclaimed})
 	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
 		t.Fatalf("publishRefusalException took %s against a reconnecting bus, want it back within 500ms: the 404 waits for it",
 			elapsed)
@@ -152,7 +157,7 @@ func TestARefusalExceptionIsRaisedOnlyForASharedNoHolderReason(t *testing.T) {
 		t.Fatalf("flush the exception subscription: %v", err)
 	}
 
-	publishRefusalException(client, logging.NewWithWriter("test", io.Discard), item, roleHolderResult{state: roleHolderState("not_live")})
+	publishRefusalException(client, logging.NewWithWriter("test", io.Discard), item, roles.Resolution{State: roles.State("not_live")})
 
 	if message, err := probe.NextMsg(250 * time.Millisecond); err == nil {
 		t.Fatalf("an unlisted refusal state raised an exception: %s", message.Data)
@@ -177,7 +182,7 @@ func TestARefusalExceptionLeavesAnOversizedPayloadOutOnTheBus(t *testing.T) {
 		t.Fatalf("flush the exception subscription: %v", err)
 	}
 
-	publishRefusalException(client, logging.NewWithWriter("test", io.Discard), item, roleHolderResult{state: roleHolderUnclaimed})
+	publishRefusalException(client, logging.NewWithWriter("test", io.Discard), item, roles.Resolution{State: roles.Unclaimed})
 
 	message, err := probe.NextMsg(5 * time.Second)
 	if err != nil {
@@ -192,8 +197,66 @@ func TestARefusalExceptionLeavesAnOversizedPayloadOutOnTheBus(t *testing.T) {
 		t.Fatalf("the exception carries %d bytes of a %d-byte payload, want none past the %d-byte bound",
 			len(payload.Payload), len(item.Payload), refusalExceptionBound)
 	}
-	if payload.OriginalTopic != item.Topic || payload.Reason != string(roleHolderUnclaimed) ||
+	if payload.OriginalTopic != item.Topic || payload.Reason != string(roles.Unclaimed) ||
 		payload.DedupeKey != item.DedupeKey || payload.PayloadSummary != item.PayloadSummary {
 		t.Fatalf("the exception payload = %+v, want the refused publish's own fields", payload)
+	}
+}
+
+// The route raises the refusal's exception where it writes the 404, and only there. A sender that
+// holds a queue of its own (keep: false) to a role nobody claims is refused `unclaimed` and the
+// exception follows it; a publish whose message the route kept instead is answered 202 and raises
+// nothing, because nothing was refused.
+func TestTheRouteRaisesOneExceptionWhereItRefusesARoleSend(t *testing.T) {
+	d, client := keptRoleDeps(t)
+	const refused, kept = "refusal-exception-opted-out", "refusal-exception-kept"
+
+	refusedProbe, err := client.Conn.SubscribeSync(bus.ExceptionTopicPrefix + contracts.RoleTopicPrefix + refused)
+	if err != nil {
+		t.Fatalf("subscribe to the refused role's exception lane: %v", err)
+	}
+	t.Cleanup(func() { _ = refusedProbe.Unsubscribe() })
+	keptProbe, err := client.Conn.SubscribeSync(bus.ExceptionTopicPrefix + contracts.RoleTopicPrefix + kept)
+	if err != nil {
+		t.Fatalf("subscribe to the kept role's exception lane: %v", err)
+	}
+	t.Cleanup(func() { _ = keptProbe.Unsubscribe() })
+	if err := client.Conn.Flush(); err != nil {
+		t.Fatalf("flush the exception subscriptions: %v", err)
+	}
+
+	recorder, _ := publishThrough(d,
+		`{"topic":"`+contracts.RoleTopicPrefix+refused+`","source":"agent","message":"the sender queues this itself","keep":false}`)
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("publish with keep: false to an unheld role: status %d, body %s; want 404", recorder.Code, recorder.Body.String())
+	}
+	message, err := refusedProbe.NextMsg(5 * time.Second)
+	if err != nil {
+		t.Fatalf("the refusal raised no exception: %v", err)
+	}
+	var exception contracts.Envelope
+	if err := json.Unmarshal(message.Data, &exception); err != nil {
+		t.Fatalf("decode the exception envelope: %v", err)
+	}
+	payload := exceptionPayloadOf(t, exception)
+	if payload.OriginalTopic != contracts.RoleTopicPrefix+refused || payload.Reason != string(roles.Unclaimed) ||
+		payload.RecipientSession != "" {
+		t.Fatalf("the exception payload = %+v, want the refused topic, reason unclaimed and no recipient", payload)
+	}
+	if second, err := refusedProbe.NextMsg(250 * time.Millisecond); err == nil {
+		t.Fatalf("one refusal raised a second exception: %s", second.Data)
+	} else if !errors.Is(err, natsgo.ErrTimeout) {
+		t.Fatalf("wait for a second exception: %v", err)
+	}
+
+	recorder, _ = publishThrough(d,
+		`{"topic":"`+contracts.RoleTopicPrefix+kept+`","source":"agent","message":"this one waits for the next holder"}`)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("publish to an unheld role: status %d, body %s; want 202, the message kept", recorder.Code, recorder.Body.String())
+	}
+	if message, err := keptProbe.NextMsg(250 * time.Millisecond); err == nil {
+		t.Fatalf("a kept message raised an exception: %s", message.Data)
+	} else if !errors.Is(err, natsgo.ErrTimeout) {
+		t.Fatalf("wait for the kept role's exception: %v", err)
 	}
 }

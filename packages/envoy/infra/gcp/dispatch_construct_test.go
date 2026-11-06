@@ -11,6 +11,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/property"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sjawhar/envoy/infra/gcp"
 	"github.com/sjawhar/envoy/infra/internal/pulumitest"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -27,9 +28,16 @@ func dispatchConstructInputs() map[string]property.Value {
 		"tailscaleImage":      property.New(dispatchTailscaleImage),
 		"cloudSqlProxyImage":  property.New(dispatchProxyImage),
 		"frontDoorToolsImage": property.New(dispatchToolsImage),
-		"tailnetService":      property.New("svc:example-dispatch"),
 		"signInClientId":      property.New("example-client-id"),
 		"signInDomain":        property.New("example.com"),
+		// The three NATS settings, so every Construct test decodes them through the plugin, where a
+		// value the plugin could not decode would refuse the Construct: the pods dial the hub in
+		// their own cluster, with three copies of every stream and a 64 MiB limit. What they render
+		// is asserted on the direct path (dispatch_test.go's natsInCluster tests). natsUrl stays the
+		// tailnet name each test sets, which is remote either way.
+		"natsInCluster":  property.New(true),
+		"natsReplicas":   property.New(float64(dispatchNatsReplicas)),
+		"streamMaxBytes": property.New(float64(dispatchStreamMaxBytes)),
 	}
 }
 
@@ -41,20 +49,49 @@ func setConstructApp(inputs map[string]property.Value) {
 	inputs["appPrivateKeySecretKey"] = property.New("private-key.b64")
 }
 
-func constructDispatch(t *testing.T, inputs map[string]property.Value, dryRun bool) (*pulumitest.Mocks, p.ConstructResponse, error) {
+// dispatchConstructGCP, dispatchConstructRandom and dispatchConstructTailscale are the references
+// a consumer's program gives Construct, one per provider package it declares.
+var (
+	dispatchConstructGCP       = p.ProviderReference{Urn: resource.URN("urn:pulumi:s::p::" + gcpProviderType + "::gcp-example"), ID: "gcp-example-id"}
+	dispatchConstructRandom    = p.ProviderReference{Urn: resource.URN("urn:pulumi:s::p::" + randomProviderType + "::random-example"), ID: "random-example-id"}
+	dispatchConstructTailscale = p.ProviderReference{Urn: resource.URN("urn:pulumi:s::p::" + tailscaleProviderType + "::tailscale-example"), ID: "tailscale-example-id"}
+)
+
+// dispatchConstructProviders are the three provider references a consumer's program declares,
+// as a function so that no caller can mutate a map another test reads.
+func dispatchConstructProviders() map[tokens.Package]p.ProviderReference {
+	return map[tokens.Package]p.ProviderReference{
+		"gcp": dispatchConstructGCP, "random": dispatchConstructRandom, "tailscale": dispatchConstructTailscale,
+	}
+}
+
+func constructDispatch(t *testing.T, inputs map[string]property.Value, dryRun bool, dependsOn ...resource.URN) (*pulumitest.Mocks, p.ConstructResponse, error) {
+	t.Helper()
+	return constructDispatchWithProviders(t, inputs, dryRun, dispatchConstructProviders(), dependsOn...)
+}
+
+// constructDispatchWithProviders constructs the component through the plugin's own Construct, the
+// path a consumer's pulumi up takes, with the provider references the consumer's program declares
+// and the resources its pulumi.DependsOn on the component names.
+func constructDispatchWithProviders(t *testing.T, inputs map[string]property.Value, dryRun bool, providers map[tokens.Package]p.ProviderReference, dependsOn ...resource.URN) (*pulumitest.Mocks, p.ConstructResponse, error) {
 	t.Helper()
 	m := newMocks()
-	response, err := pulumitest.Construct(t, m, dispatchType, "example-dispatch", inputs, dryRun, map[tokens.Package]p.ProviderReference{
-		"gcp":    {Urn: resource.URN("urn:pulumi:s::p::" + gcpProviderType + "::gcp-example"), ID: "gcp-example-id"},
-		"random": {Urn: resource.URN("urn:pulumi:s::p::" + randomProviderType + "::random-example"), ID: "random-example-id"},
-	})
+	response, err := pulumitest.Construct(t, m, dispatchType, "example-dispatch", inputs, dryRun, providers, dependsOn...)
 	return m, response, err
 }
 
-// Every Input may come from another resource. tailnetService typically is the consumer's
-// Tailscale Service's name output: the serve ConfigMap built from it, and the front door's
-// Deployment, then carry that resource among their dependencies, so on a fresh stack no front-door
-// pod exists before the Service does.
+// constructDispatchOnMocks constructs the component on mocks the caller owns, so a test can set
+// Mocks.Preview, which answers a create with no ID as a preview does. The engine's dry run is
+// that same flag: the two cannot disagree.
+func constructDispatchOnMocks(t *testing.T, m *pulumitest.Mocks, inputs map[string]property.Value) (p.ConstructResponse, error) {
+	t.Helper()
+	return pulumitest.Construct(t, m, dispatchType, "example-dispatch", inputs, m.Preview, dispatchConstructProviders())
+}
+
+// Every Input may come from another resource: tailnetAuthKey typically is the consumer's
+// Tailscale auth key, and signInClientSecret its OAuth client's, each read from a secret store
+// the program declares. The component resolves every one of them and still renders what the
+// front door needs, down to the serve.json the golden holds.
 func TestConstructTakesDispatchInputsFromAnotherResource(t *testing.T) {
 	inputs := dispatchConstructInputs()
 	inputs["agentSecretsUrl"] = property.New("https://example-broker.internal.example")
@@ -62,7 +99,6 @@ func TestConstructTakesDispatchInputsFromAnotherResource(t *testing.T) {
 	setConstructApp(inputs)
 	for key, value := range map[string]property.Value{
 		"tailnetAuthKey":     property.New("tskey-auth-example-0123456789").WithSecret(true),
-		"tailnetService":     property.New("svc:example-dispatch"),
 		"natsUrl":            property.New("nats://example-hub.example-tailnet.ts.net:4222"),
 		"natsSeedSecret":     property.New("projects/example-project/secrets/example-nats-seed"),
 		"signInClientSecret": property.New("example-client-secret").WithSecret(true),
@@ -76,12 +112,8 @@ func TestConstructTakesDispatchInputsFromAnotherResource(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "https://example-dispatch.example-tailnet.ts.net", url.AsString())
 
-	serve := m.Named(t, "kubernetes:core/v1:ConfigMap", "example-dispatch-serve").RPC
-	require.Contains(t, serve.GetDependencies(), string(upstream), "the serve ConfigMap waits for the Tailscale Service")
-	require.Contains(t, serve.GetPropertyDependencies()["data"].GetUrns(), string(upstream), "serve.json is built from the resolved tailnetService")
 	frontDoor := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch-tailnet").RPC.GetDependencies()
-	require.Contains(t, frontDoor, string(upstream), "the front door's Deployment waits for the Tailscale Service")
-	require.Contains(t, frontDoor, dispatchConstructChildURN("kubernetes:core/v1:ConfigMap", "example-dispatch-serve"), "and for the ConfigMap its pods mount")
+	require.Contains(t, frontDoor, dispatchConstructChildURN("kubernetes:core/v1:ConfigMap", "example-dispatch-serve"), "the front door's Deployment waits for the ConfigMap its pods mount")
 	data := normalizedProperty(m.Named(t, "kubernetes:core/v1:ConfigMap", "example-dispatch-serve").Inputs["data"]).(map[string]any)
 	require.Equal(t, readGolden(t, "dispatch-serve.golden"), data["serve.json"])
 }
@@ -91,12 +123,67 @@ func dispatchConstructChildURN(typ, name string) string {
 	return "urn:pulumi:stack::project::" + dispatchType + "$" + typ + "::" + name
 }
 
+// databaseWaitsFor orders the Cloud SQL instance's update after the resource its value comes
+// from, so that a consumer's own step — deleting the old tailnet device before the front door
+// comes back, say — runs before the instance restarts. The value reaches no resource, only the
+// dependencies it carries do, so the direct path cannot show this: only Construct takes an input
+// with a consumer's dependencies on it, as a real consumer's output arrives.
+func TestConstructOrdersTheDatabaseInstanceAfterDatabaseWaitsFor(t *testing.T) {
+	instance := func(t *testing.T, m *pulumitest.Mocks) pulumitest.Registration {
+		t.Helper()
+		return m.Named(t, "gcp:sql/databaseInstance:DatabaseInstance", "example-dispatch")
+	}
+	t.Run("set", func(t *testing.T) {
+		inputs := dispatchConstructBaseInputs()
+		inputs["databaseWaitsFor"] = property.New("example-tailnet-device-deleted").WithDependencies([]resource.URN{upstream})
+		m, _, err := constructDispatch(t, inputs, false)
+		require.NoError(t, err)
+
+		require.Contains(t, instance(t, m).RPC.GetDependencies(), string(upstream),
+			"the instance's update follows the resource the value came from")
+		for input, deps := range instance(t, m).RPC.GetPropertyDependencies() {
+			require.NotContains(t, deps.GetUrns(), string(upstream), "the value itself reaches no input of the instance: %s", input)
+		}
+	})
+	t.Run("unset", func(t *testing.T) {
+		m, _, err := constructDispatch(t, dispatchConstructBaseInputs(), false)
+		require.NoError(t, err)
+
+		require.NotContains(t, instance(t, m).RPC.GetDependencies(), string(upstream),
+			"with the input unset the instance waits for nothing of the consumer's")
+	})
+}
+
+// Measured, rather than read off the SDK: a consumer's pulumi.DependsOn on the component itself
+// does not reach the component's children. Constructed with one URN in the ConstructRequest's
+// Dependencies, the field that option arrives in, the Cloud SQL instance registers the
+// dependencies of its own it always has and never that URN. What it does wait for is its own
+// business and left to the tests of those orderings, so a sibling added later is no failure
+// here; the list being non-empty is what says the absence was read and not an empty answer. The
+// SDK gives a component-level DependsOn to the component's own resource options (pulumi/sdk/v3
+// v3.268.0's go/pulumi/provider.go:174-178), and each child's register request carries only the
+// DependsOn the component gave that child.
+//
+// So a consumer that must order a child of Dispatch after one of its own resources cannot get it
+// by depending on the component: databaseWaitsFor, the explicit input
+// TestConstructOrdersTheDatabaseInstanceAfterDatabaseWaitsFor measures, is the supported way to
+// order the Cloud SQL instance, and the only one.
+func TestConstructComponentDependsOnDoesNotReachTheChildren(t *testing.T) {
+	m, _, err := constructDispatch(t, dispatchConstructBaseInputs(), false, upstream)
+	require.NoError(t, err)
+
+	deps := m.Named(t, "gcp:sql/databaseInstance:DatabaseInstance", "example-dispatch").RPC.GetDependencies()
+	require.NotEmpty(t, deps, "the instance registers the dependencies it does have, so the absence below is a read and not an empty list")
+	require.NotContains(t, deps, string(upstream),
+		"the instance never waits for what the consumer's DependsOn on the component names")
+}
+
 func TestConstructAcceptsUnknownDispatchInputsUnderPreview(t *testing.T) {
 	inputs := dispatchConstructInputs()
 	inputs["agentSecretsUrl"] = property.New("https://example-broker.internal.example")
 	inputs["agentSecretsAudience"] = property.New("example-broker-audience")
 	setConstructApp(inputs)
-	for _, key := range []string{"tailnetAuthKey", "tailnetService", "natsUrl", "natsSeedSecret", "signInClientSecret"} {
+	for _, key := range []string{"tailnetAuthKey", "natsUrl", "natsSeedSecret", "signInClientSecret"} {
 		inputs[key] = property.New(property.Computed).WithDependencies([]resource.URN{upstream})
 	}
 	_, _, err := constructDispatch(t, inputs, true)
@@ -244,6 +331,12 @@ func appEnv(t *testing.T, m *pulumitest.Mocks) map[string]any {
 	return containerEnv(t, podContainer(t, deploymentPodTemplate(t, m, "example-dispatch"), "envoy-dispatch"))
 }
 
+// listenerEnv is the listener's envoy-listener container's environment, appEnv's counterpart.
+func listenerEnv(t *testing.T, m *pulumitest.Mocks) map[string]any {
+	t.Helper()
+	return containerEnv(t, podContainer(t, deploymentPodTemplate(t, m, "example-dispatch-listener"), "envoy-listener"))
+}
+
 // The endpoint, the deployment and either credential are Inputs, typically an Azure resource's or
 // a managed identity's outputs: Construct takes them from another resource and renders them as
 // they resolve.
@@ -349,6 +442,129 @@ func TestConstructRefusesASeedInAnAzureInput(t *testing.T) {
 	}
 }
 
+// answererConstructForms are the answerer's two forms as Construct inputs: the Inputs each sets,
+// its endpoint among them, with the plain inputs that endpoint needs beside them.
+var answererConstructForms = []struct {
+	name   string
+	inputs map[string]string
+	plain  map[string]property.Value
+}{
+	{
+		"azure chat",
+		map[string]string{"azureChatEndpoint": azureChatEndpoint, "azureChatDeployment": "example-chat-deployment", "azureTenantId": azureTenantID, "azureClientId": azureClientID},
+		map[string]property.Value{"azureChatTokensPerMinute": property.New(120000.0)},
+	},
+	{
+		"chat endpoint",
+		map[string]string{"chatEndpoint": chatEndpointURL, "chatTokenSecret": chatTokenSecret},
+		map[string]property.Value{"chatModel": property.New("example-chat-model")},
+	},
+}
+
+// The answerer's endpoint, the Azure deployment, the shared sign-in and the chat token's secret
+// path are Inputs, typically an Azure resource's or a secret store's outputs: Construct takes
+// them from another resource and renders them as they resolve.
+func TestConstructTakesAnswererInputsFromAnotherResource(t *testing.T) {
+	for _, form := range answererConstructForms {
+		t.Run(form.name, func(t *testing.T) {
+			inputs := dispatchConstructBaseInputs()
+			for key, value := range form.plain {
+				inputs[key] = value
+			}
+			for key, value := range form.inputs {
+				inputs[key] = property.New(value).WithDependencies([]resource.URN{upstream})
+			}
+			m, _, err := constructDispatch(t, inputs, false)
+			require.NoError(t, err)
+			env := appEnv(t, m)
+			if form.name == "azure chat" {
+				require.Equal(t, "azure", env["DISPATCH_ANSWERER"])
+				require.Equal(t, azureChatEndpoint, env["DISPATCH_AZURE_CHAT_ENDPOINT"])
+				require.Equal(t, "example-chat-deployment", env["DISPATCH_AZURE_CHAT_DEPLOYMENT"])
+				require.Equal(t, "120000", env["DISPATCH_AZURE_CHAT_TOKENS_PER_MINUTE"])
+				require.Equal(t, azureTenantID, env["DISPATCH_AZURE_TENANT_ID"])
+				require.Equal(t, azureClientID, env["DISPATCH_AZURE_CLIENT_ID"])
+				require.Equal(t, "/var/run/secrets/azure-federation/token", env["DISPATCH_AZURE_FEDERATED_TOKEN_FILE"])
+				require.NotContains(t, env, "DISPATCH_EMBEDDER", "meaning search stays on Bedrock")
+				return
+			}
+			require.Equal(t, "endpoint", env["DISPATCH_ANSWERER"])
+			require.Equal(t, chatEndpointURL, env["DISPATCH_CHAT_ENDPOINT"])
+			require.Equal(t, "example-chat-model", env["DISPATCH_CHAT_MODEL"])
+			require.Equal(t, "/var/run/secrets/chat-token/token", env["DISPATCH_CHAT_TOKEN_FILE"])
+			require.Equal(t, chatTokenSecret, m.Named(t, "gcp:secretmanager/secretIamMember:SecretIamMember", "example-dispatch-chat-token-accessor").Inputs.Mappable()["secretId"])
+		})
+	}
+}
+
+// At preview the answerer's Inputs may not be known yet (the Azure resources or the token's secret
+// are created in the same update): the resolver judges them by being set, so the component
+// previews, with the unknown values rendered as unknown.
+func TestConstructAcceptsUnknownAnswererInputsUnderPreview(t *testing.T) {
+	for _, form := range answererConstructForms {
+		t.Run(form.name, func(t *testing.T) {
+			inputs := dispatchConstructBaseInputs()
+			for key, value := range form.plain {
+				inputs[key] = value
+			}
+			for key := range form.inputs {
+				inputs[key] = property.New(property.Computed).WithDependencies([]resource.URN{upstream})
+			}
+			m, _, err := constructDispatch(t, inputs, true)
+			require.NoError(t, err)
+			env := appEnv(t, m)
+			if form.name == "azure chat" {
+				require.Equal(t, "azure", env["DISPATCH_ANSWERER"])
+				require.Equal(t, "<unknown>", env["DISPATCH_AZURE_CHAT_ENDPOINT"])
+				require.Equal(t, "<unknown>", env["DISPATCH_AZURE_CHAT_DEPLOYMENT"])
+				return
+			}
+			require.Equal(t, "endpoint", env["DISPATCH_ANSWERER"])
+			require.Equal(t, "<unknown>", env["DISPATCH_CHAT_ENDPOINT"])
+			m.Named(t, "gcp:secretmanager/secretIamMember:SecretIamMember", "example-dispatch-chat-token-accessor")
+		})
+	}
+}
+
+// The answerer's endpoint, the Azure chat deployment and the chat token's secret path are Inputs,
+// read only once they resolve: a value holding an nkey seed is refused then, naming the input and
+// never the value, so no child is registered with it.
+func TestConstructRefusesASeedInAnAnswererInput(t *testing.T) {
+	seed, _ := testnats.User(t)
+	lower := strings.ToLower(seed)
+	for _, row := range []struct {
+		name, form, input, value string
+	}{
+		{"a seed inside the Azure chat endpoint", "azure chat", "azureChatEndpoint", "https://" + lower + ".services.ai.azure.com/models"},
+		{"a seed as the Azure chat deployment", "azure chat", "azureChatDeployment", seed},
+		{"a seed inside the chat endpoint", "chat endpoint", "chatEndpoint", "https://" + lower + ".internal.example/v1"},
+		{"a seed inside the chat token secret id", "chat endpoint", "chatTokenSecret", "projects/example-project/secrets/" + seed},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			inputs := dispatchConstructBaseInputs()
+			for _, form := range answererConstructForms {
+				if form.name == row.form {
+					for key, value := range form.plain {
+						inputs[key] = value
+					}
+					for key, value := range form.inputs {
+						inputs[key] = property.New(value)
+					}
+				}
+			}
+			inputs[row.input] = property.New(row.value).WithDependencies([]resource.URN{upstream})
+			m, _, err := constructDispatch(t, inputs, false)
+			require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: "+row.input+" holds an nkey seed (not echoed)")
+			require.NotContains(t, strings.ToUpper(err.Error()), seed)
+			for _, r := range m.Registrations() {
+				for _, s := range allStrings(resource.NewProperty(r.Inputs)) {
+					require.NotContains(t, strings.ToUpper(s), seed, "%s %s holds the seed", r.Type, r.Name)
+				}
+			}
+		})
+	}
+}
+
 // The issuer and subject an Azure federated credential trusts are outputs, so the Azure side reads
 // them rather than rebuilding them: the cluster's token issuer, and the pods' ServiceAccount
 // <hostname> in the component's namespace. Neither is secret, and both are there with no Azure
@@ -392,7 +608,7 @@ func TestConstructOutputsTheServiceAccountIssuerAndSubject(t *testing.T) {
 // the component and the input, before anything registers, and never quotes a secret one
 // (provider's TestConstructRefusesAFractionInEveryIntegerInput covers every component's).
 func TestConstructRefusesAFractionalDispatchInteger(t *testing.T) {
-	for _, input := range []string{"replicas", "pprofPort", "azureEmbedTokensPerMinute"} {
+	for _, input := range []string{"replicas", "pprofPort", "azureEmbedTokensPerMinute", "azureChatTokensPerMinute"} {
 		for _, row := range []struct {
 			value property.Value
 			want  string
@@ -422,4 +638,97 @@ func TestConstructTakesAWholeDispatchIntegerSentAsAFloat(t *testing.T) {
 	require.NoError(t, err)
 	spec := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch").Inputs.Mappable()["spec"].(map[string]any)
 	require.EqualValues(t, 3, spec["replicas"])
+}
+
+// constructDispatchClusterOnly constructs a cluster-only component through the plugin's own
+// Construct, the path a consumer's pulumi up takes, from the three inputs the mode takes and a
+// gcp provider reference alone: the mode registers no RandomPassword, so a cluster-only program
+// declares no random provider.
+func constructDispatchClusterOnly(t *testing.T, dryRun bool) (*pulumitest.Mocks, p.ConstructResponse, error) {
+	t.Helper()
+	return constructDispatchWithProviders(t, map[string]property.Value{
+		"clusterOnly": property.New(true),
+		"region":      property.New("us-central1"),
+		"hostname":    property.New("example-dispatch"),
+	}, dryRun, map[tokens.Package]p.ProviderReference{"gcp": dispatchConstructGCP})
+}
+
+// A cluster-only component answers with all eight outputs. Three carry the cluster's own values,
+// which a consumer reads to reach it: the cluster's name, the service-account token issuer built
+// from the project, the location and the name, and the exec-plugin kubeconfig rendered from the
+// cluster the mocks compute. The five Dispatch would decide are an explicit empty string, present
+// and known: a field left unset would await as unknown, one value in preview and another in
+// update, while "" is the same in both and is what a consumer already reads as "not applied".
+// Hence the preview row: an empty string must be the same value there as in an update.
+func TestConstructOutputsTheClusterOnlyState(t *testing.T) {
+	for _, row := range []struct {
+		name   string
+		dryRun bool
+	}{{"an update", false}, {"a preview", true}} {
+		t.Run(row.name, func(t *testing.T) {
+			_, response, err := constructDispatchClusterOnly(t, row.dryRun)
+			require.NoError(t, err)
+			for output, want := range map[string]string{
+				"clusterName":           "example-dispatch",
+				"serviceAccountIssuer":  azureIssuer,
+				"kubeconfig":            gcp.DispatchKubeconfig("example-endpoint", "ZXhhbXBsZS1jYQ==", "example-dispatch"),
+				"url":                   "",
+				"databaseInstance":      "",
+				"principal":             "",
+				"agentToken":            "",
+				"serviceAccountSubject": "",
+			} {
+				value, ok := response.State.GetOk(output)
+				require.True(t, ok, "%s is in the state", output)
+				require.True(t, value.IsString(), "%s is a known string, not %s", output, value)
+				require.Equal(t, want, value.AsString(), output)
+			}
+		})
+	}
+}
+
+// An input that configures Dispatch, sent with clusterOnly over the wire a consumer's SDK uses,
+// is refused by name before anything registers: a stack already running Dispatch sets these, so
+// turning the mode on is refused rather than deleting what it would no longer build.
+// TestDispatchClusterOnlyRefusesEveryDispatchInput holds the refusal for every such input.
+func TestConstructRefusesADispatchInputWithClusterOnly(t *testing.T) {
+	m, _, err := constructDispatch(t, map[string]property.Value{
+		"clusterOnly": property.New(true),
+		"region":      property.New("us-central1"),
+		"hostname":    property.New("example-dispatch"),
+		"natsUrl":     property.New("nats://example-hub.example-tailnet.ts.net:4222"),
+	}, false)
+	// The component's refusal reaches the consumer through the RPC, which wraps it.
+	require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: natsUrl configures Dispatch, "+
+		"which clusterOnly does not build: unset it, or unset clusterOnly")
+	require.Empty(t, m.Types())
+}
+
+// A sandbox reaches the plugin over the same wire a consumer's pulumi up uses: the eight inputs of
+// the two groups are absent from the call, as an SDK leaves out what the program never set, and
+// not sent as empty values. tailnetAuthKey and signInClientSecret arrive as nothing at all there,
+// so the component reads neither as an Input it could resolve, and answers with the in-cluster
+// address and a declaration holding no front-door resource at all, as dispatchSandboxFrontDoor
+// names them.
+func TestConstructDispatchSandbox(t *testing.T) {
+	inputs := dispatchConstructInputs()
+	// The eight inputs of the two groups, from the groups' own lists, so a group that gains an
+	// input leaves it out of this call too.
+	for _, group := range [][]dispatchInput{dispatchSandboxTailnetGroup, dispatchSandboxSignInGroup} {
+		for _, in := range group {
+			delete(inputs, in.input)
+		}
+	}
+	inputs["allowedNamespaces"] = property.New(property.NewArray([]property.Value{property.New("legion")}))
+	inputs["natsUrl"] = property.New(inClusterNatsURL)
+	inputs["natsSeedSecret"] = property.New("projects/example-project/secrets/example-nats-seed")
+
+	m, response, err := constructDispatch(t, inputs, false)
+	require.NoError(t, err)
+	url, ok := response.State.GetOk("url")
+	require.True(t, ok)
+	require.Equal(t, dispatchSandboxURL, url.AsString())
+	for _, registration := range m.Registrations() {
+		require.NotContains(t, dispatchSandboxFrontDoor, registration.Type+" "+registration.Name, "a front door's resource registered")
+	}
 }

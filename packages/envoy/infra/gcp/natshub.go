@@ -136,13 +136,14 @@ type NatsHubArgs struct {
 	SessionUser *SessionUserArgs `pulumi:"sessionUser,optional"`
 }
 
-// NATSUserArgs are one nkey user of the hub. Exactly one of machineId, dispatchMachineId, daemon,
-// and permissions selects the user's grant. nkey is named as aws:User names it, so a consumer
-// running both clouds spells a user alike.
+// NATSUserArgs are one nkey user of the hub. Exactly one of machineId, listenerMachineId,
+// dispatchMachineId, daemon, and permissions selects the user's grant. nkey is named as aws:User
+// names it, so a consumer running both clouds spells a user alike.
 type NATSUserArgs struct {
 	Name              string           `pulumi:"name"`
 	NKey              string           `pulumi:"nkey"`                       // the user's public key; never its seed
-	MachineID         *string          `pulumi:"machineId,optional"`         // permissions = core.HostPermissions(machineId)
+	MachineID         *string          `pulumi:"machineId,optional"`         // permissions = core.HostPermissions(machineId): the user a host's listener and its sessions share
+	ListenerMachineID *string          `pulumi:"listenerMachineId,optional"` // permissions = core.ListenerHostPermissions(listenerMachineId): a listener's own user, which no session shares
 	DispatchMachineID *string          `pulumi:"dispatchMachineId,optional"` // permissions = core.DispatchPermissions(dispatchMachineId): Dispatch's user; the id is the listener's beside it
 	Daemon            bool             `pulumi:"daemon,optional"`            // permissions = core.DaemonPermissions()
 	Permissions       *PermissionsArgs `pulumi:"permissions,optional"`       // explicit
@@ -174,6 +175,19 @@ type HubListenerArgs struct {
 	// <hostname>.<tailnetDnsName>, which the hub always serves. Each entry is rendered as written,
 	// since the listener normalizes what it reads.
 	AllowedHosts []string `pulumi:"allowedHosts,optional"`
+	// AgentSecretsUrl, agentSecretsAudience and publicUrl turn on this listener's broker check
+	// together, as agentSecretsUrl and agentSecretsAudience turn on Dispatch's relay: the
+	// secrets broker a caller's broker access token is introspected at
+	// (ENVOY_AGENT_SECRETS_URL), the audience this VM's own Google identity token is minted
+	// for, which is the identity each introspection presents
+	// (ENVOY_AGENT_SECRETS_GOOGLE_AUDIENCE), and the origin a caller reaches this listener at,
+	// which a DPoP proof's target URI is checked against (ENVOY_PUBLIC_URL). Set all three or
+	// none: a hub that sets none renders none of them, and its listener takes no broker token
+	// at all. The hub is a VM, so the audience is its identity; the projected-token file a pod
+	// presents instead is no input here, since the listener refuses it beside the audience.
+	AgentSecretsUrl      string `pulumi:"agentSecretsUrl,optional"`
+	AgentSecretsAudience string `pulumi:"agentSecretsAudience,optional"`
+	PublicUrl            string `pulumi:"publicUrl,optional"`
 }
 
 // Annotate names the type gcp:HubListener in the schema, for the reason NATSUserArgs's gives.
@@ -285,7 +299,11 @@ func newSettings(args *NatsHubArgs) (settings, error) {
 	if args.Subnetwork != nil && args.Network == nil {
 		return settings{}, errors.New("subnetwork is set without network; the firewall needs the network the subnetwork belongs to")
 	}
-	auth, err := authorization(args.Hostname, args.Users, args.Listener, args.SessionUser)
+	var hubListener *listenerUser
+	if args.Listener != nil {
+		hubListener = &listenerUser{machineID: args.Hostname, nkey: args.Listener.NKey}
+	}
+	auth, err := authorization(args.Users, hubListener, args.SessionUser)
 	if err != nil {
 		return settings{}, err
 	}
@@ -318,6 +336,12 @@ func newSettings(args *NatsHubArgs) (settings, error) {
 // registers. The operator's entries are checked as their own list, by the rule core owns, so a
 // refusal names listener.allowedHosts and the index the operator wrote, not the index of the
 // rendered list the hub's own address comes first in.
+//
+// Its broker check is checked the same way, by core's rule under the hub's own prefix, so a
+// refusal names listener.agentSecretsUrl, listener.agentSecretsAudience or listener.publicUrl.
+// The listener refuses a partial set when it boots, which the group would answer by recreating
+// the VM that cannot start, so the hub refuses one at preview, naming the input left out; a hub
+// that sets none renders none of the three.
 func resolveListener(args *NatsHubArgs) (*listener, error) {
 	l := args.Listener
 	if l == nil {
@@ -339,11 +363,17 @@ func resolveListener(args *NatsHubArgs) (*listener, error) {
 	if err := core.CheckAllowedHosts("listener.allowedHosts", l.AllowedHosts); err != nil {
 		return nil, err
 	}
+	if err := core.CheckBroker("listener.", l.AgentSecretsUrl, l.AgentSecretsAudience, l.PublicUrl); err != nil {
+		return nil, err
+	}
 	env, err := core.ListenerConfig{
-		MachineID:    args.Hostname,
-		Port:         core.DefaultListenerPort,
-		ListenHost:   "127.0.0.1",
-		AllowedHosts: append([]string{core.TailnetHostName(args.Hostname, args.TailnetDnsName)}, l.AllowedHosts...),
+		MachineID:            args.Hostname,
+		Port:                 core.DefaultListenerPort,
+		ListenHost:           "127.0.0.1",
+		AllowedHosts:         append([]string{core.TailnetHostName(args.Hostname, args.TailnetDnsName)}, l.AllowedHosts...),
+		AgentSecretsURL:      l.AgentSecretsUrl,
+		AgentSecretsAudience: l.AgentSecretsAudience,
+		PublicURL:            l.PublicUrl,
 	}.Env([]string{localNATS})
 	if err != nil {
 		return nil, err
@@ -358,9 +388,12 @@ func resolveListener(args *NatsHubArgs) (*listener, error) {
 // type and the disk type, the group's and the template's inputs, the disk type also quoted by its
 // refusal; the images, written into the user data; the tailnet DNS name, which its own refusal
 // quotes and whose address the listener's environment carries, and each of the listener's further
-// allowed hosts, which that environment carries too; and each user's machine id, which the hub
-// turns into that user's rules before core sees them, so core's refusal would name a rule entry
-// the user never wrote. A user's name and rule entries are core's:
+// allowed hosts, which that environment carries too; the listener's broker check, its
+// agentSecretsUrl, agentSecretsAudience and publicUrl, each rendered into that environment as one
+// variable of the listener's docker run command, and each named here by the hub's own path, since
+// core's refusal of a seed in one would name core's input and not the hub's; and each user's
+// machine id, which the hub turns into that user's rules before core sees them, so core's refusal
+// would name a rule entry the user never wrote. A user's name and rule entries are core's:
 // core.Authorization refuses a seed in either before any refusal of its own quotes it, and the
 // hub's own user refusals name a user by its index alone (authorization). A user's nkey is core's
 // too: it refuses any nkey that is not a user public key, a seed included, without quoting it.
@@ -387,7 +420,10 @@ func seededInput(args *NatsHubArgs) (string, bool) {
 		}
 	}
 	if args.Listener != nil {
-		fields = append(fields, field{"listener.image", args.Listener.Image}, field{"listener.seedSecret", args.Listener.SeedSecret})
+		fields = append(fields, field{"listener.image", args.Listener.Image}, field{"listener.seedSecret", args.Listener.SeedSecret},
+			field{"listener.agentSecretsUrl", args.Listener.AgentSecretsUrl},
+			field{"listener.agentSecretsAudience", args.Listener.AgentSecretsAudience},
+			field{"listener.publicUrl", args.Listener.PublicUrl})
 		for i, entry := range args.Listener.AllowedHosts {
 			fields = append(fields, field{fmt.Sprintf("listener.allowedHosts[%d]", i), entry})
 		}
@@ -444,9 +480,10 @@ type userKind struct {
 
 // userKinds is the one table of every kind of hub user. The machine-id entries also drive the
 // hub's seed scan, shared machine-id check, and duplicate-durable check.
-func userKinds(u NATSUserArgs) [4]userKind {
-	return [4]userKind{
+func userKinds(u NATSUserArgs) [5]userKind {
+	return [5]userKind{
 		{input: "machineId", id: u.MachineID, set: u.MachineID != nil, grant: core.HostPermissions},
+		{input: "listenerMachineId", id: u.ListenerMachineID, set: u.ListenerMachineID != nil, grant: core.ListenerHostPermissions},
 		{input: "dispatchMachineId", id: u.DispatchMachineID, set: u.DispatchMachineID != nil, fixed: core.DispatchDurables(), grant: core.DispatchPermissions},
 		{input: "daemon", set: u.Daemon, grant: func(string) core.Permissions { return core.DaemonPermissions() }},
 		{input: "permissions", set: u.Permissions != nil, grant: func(string) core.Permissions {
@@ -468,31 +505,40 @@ func selectedUserKind(where string, u NATSUserArgs) (userKind, error) {
 		selected = kind
 	}
 	if !selected.set {
-		return userKind{}, fmt.Errorf("%s: name machineId, for its host's permission set, dispatchMachineId, for Dispatch's, daemon, for the daemon's, or permissions", where)
+		return userKind{}, fmt.Errorf("%s: name machineId, for its host's permission set, listenerMachineId, for a listener's own user, dispatchMachineId, for Dispatch's, daemon, for the daemon's, or permissions", where)
 	}
 	return selected, nil
 }
 
-// authorization maps the hub's users onto core's. Each of users is a keyed user with a seed, whose
-// permissions are its host's set when it names a machine id, Dispatch's set when it names a
-// Dispatch machine id, the daemon's set when daemon is true, and its own when it names
-// permissions. The listener's user follows them, named hostname, with the listener's set for
-// that machine and a seed; the session user comes last, with the session's set and no seed, as
-// the authorization's noAuthUser. A hub needs users or a listener: with the session user alone,
-// no client could hold more than a session's grant, and no listener could run. core validates the
-// rest when it renders, a seed in a name or a rule entry first. Each machine id, of either kind,
-// passes core's shared machine-id rule and names a listener durable and queue group. An id whose
-// durable repeats another user's, of either kind, or the hub's own listener's
-// (bus.ListenerDurable turns a space into a hyphen, so "a b" and "a-b" collide) is refused as a
-// core.InputError naming the later input. The hub's own refusals name a user by its index alone:
-// they come before core has read the names, so quoting one could quote a seed.
-func authorization(hostname string, users []NATSUserArgs, l *HubListenerArgs, session *SessionUserArgs) (core.Authorization, error) {
+// listenerUser is the Envoy listener a hub renders a NATS user for: the listener's machine id,
+// which names the user and its grant, and the public key of its seed.
+type listenerUser struct {
+	machineID string
+	nkey      string
+}
+
+// authorization maps a hub's users onto core's, for both hubs, gcp:NatsHub and
+// gcp:ClusteredNatsHub, so the two render one grant for the same users. Each of users is a keyed
+// user with a seed, whose permissions are its host's set when it names a machine id, the
+// listener-host set when it names a listener machine id, Dispatch's set when it names a Dispatch
+// machine id, the daemon's set when daemon is true, and its own when it names permissions. The
+// listener's user follows them, named after the listener's machine id, with the listener's set for
+// that machine and a seed; the session user comes last, with the session's set and no seed, as the
+// authorization's noAuthUser. A hub needs users or a listener: with the session user alone, no
+// client could hold more than a session's grant, and no listener could run. core validates the rest
+// when it renders, a seed in a name or a rule entry first. Each machine id, of any kind, passes
+// core's shared machine-id rule and names a listener durable and queue group. An id whose durable
+// repeats another user's, of any kind, or the hub's own listener's (bus.ListenerDurable turns a
+// space into a hyphen, so "a b" and "a-b" collide) is refused as a core.InputError naming the later
+// input. The hub's own refusals name a user by its index alone: they come before core has read the
+// names, so quoting one could quote a seed.
+func authorization(users []NATSUserArgs, l *listenerUser, session *SessionUserArgs) (core.Authorization, error) {
 	if len(users) == 0 && l == nil {
 		return core.Authorization{}, errors.New("users: at least one user is required, or a listener")
 	}
 	durables := map[string]string{}
 	if l != nil {
-		durables[bus.ListenerDurable(hostname)] = "the hub's own listener"
+		durables[bus.ListenerDurable(l.machineID)] = "the hub's own listener"
 	}
 	auth := core.Authorization{Users: make([]core.User, 0, len(users)+2)}
 	for i, u := range users {
@@ -524,12 +570,12 @@ func authorization(hostname string, users []NATSUserArgs, l *HubListenerArgs, se
 		})
 	}
 	if l != nil {
-		if l.NKey == "" {
+		if l.nkey == "" {
 			return core.Authorization{}, errors.New("listener.nkey is required")
 		}
-		perms := core.ListenerPermissions(hostname)
+		perms := core.ListenerPermissions(l.machineID)
 		auth.Users = append(auth.Users, core.User{
-			Name: hostname, NKey: l.NKey, Publish: &perms.Publish, Subscribe: &perms.Subscribe, HasSeed: true,
+			Name: l.machineID, NKey: l.nkey, Publish: &perms.Publish, Subscribe: &perms.Subscribe, HasSeed: true,
 			Label: "listener",
 		})
 	}

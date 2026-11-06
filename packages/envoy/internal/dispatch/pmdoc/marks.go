@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"slices"
 )
 
 // The mark vocabulary the reader and the writer share: which marks a text is written under, in
@@ -59,9 +60,10 @@ func nodeHasMark(node *Node, markType string) bool {
 }
 
 // renderedMarkTypes are the marks canonical Markdown writes. Every other mark the schema allows
-// (markTypes) is an anchor, invisible to the rendering, and StripAnchorMarks removes exactly the
-// marks that are not here: what renders is one list, not two of opposite polarity that a new
-// invisible mark could fall between.
+// (markTypes) is an anchor, invisible to the rendering, and renderedMarks, the one filter the
+// rendering and StripAnchorMarks pass marks through, removes exactly the marks that are not here:
+// what renders is one list, not two of opposite polarity that a new invisible mark could fall
+// between.
 var renderedMarkTypes = map[string]bool{
 	"link": true, "strong": true, "emphasis": true, "strike_through": true, "inlineCode": true,
 }
@@ -102,12 +104,15 @@ func markDelimiter(mark Mark) byte {
 	return 0
 }
 
+// visibleMarks is the rendered marks of marks in writing order: nil when there are none, else a
+// fresh slice the caller may filter in place (withoutMark) without touching marks.
 func visibleMarks(marks []Mark) []Mark {
-	out := make([]Mark, 0, len(marks))
-	for _, mark := range marks {
-		if renderedMarkTypes[mark.Type] {
-			out = append(out, mark)
-		}
+	out, kept := renderedMarks(marks)
+	if len(out) == 0 {
+		return nil
+	}
+	if kept {
+		out = slices.Clone(out)
 	}
 	sortMarks(out)
 	for i := range out {

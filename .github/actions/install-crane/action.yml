@@ -1,0 +1,18 @@
+name: Install crane
+description: >-
+  Installs crane v0.22.1, the registry client .github/scripts/mirror-ci-images.sh copies images
+  with, checked against its SHA-256 before it is unpacked, and puts it on PATH for the job's later
+  steps.
+runs:
+  using: composite
+  steps:
+    - name: Install crane
+      shell: bash
+      run: |
+        version=0.22.1
+        tarball="$RUNNER_TEMP/go-containerregistry_Linux_x86_64.tar.gz"
+        curl -fsSL -o "$tarball" "https://github.com/google/go-containerregistry/releases/download/v$version/go-containerregistry_Linux_x86_64.tar.gz"
+        echo "0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0  $tarball" | sha256sum -c -
+        mkdir -p "$RUNNER_TEMP/crane"
+        tar -xzf "$tarball" -C "$RUNNER_TEMP/crane" crane
+        echo "$RUNNER_TEMP/crane" >> "$GITHUB_PATH"

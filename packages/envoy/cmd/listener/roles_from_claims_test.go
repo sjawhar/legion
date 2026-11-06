@@ -16,7 +16,6 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/kvwatch"
-	"github.com/sjawhar/envoy/internal/kvwatch/kvwatchtest"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
@@ -82,6 +81,20 @@ func sessionRows(t *testing.T, registry *store.Registry, state *listenerDeps) ma
 	return byID
 }
 
+// roleViewUnanswered reports whether recorder carries the answer a session route gives when the
+// role claim view refuses it: the 503 with Retry-After: 1 whose body begins busUnansweredPrefix
+// and carries store.ErrRoleViewNotReady's reason. The reason is part of the check because a bus
+// that did not answer earns the same status, the same header and the same prefix, and these tests
+// are about the view: an assertion that took either answer would pass for a silent bus, which is
+// not what they set up.
+func roleViewUnanswered(recorder *httptest.ResponseRecorder) bool {
+	body := recorder.Body.String()
+	return recorder.Code == http.StatusServiceUnavailable &&
+		recorder.Header().Get("Retry-After") == "1" &&
+		strings.Contains(body, busUnansweredPrefix) &&
+		strings.Contains(body, store.ErrRoleViewNotReady.Error())
+}
+
 // A session holds a role exactly when the role's claim names it, and every place that says who
 // holds a role says so from the claims: a row of GET /v1/sessions, GET /v1/registry/<session_id>
 // (which Dispatch's route roster reads) and the sender a send stamps. A session whose record keeps
@@ -98,7 +111,7 @@ func TestARoleIsHeldByTheSessionItsClaimNamesWhateverTheRecordsTopics(t *testing
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t,
 		map[string][]string{stale: {contracts.RoleTopicPrefix + "reviewer"}, holder: nil, target: nil},
-		map[string]int{stale: 1, holder: 1, bare: 1, target: 1})
+		[]string{stale, holder, bare, target})
 	// The claims go in as another listener's claim would, straight to the role bucket, so no record
 	// gains a topic on the way.
 	roles, err := client.JS().KeyValue(bus.RoleClaimBucket)
@@ -158,7 +171,7 @@ func TestAClaimsViewThatCannotAnswerIsTheBusNotAnsweringOnTheSessionRoutes(t *te
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t,
 		map[string][]string{sender: nil, target: nil},
-		map[string]int{sender: 1, target: 1})
+		[]string{sender, target})
 	claimRoles(t, registry, sender, "reviewer")
 	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 	if got := publishedSender(t, state, sender, target).Roles; !slices.Equal(got, []string{"reviewer"}) {
@@ -182,9 +195,8 @@ func TestAClaimsViewThatCannotAnswerIsTheBusNotAnsweringOnTheSessionRoutes(t *te
 	} {
 		recorder := httptest.NewRecorder()
 		route.handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, route.path, nil))
-		if recorder.Code != http.StatusServiceUnavailable || recorder.Header().Get("Retry-After") != "1" ||
-			!strings.Contains(recorder.Body.String(), busUnansweredPrefix) {
-			t.Errorf("GET %s with a claims view that cannot answer: status %d, Retry-After %q, body %s; want the bus-unavailable 503",
+		if !roleViewUnanswered(recorder) {
+			t.Errorf("GET %s with a claims view that cannot answer: status %d, Retry-After %q, body %s; want the bus-unavailable 503 naming the role claim view's refusal",
 				route.path, recorder.Code, recorder.Header().Get("Retry-After"), recorder.Body.String())
 		}
 	}
@@ -193,41 +205,57 @@ func TestAClaimsViewThatCannotAnswerIsTheBusNotAnsweringOnTheSessionRoutes(t *te
 	}
 }
 
-// timeOutRoleClaimScan puts registry's role claim view where a listener start leaves it when
-// nats.go's idle timer ends the view's first scan of raw: the watcher feeding the view is replaced
-// by one whose first scan times out at once and that applies nothing. The holders the old watcher
-// delivered stay in the view, which is the hard case: an answer read from them would name the
-// holder's role, so only the view's completeness can refuse it. The holders are left alone because
-// the stopped watcher may still be applying under the registry's lock, which this goroutine does
-// not hold. Package store's own tests drive the registry's real watcher through the same timeout;
-// from here the watcher field is reached the way api_test.go reaches the session registry's.
-func timeOutRoleClaimScan(t *testing.T, registry *store.Registry, raw natsgo.KeyValue) {
+// refuseRoleClaimView puts registry's role claim view where a listener start leaves it before its
+// first complete read of the bucket: the watcher feeding the view is replaced by one that has read
+// nothing, so the copy cannot be served (kvwatch.Watcher.Servable) and RolesHeldBy refuses. The
+// holders the old watcher delivered stay in the view, which is the hard case: an answer read from
+// them would name the holder's role, so only the copy's own servability can refuse it. The
+// replacement feeds nothing, so it never touches those holders, which the stopped watcher may
+// still be applying under the registry's lock this goroutine does not hold. Package store's own
+// tests drive the registry's real watcher through the same state; from here the watcher field is
+// reached the way api_test.go reaches the session registry's.
+func refuseRoleClaimView(t *testing.T, registry *store.Registry) {
 	t.Helper()
 	fields := reflect.ValueOf(registry).Elem()
 	field := fields.FieldByName("roleWatcher")
 	watcher := reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem()
-	watcher.Interface().(*kvwatch.Watcher).Stop()
-	timedOut := kvwatch.New("role claims", bus.KeyValue{KeyValue: kvwatchtest.TimingOut(raw, 0)}, func(natsgo.KeyValueEntry) {}, func() {})
-	watcher.Set(reflect.ValueOf(timedOut))
-	t.Cleanup(timedOut.Stop)
-	timedOut.Start()
-	waitFor(t, 5*time.Second, "the role claim scan to time out", timedOut.Ready)
+	current := watcher.Interface().(*kvwatch.Watcher)
+	current.Stop()
+	refilling := kvwatch.New("role claims", current.KV(), feedsNothing{})
+	watcher.Set(reflect.ValueOf(refilling))
+	t.Cleanup(refilling.Stop)
 }
 
+// feedsNothing is a kvwatch.Cache that keeps nothing: the replacement watcher must leave the
+// registry's own view as the stopped watcher left it (refuseRoleClaimView).
+type feedsNothing struct{}
+
+func (feedsNothing) BeginRead(kvwatch.Read)            {}
+func (feedsNothing) Apply(kvwatch.Entry, kvwatch.Read) {}
+func (feedsNothing) CompleteRead(kvwatch.Read)         {}
+
 // requireRolesOrUnanswered fails the test unless recorder answers 200 with the session's rows
-// (rolesOf reads them) holding exactly want, or the bus-unavailable 503 with Retry-After: 1. It
-// reports whether the answer was the 200.
-func requireRolesOrUnanswered(t *testing.T, what string, recorder *httptest.ResponseRecorder, want []string, rolesOf func([]byte) []string) bool {
+// (rolesOf reads them) holding exactly want, or exactly kept, the copy the view had when the read
+// under way began, or the role claim view's own bus-unavailable 503 (roleViewUnanswered). It
+// reports whether the answer was the 200 holding want. Both lists name every role the session
+// holds in the bucket being read, so no answer it allows is that session short of one.
+func requireRolesOrUnanswered(t *testing.T, what string, recorder *httptest.ResponseRecorder, want, kept []string, rolesOf func([]byte) []string) bool {
 	t.Helper()
 	switch recorder.Code {
 	case http.StatusOK:
-		if got := rolesOf(recorder.Body.Bytes()); !slices.Equal(got, want) {
-			t.Fatalf("%s answered 200 with roles %v, want %v or the bus-unavailable 503: a holder reported without its role", what, got, want)
+		got := rolesOf(recorder.Body.Bytes())
+		switch {
+		case slices.Equal(got, want):
+			return true
+		case slices.Equal(got, kept):
+			return false
+		default:
+			t.Fatalf("%s answered 200 with roles %v, want %v, the copy the view had (%v), or the bus-unavailable 503: a holder reported without its role", what, got, want, kept)
+			return false
 		}
-		return true
 	case http.StatusServiceUnavailable:
-		if recorder.Header().Get("Retry-After") != "1" || !strings.Contains(recorder.Body.String(), busUnansweredPrefix) {
-			t.Fatalf("%s answered 503 with Retry-After %q and body %s, want the bus-unavailable 503", what, recorder.Header().Get("Retry-After"), recorder.Body.String())
+		if !roleViewUnanswered(recorder) {
+			t.Fatalf("%s answered 503 with Retry-After %q and body %s, want the bus-unavailable 503 naming the role claim view's refusal", what, recorder.Header().Get("Retry-After"), recorder.Body.String())
 		}
 		return false
 	default:
@@ -248,17 +276,13 @@ func TestARoleViewWhoseFirstScanTimedOutIsTheBusNotAnsweringOnTheSessionRoutes(t
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t,
 		map[string][]string{holder: nil, target: nil},
-		map[string]int{holder: 1, target: 1})
+		[]string{holder, target})
 	claimRoles(t, registry, holder, "reviewer")
 	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 	if got := decodeSessionInfo(t, sessionEntryRoute(t, state, holder)).Roles; !slices.Equal(got, []string{"reviewer"}) {
 		t.Fatalf("control: GET /v1/registry/%s reports roles %v, want [reviewer]", holder, got)
 	}
-	raw, err := client.JS().KeyValue(bus.RoleClaimBucket)
-	if err != nil {
-		t.Fatalf("open the role bucket: %v", err)
-	}
-	timeOutRoleClaimScan(t, registry, raw)
+	refuseRoleClaimView(t, registry)
 
 	for _, route := range []struct {
 		path    string
@@ -269,9 +293,8 @@ func TestARoleViewWhoseFirstScanTimedOutIsTheBusNotAnsweringOnTheSessionRoutes(t
 	} {
 		recorder := httptest.NewRecorder()
 		route.handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, route.path, nil))
-		if recorder.Code != http.StatusServiceUnavailable || recorder.Header().Get("Retry-After") != "1" ||
-			!strings.Contains(recorder.Body.String(), busUnansweredPrefix) {
-			t.Errorf("GET %s with a role claim view whose first scan timed out: status %d, Retry-After %q, body %s; want the bus-unavailable 503",
+		if !roleViewUnanswered(recorder) {
+			t.Errorf("GET %s with a role claim view whose first scan timed out: status %d, Retry-After %q, body %s; want the bus-unavailable 503 naming the role claim view's refusal",
 				route.path, recorder.Code, recorder.Header().Get("Retry-After"), recorder.Body.String())
 		}
 	}
@@ -280,14 +303,16 @@ func TestARoleViewWhoseFirstScanTimedOutIsTheBusNotAnsweringOnTheSessionRoutes(t
 	}
 }
 
-// A recreated role bucket empties the role claim view, and the refill that follows delivers the
-// claims one at a time. Until it has delivered them all, GET /v1/registry/<session_id> and GET
-// /v1/sessions answer the holder's roles or the bus-unavailable 503 with Retry-After: 1, never the
-// holder with no roles. The holder's claim is the last of thousands, so the routes are asked while
-// the refill runs. The reset empties the holders and their revisions both: after the refill, a
-// claim only the old bucket had (planner's) gives the holder nothing, and a claim the new bucket
-// writes at a lower revision than the old bucket's claim of the same role (architect's) gives its
-// holder the role.
+// A recreated role bucket is read whole again, and nothing empties the view first: the copy keeps
+// every holder it had through that read and loses only what the completed read found no evidence
+// of (kvwatch.Copy). So until the read completes, GET /v1/registry/<session_id> and GET
+// /v1/sessions answer the holder with the roles the copy held, or the bus-unavailable 503 with
+// Retry-After: 1, and never the holder short of a role it holds, nor a part of the new bucket the
+// read has reached so far. The holder's claim is the last of thousands, so the routes are asked
+// while the read runs. The read's completion is what resets the view, holders and revisions both:
+// after it, a claim only the old bucket had (planner's) gives the holder nothing, and a claim the
+// new bucket writes at a lower revision than the old bucket's claim of the same role
+// (architect's) gives its holder the role, since a read of a recreated bucket drops the fence.
 func TestARecreatedRoleBucketIsNeverAnsweredAsAHolderWithoutItsRole(t *testing.T) {
 	const (
 		holder = "ses_recreated_roles_holder"
@@ -298,7 +323,7 @@ func TestARecreatedRoleBucketIsNeverAnsweredAsAHolderWithoutItsRole(t *testing.T
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t,
 		map[string][]string{holder: nil, target: nil},
-		map[string]int{holder: 1, target: 1})
+		[]string{holder, target})
 	claimRoles(t, registry, holder, "reviewer", "planner")
 	claimRoles(t, registry, target, "architect")
 	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
@@ -339,6 +364,9 @@ func TestARecreatedRoleBucketIsNeverAnsweredAsAHolderWithoutItsRole(t *testing.T
 	}
 
 	want := []string{"reviewer"}
+	// planner's claim is the old bucket's alone, so it is the copy the view keeps until the read
+	// of the new bucket completes and sweeps it.
+	kept := []string{"planner", "reviewer"}
 	entryRoles := func(body []byte) []string {
 		var info sessionInfo
 		if err := json.Unmarshal(body, &info); err != nil {
@@ -359,23 +387,23 @@ func TestARecreatedRoleBucketIsNeverAnsweredAsAHolderWithoutItsRole(t *testing.T
 		t.Fatalf("GET /v1/sessions answered 200 without %s: %s", holder, body)
 		return nil
 	}
-	unanswered := 0
+	refilling := 0
 	for deadline := time.Now().Add(30 * time.Second); ; {
 		entry := sessionEntryRoute(t, state, holder)
-		entryAnswered := requireRolesOrUnanswered(t, "GET /v1/registry/"+holder, entry, want, entryRoles)
+		entryAnswered := requireRolesOrUnanswered(t, "GET /v1/registry/"+holder, entry, want, kept, entryRoles)
 		list := httptest.NewRecorder()
 		sessionsHandler(registry, sessions).ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/v1/sessions", nil))
-		listAnswered := requireRolesOrUnanswered(t, "GET /v1/sessions", list, want, listedRoles)
+		listAnswered := requireRolesOrUnanswered(t, "GET /v1/sessions", list, want, kept, listedRoles)
 		if entryAnswered && listAnswered {
 			break
 		}
-		unanswered++
+		refilling++
 		if time.Now().After(deadline) {
-			t.Fatal("the session routes still answer 503 30 s after the rewatch")
+			t.Fatal("the session routes still answer the copy the view had, or 503, 30 s after the rewatch")
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Logf("the session routes answered the bus-unavailable 503 %d times while the refill ran", unanswered)
+	t.Logf("the session routes answered the copy the view had, or the bus-unavailable 503, %d times while the read of the new bucket ran", refilling)
 	if got := decodeSessionInfo(t, sessionEntryRoute(t, state, target)).Roles; !slices.Equal(got, []string{"architect"}) {
 		t.Fatalf("after the refill GET /v1/registry/%s reports roles %v, want [architect]: the old bucket's revision fenced out the new bucket's claim", target, got)
 	}

@@ -1,9 +1,0 @@
-kind: Added
-body: |-
-  `AskReach`, the reach every ask read carries, shared by `AskThread` and `AskRead`: `claimant`
-  (the session holding the claim on the ask's issue), `route` (the issue's route, `session:<id>` or
-  `role:<name>`), whom a person's answer and replies on the ask reach beside its followers, and,
-  since it extends `IssueRouteReach`, `route_status` (`live`, `no_holder` or `unknown`) and
-  `route_holder` (the live session that route reaches), resolved per read as on the issue reads, so
-  a reader counts each session once and tells a route nobody holds from one Dispatch could not
-  judge; each is null when absent and on a project document's ask.

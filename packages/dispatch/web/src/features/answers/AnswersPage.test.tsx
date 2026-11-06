@@ -18,7 +18,11 @@ let whoAmI: Mock<typeof api.whoAmI>;
 let getReferences: Mock<typeof api.getReferences>;
 
 beforeEach(() => {
-  whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+  whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
+    event_head: "0",
+    kind: "user",
+    login: "alice",
+  });
   getReferences = spyOn(api, "getReferences").mockResolvedValue({
     edges: [],
     node: { id: "ask-1", kind: "ask" },
@@ -255,6 +259,7 @@ test("Change answer opens its card under the answer row, not a newer reply on th
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   });
   const { view } = renderPage();
@@ -305,6 +310,7 @@ test("a row's Change answer opens the seeded form; after Save the row and the ca
             route: null,
             route_status: null,
             route_holder: null,
+            route_status_reason: null,
           }
         : {
             answers: [shipAnswer],
@@ -316,6 +322,7 @@ test("a row's Change answer opens the seeded form; after Save the row and the ca
             route: null,
             route_status: null,
             route_holder: null,
+            route_status_reason: null,
           }
   );
   const sent: AnswerAskInput[] = [];

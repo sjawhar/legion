@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
-import { api } from "../../api/client";
+import { AGENT_LIST_REFILLING, ApiError, api } from "../../api/client";
 import type { Agent, AskFollower, Subscriber } from "../../api/types";
 import { AskRecipients, type AskRecipientsProps, reachLabel, reachRows } from "./AskRecipients";
 
@@ -323,6 +323,28 @@ test("AskRecipients says when the subscribers fetch failed and retries it, inste
   }
 });
 
+// While Envoy's agent list refills, the card says so - not that the listener is unreachable -
+// counts nobody, and shows each follower's running state as unknown rather than not running.
+test("AskRecipients says the agent list is refilling and claims no count or offline follower", async () => {
+  const refilling = new ApiError(503, { code: "ENVOY_REFILLING", error: AGENT_LIST_REFILLING });
+  const page = renderRecipients({ agents: refilling, subscribers: refilling });
+
+  try {
+    const section = screen.getByRole("region", { name: "Recipients" });
+    const notice = await within(section).findByTestId("agent-list-refilling");
+    expect(notice.textContent).toBe(AGENT_LIST_REFILLING);
+    expect(within(section).queryByRole("alert")).toBeNull();
+    expect(within(section).queryByRole("button", { name: /^Reaches/ })).toBeNull();
+    expect(within(section).getByRole("button", { name: "Recipients" })).toBeTruthy();
+    await waitFor(() =>
+      expect(within(section).getAllByRole("img", { name: "Running state unknown" })).toHaveLength(2)
+    );
+    expect(within(section).queryByRole("img", { name: "Not running" })).toBeNull();
+  } finally {
+    page.unmount();
+  }
+});
+
 test("AskRecipients tells the human an unfollowed session still hears the ask through its issue subscription", async () => {
   const page = renderRecipients({
     subscribers: [subscriber("0123456789abcdef", "Planner")],
@@ -402,7 +424,8 @@ test("AskRecipients never asks for subscribers unless the signed-in principal is
     });
     expect(toggle.textContent).toBe("Reaches 2");
     // Opening the list mounts the followers' names, which read the agent registry; once that read
-    // has begun, the card's fetches have all started, and the human-only one is not among them.
+    // has begun, the card's fetches have all started, and the one needing the `person` scope is
+    // not among them.
     fireEvent.click(toggle);
     await waitFor(() => expect(listAgents).toHaveBeenCalled());
     expect(getIssueSubscribers).not.toHaveBeenCalled();

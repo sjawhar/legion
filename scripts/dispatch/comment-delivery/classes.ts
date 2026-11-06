@@ -155,7 +155,7 @@ export const CAUSES: Readonly<Record<string, CauseEntry>> = {
     meaning:
       "Dispatch did not send the comment to the session or role that the issue's route names.",
     fix:
-      "No fix yet. The outbox sends each comment to the issue's route (publishRoute); a route " +
+      "No fix yet. The outbox sends each comment to the issue's route (addRoute); a route " +
       "it did not reach needs its own fix.",
   },
   "not-addressed:follower": {

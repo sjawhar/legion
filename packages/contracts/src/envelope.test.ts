@@ -11,6 +11,7 @@ import {
   githubResourceSubject,
   githubSubject,
   githubWorkflowSubject,
+  SUBJECT_MAX_BYTES,
   sanitizeSubjectSegment,
   slackSubject,
   slackThreadSubject,
@@ -371,6 +372,54 @@ describe("githubPushSubject", () => {
     const push = githubPushSubject("acme", "widgets", "branch", "main");
     const repoLevel = githubSubject("acme", "widgets", "push");
     expect(push.startsWith(`${repoLevel}.`)).toBe(true);
+  });
+
+  // Git bounds no ref's length, and the bus refuses a subject past SUBJECT_MAX_BYTES. The expected
+  // subjects are the ones the Go side's GithubPushSubject builds
+  // (packages/envoy/internal/contracts/push_subject_test.go).
+  describe("a ref past the subject bound", () => {
+    const prefix = "notifications.github.acme.widgets.push.branch.";
+    const room = SUBJECT_MAX_BYTES - prefix.length;
+    const bytes = (subject: string) => new TextEncoder().encode(subject).length;
+
+    test("names a ref whole in a subject of exactly the bound", () => {
+      const ref = "a".repeat(room);
+      expect(githubPushSubject("acme", "widgets", "branch", ref)).toBe(`${prefix}${ref}`);
+    });
+
+    test("cuts a ref one byte over to fit, ending in ~ and its digest", () => {
+      const subject = githubPushSubject("acme", "widgets", "branch", "a".repeat(room + 1));
+      expect(subject.startsWith(`${prefix}${"a".repeat(room - 17)}~`)).toBe(true);
+      expect(bytes(subject)).toBe(SUBJECT_MAX_BYTES);
+    });
+
+    // The subject's type names the uncut ref, so these read it as a string.
+    test("gives two 5,000-byte refs sharing the kept text two subjects", () => {
+      const kept = `${prefix}${"a".repeat(room - 17)}`;
+      expect<string>(githubPushSubject("acme", "widgets", "branch", "a".repeat(5000))).toBe(
+        `${kept}~c526c6222044dab5`
+      );
+      expect<string>(githubPushSubject("acme", "widgets", "branch", `${"a".repeat(4999)}b`)).toBe(
+        `${kept}~dedc26db66630d52`
+      );
+    });
+
+    test("digests the ref, not its sanitized segment", () => {
+      expect(githubPushSubject("acme", "widgets", "branch", "a.".repeat(2500))).not.toBe(
+        githubPushSubject("acme", "widgets", "branch", "a_".repeat(2500))
+      );
+    });
+
+    test("keeps whole 4-byte runes under the longest owner and repository", () => {
+      const owner = "o".repeat(39);
+      const repo = "r".repeat(100);
+      const runePrefix = `notifications.github.${owner}.${repo}.push.tag.`;
+      const subject = githubPushSubject(owner, repo, "tag", "𝔸".repeat(1250));
+      const runes = Math.floor((SUBJECT_MAX_BYTES - runePrefix.length - 17) / 4);
+      expect(subject.startsWith(`${runePrefix}${"𝔸".repeat(runes)}~`)).toBe(true);
+      expect(bytes(subject)).toBeLessThanOrEqual(SUBJECT_MAX_BYTES);
+      expect(bytes(subject)).toBeGreaterThan(SUBJECT_MAX_BYTES - 4);
+    });
   });
 });
 

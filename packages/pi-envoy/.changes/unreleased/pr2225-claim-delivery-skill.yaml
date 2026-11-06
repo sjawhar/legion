@@ -1,8 +1,0 @@
-kind: Changed
-body: |-
-  The `dispatch` skill this plugin ships says what a claim delivers, where it said a claim delivers
-  no comments: a person's answers, comments and messages on the claimed issue reach the session,
-  and a new comment that mentions it arrives as the mention alone once that mention was delivered,
-  or twice when the mention's receipt timed out. A `session:` route to the session brings a
-  person's answers, comments and messages as a claim does; a subscription to the issue brings
-  other agents' activity, beyond a reply in an ask the session follows.

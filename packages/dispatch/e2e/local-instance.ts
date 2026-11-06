@@ -6,9 +6,17 @@
 import { fileURLToPath } from "node:url";
 
 import { harnessVariables } from "./harness-ports";
+import { harnessProcessCount } from "./harness-processes";
 import { type Harness, startHarness } from "./harness-start";
-import { databaseUrlRefusal, Interrupted, Supervisor, shellQuote } from "./local-instance-support";
+import {
+  agentViewRefusal,
+  databaseUrlRefusal,
+  Interrupted,
+  Supervisor,
+  shellQuote,
+} from "./local-instance-support";
 import { sqlAt } from "./psql";
+import { sessionIds } from "./session-ids";
 
 const dispatchPackage = fileURLToPath(new URL("..", import.meta.url));
 const envoyPackage = fileURLToPath(new URL("../../envoy", import.meta.url));
@@ -76,6 +84,14 @@ async function main(): Promise<void> {
   if (process.env.PLAYWRIGHT_BASE_URL) {
     throw new Error("unset PLAYWRIGHT_BASE_URL: this command starts its own servers");
   }
+  // It builds, seeds and hands out one server, where two-process mode needs B's build of its own
+  // (DISPATCH_E2E_WEB_DIST_B) and serves only the multiprocess specs `bun run e2e:multiprocess` runs.
+  if (harnessProcessCount !== 1) {
+    throw new Error(
+      "unset DISPATCH_E2E_PROCESSES: this command runs one Dispatch server; " +
+        "`bun run e2e:multiprocess` runs two"
+    );
+  }
   const given = process.env.DATABASE_URL?.trim();
   for (const tool of ["go", "psql", "flock", "openssl", "python3", ...(given ? [] : ["docker"])]) {
     if (!Bun.which(tool)) throw new Error(`${tool} is required on PATH`);
@@ -117,6 +133,13 @@ async function main(): Promise<void> {
     workspaceSessionIds.every((id) => agents.has(id)),
     "agents listed"
   );
+  // The live view rides the live socket, not the API, and Dispatch refuses an agent view whose
+  // session id is not a uuid: a seed of named sessions passes every check above and still reads
+  // "This session's conversation is unavailable" at /agents/<id>/live.
+  const liveView = await untilInterrupted(
+    agentViewRefusal(baseUrl, await userHeaders("alice"), sessionIds.planner)
+  );
+  check(liveView === undefined, `the Planner's live view: ${liveView}`);
 
   // 6. Hand over, and run until Ctrl-C or until one of the processes stops by itself.
   const fakeEnvoy = `http://127.0.0.1:${harness.env[harnessVariables.fakeEnvoy]}`;
@@ -125,6 +148,7 @@ async function main(): Promise<void> {
       `  Open (signed in as alice): ${baseUrl}/auth/_dev/signin?login=alice&next=/\n` +
       `  Sign in as bob:            ${baseUrl}/auth/_dev/signin?login=bob&next=/\n` +
       `  Seeded broadcast:          ${baseUrl}/agents/broadcasts/${seeded.broadcast.id}\n` +
+      `  Planner's live view:       ${baseUrl}/agents/${sessionIds.planner}/live\n` +
       `  Agent bearer:              e2e-token (for a local Oh My Pi session: DISPATCH_URL=${baseUrl} ` +
       "DISPATCH_TOKEN=e2e-token, with DISPATCH_TOKEN_FILE unset since it wins)\n" +
       `  Database (truncated and reseeded on every start): ${databaseUrl}\n` +

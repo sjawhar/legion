@@ -4,8 +4,7 @@ import { resolve } from "node:path";
 import { z } from "zod";
 import { ISSUE_TITLE_MAX, PROJECT_NAME_MAX } from "./dispatch-api";
 import {
-  ASK_QUESTION_MAX,
-  DISPATCH_BODY_MAX,
+  DISPATCH_HANDOFF_BODY_MAX,
   dispatchToolSchema,
   dispatchToolSpecs,
   ISSUE_STATUSES,
@@ -72,6 +71,42 @@ function specFor(name: string) {
   return spec;
 }
 
+/** A schema node that keeps every description its chain carries and validates nothing. */
+interface Described extends SchemaNode<Described> {}
+
+/**
+ * Every description one spec's arguments carry, nested objects' and array items' included: what
+ * a host shows beside each field, read through the builder rather than off the source.
+ */
+function argumentDescriptions(name: string): readonly string[] {
+  const texts: string[] = [];
+  const node = (): Described => ({
+    optional: node,
+    nullable: node,
+    describe: (text) => {
+      texts.push(text);
+      return node();
+    },
+  });
+  dispatchToolSchema(specFor(name), {
+    string: node,
+    number: node,
+    boolean: node,
+    enum: node,
+    array: node,
+    unknown: node,
+    object: node,
+    refineObject: node,
+  });
+  return texts;
+}
+
+/** The one rule every ask instruction gives, written once in `dispatch-tools.ts`. */
+const ASK_RULE =
+  "An ask is short and asks one thing; its reasoning goes in the document, not in the question.";
+/** A character count in words: a group of digits, then `character`. */
+const characterCount = /\d[\d,]*[\s-]*characters?\b/iu;
+
 const validCalls = {
   dispatch_issue: { project: "DSP", title: "Native workspace" },
   dispatch_issue_update: { issue: "DSP-1", status: "in_progress" },
@@ -103,15 +138,30 @@ const validCalls = {
     issue: "DSP-1",
     summary: "A live sync replaces the nightly export.",
   },
+  dispatch_plan_approve: { issue: "DSP-1", version: 2 },
+  dispatch_result: {
+    issue: "DSP-1",
+    check: "k1",
+    role: "implementer",
+    verdict: "pass",
+    commit: "1111111111111111111111111111111111111111",
+  },
+  dispatch_results: { issue: "DSP-1" },
   dispatch_artifact: { issue: "DSP-1", name: "design.pdf", path: "design.pdf" },
   dispatch_read: { issue: "DSP-1" },
   dispatch_search: { query: "astrolabe" },
+  dispatch_related: { project: "CORE", title: "Retry failed webhook deliveries" },
   dispatch_issues: { project: "ACME" },
   dispatch_project: { key: "CORE", name: "Core" },
   dispatch_projects: {},
   dispatch_architecture_sync: { project: "CORE" },
   dispatch_open_asks: {},
+  dispatch_answers: {},
   dispatch_whoami: {},
+  dispatch_limits: {},
+  dispatch_handoff_write: specFor("dispatch_handoff_write").example,
+  dispatch_handoff_read: { issue: "DSP-1", phase: "implement", version: 2 },
+  dispatch_inbox: {},
 } as const;
 
 function schemaFor(name: keyof typeof validCalls) {
@@ -131,13 +181,13 @@ describe("zodSchemaApi", () => {
   });
 
   test("names how far an over-limit string is over its cap", () => {
-    const result = schemaFor("dispatch_ask").safeParse({
+    const result = schemaFor("dispatch_issue_update").safeParse({
       issue: "DSP-1",
-      question: "x".repeat(ASK_QUESTION_MAX + 50),
+      title: "x".repeat(ISSUE_TITLE_MAX + 50),
     });
     expect(result.success).toBe(false);
     expect(result.error?.issues.map((issue) => issue.message)).toEqual([
-      `is 50 characters over the ${ASK_QUESTION_MAX}-character limit (${ASK_QUESTION_MAX + 50}/${ASK_QUESTION_MAX})`,
+      `is 50 characters over the ${ISSUE_TITLE_MAX}-character limit (${ISSUE_TITLE_MAX + 50}/${ISSUE_TITLE_MAX})`,
     ]);
   });
 
@@ -167,15 +217,24 @@ describe("dispatchToolSpecs", () => {
       "dispatch_doc_edit",
       "dispatch_doc_read",
       "dispatch_request_approval",
+      "dispatch_plan_approve",
+      "dispatch_result",
+      "dispatch_results",
       "dispatch_artifact",
       "dispatch_read",
       "dispatch_search",
+      "dispatch_related",
       "dispatch_issues",
       "dispatch_project",
       "dispatch_projects",
       "dispatch_architecture_sync",
       "dispatch_open_asks",
+      "dispatch_answers",
       "dispatch_whoami",
+      "dispatch_limits",
+      "dispatch_handoff_write",
+      "dispatch_handoff_read",
+      "dispatch_inbox",
     ]);
 
     for (const [name, args] of Object.entries(validCalls) as Array<
@@ -219,6 +278,18 @@ describe("dispatchToolSpecs", () => {
         "description says what that approach costs"
       );
     }
+  });
+
+  test("dispatch_related takes a project key and refuses anything else by name", () => {
+    const schema = schemaFor("dispatch_related");
+
+    expect(schema.safeParse({ project: "CORE", text: "a draft spec" }).success).toBe(true);
+    expect(schema.safeParse({ title: "no project" }).success).toBe(false);
+    const lower = schema.safeParse({ project: "core", title: "Retry deliveries" });
+    expect(lower.success).toBe(false);
+    expect(lower.error?.issues.map((issue) => issue.message)).toEqual([
+      `project is not a project key: ${PROJECT_KEY_RULE}`,
+    ]);
   });
 
   test("dispatch_search rejects a one-character query and a limit above 50", () => {
@@ -285,6 +356,18 @@ describe("dispatchToolSpecs", () => {
     expect(specFor("dispatch_project").description).toContain(PROJECT_KEY_RULE);
   });
 
+  test("dispatch_project's description says to create a requested project without questions", () => {
+    const description = specFor("dispatch_project").description;
+    expect(description).toContain(
+      "When a person asks for a project, make the key from its name. Check the key with " +
+        "dispatch projects. If the key is free, create the project. Ask the person only when the key is in use."
+    );
+    expect(description).toContain(
+      "When no person asked for a project and an existing project already covers the work, do not create a " +
+        "project. File an issue in that project with dispatch issue."
+    );
+  });
+
   test("dispatch_architecture_sync takes one owner/name repository or none, refusing anything else by name", () => {
     const schema = schemaFor("dispatch_architecture_sync");
 
@@ -332,6 +415,14 @@ describe("dispatchToolSpecs", () => {
     expect(schema.safeParse({}).success).toBe(true);
     expect(schema.safeParse({ project: "ACME" }).success).toBe(true);
     expect(schema.safeParse({ session_id: "another-session" }).success).toBe(false);
+  });
+
+  test("dispatch_answers accepts no arguments and rejects any key", () => {
+    const schema = schemaFor("dispatch_answers");
+
+    expect(schema.safeParse({}).success).toBe(true);
+    expect(schema.safeParse({ session_id: "another-session" }).success).toBe(false);
+    expect(schema.safeParse({ since: "2026-10-27T00:00:00Z" }).success).toBe(false);
   });
 
   test("dispatch_issues requires a project and accepts only a nonnegative integer offset", () => {
@@ -402,6 +493,62 @@ describe("dispatchToolSpecs", () => {
 
     expect(schema.safeParse({}).success).toBe(true);
     expect(schema.safeParse({ session_id: "another-session" }).success).toBe(false);
+  });
+
+  test("dispatch_limits accepts no arguments and says the server refuses an over-long text", () => {
+    const schema = schemaFor("dispatch_limits");
+
+    expect(schema.safeParse({}).success).toBe(true);
+    expect(schema.safeParse({ project: "CORE" }).success).toBe(false);
+    expect(specFor("dispatch_limits").description).toContain(
+      "Dispatch refuses a text over a bound and names the block or the field it passed"
+    );
+  });
+
+  test("dispatch_inbox accepts no arguments, names the Envoy tool it is not, and rejects any key", () => {
+    const schema = schemaFor("dispatch_inbox");
+
+    expect(schema.safeParse({}).success).toBe(true);
+    expect(schema.safeParse({ assignee: "me" }).success).toBe(false);
+    // The two tools' names differ by one word, so the description says which Inbox this reads.
+    expect(specFor("dispatch_inbox").description).toContain("envoy_inbox");
+  });
+
+  test("dispatch_handoff_write takes one JSON object body of any length, and a phase slug", () => {
+    const schema = schemaFor("dispatch_handoff_write");
+    const refusals = (args: Record<string, unknown>) =>
+      schema.safeParse(args).error?.issues.map((issue) => issue.message);
+    const call = { issue: "DSP-1", phase: "implement" };
+
+    // A body of exactly the server's cap, counted in UTF-8 bytes ("é" is two of them), and one
+    // a byte over it: the server owns that bound and answers 413 CAP_EXCEEDED, so both reach it.
+    const filler = "é".repeat((DISPATCH_HANDOFF_BODY_MAX - '{"a":""}'.length) / 2);
+    expect(schema.safeParse({ ...call, body: `{"a":"${filler}"}` }).success).toBe(true);
+    expect(schema.safeParse({ ...call, body: `{"a":"${filler}x"}` }).success).toBe(true);
+    for (const body of ["[1]", '"text"', "null", "{not json", "{} {}"]) {
+      expect(refusals({ ...call, body }), body).toEqual([
+        'body is not one JSON object: a handoff body is a JSON object such as {"schemaVersion":1}',
+      ]);
+    }
+    for (const phase of ["Implement", "1plan", "", "a".repeat(33), "plan/x"]) {
+      expect(refusals({ ...call, phase, body: "{}" }), phase).toEqual([
+        "phase is not a handoff phase: a lowercase letter, then up to 31 lowercase letters, digits or hyphens, such as implement",
+      ]);
+    }
+    expect(schema.safeParse({ ...call, body: "{}", session_id: "other" }).success).toBe(false);
+    expect(specFor("dispatch_handoff_write").description).toContain(
+      `${DISPATCH_HANDOFF_BODY_MAX} bytes with 413 CAP_EXCEEDED`
+    );
+  });
+
+  test("dispatch_handoff_read takes an issue, a phase slug and an optional positive version", () => {
+    const schema = schemaFor("dispatch_handoff_read");
+
+    expect(schema.safeParse({ issue: "DSP-1", phase: "review" }).success).toBe(true);
+    expect(schema.safeParse({ issue: "DSP-1", phase: "review", version: 0 }).success).toBe(false);
+    expect(schema.safeParse({ issue: "DSP-1", phase: "review", version: 1.5 }).success).toBe(false);
+    expect(schema.safeParse({ issue: "DSP-1", phase: "Review" }).success).toBe(false);
+    expect(schema.safeParse({ issue: "DSP-1", phase: "review", body: "{}" }).success).toBe(false);
   });
 
   test("dispatch_project takes a key and a name and nothing else", () => {
@@ -546,6 +693,41 @@ describe("dispatchToolSpecs", () => {
     expect(schema.safeParse({ issue: "DSP-1", status: "Done" }).success).toBe(false);
   });
 
+  // A refusal that joins the document-owner rule to another rule names only the parts the call
+  // broke: a call with a valid owner is never told its owner is wrong.
+  test("owner-plus-rule refusals name only the broken part", () => {
+    const turn =
+      "turn requires reply_to_ask: turn says who holds an open ask's thread after the reply. Pass reply_to_ask with the open ask's id, or drop turn.";
+    const precondition = "A precondition selects exactly one of document or blocks.";
+    const source = "Exactly one of path or content is required.";
+    const artifactOwner =
+      "Exactly one of issue and project is required; with project, artifact names the document.";
+    const edit = { artifact: "spec.md", ops: [{ op: "delete", find: "x" }] };
+    const readOwner =
+      "Exactly one of issue and project is required; project alone lists its documents, and with artifact names one.";
+    const readMessage =
+      "message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it.";
+    for (const [tool, args, refusal] of [
+      ["dispatch_comment", { issue: "DSP-1", body: "y", turn: "agent" }, turn],
+      ["dispatch_comment", { body: "y", turn: "agent" }, `${artifactOwner} ${turn}`],
+      ["dispatch_comment", { body: "y" }, artifactOwner],
+      ["dispatch_doc_edit", { issue: "DSP-1", ...edit, precondition: {} }, precondition],
+      ["dispatch_doc_edit", { ...edit }, artifactOwner],
+      ["dispatch_artifact", { issue: "DSP-1", name: "n" }, source],
+      ["dispatch_artifact", { name: "n", content: "c" }, artifactOwner],
+      ["dispatch_artifact", { name: "n" }, `${artifactOwner} ${source}`],
+      ["dispatch_read", { issue: "DSP-1", message: "m" }, readMessage],
+      ["dispatch_read", {}, readOwner],
+    ] as const) {
+      const result = schemaFor(tool).safeParse(args);
+      expect(result.success, `${tool} ${JSON.stringify(args)}`).toBe(false);
+      expect(
+        result.error?.issues.map((issue) => issue.message),
+        `${tool} ${JSON.stringify(args)}`
+      ).toEqual([refusal]);
+    }
+  });
+
   // A closed issue refuses messages, comments, and artifacts, so the reason an issue closed can
   // only be written before the close: the tool takes it in the same call and refuses the close
   // without it.
@@ -576,17 +758,33 @@ describe("dispatchToolSpecs", () => {
         JSON.stringify(args)
       ).toEqual([refusal]);
     }
+    // The Dispatch server owns the bound on a body (INFRA-370), so the schema takes a reason the
+    // old client-side cap of 32,000 characters refused.
     expect(
-      schema.safeParse({
-        issue: "DSP-1",
-        status: "done",
-        reason: "x".repeat(DISPATCH_BODY_MAX + 1),
-      }).success
-    ).toBe(false);
-    expect(
-      schema.safeParse({ issue: "DSP-1", status: "done", reason: "x".repeat(DISPATCH_BODY_MAX) })
-        .success
+      schema.safeParse({ issue: "DSP-1", status: "done", reason: "x".repeat(32001) }).success
     ).toBe(true);
+  });
+
+  // The server owns the bound on an ask's question too, and names it in its refusal.
+  test("dispatch_ask takes a question longer than the old client-side cap", () => {
+    expect(
+      schemaFor("dispatch_ask").safeParse({ issue: "DSP-1", question: "x".repeat(2001) }).success
+    ).toBe(true);
+  });
+
+  // Every instruction an agent reads about an ask gives one rule and no count: the server owns
+  // the bound on a question and its options, names the bound in its refusal, and prints it
+  // through `dispatch limits`, so a number written here would be a second source that drifts the
+  // day the server's changes (INFRA-370). The rule itself is what the instruction carries.
+  test("every ask instruction gives one rule and states no character count", () => {
+    for (const name of ["dispatch_ask", "dispatch_edit_ask"]) {
+      const texts = [specFor(name).description, ...argumentDescriptions(name)];
+
+      for (const text of texts) {
+        expect(characterCount.exec(text), `${name}: ${text}`).toBeNull();
+      }
+      expect(texts.join(" "), name).toContain(ASK_RULE);
+    }
   });
 
   // Agents may set an issue's priority (dispatch://LEGION/artifact/issue-status-conventions-md);
@@ -881,7 +1079,7 @@ describe("dispatchToolSpecs", () => {
     }
   });
 
-  test("requires artifact with project on document tools but not dispatch_artifact", () => {
+  test("requires artifact with project on document tools but not dispatch_artifact or dispatch_read", () => {
     const cases = [
       [
         "dispatch_ask",
@@ -894,7 +1092,6 @@ describe("dispatchToolSpecs", () => {
         { project: "CORE", ops: [{ op: "replace", find: "draft", with: "final" }] },
       ],
       ["dispatch_doc_read", { project: "CORE" }],
-      ["dispatch_read", { project: "CORE" }],
     ] as const;
 
     for (const [name, args] of cases) {
@@ -907,6 +1104,8 @@ describe("dispatchToolSpecs", () => {
         content: "# Runbook",
       }).success
     ).toBe(true);
+    // A project alone is the read of its documents' list.
+    expect(schemaFor("dispatch_read").safeParse({ project: "CORE" }).success).toBe(true);
   });
 
   test("accepts a project-document ref in place of issue/project on every ref-aware tool", () => {
@@ -1089,7 +1288,7 @@ describe("dispatchToolSpecs", () => {
     ],
     [
       "dispatch_artifact",
-      "Never upload a document's own name to change it (spec.md replaces the spec whole); edit it with dispatch doc-edit. Uploading the same name again makes its next version.",
+      "Never upload a document's own name to change it (spec.md replaces the spec whole); edit it with dispatch doc-edit. Uploading the same name again makes its next version, and so does uploading a document's slug (plan-md for plan.md).",
     ],
     [
       "dispatch_ask",
@@ -1121,7 +1320,7 @@ describe("dispatchToolSpecs", () => {
     ],
     [
       "dispatch_read",
-      "A block read prints `Block:`, `Document:`, `Changed in version:` and `Text:`, then those two sections; a pinned one adds the block's text at that version and whether it is unchanged, changed or removed since, and an absent block, unpinned, reads `No block <id> in <document>.`",
+      "A block read prints `Block:`, `Type:` for a block of a document, `Document:`, every attribute a typed block carries (a `check`'s serves, surface, run, when and negative_control; a `plan_task`'s serves and needs), `Changed in version:` and `Text:`, then those two sections; a pinned one adds the block's text at that version and whether it is unchanged, changed or removed since, and an absent block, unpinned, reads `No block <id> in <document>.`",
     ],
   ])("%s's description, which --help prints, holds the rule moved from the skill", (name, rule) => {
     expect(specFor(name).description).toContain(rule);

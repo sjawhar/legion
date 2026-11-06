@@ -38,4 +38,4 @@ envoy_publish(
 )
 ```
 
-The subscribed session should receive it. An Oh My Pi or Claude Code session receives its own publish, so it can run both steps; a session delivered over a serve port cannot, and needs a second session to publish. Real WhatsApp delivery also needs the listener's MCP bridge configured with a `whatsapp` server (`packages/envoy/internal/mcpbridge`).
+The subscribed session should receive it. An Oh My Pi or Claude Code session receives its own publish, so it can run both steps. Real WhatsApp delivery also needs the listener's MCP bridge configured with a `whatsapp` server (`packages/envoy/internal/mcpbridge`).

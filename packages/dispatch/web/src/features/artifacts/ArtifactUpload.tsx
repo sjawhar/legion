@@ -1,18 +1,20 @@
 import { isPictureType, pictureCaption } from "@legion/contracts";
-import { type QueryClient, useMutation, useQueryClient } from "@tanstack/react-query";
+import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import {
   type ChangeEvent,
   type ClipboardEvent,
   type DragEvent,
   type ReactNode,
   type RefObject,
+  useId,
   useRef,
   useState,
 } from "react";
 
-import { ApiError, type ArtifactOwner, api } from "../../api/client";
+import { ApiError, type ArtifactOwner, api, type WriteBounds } from "../../api/client";
 import type { Artifact, Version } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
+import { RefusableButton } from "../../components/RefusableButton";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
   calloutInfoBg,
@@ -28,22 +30,34 @@ import {
   textMutedOnSurfaceMuted,
 } from "../../theme/classes";
 import { buildDispatchReference, type DispatchReferenceRoute } from "../refs/routes";
+import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
+
+/** Why a closed issue's Artifacts tab, or its document's repair, takes no upload: Dispatch refuses
+ *  one until the issue is reopened. */
+export const CLOSED_ISSUE_UPLOAD_REFUSAL = "This issue is closed. Reopen it to upload.";
 
 export interface UploadResult {
   artifact: Artifact;
   version: Version;
 }
 
-export async function uploadFile(
+/** One attempt of `file`'s upload to `owner`, under the write's key (`bounds`). */
+export function uploadFile(
   owner: ArtifactOwner,
   file: File,
-  options: { name?: string; summary?: string } = {}
+  options: { name?: string; summary?: string },
+  bounds: WriteBounds
 ): Promise<UploadResult> {
-  return api.uploadArtifact(owner, {
-    file,
-    name: options.name ?? (file.name || "artifact"),
-    summary: options.summary,
-  });
+  return api.uploadArtifact(
+    owner,
+    {
+      file,
+      name: options.name ?? (file.name || "artifact"),
+      summary: options.summary,
+    },
+    bounds
+  );
 }
 
 // A refused upload is described by the server, which names the bound it hit: a markdown document
@@ -111,6 +125,9 @@ export interface DraftUpload {
   error: unknown;
   isError: boolean;
   isPending: boolean;
+  /** The name of the last file Dispatch stored with no answer to give for it, so its reference
+   *  could not be added to the draft; null otherwise. */
+  madeUnanswered: string | null;
   /** Uploads the last refused file again, to the owner it was sent to. */
   retry(): void;
 }
@@ -128,16 +145,26 @@ export function useDraftUpload(insert: (text: string) => void): DraftUpload {
   const queryClient = useQueryClient();
   const [pending, setPending] = useState(0);
   const retryGuard = useSubmitGuard();
-  const upload = useMutation({
-    mutationFn: async ({ file, owner }: { file: File; owner: ArtifactOwner }) => ({
+  // Each file is one write under a key of its own, its refusal shown here beside the draft, and
+  // its file kept across a reload with it.
+  const upload = useKeyedWrite<
+    { file: File; owner: ArtifactOwner; result: UploadResult },
+    { file: File; owner: ArtifactOwner }
+  >({
+    write: async ({ file, owner }, bounds) => ({
       file,
       owner,
-      result: await uploadFile(owner, file),
+      result: await uploadFile(owner, file, {}, bounds),
     }),
+    file: ({ file }) => file,
+    inline: true,
+    label: ({ file }) => `Upload of ${file.name || "a file"}`,
     onMutate: () => setPending((count) => count + 1),
-    onSuccess: ({ file, owner, result }) => {
-      insert(uploadedFileText(owner, file, result));
+    // Stored either way; with no answer to give, its reference cannot be added to the draft, and
+    // the field says so (`upload.unanswered`).
+    onSuccess: (landed, { file, owner }) => {
       refreshOwnerArtifacts(queryClient, owner);
+      if (landed !== null) insert(uploadedFileText(owner, file, landed.result));
     },
     onSettled: () => {
       setPending((count) => count - 1);
@@ -149,6 +176,7 @@ export function useDraftUpload(insert: (text: string) => void): DraftUpload {
       return;
     }
     event.preventDefault();
+    upload.forgetUnanswered();
     for (const file of [...files]) upload.mutate({ file, owner });
   };
   return {
@@ -156,6 +184,8 @@ export function useDraftUpload(insert: (text: string) => void): DraftUpload {
     error: upload.error,
     isError: upload.isError,
     isPending: upload.isPending,
+    madeUnanswered:
+      upload.unanswered === undefined ? null : upload.unanswered.variables.file.name || "the file",
     paste: (event, owner) => receive(event.clipboardData.files, owner, event),
     pending,
     retry: () => {
@@ -181,6 +211,11 @@ export function DraftUploadStatus({ upload }: { upload: DraftUpload }): ReactNod
           retrying={upload.isPending}
         />
       ) : null}
+      {upload.madeUnanswered === null ? null : (
+        <LandedWithoutAnswer what={`The upload of ${upload.madeUnanswered}`}>
+          Its reference was not added to your message.
+        </LandedWithoutAnswer>
+      )}
     </>
   );
 }
@@ -200,8 +235,12 @@ export interface ArtifactUpload {
   fileInputRef: RefObject<HTMLInputElement | null>;
   isError: boolean;
   isPending: boolean;
+  /** The name of the last file Dispatch stored with no answer to give for it; null otherwise. */
+  madeUnanswered: string | null;
   openPicker(): void;
   pendingFile: File | null;
+  /** Why no file can be uploaded here - its issue is closed - or null while one can. */
+  refusal: string | null;
   selectFile(event: ChangeEvent<HTMLInputElement>): void;
   setSummary(value: string): void;
   summary: string;
@@ -213,34 +252,49 @@ export interface ArtifactUpload {
  * field appears once there is something to summarize and whose "Cancel" discards the pick).
  * `name` uploads every file under that document name, replacing that document, rather than under
  * the picked file's own name. Success invalidates the owner's artifact list and, for an issue, the
- * issue itself.
+ * issue itself. With a `refusal` - the issue is closed - nothing can be picked or dropped, so no
+ * upload starts that Dispatch would refuse, and the row says why on its Upload control.
  */
 export function useArtifactUpload(
   owner: ArtifactOwner,
-  { immediate = false, name }: { immediate?: boolean; name?: string } = {}
+  {
+    immediate = false,
+    name,
+    refusal = null,
+  }: { immediate?: boolean; name?: string; refusal?: string | null } = {}
 ): ArtifactUpload {
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [summary, setSummary] = useState("");
   const [isDragging, setIsDragging] = useState(false);
-  const upload = useMutation({
-    mutationFn: (file: File) =>
-      uploadFile(owner, file, {
-        name,
-        summary: summary.trim() === "" ? undefined : summary.trim(),
-      }),
+  const upload = useKeyedWrite<UploadResult, File>({
+    write: (file, bounds) =>
+      uploadFile(
+        owner,
+        file,
+        { name, summary: summary.trim() === "" ? undefined : summary.trim() },
+        bounds
+      ),
+    file: (file) => file,
+    inline: true,
+    label: (file) => `Upload of ${file.name || "a file"}`,
     onSuccess: (result) => {
+      // Stored either way: the staged file and its summary go, so a second press sends nothing;
+      // with no answer to give, the row says so (`upload.unanswered`).
       setPendingFile(null);
       setSummary("");
-      void queryClient.invalidateQueries({ queryKey: ["artifact", result.artifact.id] });
       refreshOwnerArtifacts(queryClient, owner);
+      if (result !== null) {
+        void queryClient.invalidateQueries({ queryKey: ["artifact", result.artifact.id] });
+      }
     },
   });
   const receive = (file: File | undefined) => {
-    if (file === undefined) {
+    if (file === undefined || refusal !== null) {
       return;
     }
+    upload.forgetUnanswered();
     if (immediate) {
       upload.mutate(file);
     } else {
@@ -275,8 +329,15 @@ export function useArtifactUpload(
     fileInputRef,
     isError: upload.isError,
     isPending: upload.isPending,
-    openPicker: () => fileInputRef.current?.click(),
+    madeUnanswered:
+      upload.unanswered === undefined
+        ? null
+        : (name ?? (upload.unanswered.variables.name || "the file")),
+    openPicker: () => {
+      if (refusal === null) fileInputRef.current?.click();
+    },
     pendingFile,
+    refusal,
     selectFile: (event) => {
       receive(event.target.files?.[0]);
       event.target.value = "";
@@ -287,6 +348,7 @@ export function useArtifactUpload(
 }
 
 export function ArtifactUploadRow({ upload }: { upload: ArtifactUpload }): ReactNode {
+  const refusalId = useId();
   return (
     // The host owns the strip this sits in, so the row carries no divider of its own: idle it
     // is one button beside the filter, staging a file it takes the line.
@@ -294,13 +356,22 @@ export function ArtifactUploadRow({ upload }: { upload: ArtifactUpload }): React
       className={`flex min-w-0 flex-wrap items-center gap-2 ${upload.pendingFile === null ? "shrink-0" : "w-full"}`}
     >
       {upload.pendingFile === null ? (
-        <button
-          className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
-          onClick={upload.openPicker}
-          type="button"
-        >
-          Upload
-        </button>
+        <>
+          <RefusableButton
+            className="min-h-11 shrink-0"
+            look="secondary-compact"
+            onPress={upload.openPicker}
+            refusal={upload.refusal}
+            refusalShownBy={upload.refusal === null ? undefined : refusalId}
+          >
+            Upload
+          </RefusableButton>
+          {upload.refusal === null ? null : (
+            <span className={`text-xs ${textMutedOnSurface}`} id={refusalId}>
+              {upload.refusal}
+            </span>
+          )}
+        </>
       ) : (
         <>
           <span className={`min-w-0 truncate text-sm ${textMutedOnSurface}`}>
@@ -352,11 +423,19 @@ export function ArtifactUploadStatus({ upload }: { upload: ArtifactUpload }): Re
       </p>
     );
   }
+  if (upload.madeUnanswered !== null) {
+    return (
+      <div className="w-full">
+        <LandedWithoutAnswer what={`The upload of ${upload.madeUnanswered}`} />
+      </div>
+    );
+  }
   return null;
 }
 
 /** The two ways to hand `upload` a file: a drop anywhere over `children`, and the one hidden
- * `Upload artifact` file input that the host's picker button opens through `openPicker`. */
+ * `Upload artifact` file input that the host's picker button opens through `openPicker`. While the
+ * upload is refused the input is disabled, so no key opens a chooser whose file would be ignored. */
 export function ArtifactDropZone({
   children,
   upload,
@@ -379,6 +458,7 @@ export function ArtifactDropZone({
       <input
         aria-label="Upload artifact"
         className="sr-only left-0"
+        disabled={upload.refusal !== null}
         onChange={upload.selectFile}
         ref={upload.fileInputRef}
         type="file"

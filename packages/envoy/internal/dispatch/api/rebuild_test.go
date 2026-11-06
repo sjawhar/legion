@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -17,8 +18,9 @@ import (
 )
 
 // A rebuild is only for a history ygo cannot load. A healthy, idle document can carry updates
-// newer than its latest version, so the human-only route refuses it without deleting any history.
-func TestRebuildArtifactRouteIsHumanOnlyAndRefusesADocumentThatLoads(t *testing.T) {
+// newer than its latest version, so the route refuses it without deleting any history. The route
+// needs the person scope, which the deployment's shared token does not hold.
+func TestRebuildArtifactRouteNeedsThePersonScopeAndRefusesADocumentThatLoads(t *testing.T) {
 	handler, database, deps := newTestServer(t, testServerOptions{settle: time.Hour})
 	issue := createArtifactIssue(t, handler)
 	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
@@ -44,8 +46,8 @@ func TestRebuildArtifactRouteIsHumanOnlyAndRefusesADocumentThatLoads(t *testing.
 
 	path := "/api/v1/artifacts/" + artifact.ID + "/rebuild"
 	bearer := sessionRequest(t, handler, http.MethodPost, path, map[string]any{"actor": sessionActor()})
-	if bearer.Code != http.StatusForbidden || !strings.Contains(bearer.Body.String(), `"code":"HUMAN_ONLY"`) {
-		t.Fatalf("bearer rebuild: status=%d body=%s, want 403 HUMAN_ONLY", bearer.Code, bearer.Body.String())
+	if bearer.Code != http.StatusForbidden || !strings.Contains(bearer.Body.String(), `"code":"`+codeScopeRequired+`"`) {
+		t.Fatalf("the shared token's rebuild: status=%d body=%s, want 403 %s", bearer.Code, bearer.Body.String(), codeScopeRequired)
 	}
 	human := dispatchRequest(t, handler, http.MethodPost, path, map[string]any{}, "alice")
 	if human.Code != http.StatusConflict || !strings.Contains(human.Body.String(), `"code":"DOCUMENT_LOADS"`) {
@@ -64,7 +66,7 @@ func TestRebuildArtifactRouteIsHumanOnlyAndRefusesADocumentThatLoads(t *testing.
 }
 
 // invalidLoadOnceStore loads a document failNextLoad names once, for a room or a cold read, as a
-// history that does not decode.
+// history that does not decode, at the head it stands at.
 type invalidLoadOnceStore struct {
 	docs.VersionedStore
 	mu      sync.Mutex
@@ -88,7 +90,11 @@ func (s *invalidLoadOnceStore) takeInvalid(room string) bool {
 
 func (s *invalidLoadOnceStore) Load(ctx context.Context, room string) (persistence.LoadResult, error) {
 	if s.takeInvalid(room) {
-		return persistence.LoadResult{Update: []byte{0xff}}, nil
+		head, err := s.VersionedStore.Head(ctx, room)
+		if err != nil {
+			return persistence.LoadResult{}, err
+		}
+		return persistence.LoadResult{Update: []byte{0xff}, Version: head}, nil
 	}
 	return s.VersionedStore.Load(ctx, room)
 }
@@ -224,8 +230,20 @@ func TestRebuildArtifactVersionsSuppliedMarkdownButNotTheLatestVersionSource(t *
 	}
 }
 
+// The close's settlement loads the document's room, and the close's commit closes it on every
+// process (migration 20261101181500's trigger, which room sync hears), so the rebuild that follows
+// meets no live room and is refused for the closed issue alone.
 func TestClosedIssueRebuildRefusesBeforeChangingTheDocument(t *testing.T) {
-	handler, _, broken := newBrokenTestServer(t)
+	var broken *invalidLoadOnceStore
+	handler, database, deps := newTestServer(t, testServerOptions{
+		settle: time.Hour,
+		persistence: func(database *store.Store) docs.VersionedStore {
+			broken = &invalidLoadOnceStore{VersionedStore: docs.NewPgVersioned(database), invalid: make(map[string]bool)}
+			return broken
+		},
+	})
+	documentService := deps.Docs.(*docs.Service)
+	runDocumentRoomSync(t, database, documentService)
 	issue := createArtifactIssue(t, handler)
 	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
 		"name": "closed.md", "content": "before\n",
@@ -235,6 +253,11 @@ func TestClosedIssueRebuildRefusesBeforeChangingTheDocument(t *testing.T) {
 	}](t, created).Artifact
 	if closed := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "done"}, "alice"); closed.Code != http.StatusOK {
 		t.Fatalf("close issue: status=%d body=%s", closed.Code, closed.Body.String())
+	}
+	for deadline := time.Now().Add(10 * time.Second); slices.Contains(documentService.ResidentRooms(), artifact.ID); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the closed issue's document room stayed resident after the close")
+		}
 	}
 	broken.failNextLoad(artifact.ID)
 	rebuilt := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+artifact.ID+"/rebuild", map[string]any{"markdown": "changed\n"}, "alice")

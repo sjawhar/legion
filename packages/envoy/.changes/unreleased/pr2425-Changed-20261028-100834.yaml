@@ -1,8 +1,0 @@
-kind: Changed
-body: |-
-    An issue's references answer, `GET /api/v1/issues/{key}/references`, now parses each
-    document's creator once and each distinct version author list once per request, where it parsed
-    both again for every version. The answer is unchanged.
-time: 2026-10-28T10:08:34.555618015Z
-custom:
-    Issue: pr2425

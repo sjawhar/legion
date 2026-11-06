@@ -25,9 +25,14 @@ module: packages/envoy/internal/dispatch/docs
   touched. Count the list nothing shrinks as well (`rewrites`).
 - Write the invariant at the reuse site and in `packages/envoy/AGENTS.md`'s settlement paragraph.
   Name where the read comes from (`readSettlementTree`, `liveTree`) and its one in-place writer
-  (`reconcileAskBlocks`, recorded by `changedTree`), as `service.go:1595-1598` and that paragraph
-  do, so a later change to the read path keeps it. No test enforces "only `reconcileAskBlocks`
-  changes `read`". A new in-place writer that is not recorded silently versions a stale tree.
+  (`reconcileAskBlocks`, recorded by `changedTree`), as the comment above the reuse decision in
+  `settleRoomWithin` and that paragraph do, so a later change to the read path keeps it. A new
+  in-place writer that is not recorded silently versions a stale tree. The settlement tests catch
+  one only on the settlements they drive: `requireReadUnchangedWhenReused`
+  (`settlement_read_invariant_test.go`) fails a test whose settlement reuses the rendering of a read
+  that changed after `readSettlementTree` returned it, and the tests in
+  `settlement_read_invariant_test.go` and `settlement_render_once_test.go` install it. A writer on a
+  path no test drives is caught only in review.
 - Treat a reuse condition written in a parent issue's ranking or design note as a hypothesis.
   Check it against the code, and use the wrong condition as the negative control of your tests.
 

@@ -21,8 +21,8 @@
 # non-zero exits are hits (1) and a search that failed (2).
 #
 # Run from anywhere: .github/scripts/check-plugin-names.sh
-# CI runs it over the repository in the lint job of pr-and-main.yaml, beside check-private-names.sh,
-# and its tests (check-plugin-names.test.sh) in that workflow's test job.
+# CI runs it over the repository in ci.yaml's lint job, beside check-private-names.sh, and its
+# tests (check-plugin-names.test.sh) in ci.yaml's test job.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -39,8 +39,8 @@ allowlist=(
   docs/superpowers/
   # The Envoy plugin's changelog: its history under the old name, and the entry that renames it.
   packages/pi-envoy/CHANGELOG.md
-  # Its changelog fragments: a fragment is that changelog's entry before the fold writes it in, so
-  # any line the CHANGELOG.md above may hold must be writable as its fragment.
+  # Its changelog fragments: a fragment holds an entry of the same kind as the lines above, so any
+  # line the CHANGELOG.md above may hold must be writable as its fragment.
   packages/pi-envoy/.changes/
   # The Legion plugin's changelog: its first entry says which package it was split from.
   packages/pi-legion/CHANGELOG.md
@@ -81,8 +81,6 @@ allowlist=(
   # The release workflow's first-release seed reads the old name's npm version, so the two new
   # packages continue its version line instead of restarting at 0.x.
   .github/workflows/release.yaml
-  # Committed handoffs quote the plan that names the split.
-  .legion/
   # This check and its test spell the name they hunt.
   .github/scripts/check-plugin-names.sh
   .github/scripts/check-plugin-names.test.sh

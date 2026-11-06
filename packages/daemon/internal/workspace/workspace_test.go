@@ -15,32 +15,59 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 const testTimeout = 30 * time.Second
 
-// TestMain isolates every real jj invocation this package's tests make from the operator's own
-// jj configuration — in particular fsmonitor.backend = "watchman" on this devbox: JJ_CONFIG
-// names a file that does not exist, so jj falls back to its built-in defaults instead of reading
-// ~/.jjconfig.toml, and no test-created repository ever registers a root with the operator's
-// long-running watchman. watchman drops a root once its directory is deleted, so without this,
-// the roots that pile up are the ones from a run this devbox's load killed before t.TempDir's
-// cleanup ran. A test that sets its own JJ_CONFIG afterward (newLocalRunner's isolated one)
-// still wins: os.Environ() is read fresh by every exec.Command.
-func TestMain(m *testing.M) {
-	configDir, err := os.MkdirTemp("", "legion-test-jj-config")
+// TestMain takes out of the process every variable that could lead git or jj to a workspace,
+// remote or credential not the test's own (fixtureenv.Guard), and gives the process a home of the
+// package's own (fixtureenv.Home), so every real jj and
+// git these tests run — provisioning's, which reads the process's environment, and the fixtures',
+// which run under fixtureenv.Isolated of that same home (setupEnvironment) — reads none of the
+// operator's configuration: in particular fsmonitor.backend = "watchman" on this devbox, which
+// would have every test-created repository register a root with the operator's long-running
+// watchman. watchman drops a root once its directory is deleted, so without this, the roots that
+// pile up are the ones from a run this devbox's load killed before t.TempDir's cleanup ran. A test
+// that sets a home of its own afterward (newLocalRunner's) still wins: os.Environ() is read fresh
+// by every exec.Command.
+func TestMain(m *testing.M) { os.Exit(runUnderAHomeOfThePackagesOwn(m)) }
+
+// runUnderAHomeOfThePackagesOwn does the setup the comment above describes and removes the home
+// afterwards. The removal is deferred, so it also runs when the setup below panics. A run killed
+// by a signal still keeps the home, which nothing here can help.
+func runUnderAHomeOfThePackagesOwn(m *testing.M) int {
+	if err := fixtureenv.Guard(); err != nil {
+		fmt.Fprintln(os.Stderr, "TestMain:", err)
+		return 1
+	}
+	home, err := os.MkdirTemp("", "legion-test-home")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "TestMain:", err)
-		os.Exit(1)
+		return 1
 	}
-	if err := os.Setenv("JJ_CONFIG", filepath.Join(configDir, "no-user-config.toml")); err != nil {
-		fmt.Fprintln(os.Stderr, "TestMain:", err)
-		os.Exit(1)
+	defer os.RemoveAll(home)
+	for _, entry := range fixtureenv.Home(home) {
+		key, value, _ := strings.Cut(entry, "=")
+		if err := os.Setenv(key, value); err != nil {
+			fmt.Fprintln(os.Stderr, "TestMain:", err)
+			return 1
+		}
 	}
-	code := m.Run()
-	os.RemoveAll(configDir)
-	os.Exit(code)
+	return m.Run()
+}
+
+func TestTheTestProcessIsGuarded(t *testing.T) {
+	fixtureenv.RequireGuarded(t)
+}
+
+// setupEnvironment is the environment of a fixture command: fixtureenv.Isolated under the home
+// the test's provisioning reads too (TestMain's, or newLocalRunner's), so a fixture and a
+// provision read the same jj repository configuration, and no fixture reads the workspace,
+// configuration, provisioning token or credential of the process that runs the tests.
+func setupEnvironment() []string {
+	return fixtureenv.Isolated(os.Getenv("HOME"))
 }
 
 // recordingRunner runs every command through the production runner, NewRunner, with the real jj
@@ -93,6 +120,15 @@ func (r *recordingRunner) Run(ctx context.Context, command Command) (Result, err
 	// A clone from a pod's feed reaches it through the insteadOf its own environment names.
 	if isClone(actual.Argv) && !slices.Contains(command.Env, "GIT_ALLOW_PROTOCOL=file") {
 		actual.Argv[3] = r.remote
+	}
+	// The skills clone names GitHub in its argv too: `git clone --depth 1 --single-branch
+	// --quiet <url> <dir>` (CloneSkills).
+	if commandWith(actual.Argv, "git", "clone", "--depth", "1", "--single-branch") {
+		for i, arg := range actual.Argv {
+			if arg == "https://github.com/acme/widgets" {
+				actual.Argv[i] = r.remote
+			}
+		}
 	}
 	if commandWith(actual.Argv, "git", "clone", "--bare", "--quiet", "https://github.com/acme/widgets") {
 		for i, arg := range actual.Argv {
@@ -165,8 +201,9 @@ func seedRemote(t *testing.T, root, defaultBranch string) string {
 	return remote
 }
 
-// runSetup runs a fixture command, never under a GIT_CONFIG_PARAMETERS a test planted for
-// provisioning's processes alone.
+// runSetup runs a fixture command under setupEnvironment, so it reads neither a
+// GIT_CONFIG_PARAMETERS a test planted for provisioning's processes alone nor the git
+// configuration of the process that runs the tests.
 func runSetup(t *testing.T, dir string, argv ...string) string {
 	t.Helper()
 	return runSetupWith(t, dir, nil, argv...)
@@ -177,12 +214,7 @@ func runSetupWith(t *testing.T, dir string, env []string, argv ...string) string
 	t.Helper()
 	command := exec.Command(argv[0], argv[1:]...)
 	command.Dir = dir
-	for _, entry := range os.Environ() {
-		if !strings.HasPrefix(entry, "GIT_CONFIG_PARAMETERS=") {
-			command.Env = append(command.Env, entry)
-		}
-	}
-	command.Env = append(command.Env, "JJ_USER=Legion test", "JJ_EMAIL=legion-test@example.invalid")
+	command.Env = append(setupEnvironment(), "JJ_USER=Legion test", "JJ_EMAIL=legion-test@example.invalid")
 	command.Env = append(command.Env, env...)
 	output, err := command.CombinedOutput()
 	if err != nil {
@@ -199,9 +231,9 @@ func fromOrigin(t *testing.T, run *recordingRunner, dir string, argv ...string) 
 }
 
 // newLocalRunner is a runner against a fresh local bare remote whose default branch is main. jj
-// reads no configuration of the user's who runs the tests: its user configuration is empty and its
-// config home, where jj keeps a repository's configuration, is the test's own, as in a pod's init
-// container.
+// reads no configuration of the user's who runs the tests: its home (fixtureenv.Home), whose
+// config home is where jj keeps a repository's configuration, is the test's own, as in a pod's
+// init container, and its fixtures read the same one.
 func newLocalRunner(t *testing.T) *recordingRunner {
 	t.Helper()
 	return newLocalRunnerOnBranch(t, "main")
@@ -211,8 +243,10 @@ func newLocalRunner(t *testing.T) *recordingRunner {
 func newLocalRunnerOnBranch(t *testing.T, defaultBranch string) *recordingRunner {
 	t.Helper()
 	home := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", home)
-	t.Setenv("JJ_CONFIG", filepath.Join(home, "no-user-config.toml"))
+	for _, entry := range fixtureenv.Home(home) {
+		key, value, _ := strings.Cut(entry, "=")
+		t.Setenv(key, value)
+	}
 	t.Setenv("JJ_USER", "Legion test")
 	t.Setenv("JJ_EMAIL", "legion-test@example.invalid")
 	return &recordingRunner{t: t, remote: seedRemote(t, t.TempDir(), defaultBranch), timeout: testTimeout, runner: NewRunner(testTimeout, testTools(t))}
@@ -915,7 +949,7 @@ func TestProvisionFromAFeedKeepsABookmarkPushedAfterTheSnapshot(t *testing.T) {
 	}
 	push := exec.Command("jj", "git", "push", "--named", "legion/WIDGETS-99=@", "--allow-empty-description")
 	push.Dir = working.Dir
-	push.Env = append(os.Environ(), "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=url."+run.remote+".insteadOf", "GIT_CONFIG_VALUE_0=https://github.com/acme/widgets")
+	push.Env = append(setupEnvironment(), "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=url."+run.remote+".insteadOf", "GIT_CONFIG_VALUE_0=https://github.com/acme/widgets")
 	if output, err := push.CombinedOutput(); err != nil {
 		t.Fatalf("a tree agent's push: %v\n%s", err, output)
 	}

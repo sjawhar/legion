@@ -15,13 +15,14 @@ import (
 // enroll / unenroll (a session key a launcher holds, through the local agent-secrets-helper)
 // ---------------------------------------------------------------------------
 
-// cmdEnroll implements "enroll --helper --runtime-id <id> --thumbprint <tp> [--session-id <id>]".
-// --helper is required: the broker's HTTP API has no launcher bearer token, so this CLI has no
-// other way to enroll anything — the host's one launcher credential lives only in
-// agent-secrets-helper's memory (a human installs it with `agent-secrets machine login`). It
-// enrolls a session key a launcher keeps outside the helper's process tree (agentbox's, for a
-// box); a session the helper registers enrolls itself through `agent-secrets register`, and a
-// pod's enrollment is its own launcher's job.
+// cmdEnroll implements the two enrollments this CLI makes.
+//
+// --helper is the one a launcher asks for: the broker's HTTP API has no launcher bearer token,
+// so the host's one launcher credential lives only in agent-secrets-helper's memory (a human
+// installs it with `agent-secrets machine login`). It enrolls a session key a launcher keeps
+// outside the helper's process tree (agentbox's, for a box); a session the helper registers
+// enrolls itself through `agent-secrets register`, and a pod's enrollment is its own launcher's
+// job.
 func cmdEnroll(args []string, stdout, stderr io.Writer) int {
 	flagArgs, positional := splitArgs(args, map[string]bool{
 		"runtime-id": true, "thumbprint": true, "session-id": true,
@@ -39,7 +40,7 @@ func cmdEnroll(args []string, stdout, stderr io.Writer) int {
 		return exitUsageError
 	}
 	if !*helperFlag {
-		fmt.Fprintln(stderr, "agent-secrets enroll: --helper is required (this CLI enrolls only through the local agent-secrets-helper socket)")
+		fmt.Fprintln(stderr, "agent-secrets enroll: --helper is required (this CLI enrolls a session key only through the local agent-secrets-helper socket)")
 		return exitUsageError
 	}
 	return cmdEnrollHelper(*runtimeID, *thumbprint, *sessionID, stdout, stderr)

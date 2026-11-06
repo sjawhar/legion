@@ -13,6 +13,7 @@ function summary(key: string, labels: string[]): IssueSummary {
     resolved_repo: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     key,
     labels,
     last_seq: 1,
@@ -48,7 +49,6 @@ test("the label cloud reads the project's loaded issue list instead of fetching 
         labels={["bug"]}
         onSave={() => Promise.resolve()}
         project="CORE"
-        saveError={false}
         saving={false}
       />
     </QueryClientProvider>
@@ -77,7 +77,6 @@ test("a rejected create shows its error until the next keystroke clears it", asy
         labels={[]}
         onSave={() => Promise.resolve()}
         project="CORE"
-        saveError={false}
         saving={false}
       />
     </QueryClientProvider>

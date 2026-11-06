@@ -139,8 +139,7 @@ func TestApprovingASecondLoginOnAKeyWithALiveCredentialIsKeyHoldsLiveCredential(
 	if status != http.StatusConflict || decode[wireError](t, body).Code != "KEY_HOLDS_LIVE_CREDENTIAL" {
 		t.Fatalf("approve the second login on the same key = %d %s, want 409 KEY_HOLDS_LIVE_CREDENTIAL", status, body)
 	}
-	_, body = ts.ui(t, http.MethodGet, "/v1/credential-requests/"+secondID, nil)
-	if read := decode[wireRecord](t, body); read.State != "pending" || read.Decided != nil {
+	if read := ts.record(t, secondID); read.State != "pending" || read.Decided != nil {
 		t.Fatalf("second login after the refused approve = %+v, want pending and undecided", read)
 	}
 	var credentials int

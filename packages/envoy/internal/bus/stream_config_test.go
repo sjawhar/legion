@@ -18,6 +18,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -102,7 +103,7 @@ func TestConnectWithContextBoundsMultipleUnresponsiveServers(t *testing.T) {
 	result := make(chan error, 1)
 	started := time.Now()
 	go func() {
-		conn, err := connectWithContext(ctx, "deadline-test", urls, nil, nil, nil, nil, nil, nil)
+		conn, err := connectWithContext(ctx, "deadline-test", urls, nil, nil, nil, nil, nil, nil, nil)
 		if conn != nil {
 			conn.Close()
 		}
@@ -133,7 +134,7 @@ func TestConnectWithContextDoesNotPoisonAutomaticReconnect(t *testing.T) {
 	reconnected := make(chan struct{}, 1)
 	conn, err := connectWithContext(connectCtx, "reconnect-dialer-test", []string{uri}, nil, nil, func(*nats.Conn) {
 		reconnected <- struct{}{}
-	}, nil, nil, nil)
+	}, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("connect with deadline: %v", err)
 	}
@@ -297,6 +298,22 @@ func TestConnectOwningStreamPurgesLegacyRoleMessagesBeforeDurableConsumerRestart
 		t.Fatalf("legacy role messages remained in stream after migration: %d", info.State.Msgs)
 	}
 
+	// nats-server releases a push binding on the consumer's own goroutine, after the client's
+	// Close is answered, so only the consumer's own report tells this test that the durable may
+	// be bound again; Client.Subscribe does not retry a "consumer is already bound" refusal.
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		consumer, err := client.JS().ConsumerInfo(Stream, "legacy-role-replay")
+		if err != nil {
+			t.Fatalf("read the legacy durable consumer: %v", err)
+		}
+		if !consumer.PushBound {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the server still reports the legacy durable consumer bound 10s after the legacy connection closed")
+		}
+	}
+
 	redelivered := make(chan struct{}, 1)
 	restartedSub, err := client.Subscribe("notifications.>", func(*nats.Msg) {
 		redelivered <- struct{}{}
@@ -323,6 +340,7 @@ func TestStreamConfigExcludesRoleLanes(t *testing.T) {
 		"notifications.ghostwispr.>",
 		"notifications.whatsapp.>",
 		"notifications.envoy.exceptions.notifications.agent.>",
+		"notifications.envoy.kept.>",
 	}
 	if !reflect.DeepEqual(streamCfg.Subjects, wantSubjects) {
 		t.Fatalf("stream subjects = %v, want %v", streamCfg.Subjects, wantSubjects)
@@ -600,9 +618,7 @@ func (l *capturedLogs) recordsWithMsg(t *testing.T, message string) []map[string
 func captureLogs(t *testing.T) *capturedLogs {
 	t.Helper()
 	logs := &capturedLogs{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewJSONHandler(logs, nil))
 	return logs
 }
 
@@ -744,8 +760,9 @@ func TestEnsureStreamWithConfigCreatesTheStreamWithAFreshID(t *testing.T) {
 
 // A deployed stream without an id gets one on the next start, even when nothing else about it
 // differs from the binary's configuration, and keeps the rest of its configuration and metadata:
-// settings the binary's configuration does not choose (here limits and a description; in a
-// cluster, the stream's replicas) stay as deployed.
+// settings the binary's configuration does not choose (here the message limits and a description;
+// in a cluster, the stream's placement) stay as deployed, and so do the ones it would only keep (a
+// byte limit, with no limit of its own set) or already matches (DiscardNew, the replicas).
 func TestEnsureStreamWithConfigGivesADeployedStreamWithoutAnIDOne(t *testing.T) {
 	js := streamTestJetStream(t)
 	deployed := *streamCfg
@@ -753,7 +770,6 @@ func TestEnsureStreamWithConfigGivesADeployedStreamWithoutAnIDOne(t *testing.T) 
 	deployed.MaxMsgs = 100_000
 	deployed.MaxBytes = 64 << 20
 	deployed.MaxMsgsPerSubject = 1_000
-	deployed.Discard = nats.DiscardNew
 	deployed.Metadata = map[string]string{"owner": "operations"}
 	if _, err := js.AddStream(&deployed); err != nil {
 		t.Fatalf("create the stream without an id: %v", err)

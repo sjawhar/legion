@@ -23,6 +23,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -96,7 +97,7 @@ func mappingRigJS(t *testing.T, installs *installations, opts ...func(*workflowR
 		installs.missing = map[string]bool{}
 	}
 	w := &workflowRuntime{pool: isolatedOutboxPool(t), records: record.NewStore(), dispatch: client, dispatchProject: "LEGION", installs: installs,
-		repositories: newRepositories("LEGION"), defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now), log: quietLogger(),
+		repositories: newRepositories("LEGION", ghrepo.Renames{}), defaultBranches: newDefaultBranches(roleTokens{}, nil, github.url, defaultBranchTTL, time.Now), log: quietLogger(),
 		mappingChanged: make(chan struct{}, 1)}
 	engine := workflow.New(w.records, workflow.Config{Project: "LEGION", Repositories: w, NoteUnread: w.noteUnread, DesignGate: config.DesignGateOff}, quietLogger())
 	w.engine, w.admission = engine, admit.New(w.records, engine, 3, "LEGION", quietLogger())
@@ -114,7 +115,7 @@ func mappingRigJS(t *testing.T, installs *installations, opts ...func(*workflowR
 	if err != nil {
 		t.Fatal(err)
 	}
-	if w.consumers, err = intake.OpenConsumers(ctx, js, intake.ConsumerSpec{Project: "LEGION", Repositories: heard, Logger: quietLogger(),
+	if w.consumers, err = intake.OpenConsumers(ctx, js, w.pool, intake.ConsumerSpec{Project: "LEGION", Repositories: heard, Logger: quietLogger(),
 		AckWait: time.Second, NakDelay: 10 * time.Millisecond, PrepareRepository: w.prepareRepository, RepositoryMapping: w.mappingChange}); err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +234,10 @@ func TestARefreshThatUnmapsARepositoryKeepsHearingAnIssueAdmittedOnIt(t *testing
 			Generation: 1, Status: "in_progress", Rank: "A", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets"}); err != nil {
 			return err
 		}
-		return w.records.PutSlot(ctx, tx, record.Slot{Issue: "LEGION-300", Index: 0, AdmittedAt: time.Now()})
+		if err := w.records.PutSlot(ctx, tx, record.Slot{Issue: "LEGION-300", Index: 0, AdmittedAt: time.Now()}); err != nil {
+			return err
+		}
+		return openTreeTx(ctx, tx, "LEGION", "LEGION-300")
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -498,7 +502,7 @@ func TestAnAdmissionWhosePreparationFailedIsPreparedAsDispatchNowShowsIt(t *test
 				client.set(dispatch.RepoProject{Repo: "acme/widgets", Project: "LEGION", Default: true}, dispatch.RepoProject{Repo: "zeta/tools", Project: "LEGION"})
 			}
 			github := &failingGitHub{named: map[string]string{"acme/widgets": "acme/widgets@main", "zeta/tools": "zeta/tools@main"}}
-			w.defaultBranches = newDefaultBranches(roleTokens{}, github.start(t), 0, time.Now)
+			w.defaultBranches = newDefaultBranches(roleTokens{}, w.repositories, github.start(t), 0, time.Now)
 			client.issue = dispatch.Issue{Key: "LEGION-305", Status: "todo", HandedOver: true, ResolvedRepo: repo, LastSeq: 1}
 			fact := intake.DispatchIssue{Key: "LEGION-305", Seq: 1, Status: "todo", Title: "new", Rank: "A", HandedOver: true, ResolvedRepo: repo}
 			if tc.heldFirst {
@@ -924,7 +928,7 @@ func TestAnUnreadEventIsAcknowledgedSoTheBootAdmitsRootsOnServedRepositories(t *
 	}
 	run, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
-	go func() { done <- w.consumers.Run(run, w.pool, engine, admission) }()
+	go func() { done <- w.consumers.Run(run, engine, admission) }()
 	polled := make(chan struct{})
 	go func() { w.pollHoldRelease(run); close(polled) }()
 	t.Cleanup(func() { cancel(); <-done; <-polled })
@@ -959,7 +963,7 @@ func TestAServedRepositoryKeptOnItsLastAnswerHoldsNoOtherRepositoryBack(t *testi
 	url := github.start(t)
 	w, _, installs, _ := mappingRigWith(t, installs, func(w *workflowRuntime) {
 		// Every read of a repository's name asks GitHub again, as one older than its TTL does.
-		w.defaultBranches = newDefaultBranches(roleTokens{}, url, 0, time.Now)
+		w.defaultBranches = newDefaultBranches(roleTokens{}, w.repositories, url, 0, time.Now)
 	})
 	if !served(w, "acme/widgets") || served(w, "zeta/tools") {
 		t.Fatalf("served %v at boot, want acme/widgets alone", w.repositories.Accepted())
@@ -1346,7 +1350,7 @@ func TestARecoveryWhileTheConsumerIsBehindAdmitsOnceItCatchesUp(t *testing.T) {
 	}
 	run, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
-	go func() { done <- w.consumers.Run(run, w.pool, engine, admission) }()
+	go func() { done <- w.consumers.Run(run, engine, admission) }()
 	polled := make(chan struct{})
 	go func() { w.pollHoldRelease(run); close(polled) }()
 	t.Cleanup(func() { cancel(); <-done; <-polled })
@@ -1659,7 +1663,7 @@ func (h *heldRecovery) behind(t *testing.T, key string) {
 func (h *heldRecovery) consume() {
 	run, cancel := context.WithCancel(context.Background())
 	h.cancel, h.done = cancel, make(chan error, 1)
-	go func() { h.done <- h.w.consumers.Run(run, h.w.pool, h.w.handlers...) }()
+	go func() { h.done <- h.w.consumers.Run(run, h.w.handlers...) }()
 }
 
 func (h *heldRecovery) pause() {

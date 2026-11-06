@@ -1,6 +1,7 @@
 import {
   dispatchDocumentSubject,
   dispatchIssueSubject,
+  type OpenAskOwner,
   parseBlockFragment,
 } from "@legion/contracts";
 
@@ -18,6 +19,14 @@ export interface OwnerTopic {
 /** How tool results name a project document: `<project>/<slug>`. */
 export function documentLabel(project: string, slug: string): string {
   return `${project}/${slug}`;
+}
+
+/** How the open-asks summary and the per-request answers list name an item's issue or document:
+ *  `<KEY>: <title>` or `<project> / <name>`. */
+export function ownerTitle(owner: OpenAskOwner): string {
+  return "issue" in owner
+    ? `${owner.issue.key}: ${owner.issue.title}`
+    : `${owner.document.project} / ${owner.document.name}`;
 }
 
 export function issueTopic(key: string): OwnerTopic {
@@ -41,12 +50,17 @@ export function dispatchDocumentRef(owner: string, slug: string): string {
   return `dispatch://${owner}/artifact/${slug}`;
 }
 
+/** The kinds of item whose blocks are its own rather than a document's: an ask, whose parts are
+ *  its question, its options and its answer; a comment, whose blocks its own revisions number;
+ *  and an issue message, which is never edited, so its blocks carry no revision at all. They are
+ *  the parents a block node naming no document has. */
+export const ITEM_KINDS = ["ask", "comment", "message"] as const;
+
+/** One of those kinds. */
+export type ItemKind = (typeof ITEM_KINDS)[number];
+
 /** The `dispatch://` address of an ask, comment, or message under an owner's address. */
-export function dispatchChildRef(
-  ownerRef: string,
-  kind: "ask" | "comment" | "message",
-  id: string
-): string {
+export function dispatchChildRef(ownerRef: string, kind: ItemKind, id: string): string {
   return `${ownerRef}/${kind}/${id}`;
 }
 
@@ -71,34 +85,57 @@ export interface ParsedDispatchRef {
     | "ask"
     | "comment"
     | "message";
-  /** The item's id; for a block, the id of its document (`spec` or the slug). */
+  /** The item's id; for a block of a document, the id of its document (`spec` or the slug); for a
+   *  block of an ask, a comment or a message, the item's id. */
   readonly id: string;
   readonly version?: number;
   /** The document slug a project-owned ask, comment or block ref names. */
   readonly artifact?: string;
   /** The id of the block a block ref names, decoded. */
   readonly block?: string;
-  /** The reference of the document a block ref names a block of. */
+  /** The reference of the document a block ref of a document names a block of. */
   readonly document?: string;
-  /** The version of its document a pinned block ref (`#b-<id>@v<N>`) names: N's decimal digits as
-   *  written (`parseBlockFragment`), which a number past 2^53 would round. */
+  /** The ask, comment or issue message a block ref of an item names a block of. */
+  readonly item?: { readonly kind: ItemKind; readonly id: string };
+  /** The version of its document, or the revision of its comment or of its ask's parts, a pinned
+   *  block ref (`#b-<id>@v<N>`) names: N's decimal digits as written (`parseBlockFragment`),
+   *  which a number past 2^53 would round. */
   readonly pin?: string;
 }
 
 /**
- * `ref` as the block reference `<document ref>#b-<block id>[@v<N>]` names, or null when it is no
- * such reference: the fragment as `parseBlockFragment` reads it, and the document an issue's spec
- * or document, or a project's document, at no version.
+ * `ref` as the block reference `<document or item ref>#b-<block id>[@v<N>]` names, or null when
+ * it is no such reference: the fragment as `parseBlockFragment` reads it, on an issue's spec or
+ * document, or a project's document, at no version, pinned to a version of the document; on an
+ * ask, an issue's or a project document's, pinned to a revision of the ask's parts; on a comment,
+ * an issue's or a project document's, pinned to a revision of the comment; or on an issue's
+ * message, which never changes, so a pinned message block is no reference.
  */
-function parseBlockRef(document: string, fragment: string): ParsedDispatchRef | null {
-  const target = parseBlockFragment(fragment);
-  const parsed = parseDispatchRef(document);
+function parseBlockRef(holder: string, fragment: string): ParsedDispatchRef | null {
+  // A raw `@` is only ever a pin: no key, slug or id a block's holder names holds one.
+  const target = holder.includes("@") ? undefined : parseBlockFragment(fragment);
+  const parsed = parseDispatchRef(holder);
+  if (target === undefined || parsed === null) {
+    return null;
+  }
+  const pin = target.pin === undefined ? {} : { pin: target.pin };
+  const artifact = parsed.artifact === undefined ? {} : { artifact: parsed.artifact };
   if (
-    target === undefined ||
-    parsed === null ||
-    parsed.version !== undefined ||
-    (parsed.kind !== "spec" && parsed.kind !== "artifact")
+    parsed.kind === "ask" ||
+    parsed.kind === "comment" ||
+    (parsed.kind === "message" && target.pin === undefined)
   ) {
+    return {
+      owner: parsed.owner,
+      kind: "block",
+      id: parsed.id,
+      block: target.block,
+      item: { kind: parsed.kind, id: parsed.id },
+      ...artifact,
+      ...pin,
+    };
+  }
+  if (parsed.kind !== "spec" && parsed.kind !== "artifact") {
     return null;
   }
   return {
@@ -106,9 +143,9 @@ function parseBlockRef(document: string, fragment: string): ParsedDispatchRef | 
     kind: "block",
     id: parsed.id,
     block: target.block,
-    document,
+    document: holder,
     ...(parsed.owner.kind === "project" ? { artifact: parsed.id } : {}),
-    ...(target.pin === undefined ? {} : { pin: target.pin }),
+    ...pin,
   };
 }
 

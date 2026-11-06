@@ -2,7 +2,7 @@
 # Oh My Pi reaches its model. Legion knows none of it; it delivers these pieces to every worker pod
 # and the image probe's pod (docs/kubernetes.md, "Operator configuration"; README.md beside this
 # file lists what each piece is). The Go live harnesses run on these values, with the token audience
-# they are given in place of its placeholder.
+# and the ServiceAccount they are given in place of the placeholders.
 #
 # The ConfigMap named here, legion-operator-route, holds the operator's models.yml and overlay.yml;
 # apply.sh writes it from the operator's directory. A live harness run creates its own copy
@@ -15,7 +15,9 @@ env:
   # Anthropic Foundry puts FOUNDRY_BASE_URL ahead of a model's own baseUrl; a repository's .env
   # could turn it on, and the pod's own value outranks .env.
   CLAUDE_CODE_USE_FOUNDRY: "0"
-service_account: legion-worker
+# The ServiceAccount the pods run as: the operator's own, and each live harness run's own, so the
+# repository holds no account.
+service_account: ${POD_SERVICE_ACCOUNT}
 volumes:
   - name: operator-route
     config_map:

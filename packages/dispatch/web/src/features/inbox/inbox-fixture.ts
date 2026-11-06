@@ -21,7 +21,11 @@ export function installInboxApiMocks(): InboxApiMocks {
   const mocks = {} as InboxApiMocks;
   beforeEach(() => {
     window.localStorage.clear();
-    mocks.whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+    mocks.whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
+      event_head: "0",
+      kind: "user",
+      login: "alice",
+    });
     mocks.getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue({
       pending: [],
     });
@@ -66,6 +70,7 @@ export function issueAsk(overrides: Partial<InboxRow> = {}): InboxRow {
       route: null,
       route_status: null,
       route_holder: null,
+      route_status_reason: null,
     },
     question: "Which approach?",
     state: "open",
@@ -92,6 +97,7 @@ export function mockAskReads(rows: readonly InboxRow[]) {
       route: null,
       route_status: null,
       route_holder: null,
+      route_status_reason: null,
     };
   });
 }

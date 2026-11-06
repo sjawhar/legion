@@ -1,4 +1,4 @@
-import type { Locator, Page } from "@playwright/test";
+import type { Locator, Page, Request } from "@playwright/test";
 
 /** In-app navigation, as a link does: a reload would drop a send with the page. */
 export async function navigateInApp(page: Page, path: string): Promise<void> {
@@ -18,33 +18,98 @@ export function answeredPost(page: Page, path: string, status: number) {
   );
 }
 
-/** Holds every `POST` to `pattern` until `release`, as a slow server would, and counts them. */
+/** Holds every `POST` to `pattern` until `release`, as a slow server would, and counts them, with
+ *  the `Idempotency-Key` each carried. `settled` resolves once every POST held so far has ended:
+ *  answered, or cut off by the page, which a held request the page gave up on never outlives -
+ *  so a row reads what Dispatch made only after every attempt that could reach it has. */
 export async function holdPosts(
   page: Page,
   pattern: string
-): Promise<{ posts: () => number; release: () => void }> {
+): Promise<{
+  keys: () => (string | null)[];
+  posts: () => number;
+  release: () => void;
+  settled: () => Promise<void>;
+}> {
   const { promise: held, resolve: release } = Promise.withResolvers<void>();
-  let posts = 0;
+  const keys: (string | null)[] = [];
+  const ends: Promise<void>[] = [];
   await page.route(pattern, async (route) => {
-    if (route.request().method() !== "POST") return route.fallback();
-    posts += 1;
+    const request = route.request();
+    if (request.method() !== "POST") return route.fallback();
+    const { promise: ended, resolve: end } = Promise.withResolvers<void>();
+    const onEnd = (settled: Request) => {
+      if (settled !== request) return;
+      page.off("requestfinished", onEnd);
+      page.off("requestfailed", onEnd);
+      end();
+    };
+    page.on("requestfinished", onEnd);
+    page.on("requestfailed", onEnd);
+    ends.push(ended);
+    keys.push(await request.headerValue("idempotency-key"));
     await held;
     return route.fallback();
   });
-  return { posts: () => posts, release };
+  return {
+    keys: () => [...keys],
+    posts: () => keys.length,
+    release,
+    settled: async () => {
+      await Promise.all(ends);
+    },
+  };
 }
 
-/** Holds every `POST` to `pattern` until the returned call, then refuses it, as a server that is
- *  down: 503 with a reason the composer shows. */
-export async function refusePosts(page: Page, pattern: string): Promise<() => void> {
+/** What a route answers a `POST` it refuses: the status, and the code and reason the composer
+ *  shows. */
+export interface Refusal {
+  readonly code: string;
+  readonly error: string;
+  readonly status: number;
+}
+
+/** Dispatch's verdict refusing a write. Every write the page makes tries a 5xx, a 429 or a lost
+ *  answer again under its key until Dispatch answers, so only a verdict - a 4xx of Dispatch's
+ *  own - ends one refused. */
+export const WRITE_REFUSED: Refusal = {
+  code: "INPUT_REFUSED",
+  error: "Dispatch refused the write",
+  status: 400,
+};
+
+/** What a composer says once Dispatch refuses its write with `WRITE_REFUSED`. */
+export const WRITE_REFUSED_TEXT = `Couldn't send — ${WRITE_REFUSED.error}`;
+
+/** Dispatch's verdict on a message to one session, with the code that route answers. */
+export const MESSAGE_REFUSED: Refusal = {
+  code: "MESSAGE_INPUT",
+  error: "Dispatch refused the message",
+  status: 400,
+};
+
+/** Holds every `POST` to `pattern` until the returned call, then refuses it with `refusal`,
+ *  `WRITE_REFUSED` by default. A 5xx or a 429 is no refusal: the page tries it again under the
+ *  write's key, so a row that would refuse with one is refused here, naming `WRITE_REFUSED`,
+ *  rather than left waiting on a write that never gives up. */
+export async function refusePosts(
+  page: Page,
+  pattern: string,
+  refusal: Refusal = WRITE_REFUSED
+): Promise<() => void> {
+  if (refusal.status >= 500 || refusal.status === 429) {
+    throw new Error(
+      `refusePosts: a ${refusal.status} to ${pattern} is no refusal - the page tries it again under the write's key; refuse it with WRITE_REFUSED`
+    );
+  }
   const { promise: held, resolve: refuse } = Promise.withResolvers<void>();
   await page.route(pattern, async (route) => {
     if (route.request().method() !== "POST") return route.fallback();
     await held;
     return route.fulfill({
-      body: JSON.stringify({ code: "UNAVAILABLE", error: "the server is down" }),
+      body: JSON.stringify({ code: refusal.code, error: refusal.error }),
       contentType: "application/json",
-      status: 503,
+      status: refusal.status,
     });
   });
   return refuse;

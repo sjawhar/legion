@@ -1,0 +1,84 @@
+# Every git pathspec whose files can change the Claude Code plugin's build (dist/ and legion/,
+# built by scripts/build.ts and checked by scripts/verify-build.sh).
+#
+# Format: one git pathspec per line, relative to the repository root. A line that is empty or
+# starts with # is ignored. Nothing else is special: a pathspec line holds the pathspec alone, with
+# no trailing comment.
+#
+# Who reads it:
+# - a person, and release.yaml's $CLAUDE_ENVOY_VERSION_ARGS, which carries this list's package
+#   and content paths by hand: the release's version is bumped from the commits since the newest
+#   claude-envoy-v* tag that touch them, so a source missing from both is one no release
+#   publishes a new version for. A path added or dropped here is owed the same change there.
+#   The toolchain entries below (.bun-version, bunfig.toml, bun.lock, the root package.json, the
+#   .gitattributes files and the .github paths) are not among them, as no plugin's version
+#   arguments carry theirs: a lockfile or runner change alone releases nothing, and the next
+#   source commit publishes whatever it built.
+# - tests/build-inputs.test.ts, which runs the build and fails when a file the bundles or the
+#   Legion plugin read is not matched: each bundle's sources, the manifest, tsconfig and license
+#   files of each workspace package they reach, the lockfile, root manifest and patches that decide
+#   what bun install puts in node_modules, and the skills and agents buildLegionPlugin reads. The
+#   rest is listed by hand and no test checks it: .bun-version, bunfig.toml, the
+#   .gitattributes files, scripts/third-party-notices.ts (and any other module build.ts imports
+#   from outside the packages below), scripts/pi-plugin-prepack.sh and the three .github paths at
+#   the end. A change that makes build.ts or verify-build.sh read a new file adds it here.
+#
+# The rule: whole package directories are listed and only known non-inputs are excluded, so a file
+# nobody thought of counts as an input. That is the safe direction: a false "changed" costs one
+# extra patch release, while a false "unchanged" leaves npm's newest release behind its inputs
+# with nothing queued to catch it up.
+#
+# This file is inside packages/claude-envoy, listed below, so a change to the list is itself an
+# input change.
+
+# build.ts assertPinnedBun refuses any other Bun; .github/actions/setup-bun installs this version.
+.bun-version
+
+# bun install: decides node_modules, which the bundles inline and whose licenses the notices carry.
+bun.lock
+package.json
+bunfig.toml
+patches
+
+# .gitattributes decides the bytes a checkout holds, which the bundler then reads.
+.gitattributes
+packages/.gitattributes
+
+# The bundles' sources and the workspace packages they reach: sources, manifests, tsconfig, license
+# and notice files (scripts/third-party-notices.ts). Also this package's build.ts, verify-build.sh
+# and this list.
+packages/claude-envoy
+packages/envoy-client
+packages/contracts
+packages/pi-shared
+packages/broker-client
+
+# The build's outputs themselves, not inputs.
+:(exclude)packages/claude-envoy/dist
+:(exclude)packages/claude-envoy/legion
+
+# Known non-inputs inside the packages above: changelogs, guides and tests, which no build reads.
+:(exclude,glob)packages/*/.changes/**
+:(exclude,glob)packages/*/CHANGELOG.md
+:(exclude,glob)packages/*/AGENTS.md
+:(exclude,glob)packages/*/README.md
+:(exclude,glob)packages/*/tests/**
+:(exclude,glob)packages/*/test/**
+:(exclude,glob)packages/**/__tests__/**
+:(exclude,glob)packages/**/*.test.ts
+
+# build.ts buildLegionPlugin converts these into legion/agents.
+packages/pi-legion/agents
+
+# scripts/pi-plugin-prepack.sh --stage-skills stages pi-legion's skills into legion/skills. All of
+# skills/ rather than pi-legion's share, so the partition is kept in that script alone.
+skills
+
+# build.ts runs these: the notices of the inlined packages, and the skill staging.
+scripts/third-party-notices.ts
+scripts/pi-plugin-prepack.sh
+
+# The build jobs run these through verify-build.sh, which runs check-built.
+.github/scripts/check-private-names.sh
+.github/scripts/release-push.sh
+.github/actions/setup-bun

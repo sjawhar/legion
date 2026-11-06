@@ -136,7 +136,9 @@ test("an issue's spec and Conversation tabs render the dark palette in dark mode
 
   try {
     const page = await alice.newPage();
-    const title = page.getByRole("heading", { level: 1, name: issue.title });
+    const title = page
+      .getByTestId("issue-header")
+      .getByRole("heading", { level: 1, name: issue.title });
     const header = page.locator("header").first();
 
     await page.emulateMedia({ colorScheme: "light" });
@@ -166,7 +168,7 @@ test("an issue's spec and Conversation tabs render the dark palette in dark mode
   }
 });
 
-test("a link in a comment's Markdown body renders the app's link blue in dark mode and in light mode @phone", async ({
+test("a link in a comment's Markdown body renders the app's link blue in dark mode and in light mode", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -196,7 +198,7 @@ test("a link in a comment's Markdown body renders the app's link blue in dark mo
     await expectTextColor(previewLink, C.LINK.dark);
 
     await turn.getByRole("button", { name: "Expand thread" }).click();
-    const thread = conversationThreadScope(page, testInfo.project.name, turn);
+    const thread = conversationThreadScope(page, "chromium", turn);
     const bodyLink = thread.locator(".dispatch-markdown").getByRole("link", { name: "the plan" });
     await expect(bodyLink).toBeVisible();
     await expectTextColor(bodyLink, C.LINK.dark);

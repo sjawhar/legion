@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -94,34 +93,20 @@ const commentRecipientsQuery = `
 	order by key, min(rank)
 `
 
-// loadCommentRecipients reads, in one query for a whole batch, the sessions a person's reply under
-// each comment of commentIDs reaches on their own topics, keyed by that comment's id. commentIDs
-// are canonical uuids (resolveThreadSessions parses each). They are every session that wrote a
-// comment in the comment's thread (its root first, then each reply in the order it was written),
-// then every session the thread's document credits (documentCreditsSQL; none when the thread is on
-// no document), each once. People are left out, since a person has no Envoy topic. A comment that
-// has no row has no entry. The actor and the sessions the reply's mentions reach are skipped by the
-// caller (publishAuthorRoutes).
-func loadCommentRecipients(ctx context.Context, deps Deps, commentIDs []string) (map[string][]string, error) {
+// loadCommentRecipients reads, in one query for a whole batch (or for half of a refused one's ids,
+// when loadRecipients runs it again in halves), the sessions a person's reply under each comment
+// of commentIDs reaches on their own topics, keyed by that comment's id. commentIDs are canonical
+// uuids (validIDs): a reply_to that is no uuid names no comment and is never read. They are every
+// session that wrote a comment in the comment's thread (its root first, then each reply in the
+// order it was written), then every session the thread's document credits (documentCreditsSQL;
+// none when the thread is on no document), each once. People are left out, since a person has no
+// Envoy topic. A comment that has no row has no entry. The actor and the sessions the reply's
+// mentions reach are skipped by the caller (addAuthorRoutes).
+func loadCommentRecipients(ctx context.Context, db queryer, commentIDs []string) (map[string][]string, error) {
 	if len(commentIDs) == 0 {
 		return map[string][]string{}, nil
 	}
-	return loadKeyedSessions(ctx, deps, "load comment recipients", commentRecipientsQuery, commentIDs, maxCommentThreadDepth)
-}
-
-// threadReplyOf names the comment a person's reply event replies under, the key of its
-// loadCommentRecipients entry, or "" when the event takes no thread recipients: it is no
-// comment.created or comment.edited, it does not notify (only a person's comment does,
-// events.Broker.Notify), it is a new thread rather than a reply, or it is in an ask's thread, whose
-// sessions are the ask's followers (publishFollowerRoutes).
-func threadReplyOf(event model.Event) string {
-	if !event.Notify || (event.Type != "comment.created" && event.Type != "comment.edited") {
-		return ""
-	}
-	if payloadString(event.Payload, "ask_id") != "" {
-		return ""
-	}
-	return payloadString(event.Payload, "reply_to")
+	return loadKeyedSessions(ctx, db, "load comment recipients", commentRecipientsQuery, commentIDs, maxCommentThreadDepth)
 }
 
 // primaryDocumentAuthorsQuery is loadPrimaryDocumentAuthors' one statement. $1 is the issue keys.
@@ -144,18 +129,18 @@ const primaryDocumentAuthorsQuery = `
 // document of each issue of issueKeys credits (documentCreditsSQL), keyed by the issue's key: its
 // creator first, then each version's authors, each once. People, and session credits with no id,
 // are left out (sessionCreditSQL). An issue with no primary document, or with no row, has no entry.
-func loadPrimaryDocumentAuthors(ctx context.Context, deps Deps, issueKeys []string) (map[string][]string, error) {
+func loadPrimaryDocumentAuthors(ctx context.Context, db queryer, issueKeys []string) (map[string][]string, error) {
 	if len(issueKeys) == 0 {
 		return map[string][]string{}, nil
 	}
-	return loadKeyedSessions(ctx, deps, "load primary document authors", primaryDocumentAuthorsQuery, issueKeys)
+	return loadKeyedSessions(ctx, db, "load primary document authors", primaryDocumentAuthorsQuery, issueKeys)
 }
 
 // loadKeyedSessions runs query, one statement for a whole batch whose every row is a key and a
 // session id, and returns each key's sessions in the order of its rows. what names the load in its
 // error.
-func loadKeyedSessions(ctx context.Context, deps Deps, what, query string, args ...any) (map[string][]string, error) {
-	rows, err := deps.Store.Pool.Query(ctx, query, args...)
+func loadKeyedSessions(ctx context.Context, db queryer, what, query string, args ...any) (map[string][]string, error) {
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", what, err)
 	}
@@ -170,36 +155,41 @@ func loadKeyedSessions(ctx context.Context, deps Deps, what, query string, args 
 	return sessions, nil
 }
 
-// recipientList is the sessions a batch query read for one event (resolveCommentRecipients), or
-// err, the query's failure. The failure is not the row's (pendingEvent.failure): the event's
-// attempt sends its owner topic, its route and its claimant first and ends with err at the step
-// that needed the sessions, as a lookup made per event would, so settle backs the event off, or
-// releases it when the process is stopping or NATS is unreachable, as it does any attempt that
-// failed.
-type recipientList struct {
-	sessions []string
-	err      error
+// takesPrimaryAuthors reports whether a person's comment event reaches the sessions of its issue's
+// primary document (addPrimaryDocumentAuthors): it is a comment.created or comment.edited, it
+// notifies (only a person's comment does, events.Broker.Notify), it names an issue, and that issue
+// has no route and no session claimant (routing), either of which hears it in their place. The
+// comment's thread does not matter.
+func takesPrimaryAuthors(event model.Event, routing routing) bool {
+	if !event.Notify || (event.Type != "comment.created" && event.Type != "comment.edited") {
+		return false
+	}
+	if event.IssueKey == nil || routing.claimant != "" {
+		return false
+	}
+	return routing.route == nil || *routing.route == ""
 }
 
-// recipientFilter keeps, of the sessions one step of a notifying event's attempt reaches on their
-// own topics, each one once, and none that is the event's actor. A session the comment's mentions
+// recipientFilter keeps, of the sessions one route of a notifying event reaches on their own
+// topics, each one once, and none that is the event's actor. A session the comment's mentions
 // resolved to (payloadMentionedSessions, which the claimant and follower routes read too) is left
-// to the mention by the rule every session route of a new comment applies (attempt.leftToMention):
-// skipped once its mention delivered, held back while the send is undecided, and kept when it
-// failed. publishAuthorRoutes and publishPrimaryDocumentAuthors both filter through it.
+// to the mention by the rule every session route of a new comment applies
+// (destinations.leftToMention): skipped once its mention delivered, held back while the send is
+// undecided, and kept when it failed. addAuthorRoutes and addPrimaryDocumentAuthors both filter
+// through it.
 type recipientFilter struct {
-	actor      model.Actor
-	suppressed map[string]struct{}
-	seen       map[string]bool
-	attempt    *attempt
+	actor        model.Actor
+	suppressed   map[string]struct{}
+	seen         map[string]bool
+	destinations *destinations
 }
 
-func newRecipientFilter(event model.Event, a *attempt) *recipientFilter {
+func newRecipientFilter(event model.Event, d *destinations) *recipientFilter {
 	return &recipientFilter{
-		actor:      event.Actor,
-		suppressed: payloadMentionedSessions(event.Payload),
-		seen:       map[string]bool{},
-		attempt:    a,
+		actor:        event.Actor,
+		suppressed:   payloadMentionedSessions(event.Payload),
+		seen:         map[string]bool{},
+		destinations: d,
 	}
 }
 
@@ -210,103 +200,5 @@ func (f *recipientFilter) keep(sessionID string) bool {
 	}
 	f.seen[sessionID] = true
 	_, suppressed := f.suppressed[sessionID]
-	return !suppressed || !f.attempt.leftToMention(sessionID)
-}
-
-// resolveCommentRecipients reads, for a whole batch, the sessions a person's comment events reach
-// beyond their owner topic, route and claimant, and carries each on its event: the thread
-// recipients of every reply event in one query (loadCommentRecipients), for publishAuthorRoutes,
-// and the primary document's sessions of every event that takes them (resolvePrimaryAuthors), for
-// publishPrimaryDocumentAuthors. An event already failed is skipped. When a query fails, each event
-// of the batch that needed it carries the error in place of the sessions (recipientList), and the
-// batch's other events are untouched. The sessions are filtered when the attempt sends them
-// (recipientFilter), since what a mention delivered is read per attempt.
-func resolveCommentRecipients(ctx context.Context, deps Deps, pending []pendingEvent) {
-	resolveThreadSessions(ctx, deps, pending)
-	resolvePrimaryAuthors(ctx, deps, pending)
-}
-
-// resolveThreadSessions reads the thread recipients of every reply event of a batch in one query
-// (loadCommentRecipients) and carries each on its event as threadSessions.
-func resolveThreadSessions(ctx context.Context, deps Deps, pending []pendingEvent) {
-	// A reply's key is its comment's canonical uuid, or "" when it is not a uuid: such a reply
-	// has no entry, but still carries the query's failure.
-	type reply struct {
-		index int
-		key   string
-	}
-	var replies []reply
-	var commentIDs []string
-	for index, item := range pending {
-		if item.failure != nil {
-			continue
-		}
-		commentID := threadReplyOf(item.event)
-		if commentID == "" {
-			continue
-		}
-		key := ""
-		if parsed, err := uuid.Parse(commentID); err == nil {
-			key = parsed.String()
-			commentIDs = append(commentIDs, key)
-		}
-		replies = append(replies, reply{index: index, key: key})
-	}
-	if len(replies) == 0 {
-		return
-	}
-	recipients, err := loadCommentRecipients(ctx, deps, commentIDs)
-	for _, r := range replies {
-		item := &pending[r.index]
-		if err != nil {
-			item.threadSessions.err = err
-			continue
-		}
-		if r.key != "" {
-			item.threadSessions.sessions = recipients[r.key]
-		}
-	}
-}
-
-// takesPrimaryAuthors reports whether a person's comment event reaches the sessions of its issue's
-// primary document: it is a comment.created or comment.edited, it notifies (only a person's
-// comment does, events.Broker.Notify), it names an issue, and that issue has no route and no
-// session claimant (routing), either of which hears it in their place. The comment's thread does
-// not matter.
-func takesPrimaryAuthors(item pendingEvent) bool {
-	event := item.event
-	if !event.Notify || (event.Type != "comment.created" && event.Type != "comment.edited") {
-		return false
-	}
-	if event.IssueKey == nil || item.routing.claimant != "" {
-		return false
-	}
-	return item.routing.route == nil || *item.routing.route == ""
-}
-
-// resolvePrimaryAuthors carries, on every event of a batch that takes them (takesPrimaryAuthors),
-// every session its issue's primary document credits as primaryAuthors, read for all such events in
-// one query (loadPrimaryDocumentAuthors).
-func resolvePrimaryAuthors(ctx context.Context, deps Deps, pending []pendingEvent) {
-	var indexes []int
-	var issueKeys []string
-	for index, item := range pending {
-		if item.failure != nil || !takesPrimaryAuthors(item) {
-			continue
-		}
-		indexes = append(indexes, index)
-		issueKeys = append(issueKeys, *item.event.IssueKey)
-	}
-	if len(indexes) == 0 {
-		return
-	}
-	authors, err := loadPrimaryDocumentAuthors(ctx, deps, issueKeys)
-	for position, index := range indexes {
-		item := &pending[index]
-		if err != nil {
-			item.primaryAuthors.err = err
-			continue
-		}
-		item.primaryAuthors.sessions = authors[issueKeys[position]]
-	}
+	return !suppressed || !f.destinations.leftToMention(sessionID)
 }

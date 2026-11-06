@@ -18,6 +18,7 @@ import { AskCard } from "../features/inbox/AskCard";
 import { AskReplyComposer } from "../features/inbox/AskThread";
 import { Inbox } from "../features/inbox/Inbox";
 import { commentDeliveryFields } from "./comment-fixture";
+import { keyedAttempt } from "./keyed-attempt";
 
 const getReferences = spyOn(api, "getReferences").mockResolvedValue({
   edges: [],
@@ -94,6 +95,7 @@ function emptyThread(input: Ask): () => Promise<AskRead> {
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
   });
 }
 
@@ -521,6 +523,7 @@ test("AskCard shows every previous version of an edited question, oldest first",
         route: null,
         route_status: null,
         route_holder: null,
+        route_status_reason: null,
       })}
     />
   );
@@ -1333,6 +1336,7 @@ test("AskCard restores its inbox entry if an optimistic answer fails", async () 
       route: null,
       route_status: null,
       route_holder: null,
+      route_status_reason: null,
     },
   };
   queryClient.setQueryData<InboxRow[]>(["inbox"], [inboxInput]);
@@ -1378,6 +1382,7 @@ test("AskCard reloads a changed question, requires the human to reconfirm, and a
         route: null,
         route_status: null,
         route_holder: null,
+        route_status_reason: null,
         replies: [],
       })}
     />
@@ -1550,6 +1555,7 @@ test("AskCard renders replies under the question without an open-ask thread comp
         route: null,
         route_status: null,
         route_holder: null,
+        route_status_reason: null,
         replies: [reply({ id: "comment-1", body: "Any update?" })],
       })}
     />
@@ -1732,6 +1738,7 @@ test("AskCard shows the newest two replies, expands older replies, and puts a fr
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
   });
   const { view } = renderCard(
     <AskCard
@@ -1806,6 +1813,7 @@ test("a compact answered ask's Write a reply reveals its composer as the next ke
         route: null,
         route_status: null,
         route_holder: null,
+        route_status_reason: null,
         replies: [reply({ body: "Earlier reply" })],
       })}
       thread="collapsed"
@@ -1852,6 +1860,7 @@ test("a reply arriving while the older replies are shown lands first and keeps t
         route: null,
         route_status: null,
         route_holder: null,
+        route_status_reason: null,
       })}
       thread="collapsed"
     />
@@ -1913,6 +1922,7 @@ test("a link to a folded reply opens the fold and still lets the reader collapse
         route: null,
         route_status: null,
         route_holder: null,
+        route_status_reason: null,
       })}
       thread="collapsed"
     />
@@ -1977,6 +1987,7 @@ test("AskCard with no replies offers Write a reply only after an answer, and ret
           route: null,
           route_status: null,
           route_holder: null,
+          route_status_reason: null,
         };
       }}
       thread="collapsed"
@@ -2148,10 +2159,15 @@ test("a document ask links its project and document page", async () => {
         route: null,
         route_status: null,
         route_holder: null,
+        route_status_reason: null,
       },
     },
   ]);
-  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
+    event_head: "0",
+    kind: "user",
+    login: "alice",
+  });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   // A document has no assignee, so the Inbox lists its question under the Unassigned filter
   // rather than in the reader's own default list.
@@ -2226,10 +2242,14 @@ test("asking back from a document ask posts an artifact comment and keeps the se
     fireEvent.click(view.getByRole("button", { name: "Ask back" }));
 
     await waitFor(() =>
-      expect(createArtifactComment).toHaveBeenCalledWith("artifact-1", {
-        ask_id: "ask-1",
-        body: "Does this include the rollback?",
-      })
+      expect(createArtifactComment).toHaveBeenCalledWith(
+        "artifact-1",
+        {
+          ask_id: "ask-1",
+          body: "Does this include the rollback?",
+        },
+        keyedAttempt
+      )
     );
     await waitFor(() => expect(field).toHaveProperty("value", ""));
     expect((ship as HTMLInputElement).checked).toBe(true);
@@ -2257,6 +2277,41 @@ test("AskCard compact variant keeps its note disclosure available after selectin
       within(card).getByRole("button", { name: "Add a note or answer in your own words" })
     );
     expect(await within(card).findByLabelText("Your answer")).toBeTruthy();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("the compact card's note disclosure leaves the reader in the field it reveals, and a close moves nowhere", async () => {
+  const input = ask({ options: [{ label: "Ship" }, { label: "Hold" }] });
+  const { view } = renderCard(
+    <AskCard ask={input} getAskThread={emptyThread(input)} variant="compact" />
+  );
+
+  try {
+    const card = view.getByTestId("ask-ask-1");
+    const disclosure = await within(card).findByRole("button", {
+      name: "Add a note or answer in your own words",
+    });
+    // Whoever opens it - the reader's click here, the Inbox's Enter, which presses this same
+    // control - is moved into the box behind it. Under `fireEvent` the render the press
+    // schedules is flushed inside the press, so this row cannot prove the browser case the
+    // disclosure's own focus exists for; the e2e row `Enter opens the selected decision block's
+    // note field and puts the focus in it` is that proof.
+    fireEvent.click(disclosure);
+    const answer = within(card).getByLabelText("Your answer");
+    expect(document.activeElement).toBe(answer);
+
+    // Picking an option that needs no words neither opens the disclosure nor takes the reader
+    // off the option they just picked.
+    fireEvent.click(disclosure);
+    expect(within(card).queryByLabelText("Your answer")).toBeNull();
+    expect(document.activeElement).toBe(document.body);
+    const ship = within(card).getByRole("radio", { name: "Ship" });
+    ship.focus();
+    fireEvent.click(ship);
+    expect(within(card).queryByLabelText("Your answer")).toBeNull();
+    expect(document.activeElement).toBe(ship);
   } finally {
     view.unmount();
   }

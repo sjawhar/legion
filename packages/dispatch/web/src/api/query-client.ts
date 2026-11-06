@@ -7,34 +7,54 @@ import {
   type RefetchQueryFilters,
 } from "@tanstack/react-query";
 
-import { ApiError } from "./client";
+import { ApiError, isEventHeadUnavailable, isRetryableQueryError } from "./client";
 
 /** The wait before a failed read's retry when the server asked for none. */
-const RETRY_DELAY_MS = 500;
+export const QUERY_RETRY_DELAY_MS = 500;
 
 /** The longest `Retry-After` a retry honours. With its jitter of up to as much again, a read
  *  refused by a proxy that answers a day (or more than `setTimeout` can hold) still retries within
  *  a minute rather than spinning with no error and no Retry for as long as it says. */
 const RETRY_AFTER_CEILING_MS = 30_000;
 
+/** The longest wait between two asks of a read that answers `EVENT_HEAD_UNAVAILABLE`: 500 ms,
+ *  doubling, up to this. */
+export const EVENT_HEAD_RETRY_CEILING_MS = 5_000;
+
+/**
+ * Whether a failed query is asked again (`retry` in `main.tsx`). An auth outcome (401) is
+ * definitive; everything else retryable (a dropped connection, a 5xx) gets two quick retries
+ * before the page shows an error. The sign-in check's `503 EVENT_HEAD_UNAVAILABLE` is asked again
+ * for as long as it lasts: Dispatch answers it while an event write open since before its restart
+ * keeps it from vouching for any event id, which can outlast two retries, and the page opens on
+ * its own once it ends.
+ */
+export function queryRetry(failureCount: number, error: unknown): boolean {
+  return isEventHeadUnavailable(error) || (failureCount < 2 && isRetryableQueryError(error));
+}
+
 /**
  * The wait before every query's retry (`retryDelay` in `main.tsx`). A server refusing excess load
  * (503 `OVERLOADED`, `DATABASE_BUSY` or `REQUEST_TIMEOUT`) says how long to stay away in
  * `Retry-After`: the retry waits that long, at most `RETRY_AFTER_CEILING_MS`, plus a random share
  * of it again, so the tabs it refused together do not all come back in the same instant, and the
- * whole wait stays under a minute. Any other failure waits 500 ms. `random` is a test seam;
+ * whole wait stays under a minute. `EVENT_HEAD_UNAVAILABLE` waits 500 ms doubling to
+ * `EVENT_HEAD_RETRY_CEILING_MS`. Any other failure waits 500 ms. `random` is a test seam;
  * TanStack calls this with the first two arguments.
  */
 export function queryRetryDelay(
-  _failureCount: number,
+  failureCount: number,
   error: unknown,
   random: () => number = Math.random
 ): number {
+  if (isEventHeadUnavailable(error)) {
+    return Math.min(QUERY_RETRY_DELAY_MS * 2 ** failureCount, EVENT_HEAD_RETRY_CEILING_MS);
+  }
   if (error instanceof ApiError && error.retryAfterMs !== undefined) {
     const retryAfterMs = Math.min(error.retryAfterMs, RETRY_AFTER_CEILING_MS);
     return retryAfterMs + Math.floor(random() * retryAfterMs);
   }
-  return RETRY_DELAY_MS;
+  return QUERY_RETRY_DELAY_MS;
 }
 
 /**

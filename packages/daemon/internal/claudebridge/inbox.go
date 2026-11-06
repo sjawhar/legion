@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // InboxVariable names the inbox socket in Claude Code's environment, which its MCP servers inherit:
@@ -18,8 +19,9 @@ import (
 const InboxVariable = "LEGION_CLAUDE_INBOX"
 
 // InboxDelivery is one line a client writes to the inbox: an Envoy delivery, already rendered, that
-// becomes a user turn. InboxAnswer is the line the bridge writes back once the delivery is queued:
-// the receipt the channel server publishes for a forwarded lane means exactly that.
+// becomes a user turn. InboxAnswer is the line the bridge writes back once Claude Code has taken the
+// delivery, re-emitting it as the user message it reads (--replay-user-messages), or with an error
+// once it never will: the delivery is in the transcript, which is what claude-envoy's `done` says.
 type InboxDelivery struct {
 	ID      string `json:"id"`
 	Content string `json:"content"`
@@ -41,13 +43,27 @@ type inbox struct {
 	wg       sync.WaitGroup
 }
 
+// inboxDirPrefix names the inbox's directory, which os.MkdirTemp makes under the process TMPDIR,
+// and inboxSocketName the socket the bridge binds in it.
+const (
+	inboxDirPrefix  = "legion-claude-"
+	inboxSocketName = "inbox.sock"
+)
+
+// InboxLongestPath is the longest path the bridge makes under the process TMPDIR, written
+// relative to it: the inbox directory and the socket in it. The ten digits are os.MkdirTemp's own
+// suffix at its widest, a random number below 1e10. A test that runs the bridge in-process hands
+// this to testtmp.Dir as the room the TMPDIR it places needs, so that the socket's path stays
+// inside the 107 bytes Linux holds.
+const InboxLongestPath = inboxDirPrefix + "0123456789" + "/" + inboxSocketName
+
 // listenInbox opens the inbox and serves it until close, handing each delivery to the loop.
 func listenInbox(events chan<- event, stop <-chan struct{}, logger *log.Logger) (*inbox, error) {
-	dir, err := os.MkdirTemp("", "legion-claude-")
+	dir, err := os.MkdirTemp("", inboxDirPrefix)
 	if err != nil {
 		return nil, fmt.Errorf("make the inbox directory: %w", err)
 	}
-	path := filepath.Join(dir, "inbox.sock")
+	path := filepath.Join(dir, inboxSocketName)
 	listener, err := net.Listen("unix", path)
 	if err != nil {
 		_ = os.RemoveAll(dir)
@@ -75,38 +91,73 @@ func listenInbox(events chan<- event, stop <-chan struct{}, logger *log.Logger) 
 	return in, nil
 }
 
-// serveInbox reads one client's deliveries, each answered once the loop has queued it.
+const (
+	// inboxPending bounds the deliveries one client has sent and the bridge has not yet answered;
+	// past it the inbox reads that client's next line once the oldest is answered.
+	inboxPending = 64
+	// inboxFlushTimeout bounds writing what a client is owed once the inbox closes: the answers
+	// the loop gave before closing it, each one short line a reading client takes at once.
+	inboxFlushTimeout = 100 * time.Millisecond
+	malformedDelivery = "an inbox delivery is one JSON object with an id and content"
+)
+
+// owed is one answer a client is owed, in the order it sent its deliveries.
+type owed struct {
+	id     string
+	answer <-chan error
+}
+
+// serveInbox reads one client's deliveries, handing each to the loop as it arrives, and answers
+// them in the order they came, each once the loop has answered it. The loop answers every delivery
+// it took before the inbox closes, so those answers are written then too, within inboxFlushTimeout.
 func serveInbox(conn net.Conn, events chan<- event, stop <-chan struct{}, logger *log.Logger) {
 	defer conn.Close()
 	go func() {
 		<-stop
-		_ = conn.Close()
+		_ = conn.SetReadDeadline(time.Now())
+		_ = conn.SetWriteDeadline(time.Now().Add(inboxFlushTimeout))
 	}()
-	reader := bufio.NewReaderSize(conn, 64<<10)
-	encoder := json.NewEncoder(conn)
-	for {
-		line, err := reader.ReadBytes('\n')
-		if err != nil {
-			return
-		}
-		var d InboxDelivery
-		if err := json.Unmarshal(line, &d); err != nil || d.ID == "" || d.Content == "" {
-			answer := InboxAnswer{ID: d.ID, Error: "an inbox delivery is one JSON object with an id and content"}
-			if encodeErr := encoder.Encode(answer); encodeErr != nil {
+	pending := make(chan owed, inboxPending)
+	go func() {
+		defer close(pending)
+		reader := bufio.NewReaderSize(conn, 64<<10)
+		for {
+			line, err := reader.ReadBytes('\n')
+			if err != nil {
 				return
 			}
-			continue
+			answer := make(chan error, 1)
+			var d InboxDelivery
+			if err := json.Unmarshal(line, &d); err != nil || d.ID == "" || d.Content == "" {
+				answer <- errors.New(malformedDelivery)
+			} else if !send(events, stop, event{delivery: &delivery{id: d.ID, content: d.Content, answer: answer}}) {
+				return
+			}
+			select {
+			case pending <- owed{id: d.ID, answer: answer}:
+			case <-stop:
+				return
+			}
 		}
-		queued := make(chan error, 1)
-		if !send(events, stop, event{delivery: &delivery{id: d.ID, content: d.Content, queued: queued}}) {
-			return
+	}()
+	encoder := json.NewEncoder(conn)
+	for o := range pending {
+		var err error
+		select {
+		case err = <-o.answer:
+		case <-stop:
+			select {
+			case err = <-o.answer:
+			default:
+				return
+			}
 		}
-		answer := InboxAnswer{ID: d.ID, OK: true}
-		if err := <-queued; err != nil {
-			answer = InboxAnswer{ID: d.ID, Error: err.Error()}
+		answer := InboxAnswer{ID: o.id, OK: true}
+		if err != nil {
+			answer = InboxAnswer{ID: o.id, Error: err.Error()}
 		}
 		if err := encoder.Encode(answer); err != nil {
-			logger.Printf("could not answer inbox delivery %s: %v", d.ID, err)
+			logger.Printf("could not answer inbox delivery %s: %v", o.id, err)
 			return
 		}
 	}

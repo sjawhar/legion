@@ -16,6 +16,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -39,6 +40,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/testtmp"
 )
 
 var (
@@ -47,12 +49,20 @@ var (
 	standinErr  error
 )
 
-func TestMain(m *testing.M) {
-	code := m.Run()
-	if standinDir != "" {
-		os.RemoveAll(standinDir)
-	}
-	os.Exit(code)
+func TestMain(m *testing.M) { os.Exit(runRemovingTheStandins(m)) }
+
+// runRemovingTheStandins runs the package's tests and removes the stand-in binaries' directory
+// afterwards. standins makes that directory during a test, not here, so the deferred call reads
+// standinDir when it runs rather than taking its value now, when it is still empty. Being
+// deferred, the removal also runs when setup here panics. A run killed by a signal still keeps
+// the directory, which nothing here can help.
+func runRemovingTheStandins(m *testing.M) int {
+	defer func() {
+		if standinDir != "" {
+			os.RemoveAll(standinDir)
+		}
+	}()
+	return m.Run()
 }
 
 func requireTmux(t *testing.T) {
@@ -394,17 +404,20 @@ func (c *stubConn) GetState(ctx context.Context) (runtime.ConnState, error) {
 	return runtime.ConnState{IsStreaming: *data.IsStreaming}, nil
 }
 
-func (c *stubConn) Abort(ctx context.Context) error {
-	_, err := c.request(ctx, func(id string) shimwire.Frame { return shimwire.Abort{ID: id} })
-	return err
-}
-
 func (c *stubConn) Shutdown(context.Context) error { return c.writer.WriteFrame(shimwire.Shutdown{}) }
 
 func (c *stubConn) Sequence() uint64 { return c.seq }
 
 func (c *stubConn) AdoptWorkingCopy(context.Context, runtime.GitIdentity, time.Duration) error {
 	return errors.New("the stream stub does not adopt working copies")
+}
+
+func (c *stubConn) BundleWorkspace(context.Context, string, time.Duration) (runtime.WorkspaceBundle, error) {
+	return runtime.WorkspaceBundle{}, errors.New("the stream stub bundles no workspace")
+}
+
+func (c *stubConn) RescueUnpushed(context.Context, runtime.RescueRequest) ([]runtime.WorkspaceRescue, error) {
+	return nil, errors.New("the stream stub does not run push checks")
 }
 
 func (c *stubConn) AgentSecretsEnrollment(context.Context, string) error {
@@ -452,13 +465,11 @@ func newRig(t *testing.T, adjust ...func(*Options)) *rig {
 	requireTmux(t)
 	r := &rig{t: t}
 	r.legion, r.omp = standins(t)
+	r.project = "t" + randomHex(t, 4)
 	// The directory is the server's TMUX_TMPDIR itself, with no subdirectory: tmux binds
-	// <TMUX_TMPDIR>/tmux-<uid>/legion-<project>, and a unix socket path holds at most 107 bytes,
-	// so every byte above that socket counts against a long TMPDIR.
-	dir, err := os.MkdirTemp("", "lgt")
-	if err != nil {
-		t.Fatal(err)
-	}
+	// <TMUX_TMPDIR>/tmux-<uid>/legion-<project>, the longest path put under the directory and
+	// the one a unix socket path's 107 bytes have to hold, so that is the room asked for here.
+	dir := testtmp.Dir(t, filepath.Join("tmux-"+strconv.Itoa(os.Getuid()), "legion-"+r.project))
 	r.dir = dir
 	r.stateDir = filepath.Join(dir, "state")
 	for _, d := range []string{r.stateDir, filepath.Join(dir, "roles")} {
@@ -480,7 +491,6 @@ func newRig(t *testing.T, adjust ...func(*Options)) *rig {
 		}
 	}
 	r.environ = append(r.environ, "TMUX_TMPDIR="+dir, "LEGION_STANDIN_PLUGIN_CONTRACT="+strconv.Itoa(api.DaemonAPIVersion))
-	r.project = "t" + randomHex(t, 4)
 	watchdog := armOrphanWatchdog(t, "legion-"+r.project, r.environ)
 	r.daemon = newFakeDaemon()
 	r.stream = newStreamStub(t, filepath.Join(dir, "stream.sock"), r.daemon)
@@ -490,7 +500,6 @@ func newRig(t *testing.T, adjust ...func(*Options)) *rig {
 		_ = watchdog.Process.Kill()
 		r.stream.listener.Close()
 		r.daemon.server.Close()
-		os.RemoveAll(dir)
 	})
 	return r
 }
@@ -1108,7 +1117,22 @@ var procFile = regexp.MustCompile(`^/proc/[0-9]+/(stat|cmdline)$`)
 // Panes of one issue share its window, while a pane there still verifies; another issue gets a
 // window of its own; and one claim never has two processes.
 func TestRealTmuxSplitsIntoTheIssueWindow(t *testing.T) {
-	r := newRig(t)
+	// Each mint is a fresh token, as a daemon's re-minted lease is, so a refused launch that
+	// wrote its credential would change the live pane's gh files.
+	var mintMu sync.Mutex
+	mints := 0
+	minting := func(ctx context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
+		bundle, err := staticCredential(ctx, role, owner)
+		mintMu.Lock()
+		mints++
+		token := fmt.Sprintf("ghs_mint_%d", mints)
+		mintMu.Unlock()
+		written := bundle.Owners[bundle.Default]
+		bundle.Owners[bundle.Default] = ghconfig.Render(token, written.App, staticCredentialExpiry)
+		return bundle, err
+	}
+	withMinting := func(o *Options) { o.GitHubCredential = minting }
+	r := newRig(t, withMinting)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -1116,7 +1140,8 @@ func TestRealTmuxSplitsIntoTheIssueWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Spawn architect: %v", err)
 	}
-	tester, err := r.rt.Spawn(ctx, r.spec("LEGION-2", "LEGION-2", claim.RoleTester))
+	testerSpec := r.spec("LEGION-2", "LEGION-2", claim.RoleTester)
+	tester, err := r.rt.Spawn(ctx, testerSpec)
 	if err != nil {
 		t.Fatalf("Spawn tester: %v", err)
 	}
@@ -1148,18 +1173,49 @@ func TestRealTmuxSplitsIntoTheIssueWindow(t *testing.T) {
 		t.Errorf("the issue's window is not named for it and marked as the daemon's:\n%s", windows)
 	}
 
-	// One claim, one process: a second spawn of a live claim is refused, and a resume waits for
-	// the previous incarnation to go — and refuses when it does not.
+	// One claim, one process: a second spawn of a live claim is refused, leaving the files the live
+	// process reads as they were, and a resume waits for the previous incarnation to go — and
+	// refuses when it does not.
+	readSecrets := func() map[string]string {
+		t.Helper()
+		contents := map[string]string{}
+		for _, file := range secretFiles(r.stateDir, testerSpec) {
+			raw, err := os.ReadFile(file.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			contents[file.Variable] = string(raw)
+		}
+		root := runtime.GHConfigDir(r.stateDir, testerSpec.Claim)
+		if err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
+			}
+			raw, err := os.ReadFile(path)
+			contents[path] = string(raw)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return contents
+	}
+	before := readSecrets()
 	if _, err := r.rt.Spawn(ctx, r.spec("LEGION-2", "LEGION-2", claim.RoleTester)); err == nil ||
 		!strings.Contains(err.Error(), "is still running in pane "+tester.Tmux.Pane) {
 		t.Errorf("a second spawn of a live claim = %v", err)
 	}
-	impatient := r.newRuntime(func(o *Options) { o.StopGrace = 300 * time.Millisecond })
+	if after := readSecrets(); !maps.Equal(after, before) {
+		t.Errorf("the refused second spawn rewrote the live tester's secret files from %q to %q", before, after)
+	}
+	impatient := r.newRuntime(withMinting, func(o *Options) { o.StopGrace = 300 * time.Millisecond })
 	resume := r.spec("LEGION-2", "LEGION-2", claim.RoleTester)
 	resume.ResumeSessionFile = r.rolePrompt
 	if _, err := impatient.Resume(ctx, &tester, resume); err == nil ||
 		!strings.Contains(err.Error(), "previous incarnation "+tester.Incarnation+" is still running") {
 		t.Errorf("a resume over a live incarnation = %v", err)
+	}
+	if after := readSecrets(); !maps.Equal(after, before) {
+		t.Errorf("the refused resume rewrote the live tester's secret files from %q to %q", before, after)
 	}
 }
 
