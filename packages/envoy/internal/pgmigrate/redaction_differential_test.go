@@ -3,322 +3,86 @@ package pgmigrate
 // redactedQuery's property, searched for rather than enumerated. The rows of exempt_test.go pin
 // the shapes somebody has already thought of; this file goes looking for the ones nobody has.
 //
-// It exists because the rule was found wrong three times in one place - the table of which
-// literal prefix takes which escape rule under which standard_conforming_strings - each time by
-// a reader running a text the table did not hold. scan.go reads a holder session's query text
-// under both settings and prints a byte only where both readings read it as structure, so the
-// property is closed and checkable: no byte inside a literal or a comment of either real reading
-// may survive.
+// It exists because the rule was found wrong four times in one place - which literal prefix takes
+// which escape rule under which standard_conforming_strings, and where a number ends - each time
+// by a reader running a text the rows did not hold, and each time in a reading of scan.l that
+// somebody had reasoned out. scan.go no longer holds such a reading: scanl.go is a transcription
+// of src/backend/parser/scan.l, so what is left to check is not a second opinion of the grammar
+// but the grammar itself, and the only thing that holds it is a real PostgreSQL.
 //
-// The model below is written from PostgreSQL's own src/backend/parser/scan.l - its xq, xe, xb,
-// xh, xus and xdolq states, quotestop, quotecontinue, quotefail, nested block comments,
-// {xnstart}'s yyless(1) and {integer_junk} - rather than from scan.go, so the two are independent
-// readings of the same grammar and a shared mistake is unlikely. TestDifferentialModelAgainstServer
-// holds the model itself to a real PostgreSQL, one-directionally: a marker the model says is
-// hidden must never be a token the server names. That leg skips without
-// DISPATCH_TEST_DATABASE_URL, which CI's envoy-go lane sets.
+// So the two legs of this file ask different questions.
 //
-// A text PostgreSQL refuses outright - trailing junk after a numeric literal, U&'…' with the
-// setting off - has no reading to be faithful to, and pg_stat_activity holds such texts, so the
-// search excludes them and says how many it excluded. What redactedQuery prints there is
-// unconstrained by the rule.
+// TestRedactionPrintsNoHiddenByte runs the corpus through redactedQuery and checks, text by text,
+// that the marker is never printed where the transcription says it is inside a literal, inside a
+// comment, or past the byte scan.l refused the text on. That is a check of the redaction loop,
+// not of the lexer: it is the leg that catches a loop which leaves scan.l's token boundaries, as
+// the number arm of round 4 did. It also checks the other direction where the two readings agree
+// and neither is refused, since there the redaction is the default reading's own and a marker
+// neither reading hides must survive it.
+//
+// TestRedactionAgainstServerOutcomes is the oracle, and it holds the transcription itself to a
+// real PostgreSQL by comparing OUTCOMES rather than parsing messages. For each text it asks the
+// server twice: once as it stands, and once with the marker replaced by ))) , which is three
+// bytes like the marker but can never be one token. If the server answers both the same way -
+// the same SQLSTATE at the same position, or the same success with the same columns, and the
+// same message once each word is blanked out - then nothing the server did depended on those
+// bytes being what they are, so they were not a token of its own and redactedQuery may not print
+// them. If the answers differ under both settings, the marker was a token of its own under
+// both, and nothing may swallow it: that half asks our own reading nothing either, so a reading
+// that hides too much is caught by the same oracle as one that hides too little. The leg skips
+// without DISPATCH_TEST_DATABASE_URL, which CI's envoy-go lane sets.
+//
+// Two kinds of text the oracle cannot settle, both counted and reported rather than dropped
+// quietly: one whose error sits before the marker, where the parser stopped and nothing the
+// server says is evidence about those bytes either way; and one whose marker is inside a quoted
+// identifier, which is a name the report keeps on purpose and which a server that never
+// resolved it answers for the same whatever it spells.
+//
+// Texts PostgreSQL refuses are not excluded. A session that errors inside a transaction keeps
+// every lock it took before the error and sits idle in transaction (aborted) with the refused
+// statement recorded in pg_stat_activity, which is exactly the session a migration queues behind
+// and exactly the text redactedQuery is handed, so the refused class is the one class this search
+// may not skip. It is checked three ways: a text our reading refuses must be a text the server
+// refuses; a text the server's own lexer refuses - by one of the messages scan.l's error rules
+// raise, since no outcome tells a lexical refusal from the parser's - must be a text our reading
+// refuses; and a marker at or past the byte our reading was refused on must never be printed,
+// which is the rule redactedQuery holds for the class: where the lexer cannot go on, everything
+// from there is covered.
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"testing"
 
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// --- the model, written from src/backend/parser/scan.l rather than from scan.go ---
+// --- the corpus ---
 
-type mspan struct {
-	start, end int
-	comment    bool
+// alphabet holds the pieces a text is built from: every shape of quote and prefix scan.l reads
+// differently, the bytes that move a reading (a backslash, a quote, a newline), the comment
+// openers, and the numeric shapes - a digit, a dot, the two dots of {numericfail} and the bare e
+// of {real} - whose absence is why round 4's number arm was never generated here.
+var alphabet = []string{
+	"'", "''", `\`, `\'`, `"`, "--", "/*", "*/", "\n", " ", "$t$", "$", "1", ",",
+	"B'", "X'", "N'", "E'", "U&'", "a", ".", "..", "e",
 }
 
 const (
-	mOK           = iota
-	mUnterminated // scan.l refuses it, but a truncated pg_stat_activity text looks like this
-	mJunk         // trailing junk after a numeric literal: scan.l refuses before any reading
+	marker = "zqz"
+	// markerReplacement is as long as the marker, so an error position does not move, and is
+	// three bytes no lexer can read as one token, so a server that names the token names one of
+	// them and a server that echoes content echoes all three. That is what tells "the marker is
+	// a token of its own" from "the marker is content the message happens to quote".
+	markerReplacement = ")))"
 )
-
-func mIdentStart(c byte) bool {
-	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || c == '_' || c >= 0x80
-}
-func mIdentCont(c byte) bool { return mIdentStart(c) || '0' <= c && c <= '9' || c == '$' }
-func mDigit(c byte) bool     { return '0' <= c && c <= '9' }
-func mHorizSpace(c byte) bool {
-	return c == ' ' || c == '\t' || c == '\f' || c == '\v'
-}
-func mSpace(c byte) bool { return mHorizSpace(c) || c == '\n' || c == '\r' }
-
-// mQuoteContinue implements scan.l's quotecontinue:
-//
-//	{quote}{whitespace_with_newline}{quote}, whitespace_with_newline
-//	({horiz_whitespace}*{newline}{whitespace}*), horiz_whitespace ({horiz_space}|{comment}),
-//	whitespace ({space}+|{comment}), comment ("--"{non_newline}*)
-//
-// i is the index just after the closing quote; it returns the index of the quote that carries the
-// literal on.
-func mQuoteContinue(text string, i int) (int, bool) {
-	for i < len(text) { // {horiz_whitespace}*
-		if mHorizSpace(text[i]) {
-			i++
-		} else if strings.HasPrefix(text[i:], "--") {
-			for i < len(text) && text[i] != '\n' && text[i] != '\r' {
-				i++
-			}
-		} else {
-			break
-		}
-	}
-	if i >= len(text) || (text[i] != '\n' && text[i] != '\r') { // {newline}
-		return 0, false
-	}
-	i++
-	for i < len(text) { // {whitespace}*
-		if mSpace(text[i]) {
-			i++
-		} else if strings.HasPrefix(text[i:], "--") {
-			for i < len(text) && text[i] != '\n' && text[i] != '\r' {
-				i++
-			}
-		} else {
-			break
-		}
-	}
-	if i < len(text) && text[i] == '\'' {
-		return i, true
-	}
-	return 0, false
-}
-
-// mQuoted reads the literal whose opening quote is at i. escape is scan.l's xe backslash rule,
-// double its xqdouble rule.
-func mQuoted(text string, i int, escape, double bool) (int, bool) {
-	for j := i + 1; j < len(text); {
-		switch {
-		case escape && text[j] == '\\':
-			j += 2
-		case text[j] != '\'':
-			j++
-		case double && j+1 < len(text) && text[j+1] == '\'':
-			j += 2
-		default:
-			if k, ok := mQuoteContinue(text, j+1); ok {
-				j = k + 1
-				continue
-			}
-			return j + 1, true
-		}
-	}
-	return len(text), false
-}
-
-// modelSpans reads text as scan.l does with standard_conforming_strings scsOn, returning the
-// spans it reads as a literal or a comment and how scan.l ends: mOK, mUnterminated or mJunk.
-func modelSpans(text string, scsOn bool) ([]mspan, int) {
-	var spans []mspan
-	state := mOK
-	lit := func(start, end int, ok bool) int {
-		spans = append(spans, mspan{start: start, end: end})
-		if !ok && state == mOK {
-			state = mUnterminated
-		}
-		return end
-	}
-	for i := 0; i < len(text); {
-		c := text[i]
-		var next, after byte
-		if i+1 < len(text) {
-			next = text[i+1]
-		}
-		if i+2 < len(text) {
-			after = text[i+2]
-		}
-		switch {
-		case c == '-' && next == '-':
-			j := i + 2
-			for j < len(text) && text[j] != '\n' && text[j] != '\r' {
-				j++
-			}
-			spans = append(spans, mspan{start: i, end: j, comment: true})
-			i = j
-		case c == '/' && next == '*':
-			depth, j := 1, i+2
-			for j < len(text) {
-				if strings.HasPrefix(text[j:], "/*") {
-					depth++
-					j += 2
-				} else if strings.HasPrefix(text[j:], "*/") {
-					depth--
-					j += 2
-					if depth == 0 {
-						break
-					}
-				} else {
-					j++
-				}
-			}
-			if depth != 0 && state == mOK {
-				state = mUnterminated
-			}
-			spans = append(spans, mspan{start: i, end: j, comment: true})
-			i = j
-		case c == '\'':
-			// {xqstart}: BEGIN(scsOn ? xq : xe).
-			end, ok := mQuoted(text, i, !scsOn, true)
-			i = lit(i, end, ok)
-		case c == '"':
-			// A quoted identifier is a name, not a literal: no span.
-			j := i + 1
-			for j < len(text) {
-				if text[j] != '"' {
-					j++
-				} else if j+1 < len(text) && text[j+1] == '"' {
-					j += 2
-				} else {
-					j++
-					break
-				}
-			}
-			i = j
-		case c == '$':
-			j := i + 1
-			if j < len(text) && mIdentStart(text[j]) {
-				for j++; j < len(text) && (mIdentStart(text[j]) || mDigit(text[j])); j++ {
-				}
-			}
-			if j < len(text) && text[j] == '$' {
-				delimiter := text[i : j+1]
-				if closing := strings.Index(text[j+1:], delimiter); closing >= 0 {
-					i = lit(i, j+1+closing+len(delimiter), true)
-				} else {
-					i = lit(i, len(text), false)
-				}
-				continue
-			}
-			// {dolqfailed} throws back all but the $, and a param is {dollar}{integer}.
-			j = i + 1
-			for j < len(text) && mDigit(text[j]) {
-				j++
-			}
-			if j > i+1 && j < len(text) && mIdentStart(text[j]) && state == mOK {
-				state = mJunk // {param_junk}
-			}
-			i = j
-		case mDigit(c):
-			j := i
-			for j < len(text) && (mDigit(text[j]) || text[j] == '_' || text[j] == '.') {
-				j++
-			}
-			if j < len(text) && mIdentStart(text[j]) && state == mOK {
-				// {integer_junk}/{numeric_junk}: scan.l refuses the text here, so neither
-				// reading of what follows is the one Postgres used.
-				state = mJunk
-			}
-			i = j
-		case mIdentStart(c):
-			switch {
-			case (c == 'e' || c == 'E') && next == '\'': // {xestart}
-				end, ok := mQuoted(text, i+1, true, true)
-				i = lit(i, end, ok)
-			case (c == 'b' || c == 'B') && next == '\'': // {xbstart}, xbinside [^']*
-				end, ok := mQuoted(text, i+1, false, false)
-				i = lit(i, end, ok)
-			case (c == 'x' || c == 'X') && next == '\'': // {xhstart}, xhinside [^']*
-				end, ok := mQuoted(text, i+1, false, false)
-				i = lit(i, end, ok)
-			case (c == 'n' || c == 'N') && next == '\'': // {xnstart} eats only the n, and the
-				// literal after it takes the setting; the n is counted into the span so that a
-				// prefix byte is not a disagreement of its own.
-				end, ok := mQuoted(text, i+1, !scsOn, true)
-				i = lit(i, end, ok)
-			case (c == 'u' || c == 'U') && next == '&' && after == '\'': // {xusstart}
-				end, ok := mQuoted(text, i+2, false, true)
-				i = lit(i, end, ok)
-			case (c == 'u' || c == 'U') && next == '&' && after == '"': // {xuistart}, a name
-				j := i + 3
-				for j < len(text) {
-					if text[j] != '"' {
-						j++
-					} else if j+1 < len(text) && text[j+1] == '"' {
-						j += 2
-					} else {
-						j++
-						break
-					}
-				}
-				i = j
-			default:
-				j := i + 1
-				for j < len(text) && mIdentCont(text[j]) {
-					j++
-				}
-				i = j
-			}
-		default:
-			i++
-		}
-	}
-	return spans, state
-}
-
-// --- scan.go's side ---
-
-func probeSpans(text string, backslashEscapes bool) []mspan {
-	var spans []mspan
-	for i := 0; i < len(text); {
-		kind, end, _ := nextSQLToken(text, i, backslashEscapes)
-		switch kind {
-		case sqlString, sqlDollarString:
-			spans = append(spans, mspan{start: i, end: end})
-		case sqlUnicodeEscape:
-			if i+2 < len(text) && text[i+2] == '"' {
-				break // U&"name" is a name under both readings
-			}
-			spans = append(spans, mspan{start: i, end: end})
-		case sqlComment:
-			spans = append(spans, mspan{start: i, end: end, comment: true})
-		}
-		i = end
-	}
-	return spans
-}
-
-func covered(spans []mspan, from, to int) bool {
-	for _, s := range spans {
-		if s.start < to && from < s.end {
-			return true
-		}
-	}
-	return false
-}
-
-func hiddenBytes(spans []mspan, n int) []bool {
-	out := make([]bool, n)
-	for _, s := range spans {
-		for i := s.start; i < s.end && i < n; i++ {
-			out[i] = true
-		}
-	}
-	return out
-}
-
-var alphabet = []string{
-	"'", "''", `\`, `\'`, `"`, "--", "/*", "*/", "\n", " ", "$t$", "$", "1", ",",
-	"B'", "X'", "N'", "E'", "U&'", "a",
-}
-
-const marker = "zqz"
 
 // eachText calls visit with every text of up to maxLen pieces of the alphabet, and with the
 // marker word inserted at every gap of each when withMarker. It streams rather than collecting,
-// so maxLen 5 with the marker (19.2 million texts) fits in memory.
+// so the corpus need not fit in memory.
 func eachText(maxLen int, withMarker bool, visit func(string)) int {
 	n := 0
 	var build func(prefix []string, depth int)
@@ -349,149 +113,383 @@ func eachText(maxLen int, withMarker bool, visit func(string)) int {
 	return n
 }
 
-// TestDifferentialSpansAgainstScanL compares, text by text, the spans scan.go's two readings hold
-// against the model above, and checks the invariant that matters: no byte inside a literal or a
-// comment of either reading is printed.
-func TestDifferentialSpansAgainstScanL(t *testing.T) {
-	var unsafeSpan, overSpan, junk int
-	unsafeExamples := map[string]bool{}
-	overExamples := map[string]bool{}
-	n := eachText(5, false, func(text string) {
-		for _, scsOn := range []bool{true, false} {
-			model, state := modelSpans(text, scsOn)
-			if state == mJunk {
-				junk++
-				continue
-			}
-			mine := probeSpans(text, !scsOn)
-			m := hiddenBytes(model, len(text))
-			s := hiddenBytes(mine, len(text))
-			for i := range m {
-				if m[i] && !s[i] {
-					unsafeSpan++
-					if len(unsafeExamples) < 12 {
-						unsafeExamples[fmt.Sprintf("scs_on=%v %q byte %d", scsOn, text, i)] = true
-					}
-					break
-				}
-			}
-			for i := range m {
-				if s[i] && !m[i] {
-					overSpan++
-					if len(overExamples) < 12 {
-						overExamples[fmt.Sprintf("scs_on=%v %q byte %d", scsOn, text, i)] = true
-					}
-					break
-				}
-			}
-		}
-	})
-	t.Logf("span corpus: %d texts, %d (text,setting) pairs skipped as numeric junk", n, junk)
-	t.Logf("texts where the model hides a byte scan.go does not (unsafe): %d", unsafeSpan)
-	for e := range unsafeExamples {
-		t.Logf("  unsafe: %s", e)
-	}
-	t.Logf("texts where scan.go hides a byte the model does not (over-hiding, safe): %d", overSpan)
-	for e := range overExamples {
-		t.Logf("  over: %s", e)
-	}
-	if unsafeSpan > 0 {
-		t.Errorf("%d texts where the model hides a byte scan.go does not", unsafeSpan)
-	}
+// --- what one reading of a text holds ---
+
+// reading is what scanl.go's transcription reads a text as at one standard_conforming_strings:
+// the spans it does not read as structure, the quoted identifiers it reads as a name, and where
+// scan.l refused it, or -1.
+type reading struct {
+	spans   []sqlToken
+	names   []sqlToken
+	failure int
 }
 
-// TestDifferentialMarkerIsNeverPrinted is the invariant itself: a marker word inside a literal or
-// a comment of either real reading must not survive redactedQuery.
-func TestDifferentialMarkerIsNeverPrinted(t *testing.T) {
-	var checked, leaked, junk int
-	examples := map[string]bool{}
-	n := eachText(5, true, func(text string) {
+func readingOf(text string, standardConformingStrings bool) reading {
+	var r reading
+	r.failure = lexSQL(text, standardConformingStrings, func(token sqlToken) {
+		switch token.kind {
+		case sqlString, sqlDollarString, sqlUnicodeEscape, sqlComment:
+			r.spans = append(r.spans, token)
+		case sqlQuotedIdentifier:
+			r.names = append(r.names, token)
+		}
+	})
+	return r
+}
+
+// isName reports whether this reading holds [from, to) inside a quoted identifier. What is
+// inside one is a name, and the report keeps the names a statement touches on purpose, so the
+// server answering alike whether that name is spelt one way or another says nothing: it never
+// looked the name up.
+func (r reading) isName(from, to int) bool {
+	for _, span := range r.names {
+		if span.start < to && from < span.end {
+			return true
+		}
+	}
+	return false
+}
+
+// hides reports whether this reading holds any byte of [from, to) inside a literal or a comment,
+// or at or past the byte scan.l refused the text on.
+func (r reading) hides(from, to int) bool {
+	if r.failure >= 0 && r.failure < to {
+		return true
+	}
+	for _, span := range r.spans {
+		if span.start < to && from < span.end {
+			return true
+		}
+	}
+	return false
+}
+
+func (r reading) same(other reading) bool {
+	if r.failure != other.failure || len(r.spans) != len(other.spans) {
+		return false
+	}
+	for i := range r.spans {
+		if r.spans[i] != other.spans[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// --- the redaction loop, over the whole corpus ---
+
+// corpusDepth is how many pieces of the alphabet a text of the corpus holds.
+const corpusDepth = 4
+
+// TestRedactionPrintsNoHiddenByte checks the invariant redactedQuery exists for: no byte a
+// reading holds inside a literal or a comment, and no byte past the one scan.l refused a reading
+// on, survives it. Where the two readings agree and neither is refused it checks the other
+// direction too: a marker neither hides is shape, and shape is what the report keeps.
+func TestRedactionPrintsNoHiddenByte(t *testing.T) {
+	var hiddenTexts, leaked, refusedTexts, agreedTexts, overHidden int
+	leaks := map[string]bool{}
+	swallowed := map[string]bool{}
+	n := eachText(corpusDepth, true, func(text string) {
 		at := strings.Index(text, marker)
-		hiddenOn, stateOn := modelSpans(text, true)
-		hiddenOff, stateOff := modelSpans(text, false)
-		if stateOn == mJunk || stateOff == mJunk {
-			junk++
+		on, off := readingOf(text, true), readingOf(text, false)
+		if on.failure >= 0 || off.failure >= 0 {
+			refusedTexts++
+		}
+		printed := strings.Contains(redactedQuery(text), marker)
+		if on.hides(at, at+len(marker)) || off.hides(at, at+len(marker)) {
+			hiddenTexts++
+			if printed {
+				leaked++
+				if len(leaks) < 20 {
+					leaks[fmt.Sprintf("%q -> %q", text, redactedQuery(text))] = true
+				}
+			}
 			return
 		}
-		hidden := covered(hiddenOn, at, at+len(marker)) || covered(hiddenOff, at, at+len(marker))
-		if !hidden {
-			return
-		}
-		checked++
-		if strings.Contains(redactedQuery(text), marker) {
-			leaked++
-			if len(examples) < 20 {
-				examples[fmt.Sprintf("%q -> %q", text, redactedQuery(text))] = true
+		if on.same(off) && on.failure < 0 {
+			agreedTexts++
+			if !printed {
+				overHidden++
+				if len(swallowed) < 20 {
+					swallowed[fmt.Sprintf("%q -> %q", text, redactedQuery(text))] = true
+				}
 			}
 		}
 	})
-	t.Logf("marker corpus: %d texts, %d skipped as numeric junk, %d with the marker inside a literal or comment of either reading", n, junk, checked)
-	t.Logf("leaks: %d", leaked)
-	for e := range examples {
+	t.Logf("corpus: %d texts of up to %d pieces, %d refused by scan.l under one reading or the other", n, corpusDepth, refusedTexts)
+	t.Logf("%d texts hold the marker inside a literal, inside a comment, or past a refusal; %d printed it", hiddenTexts, leaked)
+	for e := range leaks {
 		t.Logf("  leak: %s", e)
 	}
+	t.Logf("%d texts both readings read alike and neither is refused and the marker is shape; %d lost it", agreedTexts, overHidden)
+	for e := range swallowed {
+		t.Logf("  swallowed: %s", e)
+	}
 	if leaked > 0 {
-		t.Errorf("%d leaks", leaked)
+		t.Errorf("%d texts printed a marker a reading holds inside a literal, inside a comment, or past a refusal", leaked)
+	}
+	if overHidden > 0 {
+		t.Errorf("%d texts lost a marker both readings read as shape", overHidden)
 	}
 }
 
-// TestDifferentialModelAgainstServer checks the model one-directionally against a real server: a
-// marker the model holds inside a literal or a comment must not be a token the server names.
-func TestDifferentialModelAgainstServer(t *testing.T) {
+// --- the oracle ---
+
+// answer is what the server said about one statement: an error's SQLSTATE, position and message,
+// or the columns of a success. message is compared only with the word that varies blanked out.
+type answer struct {
+	failed   bool
+	sqlstate string
+	position int32
+	message  string
+	columns  string
+}
+
+// shapeOf is the part of an answer that cannot depend on what the varying bytes spell: whether
+// the server refused the statement, with which SQLSTATE and at which byte, and what columns it
+// answered with when it did not.
+func (a answer) shape() string {
+	return fmt.Sprintf("%v/%s/%d/%s", a.failed, a.sqlstate, a.position, a.columns)
+}
+
+// agrees reports whether the server answered the two statements the same way: the same shape,
+// and the same message once each statement's own varying word is blanked out. A message that
+// quotes the bytes back is therefore agreement when it quotes all three of them (the server
+// echoed content) and disagreement when it names one token of them (the server lexed them).
+func (a answer) agrees(b answer, aWord, bWord string) bool {
+	return a.shape() == b.shape() &&
+		strings.ReplaceAll(a.message, aWord, "@") == strings.ReplaceAll(b.message, bWord, "@")
+}
+
+// ask sends one statement as a simple query, as a client sends the statements pg_stat_activity
+// records, and reads what the server answers. It goes through pgconn rather than pgx because
+// pgx refuses a simple query on a connection whose standard_conforming_strings is off, and off
+// is half of what this test is for.
+func ask(ctx context.Context, conn *pgconn.PgConn, sql string) answer {
+	var columns strings.Builder
+	results := conn.Exec(ctx, sql)
+	for results.NextResult() {
+		for _, field := range results.ResultReader().FieldDescriptions() {
+			fmt.Fprintf(&columns, "%s:%d,", field.Name, field.DataTypeOID)
+		}
+	}
+	err := results.Close()
+	if err == nil {
+		return answer{columns: columns.String()}
+	}
+	out := answer{failed: true, message: err.Error()}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		out.sqlstate = pgErr.Code
+		out.position = pgErr.Position
+		out.message = pgErr.Message
+	}
+	return out
+}
+
+// verdict is what the server said about one text's marker under one standard_conforming_strings.
+type verdict struct {
+	// token is true where the server's answer changed when the marker was replaced by three
+	// bytes no lexer can read as one token: the server read the marker as a token of its own.
+	token bool
+	// conclusive is false where the server stopped before the marker - an error positioned at
+	// an earlier byte - so nothing it said is evidence about those bytes either way.
+	conclusive bool
+	// name is true where this reading holds the marker inside a quoted identifier, which is a
+	// name the report keeps on purpose and which the server need never have looked up.
+	name bool
+	// failed is true where the server refused the text, and lexical is true where the message
+	// it refused with is one of scan.l's own error rules rather than the parser's.
+	failed, lexical bool
+}
+
+// scanlErrors are the messages scan.l raises from its error rules, read off the rules
+// themselves: that is what tells a refusal the lexer owns from one the grammar owns, which no
+// outcome can, the parser stopping the statement either way. "invalid Unicode escape" and
+// "invalid Unicode surrogate pair" are left out although <xe> raises both, because gram.y
+// raises the same two words for a U&'…' whose escapes it unpicks after the lexer handed the
+// literal over whole - PostgreSQL 18.6 answers select U&'\' and select E'\u12' alike - so the
+// message cannot say which of the two refused the text.
+var scanlErrors = []string{
+	"unterminated /* comment",
+	"unterminated bit string literal",
+	"unterminated hexadecimal string literal",
+	"unterminated quoted string",
+	"unterminated dollar-quoted string",
+	"unterminated quoted identifier",
+	"zero-length delimited identifier",
+	"unsafe use of string constant with Unicode escapes",
+	"unsafe use of \\' in a string literal",
+	"trailing junk after numeric literal",
+	"trailing junk after parameter",
+	"invalid hexadecimal integer",
+	"invalid octal integer",
+	"invalid binary integer",
+	"operator too long",
+	"parameter number too large",
+}
+
+func probe(ctx context.Context, conn *pgconn.PgConn, text string, ours reading) verdict {
+	at := strings.Index(text, marker)
+	answered := ask(ctx, conn, text)
+	out := verdict{failed: answered.failed, name: ours.isName(at, at+len(marker))}
+	for _, message := range scanlErrors {
+		if strings.HasPrefix(answered.message, message) {
+			out.lexical = true
+		}
+	}
+	if answered.failed && answered.position > 0 && int(answered.position)-1 < at {
+		return out
+	}
+	out.conclusive = true
+	changed := ask(ctx, conn, strings.Replace(text, marker, markerReplacement, 1))
+	out.token = !answered.agrees(changed, marker, markerReplacement)
+	return out
+}
+
+// TestRedactionAgainstServerOutcomes holds the transcription to a real PostgreSQL by outcome,
+// never by reading what a message says about the marker: a text whose answer does not change
+// when the marker changes is a text whose marker that server never read as a token, and
+// redactedQuery may not print it; a text whose answer changes under both settings is one where
+// the marker is shape under both, and shape is what the report is for, so it must survive.
+// Neither half asks our own reading anything, which is the point: a reading that hides too
+// little and a reading that hides too much are both wrong against the same oracle, and a search
+// that excused itself with its own model would catch neither. It also checks the two halves of
+// the refusal rule: what our reading refuses the server must refuse, and what the server's own
+// lexer refuses our reading must refuse.
+func TestRedactionAgainstServerOutcomes(t *testing.T) {
 	url := os.Getenv("DISPATCH_TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("DISPATCH_TEST_DATABASE_URL must be set")
 	}
 	ctx := context.Background()
-	// Every 29th text of the four-piece corpus, so the sample spreads over the whole of it.
-	var sample []string
-	i := 0
-	eachText(4, true, func(text string) {
-		if i%29 == 0 {
-			sample = append(sample, "select "+text)
+	settings := [2]string{"on", "off"}
+	var conns [2]*pgconn.PgConn
+	for i, setting := range settings {
+		config, err := pgconn.ParseConfig(url)
+		if err != nil {
+			t.Fatalf("parse DISPATCH_TEST_DATABASE_URL: %v", err)
 		}
-		i++
-	})
-	var asked, disagreed int
-	examples := map[string]bool{}
-	for _, scs := range []string{"on", "off"} {
-		conn, err := pgx.Connect(ctx, url)
+		// The setting is given to the server in the startup packet, as PGOPTIONS gives it: a SET
+		// in a statement of its own would do, but a SET in the same simple-query string as the
+		// text under test is lexed before it takes effect, which has misled a reader of this
+		// code before.
+		config.RuntimeParams["options"] = "-c standard_conforming_strings=" + setting
+		conn, err := pgconn.ConnectConfig(ctx, config)
 		if err != nil {
 			t.Fatalf("connect: %v", err)
 		}
-		if _, err := conn.Exec(ctx, "set standard_conforming_strings = "+scs); err != nil {
-			t.Fatalf("set: %v", err)
+		defer conn.Close(ctx)
+		if running := conn.ParameterStatus("standard_conforming_strings"); running != setting {
+			t.Fatalf("standard_conforming_strings is %q, want %q", running, setting)
 		}
-		for _, text := range sample {
-			model, state := modelSpans(text, scs == "on")
-			if state == mJunk {
-				continue
+		conns[i] = conn
+	}
+	sample := serverSample()
+	var asked, leaked, lost, shape, inconclusive, named, refusedByUs, refusalMissing, refusalSpurious int
+	leaks := map[string]bool{}
+	losses := map[string]bool{}
+	refusals := map[string]bool{}
+	for _, text := range sample {
+		printed := strings.Contains(redactedQuery(text), marker)
+		var verdicts [2]verdict
+		for i, setting := range settings {
+			ours := readingOf(text, setting == "on")
+			verdicts[i] = probe(ctx, conns[i], text, ours)
+			switch {
+			case ours.failure >= 0 && !verdicts[i].failed:
+				refusalSpurious++
+				if len(refusals) < 10 {
+					refusals[fmt.Sprintf("scs=%s %q: our reading is refused at %d, the server ran it", setting, text, ours.failure)] = true
+				}
+			case ours.failure < 0 && verdicts[i].lexical:
+				refusalMissing++
+				if len(refusals) < 10 {
+					refusals[fmt.Sprintf("scs=%s %q: the server's lexer refused it, our reading did not", setting, text)] = true
+				}
 			}
-			at := strings.Index(text, marker)
-			if !covered(model, at, at+len(marker)) {
-				continue // the model says it is structure; the server cannot refute that
+			if ours.failure >= 0 {
+				refusedByUs++
 			}
-			asked++
-			_, err := conn.Exec(ctx, text)
-			if err == nil {
-				continue
+			switch {
+			case verdicts[i].name:
+				named++
+			case !verdicts[i].conclusive:
+				inconclusive++
+			default:
+				asked++
 			}
-			message := err.Error()
-			if strings.Contains(message, `column "`+marker+`" does not exist`) ||
-				strings.Contains(message, `at or near "`+marker+`"`) {
-				disagreed++
-				if len(examples) < 20 {
-					examples[fmt.Sprintf("scs=%s %q: %s", scs, text, message)] = true
+			// Safety: one setting is enough. A marker that server never read as a token is a
+			// marker inside a literal, inside a comment, or past the byte it stopped on, and
+			// none of those may reach the report.
+			if verdicts[i].conclusive && !verdicts[i].name && !verdicts[i].token && printed {
+				leaked++
+				if len(leaks) < 20 {
+					leaks[fmt.Sprintf("scs=%s %q -> %q: the server answered the same with %s in its place", setting, text, redactedQuery(text), markerReplacement)] = true
 				}
 			}
 		}
-		conn.Close(ctx)
+		// Shape: both settings are needed, since a marker one reading holds inside a literal is
+		// covered however the other reads it.
+		if verdicts[0].conclusive && verdicts[1].conclusive && verdicts[0].token && verdicts[1].token &&
+			!verdicts[0].name && !verdicts[1].name {
+			shape++
+			if !printed {
+				lost++
+				if len(losses) < 20 {
+					losses[fmt.Sprintf("%q -> %q: the server read the marker as a token of its own under both settings", text, redactedQuery(text))] = true
+				}
+			}
+		}
 	}
-	t.Logf("server check: %d statements the model holds the marker hidden in, %d the server names the marker as a token of its own", asked, disagreed)
-	for e := range examples {
-		t.Logf("  model disagreement: %s", e)
+	t.Logf("server: %d of %d sampled texts under each setting settled by outcome, %d inconclusive (the server's error sits before the marker), %d where the marker is inside a quoted identifier", asked, len(sample), inconclusive, named)
+	t.Logf("%d (text, setting) pairs our reading refuses; %d the server ran anyway, %d the server's own lexer refused and ours did not", refusedByUs, refusalSpurious, refusalMissing)
+	for e := range refusals {
+		t.Logf("  refusal: %s", e)
 	}
-	if disagreed > 0 {
-		t.Errorf("%d model disagreements", disagreed)
+	t.Logf("markers the server never read as a token and redactedQuery printed: %d", leaked)
+	for e := range leaks {
+		t.Logf("  leak: %s", e)
 	}
+	t.Logf("%d texts hold a marker the server read as a token of its own under both settings; %d lost it", shape, lost)
+	for e := range losses {
+		t.Logf("  lost: %s", e)
+	}
+	if leaked > 0 {
+		t.Errorf("%d markers printed that the server never read as a token", leaked)
+	}
+	if lost > 0 {
+		t.Errorf("%d markers dropped that the server read as a token of its own under both settings", lost)
+	}
+	if refusalSpurious > 0 || refusalMissing > 0 {
+		t.Errorf("%d refusals our reading invented, %d the server's own lexer raised and our reading did not", refusalSpurious, refusalMissing)
+	}
+}
+
+// serverSample picks the texts the oracle runs: every sampleStride'th text of the corpus whose
+// marker our reading holds hidden, and every sampleStride'th one it holds as shape, so that both
+// answers the server can give are asked for and a reading that hides too little is as reachable
+// as one that hides too much. The enumeration is deterministic, so the sample is the same on
+// every run.
+func serverSample() []string {
+	const sampleStride = 97
+	var sample []string
+	hidden, shape := 0, 0
+	eachText(corpusDepth, true, func(text string) {
+		statement := "select " + text
+		at := strings.Index(statement, marker)
+		on, off := readingOf(statement, true), readingOf(statement, false)
+		if on.hides(at, at+len(marker)) || off.hides(at, at+len(marker)) {
+			if hidden%sampleStride == 0 {
+				sample = append(sample, statement)
+			}
+			hidden++
+			return
+		}
+		if shape%sampleStride == 0 {
+			sample = append(sample, statement)
+		}
+		shape++
+	})
+	return sample
 }

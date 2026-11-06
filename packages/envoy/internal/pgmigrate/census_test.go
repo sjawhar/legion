@@ -316,3 +316,26 @@ func TestMigrationLockTimeoutsReadsEveryBoundAMigrationWaitsUnder(t *testing.T) 
 		}
 	}
 }
+
+// Postgres hides a session's query from a role that may not see it by answering the placeholder
+// <insufficient privilege> rather than null, as it does for every other column of that session,
+// so the diagnosis says the query is not visible for both - the three ways a statement can be
+// unreadable read alike. No value is involved: the placeholder holds no literal, number or
+// comment for the redactor to take out. A query that is visible is printed only as redactedQuery
+// leaves it, quoted.
+func TestHolderDiagnosisSaysAQueryItMayNotSeeIsNotVisible(t *testing.T) {
+	hidden := "<insufficient privilege>"
+	shown := "select 'ghp_SECRET' from asks where id = 42"
+	for name, tc := range map[string]struct {
+		query *string
+		want  string
+	}{
+		"null, as Postgres answers for a session that has ended": {nil, "not visible"},
+		"the placeholder, for a session the role may not see":    {&hidden, "not visible"},
+		"a query the role may see":                               {&shown, `"select ? from asks where id = ?"`},
+	} {
+		if got := visibleQuery(tc.query); got != tc.want {
+			t.Errorf("%s: visibleQuery() = %q, want %q", name, got, tc.want)
+		}
+	}
+}

@@ -72,8 +72,8 @@ func TestTableSizeExemptionReadsStatementsAsPostgresParsesThem(t *testing.T) {
 }
 
 // A refusing holder's query text keeps the statement's shape and names and loses every value a
-// row could have put there: literals of every quoting, numbers with what follows them unspaced,
-// and comments. A parameter's number stays, and a text cut off inside a literal loses the rest.
+// row could have put there: literals of every quoting, numbers whole as scan.l reads them, and
+// comments. A parameter's number stays, and a text cut off inside a literal loses the rest.
 // The holder session owns standard_conforming_strings and its query text does not carry it, so
 // each row names the setting it answers for. A text whose literals hold no backslash reads the
 // same under both, and redactedQuery answers it with the shape intact. A backslash before a
@@ -83,18 +83,30 @@ func TestTableSizeExemptionReadsStatementsAsPostgresParsesThem(t *testing.T) {
 // the answer covers the literals and the comments of both, which can swallow the shape between
 // them - a comma, or a whole literal - and leaves no part of any value behind under either. A
 // comment both readings read as a comment is the one space it has always been. Only a plain
-// literal and the N'…' that is one under another name take the setting: E'…' escapes under
-// both, U&'…' under neither, and B'…' and X'…' hold no escape at all, so the two readings end
-// those in the same place and a value next to one of them is covered rather than widened over.
+// literal and the '…' an N precedes take the setting: E'…' escapes under both, U&'…' is
+// refused outright with the setting off, and B'…' and X'…' hold no escape at all, so the two
+// readings end those in the same place and a value next to one of them is covered rather than
+// widened over.
+//
+// Where scan.l refuses the text - trailing junk after a number, U&'…' with the setting off, an
+// unterminated literal - Postgres read no further, so from that byte on the row's answer is one
+// ? rather than the shape: a session refused inside a transaction keeps every lock it took,
+// sits idle in transaction (aborted), and pg_stat_activity holds the refused text, which is the
+// session a migration queues behind. A refusal the parser raises and the lexer does not, as
+// 1..10 outside a PL/pgSQL for loop is, moves nothing: where the literals of a text are is the
+// lexer's and does not depend on the parser reaching them.
 func TestRedactedQueryKeepsTheShapeAndDropsEveryValue(t *testing.T) {
 	for name, tc := range map[string]struct {
 		// setting is the holder's standard_conforming_strings the row answers for: "on", the
 		// default; "off"; or "on and off" for a text both settings read the same way.
 		setting, in, want string
 	}{
-		"a parameter's number stays":      {"on and off", "select id from asks where id = $1 for no key update", "select id from asks where id = $1 for no key update"},
-		"a literal and a number go":       {"on and off", "update asks set body = 'ghp_SECRET' where id = 42", "update asks set body = ? where id = ?"},
-		"every other quoting goes":        {"on and off", "select E'it\\'s', $tag$ x $tag$, U&'d\\0061t', \"Quoted Name\" from t", "select ?, ?, ?, \"Quoted Name\" from t"},
+		"a parameter's number stays": {"on and off", "select id from asks where id = $1 for no key update", "select id from asks where id = $1 for no key update"},
+		"a literal and a number go":  {"on and off", "update asks set body = 'ghp_SECRET' where id = 42", "update asks set body = ? where id = ?"},
+		// U&'…' is refused outright with the setting off ({xusstart} raises "unsafe use of
+		// string constant with Unicode escapes" before reading it), so under that reading
+		// Postgres read nothing after it and everything from it is covered.
+		"every other quoting goes":        {"on and off", "select E'it\\'s', $tag$ x $tag$, U&'d\\0061t', \"Quoted Name\" from t", "select ?, ?, ?"},
 		"numbers and comments go":         {"on and off", "select 1.5e3, 0x1F, -7 -- ghp_COMMENT\n/* ghp_BLOCK */ from t", "select ?, ?, -? from t"},
 		"a text cut off inside a literal": {"on and off", "insert into asks (body) values ('cut off by track_activity_quer", "insert into asks (body) values (?"},
 		"a run of space becomes one":      {"on and off", "  select\n\t  1  ", "select ?"},
@@ -108,8 +120,15 @@ func TestRedactedQueryKeepsTheShapeAndDropsEveryValue(t *testing.T) {
 		// opened at the next quote is unterminated, which swallows the rest of the text. Every
 		// byte after body = is inside a literal of one reading or the other, so one ? is all
 		// that may be printed.
-		"off: a literal carried on to the next quote":  {"off", `update asks set body = 'a\' , ghp_SECRET , '  where id = 1`, "update asks set body = ?"},
-		"off: a national-character literal carried on": {"off", `select n'a\' , ghp_NCHAR , ' from t`, "select ?"},
+		"off: a literal carried on to the next quote": {"off", `update asks set body = 'a\' , ghp_SECRET , '  where id = 1`, "update asks set body = ?"},
+		// scan.l's {xnstart} eats only the n ("yyless(1); eat only 'n' this time") and returns
+		// it as NCHAR or as the identifier n; the quote after it opens a literal of its own,
+		// which is why the n is a word here and the literal that follows takes the setting.
+		// That n is a token PostgreSQL itself returns, not a fragment of a literal: printing it
+		// keeps a name, as the report keeps every name, and hides no byte of any value. It is
+		// one byte more than this row printed before the reading was transcribed from scan.l,
+		// and it is not under-hiding.
+		"off: a national-character literal carried on": {"off", `select n'a\' , ghp_NCHAR , ' from t`, "select n?"},
 		// The default setting, where the backslash is a plain byte: the holder's own reading
 		// ends the first literal at its quote and opens the next at the next quote, so the
 		// value between them must go, and with it whatever shape the two readings disagree on.
@@ -142,13 +161,17 @@ func TestRedactedQueryKeepsTheShapeAndDropsEveryValue(t *testing.T) {
 		// second from under both: the backslash is a byte of the literal, which ended at the
 		// quote after it, and what follows is read as structure. So both readings end a bit or
 		// hex string in the same place, and the literal after one of them is a value of its own.
-		"a hex string and the literal after it":        {"on and off", `select x'ff' , 'ghp_PLAIN'`, "select ? , ?"},
-		"a continuation carries a hex string on":       {"on and off", "select X'41'\n'42' , 'ghp_PLAIN'", "select ? , ?"},
-		"a doubled quote ends a bit string":            {"on and off", `select B'1''1' , 'ghp_PLAIN'`, "select ?? , ?"},
-		"a backslash is a byte in a bit string":        {"on and off", `select b'0\' /* ghp_BLOCK */ , 'x'`, "select ? , ?"},
-		"a name after a bit or hex string is a name":   {"on and off", `select X'\' , ghp_SECRET , '`, "select ? , ghp_SECRET , ?"},
-		"a name after a bit string is a name":          {"on and off", `select B'\' , ghp_SECRET , '`, "select ? , ghp_SECRET , ?"},
-		"a name after a Unicode-escaped string stands": {"on", `select U&'a\' , ghp_SECRET , 'x'`, "select ? , ghp_SECRET , ?"},
+		"a hex string and the literal after it":      {"on and off", `select x'ff' , 'ghp_PLAIN'`, "select ? , ?"},
+		"a continuation carries a hex string on":     {"on and off", "select X'41'\n'42' , 'ghp_PLAIN'", "select ? , ?"},
+		"a doubled quote ends a bit string":          {"on and off", `select B'1''1' , 'ghp_PLAIN'`, "select ?? , ?"},
+		"a backslash is a byte in a bit string":      {"on and off", `select b'0\' /* ghp_BLOCK */ , 'x'`, "select ? , ?"},
+		"a name after a bit or hex string is a name": {"on and off", `select X'\' , ghp_SECRET , '`, "select ? , ghp_SECRET , ?"},
+		"a name after a bit string is a name":        {"on and off", `select B'\' , ghp_SECRET , '`, "select ? , ghp_SECRET , ?"},
+		// A name after a U&'…' stood here until the refused class was read as what it is: with
+		// the setting off, scan.l's {xusstart} raises "unsafe use of string constant with
+		// Unicode escapes" before reading the literal at all, so Postgres read nothing after
+		// the U& and one ? covers the rest of the text under that reading.
+		"a Unicode-escaped string covers what follows it": {"on and off", `select U&'a\' , ghp_SECRET , 'x'`, "select ?"},
 		// The backslash that matters sits in the plain literal the hex string is followed by,
 		// not in the hex string: with the setting off that literal takes it as its quote's
 		// escape and runs on through ghp_SECRET to the next quote, which PostgreSQL 18.6 shows
@@ -158,6 +181,24 @@ func TestRedactedQueryKeepsTheShapeAndDropsEveryValue(t *testing.T) {
 		// value under the off reading and a name under the on reading, and one ? covers it.
 		"off: a hex string before a literal carried on":         {"off", "select X'\\''--\\'\n ghp_SECRET \\'' ;", "select ?? ;"},
 		"off: a hex string before a literal carried to the end": {"off", "select X'\\''--\\'\n ghp_SECRET '' ;", "select ??"},
+		// A number ends where scan.l ends it and nowhere else. {numericfail} throws back the
+		// two dots of 1..e'…' and returns the 1, so what follows is read from the dots: an
+		// E'…' literal after them is a literal, not the plain '…' a reading that ran the
+		// number over the dots and the e would find there. PostgreSQL 18.6 answers
+		// select 1..e'\'' 'a\' , ' ghp_SECRET ' from from with syntax error at or near ".."
+		// and select 1.5.e'\'' … with syntax error at or near "." under both settings, the
+		// numbers being 1 and 1.5 and the dots tokens of their own; the parser stops there and
+		// the lexer does not, so the literals after the dots are read as they are written. The
+		// values are covered either way: under the setting on by this reading's own literals,
+		// under it off by the one the backslash carries on.
+		"a number before two dots and an E literal": {"on and off", `select 1..e'\'' 'a\' , ' ghp_SECRET '`, "select ?..? ?"},
+		"a number before a dot and an E literal":    {"on and off", `select 1.5.e'\'' 'a\' , ' ghp_SECRET '`, "select ?.? ?"},
+		"a number before two dots and a literal":    {"on and off", `select 1..'a\' , ' ghp_SECRET '`, "select ?..?"},
+		"a real before a literal carried on":        {"on and off", `select 1.5e3, 'a\' , ' ghp_SECRET '`, "select ?, ?"},
+		"a hexadecimal before a literal carried on": {"on and off", `select 0x1F 'a\' , ' ghp_SECRET '`, "select ? ?"},
+		// {integer_junk} is where scan.l raises "trailing junk after numeric literal": Postgres
+		// read no further, so the rest of the text is covered rather than printed.
+		"trailing junk after a number covers the rest": {"on and off", `select 1abc , ghp_SECRET , 'x'`, "select ?"},
 	} {
 		if got := redactedQuery(tc.in); got != tc.want {
 			t.Errorf("%s (standard_conforming_strings %s): redactedQuery(%q) = %q, want %q", name, tc.setting, tc.in, got, tc.want)
