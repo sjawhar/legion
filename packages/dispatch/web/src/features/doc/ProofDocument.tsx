@@ -40,14 +40,12 @@ import {
 import { useMargin } from "../margin/margin-context";
 import type { MarginOwner } from "../margin/useMarginItems";
 import { blockFragment } from "../refs/block-reference";
-import { fetchReferencePath, needsSpecSlug, watchPicturePath } from "../refs/reference-target";
+import { watchPicturePath } from "../refs/reference-target";
 import {
   buildDispatchReference,
   buildIssuePath,
   buildProjectPath,
-  buildReferencePath,
   documentRoute,
-  parseNodeReference,
 } from "../refs/routes";
 import { importWhenOnline } from "../shell/DeploymentResilience";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
@@ -70,6 +68,7 @@ import {
 import { NameVersionDialog } from "./NameVersionDialog";
 import type { PendingState } from "./pending-sync";
 import { createPendingWaiter } from "./pending-waiter";
+import { handleReferenceClick } from "./reference-click";
 import { refocusAfterDiagrams } from "./refocus-after-diagrams";
 import { FRAGMENT_NAME } from "./roots";
 import { DocumentRuntime } from "./runtime";
@@ -185,16 +184,6 @@ function setSearchHighlights(root: HTMLElement, query: string): void {
   CSS.highlights.set("dispatch-search", new Highlight(...ranges));
 }
 
-/** A rendered link mark's `dispatch://` target, if any. `@legion/proof-editor`'s Markdown
- * serializer sanitizes a `dispatch://` href to `""` (Milkdown's link sanitizer only allows
- * http/https/mailto/tel/ftp — a document strangers can edit should never render an
- * attacker-chosen non-http scheme as a clickable href) and tags the anchor with
- * `data-dispatch-href` carrying the original target instead. */
-function dispatchHrefOf(anchor: Element): string | null {
-  const href = anchor.getAttribute("data-dispatch-href") ?? anchor.getAttribute("href");
-  return href?.startsWith("dispatch://") ? href : null;
-}
-
 export function ProofDocument({
   artifact,
   highlight,
@@ -249,6 +238,11 @@ export function ProofDocument({
   // rather than listing them as dependencies, so a margin re-render never rebuilds the editor.
   const marginRef = useRef(margin);
   marginRef.current = margin;
+  // The editor's picture links reach the page's latest `navigate` through this ref, for the same
+  // reason: React Router hands out a new one on every location change, and a navigation must
+  // never rebuild the editor.
+  const navigateRef = useRef(navigate);
+  navigateRef.current = navigate;
   highlightTermRef.current = highlightTerm;
   const queryClient = useQueryClient();
   const documentRef = buildDispatchReference(documentRoute(artifact));
@@ -771,6 +765,10 @@ export function ProofDocument({
                   name: userRef.current.login,
                 },
                 blockSchema,
+                // What a picture's fallback link opens its artifact with, since the node view is
+                // plain DOM: the page's own navigation and its query client.
+                navigate: (path) => navigateRef.current(path),
+                queryClient,
                 watchPicture: (route, onPicture) => watchPicturePath(queryClient, route, onPicture),
                 // The open document's own reference, never a version's: a pointer names a block
                 // of the document by it, so the editor refuses one to a block of a type the
@@ -964,34 +962,10 @@ export function ProofDocument({
         className="dispatch-doc relative"
         data-read-only={isClosed || schemaReadOnly}
         hidden={version !== undefined || repairError !== undefined || rebuildError !== undefined}
-        onClick={(event) => {
-          // A modifier click (open in new tab/window) or a drag-selection that happens to end
-          // on the link should reach the browser/editor's own handling, not steal the click.
-          const modified = event.ctrlKey || event.metaKey || event.shiftKey || event.altKey;
-          if (event.button !== 0 || modified) {
-            return;
-          }
-          const selection = window.getSelection();
-          if (selection !== null && !selection.isCollapsed) {
-            return;
-          }
-          const anchor = (event.target as HTMLElement).closest<HTMLAnchorElement>("a");
-          // The link's target is a node its author named, and opening it is a read, so it is read
-          // as a node's reference, whatever the length of its name.
-          const href = anchor === null ? null : dispatchHrefOf(anchor);
-          const route = href === null ? undefined : parseNodeReference(href);
-          if (route === undefined) {
-            return;
-          }
-          event.preventDefault();
-          // A block of a spec pinned to a version opens that version under the spec's slug, which
-          // only the issue names; every other reference's path is known at once.
-          if (needsSpecSlug(route)) {
-            void fetchReferencePath(queryClient, route).then((path) => navigate(path));
-            return;
-          }
-          navigate(buildReferencePath(route));
-        }}
+        // A middle click raises `auxclick` alone, so the handler hears both events; it leaves
+        // that one to the browser, which opens the link's own address in a new tab.
+        onAuxClick={(event) => handleReferenceClick(event, queryClient, navigate)}
+        onClick={(event) => handleReferenceClick(event, queryClient, navigate)}
       >
         <div ref={root} />
         {askBlockHosts.map((host) => {

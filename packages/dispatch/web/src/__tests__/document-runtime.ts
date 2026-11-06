@@ -188,7 +188,12 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       handle.view,
       options.blockSchema,
       options.onAskBlockHosts,
-      options.watchPicture
+      options.watchPicture,
+      {
+        editable: options.readOnly !== true,
+        navigate: options.navigate,
+        queryClient: options.queryClient,
+      }
     );
     editors.push(editor);
     return handle;

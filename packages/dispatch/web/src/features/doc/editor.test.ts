@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { QueryClient } from "@tanstack/react-query";
 import * as Y from "yjs";
 
 import { bindRemoteMarks, createEditor, editorAttributes, type StoredMark } from "./editor";
@@ -52,7 +53,10 @@ test("bindRemoteMarks keeps an accepted suggestion's text when its projection ar
     blockSchema,
     // This row reads the marks binding, never the document's decision blocks.
     onAskBlockHosts: () => {},
-    // No picture in this row's document, so nothing ever asks for a latest version.
+    // No picture in this row's document, so nothing ever asks for a latest version, and no
+    // fallback link is drawn for these to open.
+    navigate: () => {},
+    queryClient: new QueryClient(),
     watchPicture: () => () => {},
     user: { color: "#f59e0b", name: "alice" },
     ydoc: browser,

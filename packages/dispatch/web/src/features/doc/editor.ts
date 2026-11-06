@@ -1,10 +1,12 @@
 import type { CreateProofEditorOptions, ProofEditorHandle, StoredMark } from "@legion/proof-editor";
+import type { QueryClient } from "@tanstack/react-query";
 import type { Doc } from "yjs";
 
 import type { BlockSchema } from "../../api/types";
 import { requestMermaidDrawing } from "../refs/mermaid-diagrams";
 import { importWhenOnline } from "../shell/DeploymentResilience";
 import type { WatchPicture } from "./picture-view";
+import type { NavigateToReference } from "./reference-click";
 import { MARKS_MAP_NAME } from "./roots";
 import type { AskBlockHost } from "./typed-block-drawing";
 
@@ -24,6 +26,12 @@ export type EditorOptions = CreateProofEditorOptions & {
   blockSchema: BlockSchema;
   /** The document's decision blocks, in document order, whenever the set changes. */
   onAskBlockHosts: (hosts: readonly AskBlockHost[]) => void;
+  /** How the picture node view's fallback link opens its artifact inside the app, and the
+   *  client the one path it cannot build on its own is read through (`reference-click.ts`).
+   *  Plain DOM holds no hook, so the mount hands both down; the view is told whether it takes
+   *  edits from this mount's own `readOnly`. */
+  navigate: NavigateToReference;
+  queryClient: QueryClient;
   /** What a version-less picture's latest version is read through, for the `image` node view
    *  `installTypedBlocks` mounts below. The reading is the page's (`watchPicturePath`, bound to
    *  its query client), so a picture shares one summary read with the links and cards beside it;
@@ -63,7 +71,12 @@ export const createEditor: CreateEditor = async (root, options) => {
     handle.view,
     options.blockSchema,
     options.onAskBlockHosts,
-    options.watchPicture
+    options.watchPicture,
+    {
+      editable: options.readOnly !== true,
+      navigate: options.navigate,
+      queryClient: options.queryClient,
+    }
   );
   return handle;
 };

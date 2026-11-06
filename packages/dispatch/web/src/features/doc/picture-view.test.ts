@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
+import { QueryClient } from "@tanstack/react-query";
 import type { Window as HappyDOMWindow } from "happy-dom";
 import { Schema } from "prosemirror-model";
 import { pictureClassName } from "../refs/picture-classes";
 import type { ReferenceMedia } from "../refs/reference-target";
 import type { DispatchReferenceRoute } from "../refs/routes";
-import { pictureView, type WatchPicture } from "./picture-view";
+import { type PictureLinkOpener, pictureView, type WatchPicture } from "./picture-view";
 
 // Milkdown's `image` node: `src`/`alt`/`title` strings and a `toDOM` that writes them onto an
 // `<img>`.
@@ -36,6 +37,21 @@ const noWatch: WatchPicture = (_route, onPicture) => {
   return () => {};
 };
 
+/** What the editor lends the fallback link, with the paths its own click asked for. No
+ *  reference these tests draw needs a read to know its path, so the client answers nothing. */
+function fakeOpener(editable = false) {
+  const opened: string[] = [];
+  const opener: PictureLinkOpener = {
+    editable,
+    navigate: (path) => opened.push(path),
+    queryClient: new QueryClient(),
+  };
+  return { opened, opener };
+}
+
+/** A past version's: the view every test below draws in unless it says otherwise. */
+const pastVersion = fakeOpener().opener;
+
 /** A watcher the test drives: `report` sends the latest picture to the view, `reportVideo` a
  *  video at that address, and `stopped` counts the view's unsubscribes. */
 function fakeWatch(initial?: string) {
@@ -62,7 +78,7 @@ function fakeWatch(initial?: string) {
 }
 
 function wrapper(src: string, alt = ""): HTMLElement {
-  const { dom } = pictureView(picture(src, alt), document, noCaret, noWatch);
+  const { dom } = pictureView(picture(src, alt), document, noCaret, noWatch, pastVersion);
   if (!(dom instanceof HTMLElement) || dom.tagName !== "SPAN") {
     throw new Error(`the view's dom is not a wrapper span: ${(dom as Element).outerHTML}`);
   }
@@ -120,7 +136,8 @@ test("a leaf view: no contentDOM, no update, events on the picture kept", () => 
     () => {
       caretPlaced += 1;
     },
-    noWatch
+    noWatch,
+    pastVersion
   );
 
   expect(view.contentDOM).toBeUndefined();
@@ -152,7 +169,8 @@ test("a version the browser cannot draw becomes a link to the artifact's page", 
     () => {
       caretPlaced += 1;
     },
-    noWatch
+    noWatch,
+    pastVersion
   );
   const dom = view.dom as HTMLElement;
 
@@ -173,6 +191,63 @@ test("a version the browser cannot draw becomes a link to the artifact's page", 
   expect(caretPlaced).toBe(1);
   link.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 2 }));
   expect(caretPlaced).toBe(1);
+});
+
+// The live editor's own `Open link` card shows in an editable view, and Dispatch's card
+// triggers on `data-dispatch-href`, so the attribute is the one view's and not the other's:
+// one card on the link in each.
+test("the fallback link carries Dispatch's card in a past version and none of its own in the editor", () => {
+  const live = fakeOpener(true);
+  const view = pictureView(
+    picture("dispatch://CORE-1/artifact/notes-md@v1", "notes.md"),
+    document,
+    noCaret,
+    noWatch,
+    live.opener
+  );
+  const dom = view.dom as HTMLElement;
+  pictureOf(dom).dispatchEvent(new Event("error"));
+  const link = linkOf(dom);
+
+  expect(link.hasAttribute("data-dispatch-href")).toBe(false);
+  // Still a link to the same page, so the keyboard, the browser's menu and a middle click
+  // keep working.
+  expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/notes-md?v=1");
+  expect(link.textContent).toBe("CORE-1 notes-md");
+});
+
+test("a plain click on the fallback link opens the artifact inside the app, in either view", () => {
+  for (const editable of [true, false]) {
+    const host = fakeOpener(editable);
+    const view = pictureView(
+      picture("dispatch://CORE-1/artifact/notes-md@v1", "notes.md"),
+      document,
+      noCaret,
+      noWatch,
+      host.opener
+    );
+    const dom = view.dom as HTMLElement;
+    pictureOf(dom).dispatchEvent(new Event("error"));
+    const link = linkOf(dom);
+
+    const plain = new MouseEvent("click", { bubbles: true, button: 0, cancelable: true });
+    link.dispatchEvent(plain);
+    expect(host.opened).toEqual(["/issues/CORE-1/artifacts/notes-md?v=1"]);
+    // The browser's own follow of the href is off: the page never reloads.
+    expect(plain.defaultPrevented).toBe(true);
+
+    // A modified click and a middle click are the browser's: a new tab, from the real href.
+    const modified = new MouseEvent("click", {
+      bubbles: true,
+      button: 0,
+      cancelable: true,
+      metaKey: true,
+    });
+    link.dispatchEvent(modified);
+    link.dispatchEvent(new MouseEvent("auxclick", { bubbles: true, button: 1, cancelable: true }));
+    expect(host.opened).toHaveLength(1);
+    expect(modified.defaultPrevented).toBe(false);
+  }
 });
 
 test("an error raised as the source is set is not missed", () => {
@@ -204,7 +279,8 @@ test("a source that pins no version is its link until the latest version is know
     picture("dispatch://CORE-1/artifact/shot-png", "shot.png"),
     document,
     noCaret,
-    latest.watch
+    latest.watch,
+    pastVersion
   );
   const dom = view.dom as HTMLElement;
 
@@ -258,7 +334,8 @@ test("a source that pins no version draws at once when its latest version is alr
     picture("dispatch://CORE-1/artifact/shot-png", "shot.png"),
     document,
     noCaret,
-    latest.watch
+    latest.watch,
+    pastVersion
   );
 
   expect(pictureOf(view.dom as HTMLElement).getAttribute("src")).toBe(
@@ -272,7 +349,8 @@ test("a pinned source whose artifact is a video plays at the address it pins", (
     picture("dispatch://CORE-1/artifact/clip-webm@v2", "clip.webm"),
     document,
     noCaret,
-    pinned.watch
+    pinned.watch,
+    pastVersion
   );
   const dom = view.dom as HTMLElement;
   const pinnedSrc = "/api/v1/issues/CORE-1/artifacts/clip-webm/versions/2";
@@ -305,7 +383,8 @@ test("destroying the view closes the full-size layer its picture opened", () => 
     picture("dispatch://CORE-1/artifact/shot-png@v1", "shot.png"),
     document,
     noCaret,
-    noWatch
+    noWatch,
+    pastVersion
   );
   pictureOf(view.dom as HTMLElement).dispatchEvent(
     new MouseEvent("click", { bubbles: true, button: 0, cancelable: true })
@@ -317,7 +396,8 @@ test("destroying the view closes the full-size layer its picture opened", () => 
 });
 
 test("only the picture that opened the full-size layer closes it", () => {
-  const view = (src: string) => pictureView(picture(src, "shot.png"), document, noCaret, noWatch);
+  const view = (src: string) =>
+    pictureView(picture(src, "shot.png"), document, noCaret, noWatch, pastVersion);
   const first = view("dispatch://CORE-1/artifact/shot-png@v1");
   const second = view("dispatch://CORE-1/artifact/shot-png@v2");
   const click = () => new MouseEvent("click", { bubbles: true, button: 0, cancelable: true });
@@ -338,7 +418,8 @@ test("a replaced version's late load error leaves the newer picture, and a faile
     picture("dispatch://CORE-1/artifact/shot-png", "shot.png"),
     document,
     noCaret,
-    latest.watch
+    latest.watch,
+    pastVersion
   );
   const dom = view.dom as HTMLElement;
   const v3 = pictureOf(dom);
@@ -385,7 +466,7 @@ test("a picture from elsewhere, or a reference the grammar refuses, is drawn by 
     "logo.png",
     "dispatch://not a reference",
   ]) {
-    const view = pictureView(picture(source, "logo"), document, noCaret, noWatch);
+    const view = pictureView(picture(source, "logo"), document, noCaret, noWatch, pastVersion);
     const dom = view.dom as HTMLElement;
 
     expect(dom.tagName).toBe("IMG");

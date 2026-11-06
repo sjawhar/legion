@@ -1,8 +1,9 @@
 import { expect, test } from "bun:test";
 import type { ChangeDecorations } from "@legion/proof-editor";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, waitFor, within } from "@testing-library/react";
 import type { Node as ProseMirrorNode } from "prosemirror-model";
+import { MemoryRouter, useLocation } from "react-router-dom";
 
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { loadedEngine, warmMarkdownRenderer } from "../refs/markdown-engine";
@@ -10,6 +11,11 @@ import { changeMarksAgainst } from "./change-marks";
 import type { CreateEditor, EditorHandle } from "./editor";
 import { DocumentRuntime } from "./runtime";
 import { VersionView } from "./VersionView";
+
+function CurrentRoute() {
+  const location = useLocation();
+  return <div data-testid="current-route">{location.pathname}</div>;
+}
 
 function createQueryClient(): QueryClient {
   return new QueryClient({
@@ -50,20 +56,23 @@ function renderVersionView({
     throw new Error("VersionView test runtime must provide a block schema.");
   }
   const tree = (shown: { by: string; id: string; quote: string } | undefined) => (
-    <QueryClientProvider client={queryClient}>
-      <DocumentRuntime.Provider value={runtime.runtime}>
-        <VersionView
-          artifactId="artifact-1"
-          asks={[]}
-          blockSchema={blockSchema}
-          changeBaseline={changeBaseline}
-          createdAt="2026-09-09T00:00:00Z"
-          highlight={shown}
-          owner={undefined}
-          version={1}
-        />
-      </DocumentRuntime.Provider>
-    </QueryClientProvider>
+    <MemoryRouter initialEntries={["/issues/CORE-1/artifacts/spec-md?v=1"]}>
+      <QueryClientProvider client={queryClient}>
+        <DocumentRuntime.Provider value={runtime.runtime}>
+          <CurrentRoute />
+          <VersionView
+            artifactId="artifact-1"
+            asks={[]}
+            blockSchema={blockSchema}
+            changeBaseline={changeBaseline}
+            createdAt="2026-09-09T00:00:00Z"
+            highlight={shown}
+            owner={undefined}
+            version={1}
+          />
+        </DocumentRuntime.Provider>
+      </QueryClientProvider>
+    </MemoryRouter>
   );
   const view = render(tree(highlight));
   /** Renders the view again with `shown`, as its parent does on every render of its own. */
@@ -118,6 +127,34 @@ test("VersionView renders the version read-only with the highlighted quote focus
       readOnly: true,
     });
     expect(editors[0]?.options.awareness).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+// A past version's article hears clicks as the live editor's does. Without it a `dispatch://`
+// link here falls to the editor library's own plugin, whose href the serializer emptied, and
+// the page reloads.
+test("VersionView opens a dispatch:// link in a past version inside the app", async () => {
+  const { editors, view } = renderVersionView({
+    highlight: undefined,
+    markdown: "Read the specification",
+  });
+
+  try {
+    await waitFor(() => expect(editors).toHaveLength(1));
+    const root = editors[0]?.root;
+    if (root === undefined) throw new Error("editor root missing");
+    // What `@legion/proof-editor`'s serializer emits for a `dispatch://` link mark: the href
+    // sanitized to "", the real target in `data-dispatch-href`. The fake runtime runs no
+    // serializer of its own, so the test writes that shape.
+    root.innerHTML = '<p><a href="" data-dispatch-href="dispatch://CORE-1">CORE-1</a></p>';
+    const anchor = root.querySelector("a");
+    if (anchor === null) throw new Error("anchor missing");
+
+    fireEvent.click(anchor);
+
+    expect(within(view.container).getByTestId("current-route").textContent).toBe("/issues/CORE-1");
   } finally {
     view.unmount();
   }

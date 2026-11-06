@@ -1,5 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import type { Doc } from "yjs";
 
 import { api } from "../../api/client";
@@ -14,6 +15,7 @@ import { colorForLogin } from "./connection";
 import { createDoc, type EditorHandle } from "./editor";
 import type { Highlight } from "./highlight";
 import { embedHighlight } from "./highlight";
+import { handleReferenceClick } from "./reference-click";
 import { refocusAfterDiagrams } from "./refocus-after-diagrams";
 import { DocumentRuntime } from "./runtime";
 import type { AskBlockHost } from "./typed-block-drawing";
@@ -55,6 +57,12 @@ export function VersionView({
   });
   const userQuery = useQuery(whoAmIQuery());
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
+  // The editor effect reaches the latest `navigate` through this ref rather than listing it as
+  // a dependency: React Router hands out a new one on every location change, and a navigation
+  // must never rebuild the editor.
+  const navigateRef = useRef(navigate);
+  navigateRef.current = navigate;
   const markdown =
     versionQuery.data !== undefined && "markdown" in versionQuery.data
       ? versionQuery.data.markdown
@@ -106,6 +114,10 @@ export function VersionView({
         blockSchema,
         heatMapMode: "hidden",
         onAskBlockHosts: setAskBlockHosts,
+        // What a picture's fallback link opens its artifact with, since the node view is plain
+        // DOM: this page's own navigation and its query client.
+        navigate: (path) => navigateRef.current(path),
+        queryClient,
         readOnly: true,
         user: { color: colorForLogin(user.login), name: user.login },
         watchPicture: (route, onPicture) => watchPicturePath(queryClient, route, onPicture),
@@ -184,7 +196,17 @@ export function VersionView({
       {renderError === undefined ? null : (
         <p role="alert">This version could not be rendered: {renderError}</p>
       )}
-      <article aria-label="Document" className="dispatch-doc" data-read-only="true">
+      {/* biome-ignore lint/a11y/useKeyWithClickEvents: dispatch:// link clicks bubble here; the
+      editor already handles keyboard activation of its own links. */}
+      <article
+        aria-label="Document"
+        className="dispatch-doc"
+        data-read-only="true"
+        // A middle click raises `auxclick` alone, so the handler hears both events; it leaves
+        // that one to the browser, which opens the link's own address in a new tab.
+        onAuxClick={(event) => handleReferenceClick(event, queryClient, navigate)}
+        onClick={(event) => handleReferenceClick(event, queryClient, navigate)}
+      >
         <div ref={root} />
         {askBlockHosts.map((host) => {
           const blockId = String(host.node.attrs.blockId);

@@ -1,6 +1,7 @@
 import { DOMSerializer, type Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
 import { TextSelection } from "@milkdown/kit/prose/state";
 import type { EditorView, NodeView, NodeViewConstructor } from "@milkdown/kit/prose/view";
+import type { QueryClient } from "@tanstack/react-query";
 
 import { artifactVersionPath } from "../../api/client";
 import { pictureClassName } from "../refs/picture-classes";
@@ -13,22 +14,45 @@ import {
   pictureReference,
   shortForm,
 } from "../refs/routes";
+import { type NavigateToReference, openReference, opensReference } from "./reference-click";
+
+/** What the editor a picture is drawn in lends its fallback link: whether its view takes edits,
+ * and the pair the link opens its artifact inside the app with. The node view is plain DOM, so
+ * it is handed these at the editor's mount (`installTypedBlocks`) rather than reading a hook. */
+export interface PictureLinkOpener {
+  /** Whether the view is editable. The editor library's own `Open link` card shows in an
+   *  editable view alone, and Dispatch's card triggers on `data-dispatch-href`
+   *  (`refs/RefPreview.tsx`), so the attribute is written in a read-only view alone: the live
+   *  editor then shows the editor's card and a past version Dispatch's, one card each. */
+  readonly editable: boolean;
+  readonly navigate: NavigateToReference;
+  readonly queryClient: QueryClient;
+}
 
 /** The link a picture falls back to: the reference's short form, with the real SPA path as its
- * `href` (in the read-only version view the click is taken by proof-editor's
- * `markdownLinkClickPlugin`, which opens the page in a new tab; a Ctrl/Cmd-click does the same in
- * the live editor; a middle click uses the real `href`) and `data-dispatch-href` for the live
- * editor's click handler and the hover card. The words are the reference's own, never an author's
- * caption, as `RefLink` shows them until a title resolves. */
+ * `href`, so the keyboard, a middle click, a modified click and the browser's own menu all do
+ * what they do on any link. Its own `click` listener opens the artifact inside the app: being
+ * the element's own, it runs before anything listening above it, and it is what a past version
+ * needs, where proof-editor's `markdownLinkClickPlugin` would otherwise open a new tab. In a
+ * read-only view the link also carries `data-dispatch-href`, which is Dispatch's hover card; an
+ * editable view leaves it off, since the editor library's own card already shows there and two
+ * cards on one element is one too many (`PictureLinkOpener`). The words are the reference's
+ * own, never an author's caption, as `RefLink` shows them until a title resolves. */
 function fallbackLink(
   route: DispatchReferenceRoute,
   document: Document,
-  placeCaretAfter: () => void
+  placeCaretAfter: () => void,
+  opener: PictureLinkOpener
 ): HTMLAnchorElement {
   const link = document.createElement("a");
   link.setAttribute("href", buildReferencePath(route));
-  link.dataset.dispatchHref = buildDispatchReference(route);
+  if (!opener.editable) link.dataset.dispatchHref = buildDispatchReference(route);
   link.textContent = shortForm(route);
+  link.addEventListener("click", (event) => {
+    if (!opensReference(event)) return;
+    event.preventDefault();
+    openReference(route, opener.queryClient, opener.navigate);
+  });
   // Not a drag source: the wrapper (ProseMirror's draggable leaf root) is, so a drag that starts
   // on the link moves the picture node as one on the `<img>` does, instead of dropping the
   // browser's own link HTML into the document.
@@ -84,7 +108,8 @@ export function pictureView(
   node: ProseMirrorNode,
   document: Document,
   placeCaretAfter: () => void,
-  watchPicture: WatchPicture
+  watchPicture: WatchPicture,
+  opener: PictureLinkOpener
 ): NodeView {
   const picture = pictureReference(node.attrs);
   if (picture === undefined) {
@@ -107,7 +132,7 @@ export function pictureView(
   const showLink = () => {
     shown = undefined;
     shownKind = undefined;
-    link = fallbackLink(route, document, placeCaretAfter);
+    link = fallbackLink(route, document, placeCaretAfter, opener);
     dom.replaceChildren(link);
   };
   const showMedia = (kind: ReferenceMedia["kind"], src: string) => {
@@ -195,7 +220,11 @@ export function pictureView(
  * `TextSelection` just after the node, the caret a primary-button mousedown on the fallback link
  * places first (the comment in `fallbackLink` says why). A changed `image` node is a new view (no
  * `update`), so the `node` captured here is current. */
-export function pictureNodeView(view: EditorView, watchPicture: WatchPicture): NodeViewConstructor {
+export function pictureNodeView(
+  view: EditorView,
+  watchPicture: WatchPicture,
+  opener: PictureLinkOpener
+): NodeViewConstructor {
   return (node, _view, getPos) =>
     pictureView(
       node,
@@ -207,6 +236,7 @@ export function pictureNodeView(view: EditorView, watchPicture: WatchPicture): N
           view.state.tr.setSelection(TextSelection.create(view.state.doc, pos + node.nodeSize))
         );
       },
-      watchPicture
+      watchPicture,
+      opener
     );
 }

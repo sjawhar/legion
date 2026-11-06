@@ -1,4 +1,5 @@
 import { beforeAll, expect, test } from "bun:test";
+import { QueryClient } from "@tanstack/react-query";
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 import * as Y from "yjs";
 
@@ -101,7 +102,10 @@ test("a paragraph replaced by a rule draws the words it lost in the editor", asy
     blockSchema,
     // This row reads the editor's decorations, never its decision blocks.
     onAskBlockHosts: () => {},
-    // No picture in this row's document, so nothing ever asks for a latest version.
+    // No picture in this row's document, so nothing ever asks for a latest version, and no
+    // fallback link is drawn for these to open.
+    navigate: () => {},
+    queryClient: new QueryClient(),
     watchPicture: () => () => {},
     user: { color: "#f59e0b", name: "alice" },
     ydoc: new Y.Doc(),
