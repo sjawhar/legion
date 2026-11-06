@@ -41,6 +41,21 @@ issue's Artifacts tab and the project's Documents tab show each document's lates
 kind, and a document's version list shows every version's, so you can find a document close to
 the 1 MiB limit without opening it.
 
+## Copying a document as Markdown
+
+**Copy Markdown**, the copy button marked **Markdown** next to a document's link button, copies the
+whole document as Markdown, ready to paste into an agent session, a GitHub comment or another
+editor. On a spec it is in the Spec tab row; on an issue's other documents and a project's
+documents it is beside the title. An uploaded file that is not Markdown, such as a picture, has
+only the link button.
+
+It copies the version on screen: the current text, including what you typed a moment ago, or the
+version you picked from **Version**. The copy is the Markdown Dispatch stores for that text, so it
+has no comments and no marks of any kind. A suggestion is not applied: a suggested replacement or
+deletion leaves the words as they stand, and words a suggestion proposes to insert are copied as
+plain text. The button says **Copied** once the text is on your clipboard, as the link button does.
+While the document is open, `Ctrl+K` offers the same action, **Copy Markdown**.
+
 ## Comments in the margin
 
 Comments on a document sit in the margin beside the text they are about. On a wide screen the

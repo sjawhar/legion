@@ -25,3 +25,29 @@ export async function copyText(text: string): Promise<boolean> {
     textarea.remove();
   }
 }
+
+/** Copies text that is still being read when the click lands, such as a document fetched again
+ *  for the copy. The clipboard item holds the read itself, so the click's permission covers the
+ *  copy while the read runs: Safari needs that, and the other engines allow it. Without such an
+ *  item, or when the browser refuses it, the text is copied as `copyText` copies it once it has
+ *  arrived. False when the read fails or neither path copies. */
+export async function copyTextWhenRead(text: Promise<string>): Promise<boolean> {
+  if (
+    typeof ClipboardItem !== "undefined" &&
+    typeof navigator !== "undefined" &&
+    typeof navigator.clipboard?.write === "function"
+  ) {
+    try {
+      const blob = text.then((value) => new Blob([value], { type: "text/plain" }));
+      await navigator.clipboard.write([new ClipboardItem({ "text/plain": blob })]);
+      return true;
+    } catch {
+      // Fall through to copying the text once it has arrived.
+    }
+  }
+  try {
+    return await copyText(await text);
+  } catch {
+    return false;
+  }
+}

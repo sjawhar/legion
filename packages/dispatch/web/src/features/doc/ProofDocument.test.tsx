@@ -79,6 +79,101 @@ test("ProofDocument copies a block link whose fragment names the block as encode
   }
 });
 
+// Copy Markdown copies what `toolbar.readMarkdown()` answers when pressed: the version on screen
+// as Dispatch stores it, which the server renders without a comment's or a suggestion's mark. The
+// live editor's own serialization writes those marks as Proof's spans, so it is never the source,
+// and the text read when the page opened misses every edit since, so it is read again.
+test("Copy Markdown's read is the current text read again, not the cached read or the editor's marked text", async () => {
+  const queryClient = createQueryClient();
+  queryClient.setQueryData(["whoami"], { kind: "user", login: "alice" });
+  queryClient.setQueryData(["artifact", artifact.id, "version", 1], {
+    authors: [{ id: "alice", kind: "user" }],
+    created_at: "2026-09-09T00:00:00Z",
+    markdown: "Version one",
+    named: false,
+    number: 1,
+    summary: null,
+  });
+  const { editors, rerender, sync, toolbar, view } = renderProofDocument({ queryClient });
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    const editor = editors[0];
+    if (editor === undefined) throw new Error("editor missing");
+    editor.markdown = 'The <span data-proof="comment" data-id="c1">live</span> document';
+    const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+      markdown: "The live document, edited a moment ago",
+      version: 1,
+    });
+    expect(await toolbar.current?.readMarkdown()).toBe("The live document, edited a moment ago");
+
+    rerender({ version: 1 });
+    await waitFor(() => expect(within(view.container).getByTestId("version-view")).toBeTruthy());
+    expect(await toolbar.current?.readMarkdown()).toBe("Version one");
+
+    getArtifactText.mockResolvedValue({ markdown: "Edited again", version: 2 });
+    rerender({ version: undefined });
+    await waitFor(async () => expect(await toolbar.current?.readMarkdown()).toBe("Edited again"));
+  } finally {
+    view.unmount();
+  }
+});
+
+test("Copy Markdown's read waits for this browser's unsent edits before it reads the current text", async () => {
+  const { pending, sync, toolbar, view } = renderProofDocument();
+  const unsent = { count: 1, readOnly: false, rebuiltAt: undefined, stored: true };
+
+  try {
+    await sync();
+    act(() => pending(unsent));
+    await waitFor(() => expect(toolbar.current?.pending?.count).toBe(1));
+    const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+      markdown: "The live document, with the edit",
+      version: 1,
+    });
+    getArtifactText.mockClear();
+    const read = toolbar.current?.readMarkdown();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(getArtifactText).not.toHaveBeenCalled();
+
+    act(() => pending({ ...unsent, count: 0 }));
+    expect(await read).toBe("The live document, with the edit");
+    expect(getArtifactText).toHaveBeenCalledTimes(1);
+  } finally {
+    view.unmount();
+  }
+});
+
+test("Copy Markdown's read of an older version waits for that version's text", async () => {
+  let answer: (markdown: string) => void = () => {};
+  const getArtifactVersion = spyOn(api, "getArtifactVersion").mockImplementation(
+    (_id, number) =>
+      new Promise((resolve) => {
+        answer = (markdown) =>
+          resolve({
+            authors: [{ id: "alice", kind: "user" }],
+            created_at: "2026-09-09T00:00:00Z",
+            markdown,
+            named: false,
+            number,
+            summary: null,
+          });
+      })
+  );
+  const { toolbar, view } = renderProofDocument({ version: 3 });
+
+  try {
+    await waitFor(() => expect(getArtifactVersion).toHaveBeenCalledWith(artifact.id, 3));
+    const read = toolbar.current?.readMarkdown();
+    answer("Version three");
+    expect(await read).toBe("Version three");
+  } finally {
+    view.unmount();
+    getArtifactVersion.mockRestore();
+  }
+});
+
 test("ProofDocument clears the parent's toolbar bag on unmount", () => {
   const { toolbar, view } = renderProofDocument();
 
