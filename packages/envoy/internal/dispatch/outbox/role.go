@@ -54,7 +54,10 @@ var errNoRoleReaders = errors.New("the outbox has no role-claim or session reade
 // stores on the copy it keeps so that whoever forwards it to the role's next holder keys it by
 // that holder's own mention (keep, contracts.Envelope.MentionDedupeKeys); mentionKeys is the
 // failed ones alone, which is what the key a keep is stored under is chosen from
-// (roleFallbackKey). Every other forward knows its holder already and carries neither.
+// (roleFallbackKey). Both are put on every role forward of a new comment, by the batch that
+// resolved the role (resolveRoleHolders) and by the fallback pass that decides a held copy of
+// one (decideFallbackCopy), and both are empty for every other event, which has no mention to
+// key by.
 type roleForward struct {
 	holder      string
 	keptFor     string
@@ -150,7 +153,10 @@ func resolveRoleHolders(ctx context.Context, deps Deps, events []*batchEvent) {
 // on the event's key. settled is the comment's settled mentions by session, a delivered
 // mention's key among them, and keys its failed ones alone; only a role route carries either
 // (destination.settledKeys, destination.mentionKeys, mentionDeliveries.settledKeys,
-// mentionDeliveries.fallbackKeys), and both are empty for every other event.
+// mentionDeliveries.fallbackKeys), and both are empty for every other event. The fallback pass
+// asks the same of the copy it publishes for a held role row, in place of that row's own key
+// and for a live holder alone (decideFallbackCopy): the copy it keeps instead stays under the
+// row's key, the id every writer of the role's kept lane holds it under (bus.KeptMsgID).
 //
 // It is the rule a session route's copy follows (destinations.addSession), applied to the
 // session the role resolved to rather than to the one a route names: a mention's send can land
@@ -213,7 +219,9 @@ func roleFallbackKey(keys, settled map[string]string, forward *roleForward) stri
 // forwarded too: its copy is kept on the role's kept lane for the holder that claims the role
 // next (keptOrSkipped, roleForward.keep), and the stream's acknowledgement of that keep settles
 // the row as a holder's receipt of a forward settles it. It is nil for every other destination,
-// which the pass publishes to its topic as before (publishFallbackCopies).
+// which the pass publishes to its topic as before (publishFallbackCopies). The comment's
+// mentions by session are the caller's to put on the forward, which has read them to decide the
+// row (decideFallbackCopy), as the batch puts them on the forward of its own role route.
 func fallbackRoleForward(ctx context.Context, deps Deps, item contracts.Envelope, destination string) *roleForward {
 	role, ok := strings.CutPrefix(destination, contracts.RoleTopicPrefix)
 	if !ok || role == "" {

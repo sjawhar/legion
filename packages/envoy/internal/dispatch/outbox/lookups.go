@@ -605,7 +605,10 @@ func loadMentionDeliveries(ctx context.Context, db queryer, ids []string, found 
 
 // mentionDeliveriesOf reads what one comment's mentions did, the read loadMentionDeliveries makes
 // for a batch, over that comment alone: the fallback pass decides one row at a time, and reads
-// its key's attempts as a copy held back for that key reads them (destinations.leftTo).
+// its key's attempts as a copy held back for that key reads them (destinations.leftTo). The read
+// is of every mention of that comment, not of that key's alone, which is what lets the pass key
+// a role destination's forward by the holder's own settled mention as the event's own publish
+// does (decideFallbackCopy, roleFallbackKey).
 func mentionDeliveriesOf(ctx context.Context, db queryer, commentID string) (mentionDeliveries, error) {
 	found := &lookups{mentions: map[string]mentionDeliveries{}, failed: map[string]error{}}
 	id := canonicalID(commentID)

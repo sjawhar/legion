@@ -671,6 +671,45 @@ func seedHeldRoleFallbackCopy(ctx context.Context, t *testing.T, deps Deps, role
 	return commentID
 }
 
+// seedHeldRoleFallbackCopyMentioningTwo writes a comment on issue T-1, routed to role, that
+// mentions first - the session the route resolved to when the comment was written, whose attempt
+// the delivery sweep resends - and second, whose own mention's send landed before its attempt
+// was recorded failed; scans its comment.created event through deps, which holds the route's
+// copy as a fallback row keyed by first; and fails first's resend, so the next fallback pass
+// publishes that copy. It is seedHeldRoleFallbackCopy with a second mentioned session, which the
+// row's own key does not name and whose own mention of the comment has settled. It returns the
+// comment's id.
+func seedHeldRoleFallbackCopyMentioningTwo(ctx context.Context, t *testing.T, deps Deps, role, first, second string) string {
+	t.Helper()
+	route := "role:" + role
+	seedIssue(t, deps.Store, "T-1", &route)
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	body := "@" + first + " @" + second + " are you there?"
+	commentID := seedComment(t, deps.Store, "T-1", alice, body, nil)
+	appendEvent(t, deps.Store, deps.Broker, model.Event{
+		IssueKey: new("T-1"), Type: "comment.created", Actor: alice,
+		Payload: model.CommentEventPayload{
+			Comment: model.Comment{
+				ID: commentID, IssueKey: new("T-1"), Body: body,
+				Mentions: append(mentionOf(first), mentionOf(second)...),
+			},
+			SuppressRoute: true, SuppressedRoute: route, SuppressedRouteSessionID: new(first),
+		},
+	})
+	seedMentionDelivery(t, deps.Store, commentID, first, "resumed")
+	seedMentionDelivery(t, deps.Store, commentID, second, "failed")
+	holding(t, deps).scan(ctx, unfenced{})
+	if held := readHeldCopy(t, deps.Store, commentID, contracts.RoleTopicPrefix+role); held.settled {
+		t.Fatalf("the scan left the role route's held copy %+v, want it unsettled for the pass", held)
+	}
+	if _, err := deps.Store.Pool.Exec(ctx, `
+		update comment_deliveries set state = 'failed' where comment_id = $1
+	`, commentID); err != nil {
+		t.Fatalf("fail the resend: %v", err)
+	}
+	return commentID
+}
+
 // A copy held back for a role route reaches the role's holder. The pass resolves the role as a
 // batch resolves one its events route to and forwards the copy to the holder's agent subject
 // (fallbackRoleForward, roleForward.send); published to notifications.role.* instead it would be
@@ -1104,6 +1143,110 @@ func TestAKeptCopyHandedToAHolderWhoseMentionLandedCarriesItsOwnMentionsKey(t *t
 		t.Fatalf("the stream holds %v on %s, want the handover's one copy under %q, the id a drain's forward of it would carry too",
 			stored, subject, bus.ForwardMsgID(want, subject))
 	}
+}
+
+// A copy held back for a role route reaches a holder the row's own key does not name under that
+// holder's own mention of the comment, wherever it reaches it from. The row is keyed by the
+// session the route resolved to when the comment was written, whose mention suppressed the
+// route; the same comment mentions a second session, whose own mention's send landed before its
+// attempt was recorded failed, and that session holds the role by the time the pass runs -
+// having claimed it after the comment was written, or under the pass's own keep. Handed the
+// row's key with contracts.RoleForwardDedupePrefix in front of it - a key naming the first
+// session, which this host never claimed - it is shown the comment a second time, beside the
+// mention it has.
+//
+// It is TestAKeptCopyHandedToTheSecondMentionedHolderCarriesItsOwnMentionsKey and
+// TestAKeptCopyHandedToAHolderWhoseMentionLandedCarriesItsOwnMentionsKey on the fallback pass's
+// own role forward, which carried no per-session keys at all: the pass reads every mention of
+// the comment to decide the row (mentionDeliveriesOf), so its forward carries the maps the
+// event's own role route carries (decideFallbackCopy, roleForward.settledKeys), and the holder
+// is keyed by its own settled mention whether the pass forwards the copy to it or keeps the copy
+// for it (roleFallbackKey, contracts.Envelope.MentionDedupeKeys).
+//
+// Nothing drains the lane in the keep's case - no listener runs in this test - so the keep's
+// handover is the one path the copy has to the holder, and the stream holds its one forward of
+// it under the id bus.ForwardMsgID makes of that holder's key, which is what the listener's own
+// drain of the lane would forward it under.
+func TestAFallbackRoleCopyReachingASecondMentionedHolderCarriesItsOwnMentionsKey(t *testing.T) {
+	const role = "held-for-two-mentioned-sessions"
+	const first, second = "ses_a_mentioned_first", "ses_b_mentioned_second"
+	const target = "session:" + second
+	roleTopic := contracts.RoleTopicPrefix + role
+
+	t.Run("the holder the pass resolves", func(t *testing.T) {
+		ctx := store.WithTransactionTracking(context.Background())
+		rig := newRoleRig(t)
+		// The second mentioned session claimed the role between the comment's write and this
+		// pass, so the pass resolves it as the holder and forwards the held copy to it.
+		rig.claim(t, role, second, session.SessionEntry{SelfSubscribed: true})
+		rig.silent(t, roleTopic)
+		recv := rig.receiver(t, second, true)
+		deps := rig.deps()
+		commentID := seedHeldRoleFallbackCopyMentioningTwo(ctx, t, deps, role, first, second)
+
+		publishFallbackCopies(ctx, deps, unfenced{})
+
+		held := readHeldCopy(t, rig.database, commentID, roleTopic)
+		if !held.published || !held.settled || held.attempts != 0 {
+			t.Fatalf("the role route's held copy is attempts=%d settled=%v published=%v, want it forwarded to %s by the one pass",
+				held.attempts, held.settled, held.published, second)
+		}
+		forwards := recv.received()
+		if len(forwards) != 1 {
+			t.Fatalf("%s was sent %d copies, want the held one: %+v", second, len(forwards), forwards)
+		}
+		want := contracts.AgentSendDedupeKey(second, model.CommentMentionIdempotencyKey(commentID, target, "steer"))
+		if forwards[0].DedupeKey != want {
+			t.Fatalf("the copy forwarded to %s, whose own mention of the comment settled, is keyed %q, want that mention's own key %q, which its host drops",
+				second, forwards[0].DedupeKey, want)
+		}
+		if strings.HasPrefix(forwards[0].DedupeKey, contracts.RoleForwardDedupePrefix) {
+			t.Fatalf("the copy forwarded to the session whose own mention it repeats carries %q, want no role forward's prefix: a key no host has claimed shows the comment a second time",
+				forwards[0].DedupeKey)
+		}
+	})
+
+	t.Run("the holder that claims the role under the keep", func(t *testing.T) {
+		ctx := store.WithTransactionTracking(context.Background())
+		rig := newRoleRig(t)
+		// Nobody holds the role while the pass decides the row, so its copy is kept for the
+		// role's next holder, and the second mentioned session is that holder, claiming the role
+		// inside the window the keep's own race leaves open.
+		rig.silent(t, roleTopic)
+		recv := rig.receiver(t, second, true)
+		commentID := seedHeldRoleFallbackCopyMentioningTwo(ctx, t, rig.deps(), role, first, second)
+		claimed := make(chan error, 1)
+		publisher := claimedUnderTheKeep(rig.client, func() {
+			claimed <- rig.claimUnder(role, second, session.SessionEntry{SelfSubscribed: true})
+		})
+
+		publishFallbackCopies(ctx, rig.publisherOn(publisher), unfenced{})
+
+		if err := <-claimed; err != nil {
+			t.Fatalf("the claim made under the keep: %v", err)
+		}
+		held := readHeldCopy(t, rig.database, commentID, roleTopic)
+		if !held.published || !held.settled || held.attempts != 0 {
+			t.Fatalf("the role route's held copy is attempts=%d settled=%v published=%v, want it kept and settled by the one pass",
+				held.attempts, held.settled, held.published)
+		}
+		want := contracts.AgentSendDedupeKey(second, model.CommentMentionIdempotencyKey(commentID, target, "steer"))
+		handed := handedNow(t, recv, "the copy kept for a role the comment's second mentioned session claimed under the keep")
+		if handed.DedupeKey != want {
+			t.Fatalf("the handover carried %q to %s, whose own mention of the comment settled, want that mention's own key %q, which its host drops",
+				handed.DedupeKey, second, want)
+		}
+		if strings.HasPrefix(handed.DedupeKey, contracts.RoleForwardDedupePrefix) {
+			t.Fatalf("the copy handed to the session whose own mention it repeats carries %q, want no role forward's prefix: a key no host has claimed shows the comment a second time",
+				handed.DedupeKey)
+		}
+		subject := contracts.AgentSubject(second)
+		stored := storedMsgIDs(t, rig.conn, subject)
+		if len(stored) != 1 || stored[0] != bus.ForwardMsgID(want, subject) {
+			t.Fatalf("the stream holds %v on %s, want the handover's one copy under %q, the id a drain's forward of it would carry too",
+				stored, subject, bus.ForwardMsgID(want, subject))
+		}
+	})
 }
 
 // heldPendingCopy holds what one pass that reached no holder left of the copy held for
