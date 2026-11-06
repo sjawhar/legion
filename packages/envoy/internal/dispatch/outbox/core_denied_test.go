@@ -372,8 +372,11 @@ func TestRunRetriesAnIssueTopicNATSDenies(t *testing.T) {
 	}
 	response := httptest.NewRecorder()
 	registry.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	// The publisher is still running, so a count read here is the count at the moment of the read.
+	// The denial log goes in the message because the counter alone cannot say which send raised
+	// it: a count above the one asserted is one more send, and only the log names it.
 	if body := response.Body.String(); !strings.Contains(body, `envoy_dispatch_outbox_publish_failures_total{reason="denied"} 1`) {
-		t.Fatalf("/metrics body = %q, want the denied publish counted once", body)
+		t.Fatalf("/metrics body = %q, want the denied publish counted once; the publisher logged:\n%s", body, logged.String())
 	}
 }
 
@@ -445,11 +448,25 @@ func TestRunCountsEveryDeniedJetStreamDestinationOfOneEvent(t *testing.T) {
 	response := httptest.NewRecorder()
 	registry.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := response.Body.String()
+	// This read has gone red once in CI, with `denied` 4 at an attempt_count of 1: both
+	// destinations denied twice, so a second send the test never asked for. Three causes have
+	// been proposed and two are refuted. A deadline race, which would leave a destination
+	// uncounted (fenced) or under `failed` (batch.go) and `denied` at 1 or less, cannot give 4.
+	// A back-off retry cannot either: a denied send is answered at publishAcknowledgementTimeout
+	// (5 s, bus/async.go) and the first retry waits retry.Delay(1) = 1 s, so its denials are
+	// counted no earlier than about 11 s, and that run failed at 10.32 s. The third, a batch left
+	// unrecorded when the publisher hold's deadline passes during the ack wait (settleAndRecord
+	// in publisher.go, publisherHoldOptions in lease.go), fits both numbers and is unproven. So
+	// the log goes in the messages below: a count above the one asserted is one more send, and
+	// only the log names which send it was, which is what the next occurrence needs and the last
+	// one lacked.
 	if !strings.Contains(body, `envoy_dispatch_outbox_publish_failures_total{reason="denied"} 2`) {
-		t.Fatalf("/metrics body = %q, want both denied destinations counted as denials", body)
+		t.Fatalf("/metrics body = %q, want both denied destinations counted as denials; the publisher logged:\n%s",
+			body, logged.String())
 	}
 	if strings.Contains(body, `reason="failed"`) {
-		t.Fatalf("/metrics body = %q counts a denied destination as a failure", body)
+		t.Fatalf("/metrics body = %q counts a denied destination as a failure; the publisher logged:\n%s",
+			body, logged.String())
 	}
 }
 
@@ -537,10 +554,12 @@ func TestRunCountsADeniedSubjectOncePerRefusedMessage(t *testing.T) {
 	registry.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := response.Body.String()
 	if !strings.Contains(body, `envoy_dispatch_outbox_publish_failures_total{reason="denied"} 2`) {
-		t.Fatalf("/metrics body = %q, want each refused message counted as a denial", body)
+		t.Fatalf("/metrics body = %q, want each refused message counted as a denial; the publisher logged:\n%s",
+			body, logged.String())
 	}
 	if strings.Contains(body, `reason="failed"`) {
-		t.Fatalf("/metrics body = %q counts a denied publish as a failure", body)
+		t.Fatalf("/metrics body = %q counts a denied publish as a failure; the publisher logged:\n%s",
+			body, logged.String())
 	}
 }
 

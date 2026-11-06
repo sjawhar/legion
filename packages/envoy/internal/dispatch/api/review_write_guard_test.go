@@ -32,6 +32,8 @@ var (
 // another way, would commit unsequenced and read as older than every sequenced review, so a
 // person's newest approval or changes request would lose to the one before it; and an update
 // written anywhere else could clear or move a sequence the read orders by.
+// The second update is FillReviewContentHashes, which writes content_sha256 alone;
+// its update trigger derives the version's real hash and marks it backfill.
 //
 // Its reach is the statement as the module scan can assemble it (TestNoForUpdateOnOwnerTables):
 // string literals and chains of literals and package-level constants, in every non-test Go file
@@ -80,8 +82,8 @@ func TestOnlyWriteReviewWritesReviews(t *testing.T) {
 			"artifact.* event in the review's own transaction, and docs.ReviewOrder ranks a review "+
 			"without one below every review with one.", reviewWriter, strings.Join(offences, "\n\t"))
 	}
-	if inserts != 1 || updates != 1 {
-		t.Fatalf("%s holds %d review inserts and %d review updates the scan can see, want 1 of each: "+
+	if inserts != 1 || updates != 2 {
+		t.Fatalf("%s holds %d review inserts and %d review updates the scan can see, want 1 insert and 2 updates: "+
 			"if WriteReview's statements moved or were written around a value this scan cannot "+
 			"resolve, this guard now passes by seeing nothing", reviewWriter, inserts, updates)
 	}

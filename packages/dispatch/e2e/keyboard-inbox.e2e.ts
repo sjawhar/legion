@@ -1,6 +1,14 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
-import { createAsk, createComment, createIssue, createProject, getInbox, patchIssue } from "./api";
+import {
+  createAsk,
+  createComment,
+  createIssue,
+  createProject,
+  getInbox,
+  patchIssue,
+  requestApproval,
+} from "./api";
 import {
   assigneeFilter,
   assigneeOptions,
@@ -9,7 +17,14 @@ import {
   openAssigneeFilter,
   pickAssignee,
 } from "./inbox-filter";
-import { askControls, hasReadingPane, selectedRow, selectRow } from "./inbox-pane";
+import {
+  askControls,
+  hasReadingPane,
+  inboxPane,
+  paneScroller,
+  selectedRow,
+  selectRow,
+} from "./inbox-pane";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -1005,4 +1020,269 @@ test.describe("inbox selection @phone", () => {
       await context.close();
     }
   });
+});
+
+// ---------------------------------------------------------------------------
+// The reading pane's own keyboard (INFRA-963): `l` into the pane, the browser's scrolling keys
+// there, and Escape back to the row `l` was pressed on. The pane is drawn from 1280 px, which
+// only the `chromium` project is wide enough for, so none of the rows below takes the `@phone`
+// tag: on a phone there is no pane to step into. Every fixture here is made up.
+// ---------------------------------------------------------------------------
+
+/** A document taller than the pane: 80 paragraphs run several screens past the bottom of the
+ *  column, so every scrolling key below has somewhere to go. */
+const handoverLines = Array.from(
+  { length: 80 },
+  (_, index) =>
+    `Handover note ${index + 1}: the ledger and the mirror each keep a clock of their own.`
+);
+const handoverSpec = ["# Ledger handover", "", ...handoverLines.flatMap((line) => [line, ""])].join(
+  "\n"
+);
+const RETRY_QUESTION = "Should the mirror keep retrying after a refused lease?";
+
+interface PaneSeed {
+  /** The approval request the pane draws as a document, which is the taller one. */
+  approvalAskId: string;
+  /** The question in no document, which the pane draws as a card. */
+  cardAskId: string;
+}
+
+/** Two questions, in the order the Inbox lists them (the issue's priority first): a request to
+ *  approve a long document, and a question in no document. */
+async function seedPane(): Promise<PaneSeed> {
+  await createProject({ key: "PANE", name: "Pane keyboard" });
+  const handover = await createIssue({
+    project: "PANE",
+    spec: handoverSpec,
+    title: "Ledger handover",
+  });
+  await patchIssue(handover.key, { priority: 0 });
+  const approval = await requestApproval(
+    handover.primary_artifact_id,
+    { summary: "The handover draft." },
+    session
+  );
+  const retry = await createIssue({ project: "PANE", title: "Retry budget" });
+  await patchIssue(retry.key, { priority: 1 });
+  const card = await createAsk(
+    retry.key,
+    { options: [{ label: "Yes" }, { label: "No" }], question: RETRY_QUESTION },
+    session
+  );
+  return { approvalAskId: approval.ask.id, cardAskId: card.id };
+}
+
+/** Opens the Inbox on both seeded rows with the pane beside them. The assignee filter is
+ *  cleared, so a request to approve a document nobody holds is listed like any other question. */
+async function openPane(page: Page, seed: PaneSeed): Promise<void> {
+  await page.goto("/?assignee=everyone");
+  const rows = page.locator("[data-inbox-row]");
+  await expect(rows).toHaveCount(2);
+  await expect(rows.nth(0)).toHaveAttribute("data-inbox-row", seed.approvalAskId);
+  await expect(rows.nth(1)).toHaveAttribute("data-inbox-row", seed.cardAskId);
+  await expect(paneScroller(page)).toBeVisible();
+  await page.locator("body").focus();
+}
+
+test("l moves the focus into the reading pane, the keyboard scrolls the document there, and Escape returns to the row l was pressed on", async ({
+  browser,
+}) => {
+  const seed = await seedPane();
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    await openPane(page, seed);
+    const rows = page.locator("[data-inbox-row]");
+    await goToRow(page, 0);
+
+    // `l` hands the focus to the pane's one scroller, which is the region the pane names
+    // "Question body": one element under both names.
+    await page.keyboard.press("l");
+    const scroller = paneScroller(page);
+    await expect(scroller).toBeFocused();
+    const body = inboxPane(page).getByRole("region", { name: "Question body" });
+    await expect(body).toHaveCount(1);
+    await expect(body).toBeFocused();
+    const drawn = await body.elementHandle();
+    if (drawn === null) {
+      throw new Error("the pane drew no Question body region");
+    }
+    expect(await scroller.evaluate((node, other) => node === other, drawn)).toBe(true);
+
+    // The document the approval request is for is taller than the column it is drawn in, so
+    // the scroller has somewhere to scroll. The editor draws it after the socket syncs.
+    await expect
+      .poll(() => scroller.evaluate((node) => node.scrollHeight - node.clientHeight))
+      .toBeGreaterThan(1000);
+
+    // Every key the browser scrolls a focused box with moves it, and none of them moves the
+    // selection: the reader is reading the question the list is still on. The order is a
+    // reader's own - down to the bottom, back up to the top, then one line down - so each press
+    // has somewhere to go rather than meeting an end it is already at.
+    for (const key of ["PageDown", "Space", "End", "ArrowUp", "PageUp", "Home", "ArrowDown"]) {
+      const before = await scroller.evaluate((node) => node.scrollTop);
+      await page.keyboard.press(key);
+      await expect.poll(() => scroller.evaluate((node) => node.scrollTop)).not.toBe(before);
+      await expect(scroller).toBeFocused();
+      await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", seed.approvalAskId);
+    }
+
+    // Escape is the way back out, to the row `l` was pressed on.
+    await page.keyboard.press("Escape");
+    await expect(rows.nth(0)).toBeFocused();
+
+    // That row is the one `l` was pressed on and not the selected one, which `j` moves while
+    // the focus stays on the row: the two come apart, and Escape follows the focus.
+    await page.keyboard.press("j");
+    await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", seed.cardAskId);
+    await expect(rows.nth(0)).toBeFocused();
+    await page.keyboard.press("l");
+    await expect(scroller).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(rows.nth(0)).toBeFocused();
+    await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", seed.cardAskId);
+  } finally {
+    await context.close();
+  }
+});
+
+test("l focuses the pane and Escape returns from it where the pane draws the question as a card", async ({
+  browser,
+}) => {
+  const seed = await seedPane();
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    await openPane(page, seed);
+    const rows = page.locator("[data-inbox-row]");
+    await goToRow(page, 1);
+    await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", seed.cardAskId);
+
+    // The scroller is the pane frame's, so a question in no document is drawn in the same box
+    // the document was: one focus stop, whatever the pane is showing.
+    const scroller = paneScroller(page);
+    await expect(scroller.getByTestId(`ask-${seed.cardAskId}`)).toContainText(RETRY_QUESTION);
+    await page.keyboard.press("l");
+    await expect(scroller).toBeFocused();
+    await expect(inboxPane(page).getByRole("region", { name: "Question body" })).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(rows.nth(1)).toBeFocused();
+  } finally {
+    await context.close();
+  }
+});
+
+test("l moves no focus below 1280 px, where the Inbox draws no reading pane", async ({
+  browser,
+}) => {
+  const seed = await seedPane();
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(`${error.name}: ${error.message}`));
+
+    // One pixel below the pane's width the Inbox is the list of cards it has always been: no
+    // pane, no scroller, and nothing for `l` to step into.
+    await page.setViewportSize({ height: 900, width: 1279 });
+    await page.goto("/?assignee=everyone");
+    const rows = page.locator("[data-inbox-row]");
+    await expect(rows).toHaveCount(2);
+    await expect(inboxPane(page)).toHaveCount(0);
+    await expect(paneScroller(page)).toHaveCount(0);
+
+    await rows.nth(0).focus();
+    await page.keyboard.press("l");
+    await expect(rows.nth(0)).toBeFocused();
+    await expect(rows.nth(0)).toHaveAttribute("data-inbox-row", seed.approvalAskId);
+    expect(errors).toEqual([]);
+  } finally {
+    await context.close();
+  }
+});
+
+test("l moves no focus with an empty list, where no row is selected", async ({ browser }) => {
+  // `test.beforeEach` empties the database and this row seeds nothing, so the Inbox lists
+  // nothing: with no row selected there is no pane at all, and `l` has nothing to focus.
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(`${error.name}: ${error.message}`));
+
+    await page.goto("/");
+    await expect(page.getByText("Nothing needs you")).toBeVisible();
+    await expect(page.locator("[data-inbox-row]")).toHaveCount(0);
+    await expect(inboxPane(page)).toHaveCount(0);
+
+    await page.locator("body").focus();
+    await page.keyboard.press("l");
+    expect(await page.evaluate(() => document.activeElement?.tagName ?? null)).toBe("BODY");
+    expect(errors).toEqual([]);
+  } finally {
+    await context.close();
+  }
+});
+
+test("j from inside the reading pane leaves the focus on a row, not on the body", async ({
+  browser,
+}) => {
+  const seed = await seedPane();
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    await openPane(page, seed);
+    const rows = page.locator("[data-inbox-row]");
+    await goToRow(page, 0);
+    await page.keyboard.press("l");
+    await expect(paneScroller(page)).toBeFocused();
+
+    // The step out of the pane comes back to the list first, so the focus lands on a row rather
+    // than falling to the body when the pane swaps the document for a card.
+    await page.keyboard.press("j");
+    await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", seed.cardAskId);
+    await expect(rows.nth(0)).toBeFocused();
+    expect(await page.evaluate(() => document.activeElement?.tagName ?? null)).not.toBe("BODY");
+
+    // And Escape is still answered from there: it clears the row it is on, as it does for any
+    // row the reader walked to.
+    await page.keyboard.press("Escape");
+    await expect(rows.nth(0)).not.toBeFocused();
+    expect(await page.evaluate(() => document.activeElement?.tagName ?? null)).toBe("BODY");
+  } finally {
+    await context.close();
+  }
+});
+
+test("? lists l for the reading pane and f for the search box under Inbox alone", async ({
+  browser,
+}) => {
+  await seedInbox();
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    await openInbox(page);
+
+    await page.keyboard.press("?");
+    const dialog = page.getByRole("dialog", { name: "Keyboard shortcuts" });
+    await expect(dialog).toBeVisible();
+    const inboxScope = dialog.getByRole("region", { exact: true, name: "Inbox" });
+    const globalScope = dialog.getByRole("region", { exact: true, name: "Global" });
+    await expect(globalScope).toBeVisible();
+
+    // Both bindings are the Inbox's own, so each is listed once, under Inbox and nowhere else.
+    for (const [label, keys] of [
+      ["Move the focus into the reading pane", ["l"]],
+      ["Search asks", ["f"]],
+    ] as const) {
+      const inInbox = inboxScope.getByRole("listitem").filter({ hasText: label });
+      await expect(inInbox).toHaveCount(1);
+      await expect(inInbox.locator("kbd")).toHaveText(keys);
+      await expect(globalScope.getByRole("listitem").filter({ hasText: label })).toHaveCount(0);
+      await expect(dialog.getByRole("listitem").filter({ hasText: label })).toHaveCount(1);
+    }
+  } finally {
+    await context.close();
+  }
 });

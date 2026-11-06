@@ -216,6 +216,32 @@ type Claim struct {
 	// UpdateToldAt is when this round was last reported to the operator's side, so one round is
 	// not reported again at every sweep that finds it open.
 	UpdateToldAt *time.Time
+	// UpdateAnsweredByTurnEnd is whether the answer this claim's UpdateSignalledAt records was
+	// given by the end of the turn the round's own task started (answerByTurnEnd) rather than by
+	// the worker's own ready_for_update call (podUpdateSignalled). Every answer is written with
+	// it — the call's write clears it in the same statement — so what the daemon reads is how
+	// the answer standing now was given.
+	//
+	// It is durable because the rule it decides outlives the daemon that recorded the answer. A
+	// worker that answers by its turn's end holds its plugin's own phase-stall reminder, which
+	// starts a turn of its own every quarter of an hour while the round waits, and the daemon
+	// cannot tell such a turn from an Envoy notice: the mark is what keeps those turns from
+	// taking the answer back at every one of them (takeBackSignal). Read from the claim's plugin
+	// contract instead, a worker at this daemon's contract whose `legion` tool has no
+	// ready_for_update operation lost its answer to its own reminder every fifteen minutes and
+	// its round never ended.
+	UpdateAnsweredByTurnEnd bool
+	// UpdateReaskedForPushCheck is whether this round has already asked this claim's worker
+	// again because the pod's shim could not run the daemon's push check
+	// (internal/daemon's checkUnpushed). A pod whose shim predates that check is guarded by the
+	// workers' answers alone, and a turn's end is the weakest of those answers, so each such
+	// claim is asked once more — with the call, or with a second turn — before the disk goes.
+	//
+	// Once only, which is what this mark is for: the second answer sets
+	// UpdateAnsweredByTurnEnd again, and a round that read that mark alone would refuse its own
+	// replacement at every attempt and never end. It goes with the round (clearUpdate), so the
+	// next round asks again once of its own.
+	UpdateReaskedForPushCheck bool
 	// UpdateLeftRound is the pod round this claim left, and "" when it has left none: the daemon
 	// started the claim's process again in another pod than the one that round was opened over
 	// (launchAfter).
@@ -503,6 +529,14 @@ type Deps struct {
 	// held by an untaken task would wait for the next tick. Nil tells no one. It is called inside
 	// the machine's decision, so it returns at once.
 	TaskConfirmed func(c Claim)
+	// SessionGone is told the Envoy session a claim recorded, once a probe has judged the agent
+	// process behind it gone (died): the daemon's clean stop of that session's registration, which
+	// makes the listener read it `gone` at once rather than at the end of its live window
+	// (dispatch://INFRA-392). The claim's own session id is what it carries, read before any path
+	// that clears it (forgetSession). Nil tells no one — a daemon with no Envoy listener — and a
+	// claim that recorded no session tells nothing. It is called inside the machine's decision, so
+	// it returns at once and does the call elsewhere.
+	SessionGone func(session string)
 	// PodUpdateRetask is how long after an update task was sent an update round asks a claim that
 	// has not answered again (openPodUpdate), from the daemon's pod_update_retask_hours. The
 	// re-task clock runs from each send (Claim.UpdateTaskedAt), so asking again never postpones
@@ -1374,10 +1408,16 @@ func (m *Machine) stopPrevious(ctx context.Context) error {
 // failing the claim at the limit. A process that dies while a suspension is held leaves the claim
 // suspended instead (endHeld). A process that ended with a pod the daemon itself replaced is not
 // a death at all (displaced).
+//
+// This is the one judgement that the agent behind the claim's Envoy session has ended, so it is
+// where the session's clean stop is sent (sessionGone): a connection closing is not — a daemon
+// restart closes every stream while the agents run on — and the probe that reaches here is what
+// tells the two apart.
 func (m *Machine) died(ctx context.Context, observation runtime.Observation) error {
 	m.log.Warn("supervise: process died", "incarnation", m.claim.Locator.Incarnation, "observed", string(observation.Kind),
 		"detail", observation.Detail)
-	if err := m.interrupted(ctx, "the process died in the task's turn"); err != nil {
+	m.sessionGone()
+	if err := m.interrupted(ctx, "the process died in the task's turn", observation.OutOfMemory); err != nil {
 		return err
 	}
 	if m.held != nil {
@@ -1387,6 +1427,18 @@ func (m *Machine) died(ctx context.Context, observation runtime.Observation) err
 		return m.fail(ctx, "deaths with work outstanding ran out")
 	}
 	return m.relaunchAfterFailure(ctx)
+}
+
+// sessionGone tells the daemon to stop the Envoy session this claim recorded, now that no process
+// stands behind it. It reads the session id from the claim before anything clears it
+// (forgetSession), and a claim that recorded none — never registered, or already forgotten — has
+// nothing to stop. A relaunch of the claim registers the same session again, which is the state
+// the listener should then read, so the stop says what is true when it is sent.
+func (m *Machine) sessionGone() {
+	if m.deps.SessionGone == nil || m.claim.Session == "" {
+		return
+	}
+	m.deps.SessionGone(m.claim.Session)
 }
 
 // forgetSession drops the session the claim recorded, leaving the claim as one no agent has
@@ -1679,6 +1731,8 @@ func claimOf(ev Event) claim.Token {
 	case PodUpdateEnded:
 		return ev.Claim
 	case PodUpdateSignalled:
+		return ev.Claim
+	case PodUpdateReask:
 		return ev.Claim
 	case RequestSpawn:
 		return ev.Claim
