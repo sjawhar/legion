@@ -496,6 +496,85 @@ func TestABatchStraddlingTheIssuesCloseStoresWhatTheRoomTookInTime(t *testing.T)
 	connectWithScope(t, server.URL, artifactID, "alice", "readonly", stored)
 }
 
+// A transaction that flushes the room's queue before its own write (Ledger.flushThrough: a
+// snapshot's or a named version's capture, a repair, the block-id backfill) meets the same gate
+// the room's own batch does, and the close can cut its run the same way. Only the prefix the gate
+// admitted was stored, so only that prefix is recorded on the flush, at the version it got: the
+// rest stays queued, unstored, for the room's own call to refuse, and no credit is held at a
+// version another row has.
+func TestAJoinedFlushTheCloseCutsMarksOnlyWhatItStored(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before")
+	service, server := newHeldAppendsService(t, database)
+	seedServiceText(t, service, artifactID, "before")
+	waitForLandedAppends(t, service, artifactID)
+	alice := connectWithScope(t, server.URL, artifactID, "alice", "read-write", "before\n")
+	head := storedHead(t, database, artifactID)
+
+	// The room's own appends are held, so both keystrokes are still queued when the joined
+	// transaction below flushes them, about two margins in; the hold ends two margins later.
+	if err := service.HoldRoomPersistence(artifactID, 4*closeMargin); err != nil {
+		t.Fatalf("hold the room's appends: %v", err)
+	}
+	writeIssueClosed(t, database, "DOC-1", true)
+	typeOver(t, alice, "before", "typed in time")
+	waitPastCloseMargin(t, database, "DOC-1")
+	time.Sleep(closeMargin / 2)
+	typeOver(t, alice, "typed in time", "typed after the close")
+	waitFor(t, roomWait(t), "both keystrokes to be queued on the room", func() bool {
+		state := service.lockExistingState(artifactID)
+		if state == nil {
+			return false
+		}
+		defer service.unlockState(artifactID, state)
+		return len(state.updateClasses) == 2
+	})
+	state := service.lockExistingState(artifactID)
+	queued := slices.Clone(state.updateClasses)
+	service.unlockState(artifactID, state)
+
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the flushing transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	if err := lockDocumentRoom(joined, tx, artifactID); err != nil {
+		t.Fatalf("lock the document: %v", err)
+	}
+	if err := ledger.flushThrough(joined, tx, artifactID, roomPoint{cursor: queued[1].cursor, seq: queued[1].seq}); err != nil {
+		t.Fatalf("flush the room's queue through the second keystroke: %v", err)
+	}
+	flush := ledger.flushFor(artifactID)
+	if flush == nil {
+		t.Fatal("the transaction keeps no flush of the room")
+	}
+	if len(flush.classes) != 1 || flush.classes[0] != queued[0] || flush.versions[0] != persistence.Version(head+1) {
+		t.Fatalf("the flush records %d classes at versions %v, want the keystroke taken in time alone, at version %d: the gate stored only that one",
+			len(flush.classes), flush.versions, head+1)
+	}
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit the flushing transaction: %v", err)
+	}
+	if moved := storedHead(t, database, artifactID); moved != head+1 {
+		t.Fatalf("the document moved from update %d to %d, want one stored update: the run's admitted prefix", head, moved)
+	}
+	if stored := storedMarkdown(t, database, artifactID); strings.Contains(stored, "typed after the close") {
+		t.Fatalf("the store reads %q, holding the keystroke the room took after the close margin was out", stored)
+	}
+	if queued[1].stored.Load() {
+		t.Fatal("the keystroke the gate refused is marked stored, so the room drops it from its queue though no row holds it")
+	}
+	// The refused keystroke is the room's own call's to refuse once the hold ends, which closes
+	// the room for its issue and stores nothing more.
+	requireEnds(t, alice, "the room's own call refused the keystroke alice made after the close and left her browser connected")
+	if moved := storedHead(t, database, artifactID); moved != head+1 {
+		t.Fatalf("the document stands at update %d after the room's own call, want %d", moved, head+1)
+	}
+}
+
 // A close notified while the listener has no connection reaches nobody and is never sent again:
 // the issue-open lane reads the issue of every resident room once each LISTEN stands
 // (recheckResidentIssues), so the room closes on the reconnect, with no keystroke to make the
