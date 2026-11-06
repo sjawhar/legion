@@ -7,10 +7,11 @@ import { asUser } from "./users";
 
 // A picture line the editor cannot draw gives way to a link to the artifact's page
 // (features/doc/picture-view.ts). The link sits far enough down a real spec that the document's
-// start is off screen, and a plain click on it opens what it names. This spec is its own file so
-// that it runs in Firefox too (e2e/playwright.config.ts): Firefox does not focus a link on
-// mousedown, the editing host takes the focus instead, and the editor then restores its own
-// selection, which a reader who has not clicked into the text yet has at the document's start.
+// start is off screen, and a plain click on it opens what it names. The row carries `@firefox`,
+// the tag the `firefox` project selects by (e2e/playwright.config.ts): Firefox does not focus a
+// link on mousedown, the editing host takes the focus instead, and the editor then restores its
+// own selection, which a reader who has not clicked into the text yet has at the document's
+// start.
 
 const agentSession = {
   actor: { kind: "session" as const, id: "e2e-picture-link-click" },
@@ -21,7 +22,8 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("a fallback link far down the document opens the artifact's page on a plain click", async ({
+// @firefox: the engine's focus rule for a click on a link inside the editor.
+test("a fallback link far down the document opens the artifact's page on a plain click @firefox", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });

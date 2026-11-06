@@ -584,7 +584,8 @@ func answerApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, as
 	ask.Answer = &answer
 	// The answer is a part of the request, so its text reaches the graph with it, and the
 	// ask.answered below names what it moved.
-	changes, err := refs.IndexAskPartsCounted(ctx, tx, *ask, serverURL, answer.At, model.ReferenceChanges{})
+	changes, err := refs.IndexAskPartsCounted(ctx, tx, refs.NewReader(ctx, tx, "ask", ask.ID, serverURL),
+		*ask, answer.At, model.ReferenceChanges{})
 	if err != nil {
 		return model.Event{}, fmt.Errorf("index the parts of approval ask %s: %w", ask.ID, err)
 	}

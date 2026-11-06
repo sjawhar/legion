@@ -1,5 +1,8 @@
 # Changelog
 
+This file is history: every entry after the last section below is in the package's GitHub
+releases, one per `claude-envoy-v*` tag.
+
 ## [main@0abb1e50da7d] - 2026-11-06
 
 ### Changed

@@ -371,7 +371,7 @@ export function drawMermaidDiagrams(
  * Resolves on the microtask after no source is waiting for the worker: every block that asked
  * has drawn, been refused or been cancelled, or a failure or a reset cleared the queue. With
  * none waiting it resolves at once. A focus in a document runs again then, after the diagrams
- * above its target have drawn and moved it (`features/doc/refocus-after-diagrams.ts`).
+ * above its target have drawn and moved it (`features/doc/refocus-when-settled.ts`).
  */
 export function mermaidDrawsSettled(): Promise<void> {
   if (!mermaidQueue.waiting) return Promise.resolve();

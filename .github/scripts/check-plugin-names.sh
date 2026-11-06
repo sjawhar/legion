@@ -39,8 +39,8 @@ allowlist=(
   docs/superpowers/
   # The Envoy plugin's changelog: its history under the old name, and the entry that renames it.
   packages/pi-envoy/CHANGELOG.md
-  # Its changelog fragments: a fragment is that changelog's entry before the fold writes it in, so
-  # any line the CHANGELOG.md above may hold must be writable as its fragment.
+  # Its changelog fragments: a fragment holds an entry of the same kind as the lines above, so any
+  # line the CHANGELOG.md above may hold must be writable as its fragment.
   packages/pi-envoy/.changes/
   # The Legion plugin's changelog: its first entry says which package it was split from.
   packages/pi-legion/CHANGELOG.md

@@ -1,5 +1,8 @@
 # Changelog
 
+This file is history: every entry after the last release below is in the package's GitHub
+releases, one per `pi-legion-v*` tag.
+
 `@sjawhar/pi-legion` was split from `@sjawhar/pi-legion-envoy` 7.x (LEGION-247). Every release
 before the split, and the Envoy plugin's releases after it, are in `packages/pi-envoy/CHANGELOG.md`.
 

@@ -1,0 +1,7 @@
+kind: Added
+body: |-
+  The vocabulary of a streamed answer is declared once: the seven frame names a run's stream carries (`text`, `item`, `cut`, `changed`, `none`, `end`, `error`), the three codes an `error` frame carries, the search tool's name, and every bound of a run — the answer's 120 words, the 2,000 runes of one hit's text and the 30,000 of a whole run, three searches, four model calls, the question's 2,000 characters, the run's 30 seconds and the hour its rows are kept.
+  Dispatch's server and the page that reads the stream take them from here, so the frames one writes and the frames the other reads cannot drift apart.
+time: 2026-11-05T17:51:27.000000000Z
+custom:
+    Issue: pr2812
