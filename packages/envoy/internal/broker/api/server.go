@@ -23,6 +23,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/requests"
+	"github.com/sjawhar/envoy/internal/broker/wire"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/ratelimit"
 )
@@ -604,11 +605,11 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
-// stateResponse is what a denial, a cancel or a revoke answers.
-type stateResponse struct {
-	// The state the call left the request, record or grant in: "denied", "cancelled" or "revoked".
-	State string `json:"state"`
-}
+// stateResponse is what a denial, a cancel or a revoke answers: wire.StateResponse itself, named
+// here because the broker's generated HTTP reference documents a route's answer from a type this
+// package declares, as introspectionResponse names oauthwire.Introspection
+// (handlers_introspect.go).
+type stateResponse = wire.StateResponse
 
 // healthResponse is GET /healthz's answer while the broker is not draining and can reach
 // Postgres. Neither refusal has a type of its own: both are the ordinary broker error object
