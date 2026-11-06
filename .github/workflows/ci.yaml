@@ -2776,7 +2776,12 @@ jobs:
     # before it at their measured times plus its own limit: about 1 minute of setup, then the unit
     # step's own 20 minutes, which is 21; after the unit step's measured 35 minutes, natslive's
     # default 10 is 46, and the shell tests' 7 plus the integration step's 5 is 48.
-    timeout-minutes: 60
+    #
+    # 70 rather than 60 TEMPORARILY, for the two temporary steps at the end of this job: the
+    # INFRA-1260 proof's two ten-minute package deadlines take it to 58, and the INFRA-1075
+    # clone-cost measurement's own ten to 68. It goes back to 60 with them
+    # (dispatch://INFRA-1260, dispatch://INFRA-1075).
+    timeout-minutes: 70
     services:
       postgres:
         # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
@@ -3015,6 +3020,19 @@ jobs:
         run: |
           go test -count=20 -run '^TestRunMakesNoStatementOnceItsBootDrainAndPassAreDone$' ./internal/dispatch/embedqueue/
           go test -count=20 -run '^TestAnUploadHoldsNoIssueLockWhileTheStoreWrites$' ./internal/dispatch/api/
+        working-directory: packages/envoy
+      # TEMPORARY, the INFRA-1075 clone-cost measurement: one CI run has to say, from a real
+      # runner and its own non-durable service rather than from a development pod, what one api
+      # test's floor is made of, what a clone and a drop cost at 8 and at 24 at once under
+      # `strategy file_copy` and under `strategy wal_log`, how big the migrated template is, and
+      # what moving the drop off a test's critical path is worth. It runs after the test steps
+      # above, so the per-package times this run also reports are measured without it, and it
+      # comes out before the final pair of runs, with its one Go file
+      # (internal/dispatch/api/clonecost_measure_test.go), its pin in ci_job_reads.py and the ten
+      # minutes this job's timeout-minutes carries for it (dispatch://INFRA-1075).
+      - name: Measure what a test's database clone costs (INFRA-1075)
+        run: |
+          go test -tags clonecost -v -count=1 -timeout 10m -run '^TestCloneCostMeasurement$' ./internal/dispatch/api/
         working-directory: packages/envoy
       # Always, because a red attempt's times are the ones a reader needs, and one artifact per
       # attempt because a run's artifacts are listed per run, not per attempt, and a download by

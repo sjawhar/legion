@@ -411,6 +411,10 @@ PROOF_1260_STEP = "Twenty runs each of the two tests INFRA-1260 names"
 PROOF_1260_SCRIPT = """\
 go test -count=20 -run '^TestRunMakesNoStatementOnceItsBootDrainAndPassAreDone$' ./internal/dispatch/embedqueue/
 go test -count=20 -run '^TestAnUploadHoldsNoIssueLockWhileTheStoreWrites$' ./internal/dispatch/api/"""
+# TEMPORARY, envoy-go's INFRA-1075 clone-cost measurement step: its -run is not a flag the simple
+# form reduces. It leaves this table with the step (dispatch://INFRA-1075).
+CLONE_COST_STEP = "Measure what a test's database clone costs (INFRA-1075)"
+CLONE_COST_SCRIPT = "go test -tags clonecost -v -count=1 -timeout 10m -run '^TestCloneCostMeasurement$' ./internal/dispatch/api/"
 PACK_STEP = "Pack envoy binaries"
 PACK_SCRIPT = """\
 for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
@@ -727,6 +731,10 @@ GATES = [
         pinned_step("envoy-go", PROOF_1260_STEP, ENVOY, PROOF_1260_SCRIPT, [
             (ENVOY, ["./internal/dispatch/embedqueue/"], "go test -run … ./internal/dispatch/embedqueue/", {}),
             (ENVOY, ["./internal/dispatch/api/"], "go test -run … ./internal/dispatch/api/", {}),
+        ]),
+        # TEMPORARY with the step it pins (dispatch://INFRA-1075).
+        pinned_step("envoy-go", CLONE_COST_STEP, ENVOY, CLONE_COST_SCRIPT, [
+            (ENVOY, ["./internal/dispatch/api/"], "go test -tags clonecost -run … ./internal/dispatch/api/", {"tags": "clonecost"}),
         ]),
         # One linux build of the listener per architecture the loop reads from the target list.
         pinned_step("envoy-go", PACK_STEP, ENVOY, PACK_SCRIPT, [
