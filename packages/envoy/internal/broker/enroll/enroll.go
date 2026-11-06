@@ -649,10 +649,15 @@ const carriesForItsSession = `(e.revoked_at is null or e.dormant_since is not nu
 //     row and takes the grant, so the box is commonly left holding no live grant and no pending
 //     request at all, its end is therefore terminal and its row never goes dormant. Were the
 //     names left on it, the next enrolment of the session would find the secret automatic again
-//     and a replaced box would undo what the operator said. Taking them can never hand anything
-//     over, whichever row they come from: a withheld_secrets row only ever takes a name away from
-//     the session (requests.Machine refuses an automatic grant of a withheld name), so the widest
-//     reading of which rows to take it from is also the safest one.
+//     and a replaced box would undo what the operator said. Off a row ended for good, taking
+//     them hands nothing over: nothing reaches the broker through an enrollment that is over, so
+//     the names only ever sat there. Off a live predecessor it does hand something over, and
+//     that is accepted here: requests.Machine reads a requester's withheld names by the
+//     enrollment's own id, so the box the names move off asks for that name automatically again.
+//     What bounds it is that a withhold binds a session name and never the principal behind it —
+//     the same principal can start a session under a name it has not used and get a box with
+//     nothing withheld on it at all — and that the session the operator took the name from is
+//     left without it, because the names move to the enrollment that session runs on now.
 //
 // An enrollment of the pair that holds neither is no predecessor and is left exactly as it is,
 // which is what keeps a second live session of one name from being ended by its neighbour's

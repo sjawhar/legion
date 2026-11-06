@@ -698,6 +698,35 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 	return Decision{}, fmt.Errorf("decide record %s: exhausted retries while the request kept moving to another enrollment", recordID)
 }
 
+// enrollmentHoldsForItsSession is "enrollment e still holds something for its session": a live
+// grant, or a request nobody has answered yet. It is enroll's own holdsForItsSession word for
+// word, and must stay word for word that. Three statements read the one rule — endEnrollment's
+// dormancy probe, which decides whether an end of the box leaves the row dormant instead of
+// revoking what it holds, adopt's predecessor query, and mayGrant's third case below — and
+// mayGrant's job is to grant on a lapsed row exactly when the end the sweep is about to write
+// would leave that row dormant. Were this copy the wider of the two, an approval would be
+// granted onto a row the sweep then revokes; were it the narrower, an approval would be denied
+// on a row the sweep then carries. Either way the answer a person gets would turn on which of
+// the two ran first.
+//
+// It is a copy rather than one shared constant because enroll's is unexported, and a SQL
+// fragment that means anything only when it is spliced against an alias named e is a poor thing
+// for a package to export. What holds the copies together instead is
+// TestTheLapsedRowGrantRuleAnswersWhatTheEndThatFollowsDoes, which runs this rule and
+// enroll.Service.EndLapsed over every shape of row and compares their two answers, the way
+// enroll's own serving_test.go pins its copy of a SQL rule against the rule itself.
+const enrollmentHoldsForItsSession = `exists (select 1 from grants g where g.enrollment_id=e.id and g.revoked_at is null and (g.expires_at is null or g.expires_at > now()))
+				or exists (select 1 from requests r where r.enrollment_id=e.id and r.state='pending')`
+
+// enrollmentWouldGoDormant is "an end of this box, written now, would leave enrollment e dormant
+// rather than revoke what it holds": the row names a session, records the principal that session
+// belongs to, and still holds a live grant or a request nobody has answered. It is
+// enroll.endEnrollment's own dormancy probe — the same two tests, in the same order, around the
+// same holdsForItsSession text — because it has to answer what that probe will answer about the
+// same row a moment later.
+const enrollmentWouldGoDormant = `coalesce(e.session_id,'') <> '' and e.carry_principal is not null and (
+				` + enrollmentHoldsForItsSession + `)`
+
 // applyDecisionAttempt makes one of ApplyDecision's attempts, writing everything that decision
 // writes or nothing at all. moved is true when the request moved to another enrollment between
 // the read that locks the enrollment and the read that locks the request — an adoption
@@ -729,23 +758,33 @@ func (m *Machine) applyDecisionAttempt(ctx context.Context, recordID string, app
 		Scan(&body, &createdAt); err != nil {
 		return Decision{}, false, err
 	}
-	// mayGrant is which of the enrollment's three states a grant may be hung off. Live — not
-	// revoked and its lease not lapsed — is the ordinary one. Dormant — revoked_at set and
-	// dormant_since not null: ended by an end of its box while it still held a grant or this
+	// mayGrant is which of the enrollment's states a grant may be hung off, and there are three.
+	// Live — not revoked and its lease not lapsed — is the ordinary one. Dormant — revoked_at set
+	// and dormant_since not null: ended by an end of its box while it still held a grant or this
 	// pending request, and kept for the session's next box (enroll.endEnrollment) — is the one
 	// this carry is for, and a grant may land on it: an approval given while the box is gone is
 	// the order dispatch://INFRA-1167 reports, the next enrollment of that session name adopts
 	// the grant with the request (enroll.adopt), the carry sweep revokes it if nobody comes back
 	// (enroll.Service.EndCarried), and a person's revoke of the machine login or the sign-in
-	// reaches it as it reaches any grant (endCredential). Ended for good — revoked with nothing
-	// left to carry, or a lease lapsed with no end written against the row yet — is the third,
-	// and an approval of a request on such a row is recorded and then denied below, as it always
-	// was.
+	// reaches it as it reaches any grant (endCredential). The third is a row whose lease has
+	// lapsed and against which no end is written yet, the window between the lapse and the sweep
+	// that ends it, which is up to BROKER_SWEEP_SECONDS long: a grant lands on it when the end
+	// the sweep is about to write would leave the row dormant (enrollmentWouldGoDormant, which
+	// is enroll.endEnrollment's own probe). Denying there while granting a second later, on the
+	// same row holding the same rows, would make the sweep's timing the person's answer.
+	//
+	// Ended for good is what is left: a row revoked with nothing to carry, and a lapsed row no
+	// end of its box could leave dormant — one that names no session, or names one and records
+	// no principal to enrol under it again, so nothing could ever adopt what it holds. An
+	// approval of a request on such a row is recorded and then denied below, as it always was.
 	var mayGrant bool
 	var enr enrollmentRow
-	if err := tx.QueryRow(ctx, `select e.id, e.dormant_since is not null or (e.revoked_at is null and enrollment_lease_live(e.lease_expires_at)), e.kind, e.operator, e.subject, c.service, c.host
-		from requests r join enrollments e on e.id = r.enrollment_id
-		left join launcher_credentials c on c.id = e.launcher_credential_id where r.record_id=$1 for share of e`, recordID).
+	if err := tx.QueryRow(ctx, `select e.id,
+			e.dormant_since is not null or (e.revoked_at is null
+				and (enrollment_lease_live(e.lease_expires_at) or (`+enrollmentWouldGoDormant+`))),
+			e.kind, e.operator, e.subject, c.service, c.host
+		from requests req join enrollments e on e.id = req.enrollment_id
+		left join launcher_credentials c on c.id = e.launcher_credential_id where req.record_id=$1 for share of e`, recordID).
 		Scan(&enr.ID, &mayGrant, &enr.Kind, &enr.Operator, &enr.Subject, &enr.Service, &enr.Host); err != nil {
 		return Decision{}, false, err
 	}
