@@ -172,6 +172,53 @@ enrolment written beside the session key, the usage error, and the cleanup stopp
 everything it started — with no real Postgres, no network and no Go build; CI runs
 it in the `envoy-go` job of `.github/workflows/ci.yaml`.
 
+## airlock-check.sh
+
+Runs one `before_merge` check of the airlock's verification document
+(dispatch://INFRA-1352/artifact/verification-md) end to end and says whether it
+passed, so the implementer who records the result and the tester who re-runs it read
+the same evidence. It starts the stack the check needs (`dev-airlock.sh`, with the
+options that check's negative control asks for), runs the check's steps, runs the
+negative control, stops the stack, and prints a result block to paste into `dispatch
+result` — what the check expected, what this run observed and what the control did —
+then one `PASS:` or `FAIL:` line for each property the check's outcome sentence
+names and one for its control, and last `check <id>: passed` or `check <id>: failed
+(<n> of <m>)`.
+
+```bash
+DEV_BROKER_POSTGRES_URL="$LEGION_TEST_PG_DSN" packages/envoy/scripts/airlock-check.sh k3
+```
+
+`<id>` is `k1`, `k2`, `k3`, `k4`, `k5`, `k8a` or `k15`; `k6`, `k7` and `k9` exit 3
+until they are written. `--keep-stack` leaves the stack and the run's work directory
+up to look at a failure with, `--help` prints the usage, and a usage error exits 2.
+
+No line it prints is a credential: a value is compared by its SHA-256 (the first 16
+hex digits) and its length, and every line that compares one says so, which is a rule
+of the verification document itself.
+
+Two checks need more than the stack. `k1` scans the command's memory, and
+`/proc/sys/kernel/yama/ptrace_scope` is 1 in a Legion pod, so only an ancestor of the
+command may read its `/proc/<pid>/mem`: the scan is a small Python program the run
+writes into its work directory, which starts `agent-secrets` itself and scans the
+descendant it started. `k15` needs no stack: it builds the Lean model with `lake`,
+prints its theorem statements and their axioms, runs the comparison fuzz test for ten
+minutes, and runs the six mutants through `airlock-mutants.sh`.
+
+Where a check needs a secret the stack does not hold, the run extends the stack's own
+fake Secrets Manager and makes every broker reread it; it writes no rules file of its
+own. A control that needs other rules or another proxy setting — `k4`'s, which turns
+the refusal of a loopback address off for one host — is a second broker process on
+the stack's own database, rules, authority and stand-ins with that one setting
+changed, and the step's `HTTPS_PROXY` pointed at it. `k5`'s control is a second stack
+run under `--keep-values`.
+
+It needs bash, curl, jq, go, python3, openssl, node and psql; `k2` also needs `gh`,
+which fetches the last released `agent-secrets` from the newest `legion-envoy-v*`
+release, and `k15` needs `lake` from the Lean toolchain the environment names. Each
+bound host listens on one loopback address and port 443, so only one stack runs on a
+machine at a time.
+
 ## airlock-mutants.sh
 
 Proves that the airlock's differential fuzz test and the Lean proofs catch a defect

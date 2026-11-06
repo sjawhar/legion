@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/requests"
@@ -137,6 +138,8 @@ type GoogleOptions struct {
 // secret's minter at it.
 type GoogleStand struct {
 	options GoogleOptions
+	// refreshes numbers the tokens this stand has answered, so two mints are told apart.
+	refreshes atomic.Int64
 }
 
 // NewGoogleStand builds one. Install it with Service.AnswerWith(stand.Answer).
@@ -155,9 +158,13 @@ func (g *GoogleStand) Answer(w http.ResponseWriter, _ *http.Request, seen Reques
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid_request"})
 		return true
 	}
+	// A fresh token for each refresh, numbered, so a caller can tell one mint from the next:
+	// Google answers a new access token every time, and a check that a value was minted again
+	// cannot read a stand-in that answers one fixed string. AccessToken fixes it where a row
+	// wants the same answer twice.
 	token := g.options.AccessToken
 	if token == "" {
-		token = "the-stand-in-google-access-token"
+		token = fmt.Sprintf("the-stand-in-google-access-token-%d", g.refreshes.Add(1))
 	}
 	lifetime := g.options.Lifetime
 	if lifetime <= 0 {

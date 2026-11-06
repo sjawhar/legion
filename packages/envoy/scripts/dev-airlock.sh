@@ -364,6 +364,7 @@ echo "dev-airlock: starting dev-airlock-stands..." >&2
   --host "microsoft=$MICROSOFT_HOST" --host "microsoft=$AZURE_RESOURCE_HOST" \
   --address "aws=$AWS_ADDRESS" --host "aws=$AWS_HOST" \
   --github-owner "$GITHUB_OWNER=$GITHUB_INSTALLATION" \
+  --google-lifetime 7m \
   >"$STANDS_JSON" 2> >(trap '' TERM INT; exec tee -a "$STANDS_LOG" >&2) &
 STANDS_PID=$!
 await "dev-airlock-stands" 60 "$STANDS_LOG" 'stands listening records=' "$STANDS_PID"

@@ -1245,6 +1245,41 @@ func TestDropNameDropsOneNameAndKeepsTheGrantsOthers(t *testing.T) {
 	}
 }
 
+// TestKeepValuesHoldsAValueAcrossAReread is the negative control of the check that a new version
+// of a stored secret reaches a running command: with Options.KeepValues the proxy must go on
+// carrying the value it already holds, so a check that turns the switch on and sees the old value
+// has proved the switch is what the behaviour hangs on. Dropping the name and then holding what
+// is left would read the grant again and find the new value, which is the defect this row pins.
+func TestKeepValuesHoldsAValueAcrossAReread(t *testing.T) {
+	const placeholder = requests.PlaceholderPrefix + "keepkeepkeepkeepkeepkeepkeepke01"
+	r := newRig(t, Options{KeepValues: true})
+	r.grants.connections[placeholder] = requests.AirlockConnection{
+		GrantID: testGrantID, EnrollmentID: testEnrollID, RequestID: testRequest, Issue: testIssue,
+		Names: map[string]requests.AirlockGrantName{
+			workerName: {Slots: map[string]string{requests.SlotValue: placeholder}},
+		},
+	}
+	r.grants.setValues(testGrantID, map[string]requests.AirlockSecret{
+		workerName: {Slots: map[string]string{requests.SlotValue: "value-v1"}},
+	})
+	client := r.client(placeholder)
+	r.get(client, "https://"+boundHost+"/v1/things", "Authorization", "Bearer "+placeholder)
+
+	r.grants.setValues(testGrantID, map[string]requests.AirlockSecret{
+		workerName: {Slots: map[string]string{requests.SlotValue: "value-v2"}},
+	})
+	r.proxy.DropName(workerName)
+	r.get(client, "https://"+boundHost+"/v1/other", "Authorization", "Bearer "+placeholder)
+
+	if calls := r.grants.valueReads(testGrantID); calls != 1 {
+		t.Fatalf("AirlockValues ran %d times; want once: with KeepValues a reread reads nothing again", calls)
+	}
+	seen := r.requests()
+	if got, want := seen[len(seen)-1].Header.Get("Authorization"), "Bearer value-v1"; got != want {
+		t.Fatalf("the service saw Authorization %q after the reread; want %q, the value the proxy already held", got, want)
+	}
+}
+
 // TestAGitHubAppInstallationsTokenIsSwappedForItsOwnSlotsPlaceholder: a github-app name holds
 // one token per installation and no value slot, so what a request is handled for is the (name,
 // slot) pair whose placeholder it carries - the owner the command asked for - and the value

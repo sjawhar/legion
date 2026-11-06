@@ -155,7 +155,16 @@ func (s *Server) valuesFor(ctx context.Context, grantID string) (map[string]requ
 // each grant's names in place: a later request of such a grant reads its values again, and mints
 // again what the new version of name needs minting from. The broker calls it wherever one
 // secret's name is reread, since the reread is the only signal a stored value has a new version.
+//
+// Options.KeepValues turns it off altogether, because the drop is what a reread does to a stored
+// value: held's keep makes a stale answer usable, but a name this has taken out of the map is
+// not there to be used, and the next request reads the grant again and finds the new value. That
+// switch is the negative control of the check this behaviour belongs to, and a production start
+// with it set is refused.
 func (s *Server) DropName(name string) {
+	if s.keepValues {
+		return
+	}
 	s.valuesMu.Lock()
 	defer s.valuesMu.Unlock()
 	for _, held := range s.values {
