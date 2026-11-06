@@ -37,7 +37,6 @@ import {
   isCommandBookkeeping,
   isPictureAttachmentRow,
 } from "./claude-rows"
-import { isUnreadRowPrompt } from "./mod-session"
 
 /** The provider every model of Claude Code's is named under, so a frame carries the same
  *  `provider/id` reference an Oh My Pi session's does (`anthropic/claude-sonnet-5`). */
@@ -374,15 +373,27 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
     if (door === "response") return
     // A row Claude Code marks `isMeta` is one the person does not see as typed
     // (`ModAppendMessage.isMeta`), so drawing it attributes to a person something they never
-    // wrote. Measured on live Claude Code 2.1.310 (INFRA-1026): a `/rename` typed at a
-    // terminal left, behind its echo and its `<local-command-stdout>` row, a `type: "user"`
-    // row carrying `isMeta: true` whose whole text is
-    // `<system-reminder> The user named this session "…". …</system-reminder>`, which the live
-    // view drew as the person's own message - model-facing XML under their name. A line the
-    // person types while a turn runs is not marked: it arrives `origin composer`,
-    // `type: "attachment"`, `name: "queued_command"` and no `isMeta` (same measurement), so it
-    // reaches the reader this rule leaves untouched (`./claude-rows`, `claudeMidTurnMessage`).
-    if (message.isMeta === true) return
+    // wrote - unless this plugin wrote the row itself, which is the one `isMeta` row the page
+    // must show. Measured on live Claude Code 2.1.310 (INFRA-1026):
+    //
+    //   - a row `$.session.append` writes carries `isMeta: true` and `origin.kind` `plugin`
+    //     (the engine sets both, `hooks/claude-mod.d.ts`, `SessionAppendArgs`): the card this
+    //     server delivers into the conversation is such a row, and it is all a card delivered
+    //     during a turn ever becomes, so dropped it leaves the viewer an answer to a message
+    //     they never saw;
+    //   - a `/rename` typed at a terminal left, behind its echo and its
+    //     `<local-command-stdout>` row, a `type: "user"` row carrying `isMeta: true` and
+    //     `origin.kind` `engine` whose whole text is `<system-reminder> The user named this
+    //     session "…". …</system-reminder>`, which the live view drew as the person's own
+    //     message - model-facing XML under their name;
+    //   - the `<local-command-caveat>` row of a command run carries `isMeta: true` and the
+    //     plugin's origin, and is drawn nothing for by the bookkeeping rule of the `command`
+    //     door below (`./claude-rows`, `isCommandBookkeeping`);
+    //   - a line the person types while a turn runs is not marked at all: it arrives
+    //     `origin composer`, `type: "attachment"`, `name: "queued_command"` and no `isMeta`,
+    //     so it reaches the reader this rule leaves untouched (`./claude-rows`,
+    //     `claudeMidTurnMessage`).
+    if (message.isMeta === true && origin.kind !== "plugin") return
     // Claude Code's own note of where it put a picture's bytes, which it writes beside the
     // message that carried the picture (`./claude-rows`, `isPictureAttachmentRow`). Nobody wrote
     // it, and published it draws a second user row for the one message the person sent: measured
@@ -392,21 +403,15 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
     if (isPictureAttachmentRow(message.content)) return
     if (door === "prompt") {
       // A prompt this plugin submitted without `asUser` is not a person's message: Claude Code
-      // frames it as "The claude-envoy plugin sent a message:", and the server sends two of
-      // them (`./mod-session`). The prompt at rows a turn never read is drawn nothing for,
-      // since it quotes rows this view has already drawn and a viewer would read each of those
-      // messages twice; a card's prompt is drawn, because a card delivered to an idle session
-      // is that prompt and reaches the conversation nowhere else.
+      // frames it as "The claude-envoy plugin sent a message:" and the prompts the server
+      // sends quote rows of the conversation this view has already drawn - the rows a turn
+      // never read, and the card an idle session is prompted at, which is stored as its own
+      // row first (`./mod-session`, `unreadRowPrompt` and `hand`). Drawn, a viewer would read
+      // each of those messages twice.
       // Measured on 2.1.310: a submit with `asUser` carries `asUser: true` on the row's origin
       // and one without it carries no such field, which is what tells a person's own words
       // from the plugin's.
-      if (
-        origin.kind === "plugin" &&
-        origin.asUser !== true &&
-        isUnreadRowPrompt(claudeRowText(message.content))
-      ) {
-        return
-      }
+      if (origin.kind === "plugin" && origin.asUser !== true) return
       // The command a pane is seeded with arrives by this door, written to the session's input
       // by the daemon's bridge before anything else happens in the pane: it names the pane, and
       // no person sent it.

@@ -291,8 +291,8 @@ test("two prompts stamped in one millisecond keep separate slots", () => {
 test("a person's message shows as their own, and the prompt pointing at a row it left shows nothing", () => {
   const live = harness(1_000, (row) => (row === "row-sent" ? "msg-7" : undefined))
   // What Claude Code puts in front of the text a plugin submitted without `asUser`, measured on
-  // 2.1.310: the prompt's own words follow it, which is why the reader looks for them anywhere
-  // in the row (`isUnreadRowPrompt`, `../src/mod-session`).
+  // 2.1.310. Such a prompt quotes rows of the conversation this view has already drawn, so
+  // nothing is drawn for the prompt itself (`unreadRowPrompt` and `hand`, `../src/mod-session`).
   const framed = (text: string): string => `The claude-envoy plugin sent a message:\n${text}`
   const nudge = unreadRowPrompt([{ kind: "person", messageId: "msg-7", text: "ship it" }])
   live.feed(
@@ -315,25 +315,40 @@ test("a person's message shows as their own, and the prompt pointing at a row it
   expect(kept[0]?.dispatchMessageId).toBe("msg-7")
 })
 
-// A card delivered to an idle session is the prompt of the turn it starts and reaches the
-// conversation nowhere else (`cardPrompt`, `../src/mod-session`), so a view that drew nothing
-// for every prompt of the plugin's showed the model answering a message the viewer never saw
-// (INFRA-1026 review).
-test("a card's prompt shows, though the plugin submitted it and not the person", () => {
+// An Envoy card reaches the conversation as the row `$.session.append` writes: by the `note`
+// door, with this plugin's origin and `isMeta: true`, both of which the engine sets on a row a
+// plugin appends (`SessionAppendArgs`, `../hooks/claude-mod.d.ts`). Measured on 2.1.310 in this
+// round's own run
+// (`/legion/scratch/tmp/t-term-uz/config/projects/-legion-scratch-tmp-t-term-uz-cwd/9bdfebc9-06e5-496a-ad93-06105d0af932.jsonl:167`,
+// the HAZEL card delivered while a turn ran). That row is all a card delivered during a turn
+// ever becomes - no prompt of its own carries it - so a view that drew nothing of an `isMeta`
+// row showed the model answering a message the viewer never saw (INFRA-1026 review). An idle
+// session stores the same row and is prompted at it, and the prompt is what draws nothing.
+test("a card this session appended shows, though Claude Code marks the row isMeta", () => {
   const live = harness()
   const card = "Dispatch message from alice: the migration is approved."
   live.feed(
+    appendRow("note", [{ text: card, type: "text" }], {
+      message: {
+        content: [{ text: card, type: "text" }],
+        isMeta: true,
+        role: "user",
+        type: "user",
+      },
+      origin: { kind: "plugin", name: "claude-envoy" },
+      uuid: "row-card",
+    }),
     appendRow(
       "prompt",
       [{ text: `The claude-envoy plugin sent a message:\n${cardPrompt(card)}`, type: "text" }],
-      { origin: { kind: "plugin", name: "claude-envoy" }, uuid: "row-card" },
+      { origin: { kind: "plugin", name: "claude-envoy" }, uuid: "row-card-prompt" },
     ),
   )
 
   const kept = messages(live.replay())
   expect(kept).toHaveLength(1)
   expect(kept[0]?.role).toBe("user")
-  expect(kept.map(textOf).join("")).toContain(card)
+  expect(kept.map(textOf)).toEqual([card])
 })
 
 test("a command row keeps the row's own role and a note row an assistant one", () => {

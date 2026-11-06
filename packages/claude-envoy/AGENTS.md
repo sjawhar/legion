@@ -298,8 +298,24 @@ above says how to run it).
   waits for the person to type and one appended after a turn's last request is never read at
   all. A person's message goes with `asUser`, so Claude Code frames it as their own words; a
   card goes without it, under a line saying Envoy delivered it (`cardPrompt`), since nobody at
-  the session typed it. The live view draws the card's prompt and draws nothing for the prompt
-  at unread rows, which quotes rows it has already drawn (`isUnreadRowPrompt`).
+  the session typed it.
+- Store a card before the frame that carried it is answered: while the session is idle `hand`
+  appends the row and only then submits the prompt, so `show` resolves on the append and
+  rejects where the session cannot take the message, which leaves the Envoy frame unanswered
+  and has the listener send the card again — one time, through a restart. A submit is never
+  awaited (it lasts the turn it starts), so a branch that only submitted said `done` although
+  the prompt had not entered the session: driven live (INFRA-1026, k7's second clause — Claude
+  Code SIGSTOPped, an Envoy message sent to it, then SIGKILL and `claude --resume <id>`), the
+  resumed conversation held that message once while the append was awaited and zero times once
+  it was not. A person's message keeps the prompt alone: the router answers them on Dispatch.
+- Draw a row Claude Code marks `isMeta` only where this plugin wrote it (`origin.kind`
+  `plugin`): the engine marks every row `$.session.append` writes, so a card — which is that
+  row and, during a turn, nothing else — is the one `isMeta` row the page must show, while a
+  terminal `/rename`'s `<system-reminder>` (`origin.kind` `engine`) stays model-facing XML
+  under the person's name and is drawn nothing for, as the `<local-command-caveat>` row of a
+  run is by the bookkeeping rule of the `command` door. The live view draws nothing for a
+  prompt this plugin submitted without `asUser`: both such prompts quote rows it has already
+  drawn.
 - Keep the mod's socket where only its own user can create anything: `resolveModSocketPath`
   (`hooks/mod-protocol.ts`) puts `claude-envoy/ce-<hash of the session id>.sock` under
   `XDG_RUNTIME_DIR`, else Claude Code's own configuration directory (`CLAUDE_CONFIG_DIR`, else

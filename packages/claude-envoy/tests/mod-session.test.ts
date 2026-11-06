@@ -26,6 +26,8 @@ interface Driven {
   madeOf<N extends ModCallName>(call: N): ModCallArguments[N][]
   /** Hands the session one event, as the live view does (`startAgentStream`). */
   observe(event: ModEvent): void
+  /** Every call the session made, in the order it made them. */
+  order(): ModCallName[]
 }
 
 /** A session on a mod that answers what the test says and remembers what it was asked. */
@@ -50,6 +52,7 @@ function driven(answers: { [N in ModCallName]?: Answer<N> } = {}): Driven {
     madeOf: <N extends ModCallName>(call: N): ModCallArguments[N][] =>
       calls.filter((made) => made.call === call).map((made) => made.args as ModCallArguments[N]),
     observe: (event) => session.observe(event),
+    order: () => calls.map((made) => made.call),
     session,
   }
 }
@@ -64,12 +67,20 @@ function answers(mod: Driven, turnId: string, index: number): void {
 // An append starts nothing: a row is read at the turn's next request, and an idle session makes
 // none, so a card appended to one waited for the person to type (INFRA-1026 review). The
 // approved decision, Oh My Pi's rule for the same card (`packages/pi-envoy/src/card-wake.ts`)
-// and this package's own documentation all say the card starts the turn instead.
+// and this package's own documentation all say the card starts the turn as well, and the row is
+// stored before that prompt goes out: a submit is never awaited, so the append is the only part
+// of this the delivery's frame can be answered on (the test below, and `hand` in
+// `../src/mod-session`).
 test("a card to an idle session is the prompt of a turn, and that turn answers it", async () => {
-  const mod = driven({ "prompt.submit": (args) => ({ text: args.text }) })
+  const mod = driven({
+    "prompt.submit": (args) => ({ text: args.text }),
+    "session.append": () => ({ uuid: "row-card" }),
+  })
   await mod.session.show({ content: BLOCKS, text: CARD })
 
-  expect(mod.madeOf("session.append")).toEqual([])
+  // Stored first, started second.
+  expect(mod.order()).toEqual(["session.append", "prompt.submit"])
+  expect(mod.madeOf("session.append")).toEqual([{ message: { content: BLOCKS, type: "user" } }])
   const submits = mod.madeOf("prompt.submit")
   expect(submits).toHaveLength(1)
   // Without `asUser`: the person typed none of this, and a prompt claiming they did would put
@@ -82,6 +93,56 @@ test("a card to an idle session is the prompt of a turn, and that turn answers i
   mod.observe({ kind: "turn-start", turnId: "turn-1" })
   answers(mod, "turn-1", 0)
   await settled()
+  expect(mod.madeOf("prompt.submit")).toHaveLength(1)
+})
+
+// What the Envoy frame's `done` rests on is `show` resolving, and a submit is never awaited: it
+// resolves at the end of the turn it starts. Driven live (INFRA-1026, k7's second clause:
+// Claude Code SIGSTOPped, an Envoy message sent to it from another session, then SIGKILL and
+// `claude --resume <id>`), an idle branch that only submitted answered the frame although the
+// prompt never entered the stopped process, and the resumed conversation held that message zero
+// times where the branch that awaited the append held it once.
+test("a card an idle session cannot take rejects, so its frame goes unanswered", async () => {
+  const stopped = driven({
+    "prompt.submit": (args) => ({ text: args.text }),
+    "session.append": () => Promise.reject(new Error("this session has no link to Claude Code")),
+  })
+  await expect(stopped.session.show({ content: BLOCKS, text: CARD })).rejects.toThrow(
+    "this session has no link to Claude Code",
+  )
+  // Nothing was submitted either: the card is the session's to take or to refuse whole.
+  expect(stopped.madeOf("prompt.submit")).toEqual([])
+
+  // A session that answers the call and refuses the row is the same to the caller.
+  const refusing = driven({
+    "prompt.submit": (args) => ({ text: args.text }),
+    "session.append": () => ({ deny: "the conversation is compacting" }),
+  })
+  await expect(refusing.session.show({ content: BLOCKS, text: CARD })).rejects.toThrow(
+    "the session refused the message: the conversation is compacting",
+  )
+  expect(refusing.madeOf("prompt.submit")).toEqual([])
+})
+
+test("the card's frame is answered once the row is stored, and not before", async () => {
+  const stored = Promise.withResolvers<ModCallResults["session.append"]>()
+  const mod = driven({
+    "prompt.submit": (args) => ({ text: args.text }),
+    "session.append": () => stored.promise,
+  })
+  let answered = false
+  const showing = mod.session.show({ content: BLOCKS, text: CARD }).then(() => {
+    answered = true
+  })
+
+  await settled()
+  expect(answered).toBe(false)
+  // The prompt waits on the row too: the turn it starts is the one that reads that row.
+  expect(mod.madeOf("prompt.submit")).toEqual([])
+
+  stored.resolve({ uuid: "row-card" })
+  await showing
+  expect(answered).toBe(true)
   expect(mod.madeOf("prompt.submit")).toHaveLength(1)
 })
 

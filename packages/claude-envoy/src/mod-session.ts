@@ -10,7 +10,8 @@
 //     request follows it, so an idle session reads nothing that is appended to it. So a row
 //     added to a running turn is watched until that turn ends, one the turn never read is
 //     quoted in full by a prompt of its own (`unreadRowPrompt`), and an idle session is handed
-//     a prompt instead of a row - a person's message and a card alike (`hand`).
+//     a prompt: a person's message as the prompt alone, a card as the stored row first and the
+//     prompt that starts the turn reading it second (`hand`).
 //   - a turn's next request goes out about 50 ms after the tool result that freed it, and its
 //     first chunk arrives seconds later (2.4 s and 2.5 s in the recorded runs). So which request
 //     a row made it into is read off `step-request`, which the mod sends as the request goes
@@ -111,8 +112,7 @@ function quotedUnread(message: UnreadMessage): string {
 
 /**
  * The words every prompt at an unread row carries, whichever of the two wordings below it is:
- * the live view reads them to tell such a prompt from a card's (`isUnreadRowPrompt`), so both
- * wordings are built from this one string rather than spelling it twice.
+ * both are built from this one string rather than spelling it twice.
  */
 const UNREAD_LEAD = "while your last request was already running, so you have not read"
 
@@ -150,28 +150,14 @@ export function unreadRowPrompt(unread: readonly UnreadMessage[]): string {
 }
 
 /**
- * Whether `text`, the text of a row the plugin's own prompt wrote, is a prompt at rows a turn
- * never read (`unreadRowPrompt`) rather than a card's (`cardPrompt`).
- *
- * The live view draws nothing for the first and draws the second (`./agent-stream-claude`): a
- * prompt at unread rows quotes rows the view has already drawn, where a card delivered to an
- * idle session is that prompt and reaches the conversation nowhere else. The row carries Claude
- * Code's own framing in front of the submitted text ("The claude-envoy plugin sent a message:",
- * measured on 2.1.310), so the words are looked for anywhere in the row.
- */
-export function isUnreadRowPrompt(text: string): boolean {
-  return text.includes(UNREAD_LEAD)
-}
-
-/**
  * The prompt a card is while the session is idle, submitted without `asUser`: the card's own
  * text under one line saying what it is.
  *
- * A card is submitted rather than appended because an append starts nothing — a row is read at
- * the turn's next request, and an idle session makes none — so an ask answer or a teammate's
- * message would sit unread until the person typed (INFRA-1026 review). The line is needed
- * because a prompt is the one place the model takes direction from: without it the card reads
- * as an instruction the plugin wrote, and with `asUser` it would read as the person's own
+ * An idle session is prompted as well as appended to because an append starts nothing — a row
+ * is read at the turn's next request, and an idle session makes none — so an ask answer or a
+ * teammate's message would sit unread until the person typed (INFRA-1026 review). The line is
+ * needed because a prompt is the one place the model takes direction from: without it the card
+ * reads as an instruction the plugin wrote, and with `asUser` it would read as the person's own
  * words, which nobody typed.
  */
 export function cardPrompt(text: string): string {
@@ -209,14 +195,16 @@ export interface ModSession {
    * answer, a teammate's or an architect's message, an issue event, a notice of Envoy's own.
    *
    * It takes the three states a person's message takes (`deliver`), all but `asUser`: a row of
-   * the turn running, a prompt of its own when that turn ends without reading the row, and the
-   * prompt of a new turn while the session is idle (`cardPrompt`). An append alone starts
-   * nothing, so an idle session would sit on the card until the person typed, and a card
-   * appended after a turn's last request would never be read at all (INFRA-1026 review).
+   * the turn running, a prompt of its own when that turn ends without reading the row, and,
+   * while the session is idle, the row stored first and the prompt of a new turn behind it
+   * (`cardPrompt`). An append alone starts nothing, so an idle session would sit on the card
+   * until the person typed, and a card appended after a turn's last request would never be
+   * read at all (INFRA-1026 review).
    *
-   * It resolves once the session has stored the row, or at once while the session is idle: a
-   * prompt lasts the turn it starts, so waiting for one would hold the delivery's frame open
-   * for that whole turn.
+   * It resolves once the session has stored the row, in every one of those states, and never
+   * waits for the prompt, which lasts the turn it starts. What the delivery's frame is
+   * answered on is that resolution: a session that cannot take the card rejects it here, the
+   * frame goes unanswered, and the listener sends the card again.
    */
   show(card: { readonly text: string; readonly content: readonly ModContentBlock[] }): Promise<void>
   /**
@@ -460,21 +448,38 @@ export function modSession(options: ModSessionOptions): ModSession {
    * One message into the session, in whichever of the three states the session is in: the prompt
    * of a new turn while it is idle, a row of the turn running, and a prompt of its own when that
    * turn ends without a request having read the row. A person's message and a card take the same
-   * three (`deliver`, `show`); what separates them is `asUser` and the words of the prompts.
+   * three (`deliver`, `show`); what separates them is `asUser`, the words of the prompts, and
+   * what an idle session does with the message before the prompt goes out.
    */
   const hand = async (message: {
     readonly content: readonly ModContentBlock[]
     /** What goes out while the session is idle, and whether it is the person's own words. */
     readonly prompt: { readonly text: string; readonly asUser: boolean }
-    /** What the prompt at an unread row carries, where the turn never reads it. */
+    /** What the message is - a person's own words or a card - and what the prompt at an unread
+     *  row carries, where the turn never reads it. */
     readonly unread: UnreadMessage
     readonly failed?: (error: unknown) => void
   }): Promise<string | undefined> => {
     const started = turn
     if (started === undefined) {
-      // The turn this starts runs for as long as the model works; the frame is answered now.
+      // An idle session stores a card before anything is answered for it, and takes a person's
+      // message as the prompt alone: what a card's frame is answered on is `show` resolving,
+      // where the router answers the person on Dispatch itself. A `$.prompt.submit` is never
+      // awaited - it lasts the turn it starts - so an idle branch that only submitted answered
+      // the frame although the prompt had not entered the session. Driven live (INFRA-1026,
+      // k7's second clause: Claude Code SIGSTOPped, an Envoy message sent to it from another
+      // session, then SIGKILL and `claude --resume <id>`), the resumed conversation held that
+      // message once while this branch awaited the append and zero times once it did not: the
+      // channel server had answered the frame `done`, so the listener never sent the message
+      // again, while the prompt itself never entered the stopped process. The append rejects
+      // where the session cannot take the message, which is what leaves the frame unanswered
+      // and brings the message back - one time, through a restart.
+      const uuid = message.unread.kind === "card" ? await append(message.content) : undefined
+      // The turn this starts runs for as long as the model works, so the submit is not awaited
+      // and the frame is answered now; a submit that fails is a line through `warn`, with a
+      // card's row already in the conversation for the next turn to read.
       void submit(message.prompt.text, message.prompt.asUser, message.failed)
-      return undefined
+      return uuid
     }
     const uuid = await append(message.content)
     // The turn may have ended while the row was being stored: then no request will read it, and
