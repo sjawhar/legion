@@ -334,6 +334,30 @@ func TestLoadReadsTrustedProxyHeaderOptionally(t *testing.T) {
 	}
 }
 
+// TestLoadReadsTheAirlockRulesFileOptionally pins that BROKER_AIRLOCK_RULES_FILE is optional —
+// unset is "", a deployment with no airlock — and that a path given is read as written. Load
+// opens nothing: the broker reads the file itself at start, where a file it cannot read refuses
+// the boot.
+func TestLoadReadsTheAirlockRulesFileOptionally(t *testing.T) {
+	cfg, err := Load(env(validEnv()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AirlockRulesFile != "" {
+		t.Fatalf("AirlockRulesFile = %q, want empty when BROKER_AIRLOCK_RULES_FILE is unset", cfg.AirlockRulesFile)
+	}
+
+	e := validEnv()
+	e["BROKER_AIRLOCK_RULES_FILE"] = "/etc/broker/airlock.json"
+	cfg, err = Load(env(e))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AirlockRulesFile != "/etc/broker/airlock.json" {
+		t.Fatalf("AirlockRulesFile = %q, want /etc/broker/airlock.json", cfg.AirlockRulesFile)
+	}
+}
+
 // TestLoadReadsTheRegisteredServices pins BROKER_SERVICES: whitespace-separated
 // name=<service-account subject> entries keyed by subject, none when unset. A name is one a
 // machine login's service can take ([a-z0-9-]{1,64}) and not the owner tag's own "shared"; a
@@ -946,7 +970,9 @@ func TestLoadReadsTheServiceLogins(t *testing.T) {
 }
 
 // TestLoadRefusesTheRulesFileVariables pins that a deployment still configured for the rules file
-// refuses to start naming the variable, rather than running with its rules silently ignored.
+// refuses to start naming the variable, rather than running with its rules silently ignored. The
+// reason names both halves of what replaced it: the tags each secret's owner and tier come from,
+// and BROKER_AIRLOCK_RULES_FILE, the file the broker does read, for the other question.
 func TestLoadRefusesTheRulesFileVariables(t *testing.T) {
 	for name, value := range map[string]string{
 		"BROKER_RULES_FILE":           "/r.yaml",
@@ -956,8 +982,8 @@ func TestLoadRefusesTheRulesFileVariables(t *testing.T) {
 		e := validEnv()
 		e[name] = value
 		_, err := Load(env(e))
-		if err == nil || !strings.HasPrefix(err.Error(), name+" is removed; ") || !strings.Contains(err.Error(), "tags") {
-			t.Fatalf("Load(%s set) = %v, want a refusal naming it and the tags that replace it", name, err)
+		if err == nil || !strings.HasPrefix(err.Error(), name+" is removed; ") || !strings.Contains(err.Error(), "tags") || !strings.Contains(err.Error(), "BROKER_AIRLOCK_RULES_FILE") {
+			t.Fatalf("Load(%s set) = %v, want a refusal naming it, the tags that replace it and BROKER_AIRLOCK_RULES_FILE", name, err)
 		}
 	}
 }

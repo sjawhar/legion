@@ -167,6 +167,14 @@ type Config struct {
 	// with automatic replication takes a global key). A secret under the prefix encrypted with any
 	// other key, the provider's default one included, is refused.
 	SecretsKMSKey string
+	// BROKER_AIRLOCK_RULES_FILE: the path of the airlock's rules file, airlock.json, which says
+	// for each secret which hosts its value may reach and in which headers. The broker reads it
+	// once at start, so a change to it rolls the pods; it refuses to start on a file it cannot
+	// read, cannot parse, or whose entries it refuses, naming the file and the entry. A secret
+	// the file names is never released as a value: a session is given a placeholder, and the
+	// broker swaps the real value into the headers the entry allows. Empty (the default) is a
+	// deployment with no airlock, where every granted secret is released as its value.
+	AirlockRulesFile string
 	// BROKER_AZURE_TOKEN_FILE: the path of the broker pod's projected ServiceAccount token for
 	// azure-login releases, default /var/run/secrets/azure/tokens/azure-identity-token. Read only
 	// on release, not at boot, and read anew each time so the rotated token is used. The token's
@@ -385,9 +393,12 @@ const noDispatchCredential = "the broker holds no Dispatch credential"
 // alone says how the broker signs in.
 const noDatabasePassword = "the broker substitutes no password into BROKER_DATABASE_URL: on Amazon RDS it signs in by IAM token (https://cybermonklabs.github.io/legion/broker/operate/#signing-in-to-rds-by-iam-token), and any other database's password goes in the URL itself"
 
-// noRulesFile is why the rules file's variables are gone: each secret's own tags say who owns it
-// and its tier.
-const noRulesFile = "the broker reads each secret's owner and tier from the secret's own tags under BROKER_SECRETS_PREFIX, so there is no rules file"
+// noRulesFile is why these three variables are gone. They named a file that said who owned each
+// secret and at what tier, which the secret's own tags say now. The broker does read a rules
+// file again, BROKER_AIRLOCK_RULES_FILE, but it answers another question — where a secret's
+// value may go — so the reason names it rather than letting a deployment point the old variables
+// at it.
+const noRulesFile = "the broker reads each secret's owner and tier from the secret's own tags under BROKER_SECRETS_PREFIX; where a secret's value may go is BROKER_AIRLOCK_RULES_FILE, the airlock's rules file, and no variable names any other rules file"
 
 // noGrantCap is why BROKER_MAX_GRANT_SECONDS is gone: a request chooses its lifetime with --ttl;
 // with none its grant lasts 12 hours, or until the requesting session ends when every requested
@@ -883,6 +894,7 @@ func Load(getenv func(string) string) (Config, error) {
 		MachineLoginURL:    strings.TrimSpace(getenv("BROKER_MACHINE_LOGIN_URL")),
 		SecretsStore:       orDefault(getenv("BROKER_SECRETS_STORE"), secrets.StoreAWS),
 		SecretsPrefix:      getenv("BROKER_SECRETS_PREFIX"),
+		AirlockRulesFile:   orDefault(getenv("BROKER_AIRLOCK_RULES_FILE"), ""),
 		AzureTokenFile:     orDefault(getenv("BROKER_AZURE_TOKEN_FILE"), secrets.DefaultAzureTokenFile),
 		AzureLoginSecret:   getenv("BROKER_AZURE_LOGIN_SECRET"),
 		K8sOIDCIssuer:      getenv("BROKER_K8S_OIDC_ISSUER"),

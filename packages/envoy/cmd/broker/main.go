@@ -32,6 +32,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/google/uuid"
 
+	"github.com/sjawhar/envoy/internal/broker/airlock"
 	"github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/broker/approval"
 	"github.com/sjawhar/envoy/internal/broker/config"
@@ -197,6 +198,12 @@ func main() {
 	// BROKER_SECRETS_KMS_KEY_ARN, or BROKER_SECRETS_KMS_KEY_NAME under gcp-secret-manager.
 	fakeSecrets := os.Getenv("BROKER_FAKE_SECRETS_FILE")
 	fatal(refusePortZeroPublicURLInProduction(cfg.PublicURL, fakeSecrets))
+	// The airlock's rules, read here beside the port-0 refusal: before the database is migrated,
+	// before the socket is bound and before anything reaches for AWS, so a pod given a file it
+	// cannot read or cannot serve refuses to start instead of running without the rules its
+	// operator believes are in force. The file is read once; a change to it rolls the pods.
+	rules, err := readAirlockRules(cfg.AirlockRulesFile)
+	fatal(err)
 	// The whole stop budget, logged as soon as the configuration naming its first half is loaded,
 	// because a deployment's terminationGracePeriodSeconds has to cover it and nothing in this
 	// repository can check that it does: the guard this repository would otherwise write — a test
@@ -253,7 +260,9 @@ func main() {
 		secretStore, credentials = secrets.AWS{Client: sm, KMS: kms.NewFromConfig(awsCfg), KeyARN: cfg.SecretsKMSKey}, "aws-sdk"
 	}
 	slog.Info("secret store", "store", cfg.SecretsStore, "credentials", credentials)
-	loader := policy.Loader{Store: secretStore, Prefix: cfg.SecretsPrefix, Services: serviceNames(cfg)}
+	// rules.Digest is "" for every secret when no rules file was named, so such a deployment's
+	// policy version is the one it has today.
+	loader := policy.Loader{Store: secretStore, Prefix: cfg.SecretsPrefix, Services: serviceNames(cfg), AirlockDigest: rules.Digest}
 	// One key source per issuer, read by everything that needs that issuer's keys: the verifiers
 	// discoverVerifiers builds and, for the cluster's issuer and Google's, the RFC 8693 exchange
 	// below, which resolves a subject token's own key through the same *oidc.Keys. So the boot
@@ -678,6 +687,32 @@ func refusePortZeroPublicURLInProduction(publicURL, fakeSecretsFile string) erro
 		return nil
 	}
 	return fmt.Errorf("BROKER_PUBLIC_URL %q: port 0 is never dialable in production (BROKER_FAKE_SECRETS_FILE is unset); only a local run may use it as dev-broker.sh's derive-from-bind convention", redact.URL(publicURL))
+}
+
+// readAirlockRules reads the airlock's rules file, the path BROKER_AIRLOCK_RULES_FILE names. An
+// empty path is a deployment with no airlock, and answers empty rules, whose Digest is "" for
+// every secret. Anything else refuses the boot: a path that cannot be read, a file airlock.Parse
+// will not read as JSON (whose refusal names the parse position), and a file airlock.Validate
+// refuses (whose refusal names the entry). Each refusal names the file beside what the airlock
+// package said about it, since that package names a rules file no way but by its contents.
+// Extracted from main so a test can drive it without exiting the test process.
+func readAirlockRules(path string) (airlock.Rules, error) {
+	if path == "" {
+		return airlock.Rules{}, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		// os.ReadFile's own error names the path, so this adds the variable alone.
+		return airlock.Rules{}, fmt.Errorf("BROKER_AIRLOCK_RULES_FILE: %w", err)
+	}
+	rules, err := airlock.Parse(data)
+	if err != nil {
+		return airlock.Rules{}, fmt.Errorf("BROKER_AIRLOCK_RULES_FILE %s: %w", path, err)
+	}
+	if err := airlock.Validate(rules); err != nil {
+		return airlock.Rules{}, fmt.Errorf("BROKER_AIRLOCK_RULES_FILE %s: %w", path, err)
+	}
+	return rules, nil
 }
 
 // newRequestMachine builds the requests.Machine the broker decides every secret request with, from

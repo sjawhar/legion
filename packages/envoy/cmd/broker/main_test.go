@@ -650,3 +650,78 @@ func TestFakeSecretsFileServesUnderTheGCPStore(t *testing.T) {
 		t.Fatalf("reread DEMO_KEY = status %d, %+v, %v; want served under the GCP store's key", reread.StatusCode, answer, err)
 	}
 }
+
+// airlockRulesFile writes rules into a file of t's own and answers its path, the file
+// BROKER_AIRLOCK_RULES_FILE names.
+func airlockRulesFile(t *testing.T, rules string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "airlock.json")
+	if err := os.WriteFile(path, []byte(rules), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestMainRefusesAnAirlockRulesFileItCannotServe drives the real binary with each kind of rules
+// file it must refuse — one whose entry the airlock will not validate, one that is not JSON, and
+// a path that is not there — and asserts it exits non-zero naming the file and what is wrong
+// with it, without ever binding. The database it is given is unreachable, so a broker that read
+// the file after opening the store would fail on the host instead of on the file.
+func TestMainRefusesAnAirlockRulesFileItCannotServe(t *testing.T) {
+	binary := buildBroker(t)
+	missing := filepath.Join(t.TempDir(), "absent.json")
+	for name, c := range map[string]struct {
+		path string
+		want []string
+	}{
+		// The broker logs a refusal as slog's quoted error=…, so a quotation mark inside it
+		// comes out escaped; these rows look for the parts around it.
+		"an entry the airlock refuses": {
+			path: airlockRulesFile(t, `{"secrets": [{"name": "DEEL_API_KEY", "hosts": []}]}`),
+			want: []string{"secrets[0]", "DEEL_API_KEY", "no host"},
+		},
+		"a file that is not JSON": {
+			path: airlockRulesFile(t, "these are not the rules you are looking for\n"),
+			want: []string{"not JSON", "byte offset 2, line 1, column 2"},
+		},
+		"a path that cannot be read": {
+			path: missing,
+			want: []string{missing, "no such file"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			out := runRefusedBroker(t, binary,
+				"BROKER_DATABASE_URL=postgres://nonexistent-host-this-test-must-never-reach/db",
+				"BROKER_PUBLIC_URL=https://secrets.internal.example",
+				"BROKER_AIRLOCK_RULES_FILE="+c.path,
+			)
+			if !strings.Contains(out, "BROKER_AIRLOCK_RULES_FILE") {
+				t.Fatalf("broker refused, but its output does not name BROKER_AIRLOCK_RULES_FILE: %s", out)
+			}
+			for _, want := range c.want {
+				if !strings.Contains(out, want) {
+					t.Fatalf("broker refused, but its output does not say %q: %s", want, out)
+				}
+			}
+		})
+	}
+}
+
+// TestMainStartsWithAnAirlockRulesFile: a file the airlock parses and validates is no obstacle to
+// the boot, and the broker goes on to serve.
+func TestMainStartsWithAnAirlockRulesFile(t *testing.T) {
+	fakeSecretsFile := filepath.Join(t.TempDir(), "fake-secrets.json")
+	if err := os.WriteFile(fakeSecretsFile, []byte(`{"secrets": []}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	broker := startBroker(t, brokerOptions{Env: []string{
+		"BROKER_DATABASE_URL=" + storetest.URL(t),
+		"BROKER_LISTEN_ADDR=127.0.0.1:0",
+		"BROKER_PUBLIC_URL=http://127.0.0.1:0",
+		"BROKER_FAKE_SECRETS_FILE=" + fakeSecretsFile,
+		"BROKER_AIRLOCK_RULES_FILE=" + airlockRulesFile(t, `{"secrets": [
+			{"name": "DEEL_API_KEY", "hosts": ["api.deel.com"], "allow": [{"method": "GET", "pathPrefix": "/rest/"}]}
+		]}`),
+	}})
+	requireHealthy(t, broker.Addr)
+}

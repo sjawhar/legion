@@ -539,3 +539,44 @@ func TestRewrite(t *testing.T) {
 		}
 	})
 }
+
+// TestDigest pins what one entry's fingerprint covers: every field of it, so a change to any one
+// of them moves the digest and ends the grants that entry affects, and nothing else, so two reads
+// of an unchanged file answer the same thing.
+func TestDigest(t *testing.T) {
+	judge := uint32(60)
+	base := SecretRule{
+		Name:    "github",
+		Hosts:   []string{"api.github.com"},
+		Headers: []string{"authorization"},
+		Allow:   []Allow{{Method: "GET", PathPrefix: "/repos/"}},
+		Kind:    "aws",
+		Judge:   &judge,
+	}
+	rules := Rules{Secrets: []SecretRule{base}}
+	want := rules.Digest("github")
+	if want == "" {
+		t.Fatal(`Digest("github") = "", want the entry's fingerprint`)
+	}
+	if again := rules.Digest("github"); again != want {
+		t.Errorf("Digest twice = %s then %s, want one answer", want, again)
+	}
+	if absent := rules.Digest("absent"); absent != "" {
+		t.Errorf("Digest of a name the file does not name = %q, want the empty string", absent)
+	}
+	later := uint32(61)
+	for field, change := range map[string]func(*SecretRule){
+		"name":    func(s *SecretRule) { s.Name = "github-two" },
+		"hosts":   func(s *SecretRule) { s.Hosts = []string{"api.github.com", "codeload.github.com"} },
+		"headers": func(s *SecretRule) { s.Headers = nil },
+		"allow":   func(s *SecretRule) { s.Allow = []Allow{{Method: "POST", PathPrefix: "/repos/"}} },
+		"kind":    func(s *SecretRule) { s.Kind = "" },
+		"judge":   func(s *SecretRule) { s.Judge = &later },
+	} {
+		entry := base
+		change(&entry)
+		if got := (Rules{Secrets: []SecretRule{entry}}).Digest(entry.Name); got == want {
+			t.Errorf("a changed %s left the digest at %s", field, got)
+		}
+	}
+}

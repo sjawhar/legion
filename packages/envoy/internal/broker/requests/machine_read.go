@@ -41,19 +41,20 @@ const NarrowingRefusedMessage = "broker: narrowing refused"
 // the policy has changed since the grant's request was decided, or any granted name is a service's
 // (anyServiceOwned: the policy's version does not cover which service BROKER_SERVICES' accounts
 // prove) — that the current policy still allows the session, with the names its operator withheld
-// from it, every granted name under the login that decided it (stillAllowed), and that no granted
-// name's max-grant is now shorter than the lifetime the grant's request signed (overMaxGrant). A
-// stored secret releases its frozen source. A kind secret reads that same stored source and
-// passes its value to the kind's minter. Once every value is read, each stored one is checked
-// against the policy as it stands then (recheckStoredSources), so a retag that lands during the
-// reads never releases what the secret stores once it is a kind. It holds no pooled connection
-// across a Secrets Manager read: the grant's names are read into memory before the first value is
-// fetched. A non-nil narrowing is this release's alone: it reaches the github-app minter of every
-// github-app name the grant holds, and the grant records nothing of it, so its next release
-// without one is owner-wide again. A grant that holds no github-app name refuses a narrowing
-// (ErrNarrowingNotApplicable), and so does one whose github-app name does not list the
-// narrowing's owner in the snapshot the release mints from (ErrNarrowingOwnerNotListed); each
-// releases nothing and runs no minter.
+// from it, every granted name under the login that decided it (stillAllowed), that no granted
+// name's max-grant is now shorter than the lifetime the grant's request signed (overMaxGrant),
+// and that no granted name's airlock entry has changed since the request recorded its
+// fingerprint, which ends the grant for good. A stored secret releases its frozen source. A kind
+// secret reads that same stored source and passes its value to the kind's minter. Once every
+// value is read, each stored one is checked against the policy as it stands then
+// (recheckStoredSources), so a retag that lands during the reads never releases what the secret
+// stores once it is a kind. It holds no pooled connection across a Secrets Manager read: the
+// grant's names are read into memory before the first value is fetched. A non-nil narrowing is
+// this release's alone: it reaches the github-app minter of every github-app name the grant
+// holds, and the grant records nothing of it, so its next release without one is owner-wide
+// again. A grant that holds no github-app name refuses a narrowing (ErrNarrowingNotApplicable),
+// and so does one whose github-app name does not list the narrowing's owner in the snapshot the
+// release mints from (ErrNarrowingOwnerNotListed); each releases nothing and runs no minter.
 func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narrowing *secrets.GitHubNarrowing) (map[string]string, *time.Time, error) {
 	var owner, requestID, policyVersion, decidedBy string
 	var expires *time.Time
@@ -106,6 +107,17 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narr
 			// runs whenever it moved.
 			if limit, over := overMaxGrant(set, g.name, lifetime); over {
 				return nil, nil, m.endGrant(ctx, grantID, fmt.Errorf("%w: %w: %s now allows grants of at most %s", ErrGrantNotLive, ErrGrantRequiresLifetime, g.name, limit))
+			}
+			// A name whose airlock entry is not the one its request recorded ends this grant
+			// for good: what was granted was decided under the old entry, so putting the entry
+			// back does not bring the grant back. The comparison is per name, so only the
+			// grants an entry's change affects end. It sits inside this block because an
+			// entry's change moves the policy version (policy.NewSet folds the fingerprint
+			// in), so the block runs whenever any entry changed and the common path pays
+			// nothing for this. During a roll the two pods may read different files for a
+			// moment; a grant the one with the newer file ends is simply asked for again.
+			if held := set.Secrets[g.name].AirlockDigest; held != g.airlockDigest {
+				return nil, nil, m.endGrant(ctx, grantID, fmt.Errorf("%w: %s's airlock entry changed since this grant was decided", ErrGrantNotLive, g.name))
 			}
 		}
 	}
@@ -212,10 +224,11 @@ const GrantEndedActor = "broker:release-recheck"
 // endGrant ends grantID for good in one transaction, revoking it and writing a grant.revoked audit
 // row naming GrantEndedActor and why (reason's text), then answers reason, an ErrGrantNotLive. A
 // release ends a grant this way when what it was granted cannot come back: its frozen source is
-// not the one served now (a kind change), or its lifetime is longer than the secret's max-grant
-// now. A secret the policy merely stops serving (no value, a malformed tag) pauses its grants
-// instead, which release again once it is served. A grant another writer revoked first is left as
-// it is, with no second audit row.
+// not the one served now (a kind change), its lifetime is longer than the secret's max-grant
+// now, or the name's airlock entry is not the one the request recorded. A secret the policy
+// merely stops serving (no value, a malformed tag) pauses its grants instead, which release
+// again once it is served. A grant another writer revoked first is left as it is, with no second
+// audit row.
 func (m *Machine) endGrant(ctx context.Context, grantID string, reason error) error {
 	tx, err := m.Store.Pool.Begin(ctx)
 	if err != nil {
@@ -285,14 +298,15 @@ func (m *Machine) release(ctx context.Context, g requestedSecret, served policy.
 }
 
 // requestedSecret is one name a request asked for that the policy did not deny when the request
-// was made: the secret it froze (source) and the decision the policy gave it then.
-type requestedSecret struct{ name, source, decision string }
+// was made: the secret it froze (source), the decision the policy gave it then, and the
+// fingerprint of its airlock entry then (airlockDigest, "" for a name the rules do not name).
+type requestedSecret struct{ name, source, decision, airlockDigest string }
 
 // requestedSecrets reads request requestID's names that the policy did not deny, in name order:
 // what a granted request's grant releases (Values, reuseLiveGrant), and what a pending request
 // waits to have approved (currentPolicyAdmits), since one denied name denies the whole request.
 func requestedSecrets(ctx context.Context, q querier, requestID string) ([]requestedSecret, error) {
-	rows, err := q.Query(ctx, `select name, source, decision from request_secrets where request_id=$1 and decision <> 'deny' order by name`, requestID)
+	rows, err := q.Query(ctx, `select name, source, decision, airlock_digest from request_secrets where request_id=$1 and decision <> 'deny' order by name`, requestID)
 	if err != nil {
 		return nil, err
 	}
@@ -300,7 +314,7 @@ func requestedSecrets(ctx context.Context, q querier, requestID string) ([]reque
 	var requested []requestedSecret
 	for rows.Next() {
 		var g requestedSecret
-		if err := rows.Scan(&g.name, &g.source, &g.decision); err != nil {
+		if err := rows.Scan(&g.name, &g.source, &g.decision, &g.airlockDigest); err != nil {
 			return nil, err
 		}
 		requested = append(requested, g)

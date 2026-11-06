@@ -304,6 +304,11 @@ type Secret struct {
 	// GitHubOwners is a github-app secret's github-owners tag as ParseGitHubOwners answers it, and
 	// "" for every other secret. A string, not a slice, for the same reason as MaxGrant.
 	GitHubOwners string
+	// AirlockDigest is the fingerprint of this secret's entry in the airlock's rules file
+	// (airlock.Rules.Digest), and "" for a secret the rules do not name or a deployment with no
+	// rules file. A string, not a pointer, for the same reason as MaxGrant. It is in Version, so
+	// a change to one secret's entry moves the policy version and ends the grants of that name.
+	AirlockDigest string
 	// SessionDefault is true when the secret's default-grant tag is "session": a request naming
 	// no lifetime gets a grant that lasts until its session ends instead of DefaultGrantLifetime.
 	SessionDefault bool
@@ -340,8 +345,9 @@ func (secret Secret) approver() string {
 // Set is the policy as one load read it, or as a single name's reread left it (NewSet builds both).
 type Set struct {
 	// Version is the SHA-256 of every served secret's name, owner, tier, source, max-grant and
-	// github-owners: equal versions are equal policies. A request records the version it was decided
-	// under, so a live grant is re-evaluated only once the policy changed.
+	// github-owners, and of the fingerprint of each one's airlock entry: equal versions are equal
+	// policies. A request records the version it was decided under, so a live grant is
+	// re-evaluated only once the policy changed.
 	Version string
 	Secrets map[string]Secret
 }
@@ -350,7 +356,10 @@ type Set struct {
 // (keyed by Name) as its Secrets. A secret with no max-grant and no github-owners writes the
 // pre-kind digest bytes, "<Name>\t<Owner>\t<Tier>\t<Source>\n" (a kind secret's kind is in its
 // Source); one with either adds both, as a fifth field (time.Duration's form, 0s for none) and a
-// sixth (empty for none). Entries are ascending by the secret's name in the store (the slug) —
+// sixth (empty for none). A secret the airlock's rules name adds one line more,
+// "<Name>\tairlock=<digest>\n", rather than a field of the line above it, so every line a
+// deployment with no rules file writes is byte-identical to the one it writes today and its
+// Version does not shift. Entries are ascending by the secret's name in the store (the slug) —
 // the exact order Load wrote before NewSet existed, so deployed plain-secret digests do not shift.
 // (Sorting by the uppercased Name would NOT be equivalent: '-' is 0x2D, '_' is 0x5F, so "a-b" <
 // "a0" as slugs but "A0" < "A_B" as Names.)
@@ -366,15 +375,17 @@ func NewSet(secrets map[string]Secret) *Set {
 	slices.SortFunc(served, func(a, b bySlug) int { return strings.Compare(a.slug, b.slug) })
 	digest := sha256.New()
 	for _, s := range served {
-		if s.secret.MaxGrant == 0 && s.secret.GitHubOwners == "" && !s.secret.SessionDefault {
+		switch {
+		case s.secret.MaxGrant == 0 && s.secret.GitHubOwners == "" && !s.secret.SessionDefault:
 			fmt.Fprintf(digest, "%s\t%s\t%s\t%s\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.Source)
-			continue
-		}
-		if s.secret.SessionDefault {
+		case s.secret.SessionDefault:
 			fmt.Fprintf(digest, "%s\t%s\t%s\t%s\t%s\t%s\tdefault-grant=session\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.Source, s.secret.MaxGrant, s.secret.GitHubOwners)
-			continue
+		default:
+			fmt.Fprintf(digest, "%s\t%s\t%s\t%s\t%s\t%s\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.Source, s.secret.MaxGrant, s.secret.GitHubOwners)
 		}
-		fmt.Fprintf(digest, "%s\t%s\t%s\t%s\t%s\t%s\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.Source, s.secret.MaxGrant, s.secret.GitHubOwners)
+		if s.secret.AirlockDigest != "" {
+			fmt.Fprintf(digest, "%s\tairlock=%s\n", s.secret.Name, s.secret.AirlockDigest)
+		}
 	}
 	return &Set{Version: hex.EncodeToString(digest.Sum(nil)), Secrets: secrets}
 }
