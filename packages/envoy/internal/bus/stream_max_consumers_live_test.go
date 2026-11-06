@@ -75,10 +75,11 @@ func liveServerEnvironment(key string) (string, bool) {
 // compiles (StreamMaxConsumers), and the keeper of the client it returns puts that cap back after
 // an operator lowers it - on the image the hub runs, which takes an update that changes
 // MaxConsumers. On the copy of nats:2.10, which refuses such an update whatever it carries, the
-// same start fails, and its refusal names the field, the cap it asked for and the first
-// nats-server that can take the change (refusedSettings), so an operator reading it knows both
-// what was refused and what takes it. Neither half can be shown in this process: the module links
-// nats-server v2.10.29.
+// same start fails, its refusal is the server's own refusal of the change (maxConsumersRefused)
+// and not some other answer that server happened to give, and it names the field, the cap it
+// asked for and the first nats-server that can take the change (refusedSettings), so an operator
+// reading it knows both what was refused and what takes it. Neither half can be shown in this
+// process: the module links nats-server v2.10.29.
 func TestAStartCapsAnUncappedStreamOnTheHubsServerAndIsRefusedOnTheOlderOne(t *testing.T) {
 	for _, image := range testnats.Images {
 		t.Run(image.Name, func(t *testing.T) {
@@ -101,10 +102,19 @@ func TestAStartCapsAnUncappedStreamOnTheHubsServerAndIsRefusedOnTheOlderOne(t *t
 					client.Close()
 					t.Fatal("the start raised the cap on a server that cannot take the change, want a refusal")
 				}
-				for _, want := range []string{"max_consumers", strconv.Itoa(StreamMaxConsumers), streamMaxConsumersFloor} {
+				// The first three names below are the bus's own (refusedSettings), so a subtest
+				// that asserted only them would pass for a refusal with another cause reaching
+				// the same lines of this file. The fourth is the server's own words, which the
+				// bus writes nowhere itself, and maxConsumersRefused, what the production path
+				// reads to add the floor at all, is asserted after them, so this test and that
+				// path agree on what the refusal is.
+				for _, want := range []string{"max_consumers", strconv.Itoa(StreamMaxConsumers), streamMaxConsumersFloor, maxConsumersRefusal} {
 					if !strings.Contains(err.Error(), want) {
 						t.Errorf("the start's refusal %q does not name %q", err, want)
 					}
+				}
+				if !maxConsumersRefused(err) {
+					t.Errorf("the start's refusal %q is not the server's refusal of a change of MaxConsumers, so the subtest proves nothing about the cap", err)
 				}
 				return
 			}

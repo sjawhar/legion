@@ -722,6 +722,24 @@ func overlapRefused(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.ErrorCode == jsStreamSubjectOverlap
 }
 
+// maxConsumersRefusal is what nats-server answers an update that changes a stream's MaxConsumers
+// with, word for word, on every server before streamMaxConsumersFloor: the text it hands
+// NewJSStreamInvalidConfigError (server/stream.go), measured on v2.10.29, v2.11.0 and v2.12.0,
+// which nats.go gives the caller as the whole description of an *nats.APIError, under its own
+// `nats: ` prefix.
+const maxConsumersRefusal = "stream configuration update can not change MaxConsumers"
+
+// maxConsumersRefused reports whether err is that refusal, read by the server's own words and not
+// by its code: the code is JSStreamInvalidConfigF, which nats.go names nats.JSStreamInvalidConfig
+// (10052) and which carries whatever the server has to say about a stream's configuration, the
+// storage type and the retention policy an update may not change among them, so a code test would
+// take any of those for this one. The words are read off the error's own string, so a refusal
+// still counts when something has wrapped it on its way here, and when it reaches the bus as
+// anything other than an *nats.APIError.
+func maxConsumersRefused(err error) bool {
+	return err != nil && strings.Contains(err.Error(), maxConsumersRefusal)
+}
+
 // unanswered reports whether err is a JetStream request's wait running out with no answer, rather
 // than the server's refusal.
 func unanswered(err error) bool {
@@ -738,12 +756,16 @@ func unanswered(err error) bool {
 // returned as they are.
 //
 // An update that changes the deployed stream's consumer cap names the cap too, under the name
-// nats-server spells it (max_consumers), with the value this binary asks for and the first server
-// that can take the change (streamMaxConsumersFloor): every server before it refuses such an
-// update with a bare `stream configuration update can not change MaxConsumers`, which says neither
-// which field nor which server takes it. The cap is compiled in rather than read from a variable
-// (StreamMaxConsumers), so it is named as the field and not as a setting an operator can change. A
-// create is never named: a create carries the cap on every nats-server.
+// nats-server spells it (max_consumers), with the value this binary asks for; the cap is compiled
+// in rather than read from a variable (StreamMaxConsumers), so it is named as the field and not
+// as a setting an operator can change. That name carries the first server which can take the
+// change (streamMaxConsumersFloor) only when the server's answer is its own refusal of the change
+// (maxConsumersRefused), a bare `stream configuration update can not change MaxConsumers` that
+// says neither which field nor which server takes it. Every other refusal of such an update - a
+// raise of the copies the cluster has no room for on a server that would have taken the cap, an
+// overlap still refused after its sends - names the cap alone, as the copies and the byte limit
+// are named, since the server the cap needs is nothing to an operator whose update was refused
+// for another reason. A create is never named: a create carries the cap on every nats-server.
 func refusedSettings(err error, deployed, request *nats.StreamConfig) error {
 	if err == nil {
 		return nil
@@ -756,7 +778,11 @@ func refusedSettings(err error, deployed, request *nats.StreamConfig) error {
 		settings = append(settings, fmt.Sprintf("%s=%d", StreamMaxBytesEnvVar, request.MaxBytes))
 	}
 	if deployed != nil && request.MaxConsumers != deployed.MaxConsumers {
-		settings = append(settings, fmt.Sprintf("max_consumers %d (only nats-server %s and later can change it on an existing stream)", request.MaxConsumers, streamMaxConsumersFloor))
+		named := fmt.Sprintf("max_consumers %d", request.MaxConsumers)
+		if maxConsumersRefused(err) {
+			named += fmt.Sprintf(" (only nats-server %s and later can change it on an existing stream)", streamMaxConsumersFloor)
+		}
+		settings = append(settings, named)
 	}
 	if len(settings) == 0 {
 		return err

@@ -661,23 +661,100 @@ func TestOwnedStreamRaisesTheConsumerCapAndKeepsAHigherDeployedOne(t *testing.T)
 // A server below the floor refuses the update that carries the cap with a bare `can not change
 // MaxConsumers`, which names neither the value asked for nor a server that would take it, so the
 // bus names the field as nats-server spells it, the cap this binary asks for and the first server
-// that takes the change. A refusal of an update whose cap is the deployed stream's own is returned
-// as it is: that refusal is not the cap's.
-func TestARefusedUpdateNamesTheConsumerCapAndTheServerThatTakesIt(t *testing.T) {
-	refusal := errors.New("nats: stream configuration update can not change MaxConsumers")
-	deployed := &nats.StreamConfig{Name: Stream, MaxConsumers: -1}
-	request := &nats.StreamConfig{Name: Stream, MaxConsumers: StreamMaxConsumers}
-	named := refusedSettings(refusal, deployed, request)
-	for _, want := range []string{fmt.Sprintf("max_consumers %d", StreamMaxConsumers), streamMaxConsumersFloor, refusal.Error()} {
-		if !strings.Contains(named.Error(), want) {
-			t.Fatalf("the refused update reads %q, want it to name %q", named, want)
-		}
+// that takes the change. Any other refusal of an update that changes the cap names the field and
+// the cap alone, the refusal the server sends under the same invalid-configuration code for
+// another field included: a server that would have taken the cap is nothing to the operator whose
+// update it refused for another reason. A refusal of an update whose cap is the deployed stream's
+// own is returned as it is: that refusal is not the cap's.
+func TestARefusedUpdateNamesTheConsumerCapAndTheServerThatTakesItOnlyForTheServersOwnRefusal(t *testing.T) {
+	serversRefusal := &nats.APIError{Code: 500, ErrorCode: nats.JSStreamInvalidConfig, Description: maxConsumersRefusal}
+	uncapped := &nats.StreamConfig{Name: Stream, MaxConsumers: -1}
+	capped := &nats.StreamConfig{Name: Stream, MaxConsumers: StreamMaxConsumers}
+	namedCap := fmt.Sprintf("max_consumers %d", StreamMaxConsumers)
+	for _, row := range []struct {
+		name     string
+		refusal  error
+		deployed *nats.StreamConfig
+		request  *nats.StreamConfig
+		names    []string
+		unnamed  []string
+	}{
+		{
+			name:     "the server's own refusal of the change names the cap and the server that takes it",
+			refusal:  serversRefusal,
+			deployed: uncapped,
+			request:  capped,
+			names:    []string{namedCap, streamMaxConsumersFloor, serversRefusal.Error()},
+		},
+		{
+			name:     "a refusal that is no API error at all names the cap alone",
+			refusal:  errors.New("nats: insufficient resources"),
+			deployed: uncapped,
+			request:  capped,
+			names:    []string{namedCap},
+			unnamed:  []string{streamMaxConsumersFloor},
+		},
+		{
+			name:     "a refusal of another field under the same invalid-configuration code names the cap alone",
+			refusal:  &nats.APIError{Code: 500, ErrorCode: nats.JSStreamInvalidConfig, Description: "stream configuration update can not change storage type"},
+			deployed: uncapped,
+			request:  capped,
+			names:    []string{namedCap},
+			unnamed:  []string{streamMaxConsumersFloor},
+		},
+		{
+			name:     "a refusal of an update that changes no cap is returned as it is",
+			refusal:  serversRefusal,
+			deployed: capped,
+			request:  capped,
+			unnamed:  []string{"max_consumers", streamMaxConsumersFloor},
+		},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			named := refusedSettings(row.refusal, row.deployed, row.request)
+			if !errors.Is(named, row.refusal) {
+				t.Fatalf("the refused update reads %q, want the server's error wrapped in it", named)
+			}
+			for _, want := range row.names {
+				if !strings.Contains(named.Error(), want) {
+					t.Errorf("the refused update reads %q, want it to name %q", named, want)
+				}
+			}
+			for _, unwanted := range row.unnamed {
+				if strings.Contains(named.Error(), unwanted) {
+					t.Errorf("the refused update reads %q, want it not to name %q", named, unwanted)
+				}
+			}
+			if len(row.names) == 0 && named != row.refusal {
+				t.Errorf("the refused update reads %q, want the server's error itself", named)
+			}
+		})
 	}
-	if !errors.Is(named, refusal) {
-		t.Fatalf("the refused update reads %q, want the server's error wrapped in it", named)
-	}
-	unchanged := &nats.StreamConfig{Name: Stream, MaxConsumers: StreamMaxConsumers}
-	if named := refusedSettings(refusal, unchanged, unchanged); named.Error() != refusal.Error() {
-		t.Fatalf("the refusal of an update that changes no cap reads %q, want the server's error as it is", named)
+}
+
+// maxConsumersRefused reads the server's own words rather than the code they arrive under, so it
+// takes that refusal however it reaches the bus, as nats.go's *nats.APIError or wrapped in what a
+// start adds on the way out, and it takes no refusal the server sends under the same code for
+// another field, which is the whole reason the words and not the code are read.
+func TestTheConsumerCapRefusalIsReadByTheServersOwnWordsAndNoOthers(t *testing.T) {
+	serversRefusal := &nats.APIError{Code: 500, ErrorCode: nats.JSStreamInvalidConfig, Description: maxConsumersRefusal}
+	for _, row := range []struct {
+		name    string
+		err     error
+		refused bool
+	}{
+		{"no error at all", nil, false},
+		{"the server's refusal as nats.go hands it over", serversRefusal, true},
+		{"the same refusal wrapped on its way out", fmt.Errorf("reconcile %s: %w", Stream, serversRefusal), true},
+		{"the same words from something that is no API error", errors.New("nats: " + maxConsumersRefusal), true},
+		{"another field refused under the same invalid-configuration code", &nats.APIError{Code: 500, ErrorCode: nats.JSStreamInvalidConfig, Description: "stream configuration update can not change storage type"}, false},
+		{"a refusal that is nothing to do with the configuration", &nats.APIError{Code: 503, ErrorCode: nats.JSErrCodeInsufficientResourcesErr, Description: "insufficient resources"}, false},
+		{"a request that went unanswered", nats.ErrTimeout, false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			if refused := maxConsumersRefused(row.err); refused != row.refused {
+				t.Fatalf("maxConsumersRefused(%v) = %t, want %t", row.err, refused, row.refused)
+			}
+		})
 	}
 }
