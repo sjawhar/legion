@@ -252,14 +252,17 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 			return
 		}
 	}
-	askChanges, err := s.replaceReferences(r.Context(), tx, "ask", ask.ID, ask.Question)
+	// The question and the parts of this write through one reader: its parts hold its question,
+	// so the database answers once per kind for both.
+	reader := refs.NewReader(r.Context(), tx, "ask", ask.ID, s.deps.ServerURL)
+	askChanges, err := refs.ReplaceCounted(r.Context(), tx, reader, ask.Question)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	// The ask's parts, beside the ask's own references: the row is in, so its state row comes
 	// after it, and the event below names what both moved.
-	askChanges, err = s.indexAskParts(r.Context(), tx, ask, ask.CreatedAt, askChanges)
+	askChanges, err = refs.IndexAskPartsCounted(r.Context(), tx, reader, ask, ask.CreatedAt, askChanges)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -518,14 +521,16 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ask.EditedAt = timestampPtr(&editedAt)
-	askChanges, err := s.replaceEditedReferences(documentCtx, tx, "ask", ask.ID, previous.Question, ask.Question)
+	reader := refs.NewReader(documentCtx, tx, "ask", ask.ID, s.deps.ServerURL)
+	askChanges, err := refs.ReplaceCountedEdit(documentCtx, tx, reader, previous.Question, ask.Question)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	// The edit writes the question and the options, so it is a revision of the ask's parts:
-	// index them at the edited_at the row took, and name what they moved beside the rest.
-	askChanges, err = s.indexAskParts(documentCtx, tx, ask, editedAt, askChanges)
+	// index them, through the same reader, at the edited_at the row took, and name what they
+	// moved beside the rest.
+	askChanges, err = refs.IndexAskPartsCounted(documentCtx, tx, reader, ask, editedAt, askChanges)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

@@ -258,6 +258,14 @@ export function readyLine(issue: Tracked, example: Example): string {
   return `READY #${number} at ${example.head} (approved at ${example.head}) for ${issue.key} (${url})`;
 }
 
+/** The first line of the READY message as a reader sees it, which is not what the message holds:
+ *  the bare issue key in it links to its issue and reads as that issue's key and title, so the
+ *  words on the page carry the title the stored line does not. */
+export function readyLineRendered(issue: Tracked, example: Example): string {
+  const { number, url } = example.pullRequest;
+  return `READY #${number} at ${example.head} (approved at ${example.head}) for ${issue.key} ${example.title} (${url})`;
+}
+
 /** The daemon posts the merger's READY on the issue. */
 export async function postReady(issue: Tracked, example: Example): Promise<void> {
   const api = await dispatchApi();

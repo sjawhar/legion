@@ -1749,6 +1749,31 @@ This states every arm of both, and is the arm list a later migration re-states f
 It creates nothing and reads no stored row; it refuses and rewrites no row, and its census answers `0`.
 It takes the view `ACCESS EXCLUSIVE` for its short transaction, as the two before it do.
 
+Migration `20261103205037_refs_grammar_owed` creates `refs_grammar_owed (kind, id, enqueued_at)`, the queue of text owed an index with the whole reference grammar — the bare issue keys, the `#id`s naming a document's question blocks and the short ids a text writes — which a build that predates them indexes without.
+`kind` is `comment`, `ask`, `message`, `artifact` (a document at its latest version) or `scope`, whose id is a document whose question blocks moved and which owes a re-index of every source whose text belongs to it (`refs.ScopeSources`), and `refs_grammar_owed_enqueued` is the index the drain reads oldest first.
+It is a queue of its own rather than a row in `0121`'s `block_grammar_owed` because a server of the previous release drains that table:
+during a rolling update it would consume the rows seeded there, index that text with the grammar it knows and delete them, and this release would never re-index them.
+It also creates the three trigger functions no trigger calls until the four migrations after it (`refs_grammar_owe`, whose kind is its trigger's argument, `refs_grammar_owe_version` and `refs_grammar_owe_ask_scope`).
+It creates a table, an index and three functions and touches no row, and the release before it neither reads nor writes any of them; its census answers `0`.
+
+Migrations `20261103205038_comments_refs_grammar_trigger`, `20261103205039_asks_refs_grammar_trigger`, `20261103205040_messages_refs_grammar_trigger` and `20261103205041_artifact_versions_refs_grammar_trigger` attach those functions, each in its own migration so each transaction holds one table's `SHARE ROW EXCLUSIVE` alone (`0122`-`0125`'s precedent), so a write of that table waits behind it while a read does not.
+They enqueue whatever the text says: no cheap SQL predicate finds a bare issue key, a `#id` or a short id, where `0123`-`0125` could test `like '%#b-%'`, and `0122`'s document trigger is the precedent for a trigger that enqueues every write.
+What they test is whether the write changed what the index reads — the text, and the columns that say which document a `#id` in it resolves against (`refs.ScopeOf`) — since a write that leaves every one of them as it found it cites exactly what it cited.
+A comment is owed on insert and on an update that changes `body`, `reply_to`, `artifact_id`, `ask_id`, `issue_key` or the `artifact_id` of its `anchor`, and an ask on insert and on an update that changes `question`, `block_artifact_id`, `artifact_id`, `issue_key` or the `artifact_id` of its `anchor`; an issue message is owed on insert and on an update of `body`, and a direct message, which no mention is indexed from, is owed nothing.
+Each of the two tables carries two triggers for this, one for the insert and one for the update, because a `WHEN` clause of an insert trigger may not name `OLD`.
+The rest of an anchor is left out on purpose: a settlement rewrites `anchor.quote` and `anchor.orphaned` as a quote moves (`docs/marks.go`) and writes `anchor.block_id` (`docs/anchor_blocks.go`) without re-indexing anything, so a trigger on the whole column would leave a row owed, and the drain re-reading an unchanged text, on every settlement that moves a quote.
+An ask's `block_id` is left out for the same reason it is named by the scope triggers below: it keys the question map of the document the block is on (`refs.QuestionMap`) rather than the ask's own scope, so a change to it owes that document's whole scope, which re-indexes the ask with every other source of it.
+A markdown version owes its document and that document's scope, since the version declares the question blocks every `#id` in its scope resolves against, and an image's or file's version owes neither.
+An ask that gains or changes `block_id` or `block_artifact_id` is the settlement of a question block, so it owes that document's scope, and the document it left as well where its block moved.
+A write this release makes settles its own row in the write's transaction (`refs.replaceRefs`), so only a write of an earlier build is left owed.
+Each touches no row; each census answers `0`.
+
+Migration `20261103205042_refs_grammar_seed` owes that index to every text already stored: each comment, each ask, each issue message and each document with a markdown version, and each such document's scope.
+Those triggers are live by then, so a write that lands while it runs is owed by its trigger, and a row a trigger has already written keeps its `enqueued_at`.
+It takes `ACCESS SHARE` on `comments`, `asks`, `messages`, `artifacts` and `artifact_versions`, which no write waits behind, and writes only `refs_grammar_owed`.
+Its census answers `0`: the one table it writes is `20261103205037`'s, which holds no row at deploy, and the rows it inserts are new work owed, not a rewrite.
+The server drains them itself, a fourth batch of `docs.Service.RunBlockIndexReconciliation` (`packages/envoy/AGENTS.md`), so the links and the edges of text stored before this release appear with no edit and no command run.
+
 Migration `20261102110000_artifact_document_roles` gives `artifacts` a nullable `role`, `verification` for the document an issue holds as `verification.md` and `plan` for its `plan.md`, null for every other document.
 The upload route sets it from the slug when it creates the row and never changes it, as `is_primary` never changes, and the Verification and Plan tabs find their document by it rather than by reading names back.
 Two checks hold it to those two values and to a markdown document of an issue, and the partial unique index `artifacts_issue_role` holds an issue to one document per role.
@@ -3022,7 +3047,7 @@ Each item below names a path with its method and identity, then its purpose.
   A comment's current blocks in body order:
   `{item, revision, indexed, blocks: [{id, type, text, ref, from, to, changed_revision, changed_at, embedding}]}`, `item` the comment's graph node, `revision` its indexed revision, `from` and `to` UTF-16 code units into its stored body, `embedding` where meaning search stands on the block: `embedded`, `pending`, or `none` while no window covers it.
   While the comment is owed a block index, or was indexed from another body than it stores, `indexed` is `false` and `blocks` empty; the read writes nothing.
-  `400 COMMENT_ID_INPUT` for a non-uuid id.
+  `400 COMMENT_ID_INPUT` for an id that is neither a whole uuid nor a unique prefix of 8 or more characters of one.
 
 - `/api/v1/comments/{id}` (PATCH; cookie, trusted header, or bearer; needs the `person` scope)
 
@@ -3482,6 +3507,15 @@ Each item below names a status and code, then its meaning.
 - `400 INVALID_SESSION_ID`
 
   An agent artifact route's `session_id` is empty or holds `/`, `?`, `#`, whitespace, a control character or a character that ends a reference in text, so no reference could name what it owns; nothing is written.
+
+- `409 ID_AMBIGUOUS`
+
+  The id in a route's path is written short — 8 or more characters of the hex digits and hyphens an id starts with, read without case — and two items or more carry it.
+  The body carries `candidates`, each with its `kind`, its whole `id`, its `ref` (the whole `dispatch://` reference), the issue key or project document that owns it, and its `first_line`, which is left out for a direct conversation the caller is not in.
+  Write more of the id.
+  An id written short that names one item is resolved before the route's handler runs, so the handler, the project-scope check and the response all read the whole id;
+  one that names none answers the 404 that route answers for a whole id that names none, and a value that is no short id at all — fewer than 8 characters, or not hex — gets the answer it has always had.
+  The ids this covers are an ask's, a comment's, a message's, a document's and a document block's; an id in a request body (`reply_to`, `ask_id`, `in_reply_to`) and the `artifact=` filters are read whole, since the programs that write them hold the whole id.
 
 ## Document errors
 
