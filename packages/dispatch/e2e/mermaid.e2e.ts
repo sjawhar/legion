@@ -127,8 +127,26 @@ async function expectDrawnDiagram(card: Locator, labels: readonly string[]): Pro
   // Mounted, closed inside the disclosure: toBeHidden alone also passes on no match at all.
   await expect(source).toHaveCount(1);
   await expect(source).toBeHidden();
-  await card.getByText("Mermaid source", { exact: true }).click();
-  await expect(source).toBeVisible();
+  const disclosure = card.getByText("Mermaid source", { exact: true });
+  // The reader's click is retried until the disclosure opens, because a click can be lost. An
+  // instrumented run of these rows caught it: a document-level `click` listener recorded
+  // `click ARTICLE connected=true`, so the click landed on the `<article>` behind the summary -
+  // the page moved between Playwright's actionability check on the summary and the click's own
+  // dispatch - and no `toggle` fired and no figure was redrawn. Nothing had opened the
+  // disclosure, so the row waited out its whole expect timeout; it failed that way twice in 100
+  // repeats on firefox in a two-lane run of this pod. A click already taken leaves the source
+  // visible, so the retry clicks only while it is still hidden rather than closing what the
+  // first click opened.
+  //
+  // A retried click is no proof of the product's own rule, that a source the reader opened is
+  // drawn open again after a repaint: this helper only gets the reader's click to land. That
+  // rule is proven by the row `a mermaid source a reader opened is open again when the comment
+  // is edited` and by the module's own test file,
+  // `web/src/features/refs/mermaid-diagrams.test.tsx`.
+  await expect(async () => {
+    if (await source.isHidden()) await disclosure.click();
+    await expect(source).toBeVisible({ timeout: 1_000 });
+  }).toPass({ timeout: 5_000 });
 }
 
 /** Starts recording `page`'s console errors and returns the check both rows whose renderer never
