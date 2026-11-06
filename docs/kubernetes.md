@@ -73,11 +73,18 @@ It carries:
   socat is one such pipe; `python3` or bash's `/dev/tcp` over the same `kubectl exec` works too.
   A listener bound to `0.0.0.0` is also reachable on the pod IP from inside the cluster, unless the deployment's NetworkPolicy denies that ingress;
 
+- `unzip` from Debian trixie's archive, at `/usr/bin/unzip`:
+  `model-gateway/apply_test.sh` of theorem-labs/agent-infra calls it, and no package runner in the image reaches it.
+  A role cannot install it in its pod either:
+  the pod's `/usr/local/bin` and `/opt` are read-only, and `apt-get` cannot take dpkg's lock;
+
 - a generic toolchain for the repositories the workers work, specific to none of them:
   `uv` and `uvx`; `node`, `npm`, `npx` and `corepack` from Node 24 LTS, with `pnpm`, `pnpx`, `yarn` and `yarnpkg` linked to corepack's shims (the links `corepack enable` would write, which uid 1000 cannot);
   the Go toolchain at `go.work`'s version — `go` and `gofmt`, the tree at `/opt/go` (its `GOROOT`, which `go` finds by resolving the `/usr/local/bin/go` symlink;
   the image sets no `GOROOT`), with the warm module cache of the two modules `go.work` binds, which the second paragraph after this list places;
-  the AWS CLI v2's `aws`; and `kubectl` 1.35, the minor version of the API server of the production cluster the workers run on, which Kubernetes' version skew policy requires within one minor of kubectl (a deployment whose cluster runs another minor layers its own `kubectl` on the image:
+  the AWS CLI v2's `aws`;
+  mikefarah's `yq` 4, the YAML processor, fetched rather than installed from apt because Debian's `yq` is a different program (kislyuk's Python wrapper over `jq`, 3.4.3 in trixie);
+  and `kubectl` 1.35, the minor version of the API server of the production cluster the workers run on, which Kubernetes' version skew policy requires within one minor of kubectl (a deployment whose cluster runs another minor layers its own `kubectl` on the image:
   [Per-deployment toolchains layer on top](#per-deployment-toolchains-layer-on-top)) — all at `/usr/local/bin`, which is on the image's `PATH` and every pod's.
   Each is a pinned release whose linux/amd64 download the build checks against a pinned SHA-256 before unpacking or installing it (the `ARG`s at the top of `worker.Dockerfile`;
   `kubectl`'s is the SHA-256 Kubernetes publishes beside the binary, taken once the binary's Sigstore signature verifies).
@@ -188,7 +195,7 @@ the CodeGraph CLI, the CodeGraph plugin, TypeScript and the two npm language ser
 ### The tools a role's own work needs
 
 The image carries the five clients above
-— `psql`, `redis-cli`, `sqlite3`, `nc` and `dig` — the PostgreSQL 18 server with `pgvector` and `/usr/local/bin/legion-testpg` ("A test database in the pod" below, where the roles container's launcher starts it), and for everything else the one documented step is the pinned form of the three package runners the image already has:
+— `psql`, `redis-cli`, `sqlite3`, `nc` and `dig` — the PostgreSQL 18 server with `pgvector` and `/usr/local/bin/legion-testpg` ("A test database in the pod" below, where the roles container's launcher starts it), `unzip` and `yq` (the list above), and for everything the image does not carry the one documented step is the pinned form of the three package runners it already has:
 `uvx`, `bunx` and `go run`, plus `uv run --with` where what a role needs is a library rather than a command.
 The two answer different halves of the question.
 The image answers the tools a role may not arrange for itself
@@ -518,7 +525,7 @@ that row reads `unchecked`, and the OK line carries `capabilities=browser-skippe
 The daemon's probe never passes the flag and refuses that line, so such an image runs only where no probe runs, under `runtime: tmux`.
 Oh My Pi downloads Chrome for Testing on first use when it finds no browser, so the deployment's own overlay must turn the browser off.
 A step of its own, before that final one, runs every toolchain command listed above as `legion`, from the image `PATH` — the language servers (`gopls version`, `typescript-language-server --version`, `tsc --version`, and `pyright --version` for `pyright-langserver`, which takes no `--version`), `go
-version` with `go env GOROOT` required to be `/opt/go`, `gcc --version` (Go's cgo, and so its race detector, needs it), `go env CGO_ENABLED` with `CGO_ENABLED` removed from the environment required to be `0` (so the build fails if `/opt/go/go.env`'s `CGO_ENABLED=0` line, the default a scrubbed environment depends on, is ever lost), `go env GOPROXY` read the same way and required to be the `file:///home/legion/go/pkg/mod/cache/download|https://proxy.golang.org|direct` that same `go.env` carries, with the cache it names held to the runtime user, to a writable download directory and to carrying no `@v/list` and no `@latest` file, `gofmt`, `kubectl version --client`, and trixie's commands included
+version` with `go env GOROOT` required to be `/opt/go`, `gcc --version` (Go's cgo, and so its race detector, needs it), `go env CGO_ENABLED` with `CGO_ENABLED` removed from the environment required to be `0` (so the build fails if `/opt/go/go.env`'s `CGO_ENABLED=0` line, the default a scrubbed environment depends on, is ever lost), `go env GOPROXY` read the same way and required to be the `file:///home/legion/go/pkg/mod/cache/download|https://proxy.golang.org|direct` that same `go.env` carries, with the cache it names held to the runtime user, to a writable download directory and to carrying no `@v/list` and no `@latest` file, `gofmt`, `kubectl version --client`, `yq --version`, and trixie's commands included
 — the corepack shims fetching their shipped default pnpm and yarn into a scratch directory the step removes.
 Trixie's commands are these:
 
@@ -542,6 +549,8 @@ Trixie's commands are these:
 
 - `dig -v`
 
+- `unzip -v`
+
 - `chromium --version`
 
 - `socat -V`
@@ -551,6 +560,8 @@ Two of the five clients are odd the same way:
 `nc` takes no `--version` either, so the step runs `nc -h`, which prints its usage and exits 0, under the `nc` name the alternatives system installs and never `nc.openbsd`;
 and `dig -v` prints its version on stdout, measured in a pod of the image (`dig -v
 2>/dev/null` prints `DiG 9.20.30-1~deb13u1-Debian`, `dig -v 2>&1 >/dev/null` prints nothing).
+The step checks `yq` with `--version` rather than `-v`, which is mikefarah's verbose flag:
+`-v` emits `level=DEBUG` lines and reads stdin rather than printing a version.
 It reruns only when the toolchain or an earlier layer changes, so a commit that only rebuilds `legion` needs no package registry.
 To check a published image's toolchain end to end, a project Python install included:
 
@@ -561,6 +572,7 @@ docker run --rm --entrypoint sh ghcr.io/cybermonklabs/legion-worker@sha256:… -
   npm --version &&
   aws --version &&
   kubectl version --client &&
+  yq --version &&
   go version &&
   go env GOPROXY &&
   gcc --version &&
@@ -574,6 +586,7 @@ docker run --rm --entrypoint sh ghcr.io/cybermonklabs/legion-worker@sha256:… -
   sqlite3 --version &&
   nc -h &&
   dig -v &&
+  unzip -v &&
   ssh-keygen -t ed25519 -N "" -f /tmp/k &&
   chromium --version &&
   uv python install 3.13 &&
@@ -1631,6 +1644,67 @@ From a release that also carries the one `roles` container (daemon API contract 
 — push, stop the daemon, the locators and their `schema_version` row, and `legion.yaml`'s `resources` block
 — since the release before this one refuses a `roles` locator and an `issue` resources entry as this one does;
 its step 4 is not needed, since every issue Sandbox is deleted here.
+
+#### Rolling back the release whose cap counts issues
+
+This release's migration `20261103183833_issue_slots` gives a slot to every issue already at work, adds `design_gates.ever_opened` and `dispatch_issues.parent`, and writes the tree lifecycle row of every running tree that had none.
+Re-pinning the earlier image on that schema is not safe by itself, and the reason is the slots rather than the columns:
+the earlier release reads one slot per root and reads a root in `in_progress`, `testing`, `needs_review` or `retro` that holds none as stranded, so its first admission pass calls `LeaveUnslotted` on it and lingers its tree.
+Under this release a running root holds no slot in `accepting`, in `awaiting_merge`, at `admitted` while its children work, or while it waits in the line, so most live trees are in exactly that shape and the earlier image suspends them on its first pass.
+Its cap also counts the child slots this migration wrote, so it admits nothing until they drain.
+
+**Take a dump of the daemon's database before the upgrade** ([Rolling back the upgrade](#rolling-back-the-upgrade) says how, and says which tables a shared login cannot read), and restore that dump to roll back.
+No column has to be undone by hand: the earlier release ignores the two new columns and reads the `slots` and `tree_lifecycles` rows it knows.
+The outbox is the one thing that does, and it is undone the same way whether or not a dump is restored, since a dump taken before the upgrade carries no row of this release's shape while one taken after it carries them all ("The outbox rows the earlier release refuses" below).
+
+With no dump, put the slots back in the shape the earlier release reads, with the daemon stopped and before the earlier image is pinned:
+
+```sql
+-- Every slot a child holds, which the earlier release never writes and counts against its cap.
+delete from slots where issue <> (select tree from issues where issues.key = slots.issue);
+-- One slot for every root the earlier release expects to hold one: in the workflow, not
+-- lingering, and not waiting in the line, which under this release is a root in todo.
+insert into slots (issue, index, admitted_at)
+select i.key, row_number() over (order by i.key) + coalesce((select max(index) from slots), -1), now()
+  from issues i
+ where i.key = i.tree and i.linger_until is null and i.phase <> 'done' and i.status <> 'todo'
+   and i.status not in ('triage', 'icebox', 'backlog', 'done')
+   and not exists (select 1 from slots held where held.issue = i.key);
+```
+
+Read the count the second statement wrote against the deployment's `admissionCap` before starting the earlier image: it writes a row per running root whatever the cap, as this release's own migration does, and the earlier release's cap loop drains the surplus as trees finish rather than refusing to boot.
+Set `admissionCap` back to the value it had before the upgrade in the same change that pins the earlier image, since this release's value counts issues and the earlier one's counts trees.
+
+A root in `todo` is left out because it holds a slot under neither release: it goes back into the earlier release's waiting line, whose own admission pass gives it a slot and opens its tree when the line reaches it.
+Giving it one here would be the opposite of a rollback.
+The earlier release's `line` passes over a root that already holds a slot, and its `releasesSlot` and `releaseInactiveSlots` free only a root that is done, waiting on a person, or out of the workflow (`internal/admit/admit.go` on that release), so a queued root would hold its slot for ever, be promoted by nothing and fill the cap.
+With the cap full, which is the normal state, that strands every root waiting in the line.
+
+**The outbox rows the earlier release refuses must go, with or without a dump.**
+This release writes two marks into every phase worker's start — `needsSlot` on the row that carries the task, `relaunch` on the row that brings the worker's session back (`record.SuperviseRequest`, written by `workflow.StartOrOwe`) — and a `children-first` notice kind.
+The earlier release decodes an outbox payload strictly (`DisallowUnknownFields` in `record/outbox.go`), its `validNoticeKind` does not know that kind, and its `execute` returns the decode error, which is a permanent refusal for neither kind of row: every such row still queued fails and is retried on its backoff for ever, so the worker it was written for is never started again and the notice reaches nobody.
+Run this with the daemon stopped, before the earlier image is pinned:
+
+```sql
+-- The marks this release writes into the pair of rows a phase worker's start is.
+update outbox set payload = payload - 'needsSlot' - 'relaunch'
+ where kind = 'supervise' and (payload ? 'needsSlot' or payload ? 'relaunch');
+-- The notice kind the earlier release does not know.
+delete from outbox where kind = 'notice' and payload->>'kind' = 'children-first';
+```
+
+A start that was waiting for its issue's slot loses the mark that held it unclaimable, so the earlier release claims it as soon as it is due and delivers its task: that worker starts under the earlier release's own cap, which counts the trees holding a slot and not the issues at work, and the slot statements above are what keep that cap honest.
+The relaunch row beside it becomes an ordinary start of the same role carrying no task, which brings the claim back and delivers nothing, so for a claim that holds no task of its own the pair starts one worker and hands it one task between them.
+One case hands that worker the same task twice: the architect's or the operator's retry of a held phase, whose pair carries `ResumeTask` on neither row (`restart` → `started`, `internal/workflow/effects.go`), where the claim failed still holding the task of the phase being retried.
+Stripped of its mark, the relaunch row no longer leaves that failed claim to the task row behind it: the earlier release retries the claim as a plain start does, and the retry sends it the task it kept.
+The task row then fails the earlier release's guard against a second copy, which holds only for a row marked `ResumeTask` or a claim still failed (`internal/daemon/outbox.go` on that release), so the row's own copy waits while the kept task is pending and is delivered after it, a second prompt for the phase the worker is already on.
+It is one worker still, told the same work twice, and no other part of the rollback turns on it.
+A deleted `children-first` notice is told to nobody, and nothing of the earlier release keeps the wait it named: that release starts a parent's own first phase whatever the Dispatch children under it are doing.
+
+**Every daemon sharing the database moves together.**
+Several projects' daemons can share one database ([Daemon-launched controller](#daemon-launched-controller), step 3), and `issues`, `slots` and `tree_lifecycles` are one table each for all of them: this migration's inserts act on every project's rows, not only on the project of the daemon that ran it.
+So a daemon left on the earlier release counts the new child slots of its own project against its cap and admits nothing until they drain.
+Upgrade, and roll back, every daemon of one database in the same change.
 
 ### Pinning a release that drops what a running pod still uses
 
@@ -3930,14 +4004,14 @@ The reservation is the pod's working set, and its request is what the scheduler 
 Concurrently running issue pods are bounded by what the pool's `limits.cpu` and `limits.memory` leave for pods of the per-pod sum of requests:
 at the defaults, two pods fit a floor node and `limits.cpu: 256` places about 80 three-CPU pods (less what the nodes' daemonsets hold), and `limits.memory` divided by 19 GiB bounds them too when that is the smaller (a `Burstable` issue pod's lower request places more)
 — where the tree-volume layout ran one tree per node, each pinned to a node of its own.
-`admission_cap` bounds roots alone: a tree of N children runs N+1 pods at once, and nothing caps concurrent child pods.
+`admission_cap` bounds the issues at work, not the pods: an issue that only waits — for its merge, in `accepting`, on a blocker, on its children or on a person — keeps its pod and holds no slot, so a deployment runs at least one pod per open issue of every live tree and nothing caps that number.
 A pod the pool cannot place stays `Pending`, unscheduled;
 once it has been for longer than `worker_boot_timeout_seconds` the boot watchdog reads it dead ([Liveness rules](#liveness-rules)), one launch failure, its relaunch meets the same pool, and the claim fails once its launch failures run out
 — no later than its registration deadline.
 Two pods beside the issue pods count against the same limits:
 the image probe pod, its own 250m / 1Gi, present at every boot and daemon restart for as long as the probe runs;
 and, under `controller: daemon`, the controller's pod, 1 CPU / 4Gi at the default, for as long as the daemon runs.
-Size the pool's limits for `admission_cap × (1 + the children a tree runs at once)` pods of the per-pod sum plus those two, or keep `admission_cap` within what the limits place.
+Size the pool's limits for the pods of every open tree a deployment runs at once, per-pod sum, plus those two, since `admission_cap` bounds the issues at work rather than the pods a waiting issue keeps.
 
 A pool with no room for the probe pod itself does not refuse the boot.
 The probe pod stays `Pending` with `PodScheduled=False Unschedulable`;
@@ -4634,131 +4708,6 @@ A change that adds one of them applies it first, and fails here at once until it
 — the missing ConfigMap or Secret and the volume the pod block gives it to (`the probe pod <name> cannot mount
 volume "<volume>", which runtime.kubernetes.pod.volumes gives it from ConfigMap "<name>": …`), as the daemon's boot would;
 a change that removes or renames one the pod still names passes here and fails at the restart.
-
-### Moving the handoffs onto their Dispatch issues
-
-From sjawhar/legion#2354 on, a phase handoff is a record on the issue's Dispatch issue, written with `dispatch handoff-write`, and no longer a file committed under `.legion/<KEY>/` on the issue's branch.
-The daemon of that release reads a completion's handoff from Dispatch alone, so a branch still in flight at the release carries files its next role would never see.
-`legion handoffs import --config <legion.yaml> [--dry-run]` (`packages/daemon/internal/handoffimport/`) moves them.
-From the daemon's own configuration — `project`, `dispatch_url` and `dispatch_token_file`, the implement GitHub App, and `daemon_url` — it reads the running daemon's unauthenticated `GET /legion/v1/state` for every issue in a phase other than done, and for the daemon's `daemon.schemaVersion`, which tells which release runs:
-at or past 20261101144900, the store migration `20261101144900_handoff_records` the records' release added, it is the new daemon; below it, the old one.
-Run the import only against a daemon whose deployed release is either the release before this one or a release that carries this merge:
-a store's schema version is its highest migration's identifier, so a release built from a main that took a later-written daemon migration before this one merged, and not this one, would read as the new daemon, the one case the comparison misreads.
-For each issue, as the implement App, it:
-
-- lists `.legion/` on `legion/<KEY>` through GitHub's contents API, and writes each of `.legion/<KEY>/plan.json`, `implement.json`, `test.json` and `review.json` to Dispatch as that phase's handoff record (`plan`, `implement`, `test`, `review`), the file's text exactly, under the daemon's Dispatch session `legion-daemon:<PROJECT>`.
-  It writes only when the phase's newest record is absent, or is one the import wrote and differs from the file; it never writes above a record a worker wrote.
-  The daemon refuses a completion naming a record the import wrote, since that record is another session's:
-  the next role reads it with `dispatch handoff-read` and writes it again under its own session.
-
-- then, when every file of the issue is on Dispatch, makes one commit on the branch's head that removes the handoffs, with the message `chore(legion): <KEY>'s handoffs are on its Dispatch issue now`, no trailer and no bracket keyword, so every required check runs on it as on any push, and moves the branch to it with a non-forced ref update.
-  What it removes follows the daemon:
-
-  - **old daemon:** `.legion/<KEY>/` alone, the one push the old daemon's carry counts as the issue's handoffs (`HandoffPath`), so the issue keeps its verdict and its approval across it.
-    Any other path under `.legion/` (another issue's directory, merged in from its branch) would make the push a code push to the old daemon too, so it stays on the branch, and the line says `kept .legion/<dirs> for the run after the rollout`.
-
-  - **new daemon:** all of `.legion/`, other issues' directories included.
-    The new daemon carries no push, so the removal is a code push like any other.
-    For an issue in `testing` it would clear the tester's planned red;
-    in `reviewing` an approval of a round the reviewer has not completed would no longer stand;
-    in `merging` the merger builds its READY at the head it reads, and a push past that head makes the daemon refuse or void that READY (`READY_HEAD_MOVED`), so the merger builds it again;
-    in `awaiting_merge` a push past READY's head withdraws that READY and sends the issue back to `implementing`;
-    and a `held` issue may have been held from any of these (the daemon's state does not say which), so the retry that restores its phase would find the push.
-    There the import writes the records as usual, removes nothing, and the line says `removal deferred: <KEY> is in <phase>; <what the operator does about it>`:
-    another run once the phase ends for `testing`, `reviewing` and `held`, and for `merging` and `awaiting_merge`, which end in `done`, that the issue's own merge carries `.legion/` to the default branch, where the cleanup after the cutover will remove it.
-    It reads the issue's phase again just before each removal, which narrows the window but does not close it:
-    the re-read comes before the removal commit is built, so an issue that enters one of these phases between the re-read and the ref update is still pushed over, and the line reads `removed .legion/ at <sha>`.
-    An issue that has left the workflow by the re-read
-    — merged, and `done` — has no phase to wait for and nothing the push could undo, and its line says `left the workflow; nothing removed`.
-
-  A branch that moved in between is read again and the issue started over, three times at most.
-  A ref update GitHub refuses with the branch still where it was (a ruleset's refusal, a validation's) fails the issue at once with GitHub's answer.
-
-`--dry-run` reads all of it and prints what the run would do, writing nothing.
-A second run with nothing changed writes nothing and pushes nothing.
-
-Run it where `legion probe-boot` runs ([Probing a configuration before the daemon boots on it](#probing-a-configuration-before-the-daemon-boots-on-it)):
-a one-shot pod of the worker image of the release the daemon will roll to, under the daemon's ServiceAccount, with the daemon pod's environment and mounts.
-It reads the configuration as boot does, so the implement App's `private_key_command` or secret runs there, and the Dispatch bearer and the configuration are mounted as the daemon's are;
-no daemon credential leaves the cluster.
-It reads the daemon at `daemon_url`, the address every pod of the deployment is told, so the pod must reach it.
-
-The cutover, in this order:
-
-1. **Dispatch deployed with the handoff routes.**
-   Dispatch is deployed by hand.
-   A run against a Dispatch without them stops at its first handoff call, naming the route Dispatch answered 404 to, before it writes or pushes anything;
-   that is the order's own check, and the daemon has no boot refusal for it.
-
-2. **`legion handoffs import` of the new release, while the old daemon still runs.**
-   On each branch it removes `.legion/<KEY>/` alone, which the old daemon carries as a push of the issue's handoffs, so the issue keeps its verdict and its approval across the removal push.
-   A branch that also carries another issue's directory keeps it, and its line says `kept .legion/<dirs> for the run after the rollout`:
-   removing it under the old daemon would be a code push there.
-
-3. **The daemon and the plugins roll to the release.**
-   The plugin pair comes with the stale-plugin relaunch from the release ([Contract discipline](#contract-discipline)).
-   On the first push to a pull request after the upgrade, one that holds more than 16 pairs of heads of pushes waiting for a link
-   — the handoff-only pushes the release before it stored, which no longer lie on the path forward from the head
-   — lets the oldest pairs past that bound go (`boundedPushes`, `maxWaitingPushes` in `packages/daemon/internal/classify/decisions.go`), one WARN each, `workflow: a pull request holds the most pushes waiting for a link; the oldest is let go`.
-   The record is only trimmed: no verdict, approval or phase changes with it.
-
-4. **`legion handoffs import` again, until no line asks for another run and none says `kept`.**
-   It catches a file a worker of the old release pushed between step 2 and step 3, and removes what is left under `.legion/`:
-   every directory step 2 kept, and the issue's own on a branch that took a file since.
-   Under the new daemon the removal push is a code push, with the effects of any:
-
-   - in `testing` or `reviewing` it is deferred, the line saying so; run the import again once the phase ends;
-
-   - in `merging` it is deferred, since the merger builds READY at the head it reads and a push past it makes the daemon refuse or void that READY (`READY_HEAD_MOVED`);
-
-   - in `awaiting_merge` it is deferred, since a push past READY's head withdraws that READY and sends the issue back to `implementing`.
-     `merging` and `awaiting_merge` end in `done`, which the import skips, so neither asks for another run:
-     a branch in either can still carry another issue's directory (retro removed only its own `.legion/<KEY>/`, and a child branch can carry its parent's), and when it merges, that directory reaches the default branch with the merge, where the cleanup after the cutover will remove it;
-
-   - in `held` it is deferred, since the hold may have come from any of the phases above and the retry that restores the phase would find the push;
-
-   - in `implementing` on a red head it counts one fix attempt, as any push onto a red head does;
-
-   - in `accepting` or `retro` the new head runs its required checks, and a red sends the issue back to `implementing` as any red does;
-     READY lets the removal of `.legion/` above the approved head through without a new review round, and refuses a `.legion/` file added there.
-
-   Everything else reads `unchanged`.
-
-A worker whose push is refused because `legion/<KEY>` moved under it by the removal commit (its message names it) fetches, merges `legion/<KEY>@origin` forward and pushes again; it never rewrites.
-
-Each line names an issue, with a phase word for a file's line (`<KEY> plan: …`) and none for the branch's (`<KEY>: …`):
-
-- `imported v<n>` — the file is now version `<n>` of the phase's records, written under `legion-daemon:<PROJECT>` (under `--dry-run`, `would import v<n>`).
-
-- `unchanged` — on a file's line, the phase's newest record is the import's and holds the file's text exactly, so nothing was written;
-  on a branch's line, the branch carries nothing under `.legion/`, so nothing was pushed (`unchanged; kept .legion/<dirs> for the run after the rollout` under the old daemon:
-  the branch carries nothing of the issue's, and another issue's directory it leaves for step 4).
-
-- `kept worker record v<n>` — a worker's session wrote the phase's newest record, version `<n>`;
-  the file was not written above it, and is removed with the rest of the issue's handoffs.
-
-- `removed .legion/ at <sha>` under the new daemon, `removed .legion/<KEY>/ at <sha>` under the old one
-  — the branch now names `<sha>`, the one commit that removed them (under `--dry-run`, `would remove .legion/ (<n> paths) above <head>`, or `.legion/<KEY>/`).
-  Under the old daemon a branch carrying more under `.legion/` adds `; kept .legion/<dirs> for the run after the rollout`.
-
-- `removal deferred: <KEY> is in <phase>; <what the operator does about it>` — under the new daemon, for an issue in `testing`, `reviewing`, `merging`, `awaiting_merge` or `held` (read again just before the removal):
-  the records are written, nothing is pushed.
-  For `testing`, `reviewing` and `held` the line reads `run the import again once the phase ends`;
-  for `merging` and `awaiting_merge`, which end in `done`, it reads `its merge carries .legion/ to the default branch, which the cleanup after the cutover removes`, and asks nothing more of the import.
-
-- `left the workflow; nothing removed` — under the new daemon, the phase read again just before the removal says the daemon no longer holds the issue in a phase (it merged, and is `done`):
-  there is no phase to wait for and no work the push could undo, and the records written above stand.
-
-- `no branch` — GitHub has no `legion/<KEY>`: the issue has nothing to import.
-
-- `failed: <why>` — that file or branch did not go through;
-  on a file's failure `.legion/` stays on the branch, and the branch's line says so;
-  `failed: GitHub refused the ref update: <answer>` quotes GitHub's refusal of the removal.
-  Run the import again once the cause is fixed.
-
-A last line counts each kind, `deferred` and `left the workflow` among them.
-The exit is 0 when no line failed (a deferred removal included), and 1 when one did or the run stopped, its reason on stderr:
-a configuration it could not read, a daemon that did not answer or serves another project, or a Dispatch without the handoff routes.
 
 ## Kubernetes runtime (TypeScript daemon)
 

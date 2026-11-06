@@ -161,9 +161,7 @@ test("Activity breaks its rows by day and marks where the reader stopped", async
   }
 });
 
-test("an Activity row pins into the review margin and unpins from it @phone", async ({
-  browser,
-}, testInfo) => {
+test("an Activity row pins into the review margin and unpins from it", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Pin an event" });
   await patchIssue(issue.key, { status: "in_progress" });
@@ -183,17 +181,11 @@ test("an Activity row pins into the review margin and unpins from it @phone", as
       "true"
     );
 
-    if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: /Open review panel/ }).click();
-    }
     const margin = page.getByTestId("margin-sheet");
     await margin.getByRole("tab", { name: "Pinned" }).click();
     await expect(margin.getByText("Issue updated")).toBeVisible();
     await margin.getByRole("button", { name: "Unpin" }).click();
     await expect(margin.getByText("No pinned items.")).toBeVisible();
-    if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: /Close review panel/ }).click();
-    }
     await expect(row.getByRole("button", { name: "Pin" })).toHaveAttribute("aria-pressed", "false");
   } finally {
     await alice.close();
@@ -204,9 +196,9 @@ test("an Activity row pins into the review margin and unpins from it @phone", as
 // its first part and the event says so. The row a reader opens then shows the part it has and,
 // under it, a link to the comment's own page, which reads the stored body whole. The margin's
 // Pinned tab is where the Activity tab draws an event's body, so the row is pinned first.
-test("an Activity row whose comment event carried the body in part links to the whole comment @phone", async ({
+test("an Activity row whose comment event carried the body in part links to the whole comment", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "A comment longer than one event" });
   // Two 20,000-unit paragraphs: each is inside the 32,000-unit block bound, and together they
@@ -229,9 +221,6 @@ test("an Activity row whose comment event carried the body in part links to the 
     await expect(row).toHaveCount(1);
     await row.getByRole("button", { name: "Pin" }).click();
 
-    if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: /Open review panel/ }).click();
-    }
     const margin = page.getByTestId("margin-sheet");
     await margin.getByRole("tab", { name: "Pinned" }).click();
     const link = margin.getByRole("link", { name: "Read the whole comment" });

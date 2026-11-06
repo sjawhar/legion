@@ -29,6 +29,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/controller"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
@@ -890,14 +891,12 @@ func TestControllerStartOmitsTheOptionalPointersTheFileDoesNotSet(t *testing.T) 
 		"project: demo", "daemon_url: " + d.url, "operator_token_file: ./operator-token",
 		"envoy_url: http://envoy.test:9020", "nats_urls: [nats://a:4222]",
 	}})
-	for _, name := range []string{"DISPATCH_URL", "DISPATCH_TOKEN_FILE", "ENVOY_TOKEN_FILE", "NATS_NKEY_SEED_FILE"} {
-		os.Unsetenv(name)
-	}
+	fixtureenv.Unset(t, startupRestored...)
 	if code, _, errb := c.run(); code != 0 {
 		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
 	}
 	env := c.env()
-	for _, name := range []string{"DISPATCH_URL", "DISPATCH_TOKEN_FILE", "ENVOY_TOKEN_FILE", "NATS_NKEY_SEED_FILE"} {
+	for _, name := range startupRestored {
 		if _, set := env[name]; set {
 			t.Errorf("%s is set with no key naming it", name)
 		}
@@ -1732,7 +1731,7 @@ func TestControllerStartResolvesTheRealGh(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(wrapper, "gh"), []byte("#!/bin/sh\nexit 97\n"), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		unsetenv(t, "LEGION_GH_PATH")
+		fixtureenv.Unset(t, "LEGION_GH_PATH")
 		t.Setenv("PATH", wrapper+":"+bin+":/usr/bin:/bin")
 		if code, _, errb := c.run(); code != 0 {
 			t.Fatalf("legion controller start = %d, stderr %q", code, errb)
@@ -1752,7 +1751,7 @@ func TestControllerStartResolvesTheRealGh(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(bin, "gh"), []byte("\x7fELF\x02\x01\x01\x00"), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		unsetenv(t, "LEGION_GH_PATH")
+		fixtureenv.Unset(t, "LEGION_GH_PATH")
 		t.Setenv("PATH", shims+":"+bin+":/usr/bin:/bin")
 		code, _, errb := c.run()
 		if want := "the first gh on PATH, " + shim + ", is a script"; code != 1 || !strings.Contains(errb, want) || !strings.Contains(errb, "LEGION_GH_PATH") {
@@ -1774,7 +1773,7 @@ func TestControllerStartResolvesTheRealGh(t *testing.T) {
 			d := newControllerDaemon(t)
 			c := newControllerStart(t, d, controllerOptions{})
 			if tc.value == "" {
-				unsetenv(t, "LEGION_GH_PATH")
+				fixtureenv.Unset(t, "LEGION_GH_PATH")
 				t.Setenv("PATH", t.TempDir())
 			} else {
 				t.Setenv("LEGION_GH_PATH", tc.value)
