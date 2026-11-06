@@ -176,6 +176,12 @@ func (l *lookups) mentionDeliveries(commentID string) (mentionDeliveries, error)
 	return l.mentions[id], nil
 }
 
+// readings is what the batch read of each comment's mentions, in no order: what the holders of
+// the roles their unpinned attempts target are resolved for (resolveUnpinnedRoleMentions).
+func (l *lookups) readings() []mentionDeliveries {
+	return slices.Collect(maps.Values(l.mentions))
+}
+
 func decodeAuthor(raw []byte, kind, id string) (model.Actor, bool, error) {
 	var author model.Actor
 	if err := json.Unmarshal(raw, &author); err != nil {
@@ -468,19 +474,24 @@ func loadDocumentSessionAuthors(ctx context.Context, db queryer, ids []string) (
 // key (model.CommentMentionIdempotencyKey),
 // so the mode comes from comment_mentions - one row per (comment, target), which is what makes
 // min() of it that row's mode - and never from the attempts themselves. Every attempt is opened
-// under that row (claimCommentDeliveryAttempt in internal/dispatch/api), so the join drops none.
+// under that row (claimCommentDeliveryAttempt in internal/dispatch/api), so the mention's mode
+// is there for every attempt a comment's own write recorded; the join is an outer one all the
+// same, and an attempt with no mention row beside it is read under its own mode. What this
+// reading decides is what the outbox holds back while a send is live, and an attempt dropped
+// from it is a send the outbox publishes a copy beside, which is the one outcome every rule
+// here exists to stop.
 var mentionDeliveryQuery = `
 	select d.comment_id::text,
 	       ` + model.MentionSessionSQL("d") + `,
 	       d.target,
-	       min(m.delivery),
+	       coalesce(min(m.delivery), min(d.delivery)),
 	       bool_or(d.state = 'sent'),
 	       bool_or(d.state = 'pending' and ` + model.MentionResumedSQL("d") + `),
 	       bool_or(d.state = 'pending' and ` + model.MentionLiveSQL("d") + `),
 	       bool_or(d.state = 'pending' and ` + model.MentionAbandonedSQL("d") + `),
 	       bool_or(d.state = 'failed' or (d.state = 'pending' and ` + model.MentionAbandonedSQL("d") + `))
 	from comment_deliveries d
-	join comment_mentions m on m.comment_id = d.comment_id and m.target = d.target
+	left join comment_mentions m on m.comment_id = d.comment_id and m.target = d.target
 	where d.comment_id = any($1::text[]::uuid[])
 	group by 1, 2, 3
 `
@@ -530,6 +541,11 @@ func (m settledMention) beats(current settledMention) bool {
 // (eventDestinations): every other event, edits, resolutions and reopenings included, suppresses
 // nothing. A comment no attempt was recorded for answers empty sets, so it suppresses nothing
 // either.
+//
+// An attempt that is live and names no session is read under its target alone, as every reading
+// here is, and its target's role is recorded beside it (unpinnedRoleMentions.record): that role
+// is all there is to say which session's copies the attempt holds back, and its holder is
+// resolved once the batch has read every comment (resolveUnpinnedRoleMentions).
 func loadMentionDeliveries(ctx context.Context, db queryer, ids []string, found *lookups) error {
 	if len(ids) == 0 {
 		return nil
@@ -555,6 +571,11 @@ func loadMentionDeliveries(ctx context.Context, db queryer, ids []string, found 
 		func() error {
 			deliveries := of(commentID)
 			state := mentionStateOf(sent, resending, sending, abandoned)
+			if sessionID == nil && sending {
+				// An attempt of this target is live and names no session: only the role's
+				// holder says whose copies it holds back (unpinnedRoleMentions).
+				deliveries.unpinned.record(target)
+			}
 			if sessionID != nil {
 				deliveries.sessions.record(*sessionID, state)
 				if sent || failedSend {

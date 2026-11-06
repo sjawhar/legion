@@ -264,10 +264,11 @@ func readRows(ctx context.Context, deps Deps, inFlight []string) (pending []pend
 // batch read them (mentionDeliveries.anyLive), so the settled ones are not all of them yet and a
 // keep of this copy waits for the attempt's lease to end one way or the other
 // (resolveRoleHolders). mentionStates is read beside those two, by a role route alone as well:
-// the state of each mentioned session's own mention of the comment (mentionDeliveries.sessions),
-// which is asked of the holder a forward names - a forward to a holder whose own mention is
-// still being sent waits for that one mention, as the keep waits for any of them
-// (mentionOutcomes.live, roleCopyWaitsForAMention).
+// what each session's copies of the comment wait on (mentionDeliveries.holds) - the states of
+// that session's own attempts, and the attempts that name no session yet whose role it holds -
+// which is asked of the holder a forward names: a forward to a holder a mention of the comment
+// is still being sent to waits for that one holder's mentions, as the keep waits for any of
+// them (mentionHolds.live, roleCopyWaitsForAMention).
 //
 // waiting is that wait, written once the role's holder is known (resolveRoleHolders): the
 // destination makes no send this read and holds its key against the owner's later events
@@ -282,7 +283,7 @@ type destination struct {
 	dedupeKey     string
 	mentionKeys   map[string]string
 	settledKeys   map[string]string
-	mentionStates mentionOutcomes
+	mentionStates mentionHolds
 	liveMention   bool
 	waiting       bool
 	forward       *roleForward

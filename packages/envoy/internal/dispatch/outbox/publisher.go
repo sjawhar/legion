@@ -874,6 +874,9 @@ func resolveDestinations(ctx context.Context, deps Deps, events []*batchEvent) e
 	}); err != nil {
 		return err
 	}
+	// What the attempts that name no session yet hold back, which the destinations below read
+	// of every session they would send a copy to (unpinnedRoleMentions, mentionHolds).
+	resolveUnpinnedRoleMentions(ctx, deps, found.readings()...)
 	for _, event := range resolvable {
 		event.destinationsOf, event.mentionPending, event.resolveErr = eventDestinations(ctx, deps, event, found)
 		event.resolveLost = lostToContextEnd(ctx, event.resolveErr)
@@ -1019,7 +1022,7 @@ func eventDestinations(ctx context.Context, deps Deps, item *batchEvent, look lo
 // (destination.mentionKeys), which are what a kept copy's own stored key is chosen from, whether
 // a mention of the comment was still live when the batch read them (destination.liveMention,
 // mentionDeliveries.anyLive), which holds a keep of that copy back until the settled mentions
-// are all of them, and the state of each mentioned session's own mention
+// are all of them, and the state of each session's mentions of the comment
 // (destination.mentionStates), which holds a forward back while the holder it reaches has one
 // live (roleCopyWaitsForAMention).
 func addRoute(d *destinations, route *string) error {
@@ -1034,7 +1037,7 @@ func addRoute(d *destinations, route *string) error {
 	case "role":
 		d.addDestination(destination{subject: contracts.RoleTopicPrefix + parsed.ID, label: "publish route", id: *route,
 			role: parsed.ID, mentionKeys: d.mentions.fallbackKeys, settledKeys: d.mentions.settledKeys,
-			mentionStates: d.mentions.sessions, liveMention: d.mentions.anyLive()})
+			mentionStates: d.mentions.holds(), liveMention: d.mentions.anyLive()})
 	case "session":
 		d.addSession(parsed.ID, "publish route", *route)
 	default:

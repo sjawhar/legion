@@ -124,13 +124,18 @@ func resolveRole(ctx context.Context, deps Deps, role string) (roles.Resolution,
 //   - a keep of the copy for a role nobody holds, while an attempt of any of the comment's
 //     mentions is live (destination.liveMention), since the session that claims the role next is
 //     keyed by the map the keep stores and any mentioned session may be that session;
-//   - a forward to a live holder, while that holder's own mention of the comment is live
-//     (destination.mentionStates, mentionOutcomes.live), since the key of a mention whose only
+//   - a forward to a live holder, while a mention of the comment bound for that holder is live
+//     (destination.mentionStates, mentionHolds.live), since the key of a mention whose only
 //     attempt is live is in no settled map (mentionDeliveries.settledKeys) and the forward would
 //     go under contracts.RoleForwardDedupePrefix and the event's key - one that host never
-//     claimed - beside the mention landing after it. The wait is that one holder's mention and
-//     no other: a holder with no live mention of its own is forwarded to at once, as the
+//     claimed - beside the mention landing after it. The wait is the mentions of that one holder
+//     and no other's: a holder with no live mention of its own is forwarded to at once, as the
 //     fallback pass's own forward of a held copy is (decideFallbackCopy, mentionDeliveries.liveFor).
+//     An attempt that names no session yet is one of that holder's mentions when its own role
+//     resolves to it, which is the one reading that names the holder of an unanswered @role:
+//     mention at all (unpinnedRoleMentions, resolveUnpinnedRoleMentions); the copies bound for
+//     that session's own topic ask the same question (destinations.leftToMention), so the two
+//     roads to one host hold or go together.
 //
 // A destination that waits keeps its place in the event's list, marked waiting
 // (destination.waiting): it makes no send this read and holds its key against the owner's later
@@ -171,19 +176,7 @@ func resolveRoleHolders(ctx context.Context, deps Deps, events []*batchEvent) {
 	if len(routed) == 0 {
 		return
 	}
-	resolved := make(map[string]roleResolution, len(routed))
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	for _, role := range routed {
-		wg.Go(func() {
-			var result roleResolution
-			result.resolution, result.err = resolveRole(ctx, deps, role)
-			mu.Lock()
-			resolved[role] = result
-			mu.Unlock()
-		})
-	}
-	wg.Wait()
+	resolved := resolveRoles(ctx, deps, routed)
 	for _, event := range events {
 		// Written into the event's own list: a destination that waits stays in it, marked, so
 		// that it holds its key against the owner's later events (destination.waiting,
@@ -209,11 +202,83 @@ func resolveRoleHolders(ctx context.Context, deps Deps, events []*batchEvent) {
 	}
 }
 
+// resolveRoles resolves the holder of each of names, once per role and every role at once,
+// within ctx (resolveRole). It is the one resolution a batch runs: of the roles its events route
+// to (resolveRoleHolders) and of the roles the unanswered mentions of its comments name
+// (resolveUnpinnedRoleMentions).
+func resolveRoles(ctx context.Context, deps Deps, names []string) map[string]roleResolution {
+	resolved := make(map[string]roleResolution, len(names))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, role := range names {
+		wg.Go(func() {
+			var result roleResolution
+			result.resolution, result.err = resolveRole(ctx, deps, role)
+			mu.Lock()
+			resolved[role] = result
+			mu.Unlock()
+		})
+	}
+	wg.Wait()
+	return resolved
+}
+
+// resolveUnpinnedRoleMentions names the holder of every role an attempt of one of read that is
+// live and names no session yet targets (unpinnedRoleMentions), resolving each role once and
+// every role at once (resolveRoles). Those attempts are the mentions whose listener lookup went
+// unanswered when the comment was written: the row names the role alone until the sender pins a
+// session on it a round trip later, so this is what says whose copies of the comment wait for
+// one. It is run before any destination of the batch is read (resolveDestinations), the copies
+// bound for a session's own topic being decided there, and again by the fallback pass for the
+// one comment a held row is of (decideFallbackCopy).
+//
+// A role whose resolution names a holder holds that holder's copies back, whatever state the
+// holder is in: a claim stands until its holder is gone, and the mention is sent to the session
+// the listener resolves the role to, not to a live one. A role whose resolution names no holder
+// at all holds nothing back: no claim names a session, so the mention's own lookup finds none
+// either and no session is shown the comment twice. A resolution that failed names no holder it
+// might have had, so every copy of that comment bound for a session's own topic waits instead,
+// for the attempt's own lease and no longer (unpinnedRoleMentions.holds).
+func resolveUnpinnedRoleMentions(ctx context.Context, deps Deps, read ...mentionDeliveries) {
+	var names []string
+	seen := map[string]struct{}{}
+	for _, deliveries := range read {
+		if deliveries.unpinned == nil {
+			continue
+		}
+		for role := range deliveries.unpinned.roles {
+			if _, ok := seen[role]; ok {
+				continue
+			}
+			seen[role] = struct{}{}
+			names = append(names, role)
+		}
+	}
+	if len(names) == 0 {
+		return
+	}
+	resolved := resolveRoles(ctx, deps, names)
+	for _, deliveries := range read {
+		if deliveries.unpinned == nil {
+			continue
+		}
+		for role := range deliveries.unpinned.roles {
+			result := resolved[role]
+			switch holder := result.resolution.Holder; {
+			case holder != "":
+				deliveries.unpinned.holders[holder] = struct{}{}
+			case result.err != nil:
+				deliveries.unpinned.unresolved = true
+			}
+		}
+	}
+}
+
 // roleCopyWaitsForAMention reports whether dest's copy of the comment waits for a mention of that
 // comment to settle, which is the mention its own dedupe key comes from: for a copy kept for a
 // role nobody holds (roleForward.keptFor), any mention of the comment still live when the batch
 // read them (destination.liveMention), since the session that claims the role next is keyed by
-// the map the keep stores; for a forward, the holder's own mention alone
+// the map the keep stores; for a forward, the mentions of the holder it reaches alone
 // (destination.mentionStates), since that is the one key this copy is chosen by
 // (roleFallbackKey). A destination this event has reached already waits for nothing, and
 // neither does one that sends nothing whatever its key - a role route reached with nothing to

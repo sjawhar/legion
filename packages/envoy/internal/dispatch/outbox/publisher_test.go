@@ -119,6 +119,8 @@ func publish(ctx context.Context, deps Deps, event model.Event, slug string, rou
 	if err != nil {
 		return err
 	}
+	// As a batch does before it reads any destination (resolveDestinations).
+	resolveUnpinnedRoleMentions(ctx, deps, found.readings()...)
 	list, mentionPending, resolveErr := eventDestinations(ctx, deps, single, found)
 	single.destinationsOf, single.mentionPending = list, mentionPending
 	resolveRoleHolders(ctx, deps, []*batchEvent{single})
