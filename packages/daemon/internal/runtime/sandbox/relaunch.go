@@ -18,6 +18,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -284,8 +285,9 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 // keptBy is what the live pod of the Sandbox read as s was built with, for the role l starts in
 // it: the enrollment decision for that role in that pod (enrollsIn, which reads the broker's
 // volumes the pod carries), which of the role's own overlays and of the project's memory overlays
-// its container holds (heldRoleOverlays), and the session store it was built under
-// (heldSessionStore, the URL file its generation is pointed at). A launch that keeps such a pod
+// its container holds (heldRoleOverlays), the skills repository its recorded pod shape names, and
+// the session store it was built under (heldSessionStore, the URL file its generation is pointed
+// at). A launch that keeps such a pod
 // builds its start command from these rather than from the configuration as it now reads, so the
 // role is started as its pod was built (launcherCommand, roleOperatorEnv, mainEnvironment) and
 // runs degraded until the update round replaces the pod — able to push its work and answer that
@@ -294,10 +296,11 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 // The same enrollment decision writes the generation's address record (recordAddresses), so the
 // record says what the start said.
 //
-// It reads the Sandbox's stored pod template, the build of the pod the controller made from it,
-// and not the pod-shape annotation (podShapeAnnotation): the annotation is written only by this
-// release and records the operator's volumes and mounts alone, where every release writes the
-// template, so a pod created before this one is read as well. readable is false when the template
+// It reads the Sandbox's stored pod template and its pod-shape annotation. Overlays and session
+// storage predate that annotation and are read from the template; skills_repository is recorded
+// there when the skills volume is built. A missing field names no skills, so an old pod's role
+// can still answer the ordinary update round instead of looking for a volume it does not carry.
+// readable is false when the template
 // holds no container for the role — a template of another shape, or one this daemon cannot read:
 // the daemon then cannot tell what the pod carries, and relaunch replaces the pod.
 func (r *Runtime) keptBy(s *sandbox, l launch) (keptPod, bool) {
@@ -306,8 +309,22 @@ func (r *Runtime) keptBy(s *sandbox, l launch) (keptPod, bool) {
 	if !readable {
 		return keptPod{}, false
 	}
+	var shape podShapeRecord
+	if record := s.Spec.PodTemplate.Metadata.Annotations[podShapeAnnotation]; record != "" {
+		if err := json.Unmarshal([]byte(record), &shape); err != nil {
+			return keptPod{}, false
+		}
+	}
+	var skills ghrepo.Repository
+	if shape.SkillsRepository != "" {
+		var err error
+		skills, err = ghrepo.Parse("the stored pod's skills repository", shape.SkillsRepository)
+		if err != nil {
+			return keptPod{}, false
+		}
+	}
 	kind, _, _ := heldSessionStore(spec)
-	return keptPod{enrolled: r.enrollsIn(&spec, l.spec.Role), overlays: overlays, memory: memory, store: kind}, true
+	return keptPod{enrolled: r.enrollsIn(&spec, l.spec.Role), overlays: overlays, memory: memory, store: kind, skills: skills}, true
 }
 
 // stopIssuedChild stops generation of token's launcher in podUID after its Start returned startErr,
