@@ -3889,8 +3889,8 @@ Each item below names an endpoint and its method, then its contract, and an item
   Any other revision in the bucket, a record where the claim names none, or none where it names one is `409 {error, role, holder, claim_revision}`, where `claim_revision` is the revision the bucket does hold (`0` for no record) and `holder` the session its claim names (empty for none), and so is a claim that passed that check and then lost its conditional write to a claim that landed in between.
   **No claim record is written**, so the role keeps the holder the standing claim gave it: the precondition is weighed before the claimant's interest record is touched, and a claim that lost the conditional write rolls that record's topic back unless the winning claim names that same session, whose record then keeps the lane topic of the role it now holds (`store.Registry.SetRoleWithPrevious`, `store.ErrRoleClaimRevisionMismatch`).
   The claimant's own session registration is refreshed before any of this, as it is on every claim this route takes, conditional or not.
-  A claim with no `if_claim_revision` is weighed by the soft and last-claim-wins rules alone, exactly as before the field.
   It is how a scheduler turns a lookup of a role and the claim that follows into one decision, which neither last-claim-wins nor a soft claim can do: a claim that landed in between refuses this one rather than being overwritten by it.
+  A hard claim with no `if_claim_revision` is weighed by the last-claim-wins rule alone, exactly as before the field, and a soft one with none carries a precondition of the route's own, the bullet below.
   A write route (below the list).
 
 - A soft claim of a role already held under the claimant's **own** session id is decided on the standing claim and never on the session record, which names whichever process registered that id last.
@@ -3901,6 +3901,13 @@ Each item below names an endpoint and its method, then its contract, and an item
   A request that states no instance, and a claim record that names none, reach that renewal test rather than a case of their own, since an absent instance matches nothing.
   So a second process that resumed a live session's id cannot take the role that session holds, and reads `/v1/roles/<role>`'s `client_instance_id` to see which process does.
   A hard claim is unchanged: it reads no holder and lands last-claim-wins.
+
+- A soft claim that states no `if_claim_revision` is conditional all the same, on a revision the route supplies rather than the caller: the revision of the claim record it made its decision on (`store.RoleClaim.Revision`, which a role with no record at all reports as `0`, so the precondition is that there is still no record), weighed by the write exactly as a stated revision is.
+  The route decides on one read of that record and `store.Registry.SetRoleWithPrevious` writes against a second read of its own, so without the precondition two processes of one session id claiming one unheld role in the same moment were both granted it: each read the role as unheld, and the loser of the write's compare-and-swap read the winning claim as its own session's and answered 200.
+  A record replaced in between is no answer for a caller that asked nothing about revisions, so the route reads the claim again, makes the whole decision again on what the second read finds — the same-session-id arms and the predecessor verdict with it, never a verdict kept from the first read — and tries once more.
+  A second mismatch is answered exactly as a stated revision's is, the `409 {error, role, holder, claim_revision}` above, and nothing is retried twice.
+  A claim that states its own `if_claim_revision` is never retried, that revision being the caller's own precondition and deciding again answering a question it did not ask, and a hard claim that states none is written with no precondition at all, last-claim-wins.
+  The claimant's registration is refreshed once, whichever attempt then claims, and the lines a decision writes to the log — the refusal of a second process of one session id, the takeover of a predecessor neither side identifies — are written by the attempt whose answer this route writes, so a decision a retry threw away logs nothing.
 
 - `/v1/interests/subscribe` (POST)
 

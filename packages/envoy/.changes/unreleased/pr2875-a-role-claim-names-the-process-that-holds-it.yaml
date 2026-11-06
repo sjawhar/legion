@@ -25,6 +25,16 @@ body: |-
   that forces. The role claim reaper frees no claim renewed inside the live window, whatever the
   holder's session record says, and reports that outcome as its own. `GET /v1/roles/<role>`
   answers the holder's `client_instance_id` on the 200 and on a lapsed holder's 404.
+
+  A soft claim is written against the very claim record the route decided on, so two processes of
+  one session id claiming one unheld role in the same moment are no longer both granted it: the
+  route decided on one read of that record while the write weighed a second read of its own, and
+  each loser of that write read the winning claim as its own session's and answered 200. A record
+  replaced under such a claim is read again, the whole decision is made again on what stands, and
+  the claim is tried once more; a second mismatch is the same `409` naming the role, its holder and
+  `claim_revision` that a stated `if_claim_revision` gets. A claim that states its own
+  `if_claim_revision` keeps that meaning and is never decided again, and a hard claim that states
+  none carries no precondition at all, last-claim-wins.
 time: 2026-11-06T17:29:51.000000000Z
 custom:
     Issue: pr2875
