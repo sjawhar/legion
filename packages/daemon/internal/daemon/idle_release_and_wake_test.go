@@ -509,14 +509,7 @@ func idleRigDeliveredOnce(t *testing.T, rig *idleWakeRig, issue idleRigIssue, me
 // idleRigEventually's, the run's own deadline (idleRigDeadline), and no span of its own.
 func idleRigUntil(t *testing.T, what string, attempt func() bool) {
 	t.Helper()
-	deadline := idleRigDeadline(t)
-	for time.Now().Before(deadline) {
-		if attempt() {
-			return
-		}
-		time.Sleep(time.Second)
-	}
-	t.Fatalf("timed out waiting for %s", what)
+	idleRigWaiting(t, what, time.Second, attempt)
 }
 
 // awaitTask waits until the issue's woken role has been given a task carrying want.
@@ -543,7 +536,7 @@ func idleRigSettle(t *testing.T, within time.Duration, check func()) {
 		if t.Failed() || time.Now().After(deadline) {
 			return
 		}
-		time.Sleep(250 * time.Millisecond)
+		time.Sleep(idleRigPoll)
 	}
 }
 

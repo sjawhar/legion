@@ -879,22 +879,24 @@ exit "$(cat "$PWD/exit-status" 2>/dev/null || echo 0)"
    * `skill-scenarios: `, the prefix note() and fail() give every word of the rig's own. Equality
    * against the whole stderr string read a byte from docker, getent, mise or flock as a failed
    * row; what a row is about is that the judge ran and the rig refused nothing. A result that is
-   * not clean carries the stderr that was read, so a failing row still names what went wrong.
+   * not clean carries the stderr that was read, so a failing row still names what went wrong; a
+   * clean result reports no stderr.
    */
   const judged = (result: { exitCode: number; stderr: Buffer }) => {
     const stderr = result.stderr.toString();
     const refused = stderr.split("\n").some((line) => line.startsWith("skill-scenarios: "));
-    return refused || result.exitCode !== 0
-      ? { code: result.exitCode, refused, stderr }
-      : { code: 0, refused: false };
+    const clean = !refused && result.exitCode === 0;
+    return { code: result.exitCode, refused, stderr: clean ? "" : stderr };
   };
+  /** What `judged` reads back from a judge that ran and a rig that refused nothing. */
+  const judgedCleanly = { code: 0, refused: false, stderr: "" };
 
   // Catches: a judge session with the label's plugins, the operator's skills or the default model,
   // run outside its own directory, or with no record of its model.
   test("ste runs omp in the directory on its prompt, no plugins, asd-ste100 alone, the pinned model", () => {
     const dir = judgeDir();
     const result = judge("ste", dir);
-    expect(judged(result)).toEqual({ code: 0, refused: false });
+    expect(judged(result)).toEqual(judgedCleanly);
     expect(recorded(dir, "argv")).toEqual([
       "/opt/omp/omp",
       "-p",
@@ -1046,7 +1048,7 @@ printf 'eyJhbGciOiJub25lIn0.%s.c2ln\\n' "$payload"
       const dir = gatewayDir();
       const before = mintCount();
       const result = gatewayJudge("ste", dir);
-      expect(judged(result)).toEqual({ code: 0, refused: false });
+      expect(judged(result)).toEqual(judgedCleanly);
       expect(mintCount() - before).toBeLessThanOrEqual(1);
       expect(recorded(dir, "env")).toEqual([
         `PWD=${dir}`,
@@ -1078,7 +1080,7 @@ printf 'eyJhbGciOiJub25lIn0.%s.c2ln\\n' "$payload"
     test("the token file is the owner's alone while the judge runs", () => {
       const dir = gatewayDir();
       const result = gatewayJudge("bare", dir);
-      expect(judged(result)).toEqual({ code: 0, refused: false });
+      expect(judged(result)).toEqual(judgedCleanly);
       expect(recorded(dir, "mode")).toEqual(["key-dir 700", "token 600"]);
       expect(existsSync(`${dir}.key`)).toBe(false);
     });

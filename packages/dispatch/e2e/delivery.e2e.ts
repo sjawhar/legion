@@ -20,25 +20,29 @@ const FIXTURE_WINDOW = "from=2024-06-01T00%3A00%3A00Z&to=2024-06-02T00%3A00%3A00
 const DEPLOY_500 = { series: "Deploys", x: 0.15, at: "2024-06-01T01:40:00Z" };
 const FAILURE_501 = { series: "Pipeline failures", x: 0.85, at: "2024-06-01T12:20:00Z" };
 
-/** The page position of a chart point, from ECharts' own coordinate conversion: the chart draws
- *  on a canvas, so a deploy dot or a failure triangle has no element to click. The page loads the
- *  echarts chunk once; importing the same URL here hands back that module, whose
- *  `getInstanceByDom` finds the chart the page made. `x` and `at` name the point; without them it
- *  is the series' first data point (a merge dot's x carries a per-PR jitter). Null until the
- *  chart has painted the series, the moments it holds an instance that has drawn nothing
- *  included: `Timeline.tsx` registers the chart with `echarts.init` in its mount effect and
- *  pushes the first `setOption` from a second effect React runs in a later task, and in between
- *  `getOption()` answers undefined (`this._model && this._model.getOption()`, echarts' own
- *  `core/echarts.js`). A caller polls this function, and a poll fails on a throw rather than
- *  asking again, so that moment has to read as "nothing painted yet". */
-async function shapePosition(
+/** One reading of the chart the page made: where a point of a series stands on the page, and
+ *  whether the chart has taken the size of its host. Both answers come from ECharts' own
+ *  instance, because the chart draws on a canvas and a deploy dot or a failure triangle has no
+ *  element to click: the page loads the echarts chunk once, so importing the same URL here hands
+ *  back that module, whose `getInstanceByDom` finds the chart. `x` and `at` name the point;
+ *  without them it is the series' first data point (a merge dot's x carries a per-PR jitter).
+ *  Null until the chart exists, and `position` is null on its own until the chart has painted
+ *  the series, the moments it holds an instance that has drawn nothing included: `Timeline.tsx`
+ *  registers the chart with `echarts.init` in its mount effect and pushes the first `setOption`
+ *  from a second effect React runs in a later task, and in between `getOption()` answers
+ *  undefined (`this._model && this._model.getOption()`, echarts' own `core/echarts.js`). A
+ *  caller polls this function, and a poll fails on a throw rather than asking again, so those
+ *  moments have to read as "nothing painted yet". */
+async function chartReading(
   page: Page,
   shape: { series: string; x?: number; at?: string }
-): Promise<{ x: number; y: number } | null> {
+): Promise<{ position: { x: number; y: number } | null; tookItsHost: boolean } | null> {
   return page.evaluate(async ({ series, x, at }) => {
     interface Chart {
       convertToPixel: (finder: { seriesName: string }, value: number[]) => number[];
+      getHeight: () => number;
       getOption: () => { series?: { name?: string; data?: { value?: number[] }[] }[] } | undefined;
+      getWidth: () => number;
     }
     const host = document.querySelector<HTMLElement>("[data-testid=delivery-chart]");
     if (host === null) return null;
@@ -56,48 +60,36 @@ async function shapePosition(
       if (chart !== undefined) break;
     }
     if (chart === undefined) return null;
+    const tookItsHost =
+      chart.getWidth() === host.clientWidth && chart.getHeight() === host.clientHeight;
     const painted = chart.getOption()?.series?.find((candidate) => candidate.name === series);
     const first = painted?.data?.[0]?.value;
-    if (first === undefined) return null;
+    if (first === undefined) return { position: null, tookItsHost };
     const value = x !== undefined && at !== undefined ? [x, Date.parse(at)] : first;
     const [px, py] = chart.convertToPixel({ seriesName: series }, value);
-    if (px === undefined || py === undefined) return null;
+    if (px === undefined || py === undefined) return { position: null, tookItsHost };
     const rect = host.getBoundingClientRect();
-    return { x: rect.left + px, y: rect.top + py };
+    return { position: { x: rect.left + px, y: rect.top + py }, tookItsHost };
   }, shape);
+}
+
+/** The page position of a chart point, from ECharts' own coordinate conversion. Null until the
+ *  chart has painted the series the shape names. */
+async function shapePosition(
+  page: Page,
+  shape: { series: string; x?: number; at?: string }
+): Promise<{ x: number; y: number } | null> {
+  return (await chartReading(page, shape))?.position ?? null;
 }
 
 /** Whether the chart has taken the size of its host. ECharts measures the host once at
  *  `echarts.init` and again on every notice its `ResizeObserver` gets, and the lane header above
  *  it is relaid out from the same `containerWidth` (`Timeline.tsx`): until a pass it owes has
  *  run, its canvas is drawn to a size the host no longer has, every shape on it stands somewhere
- *  other than where it will stand, and the page is still being laid out around it. Null until
- *  the chart exists, as `shapePosition` is: a poll fails on a throw rather than asking again, so
- *  that moment has to read as "nothing to measure yet". */
+ *  other than where it will stand, and the page is still being laid out around it. The shape the
+ *  reading is taken for does not enter this answer. */
 async function chartTookItsHost(page: Page): Promise<boolean | null> {
-  return page.evaluate(async () => {
-    interface Chart {
-      getHeight: () => number;
-      getWidth: () => number;
-    }
-    const host = document.querySelector<HTMLElement>("[data-testid=delivery-chart]");
-    if (host === null) return null;
-    const chunks = performance
-      .getEntriesByType("resource")
-      .map((resource) => resource.name)
-      .filter((name) => /\/assets\/index-[\w-]+\.js$/.test(name));
-    for (const chunk of chunks) {
-      // The page's own chunks, found by URL at run time: no specifier is known in advance.
-      const loaded = (await import(chunk)) as {
-        getInstanceByDom?: (element: HTMLElement) => Chart | undefined;
-      };
-      const chart = loaded.getInstanceByDom?.(host);
-      if (chart !== undefined) {
-        return chart.getWidth() === host.clientWidth && chart.getHeight() === host.clientHeight;
-      }
-    }
-    return null;
-  });
+  return (await chartReading(page, DEPLOY_500))?.tookItsHost ?? null;
 }
 
 /** Opens the seeded timeline and waits for its chart to paint run 500's deploy and to have taken

@@ -93,7 +93,7 @@ func (f roleForward) msgID(subject string) string {
 // forwards, which the end of one gives way to (finish).
 func (f *roleForwarder) enqueue(forward roleForward) {
 	f.mu.Lock()
-	for f.held == roleForwardWaitLimit {
+	for f.held >= roleForwardWaitLimit {
 		f.ended.Wait()
 	}
 	f.held++

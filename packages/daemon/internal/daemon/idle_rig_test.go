@@ -833,15 +833,23 @@ func idleRigDeadline(t *testing.T) time.Time {
 	return time.Now().Add(idleRigNoDeadline)
 }
 
-// idleRigEventually waits for condition until that deadline, failing with what it waited for.
-func idleRigEventually(t *testing.T, what string, condition func() bool) {
+// idleRigWaiting waits for condition until the rig's deadline, asking it once every pace, and
+// fails naming what it waited for. idleRigEventually and idleRigUntil are this loop, each at
+// the pace its callers need.
+func idleRigWaiting(t *testing.T, what string, pace time.Duration, condition func() bool) {
 	t.Helper()
 	deadline := idleRigDeadline(t)
 	for time.Now().Before(deadline) {
 		if condition() {
 			return
 		}
-		time.Sleep(idleRigPoll)
+		time.Sleep(pace)
 	}
 	t.Fatalf("timed out waiting for %s", what)
+}
+
+// idleRigEventually waits for condition until that deadline, failing with what it waited for.
+func idleRigEventually(t *testing.T, what string, condition func() bool) {
+	t.Helper()
+	idleRigWaiting(t, what, idleRigPoll, condition)
 }

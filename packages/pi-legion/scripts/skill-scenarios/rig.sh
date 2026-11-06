@@ -1283,15 +1283,13 @@ cmd_judge_omp() {
   # three times a couple of seconds apart before the rig refuses. Only the last attempt's own
   # words are kept, and only for the refusal: an attempt the next one makes good says nothing.
   if ! docker image inspect "$judge_image" >/dev/null 2>&1; then
-    local attempt=1 pulled='' pull_error=''
-    while :; do
+    local pulled='' pull_error=''
+    for attempt in 1 2 3; do
       pull_error=$(docker pull --quiet "$judge_image" 2>&1 >/dev/null) && {
         pulled=1
         break
       }
-      [ "$attempt" -lt 3 ] || break
-      attempt=$((attempt + 1))
-      sleep 2
+      [ "$attempt" -eq 3 ] || sleep 2
     done
     [ -n "$pulled" ] || fail "judge-omp: docker could not pull $judge_image in 3 attempts: $pull_error"
   fi

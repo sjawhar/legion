@@ -128,6 +128,10 @@ async function seedAsks(
  */
 const STILL_FRAMES = 10;
 
+/** How many pixels of travel left still read as arrived: sub-pixel layout and a fractional
+ *  scroll offset leave a landing a shade short of its mark. */
+const LANDED_WITHIN_PX = 2;
+
 /**
  * Waits until the landing has stopped moving and reports where it stopped. A link's scroll to
  * its quote is smooth, and the margin corrects its own scroll as it fills in, so the target is
@@ -214,7 +218,7 @@ async function markLanded(page: Page, markId: string): Promise<void> {
           return offBy;
         })
     )
-    .toBeLessThanOrEqual(2);
+    .toBeLessThanOrEqual(LANDED_WITHIN_PX);
 }
 
 /** Polls until `inner` has settled wholly inside `outer`'s box - the margin's own scrollport,

@@ -1254,15 +1254,9 @@ func TestAFailedStepOfAnIssuePodsProvisioningReleasesThePodsTurn(t *testing.T) {
 // test's failure, so a launch that panics fails its own subtest by name rather than the binary.
 func failedLaunch(t *testing.T, g *rig, spec runtime.SpawnSpec) error {
 	t.Helper()
-	defer func() {
-		if p := recover(); p != nil {
-			t.Fatalf("Spawn panicked: %v", p)
-		}
-	}()
 	launching, cancel := context.WithTimeout(g.ctx, time.Second)
 	defer cancel()
-	_, err := g.r.Spawn(launching, spec)
-	return err
+	return failedLaunchOn(t, g, launching, spec)
 }
 
 // failedLaunchOn is failedLaunch for a row whose launch no wall clock bounds: it runs on

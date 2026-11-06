@@ -602,7 +602,11 @@ test("live: a fresh page load opens the socket at the current head and stays wit
   const page = await alice.newPage();
   const apiRequestPaths: string[] = [];
   page.on("request", (request) => {
-    const url = new URL(request.url());
+    // Called for every request of a cold load this row measures, so the cheap string test comes
+    // first: a path under /api/v1/ or /auth/ always shows in the raw URL.
+    const raw = request.url();
+    if (!(raw.includes("/api/v1/") || raw.includes("/auth/"))) return;
+    const url = new URL(raw);
     if (url.pathname.startsWith("/api/v1/") || url.pathname.startsWith("/auth/")) {
       apiRequestPaths.push(url.pathname + url.search);
     }
