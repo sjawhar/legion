@@ -20,28 +20,28 @@
 # Inputs: DISPATCH_URL (the server), DISPATCH_TOKEN or DISPATCH_TOKEN_FILE (an agent bearer, read
 # here and never printed), PROJECT (an existing project key), and optionally FAKE_GITHUB_PORT (the
 # harness's fake GitHub, packages/dispatch/e2e/fake-github.ts, which the server reads as
-# DISPATCH_GITHUB_API_BASE: the currency section seeds it with one repository holding one pull
-# request and one commit beside its head, replacing every repository it served, maps that
-# repository as PROJECT's default and removes the mapping again, so a result recorded at that pull
+# DISPATCH_GITHUB_API_BASE: the run gives it one repository holding one pull request and one
+# commit beside its head, replacing every repository it served, so a result recorded at that pull
 # request's head reads `current`, one at a commit the repository holds is stored, and one at a
-# commit it does not hold is refused `400 RESULT_COMMIT_UNKNOWN`; unset, or with PROJECT already
-# naming a default repository, one `SKIP: currency …` line stands in for the section) and
-# DEV_SIGNIN_LOGIN (a login the server's dev sign-in route, /auth/_dev/signin,
+# commit it does not hold is refused `400 RESULT_COMMIT_UNKNOWN`; unset, one `SKIP: currency …`
+# line stands in for the section, which no other way of running has a pull request's head to
+# read) and DEV_SIGNIN_LOGIN (a login the server's dev sign-in route, /auth/_dev/signin,
 # signs in: the local harness has it, a deployed server does not). Recording a review is a person's
 # write alone, so the two review sections sign that person in with a cookie jar; with
 # DEV_SIGNIN_LOGIN unset each prints one `SKIP: … POST /api/v1/artifacts/{id}/reviews needs a
 # person's credential holding the approve scope …` line and every other section runs.
 #
-# The run reads PROJECT's repository mappings once, in its setup. Where PROJECT already maps a
-# default repository, every issue this script writes resolves to that repository, so Dispatch
-# asks GitHub whether the repository holds each result's commit and refuses the one it does not
-# hold — and the commits below are this script's own, which no repository outside the fake
-# GitHub holds. Each check that reaches that read then prints one `SKIP: <section> <what>` line
-# instead: the result section's record and the two reads of what it recorded, the closed
-# section's record and its ISSUE_CLOSED refusal, which the commit's own refusal would answer
-# first, and the currency section whole. Every other check runs, the result section's two
-# refusals among them: a malformed field and an unknown check are refused before any commit is
-# read.
+# The run reads PROJECT's repository mappings once, in its setup, since every result it records
+# names a commit the repository of its issue must hold. Where PROJECT maps no default repository,
+# its issues resolve to none, nothing is ever asked about them, and the commits are the synthetic
+# ones below, the currency section mapping a repository of its own for the one check that needs a
+# pull request. Where PROJECT already maps one, every issue this script writes resolves to that
+# repository, so the setup reads the repository's default-branch head from GitHub with gh and
+# every result is recorded at that head: no check stands down. A repository gh cannot read fails
+# the run, naming it. Where FAKE_GITHUB_PORT is set the setup also gives that repository, that
+# head and its pull request to the fake, since a server reading the fake asks the fake and not
+# GitHub; a server reading the real GitHub needs no such seeding, and a fake-backed run proves
+# this script's fixture and its count rather than a server talking to GitHub.
 #
 # It writes four issues in PROJECT — a root, a child of it, a sibling in another tree and one more
 # whose spec and Verification document are approved together — with a spec, a Verification document
@@ -68,7 +68,9 @@ Usage: DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token PROJECT=CORE 
        FAKE_GITHUB_PORT, on a server reading the harness's fake GitHub alone, runs the currency
        section, which replaces every repository that fake served; unset, it is skipped;
        DEV_SIGNIN_LOGIN, on a server with dev sign-in alone, records the two human reviews as that
-       person; unset, those two sections are skipped)
+       person; unset, those two sections are skipped;
+       a PROJECT that maps a default repository needs gh, which reads that repository's
+       default-branch head: every result is recorded at it)
 USAGE
 }
 
@@ -344,28 +346,53 @@ refused_result() {
   expect "$1" "$2 is refused $want_code" "\"$want_code\"" '.code'
 }
 
-readonly commit_one=1111111111111111111111111111111111111111
-readonly commit_two=2222222222222222222222222222222222222222
+# The commits the run records at, where PROJECT maps no default repository: no issue this script
+# writes resolves to a repository then, so no result's commit is ever asked about, and these are
+# the script's own. Where one is mapped, the setup below replaces all three with that
+# repository's default-branch head and a look-alike of it, both of which GitHub holds.
+commit_one=1111111111111111111111111111111111111111
+commit_two=2222222222222222222222222222222222222222
 # The shape of the incident this rule came of: a commit whose first twelve characters are the
 # head's, so a line printing twelve reads exactly like the head, and whose other twenty-eight are
 # not. The repository holds it, so the result at it is stored rather than refused.
-readonly commit_lookalike=2222222222223333333333333333333333333333
+commit_lookalike=2222222222223333333333333333333333333333
 # A commit no repository holds, which the record route must refuse.
 readonly commit_unknown=4444444444444444444444444444444444444444
 
 # --- setup ---------------------------------------------------------------------------------------
 
-# Whether PROJECT already maps a default repository, read once and read by three sections. With
-# one mapped, every issue of the project resolves to that repository, so Dispatch asks GitHub
-# whether it holds the commit each result names and refuses the ones it does not; the commits
-# below are this script's own, which no real repository holds. Every check that records a result
-# therefore stands down with a SKIP line, and every other check runs.
+# PROJECT's default repository, read once and read by every section that records a result. With
+# one mapped, every issue of the project resolves to it, so Dispatch asks GitHub whether it holds
+# the commit each result names and refuses the ones it does not. This run therefore records every
+# result at that repository's own default-branch head, which gh reads from GitHub below: no check
+# stands down, and a repository gh cannot read fails the run by name rather than skipping it.
 get "/api/v1/settings/repo-projects"
 want_status 200 setup "the repository mappings answer"
-default_repo_mapped="$(jq -r --arg p "$project" \
-  '[.[] | select(.project == $p and .default)] | length' "$work/body")" ||
+default_repo="$(jq -r --arg p "$project" \
+  'first(.[] | select(.project == $p and .default) | .repo) // ""' "$work/body")" ||
   fail setup "read the repository mappings" "$(body)"
-readonly default_repo_mapped
+readonly default_repo
+
+if [[ -n "$default_repo" ]]; then
+  command -v gh >/dev/null ||
+    fail setup "read $default_repo's default-branch head" "gh is not on PATH, and every result this run records names that head"
+  branch="$(gh api "repos/$default_repo" --jq .default_branch 2>"$work/gh")" && [[ -n "$branch" ]] ||
+    fail setup "read $default_repo's default branch with gh" "$(<"$work/gh")"
+  readonly branch
+  head_commit="$(gh api "repos/$default_repo/commits/$branch" --jq .sha 2>"$work/gh")" ||
+    fail setup "read $default_repo's $branch head with gh" "$(<"$work/gh")"
+  [[ "$head_commit" =~ ^[0-9a-f]{40}$ ]] ||
+    fail setup "read $default_repo's $branch head with gh" "gh answered '$head_commit', which is no commit"
+  readonly head_commit
+  commit_one="$head_commit"
+  commit_two="$head_commit"
+  # The look-alike of that head: its first twelve characters, then its other twenty-eight with
+  # every character replaced, so the two read alike only where a line cut to twelve shows them.
+  commit_lookalike="${head_commit:0:12}$(printf '%s' "${head_commit:12}" |
+    tr '0123456789abcdef' '89abcdef01234567')"
+  pass setup "read $default_repo's $branch head $head_commit with gh"
+fi
+readonly commit_one commit_two commit_lookalike
 
 # The root's spec marks three requirements: r1 is served by a check and a plan task, r2 by a check
 # alone, and r3 by nothing until a child's check serves it.
@@ -417,6 +444,25 @@ SPEC
 issue setup "Verification rules, approved with its proof" "$work/both-spec.md"
 both="$key"
 readonly both
+
+# A server reading the harness's fake GitHub asks the fake, not GitHub, whether the mapped
+# repository holds a result's commit, so the fake is given that repository: the head gh named,
+# the look-alike beside it, and pull request 7 of the root issue, which is what makes a result
+# at that head read `current` in the currency section below. A server reading the real GitHub
+# needs no seeding of any kind — it reads the same repository gh did — and a fake-backed run
+# proves this script's fixture and its count rather than a server talking to GitHub.
+if [[ -n "$default_repo" && -n "$fake_github_port" ]]; then
+  curl -sS -o /dev/null -X PUT -H 'Content-Type: application/json' --data-binary "$(
+    jq -cn --arg r "$default_repo" --arg k "$root" --arg sha "$commit_two" \
+      --arg look "$commit_lookalike" \
+      '{($r): {contents: "read", pull_requests: "read", installation_id: 256,
+               commit_pulls: {($sha): [7]}, commits: [$look],
+               pulls: {"7": {head_sha: $sha, state: "open", title: "\($k) the verification check"}}}}'
+  )" "http://127.0.0.1:$fake_github_port/__fixture/repos" 2>"$work/curl" ||
+    fail setup "seed the fake GitHub with $default_repo" "$(<"$work/curl")"
+  seeded_github=1
+  pass setup "seeded the fake GitHub with $default_repo, its head $commit_two, $commit_lookalike and pull request 7"
+fi
 
 # --- check: a check's attributes, and the `when` the schema does not know ------------------------
 
@@ -598,26 +644,17 @@ expect move "r1 keeps both edges that serve it through the move" 2 \
 
 # --- result: recording one, and the two refusals a result's own fields earn ----------------------
 
-if [[ "$default_repo_mapped" != 0 ]]; then
-  skip result "record a pass for c1: $project already maps a default repository, and a result at a commit that repository does not hold is refused, so this run cannot record one"
-  skip result "the record prints the pull-request body line: no result was recorded to print it"
-else
-  record result "record a pass for c1" "$root" --check c1 --role tester --verdict pass \
-    --commit "$commit_one" --surface cli --run "bash e2e/acceptance/verification.sh" \
-    --observed "every check passed" --negative-control "Deleted the check and the flag came back."
-  grep -qF "Pull request body line:" "$work/out" ||
-    fail result "the record prints the pull-request body line" "$(<"$work/out")"
-  pass result "the record prints the pull-request body line"
-fi
+record result "record a pass for c1" "$root" --check c1 --role tester --verdict pass \
+  --commit "$commit_one" --surface cli --run "bash e2e/acceptance/verification.sh" \
+  --observed "every check passed" --negative-control "Deleted the check and the flag came back."
+grep -qF "Pull request body line:" "$work/out" ||
+  fail result "the record prints the pull-request body line" "$(<"$work/out")"
+pass result "the record prints the pull-request body line"
 
 run result "read the results of $root" results --issue "$root"
-if [[ "$default_repo_mapped" != 0 ]]; then
-  skip result "the results read shows the pass under c1: no result was recorded to read"
-else
-  grep -qE "^- c1 \(before_merge\): pass at ${commit_one} by tester, " "$work/out" ||
-    fail result "the results read shows the result under c1" "$(<"$work/out")"
-  pass result "the results read shows the pass under c1"
-fi
+grep -qE "^- c1 \(before_merge\): pass at ${commit_one} by tester, " "$work/out" ||
+  fail result "the results read shows the result under c1" "$(<"$work/out")"
+pass result "the results read shows the pass under c1"
 grep -qF -- "- cnone (before_merge): no result yet." "$work/out" ||
   fail result "a check with no result says so" "$(<"$work/out")"
 pass result "a check nobody has run reads no result yet"
@@ -634,20 +671,13 @@ refused_result result "a pass counting a skipped case" "$root" \
 # --- closed: the one write a closed issue takes --------------------------------------------------
 
 close_issue closed "$child"
-if [[ "$default_repo_mapped" != 0 ]]; then
-  skip closed "record a pass for the after-merge check on the closed $child: $project already maps a default repository, and a result at a commit that repository does not hold is refused, so this run cannot record one"
-  # The closed-issue refusal is read after the commit's own, so this POST would be refused
-  # RESULT_COMMIT_UNKNOWN rather than ISSUE_CLOSED here, which says nothing about a closed issue.
-  skip closed "a result for a before-merge check on a closed issue: the commit would be refused first"
-else
-  record closed "record a pass for the after-merge check on the closed $child" "$child" \
-    --check cafter --role tester --verdict pass --commit "$commit_two" --surface api \
-    --run "curl the production route" --observed "the production route answered"
-  refused_result closed "a result for a before-merge check on a closed issue" "$child" \
-    "$(jq -cn --arg s "$session" --arg c "$commit_two" \
-      '{actor: {kind: "session", id: $s}, check: "cbefore", role: "tester", verdict: "pass", commit: $c}')" \
-    ISSUE_CLOSED 409
-fi
+record closed "record a pass for the after-merge check on the closed $child" "$child" \
+  --check cafter --role tester --verdict pass --commit "$commit_two" --surface api \
+  --run "curl the production route" --observed "the production route answered"
+refused_result closed "a result for a before-merge check on a closed issue" "$child" \
+  "$(jq -cn --arg s "$session" --arg c "$commit_two" \
+    '{actor: {kind: "session", id: $s}, check: "cbefore", role: "tester", verdict: "pass", commit: $c}')" \
+  ISSUE_CLOSED 409
 
 printf 'A note the closed issue must refuse.\n' >"$work/note.md"
 send POST "/api/v1/issues/$child/artifacts" "$(document_body "$child" note.md "$work/note.md")"
@@ -793,8 +823,11 @@ currency_repo="acme/verification-$$"
 if [[ -z "$fake_github_port" ]]; then
   skip currency "a result at the pull request's head reads current: FAKE_GITHUB_PORT is unset; only a server reading the harness's fake GitHub can be told a pull request's head"
 else
-  if [[ "$default_repo_mapped" != 0 ]]; then
-    skip currency "a result at the pull request's head reads current: $project already names a default repository, which this section would replace"
+  if [[ -n "$default_repo" ]]; then
+    # The mapped repository is this section's: the setup gave the fake that repository, the head
+    # gh named, the look-alike and pull request 7, and PROJECT already names it, so this section
+    # seeds nothing and maps nothing of its own.
+    currency_repo="$default_repo"
   else
     curl -sS -o /dev/null -X PUT -H 'Content-Type: application/json' --data-binary "$(
       jq -cn --arg r "$currency_repo" --arg k "$root" --arg sha "$commit_two" \
@@ -813,27 +846,27 @@ else
     want_status 200 currency "map $currency_repo as $project's default repository"
     mapped="$currency_repo"
     pass currency "mapped $currency_repo as $project's default repository"
-
-    # The incident, driven: a result at a commit that reads like the head, and then the head's
-    # own results, the last of which is the one the read must name.
-    record currency "record a pass at the commit that reads like the head" "$root" --check c1 \
-      --role tester --verdict pass --commit "$commit_lookalike" --surface cli \
-      --run "bash e2e/acceptance/verification.sh"
-    record currency "record a pass at the pull request's head" "$root" --check c1 --role tester \
-      --verdict pass --commit "$commit_two" --surface cli --run "bash e2e/acceptance/verification.sh"
-    record currency "record the newest pass at the pull request's head" "$root" --check c1 \
-      --role tester --verdict pass --commit "$commit_two" --surface cli \
-      --run "bash e2e/acceptance/verification.sh" --observed "the last of the three results"
-    run currency "read the results of $root" results --issue "$root"
-    grep -qE "^- c1 \(before_merge\): pass at ${commit_two} by tester, current\." "$work/out" ||
-      fail currency "the newest result reads current" "$(<"$work/out")"
-    pass currency "the newest result reads current and prints all forty characters of the pull request's head, so the look-alike's own characters cannot stand in for it"
-
-    refused_result currency "a result at a commit $currency_repo does not hold" "$root" \
-      "$(jq -cn --arg s "$session" --arg c "$commit_unknown" \
-        '{actor: {kind: "session", id: $s}, check: "c1", role: "tester", verdict: "pass", commit: $c}')" \
-      RESULT_COMMIT_UNKNOWN 400
   fi
+
+  # The incident, driven: a result at a commit that reads like the head, and then the head's
+  # own results, the last of which is the one the read must name.
+  record currency "record a pass at the commit that reads like the head" "$root" --check c1 \
+    --role tester --verdict pass --commit "$commit_lookalike" --surface cli \
+    --run "bash e2e/acceptance/verification.sh"
+  record currency "record a pass at the pull request's head" "$root" --check c1 --role tester \
+    --verdict pass --commit "$commit_two" --surface cli --run "bash e2e/acceptance/verification.sh"
+  record currency "record the newest pass at the pull request's head" "$root" --check c1 \
+    --role tester --verdict pass --commit "$commit_two" --surface cli \
+    --run "bash e2e/acceptance/verification.sh" --observed "the last of the three results"
+  run currency "read the results of $root" results --issue "$root"
+  grep -qE "^- c1 \(before_merge\): pass at ${commit_two} by tester, current\." "$work/out" ||
+    fail currency "the newest result reads current" "$(<"$work/out")"
+  pass currency "the newest result reads current and prints all forty characters of the pull request's head, so the look-alike's own characters cannot stand in for it"
+
+  refused_result currency "a result at a commit $currency_repo does not hold" "$root" \
+    "$(jq -cn --arg s "$session" --arg c "$commit_unknown" \
+      '{actor: {kind: "session", id: $s}, check: "c1", role: "tester", verdict: "pass", commit: $c}')" \
+    RESULT_COMMIT_UNKNOWN 400
 fi
 
 # --- close: the issues the run wrote -------------------------------------------------------------

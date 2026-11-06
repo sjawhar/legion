@@ -20,7 +20,8 @@ const repository = "acme/widgets";
 const sharedPrefix = "a1b2c3d4e5f6";
 /** The head of the pull request Dispatch holds for the issue. */
 const head = `${sharedPrefix}${"0".repeat(28)}`;
-/** A commit no repository holds, whose first twelve characters are the head's. */
+/** A commit of the repository that heads no pull request, whose first twelve characters are
+ *  the head's. */
 const mistyped = `${sharedPrefix}${"9".repeat(28)}`;
 
 /** The spec the check serves. A `serves` pointer is refused unless it names a block that
@@ -53,11 +54,13 @@ test("a result's line names the whole commit, so a result at a mistyped commit i
   await putRepoProject(repository, { default: true, project: "VER" });
   const issue = await createIssue({ project: "VER", spec, title: "Whole commits in a result" });
   // A result at a commit the repository does not hold is refused (`refuseUnknownCommit`), so the
-  // mistyped commit is seeded as one the fake GitHub answers for. It is named by no pull
-  // request, which is what keeps it a commit of its own rather than another name for the head.
+  // mistyped commit is seeded as one the fake GitHub answers for: `commits` is the field that
+  // says the repository holds it and nothing else does, which is what keeps it a commit of its
+  // own rather than another name for the head.
   await seedFakeGithub({
     [repository]: {
-      commit_pulls: { [head]: [7], [mistyped]: [] },
+      commit_pulls: { [head]: [7] },
+      commits: [mistyped],
       contents: "read",
       installation_id: 256,
       pull_requests: "read",
