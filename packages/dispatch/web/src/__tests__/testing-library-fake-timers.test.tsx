@@ -17,22 +17,35 @@ function Later(): ReactNode {
   return <div>{shown ? "later" : "not yet"}</div>;
 }
 
-// What this test holds in place is the global `jest` that `setup.ts` assigns. Testing Library
-// asks two things before it moves a clock: first `typeof jest !== 'undefined'`, then whether
-// `setTimeout` carries a `clock` property or an `_isMockFunction` flag - the two halves of
-// `jestFakeTimersAreEnabled` in @testing-library/dom@10.4.1 `dist/helpers.js`. The second half is
-// the one a later Bun could break without a single wait failing anywhere, because a suite that
-// stays green shows nothing of it, so it is asserted here rather than left to be noticed. The
-// `findBy` at the end is the behaviour the preload's line exists for; the two assertions above it
-// are what turn a removal of that line, or a change in Bun, into a red test that names the cause
-// rather than a timeout somewhere else that names nothing.
+// What this holds in place is the global `jest` of `setup.ts`. Testing Library asks
+// `typeof jest !== 'undefined'` to decide whether to advance the clock inside `waitFor` and
+// `findBy*` (`jestFakeTimersAreEnabled`, @testing-library/dom@10.4.1,
+// dist/@testing-library/dom.esm.js:171), and Bun's `jest` is a module binding from `bun:test`,
+// not a global. Without the line the library takes its real-clock path, which polls with timers
+// a held clock need not fire, so a wait that needs the clock to move can never end: that is the
+// 16 failures dispatch://INFRA-983 measured over four of its files on a 2-core pod.
+//
+// Measured here, and the reason this test is shaped as it is: the first assertion is the half
+// that discriminates. With the line removed it fails naming the missing global; the `findBy`
+// below passes either way on this pod, because something outside the held clock still delivers
+// the effect's timer here (a timer scheduled under `jest.useFakeTimers()` does not fire on its
+// own: a probe of one ran to its 20 s deadline). So the wait below is the behaviour the line
+// exists for rather than a discriminator on this machine, and the assertion above it is what
+// turns a removal into a red test instead of a timeout that names nothing.
+//
+// `jestFakeTimersAreEnabled` has a second half, and the second assertion below is it: after the
+// global, the library asks whether `setTimeout` carries a `clock` property or an
+// `_isMockFunction` flag (@testing-library/dom@10.4.1, dist/helpers.js). Measured here under
+// `jest.useFakeTimers()`: `clock` is an own property of `setTimeout` and `_isMockFunction` is
+// `undefined`. That half is the one a later Bun could break with no wait failing anywhere, so a
+// green suite would show nothing of it, and it is asserted rather than left to be noticed.
+//
+// The test carries no deadline of its own: `setup.ts` sets Bun's per-test deadline for the
+// package (dispatch://INFRA-1505).
 test("a Testing Library wait advances the fake clock a test installed", async () => {
   jest.useFakeTimers();
 
   expect(typeof (globalThis as { jest?: unknown }).jest).toBe("object");
-
-  // Measured in this pod under `jest.useFakeTimers()`: `clock` is an own property of `setTimeout`
-  // and `_isMockFunction` is `undefined`, so either mark satisfies Testing Library's second half.
   expect(
     Object.hasOwn(setTimeout, "clock") ||
       (setTimeout as unknown as { _isMockFunction?: boolean })._isMockFunction === true

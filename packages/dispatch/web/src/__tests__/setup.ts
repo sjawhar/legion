@@ -137,7 +137,7 @@ afterEach(resetPinState);
 // otherwise make the next test's first answer start every waiting write's backoff over.
 afterEach(resetReachability);
 
-// A fake clock a test installed is restored here as well as in the test's own `finally`, because
+// A fake clock a test installed is put back here as well as in that test's own `finally`, because
 // Bun keeps it across files: a test that installs it and then fails before its `try` - an awaited
 // helper of its own, say - would otherwise leave every later test in the process, and every later
 // file, with timers that never fire, so one regression reads as timeouts everywhere and the real

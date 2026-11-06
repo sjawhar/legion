@@ -875,7 +875,7 @@ test("rejecting a suggestion on part of an identifier in an approved spec leaves
   }
 });
 
-test("an approval request for an unassigned issue's non-primary document remains actionable while the primary is draft @phone", async ({
+test("an approval request for an unassigned issue's non-primary document remains actionable while the primary is draft", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "GATE", name: "Gate" });
@@ -931,9 +931,6 @@ test("an approval request for an unassigned issue's non-primary document remains
     // Every open issue ask remains visible in the issue margin; the target being a secondary
     // document must not hide this decision while the primary approval stays draft.
     await page.goto(`/issues/${issue.key}/artifacts/${supporting.artifact.slug}`);
-    if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: "Open review panel (1 open ask)" }).click();
-    }
     const margin = needsYouCards(page);
     const nonPrimaryMarginCard = margin.getByTestId(`ask-${nonPrimary.ask.id}`);
     await expect(nonPrimaryMarginCard).toBeVisible();
@@ -1028,9 +1025,9 @@ test("an approval ask's Inbox row, drawer link and bare ask route land on the sp
   }
 });
 
-test("an open approval ask's document link reaches the issue's Conversation, and a project document's own approval link reaches its document, while the margin omits the link on both @phone", async ({
+test("an open approval ask's document link reaches the issue's Conversation, and a project document's own approval link reaches its document, while the margin omits the link on both", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "GATE", name: "Gate" });
   const issue = await createIssue(
     { project: "GATE", spec: "The plan.", title: "Design gate" },
@@ -1062,15 +1059,9 @@ test("an open approval ask's document link reaches the issue's Conversation, and
     await expect(page).toHaveURL(`/issues/${issue.key}/spec?ask=${requested.ask.id}`);
 
     // The issue margin lists the same ask (it is already on that document), without the link.
-    if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: "Open review panel (1 open ask)" }).click();
-    }
     const marginCard = needsYouCards(page).getByTestId(`ask-${requested.ask.id}`);
     await expect(marginCard).toBeVisible();
     await expect(marginCard.getByRole("link", { name: /spec\.md, version/ })).toHaveCount(0);
-    if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: "Close review panel (1 open ask)" }).click();
-    }
 
     // A project-level document's approval request links its own document the same way. A
     // document has no assignee, so the Unassigned filter is where the Inbox lists it. The link
@@ -1086,9 +1077,6 @@ test("an open approval ask's document link reaches the issue's Conversation, and
     await expect(inboxLink).toHaveAttribute("href", docPath);
 
     await page.goto(`/projects/GATE/documents/${doc.artifact.slug}`);
-    if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: "Open review panel (1 open ask)" }).click();
-    }
     const docMarginCard = needsYouCards(page).getByTestId(`ask-${docApproval.ask.id}`);
     await expect(docMarginCard).toBeVisible();
     await expect(docMarginCard.getByRole("link", { name: /runbook\.md, version/ })).toHaveCount(0);

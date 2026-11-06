@@ -631,6 +631,8 @@ test("a document the editor is refused admission to leaves the column on the car
 });
 
 test("a selection changed twice inside the settle opens the second document alone", async () => {
+  // On the fake clock from the first render, so the settle of the first selection is a timer this
+  // test moves the clock past rather than a wait of its own.
   jest.useFakeTimers();
   const { opened, rerender, runtime, view } = renderPane({
     ask: decisionAsk({ id: "ask-1" }),
