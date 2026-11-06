@@ -8,7 +8,13 @@ body: |-
   `POST /v1/roles/set` takes `client_instance_id`, and where the role is already held under the
   claimant's own session id it decides on the standing claim rather than on the session record:
   granted where the claim names that very process, granted where nobody renewed the claim inside
-  the listener's live window, and otherwise refused `409` naming the holder. A hard claim is
+  the listener's live window and the role claim view can answer, and otherwise refused `409`
+  naming the holder. That renewal arm is read only while the view answers, because nothing but a
+  registration renews a claim and a registration renews through that very view: while a listener
+  restart leaves the view refilling, the arm answers the bus-unavailable `503` with
+  `Retry-After: 1` naming it and claims nothing, so a refill longer than the live window hands
+  no live holder's role to a second process; a claim from the process the standing claim names
+  rests on no renewal and is granted through the refill. A hard claim is
   unchanged, and the predecessor rule is unchanged, still reading the claimant's stored instance
   where the request states none. `POST /v1/interests/subscribe` renews every claim the
   registering session holds that names the registering process, and the first such registration

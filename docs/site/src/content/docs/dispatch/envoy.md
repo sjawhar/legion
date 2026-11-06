@@ -340,10 +340,15 @@ made it and the moment that process last answered for it, which is every registr
 process sends, so a second process that resumes a live session's id is refused the role that
 session holds (`409` naming the session), and its hand-back of the role's topic frees nothing,
 while the process holding the claim keeps the role through both. The second process is granted
-the role once the first stops answering for the claim and the live window passes. `GET
-/v1/roles/<role>` answers the holding process's `client_instance_id` beside the holder's session
-id, which is how a refused claimant tells its own session id held by another process from a
-different session.
+the role once the first stops answering for the claim and the live window passes, and only
+while Envoy can read its own view of the role claims: a listener that has just restarted is
+still filling that view, and nothing renews a claim while it cannot be read, so that one grant
+answers `503` with `Retry-After: 1` and claims nothing until the view answers again, rather
+than hand a live holder's role away because its renewal aged with nothing able to move it. A
+claim from the process the standing claim already names is granted through that refill, since
+it takes the role from nobody. `GET /v1/roles/<role>` answers the holding process's
+`client_instance_id` beside the holder's session id, which is how a refused claimant tells its
+own session id held by another process from a different session.
 
 Dispatch judges a role route's holder by the same two windows, and both processes carry the same
 values: give every listener of a deployment and Dispatch's server the same

@@ -36,11 +36,16 @@ another process still runs keeps the role, and the claim is refused naming that 
 of a role already held under this session's own id is decided on the standing claim rather than
 on the registration: the listener grants it to the process that claim names, grants it once
 nobody renewed the claim inside its live window, and otherwise refuses it naming this very
-session. A refused session keeps running and stays registered, without the role: it does not
-claim again at each heartbeat, and it takes the role on its next session event once the holder is
-gone. The one refusal a heartbeat does ask about again is that last one — the lookup naming this
-session as the holder under another process — which the listener grants as soon as that process
-stops renewing its claim. Each extension instance mints its client instance id when it starts and
+session. A session refused a role it does not hold keeps running and stays registered, without
+the role: it does not claim again at each heartbeat, and it takes the role on its next session
+event once the holder is gone. The one refusal a heartbeat does ask about again is that last
+one — the lookup naming this session as the holder under another process — which the listener
+grants as soon as that process stops renewing its claim. Each healthy heartbeat also re-asserts
+a role this session already holds, and confirms it only when the lookup names this session and
+this process; a re-assertion the listener refuses naming this session's own id is that other
+process's standing claim, so the role stays held here, nothing is recorded, nothing is said,
+and the next heartbeat asks again, while a refusal naming a different session ends the role
+here. Each extension instance mints its client instance id when it starts and
 sends it on every registration, on every claim and release, and on the deregistration at
 shutdown, where the listener removes the registration only while it carries the same id or none.
 A registration also renews every role claim this session holds that names this same instance,

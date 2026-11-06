@@ -13,6 +13,15 @@ body: |-
   A claim the listener refused because the lookup names this very session under another process
   is asked again on each heartbeat pass, so a relaunched role is no longer stranded by a stale
   claim; every other refusal stays latched until a session event lands.
+
+  A heartbeat's re-assertion of a role this session already holds now confirms it only when the
+  lookup names this session and this process, a holder naming no process being read as this
+  one's, so a lane whose role a continuation took under this very session's id claims again
+  instead of reading itself as the holder for ever and never handing the role back. The refusal
+  that re-assertion may get is weighed on the session it names: one naming this session's own id
+  is the other process's standing claim, so the role stays held here, no refusal is latched,
+  nothing is said, and the next heartbeat asks again; one naming a different session ends the
+  role here as before.
 time: 2026-11-06T17:29:51.000000000Z
 custom:
     Issue: pr2875
