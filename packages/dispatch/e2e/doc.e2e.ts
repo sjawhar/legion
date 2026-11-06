@@ -120,7 +120,8 @@ test("the spec opens as a formatted, editable document with no source pane", asy
 // than push the table, and the page with it, sideways.
 test("a spec whose table holds an unbreakable token keeps the page within the screen @phone", async ({
   browser,
-}) => {
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "only a phone screen is narrower than the token");
   await createProject({ key: "READ", name: "Readable" });
   const issue = await createIssue({
     project: "READ",

@@ -417,7 +417,8 @@ test("the page reads the agent list once, asks nothing per agent, and shows a re
 // read, no per-agent read, a rename and a stop - is the same work at any width.
 test("a claimed issue's Conversation fits a phone screen with its agent turns @phone", async ({
   browser,
-}) => {
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "a page fits a phone screen only at a phone width");
   const seeded = await seed();
   const alice = await asUser(browser, "alice");
   try {

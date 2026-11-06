@@ -1076,7 +1076,8 @@ test("the board groups into priority swimlanes on a toggle that persists per sig
 // touch target; what the toggles do is the two walks above, which assert it at any width.
 test("the board's view, lanes and edge toggles keep touch-sized targets @phone", async ({
   browser,
-}) => {
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "the 44 px touch rule applies below 1280 px");
   await createProject({ key: "CORE", name: "Core" });
   await createIssue({ project: "CORE", title: "Toggle card" });
 

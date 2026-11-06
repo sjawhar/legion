@@ -91,6 +91,7 @@ test("project filters stay collapsed until needed and margin asks use the compac
 // the page a phone's width can push sideways; the row above walks the same board at 1280 px,
 // where there is room for them.
 test("the project board's columns stay inside the screen @phone", async ({ browser }, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "only a phone screen is narrower than the columns");
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Polish the queue" });
   await patchIssue(issue.key, { status: "todo" });

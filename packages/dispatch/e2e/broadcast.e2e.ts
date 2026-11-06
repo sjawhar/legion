@@ -277,6 +277,7 @@ test("a broadcast written as a numbered list renders as a list on the broadcast 
 test("a Broadcasts row keeps its sender above its link and fits the screen @phone", async ({
   browser,
 }, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "the row stacks, and the page fits, only below xl");
   await setLiveSessions([planner]);
   // Longer than the row is wide on any project's viewport, so the preview has something to cut.
   await createBroadcast({
