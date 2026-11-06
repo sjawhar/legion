@@ -12,10 +12,28 @@ and a socket under it, or under a directory made from it (an `XDG_RUNTIME_DIR`, 
 directory a test sets to `t.TempDir()`), a temporary directory of about 20 bytes is enough to pass
 the limit, as on a dev box whose `TMPDIR` is on a data disk.
 
-- Put a test's socket under a short directory of its own: `os.MkdirTemp("", "<short prefix>")`,
-  removed in `t.Cleanup`. A package that binds sockets in its tests keeps one helper for it,
-  `shortTempDir` (`packages/daemon/internal/daemon/daemon_test.go` is one). Use the package's
-  helper, or add one where the package has none.
+- Take a test's socket directory from the module's `internal/testtmp`, the one helper every test
+  that binds a socket calls (`packages/daemon/internal/testtmp`, and the same file in
+  `packages/envoy`). `testtmp.Dir(t, longest)` is a fresh directory of the test's own, removed
+  when the test ends, where `longest` is the longest path the test puts inside it, written
+  relative to the directory (`"g9/.s.PGSQL.5432"`); `testtmp.Socket(t, name)` is the path of a
+  socket named `name` in such a directory. `Dir` makes the directory under `TMPDIR` and measures
+  what `longest` would come to there; only when that passes 107 bytes, or `TMPDIR` holds no
+  directory at all, does it fall back to `/tmp`, and it says so with `t.Logf` when it does. Each
+  module's `internal/testtmp` keeps a test that fails a new `os.TempDir()`, or a new
+  `os.MkdirTemp` given a directory to write in, anywhere in that module's tests.
+- Two sites keep a directory of their own on purpose.
+  `packages/daemon/internal/shim/socketpath_test.go`'s `roleTempDir` builds a deliberately long
+  one, as long as the `TMPDIR` a Legion role is told, so that its test proves sockets still bind
+  where a role runs; a short directory would take the proof away. The once-per-binary build
+  directories (`cmd/legion/main_test.go` and four others) bind no socket, so they need no byte
+  budget, and no `*testing.T` outlives them, so they keep `os.MkdirTemp("", …)` and a removal in
+  their package's `TestMain`.
+- A package whose tests change a process variable, `TMPDIR` above all, runs no `t.Parallel()`
+  test: `t.Setenv` fences the test that calls it, not a sibling running beside it, which would
+  read the changed value or have its own taken away. A test that must unset a variable calls the
+  module's `fixtureenv.Unset`, never a bare `os.Unsetenv`, since `Unset` goes through `t.Setenv`
+  and so has Go put back what the process held when the test ends.
 - Before you call a test that binds a socket done, run it with a temporary directory of about 64
   bytes. A pass under `/tmp` does not show that the test works under a longer one. Set `GOTMPDIR`
   as well, since `t.TempDir()` reads it first:
