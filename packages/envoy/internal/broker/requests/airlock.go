@@ -43,8 +43,11 @@ var ErrAirlockNoNames = errors.New("this grant holds no airlock name the session
 //   - SlotGitHubPrefix + owner: one installation of a github-app secret, the owner lower-cased;
 //   - SlotAzureFederated: an azure-login secret's federated token.
 //
-// The set is open, not closed: the proxy adds azure-access:<scope> when it exchanges the
-// federated token, so nothing may assume a slot it does not know is a mistake.
+// The set is open, not closed: the proxy adds one slot per exchange it makes of an azure-login
+// secret's federated token, opening with SlotAzureAccessPrefix and carrying the token endpoint
+// and the scope of that exchange (internal/broker/airlockproxy's azure.go, which writes and
+// reads that text and is the only code that does). Nothing may assume a slot it does not know
+// is a mistake.
 const (
 	SlotValue              = "value"
 	SlotAWSAccessKeyID     = "aws-access-key-id"
@@ -52,6 +55,7 @@ const (
 	SlotAWSSessionToken    = "aws-session-token"
 	SlotGitHubPrefix       = "github:"
 	SlotAzureFederated     = "azure-federated"
+	SlotAzureAccessPrefix  = "azure-access:"
 )
 
 // airlockKindAWS is the airlock entry kind of a stored AWS key pair, the one entry kind that
@@ -156,6 +160,38 @@ func (m *Machine) mintPlaceholders(ctx context.Context, grantID string, expires 
 		return nil, err
 	}
 	return placeholdersOf(ctx, m.Store.Pool, grantID)
+}
+
+// AirlockAccessPlaceholder answers the placeholder that stands for one access token of grantID's
+// name, minting its row the first time and answering the same string after. slot is the
+// access-token slot the proxy encoded the exchange into (SlotAzureAccessPrefix and the exchange
+// it made), so a second exchange of one scope - by this pod or by another one - is answered the
+// placeholder the first was, and the command's token keeps working wherever its next connection
+// lands.
+//
+// The row is one of the grant's own, written with the grant's expiry like every other: it opens
+// a connection of that grant while it lives, it goes when the grant's rows go
+// (deleteSpentPlaceholders), and AirlockConnection answers it among the name's slots.
+func (m *Machine) AirlockAccessPlaceholder(ctx context.Context, grantID, name, slot string) (string, error) {
+	if !strings.HasPrefix(slot, SlotAzureAccessPrefix) {
+		return "", fmt.Errorf("airlock: %q is no access-token slot", slot)
+	}
+	var expires *time.Time
+	if err := m.Store.Pool.QueryRow(ctx, `select expires_at from grants where id=$1`, grantID).Scan(&expires); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", ErrGrantNotLive
+		}
+		return "", err
+	}
+	minted, err := m.mintPlaceholders(ctx, grantID, expires, map[string][]string{name: {slot}})
+	if err != nil {
+		return "", err
+	}
+	placeholder := minted[name][slot]
+	if placeholder == "" {
+		return "", fmt.Errorf("airlock: no placeholder was minted for %s's access token", name)
+	}
+	return placeholder, nil
 }
 
 // deleteSpentPlaceholders deletes the placeholders of every grant that is revoked or has expired,

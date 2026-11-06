@@ -9,7 +9,6 @@ import (
 	"cmp"
 	"context"
 	"errors"
-	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httputil"
@@ -152,6 +151,7 @@ func (s *Server) DropName(name string) {
 	for _, held := range s.values {
 		held.drop(name)
 	}
+	s.dropAccess(name)
 }
 
 // serveBound answers one request on a connection the proxy decrypted: the whole of what the
@@ -193,20 +193,23 @@ func (s *Server) serveBound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	chosen := choosePair(candidates, info.grant, request)
-	placeholder := info.grant.Names[chosen.name].Slots[chosen.slot]
-	if entry := s.rules.Lookup(chosen.name); entry != nil && entry.Kind != "" {
-		// The seam for the two entry kinds whose value is not a string a header carries. An
-		// entry of kind "aws" is a key pair the call has to be signed with rather than a
-		// header it carries; one of kind "azure" is a federated token that has to be exchanged
-		// for an access token first. Each needs a step the proxy does not carry yet, so such a
-		// name is refused here, naming its kind, rather than forwarded with nothing swapped -
-		// which would send the command's placeholder to the service and read as the service's
-		// refusal. Every other entry - a stored secret, a google-login's access token, a
-		// github-app installation's - is one slot's string in one header, which is what the
-		// swap below does.
-		s.refuse(w, info, r, chosen, http.StatusForbidden, fmt.Sprintf("the airlock does not yet carry %s, a secret of kind %q", chosen.name, entry.Kind))
-		return
+	// The entry's kind is what the value behind this name is: "" a string a header carries,
+	// which the swap below puts there; "aws" a key pair the call itself has to be signed with
+	// (aws.go); "azure" a federated token that has to be exchanged at a token endpoint for an
+	// access token (azure.go). Validate allows no other kind, so an entry this reads nothing
+	// for is a header swap.
+	kind := ""
+	if entry := s.rules.Lookup(chosen.name); entry != nil {
+		kind = entry.Kind
 	}
+	exchange := kind == airlockKindAzure && isTokenRequest(r)
+	if exchange {
+		// A token request carries the grant's placeholder in its form rather than in a header,
+		// so what it is handled for is the federated slot whatever choosePair read of its
+		// headers. The exchange below checks the form itself.
+		chosen.slot = requests.SlotAzureFederated
+	}
+	placeholder := info.grant.Names[chosen.name].Slots[chosen.slot]
 	values, err := s.valuesFor(r.Context(), info.grant.GrantID)
 	if err != nil {
 		// The full release checks refused this grant. ErrGrantNotLive is 407 as the connection
@@ -224,11 +227,22 @@ func (s *Server) serveBound(w http.ResponseWriter, r *http.Request) {
 		s.refuse(w, info, r, chosen, http.StatusForbidden, "the broker released no value for "+chosen.name)
 		return
 	}
-	value, ok := secret.Slots[chosen.slot]
-	if !ok {
+	value, held := secret.Slots[chosen.slot]
+	switch {
+	case held:
+	case isAzureAccessSlot(chosen.slot):
+		// An access token of an exchange some pod made: the broker holds no value for such a
+		// slot, and this pod either holds the token already or exchanges for itself to get it.
+		value, err = s.azureAccess(r.Context(), info, chosen, secret)
+		if err != nil {
+			s.refuse(w, info, r, chosen, http.StatusForbidden, err.Error())
+			return
+		}
+	default:
 		// The grant holds a placeholder for a slot the broker's read of this name no longer
 		// fills: a github-app whose installation on that owner has gone since the release.
-		// Refused rather than forwarded, for the reason the kind seam above is refused.
+		// Refused rather than forwarded with the placeholder in it, which would read as the
+		// service's own refusal.
 		s.refuse(w, info, r, chosen, http.StatusForbidden, "the broker released no "+chosen.slot+" value for "+chosen.name)
 		return
 	}
@@ -238,21 +252,41 @@ func (s *Server) serveBound(w http.ResponseWriter, r *http.Request) {
 		s.refuse(w, info, r, chosen, http.StatusForbidden, why)
 		return
 	}
-	rewritten := airlock.Rewrite(s.rules, grant, value, request)
-	if rewritten == nil {
-		// Decide and Rewrite take the one decision (airlock.check), so this is unreachable;
-		// refusing rather than forwarding is what keeps it unreachable and harmless if the two
-		// ever part.
-		s.refuse(w, info, r, chosen, http.StatusForbidden, "the swap refused a request the decision allowed")
+	if exchange {
+		// The one request the proxy answers itself: the broker makes the exchange with the
+		// real federated token and hands the command a placeholder access token.
+		s.exchangeToken(w, info, r, chosen, value)
 		return
 	}
 
-	header := headerOf(rewritten.Headers)
-	// Hop-by-hop headers of the proxy itself, which belong to this connection and not to the
-	// service. The swap has already run, so a header the entry names keeps its value whatever
-	// these were.
+	// What the request leaves with: its headers and its query. A header swap changes the
+	// headers the entry names and nothing else; the AWS path replaces the signature, which is
+	// the Authorization header, the date, the session token and the canonical query.
+	header, rawQuery := http.Header(nil), r.URL.RawQuery
+	if kind == airlockKindAWS {
+		signed, signedQuery, why := s.signAWS(r.Context(), r, hostHeaderOf(info.target), info.grant.Names[chosen.name].Slots, secret.Slots)
+		if why != "" {
+			s.refuse(w, info, r, chosen, http.StatusForbidden, why)
+			return
+		}
+		header, rawQuery = signed, signedQuery
+	} else {
+		rewritten := airlock.Rewrite(s.rules, grant, value, request)
+		if rewritten == nil {
+			// Decide and Rewrite take the one decision (airlock.check), so this is
+			// unreachable; refusing rather than forwarding is what keeps it unreachable and
+			// harmless if the two ever part.
+			s.refuse(w, info, r, chosen, http.StatusForbidden, "the swap refused a request the decision allowed")
+			return
+		}
+		header = headerOf(rewritten.Headers)
+	}
+	// Headers of the proxy itself, which belong to this connection and not to the service. The
+	// swap and the signature have already run, so a header the entry names keeps its value and
+	// the signature covers neither of these.
 	header.Del("Proxy-Authorization")
 	header.Del("Proxy-Connection")
+
 	answer := &statusWriter{ResponseWriter: w}
 	proxy := &httputil.ReverseProxy{
 		Transport: s.upstream,
@@ -266,7 +300,7 @@ func (s *Server) serveBound(w http.ResponseWriter, r *http.Request) {
 				Host:     info.target,
 				Path:     r.URL.Path,
 				RawPath:  r.URL.RawPath,
-				RawQuery: r.URL.RawQuery,
+				RawQuery: rawQuery,
 			}
 			pr.Out.Host = hostHeaderOf(info.target)
 			pr.Out.Header = header

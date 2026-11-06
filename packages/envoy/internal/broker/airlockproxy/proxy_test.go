@@ -104,6 +104,10 @@ type fakeGrants struct {
 	valuesErr   error
 	valueCalls  map[string]int
 	connCalls   int
+	// access is the placeholder each (grant, name, slot) of an exchange was minted, as the
+	// broker's own table holds it: minted once and answered again after.
+	access      map[string]string
+	accessCalls int
 }
 
 func newFakeGrants() *fakeGrants {
@@ -112,6 +116,7 @@ func newFakeGrants() *fakeGrants {
 		refusals:    map[string]error{},
 		values:      map[string]map[string]requests.AirlockSecret{testGrantID: storedValues(workerName, workerValue)},
 		valueCalls:  map[string]int{},
+		access:      map[string]string{},
 	}
 }
 
@@ -154,6 +159,44 @@ func (f *fakeGrants) valueReads(grantID string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.valueCalls[grantID]
+}
+
+// AirlockAccessPlaceholder is the broker's mint of one access token's placeholder: the same
+// string for one (grant, name, slot) however often it is asked for, and written into the
+// grant's names, as the broker's own row is, so a connection opened after it carries it and one
+// opened before does not.
+func (f *fakeGrants) AirlockAccessPlaceholder(_ context.Context, grantID, name, slot string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.accessCalls++
+	key := grantID + "\x00" + name + "\x00" + slot
+	placeholder, minted := f.access[key]
+	if !minted {
+		placeholder = fmt.Sprintf("%saccessToken%021d", requests.PlaceholderPrefix, len(f.access))
+		f.access[key] = placeholder
+	}
+	for password, conn := range f.connections {
+		held, carries := conn.Names[name]
+		if conn.GrantID != grantID || !carries {
+			continue
+		}
+		// Copied rather than written to: a connection already open is reading the map it was
+		// handed, and the row this mints reaches it only on its next connection.
+		slots := maps.Clone(held.Slots)
+		slots[slot] = placeholder
+		names := maps.Clone(conn.Names)
+		names[name] = requests.AirlockGrantName{Slots: slots, Kind: held.Kind}
+		conn.Names = names
+		f.connections[password] = conn
+	}
+	return placeholder, nil
+}
+
+// accessMints is how many exchanges asked the broker for a placeholder.
+func (f *fakeGrants) accessMints() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.accessCalls
 }
 
 // seenRequest is one request the stand-in service received, as the rows read it.
@@ -345,11 +388,29 @@ func (r *rig) requests() []seenRequest {
 	return append([]seenRequest(nil), r.seen...)
 }
 
-// client is a command's own HTTP client, pointed at the proxy with password as its proxy
-// password and trusting the proxy's authority.
+// answerWith is what the stand-in service answers from here on, in place of its one line: a row
+// whose point is what the service received - the signature it verifies, the token it is given,
+// the upgrade it answers - writes that answer here.
+func (r *rig) answerWith(answer func(w http.ResponseWriter, req *http.Request)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.answer = answer
+}
+
+// client is a command's own HTTP client, pointed at the rig's proxy with password as its proxy
+// password and trusting the proxy's authority. Each call makes a client of its own, so two of
+// them are two connections, which is what a command's second call after a pod minted something
+// for it is.
 func (r *rig) client(password string) *http.Client {
 	r.t.Helper()
-	proxyURL, err := url.Parse("http://agent:" + password + "@" + r.addr)
+	return r.clientAt(r.addr, password)
+}
+
+// clientAt is that client pointed at one proxy address, which a row with a second pod of its
+// own needs.
+func (r *rig) clientAt(addr, password string) *http.Client {
+	r.t.Helper()
+	proxyURL, err := url.Parse("http://agent:" + password + "@" + addr)
 	if err != nil {
 		r.t.Fatalf("the proxy URL: %v", err)
 	}
@@ -978,31 +1039,6 @@ func TestOneRequestIsHandledForOneNameOfTheGrant(t *testing.T) {
 	}
 	if want := "Token " + betaPlaceholder; seen[2].header.Get("X-Beta") != want {
 		t.Errorf("the service saw X-Beta %q; want %q: one request is handled for one name", seen[2].header.Get("X-Beta"), want)
-	}
-}
-
-// TestANameWhoseEntryKindNeedsMoreThanAHeaderIsRefused: the two entry kinds whose value is not a
-// string a header carries - "aws", which has to sign the call, and "azure", whose federated
-// token has to be exchanged first - are the next task's. Until then such a name is refused,
-// naming its kind, rather than forwarded with the command's placeholder in it.
-func TestANameWhoseEntryKindNeedsMoreThanAHeaderIsRefused(t *testing.T) {
-	for _, kind := range []string{"aws", "azure"} {
-		t.Run(kind, func(t *testing.T) {
-			rules := testRules()
-			rules.Secrets[0].Kind = kind
-			r := newRig(t, Options{Rules: rules})
-			client := r.client(workerPlaceholder)
-			answer, body := r.get(client, "https://"+boundHost+"/v1/things", "Authorization", "Bearer "+workerPlaceholder)
-			if answer.StatusCode != http.StatusForbidden || !strings.Contains(body, `kind "`+kind+`"`) {
-				t.Fatalf("the call answered %d %q; want 403 naming the kind the airlock does not yet carry", answer.StatusCode, body)
-			}
-			if seen := r.requests(); len(seen) != 0 {
-				t.Fatalf("the service was sent %d requests; want none", len(seen))
-			}
-			if r.grants.valueReads(testGrantID) != 0 {
-				t.Fatalf("the proxy read the grant's values for a name it cannot carry; want no read")
-			}
-		})
 	}
 }
 

@@ -66,6 +66,11 @@ type GrantSource interface {
 	// every name, with when each name must be read or minted again. The proxy calls it on a
 	// grant's first connection on this pod and keeps what it answered.
 	AirlockValues(ctx context.Context, grantID string) (map[string]requests.AirlockSecret, error)
+	// AirlockAccessPlaceholder is the placeholder that stands for one access token the proxy
+	// exchanged a grant's federated token for (azure.go): minted on the first exchange of that
+	// name and slot and answered again after, so a command that asks for one scope twice - and
+	// a second pod that exchanges that scope for itself - reads back the same string.
+	AirlockAccessPlaceholder(ctx context.Context, grantID, name, slot string) (string, error)
 }
 
 // Options is what a Server is built from.
@@ -132,6 +137,12 @@ type Server struct {
 	// (grantValues, mintAgainBefore).
 	valuesMu sync.Mutex
 	values   map[string]*grantValues
+
+	// access is each access token this pod exchanged a grant's federated token for, by grant,
+	// name and slot (azure.go). It is this pod's own: the placeholder that stands for one of
+	// them is the whole grant's, and a pod holding none for a slot exchanges for itself.
+	accessMu sync.Mutex
+	access   map[accessKey]*accessHeld
 }
 
 // connInfo is what a decrypted connection carries into each request on it: the CONNECT target
@@ -161,6 +172,7 @@ func New(o Options) *Server {
 		innerLn: newChanListener(),
 		open:    map[io.Closer]struct{}{},
 		values:  map[string]*grantValues{},
+		access:  map[accessKey]*accessHeld{},
 	}
 	if s.log == nil {
 		s.log = slog.Default()
