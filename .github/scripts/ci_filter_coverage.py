@@ -900,14 +900,36 @@ def check_push_workflows(data, filters: dict, problems: list) -> list:
     return report
 
 
+# A line of a run: script that runs `go test` passing both -tags and -run: it runs only the tests
+# its tag adds to the package, so another job must run that package's untagged tests. A `go vet`
+# or `go build` line is no such step, and `-runtime` or `-tagsomething` is not the flag.
+TAG_RUN_TEST = re.compile(r"\bgo\s+(?:-C\s+\S+\s+)?test\b")
+TAG_RUN_FLAGS = (re.compile(r"(?<![\w-])-tags\b"), re.compile(r"(?<![\w-])-run\b"))
+
+
+def tag_run_steps(jobs: dict) -> list:
+    """Every run: step of `jobs` whose script holds a line running `go test` with both -tags and
+    -run, as (the job, the step). Read with script_lines, so a comment is no trigger and both
+    flags must be on the go test line itself, as every such step of ci.yaml writes them."""
+    found = []
+    for name, job in jobs.items():
+        for step in (job or {}).get("steps") or []:
+            if any(TAG_RUN_TEST.search(line) and all(flag.search(line) for flag in TAG_RUN_FLAGS)
+                   for line in script_lines(str(step.get("run", "")))):
+                found.append((name, step))
+    return found
+
+
 def check_tag_runs(document: dict, data, filters: dict, quantifiers: dict, files: list, problems: list) -> list:
     """A step that runs a package under a build tag and passes `-run` runs only the tests the tag
     adds, so the package's untagged tests must run elsewhere in every run that step runs. The job
     that runs them is declared (TAG_RUNS), and its filter must cover every file the tag step's
     filter covers; otherwise a change to a file only the tag step's filter matches runs the tagged
-    tests alone and the untagged ones nowhere. The table cannot go stale either: an entry naming a
-    filter the changes job does not have, a job ci.yaml does not have, a step that job does not
-    have, or a step whose run: holds no -run is a failure of its own. Returns the report lines."""
+    tests alone and the untagged ones nowhere. The table is no entry's to opt into: a `go test`
+    step of ci.yaml passing both -tags and -run that no entry names is a failure of its own, and
+    so is a stale entry - one naming a filter the changes job does not have, a job ci.yaml does
+    not have, a step that job does not have, or a step whose run: holds no -run. Returns the
+    report lines."""
     report = []
     jobs = document.get("jobs") or {}
     for entry in data.TAG_RUNS:
@@ -945,6 +967,17 @@ def check_tag_runs(document: dict, data, filters: dict, quantifiers: dict, files
                             f"{entry.untagged_filter} does not match {' '.join(uncovered[:SHOWN])}{more}, which filter "
                             f"{entry.filter} matches: a change to one of them runs the tagged tests alone and the "
                             f"untagged ones nowhere")
+    # The other side of the rule: an entry holds the step it names, and this holds every step no
+    # entry names - a step added without one, or an entry deleted while its step stayed. A step
+    # whose entry is itself stale is named all the same, so it keeps the refusal above rather
+    # than drawing a second, confusing one.
+    for name, step in tag_run_steps(jobs):
+        if any(entry.job == name and step_matches(step, entry.step) for entry in data.TAG_RUNS):
+            continue
+        problems.append(f"::error file={WORKFLOW}::{name} step \"{step_label(step)}\" runs only what its tag adds "
+                        f"(-run), but no TAG_RUNS entry of .github/scripts/ci_job_reads.py names it: the job that "
+                        f"runs that package's untagged tests must be declared there, so the check holds it to "
+                        f"running in every run this step runs")
     return report
 
 

@@ -477,11 +477,11 @@ UNIT_TEST_SCRIPT = f"go list ./... | grep -Ev '{UNIT_TEST_PATTERN}' | xargs go t
 # A test of a Go file: `go help test`'s Test, Fuzz and Example functions, whose name goes on with
 # no lower-case letter. TestMain is the package's entry point, not a test.
 GO_TEST_FUNC = re.compile(r"^func ((?:Test|Fuzz|Example)(?:[^\Wa-z]\w*)?)\(", re.M)
-# Every top-level function declaration, test or not, and the line that closes one's body: a
-# gofmt'd file puts both in column 0, so the body of the declaration at one start runs to the
-# next such closing line.
+# Every top-level function declaration, test or not: a gofmt'd file puts the `func` of one in
+# column 0. Where its body ends is not a line pattern - a one-line body writes no closing brace
+# in column 0 - so go_top_level_spans() counts braces from the declaration's own `{`.
 GO_TOP_FUNC = re.compile(r"^func\b", re.M)
-GO_TOP_CLOSE = re.compile(r"^\}", re.M)
+GO_BRACE = re.compile(r"[{}]")
 GO_BUILD_LINE = re.compile(r"^//go:build +(.+?) *$", re.M)
 RACE_ENABLED = re.compile(r"\braceEnabled\b")
 RACE_ENABLED_DECLARATION = re.compile(r"^const +raceEnabled\b|^\t*raceEnabled +=", re.M)
@@ -512,16 +512,47 @@ def go_code_only(text: str) -> str:
     return "".join(out)
 
 
+def go_top_level_spans(code: str, path) -> list:
+    """Each top-level function declaration of `code` as (start, end): the offset of its `func`,
+    and the offset of the `}` closing its own body, counted forward from the first `{` of the
+    declaration. `code` has been through go_code_only, so no brace of a comment, a string or a
+    rune literal is counted, and a one-line body ends on its own line rather than running to the
+    next closing brace in column 0. A declaration with no body - no `{` before the next
+    declaration, as an assembly stub has - has no span, so nothing is attributed to it. A
+    declaration whose braces never balance raises: the rest of the file is not its body, and a
+    file this cannot parse must make ci-filters red rather than be guessed at."""
+    starts = [m.start() for m in GO_TOP_FUNC.finditer(code)]
+    spans = []
+    for i, start in enumerate(starts):
+        limit = starts[i + 1] if i + 1 < len(starts) else len(code)
+        opened = code.find("{", start, limit)
+        if opened < 0:
+            continue
+        depth = 0
+        for brace in GO_BRACE.finditer(code, opened):
+            depth += 1 if brace.group() == "{" else -1
+            if depth == 0:
+                spans.append((start, brace.start()))
+                break
+        else:
+            raise ValueError(f"{path}:{code.count(chr(10), 0, start) + 1}: the braces of this top-level "
+                             "declaration never balance, so ci_job_reads.py cannot find where its body ends; "
+                             "the file is not one race_impossible_tests_of() can read")
+    return spans
+
+
 def race_impossible_tests_of(path: Path) -> set:
     """The tests of one _test.go file that only a plain run covers: every test of a file the race
     build does not compile (`//go:build !race`), and every test whose body reads raceEnabled, the
     constant behind which a test runs smaller under the detector, so the plain run is its full-size
     one. The constant's own declaration, and any mention of it in a comment or a string, count for
-    nothing. Raises on a //go:build that names race in a form this does not read, and on a
-    raceEnabled a test does not enclose: the read is attributed to the top-level function whose
-    body holds it, and only when that function is itself a test, so a read in a helper - which a
-    later test may be the one caller of - makes ci-filters red rather than giving a test that does
-    not run smaller the plain run and dropping the one that does."""
+    nothing. Raises on a //go:build that names race in a form this does not read, on a file whose
+    braces go_top_level_spans() cannot balance, and on a raceEnabled no top-level test encloses:
+    the read is attributed to the top-level function whose body - its own, up to the brace that
+    closes it - holds it, and only when that function is itself a test, so a read in a helper,
+    at package level or in a function literal outside any declaration - which a later test may be
+    the one caller of - makes ci-filters red rather than giving a test that does not run smaller
+    the plain run and dropping the one that does."""
     text = path.read_text()
     found = GO_BUILD_LINE.search(text)
     constraint = found.group(1) if found else ""
@@ -542,8 +573,7 @@ def race_impossible_tests_of(path: Path) -> set:
                                              if m.group(1) != "TestMain"]
     names = {name for _, name in tests} if constraint == "!race" else set()
     enclosing = dict(tests)  # the start of a top-level test -> its name
-    starts = [m.start() for m in GO_TOP_FUNC.finditer(code)]
-    closes = [m.start() for m in GO_TOP_CLOSE.finditer(code)]
+    spans = go_top_level_spans(code, path)
     # Each declaration's own line, read from the declaration rather than from the use, so a file
     # that declares the constant and also reads it in a test has that read attributed, not passed
     # over.
@@ -551,10 +581,8 @@ def race_impossible_tests_of(path: Path) -> set:
     for use in RACE_ENABLED.finditer(code):
         if any(start <= use.start() < (len(code) if end < 0 else end) for start, end in declarations):
             continue
-        before = [start for start in starts if start < use.start()]
-        holder = before[-1] if before else None
-        body_end = next((close for close in closes if close > holder), len(code)) if holder is not None else 0
-        if holder is None or use.start() > body_end or holder not in enclosing:
+        holder = next((start for start, end in spans if start <= use.start() <= end), None)
+        if holder not in enclosing:
             raise ValueError(f"{path}:{code.count(chr(10), 0, use.start()) + 1}: raceEnabled is read where no "
                              "top-level test encloses it, so ci_job_reads.py cannot say which test runs smaller "
                              "under the detector; move the read into the test that runs smaller for it, or teach "

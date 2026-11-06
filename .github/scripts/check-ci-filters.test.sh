@@ -472,6 +472,16 @@ run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the step" "$(contains "$out" 'image step "Build"')"
 
+# The other side of that walk: a `go test` passing -tags and no -run runs the package's untagged
+# tests itself, there being no selection to lean on another job for, so no entry is wanted and
+# the step needs none.
+echo "case: a tag step that passes no -run and that TAG_RUNS does not name"
+root=$(fixture tag-run-undeclared-no-run-flag)
+replace "$root/.github/workflows/ci.yaml" "        run: go build ./..." \
+  "        run: go test -tags live -count=1 ./..."
+run_check "$root"
+check "passes" "$(is "$status" 0)"
+
 # A job that calls a reusable workflow keeps its gate in ci.yaml and gives its steps away, so a
 # why cites the step in the file that holds it. ci.yaml's docs job does that with docs-site.yaml.
 echo "case: a why cites a step of another workflow file"
@@ -1004,11 +1014,12 @@ check "refuses rather than naming the test before the helper" \
   "$(contains "$out" 'RAISED: .*x_test.go:8: raceEnabled is read where no top-level test encloses it')"
 check "and names neither test" "$(is "$(contains "$out" 'TestEarlier')" false)"
 
-# Enclosure is judged by the body's closing brace in column 0, which a one-line body does not
-# write, so a read at package level after one is attributed to that test instead of refused.
-# Here the sizes a function literal computes at package level are the ones the detector shrinks,
-# and the test above them is named in their place: the plain step then runs a test that is no
-# smaller under the detector and leaves out whichever one reads sizes.
+# A one-line body writes no closing brace in column 0, so a rule that ended a body at the next
+# such line let a read at package level after one belong to that test. Here the sizes a function
+# literal computes at package level are the ones the detector shrinks, and naming the test above
+# them in their place would have run a test that is no smaller under the detector and left out
+# whichever one reads sizes. go_top_level_spans() counts braces from the declaration's own `{`,
+# so the body ends where it ends and the read is refused.
 echo "case: a raceEnabled a package-level declaration holds after a one-line test"
 root="$work/race-package-level-read"
 mkdir -p "$root/pkg"
@@ -1017,6 +1028,18 @@ out=$(derived "$root" "pkg")
 check "refuses rather than naming the one-line test above it" \
   "$(contains "$out" 'RAISED: .*x_test.go:8: raceEnabled is read where no top-level test encloses it')"
 check "and names no test" "$(is "$(contains "$out" 'TestOneLine')" false)"
+
+# A body ends at the brace that closes it, counted from the declaration's own `{`, so a
+# declaration whose braces never balance has no end to find. Taking the rest of the file for its
+# body would attribute to it every read after it, which is the very guess this refuses.
+echo "case: a top-level function whose body never closes"
+root="$work/race-unbalanced-braces"
+mkdir -p "$root/pkg"
+printf 'package pkg\n\nimport "testing"\n\nfunc TestUnclosed(t *testing.T) {\n\tif raceEnabled {\n\nfunc TestAfter(t *testing.T) {}\n' > "$root/pkg/x_test.go"
+out=$(derived "$root" "pkg")
+check "refuses rather than taking the rest of the file for the body" \
+  "$(contains "$out" 'RAISED: .*x_test.go:5: the braces of this top-level declaration never balance')"
+check "and names no test" "$(is "$(contains "$out" 'TestUnclosed')" false)"
 
 echo "case: a //go:build that names race in a form the walk does not read"
 root="$work/race-unread-constraint"
