@@ -98,6 +98,14 @@ const (
 	RoleProbeDir = launcher.FixedRoot + "/role-probe"
 )
 
+// SkillsDir is where an issue pod mounts its skills volume: the clone of the deployment's skills
+// marketplace (runtime.kubernetes.skills_repository) that skills-fetch filled, with the commit,
+// the marketplace's name and its plugins recorded beside it (workspace.SkillsClone and its
+// siblings). It is read-write in skills-fetch alone and read-only in the pod's launcher
+// container, and it is not under RolesDir or HomeMountsDir, the two directories a role's
+// namespaces cover, so every role of the pod reads it at this one path.
+const SkillsDir = launcher.FixedRoot + "/skills"
+
 // roleDir is role's own directory of an issue pod's one container, under RolesDir: its launcher
 // token and gh projections of its role Secret, read-only, and its memory-backed private, state and
 // agent-secrets key directories, the last only in a pod enrolled with the secrets broker, each one

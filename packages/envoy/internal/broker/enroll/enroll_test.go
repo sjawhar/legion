@@ -23,10 +23,13 @@ import (
 const testAudience = "broker"
 
 // newService opens a store on a fresh schema (params are extra connection parameters) and returns
-// a Service with no pod verifier configured. Tests that need a pod verifier call withPodVerifier.
+// a Service with no pod verifier configured, wired to the real session-name binder as
+// cmd/broker/main.go wires it, so every enrollment these tests make is held to the rule that a
+// session name belongs to one principal. Tests that need a pod verifier call withPodVerifier.
 func newService(t *testing.T, params ...string) *Service {
 	t.Helper()
-	return &Service{Store: storetest.Open(t, params...), Lease: time.Hour}
+	st := storetest.Open(t, params...)
+	return &Service{Store: st, Lease: time.Hour, Sessions: oauthstore.New(st.Pool)}
 }
 
 // withPodVerifier wires svc to a real K8sPodVerifier backed by a fresh local OIDC issuer, and

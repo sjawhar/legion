@@ -320,6 +320,22 @@ type Config struct {
 	// sweep of 1 or 5 seconds, 105 s at 10, 225 s at 30 and 360 s at 60. The broker refuses a
 	// shorter pair at boot and names the shortest lease that survives that sweep.
 	LeaseSeconds int
+	// BROKER_SESSION_CARRY_SECONDS: how long what a session holds — its grants and its pending
+	// requests — waits on the enrollment of a box the session has left, for the next enrollment of
+	// that session name under the same principal to take it. An enrollment that ends while it
+	// holds either is left dormant instead of having them revoked (enroll.endEnrollment), and the
+	// sweep ends it for good once this long has passed since it went dormant
+	// (enroll.Service.EndCarried).
+	//
+	// 12 hours is requests.DefaultGrantLifetime, the life the broker already gives a grant whose
+	// request named none, so the default carry never outlives the grant it carries; and it is what
+	// an overnight approval takes, a request filed in the morning, the box replaced an hour later
+	// and the approval granted later that day. 0 turns the carry off: the next sweep ends every
+	// dormant enrollment it finds, which is what every end did before the carry. The maximum is
+	// one day, because a dormant enrollment holds a grant no session is proving and the approval
+	// behind it was given for one day's work: past a day the person who approved yesterday has not
+	// approved today, and the session asking again is the right outcome.
+	SessionCarrySeconds int
 	// BROKER_PROOF_SKEW_SECONDS: how far the issue time of a signed proof or request object may
 	// differ from the broker's clock.
 	ProofSkewSeconds int
@@ -1123,6 +1139,7 @@ func Load(getenv func(string) string) (Config, error) {
 		min, max int
 	}{
 		{"BROKER_LEASE_SECONDS", &cfg.LeaseSeconds, 900, 1, 3600},
+		{"BROKER_SESSION_CARRY_SECONDS", &cfg.SessionCarrySeconds, 43200, 0, 86400},
 		{"BROKER_PROOF_SKEW_SECONDS", &cfg.ProofSkewSeconds, 60, 1, 300},
 		{"BROKER_ACCESS_TOKEN_SECONDS", &cfg.AccessTokenSeconds, 900, 1, 3600},
 		{"BROKER_LAUNCHER_CREDENTIAL_SECONDS", &cfg.LauncherCredentialSeconds, 2592000, 1, 2592000},

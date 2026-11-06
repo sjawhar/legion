@@ -1,3 +1,4 @@
+import { SESSION_HEARTBEAT_MS } from "@legion/contracts";
 import { bearerCredential, bearerSource, fileBearer, type RequestCredential } from "./bearer";
 import {
   type BrokerSessionName,
@@ -25,15 +26,15 @@ export const DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
 // (`envoy.natsUrls` or `ENVOY_NATS_URL`), and any baked-in value silently misroutes every
 // deployment it doesn't match. An empty natsUrls means "inbound messaging not configured" -
 // consumers must degrade loudly instead of dialing an invented address.
-// The Envoy listener expires a session record 300 s after its last write
-// (`OpenSessionRegistry`'s default `ttl`, `packages/envoy/internal/session/registry.go`). The
-// interval is set so three refresh attempts plus one whole listener call's budget (10 250 ms: two
-// 5 000 ms attempts and the 250 ms retry delay between them, `transport.ts`) fit inside that
-// lifetime — 3 × 90 000 + 10 250 = 280 250 ms — so two whole refreshes may fail and the third
-// still completes before the record is dropped. The previous 100 000 bought nothing: three
-// attempts landed on 300 000 ms exactly, the third had not yet paid for its round trip, and
-// `setInterval` only ever fires late, so what it really allowed was one failed refresh.
-export const DEFAULT_HEARTBEAT_MS = 90_000;
+/**
+ * The interval at which a pane's heartbeat refreshes its session registration:
+ * `SESSION_HEARTBEAT_MS`, declared with the arrangement it belongs to in
+ * `packages/contracts/src/envoy-session.ts`. Three refreshes plus one whole listener call must
+ * fall strictly short of the listener's live window (`SESSION_LIVE_WINDOW_MS`), so two whole
+ * refreshes may fail and the third still completes before the session reads unresponsive. The
+ * sum, the window and the call's budget are stated there; change the interval there, not here.
+ */
+export const DEFAULT_HEARTBEAT_MS = SESSION_HEARTBEAT_MS;
 /** The floor under a pass deadline when nothing names one and the heartbeat is shorter than it. */
 export const MIN_PASS_DEADLINE_MS = 30_000;
 const MIN_INTERVAL_MS = 25;
@@ -67,7 +68,7 @@ export const SHUTDOWN_SETTLE_MS = 250;
 /**
  * The window the one extra registration a failed heartbeat makes waits out, before the heartbeat
  * returns to its plain interval. A registration that times out under listener load costs the
- * session a third of its live window (`.github/scripts/check-heartbeat-margin.sh`), and three
+ * session a third of its live window (`SESSION_LIVE_WINDOW_MS` in `@legion/contracts`), and three
  * missed refreshes drop a running session out of every live listing (dispatch://INFRA-392), so
  * one failure buys one extra call rather than a whole interval's wait.
  */
