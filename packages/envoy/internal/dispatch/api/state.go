@@ -183,11 +183,13 @@ func (s *server) putUserState(w http.ResponseWriter, r *http.Request) {
 // exchange whose newest message is at or before cleared_before (the viewer's Clear); read_through
 // is how far the viewer has read; unread_replies counts the session's replies to messages this
 // viewer sent that are newer than both and that the viewer has not read by id (read_replies),
-// which is how the dashboard says an agent answered.
+// which is how the dashboard says an agent answered; pinned_at is when the viewer pinned the
+// session, which is what puts it in the sidebar's Agents list and the order it is drawn in.
 type userAgentState struct {
 	ClearedBefore *string `json:"cleared_before,omitempty"`
 	ReadThrough   *string `json:"read_through,omitempty"`
 	UnreadReplies int     `json:"unread_replies"`
+	PinnedAt      *string `json:"pinned_at,omitempty"`
 }
 
 // agentStateCutoffSkew is how far ahead of the server clock a Clear or a read mark may land. The
@@ -195,26 +197,36 @@ type userAgentState struct {
 // refused.
 const agentStateCutoffSkew = time.Minute
 
-// userAgentStatesQuery reads a viewer's per-session state from the shared unreadDirectRepliesCTE
-// alone: `direct_marks` is every session with a Clear (user_agent_state) or a read mark
-// (user_agent_read), and `unread_direct_replies` counted per session is every session holding a
-// reply the viewer has not read. Parameters are the fragment's own (unreadDirectRepliesArgs).
+// userAgentStatesQuery reads a viewer's per-session state from three sources, so a session named
+// by any one of them is in the answer: the shared unreadDirectRepliesCTE gives `direct_marks`,
+// every session with a Clear (user_agent_state) or a read mark (user_agent_read), and
+// `unread_direct_replies` counted per session, every session holding a reply the viewer has not
+// read; `pinned` is every session the viewer pinned. A pinned session with neither a mark nor an
+// unread reply is named by `pinned` alone, which is why the join is three ways and not two.
+// Parameters are the fragment's own (unreadDirectRepliesArgs): the pin
+// is keyed on the canonical login, $1, as the read mark is.
 const userAgentStatesQuery = `
 	with recursive` + unreadDirectRepliesCTE + `,
 	unread as (
 		select session_id, count(*)::int as unread from unread_direct_replies group by session_id
+	),
+	pinned as (
+		select session_id, pinned_at from user_agent_pin
+		where login = $1 and ($3::text is null or session_id = $3::text)
 	)
-	select coalesce(direct_marks.session_id, unread.session_id),
+	select coalesce(direct_marks.session_id, unread.session_id, pinned.session_id),
 	       direct_marks.cleared_before, direct_marks.read_through,
-	       coalesce(unread.unread, 0)
-	from direct_marks full join unread on unread.session_id = direct_marks.session_id
+	       coalesce(unread.unread, 0), pinned.pinned_at
+	from direct_marks
+	full join unread on unread.session_id = direct_marks.session_id
+	full join pinned on pinned.session_id = coalesce(direct_marks.session_id, unread.session_id)
 	order by 1
 `
 
 // loadUserAgentStates runs userAgentStatesQuery for login, narrowed to sessionID when it is
-// not nil. The read mark and the viewer's own direct messages are matched on the canonical
-// login, so one person is one viewer however their identity source spells them; the Clear
-// (user_agent_state, migration 0033) is keyed on the raw actor id.
+// not nil. The read mark, the pin and the viewer's own direct messages are matched on the
+// canonical login, so one person is one viewer however their identity source spells them; the
+// Clear (user_agent_state, migration 0033) is keyed on the raw actor id.
 func (s *server) loadUserAgentStates(ctx context.Context, login string, sessionID *string) (map[string]userAgentState, error) {
 	rows, err := s.deps.Store.Pool.Query(ctx, userAgentStatesQuery, unreadDirectRepliesArgs(login, sessionID)...)
 	if err != nil {
@@ -224,13 +236,14 @@ func (s *server) loadUserAgentStates(ctx context.Context, login string, sessionI
 	states := map[string]userAgentState{}
 	for rows.Next() {
 		var session string
-		var clearedBefore, readThrough *time.Time
+		var clearedBefore, readThrough, pinnedAt *time.Time
 		var state userAgentState
-		if err := rows.Scan(&session, &clearedBefore, &readThrough, &state.UnreadReplies); err != nil {
+		if err := rows.Scan(&session, &clearedBefore, &readThrough, &state.UnreadReplies, &pinnedAt); err != nil {
 			return nil, err
 		}
 		state.ClearedBefore = timestampPtr(clearedBefore)
 		state.ReadThrough = timestampPtr(readThrough)
+		state.PinnedAt = timestampPtr(pinnedAt)
 		states[session] = state
 	}
 	return states, rows.Err()
@@ -267,11 +280,12 @@ func parseAgentStateCutoff(name string, value *string) (*time.Time, error) {
 
 // putUserAgentState records a Clear (cleared_before, which replaces the previous one), a read
 // mark (read_through, which only ever moves forward, so a tab that read less a moment ago cannot
-// make a reply unread again), and/or replies read one by one (read_replies, the session's own
+// make a reply unread again), replies read one by one (read_replies, the session's own
 // messages by id, which a view that shows only some of a session's replies writes so it marks
-// nothing it did not show), announces the write to the viewer's other tabs unless it was only
-// replies already read by id or passed by the read mark (one the Clear hides is neither), and
-// answers with the session's whole state.
+// nothing it did not show), and/or the pin that puts the session in the sidebar's Agents list
+// (pinned), announces the write to the viewer's other tabs unless it was only replies already
+// read by id or passed by the read mark (one the Clear hides is neither), and answers with the
+// session's whole state.
 func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.actingPerson(w, r)
 	if !ok {
@@ -281,13 +295,15 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 		ClearedBefore *string  `json:"cleared_before"`
 		ReadThrough   *string  `json:"read_through"`
 		ReadReplies   []string `json:"read_replies"`
+		Pinned        *bool    `json:"pinned"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if input.ClearedBefore == nil && input.ReadThrough == nil && len(input.ReadReplies) == 0 {
-		writeError(w, "INVALID_STATE", http.StatusBadRequest, "cleared_before, read_through or read_replies is required")
+	if input.ClearedBefore == nil && input.ReadThrough == nil && len(input.ReadReplies) == 0 && input.Pinned == nil {
+		writeError(w, "INVALID_STATE", http.StatusBadRequest,
+			"cleared_before, read_through, read_replies or pinned is required")
 		return
 	}
 	clearedBefore, err := parseAgentStateCutoff("cleared_before", input.ClearedBefore)
@@ -330,9 +346,9 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	// A Clear or a read mark is announced whenever it is given; replies read by id only when one
-	// of them gets a row (below).
-	announce := clearedBefore != nil || readThrough != nil
+	// A Clear, a read mark or a pin is announced whenever it is given; replies read by id only
+	// when one of them gets a row (below).
+	announce := clearedBefore != nil || readThrough != nil || input.Pinned != nil
 	// A cutoff up to agentStateCutoffSkew ahead of the server clock is accepted, so a browser a few
 	// seconds fast is not refused, but it is stored as no later than now: a reply that lands in
 	// the gap is still after the viewer's Clear and read mark, so it shows and it counts.
@@ -356,6 +372,27 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 			on conflict (login, session_id) do update set
 				read_through = greatest(user_agent_read.read_through, excluded.read_through)
 		`, model.CanonicalLogin(actor.ID), sessionID, *readThrough); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	if input.Pinned != nil {
+		// The pin is keyed on the canonical login, like the read mark and unlike the Clear: it is
+		// a table of this change's own (user_agent_pin), so it follows 0048's and 0051's
+		// convention and no row of it predates them. It is stamped with the server's clock and
+		// not the browser's, because nothing hides behind it: it is the order the sidebar draws
+		// the person's pinned agents in, oldest first. Unpinning deletes the row, so the table
+		// holds what is pinned now; either way the Clear is left exactly as it was, since
+		// pinning a conversation is not reading it.
+		pin := `delete from user_agent_pin where login = $1 and session_id = $2`
+		if *input.Pinned {
+			pin = `
+				insert into user_agent_pin (login, session_id, pinned_at)
+				values ($1, $2, now())
+				on conflict (login, session_id) do update set pinned_at = excluded.pinned_at
+			`
+		}
+		if _, err := tx.Exec(r.Context(), pin, model.CanonicalLogin(actor.ID), sessionID); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
