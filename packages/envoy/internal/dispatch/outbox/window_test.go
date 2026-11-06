@@ -513,6 +513,9 @@ func TestABatchCutOffInFlightKeepsItsOrder(t *testing.T) {
 //
 // The hold is production's: the dead holder's row lapses its TTL after it was written and the
 // next holder waits that out, which is what the floor below reads.
+//
+// Real time, at publisherHoldOptions.TTL: the lapse is a Postgres row's expiry and the republish
+// crosses a live NATS server, neither of which a synctest bubble can hold.
 func TestAnOutboxThatDiesBetweenAckAndMarkPublishesAgainWithoutDuplicates(t *testing.T) {
 	t.Parallel()
 	const issues, count = 2, 10

@@ -147,6 +147,9 @@ func backOffIn(t *testing.T, database *store.Store, id int64, attempts int, wait
 // out (batchResult.excluded). Both issues are routed to a holder that never answers, so neither
 // owner is settled before its batch ends and neither release wakes the scan; with the second
 // event unread, the scan's retry timer is armed to the two back-offs alone, minutes out.
+//
+// Real time, at roleReceiptTimeout: the forwards it waits out are requests to a live NATS server
+// over TCP, which no synctest bubble can hold.
 func TestAnEventCommittedWhileItsOwnerIsInFlightIsReadWhenThatOwnerIsBack(t *testing.T) {
 	t.Parallel()
 	const (

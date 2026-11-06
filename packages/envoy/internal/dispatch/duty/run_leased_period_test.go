@@ -20,11 +20,16 @@ import (
 // half passes here, jump over a whole period that no pass serves: the period a lone process
 // loses. A loop that ticks on a ticker, its due times one interval apart while each pass takes
 // less than the interval, serves every one.
+//
+// The interval is this test's own argument to RunLeased, which takes it in the call, and the pass
+// time is scaled with it: what this reads is that a pass taking most of an interval still serves
+// every period, a property of the ratio and not of the second. cmd/dispatch passes each loop's
+// own interval.
 func TestRunLeasedServesEveryPeriodOfALoneLoopWhosePassesTakeTime(t *testing.T) {
 	database := storetest.Open(t)
 	leases := leasesOf(t, database)
 	const name = "document-compaction"
-	const interval, passTime = time.Second, 400 * time.Millisecond
+	const interval, passTime = 300 * time.Millisecond, 120 * time.Millisecond
 	const passes = 7
 
 	// Each pass reads the period the pass before it recorded: Exclusive writes a pass's record once

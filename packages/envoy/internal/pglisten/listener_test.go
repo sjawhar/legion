@@ -306,6 +306,9 @@ func databaseAddress(database *store.Store) string {
 // A healthy connection the listener has been idle on for several idle periods is pinged, not
 // replaced: one dial, one OnConnected, the backend's last statement the ping, and a notification
 // still reaches OnNotify on it.
+//
+// Real time, at the idle period and ping timeout this sets: both are waits on a live Postgres
+// connection, which no synctest bubble can hold.
 func TestTheListenerKeepsAHealthyIdleConnection(t *testing.T) {
 	t.Parallel()
 	database := storetest.Open(t)
@@ -338,6 +341,8 @@ func TestTheListenerKeepsAHealthyIdleConnection(t *testing.T) {
 	}
 }
 
+// Real time, at the idle period and ping timeout this sets: the half-open connection is a real
+// one behind a blinding TCP proxy, which no synctest bubble can hold.
 func TestTheListenerReplacesAHalfOpenConnection(t *testing.T) {
 	t.Parallel()
 	database := storetest.Open(t)
@@ -685,6 +690,9 @@ func TestAListenerWokenShorterThanItsIdlePeriodIsStillPinged(t *testing.T) {
 // stays the idle period, and the ping that belongs to that wait still runs. Without the pairing
 // the first wait NextWake ended called a nil func, and the panic took the whole process with it
 // - the delivery hub's listener and the event stream relay's included, since they run in it.
+//
+// Real time, at the idle period and ping timeout this sets: both are waits on a live Postgres
+// connection, which no synctest bubble can hold.
 func TestAListenerWithNoOnWakeIsNotWokenAndDoesNotPanic(t *testing.T) {
 	t.Parallel()
 	database := storetest.Open(t)
@@ -721,6 +729,9 @@ func TestAListenerWithNoOnWakeIsNotWokenAndDoesNotPanic(t *testing.T) {
 // Without the check the first notification called a nil func, and the panic took the whole
 // process with it - the delivery hub's listener and the event stream relay's included, since
 // they run in it.
+//
+// Real time, at the idle period and ping timeout this sets: both are waits on a live Postgres
+// connection, which no synctest bubble can hold.
 func TestAListenerWithNoOnNotifyDropsItsNotificationsAndDoesNotPanic(t *testing.T) {
 	t.Parallel()
 	database := storetest.Open(t)

@@ -1514,10 +1514,14 @@ func insertCommentWithWindow(t *testing.T, q querier, issueKey, body string) {
 // is necessarily made after everything the coverage pass wrote and after any wake it left in
 // the buffer. That is stronger than the quiet window this waited for on main, which failed at
 // random because a wake Cover left in the buffer earned a pass five seconds (retryInterval)
-// into the window the test had already called quiet (dispatch://INFRA-1075). The second below
+// into the window the test had already called quiet (dispatch://INFRA-1075). The window below
 // is no longer what rules a period out - the two reports do that - but a guard on anything else
 // in the process that might still make a statement, and it stays far shorter than
 // identityRecheckInterval, which this test leaves at its ten minutes.
+//
+// Real time, over a window longer than retryInterval: every statement it counts is one on a
+// Postgres pool, which no synctest bubble can hold, and the window is the test's own guard
+// rather than a constant any call takes.
 func TestRunMakesNoStatementOnceItsBootDrainAndPassAreDone(t *testing.T) {
 	database := storetest.Open(t)
 	seedIssue(t, database, "IDLE", "IDLE-1", "Enqueued by its trigger")

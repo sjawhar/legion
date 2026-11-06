@@ -193,6 +193,9 @@ func waitForPublished(t *testing.T, within time.Duration, database *store.Store,
 // Serial: it measures the process. What it counts is how often this outbox scanned over a window
 // of wall time, and a parallel test's load lengthens every period inside that window
 // (docs/testing.md).
+//
+// Real time, at production's waits: every scan it counts is a statement on a Postgres pool with
+// a LISTEN connection beside it, which no synctest bubble can hold.
 func TestTheOutboxDoesNotScanWhileIdle(t *testing.T) {
 	database := storetest.Open(t)
 	other := storetest.SecondProcess(t, database)
@@ -282,6 +285,9 @@ func appendBackedOffEvent(t *testing.T, database *store.Store, wait time.Duratio
 // What the samples have to span is renewals: a holder that stopped renewing, or one whose standby
 // took the name beside it, shows as none or two publishers, so the window below spans several of
 // production's renewal periods.
+//
+// Real time, at publisherHoldOptions: the hold is a Postgres row the two processes renew, and
+// each publishes to a live NATS server, which no synctest bubble can hold.
 func TestOnlyOneOutboxPublishesAtATime(t *testing.T) {
 	t.Parallel()
 	url := testnats.URL(t)
@@ -335,10 +341,10 @@ func TestAStoppedOutboxHandsThePublisherToTheOtherAtOnce(t *testing.T) {
 
 // A holder whose NATS connection is cut releases the publisher hold once it has been without NATS
 // for the grace it gives a connection that is down, and the other process, whose NATS works, takes
-// the hold and publishes what is written after the cut. The grace is this test's own, half a
-// second rather than production's three: what it proves is the release and the hand-over, not how
-// long the holder waits first (natsLossGrace, held to three seconds by
-// TestTheOutboxTakesProductionsTimings).
+// the hold and publishes what is written after the cut.
+//
+// Real time, at natsLossGrace: the cut is of a TCP proxy in front of a live NATS server, which no
+// synctest bubble can hold.
 func TestAnOutboxThatLosesNATSReleasesThePublisher(t *testing.T) {
 	t.Parallel()
 	url := testnats.URL(t)
@@ -369,6 +375,9 @@ func TestAnOutboxThatLosesNATSReleasesThePublisher(t *testing.T) {
 // hold. It does not take the hold back while its connection stays silent, although the connection
 // still reports itself connected: the other process, whose NATS works, takes it and publishes the
 // event, within 10 s of the silence.
+//
+// Real time, at probeTimeout and holdRetry: the silence is a frozen TCP proxy in front of a live
+// NATS server, which no synctest bubble can hold.
 func TestAnOutboxWhoseNATSGoesSilentGivesThePublisherToTheOther(t *testing.T) {
 	t.Parallel()
 	url := testnats.URL(t)

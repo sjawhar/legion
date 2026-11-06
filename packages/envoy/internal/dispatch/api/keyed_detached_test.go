@@ -113,6 +113,10 @@ func TestAKeyedWriteSlowerThanItsClientFinishesAndIsReplayed(t *testing.T) {
 // A run that outlives its key's lease keeps the key: it renews the lease while it runs, so a repeat
 // past the lease is still told the first run is going rather than taking the key over and making
 // the write a second time. Only a run whose renewals stopped - its process died - is taken over.
+//
+// Real time, at the lease and renewal this row sets: the key and its lease are Postgres rows the
+// handler renews while its client waits on an httptest connection, which no synctest bubble can
+// hold.
 func TestARunningHandlerRenewsItsKeyPastTheLease(t *testing.T) {
 	// No t.Parallel: this test holds a transaction, a row lock or an advisory lock open on
 	// purpose. The event log's safe horizon is proven from pg_snapshot_xmin, the oldest
@@ -463,6 +467,10 @@ func TestAKeyedClaimFinishesWhenItsClientGivesUpDuringIt(t *testing.T) {
 // longer: the lease is renewed until the limit and no further, so once it lapses a repeat is
 // answered as one whose holder died, here taking over a key the run made nothing under, rather than
 // told KEY_IN_FLIGHT for as long as the handler ignores its context.
+//
+// Real time, at the lease, renewal and run limit this row sets: the key and its lease are
+// Postgres rows the handler renews while its client waits on an httptest connection, which no
+// synctest bubble can hold.
 func TestARunPastItsLimitStopsRenewingItsLease(t *testing.T) {
 	// No t.Parallel: this test holds a transaction, a row lock or an advisory lock open on
 	// purpose. The event log's safe horizon is proven from pg_snapshot_xmin, the oldest

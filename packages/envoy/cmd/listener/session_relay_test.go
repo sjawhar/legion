@@ -495,6 +495,9 @@ func TestRelayRunRetryWaitEndsOnAWake(t *testing.T) {
 // own, with no registration: after its pause backoff it restarts at the ack floor and sends the
 // unanswered frame and the one stored during the pause, in stream order, which a session that is
 // answering again takes once.
+//
+// Real time, at relayReceiptWait: the relay, the session stand-in and the frames between them are
+// a live NATS server over TCP, which no synctest bubble can hold.
 func TestSessionConsumerUnreachableSessionPausesAndSendsAgainAfterItsBackoff(t *testing.T) {
 	// Shorter than the production bounds, long enough that the silent window below ends before the
 	// first probe: the relay sends again relayReceiptWait + pauseFirst after the frame it got no
@@ -527,6 +530,9 @@ func TestSessionConsumerUnreachableSessionPausesAndSendsAgainAfterItsBackoff(t *
 }
 
 // A registration resumes a paused relay at once, long before its backoff would send again.
+//
+// Real time, at relayReceiptWait: the relay and its session stand-in are a live NATS server over
+// TCP, which no synctest bubble can hold.
 func TestSessionConsumerUnreachableSessionResumesAtOnceWhenItRegisters(t *testing.T) {
 	// A backoff no test waits out: only the registration can make the relay send again here.
 	rig := newRelayRigPausing(t, time.Minute, time.Minute)

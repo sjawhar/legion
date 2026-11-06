@@ -1004,7 +1004,9 @@ func holdLock(t *testing.T, store *Store, table, mode string) uint32 {
 }
 
 // longHold is the transaction age the census tests refuse a lock holder at: the second these
-// rows ran on, rather than production's minute (pgmigrate.CensusLongTransaction).
+// rows ran on, rather than production's minute (pgmigrate.CensusLongTransaction). Real time: the
+// age is the Postgres server's own clock over a transaction really left open, which no synctest
+// bubble can hold.
 const longHold = time.Second
 
 // awaitTransactionOlderThan waits until session pid's open transaction reads at least age old on

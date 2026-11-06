@@ -1138,6 +1138,9 @@ func TestHubFramesAreWrittenAheadOfAFullStreamQueue(t *testing.T) {
 // second, so the page's first pong has a heartbeat to arrive before the pong deadline, two
 // heartbeats after the socket opened, and a loaded runner that delays it most of a heartbeat still
 // meets it. A page that answers no ping, which a short heartbeat ends quickly, is the next test's.
+//
+// Real time, at the server's heartbeat: the pings and pongs cross a real websocket, which no
+// synctest bubble can hold.
 func TestPingsKeepAnIdleSocketOpen(t *testing.T) {
 	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
 	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the

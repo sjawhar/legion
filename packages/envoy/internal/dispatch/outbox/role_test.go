@@ -352,6 +352,9 @@ func dueNow(t *testing.T, database *store.Store, id int64) {
 // event backed off with its attempt and the reason; once it answers, a retry publishes it, and the
 // stream, which captures the holder's subject, holds one copy of the forward however often it was
 // sent. Nothing crosses the role's topic.
+//
+// Real time, at roleReceiptTimeout: the forward and the receipt it waits for cross a live NATS
+// server over TCP, which no synctest bubble can hold.
 func TestARoleRouteIsForwardedToASelfSubscribedHolderAndPublishedOnItsReceipt(t *testing.T) {
 	t.Parallel()
 	rig := newRoleRig(t)
@@ -795,6 +798,9 @@ func TestAForwardHeldByItsHoldersResolutionIsAWaitNotAFailure(t *testing.T) {
 // flush confirmed the publish, so what is missing is the holder's answer and not the bus. The
 // holder here is registered and self-subscribed, as a session plugin registers it, with nothing
 // subscribed to its agent subject, which is the shape a holder that stopped reading has.
+//
+// Real time, at roleReceiptTimeout: the forward NATS took and the answer that never comes cross a
+// live NATS server over TCP, which no synctest bubble can hold.
 func TestAForwardNoHolderAnsweredIsCountedUnanswered(t *testing.T) {
 	t.Parallel()
 	rig := newRoleRig(t)

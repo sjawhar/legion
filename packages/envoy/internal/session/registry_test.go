@@ -159,6 +159,8 @@ func TestSessionRegistry_GetNotFound(t *testing.T) {
 	}
 }
 
+// Real time, at the TTL the registry is opened with: the expiry is the JetStream key-value
+// bucket's, which the NATS server clocks over TCP, and no synctest bubble can hold.
 func TestSessionRegistry_TTLExpiry(t *testing.T) {
 	const ttl = 2 * time.Second
 	client := setupNATS(t)
@@ -186,6 +188,8 @@ func TestSessionRegistry_TTLExpiry(t *testing.T) {
 	t.Fatalf("session entry did not expire within 5s (TTL was %s)", ttl)
 }
 
+// Real time, at the TTL the registry is opened with: the expiry and its refresh are the JetStream
+// key-value bucket's, which the NATS server clocks over TCP, and no synctest bubble can hold.
 func TestSessionRegistry_PutRefreshesTTL(t *testing.T) {
 	// Each wait below is three quarters of the window: the refresh lands inside the first
 	// window and the entry outlives the second.

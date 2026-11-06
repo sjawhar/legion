@@ -190,6 +190,10 @@ func hubOn(t *testing.T, handler http.Handler, database *store.Store, deps Deps,
 // frame a recompute of the test's write would send has been queued (sendLocked runs inside the
 // recompute, before its "recompute end" note), and then takes conn's queue as final. It is how
 // these tests prove a frame is not owed without resting on a span of time.
+//
+// Real time, at viewQuiet: the hub reads its views from Postgres and hears its changes on a
+// pglisten connection, which no synctest bubble can hold, and the view timings are constants its
+// worker reads rather than an argument of any call.
 func (r *hubRig) nothingMore(t *testing.T, conn *fakeLiveConn, after string) {
 	t.Helper()
 	r.waitNoRecompute(t, 2*viewQuiet)
@@ -794,6 +798,8 @@ func TestResumeFromBeforeTheKeptDayGetsASnapshot(t *testing.T) {
 	rig.nothingMore(t, kept, "a resume from the change the view's body reflects")
 }
 
+// Real time, at viewMaxWait: the merge the blinded listener missed is a Postgres write heard on a
+// pglisten connection, which no synctest bubble can hold.
 func TestAReconnectCatchesUpWhatTheListenerMissed(t *testing.T) {
 	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
 	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
@@ -1607,6 +1613,9 @@ func (c *fakeLiveConn) freshness(t *testing.T, within time.Duration, what string
 
 // The clock stands still at noon, so the pull request's leaving, two seconds on, is the view's
 // first expiry, never the midnight one, and the test moves the clock past it rather than waiting.
+//
+// Real time, at viewQuiet: the recompute it waits out reads the view from Postgres, which no
+// synctest bubble can hold.
 func TestAPresetViewSendsItsOldestPullRequestLeavingWithoutAReadingTheDatabase(t *testing.T) {
 	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
 	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
@@ -2140,6 +2149,9 @@ func TestIdenticalViewsShareOneRecompute(t *testing.T) {
 // TestABurstCoalescesIntoOneRecompute writes 50 merges on a clock that stands still, so the burst
 // is one instant to the hub however long the writes take: nothing is due until the clock moves
 // viewQuiet past the last mark, and then one recompute sends all 50 in one delta.
+//
+// Real time, at viewQuiet: the burst is 50 Postgres writes the hub reads back, which no synctest
+// bubble can hold.
 func TestABurstCoalescesIntoOneRecompute(t *testing.T) {
 	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
 	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
@@ -2226,6 +2238,8 @@ func TestOneRecomputeAtATime(t *testing.T) {
 	}
 }
 
+// Real time, at viewMaxWait: the merge outside the window is a Postgres write the hub reads
+// back, which no synctest bubble can hold.
 func TestAChangeOutsideAWindowRecomputesNothing(t *testing.T) {
 	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
 	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the

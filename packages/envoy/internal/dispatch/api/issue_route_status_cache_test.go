@@ -278,6 +278,9 @@ func timedRosterServer(t *testing.T, delay time.Duration, hang bool, lifetime co
 // age of the answers a read is served past the TTL. A 1 s fetch with a 1.5 s TTL expires 1.5 s
 // after it was sent: a read 2.2 s in asks again, where a TTL counted from the answer would serve
 // it until 2.5 s.
+//
+// Real time, at the TTL this row sets: the fetch it times is an HTTP call to an httptest listener
+// over TCP, which no synctest bubble can hold.
 func TestAnAnswersTTLCountsFromWhenItsCallWasSent(t *testing.T) {
 	// No t.Parallel: this test measures the process. It bounds how long the cached answer
 	// outlives the call that fetched it, against a TTL of 1.5 s, and another test's work on
@@ -299,6 +302,9 @@ func TestAnAnswersTTLCountsFromWhenItsCallWasSent(t *testing.T) {
 // alone for the whole window after its call times out. A call bound at 1 s with a 1.5 s window
 // leaves the listener alone until 2.5 s: a read 2 s in asks nothing, where a window counted from
 // the send would have ended at 1.5 s.
+//
+// Real time, at the window this row sets: the call that times out is an HTTP call to an httptest
+// listener over TCP, which no synctest bubble can hold.
 func TestAFailuresWindowCountsFromWhenTheFailureIsKnown(t *testing.T) {
 	// No t.Parallel: this test measures the process. It bounds when the failure window starts
 	// from, against a silence TTL of 1.5 s, and another test's work on the same core would

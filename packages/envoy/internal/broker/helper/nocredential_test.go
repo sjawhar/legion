@@ -218,6 +218,9 @@ func TestALoginBetweenARefusalAndItsLineIsAnOrdinaryRetry(t *testing.T) {
 // This row is the shape of the backoff, so it sets the production one rather than taking the
 // rig's short default: a backoff whose next attempt is due inside the bound below would pass
 // whether or not the login woke anything.
+//
+// Real time, at the production backoff: the rig serves the helper on a real unix socket and pins
+// each caller through SO_PEERPIDFD, which no synctest bubble can hold.
 func TestALoginWakesTheEnrollmentOfASessionRegisteredWithoutACredential(t *testing.T) {
 	r := newRig(t, "", func(r *rig) {
 		r.srv.EnrollRetryMin = time.Second

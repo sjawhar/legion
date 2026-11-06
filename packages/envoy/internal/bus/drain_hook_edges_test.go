@@ -146,6 +146,9 @@ func TestADrainHookLosingTheConnectionWarns(t *testing.T) {
 // is less, so the hooks and the connection's drain always keep it, however long a delivery takes.
 // Of the 600 ms that share is of a 2 s drain, the test asks for half, which leaves the scheduler
 // the other half.
+//
+// Real time, at production's reserve: the drain it measures is of a live NATS connection over
+// TCP, which no synctest bubble can hold.
 func TestASlowDeliveryLeavesTheDrainHooksTheirShare(t *testing.T) {
 	_, uri := testnats.Start(t)
 	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
@@ -184,6 +187,9 @@ func TestASlowDeliveryLeavesTheDrainHooksTheirShare(t *testing.T) {
 // The listener drains for 13 s, and its deliveries keep the 10 s they had before the drain hooks:
 // a delivery that takes 9.5 s finishes, the drain reports no error, and the hooks still have their
 // 3 s once it has (bus's drainHookReserve).
+//
+// Real time, at production's reserve: the drain it measures is of a live NATS connection over
+// TCP, which no synctest bubble can hold.
 func TestADeliveryKeepsTenSecondsOfTheListenersDrain(t *testing.T) {
 	_, uri := testnats.Start(t)
 	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
@@ -233,6 +239,9 @@ func TestADeliveryKeepsTenSecondsOfTheListenersDrain(t *testing.T) {
 // A delivery that outlasts the drain's share for deliveries still lets the hooks end the KV
 // watchers, within what is left of the deadline, before the connection closes: closing it with
 // the watchers still subscribed would leave their consumers for the server to time out.
+//
+// Real time, at production's reserve: the drain and the KV watchers it ends are a live NATS
+// connection over TCP, which no synctest bubble can hold.
 func TestAStuckDeliveryStillEndsTheKVWatchers(t *testing.T) {
 	_, uri := testnats.Start(t)
 	logs := captureBusLogs(t)

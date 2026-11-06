@@ -92,6 +92,9 @@ func (r *hubRig) recomputesSince(mark int) int {
 // sjawhar/legion#2686 forced with delays), then after it, with the merge past that position. Each
 // mark is for something committed before the reads that follow, so the one recompute's delta holds
 // both merges and no second recompute follows.
+//
+// Real time, at viewQuiet: each mark and read is a Postgres statement the hub makes, which no
+// synctest bubble can hold.
 func TestAMarkMadeBeforeAReadTakesItsPositionIsThatReadsToAnswer(t *testing.T) {
 	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
 	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
