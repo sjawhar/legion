@@ -21,14 +21,18 @@
   "devDependencies": {
     "@biomejs/biome": "^2.3.14",
     "@happy-dom/global-registrator": "^20.14.0",
+    "@mswjs/interceptors": "0.45.11",
     "@playwright/test": "^1.64.1",
+    "@testing-library/jest-dom": "7.0.1",
     "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "14.6.8",
     "@types/bun": "latest",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
     "@vitejs/plugin-react": "^4.3.4",
     "fake-indexeddb": "^6.2.5",
     "happy-dom": "^20.14.0",
+    "msw": "3.0.4",
     "typescript": "^5",
     "vite": "^5"
   },
