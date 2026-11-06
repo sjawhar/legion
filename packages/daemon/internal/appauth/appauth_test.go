@@ -582,6 +582,42 @@ func TestGrantedAccessBelowTheSetIsAskedForAtWhatIsGranted(t *testing.T) {
 	}
 }
 
+// GitHub's answer may name an access this daemon does not know, today or after GitHub adds one,
+// and an access above the set's is no reason to ask for more than the set names. A word outside
+// read, write and admin is granted none: the permission is left out of the request and said on
+// stderr, rather than passed back to GitHub, which would refuse the mint whole and leave the
+// role no gh files. An admin grant is asked for at the write the set names, never at admin.
+func TestGrantedAnAccessThisDoesNotKnowIsGrantedNone(t *testing.T) {
+	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	var stderr bytes.Buffer
+	github := &keyModeGitHub{
+		owners: []string{"acme"},
+		slug:   "legion-implementer",
+		grants: map[string]string{"contents": "maintain", "metadata": "read", "statuses": "", "workflows": "admin"},
+	}
+	github.answer = func(exchange int, body accessTokensBody) (int, string) {
+		return http.StatusOK, mintedFor(fmt.Sprintf("ghs_%d", exchange), now.Add(time.Hour), body.Repositories...)
+	}
+	tokens := keyModeManager(t, github, &now, &stderr)
+
+	if _, err := tokens.Token(context.Background(), Implement, ghrepo.MustParse("acme/legion")); err != nil {
+		t.Fatalf("Token: %v", err)
+	}
+
+	asked := github.exchanges()
+	if len(asked) != 1 {
+		t.Fatalf("%d exchanges, want the one mint", len(asked))
+	}
+	want := map[string]string{"metadata": "read", "workflows": "write"}
+	if !maps.Equal(asked[0].Permissions, want) {
+		t.Errorf("the write request named permissions %v, want exactly %v", asked[0].Permissions, want)
+	}
+	line := "appauth: the implement App's installation on acme is granted contents: maintain, where its token asks for contents: write, so the token is minted without it; grant the App contents: write and approve it on that account"
+	if count := strings.Count(stderr.String(), line); count != 1 {
+		t.Errorf("stderr holds %d of %q, want exactly one:\n%s", count, line, stderr.String())
+	}
+}
+
 // An account approves each of an App's grants, so an installation may be granted no actions at
 // all. The read mint leaves actions out of the request and asks for the other three in one
 // exchange, so every owner's read token is served rather than the first such owner's mint
