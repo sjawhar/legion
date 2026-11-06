@@ -466,10 +466,20 @@ What each part is for:
   `BROKER_SERVICE_LOGINS` names the daemon's ServiceAccount.
 - **`runtime.kubernetes.setup`** (optional) is a command, as an argv, that every role, in its own
   namespaces,
-  runs before each start of its Oh My Pi, such as installing an Oh My Pi plugin from a marketplace
-  repository. It runs in the role's working directory with the role's environment, and its `git`
+  runs before each start of its Oh My Pi. It runs in the role's working directory with the role's
+  environment, and its `git`
   answers `https://github.com` for your project's owners with the role's App token. Oh My Pi starts
-  only once it exits 0; a failure is a failed launch, and its output is in the role's log.
+  only once it exits 0; a failure is a failed launch, and its output is in the role's log. Under
+  this runtime it must fetch nothing: a clone in a role's launch context ends the pod's gVisor
+  sandbox a few seconds in, so install skills with `skills_repository` below and leave `setup` to
+  check that they are there.
+- **`runtime.kubernetes.skills_repository`** (optional) is the Oh My Pi plugin marketplace your
+  pods' roles load their skills from, as `owner/name`. Each issue pod clones its default branch
+  shallow in an init container of its own, with the project's App token, and every role installs
+  from that clone before Oh My Pi starts — so a pod's skills are that branch as of the pod's start,
+  with no image rebuild and no fetch in any role's launch. Each role then checks that the files Oh
+  My Pi installed are the ones that commit holds, and fails its launch if they are not, so a pod
+  can always say which commit its agents' skills came from.
 - **`controller`** (optional) is who runs the project's controller: `operator` (the default), you,
   with `legion controller start`, or `daemon`, a pod the daemon launches and keeps running
   ([Start the controller](#start-the-controller)).

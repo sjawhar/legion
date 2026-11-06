@@ -531,6 +531,37 @@ func (sh *renderShadow) write(t *testing.T, ops ...func(ctx context.Context) err
 	return write
 }
 
+// writeThenLoad runs ops as one transaction, as write does, but loads the document's room between
+// the commit and the publish: a cold write's publish loads no room (publishLiveWrite), so a room
+// whose load read the head after the commit is how a cold write's updates meet a room that holds
+// them already.
+func (sh *renderShadow) writeThenLoad(t *testing.T, ops ...func(ctx context.Context) error) *liveWrite {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := sh.service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := sh.service.Join(ctx, tx)
+	defer ledger.Discard()
+	var write *liveWrite
+	for _, run := range ops {
+		write = sh.op(t, joined, run)
+	}
+	if !write.cold {
+		t.Fatal("the write forked a room, so nothing here is tested")
+	}
+	if err := ledger.commit(ctx); err != nil {
+		t.Fatalf("commit the write: %v", err)
+	}
+	if err := sh.service.warmLiveDocument(ctx, sh.artifactID); err != nil {
+		t.Fatalf("load the room: %v", err)
+	}
+	ledger.publish()
+	return write
+}
+
 // versions checks the content_changed of every version write appended against the renders of its
 // operations' forks, and returns them.
 func (sh *renderShadow) versions(t *testing.T, write *liveWrite) []bool {
@@ -1133,8 +1164,8 @@ func TestRenderReuseAForeignCommitBetweenOperations(t *testing.T) {
 	}
 }
 
-// E10. A cold write's publish loads the room from the store, which holds the write, so its
-// publish changes nothing in the room: ygo commits nothing for it, and no observer classifies it.
+// E10. A cold write's room loads after the write committed, from the store, which holds the
+// write, so nothing of the write reaches that room as a commit and no observer classifies it.
 func TestRenderReuseAColdWriteIsAlreadyInTheRoom(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -1162,7 +1193,7 @@ func TestRenderReuseAColdWriteIsAlreadyInTheRoom(t *testing.T) {
 			for _, op := range test.ops {
 				ops = append(ops, applyOps(service, artifactID, reuseAgent, op))
 			}
-			write := sh.write(t, ops...)
+			write := sh.writeThenLoad(t, ops...)
 			sh.check(t)
 			m.expect(t, test.want, 0)
 			sh.versions(t, write)
@@ -1238,7 +1269,7 @@ func TestRenderReuseAColdWriteAppendedDuringALoadIsRendered(t *testing.T) {
 
 // E12. A document outside the schema: a warm repair's rendering is taken and counted a change; a
 // document pushed outside the schema after the fork read renders, and WARNs, as before; a cold
-// repair is already in the room it loads, so its publish commits nothing.
+// repair is already in the room that loads after it committed, so nothing of it is classified.
 func TestRenderReuseADocumentOutsideTheSchema(t *testing.T) {
 	const updatedOutside = "updated document outside Proof schema"
 	captureWarnings := func(t *testing.T) *storetest.LockedLog {
@@ -1296,7 +1327,7 @@ func TestRenderReuseADocumentOutsideTheSchema(t *testing.T) {
 		closeDocumentRoom(t, service, artifactID)
 		logs := captureWarnings(t)
 		m := sh.measure()
-		write := sh.write(t, replaceWhole(service, artifactID))
+		write := sh.writeThenLoad(t, replaceWhole(service, artifactID))
 		sh.check(t)
 		m.expect(t, renderPaths{}, 0)
 		if stored := sh.versions(t, write); len(stored) != 1 || !stored[0] {
@@ -1309,8 +1340,7 @@ func TestRenderReuseADocumentOutsideTheSchema(t *testing.T) {
 }
 
 // E13. A committed warm write keeps no fork, rendering, update or published rendering: each goes
-// with the publish (finishLiveWrite). TestAColdWriteLoadsNoRoomUntilItCommits holds a cold write to
-// the same.
+// with the publish (finishLiveWrite). TestAColdWriteLoadsNoRoom holds a cold write to the same.
 func TestRenderReuseACommittedWriteKeepsNoRendering(t *testing.T) {
 	service, artifactID, sh := newWarmRenderReuseRoom(t)
 	m := sh.measure()

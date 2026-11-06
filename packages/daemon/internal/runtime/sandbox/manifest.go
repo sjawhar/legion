@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/claudelaunch"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/repocache"
@@ -26,12 +27,15 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
-// The pod's init containers: workspace-fetch, the one that holds the provisioning token and
-// mounts nothing an agent of the issue can write; and workspace-init, which works on the issue's
-// volume without it. The pod's one container is its kind's (podKind.container).
+// The pod's init containers: workspace-fetch, one of the two that hold the provisioning token and
+// mount nothing an agent of the issue can write; skills-fetch, the other such container, which a
+// deployment naming runtime.kubernetes.skills_repository adds and which clones the skills
+// marketplace into the pod's skills volume; and workspace-init, which works on the issue's volume
+// without the token. The pod's one container is its kind's (podKind.container).
 const (
-	fetchContainer = "workspace-fetch"
-	initContainer  = "workspace-init"
+	fetchContainer  = "workspace-fetch"
+	skillsContainer = "skills-fetch"
+	initContainer   = "workspace-init"
 )
 
 // The pod's volumes. ghVolume is the prefix of each launcher role's gh volume (roleVolume), the
@@ -51,6 +55,14 @@ const (
 	// testPGVolume is the disk emptyDir an issue pod keeps its own test PostgreSQL's cluster on
 	// (TestPGDir), when the deployment sets runtime.kubernetes.test_postgres.
 	testPGVolume = "testpg"
+	// skillsVolume is the disk emptyDir skills-fetch clones the deployment's skills marketplace
+	// into (SkillsDir), read-write there and read-only in the pod's launcher container, so a role
+	// installs from a directory no role wrote; skillsTempVolume is that container's own in-memory
+	// TMPDIR, where its one-shot credential goes, off every volume another container mounts, as
+	// workspace-fetch's tempVolume is. Neither exists when the deployment names no skills
+	// repository.
+	skillsVolume     = "skills"
+	skillsTempVolume = "skills-tmp"
 )
 
 // The agent-secrets volumes: agentSecretsTokenVolume alone carries the projected token for the
@@ -147,13 +159,16 @@ var sessionProxyFlagNames = [3]string{"--session-instance", "--session-database"
 
 // legionVolumeNames are the volumes Legion puts in a pod, an issue pod's, the controller's or the
 // probe's, whose names the operator's volumes may not take: the shared ones, the role homes, the
-// test database's, and each launcher role's private ones. The agent-secrets volumes are reserved
-// whether or not this deployment enrolls, and the test database's whether or not it sets
-// `runtime.kubernetes.test_postgres`: an operator's pod may never claim them. Every launcher role,
-// the controller's included, has a key volume when the pod enrolls and a gh volume always.
+// test database's, the skills clone's and its fetch's TMPDIR, and each launcher role's private
+// ones. The agent-secrets volumes are reserved
+// whether or not this deployment enrolls, the test database's whether or not it sets
+// `runtime.kubernetes.test_postgres`, and the skills volumes whether or not it names a
+// `runtime.kubernetes.skills_repository`: an operator's pod may never claim them. Every launcher
+// role, the controller's included, has a key volume when the pod enrolls and a gh volume always.
 func legionVolumeNames() []string {
 	names := []string{
 		issueVolume, provisionVolume, tempVolume, configVolume, providersVolume, agentSecretsTokenVolume, roleHomesVolume, roleProbeVolume, testPGVolume,
+		skillsVolume, skillsTempVolume,
 	}
 	for _, role := range launcherRoles {
 		names = append(names, roleVolume("launcher", role), roleVolume("private", role), roleVolume(stateVolume, role), roleVolume(ghVolume, role),
@@ -167,7 +182,9 @@ func legionVolumeNames() []string {
 // the launcher container of either pod and the image probe's, or where a role's namespace binds
 // one: an operator's mount may be neither at, under, nor above one. AgentSecretsKeyDir and
 // AgentSecretsTokenDir are reserved whether or not this deployment enrolls, GHConfigDir whether or
-// not the pod is an issue's, FeedDir, which TreeRoot already covers, is named for the read-only
+// not the pod is an issue's, SkillsDir whether or not the deployment names a skills repository —
+// an operator's mount there would overlay the read-only clone a role installs from with storage
+// the operator writes — FeedDir, which TreeRoot already covers, is named for the read-only
 // mount every issue pod's container carries there, RolesDir is where an issue pod mounts every
 // role's own volumes, which each role's namespace covers whole, HomeMountsDir is where an issue
 // pod's roles container mounts what belongs under the home (homeMountsView), which each role's
@@ -176,7 +193,7 @@ func legionVolumeNames() []string {
 func legionMountPaths() []string {
 	paths := []string{
 		TreeRoot, FeedDir, LauncherDir, LauncherPrivateDir, StateDir, xdgConfigHome, ProvidersDir,
-		AgentSecretsKeyDir, AgentSecretsTokenDir, GHConfigDir, RolesDir, HomeMountsDir, RoleProbeDir,
+		AgentSecretsKeyDir, AgentSecretsTokenDir, GHConfigDir, RolesDir, HomeMountsDir, RoleProbeDir, SkillsDir,
 	}
 	slices.Sort(paths)
 	return paths
@@ -276,6 +293,15 @@ type keptPod struct {
 	// none, and its role is told neither of Oh My Pi's two session variables rather than a URL
 	// file it cannot read.
 	store ompsessions.StoreKind
+	// skills is the skills marketplace this pod was built with, read from its stored shape
+	// (podShapeRecord.SkillsRepository): the repository whose clone its skills volume holds, and
+	// so the one a role started in it may install from. It is the zero repository for a pod built
+	// before the deployment named one, or built with none, whose volume holds no clone at all —
+	// such a role starts without its skills until an ordinary update round replaces the pod, as a
+	// role of a pod built before an overlay was added runs without that overlay. A launch that
+	// builds the pod itself carries no keptPod and uses the configuration as it now reads
+	// (podKind.skillsRepository).
+	skills ghrepo.Repository
 }
 
 // enrollsIn is the one decision whether a generation of role started now in a pod holds the
@@ -744,7 +770,7 @@ func (r *Runtime) volumes(l launch) []corev1.Volume {
 	_, disk := l.kind.disk(r, l)
 	volume := corev1.Volume{Name: issueVolume, VolumeSource: disk}
 	config := corev1.Volume{Name: configVolume, VolumeSource: memory}
-	return slices.Concat([]corev1.Volume{volume}, l.kind.initVolumes(l), []corev1.Volume{config}, roleVolumes,
+	return slices.Concat([]corev1.Volume{volume}, l.kind.initVolumes(r, l), []corev1.Volume{config}, roleVolumes,
 		l.kind.mainVolumes(r), r.agentSecretsVolumes(l.roles), providers, r.pod.Volumes)
 }
 
@@ -1127,6 +1153,18 @@ func fetchEnvironment(l launch) []corev1.EnvVar {
 // disk, so no two provisions share a repository.
 func (r *Runtime) initEnvironment(launch) []corev1.EnvVar {
 	return append([]corev1.EnvVar{{Name: "PATH", Value: imagePath}}, xdgEnvironment()...)
+}
+
+// skillsEnvironment is `workspace-init skills`'s: the image's PATH alone, its own TMPDIR, where
+// the one-shot credential goes, and the mounted provisioning token. It names no repository cache
+// — a skills marketplace has none, and the clone is one shallow transfer — and no config home: its
+// git reads no configuration but its own.
+func skillsEnvironment() []corev1.EnvVar {
+	return []corev1.EnvVar{
+		{Name: "PATH", Value: imagePath},
+		{Name: "TMPDIR", Value: initTempDir},
+		{Name: "LEGION_PROVISION_TOKEN_FILE", Value: ProvisionDir + "/" + provisionTokenKey},
+	}
 }
 
 // ProvisionBound satisfies runtime.Runtime: workspace.FetchBudget plus workspace.CloneTimeout, the

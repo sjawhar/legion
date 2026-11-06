@@ -137,7 +137,7 @@ func newHarnessBeforeTheListener(t *testing.T, reviewer string) *harness {
 // creates no bucket and so fails until the listener has made one.
 func openWriter(client *bus.Client) func() (Writer, error) {
 	return func() (Writer, error) {
-		writer, err := cistore.OpenWriter(client.JS(), logging.New("writer"))
+		writer, err := cistore.OpenWriter(client.Connection(), client.JS(), logging.New("writer"))
 		if err != nil {
 			return nil, err
 		}
