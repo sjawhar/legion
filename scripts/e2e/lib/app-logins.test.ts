@@ -635,7 +635,11 @@ printf 'command %s\\n' "$(app_token_command "$implement_app_secret")"`
         'IMPLEMENT_APP --reason=legion-live-proof-github-app-token --github-owner Acme-Org --github-repo legion -- sh -c printf %s "$IMPLEMENT_APP"',
       ],
       [
-        { LEGION_GITHUB_OWNER: "Acme-Org", LEGION_GITHUB_REPOS: "legion nats-server", LEGION_GITHUB_READ_ONLY: "1" },
+        {
+          LEGION_GITHUB_OWNER: "Acme-Org",
+          LEGION_GITHUB_REPOS: "legion nats-server",
+          LEGION_GITHUB_READ_ONLY: "1",
+        },
         'IMPLEMENT_APP --reason=legion-live-proof-github-app-token --github-owner Acme-Org --github-repo legion --github-repo nats-server --github-read-only -- sh -c printf %s "$IMPLEMENT_APP"',
       ],
       [

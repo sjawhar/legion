@@ -906,18 +906,27 @@ pod_viewer() {
   pod_exec "$1" "$2" sh -c "$gh_wrapper_env GH_CONFIG_DIR=${3:-$gh_config_dir} GH_TOKEN= GITHUB_TOKEN= GH_HOST= gh api graphql -f query='{viewer{login}}' --jq .data.viewer.login"
 }
 # assert_gh_files POD CONTAINER WHO fails the check unless CONTAINER's gh bundle in POD holds the
-# repository owner's directory with both gh files and nothing else, beside nothing but other
-# owners' directories and the kubelet's entries. The bundle is a whole-volume Secret projection
-# (the mount the hour-boundary refresh needs: the kubelet rewrites it in place when the Secret
-# changes, where a subPath mount never sees an update), so beside the owners' directories its root
-# always lists the kubelet's atomic-writer entries, `..data` and a `..<timestamp>` directory. The
-# owner's directory is required, and so is `..data`, which a subPath mount (which never refreshes)
-# would not have; any other `..`-prefixed entry is the kubelet's, and any other entry must be a
-# lowercased GitHub login; anything else, at the root or in the owner's directory, is a stranger,
-# named. WHO names the container in the failure. Call it outside a command substitution: fail must
-# end the run.
+# repository owner's directory with both gh files, beside nothing but other owners' directories and
+# the kubelet's entries. The bundle is a whole-volume Secret projection (the mount the hour-boundary
+# refresh needs: the kubelet rewrites it in place when the Secret changes, where a subPath mount
+# never sees an update), so beside the owners' directories its root always lists the kubelet's
+# atomic-writer entries, `..data` and a `..<timestamp>` directory. The owner's directory is
+# required, and so is `..data`, which a subPath mount (which never refreshes) would not have; any
+# other `..`-prefixed entry is the kubelet's, and any other entry must be a lowercased GitHub login;
+# anything else at the root is a stranger, named.
+#
+# The owner's own directory holds its two gh files and, since INFRA-513 narrowed every token, a
+# directory per other repository the project serves under that owner (the bundle's `<owner>/<repo>`
+# entries), each holding those two files alone. The listing an exec can reach is `ls -A`, which
+# lists such a directory as an entry of the owner's like any file, so every entry that is neither gh
+# file is listed in turn: it is a repository's directory when its name is one GitHub could have
+# (lowercased, as ghconfig writes it) and its listing holds a gh file, and then the gh file it lacks
+# is a failure naming the listing; anything else — a name no repository has, or a listing with
+# neither gh file, which for a stray file is the path `ls -A` prints back — is a stranger, named.
+# WHO names the container in the failure. Call it outside a command substitution: fail must end the
+# run.
 assert_gh_files() {
-  local root owned want strangers
+  local root owned want strangers entry listed
   root=$(pod_exec "$1" "$2" sh -c "ls -A $gh_owners_dir") || fail "could not list $3's $gh_owners_dir"
   grep -qxF -- "${gh_config_dir##*/}" <<<"$root" || fail "$3's $gh_owners_dir lacks ${gh_config_dir##*/}; it holds: $(tr '\n' ' ' <<<"$root")"
   grep -qxF -- ..data <<<"$root" ||
@@ -928,8 +937,20 @@ assert_gh_files() {
   for want in config.yml hosts.yml; do
     grep -qxF -- "$want" <<<"$owned" || fail "$3's $gh_config_dir lacks $want; it holds: $(tr '\n' ' ' <<<"$owned")"
   done
-  strangers=$(grep -vxF -e config.yml -e hosts.yml <<<"$owned" || true)
-  [ -z "$strangers" ] || fail "$3's $gh_config_dir holds an entry that is not a gh file: $(tr '\n' ' ' <<<"$strangers")"
+  while read -r entry; do
+    case $entry in
+      "" | config.yml | hosts.yml) continue ;;
+      . | .. | *[!a-z0-9._-]*) listed= ;;
+      # The exec reads /dev/null, never the listing this loop reads line by line.
+      *) listed=$(pod_exec "$1" "$2" sh -c "ls -A $gh_config_dir/$entry" </dev/null) || listed= ;;
+    esac
+    grep -qxF -e config.yml -e hosts.yml <<<"$listed" ||
+      fail "$3's $gh_config_dir holds an entry that is neither a gh file nor a repository's directory: $entry"
+    for want in config.yml hosts.yml; do
+      grep -qxF -- "$want" <<<"$listed" ||
+        fail "$3's $gh_config_dir/$entry lacks $want; it holds: $(tr '\n' ' ' <<<"$listed")"
+    done
+  done <<<"$owned"
 }
 # operator_gh DIR args… runs the real gh (real_gh, mise's) with the same three variables pod_viewer
 # empties, against the controller's gh config directory rather than a pod's. The devbox's `gh` on
@@ -5927,8 +5948,9 @@ if [ -n "$skip_controller" ]; then
 else
 # The controller the daemon launched: its gh, from its owner's directory of the pod's gh bundle,
 # answers tree 1's pull request's state and the review App's viewer, the bundle holds that
-# directory with both gh files beside the kubelet's own entries alone (assert_gh_files), and the
-# real gh with GH_CONFIG_DIR=/nonexistent answers neither.
+# directory with both gh files and a directory per other repository of that owner the project
+# serves, each holding both gh files, beside the kubelet's own entries alone (assert_gh_files), and
+# the real gh with GH_CONFIG_DIR=/nonexistent answers neither.
 [ -n "$pr_number" ] || fail "the controller's GitHub credential check needs tree 1's pull request, but pr_number is empty"
 container=$(jq -r .locator.sandbox.container <<<"$claim")
 state=$(pod_exec "$pod" "$container" sh -c "$gh_wrapper_env GH_CONFIG_DIR=$gh_config_dir GH_TOKEN= GITHUB_TOKEN= GH_HOST= gh pr view $pr_number -R $repo --json state -q .state 2>&1") || fail "the daemon-launched controller's gh in $pod/$container could not read $repo#$pr_number: $(scrub <<<"$state")"
@@ -5942,7 +5964,7 @@ assert_gh_files "$pod" "$container" "the daemon-launched controller's container 
 if out=$(pod_exec "$pod" "$container" sh -c "GH_CONFIG_DIR=/nonexistent GH_TOKEN= GITHUB_TOKEN= GH_HOST= /usr/local/bin/gh pr view $pr_number -R $repo --json state -q .state" 2>&1); then
   fail "gh with GH_CONFIG_DIR=/nonexistent in $pod/$container unexpectedly answered pull request state: $(scrub <<<"$out")"
 fi
-note "the daemon-launched controller's gh in $pod/$container: pull request state $state, viewer $viewer, $gh_config_dir holds both gh files and $gh_owners_dir only owners' directories and the kubelet's entries beside it; GH_CONFIG_DIR=/nonexistent failed"
+note "the daemon-launched controller's gh in $pod/$container: pull request state $state, viewer $viewer, $gh_config_dir holds both gh files and repository directories holding both, and $gh_owners_dir only owners' directories and the kubelet's entries beside it; GH_CONFIG_DIR=/nonexistent failed"
 fi
 # 2. The controller cannot come back.
 controller_cpu=100000
