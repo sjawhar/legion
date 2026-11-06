@@ -83,6 +83,11 @@ type Outbox struct {
 	hold atomic.Pointer[duty.Hold]
 	// claims counts the batches this outbox read, one per scanBatch: how often it scanned.
 	claims atomic.Int64
+	// afterRetryArmed is given the wait serve armed its one retry timer for, each time it arms
+	// one. Nil in production; a test uses it to read the sequence the outbox went through - which
+	// wait it armed, and when - rather than measuring the wall clock the publish landed on. Set
+	// it only before Run starts, so nothing races it.
+	afterRetryArmed func(wait time.Duration)
 	// probeBeforeHold is set when this process gave the publisher hold up for NATS lost, and
 	// cleared once a probe of its connection is answered (answering). Only Run's goroutine reads
 	// and writes it.
@@ -381,6 +386,9 @@ func (o *Outbox) serve(ctx context.Context, hold *duty.Hold) holdEnd {
 				if wait, ok := o.nextRetry(ctx, end.failed); ok {
 					retryTimer = time.NewTimer(wait)
 					retryDue = retryTimer.C
+					if o.afterRetryArmed != nil {
+						o.afterRetryArmed(wait)
+					}
 				}
 				// The client's state is read again before waiting: a scan takes the wakes that
 				// reach it while it runs (scan), the change of this connection among them, so the

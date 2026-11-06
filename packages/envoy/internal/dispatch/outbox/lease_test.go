@@ -178,6 +178,26 @@ func TestTheOutboxDoesNotScanWhileIdle(t *testing.T) {
 	outbox := New(Deps{Store: database, Publisher: publisher, Broker: events.NewBroker(), Listen: database.Pool.Listener})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+	// Every wait the outbox arms its one retry timer for, with the moment it was armed and the
+	// claims the outbox had made by then: the sequence this row reads, in place of a wall clock.
+	type armedWait struct {
+		wait   time.Duration
+		at     time.Time
+		claims int64
+	}
+	var armedMu sync.Mutex
+	var armed []armedWait
+	outbox.afterRetryArmed = func(wait time.Duration) {
+		armedMu.Lock()
+		defer armedMu.Unlock()
+		armed = append(armed, armedWait{wait: wait, at: time.Now(), claims: outbox.claims.Load()})
+	}
+	// armedWaits copies what has been armed so far, so nothing reads the slice unlocked.
+	armedWaits := func() []armedWait {
+		armedMu.Lock()
+		defer armedMu.Unlock()
+		return append([]armedWait(nil), armed...)
+	}
 	go func() { outbox.Run(ctx); close(done) }()
 	t.Cleanup(func() { cancel(); <-done })
 
@@ -205,25 +225,62 @@ func TestTheOutboxDoesNotScanWhileIdle(t *testing.T) {
 	t.Logf("the event another process committed was claimed %s after its commit", time.Since(committed).Round(time.Millisecond))
 	waitFor(t, time.Second, "the other process's event published", func() bool { return publishedAt(t, database, fresh.ID) != nil })
 
+	// The sequence below starts from an outbox at rest, so the row waits for it to park before
+	// it inserts: the waitFor above returns as soon as the other process's event is marked
+	// published, while the batch that published it has still to start the batch that follows it
+	// and the scan has still to arm whatever comes of that. Parked is no claim and no arming for
+	// 250 ms, and with nothing left to send that is reached at once.
+	waitFor(t, 10*time.Second, "the outbox parking after the other process's event", func() bool {
+		claims, waits := outbox.claims.Load(), len(armedWaits())
+		time.Sleep(250 * time.Millisecond)
+		return outbox.claims.Load() == claims && len(armedWaits()) == waits
+	})
+
 	// A back-off due in 3 s, committed by the other process: its insert wakes the outbox, whose scan
-	// finds nothing due and arms the retry timer.
+	// finds nothing due and arms its one retry timer to the back-off's own moment, and the timer's
+	// scan is the one that publishes it. The waits armed earlier in this row are not this one's.
+	armedBefore := len(armedWaits())
 	backedOff := appendBackedOffEvent(t, other, 3*time.Second)
 	inserted := time.Now()
-	time.Sleep(time.Second)
-	armedAt := outbox.claims.Load()
 	for publishedAt(t, database, backedOff.ID) == nil {
-		if time.Since(inserted) > 3200*time.Millisecond {
-			t.Fatal("a back-off due in 3 s was not published within 3.2 s")
+		// The one clock left in this loop is a hang guard, 60 s against the 3 s the work takes, so
+		// no load reaches it: it fires only when nothing was published at all.
+		if time.Since(inserted) > 60*time.Second {
+			t.Fatalf("the back-off due in 3 s was never published: %s after its insert the outbox had armed %v",
+				time.Since(inserted).Round(time.Millisecond), armedWaits()[armedBefore:])
 		}
-		if time.Since(inserted) < 2800*time.Millisecond && outbox.claims.Load() != armedAt {
-			t.Fatalf("the outbox claimed %d times before the back-off fell due, want 0", outbox.claims.Load()-armedAt)
+		// Nothing else wakes the outbox until the timer fires: no claim since the wait was armed,
+		// while the back-off is not yet due. Load can only delay a claim, never bring one forward.
+		if since := armedWaits()[armedBefore:]; len(since) > 0 && time.Since(inserted) < 2500*time.Millisecond {
+			if claims := outbox.claims.Load() - since[0].claims; claims != 0 {
+				t.Fatalf("the outbox made %d claims in the %s since it armed a %s wait for the back-off, %s after the insert and before the back-off fell due, want none",
+					claims, time.Since(since[0].at).Round(time.Millisecond), since[0].wait.Round(time.Millisecond),
+					since[0].at.Sub(inserted).Round(time.Millisecond))
+			}
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if elapsed := time.Since(inserted); elapsed < 2500*time.Millisecond {
-		t.Fatalf("the back-off due in 3 s was published %s after its insert", elapsed)
+	published := time.Since(inserted)
+	since := armedWaits()[armedBefore:]
+	if len(since) != 1 {
+		t.Fatalf("the outbox armed %d waits between the back-off's insert and its publish, want 1: %v", len(since), since)
 	}
-	t.Logf("the back-off due in 3 s was published %s after its insert", time.Since(inserted).Round(time.Millisecond))
+	// The wait is a value the database computed from its own next_attempt_at, not an elapsed time
+	// this test measured, so a loaded runner can only make it smaller: the only way past 3 s is a
+	// wait armed for something that is not this back-off.
+	if since[0].wait <= 0 || since[0].wait > 3*time.Second {
+		t.Fatalf("the outbox armed a %s wait for a back-off due in 3 s, want one above zero and no more than 3 s", since[0].wait)
+	}
+	// Safe under any load: the arming is tied to the database's next_attempt_at, not to when the
+	// scan that armed it ran, so a late scan cannot publish the back-off early.
+	if published < 2500*time.Millisecond {
+		t.Fatalf("the back-off due in 3 s was published %s after its insert, want no sooner than 2.5 s", published.Round(time.Millisecond))
+	}
+	// A reading for the record, not an assertion: the publishing batch starts another batch, so
+	// the scan the timer woke claims more than once.
+	t.Logf("the outbox armed a %s wait %s after the insert, the back-off was published %s after it, and the outbox made %d claims from the arming to the publish",
+		since[0].wait.Round(time.Millisecond), since[0].at.Sub(inserted).Round(time.Millisecond),
+		published.Round(time.Millisecond), outbox.claims.Load()-since[0].claims)
 }
 
 // appendBackedOffEvent commits an event on database whose next attempt is due after wait on the
