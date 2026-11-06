@@ -460,6 +460,18 @@ check "fails" "$(is "$status" 1)"
 check "names the step" \
   "$(contains "$out" 'TAG_RUNS names image step "Build", which passes no -run, so it runs the package.s untagged tests itself')"
 
+# A tag step that passes -run and that no TAG_RUNS entry names is the hole rule 10 exists to
+# close, read from the other side: the four staleness refusals above all start from an entry, so
+# a step added without one, or an entry deleted while its step stays, is held by nothing. Which
+# job runs a package's untagged tests cannot be derived, but which steps need an entry can: a
+# `go test` that passes both -tags and -run runs only what its tag adds.
+echo "case: a tag step that passes -run and that TAG_RUNS does not name"
+root=$(fixture tag-run-undeclared)
+tagged_step "$root"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the step" "$(contains "$out" 'image step "Build"')"
+
 # A job that calls a reusable workflow keeps its gate in ci.yaml and gives its steps away, so a
 # why cites the step in the file that holds it. ci.yaml's docs job does that with docs-site.yaml.
 echo "case: a why cites a step of another workflow file"
@@ -991,6 +1003,20 @@ out=$(derived "$root" "pkg")
 check "refuses rather than naming the test before the helper" \
   "$(contains "$out" 'RAISED: .*x_test.go:8: raceEnabled is read where no top-level test encloses it')"
 check "and names neither test" "$(is "$(contains "$out" 'TestEarlier')" false)"
+
+# Enclosure is judged by the body's closing brace in column 0, which a one-line body does not
+# write, so a read at package level after one is attributed to that test instead of refused.
+# Here the sizes a function literal computes at package level are the ones the detector shrinks,
+# and the test above them is named in their place: the plain step then runs a test that is no
+# smaller under the detector and leaves out whichever one reads sizes.
+echo "case: a raceEnabled a package-level declaration holds after a one-line test"
+root="$work/race-package-level-read"
+mkdir -p "$root/pkg"
+printf 'package pkg\n\nimport "testing"\n\nfunc TestOneLine(t *testing.T) { run(t, sizes) }\n\nvar sizes = func() int {\n\tif raceEnabled {\n\t\treturn 2\n\t}\n\treturn 4\n}()\n\nfunc run(t *testing.T, n int) {}\n' > "$root/pkg/x_test.go"
+out=$(derived "$root" "pkg")
+check "refuses rather than naming the one-line test above it" \
+  "$(contains "$out" 'RAISED: .*x_test.go:8: raceEnabled is read where no top-level test encloses it')"
+check "and names no test" "$(is "$(contains "$out" 'TestOneLine')" false)"
 
 echo "case: a //go:build that names race in a form the walk does not read"
 root="$work/race-unread-constraint"
