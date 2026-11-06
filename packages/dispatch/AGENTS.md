@@ -1213,6 +1213,31 @@ a gap its replay does not cover - leave a connected editor alone whether they su
 outage that answers
 them 500 or 503 keeps the editor and the edits it holds.
 
+**And the address asks for the document's chunks before the page renders.** The editor's whole
+half of the load - the transport chunk, the socket, its SyncStep1, the sync's apply, the editor
+and its first batch - begins only once `ProofDocument` admits, which on a phone at 4x CPU
+throttling is 5,920 ms into the load, after the issue page and the read-only preview have
+rendered; the first block a reader can type in lands at 8,158 ms (dispatch://INFRA-341, R11).
+What a document address can take out of that wait for nothing is the downloads: the task that
+reads the document's text ahead of the render asks for the transport chunk (hocuspocus and yjs)
+and for the editor's own chunk in the same task it asks for the app's, and reads the block schema
+there under the key every document surface reads it by (`openDocumentEarly` from
+`features/shell/boot.ts`, `blockSchemaQueryOptions` in `features/doc/schema.ts`). The admission
+finds all three in hand, and bytes that arrive while the page renders cost that render nothing.
+
+**The socket is not opened there, and that was measured rather than assumed.** Opening it from
+that same task - on the text read above, with the page's admission adopting the connection rather
+than making a second - moved the socket 2.9 s earlier and bought 375-811 ms on the first block a
+reader can type in. It cost more than it bought: on a throttled phone it moved two to three
+seconds of the editor's own main-thread work, the sync's apply and the build it starts, in front
+of the page's draw of the document, and that draw is what the reader reads while they wait. The
+draw slipped from 4,725 ms to 6,505 ms on the 28-section document and from 5,166 ms to 7,794 ms
+on the 140-section one (`e2e/large-documents.ts`, dispatch://INFRA-341, R11). So the socket is
+opened by the page's own admission, as every socket in this section is: bytes downloaded in
+parallel cost the reader's draw nothing, main-thread work moved in front of it costs it
+directly. Anyone moving the socket earlier again owes the same two numbers on both documents -
+the first editable block and the page's own draw.
+
 Before constructing Proof, Dispatch fetches `/api/v1/schema/blocks` once and keeps the schema by
 version for the session. It passes that schema to the live editor, historical-version editor, and
 the one headless Markdown engine cached per schema version; the connection carries it as

@@ -7,13 +7,16 @@ import type { ArtifactText } from "../../api/types";
 import { parseAheadOfTheRender, warmMarkdownRenderer } from "../refs/markdown-engine";
 import { markdownWorkerThreshold } from "../refs/markdown-worker-threshold";
 import { parseIssuePath } from "../refs/routes";
+import { loadDocumentTransport } from "./connection";
 import { leadingBlocks } from "./document-blocks";
 import { currentAddress, dropFirstScreen, firstScreenAwaits } from "./first-screen";
 import { liveTextQueryOptions } from "./live-text";
+import { blockSchemaQueryOptions } from "./schema";
 
 /**
- * Starts the reads an open document needs, from the address alone, as early as the page knows
- * it: the issue, and then the document's own text.
+ * Starts what an open document needs, from the address alone, as early as the page knows it:
+ * the issue, the document's own text, the block schema, and the two chunks its editor is
+ * built from.
  *
  * It exists because of what those reads used to wait behind. The document's first fetch began
  * about 3.5 s after the issue's own answer arrived on a phone, because nothing asked for it
@@ -39,6 +42,23 @@ import { liveTextQueryOptions } from "./live-text";
  * (`AuthGate`). The page that mounts next finds each read in the cache or in flight, and asks
  * for it itself exactly as it always did. A failure is left in the cache as any failed read
  * is, for that page to show and to retry.
+ *
+ * The chunks are here for the same reason the reads are. A document address names the
+ * document, so neither the transport chunk (hocuspocus and yjs) nor the editor's own chunk
+ * depends on anything the page renders, and both used to be downloaded and evaluated in
+ * series after everything else: on a phone at 4x CPU throttling the editor's half of the load
+ * began at 5,920 ms, once the issue page and the read-only preview had rendered and
+ * `ProofDocument` admitted. Bytes asked for here are bytes that arrive while the page renders,
+ * and they cost that render nothing.
+ *
+ * The socket is not opened here, and that was measured rather than assumed. Opening it from
+ * this task moved it 2.9 s earlier and bought 375-811 ms on the first block a reader can type
+ * in, but it put two to three seconds of the editor's main-thread work - the sync's apply and
+ * the build it starts - in front of the page's own draw of the document, which slipped from
+ * 4,725 ms to 6,505 ms on the 28-section document and from 5,166 ms to 7,794 ms on the
+ * 140-section one (`e2e/large-documents.ts`). The reader reads that draw while they wait for
+ * the editor, so the socket is opened by the page's admission as it always was
+ * (`ProofDocument`'s `admit`, `packages/dispatch/AGENTS.md`).
  */
 export function openDocumentEarly(client: QueryClient, pathname: string, search: string): void {
   const address = `${pathname}${search}`;
@@ -64,6 +84,21 @@ export function openDocumentEarly(client: QueryClient, pathname: string, search:
   if (route?.kind !== "issue" && route?.kind !== "spec" && route?.kind !== "artifact") {
     return;
   }
+  // The transport chunk - the hocuspocus provider and yjs - asked for here, in the task that
+  // asks for the app's own chunk, rather than when `ProofDocument` admits. It is the first
+  // thing the editor's half of the load needs and nothing about it depends on the document's
+  // state, so a page that waited for the admission to ask for it paid its download and its
+  // evaluation in series after everything else (dispatch://INFRA-341, R11). A second ask costs
+  // nothing: the module cache answers it, and the admission asks again as it always did.
+  void loadDocumentTransport().catch(() => undefined);
+  // And the editor's own chunk, the largest the document loads, for the same reason
+  // (`loadEditor`). It is reached through `import()` rather than a static import because the
+  // editor's module brings the document surface's chunk with it, which this task has no other
+  // use for.
+  void import("./editor").then(({ loadEditor }) => loadEditor()).catch(() => undefined);
+  // The schema the surface draws with and the socket is admitted under, read here for the same
+  // reason: the page's own read of it finds it read (`blockSchemaQueryOptions`).
+  void client.fetchQuery(blockSchemaQueryOptions()).catch(() => undefined);
   // The text itself, where the address names the document: `/issues/{key}/artifacts/{slug}`
   // names it as Dispatch's own route does, so the bytes a reader reads are asked for in the
   // first round trip rather than the second, and `web/index.html` has usually asked for them

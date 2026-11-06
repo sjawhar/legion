@@ -20,7 +20,7 @@ import { CHANGED_BLOCK_CLASS } from "../doc/change-marks";
 import { liveTextQueryOptions } from "../doc/live-text";
 import { ProofDocument } from "../doc/ProofDocument";
 import { DocumentRuntime } from "../doc/runtime";
-import { loadBlockSchema } from "../doc/schema";
+import { blockSchemaQueryOptions } from "../doc/schema";
 import { BLOCK_ID_ATTRIBUTE, scrollBlockToTop, scrollElementToTop } from "../doc/scroll-block";
 import { VersionView } from "../doc/VersionView";
 import { MarkdownBody } from "../refs/MarkdownBody";
@@ -293,11 +293,7 @@ function ApprovalBody({
   const approvedVersion = approval.approved?.version;
 
   const { blockSchema: runtimeBlockSchema } = useContext(DocumentRuntime);
-  const blockSchemaQuery = useQuery({
-    queryFn: loadBlockSchema,
-    queryKey: ["block-schema"],
-    staleTime: Number.POSITIVE_INFINITY,
-  });
+  const blockSchemaQuery = useQuery(blockSchemaQueryOptions());
   const blockSchema = runtimeBlockSchema ?? blockSchemaQuery.data;
   const user = useQuery(whoAmIQuery()).data;
   const artifactQuery = useQuery({ ...artifactQueryOptions(artifactId), enabled: settled });

@@ -79,7 +79,7 @@ import { createPendingWaiter } from "./pending-waiter";
 import { refocusAfterDiagrams } from "./refocus-after-diagrams";
 import { FRAGMENT_NAME } from "./roots";
 import { DocumentRuntime } from "./runtime";
-import { loadBlockSchema } from "./schema";
+import { blockSchemaQueryOptions } from "./schema";
 import { readLineText, useSpecMarks } from "./spec-marks";
 import type { AskBlockHost } from "./typed-block-drawing";
 import { useAskCardsDrawnInTasks } from "./useAskCardsDrawnInTasks";
@@ -329,11 +329,7 @@ export function ProofDocument({
   highlightTermRef.current = highlightTerm;
   const queryClient = useQueryClient();
   const documentRef = buildDispatchReference(documentRoute(artifact));
-  const blockSchemaQuery = useQuery({
-    queryFn: loadBlockSchema,
-    queryKey: ["block-schema"],
-    staleTime: Number.POSITIVE_INFINITY,
-  });
+  const blockSchemaQuery = useQuery(blockSchemaQueryOptions());
   // The artifact's own read waits for the editor's draw, as the badges' read below does. The
   // one thing it gives this component is a fresher `versions` list, and the artifact the issue
   // named already carries that list - it is the fallback two lines of this file use anyway
