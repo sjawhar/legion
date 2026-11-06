@@ -210,7 +210,9 @@ const mermaidQueue = new WorkerQueue<WorkerJob, DrawnSource, MermaidDrawing>({
     let drawn: CachedDrawing;
     if ("markup" in reply) {
       try {
-        drawn = { svg: mermaidSvgElement(reply.markup, document) };
+        // The worker draws every source with beautiful-mermaid, whose markup is XML
+        // (`mermaid-render.worker.ts`); a reply that names its renderer picks the parse here.
+        drawn = { svg: mermaidSvgElement(reply.markup, document, "xml") };
       } catch (error) {
         drawn = refusal(error instanceof Error ? error.message : null);
       }

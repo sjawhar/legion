@@ -48,7 +48,7 @@ describe("renderMermaidMarkup", () => {
 describe("mermaidSvgElement", () => {
   test("draws a sequence diagram as an svg of the document with the editor's accessible name", () => {
     const markup = renderMermaidMarkup("sequenceDiagram\n  Alice->>Bob: Hi");
-    const svg = mermaidSvgElement(markup, document);
+    const svg = mermaidSvgElement(markup, document, "xml");
 
     expect(svg.localName).toBe("svg");
     expect(svg.ownerDocument).toBe(document);
@@ -69,7 +69,8 @@ describe("mermaidSvgElement", () => {
       renderMermaidMarkup(
         "graph TD\n  A --> B\n  classDef evil fill:url(https://evil.example/x.png)\n  class A evil\n  style B fill:url(https://evil.example/y.png)\n  linkStyle 0 stroke:\\75rl(https://evil.example/q)"
       ),
-      document
+      document,
+      "xml"
     );
 
     const values = attributeValues(svg);
@@ -78,7 +79,7 @@ describe("mermaidSvgElement", () => {
   });
 
   test("throws for markup that is not an svg document", () => {
-    expect(() => mermaidSvgElement("<div>not a diagram</div>", document)).toThrow(
+    expect(() => mermaidSvgElement("<div>not a diagram</div>", document, "xml")).toThrow(
       "Invalid SVG output"
     );
   });
@@ -96,7 +97,8 @@ describe("showMermaidSvg", () => {
     const diagram = (id: string) =>
       mermaidSvgElement(
         `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect id="${id}" width="4" height="4"/></svg>`,
-        document
+        document,
+        "xml"
       );
     const sheet = "svg{display:block}";
     const second = diagram("second");
@@ -128,7 +130,7 @@ describe("sanitizeMermaidSvg", () => {
     ];
     for (const source of diagrams) {
       const markup = renderMermaidMarkup(source);
-      const svg = sanitizeMermaidSvg(markup, document);
+      const svg = sanitizeMermaidSvg(markup, document, "xml");
       expect(elementNames(svg)).toEqual(elementNames(parseRaw(markup)));
     }
   });
@@ -152,10 +154,18 @@ describe("sanitizeMermaidSvg", () => {
   </svg>`;
 
   test("keeps the shapes, text and styling and drops every script, link and fetch", () => {
-    const svg = sanitizeMermaidSvg(hostile, document);
+    const svg = sanitizeMermaidSvg(hostile, document, "xml");
 
     expect(svg.ownerDocument).toBe(document);
-    expect(elementNames(svg)).toEqual(["svg", "style", "rect", "path", "text"]);
+    expect(elementNames(svg)).toEqual([
+      "svg",
+      "style",
+      "foreignObject",
+      "div",
+      "rect",
+      "path",
+      "text",
+    ]);
     expect(svg.getAttribute("onload")).toBeNull();
     expect(svg.getAttribute("viewBox")).toBe("0 0 10 10");
     const rect = svg.getElementsByTagName("rect")[0];
@@ -180,7 +190,8 @@ describe("sanitizeMermaidSvg", () => {
         <rect id="imaged" style="background:image-set('https://x.example/f' 1x)"/>
         <rect id="local" fill="url(#grad)" marker-end='url( "#arrow" )' data-label="a\\b (x.example)"/>
       </svg>`,
-      document
+      document,
+      "xml"
     );
 
     expect(
@@ -206,7 +217,7 @@ describe("sanitizeMermaidSvg", () => {
 
   test("compares element names exactly, since XML names are case-sensitive", () => {
     expect(() =>
-      sanitizeMermaidSvg('<SVG xmlns="http://www.w3.org/2000/svg"><rect/></SVG>', document)
+      sanitizeMermaidSvg('<SVG xmlns="http://www.w3.org/2000/svg"><rect/></SVG>', document, "xml")
     ).toThrow("Invalid SVG output");
 
     const svg = sanitizeMermaidSvg(
@@ -214,7 +225,8 @@ describe("sanitizeMermaidSvg", () => {
         <RECT id="upper" width="1" height="1"/>
         <rect id="lower" width="1" height="1"/>
       </svg>`,
-      document
+      document,
+      "xml"
     );
     expect(elementNames(svg)).toEqual(["svg", "rect"]);
     expect(svg.getElementsByTagName("rect")[0]?.getAttribute("id")).toBe("lower");
@@ -227,7 +239,7 @@ describe("sanitizeMermaidSvg", () => {
       "<svg><rect/></svg>",
       "not markup at all",
     ]) {
-      expect(() => sanitizeMermaidSvg(markup, document)).toThrow("Invalid SVG output");
+      expect(() => sanitizeMermaidSvg(markup, document, "xml")).toThrow("Invalid SVG output");
     }
   });
 });
