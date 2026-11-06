@@ -3,6 +3,7 @@ package api
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
@@ -24,25 +26,30 @@ const duplicateCandidateLimit = 5
 // The two bars the near-copy score is read against. A score is the share of the new text's picked
 // rarest-word weight that a candidate holds, so both are fractions of one.
 //
-// TestNearCopyRefusalReplay sets them: it replays every create of INFRA from 2026-10-20 to
+// TestNearCopyRefusalReplay measures them: it replays every create of INFRA from 2026-10-20 to
 // 2026-11-04 against the project as it stood at each create, over the corpus
 // `near-copy-corpus.jsonl` attached to dispatch://INFRA-1160, and reports the false-refusal and
-// nudge rates at each bar. The test asserts that these constants hold the rates the report
-// names, so a later drift fails it. A change to the term picker, to the project's term
-// statistics or to the scoring statement invalidates the calibration: run the replay again.
+// nudge rates at each bar. It holds the two constants to the ceilings the spec gives them, but
+// it is env-gated and CI never runs it (near_copy_replay_test.go), so nothing fails when the
+// numbers below go stale. A change to the term picker, to the project's term statistics or to
+// the scoring statement invalidates this calibration, and the replay is the recalibration to
+// run by hand after it.
 const (
 	// duplicateRefuseScore is the score at or above which a create is refused 409
 	// POSSIBLE_DUPLICATE. At most 5% of the creates the replay judges not duplicates may reach it
-	// (dispatch://INFRA-1160/spec#b-r2). Measured on 2026-11-05 over 1,159 INFRA creates, with
-	// the project's term statistics refreshed every ten minutes of replayed time as a live server
-	// refreshes them: 61 refused, 49 of them not duplicates, 4.28% of the 1,144 creates not
-	// marked. It is the lowest bar under that ceiling, so it stops the most near copies the
-	// ceiling allows: the next bar down, 0.75, refuses 63 that are not duplicates, 5.51%.
+	// (dispatch://INFRA-1160/spec#b-r2). Measured over 1,159 INFRA creates, with the project's
+	// term statistics refreshed every ten minutes of replayed time as a live server refreshes
+	// them (dispatch://INFRA-1160/artifact/near-copy-replay-md, version 3): 55 refused, 43 of
+	// them not duplicates, 3.76% of the 1,144 creates not marked. It is not the lowest bar under
+	// that ceiling - the next bar down, 0.75, refuses 57 that are not duplicates, 4.98%, which
+	// holds too - and the architect kept 0.80 for the margin 3.76% leaves: the two creates 0.75
+	// refuses and 0.80 does not are both above the nudge bar, so their filer is told of the
+	// issue either way.
 	duplicateRefuseScore = 0.80
 	// duplicateNudgeScore is the score at or above which the closest open issue is named to the
 	// filer as a likely duplicate, without refusing the create. At most 15% of the replay's
-	// creates may reach it (dispatch://INFRA-1160/spec#b-r4). Measured on the same replay: 133
-	// creates nudged, 11.5%. The next bar down, 0.55, nudges 182, 15.7%, over that ceiling.
+	// creates may reach it (dispatch://INFRA-1160/spec#b-r4). Measured on the same replay: 131
+	// creates nudged, 11.30%. The next bar down, 0.55, nudges 15.53%, over that ceiling.
 	duplicateNudgeScore = 0.60
 	// duplicateMinTerms is how many terms the new text must carry before the gate scores it at
 	// all. The score is a share of the picked terms, and pickRelatedTerms keeps only a term some
@@ -251,15 +258,20 @@ type scoredDuplicate struct {
 
 // duplicateGateResult is what the near-copy gate answered for one create.
 type duplicateGateResult struct {
-	// Answered is false when the gate's read failed or ran out of its bound. The create goes in
-	// either way: a forced one records that it was forced with no issues named, an unforced one
-	// is told that no near-copy check was made. Refusing a create because the gate was slow
-	// would turn one slow read into a project that cannot be written to.
-	Answered bool
+	// Unanswered is why the gate's read did not answer, in the words the create tells the filer
+	// (model.Suggestions.NearCopyCheck); empty exactly when it answered. The create goes in
+	// either way - a forced one records that it was forced with no issues named, an unforced one
+	// is told this - because refusing a create whose check was slow or broken would turn one bad
+	// read into a project that cannot be written to.
+	Unanswered string
 	// Candidates are the project's open non-ancestor issues whose score reaches
 	// duplicateNudgeScore, best score first, at most duplicateCandidateLimit.
 	Candidates []scoredDuplicate
 }
+
+// answered reports whether the gate's read answered at all. Candidates is empty both when it
+// answered and found nothing and when it did not answer, and the two are recorded apart.
+func (result duplicateGateResult) answered() bool { return result.Unanswered == "" }
 
 // refusals are the candidates at or above duplicateRefuseScore: what a 409 names, and what a
 // forced create records that it forced past. Never nil, so it marshals as [].
@@ -314,8 +326,10 @@ func duplicateGateText(title, spec string) string {
 // two, a read of 1.2 seconds would refuse an unforced create while recording for a forced one
 // that the check did not answer.
 //
-// The error is the read's own. An unforced create is refused with it, as createIssue has always
-// answered a failed check; a forced one goes on with Answered false.
+// A read that does not answer refuses nothing: the create goes in and the filer is told, in the
+// words Unanswered carries, that no near-copy check was made. The bound and a failure of the
+// read itself are told apart there and in the log, because the second is the server's own fault
+// - before this gate it was a visible 500 - and happens whatever the bound is.
 func (s *server) duplicateGate(
 	ctx context.Context, project, title, spec string, ancestors []string,
 ) duplicateGateResult {
@@ -323,11 +337,18 @@ func (s *server) duplicateGate(
 	gateCtx, cancel := context.WithTimeout(ctx, bound)
 	defer cancel()
 	candidates, err := s.readDuplicateCandidates(gateCtx, project, title, spec, ancestors, bound, duplicateNudgeScore)
-	if err != nil {
-		slog.Warn("dispatch: the near-copy check did not answer", "project", project, "error", err)
-		return duplicateGateResult{}
+	switch {
+	case err == nil:
+		return duplicateGateResult{Candidates: candidates}
+	case nearCopyBoundHit(err) || errors.Is(err, context.Canceled):
+		// The read ran out of its bound, or the create's own request went away under it, which
+		// answers nobody anything.
+		slog.Warn("dispatch: the near-copy check did not answer within its bound",
+			"project", project, "bound", bound, "error", err)
+		return duplicateGateResult{Unanswered: nearCopyCheckNotMade(bound)}
 	}
-	return duplicateGateResult{Answered: true, Candidates: candidates}
+	slog.Error("dispatch: the near-copy check failed", "project", project, "error", err)
+	return duplicateGateResult{Unanswered: nearCopyCheckFailed}
 }
 
 // readDuplicateCandidates picks the new text's rarest words and scores the project's open issues
@@ -363,15 +384,7 @@ func (s *server) readDuplicateCandidates(
 	if err != nil {
 		return nil, err
 	}
-	lexemes := make([]string, 0, len(picked.Terms))
-	weights := make([]float64, 0, len(picked.Terms))
-	for _, term := range picked.Terms {
-		if keyLexemes[term.Lexeme] || duplicateIssueKeyLexeme.MatchString(term.Lexeme) {
-			continue
-		}
-		lexemes = append(lexemes, term.Lexeme)
-		weights = append(weights, term.IDF)
-	}
+	lexemes, weights := nearCopyScoreTerms(picked, keyLexemes)
 	if ancestors == nil {
 		ancestors = []string{}
 	}
@@ -421,7 +434,48 @@ func scanDuplicateCandidates(rows pgx.Rows) ([]scoredDuplicate, error) {
 	return candidates, nil
 }
 
-// nearCopyCheckNotMade is model.Suggestions.NearCopyCheck when the gate's read did not answer:
-// the create went in without the near-copy check an unforced create otherwise meets.
-const nearCopyCheckNotMade = "the near-copy check before this create did not answer in " +
-	"500ms, so the create was not checked against the project's open issues"
+// nearCopyScoreTerms is duplicateScoreQuery's $2 and $3: the picked lexemes and their idf, with
+// every lexeme an issue key contributes left out (duplicateKeyLexemes says why). The gate and
+// the replay that times it both build the statement's parameters here, so what the replay
+// measures is the statement the gate runs.
+func nearCopyScoreTerms(picked relatedTerms, keyLexemes map[string]bool) ([]string, []float64) {
+	lexemes := make([]string, 0, len(picked.Terms))
+	weights := make([]float64, 0, len(picked.Terms))
+	for _, term := range picked.Terms {
+		if keyLexemes[term.Lexeme] || duplicateIssueKeyLexeme.MatchString(term.Lexeme) {
+			continue
+		}
+		lexemes = append(lexemes, term.Lexeme)
+		weights = append(weights, term.IDF)
+	}
+	return lexemes, weights
+}
+
+// nearCopyBoundHit says whether the gate's read ended at its bound. The bound is on the context
+// and on statement_timeout inside the read transaction, so Postgres cancels the statement
+// (SQLSTATE 57014) or the context expires first; either way no check was made, and the read
+// itself is at no fault.
+func nearCopyBoundHit(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var pgError *pgconn.PgError
+	return errors.As(err, &pgError) && pgError.Code == "57014" // query_canceled
+}
+
+// nearCopyCheckNotMade is model.Suggestions.NearCopyCheck when the gate's read ran out of its
+// bound: the create went in without the near-copy check an unforced create otherwise meets. The
+// time is the bound the read was given (duplicateGateBound), never a literal, so the note cannot
+// name a bound the server does not run under.
+func nearCopyCheckNotMade(bound time.Duration) string {
+	return fmt.Sprintf("the near-copy check before this create did not answer in %s, so the "+
+		"create was not checked against the project's open issues", bound)
+}
+
+// nearCopyCheckFailed is model.Suggestions.NearCopyCheck when the gate's read failed outright: a
+// SQL error, a connection lost, anything that is not the bound. It is worded apart from a slow
+// read because it is deterministic - every create of every project meets it until it is fixed -
+// and a filer told its create "was not answered in 500ms" would wait for a bound that was never
+// the cause.
+const nearCopyCheckFailed = "the near-copy check before this create failed, so the create was " +
+	"not checked against the project's open issues"

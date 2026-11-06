@@ -5,7 +5,6 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"os"
 	"slices"
@@ -14,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -216,10 +214,13 @@ type nearCopyScore struct {
 }
 
 // nearCopyGateBound is the bound the replay runs the gate under. Production's is 500 ms
-// (duplicateGateTimeout), which this replay must not be held to: it measures the score, and a
-// cold project with no term statistics probes every lexeme live, so an early create can take far
-// longer than a warm server ever does. What the gate costs is reported rather than enforced, and
-// the report says how many of the replay's reads production's own bound would have cut.
+// (duplicateGateTimeout), which this replay must not be held to: it measures what the gate
+// costs, and a read cut off at the bound measures nothing. The gate prices the words a cold
+// project's statistics do not hold rather than probing for them (priceUnknownTerms), so no
+// early create pays for probes, but the replay's own walk writes the project as it reads it,
+// and a read here can take far longer than a warm server's. What the gate costs is reported
+// rather than enforced, and the report says how many of the replay's reads production's own
+// bound would have cut.
 const nearCopyGateBound = time.Minute
 
 // nearCopyMarkedDuplicates are the replayed creates the implementer read and marked real
@@ -347,6 +348,12 @@ func measureNearCopyGate(
 		words = words[:10000]
 	}
 	texts := map[string]string{"an ordinary text": ordinary, "a 10,000-word spec": strings.Join(words, " ")}
+	// The gate drops every lexeme an issue key contributes before it scores, so the timings and
+	// the plan below are of the parameters the gate really sends (nearCopyScoreTerms).
+	keyLexemes, err := duplicateKeyLexemes(ctx, database.Pool, corpus.project)
+	if err != nil {
+		t.Fatalf("read the project's issue-key lexemes: %v", err)
+	}
 
 	for name, text := range texts {
 		title, _, _ := strings.Cut(text, "\n")
@@ -374,7 +381,7 @@ func measureNearCopyGate(
 			}
 			pick := time.Since(started)
 
-			lexemes, weights := nearCopyTermArrays(picked)
+			lexemes, weights := nearCopyScoreTerms(picked, keyLexemes)
 			started = time.Now()
 			rows, err := database.Pool.Query(ctx, duplicateScoreQuery,
 				corpus.project, lexemes, weights, []string{}, duplicateNudgeScore, duplicateHeadlineOptions)
@@ -411,7 +418,7 @@ func measureNearCopyGate(
 	if err != nil {
 		t.Fatalf("pick the terms for the plan: %v", err)
 	}
-	lexemes, weights := nearCopyTermArrays(picked)
+	lexemes, weights := nearCopyScoreTerms(picked, keyLexemes)
 	plan, err := database.Pool.Query(ctx, "explain (analyze, buffers) "+duplicateScoreQuery,
 		corpus.project, lexemes, weights, []string{}, duplicateNudgeScore, duplicateHeadlineOptions)
 	if err != nil {
@@ -425,17 +432,6 @@ func measureNearCopyGate(
 		}
 		t.Logf("plan: %s", line)
 	}
-}
-
-// nearCopyTermArrays is the scoring statement's two parameters, as the gate builds them.
-func nearCopyTermArrays(picked relatedTerms) ([]string, []float64) {
-	lexemes := make([]string, 0, len(picked.Terms))
-	weights := make([]float64, 0, len(picked.Terms))
-	for _, term := range picked.Terms {
-		lexemes = append(lexemes, term.Lexeme)
-		weights = append(weights, term.IDF)
-	}
-	return lexemes, weights
 }
 
 // replayNearCopyGate runs the real gate for one create, against the project as the walk has left
@@ -465,17 +461,6 @@ func replayNearCopyGate(t *testing.T, srv *server, corpus nearCopyCorpus, key st
 		score.candidateTitle = closest.Title
 	}
 	return score
-}
-
-// nearCopyBoundHit says whether the gate's read ended at its bound. The bound is on the context
-// and on statement_timeout inside the read transaction, so Postgres cancels the statement
-// (SQLSTATE 57014) or the context expires first; either way no check was made.
-func nearCopyBoundHit(err error) bool {
-	if errors.Is(err, context.DeadlineExceeded) {
-		return true
-	}
-	var pgError *pgconn.PgError
-	return errors.As(err, &pgError) && pgError.Code == "57014" // query_canceled
 }
 
 func execNearCopy(t *testing.T, ctx context.Context, database *store.Store, statement string, arguments ...any) {
@@ -679,7 +664,8 @@ func reportNearCopyReplay(
 	}
 	t.Logf("corpus: %s; creates replayed: %d; marked duplicates: %d; term statistics refreshed %d times, every %v of replayed time",
 		os.Getenv("DISPATCH_NEARCOPY_CORPUS"), total, len(marked), refreshes, SearchTermStatsInterval)
-	t.Logf("distortions a later reader must know: a project with no term statistics scores in probe mode; "+
+	t.Logf("distortions a later reader must know: in a project with no term statistics the gate prices every "+
+		"lexeme at the rarest priced document frequency and reads N as 0, since it prices rather than probes; "+
 		"document frequency is counted per project while the index scan is not; every lexeme an issue key "+
 		"contributes is dropped; the picker keeps at most %d terms, spends at most %d document frequency, "+
 		"and drops a term in more than a tenth of the project or under %d items; a text left with fewer "+

@@ -69,8 +69,9 @@ func openEmptyTestStore(t *testing.T) *Store {
 		// process`. The pool above is closed first (cleanups are LIFO), but Postgres tears a
 		// backend down after its client has closed the socket, so a drop inside that window
 		// finds a connection and cannot clear it. So the drop is tried plainly and tried again
-		// while Postgres says the database is in use, as storetest.dropDatabase does; this
-		// package is storetest's own dependency, so the rule is written twice rather than
+		// while Postgres says the database is in use (SQLSTATE 55006, object_in_use, which is
+		// what the drop answers however the server words it), as storetest.dropDatabase does;
+		// this package is storetest's own dependency, so the rule is written twice rather than
 		// imported.
 		deadline := time.Now().Add(15 * time.Second)
 		var err error
@@ -78,13 +79,15 @@ func openEmptyTestStore(t *testing.T) *Store {
 			if _, err = admin.Exec(context.Background(), "drop database "+databaseName); err == nil {
 				return
 			}
-			if !strings.Contains(err.Error(), "is being accessed by other users") || time.Now().After(deadline) {
+			if !isSQLState(err, "55006") || time.Now().After(deadline) {
 				break
 			}
 			time.Sleep(200 * time.Millisecond)
 		}
+		// The forced drop is what ended the cleanup, so its error is the one reported; the plain
+		// drop's says what the force was for.
 		if _, forced := admin.Exec(context.Background(), "drop database "+databaseName+" with (force)"); forced != nil {
-			t.Errorf("drop isolated database: %v", err)
+			t.Errorf("drop isolated database: %v, after the plain drop answered: %v", forced, err)
 		}
 	})
 

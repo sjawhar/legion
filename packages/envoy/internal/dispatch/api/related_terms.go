@@ -460,13 +460,6 @@ type relatedTerm struct {
 	// rank (relatedCoordinationRank); Score is the text's tf of it times IDF.
 	IDF   float64
 	Score float64
-	// Quoted is the lexeme as quote_literal writes it, which relatedTerms.TSQuery joins.
-	Quoted string
-	// Unpriced marks a lexeme the project's statistics do not hold, which priceUnknownTerms took
-	// at the rarest priced document frequency. Only the near-copy gate picks such a term, where
-	// it belongs in the denominator; a search over it matches nothing, so a caller handing these
-	// terms to the related-item check leaves them out (duplicateGateResult.pickedTerms).
-	Unpriced bool
 }
 
 // relatedTerms is what pickRelatedTerms chose for a text.
@@ -654,6 +647,20 @@ type relatedCandidate struct {
 	known  bool
 }
 
+// probeUnknownTerms and priceUnknownTerms are pickRelatedTerms's two ways with a lexeme the
+// project's statistics do not hold. The related-item check probes: a live exists per kind, up to
+// relatedProbeLimit of them, which costs a text of many unseen words hundreds of milliseconds.
+// The near-copy gate, which a create waits on before it is written, prices instead: such a
+// lexeme is taken at the rarest document frequency the statistics did price, the highest idf
+// they carry, because a word they have not seen is almost always rare or new since the last
+// refresh. Document frequency 1 would rank it above every priced word and reorder the pick, and
+// zero weight would be wrong the other way: a copy filed seconds after its original would lose
+// exactly the words that make it a copy.
+const (
+	probeUnknownTerms = true
+	priceUnknownTerms = false
+)
+
 // pickRelatedTerms chooses the related-item check's keywords from text (as More Like
 // This does): each lexeme scored tf × idf, idf = ln(1 + (N − df + 0.5)/(df + 0.5)) (Lucene's BM25
 // idf), where df is how many of the project's items hold it and N how many items the project
@@ -665,22 +672,10 @@ type relatedCandidate struct {
 //
 // df comes from the project's statistics (refreshSearchTermStats). A lexeme they do not hold, or
 // whose df the excluded owner's items bring to zero, is probed live, the relatedProbeLimit most
-// frequent in the text, and a hit counts as df 1. A project with no statistics starts their
-// refresh (ensureSearchTermStats) and is picked in probe mode, every lexeme probed and N taken as
-// 0. Each chosen term's surface is read from title alone (relatedTermsSQL).
-// probeUnknownTerms and priceUnknownTerms are pickRelatedTerms's two ways with a lexeme the
-// project's statistics do not hold. The related-item check probes: a live exists per kind, up to
-// relatedProbeLimit of them, which costs a text of many unseen words hundreds of milliseconds.
-// The near-copy gate, which a create waits on before it is written, prices instead: such a
-// lexeme is taken at document frequency 1, the highest idf the project's statistics can carry,
-// because a word the statistics have not seen is almost always rare or new since the last
-// refresh. Zero weight would be wrong there: a copy filed seconds after its original would lose
-// exactly the words that make it a copy.
-const (
-	probeUnknownTerms = true
-	priceUnknownTerms = false
-)
-
+// frequent in the text, and a hit counts as df 1, or is priced instead where the caller asks for
+// that (priceUnknownTerms). A project with no statistics starts their refresh
+// (ensureSearchTermStats) and is picked in probe mode, every lexeme probed and N taken as 0.
+// Each chosen term's surface is read from title alone (relatedTermsSQL).
 func (s *server) pickRelatedTerms(
 	ctx context.Context, q queryer, project, text, title string, exclude relatedExclusion, probe bool,
 ) (relatedTerms, error) {
@@ -749,7 +744,6 @@ func (s *server) pickRelatedTerms(
 		for index := range candidates {
 			if !candidates[index].known {
 				candidates[index].DF, candidates[index].known = rarest, true
-				candidates[index].Unpriced = true
 			}
 		}
 	}
@@ -781,7 +775,6 @@ func (s *server) pickRelatedTerms(
 			continue
 		}
 		matches += candidate.DF
-		candidate.relatedTerm.Quoted = candidate.quoted
 		picked.Terms = append(picked.Terms, candidate.relatedTerm)
 		quoted = append(quoted, candidate.quoted)
 	}

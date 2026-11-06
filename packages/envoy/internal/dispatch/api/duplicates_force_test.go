@@ -207,6 +207,46 @@ func TestCreateIssueForcedWithNoAnswerRecordsAnEmptyList(t *testing.T) {
 	}
 }
 
+// A create naming a GitHub issue runs no near-copy gate, so a forced one records nothing. A
+// `forced: {past: []}` here would say a check did not answer that was never made, and the weekly
+// count would report it as an override; `near_copy_check` has always been absent on this path,
+// and the two records must agree.
+func TestCreateIssueForcedExternalRecordsNoCheckThatNeverRan(t *testing.T) {
+	handler := newTestHandler(t)
+	createDuplicateTestProject(t, handler, "TEST")
+	mapping := dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/owner/repo", map[string]string{
+		"project": "TEST",
+	}, "alice")
+	if mapping.Code != http.StatusOK {
+		t.Fatalf("map external repository: status=%d body=%s", mapping.Code, mapping.Body.String())
+	}
+	requireCreatedIssue(t, createIssueRequest(t, handler, map[string]any{
+		"project": "TEST", "title": "Astrolabe calibration drifts after a reseat",
+		"spec": duplicateSpecAstrolabe,
+	}))
+
+	// The same text as that open issue, which an unforced create of the project is refused for:
+	// the external create goes in unchecked, and `force` changes nothing it records.
+	response := createIssueRequest(t, handler, map[string]any{
+		"external": "owner/repo#41", "title": "Astrolabe calibration drifts after a reseat",
+		"spec": duplicateSpecAstrolabe, "force": true,
+	})
+	created := requireCreatedIssue(t, response)
+	if forced, ok := rawCreatedPayload(t, handler, created.Key)["forced"]; ok {
+		t.Fatalf("forced external create %s carries forced = %#v, want no forced key: no gate ran",
+			created.Key, forced)
+	}
+	suggestions := decodeBody[struct {
+		Advice struct {
+			Suggestions model.Suggestions `json:"suggestions"`
+		} `json:"advice"`
+	}](t, response).Advice.Suggestions
+	if suggestions.NearCopyCheck != "" || len(suggestions.TitleMatches) != 0 || suggestions.LikelyDuplicate != nil {
+		t.Fatalf("a create that ran no gate told its filer about one: %q %#v %#v",
+			suggestions.NearCopyCheck, suggestions.TitleMatches, suggestions.LikelyDuplicate)
+	}
+}
+
 // An unforced create the gate could not check is written, not refused, and the filer is told
 // that no near-copy check was made. Refusing it would turn one slow read into a project nobody
 // can write to.

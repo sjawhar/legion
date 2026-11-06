@@ -28,14 +28,15 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -125,6 +126,13 @@ func Main(m *testing.M) int {
 	return code
 }
 
+// dropWindow and dropPause bound the plain drop's retry: how long a drop is tried again while
+// Postgres says the database is still in use, and the wait between tries.
+const (
+	dropWindow = 15 * time.Second
+	dropPause  = 200 * time.Millisecond
+)
+
 // dropDatabase drops name without waiting for it; Main waits for every drop. Drops in flight
 // together share one checkpoint.
 //
@@ -133,13 +141,9 @@ func Main(m *testing.M) int {
 // test's own pool is closed before this runs (Open's cleanups are LIFO), but Postgres tears a
 // backend down after the client has closed its socket, so a drop that lands inside that window
 // finds a connection and, without that right, cannot clear it. So the drop is tried plainly
-// and tried again while Postgres says the database is still in use, up to dropWindow; `force`
-// is the last attempt, for a connection that really is somebody else's.
-const (
-	dropWindow = 15 * time.Second
-	dropPause  = 200 * time.Millisecond
-)
-
+// and tried again while Postgres answers SQLSTATE 55006 (object_in_use), the code it gives
+// whatever words it puts on the message, up to dropWindow; `force` is the last attempt, for a
+// connection that really is somebody else's.
 func dropDatabase(name string) {
 	shared.drops.Go(func() {
 		deadline := time.Now().Add(dropWindow)
@@ -148,16 +152,21 @@ func dropDatabase(name string) {
 			if _, err = shared.admin.Exec(context.Background(), "drop database "+name); err == nil {
 				return
 			}
-			if !strings.Contains(err.Error(), "is being accessed by other users") || time.Now().After(deadline) {
+			var pgError *pgconn.PgError
+			if !errors.As(err, &pgError) || pgError.Code != "55006" || time.Now().After(deadline) {
 				break
 			}
 			time.Sleep(dropPause)
 		}
-		if _, forced := shared.admin.Exec(context.Background(), "drop database "+name+" with (force)"); forced == nil {
+		_, forced := shared.admin.Exec(context.Background(), "drop database "+name+" with (force)")
+		if forced == nil {
 			return
 		}
+		// The forced drop is what ended the cleanup, so its error is the one reported; the
+		// plain drop's says what the force was for.
 		shared.dropMu.Lock()
-		shared.dropFails = append(shared.dropFails, fmt.Sprintf("drop isolated database %s: %v", name, err))
+		shared.dropFails = append(shared.dropFails,
+			fmt.Sprintf("drop isolated database %s: %v, after the plain drop answered: %v", name, forced, err))
 		shared.dropMu.Unlock()
 	})
 }
