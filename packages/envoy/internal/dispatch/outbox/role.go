@@ -136,11 +136,14 @@ func resolveRole(ctx context.Context, deps Deps, role string) (roles.Resolution,
 // (destination.waiting): it makes no send this read and holds its key against the owner's later
 // events instead (planChains), and the event is marked mentionPending, so settleEvent blocks it
 // for mentionPendingDelay and it is read again, by which time the attempt has settled or its
-// lease has lapsed. Nothing else delivers a role copy - a keep waits for the role's next claim
-// and a forward is the holder's one copy - so a copy dropped from the list would let the owner's
-// next event of the same role reach that holder first, which is why this differs from the
-// mention rule's own hold of a mentioned session's copy (destinations.leftTo), left out of the
-// list because the mention delivers that comment to that very session.
+// lease has lapsed. The hold is the owner's later events and no copy of the waiting event
+// itself: the copies of one event have no order among themselves, so the same event's claimant,
+// author, follower and route copies to that holder, which share the forward's key, go in the
+// pass the forward waits in. Nothing else delivers a role copy - a keep waits for the role's
+// next claim and a forward is the holder's one copy - so a copy dropped from the list would let
+// the owner's next event of the same role reach that holder first, which is why this differs
+// from the mention rule's own hold of a mentioned session's copy (destinations.leftTo), left
+// out of the list because the mention delivers that comment to that very session.
 //
 // The wait is the attempt's own lease and nothing longer (model.DeliveryClaimLapse): past it the
 // attempt reads resumed or abandoned rather than live, no mention is live any more, and the copy

@@ -230,6 +230,15 @@ func scanBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID) (ba
 // is an owner an early settle would release or leave unrecorded, so it is settled once, there.
 // Whichever way an owner settles, every lane the read took is given back before the batch
 // returns.
+//
+// What an owner's own settle came to is the batch's too: its published events are counted, and
+// an event it released reports the batch blocked, so the scan stops after it (Outbox.scan,
+// batchResult.blocked). A release settled early is no different from one the final settle
+// writes - the event moved nowhere and is due again at once - so the owner it released keeps
+// its lane to the batch's end, where the lanes of the final settle's owners go back as well,
+// rather than giving it back with the wake an owner settled early gives (lanes.releaseEarly).
+// A batch that kept such a release to itself, or woke the scan on it, would have that scan read
+// the released events again at once, and again, for as long as the release repeats.
 func publishBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID, pending []pendingEvent, stopped bool) (batchResult, error) {
 	result := batchResult{}
 	events := make([]*batchEvent, len(pending))
@@ -269,6 +278,9 @@ func publishBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID, 
 	settled := map[string]struct{}{}
 	var recordErr error
 	lostHold := false
+	// releasedEarly is a release an owner's own settle wrote (settleOwner), which blocks the
+	// batch as one the batch's final settle wrote does.
+	releasedEarly := false
 	// settleAndRecord settles each due event of owned (settleEvent), defers the due events their
 	// owners' windows left unread (deferPastWindow) and writes what they all came to in one
 	// statement. Every event the batch settles goes through here once, so each is logged once:
@@ -312,6 +324,15 @@ func publishBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID, 
 		done.holds = holds
 		return done, err
 	}
+	// settleOwner settles, records and releases owner as soon as the last chain of its own has
+	// finished, leaving to the batch's end every owner whose sends the connection, the hold's
+	// deadline or the batch's stop decides (publishBatch). What it writes is what the batch's
+	// final settle writes for the owners left to it, so what it came to reaches the batch's
+	// result the same way: its published events are counted, and a release of one of its events
+	// blocks the batch (releasedEarly), an event released here having moved no further than one
+	// released at the batch's end. Such an owner keeps its lane to the batch's end too, where
+	// the lanes go back with no wake: the scan stops after a blocked batch, and the wake an
+	// owner settled early gives would have it read the released events again at once.
 	settleOwner := func(owner string) {
 		if ctx.Err() != nil || !time.Now().Before(hold.Deadline()) {
 			return
@@ -325,6 +346,7 @@ func publishBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID, 
 		}
 		done, err := settleAndRecord(byOwner[owner], false)
 		settled[owner] = struct{}{}
+		releasedEarly = releasedEarly || done.released
 		switch {
 		case err != nil:
 			recordErr = err
@@ -336,6 +358,13 @@ func publishBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID, 
 			lostHold = true
 		default:
 			result.published += done.published
+			if done.released {
+				// The batch is blocked, and the scan stops after it: this lane goes back at the
+				// batch's end with no wake, as every lane of the batch's final settle does
+				// (lanes.release), a wake here having the scan read at once what this settle
+				// just released.
+				return
+			}
 			delete(lanesHeld, owner)
 			deps.lanes.releaseEarly(owner)
 		}
@@ -407,7 +436,7 @@ func publishBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID, 
 		lostHold = true
 	}
 	result.fenced = result.fenced || lostHold
-	result.blocked = stopped || done.released
+	result.blocked = stopped || done.released || releasedEarly
 	if recordErr != nil {
 		result.blocked = true
 		return result, recordErr
@@ -430,8 +459,9 @@ func connectionReplaced(changed <-chan struct{}) bool {
 // batchResult is what one batch (scanBatch) came to. sendable is how many of its events were due,
 // sent how many of them it sent at least one envelope of, from firstID to lastID, the first send no
 // earlier than started, and published how many it marked published. blocked is a batch after which
-// the scan stops: a row it could not read, an event it released, or its record failed. fenced is
-// the publisher hold's deadline passing during it, or its record finding the hold another's, and
+// the scan stops: a row it could not read, an event any settle of it released - an owner's own as
+// its chains finish, or the batch's final one - or its record failed. fenced is the publisher
+// hold's deadline passing during it, or its record finding the hold another's, and
 // natsLost a probe of its connection failing after its sends failed for the connection. excluded
 // is a read that left the owners the batches beside it held out (lanes.reserve): it may have read
 // past their events, so the scan reads again once every batch has given its owners back.
@@ -445,9 +475,10 @@ type batchResult struct {
 }
 
 // settlement is what one settle-and-record (publishBatch's settleAndRecord) came to: how many of
-// its events it marked published, whether any of them was released, and, when it wrote them,
-// whether the hold was still this process's. It wrote them unless the batch is fenced
-// (result.fenced): a batch past the publisher hold's deadline is left unrecorded.
+// its events it marked published, whether any of them was released - which blocks the batch
+// whichever settle it came from (batchResult.blocked) - and, when it wrote them, whether the
+// hold was still this process's. It wrote them unless the batch is fenced (result.fenced): a
+// batch past the publisher hold's deadline is left unrecorded.
 type settlement struct {
 	published       int
 	released, holds bool
@@ -613,7 +644,11 @@ func backOffAttempt(result outcome, item pendingEvent, cause error) outcome {
 
 // holdBack returns result blocked on blockers: due when the earliest of them is, so that it is read
 // again beside its blocker and sent after it, rather than read at every wake while the blocker
-// waits out a back-off. A blocker of the same batch that was released releases it too.
+// waits out a back-off. A blocker of the same batch that was released releases it too. Every
+// blocker that carries an event is an earlier event of the same owner, settled before this one
+// in the owner's own id order (publishBatch), and never the held event itself (planChains), so
+// the outcome read of it is one the batch has written: an event's own unwritten outcome would
+// read released here, on its zero state.
 func holdBack(result outcome, blockers []blocker) outcome {
 	result.state = blocked
 	earlierDelay := func(delay *time.Duration) {

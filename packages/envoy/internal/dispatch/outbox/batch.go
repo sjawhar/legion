@@ -271,8 +271,9 @@ func readRows(ctx context.Context, deps Deps, inFlight []string) (pending []pend
 //
 // waiting is that wait, written once the role's holder is known (resolveRoleHolders): the
 // destination makes no send this read and holds its key against the owner's later events
-// instead, the way an event that is not due holds a key it has not reached (planChains), and the
-// event is marked mentionPending so that it is read again.
+// instead, the way an event that is not due holds a key it has not reached, and against no copy
+// of its own event (planChains), and the event is marked mentionPending so that it is read
+// again.
 type destination struct {
 	subject       string
 	label         string
@@ -352,7 +353,8 @@ type batchEvent struct {
 	sends      []*chainSend
 	// held are the earlier events of the owner that held a destination of this one back without a
 	// send of this batch: one that is not due, one whose list is incomplete, or one whose own
-	// copy for that destination waits on a mention.
+	// copy for that destination waits on a mention. A waiting copy of this event is none of them:
+	// the copies of one event have no order among themselves (planChains).
 	held    []blocker
 	outcome outcome
 }
@@ -361,7 +363,10 @@ type batchEvent struct {
 // had that destination unreached, or whose list is incomplete and neither names nor reached it. It
 // is either an event of the batch, whose outcome then says when the held one is tried again - its
 // send to the destination failed, its recipient read did, or its copy for that destination waits
-// on a mention - or one that is not due, until its nextAttempt.
+// on a mention - or one that is not due, until its nextAttempt. It is never the held event
+// itself: the copies of one event have no order among themselves, so the batch reads a blocker
+// only for the owner's later events, and the outcome read of one is always an outcome the batch
+// has settled already (planChains, holdBack).
 type blocker struct {
 	event *batchEvent
 	until *time.Time
@@ -481,6 +486,18 @@ type chain struct {
 // other case and holds nothing back, the mention itself delivering the comment to that session
 // (batchEvent.mentionPending).
 //
+// A waiting copy holds no copy of its own event. The order the outbox keeps is the one between
+// an owner's successive events, and the copies of one event have no order among themselves, so
+// the hold is read for the owner's later events alone (by.event != event). A forward waiting
+// for its holder's own live mention is keyed by that holder's agent subject, which the same
+// event's claimant, author, follower and route copies share, and those copies go in this pass:
+// nothing of the event has reached that session yet, so none of them can overtake the forward.
+// An event held by a blocker carrying itself would settle on an outcome settleEvent has not
+// written, whose zero state holdBack reads as released - no delay, and no mentionPendingDelay
+// clamp, which applies to a blocked outcome alone - so the batch would stop with that event
+// released and read it again at once, until the mention's attempt ran out its lease and the
+// copy the wait exists to stop was published after all.
+//
 // A role route that counts as reached with nothing to send (roleForward.skip) goes on no chain: a
 // due event's is reached at once, and a not-due event's holds nothing back, since nothing of it is
 // delivered to anyone. A role route that stays pending (roleForward.err) goes on its key's chain
@@ -530,7 +547,7 @@ func planChains(events []*batchEvent) []*chain {
 				continue
 			}
 			held := len(event.held)
-			if by, ok := blocked[event.owner][key]; ok {
+			if by, ok := blocked[event.owner][key]; ok && by.event != event {
 				event.held = append(event.held, by)
 			}
 			for _, earlier := range unknown[event.owner] {
