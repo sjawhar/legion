@@ -90,7 +90,14 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is the one `DaemonAPIVersion` declares, last bumped by contract 49's memory group (each
+number is the one `DaemonAPIVersion` declares, last bumped by contract 50's production check
+(INFRA-809: the project's `projects.<KEY>.production_check`, `off` or `tester` and `tester` by
+default, decides whether a merge that closes an issue opens a check and who works it; the
+`check` object of `GET /legion/v1/state` gains `role`, the role the check recorded when it
+opened, and its `nextWakeAt` is when the next look is due — the time the checking agent named
+for itself, the retry of a look nobody reported, or the check's own bound where neither stands;
+`handoff_complete` gains `wakeAt`, which a `pending` report on a look that is not the check's
+last must carry and no other report may), after contract 49's memory group (each
 issue of `GET /legion/v1/state` carries its tree's `memoryGroup`, `memoryDrawMode` and
 `memoryDrawnAt`, which a strict reader before 49 refuses, and a caller from a pod below 49 is
 served the state without them), after contract 48's idle release (the plugin reports each
@@ -141,7 +148,7 @@ controller's, told the issue's own `/legion/scratch/{tmp,cache,data,bun/install/
 per-role directory), after contract 33's acceptance before the
 merge (LEGION-781: the phase `accepting` in place of `production_check`, each closed issue's open
 production check as `check` on `GET /legion/v1/state`, `handoff_complete`'s optional `commit` and
-`pending` verdict for the implementer's report on a look of that check, and the architect's
+`pending` verdict for the checking role's report on a look of that check, and the architect's
 `request_backward_move` naming its `issue`), after contract 32's repository cache
 (sjawhar/legion#1986: `workspace-init cache`, the issue pods' `LEGION_REPOSITORY_CACHE_URL` and
 `LEGION_REPOSITORY_CACHE_TOKEN_FILE`, and the state's `repositories[].cache` and `caches`), after
@@ -489,12 +496,16 @@ the commit `legion/<issue>@origin` names, refused while `@-` is not on that bran
 complete again); retro, the merger's READY and every other phase report the commit the workspace
 stands on, `@-`. It then posts
 `POST /legion/v1/handoff/complete` (`summary`, `verdict`, `ready`, and `handoffId`,
-`handoffVersion` and `commit` where they apply). The implementer's
-report on a look of its closed issue's production check is the one call that finds neither: the
-operation reads the daemon's state first, and an implementer's call on an issue in `done` whose
+`handoffVersion`, `commit` and `wakeAt` where they apply). A
+report on a look of a closed issue's production check is the one call that finds neither: the
+operation reads the daemon's state first, and a call on an issue in `done` whose
 `check` is open is a check report, posted with its `verdict` (`pass`, `pending` or `fail`, required
-there; `pending` is refused on a phase completion) and `summary` alone, no handoff and no `commit`;
-the daemon refuses it with `CHECK_NOT_OPEN`, `CHECK_LOOK_NOT_OPEN` or `CHECK_VERDICT_REQUIRED`
+there; `pending` is refused on a phase completion), its `summary` and, on a `pending` that is not
+the check's last look, `wakeAt` — no handoff and no `commit`. The plugin refuses, posting nothing,
+a session whose role is not the check's `role`, a `pending` with no `wake_at` while `check.last`
+is false, and a `wake_at` on a `pass`, a `fail` or the last look's `pending`; the daemon refuses
+the same three (`CHECK_ROLE_MISMATCH`, `CHECK_WAKE_REQUIRED`, `CHECK_WAKE_UNEXPECTED`) beside
+`CHECK_NOT_OPEN`, `CHECK_LOOK_NOT_OPEN` and `CHECK_VERDICT_REQUIRED`
 (`packages/daemon/internal/api/handoff.go`). The daemon reads the named record back from Dispatch
 and refuses, recording nothing, a completion that names no record (`HANDOFF_RECORD_REQUIRED`), a
 record Dispatch does not have (`HANDOFF_RECORD_NOT_FOUND`), a read Dispatch did not answer

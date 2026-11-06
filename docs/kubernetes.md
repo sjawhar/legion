@@ -1480,7 +1480,7 @@ Do these steps in this order:
      `capabilities`, `production_check_hours`, `worker_backends` and `role_config_files`;
 
    - under `projects.<KEY>`, the `repo` the earlier release requires (`projects.<KEY>.repo must
-     be "owner/name" (got "undefined")`, `readProject` in `internal/config/stage3.go` at that tag) and every key this release added there, `deploys`, `memory`, `merge` and `slack_channels`, each `Unknown key "projects.<KEY>.<key>"`;
+     be "owner/name" (got "undefined")`, `readProject` in `internal/config/stage3.go` at that tag) and every key this release added there, `deploys`, `memory`, `merge`, `production_check` and `slack_channels`, each `Unknown key "projects.<KEY>.<key>"`;
 
    - `tree_volume` where this release's file sets `issue_volume` (`unknown key
      runtime.kubernetes.issue_volume`, `members` in `internal/config/config.go` at that tag), one `resources.<role>` entry per workflow role where it sets `resources.issue` (`runtime.kubernetes.resources key "issue" must be a role (architect, planner, implementer,
@@ -2296,6 +2296,8 @@ After its `Config OK: project=…` line it prints one line per deployment capabi
 — in boot's words (`capability <name> is open: <detail>; to record a decision,
 add to legion.yaml: capabilities.decided.<name>: "<reason>"`), and still exits 0:
 a report, not a refusal ([The deployment's capability report](#the-deployments-capability-report)).
+It prints each loader warning after that line too, and exits 0:
+`projects.<KEY>.deploys` is one, since the key is still accepted and read for nothing — no deploy run wakes a production check any more — and `legion start` logs the same warning as it boots.
 What it does not do is what boot writes or runs: the state directory, secretsd's provider keys, the plugin gate and the image probe.
 
 The NATS nkey seed is optional, as on tmux:
@@ -4086,7 +4088,7 @@ The wakes are these:
   An architect gets no backstop, since every wake of an architect is a daemon task or notice or a message.
 
 A wake acts only on a claim that is still `released`, of an issue still in the workflow whose tree is live.
-Every other path that suspends, resumes, stops or closes a claim takes a released claim over, after which no wake acts on it: a linger, a park, a close, a hand-over, the production check, and the operator's `legion claims` commands.
+Every other path that suspends, resumes, stops or closes a claim takes a released claim over, after which no wake acts on it: a linger, a park, a close, a hand-over, the production check — whose `pending` report suspends the checking role's claim, the role the project's `production_check` names, until the look the report's own `wake_at` asked for — and the operator's `legion claims` commands.
 A daemon restart resumes no released claim, and a wake or a backstop that came due while the daemon was down acts once it has started.
 A wake that arrives while the release runs cancels it, up to the moment the first role process of the pod is stopped, and the roles go on in the same pod; after that moment the wake waits for the release to finish and then resumes the pod.
 A cancel is one act: in one transaction the daemon queues the resume of each claim that release had suspended — the roles its own mark recorded, never a claim an earlier release left `released` — and deletes the mark.
