@@ -818,7 +818,7 @@ func loopTestDBAt(t *testing.T) (*pgxpool.Pool, string) {
 		t.Fatal(err)
 	}
 	name := "loopseed_test_" + hex.EncodeToString(suffix[:])
-	if _, err := admin.Exec(ctx, "create database "+name); err != nil {
+	if _, err := admin.Exec(ctx, "create database "+name+" strategy file_copy"); err != nil {
 		t.Fatalf("create the test database: %v", err)
 	}
 	u, err := url.Parse(loopTestPG(t))

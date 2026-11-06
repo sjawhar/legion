@@ -12,9 +12,9 @@
   "iamcredentials": "https://iamcredentials.googleapis.com",
   "oslogin": "https://oslogin.googleapis.com",
   "vms": {
-    "app": {"host": "10.138.0.21", "instance": "lt-app"},
-    "generator": {"host": "10.138.0.22", "instance": "lt-gen"},
-    "nats": {"host": "10.138.0.23", "instance": "lt-nats"}
+    "app": { "host": "10.138.0.21", "instance": "lt-app" },
+    "generator": { "host": "10.138.0.22", "instance": "lt-gen" },
+    "nats": { "host": "10.138.0.23", "instance": "lt-nats" }
   },
   "load_vm": "generator",
   "containers": {
