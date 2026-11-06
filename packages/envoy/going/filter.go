@@ -11,11 +11,12 @@ import (
 
 // heldByteMax bounds the span the filter holds undecided: a [ whose ] never arrives, or a < that
 // closes on no >. At the bound the span is decided as it stands - exactly as Close decides it -
-// and the byte that opened it goes out as the ordinary text it turned out to be, because no
-// further byte can make that byte safer: escaped, it opens no link, image, tag or code span
-// whatever follows it. The bound is what keeps one stray [ from stalling the rest of the answer
-// for a reader, and keeps each delta from re-scanning text without end. The word the filter is
-// building waits on a bound of its own, heldWordMax: the two are different waits.
+// and the byte that opened it joins the word being built as the ordinary text it turned out to
+// be and is judged with that word, because no further byte can make that byte safer: escaped,
+// it opens no link, image, tag or code span whatever follows it. The bound is what keeps one
+// stray [ from stalling the rest of the answer for a reader, and keeps each delta from
+// re-scanning text without end. The word the filter is building waits on a bound of its own,
+// heldWordMax: the two are different waits.
 const heldByteMax = 1024
 
 // heldWordMax bounds the output word the filter builds before it can judge it. At the bound that
@@ -84,13 +85,12 @@ type answerFilter struct {
 	// is told a delta's words in one frame rather than one frame a word.
 	out []byte
 
-	// wrote says the model produced answer text, which is the one thing none denies; words and
-	// inWord count the cleared text's words the way strings.Fields does, carried across deltas;
-	// named holds the href of every hit named, which is said once and counted by being there;
-	// dropped counts what the server did not pass on as the model wrote it.
+	// wrote says the model produced answer text, which is the one thing none denies; words
+	// counts the words a reader was given, one for each word complete emitted; named holds the
+	// href of every hit named, which is said once and counted by being there; dropped counts
+	// what the server did not pass on as the model wrote it.
 	wrote   bool
 	words   int
-	inWord  bool
 	named   map[string]bool
 	dropped int
 
@@ -237,7 +237,8 @@ func (f *answerFilter) spaces(b []byte, i, size int) (int, error) {
 	if err := f.complete(); err != nil {
 		return end, err
 	}
-	return end, f.cleared(b[i:end])
+	f.cleared(b[i:end])
+	return end, nil
 }
 
 // text adds the run of non-space bytes at i, up to the span it may run into, to the word being
@@ -281,18 +282,29 @@ func (f *answerFilter) add(text []byte) {
 // complete judges the output word the filter has built - the run of non-whitespace bytes a
 // reader will see, joined across every tag dropped and every link reduced inside it - and emits
 // it or drops it whole. A word GFM would link on its own is dropped and counted once, however
-// many pieces of the model's text it was built from; every other word is escaped, counted and
-// emitted. It is what whitespace, Close and the word's own bound each end a word with.
+// many pieces of the model's text it was built from; every other word is counted and escaped,
+// and the word past contracts.GoingAnswerWordMax cuts the answer where it begins rather than
+// reaching a reader. It is what whitespace, Close and the word's own bound each end a word
+// with, and the one place the answer's words are counted: a word is what this emits, so there
+// is nothing else to count them from.
 func (f *answerFilter) complete() error {
 	if len(f.word) == 0 && !f.wordDropped {
 		return f.release()
 	}
-	drop := f.wordDropped || linkifiable(f.word)
 	var err error
-	if drop {
-		f.change()
-	} else {
-		err = f.cleared(f.word)
+	switch {
+	case f.wordDropped || linkifiable(f.word):
+		f.dropped++
+	case f.words == contracts.GoingAnswerWordMax:
+		// The cut falls where this word begins, so no byte of it is escaped or emitted and
+		// the words before it have gone out already.
+		f.cut = true
+		if err = f.flush(); err == nil {
+			err = f.emit(Cut(f.words))
+		}
+	default:
+		f.words++
+		f.cleared(f.word)
 	}
 	f.word, f.wordDropped = f.word[:0], false
 	if err != nil {
@@ -467,44 +479,22 @@ func (f *answerFilter) ordinary(b []byte, i int) (int, error) {
 	return i + 1, nil
 }
 
-// change counts one thing the server did not pass on as the model wrote it: a link or image
-// reduced to its text, a tag, or an output word GFM would link on its own. Every count the
-// changed event carries is made here, so the count and the rules that raise it cannot drift
-// apart.
-func (f *answerFilter) change() {
-	f.dropped++
-}
-
-// drop counts the span the scanner has just decided not to pass on and answers where scanning
-// goes on after it.
+// drop counts the span the scanner has just decided not to pass on - a link or image reduced to
+// its text, a tag, or an autolink - and answers where scanning goes on after it.
 func (f *answerFilter) drop(next int) (int, error) {
-	f.change()
+	f.dropped++
 	return next, nil
 }
 
-// cleared escapes text into the buffer the next text event is sent from, counts its words, and
-// cuts the answer where the word past contracts.GoingAnswerWordMax begins. It is the one way a
+// cleared escapes text into the buffer the next text event is sent from. It is the one way a
 // byte of the model's text reaches a reader, which is what makes the escape whole: there is no
 // second path for a piece of text to leave by unescaped. It is given one completed word or one
-// run of whitespace, never the half of either.
-func (f *answerFilter) cleared(text []byte) error {
-	if f.cut || len(text) == 0 {
-		return nil
+// run of whitespace, never the half of either, and nothing at all once the answer is cut.
+func (f *answerFilter) cleared(text []byte) {
+	if f.cut {
+		return
 	}
-	words, inWord, at := countWords(text, f.words, f.inWord)
-	f.words, f.inWord = words, inWord
-	if at < 0 {
-		f.out = escape(f.out, text)
-		return nil
-	}
-	// The cut falls where the word past the cap begins, and the escape is written after that
-	// byte is found, so no backslash is ever cut from the byte it escapes.
-	f.out = escape(f.out, text[:at])
-	f.cut = true
-	if err := f.flush(); err != nil {
-		return err
-	}
-	return f.emit(Cut(f.words))
+	f.out = escape(f.out, text)
 }
 
 // flush sends what is cleared as the next piece of the answer. It is one event a delta, not one
@@ -516,27 +506,6 @@ func (f *answerFilter) flush() error {
 	text := string(f.out)
 	f.out = f.out[:0]
 	return f.emit(Text(text))
-}
-
-// countWords counts the words text adds to an answer that has words words and did or did not end
-// inside one, and says where the word past contracts.GoingAnswerWordMax begins, or -1 when text
-// stays inside the cap. It is strings.Fields' own rule - a word begins where a non-space follows
-// a space or the start - carried across deltas, because Fields over one delta cannot see the word
-// the delta before it ended in. It counts the model's own bytes, which carry the words the
-// escaped text a reader is sent carries: an escape adds no space, and so no word. It is the one
-// place the filter walks text for words.
-func countWords(text []byte, words int, inWord bool) (int, bool, int) {
-	for at, letter := range string(text) {
-		space := unicode.IsSpace(letter)
-		if !space && !inWord {
-			if words == contracts.GoingAnswerWordMax {
-				return words, inWord, at
-			}
-			words++
-		}
-		inWord = !space
-	}
-	return words, inWord, -1
 }
 
 // escape appends text to dst with a backslash before every ASCII punctuation byte, which is
@@ -594,9 +563,9 @@ func containsFold(b, mark []byte) bool {
 }
 
 // hasEmail reports whether the word holds an address GFM links on its own: a local part, an @,
-// and a host carrying a dot. GFM also refuses a host whose last two labels hold a _; the filter
-// drops such a word all the same, because a word it drops costs a reader one word and a word it
-// keeps may cost them a link the server never gave the model.
+// and a host carrying a dot. GFM also refuses an address whose host does not end in a letter;
+// the filter drops such a word all the same, because a word it drops costs a reader one word
+// and a word it keeps may cost them a link the server never gave the model.
 func hasEmail(word []byte) bool {
 	for at, letter := range word {
 		if letter != '@' || at == 0 || !emailLocal(word[at-1]) {
@@ -614,23 +583,32 @@ func emailLocal(letter byte) bool {
 	return letter == '.' || letter == '-' || letter == '_' || letter == '+' || alphanumeric(letter)
 }
 
-// emailHost reports whether b begins with the host of an address GFM links: labels of letters,
-// digits, - and _, with a dot between two of them. The punctuation the host trails off in is
-// none of the host: GFM leaves a sentence's own full stop out of the link rather than refusing
-// the link, so a dot followed by a label makes the address whatever stands after it.
+// emailHost reports whether b begins with the host of an address GFM links: two or more labels
+// of letters, digits, - and _ with a dot between them, which is the ([-\w]+(?:\.[-\w]+)+) of
+// mdast-util-gfm-autolink-literal 2.0.1, the rule the app's own remark pipeline links an
+// address by. Any label byte may follow the dot, the - and the _ among them. The punctuation
+// the host trails off in is none of the host: GFM leaves a sentence's own full stop out of the
+// link rather than refusing the link, so a dot one label byte follows makes the address,
+// whatever stands after it.
 func emailHost(b []byte) bool {
 	for at, letter := range b {
 		switch {
 		case letter == '.':
-			if at+1 < len(b) && alphanumeric(b[at+1]) {
+			if at+1 < len(b) && hostLabel(b[at+1]) {
 				return true
 			}
-		case letter == '-' || letter == '_' || alphanumeric(letter):
+		case hostLabel(letter):
 		default:
 			return false
 		}
 	}
 	return false
+}
+
+// hostLabel reports whether letter may stand in a label of a host GFM links: the [-\w] of the
+// host rule above, which is a letter, a digit, a - or a _.
+func hostLabel(letter byte) bool {
+	return letter == '-' || letter == '_' || alphanumeric(letter)
 }
 
 // alphanumeric reports whether letter is an ASCII letter or digit, which is what a host's labels

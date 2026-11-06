@@ -108,7 +108,8 @@ export interface GoingTextEvent {
 }
 
 /** One thing the answer cites: its kind and id name it, `href` links it and `title` names it to a
- *  reader. This is the one frame of the stream that carries a link. */
+ *  reader. This is the one frame of the stream that carries a link. `title`, `kind` and `id` are
+ *  plain text, which a reader is shown as text and never read as markdown. */
 export interface GoingItemEvent {
   readonly event: typeof GOING_EVENT_ITEM;
   readonly data: {

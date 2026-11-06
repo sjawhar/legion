@@ -35,7 +35,8 @@ type TextData struct {
 }
 
 // ItemData names one thing the answer cites, so the reader's page can link it. Href is the
-// cited hit's own href, and it is the one link the stream carries.
+// cited hit's own href, and it is the one link the stream carries. Title, Kind and ID are plain
+// text, which a reader is shown as text and never read as markdown.
 type ItemData struct {
 	Kind  string `json:"kind"`
 	ID    string `json:"id"`

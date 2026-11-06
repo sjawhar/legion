@@ -69,6 +69,13 @@ const LINKING: Record<string, true> = { link: true, image: true, html: true };
  * policy. The two it installs after that policy (`remarkTypedBlocks` with `remarkUnfitTypedBlocks`,
  * or `remarkReadOnlyDirectives`) shape typed blocks against a block schema and a ProseMirror
  * schema; they make no link, and they need an engine, so the parse here ends at the policy.
+ *
+ * The guard below compares these names, in this order, and not the options each plugin is
+ * installed with. That is the whole of what can move this parse away from the app's: the chain
+ * in `lib-headless.ts` is one closed list of `.use(...)` calls, the only one of them that takes
+ * an option there is `remarkFrontmatter`'s `['yaml']`, and `remarkGfm` is installed with none at
+ * all - none of its options (`firstLineBlank`, `stringLength`, `singleTilde`, `tablePipeAlign`,
+ * `tableCellPadding`) touches an autolink literal, which is what this file is about.
  */
 const APP_PARSE_PLUGINS = [
   "remarkParse",
@@ -101,12 +108,13 @@ const answerParser = unified()
   .use(remarkHoistNestedLinks)
   .use(remarkSoftBreakAsSpace);
 
-/** The renderer this file is the ground truth of, named from the manifest that pins it, so a bump
- *  of the pin cannot move the ground truth under the assertion without moving this text. */
-const manifest = JSON.parse(readFileSync(join(import.meta.dir, "../package.json"), "utf8")) as {
-  dependencies: Record<string, string>;
-};
-const renderer = `remark-gfm ${manifest.dependencies["remark-gfm"]}`;
+/** The renderer this file is the ground truth of, named from the `remark-gfm` the install
+ *  resolved and not from the range `package.json` pins (`^4.0.1`), which names no one version:
+ *  a failure here names the renderer that actually read the probe. */
+const rendererManifest = JSON.parse(
+  readFileSync(join(import.meta.dir, "../node_modules/remark-gfm/package.json"), "utf8")
+) as { version: string };
+const renderer = `remark-gfm ${rendererManifest.version}`;
 
 const fixturePath = join(import.meta.dir, "../../envoy/going/testdata/filtered-answers.json");
 const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as FilteredAnswers;

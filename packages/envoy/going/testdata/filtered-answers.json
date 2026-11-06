@@ -157,6 +157,26 @@
       "filtered": "Mail  now\\."
     },
     {
+      "probe": "an address whose host label begins with a -",
+      "answer": "mail a@b.-c now",
+      "filtered": "mail  now"
+    },
+    {
+      "probe": "an address whose host label begins with a - after a full label",
+      "answer": "support@corp.-internal",
+      "filtered": ""
+    },
+    {
+      "probe": "an address whose host label begins with a _",
+      "answer": "user@evil._x",
+      "filtered": ""
+    },
+    {
+      "probe": "a tag whose deletion joins a host label beginning with a -",
+      "answer": "user@evil\u003cb\u003e.-com",
+      "filtered": ""
+    },
+    {
       "probe": "The order is [not a link] here.",
       "answer": "The order is [not a link] here.",
       "filtered": "The order is \\[not a link\\] here\\."

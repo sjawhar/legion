@@ -281,11 +281,13 @@ func offers(text, shape string) bool {
 }
 
 // autolinkMarks are the marks GFM links a word by with no markdown around it at all, and
-// emailShape the address it links the same way. Both are written out here rather than taken
-// from the filter, so a test is a second opinion on the set and not a copy of one.
+// emailShape the address it links the same way: a local part, an @, and a host whose labels are
+// made of [-\w] with a dot between them, which is how mdast-util-gfm-autolink-literal 2.0.1
+// reads a host. Both are written out here rather than taken from the filter, so a test is a
+// second opinion on the set and not a copy of one.
 var (
 	autolinkMarks = []string{"www.", "://", "mailto:", "xmpp:"}
-	emailShape    = regexp.MustCompile(`[A-Za-z0-9._+-]+@[A-Za-z0-9_-]+\.[A-Za-z0-9]`)
+	emailShape    = regexp.MustCompile(`[A-Za-z0-9._+-]+@[A-Za-z0-9_-]+\.[A-Za-z0-9_-]`)
 )
 
 // decoded is the text a renderer holds once it has decoded the character escapes the server
@@ -712,6 +714,37 @@ var linkProbes = []linkProbe{
 		linked:  "user@evil.com",
 		dropped: 2,
 	},
+	{
+		// GFM's host is labels of letters, digits, - and _ with a dot between them -
+		// [-\w]+(?:\.[-\w]+)+ in mdast-util-gfm-autolink-literal 2.0.1 - so a label may
+		// begin with a - or a _, and the address is one a reader can click all the same.
+		name:    "an address whose host label begins with a -",
+		answer:  "mail a@b.-c now",
+		want:    escaped("mail ") + escaped(" now"),
+		linked:  "a@b.-c",
+		dropped: 1,
+	},
+	{
+		name:    "an address whose host label begins with a - after a full label",
+		answer:  "support@corp.-internal",
+		want:    "",
+		linked:  "support@corp.-internal",
+		dropped: 1,
+	},
+	{
+		name:    "an address whose host label begins with a _",
+		answer:  "user@evil._x",
+		want:    "",
+		linked:  "user@evil._x",
+		dropped: 1,
+	},
+	{
+		name:    "a tag whose deletion joins a host label beginning with a -",
+		answer:  "user@evil<b>.-com",
+		want:    "",
+		linked:  "user@evil.-com",
+		dropped: 2,
+	},
 }
 
 // TestFilterEmitsNoLinkInATextFrame: every form a renderer makes a link of, reduced to the text
@@ -767,6 +800,29 @@ var plainProbes = []string{
 	"Mind the <3 and the [brackets] alike.",
 }
 
+// suiteProbe is one probe of the whole suite: the name the suite knows it by, and the answer
+// the model wrote. A plain probe has no name of its own and is named by its own text, as
+// TestFilterKeepsTextThatOnlyLooksLikeALink names it.
+type suiteProbe struct {
+	name   string
+	answer string
+}
+
+// allProbes is every probe the suite holds, the link forms and the plain shapes alike, in the
+// order this file declares them. It is the one list of them: the invariant read over the whole
+// suite and the golden the renderer's test reads are both built from it, so neither can miss a
+// form the other has.
+func allProbes() []suiteProbe {
+	probes := make([]suiteProbe, 0, len(linkProbes)+len(plainProbes))
+	for _, probe := range linkProbes {
+		probes = append(probes, suiteProbe{name: probe.name, answer: probe.answer})
+	}
+	for _, answer := range plainProbes {
+		probes = append(probes, suiteProbe{name: answer, answer: answer})
+	}
+	return probes
+}
+
 // TestFilterKeepsTextThatOnlyLooksLikeALink: the control for every form above. The same shapes
 // that are not links are the answer's own words, and a reader is given every one of them,
 // escaped as plain text, so each rule above drops a link and not the prose around it.
@@ -792,15 +848,10 @@ func TestFilterKeepsTextThatOnlyLooksLikeALink(t *testing.T) {
 // reads the text, so what that extension is given is the decoded answer, and the decoded answer
 // of every probe may carry no www. host, no scheme's ://, no mailto: or xmpp: and no address.
 func TestFilterOffersARendererNoAutolink(t *testing.T) {
-	answers := make([]string, 0, len(linkProbes)+len(plainProbes))
-	for _, probe := range linkProbes {
-		answers = append(answers, probe.answer)
-	}
-	answers = append(answers, plainProbes...)
-	for _, answer := range answers {
-		t.Run(answer, func(t *testing.T) {
+	for _, probe := range allProbes() {
+		t.Run(probe.answer, func(t *testing.T) {
 			for _, size := range []int{1, 4, 1000} {
-				emitted := drive(t, citationsOf(citedIssue, citedComment), pieces(answer, size)...)
+				emitted := drive(t, citationsOf(citedIssue, citedComment), pieces(probe.answer, size)...)
 				noAutolink(t, emitted.text())
 			}
 		})

@@ -49,29 +49,21 @@ func filterOnce(t *testing.T, answer string) string {
 	return drive(t, citationsOf(citedIssue, citedComment), answer).text()
 }
 
-// filteredSuite is every probe the suite holds, filtered. The probes are read from linkProbes and
-// plainProbes themselves, never copied, so the golden cannot name a form the suite no longer has
-// or miss one it gained.
+// filteredSuite is every probe the suite holds, filtered. The probes are read from allProbes,
+// which is the suite's own list, so the golden cannot name a form the suite no longer has or
+// miss one it gained.
 func filteredSuite(t *testing.T) filteredAnswers {
 	t.Helper()
+	probes := allProbes()
 	suite := filteredAnswers{
 		Generator: filteredAnswersGenerator,
-		Answers:   make([]filteredAnswer, 0, len(linkProbes)+len(plainProbes)),
+		Answers:   make([]filteredAnswer, 0, len(probes)),
 	}
-	for _, probe := range linkProbes {
+	for _, probe := range probes {
 		suite.Answers = append(suite.Answers, filteredAnswer{
 			Probe:    probe.name,
 			Answer:   probe.answer,
 			Filtered: filterOnce(t, probe.answer),
-		})
-	}
-	for _, answer := range plainProbes {
-		// A plain probe has no name of its own: the suite names each of them by its own text,
-		// as TestFilterKeepsTextThatOnlyLooksLikeALink does.
-		suite.Answers = append(suite.Answers, filteredAnswer{
-			Probe:    answer,
-			Answer:   answer,
-			Filtered: filterOnce(t, answer),
 		})
 	}
 	return suite
