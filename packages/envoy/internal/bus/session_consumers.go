@@ -405,6 +405,20 @@ func (s *SessionConsumers) Info(ctx context.Context, sessionID string) (*jetstre
 	return s.info(ctx, name)
 }
 
+// Delete deletes sessionID's consumer, so a session's consumer dies with the session that was
+// delivered through it: the session reaper calls it for each record it deleted
+// (session.ReapSessions), and SessionConsumerInactiveThreshold stays the backstop for a consumer
+// no reaper pass ever names. A consumer the stream does not hold - never created, deleted
+// already, or removed at that threshold - is no error. A session id no consumer can be named
+// after is ErrNoSessionConsumerName, as it is for Info and Ensure.
+func (s *SessionConsumers) Delete(ctx context.Context, sessionID string) error {
+	name, err := sessionConsumerNameOf(sessionID)
+	if err != nil {
+		return err
+	}
+	return s.delete(ctx, name)
+}
+
 // ListSessionConsumers reads every session consumer the stream holds, by session id, with the
 // paged consumer list ($JS.API.CONSUMER.LIST; nats-server v2.10.29 answers 256 consumers a page),
 // so a listener that starts relaying every session at once reads them in a few requests rather

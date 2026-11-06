@@ -219,6 +219,20 @@ func (m *sessionDelivery) close() {
 	}
 }
 
+// deleteConsumer deletes sessionID's session consumer, bounded as every other consumer call this
+// listener makes (sessionConsumerCallTimeout). It is what the session reaper deletes a reaped
+// session's consumer through (session.SessionReaper.DeleteConsumer), so a consumer lives as long
+// as the session it delivers to; a listener without the session-consumer connection, which only a
+// test builds, deletes nothing.
+func (m *sessionDelivery) deleteConsumer(ctx context.Context, sessionID string) error {
+	if m == nil || m.consumers == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, sessionConsumerCallTimeout)
+	defer cancel()
+	return m.consumers.Delete(ctx, sessionID)
+}
+
 // mark returns the next of the marks that order registrations against the relay's restarts: a
 // registration takes one once its topics are stored and its consumer created or updated, and a
 // relay restart takes one, under the session's lock, before it reads the session's topics and

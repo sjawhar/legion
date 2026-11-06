@@ -1,0 +1,11 @@
+kind: Changed
+body: |-
+  A session's JetStream consumer dies with its session: the session reaper deletes the consumer of
+  every record it deletes, so the stream holds a consumer for each session a deployment has rather
+  than for each it has ever relayed. A session inside the gone horizon keeps its consumer and the
+  position it holds, whether it is live or has stopped answering, and so does one that registered
+  again between the reaper's decision and its delete. The consumers' 72-hour inactive threshold
+  stays the backstop for a session no reaper pass ever sees, and a consumer the pass could not
+  delete is logged and left to it.
+custom:
+    Issue: pr2603

@@ -1333,11 +1333,15 @@ func main() {
 		registry.StartReaper(kvLoopsCtx, func(sessionID string) (bool, error) { return sessionMayBeLive(sessions, sessionID) }, 5*time.Minute, store.InterestReapGrace),
 		registry.StartRoleClaimReaper(kvLoopsCtx, func(sessionID string) bool { return roleHolderMayBeLive(logger, sessions, sessionID) }, roleClaimReapInterval, sessionLive),
 		// The session reaper is the one loop that deletes a session's record, and the one place
-		// the bucket's maximum age is settled while the listener runs (session.ReapSessions).
+		// the bucket's maximum age is settled while the listener runs (session.ReapSessions). It
+		// deletes the session consumer of each record it deletes, so the stream holds a consumer
+		// for each session this deployment has rather than for each that reached the gone horizon
+		// inside the consumers' inactive threshold (bus.SessionConsumerInactiveThreshold).
 		sessions.StartSessionReaper(kvLoopsCtx, sessionReapInterval, session.SessionReaper{
 			Client:              client,
 			Reaped:              sessionsReaped,
 			StoredAfterLastSeen: sessionStoredAfterLastSeen,
+			DeleteConsumer:      delivery.deleteConsumer,
 		}),
 	}
 
