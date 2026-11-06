@@ -101,6 +101,8 @@ github_apps:
     installations: {sjawhar: "2003"}
 linger_hours: 1.5
 production_check_hours: 240
+pod_update_max_open_rounds: 6
+pod_update_rounds_per_minute: 2
 review_round_cap: 4
 max_fix_attempts: 5
 controller: daemon
@@ -146,6 +148,7 @@ runtime:
       pi_legion: 10.4.0
       pi_envoy: https://legion:fixture-plugin-password@plugins.internal.example/pi-envoy-10.4.0.tgz?token=fixture-plugin-token
     setup: [/bin/sh, -c, 'echo fixture-setup']
+    skills_repository: acme/agent-skills
     repository_cache:
       volume: 40Gi
       refresh_minutes: 15
@@ -822,7 +825,10 @@ func TestForgetSessionOperatorClaimGolden(t *testing.T) {
 	})
 }
 
-// What the list route answers: a queued claim carries no locator and no delivery yet.
+// What the list route answers: a queued claim carries no locator and no delivery yet. The
+// pod-update record is left out of the value this marshals, so the fixture is also the proof
+// that OperatorClaims.MarshalJSON writes the zero record for a nil field and the wire carries
+// the object either way.
 func TestOperatorClaimsGolden(t *testing.T) {
 	golden(t, "operator-claims.json", OperatorClaims{Claims: []OperatorClaim{
 		{

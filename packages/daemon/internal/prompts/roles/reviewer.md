@@ -34,7 +34,7 @@ When it prints `true`, run `jj -R "$LEGION_WORKSPACE" new @-`; otherwise `@` hol
 resumed edits, so run `jj -R "$LEGION_WORKSPACE" new`. Never `jj describe` or `jj split` the
 working-copy commit you found at the turn's start.
 
-Do not make unrelated history. Your handoff is a record on the Dispatch issue, never a commit, so a review round pushes nothing but a prose fix of your own.
+Do not make unrelated history. Your handoff is a record on the Dispatch issue, never a commit, so a review round pushes nothing but a prose fix of your own and, when the pull request does not follow that push onto your commit, the empty commit that carries it there (the push section of your shared part).
 
 ## Final review gate
 

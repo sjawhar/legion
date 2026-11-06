@@ -21,6 +21,7 @@ import {
   IDEMPOTENCY_KEY_TTL_MS,
   IDEMPOTENCY_LEASE_MS,
   IDEMPOTENCY_REPLAYED_HEADER,
+  ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS,
   ISSUE_TITLE_MAX,
   LIVE_SOCKET_MAX_AGE_CLOSE,
   LIVE_SOCKET_MAX_AGE_MS,
@@ -34,9 +35,10 @@ import {
   SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE,
 } from "../src/dispatch-api";
 import {
-  ASK_QUESTION_MAX,
-  DISPATCH_BODY_MAX,
+  DISPATCH_BLOCK_UNITS,
+  DISPATCH_EVENT_BODY_MAX,
   DISPATCH_HANDOFF_BODY_MAX,
+  DISPATCH_ITEM_BLOCKS,
   HANDOFF_PHASE_PATTERN,
   HANDOFF_PHASE_RULE_WORDS,
   PROJECT_KEY_PATTERN,
@@ -123,6 +125,14 @@ const GithubTopicPrefix = "notifications.github."
 // this window bounds, so the stream, the hosts and the dashboard read one number.
 const DeliveryDuplicateWindow = ${DELIVERY_DUPLICATE_WINDOW_MS} * time.Millisecond
 
+// IssueClaimUnresponsiveGrace is how long an issue claim is held for a holder the Envoy registry
+// calls unresponsive: a session that missed its heartbeats keeps the issue it is working until it
+// was last seen longer ago than this, and only then may another agent take or release the claim
+// without a person's force. Generated from ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS in
+// packages/contracts, whose doc comment states the rule, so the server's refusal and the wait a
+// client predicts are one number.
+const IssueClaimUnresponsiveGrace = ${ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS} * time.Millisecond
+
 // MintedDedupeKeyPattern is the shape of a dedupe key minted once for its message, by the listener
 // or by the shared transport's idempotency key, which DedupeKeyNamesTheUpstreamEvent counts as
 // naming its event. Generated from MINTED_DEDUPE_KEY_PATTERN in packages/contracts, which the
@@ -186,16 +196,21 @@ const DefaultIssuePageLimit = ${DEFAULT_ISSUE_PAGE_LIMIT}
 // server's refusal and the dashboard's title fields cannot drift apart.
 const IssueTitleMax = ${ISSUE_TITLE_MAX}
 
-// DispatchBodyMax is the longest comment, comment-edit, message and broadcast body the server
-// accepts, in UTF-16 units. Generated from DISPATCH_BODY_MAX in packages/contracts so the server's
-// refusal, the agent tools' pre-send refusal and the dashboard composer cannot drift apart.
-const DispatchBodyMax = ${DISPATCH_BODY_MAX}
+// DispatchBlockUnits is the longest one block of a comment, comment edit, message, broadcast or
+// ask part may be, in UTF-16 units. Generated from DISPATCH_BLOCK_UNITS in packages/contracts;
+// the server enforces it, names it in its refusal, and publishes it through GET /api/v1/limits.
+const DispatchBlockUnits = ${DISPATCH_BLOCK_UNITS}
 
-// AskQuestionMax is the longest ask question the server accepts, in UTF-16 units; an approval
-// request's summary gets what its question leaves of it. Generated from ASK_QUESTION_MAX in
-// packages/contracts so the server's refusal, the agent tools' pre-send refusal and the dashboard
-// ask composer cannot drift apart.
-const AskQuestionMax = ${ASK_QUESTION_MAX}
+// DispatchItemBlocks is the most blocks one body may hold. Generated from DISPATCH_ITEM_BLOCKS in
+// packages/contracts; the server enforces it, names it in its refusal, and publishes it through
+// GET /api/v1/limits.
+const DispatchItemBlocks = ${DISPATCH_ITEM_BLOCKS}
+
+// DispatchEventBodyMax is the longest body an event carries whole, in UTF-16 units, and the bound
+// on an ask's question and its options together. Generated from DISPATCH_EVENT_BODY_MAX in
+// packages/contracts; the server enforces it, names it in its refusal, and publishes it through
+// GET /api/v1/limits.
+const DispatchEventBodyMax = ${DISPATCH_EVENT_BODY_MAX}
 
 // DispatchHandoffBodyMax is the longest phase handoff body, in UTF-8 bytes, that
 // POST /api/v1/issues/{key}/handoffs/{phase} accepts. Generated from DISPATCH_HANDOFF_BODY_MAX in
@@ -554,16 +569,6 @@ ${keep}
 `;
 }
 
-function renderDaemonDispatch() {
-  return `package dispatch
-
-// MessageBodyLimit is the longest body Dispatch accepts on a message, in UTF-16 code units as
-// Dispatch counts them. Generated from DISPATCH_BODY_MAX in packages/contracts;
-// record.MessagePostLimit subtracts the outbox marker the runner appends from it.
-const MessageBodyLimit = ${DISPATCH_BODY_MAX}
-`;
-}
-
 // The slice of JSON Schema that schemas/block-schema.schema.json uses, which the block schema
 // renderers below read. `x-ordered` marks an object whose keys carry their declaration order,
 // `x-go-type` names the Go type holding such an object, and `x-go-constants` names the Go
@@ -785,18 +790,11 @@ const envelope = (await Bun.file(envelopeFile).json()) as Schema;
 const blockSchema = (await Bun.file(blockSchemaFile).json()) as BlockSchemaDocument;
 
 // Every generated file this script owns, each marked with the language it is written in: a Go
-// file is gofmt-formatted before it is written and before it is compared. The daemon carries its
-// own copy of the body cap rather than importing the envoy package: its production build imports
-// nothing from github.com/sjawhar/envoy.
+// file is gofmt-formatted before it is written and before it is compared.
 const outputs = [
   {
     path: resolve(import.meta.dir, "../../envoy/internal/contracts/generated.go"),
     rendered: renderContracts(envelope),
-    language: "go",
-  },
-  {
-    path: resolve(import.meta.dir, "../../daemon/internal/dispatch/generated.go"),
-    rendered: renderDaemonDispatch(),
     language: "go",
   },
   {
