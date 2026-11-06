@@ -2567,8 +2567,12 @@ jobs:
     if: needs.changes.outputs.dispatch_browser == 'true'
     uses: ./.github/workflows/dispatch-browser.yaml
     with:
-      lane: ${{ github.event_name == 'pull_request' && 'pull-request' || 'full' }}
-      engines: ${{ github.event_name == 'pull_request' && 'chromium' || 'chromium webkit firefox' }}
+      # SCRATCH, for INFRA-1403's k2 only: the full lane on this pull request's own push, so
+      # that the lane the merge queue and the nightly run is proven before the merge. No
+      # scheduled run and no merge-group run exists on a branch, so neither would prove it. The
+      # commit after this one puts both expressions back exactly as they were.
+      lane: full
+      engines: chromium webkit firefox
       ci-ok-changes: ${{ toJSON(needs.changes) }}
 
   claude-envoy:
