@@ -213,27 +213,30 @@ func TestARotatedCredentialFileWhosePathDidNotChangeIsReadAgain(t *testing.T) {
 }
 
 // countingHolder is a holder that counts the rebuilds asked of it, under whichever name the test
-// registers it as.
+// registers it as, and answers whatever rebuild failure the test gave it.
 type countingHolder struct {
 	name  string
 	built int
+	// fails is what its rebuild answers: a holder the daemon could not build again — a NATS the
+	// new seed cannot reach — answers one, and the rebuild succeeded when it is nil.
+	fails error
 }
 
 func (h *countingHolder) holder() string { return h.name }
 
 func (h *countingHolder) rebuild(*config.Config) error {
 	h.built++
-	return nil
+	return h.fails
 }
 
-// countingCredentialHolder is a countingHolder that reads credential files of its own, which it
-// names as every credential holder does (credentialReader).
+// countingCredentialHolder is a countingHolder built from credentials of its own, which it says
+// as every credential holder does (credentialHolder).
 type countingCredentialHolder struct {
 	countingHolder
-	files func(cfg *config.Config) []string
+	reads func(cfg *config.Config) string
 }
 
-func (h *countingCredentialHolder) credentialFiles(cfg *config.Config) []string { return h.files(cfg) }
+func (h *countingCredentialHolder) credentials(cfg *config.Config) string { return h.reads(cfg) }
 
 // The file watcher wakes on the state of a whole directory, so a projected token the kubelet
 // refreshed wakes it beside credentials that did not move. A reread rebuilds a credential holder
@@ -253,11 +256,11 @@ func TestARereadRebuildsOnlyTheHoldersWhoseCredentialFilesMoved(t *testing.T) {
 	rebuild := newRebuilder(quietLogger(), config.Settled(*cfg))
 	server := &countingCredentialHolder{
 		countingHolder: countingHolder{name: config.HolderAPIServer},
-		files:          func(cfg *config.Config) []string { return []string{cfg.OperatorTokenFile} },
+		reads:          func(cfg *config.Config) string { return credentialDigest(cfg.OperatorTokenFile) },
 	}
 	natsClient := &countingCredentialHolder{
 		countingHolder: countingHolder{name: config.HolderNATS},
-		files:          func(cfg *config.Config) []string { return []string{cfg.NatsNkeySeedFile} },
+		reads:          func(cfg *config.Config) string { return credentialDigest(cfg.NatsNkeySeedFile) },
 	}
 	rebuild.register(server, natsClient)
 
@@ -355,7 +358,17 @@ func TestAChangedNatsSeedRebuildsTheNatsClient(t *testing.T) {
 	}
 	rebuild := newRebuilder(w.log, config.Settled(*live.Snapshot()))
 	live.OnChange(rebuild.observe)
-	w.nats = newNATSHolder(conn, consumers, w.log, open)
+	// The daemon's own reopen reads what the consumers hear and swaps under the lock every fact
+	// applies under (workflowRuntime.connect); this one, whose consumers hear the boot's set and
+	// whose rebuild is what the test is about, opens and swaps.
+	w.nats = newNATSHolder(conn, consumers, w.log, func(c config.Config, swap func(*nats.Conn, *intake.Consumers)) error {
+		conn, consumers, err := open(c)
+		if err != nil {
+			return err
+		}
+		swap(conn, consumers)
+		return nil
+	})
 	rebuild.register(w.nats)
 	t.Cleanup(w.stop)
 	before := w.nats.connection()
@@ -432,6 +445,71 @@ func TestANatsRebuildHearsTheRepositoriesMappedSinceBoot(t *testing.T) {
 	}
 	if filters := githubFiltersOf(t, stream, cfg.Project); !slices.Contains(filters, "notifications.github.acme.widgets.>") {
 		t.Fatalf("the GitHub durable consumer filters on %v, want the subject of the repository mapped since boot among them", filters)
+	}
+}
+
+// That read and the swap onto the new consumers run under one hold of the lock every fact
+// applies under (intake.SerializeFacts): a mapping read holds that lock across its own
+// SetRepositories (refreshMapping), so one that landed between the read and the swap would set
+// its repositories on the consumers the rebuild is replacing, and the repository it mapped
+// would go unheard with them until something else moved the mapping again.
+func TestANatsRebuildWaitsForAMappingReadHoldingTheFactLock(t *testing.T) {
+	url := testnats.URL(t)
+	probe, err := nats.Connect(url, nats.Timeout(5*time.Second))
+	if err != nil {
+		t.Fatalf("connect to the test NATS server: %v", err)
+	}
+	t.Cleanup(probe.Close)
+	js, err := jetstream.New(probe)
+	if err != nil {
+		t.Fatalf("open JetStream: %v", err)
+	}
+	testnats.CreateStream(t, js, jetstream.StreamConfig{Name: "ENVOY_NOTIFICATIONS", Subjects: []string{"notifications.>"}})
+	w := grantWorkflow(t, &syncBuffer{})
+	cfg := daemonGrantConfig(url)
+	if err := w.connect(t.Context(), cfg, newRebuilder(w.log, config.Settled(cfg)), func(string) (string, bool) { return "", false }); err != nil {
+		t.Fatalf("connect the workflow's NATS: %v", err)
+	}
+	t.Cleanup(w.stop)
+
+	// A mapping read in flight: its transaction holds the fact lock from its record snapshot
+	// through its SetRepositories.
+	mapping, err := w.pool.Begin(t.Context())
+	if err != nil {
+		t.Fatalf("begin the mapping read's transaction: %v", err)
+	}
+	defer func() { _ = mapping.Rollback(t.Context()) }()
+	if err := intake.SerializeFacts(t.Context(), mapping); err != nil {
+		t.Fatalf("take the fact lock as a mapping read does: %v", err)
+	}
+
+	rebuilt := make(chan error, 1)
+	go func() { rebuilt <- w.nats.rebuild(&cfg) }()
+	select {
+	case err := <-rebuilt:
+		t.Fatalf("the rebuild read what the consumers hear while a mapping read held the fact lock: %v", err)
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	// The mapping read maps a repository and commits; the rebuild then reads the set it left.
+	mapped := ghrepo.MustParse("acme/widgets")
+	if err := w.nats.intake().SetRepositories(t.Context(), append(w.nats.intake().Repositories(), mapped)); err != nil {
+		t.Fatalf("hear the repository the mapping read mapped: %v", err)
+	}
+	if err := mapping.Commit(t.Context()); err != nil {
+		t.Fatalf("commit the mapping read: %v", err)
+	}
+	select {
+	case err := <-rebuilt:
+		if err != nil {
+			t.Fatalf("rebuild the NATS holder: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the rebuild did not return once the mapping read had committed")
+	}
+
+	if heard := w.nats.intake().Repositories(); !slices.Contains(heard, mapped) {
+		t.Fatalf("after the rebuild GitHub intake hears %v, want the repository the mapping read mapped while the rebuild waited among them", heard)
 	}
 }
 

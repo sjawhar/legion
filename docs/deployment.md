@@ -526,6 +526,8 @@ What a change of one key needs is its class, which the table below gives for eve
 
 - **`rebuild`** — a client, a listener or a connection holds the value, so the daemon builds that holder again under the work it is running; the route answers `rebuilt` and names the holder.
   No socket is rebound and no worker connection drops.
+  The call waits while the daemon lets go of what it replaced, under the lock every settings change takes, so a second call waits behind it:
+  a NATS connection is given two minutes for the messages its intake still holds, and the runtime being replaced is given its own launch bound and those two minutes beyond it, so a `runtime.*` change made while a pod is being launched waits for that launch's turn rather than ending it.
 
 - **`launch`** — a pod's or a pane's own launch reads the value, so it reaches a role at that role's next launch; the route answers `next-launch` and names the holder the launch reads the value from.
   Under `runtime: kubernetes` each issue pod records the launch settings its own launch read, in its `legion.dev/launch-settings` annotation, so a pod launched on the old value is brought onto the new one by an update round, once every worker in it has pushed and answered.

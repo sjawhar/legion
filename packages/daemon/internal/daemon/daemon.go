@@ -2214,43 +2214,37 @@ func projectMergeRules(cfg config.Config) func(project string) config.MergeRules
 	}
 }
 
-// sandboxQuestion is a question only the Sandbox runtime answers — its repository caches, the
-// pod at an address — as the daemon asks it: nil when rt is no Sandbox runtime, so the caller
-// hands the API nothing to ask; otherwise ask, over the Sandbox runtime behind rt at the moment
-// of the call (sandboxOf), which is what makes the answer follow a rebuild of the runtime: the
-// holder's readers hold the holder, and the runtime inside it is replaced under them. A runtime
-// that is no Sandbox one by then answers the zero value.
-func sandboxQuestion[A any](rt runtime.Runtime, ask func(*sandbox.Runtime) A) func() A {
+// repositoryCachesOf is rt's repository caches when rt is the Sandbox runtime, the one runtime
+// that keeps them, and nil under any other, so the caller hands the API nothing to ask.
+//
+// The caches are read over the Sandbox runtime behind rt at the moment of the call (sandboxOf),
+// which is what makes the answer follow a rebuild of the runtime: the holder's readers hold the
+// holder, and the runtime inside it is replaced under them. A runtime that is no Sandbox one by
+// then answers nothing. callerPodOf reads its pod the same way.
+func repositoryCachesOf(rt runtime.Runtime) func() []sandbox.CacheStatus {
 	if _, sandboxed := sandboxOf(rt); !sandboxed {
 		return nil
 	}
-	return func() (none A) {
+	return func() []sandbox.CacheStatus {
 		sandboxed, ok := sandboxOf(rt)
 		if !ok {
-			return none
+			return nil
 		}
-		return ask(sandboxed)
+		return sandboxed.RepositoryCaches()
 	}
-}
-
-// repositoryCachesOf is rt's repository caches when rt is the Sandbox runtime, the one runtime
-// that keeps them, and nil under any other.
-func repositoryCachesOf(rt runtime.Runtime) func() []sandbox.CacheStatus {
-	return sandboxQuestion(rt, (*sandbox.Runtime).RepositoryCaches)
 }
 
 // callerPodOf is rt's pod at an address when rt is the Sandbox runtime, the one runtime that
 // runs pods, and nil under any other (api's Options.CallerPod).
 func callerPodOf(rt runtime.Runtime) func(netip.Addr) (string, bool) {
-	at := sandboxQuestion(rt, func(sandboxed *sandbox.Runtime) func(netip.Addr) (string, bool) { return sandboxed.PodAt })
-	if at == nil {
+	if _, sandboxed := sandboxOf(rt); !sandboxed {
 		return nil
 	}
 	return func(addr netip.Addr) (string, bool) {
-		pod := at()
-		if pod == nil {
+		sandboxed, ok := sandboxOf(rt)
+		if !ok {
 			return "", false
 		}
-		return pod(addr)
+		return sandboxed.PodAt(addr)
 	}
 }

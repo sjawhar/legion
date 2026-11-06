@@ -26,8 +26,8 @@ import (
 //
 // Every other call is forwarded through enter, which counts it against the runtime it runs on:
 // a rebuild ends the runtime it replaced only once the calls inside it have returned, within
-// drainBound, so a Spawn or a Resume already waiting on that runtime's informers finishes on
-// informers that are still watching.
+// that runtime's own launch bound and a margin (runtimeDrainBound), so a Spawn or a Resume
+// already waiting on that runtime's informers finishes on informers that are still watching.
 type runtimeHolder struct {
 	current atomic.Pointer[runtime.Runtime]
 	// build makes a runtime from a configuration and answers the stop that ends it: the Sandbox
@@ -52,14 +52,15 @@ type runtimeHolder struct {
 	closed   bool
 }
 
-// servedRuntime is one runtime of the holder's while it is the one calls run on: the stop that
-// ends everything that runtime runs of its own, how many calls are inside it now, whether a
-// rebuild has replaced it, and the channel the last of those calls closes once it has.
+// servedRuntime is one runtime of the holder's while it is the one calls run on: the runtime
+// itself, whose launch bound is how long a rebuild waits for the calls inside it, the stop that
+// ends everything that runtime runs of its own, how many calls are inside it now, and the
+// channel the last of those calls closes once it has returned.
 type servedRuntime struct {
-	stop     context.CancelFunc
-	calls    int
-	replaced bool
-	drained  chan struct{}
+	rt      runtime.Runtime
+	stop    context.CancelFunc
+	calls   int
+	drained chan struct{}
 }
 
 var _ runtime.Runtime = (*runtimeHolder)(nil)
@@ -91,7 +92,7 @@ func newRuntimeHolder(rt runtime.Runtime, stop context.CancelFunc, log *slog.Log
 	if log == nil {
 		log = slog.Default()
 	}
-	h := &runtimeHolder{build: build, log: log, serving: &servedRuntime{stop: stop}}
+	h := &runtimeHolder{build: build, log: log, serving: &servedRuntime{rt: rt, stop: stop}}
 	h.current.Store(&rt)
 	if answersIssueResources(rt) {
 		return &issueResourceHolder{runtimeHolder: h}
@@ -130,13 +131,13 @@ func (h *runtimeHolder) holder() string { return config.HolderRuntime }
 // credential refreshers — ends with it, so a deployment that changes a `runtime.*` key ten
 // times is watching the cluster once and not ten times over.
 //
-// A call already inside the runtime being replaced holds that end back, up to drainBound: the
-// informers a Spawn's await and a Resume's awaitNewPod poll (runtime/sandbox's await,
-// awaitNewPod) are the replaced runtime's, and a launch left polling a store nothing refreshes
-// fails at its boot timeout and spends one of the claim's launch failures
-// (supervise.Limits.LaunchFailures). Past the bound the runtime is ended anyway and the call
-// sees the cancelled context, as the NATS rebuild closes a connection whose intake never
-// settled.
+// A call already inside the runtime being replaced holds that end back, up to that runtime's
+// own drain bound (runtimeDrainBound): the informers a Spawn's await and a Resume's awaitNewPod
+// poll (runtime/sandbox's await, awaitNewPod) are the replaced runtime's, and a launch left
+// polling a store nothing refreshes fails at its boot timeout and spends one of the claim's
+// launch failures (supervise.Limits.LaunchFailures). Past the bound the runtime is ended anyway
+// and the call sees the cancelled context, as the NATS rebuild closes a connection whose intake
+// never settled.
 //
 // A failure changes nothing: the runtime that was built is stopped, the feed stays on the
 // runtime the daemon is supervising with, and the rebuilder logs what could not be built.
@@ -164,25 +165,46 @@ func (h *runtimeHolder) rebuild(cfg *config.Config) error {
 	}
 	h.current.Store(&next)
 	replaced := h.serving
-	h.serving = &servedRuntime{stop: stopNext}
+	h.serving = &servedRuntime{rt: next, stop: stopNext}
 	var draining chan struct{}
-	if replaced != nil && replaced.calls > 0 {
-		replaced.replaced, replaced.drained = true, make(chan struct{})
+	if replaced.calls > 0 {
+		replaced.drained = make(chan struct{})
 		draining = replaced.drained
 	}
 	h.mu.Unlock()
 	if draining != nil {
+		bound := runtimeDrainBound(replaced.rt)
 		select {
 		case <-draining:
-		case <-time.After(drainBound):
+		case <-time.After(bound):
 			h.log.Warn("legion settings: a call was still inside the runtime being replaced; the daemon ends that runtime anyway and the call sees its context cancelled",
-				"holder", config.HolderRuntime, "waited", drainBound)
+				"holder", config.HolderRuntime, "waited", bound)
 		}
 	}
-	if replaced != nil && replaced.stop != nil {
+	if replaced.stop != nil {
 		replaced.stop()
 	}
 	return nil
+}
+
+// runtimeDrainBound is how long a rebuild waits for the calls inside the runtime it replaced to
+// return before it ends that runtime anyway: that runtime's own LaunchBound — the longest one
+// Spawn or Resume try may rightfully run on its account, the Sandbox runtime's being
+// `worker_boot_timeout_seconds` several times over plus its provision bound and its calls
+// (runtime/sandbox's launchBound) — with drainBound as the margin for the Suspend, Release or
+// ReplacePod that is no launch at all. A runtime that states no bound, whose calls wait on
+// nothing of the kind (tmux, whose pane start is a local command), is waited drainBound.
+//
+// It is read from the runtime being replaced and not from the configuration, because that
+// runtime's bound is the one its calls were started under: `worker_boot_timeout_seconds` is the
+// runtime's own to rebuild, so the change being applied here may be the one that raised it, and
+// a bound shorter than the work inside the old runtime would stop that runtime under a launch
+// that had not yet had its turn.
+func runtimeDrainBound(rt runtime.Runtime) time.Duration {
+	if launch := rt.LaunchBound(); launch > 0 {
+		return launch + drainBound
+	}
+	return drainBound
 }
 
 func (h *runtimeHolder) get() runtime.Runtime { return *h.current.Load() }

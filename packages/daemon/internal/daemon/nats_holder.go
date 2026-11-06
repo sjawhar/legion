@@ -22,9 +22,14 @@ import (
 // position is lost — the consumers are durable, and the new ones resume where the old ones
 // stopped.
 type natsHolder struct {
-	// open builds a connection and its consumers from a configuration.
-	open func(cfg config.Config) (*nats.Conn, *intake.Consumers, error)
-	log  *slog.Logger
+	// reopen builds a connection and its consumers from a configuration and hands them to swap,
+	// which takes the holder onto them. The two run under one hold of the lock every fact applies
+	// under (workflowRuntime.connect, intake.SerializeFacts), because what the new consumers hear
+	// is read from the consumers this swap replaces: a mapping read landing between that read and
+	// the swap would set the repositories on the consumers being replaced and lose them with them
+	// (refreshMapping's SetRepositories).
+	reopen func(cfg config.Config, swap func(*nats.Conn, *intake.Consumers)) error
+	log    *slog.Logger
 
 	mu         sync.Mutex
 	conn       *nats.Conn
@@ -38,19 +43,19 @@ type natsHolder struct {
 	settled   chan struct{}
 }
 
-func newNATSHolder(conn *nats.Conn, consumers *intake.Consumers, log *slog.Logger, open func(cfg config.Config) (*nats.Conn, *intake.Consumers, error)) *natsHolder {
+func newNATSHolder(conn *nats.Conn, consumers *intake.Consumers, log *slog.Logger, reopen func(cfg config.Config, swap func(*nats.Conn, *intake.Consumers)) error) *natsHolder {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &natsHolder{open: open, log: log, conn: conn, consumers: consumers}
+	return &natsHolder{reopen: reopen, log: log, conn: conn, consumers: consumers}
 }
 
 func (h *natsHolder) holder() string { return config.HolderNATS }
 
-// credentialFiles are the nkey seeds the connection authenticates as, which a rebuild reads
-// again (readNATSConnection).
-func (h *natsHolder) credentialFiles(cfg *config.Config) []string {
-	return []string{cfg.NatsNkeySeedFile, cfg.NatsDaemonNkeySeedFile}
+// credentials are the nkey seeds the connection authenticates as, which a rebuild reads again
+// (readNATSConnection).
+func (h *natsHolder) credentials(cfg *config.Config) string {
+	return credentialDigest(cfg.NatsNkeySeedFile, cfg.NatsDaemonNkeySeedFile)
 }
 
 // connection and intake are the connection and the consumers as they now stand.
@@ -92,16 +97,30 @@ func (h *natsHolder) rebuilt(generation uint64) bool {
 // nak'd. An ack of a fact in flight therefore goes to the connection it was delivered on, never
 // to a closed one, and a fact the handler had not finished is redelivered by the durable
 // consumer the new connection holds. No consumer is deleted and no position is lost.
+//
+// The build and the swap run under one hold of the lock every fact applies under (reopen), so
+// the repositories the new consumers hear are the ones the consumers they replace heard at the
+// swap: a mapping read that lands while a rebuild is opening its connection waits, and sets its
+// repositories on the consumers this rebuild has swapped in.
 func (h *natsHolder) rebuild(cfg *config.Config) error {
-	conn, consumers, err := h.open(*cfg)
-	if err != nil {
+	var old *nats.Conn
+	var cancel context.CancelFunc
+	var settled chan struct{}
+	swapped := false
+	err := h.reopen(*cfg, func(conn *nats.Conn, consumers *intake.Consumers) {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		swapped = true
+		old, cancel, settled = h.conn, h.cancelRun, h.settled
+		h.conn, h.consumers, h.generation = conn, consumers, h.generation+1
+		h.cancelRun, h.settled = nil, nil
+	})
+	if !swapped {
 		return err
 	}
-	h.mu.Lock()
-	old, cancel, settled := h.conn, h.cancelRun, h.settled
-	h.conn, h.consumers, h.generation = conn, consumers, h.generation+1
-	h.cancelRun, h.settled = nil, nil
-	h.mu.Unlock()
+	// The holder is on the new connection, so what it replaced is let go of whatever reopen
+	// answered: a transaction that could not commit once the swap had happened would otherwise
+	// leave the daemon holding two connections, the old one's intake still delivering.
 	if cancel != nil {
 		cancel()
 	}
@@ -116,7 +135,7 @@ func (h *natsHolder) rebuild(cfg *config.Config) error {
 	if old != nil {
 		old.Close()
 	}
-	return nil
+	return err
 }
 
 // close ends the connection the holder holds, which the daemon's stop calls.

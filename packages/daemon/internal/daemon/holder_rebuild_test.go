@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -21,8 +23,9 @@ import (
 // on, never to a closed one. Without the wait the rebuild cancelled the run and closed the
 // connection in the same breath, and whatever the handlers were holding was acked into nothing.
 func TestANatsRebuildWaitsForTheIntakeItEndedToSettle(t *testing.T) {
-	holder := newNATSHolder(nil, nil, quietLogger(), func(config.Config) (*nats.Conn, *intake.Consumers, error) {
-		return nil, nil, nil
+	holder := newNATSHolder(nil, nil, quietLogger(), func(_ config.Config, swap func(*nats.Conn, *intake.Consumers)) error {
+		swap(nil, nil)
+		return nil
 	})
 	_, running, _, settled := holder.begin(t.Context())
 	// The intake loop: its Run returns once the messages it holds are settled, which this test
@@ -162,6 +165,29 @@ func TestARuntimeRebuildWaitsForTheCallsInsideTheRuntimeItReplaced(t *testing.T)
 	}
 }
 
+// The wait a rebuild gives the calls inside the runtime it replaced is that runtime's own
+// launch bound and a margin, never a fixed two minutes. One Sandbox launch try may run up to
+// LaunchBound — `worker_boot_timeout_seconds` several times over plus the provision bound
+// (runtime/sandbox's launchBound) — and that timeout defaults to 120 s and is the runtime's own
+// to rebuild, so a projected caller can raise it: a drain bounded by the two minutes the NATS
+// intake is given would stop the old runtime under a Spawn, Resume or ReplacePod that was still
+// rightfully inside it, leaving the call a cancelled context and the claim one of its launch
+// failures.
+func TestTheRuntimeDrainBoundIsTheReplacedRuntimesLaunchBoundAndAMargin(t *testing.T) {
+	launching := fake.NewRuntime()
+	launching.TryBound = 25 * time.Minute
+
+	if bound := runtimeDrainBound(launching); bound != launching.TryBound+drainBound {
+		t.Fatalf("a rebuild waits %s for the calls inside a runtime whose launch bound is %s, want that bound and the %s margin",
+			bound, launching.TryBound, drainBound)
+	}
+	// A runtime that states no bound — a tmux pane start is a local command with no cluster
+	// wait — is waited the margin alone.
+	if bound := runtimeDrainBound(fake.NewRuntime()); bound != drainBound {
+		t.Fatalf("a rebuild waits %s for the calls inside a runtime that states no launch bound, want %s", bound, drainBound)
+	}
+}
+
 // The App token manager is built again only when its own App credentials moved. A rebuild closes
 // the manager it replaces — every lease it granted is dropped and a `token_command` still
 // waiting on a person's approval is killed — and the file watcher wakes on every watched
@@ -189,6 +215,131 @@ func TestARereadRebuildsTheAppTokenManagerOnlyWhenItsAppCredentialsMoved(t *test
 	if !held.closed {
 		t.Fatal("a reread after the App private key moved left the manager built on the old key serving")
 	}
+}
+
+// One changed credential file is one rebuild. The watcher's settle applies the change — the
+// holder its row names is built again — and then asks every credential holder to read its
+// credentials again (the daemon's watcher.Settled, rereadCredentials): with the digest recorded
+// where the reread decided rather than where the holder was built, that reread found the file
+// moved from what it last recorded and built the holder a second time, replacing the Dispatch
+// client twice over for one change.
+func TestAChangedCredentialFileRebuildsItsHolderOnce(t *testing.T) {
+	dir := t.TempDir()
+	held, routed := filepath.Join(dir, "dispatch-token"), filepath.Join(dir, "dispatch-token-rotated")
+	for file, contents := range map[string]string{held: "bearer\n", routed: "new-bearer\n"} {
+		if err := os.WriteFile(file, []byte(contents), 0o600); err != nil {
+			t.Fatalf("write %s: %v", file, err)
+		}
+	}
+	cfg := &config.Config{DispatchTokenFile: held}
+	rebuild := newRebuilder(quietLogger(), config.Settled(*cfg))
+	client := &countingCredentialHolder{
+		countingHolder: countingHolder{name: config.HolderDispatchClient},
+		reads:          func(cfg *config.Config) string { return credentialDigest(cfg.DispatchTokenFile) },
+	}
+	rebuild.register(client)
+
+	// The change: the daemon is running on the file the operator named.
+	cfg.DispatchTokenFile = routed
+	rebuild.observe(cfg, []config.Change{changeOfPath(t, "dispatch_token_file")})
+	// And the reread the settle runs behind it, over credentials nothing has moved since.
+	rebuild.rereadCredentials(cfg)
+
+	if client.built != 1 {
+		t.Fatalf("the Dispatch client was built %d times for one changed dispatch_token_file, want once", client.built)
+	}
+}
+
+// countingApps is the App credential holder with its rebuilds counted: the holder itself, so
+// what a reread compares is the manager's own credentials (appsHolder.credentials).
+type countingApps struct {
+	*appsHolder
+	built int
+}
+
+func (h *countingApps) rebuild(cfg *config.Config) error {
+	h.built++
+	return h.appsHolder.rebuild(cfg)
+}
+
+// A route change of an App credential is built once, and the next wake of the file watcher —
+// the kubelet refreshing a projected token in a watched directory, which is no credential of
+// the manager's at all — leaves the manager that change built serving. Built again there, that
+// rebuild would close the manager that has served since the change: every lease it granted
+// dropped, and a `token_command` still waiting on a person's approval killed.
+func TestARouteChangeOfAnAppCredentialIsNotBuiltAgainAtTheNextWake(t *testing.T) {
+	cfg := &config.Config{GitHubApps: config.GitHubApps{
+		Implement: config.GitHubApp{AppID: "1", PrivateKey: "implement-key"},
+		Review:    config.GitHubApp{AppID: "2", PrivateKey: "review-key"},
+	}}
+	rebuild := newRebuilder(quietLogger(), config.Settled(*cfg))
+	apps := &countingApps{appsHolder: newAppsHolder(&closingTokens{})}
+	rebuild.register(apps)
+
+	cfg.GitHubApps.Implement.PrivateKey = "rotated-implement-key"
+	rebuild.observe(cfg, []config.Change{changeOfPath(t, "github_apps.implement.private_key")})
+	if apps.built != 1 {
+		t.Fatalf("the App manager was built %d times by the change of its own private key, want once", apps.built)
+	}
+
+	rebuild.rereadCredentials(cfg)
+
+	if apps.built != 1 {
+		t.Fatalf("the App manager was built %d times, want the change's one: the wake's rebuild closes the manager that has served since, dropping its leases and killing a token_command waiting on a person", apps.built)
+	}
+}
+
+// A rebuild that failed records nothing, so the next reread tries the credentials it could not
+// build on again: a seed rotated while NATS is unreachable is reached at the next wake of the
+// watcher, and not left for a restart. Recorded before the rebuild, the new seed counted as
+// built on and the daemon stayed on the connection it had with nothing to try it again.
+func TestARereadRebuildThatFailedIsTriedAgainAtTheNextReread(t *testing.T) {
+	seedFile := filepath.Join(t.TempDir(), "nats-seed")
+	if err := os.WriteFile(seedFile, []byte("seed\n"), 0o600); err != nil {
+		t.Fatalf("write the seed: %v", err)
+	}
+	cfg := &config.Config{NatsNkeySeedFile: seedFile}
+	rebuild := newRebuilder(quietLogger(), config.Settled(*cfg))
+	natsClient := &countingCredentialHolder{
+		countingHolder: countingHolder{name: config.HolderNATS, fails: errors.New("connect Envoy NATS: no servers available")},
+		reads:          func(cfg *config.Config) string { return credentialDigest(cfg.NatsNkeySeedFile) },
+	}
+	rebuild.register(natsClient)
+
+	// The seed is rotated in place, which names no setting, and the rebuild on it fails.
+	if err := os.WriteFile(seedFile, []byte("rotated-seed\n"), 0o600); err != nil {
+		t.Fatalf("rotate the seed: %v", err)
+	}
+	rebuild.rereadCredentials(cfg)
+	if natsClient.built != 1 {
+		t.Fatalf("the rotated seed was tried %d times, want once", natsClient.built)
+	}
+
+	// The next wake of the watcher, with the seed where the rotation left it, tries it again.
+	rebuild.rereadCredentials(cfg)
+	if natsClient.built != 2 {
+		t.Fatalf("the seed the daemon could not connect with was tried %d times, want it tried again at the next reread", natsClient.built)
+	}
+
+	// Once the rebuild succeeds the holder is recorded on that seed, and the wake after it
+	// builds nothing.
+	natsClient.fails = nil
+	rebuild.rereadCredentials(cfg)
+	rebuild.rereadCredentials(cfg)
+	if natsClient.built != 3 {
+		t.Fatalf("NATS was built %d times, want three: the reread after the rebuild that worked rebuilt it over a seed that had not moved since", natsClient.built)
+	}
+}
+
+// changeOfPath is one applied change of the path, as an apply reports it to the rebuild
+// observer: the row's own holder and class (config.ClassOf).
+func changeOfPath(t *testing.T, path string) config.Change {
+	t.Helper()
+	row, known := config.ClassOf(path)
+	if !known {
+		t.Fatalf("the class table holds no %s row", path)
+	}
+	return config.Change{Path: path, Holder: row.Holder, Class: row.Class, Outcome: row.Class.Outcome()}
 }
 
 // `repository_renames` is held by four things — the API server's settings, the project's

@@ -94,30 +94,30 @@ type rebuilt interface {
 type rebuilder struct {
 	log *slog.Logger
 	// live is the settings holder the daemon runs on, which register reads to record what a
-	// holder's credential files said when that holder was built from them.
+	// holder's credentials said when that holder was built from them.
 	live *config.Live
 	// order is the registration order, and holders the registry by name: a holder the daemon did
 	// not build — a test's replaced runtime, a supplied token source — is simply not registered,
 	// and a change naming it is logged and does nothing.
 	order   []string
 	holders map[string]rebuilt
-	// credentialDigests is what each credential holder's files said the last time
-	// rereadCredentials looked, by holder name, seeded at registration with what they said when
-	// the holder was built: the guard that keeps a wake of the file watcher from rebuilding a
-	// holder whose files have not moved (rereadCredentials).
+	// credentialDigests is what each credential holder was built from, by holder name: recorded
+	// at registration and at every rebuild that succeeded (rebuilder.rebuild), and the guard that
+	// keeps a wake of the file watcher from rebuilding a holder whose credentials have not moved
+	// since (rereadCredentials).
 	credentialDigests map[string]string
 }
 
 // newRebuilder is the rebuild observer of the daemon running on live, whose snapshot every
-// registration reads the new holder's credential files from.
+// registration reads the new holder's credentials from.
 func newRebuilder(log *slog.Logger, live *config.Live) *rebuilder {
 	return &rebuilder{log: log, live: live, holders: map[string]rebuilt{}, credentialDigests: map[string]string{}}
 }
 
 // register adds one holder. A second registration of the same name replaces the first.
 //
-// A holder that reads credential files is registered having just been built from them, so what
-// those files say now is recorded here: without it the first reread after boot would count every
+// A holder built from a credential is registered having just been built from it, so what that
+// credential says now is recorded here: without it the first reread after boot would count every
 // one of them as moved and rebuild it — reconnecting NATS, migrating every durable consumer and
 // dropping every App lease — on the first wake of the file watcher, which the kubelet's refresh
 // of any watched directory, `agent_secrets.token_file`'s among them, is.
@@ -130,12 +130,8 @@ func (r *rebuilder) register(holders ...rebuilt) {
 			r.order = append(r.order, h.holder())
 		}
 		r.holders[h.holder()] = h
-		reads, credentials := h.(credentialReader)
-		if !credentials || r.live == nil {
-			continue
-		}
-		if digest, comparable := credentialsOf(reads, r.live.Snapshot()); comparable {
-			r.credentialDigests[h.holder()] = digest
+		if credentials, reads := h.(credentialHolder); reads {
+			r.credentialDigests[h.holder()] = credentials.credentials(r.live.Snapshot())
 		}
 	}
 }
@@ -179,63 +175,68 @@ func (r *rebuilder) observe(cfg *config.Config, applied []config.Change) {
 	}
 }
 
-// rebuild builds one holder again and logs what it did. A failure is logged with the holder's
-// name and leaves the old one serving: a daemon that cannot reach NATS with a new seed keeps
-// reading events on the connection it has, and the operator sees why in the log.
+// rebuild builds one holder again, records what its credentials said when it was built, and
+// logs what it did. A failure is logged with the holder's name and leaves the old one serving:
+// a daemon that cannot reach NATS with a new seed keeps reading events on the connection it
+// has, and the operator sees why in the log.
+//
+// The digest is recorded here and at registration, and nowhere else: a holder is recorded as
+// what it was built from, whichever route built it. It is read before the rebuild, so a
+// credential that moved while the holder was being built is read again at the next reread
+// rather than taken for the one it was built from, and a rebuild that failed records nothing,
+// so the credentials it could not build on are tried again at the next reread. Recorded where a
+// rebuild is decided instead — in the reread's own loop — the two drifted apart: one
+// `dispatch_token_file` change rebuilt the client twice (the change's own rebuild, then the
+// reread the watcher's settle runs), a route change of `github_apps.*` was rebuilt over again
+// at the next unrelated wake, closing the manager that had served since — every lease dropped,
+// every `token_command` waiting on a person killed — and a reread rebuild that failed was never
+// retried.
 func (r *rebuilder) rebuild(cfg *config.Config, holder rebuilt) {
 	name := holder.holder()
+	credentials, reads := holder.(credentialHolder)
+	var built string
+	if reads {
+		built = credentials.credentials(cfg)
+	}
 	if err := holder.rebuild(cfg); err != nil {
 		r.log.Error("legion settings: rebuilding a holder failed; the daemon keeps the one it has",
 			"holder", name, "error", err)
 		return
 	}
+	if reads {
+		r.credentialDigests[name] = built
+	}
 	r.log.Info("legion settings: holder rebuilt", "holder", name)
 }
 
-// credentialReader is a holder that reads a credential file of this host's through
-// internal/config's readers (config.ReadSecretPointer and its neighbours): it names the files
-// its own rebuild reads, beside that reader, so the daemon holds one list of what a holder reads
-// rather than one here and one where it is read.
+// credentialHolder is a holder built from a credential that can move under the daemon with no
+// setting changing: a file of this host's, read through internal/config's readers
+// (config.ReadSecretPointer and its neighbours), or a value of the configuration itself. It
+// says what its own rebuild would be built from as one string, beside that reader, so the
+// daemon holds one list of what a holder reads rather than one here and one where it is read.
 //
-// A holder that reads credentials but names no file of this host's — the GitHub App manager,
-// whose private key is the key itself and whose command and secret are no file — answers none
-// and says what it was built from as a credentialValues instead. A holder that is no
-// credentialReader is left alone by a reread: nothing it holds was read from a file that can
-// rotate under it.
-type credentialReader interface {
+// What that string is, a reread compares with what the holder was built from
+// (rereadCredentials), and the rebuilder records at every rebuild (rebuilder.rebuild). A
+// holder's files are digested with credentialDigest; the App manager, whose private key is the
+// key itself and whose command and secret are no file, digests the credentials it was built
+// from instead, and that is why the comparison is a string rather than a list of files. It has
+// to be compared at all because its rebuild closes the manager it replaces — every lease
+// dropped, every `token_command` still waiting on a person's approval killed
+// (appauth.Manager.Close) — and the file watcher wakes on the state of a whole directory, the
+// one the kubelet rewrites a projected token in among them.
+//
+// A holder that is no credentialHolder is left alone by a reread: nothing it holds was read
+// from a credential that can move under it.
+type credentialHolder interface {
 	rebuilt
-	credentialFiles(cfg *config.Config) []string
-}
-
-// credentialValues is a credential holder whose credentials are values of the configuration
-// rather than files of this host's: it digests what its own rebuild would be built from, so a
-// reread rebuilds it when that moved and leaves it alone when it did not. Without it such a
-// holder would be rebuilt at every wake of the file watcher, and the GitHub App manager's
-// rebuild closes the manager it replaces — every lease dropped, every token_command still
-// waiting on a person's approval killed (appauth.Manager.Close).
-type credentialValues interface {
-	credentialReader
-	credentialMark(cfg *config.Config) string
-}
-
-// credentialsOf is what a holder's credentials say now: the digest of the files it names, or,
-// for a holder that names none, what it was built from (credentialValues). A holder that
-// answers neither has nothing a reread can compare, and is rebuilt at every reread as before.
-func credentialsOf(holder credentialReader, cfg *config.Config) (string, bool) {
-	if files := holder.credentialFiles(cfg); len(files) > 0 {
-		return credentialDigest(files), true
-	}
-	if values, marks := holder.(credentialValues); marks {
-		return values.credentialMark(cfg), true
-	}
-	return "", false
+	credentials(cfg *config.Config) string
 }
 
 // credentialDigest is what files say, as one string: each file's name beside the digest of its
 // bytes, with a read failure folded in as its own text so a file that comes and goes is a change
 // like any other. A file the configuration does not name is its own distinct mark, so a path
 // appearing or being cleared moves the digest.
-func credentialDigest(files []string) string {
+func credentialDigest(files ...string) string {
 	sum := sha256.New()
 	for _, file := range files {
 		if file == "" {
@@ -253,15 +254,21 @@ func credentialDigest(files []string) string {
 }
 
 // drainBound is how long a rebuild waits for what it replaced to let go of the work inside it
-// before it ends that thing anyway: the NATS rebuild's wait for the intake it ended to settle
-// its messages (natsHolder.rebuild), and the runtime rebuild's for the calls still inside the
-// runtime it replaced (runtimeHolder.rebuild). It is longer than the ack wait a consumer is
-// built with (`worker_rpc_timeout_seconds`) and than a launch's boot deadline
-// (`worker_boot_timeout_seconds`), so work that is going to finish has its turn, and short
-// enough that work that will never return does not hold the settings change for ever: the
-// daemon then closes the old connection, or ends the old runtime, and logs that it did, where
-// the messages still in flight are redelivered by the durable consumers the new connection
-// holds and a call inside the old runtime sees its context cancelled.
+// before it ends that thing anyway: the whole of the NATS rebuild's wait for the intake it
+// ended to settle its messages (natsHolder.rebuild), and the margin the runtime rebuild adds to
+// the bound of the runtime it replaced (runtimeDrainBound). It is longer than the ack wait a
+// consumer is built with (`worker_rpc_timeout_seconds`, 5 s by default), so a message that is
+// going to settle has its turn, and short enough that an intake that will never settle does not
+// hold the settings change for ever: the daemon then closes the old connection and logs that it
+// did, where the messages still in flight are redelivered by the durable consumers the new
+// connection holds.
+//
+// It is no bound for a launch and the runtime rebuild does not take it for one. One Spawn or
+// Resume try may rightfully run for the whole of the runtime's LaunchBound — the Sandbox
+// runtime's is `worker_boot_timeout_seconds` several times over plus its provision bound, and a
+// projected caller can raise that timeout — so that rebuild waits the replaced runtime's own
+// bound with this as the margin beyond it (runtimeDrainBound), and only past that is the old
+// runtime ended and the call inside it left with a cancelled context.
 //
 // That wait is taken under the settings holder's lock, which every other settings change takes:
 // a rebuild runs either from an apply's observers (config.Live.Apply holds l.mu for the whole
@@ -272,15 +279,16 @@ func credentialDigest(files []string) string {
 // still held the connection or the runtime it says it replaced, and would let the next rebuild
 // of that holder start while the one before it was still letting go, with two drains of one
 // holder in flight and no order between their ends. A drain is rare (nothing is in flight in
-// the ordinary case, and the wait returns at once) and bounded; a rebuild answering for work it
-// has not finished would be neither.
+// the ordinary case, and the wait returns at once) and bounded, by the replaced runtime's own
+// launch bound where that is the longer, which is the one wait that may hold a settings change
+// for as long as a launch; a rebuild answering for work it has not finished would be neither.
 const drainBound = 2 * time.Minute
 
-// rereadCredentials builds every holder whose credentials have moved since the last reread
-// again, whatever the configuration says: the answer to a rotation of a file whose path did not
-// change, which no settings change names, since the path is what the file holds and the path has
-// not moved. It runs in the order the holders were registered, and over the holders that read a
-// credential at all (credentialReader).
+// rereadCredentials builds every holder whose credentials have moved since that holder was
+// built again, whatever the configuration says: the answer to a rotation of a file whose path
+// did not change, which no settings change names, since the path is what the file holds and the
+// path has not moved. It runs in the order the holders were registered, and over the holders
+// that were built from a credential at all (credentialHolder).
 //
 // The file watcher calls it, once the file arm has settled the configuration, and calls it
 // under the settings holder's own lock (config.Live.WhileSettled), where an applied change's
@@ -292,20 +300,15 @@ const drainBound = 2 * time.Minute
 // settles the configuration again; without the guard that wake would reconnect NATS and migrate
 // every durable consumer, drop every App lease and rewrite the deployment instructions. A holder
 // whose credentials read the same holds what they say already, so rebuilding it is work with no
-// answer of its own. What each holder said when it was built is recorded as it is registered
-// (register), so the first reread after boot rebuilds nothing either.
+// answer of its own. What each holder was built from is recorded as it is registered (register)
+// and at every rebuild that succeeded (rebuilder.rebuild), so the first reread after boot
+// rebuilds nothing, a holder a route change has just rebuilt is left alone at the next wake, and
+// a rebuild that failed is tried again at the next reread.
 func (r *rebuilder) rereadCredentials(cfg *config.Config) {
 	for _, name := range r.order {
-		holder, reads := r.holders[name].(credentialReader)
-		if !reads {
+		holder, reads := r.holders[name].(credentialHolder)
+		if !reads || r.credentialDigests[name] == holder.credentials(cfg) {
 			continue
-		}
-		if digest, comparable := credentialsOf(holder, cfg); comparable {
-			moved := r.credentialDigests[name] != digest
-			r.credentialDigests[name] = digest
-			if !moved {
-				continue
-			}
 		}
 		r.rebuild(cfg, holder)
 	}
@@ -336,10 +339,10 @@ func newDispatchHolder(client dispatch.Client) *dispatchHolder {
 
 func (h *dispatchHolder) holder() string { return config.HolderDispatchClient }
 
-// credentialFiles is the bearer this client is built with (`dispatch_token_file`, read again by
+// credentials is the bearer this client is built with (`dispatch_token_file`, read again by
 // every rebuild through readDispatchToken).
-func (h *dispatchHolder) credentialFiles(cfg *config.Config) []string {
-	return []string{cfg.DispatchTokenFile}
+func (h *dispatchHolder) credentials(cfg *config.Config) string {
+	return credentialDigest(cfg.DispatchTokenFile)
 }
 
 func (h *dispatchHolder) rebuild(cfg *config.Config) error {
@@ -427,10 +430,10 @@ func newPublisherHolder(publisher notify.Publisher) *publisherHolder {
 
 func (h *publisherHolder) holder() string { return config.HolderEnvoyPublisher }
 
-// credentialFiles is the bearer this publisher is built with (`envoy_token_file`, read again by
+// credentials is the bearer this publisher is built with (`envoy_token_file`, read again by
 // every rebuild through readEnvoyToken).
-func (h *publisherHolder) credentialFiles(cfg *config.Config) []string {
-	return []string{cfg.EnvoyTokenFile}
+func (h *publisherHolder) credentials(cfg *config.Config) string {
+	return credentialDigest(cfg.EnvoyTokenFile)
 }
 
 func (h *publisherHolder) rebuild(cfg *config.Config) error {
@@ -482,17 +485,14 @@ func newAppsHolder(tokens appauth.Tokens) *appsHolder {
 
 func (h *appsHolder) holder() string { return config.HolderGitHubApps }
 
-// credentialFiles is none of this host's: an App private key is the key itself, and its command
-// and its secret are no file here (buildApps). credentialMark is what a reread compares instead.
-func (h *appsHolder) credentialFiles(*config.Config) []string { return nil }
-
-// credentialMark is the App credentials this manager was built from (buildApps), digested: a
-// reread rebuilds the manager only when one of them moved. It has to, because the rebuild closes
-// the manager it replaces: every lease that manager granted is dropped and a `token_command`
-// still waiting on a person's approval is killed (appauth/tokencommand.go's run). The watcher
-// wakes on a whole directory and the kubelet rewrites the projected token in one of them, so
-// without this the daemon would do that routinely, for nothing.
-func (h *appsHolder) credentialMark(cfg *config.Config) string {
+// credentials is no file of this host's: an App private key is the key itself, and its command
+// and its secret are no file here (buildApps), so what a reread compares is the App credentials
+// this manager was built from, digested. The comparison has to be made, because the rebuild
+// closes the manager it replaces: every lease that manager granted is dropped and a
+// `token_command` still waiting on a person's approval is killed (appauth/tokencommand.go's
+// run). The watcher wakes on a whole directory and the kubelet rewrites the projected token in
+// one of them, so without this the daemon would do that routinely, for nothing.
+func (h *appsHolder) credentials(cfg *config.Config) string {
 	sum := sha256.Sum256(fmt.Appendf(nil, "%+v", cfg.GitHubApps))
 	return hex.EncodeToString(sum[:])
 }
@@ -577,10 +577,10 @@ func newAPIHolder(cfg config.Config, operatorToken string) *apiHolder {
 
 func (h *apiHolder) holder() string { return config.HolderAPIServer }
 
-// credentialFiles is the operator bearer the server compares against (`operator_token_file`,
-// read again by every rebuild through readOperatorToken).
-func (h *apiHolder) credentialFiles(cfg *config.Config) []string {
-	return []string{cfg.OperatorTokenFile}
+// credentials is the operator bearer the server compares against (`operator_token_file`, read
+// again by every rebuild through readOperatorToken).
+func (h *apiHolder) credentials(cfg *config.Config) string {
+	return credentialDigest(cfg.OperatorTokenFile)
 }
 
 func (h *apiHolder) rebuild(cfg *config.Config) error {
@@ -690,10 +690,10 @@ func newSpecsHolder(settled specs, build func(cfg config.Config) (specs, error))
 
 func (h *specsHolder) holder() string { return config.HolderLaunchSpecs }
 
-// credentialFiles are the launch secrets every spec carries and the operator's instructions,
-// which a rebuild reads again (readLaunchSecrets, readInstructions).
-func (h *specsHolder) credentialFiles(cfg *config.Config) []string {
-	return []string{cfg.EnvoyTokenFile, cfg.NatsNkeySeedFile, cfg.InstructionsPath}
+// credentials are the launch secrets every spec carries and the operator's instructions, which
+// a rebuild reads again (readLaunchSecrets, readInstructions).
+func (h *specsHolder) credentials(cfg *config.Config) string {
+	return credentialDigest(cfg.EnvoyTokenFile, cfg.NatsNkeySeedFile, cfg.InstructionsPath)
 }
 
 func (h *specsHolder) rebuild(cfg *config.Config) error {
@@ -712,16 +712,16 @@ func (h *specsHolder) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime
 // keeperHolder is the controller keeper and the controller tick
 // (config.HolderControllerKeeper): whether this daemon launches the project's controller itself
 // (`controller`) and how often it wakes it (`controller_wake_interval_seconds`). A rebuild
-// stores the new interval, which the tick reads at every turn, and starts or stops the keeper's
-// own loop when the launch mode changed — the controller's claim is the store's either way, so
-// neither start nor stop touches a running controller.
+// stores the new interval, which the controller tick reads as it starts its ticker, and starts
+// or stops the keeper's own loop when the launch mode changed — the controller's claim is the
+// store's either way, so neither start nor stop touches a running controller.
 //
 // The loop is started here and nowhere else (begin): the boot starts it through this holder
 // under `controller: daemon`, and so does a change that moves the mode to the daemon, so there
 // is one way the keeper runs and one place that knows whether it is running.
 type keeperHolder struct {
-	// wake is controller_wake_interval_seconds in nanoseconds, read by the controller tick at
-	// every turn: the one place the daemon holds it (workflowRuntime.wakeInterval).
+	// wake is controller_wake_interval_seconds in nanoseconds, which the controller tick reads
+	// as it starts its ticker: the one place the daemon holds it (workflowRuntime.tickController).
 	wake atomic.Int64
 	// launched is whether the daemon launches the controller itself, and start runs the keeper's
 	// own loop until the context it is given ends; start is nil in a deployment with no keeper

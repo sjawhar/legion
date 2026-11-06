@@ -448,14 +448,8 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, rebuil
 	// the consumers hear now and not from the boot's, or a repository mapped since boot would
 	// stop being heard the moment anything reopened the connection: its merges, check runs and
 	// reviews would be skipped by JetStream's own filter, and nothing redelivers them when the
-	// filter widens again. Before the holder exists this is the boot's own set.
-	open := func(c config.Config) (*nats.Conn, *intake.Consumers, error) {
-		hearing := heard
-		if w.nats != nil {
-			if consumers := w.nats.intake(); consumers != nil {
-				hearing = consumers.Repositories()
-			}
-		}
+	// filter widens again.
+	open := func(c config.Config, hearing []ghrepo.Repository) (*nats.Conn, *intake.Consumers, error) {
 		return openNATS(ctx, w, c, lookup, intake.ConsumerSpec{
 			Project: c.Project, Repositories: hearing, Deploys: c.Projects[c.Project].Deploys, Renames: c.RepositoryRenames,
 			AckWait: c.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
@@ -463,11 +457,30 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, rebuil
 			RepositoryMapping: w.mappingChange, PrepareRepository: w.prepareRepository, PrepareArtifact: w.prepareArtifact,
 		})
 	}
-	conn, consumers, err := open(cfg)
+	conn, consumers, err := open(cfg, heard)
 	if err != nil {
 		return err
 	}
-	w.nats = newNATSHolder(conn, consumers, w.log, open)
+	// The boot's set is what the boot heard; from here on it is read from the consumers the
+	// rebuild is replacing, and that read and the swap onto the new consumers run under one hold
+	// of the lock every fact applies under (intake.SerializeFacts), which a mapping read takes
+	// across its own SetRepositories (refreshMapping). One that landed between them would set
+	// its repositories on the consumers being replaced, and they would go with them: the
+	// repository it mapped would be unheard until something else moved the mapping again.
+	reopen := func(c config.Config, swap func(*nats.Conn, *intake.Consumers)) error {
+		return pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
+			if err := intake.SerializeFacts(ctx, tx); err != nil {
+				return fmt.Errorf("serialize the NATS rebuild with every fact: %w", err)
+			}
+			conn, consumers, err := open(c, w.nats.intake().Repositories())
+			if err != nil {
+				return err
+			}
+			swap(conn, consumers)
+			return nil
+		})
+	}
+	w.nats = newNATSHolder(conn, consumers, w.log, reopen)
 	rebuild.register(w.nats)
 	w.bootID = fmt.Sprintf("%d", time.Now().UnixNano())
 	return nil
@@ -1323,14 +1336,15 @@ func (w *workflowRuntime) reconnectWatchdogWith(ctx context.Context, conn connSt
 const firstControllerTick = time.Minute
 
 // tickController applies a ControllerTick fact once shortly after the runtime starts
-// (firstControllerTick, or the interval when that is shorter) and then every controllerWake, so
+// (firstControllerTick, or the interval when that is shorter) and then every
+// `controller_wake_interval_seconds` the keeper's holder answers (keeperHolder.interval), so
 // admission wakes the controller even when no event arrives: the last tree finishing, a tree
 // waiting on a refused root claim, or a quiet day would otherwise leave the controller idle and the
 // daily report unposted until the next wake. Each tick's event id is its
 // own (the project, this boot, and the tick's time), since processed_events is shared by every
 // project's daemon. A failed apply is logged, and the next tick tries again.
 func (w *workflowRuntime) tickController(ctx context.Context) {
-	interval := w.wakeInterval()
+	interval := w.keeper.interval()
 	if interval <= 0 {
 		interval = time.Hour
 	}
@@ -1458,9 +1472,3 @@ func closeTokens(tokens appauth.Tokens) {
 		closer.Close()
 	}
 }
-
-// wakeInterval is how often the controller tick wakes the controller
-// (`controller_wake_interval_seconds`): the keeper's holder answers it, so a change of the
-// setting moves the next tick. Every runtime that ticks holds one, a test's built by hand
-// included (newKeeperHolder).
-func (w *workflowRuntime) wakeInterval() time.Duration { return w.keeper.interval() }
