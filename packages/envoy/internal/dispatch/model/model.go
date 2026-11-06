@@ -524,9 +524,10 @@ type SearchResult struct {
 // SearchQueryReading is how GET /api/v1/search read the words it was given: Operators names the
 // operator forms the query was read as using (contracts.SearchOperatorPhrase,
 // SearchOperatorOr, SearchOperatorExclude), empty for a query that wrote none, and Broadened is
-// whether the query was long enough for search to add the any-word leg beside
-// websearch_to_tsquery's AND of its words. A caller showing a person what was done with their
-// words reads it rather than parsing them again. Mirrors contracts' SearchQueryReading.
+// whether the answer came from the fallback search over the query's rarest words, which runs for
+// a query the words as typed match nothing at all for (api.runSearch, api.searchRarestWords). A
+// caller showing a person what was done with their words reads it rather than parsing them
+// again. Mirrors contracts' SearchQueryReading.
 type SearchQueryReading struct {
 	Operators []string `json:"operators"`
 	Broadened bool     `json:"broadened"`

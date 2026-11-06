@@ -58,15 +58,17 @@ const (
 	// reach together, (searchKeywordWeight + searchMeaningWeight) / (searchFusionK + 1), about
 	// 0.023, so the lead is absolute rather than one more term to be outweighed.
 	searchOwnKeyLead = 1.0
-	// searchBroadenWords is how many words a query may hold before search adds the any-word leg
-	// beside websearch_to_tsquery's AND of them (searchQOpener). Five is where the two readings
-	// part: a person naming a thing writes two to five words ("astrolabe", "search ranking
-	// fusion"), every one of them meant, and the AND of them is what makes the answer precise;
-	// from six words on they are writing a sentence ("why does the controller restart after every
-	// deploy"), whose auxiliary words no one item repeats, so the AND answers nothing at all
-	// while the words themselves rank the rows holding most of them first. Only words count: a
-	// quoted phrase, an OR and a -word are operators a person wrote, and websearch_to_tsquery
-	// keeps reading them (readSearchQuery).
+	// searchBroadenWords is how many of a query's own words the fallback searches for when the
+	// query as typed answers nothing at all (searchRarestWords): its rarest words, and no more of
+	// them. It is no longer a length threshold - a query of any length is answered by
+	// websearch_to_tsquery's AND of its words for as long as that AND matches anything (runSearch)
+	// - but the bound survives on the fallback, for the reason the number was chosen: a person
+	// naming a thing writes two to five words ("astrolabe", "search ranking fusion"), so the five
+	// rarest words of a sentence are the thing it is about, and the words past them are what a row
+	// holding nothing of its subject still matches. ORing all of one ask's own thirty words
+	// matched 3,424 asks, 36,059 comments and 3,710 issues of a corpus of 79,555 items where the
+	// AND of them matched the one ask asked for, and no leg being read deeper than
+	// contracts.SearchKindDepth, the right row never reached the page at all.
 	searchBroadenWords = 5
 	// searchAuthorMax bounds the author filter's value, in UTF-16 units as every other cap on
 	// this route counts: 320 is the longest address RFC 5321 allows, and an author is a person's
@@ -393,7 +395,7 @@ select t.total, t.reachable, r.kind, case when r.owner_artifact_id is null then 
 //
 // Parameters: $1 q, $2 project (empty for every project), $3 limit, $4 firstTerm,
 // $5 headlineOptions, $6 offset, $7 contracts.SearchKindDepth, $8 searchFusionK, then
-// searchQOpener's own six from $9: $9 the any-word leg's words, $10 the words it excludes,
+// searchQOpener's own six from $9: $9 the fallback's rarest words, $10 the words it excludes,
 // $11 the issues the query names by key, $12 status, $13 author, $14 updated_since
 // (searchQueryArguments).
 var searchQuery = searchQOpener(9) + searchQueryBody(searchKeywordLegsSQL)
@@ -409,19 +411,20 @@ var searchQuery = searchQOpener(9) + searchQueryBody(searchKeywordLegsSQL)
 // of each body, the fused score and the page, is search's own.
 //
 // tsq is websearch_to_tsquery's own reading of the text - the phrase, OR and -word forms a person
-// already has - with the any-word leg OR-ed onto it for a query past searchBroadenWords words
-// ($base, readSearchQuery), so a long question answers at least what its strongest words answer,
-// ranked by how many of them a row holds, where the AND of every word answers nothing as soon as
-// one of them is absent everywhere. The words the query excludes are ANDed onto that leg
-// ($base+1), since OR-ing the words back in without them would return the rows a -word left out;
+// already has - and that is what every search runs, whatever its length. The fallback runs this
+// same statement a second time, and only for a query whose first run matched nothing at all
+// (runSearch), with the query's rarest words bound at $base (searchRarestWords): tsq is then the
+// OR of those words alone, never OR-ed onto the AND that has just matched nothing, since the
+// AND's own lexemes would otherwise be counted a second time by ts_rank_cd and rank the
+// fallback's rows by the words it dropped. The words the query excludes are ANDed onto that OR
+// ($base+1), since ORing the words back in without them would return the rows a -word left out;
 // a query that excludes nothing binds the empty string and takes the shorter form.
 func searchQOpener(base int) string {
 	return fmt.Sprintf(`
 with q as (select
          case when $%[1]d = '' then websearch_to_tsquery('english', $1)
-              when $%[2]d = '' then websearch_to_tsquery('english', $1) || websearch_to_tsquery('english', $%[1]d)
-              else websearch_to_tsquery('english', $1)
-                   || (websearch_to_tsquery('english', $%[1]d) && websearch_to_tsquery('english', $%[2]d))
+              when $%[2]d = '' then websearch_to_tsquery('english', $%[1]d)
+              else websearch_to_tsquery('english', $%[1]d) && websearch_to_tsquery('english', $%[2]d)
          end as tsq,
          $4::text as term, $%[3]d::text[] as own_keys,
          $%[4]d::text as status_filter, $%[5]d::text as author_filter, $%[6]d::timestamptz as updated_since),
@@ -545,7 +548,7 @@ func (s *server) beginMeaningScan(ctx context.Context) (pgx.Tx, error) {
 // Parameters: $1 q, $2 project, $3 limit, $4 firstTerm, $5 headlineOptions, $6 offset,
 // $7 contracts.SearchKindDepth, $8 searchFusionK, $9 the query's embedding (a vector literal),
 // $10 searchMeaningFloor, $11 the query embedder's identity, then searchQOpener's own six from
-// $12: $12 the any-word leg's words, $13 the words it excludes, $14 the issues the query names
+// $12: $12 the fallback's rarest words, $13 the words it excludes, $14 the issues the query names
 // by key, $15 status, $16 author, $17 updated_since (searchMeaningQueryArguments).
 var searchQueryMeaning = searchQOpener(12) + searchQueryMeaningBody(searchKeywordLegsSQL)
 
@@ -684,7 +687,10 @@ totals as (
 
 // searchParameters is one validated search: the words, the filters every leg of it is narrowed
 // by, and the page. ownKeys is what runSearch resolves the words to when they name an issue
-// (searchOwnIssueKeys) and empty otherwise.
+// (searchOwnIssueKeys) and empty otherwise. broaden is empty for the query as typed, which is
+// what every search runs first and what nearly every search runs alone; it holds the rarest
+// words of a query that matched nothing (searchRarestWords) on the one second run such a query
+// is given, and the statement then searches for those words alone (searchQOpener).
 type searchParameters struct {
 	text    string
 	project string
@@ -694,12 +700,13 @@ type searchParameters struct {
 	limit   int
 	offset  int
 	ownKeys []string
+	broaden []string
 }
 
 // searchReading is a query read as the words a person wrote and the operators they wrote around
 // them: words are the plain words websearch_to_tsquery ANDs, excluded the -word terms it negates,
 // phrase whether the text quotes a phrase and or whether it holds the OR operator. A quoted
-// phrase's words are words of their own here, since the any-word leg searches for each of them;
+// phrase's words are words of their own here, since the fallback searches for the rarest of them;
 // the phrase itself stays in the query text, which the statement reads with websearch_to_tsquery
 // whatever this reading says.
 type searchReading struct {
@@ -711,8 +718,8 @@ type searchReading struct {
 
 // readSearchQuery reads q as searchReading describes: one pass over its whitespace-separated
 // tokens, the same tokens firstTerm walks. A token holding no letter or digit is no word of
-// anyone's and is left out of both lists, so a stray dash or ampersand never becomes a term of
-// the any-word leg.
+// anyone's and is left out of both lists, so a stray dash or ampersand never becomes a word of
+// the fallback's own.
 func readSearchQuery(q string) searchReading {
 	reading := searchReading{phrase: strings.Count(q, `"`) >= 2}
 	for _, token := range strings.Fields(q) {
@@ -736,26 +743,12 @@ func searchHasWordRune(value string) bool {
 	return strings.ContainsFunc(value, func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) })
 }
 
-// broadened is whether this query is long enough for the any-word leg (searchBroadenWords).
-func (r searchReading) broadened() bool { return len(r.words) > searchBroadenWords }
-
-// anyWords is the any-word leg's own text: every word the query holds joined by the OR a person
-// writes in the bar, which websearch_to_tsquery stems exactly as it stems the query itself, so
-// the two legs hold the same lexemes. Empty for a query of searchBroadenWords words or fewer,
-// which leaves websearch_to_tsquery's AND the whole of the query.
-func (r searchReading) anyWords() string {
-	if !r.broadened() {
-		return ""
-	}
-	return strings.Join(r.words, " or ")
-}
-
-// excludedWords is the -word terms as the same text, which searchQOpener ANDs onto the any-word
-// leg. Empty when the query excludes nothing, or when it is too short to be broadened at all:
-// the leg it narrows does not exist then, and the words the person excluded are already
-// websearch_to_tsquery's own business.
+// excludedWords is the -word terms as the text searchQOpener ANDs onto the fallback's OR of the
+// query's rarest words, since ORing those words back in without them would return the rows a
+// -word left out. Empty when the query excludes nothing. The query as typed needs none of it:
+// websearch_to_tsquery is reading the person's own -word there.
 func (r searchReading) excludedWords() string {
-	if !r.broadened() || len(r.excluded) == 0 {
+	if len(r.excluded) == 0 {
 		return ""
 	}
 	return "-" + strings.Join(r.excluded, " -")
@@ -856,14 +849,22 @@ func (s *server) searchOwnIssueKeys(ctx context.Context, q, project string) ([]s
 // searchQueryMeaning takes the same values with the meaning leg's three between them
 // (searchMeaningQueryArguments), so this pair is the one place that knows what a search binds.
 func searchQueryArguments(parameters searchParameters) []any {
-	reading := readSearchQuery(parameters.text)
 	keys := parameters.ownKeys
 	if keys == nil {
 		keys = []string{}
 	}
+	// Both of the fallback's own values are empty for the query as typed, which is what has the
+	// statement read $1 as the whole of the query (searchQOpener): the words a person excluded
+	// narrow the fallback's OR alone, since websearch_to_tsquery is already reading their -word
+	// in $1 itself.
+	broaden, excluded := "", ""
+	if len(parameters.broaden) > 0 {
+		broaden = strings.Join(parameters.broaden, " or ")
+		excluded = readSearchQuery(parameters.text).excludedWords()
+	}
 	return []any{parameters.text, parameters.project, parameters.limit, firstTerm(parameters.text), headlineOptions,
 		parameters.offset, contracts.SearchKindDepth, searchFusionK,
-		reading.anyWords(), reading.excludedWords(), keys, parameters.status, parameters.author, parameters.since}
+		broaden, excluded, keys, parameters.status, parameters.author, parameters.since}
 }
 
 // searchMeaningQueryArguments binds searchQueryMeaning's: searchQueryArguments' first eight, the
@@ -874,13 +875,63 @@ func searchMeaningQueryArguments(parameters searchParameters, vector []float32, 
 	return slices.Concat(arguments[:8], meaning, arguments[8:])
 }
 
-// searchQueryReading is what the answer tells a reader about the words it was given: the operator
-// forms search read them as using, and whether the query was long enough for search to add the
-// any-word leg beside websearch_to_tsquery's AND (searchBroadenWords). A bar that shows a person
-// what it did with their sentence reads it from here rather than parsing the sentence again.
-func searchQueryReading(text string) model.SearchQueryReading {
-	reading := readSearchQuery(text)
-	return model.SearchQueryReading{Operators: reading.operators(), Broadened: reading.broadened()}
+// searchRarestWordsSQL is the fallback's choice of words: the words of $1 ordered rarest first,
+// the $3 rarest of them answered. Each word is stemmed to its lexeme by the
+// configuration every search column is built with ('english'), so the word a person wrote and
+// the lexeme the statistics count are the same thing; the lexemes of one query are matched once
+// each (distinct on), and the df is summed over the projects in scope - one when the search names
+// a project ($2), every project when it names none.
+//
+// The statistics are search_term_stats, the per-project document frequencies the related-terms
+// refresh keeps up to date through search_term_queue and the snapshot beside its totals
+// (api/related_terms.go, migrations 0139, 20261101182508, 20261101182515). df is the one rarity
+// measure this database already has, and the one relatedCoordinationRank's idf is computed from
+// (pickRelatedTerms): idf falls as df rises, so ordering by df ascending is ordering by idf
+// descending, and no logarithm is taken here that would not change the order. Ties go to the
+// word's place in the query, which makes the pick total and the fallback repeatable.
+//
+// A word the statistics hold no row for is ordered behind every word they do know: it is a word
+// written since the last pass counted the project, or a word no item holds at all, and the
+// fallback has few enough words that it should spend none of them on a leg matching nothing
+// while a word known to match something is left over. Such a word is still kept once the known
+// ones run out, which is what broadens a query on a database whose statistics have never been
+// built: every word unknown, the order is the query's own and the bound is all that is left of
+// the pick.
+const searchRarestWordsSQL = `
+with words as (
+  select distinct on (w.lexeme) w.word, w.at, w.lexeme
+    from (select t.word, t.at,
+                 (select l.lexeme from unnest(to_tsvector('english', t.word)) l limit 1) as lexeme
+            from unnest($1::text[]) with ordinality as t(word, at)) w
+   where w.lexeme is not null
+   order by w.lexeme, w.at
+),
+df as (
+  select s.lexeme, sum(s.ndoc) as ndoc
+    from search_term_stats s
+   where s.lexeme in (select lexeme from words) and ($2 = '' or s.project_key = $2)
+   group by s.lexeme
+)
+select w.word from words w left join df on df.lexeme = w.lexeme
+ order by df.ndoc nulls last, w.at
+ limit $3`
+
+// searchRarestWords is the fallback's own words: the searchBroadenWords rarest words of the
+// query (searchRarestWordsSQL). It is the one extra statement the fallback costs, and it runs for
+// no search whose query as typed matched anything (runSearch).
+//
+// A query of one word is its own rarest word, and the OR of one word is the AND of it, so such a
+// query is not broadened at all and pays for no statement here.
+func (s *server) searchRarestWords(ctx context.Context, parameters searchParameters) ([]string, error) {
+	words := readSearchQuery(parameters.text).words
+	if len(words) < 2 {
+		return nil, nil
+	}
+	rows, err := s.deps.Store.Pool.Query(ctx, searchRarestWordsSQL, words, parameters.project, searchBroadenWords)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
 }
 
 // searchAppliedFilters is the filters this search narrowed every leg by, which a bar shows as its
@@ -983,8 +1034,9 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 	}
 	// What search made of the words, and which filters it narrowed every leg by, for a caller
 	// that shows a person what it did with them; answered on every path, the empty answer of a
-	// query with no lexemes included.
-	response.Query = searchQueryReading(searchText)
+	// query with no lexemes included. Whether search broadened the query is no reading of the
+	// text: runSearch stamps that on the response itself, true only where the fallback ran.
+	response.Query.Operators = readSearchQuery(searchText).operators()
 	response.Filters = searchAppliedFilters(parameters)
 	// Where each ask hit stands is read for this route alone: the write-time suggestions share
 	// the ranking (runFusedSearch) but never show it. TookMS counts the read.
@@ -1006,6 +1058,14 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 // only when the query's own embedding could not be had - never when the meaning query itself then
 // fails, which is a real error the caller should see as a 500, not something to paper over as a
 // degraded answer.
+//
+// The query as typed is what it runs, however many words that query holds: one statement, and
+// for every query matching anything the only statement a search runs, so the common path costs
+// what it cost before there was a fallback at all. A query that matches nothing - no row of any
+// kind, which is what the answer's own total says - is run a second time over its rarest words
+// (searchRarestWords, searchBroadenWords), and that second answer alone is stamped broadened.
+// The query's embedding is taken once and both runs share it, so a broadened search still costs
+// one model-service call.
 func (s *server) runSearch(ctx context.Context, parameters searchParameters) (model.SearchResponse, error) {
 	var nodes int
 	if err := s.deps.Store.Pool.QueryRow(ctx,
@@ -1020,15 +1080,39 @@ func (s *server) runSearch(ctx context.Context, parameters searchParameters) (mo
 	if nodes == 0 && len(keys) == 0 {
 		return model.SearchResponse{Results: []model.SearchResult{}, Limit: parameters.limit, Offset: parameters.offset}, nil
 	}
-	if s.deps.Embedder == nil {
-		return s.runKeywordOnlyDegraded(ctx, parameters)
+	run := s.runKeywordOnlyDegraded
+	if s.deps.Embedder != nil {
+		vector, err := s.embedQuery(ctx, parameters.text)
+		if err != nil {
+			slog.Warn("dispatch search: query embedding unavailable, answering keyword-only", "error", err)
+		} else {
+			run = func(ctx context.Context, parameters searchParameters) (model.SearchResponse, error) {
+				return s.runMeaningSearch(ctx, parameters, vector)
+			}
+		}
 	}
-	vector, err := s.embedQuery(ctx, parameters.text)
+	started := time.Now()
+	response, err := run(ctx, parameters)
+	if err != nil || response.Total > 0 {
+		return response, err
+	}
+	words, err := s.searchRarestWords(ctx, parameters)
 	if err != nil {
-		slog.Warn("dispatch search: query embedding unavailable, answering keyword-only", "error", err)
-		return s.runKeywordOnlyDegraded(ctx, parameters)
+		return model.SearchResponse{}, err
 	}
-	return s.runMeaningSearch(ctx, parameters, vector)
+	if len(words) == 0 {
+		return response, nil
+	}
+	parameters.broaden = words
+	broadened, err := run(ctx, parameters)
+	if err != nil {
+		return model.SearchResponse{}, err
+	}
+	broadened.Query.Broadened = true
+	// What the caller waited for is all three reads: the query as typed, its words' df, and the
+	// fallback itself.
+	broadened.TookMS = time.Since(started).Milliseconds()
+	return broadened, nil
 }
 
 // runKeywordOnlyDegraded runs the keyword-only fallback and stamps the response Degraded on

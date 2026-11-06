@@ -95,11 +95,72 @@ func TestSearchLeadsWithTheIssueTheQueryNamesInEveryForm(t *testing.T) {
 	})
 }
 
-// websearch_to_tsquery ANDs a person's words, so a question of theirs answers nothing as soon as
-// one of its words is in no item at all. Past searchBroadenWords words search ORs the words onto
-// the query, which ranks a row by how many of them it holds, and the words the question excludes
-// are ANDed onto that leg, so a -word still leaves its rows out.
-func TestSearchBroadensALongQuestionToItsOwnWords(t *testing.T) {
+// An ask searched for by its own words is the answer to that search, whatever else the corpus
+// says about those words and however many of them there are. Broadening every long query ORed an
+// ask's own thirty words, which every neighbouring ask holding most of them matched and outranked
+// it on, and with each leg read only contracts.SearchKindDepth deep the ask a person asked for
+// left the page altogether (the measurement behind this change: 3,424 asks, 36,059 comments and
+// 3,710 issues matched for a query whose AND matched one ask). The query as typed is the AND of
+// those words, and one ask holds them all.
+func TestSearchFindsAnAskByItsOwnWordsPastWhatBroadeningWouldBury(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "SRCH", "Ferry schedule", "")
+
+	const question = "The harbour chronometer drifts whenever the pilot boat leaves its mooring before dawn, " +
+		"so the ferry timetable needs a second reading taken from the lighthouse clock."
+	// Every word of the question but the one naming the instrument, written twice: an ask the AND
+	// of the question never matches, and one the OR of those words matches with twice the
+	// occurrences of all but one of them, which is the higher ts_rank_cd of the two. Twenty-four
+	// of them is more than a page, so under the OR the ask asked for is not on the page at all.
+	decoy := strings.Repeat(strings.Replace(question, "chronometer ", "", 1)+" ", 2)
+	for range 24 {
+		createSearchAsk(t, handler, issue.Key, decoy)
+	}
+	ask := createSearchAsk(t, handler, issue.Key, question)
+
+	body := searchResponse(t, handler, url.Values{"q": {question}}.Encode())
+	if len(body.Results) != 1 || body.Results[0].Kind != "ask" || body.Results[0].ID != ask {
+		t.Fatalf("results = %#v, want the one ask %s whose own words the question is", body.Results, ask)
+	}
+	if body.Query.Broadened {
+		t.Fatalf("query reading = %#v, want the query as typed: its own words match an ask", body.Query)
+	}
+}
+
+// A query whose words match something is answered from the query as typed and nothing else,
+// however many words it holds: what a question is about is what every one of its words holds
+// together, and a row holding some of them is not an answer while a row holding all of them
+// exists. Length decides nothing now (searchBroadenWords bounds the fallback's own words, not
+// the queries that reach it).
+func TestSearchAnswersAQueryThatMatchesFromTheQueryAsTyped(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "SRCH", "Controller restarts deploy", "")
+	comment := searchComment(t, handler, issue.Key, "alice", "The agent pool is drained first.")
+
+	// Six words, every one of them the comment's: the AND answers the comment, and the issue,
+	// which holds none of them, is no part of the answer.
+	body := searchResponse(t, handler, url.Values{"q": {"the agent pool is drained first"}}.Encode())
+	if body.Query.Broadened {
+		t.Fatalf("query reading = %#v, want the query as typed: one comment holds every word", body.Query)
+	}
+	if len(body.Results) != 1 || searchResultOf(body, "comment", comment) == nil {
+		t.Fatalf("results = %#v, want the comment %s alone", body.Results, comment)
+	}
+
+	// Three words of the issue's title, which is the AND it has always been.
+	found := searchResponse(t, handler, url.Values{"q": {"controller restarts deploy"}}.Encode())
+	if found.Query.Broadened {
+		t.Fatalf("query reading = %#v, want the query as typed: the title holds every word", found.Query)
+	}
+	if searchResultOf(found, "issue", issue.Key) == nil {
+		t.Fatalf("results = %#v, want the issue %s, whose title holds every word", found.Results, issue.Key)
+	}
+}
+
+// A query only the fallback can answer - the AND of its words matches nothing at all - is
+// broadened, whatever its length, and the words the question excludes are ANDed onto the
+// fallback's own, so a -word still leaves its rows out.
+func TestSearchBroadensAQuestionThatAnswersNothing(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "SRCH", "Controller restarts deploy", "")
 	comment := searchComment(t, handler, issue.Key, "alice", "The agent pool is drained first.")
@@ -109,7 +170,7 @@ func TestSearchBroadensALongQuestionToItsOwnWords(t *testing.T) {
 	body := searchResponse(t, handler,
 		url.Values{"q": {"controller restarts deploy agent pool zebraquill"}}.Encode())
 	if !body.Query.Broadened {
-		t.Fatalf("query reading = %#v, want the any-word leg for a six-word question", body.Query)
+		t.Fatalf("query reading = %#v, want the fallback for a question nothing answers", body.Query)
 	}
 	if len(body.Results) == 0 || body.Results[0].Kind != "issue" || body.Results[0].ID != issue.Key {
 		t.Fatalf("results = %#v, want the issue first: it holds three of the six words where the comment holds two",
@@ -120,7 +181,7 @@ func TestSearchBroadensALongQuestionToItsOwnWords(t *testing.T) {
 	}
 
 	// The same question, less what it excludes: the comment holds "drained" and goes, the issue
-	// stays. Without the exclusion ANDed onto the any-word leg, OR-ing the words back in would
+	// stays. Without the exclusion ANDed onto the fallback's words, ORing them back in would
 	// return the comment the question refused.
 	less := searchResponse(t, handler,
 		url.Values{"q": {"controller restarts deploy agent pool zebraquill -drained"}}.Encode())
@@ -134,29 +195,45 @@ func TestSearchBroadensALongQuestionToItsOwnWords(t *testing.T) {
 	if searchResultOf(less, "issue", issue.Key) == nil {
 		t.Fatalf("results = %#v, want the issue %s, which holds none of the excluded word", less.Results, issue.Key)
 	}
+
+	// A short question is broadened on the same terms: five words, one of them in nothing, is the
+	// fallback's as much as a sentence is.
+	brief := searchResponse(t, handler, url.Values{"q": {"controller restarts deploy agent zebraquill"}}.Encode())
+	if !brief.Query.Broadened {
+		t.Fatalf("query reading = %#v, want the fallback: no item holds all five words", brief.Query)
+	}
+	if len(brief.Results) == 0 || brief.Results[0].ID != issue.Key {
+		t.Fatalf("results = %#v, want the issue first: it holds three of the five words", brief.Results)
+	}
 }
 
-// A query of searchBroadenWords words or fewer is the AND it has always been: every word must
-// hold, and a query naming one word nothing holds answers nothing, however many of the rest it
-// gets right.
-func TestSearchKeepsAShortQueryTheANDOfItsWords(t *testing.T) {
-	handler := newTestHandler(t)
-	issue := createInteractionIssue(t, handler, "SRCH", "Controller restarts deploy", "")
-	searchComment(t, handler, issue.Key, "alice", "The agent pool is drained first.")
-
-	// Five words, one of them in nothing.
-	brief := searchResponse(t, handler, url.Values{"q": {"controller restarts deploy agent zebraquill"}}.Encode())
-	if brief.Query.Broadened {
-		t.Fatalf("query reading = %#v, want no any-word leg for a five-word query", brief.Query)
+// The fallback searches for the query's rarest words, not its own first ones: rarity is the
+// document frequency the project's term statistics already hold (search_term_stats, the counts
+// relatedCoordinationRank weighs its terms by), and the fallback keeps searchBroadenWords of
+// them. Here the two commonest words of the question lead it, and the five rare ones that name
+// what the question is about are what the fallback searches for, so the dozen comments holding a
+// common word are no part of the answer.
+func TestSearchBroadensToTheRarestWordsNotTheFirstOnes(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	ctx := context.Background()
+	issue := createInteractionIssue(t, handler, "SRCH", "Instrument notes", "")
+	for i := range 12 {
+		searchComment(t, handler, issue.Key, "alice", "The mooring at the harbour is clear, "+strconv.Itoa(i)+".")
 	}
-	if len(brief.Results) != 0 {
-		t.Fatalf("results = %#v, want none: one word of the five is in no item", brief.Results)
-	}
+	ask := createSearchAsk(t, handler, issue.Key, "Chronometer alidade quadrant astrolabe sextant?")
+	RefreshEverySearchTermStats(ctx, database.Pool)
 
-	// The same length, every word held: the AND answers what it always answered.
-	found := searchResponse(t, handler, url.Values{"q": {"controller restarts deploy"}}.Encode())
-	if searchResultOf(found, "issue", issue.Key) == nil {
-		t.Fatalf("results = %#v, want the issue %s, whose title holds every word", found.Results, issue.Key)
+	// Eight words: the two the corpus holds a dozen times, the five one ask holds once each, and
+	// one no item holds at all, which is what leaves the AND with nothing.
+	body := searchResponse(t, handler, url.Values{
+		"q": {"mooring harbour chronometer alidade quadrant astrolabe sextant zzzabsent"},
+	}.Encode())
+	if !body.Query.Broadened {
+		t.Fatalf("query reading = %#v, want the fallback: no item holds every word", body.Query)
+	}
+	if len(body.Results) != 1 || body.Results[0].Kind != "ask" || body.Results[0].ID != ask {
+		t.Fatalf("results = %#v, want the ask %s alone: the fallback drops the two common words",
+			body.Results, ask)
 	}
 }
 
@@ -335,12 +412,12 @@ func TestSearchAnswersHowItReadTheWordsAndWhatItNarrowed(t *testing.T) {
 		t.Fatalf("query operators = %v, want %v", read.Query.Operators, want)
 	}
 	if read.Query.Broadened {
-		t.Fatalf("query reading = %#v, want no any-word leg for three words", read.Query)
+		t.Fatalf("query reading = %#v, want no fallback: the words as typed match an issue", read.Query)
 	}
 
 	plain := searchResponse(t, handler, "q=astrolabe")
 	if len(plain.Query.Operators) != 0 || plain.Query.Broadened {
-		t.Fatalf("query reading = %#v, want no operator and no any-word leg", plain.Query)
+		t.Fatalf("query reading = %#v, want no operator and no fallback", plain.Query)
 	}
 	if plain.Filters != (model.SearchFilters{}) {
 		t.Fatalf("filters = %#v, want none: the request named none", plain.Filters)

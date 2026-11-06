@@ -37,8 +37,9 @@ def main():
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--limit", type=int, default=50, help="results per page; a rank past it is absent")
     parser.add_argument("--first-words", type=int, default=0,
-                        help="send only each query's first N words: the probe of what the any-word leg costs, "
-                             "since a query of more than five words is broadened and a shorter one is not")
+                        help="send only each query's first N words: the probe of what a query's "
+                             "length costs, since a short query is likelier to match as typed and "
+                             "a long one likelier to answer nothing and reach the rarest-words leg")
     parser.add_argument("--warmup", action="store_true",
                         help="run every case once, unrecorded, before the run that is recorded")
     arguments = parser.parse_args()

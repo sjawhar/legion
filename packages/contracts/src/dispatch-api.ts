@@ -2188,10 +2188,11 @@ export type SearchOperator = (typeof SEARCH_OPERATORS)[number];
 
 /** How `GET /api/v1/search` read the words it was given, for a client that shows a person what
  *  was done with them: `operators` the operator forms the query was read as using, in the order
- *  above and empty when it wrote none, and `broadened` whether the query held more than five
- *  words, the length past which search adds the any-word leg beside `websearch_to_tsquery`'s AND
- *  of them, so a long question answers at least what its own strongest words answer. Mirrors
- *  `model.SearchQueryReading`. */
+ *  above and empty when it wrote none, and `broadened` whether the query as typed answered
+ *  nothing and search ran a second time over its rarest words alone, so a question no one item
+ *  holds every word of still answers what its own strongest words answer. A query that matches
+ *  anything as typed is answered from that alone, whatever its length, and `broadened` is then
+ *  false. Mirrors `model.SearchQueryReading`. */
 export interface SearchQueryReading {
   readonly operators: SearchOperator[];
   readonly broadened: boolean;

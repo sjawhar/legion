@@ -1975,9 +1975,13 @@ Migrations `0057`–`0061` made them plain columns that a `BEFORE INSERT OR UPDA
 Every indexed text, headline, and duplicate-title comparison first passes through `search_text` (0056), which puts a space after every sixteenth underscore-joined segment.
 A query is not normalised and is limited to 1,000 characters.
 `websearch_to_tsquery` ANDs a person's words, so a question of theirs answers nothing as soon as one of its words is in no item at all.
-Past `searchBroadenWords` (5) words search ORs the query's own words onto it, each stemmed by the same `websearch_to_tsquery`, and the words the query excludes are ANDed onto that leg, so a `-word` still leaves its rows out.
-`ts_rank_cd` then ranks a row by how many of the words it holds, which puts a row holding all of them first, and a query of five words or fewer is the AND it has always been.
-The operator forms a person writes — a `"phrase"`, an `OR`, a `-word` — are `websearch_to_tsquery`'s own reading throughout, and the answer names the ones it read (`query.operators`, `contracts.SearchOperator*`) and whether it broadened the query (`query.broadened`).
+That AND is what every search runs, whatever the question's length, and a question it answers is answered from it and nothing else.
+Only a question it answers nothing at all for is searched a second time, for the `searchBroadenWords` (5) rarest words of the question ORed, each stemmed by the same `websearch_to_tsquery`, the words the question excludes ANDed onto them so that a `-word` still leaves its rows out (`searchRarestWords`).
+Rarest is the document frequency the project's own term statistics hold (`search_term_stats`, the counts the related-item check weighs its terms by: `relatedCoordinationRank`), and a word those statistics do not know is kept only once the words they do know are spent.
+The bound is what keeps that second search a search:
+ORing all thirty of one ask's own words matched about 43,000 items of a corpus of 79,555, where the AND of them matched the one ask the question was written from, and with each leg read `contracts.SearchKindDepth` deep that ask left the page altogether.
+`ts_rank_cd` ranks what either search matched, which puts a row holding all of the words first.
+The operator forms a person writes — a `"phrase"`, an `OR`, a `-word` — are `websearch_to_tsquery`'s own reading throughout, and the answer names the ones it read (`query.operators`, `contracts.SearchOperator*`) and whether that second search is what answered (`query.broadened`).
 
 Three filters narrow every leg of a search beside `project`, each in the arm itself rather than over the page, so a filtered search reads its own matches as deep as any other search reads (`searchRowFilters`):
 `status` is the status of the issue a row belongs to, and a row whose kind has no issue — a project document, and a comment or ask on one — matches no status at all;
