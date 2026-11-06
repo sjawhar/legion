@@ -64,7 +64,8 @@ func databaseOn(t testing.TB, raw string) string {
 	t.Helper()
 	server, err := url.Parse(raw)
 	if err != nil {
-		t.Fatalf("parse %s: %v", databaseURLEnv, err)
+		// url.Parse's own error quotes the URL it was given, so only the error it wraps is printed.
+		t.Fatalf("parse %s: %v", databaseURLEnv, errors.Unwrap(err))
 	}
 	return DatabaseOn(t, databaseURL(*server, "postgres"), "testpg")
 }

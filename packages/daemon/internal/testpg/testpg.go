@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -31,7 +32,8 @@ const Image = "mirror.gcr.io/library/postgres@sha256:979bccfde35445db618c65107d2
 func create(dsn, prefix string) (string, func() error, error) {
 	base, err := url.Parse(dsn)
 	if err != nil {
-		return "", nil, fmt.Errorf("parse LEGION_TEST_PG_DSN: %w", err)
+		// url.Parse's own error quotes the URL it was given, so only the error it wraps is printed.
+		return "", nil, fmt.Errorf("parse LEGION_TEST_PG_DSN: %w", errors.Unwrap(err))
 	}
 	var suffix [8]byte
 	if _, err := rand.Read(suffix[:]); err != nil {

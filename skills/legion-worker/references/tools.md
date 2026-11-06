@@ -14,9 +14,9 @@ In the pod you compile and test the packages your change touches, build the prog
 your issue drives (`go build ./cmd/legion`), vet the module you changed (`go vet -tags e2e ./...`,
 which compiles and runs no test), and, in a package whose tests need Postgres, run only the tests
 your change touches by name (`go test -run`). To run Go's race detector, prefix the command with
-`CGO_ENABLED=1`: `CGO_ENABLED=1 go test -race -count=1 ./internal/<package>/`. The worker image
-sets `CGO_ENABLED=0` and carries gcc (`packages/daemon/docker/worker.Dockerfile:976-977`), and Go
-refuses `-race` without cgo.
+`CGO_ENABLED=1`: `CGO_ENABLED=1 go test -race -count=1 -run '<TestName>' ./internal/<package>/`.
+The worker image sets `CGO_ENABLED=0` and carries gcc
+(`packages/daemon/docker/worker.Dockerfile:976-977`), and Go refuses `-race` without cgo.
 
 A whole module's or whole package's test run goes to CI on the pull request, where a job of that
 pull request runs it: `go test ./...`, a whole Postgres-backed package such as
@@ -30,8 +30,16 @@ heavy run goes where your deployment's instructions say.
   file `OMP_SESSION_SQL_DSN_FILE`: that is the live sessions database every pod shares, and its
   login can create and drop databases there.
 - Give every Postgres variable a test reads `$LEGION_TEST_PG_DSN`, your pod's own server:
-  `LEGION_TEST_PG_DSN`, `DISPATCH_TEST_DATABASE_URL` and `BROKER_TEST_DATABASE_URL`. Each makes
-  and drops a database of its own per test, so your pod's roles can share the server.
+  `LEGION_TEST_PG_DSN`, `DISPATCH_TEST_DATABASE_URL` and `BROKER_TEST_DATABASE_URL`. Most suites
+  make and drop one of their own per test on that server — a database through `internal/testpg`,
+  a schema through `internal/broker/store/storetest`'s `URL` — so your pod's roles can share the
+  server. Two write the database the URL itself names instead, and take a database of their own
+  from the next bullet's `createdb` line: `packages/envoy/internal/broker/store`, whose
+  `store_test.go` helpers call `Open(ctx, testDatabaseURL(t))` and then `Migrate` on the database
+  `BROKER_TEST_DATABASE_URL` names, and `packages/envoy/internal/dispatch/store`, whose
+  `openTestStore` (`store_test.go:36-44`) opens the database `DISPATCH_TEST_DATABASE_URL` names
+  and whose tests migrate it. Measured on 2026-11-06, each against an empty database of its own:
+  one run of the first left 24 tables there, and one run of the second, whole, left 99.
 - Anything that migrates into the database its DSN names, rather than making one per test, needs
   a database of your own, because a sibling role writing the same one collides with you: the
   Dispatch browser suite's `DATABASE_URL`, which resets what it is given, and the stage scripts'
