@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
 const duplicateHeadlineOptions = "StartSel=" + markStart + ", StopSel=" + markEnd + ", HighlightAll=true"
@@ -165,10 +166,15 @@ select s.key, i.title, i.status, s.shared, s.score,
 // Each side's lexemes are built the way the row that stores them was built, or the comparison
 // would answer on a difference in construction rather than in words. A title's are
 // title_lexemes() (migration 0088), the function the issues trigger writes issues.title_lexemes
-// with. A spec's are the document vector artifact_versions_search() builds (migration 0058),
-// ask blocks stripped, which document_search holds for the primary document's latest version
-// (migration 20261101182454). tsvector_to_array answers a vector's lexemes sorted and each once,
-// as title_lexemes does, so array equality is set equality here.
+// with. A spec's are the document vector artifact_versions_search() builds, which 0058's trigger
+// writes on every version and 20261101182454's trigger copies into document_search for the
+// primary document's latest version: search_vector, with an empty head, over search_text of the
+// stored markdown with its ask blocks stripped, as 0087 rewrote that function (0058 built the
+// same vector with to_tsvector, which search_vector only leaves for text too long to hold in one
+// tsvector). The spec this side reads is the new one as Dispatch would store it, rendered by
+// duplicateStoredSpec, because the stored vector is of the rendering and not of the request's
+// markdown. tsvector_to_array answers a vector's lexemes sorted and each once, as title_lexemes
+// does, so array equality is set equality here.
 //
 // A spec is compared whether or not either side has one, which covers the architect's rule for
 // both: with no spec on either side the two empty sets are equal and the titles decide, and with
@@ -180,12 +186,12 @@ select s.key, i.title, i.status, s.shared, s.score,
 // no text to be a copy of. Without that guard it would name every other such issue in the
 // project.
 //
-// Parameters: $1 project, $2 the new title, $3 the new spec, $4 the new issue's ancestors,
-// $5 the headline options.
+// Parameters: $1 project, $2 the new title, $3 the new spec as it would be stored, $4 the new
+// issue's ancestors, $5 the headline options.
 var duplicateEqualLexemesQuery = `
 with new_text as (
   select title_lexemes($2) as title_lex,
-         tsvector_to_array(to_tsvector('english',
+         tsvector_to_array(search_vector('',
            regexp_replace(search_text($3), '(?s):::ask\{.*?:::', '', 'g'))) as spec_lex
 )
 select i.key, i.title, i.status, cardinality(n.title_lex)::int as shared, 1::float8 as score,
@@ -202,6 +208,38 @@ select i.key, i.title, i.status, cardinality(n.title_lex)::int as shared, 1::flo
  order by i.updated_at desc
  limit ` + strconv.Itoa(duplicateCandidateLimit) + `
 `
+
+// duplicateStoredSpec is the new spec as a create would store it: the parse and the render
+// createIssue runs over it (docs' SeedText, pmdoc.ParseWritten over no live document, taken as
+// an upload is taken, then pmdoc.Render), without writing anything. Nothing else of the seed is
+// run here, since nothing else of it changes the markdown.
+//
+// duplicateEqualLexemesQuery compares the new spec with document_search.search, the vector of
+// the markdown the seed stored, and a rendering differs from the text it was parsed from
+// wherever the renderer normalises one: an ordered list is renumbered, and Postgres keeps a
+// list's numbers as lexemes, so `1.` `1.` is stored as `1.` `2.` and an exact copy of that spec
+// would hold different lexemes from the row it copies. An empty spec is what createIssue seeds
+// for a spec of whitespace alone.
+//
+// Markdown the parse or the render refuses is handed on as it came. The create that follows
+// refuses it with the error of its own seed, which says what is wrong with it; the gate answers
+// on the text it was given rather than failing a create the seed would have let through.
+func duplicateStoredSpec(spec string) string {
+	if strings.TrimSpace(spec) == "" {
+		return ""
+	}
+	tree, _, err := pmdoc.ParseWritten(spec, nil)
+	if err != nil {
+		return spec
+	}
+	tree = pmdoc.StripAnchorMarks(tree)
+	pmdoc.StripServerOwnedAttrs(tree)
+	stored, err := pmdoc.Render(tree)
+	if err != nil {
+		return spec
+	}
+	return stored
+}
 
 // scoredDuplicate is one candidate with the near-copy score that found it. The score is the
 // gate's own reading and is not part of what a client is told, so it rides here rather than on
@@ -346,7 +384,7 @@ func (s *server) readDuplicateCandidates(
 		// whose spec mentions a stopped one. Its answer is an equality rather than a score, so
 		// floor does not apply to it - a match is 1 and nothing else is answered.
 		rows, err := tx.Query(ctx, duplicateEqualLexemesQuery,
-			project, title, spec, ancestors, duplicateHeadlineOptions)
+			project, title, duplicateStoredSpec(spec), ancestors, duplicateHeadlineOptions)
 		if err != nil {
 			return nil, err
 		}

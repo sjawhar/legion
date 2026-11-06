@@ -363,3 +363,34 @@ func TestCreateIssueDuplicateCreatesTwoTitlesThatDifferInTheirOneMeaningWord(t *
 		t.Fatalf("second create: status=%d body=%s", second.Code, second.Body.String())
 	}
 }
+
+// A spec is stored as Dispatch renders it, not as the request wrote it: the seed parses the
+// markdown and stores its rendering (docs' SeedText), which renumbers an ordered list, and
+// Postgres keeps a list's numbers as lexemes. Below duplicateMinTerms the gate compares the new
+// spec's lexemes with the stored row's, so it renders the new spec the same way first
+// (duplicateStoredSpec); built from the request's markdown instead, the copy of a spec written
+// `1.` `1.` holds no `2` where the row it copies holds one, and the exact copy R2 refuses was
+// created.
+func TestCreateIssueDuplicateRefusesACopiedSpecWhoseListIsRenumbered(t *testing.T) {
+	handler := newTestHandler(t)
+	createDuplicateTestProject(t, handler, "LIST")
+
+	first := requireCreatedIssue(t, createIssueRequest(t, handler, map[string]any{
+		"project": "LIST", "title": "Restart the scanner", "spec": "1. Restart\n1. Check\n",
+	}))
+	// The copy as the first create wrote it, the numbering the renderer changes.
+	copied := requireDuplicateRefusal(t, createIssueRequest(t, handler, map[string]any{
+		"project": "LIST", "title": "Restart the scanner", "spec": "1. Restart\n1. Check\n",
+	}))
+	if len(copied.Candidates) != 1 || copied.Candidates[0].Key != first.Key {
+		t.Fatalf("candidates for the copy = %#v, want %q alone", copied.Candidates, first.Key)
+	}
+	// The same copy written with the numbers the renderer gives it: the other ordering of the
+	// one spec, and the same near copy.
+	renumbered := requireDuplicateRefusal(t, createIssueRequest(t, handler, map[string]any{
+		"project": "LIST", "title": "Restart the scanner", "spec": "1. Restart\n2. Check\n",
+	}))
+	if len(renumbered.Candidates) != 1 || renumbered.Candidates[0].Key != first.Key {
+		t.Fatalf("candidates for the renumbered copy = %#v, want %q alone", renumbered.Candidates, first.Key)
+	}
+}
