@@ -6,9 +6,10 @@ package testbin
 import (
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 )
 
 // OMP is the pinned Oh My Pi binary LEGION_TEST_OMP names (.github/actions/install-omp).
@@ -34,10 +35,21 @@ func RequireJJFilters(t *testing.T) {
 	// from the directory it runs in for the closest .jj, so a probe with no Dir would open the
 	// workspace the test process stands in, which in a Legion issue pod is a real one.
 	probe.Dir = home
-	probe.Env = append(os.Environ(), "JJ_CONFIG="+filepath.Join(home, "none.toml"), "XDG_CONFIG_HOME="+home, "HOME="+home)
+	probe.Env = probeEnv(home)
 	if out, _ := probe.Output(); len(strings.TrimSpace(string(out))) == 0 {
 		t.Fatal("this jj has no working-copy filters: provisioning is proven against the jj the worker image ships (packages/daemon/docker/worker.Dockerfile, ARG JJ_TOOL), which CI installs")
 	}
+}
+
+// probeEnv is what the probe runs under: fixtureenv.Isolated's environment, which holds nothing
+// that could lead jj to another workspace, repository, remote or credential — in a Legion issue
+// pod the test process holds the pod's own — and which supplies HOME, the XDG_CONFIG_HOME under
+// it and a JJ_CONFIG naming a file that does not exist, so the probe reads the pinned jj's own
+// defaults and no configuration of the user's or the pod's. It is a function of its own so that
+// TestTheJJProbeTakesNoVariableOfTheProcess can read that environment without starting jj: the
+// probe's answer needs the pinned binary, but what it would inherit does not.
+func probeEnv(home string) []string {
+	return fixtureenv.Isolated(home)
 }
 
 // binary is the path variable names. A run without one skips, except on GitHub Actions, where
