@@ -26,7 +26,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:net";
-import { hostname, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { dispatchIssueSubject, type SessionAnswer } from "@legion/contracts";
 import {
@@ -963,6 +963,26 @@ function response(body: unknown): Response {
     headers: { "Content-Type": "application/json" },
     status: 200,
   });
+}
+
+/** The client instance id one extension instance mints, read by its shape alone: a test that
+ *  needs the id itself reads it off a request the extension made. */
+const ANY_CLIENT_INSTANCE = expect.stringMatching(/^[0-9a-f]{32}$/);
+
+/** The transcript record a landed claim of `role` for `session` writes: the role, the session
+ *  claimed for and the process that claimed it (INFRA-783). */
+function roleClaimRecord(role: string, session: string): unknown {
+  return {
+    type: "custom",
+    customType: "envoy-role-claim",
+    data: { role, session_id: session, client_instance_id: ANY_CLIENT_INSTANCE },
+  };
+}
+
+/** The body a claim of `role` for `session` sends, `rest` carrying what that claim adds (`soft`,
+ *  `previous_session_id`): every claim names the process making it (INFRA-783). */
+function roleClaimBody(session: string, role: string, rest: Record<string, unknown> = {}): unknown {
+  return { session_id: session, role, ...rest, client_instance_id: ANY_CLIENT_INSTANCE };
 }
 
 /** A listener that serves replay over a stream holding nothing: every subject's cursor starts. */
@@ -3003,7 +3023,15 @@ describe("envoy OMP extension", () => {
         path: "/v1/replay",
         body: { session_id: "ses_omp", subjects: [{ subject: "notifications.agent.ses_omp" }] },
       },
-      { path: "/v1/roles/set", body: { session_id: "ses_omp", role: "controller" } },
+      {
+        path: "/v1/roles/set",
+        body: {
+          session_id: "ses_omp",
+          role: "controller",
+          // The process making the claim, the same id the registration carries (INFRA-783).
+          client_instance_id: expect.stringMatching(/^[0-9a-f]{32}$/),
+        },
+      },
       { path: "/v1/interests/ses_omp", body: undefined },
       {
         path: "/v1/messages/send",
@@ -6385,14 +6413,27 @@ console.log(JSON.stringify(args));
       | { topic: string; session: string; reached: () => void; release: Promise<void> }
       | undefined;
     // The listener's holder per role, and its rule for a soft claim: it takes the role only when
-    // the role is unheld, already held by the claimant, or held by the session it names as its
-    // predecessor (every holder here is live).
+    // the role is unheld, held by the session it names as its predecessor, or held by the
+    // claimant's own session id under a process `holderInstances` does not name as another one
+    // (every holder here is live).
     const holders = new Map<string, string>();
+    // The process each role's holder claimed under, which a role read answers and a claim under
+    // the holder's own session id is weighed against: a test names one where the holder is
+    // another process on the same session id, and a claim this fixture grants records its own.
+    const holderInstances = new Map<string, string>();
+    // The roles whose standing claim nobody has renewed inside the live window, which a test
+    // names when the process that made the claim has stopped: the listener grants a claim under
+    // the holder's own session id then, whatever process that standing claim names.
+    const unrenewedClaims = new Set<string>();
     // The listener's `last_seen` per session, which every registration of that session moves, by
     // this process or (set by a test) another one.
     const lastSeen = new Map<string, number>();
     // While positive, each read of a role's holder fails with a 500 (the client retries once).
     let failingRoleReads = 0;
+    // The client instance this extension instance registers, claims and releases under, read off
+    // its first registration: one test writes transcript records as that process, another reads
+    // the one a claim recorded.
+    let ownInstance: string | undefined;
     globalThis.fetch = async (input, init) => {
       const url = new URL(input.toString());
       const body = init?.body === undefined ? undefined : JSON.parse(init.body.toString());
@@ -6412,12 +6453,14 @@ console.log(JSON.stringify(args));
           await release;
         }
         const holder = holders.get(claimed);
-        if (
-          body?.soft === true &&
-          holder !== undefined &&
-          holder !== claimant &&
-          holder !== body?.previous_session_id
-        ) {
+        const holdingProcess = holderInstances.get(claimed);
+        const refused =
+          holder === claimant
+            ? holdingProcess !== undefined &&
+              holdingProcess !== body?.client_instance_id &&
+              !unrenewedClaims.has(claimed)
+            : holder !== undefined && holder !== body?.previous_session_id;
+        if (body?.soft === true && refused) {
           return new Response(JSON.stringify({ error: "role held", role: claimed, holder }), {
             status: 409,
           });
@@ -6431,6 +6474,11 @@ console.log(JSON.stringify(args));
           );
         }
         holders.set(claimed, claimant);
+        // The claim this grant writes is renewed as it lands, whatever became of the one before.
+        unrenewedClaims.delete(claimed);
+        if (typeof body?.client_instance_id === "string") {
+          holderInstances.set(claimed, body.client_instance_id);
+        } else holderInstances.delete(claimed);
         return response({
           session_id: claimant,
           machine_id: "test",
@@ -6450,10 +6498,18 @@ console.log(JSON.stringify(args));
           answer = new Response(JSON.stringify({ error: "listener failed" }), { status: 500 });
         } else {
           const holder = holders.get(role);
+          const holdingProcess = holderInstances.get(role);
           answer =
             holder === undefined
               ? new Response(JSON.stringify({ error: "no live holder" }), { status: 404 })
-              : response({ role, holder, last_seen: lastSeen.get(holder) ?? 1 });
+              : response({
+                  role,
+                  holder,
+                  last_seen: lastSeen.get(holder) ?? 1,
+                  // The process the standing claim names, where this fixture knows it: a reader
+                  // tells a role held under its own session id by another process by this field.
+                  ...(holdingProcess === undefined ? {} : { client_instance_id: holdingProcess }),
+                });
         }
         if (roleReadGate?.role === role) {
           const { reached, release } = roleReadGate;
@@ -6481,7 +6537,16 @@ console.log(JSON.stringify(args));
         for (const topic of body?.topics ?? []) {
           handedBack.push(`${topic}@${body?.session_id}`);
           const role = String(topic).replace("notifications.role.", "");
-          if (holders.get(role) === body?.session_id) holders.delete(role);
+          // The listener frees a role claim only for the process that made it; a claim whose
+          // process this fixture never recorded is freed as it always was.
+          const ours = holderInstances.get(role);
+          if (
+            (ours === undefined || ours === body?.client_instance_id) &&
+            holders.get(role) === body?.session_id
+          ) {
+            holders.delete(role);
+            holderInstances.delete(role);
+          }
           const listed = rows.get(body?.session_id ?? "");
           if (listed !== undefined) {
             rows.set(
@@ -6508,6 +6573,7 @@ console.log(JSON.stringify(args));
       }
       if (url.pathname === "/v1/interests/subscribe") {
         registrations.push(body?.session_id);
+        if (typeof body?.client_instance_id === "string") ownInstance = body.client_instance_id;
         if (outage !== undefined && outage.refusing > 0) {
           outage.refusing -= 1;
           if (outage.refusing === 0) outage.over();
@@ -6653,6 +6719,13 @@ console.log(JSON.stringify(args));
       claimSessions,
       handedBack,
       holders,
+      holderInstances,
+      unrenewedClaims,
+      /** The client instance this extension instance makes every listener call under. */
+      instanceID: (): string => {
+        if (ownInstance === undefined) throw new Error("this extension has not registered yet");
+        return ownInstance;
+      },
       lastSeen,
       manager,
       notifications,
@@ -7831,7 +7904,7 @@ console.log(JSON.stringify(args));
     expect(natsState.controls.get("notifications.agent.ses_ur_y")?.active()).toBe(true);
   });
 
-  test("a release the session's records hold is final: a pass hands the role back and claims nothing", async () => {
+  test("a release the session's records hold is final where no other process wrote it: a pass hands the role back and claims nothing", async () => {
     const { fixture, live, claimSessions, holders, handedBack } = await gatedRoleFixture(
       "release-is-final",
       "ses_rl"
@@ -7842,6 +7915,140 @@ console.log(JSON.stringify(args));
     expect(claimSessions.slice(before)).toEqual([]);
     expect(holders.has("legion-controller")).toBe(false);
     expect(handedBack).toContain("notifications.role.legion-controller@ses_rl");
+  });
+
+  test("a claim records the session it was made for and the process that made it, and a record an older build wrote names neither", async () => {
+    const role = "release-captain";
+    const { fixture, live, roleTool, holders, instanceID } = await gatedRoleFixture(
+      "claim-record-names-its-process",
+      "ses_cr"
+    );
+    expect((await roleTool.execute("", { role })).isError).toBeFalsy();
+    expect(
+      fixture.entries.filter((entry) => entry.customType === "envoy-role-claim").at(-1)
+    ).toEqual({
+      type: "custom",
+      customType: "envoy-role-claim",
+      data: { role, session_id: "ses_cr", client_instance_id: instanceID() },
+    });
+    // A record from a build before those fields names neither, and is read exactly as it was
+    // then: the session takes the role it records.
+    fixture.pi.appendEntry("envoy-role-claim", { role: "sre" });
+    await fixture.handlers.get("session_tree")?.({ newLeafId: "leaf" }, live("ses_cr"));
+    expect(holders.get("sre")).toBe("ses_cr");
+    expect(holders.has(role)).toBe(false);
+  });
+
+  test("a release another process wrote on this transcript ends no role this one holds, and one this process wrote does", async () => {
+    const role = "legion-controller";
+    const { fixture, live, holders, handedBack, instanceID } = await gatedRoleFixture(
+      "release-names-its-process",
+      "ses_rp"
+    );
+    const before = handedBack.length;
+    // A continuation resumed this session's id in another process and recorded a release on the
+    // transcript both read. The role is this process's, and that record is not its to act on.
+    fixture.pi.appendEntry("envoy-role-claim", {
+      role: null,
+      session_id: "ses_rp",
+      client_instance_id: "another-process",
+    });
+    await fixture.handlers.get("session_tree")?.({ newLeafId: "leaf" }, live("ses_rp"));
+    expect(holders.get(role)).toBe("ses_rp");
+    expect(handedBack.slice(before)).toEqual([]);
+    // This process's own release ends it, and the hold goes back to the listener.
+    fixture.pi.appendEntry("envoy-role-claim", {
+      role: null,
+      session_id: "ses_rp",
+      client_instance_id: instanceID(),
+    });
+    await fixture.handlers.get("session_tree")?.({ newLeafId: "leaf" }, live("ses_rp"));
+    expect(holders.has(role)).toBe(false);
+    expect(handedBack.slice(before)).toEqual([`notifications.role.${role}@ses_rp`]);
+  });
+
+  test("a claim another process recorded is pressed only while this process holds no role", async () => {
+    const role = "legion-controller";
+    const other = "release-captain";
+    const { fixture, live, holders, handedBack, tick } = await gatedRoleFixture(
+      "foreign-claim-pressed-when-free",
+      "ses_fp"
+    );
+    const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+    const before = handedBack.length;
+    // A second process on this transcript records a claim of another role. This process holds
+    // one, so it neither gives that up nor presses a record it did not write.
+    fixture.pi.appendEntry("envoy-role-claim", {
+      role: other,
+      session_id: "ses_fp",
+      client_instance_id: "another-process",
+    });
+    await fixture.handlers.get("session_tree")?.({ newLeafId: "leaf" }, live("ses_fp"));
+    expect(holders.get(role)).toBe("ses_fp");
+    expect(holders.has(other)).toBe(false);
+    expect(handedBack.slice(before)).toEqual([]);
+    // Another session takes the role, so the next heartbeat's re-assertion ends it here.
+    holders.set(role, "ses_rival");
+    tick();
+    for (let step = 0; step < 10; step += 1) await drain();
+    expect(holders.get(role)).toBe("ses_rival");
+    // Holding nothing now, this process presses that record, and the listener decides the claim.
+    tick();
+    for (let step = 0; step < 10; step += 1) await drain();
+    expect(holders.get(other)).toBe("ses_fp");
+  });
+
+  test("a refused claim is asked again on each heartbeat while the lookup names this session under another process, and a refusal naming another session stays", async () => {
+    const role = "legion-controller";
+    const {
+      fixture,
+      live,
+      holders,
+      holderInstances,
+      unrenewedClaims,
+      claimSessions,
+      tick,
+      instanceID,
+    } = await gatedRoleFixture("refusal-under-another-process", "ses_rf", { claimAtStart: false });
+    const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+    const ticks = async (count: number) => {
+      for (let each = 0; each < count; each += 1) {
+        tick();
+        for (let step = 0; step < 10; step += 1) await drain();
+      }
+    };
+    // Another process resumed this session's id, holds the role under it and still renews it:
+    // its record is on the transcript this process reads, and its claim refuses this one's.
+    fixture.pi.appendEntry("envoy-role-claim", {
+      role,
+      session_id: "ses_rf",
+      client_instance_id: "another-process",
+    });
+    holders.set(role, "ses_rf");
+    holderInstances.set(role, "another-process");
+    await fixture.handlers.get("session_tree")?.({ newLeafId: "leaf" }, live("ses_rf"));
+    expect(holderInstances.get(role)).toBe("another-process");
+    // The refusal names this very session, so each heartbeat asks again rather than waiting for
+    // a session event.
+    const refused = claimSessions.length;
+    await ticks(1);
+    expect(claimSessions.length).toBeGreaterThan(refused);
+    expect(holderInstances.get(role)).toBe("another-process");
+    // That process ends: nobody renews its claim, and the listener grants the next ask. The
+    // session id it holds under is this one's own, which its registrations keep live.
+    unrenewedClaims.add(role);
+    await ticks(1);
+    expect(holders.get(role)).toBe("ses_rf");
+    expect(holderInstances.get(role)).toBe(instanceID());
+    // A genuinely different session takes it next: that refusal is the newer holder's, and it
+    // stands until a session event lands here, as it always did.
+    holders.set(role, "ses_rival");
+    holderInstances.set(role, "a-rival-process");
+    await ticks(1);
+    expect(holders.get(role)).toBe("ses_rival");
+    const latched = claimSessions.length;
+    await ticks(2);
+    expect(claimSessions.length).toBe(latched);
   });
 
   test("a fork does not take its recorded role from a live session outside its lineage, nor once that session leaves, until a session event lands on it", async () => {
@@ -8391,7 +8598,7 @@ console.log(JSON.stringify(args));
       expect(natsState.controls.get(notice)?.active()).toBe(true);
       expect(
         fixture.entries.filter((entry) => entry.customType === "envoy-role-claim").at(-1)
-      ).toEqual({ type: "custom", customType: "envoy-role-claim", data: { role } });
+      ).toEqual(roleClaimRecord(role, "ses_nr_c"));
     });
   });
 
@@ -10146,15 +10353,15 @@ console.log(JSON.stringify(args));
 
     expect(unsubscriptions).toEqual([["notifications.dispatch.issue.LEGION-1", subscription]]);
     expect(fixture.entries.filter((entry) => entry.customType === "envoy-role-claim")).toEqual([
-      { type: "custom", customType: "envoy-role-claim", data: { role } },
+      roleClaimRecord(role, "ses_unsubscribe"),
     ]);
 
     listenerHoldsClaim = false;
     intervals[0]?.();
     await reasserted.promise;
     expect(roleClaims).toEqual([
-      { session_id: "ses_unsubscribe", role },
-      { session_id: "ses_unsubscribe", role, soft: true },
+      roleClaimBody("ses_unsubscribe", role),
+      roleClaimBody("ses_unsubscribe", role, { soft: true }),
     ]);
   });
 
@@ -10224,7 +10431,7 @@ console.log(JSON.stringify(args));
       { topic: roleTopic, source: "registry" },
     ]);
     expect(fixture.entries.filter((entry) => entry.customType === "envoy-role-claim")).toEqual([
-      { type: "custom", customType: "envoy-role-claim", data: { role } },
+      roleClaimRecord(role, "ses_role_subscription"),
     ]);
 
     await subscribeTool.execute("", { topics: [roleTopic] });
@@ -10239,7 +10446,7 @@ console.log(JSON.stringify(args));
       { topic: roleTopic, source: "registry" },
     ]);
     expect(fixture.entries.filter((entry) => entry.customType === "envoy-role-claim")).toEqual([
-      { type: "custom", customType: "envoy-role-claim", data: { role } },
+      roleClaimRecord(role, "ses_role_subscription"),
     ]);
   });
 
@@ -10288,7 +10495,7 @@ console.log(JSON.stringify(args));
     const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
     if (roleTool === undefined) throw new Error("role tool was not registered");
     await roleTool.execute("", { role });
-    expect(roleClaims).toEqual([{ session_id: "ses_reassert", role }]);
+    expect(roleClaims).toEqual([roleClaimBody("ses_reassert", role)]);
 
     // The listener drops the claim out from under the session (a reaped claim, NATS data
     // loss, an older listener build). Nothing in this process notices until the heartbeat.
@@ -10299,12 +10506,12 @@ console.log(JSON.stringify(args));
 
     expect(roleReads).toEqual([`/v1/roles/${role}`]);
     expect(roleClaims).toEqual([
-      { session_id: "ses_reassert", role },
-      { session_id: "ses_reassert", role, soft: true },
+      roleClaimBody("ses_reassert", role),
+      roleClaimBody("ses_reassert", role, { soft: true }),
     ]);
     // The held role did not change, so the durable record is not rewritten.
     expect(fixture.entries.filter((entry) => entry.customType === "envoy-role-claim")).toEqual([
-      { type: "custom", customType: "envoy-role-claim", data: { role } },
+      roleClaimRecord(role, "ses_reassert"),
     ]);
     expect(regained).toEqual([{ role, reason: "reclaimed" }]);
   });
@@ -10368,8 +10575,8 @@ console.log(JSON.stringify(args));
     await regainFired.promise;
 
     expect(roleClaims).toEqual([
-      { session_id: "ses_lapsed_read", role },
-      { session_id: "ses_lapsed_read", role, soft: true },
+      roleClaimBody("ses_lapsed_read", role),
+      roleClaimBody("ses_lapsed_read", role, { soft: true }),
     ]);
     expect(regained).toEqual([{ role, reason: "reclaimed" }]);
   });
@@ -10423,7 +10630,7 @@ console.log(JSON.stringify(args));
 
     expect(registrations).toBe(4);
     expect(roleReads).toBe(3);
-    expect(roleClaims).toEqual([{ session_id: "ses_quiet", role }]);
+    expect(roleClaims).toEqual([roleClaimBody("ses_quiet", role)]);
     expect(claimEntries()).toHaveLength(1);
     expect(regained).toEqual([]);
   });
@@ -10505,15 +10712,15 @@ console.log(JSON.stringify(args));
     }
 
     expect(roleClaims).toEqual([
-      { session_id: "ses_refused", role },
-      { session_id: "ses_refused", role, soft: true },
+      roleClaimBody("ses_refused", role),
+      roleClaimBody("ses_refused", role, { soft: true }),
     ]);
     expect(notifications.filter((message) => message.includes("is now held by"))).toHaveLength(1);
     expect(regained).toEqual([]);
     // A 409 clears only this process's transient claim. The durable record
     // remains for a future session to arbitrate with the listener.
     expect(fixture.entries.filter((entry) => entry.customType === "envoy-role-claim")).toEqual([
-      { type: "custom", customType: "envoy-role-claim", data: { role } },
+      roleClaimRecord(role, "ses_refused"),
     ]);
   });
 
@@ -10579,7 +10786,7 @@ console.log(JSON.stringify(args));
     await hooked.promise;
     expect(regained).toEqual([{ role, reason: "reregistered" }]);
     // The claim survived: only the explicit hard claim ever went out.
-    expect(roleClaims).toEqual([{ session_id: "ses_outage", role }]);
+    expect(roleClaims).toEqual([roleClaimBody("ses_outage", role)]);
 
     // The following healthy tick is quiet again.
     intervals[0]?.();
@@ -11000,7 +11207,7 @@ console.log(JSON.stringify(args));
       intervals[0]?.();
       await new Promise((resolve) => setTimeout(resolve, 20));
       expect(regained).toHaveLength(1);
-      expect(roleClaims).toEqual([{ session_id: "ses_stall_regain", role }]);
+      expect(roleClaims).toEqual([roleClaimBody("ses_stall_regain", role)]);
 
       answered.resolve();
       for (let step = 0; step < 20; step += 1) await new Promise((r) => setImmediate(r));
@@ -11088,11 +11295,11 @@ console.log(JSON.stringify(args));
         // The listener did hear the abandoned claim, and granted it: this process recorded
         // nothing of it in the transcript, and the live role is the one the newer move took.
         expect(roleClaims).toEqual([
-          { session_id: "ses_fenced_b", role: "release-captain" },
-          { session_id: "ses_fenced_b", role: "reviewer" },
+          roleClaimBody("ses_fenced_b", "release-captain"),
+          roleClaimBody("ses_fenced_b", "reviewer"),
         ]);
         expect(fixture.entries.filter((entry) => entry.customType === "envoy-role-claim")).toEqual([
-          { type: "custom", customType: "envoy-role-claim", data: { role: "reviewer" } },
+          roleClaimRecord("reviewer", "ses_fenced_b"),
         ]);
         await expect(
           subscribeLegionNotice(
@@ -11255,7 +11462,7 @@ console.log(JSON.stringify(args));
     intervals[0]?.();
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(regained).toEqual([]);
-    expect(roleClaims).toEqual([{ session_id: "ses_role_read", role }]);
+    expect(roleClaims).toEqual([roleClaimBody("ses_role_read", role)]);
     expect(
       notifications.filter((message) => message.includes("registry heartbeat failed"))
     ).toHaveLength(1);
@@ -11336,7 +11543,7 @@ console.log(JSON.stringify(args));
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(regained).toEqual([{ role, reason: "reregistered" }]);
     // The claim survived throughout: only the explicit hard claim ever went out.
-    expect(roleClaims).toEqual([{ session_id: "ses_late_regain", role }]);
+    expect(roleClaims).toEqual([roleClaimBody("ses_late_regain", role)]);
 
     // A further healthy tick adds nothing.
     intervals[0]?.();
@@ -15060,22 +15267,33 @@ console.log(JSON.stringify(args));
   });
 
   test("reports the active session directory through envoy_whoami", async () => {
-    const { default: envoyExtension } = await import("./envoy.ts?whoami-directory");
-    const fixture = createPi();
-    const context = sessionContext("ses_whoami");
+    // The machine id is the one ENVOY_MACHINE_ID names, falling back to the kernel hostname
+    // (@legion/envoy-client/machine). The test states it, so a host that sets the variable -
+    // every Legion pod does - reads the same answer as one that does not.
+    const machineID = "example-host-whoami";
+    const previousMachineID = process.env.ENVOY_MACHINE_ID;
+    process.env.ENVOY_MACHINE_ID = machineID;
+    try {
+      const { default: envoyExtension } = await import("./envoy.ts?whoami-directory");
+      const fixture = createPi();
+      const context = sessionContext("ses_whoami");
 
-    envoyExtension(fixture.pi);
-    await fixture.handlers.get("session_start")?.({}, context);
-    const whoami = fixture.tools.find((tool) => tool.name === "envoy_whoami");
-    if (whoami === undefined) throw new Error("envoy_whoami was not registered");
+      envoyExtension(fixture.pi);
+      await fixture.handlers.get("session_start")?.({}, context);
+      const whoami = fixture.tools.find((tool) => tool.name === "envoy_whoami");
+      if (whoami === undefined) throw new Error("envoy_whoami was not registered");
 
-    const result = await whoami.execute("", {}, undefined, undefined, context);
+      const result = await whoami.execute("", {}, undefined, undefined, context);
 
-    expect(JSON.parse(result.content[0]?.text ?? "")).toMatchObject({
-      session_id: "ses_whoami",
-      machine_id: hostname(),
-      dir: "/tmp/envoy-omp-test",
-    });
+      expect(JSON.parse(result.content[0]?.text ?? "")).toMatchObject({
+        session_id: "ses_whoami",
+        machine_id: machineID,
+        dir: "/tmp/envoy-omp-test",
+      });
+    } finally {
+      if (previousMachineID === undefined) delete process.env.ENVOY_MACHINE_ID;
+      else process.env.ENVOY_MACHINE_ID = previousMachineID;
+    }
   });
 
   test("registers /whoami and copies the current session ID to the clipboard", async () => {
