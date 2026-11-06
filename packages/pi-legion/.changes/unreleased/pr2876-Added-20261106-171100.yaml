@@ -1,0 +1,5 @@
+kind: Added
+body: The architect dispatches a new `goal-red-team` task agent before it signs off, which judges the change against the issue's goal and every requirement of its spec and reports each one met or unmet.
+time: 2026-11-06T17:11:00.278929986Z
+custom:
+    Issue: pr2876
