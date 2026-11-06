@@ -196,7 +196,13 @@ export interface TaskHandle {
   ) => Promise<boolean>;
   /**
    * Makes sure the listener still resolves this session as `role`'s holder: reads first, and a
-   * soft claim goes out only when it does not. A refusal ends the role here and records it.
+   * soft claim goes out only when it does not. The lookup confirms the role only when it names
+   * this session *and* this process, since a claim standing under this very session id that
+   * another process made is not this one's to renew; a holder naming no process is read as this
+   * one's. A refusal naming a different session ends the role here and records it. A refusal
+   * naming this session's own id is that other process's standing claim, which the listener
+   * grants the moment it stops renewing it: the role stays held here, nothing is recorded or
+   * said, and the next heartbeat asks again.
    */
   readonly reassertRole: (role: string, afterOutage: boolean) => Promise<RoleReassertion>;
   /**
@@ -710,8 +716,8 @@ export function createRegistrationState(deps: RegistrationStateDeps): Registrati
       // event can end it while the listener is read or claimed, and the task that ends it owns
       // the role from there.
       const stillHolds = (): boolean => claimedRoleTopic === topic;
-      const holder = await client.getRole(role).then(
-        (info) => info.holder,
+      const holding = await client.getRole(role).then(
+        (info) => info,
         (error: unknown) => {
           // 404 is the listener's answer for "no live holder", not a failure.
           if (error instanceof EnvoyApiError && error.details.status === 404) return undefined;
@@ -720,13 +726,32 @@ export function createRegistrationState(deps: RegistrationStateDeps): Registrati
       );
       guard();
       if (!stillHolds()) return { decided: false };
-      if (holder === id) {
+      // This session *and* this process: a claim standing under this very session id that
+      // another process made is not this one's to renew. A holder naming no process at all is
+      // read as this one's — an older listener, and a claim an earlier build wrote, name none.
+      const holdingProcess = holding?.client_instance_id;
+      if (
+        holding?.holder === id &&
+        (holdingProcess === undefined || holdingProcess === clientInstanceID)
+      ) {
         return afterOutage ? { decided: true, regain: "reregistered" } : { decided: true };
       }
       const result = await client.setRole({ sessionID: id, role, soft: true, clientInstanceID });
       guard();
       if (!stillHolds()) return { decided: false };
       if (!result.claimed) {
+        if (result.holder === id) {
+          // The standing claim of another process under this session's id, which the listener
+          // grants the moment that process stops renewing it. Nothing says another session took
+          // the role, so the role stays held here and the next heartbeat asks again: no
+          // `endRole`, and no refusal latched either — a latch would make `desiredRole` want no
+          // role on the next pass and hand this one back, undoing what this branch keeps, while
+          // `reconsiderRefusal` would only be clearing a latch this branch had no reason to
+          // write. The pane is told nothing, because nothing changed for it, and the log is left
+          // alone too: the state is normal, self-resolving, and would otherwise be written out
+          // again on every heartbeat for as long as the other process lives.
+          return { decided: true };
+        }
         endRole();
         refusedRoles.set(id, role);
         deps.log.warn("envoy: role re-assertion refused; held by another live session", {
@@ -743,7 +768,7 @@ export function createRegistrationState(deps: RegistrationStateDeps): Registrati
       deps.log.warn("envoy: role re-asserted after the listener lost the claim", {
         role,
         sessionID: id,
-        previousHolder: holder ?? null,
+        previousHolder: holding?.holder ?? null,
       });
       return { decided: true, regain: "reclaimed" };
     };

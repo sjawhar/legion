@@ -1313,6 +1313,39 @@ describe("reassertRole", () => {
     expect(harness.notices).toEqual([]);
   });
 
+  test("a tick that names this session under this very process writes nothing", async () => {
+    const harness = createHarness();
+    await harness.hold("alpha", "ses_a");
+    harness.control.getRole = async (role) => ({
+      role,
+      holder: "ses_a",
+      client_instance_id: harness.state.clientInstanceID,
+      last_seen: 2,
+      state: "live",
+    });
+    harness.claims.length = 0;
+    expect(await reassert(harness, false)).toEqual({ decided: true });
+    expect(harness.claims).toEqual([]);
+    expect(harness.state.heldRole()).toBe("alpha");
+  });
+
+  // The refusal this session's own id carries latches nothing: a latched refusal makes the next
+  // pass want no role and hand this one back, which is the opposite of keeping it.
+  test("a re-assertion refused by this session's own id records no refusal", async () => {
+    const harness = createHarness();
+    await harness.hold("alpha", "ses_a");
+    harness.control.getRole = async (role) => ({
+      role,
+      holder: "ses_a",
+      client_instance_id: "another-process",
+      last_seen: 2,
+      state: "live",
+    });
+    harness.control.setRole = async () => ({ claimed: false, holder: "ses_a" });
+    expect(await reassert(harness, false)).toEqual({ decided: true });
+    expect(harness.state.refusalFor("ses_a")).toBeUndefined();
+  });
+
   test("the first healthy tick after an outage asks for a reregistered regain", async () => {
     const harness = createHarness();
     await harness.hold("alpha", "ses_a");
