@@ -953,6 +953,51 @@ func TestTokenRefusesATokenWiderThanTheRepositoriesAsked(t *testing.T) {
 	}
 }
 
+// A request body with no `repositories` is the owner-wide token this change exists to stop:
+// GitHub mints the whole installation for it, and narrowedTo passes an answer no repository was
+// asked for. So every door into a mint refuses a call that names none, and refuses it before any
+// exchange is sent rather than after reading what came back.
+func TestNoMintWithoutRepositoriesEverReachesGitHub(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mint func(tokens *Manager) error
+	}{
+		{"a write token for the zero repository", func(tokens *Manager) error {
+			_, err := tokens.Token(context.Background(), Implement, ghrepo.Repository{})
+			return err
+		}},
+		{"a read token for no repository", func(tokens *Manager) error {
+			_, err := tokens.ReadToken(context.Background(), Implement, "sjawhar", nil)
+			return err
+		}},
+		{"a read token for an empty list", func(tokens *Manager) error {
+			_, err := tokens.ReadToken(context.Background(), Implement, "sjawhar", []string{})
+			return err
+		}},
+		{"a read token for a repository with no name", func(tokens *Manager) error {
+			_, err := tokens.ReadToken(context.Background(), Implement, "sjawhar", []string{" "})
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+			var stderr bytes.Buffer
+			github := &keyModeGitHub{owners: []string{"sjawhar"}, slug: "legion-implementer"}
+			github.answer = func(int, accessTokensBody) (int, string) {
+				return http.StatusOK, mintedFor("ghs_wide", now.Add(time.Hour))
+			}
+			tokens := keyModeManager(t, github, &now, &stderr)
+
+			if err := tc.mint(tokens); err == nil {
+				t.Fatal("the mint succeeded, want a call naming no repository refused")
+			}
+			if asked := github.exchanges(); len(asked) != 0 {
+				t.Errorf("%d exchanges, want none: a body with no repositories mints the whole installation", len(asked))
+			}
+		})
+	}
+}
+
 // GitHub answers 422 both to a repository the installation does not reach and to a permission it
 // does not hold, and says which in no way a caller may read, so a write mint reports the refusal
 // naming both halves of what it asked for and an operator reads which it was. It is not the
