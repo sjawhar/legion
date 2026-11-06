@@ -442,12 +442,19 @@ api() { # api PORT METHOD PATH [BODY]
 # same POST /v1/interests/subscribe a plugin's heartbeat makes, for the sessions a check needs to
 # age by the second rather than by a process's own clock. The listener refuses a registration that
 # names a port (sjawhar/legion#2674), so every session here receives on its own NATS connection.
+# It asks for the session consumer, as every plugin's registration does (dispatch://INFRA-771):
+# whatever else a registration says, one that asks for no consumer is refused 409 not_requested
+# and writes nothing (`consumerFor`), so a session registered without it would exist for no check
+# to read. The ask does not turn on SELF: `self_subscribed` records what the session says of
+# itself and decides no delivery any more, since a session receives what its own consumer holds
+# and nothing else.
 registered() {
   local session=$1 self=$2 body
   shift 2
   body=$(jq -cn --arg s "$session" --arg d "$work/registered" --arg t "rig $session" \
     --argjson self "$self" --args \
-    '{session_id:$s,dir:$d,title:$t,self_subscribed:$self,driving:true,topics:$ARGS.positional}' "$@")
+    '{session_id:$s,dir:$d,title:$t,self_subscribed:$self,driving:true,topics:$ARGS.positional,
+      delivery:{consumer:true}}' "$@")
   api "$port_a" POST /v1/interests/subscribe "$body" ||
     refuse "registering $session answered $api_status: $(head -c 200 "$answer")"
 }
