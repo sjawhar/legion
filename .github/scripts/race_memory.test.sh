@@ -64,9 +64,9 @@ check "names the limit it was given" "$(contains "$out" 'the limit is 1 kB (RACE
 check "its decision line names the tests at the highest sample" \
   "$(contains "$out" 'had these tests running: TestTheSamplerNamesMe')"
 check "says the peak passed the limit" "$(contains "$out" 'passed the limit of 1 kB')"
-# How that line ends depends on the kernel: a VmHWM peak can have been reached between two
-# samples, while a VmRSS peak — all gVisor gives, since it reports no VmHWM — is the highest
-# sample itself, the one the line has just named.
+# How that line ends depends on the kernel, so this is the end-to-end check only — that the
+# field the sampler chose reaches the line main writes. The rule itself, both of its branches,
+# is pinned by the two fixture cases below, on either kernel.
 if [ "$(contains "$out" 'the peak was [0-9][0-9]* kB (VmHWM),')" = true ]; then
   check "warns that a VmHWM peak may be between two samples" \
     "$(contains "$out" 'VmHWM can be reached between two samples')"
@@ -95,7 +95,7 @@ peak_kb, field = race_memory.choose_peak(walk.hwm_kb, walk.rss_kb)
 print("%d %s" % (peak_kb, field))
 print(race_memory.decision_line(peak_kb, field, 1, walk))
 ')
-check "takes the largest VmHWM, not the largest VmRSS" "$(is "${hwm%%$'\n'*}" "4200 VmHWM")"
+check "takes the largest VmHWM, not the largest VmRSS" "$(contains "$hwm" '^4200 VmHWM$')"
 check "its decision line warns the peak may belong to another moment" \
   "$(contains "$hwm" 'VmHWM can be reached between two samples, so the peak may belong')"
 
@@ -106,9 +106,13 @@ walk = race_memory.summarize([
     "Name:\tgo\nPPid:\t1\nVmRSS:\t    1000 kB\n",
     "Name:\tdocs.test\nPPid:\t2\nVmRSS:\t    3000 kB\n",
 ], 0.0, "none")
-print("%d %s" % race_memory.choose_peak(walk.hwm_kb, walk.rss_kb))
+peak_kb, field = race_memory.choose_peak(walk.hwm_kb, walk.rss_kb)
+print("%d %s" % (peak_kb, field))
+print(race_memory.decision_line(peak_kb, field, 1, walk))
 ')
-check "takes the highest sampled VmRSS" "$(is "$rss" "3000 VmRSS")"
+check "takes the highest sampled VmRSS" "$(contains "$rss" '^3000 VmRSS$')"
+check "its decision line leaves the between-samples warning off a VmRSS peak" \
+  "$(is "$(contains "$rss" 'may belong to another moment')" false)"
 
 echo "case: a -json stream's output reaches the log"
 stream='
