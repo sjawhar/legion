@@ -25,7 +25,6 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { createServer } from "node:net";
 import { hostname, tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { dispatchIssueSubject, type SessionAnswer } from "@legion/contracts";
@@ -508,6 +507,39 @@ function createPi(options: { readonly clipboardError?: Error; readonly zod?: typ
     ...createStandInHost({ zod: options.zod }),
     copiedSessionIDs: clipboardState.copiedSessionIDs,
   };
+}
+
+/** nats.js's own default server, the one it dials when a connect is handed none. */
+const NATS_DEFAULT_PORT = 4222;
+
+/**
+ * A listener on `127.0.0.1:<port>` that counts the connections made to it and closes each, or
+ * null when something already listens there. `Bun.listen` binds synchronously and throws
+ * `EADDRINUSE`, so a `describe` body can read the answer and hand it to `test.skipIf`, and the
+ * listener it returns holds the port from that moment: no second bind, so no race with whatever
+ * else on the machine might take the port between the question and the row that asks it.
+ */
+function listenCountingDials(
+  port: number
+): { readonly dialed: () => number; readonly stop: () => void } | null {
+  let dialed = 0;
+  try {
+    const listener = Bun.listen({
+      hostname: "127.0.0.1",
+      port,
+      socket: {
+        open(socket) {
+          dialed += 1;
+          socket.end();
+        },
+        data() {},
+      },
+    });
+    return { dialed: () => dialed, stop: () => listener.stop(true) };
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "EADDRINUSE") return null;
+    throw error;
+  }
 }
 
 /** Every callback the default `sessionContext()` timer ran, awaited after each test. */
@@ -15181,6 +15213,19 @@ console.log(JSON.stringify(args));
 
   // nats.js dials 127.0.0.1:4222 when handed no server, so a subscription with inbound off must
   // refuse before any connect: one that reached it would attach to whatever NATS this machine runs.
+  // The refusals are checked on every machine. That nothing was dialed is checked against a
+  // listener of this file's own on that one port — the kernel cannot pick it, 4222 being the
+  // default under proof — bound once here and held for the rows that count its connections. Where
+  // something else already listens there (a local NATS, a CI service), those rows skip, named.
+  const dialProbe = listenCountingDials(NATS_DEFAULT_PORT);
+  if (dialProbe === null) {
+    console.warn(
+      `127.0.0.1:${NATS_DEFAULT_PORT} is already in use: the rows that count what dials nats.js's ` +
+        "default port are skipped. Every other row of this file still runs."
+    );
+  }
+  afterAll(() => dialProbe?.stop());
+
   for (const { slug, name, configure, why } of [
     {
       slug: "seed-refused",
@@ -15204,58 +15249,51 @@ console.log(JSON.stringify(args));
       why: () => "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)",
     },
   ]) {
-    test(`with ${name}, envoy_subscribe and the Legion subscribe refuse naming why, and no NATS is dialed`, async () => {
+    /**
+     * Starts the extension with inbound off and calls both subscribes, each awaited, so a connect
+     * would already have been made by the time it returns. `instance` gives each call a module
+     * instance of its own: the extension keeps its session's state.
+     */
+    const bothSubscribesRefuse = async (instance: string): Promise<void> => {
       const file = process.env.ENVOY_CONFIG_FILE ?? "";
       configure(file);
-      // A listener of the row's own on 127.0.0.1:4222 counts what dials it. Where something else
-      // already listens there (a local NATS, a CI service), only that count goes unchecked: every
-      // other assertion stands, and the mock records a connect without handing it to that server.
-      let dialed = 0;
-      const loopback = createServer((socket) => {
-        dialed += 1;
-        socket.destroy();
-      });
-      const listening = Promise.withResolvers<boolean>();
-      loopback.once("error", (error: Error & { readonly code?: string }) => {
-        if (error.code === "EADDRINUSE") listening.resolve(false);
-        else listening.reject(error);
-      });
-      loopback.listen(4222, "127.0.0.1", () => listening.resolve(true));
-      const watching = await listening.promise;
-      if (!watching) {
-        console.warn(
-          "127.0.0.1:4222 is already in use: this row leaves unchecked that nothing dialed it"
-        );
-      }
-      natsState.realConnect = watching;
-      try {
-        const { default: envoyExtension } = await import(`./envoy.ts?inbound-off-${slug}`);
-        const fixture = createPi();
-        envoyExtension(fixture.pi);
-        const context = sessionContext("ses_inbound_off");
-        await fixture.handlers.get("session_start")?.({}, context);
-        const refusal = `inbound messages are off for this session: ${why(file)}`;
+      const { default: envoyExtension } = await import(
+        `./envoy.ts?inbound-off-${slug}-${instance}`
+      );
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      const context = sessionContext("ses_inbound_off");
+      await fixture.handlers.get("session_start")?.({}, context);
+      const refusal = `inbound messages are off for this session: ${why(file)}`;
 
-        const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
-        if (subscribeTool === undefined) throw new Error("envoy_subscribe was not registered");
-        const result = await subscribeTool.execute("", { topics: ["team.standup"] });
-        expect(result.isError).toBe(true);
-        expect(result.content[0]?.text).toBe(refusal);
-        await expect(
-          subscribeLegionNotice("ses_inbound_off", "notifications.dispatch.ACME", context)
-        ).rejects.toThrow(refusal);
+      const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+      if (subscribeTool === undefined) throw new Error("envoy_subscribe was not registered");
+      const result = await subscribeTool.execute("", { topics: ["team.standup"] });
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text).toBe(refusal);
+      await expect(
+        subscribeLegionNotice("ses_inbound_off", "notifications.dispatch.ACME", context)
+      ).rejects.toThrow(refusal);
+      expect(natsState.connects).toEqual([]);
+    };
 
-        // Each call above awaited its connect, so a dial would already have reached the listener.
-        if (watching) expect(dialed).toBe(0);
-        expect(natsState.connects).toEqual([]);
-      } finally {
-        if (watching) {
-          const closed = Promise.withResolvers<void>();
-          loopback.close(() => closed.resolve());
-          await closed.promise;
-        }
-      }
+    test(`with ${name}, envoy_subscribe and the Legion subscribe refuse naming why`, async () => {
+      await bothSubscribesRefuse("refusals");
     });
+
+    test.skipIf(dialProbe === null)(
+      `with ${name}, nothing dials nats.js's default 127.0.0.1:${NATS_DEFAULT_PORT}`,
+      async () => {
+        if (dialProbe === null) {
+          throw new Error(`nothing of this file's own listens on 127.0.0.1:${NATS_DEFAULT_PORT}`);
+        }
+        // nats.js's own connect, so a dial that got through reaches the probe, not the mock.
+        natsState.realConnect = true;
+        const before = dialProbe.dialed();
+        await bothSubscribesRefuse("dials");
+        expect(dialProbe.dialed()).toBe(before);
+      }
+    );
   }
 
   // The daemon sends a role's every task and notice to its role topic, which reaches a session only
