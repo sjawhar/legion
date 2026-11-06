@@ -2,7 +2,7 @@
 # A GitHub-hosted runner shares one anonymous pull quota with every other runner on its address,
 # so a CI job that fetches an image from a third-party registry fails for a reason the change
 # under test did not cause. Every image a CI job of this repository fetches is therefore one copy
-# in one package this repository publishes, ghcr.io/sjawhar/legion/ci, and every reference names
+# in one package this repository publishes, ghcr.io/cybermonklabs/legion/ci, and every reference names
 # that copy by digest. .github/ci-images.yaml holds one row per distinct upstream image, and
 # .github/scripts/mirror-ci-images.sh copies the rows the package does not hold yet with
 # `crane copy`, which keeps the manifest digest. ci.yaml's ci-images job runs that script and
@@ -54,7 +54,7 @@
 #      rule 7 read a row's repository with Docker Hub's implicit `library/` written out, so
 #      `docker.io/golang:1.27.1-alpine` and `docker.io/library/golang:1.27.1-alpine` are one
 #      repository to both of them.
-#   4. a reference in CI's reach that names a registry other than ghcr.io/sjawhar/legion/ci,
+#   4. a reference in CI's reach that names a registry other than ghcr.io/cybermonklabs/legion/ci,
 #   5. a reference in CI's reach that is not pinned by digest (`@sha256:` and 64 hex characters):
 #      a tag is a name the registry can move, so only a digest names the bytes a job ran,
 #   6. a reference in CI's reach whose digest no row of .github/ci-images.yaml holds,
@@ -114,8 +114,8 @@
 # read green locally.
 #
 # CHECK 8 AND THE NETWORK. The package mode's read of the package is one anonymous token request
-# (`GET https://ghcr.io/token?scope=repository:sjawhar/legion/ci:pull&service=ghcr.io`) and one
-# `HEAD https://ghcr.io/v2/sjawhar/legion/ci/manifests/<digest>` per row, with an `Accept` naming
+# (`GET https://ghcr.io/token?scope=repository:cybermonklabs/legion/ci:pull&service=ghcr.io`) and one
+# `HEAD https://ghcr.io/v2/cybermonklabs/legion/ci/manifests/<digest>` per row, with an `Accept` naming
 # the four index and manifest media types. CI_IMAGES_MANIFEST_HEAD is the seam that read hangs
 # on: when it is set, this check runs `"$CI_IMAGES_MANIFEST_HEAD" <digest>` once per row instead
 # and reads the HTTP status code the command prints on stdout (200 = the package holds the
@@ -136,7 +136,7 @@ cd "$(dirname "$0")/../.."
 case "$#:${1:-}" in
   1:tree | 1:package) ;;
   *)
-    echo "::error file=.github/scripts/check-ci-images.sh::this check takes one mode: \`tree\` reads the files of this tree and makes no network read, and \`package\` reads ghcr.io/sjawhar/legion/ci. Run \`.github/scripts/check-ci-images.sh tree\` or \`.github/scripts/check-ci-images.sh package\`." >&2
+    echo "::error file=.github/scripts/check-ci-images.sh::this check takes one mode: \`tree\` reads the files of this tree and makes no network read, and \`package\` reads ghcr.io/cybermonklabs/legion/ci. Run \`.github/scripts/check-ci-images.sh tree\` or \`.github/scripts/check-ci-images.sh package\`." >&2
     exit 1
     ;;
 esac
@@ -198,8 +198,8 @@ def key_line(mapping: object, name: str) -> int:
 PACKAGE = "package"
 MODE = os.environ["CI_IMAGES_MODE"]
 
-REGISTRY = "ghcr.io/sjawhar/legion/ci"
-REPOSITORY = "sjawhar/legion/ci"
+REGISTRY = "ghcr.io/cybermonklabs/legion/ci"
+REPOSITORY = "cybermonklabs/legion/ci"
 CI_IMAGES = Path(".github/ci-images.yaml")
 MIRROR_SCRIPT = ".github/scripts/mirror-ci-images.sh"
 MIRROR_JOB = "ci.yaml's ci-images job"
@@ -294,6 +294,7 @@ EXCEPTIONS = {
     "scripts/e2e/dispatch-user-turns.sh": NO_CI_JOB,
     "scripts/e2e/lib/bridge-tunnel.sh": NO_CI_JOB,
     "scripts/e2e/lib/kind-sandbox.sh": NO_CI_JOB,
+    "scripts/e2e/parked-decision-devbox.sh": NO_CI_JOB,
     "scripts/e2e/share-volumes-kind.sh": NO_CI_JOB,
     "scripts/e2e/stage2-tmux-supervision.sh": NO_CI_JOB,
     "scripts/e2e/stage3-devbox-workflow.sh": NO_CI_JOB,

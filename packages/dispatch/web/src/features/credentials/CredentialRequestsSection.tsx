@@ -14,6 +14,7 @@ import { useAgents } from "../conversation/useAgents";
 import { Timestamp } from "../refs/Timestamp";
 import { brokerPage } from "./brokerPage";
 import { CredentialSessionLines } from "./CredentialSessionLines";
+import { useMachineCodePage } from "./capabilities";
 import type { CredentialRequests } from "./pending";
 import { credentialSessionNamesAnyone } from "./session";
 
@@ -22,11 +23,14 @@ const rowLinkClass = `${rowLineClass} rounded-lg outline-none focus-visible:ring
 
 /** One pending request's line. A machine (`launcher_credential`) record is decided only through
  *  the code-lookup route, so its line links to the code-entry page rather than trying to deep-link
- *  the specific pending request. A secret request is decided on the secrets broker's own page, so
- *  its line is a plain link there, leaving Dispatch in the same tab; from a broker that names no
- *  page (one older than it), the line is the same summary with no link at all, since Dispatch
- *  decides no secret request of its own any more. */
+ *  the specific pending request — and only while this deployment serves that page, which it does
+ *  only while the broker serves the device grant (`useMachineCodePage`); with no such page the
+ *  line is plain text, since there is nowhere to send the person. A secret request is decided on
+ *  the secrets broker's own page, so its line is a plain link there, leaving Dispatch in the same
+ *  tab; from a broker that names no page (one older than it), the line is the same summary with
+ *  no link at all, since Dispatch decides no secret request of its own any more. */
 function PendingRowLine({ row }: { row: CredentialPendingRow }): ReactNode {
+  const machineCodePage = useMachineCodePage();
   const summary = (
     <>
       <LabelPill>
@@ -37,6 +41,9 @@ function PendingRowLine({ row }: { row: CredentialPendingRow }): ReactNode {
     </>
   );
   if (row.kind === "launcher_credential") {
+    if (!machineCodePage) {
+      return <span className="flex flex-wrap items-center gap-2 text-sm">{summary}</span>;
+    }
     return (
       <Link className={rowLinkClass} to="/credentials/machine">
         {summary}
@@ -68,7 +75,7 @@ export function CredentialRequestsSection({
 }: {
   credentials: CredentialRequests;
 }): ReactNode {
-  const { agents, isError, isPending } = useAgents(
+  const { agents, isError, isPending, refilling } = useAgents(
     requests.some((row) => credentialSessionNamesAnyone(row.session)),
     true
   );
@@ -96,6 +103,7 @@ export function CredentialRequestsSection({
                 agents={agents}
                 isError={isError}
                 isPending={isPending}
+                refilling={refilling}
                 session={row.session}
               />
             </div>

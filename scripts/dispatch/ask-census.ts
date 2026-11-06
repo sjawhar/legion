@@ -22,7 +22,7 @@ export const ISSUE_CONCURRENCY = 8;
 
 type Code = (typeof CODES)[number];
 
-type DispatchConfig = Pick<ActiveDispatchConfig, "url" | "token">;
+type DispatchConfig = Pick<ActiveDispatchConfig, "url" | "credential">;
 
 /** The fields of an ask the census reads. */
 export type CensusAsk = Pick<
@@ -50,7 +50,9 @@ export interface CensusEvent {
   readonly payload: {
     /** The ask an `ask.*` event carries. */
     readonly id?: Ask["id"];
-    readonly kind?: Ask["kind"];
+    /** The ask kind an `ask.*` event carries, or the review kind an `artifact.*` event does:
+     *  one field, two vocabularies, of which the census reads `"approval"` alone. */
+    readonly kind?: Ask["kind"] | ArtifactReviewEventPayload["kind"];
     /** The ask a comment replied to or a review answered. */
     readonly ask_id?: ArtifactReviewEventPayload["ask_id"];
     readonly approval?: RecordedApproval;
@@ -386,8 +388,11 @@ function parseArguments(argv: readonly string[]): RunOptions {
 }
 
 async function get<T>(config: DispatchConfig, path: string): Promise<T> {
-  const response = await fetch(`${config.url}${path}`, {
-    headers: { Authorization: `Bearer ${config.token}` },
+  const url = `${config.url}${path}`;
+  // The bearer, or the access token this machine traded its own identity for, with the proof
+  // that goes with it: this read goes around DispatchClient, so it presents the credential itself.
+  const response = await fetch(url, {
+    headers: await config.credential.headers("GET", url),
   });
   if (!response.ok) throw new Error(`GET ${path}: ${response.status} ${await response.text()}`);
   return (await response.json()) as T;
@@ -426,7 +431,7 @@ async function censusIssue(
   const toTime = date(options.to, "to");
   // A client's deadline (DISPATCH_TOOL_DEADLINE_MS) runs from its construction, so each issue's
   // reads get one of their own, never what is left of the whole run's.
-  const client = new DispatchClient(config.url, config.token);
+  const client = new DispatchClient(config.url, config.credential);
   const issueAsks = await client.listIssueAsks(issue);
   const windowAsks = filterAsksInWindow(issueAsks, options.from, options.to);
   const asks = excludeSessionAsks(windowAsks, options.excludedSessionIds);

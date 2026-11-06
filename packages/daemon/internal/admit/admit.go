@@ -16,8 +16,10 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/blockers"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/memorygroup"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
@@ -33,6 +35,12 @@ type Admission struct {
 	project string
 	log     *slog.Logger
 	now     func() time.Time
+	// memory is the project's `memory` block (UseMemory), whose mode each tree this admission
+	// opens is drawn under; the zero block is a project that names none, which draws every tree
+	// `none`. coin is the fair coin the `random` mode is drawn with, memorygroup.CryptoCoin in
+	// production and a pinned one in a test, injected as now is.
+	memory config.Memory
+	coin   func() (bool, error)
 
 	// mu guards pending, target and catchingUp, the only Admission state a caller outside its own
 	// transactions touches: the daemon's boot-owned poll calls Held on every tick, outside any
@@ -77,6 +85,15 @@ func (a *Admission) ReportCapabilities(open func() []string) {
 	a.openCapabilities = open
 }
 
+// UseMemory registers the project's `memory` block, under whose mode every tree this admission
+// opens for the first time is drawn (memorygroup.DrawAndRecord, promoteHolds). A project whose
+// file names no block leaves the zero value, which draws every tree `none`. It is a setter rather
+// than a parameter of New for the reason ReportCapabilities is: every test that admits anything
+// builds an admission, and none of them configures memory.
+func (a *Admission) UseMemory(memory config.Memory) {
+	a.memory = memory
+}
+
 var _ intake.Handler = (*Admission)(nil)
 
 // New creates an admission handler for one Dispatch project. engine is the workflow's own, shared
@@ -86,7 +103,8 @@ func New(store record.Store, engine *workflow.Engine, cap int, project string, l
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Admission{store: store, engine: engine, cap: cap, project: project, log: log, now: time.Now, pending: make(map[string]intake.DispatchIssue)}
+	return &Admission{store: store, engine: engine, cap: cap, project: project, log: log, now: time.Now,
+		coin: memorygroup.CryptoCoin, pending: make(map[string]intake.DispatchIssue)}
 }
 
 // Apply records root and orphan todo observations of issues handed to Legion and every newer
@@ -961,8 +979,22 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	}
 	// A child leaving its old tree, carried or fresh, takes its hand-over fence with it: left behind,
 	// it would read a later daemon todo of this root (a controller's reopen) as the stale hand-over.
+	// The hand-over settles its memory too, here and not at its own first open: it takes the answer
+	// of the tree it leaves, that tree's draw verbatim with the time it was drawn where it had one,
+	// so the work goes on running under the group it has been running under, and no draw at all
+	// where that tree had been opened with none — a tree first opened before this release, which
+	// nothing draws for. A child out of a tree nothing ever opened has run under nothing, so the
+	// carry writes it nothing and its own first promotion draws it. tree_lifecycles is keyed by
+	// the normalized project token, so the carry is handed that token, as promoteHolds reads it.
 	if oldTree != stored.Key {
 		if err := a.store.DeleteHandover(ctx, tx, stored.Key); err != nil {
+			return err
+		}
+		project, err := claim.ProjectToken(a.project)
+		if err != nil {
+			return fmt.Errorf("carry the memory of re-admitted %s: %w", stored.Key, err)
+		}
+		if _, err := a.store.CarryMemory(ctx, tx, project, stored.Key, oldTree); err != nil {
 			return err
 		}
 	}
@@ -996,9 +1028,38 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 			return err
 		}
 	}
+	if err := a.keepStaleApproval(ctx, tx, stored.Key); err != nil {
+		return err
+	}
 	// A root set back to todo is a new generation of the whole tree, so the old generation's pull
 	// request, gate, handoffs and pending READY go for every issue of it, not only the root's.
 	return a.store.ClearTreeGeneration(ctx, tx, stored.Tree)
+}
+
+// keepStaleApproval keeps, for the architect start of the root key re-admission is clearing, the
+// person's approval its gate holds of a version the spec has since moved past: the new
+// generation's architect registers its spec again on a cleared gate, and its start task
+// (workflow.Engine.ParkedDecisionTask) tells it to request approval of the latest version. Under
+// gates.design off, which asks no person, nothing is kept and any pair an earlier re-admission kept
+// is dropped: no start names one there, so no delivery would forget it. Under an armed gate, a gate
+// that holds no stale approval drops an earlier pair, which this gate has since outgrown; a root
+// with no gate at all (an earlier re-admission cleared it and nothing has registered since) keeps
+// the earlier pair, which no start has delivered yet.
+func (a *Admission) keepStaleApproval(ctx context.Context, tx pgx.Tx, key string) error {
+	if a.engine.DesignGateOff() {
+		return a.store.DropReadmittedApproval(ctx, tx, key)
+	}
+	gate, err := a.store.Gate(ctx, tx, key)
+	if err != nil {
+		return fmt.Errorf("read the gate of re-admitted %s: %w", key, err)
+	}
+	switch {
+	case gate == nil:
+		return nil
+	case gate.ApprovedVersion == nil || *gate.ApprovedVersion >= gate.LatestVersion:
+		return a.store.DropReadmittedApproval(ctx, tx, key)
+	}
+	return a.store.KeepReadmittedApproval(ctx, tx, key, *gate.ApprovedVersion, gate.LatestVersion)
 }
 
 // releaseReturnedSlots gives back the slots of roots that no longer need one: a completed root or
@@ -1059,12 +1120,14 @@ func (a *Admission) logSlot(ctx context.Context, change, issue string, inUse int
 // Before it assigns any, every admitted root that now waits only on a person gives its slot back
 // (workflow's ReconcileAwaiting, then releaseReturnedSlots), and every root in the workflow that
 // neither holds a slot nor waits for one leaves it (releaseUnslotted), so each pass of admission —
-// a live fact, the boot read, a release, a tick — repairs that state rather than keeping it. A
-// candidate a.pending still names is held back: the Dispatch consumer has not yet reached the
-// stream position Reconcile captured when it deferred that key. release, not promote, is what
-// clears pending — it empties the whole set at once, so this need only check membership. An
-// admitted candidate's architect start is queued behind a row creating its issue branch
-// (record.IssueBranch), which the start waits for.
+// a live fact, the boot read, a release, a tick — repairs that state rather than keeping it. The
+// pass stops at the first candidate either hold holds: one a.pending still names, since the
+// Dispatch consumer has not yet reached the stream position Reconcile captured when it deferred
+// that key, or one the boot's catch-up still holds (catchingUp). A pass after the hold's release
+// fills the free slots in line order. release, not promote, is what clears pending — it empties
+// the whole set at once, so this need only check membership. An admitted candidate's architect
+// start is queued behind a row creating its issue branch (record.IssueBranch), which the start
+// waits for.
 func (a *Admission) promote(ctx context.Context, tx pgx.Tx) (int, []string, error) {
 	return a.promoteHolds(ctx, tx, true)
 }
@@ -1137,14 +1200,15 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 	for len(own) < a.cap && len(waiting) > 0 {
 		candidate := waiting[0]
 		waiting = waiting[1:]
-		if respectHolds && a.held(candidate.Key) {
-			continue
-		}
-		// An answered root the boot's catch-up still holds has not applied everything Dispatch
-		// recorded while the daemon was down, so its resume task would miss it; it keeps its place
-		// at the front of the line, and nothing behind it takes the slot, until its catch-up
-		// releases it and decides it on the next pass.
-		if a.catchingUpFor(candidate.Key) {
+		// A hold stops the pass rather than skipping the root it holds: a held root's record may
+		// still miss what Dispatch recorded, so no pass decides it, and an answered root the boot's
+		// catch-up still holds would get a resume task that misses what Dispatch recorded while the
+		// daemon was down. The held root keeps its place in the waiting line and nothing behind it
+		// takes its slot until a pass after the hold's release fills the free slots in line order:
+		// release's own pass for the Dispatch consumer hold, and the next pass (normally the one
+		// intake.CatchUpApplied drives) for the catch-up hold. heldKeys is the same predicate
+		// ReconcileAwaiting was handed above.
+		if heldKeys(candidate.Key) {
 			break
 		}
 		answered := candidate.Answered()
@@ -1180,7 +1244,8 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 			if err != nil {
 				return admitted, returned, fmt.Errorf("open admission lifecycle of %s: %w", candidate.Key, err)
 			}
-			if _, err := a.store.OpenTreeLifecycle(ctx, tx, project, candidate.Tree, treelifecycle.AuthorityWorkflow); err != nil {
+			lifecycle, err := a.store.OpenTreeLifecycle(ctx, tx, project, candidate.Tree, treelifecycle.AuthorityWorkflow)
+			if err != nil {
 				if errors.Is(err, treelifecycle.ErrCleanupReserved) {
 					a.log.Info("admission waits for tree cleanup", "issue", candidate.Key, "tree", candidate.Tree)
 					continue
@@ -1192,6 +1257,16 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 					continue
 				}
 				return admitted, returned, fmt.Errorf("open admission lifecycle of %s: %w", candidate.Key, err)
+			}
+			// The tree's row was created by this call, so this is the one moment its memory group
+			// is drawn, in the fact's own transaction: a crash before the commit leaves neither the
+			// lifecycle nor the draw. Every later open of the tree — its next epoch after a
+			// cleanup, and every re-admission — creates nothing and draws nothing, and the draw
+			// itself is written once (record.Store.DrawMemory).
+			if lifecycle.Created {
+				if err := memorygroup.DrawAndRecord(ctx, tx, a.store, candidate.Tree, a.memory, a.coin, a.now()); err != nil {
+					return admitted, returned, err
+				}
 			}
 		}
 		now := a.now()
@@ -1237,8 +1312,13 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 			if err := a.enqueue(ctx, tx, candidate.Key, record.IssueBranch{Generation: candidate.Generation}, now); err != nil {
 				return admitted, returned, err
 			}
-			if err := a.enqueue(ctx, tx, candidate.Key, record.SuperviseRequest{Op: "start", Tree: candidate.Tree, Role: claim.RoleArchitect, Generation: candidate.Generation}, now); err != nil {
-				return admitted, returned, err
+			task, kept, err := a.engine.ParkedDecisionTask(ctx, tx, candidate)
+			if err != nil {
+				return admitted, returned, fmt.Errorf("name the decisions on %s while nobody in its tree could hear them: %w", candidate.Key, err)
+			}
+			if err := a.engine.EnqueueNaming(ctx, tx, candidate.Key, candidate.Key, record.SuperviseRequest{Op: "start", Tree: candidate.Tree,
+				Role: claim.RoleArchitect, Generation: candidate.Generation, Task: task, Kept: kept}, kept, now); err != nil {
+				return admitted, returned, fmt.Errorf("enqueue the architect start of %s: %w", candidate.Key, err)
 			}
 			if err := a.startMidPhaseMembers(ctx, tx, candidate, append(issues, candidate), now); err != nil {
 				return admitted, returned, err

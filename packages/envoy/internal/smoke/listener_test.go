@@ -202,7 +202,10 @@ func TestSmoke(t *testing.T) {
 	})
 
 	t.Run("subscribe_and_verify", func(t *testing.T) {
-		subBody := `{"session_id":"ses_smoke_test","topics":["notifications.test.smoke"],"port":8080}`
+		// No port: this listener delivers nothing to a session's port and refuses a registration
+		// that names one (subscribeHandler). self_subscribed is what writes the session entry,
+		// so the session is in GET /v1/sessions below.
+		subBody := `{"session_id":"ses_smoke_test","topics":["notifications.test.smoke"],"port":0,"self_subscribed":true}`
 		resp, err := apiRequest(http.MethodPost, baseURL+"/v1/interests/subscribe", subBody)
 		if err != nil {
 			t.Fatalf("POST /v1/interests/subscribe: %v", err)

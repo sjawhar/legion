@@ -510,6 +510,8 @@ test("issue routes select Spec and artifact routes select Artifacts unless prima
   expect(issueTabForRoute({ key: "CORE-1", kind: "children" }, undefined)).toBe("children");
   expect(issueTabForRoute({ key: "CORE-1", kind: "artifacts" }, undefined)).toBe("artifacts");
   expect(issueTabForRoute({ key: "CORE-1", kind: "activity" }, undefined)).toBe("activity");
+  expect(issueTabForRoute({ key: "CORE-1", kind: "verification" }, undefined)).toBe("verification");
+  expect(issueTabForRoute({ key: "CORE-1", kind: "plan" }, undefined)).toBe("plan");
   expect(
     issueTabForRoute(
       { key: "CORE-1", kind: "artifact", slug: "diagram", version: 2 },
@@ -617,6 +619,35 @@ test("the activity tab owns its path, its reference and its short form", () => {
   expect(buildIssuePath(route)).toBe(browserPath("issues/CORE-1/activity"));
   expect(
     referenceRouteFromHref("https://dispatch.test/issues/CORE-1/activity", "https://dispatch.test")
+  ).toEqual(route);
+});
+
+test("the verification tab owns its path, its reference and its short form", () => {
+  const route = { key: "CORE-1", kind: "verification" as const };
+
+  expect(parseDispatchReference("dispatch://CORE-1/verification")).toEqual(route);
+  expect(buildDispatchReference(route)).toBe("dispatch://CORE-1/verification");
+  expect(shortForm(route)).toBe("CORE-1 verification");
+  expect(parseIssuePath("/issues/CORE-1/verification")).toEqual(route);
+  expect(buildIssuePath(route)).toBe(browserPath("issues/CORE-1/verification"));
+  expect(
+    referenceRouteFromHref(
+      "https://dispatch.test/issues/CORE-1/verification",
+      "https://dispatch.test"
+    )
+  ).toEqual(route);
+});
+
+test("the plan tab owns its path, its reference and its short form", () => {
+  const route = { key: "CORE-1", kind: "plan" as const };
+
+  expect(parseDispatchReference("dispatch://CORE-1/plan")).toEqual(route);
+  expect(buildDispatchReference(route)).toBe("dispatch://CORE-1/plan");
+  expect(shortForm(route)).toBe("CORE-1 plan");
+  expect(parseIssuePath("/issues/CORE-1/plan")).toEqual(route);
+  expect(buildIssuePath(route)).toBe(browserPath("issues/CORE-1/plan"));
+  expect(
+    referenceRouteFromHref("https://dispatch.test/issues/CORE-1/plan", "https://dispatch.test")
   ).toEqual(route);
 });
 
@@ -941,6 +972,24 @@ test("the inbox's selected item round-trips beside the filters and is absent whe
   expect(parseInboxSearch("?item=")).toEqual({});
   expect(parseInboxSearch("?item=+")).toEqual({});
   expect(buildInboxPath({ assignees: [], item: undefined })).toBe("/?assignee=everyone");
+});
+
+// The Inbox's search text rides in the address like its other filters: `usePaneSelection`
+// rebuilds the whole query string on every selection change, so anything not in the route is
+// lost on the next `j`.
+test("the inbox's search text round-trips in the address and is absent when empty", () => {
+  expect(buildInboxPath({ q: "two words" })).toBe("/?q=two+words");
+  expect(parseInboxSearch("?q=two+words")).toEqual({ q: "two words" });
+  expect(parseInboxSearch("?q=")).toEqual({});
+  // Nothing trims it: a reader mid-word has a trailing space, and it is part of what they typed.
+  expect(parseInboxSearch("?q=two+")).toEqual({ q: "two " });
+  const route = {
+    agent: "s1",
+    assignees: ["ana@example.com"],
+    item: "ask-3",
+    q: "two words",
+  };
+  expect(parseInboxSearch(buildInboxPath(route).slice(1))).toEqual(route);
 });
 
 // The shell reserves its right gutter from this, and `features/margin/Margin.tsx` renders from

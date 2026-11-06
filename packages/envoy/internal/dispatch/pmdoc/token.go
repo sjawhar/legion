@@ -359,7 +359,7 @@ func appendTokenFloat(dst []byte, f float64) ([]byte, error) {
 
 // serverAttributes is the attribute schema of a node of type nodeType when it is a typed block,
 // whose server-owned attributes a token leaves out, or nil.
-func serverAttributes(nodeType string) map[string]BlockAttributeSchema {
+func serverAttributes(nodeType string) BlockAttributes {
 	typ, _ := typedBlock(nodeType)
 	return typ.Attributes
 }
@@ -368,8 +368,8 @@ func serverAttributes(nodeType string) map[string]BlockAttributeSchema {
 // the attributes the server owns (server is serverAttributes of the node's type) and nil values are
 // left out. The encoder and tokenAttrs share it, so the representation the readback compares is the
 // one tokens hash.
-func tokenAttrKept(server map[string]BlockAttributeSchema, name string, value any) bool {
-	return value != nil && name != BlockIDAttr && !server[name].Server
+func tokenAttrKept(server BlockAttributes, name string, value any) bool {
+	return value != nil && name != BlockIDAttr && !server.Get(name).Server
 }
 
 type tokenMark struct {

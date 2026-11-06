@@ -48,8 +48,9 @@ type createRequestResponse struct {
 	// for "anyone", linking approve_url. Null when the policy decided it at once, so no record
 	// names one.
 	Approver *string `json:"approver"`
-	// How many seconds its grant lasts, as the signed request asked; null when it asked for no
-	// lifetime, and the grant lasts until the session ends. A reused or coalesced request answers
+	// How many seconds its grant lasts, as the signed request asked; or, when it asked for none, 12
+	// hours; null when every name is tagged default-grant=session and the grant lasts until the
+	// session ends. A reused or coalesced request answers
 	// its own, which equals the one asked for. A client that asked for a lifetime and reads null,
 	// or no such field from a broker before it, was not given that lifetime.
 	LifetimeSeconds *int `json:"lifetime_seconds"`
@@ -137,8 +138,8 @@ type requestStatusResponse struct {
 	// owner does not move it, and it stays once the request is decided. Null when the policy
 	// decided it at once, so no record names one.
 	Approver *string `json:"approver"`
-	// How many seconds its grant lasts, as the signed request asked; null for a grant that lasts
-	// until the session ends.
+	// How many seconds its grant lasts: as the signed request asked, else 12 hours; null for a
+	// grant that lasts until the session ends (every name tagged default-grant=session).
 	LifetimeSeconds *int `json:"lifetime_seconds"`
 	// When it left "pending"; null while pending.
 	DecidedAt *time.Time `json:"decided_at"`
@@ -173,7 +174,8 @@ type githubNarrowing struct {
 	// organization permissions among them, unless read_only is set too. The answer names them
 	// sorted, each once.
 	Repositories []string `json:"repositories,omitempty"`
-	// Optional: true limits the token to contents: read and metadata: read. A machine that must
+	// Optional: true limits the token to contents: read, metadata: read, pull_requests: read and
+	// actions: read, less the Actions grant the installation does not hold. A machine that must
 	// only read needs it, with or without repositories.
 	ReadOnly bool `json:"read_only,omitempty"`
 }

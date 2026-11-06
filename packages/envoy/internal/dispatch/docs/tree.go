@@ -197,9 +197,11 @@ func treeOf(doc *crdt.Doc) (*pmdoc.Node, error) {
 }
 
 // treeOfUnshared is treeOf for a document nothing else reads or writes while the call runs - a
-// write transaction's fork, read on the request goroutine that holds it (readForkTree, startTree) -
-// which it reads through pmdoc.ReadUnshared, without ygo's ToDelta, and hands back validated once
-// (pmdoc.ValidDocument), so the renders and reads that follow do not validate it again.
+// write transaction's fork, read on the request goroutine that holds it (readForkTree, startTree),
+// and a room's replica, read by a holder of its mu, the only holders of which read or write it
+// (Service.treePoint) - which it reads through pmdoc.ReadUnshared, without ygo's ToDelta, and hands
+// back validated once (pmdoc.ValidDocument), so the renders and reads that follow do not validate
+// it again.
 func treeOfUnshared(doc *crdt.Doc) (pmdoc.ValidDocument, error) {
 	if doc == nil {
 		return pmdoc.ValidDocument{}, errDocUnloaded
@@ -226,25 +228,25 @@ func treeOfTransaction(txn *crdt.Transaction, fragment *crdt.YXmlFragment) (*pmd
 // it stands, read inside that transaction, which holds the document's lock, and reports whether it
 // changed the tree; only a changed tree is written. A repair computed on a tree read before the
 // transaction and written back would revert whatever another writer wrote after that read
-// (LEGION-479). It returns the tree as the transaction left it and whether edit changed it.
-func rewriteLive(doc *crdt.Doc, origin any, edit func(live *pmdoc.Node) bool) (*pmdoc.Node, bool, error) {
+// (LEGION-479). It returns the tree as the transaction left it; whether the transaction changed the
+// document is the update ygo emits for it, or its absence.
+func rewriteLive(doc *crdt.Doc, origin any, edit func(live *pmdoc.Node) bool) (*pmdoc.Node, error) {
 	fragment := doc.GetXmlFragment(fragmentName)
 	var live *pmdoc.Node
-	changed := false
 	err := doc.TransactE(func(transaction *crdt.Transaction) error {
 		var readErr error
 		if live, readErr = treeOfTransaction(transaction, fragment); readErr != nil {
 			return readErr
 		}
-		if changed = edit(live); !changed {
+		if !edit(live) {
 			return nil
 		}
 		return pmdoc.Update(transaction, fragment, live)
 	}, origin)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
-	return live, changed, nil
+	return live, nil
 }
 
 func renderTree(tree *pmdoc.Node) (string, error) {
@@ -317,20 +319,32 @@ func renderDocument(doc *crdt.Doc) (string, error) {
 	return documentMarkdown(tree)
 }
 
-// renderDocumentForUpdate is renderDocument of the document whose fragment is fragment, without
-// pmdoc.Read's deep copy (pmdoc.ReadForRendering), recording the rendering's layout from the same
-// render: for the update observer's render, which runs the render and discards the tree before
-// releasing the replica's lock (renderedReplica.updateChangesMarkdown), so nothing retains the
-// tree past this call to alias a later reader - a caller that reads tree past the call (the ask
-// blocks updateChangesMarkdown hands classify, walked before the lock is released) aliases none of
-// it by doing so, since tree itself, not a copy of it, is what the caller walks.
-func renderDocumentForUpdate(fragment *crdt.YXmlFragment) (string, *pmdoc.Node, *pmdoc.Layout, error) {
+// readFragmentForRendering is the tree fragment holds, read without pmdoc.Read's deep copy
+// (pmdoc.ReadForRendering), for the two renders that read a room's live fragment:
+// renderDocumentForUpdate and renderFragmentMarkdown. A nil fragment is a document that is not
+// loaded, and a tree the reader refuses is that document's schema error (documentSchemaError).
+func readFragmentForRendering(fragment *crdt.YXmlFragment) (*pmdoc.Node, error) {
 	if fragment == nil {
-		return "", nil, nil, errDocUnloaded
+		return nil, errDocUnloaded
 	}
 	tree, err := pmdoc.ReadForRendering(fragment)
 	if err != nil {
-		return "", nil, nil, documentSchemaError(err)
+		return nil, documentSchemaError(err)
+	}
+	return tree, nil
+}
+
+// renderDocumentForUpdate is renderDocument of the document whose fragment is fragment, read
+// without pmdoc.Read's deep copy (readFragmentForRendering), recording the rendering's layout from
+// the same render: for the update observer's render, which runs the render and discards the tree
+// before releasing the replica's lock (renderedReplica.updateChangesMarkdown), so nothing retains
+// the tree past this call to alias a later reader - a caller that reads tree past the call (the
+// ask blocks updateChangesMarkdown hands classify, walked before the lock is released) aliases
+// none of it by doing so, since tree itself, not a copy of it, is what the caller walks.
+func renderDocumentForUpdate(fragment *crdt.YXmlFragment) (string, *pmdoc.Node, *pmdoc.Layout, error) {
+	tree, err := readFragmentForRendering(fragment)
+	if err != nil {
+		return "", nil, nil, err
 	}
 	markdown, _, layout, err := documentRenderingWithLayout(tree)
 	return markdown, tree, layout, err
@@ -342,12 +356,9 @@ func renderDocumentForUpdate(fragment *crdt.YXmlFragment) (string, *pmdoc.Node, 
 // fold of a document's stored updates (renderStoredFold) - which pmdoc.RenderWithLayout would
 // hand a pmdoc.Layout each has nothing to do with.
 func renderFragmentMarkdown(fragment *crdt.YXmlFragment) (string, error) {
-	if fragment == nil {
-		return "", errDocUnloaded
-	}
-	tree, err := pmdoc.ReadForRendering(fragment)
+	tree, err := readFragmentForRendering(fragment)
 	if err != nil {
-		return "", documentSchemaError(err)
+		return "", err
 	}
 	return documentMarkdown(tree)
 }
@@ -355,7 +366,7 @@ func renderFragmentMarkdown(fragment *crdt.YXmlFragment) (string, error) {
 // snapshotDocument copies doc's state as of one moment. Encoding it takes the document's lock, which
 // every peer update and service write holds while it applies, so the copy is never a tree half
 // way through a write - which a direct walk of a resident room's live tree can read, since the
-// walk takes no lock (sjawhar/ygo v1.51.3-sami.1, crdt/yxml.go:353-369) - and nothing writes the
+// walk takes no lock (sjawhar/ygo v1.55.1-sami.2, crdt/yxml.go:351-367) - and nothing writes the
 // copy.
 func snapshotDocument(doc *crdt.Doc) (*crdt.Doc, error) {
 	snapshot := newDocumentCopy()
@@ -371,11 +382,10 @@ func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 	return newCappedDocumentCopy(maxUpdateItems, options...)
 }
 
-// newCappedDocumentCopy builds every copy that replays a document's stored or room updates, and
-// is the one place a copy is built: at the pending queue of the instance the decode runs for -
-// PgVersioned.maxPendingItems or Service.maxPendingItems, both maxUpdateItems in production and
-// lowered only by a test (shrinkPendingItems) - so a copy decodes what that instance decodes and
-// no more, and refuses what it would refuse. See maxUpdateItems for what those caps hold.
+// newCappedDocumentCopy builds a fresh document for replay at the instance's pending-queue cap:
+// a copy of its room decodes what that instance decodes and refuses what it would refuse. The
+// cap follows the instance (newRoomServer, loadTree, replica); other callers use newDocumentCopy.
+// See maxUpdateItems for the production and protocol caps.
 //
 // Every copy replays without ygo's format cleanup (crdt.WithFormatCleanup), which follows each
 // remote apply that changes formatted text with a commit of its own: every update a copy applies
@@ -385,8 +395,21 @@ func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 // cleaned up would hold a state the room never held - and a compaction that folded such a copy
 // would store it. A write's fork commits its own writes locally, which never clean up.
 func newCappedDocumentCopy(maxPending int, options ...crdt.DocOption) *crdt.Doc {
-	return crdt.New(append(options, crdt.WithMaxPendingItems(maxPending), crdt.WithFormatCleanup(false))...)
+	return crdt.New(documentCopyOptions(maxPending, options...)...)
 }
+
+// documentCopyOptions is what newCappedDocumentCopy builds a copy with, for a caller that needs
+// the options rather than a document built from them: a write's fork, which is built from them
+// both by decoding a state into a new document (buildFork) and by cloning the room's replica
+// (Service.forkPoint), and the two must be the same document (forkOptions).
+func documentCopyOptions(maxPending int, options ...crdt.DocOption) []crdt.DocOption {
+	return append(options, crdt.WithMaxPendingItems(maxPending), crdt.WithFormatCleanup(false))
+}
+
+// emptyUpdateV1 is the V1 encoding of no structs and no delete ranges. ygo logs it beside Parked
+// for a commit that kept only parked bytes, and calls no OnUpdate for that commit
+// (crdt.LoggedUpdate).
+var emptyUpdateV1 = crdt.EncodeStateAsUpdateV1(crdt.New(), nil)
 
 // forkTreeCounts counts the trees read off a write transaction's fork, and the reads that taking
 // the write's rendering in place of one avoided, so a test can assert that a write reads its fork
@@ -405,9 +428,21 @@ type forkTreeCounts struct {
 
 // listResident lists value under live, a room's resident document, in listing until live is
 // collected: the key holds live weakly, so the listing never keeps an evicted room's document
-// alive, and the entry goes once that document is collected.
+// alive, and the entry goes once that document is collected, unless the listing went first.
 func listResident(listing *sync.Map, live *crdt.Doc, value any) {
 	key := weak.Make(live)
 	listing.Store(key, value)
-	runtime.AddCleanup(live, func(key weak.Pointer[crdt.Doc]) { listing.Delete(key) }, key)
+	// The cleanup holds the listing weakly because runtime.AddCleanup keeps a cleanup's closure
+	// alive for as long as the object it is attached to, and every listing here is a field of the
+	// service (Service.instances, Service.replicas), which reaches every resident room document
+	// through ygo's room table: a closure holding the listing strongly would be a cycle through
+	// live, which would then never be collected, and nor would anything it holds. The nil check
+	// skips the delete only where the listing went first, and a listing that is gone has no entry
+	// left to drop (dispatch://INFRA-1085).
+	owner := weak.Make(listing)
+	runtime.AddCleanup(live, func(key weak.Pointer[crdt.Doc]) {
+		if listing := owner.Value(); listing != nil {
+			listing.Delete(key)
+		}
+	}, key)
 }

@@ -110,6 +110,8 @@ machine's Application Default Credentials are its own identity, and so does ever
   shell quotes it: `--github-owners "acme-org ada"`. A comma is refused before anything is written.
 - **`--max-grant`** is optional. It is the longest `--ttl` a request for this secret may use.
   It must be a duration of at least one second.
+- **`--default-grant session`** is optional. A request with no `--ttl` for secrets that all carry it
+  gets a grant that lasts until its session ends, instead of 12 hours.
 - **The value.** At a terminal the CLI reads one hidden line. Enter or Ctrl-D ends it; Backspace,
   Ctrl-W and the terminal's kill-line character edit it. An unhandled control byte, including
   Ctrl-S, Ctrl-Q, and Ctrl-C, Ctrl-\\ or Ctrl-Z inside a bracketed paste, refuses the value. The
@@ -235,10 +237,10 @@ form makes.
 
 ```console
 $ agent-secrets secret list
-NAME               OWNER            TIER   KIND          MAX_GRANT  VALUE  DELETED  EARLIEST_PURGE
-DEMO_DEPLOY_TOKEN  ada@example.com  agent  -             -          yes    -        -
-DEMO_GITHUB_APP    ada@example.com  agent  github-app    -          yes    -        -
-DEMO_LOGIN         ada@example.com  human  google-login  1h         yes    -        -
+NAME               OWNER            TIER   KIND          MAX_GRANT  DEFAULT_GRANT  VALUE  DELETED  EARLIEST_PURGE
+DEMO_DEPLOY_TOKEN  ada@example.com  agent  -             -          -              yes    -        -
+DEMO_GITHUB_APP    ada@example.com  agent  github-app    -          -              yes    -        -
+DEMO_LOGIN         ada@example.com  human  google-login  1h         -              yes    -        -
 Every row is a secret in AWS Secrets Manager account 111122223333 in us-east-1.
 ```
 
@@ -257,6 +259,7 @@ owner: ada@example.com
 tier: agent
 kind: -
 max_grant: -
+default_grant: -
 created: 2026-10-06T20:31:08Z
 last_changed: 2026-10-06T20:31:08Z
 version: 8ae2ea20-8e93-4f1a-b3d1-2e5396ecef72 AWSCURRENT
@@ -286,13 +289,13 @@ retagged DEMO_DEPLOY_TOKEN in AWS Secrets Manager account 111122223333 in us-eas
 broker: serving DEMO_DEPLOY_TOKEN from AWS Secrets Manager account 111122223333 in us-east-1
 ```
 
-Name `--owner`, `--tier`, `--kind`, `--github-owners`, `--max-grant` or a combination. A retag that
+Name `--owner`, `--tier`, `--kind`, `--github-owners`, `--max-grant`, `--default-grant` or a combination. A retag that
 sets tags reads the owner and tier tags the secret holds and sends both in one request. On AWS,
 this lets an IAM condition inspect both tags. Every other tag or annotation stays as it is. For a
 secret missing an owner or tier tag, name that tag too.
 
 `--kind none` removes the kind tag and the `mint-service-account` tag written with it,
-`--github-owners none` removes the GitHub owners and `--max-grant none` removes the max grant. A
+`--github-owners none` removes the GitHub owners and `--max-grant none` removes the max grant, and `--default-grant none` removes the opt-out. A
 removal is a retag of its own: it changes no other tag, so the cloud refusing it leaves the secret
 as it was. A retag that names `none` beside another change is refused before it writes anything.
 So is a retag that would leave a `github-app` secret without `--github-owners`, as the broker would
@@ -411,10 +414,10 @@ that moment is both), and the **earliest** it can be purged:
 
 ```console
 $ agent-secrets secret list
-NAME               OWNER            TIER   KIND  MAX_GRANT  VALUE  DELETED               EARLIEST_PURGE
-DEMO_DEPLOY_TOKEN  ada@example.com  human  -     -          yes    2026-10-06T20:22:33Z  2026-10-13T20:22:33Z
-DEMO_EMPTY_KEY     ada@example.com  human  -     -          yes    -                     -
-DEMO_SHARED_KEY    shared           human  -     -          yes    -                     -
+NAME               OWNER            TIER   KIND  MAX_GRANT  DEFAULT_GRANT  VALUE  DELETED               EARLIEST_PURGE
+DEMO_DEPLOY_TOKEN  ada@example.com  human  -     -          -              yes    2026-10-06T20:22:33Z  2026-10-13T20:22:33Z
+DEMO_EMPTY_KEY     ada@example.com  human  -     -          -              yes    -                     -
+DEMO_SHARED_KEY    shared           human  -     -          -              yes    -                     -
 EARLIEST_PURGE is the deletion plus Secrets Manager's 7-day minimum recovery window: restore works at least until then; the window the delete chose may be longer.
 ```
 

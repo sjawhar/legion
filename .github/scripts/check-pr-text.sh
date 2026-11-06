@@ -3,11 +3,10 @@
 # commit's message, author name and email, and committer name and email), and over every issue
 # comment, review and review comment on it that a trusted author posted (see "Who counts" below).
 # The first four are as public as the tree: with this
-# repository's squash settings (the commit-or-PR title, then the commit messages), the title or a
-# commit subject becomes main's commit subject and the commit messages its body; the release
-# workflows' generated notes list merged titles; the branch name keeps showing on the pull
-# request's page after the branch is deleted; and a commit's author or committer identity reaches
-# main through a squash's auto-generated Co-authored-by trailer. A comment, review or review
+# repository's squash settings (the pull request title, then a blank message), the title becomes
+# main's commit subject; the release workflows' generated notes list merged titles; the branch
+# name keeps showing on the pull request's page after the branch is deleted; and each commit's
+# message, author and committer stay public on the pull request's page. A comment, review or review
 # comment is public on the pull request's page from the moment it is posted. A hit is reported as
 # `title:<line>`, `body:<line>`, `branch:<line>`, `commits:<line>`, `comment:<id>:<line>`,
 # `review:<id>:<line>` or `review-comment:<id>:<line>` (the id GitHub gives that issue comment,
@@ -15,8 +14,8 @@
 #
 # It also requires the title to be a conventional commit subject (`type(scope): summary`, the
 # scope and a `!` optional): squash merges use the title as main's commit subject, and the release
-# workflows version from conventional subjects; a merge the Legion daemon submits writes an empty
-# squash body, so on it the title is the only text they read. That failure prints no title text
+# workflows version from conventional subjects; this repository's squash merges write an empty
+# body, so the title is the only text they read. That failure prints no title text
 # either.
 #
 # It reads the event payload GitHub writes to GITHUB_EVENT_PATH, never the step's environment,
@@ -71,7 +70,7 @@ jq -r '.body // ""' "$live" | tr -d '\000' > "$text/body"
 jq -r '.head.ref' "$live" | tr -d '\000' > "$text/branch"
 title_status=0
 if ! grep -qE '^[a-z]+(\([^)]+\))?!?: .+' "$text/title"; then
-  echo "::error::PR title must be a conventional commit subject (type(scope): summary). Squash merges use the PR title as the commit subject, and the release workflows version from conventional subjects — a merge the Legion daemon submits writes an empty squash body, so on it the title is the only text they read."
+  echo "::error::PR title must be a conventional commit subject (type(scope): summary). Squash merges use the PR title as the commit subject, and the release workflows version from conventional subjects — this repository's squash merges write an empty body, so the title is the only text they read."
   title_status=1
 fi
 

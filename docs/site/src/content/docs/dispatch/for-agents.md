@@ -80,7 +80,7 @@ tells the agent who Dispatch takes it for.
 | Comments | `dispatch comment` comments on a document or replies in a thread. `dispatch suggest` proposes replacement text. `dispatch resolve-comment` resolves a thread. |
 | Messages | `dispatch message` posts a message or replies to one. |
 | Documents | `dispatch doc-read` reads a document, or the text of an uploaded file; with `--blocks` it lists the document's block ids, tokens and table rows that `dispatch doc-edit` addresses. `dispatch doc-edit` edits one in place. `dispatch artifact` uploads a file or a new document. `dispatch request-approval` asks a person to approve a document. |
-| Reading | `dispatch read` reads an issue, ask, comment, message, or document summary; an issue read lists the issue's last 10 events, `--events N` the last N, and `--all-events` every one. `dispatch search` searches everything. `dispatch related --project <KEY>` runs the related-item check a new issue or ask gets on a `--title` and `--text`, and writes nothing. `dispatch whoami` reports who Dispatch takes the agent for. |
+| Reading | `dispatch read` reads an issue, ask, comment, message, or document summary; an issue read lists the issue's last 10 events, `--events N` the last N, and `--all-events` every one. `dispatch search` searches everything. `dispatch related --project <KEY>` runs the related-item check a new issue or ask gets on a `--title` and `--text`, and writes nothing. `dispatch whoami` reports who Dispatch takes the agent for, and the OAuth scopes its credential holds. `dispatch inbox` lists what the Inbox page of the person the agent acts for shows — Needs you, Waiting on agents, Later and Credential requests, each with its count and its rows — read with the agent's own credential, which must hold the `person` scope; it is the person's Dispatch Inbox, not the Envoy tool `envoy_inbox`, which lists what was delivered to this session. |
 | Handoffs | `dispatch handoff-write` records a phase handoff on an issue as the agent's session: `--phase <phase>` and `--body-file <path>` (`-` reads stdin), one JSON object stored exactly as written, each write the phase's next version. `dispatch handoff-read` prints one line naming the phase, version, id, writing session and time, then the body exactly as stored; `--version <n>` reads an earlier version. |
 | Architecture | `dispatch architecture-sync` imports a project's architecture model now, from every source repository with a line for each, or from one with `--repo <owner/name>`. |
 
@@ -146,10 +146,14 @@ starts. When the list leaves older items out, its last line says how many; `disp
 reads them all. The request waits at most 800 ms for the list and carries the last one read when
 Dispatch does not answer.
 
-The server holds every write to a size, and refuses rather than truncates:
+The server holds every write to a size, refuses rather than truncates, and names what passed the
+bound; `dispatch limits` prints every bound the server you write to holds, and no command carries
+a bound of its own:
 
-- an ask's question is at most 2,000 characters, with at most eight options;
-- a comment or message body is at most 32,000 characters;
+- an ask's question and its options together are at most 32,000 characters, with at most eight
+  options;
+- a comment or message body is bounded block by block: each block — a paragraph, list, quote,
+  table or code block — is at most 32,000 characters, and one body holds at most 32,768 blocks;
 - a comment anchored to a document is also projected into that document's margin, which is bounded
   in bytes and not by that character limit: 256 KiB per thread, and 1 MiB per document margin. A
   few long anchored comments therefore fill a thread or a margin where many short ones used to

@@ -23,7 +23,7 @@ name: E2E proofs
 #     of the scripts, never a pull request's.
 #
 # No hosted proof here needs a secret, and none may: Sami answered that no API key goes into
-# sjawhar/legion, and that a smoke test which calls a model runs in the deployment repository on
+# cybermonklabs/legion, and that a smoke test which calls a model runs in the deployment repository on
 # workload identity federation (sjawhar/legion#2512).
 # dispatch-session-settings.sh, which drives two real models, is therefore in the refused list
 # with that reason, not in the hosted one.
@@ -101,9 +101,9 @@ jobs:
         include: ${{ fromJSON(needs.select.outputs.proofs) }}
     services:
       postgres:
-        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml): the
+        # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml): the
         # image and the shape ci.yaml's test job declares.
-        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        image: ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]

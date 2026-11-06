@@ -11,10 +11,11 @@ import (
 // 46). A claim whose registration declared a contract below it has no op to answer an update
 // task with: the op list is a closed enum compiled into the plugin, and a Claude Code role's
 // plugin is its image's own, never installed. Such a claim is asked all the same, and the end of
-// the turn its task starts is its answer (askForUpdate, answerByTurnEnd), so a round over it
-// completes and its pod is replaced like any other. The stale-plugin lane relaunches it once its
-// turn ends where no round covers it (refreshPlugin, holdStaleRelaunch), which keeps the pod and
-// the disk and so loses nothing.
+// the turn its task starts is its answer (askForUpdate, answerByTurnEnd) — as it is for every
+// other claim that ends that turn without calling, since a plugin at this contract can be built
+// without the op too — so a round over it completes and its pod is replaced like any other. The
+// stale-plugin lane relaunches it once its turn ends where no round covers it (refreshPlugin,
+// holdStaleRelaunch), which keeps the pod and the disk and so loses nothing.
 //
 // That relaunch is what takes a worker of the release before this one past the constant: it
 // installs this daemon's plugin, and the registration that follows records this daemon's
@@ -30,23 +31,29 @@ import (
 // constant alone cannot move it; a merge that renumbers this change moves that test's literal
 // and api/version.go's entry with it, which names this constant. Behind is the dangerous
 // direction: at 45, with the op at 46, every worker of the released plugin is
-// judged able to answer an op it does not have, so the end of its turn is not taken as its
-// answer and the stale lane opens a plugin round instead of relaunching it. Every round of the
-// first roll would stall, which is the one deploy this change exists for.
+// judged able to answer an op it does not have, and the stale lane opens a plugin round instead
+// of relaunching it. Every round of the first roll would stall, which is the one deploy this
+// change exists for.
 const PodUpdateContract = 46
 
-// CannotAnswerUpdate says whether c's worker has no ready_for_update op to answer its update task
+// CannotAnswerUpdate says whether c's worker has no ready_for_update op to answer an update task
 // with: its process runs now (HoldsCapability) and the registration that process made declared a
-// plugin contract below the one that introduced the op. It is the one statement of that rule,
-// read by the turn's end, which is such a worker's answer (answerByTurnEnd), and by the
-// stale-plugin lane (refreshPlugin).
+// plugin contract below PodUpdateContract, the contract that introduced the op.
+//
+// refreshPlugin is its one caller, and what it decides there is the whole of what this is for: a
+// claim that cannot answer is relaunched onto this daemon's plugin, once a turn of it has ended,
+// and one that can is given a plugin round of its own and keeps running until it answers. The
+// controller's claim is the exception: it is relaunched at once either way. internal/daemon's
+// reaskedForPushCheck reads the contract for a decision of its own, under a rule its own comment
+// states.
 //
 // The running process is half the rule, and the half a reading of the contract alone would get
-// wrong. A claim with none — suspended, failed, launching, or still queued — records the contract
-// of a process that has ended, and the one its next launch starts speaks this daemon's: a claim
-// relaunched onto the current plugin a moment ago registers at this contract, and a suspended
-// claim the round revives comes back on it. Reading those records as "this claim has no op" would
-// take the answer of a worker that is about to make the call itself.
+// wrong, because what the contract records is a statement about a process rather than about a
+// claim. A claim with none — suspended, failed, launching, or still queued — records what a
+// process that has ended declared, and the one its next launch starts speaks this daemon's: a
+// claim relaunched onto the current plugin a moment ago registers at this contract, and a
+// suspended claim the round revives comes back on it. Read as a claim that cannot answer, each
+// of them would be relaunched for a plugin its next launch brings by itself.
 func CannotAnswerUpdate(c Claim) bool {
 	return HoldsCapability(c.State) && c.PluginContract < PodUpdateContract
 }
@@ -165,7 +172,7 @@ func (m *Machine) relaunchStale(ctx context.Context, trigger string) error {
 		"incarnation", m.claim.Locator.Incarnation, "pluginContract", m.claim.PluginContract,
 		"daemonApiVersion", m.deps.PluginContract, "trigger", trigger)
 	m.claim.PluginRelaunchFor = m.deps.PluginContract
-	return m.replaceProcess(ctx, "the process on another plugin contract is replaced mid-turn")
+	return m.replaceProcess(ctx, "the process on another plugin contract is replaced mid-turn", ordinaryEnd)
 }
 
 // openPluginUpdate opens this claim's own update round for the plugin contract it is behind: the

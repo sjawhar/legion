@@ -1,5 +1,0 @@
-kind: Removed
-body: The GitHub listener no longer sends `changed_paths`, `changed_paths_truncated` or `forced` on a push envelope. A push payload is now exactly `kind`, `repo`, `ref`, `after`, `before`, `pusher`, `sender`, `head_subject`, `commit_count` and `compare_url`, and every one of those fields is capped at 2,048 runes like any other envelope text. No consumer has read the three since sjawhar/legion#2354 moved Legion's phase handoffs onto their Dispatch issues and deleted the push classifier that read them.
-time: 2026-11-02T09:44:51.000544964Z
-custom:
-    Issue: pr2675

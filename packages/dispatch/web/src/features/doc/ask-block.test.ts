@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { EditorState, TextSelection } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
-import { Schema } from "prosemirror-model";
+import { DOMSerializer, Schema } from "prosemirror-model";
 
 import type { BlockTypeSchema } from "../../api/types";
 import { askBlockEditingPlugin, editingAskBlockPos } from "./ask-block";
@@ -167,4 +167,82 @@ test("a typed block's header shows the author's attributes and hides the schema'
   expect(text).not.toContain("blockId");
   expect(text).not.toContain("alice");
   expect(text).not.toContain("resolved_by");
+});
+
+// A `check` block, whose `serves` points at the requirements it proves. The drawing printed
+// every array attribute with `JSON.stringify`, so driving the real page showed a reader
+// `serves ["dispatch://VER-1/spec#b-r1"]` - the value's JSON instead of the blocks it names
+// (INFRA-174).
+const checkSchema = new Schema({
+  nodes: {
+    doc: { content: "block+" },
+    paragraph: { content: "inline*", group: "block" },
+    text: { group: "inline" },
+    check: {
+      attrs: { blockId: { default: null }, run: { default: null }, serves: { default: null } },
+      content: "paragraph+",
+      group: "block",
+    },
+  },
+});
+
+const checkType: BlockTypeSchema = {
+  attributes: {
+    run: { kind: "string" },
+    serves: { kind: "block[]", targets: ["requirement"] },
+  },
+  content: "paragraph+",
+  name: "check",
+  render: "host",
+};
+
+function checkBlock(serves: string[]): HTMLElement {
+  const node = checkSchema.node("check", { blockId: "c1", run: "bun test web/src", serves }, [
+    checkSchema.node("paragraph", undefined, [checkSchema.text("The tab lists every check.")]),
+  ]);
+  return DOMSerializer.renderSpec(document, renderTypedBlock(node, checkType)).dom as HTMLElement;
+}
+
+test("a block[] attribute draws the blocks it points at, each linked to its block", () => {
+  const drawn = checkBlock([
+    "dispatch://CORE-1/spec#b-r1",
+    "dispatch://CORE-1/artifact/plan-md#b-t1",
+  ]);
+
+  const serves = drawn.querySelector('dd[data-proof-block-attribute="serves"]');
+  expect(
+    Array.from(serves?.querySelectorAll("a") ?? [], (link) => ({
+      href: link.getAttribute("href"),
+      // What the document's own click handler and hover card read a drawn link's target from.
+      reference: link.getAttribute("data-dispatch-href"),
+      text: link.textContent,
+    }))
+  ).toEqual([
+    {
+      href: "/issues/CORE-1/spec#b-r1",
+      reference: "dispatch://CORE-1/spec#b-r1",
+      text: "CORE-1 spec block",
+    },
+    {
+      href: "/issues/CORE-1/artifacts/plan-md#b-t1",
+      reference: "dispatch://CORE-1/artifact/plan-md#b-t1",
+      text: "CORE-1 plan-md block",
+    },
+  ]);
+  // None of the JSON a reader used to see, and the pointers read as separate words.
+  expect(serves?.textContent).toBe("CORE-1 spec block CORE-1 plan-md block");
+  // Every other kind is drawn as it was: the check's `run` is still its own text.
+  expect(drawn.querySelector('dd[data-proof-block-attribute="run"]')?.textContent).toBe(
+    "bun test web/src"
+  );
+});
+
+test("a block[] attribute pointing at no block is not drawn at all", () => {
+  const drawn = checkBlock([]);
+
+  expect(drawn.querySelector('[data-proof-block-attribute="serves"]')).toBeNull();
+  expect(drawn.textContent).not.toContain("serves");
+  expect(drawn.querySelector('dd[data-proof-block-attribute="run"]')?.textContent).toBe(
+    "bun test web/src"
+  );
 });

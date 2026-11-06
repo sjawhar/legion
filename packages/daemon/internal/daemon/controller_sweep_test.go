@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/client-go/rest"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -75,13 +74,14 @@ func TestTheOrphanSweepKeepsASuspendedControllersSandboxAndDeletesARetiredOnes(t
 			if tc.state != supervise.StateRetired {
 				trees.unretired = controller
 			}
-			rt, err := sandbox.New(ctx, &rest.Config{Host: server.URL}, sandbox.Options{
+			rt, err := sandbox.New(ctx, sandboxRESTConfig(server.URL), sandbox.Options{
 				Namespace: "legion", Project: "legion", Store: trees, Image: "ghcr.io/example/worker@sha256:" + strings.Repeat("a", 64),
 				StorageClass: "standard", IssueVolume: resource.MustParse("1Gi"), StreamURL: "tcp://127.0.0.1:13371", Resources: defaultReservations(t),
 				SessionStore: ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: "SESSION_DSN"},
 				Tools:        sandbox.Tools{GH: "/usr/bin/gh", Git: "/usr/bin/git", JJ: "/usr/bin/jj", Legion: "/opt/legion/bin/legion", AgentSecrets: "/opt/legion/bin/agent-secrets"},
 				BootTimeout:  time.Second, RegistrationIntervals: 3, BusyBackoff: time.Millisecond, TerminationGrace: time.Second, ProbeInterval: time.Hour, AdoptTimeout: time.Second,
-				Tokens: issueProvisionTokens{}, GitHubCredential: appauth.GitHubCredential(outboxTokens{}, legionOwner, ghrepo.Renames{}), Conns: fake.NewConns(), Log: quietLogger(),
+				Tokens: issueProvisionTokens{}, GitHubCredential: appauth.GitHubCredential(outboxTokens{}, legionOwner, ghrepo.Renames{}),
+				GitHubOwners: legionOwner, Conns: fake.NewConns(), Log: quietLogger(),
 				RepositoryCache: defaultRepositoryCache(t), Mapped: noRepositories,
 			})
 			if err != nil {

@@ -1,6 +1,7 @@
 package appauth
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/rand"
@@ -13,8 +14,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -22,6 +25,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 func testAppKey(t *testing.T) (*rsa.PrivateKey, string) {
@@ -428,9 +432,168 @@ func TestReadTokenMintsANarrowedTokenCachedApartFromToken(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	want := []string{`{"permissions":{"contents":"read","metadata":"read","pull_requests":"read"}}`, ""}
+	// json.Marshal of a map sorts its keys, so the body is this exact text: the four read
+	// permissions a narrowed lease carries, actions among them, and nothing writable.
+	want := []string{`{"permissions":{"actions":"read","contents":"read","metadata":"read","pull_requests":"read"}}`, ""}
 	if len(bodies) != len(want) || bodies[0] != want[0] || bodies[1] != want[1] {
 		t.Fatalf("exchange bodies = %q, want %q", bodies, want)
+	}
+}
+
+// An App holds Actions only once each installation's account approves that grant, and GitHub
+// answers 422 to a token request naming a permission the installation does not hold, minting
+// nothing. The read token is then asked for again without actions: the lease is served with
+// contents, pull requests and metadata, a controller's whole gh bundle mints rather than failing
+// on the first such owner, and the daemon writes what that lease cannot read once per owner.
+func TestReadTokenDropsActionsWhereTheInstallationDoesNotHoldThem(t *testing.T) {
+	_, privatePEM := testAppKey(t)
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	var mu sync.Mutex
+	bodies := map[string][]string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/app/installations":
+			fmt.Fprint(w, `[{"id":77,"account":{"login":"acme"}},{"id":88,"account":{"login":"sjawhar"}}]`)
+		case strings.HasSuffix(r.URL.Path, "/access_tokens"):
+			installation := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/app/installations/"), "/access_tokens")
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("read the exchange body: %v", err)
+				return
+			}
+			mu.Lock()
+			bodies[installation] = append(bodies[installation], string(body))
+			exchanges := len(bodies[installation])
+			mu.Unlock()
+			// GitHub's own answer to a request naming a permission the installation does not
+			// hold: no token at all, rather than a token without that permission.
+			if strings.Contains(string(body), `"actions"`) {
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				fmt.Fprint(w, `{"message":"The permissions requested are not granted to this installation."}`)
+				return
+			}
+			fmt.Fprintf(w, `{"token":"installation-%s-%d","expires_at":%q}`, installation, exchanges, now.Add(time.Hour).Format(time.RFC3339))
+		case r.URL.Path == "/app":
+			fmt.Fprint(w, `{"slug":"legion-reviewer"}`)
+		case r.URL.Path == "/users/legion-reviewer[bot]":
+			fmt.Fprint(w, `{"id":271566631}`)
+		default:
+			t.Errorf("unexpected GitHub path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stderr bytes.Buffer
+	tokens := New(config.GitHubApps{
+		Review: config.GitHubApp{AppID: "67890", PrivateKey: privatePEM},
+	}, Options{BaseURL: server.URL, HTTPClient: server.Client(), Now: func() time.Time { return now }, Stderr: &stderr})
+	defer tokens.Close()
+
+	read, err := tokens.ReadToken(context.Background(), Review, "acme")
+	if err != nil {
+		t.Fatalf("read token for an installation that holds no actions: %v", err)
+	}
+	if read.Token != "installation-77-2" {
+		t.Fatalf("read token = %q, want installation-77-2, the exchange that named no actions", read.Token)
+	}
+	credential := GitHubCredential(tokens, func() []string { return []string{"acme", "sjawhar"} }, ghrepo.Renames{})
+	bundle, err := credential(context.Background(), claim.RoleController, "")
+	if err != nil {
+		t.Fatalf("the controller's bundle: %v", err)
+	}
+	if got := bundleTokens(t, bundle); !maps.Equal(got, map[string]string{"acme": "installation-77-2", "sjawhar": "installation-88-2"}) {
+		t.Fatalf("bundle tokens = %v, want every owner's token minted without actions", got)
+	}
+	asked := []string{
+		`{"permissions":{"actions":"read","contents":"read","metadata":"read","pull_requests":"read"}}`,
+		`{"permissions":{"contents":"read","metadata":"read","pull_requests":"read"}}`,
+	}
+	mu.Lock()
+	if !maps.EqualFunc(bodies, map[string][]string{"77": asked, "88": asked}, slices.Equal) {
+		mu.Unlock()
+		t.Fatalf("exchange bodies = %v, want each installation asked for %v", bodies, asked)
+	}
+	mu.Unlock()
+
+	// Each owner's lease is cached, so the line is not written again for a bundle served from the
+	// cache, nor for the fresh mint a Forget makes the next read token do.
+	tokens.Forget(Review, "acme")
+	if _, err := tokens.ReadToken(context.Background(), Review, "acme"); err != nil {
+		t.Fatalf("read token after Forget: %v", err)
+	}
+	for _, line := range []string{
+		"appauth: the review App's installation on acme does not hold actions",
+		"appauth: the review App's installation on sjawhar does not hold actions",
+	} {
+		if count := strings.Count(stderr.String(), line); count != 1 {
+			t.Errorf("stderr holds %d of %q, want exactly one:\n%s", count, line, stderr.String())
+		}
+	}
+	if !strings.Contains(stderr.String(), "grant the App Actions: Read") {
+		t.Errorf("stderr does not say what fixes it:\n%s", stderr.String())
+	}
+}
+
+// A 422 carrying GitHub's rate limit says nothing about what the installation holds: it is
+// GitHub's trouble (TransientError), so the request is not asked again without actions, no lease
+// is served and nothing is said about a missing grant. GitHub documents its limits on a 429 and a
+// 403, so the three ways a 422 can still carry one are each checked.
+func TestARateLimited422DoesNotDropActions(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		headers map[string]string
+		body    string
+	}{
+		{"the remaining header", map[string]string{"X-RateLimit-Remaining": "0"}, `{"message":"Validation failed"}`},
+		{"a retry-after", map[string]string{"Retry-After": "60"}, `{"message":"Validation failed"}`},
+		{"the secondary limit in the body", nil, `{"message":"You have exceeded a secondary rate limit."}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, privatePEM := testAppKey(t)
+			now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+			var mu sync.Mutex
+			exchanges := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/app/installations":
+					fmt.Fprint(w, `[{"id":77,"account":{"login":"acme"}}]`)
+				case strings.HasSuffix(r.URL.Path, "/access_tokens"):
+					mu.Lock()
+					exchanges++
+					mu.Unlock()
+					for name, value := range tc.headers {
+						w.Header().Set(name, value)
+					}
+					w.WriteHeader(http.StatusUnprocessableEntity)
+					fmt.Fprint(w, tc.body)
+				default:
+					t.Errorf("unexpected GitHub path %s", r.URL.Path)
+				}
+			}))
+			defer server.Close()
+
+			var stderr bytes.Buffer
+			tokens := New(config.GitHubApps{Review: config.GitHubApp{AppID: "67890", PrivateKey: privatePEM}},
+				Options{BaseURL: server.URL, HTTPClient: server.Client(), Now: func() time.Time { return now }, Stderr: &stderr})
+			defer tokens.Close()
+
+			lease, err := tokens.ReadToken(context.Background(), Review, "acme")
+			var trouble *TransientError
+			if lease.Token != "" || !errors.As(err, &trouble) {
+				t.Fatalf("read token under a rate limit = %q, %v; want no lease and a TransientError", lease.Token, err)
+			}
+			if errors.Is(err, errPermissionsRefused) {
+				t.Errorf("a rate limit = %v, want it never read as the permissions the installation holds", err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if exchanges != 1 {
+				t.Errorf("%d exchanges, want the one request: a rate limit is not asked again without actions", exchanges)
+			}
+			if stderr.Len() != 0 {
+				t.Errorf("stderr = %q, want nothing said of a grant the answer says nothing about", stderr.String())
+			}
+		})
 	}
 }
 

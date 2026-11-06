@@ -108,10 +108,11 @@ type GitHub interface {
 	Redeliver(ctx context.Context, deliveryID int64) error
 }
 
-// OpenState opens the sweep's KV bucket, creating it on first use with replicas copies, the
-// deployment's ENVOY_NATS_REPLICAS, and raising a bucket found with fewer (bus.EnsureKeyValue).
-func OpenState(js nats.JetStreamContext, replicas int) (bus.KeyValue, error) {
-	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: bus.WebhookRedeliveryBucket, TTL: retention, Storage: nats.FileStorage, Replicas: replicas})
+// OpenState opens the sweep's KV bucket on conn, through js, creating it on first use with
+// replicas copies, the deployment's ENVOY_NATS_REPLICAS, and raising a bucket found with fewer
+// (bus.EnsureKeyValue).
+func OpenState(conn *nats.Conn, js nats.JetStreamContext, replicas int) (bus.KeyValue, error) {
+	kv, err := bus.EnsureKeyValue(conn, js, &nats.KeyValueConfig{Bucket: bus.WebhookRedeliveryBucket, TTL: retention, Storage: nats.FileStorage, Replicas: replicas})
 	if err != nil {
 		return bus.KeyValue{}, fmt.Errorf("open %s KV bucket: %w", bus.WebhookRedeliveryBucket, err)
 	}
@@ -271,9 +272,16 @@ var jittered = duty.Jittered
 // the jitter ever makes a process skip its own next sweep. leases is required, as it is of every
 // leased loop (cmd/dispatch exits at boot if the lease pool cannot be opened).
 func (s *Sweeper) Run(ctx context.Context, interval time.Duration, leases duty.Leases) {
+	s.run(ctx, interval, leases, duty.Exclusive)
+}
+
+// run is Run with the lease gate handed in (duty.ExclusiveFunc), so the schedule above - the sweep
+// at start, and the jittered wait between one sweep and the next - can be tested on a fake clock
+// against a lease of the test's own, with no Postgres the bubble's clock would have to wait on.
+func (s *Sweeper) run(ctx context.Context, interval time.Duration, leases duty.Leases, exclusive duty.ExclusiveFunc) {
 	due := time.Now()
 	for {
-		duty.Exclusive(ctx, leases, webhookRedeliveryLease, due, interval, s.sweepAndReport)
+		exclusive(ctx, leases, webhookRedeliveryLease, due, interval, s.sweepAndReport)
 		timer := time.NewTimer(jittered(interval))
 		select {
 		case <-ctx.Done():

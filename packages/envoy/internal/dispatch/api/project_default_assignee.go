@@ -10,11 +10,12 @@ import (
 
 // A project's default assignee is the last step of an issue create's assignee chain
 // (defaultAssignee, issue_assignee.go): it names a person by lowercase email, so both routes
-// below are human-only, the gate GET /api/v1/users uses. That is deliberate and not an
-// oversight to be tidied away: no agent command, flag or route gains the power to set or clear
-// a project's default, however the architecture-source routes beside it are shaped. An agent
-// session acts for a machine; choosing which person a project's unowned work lands on is a
-// human's call, and the only agent-visible effect is the assignee a create comes back with.
+// below need the `person` scope, the gate GET /api/v1/users uses. That is deliberate and not an
+// oversight to be tidied away: no credential the deployment configured — the shared token, a
+// pod's — gains the power to set or clear a project's default, however the architecture-source
+// routes beside it are shaped. Such a credential acts for a machine and for no person; choosing
+// which person a project's unowned work lands on is a person's call, which their own credential
+// makes, and the only agent-visible effect is the assignee a create comes back with.
 
 type projectDefaultAssignee struct {
 	Project  string  `json:"project"`
@@ -25,7 +26,7 @@ type projectDefaultAssignee struct {
 // Settings page's one read. A project with no default is left out, and no default anywhere is
 // an empty list, never null.
 func (s *server) listProjectDefaultAssignees(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHuman(w, r); !ok {
+	if _, ok := s.actingPerson(w, r); !ok {
 		return
 	}
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `
@@ -51,13 +52,13 @@ func (s *server) listProjectDefaultAssignees(w http.ResponseWriter, r *http.Requ
 }
 
 // putProjectDefaultAssignee sets a project's default assignee, or clears it with an explicit
-// null. Human-only, as the file's head says. A body without an assignee is refused (400
-// INVALID_PROJECT), never read as a null, so a PUT of `{}` cannot wipe a default. A login that
-// is not a person who has signed in is refused here (400 ASSIGNEE_NOT_ALLOWED) so a typo never
-// becomes a stored default; a default that goes stale later is not refused but ignored, by the
-// create chain.
+// null. It needs the `person` scope, as the file's head says. A body without an assignee is
+// refused (400 INVALID_PROJECT), never read as a null, so a PUT of `{}` cannot wipe a default. A
+// login that is not a person who has signed in is refused here (400 ASSIGNEE_NOT_ALLOWED) so a
+// typo never becomes a stored default; a default that goes stale later is not refused but
+// ignored, by the create chain.
 func (s *server) putProjectDefaultAssignee(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}

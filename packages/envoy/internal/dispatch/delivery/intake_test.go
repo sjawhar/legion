@@ -57,7 +57,7 @@ func deliveryTestPool(t *testing.T) (*store.Pool, context.Context) {
 	// is the server's own and outlives the run, where storetest's clones do not, so a reconcile
 	// pass an earlier run recorded inside ReconcileInterval would make this run's pass skip for
 	// a period it did not serve (duty.Exclusive).
-	for _, table := range []string{"delivery_run_jobs", "delivery_runs", "delivery_pull_requests", "delivery_reconcile_progress", "delivery_settings", "duty_passes"} {
+	for _, table := range []string{"delivery_run_jobs", "delivery_runs", "delivery_pull_requests", "pull_request_heads", "default_branch_commits", "delivery_reconcile_progress", "delivery_settings", "duty_passes"} {
 		if _, err := pool.Exec(ctx, "delete from "+table); err != nil {
 			t.Fatalf("truncate %s: %v", table, err)
 		}

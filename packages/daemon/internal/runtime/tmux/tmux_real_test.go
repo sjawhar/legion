@@ -403,6 +403,14 @@ func (c *stubConn) AdoptWorkingCopy(context.Context, runtime.GitIdentity, time.D
 	return errors.New("the stream stub does not adopt working copies")
 }
 
+func (c *stubConn) BundleWorkspace(context.Context, string, time.Duration) (runtime.WorkspaceBundle, error) {
+	return runtime.WorkspaceBundle{}, errors.New("the stream stub bundles no workspace")
+}
+
+func (c *stubConn) RescueUnpushed(context.Context, runtime.RescueRequest) ([]runtime.WorkspaceRescue, error) {
+	return nil, errors.New("the stream stub does not run push checks")
+}
+
 func (c *stubConn) AgentSecretsEnrollment(context.Context, string) error {
 	return errors.New("the stream stub does not enroll agent secrets")
 }

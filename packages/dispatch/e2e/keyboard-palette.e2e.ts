@@ -1,5 +1,8 @@
+import { setTimeout as sleep } from "node:timers/promises";
+
 import { expect, type Page, test } from "@playwright/test";
 
+import { QUERY_RETRY_DELAY_MS } from "../web/src/api/query-client";
 import { openAgents, seedAgents, shownAgentRows } from "./agents";
 import {
   createAsk,
@@ -180,6 +183,9 @@ test("a failed palette search keeps its Retry action", async ({ browser }) => {
         });
       }
     );
+    // A failed read is retried twice, `QUERY_RETRY_DELAY_MS` apart, before the alert: page
+    // timers, which the page's own clock fires.
+    await page.clock.install();
     await openIssue(page, issue.key, "Failed palette search");
     await page.keyboard.press("Control+k");
     const dialog = page.getByRole("dialog", { name: "Search" });
@@ -187,6 +193,16 @@ test("a failed palette search keeps its Retry action", async ({ browser }) => {
     await input.fill("astrolabe");
 
     const failure = dialog.getByRole("alert");
+    // Each refusal arms the next retry, so the jump repeats until the palette gives the read up.
+    await expect
+      .poll(
+        async () => {
+          await page.clock.runFor(QUERY_RETRY_DELAY_MS + 50);
+          return failure.count();
+        },
+        { intervals: [50, 50, 100, 200, 500] }
+      )
+      .toBe(1);
     await expect(failure).toHaveText(/Search failed\./);
     const retry = failure.getByRole("button", { name: "Retry" });
     await expect(retry).toBeVisible();
@@ -1029,12 +1045,14 @@ test("a row whose control has gone since the palette opened does nothing", async
       page.locator('[data-testid="issue-header"] button[aria-label="Reopen issue"]')
     ).toHaveCount(0);
 
-    // The row checks its control again when it runs, so it writes nothing.
+    // The row checks its control again when it runs, so it writes nothing. The palette closing
+    // is the run's own signal - a PATCH would have left with the same task - and the read below
+    // is a round trip past it; the margin covers the request's dispatch alone.
     await reopen.click();
     await expect(dialog).toHaveCount(0);
-    await page.waitForTimeout(500);
-    expect(patches).toBe(0);
+    await sleep(100);
     expect((await getIssue(issue.key)).status).toBe("in_progress");
+    expect(patches).toBe(0);
   } finally {
     await context.close();
   }

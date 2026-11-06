@@ -21,6 +21,8 @@
 // closed-source check. Before the change the editor draws with upstream's view, synchronously on
 // the page's thread, its sheet and Google Fonts `@import` in the page, so the style,
 // hostile-document, worker, time-limit, focus and no-worker rows fail.
+import { setTimeout as sleep } from "node:timers/promises";
+
 import {
   type BrowserContext,
   expect,
@@ -36,6 +38,7 @@ import {
   createIssue,
   createMessage,
   createProject,
+  editComment,
   getArtifactText,
 } from "./api";
 import { blockId, documentEditor, markSpan, openSpec, placeCaret } from "./editor";
@@ -102,13 +105,23 @@ async function openCommentThread(
 ): Promise<Locator> {
   const turn = conversationTurns(page).locator(`:scope > li[data-turn="comment:${rootId}"]`);
   await expect(turn).toContainText(lead);
-  await turn.getByRole("button", { exact: true, name: "Expand thread" }).click();
+  const expand = turn.getByRole("button", { exact: true, name: "Expand thread" });
+  const opened =
+    testInfo.project.name === "iphone"
+      ? page.getByRole("dialog", { name: "Thread" })
+      : turn.getByRole("button", { exact: true, name: "Collapse thread" });
+  // Retried for the reason the reader's click on `Mermaid source` is below: the page moves
+  // while the turn's diagrams draw, so a click can land on whatever slid under the pointer and
+  // the thread never opens. Measured here on firefox, where the expand click was lost and the
+  // row waited out its budget for a `Collapse thread` that never appeared. The expand button is
+  // gone once the thread is open, so the retry clicks only while it is still there.
+  await expect(async () => {
+    if (await expand.isVisible()) await expand.click();
+    await expect(opened).toBeVisible({ timeout: 1_000 });
+  }).toPass({ timeout: 5_000 });
   if (testInfo.project.name === "iphone") {
-    const thread = page.getByRole("dialog", { name: "Thread" });
-    await expect(thread).toBeVisible();
-    return thread.locator(`li[data-turn="comment:${rootId}"]`);
+    return opened.locator(`li[data-turn="comment:${rootId}"]`);
   }
-  await expect(turn.getByRole("button", { exact: true, name: "Collapse thread" })).toBeVisible();
   return turn;
 }
 
@@ -124,8 +137,26 @@ async function expectDrawnDiagram(card: Locator, labels: readonly string[]): Pro
   // Mounted, closed inside the disclosure: toBeHidden alone also passes on no match at all.
   await expect(source).toHaveCount(1);
   await expect(source).toBeHidden();
-  await card.getByText("Mermaid source", { exact: true }).click();
-  await expect(source).toBeVisible();
+  const disclosure = card.getByText("Mermaid source", { exact: true });
+  // The reader's click is retried until the disclosure opens, because a click can be lost. An
+  // instrumented run of these rows caught it: a document-level `click` listener recorded
+  // `click ARTICLE connected=true`, so the click landed on the `<article>` behind the summary -
+  // the page moved between Playwright's actionability check on the summary and the click's own
+  // dispatch - and no `toggle` fired and no figure was redrawn. Nothing had opened the
+  // disclosure, so the row waited out its whole expect timeout; it failed that way twice in 100
+  // repeats on firefox in a two-lane run of this pod. A click already taken leaves the source
+  // visible, so the retry clicks only while it is still hidden rather than closing what the
+  // first click opened.
+  //
+  // A retried click is no proof of the product's own rule, that a source the reader opened is
+  // drawn open again after a repaint: this helper only gets the reader's click to land. That
+  // rule is proven by the row `a mermaid source a reader opened is open again when the comment
+  // is edited` and by the module's own test file,
+  // `web/src/features/refs/mermaid-diagrams.test.tsx`.
+  await expect(async () => {
+    if (await source.isHidden()) await disclosure.click();
+    await expect(source).toBeVisible({ timeout: 1_000 });
+  }).toPass({ timeout: 5_000 });
 }
 
 /** Starts recording `page`'s console errors and returns the check both rows whose renderer never
@@ -155,10 +186,12 @@ function watchSourceAsCode(page: Page): (source: string) => Promise<void> {
   };
 }
 
-/** A request that never happens can only be shown by waiting: this long after the diagram shows
- *  is far longer than an inserted element or sheet takes to start its fetch, so a request list
- *  read after it holds every fetch the drawing caused. */
-const REQUEST_SETTLE_MS = 1_000;
+/** The margin an absence of a request is read after, taken in Node so the page's own clock
+ *  cannot skip it. Each row that reads one first forces the drawing into the DOM and walks the
+ *  shadow root the markup would fetch from, which is the style resolution that starts a
+ *  stylesheet's `@import`, an `<image>`'s load and a fetching `url(…)` paint; this margin covers
+ *  a fetch begun a task or two after that pass rather than inside it. */
+const REQUEST_MARGIN_MS = 250;
 
 /** Records every request `context` makes to Google Fonts' two hosts and answers it with an empty
  *  stylesheet, so a run needs no outbound network. */
@@ -272,10 +305,12 @@ async function expectNothingHostile(
   const diagram = diagramIn(scope);
   await expect(diagram).toBeVisible();
   await expect(diagram).toContainText("Hostile label");
-  await page.waitForTimeout(REQUEST_SETTLE_MS);
+  // The shadow-root walk is read first: it is the positive signal that the drawing is installed,
+  // and walking it forces the style pass each hostile carrier would fetch from.
+  expect(await hostileLeftovers(preview)).toEqual([]);
+  await sleep(REQUEST_MARGIN_MS);
   expect(await page.evaluate(() => window.__hostile)).toEqual([]);
   expect(requested).toEqual([]);
-  expect(await hostileLeftovers(preview)).toEqual([]);
 }
 
 test.beforeEach(async () => {
@@ -401,11 +436,83 @@ test("a mermaid source the renderer refuses shows the reason and its source, and
   }
 });
 
+// SLOW(>=2s): three edits reach the page over the event feed, each waited out at the page's own
+// once-a-second refresh, and two real worker draws - the diagram the reader opens and the one
+// an edit puts in its place. The clock cannot spend any of it, for the reason below.
+// A body is painted whole, so an edit landing under a reader builds its source disclosure anew.
+// What that disclosure shows is the reader's own: a source they opened is open again on every
+// later paint of it, with no second click, and a source they never opened - the one an edit
+// draws in its place - comes back closed. A refusal draws open whatever came before it. Against
+// a build of the commit before the change, the first repaint below draws the opened source
+// closed again and the row fails there. No clock runs here: a fast-forward before a diagram has
+// drawn would spend the 5 s render limit and refuse the source, which is how this file's
+// time-limit rows work on purpose. Every comment the row edits is a person's: an agent session's
+// credential is refused on an edit.
+test("a mermaid source a reader opened is open again when the comment is edited, and an edited diagram draws closed @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Reopened source" });
+  const drawn = await createComment(issue.key, {
+    body: flowchart("Reading this:", "Opened", "Kept"),
+  });
+  const brokenFence = "```mermaid\ngraph TD\n  A -->\n```\n";
+  const refused = await createComment(issue.key, { body: `Broken:\n\n${brokenFence}` });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const card = await openCommentThread(page, testInfo, drawn.id, "Reading this:");
+    // Both halves of the control, ending in the reader's one click: the source is open.
+    await expectDrawnDiagram(card, ["Opened", "Kept"]);
+    const source = card.getByText("graph TD");
+
+    // The edit reaches the page over the event feed, whose refetch the page holds to one a
+    // second (`MIN_REFETCH_INTERVAL_MS`, `web/src/api/query-refresh.ts`), so the new lead in the
+    // card is the repaint. The diagram's source is byte for byte the one the reader opened, and
+    // it is theirs again without another click.
+    await editComment(drawn.id, { body: flowchart("Reading this, reworded:", "Opened", "Kept") });
+    await expect(card).toContainText("Reading this, reworded:");
+    await expect(diagramIn(card)).toBeVisible();
+    await expect(source).toBeVisible();
+
+    // An edit of the source itself draws a diagram the reader never opened, so it draws closed.
+    await editComment(drawn.id, { body: flowchart("Rewired:", "Replaced", "Drawn") });
+    await expect(card).toContainText("Rewired:");
+    await expect(diagramIn(card)).toContainText("Replaced");
+    await expect(source).toHaveCount(1);
+    await expect(source).toBeHidden();
+
+    // On a phone the open thread is a dialog over the Conversation, so the reader goes back to
+    // it before opening the refused comment's thread.
+    if (testInfo.project.name === "iphone") {
+      const phoneThread = page.getByRole("dialog", { name: "Thread" });
+      await phoneThread.getByRole("button", { exact: true, name: "Back" }).click();
+      await expect(phoneThread).toHaveCount(0);
+    }
+
+    // A source the renderer refuses is readable at once on every paint of it, edit or no edit.
+    const broken = await openCommentThread(page, testInfo, refused.id, "Broken:");
+    const brokenSource = broken.locator("pre code").filter({ hasText: "A -->" });
+    await expect(brokenSource).toBeVisible();
+    await editComment(refused.id, { body: `Broken, still:\n\n${brokenFence}` });
+    await expect(broken).toContainText("Broken, still:");
+    await expect(brokenSource).toBeVisible();
+    await expect(diagramIn(broken)).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
 // The worker holds the source (`holdWorkerSource`), so the shipped 5 s limit refuses even this
 // two-node flowchart on every runner, and the row proves what the limit does, not how fast a
 // machine draws: the page hands the source to the worker chunk, the page's thread keeps answering
 // while the worker is busy, and the limit refuses it with the reason and the source shown. A page
-// drawing on its own thread never loads the chunk and fails at the hold assertion.
+// drawing on its own thread never loads the chunk and fails at the hold assertion. The limit is a
+// page timer, so the clock fires it rather than the row waiting 5 s for it; the responsiveness
+// samples run first, on the clock at real speed (`install` alone does not pause it), since an
+// advanced clock would make a sample read its deadline for free.
 test("a diagram too large to draw in time shows the reason, and the page keeps responding @phone", async ({
   browser,
 }, testInfo) => {
@@ -417,6 +524,7 @@ test("a diagram too large to draw in time shows the reason, and the page keeps r
   try {
     const page = await alice.newPage();
     const holds = await holdWorkerSource(page);
+    await page.clock.install();
     await page.goto(`/issues/${issue.key}/conversation`);
     const card = await openCommentThread(page, testInfo, comment.id, "Large:");
     await expect(card).toContainText("Large:");
@@ -426,6 +534,7 @@ test("a diagram too large to draw in time shows the reason, and the page keeps r
     await expectHeldAndResponsive(page, holds);
     // The samples ran while the worker still held the source, before the time limit refused it.
     await expect(refusal).toHaveCount(0);
+    await page.clock.fastForward(5_000);
     await expect(refusal).toHaveText(
       "Unable to render Mermaid diagram: it did not finish within 5 seconds"
     );
@@ -550,10 +659,9 @@ test("a document's mermaid diagram draws, styles nothing outside it, and fetches
     });
     expect(pageRules).toEqual([]);
 
-    await page.waitForTimeout(REQUEST_SETTLE_MS);
-    expect(googleFonts).toEqual([]);
-
-    // The diagram's own sheet survives, inside its shadow root, without its `@import`.
+    // The diagram's own sheet survives, inside its shadow root, without its `@import`. Reading it
+    // is also the positive signal the absence below is taken after: the sheet whose `@import`
+    // would fetch the font is installed and has been resolved.
     const ownStyles = await documentEditor(page)
       .locator(".proof-mermaid-preview")
       .evaluate((preview) =>
@@ -564,6 +672,9 @@ test("a document's mermaid diagram draws, styles nothing outside it, and fetches
     expect(ownStyles, "the preview holds a shadow root").not.toBeNull();
     expect(ownStyles).toContainEqual(expect.stringContaining("--_text"));
     expect(ownStyles?.filter((style) => style?.includes("@import"))).toEqual([]);
+
+    await sleep(REQUEST_MARGIN_MS);
+    expect(googleFonts).toEqual([]);
   } finally {
     await alice.close();
   }
@@ -614,6 +725,8 @@ test("hostile diagram markup in a document runs nothing and fetches nothing @pho
   }
 });
 
+// SLOW(>=2s): two real worker draws - the open and the redraw after the edit - and the document
+// read that shows the edit was the only change the document took. There is no wait to shorten.
 test("a document's mermaid diagram redraws as it is edited, and a click on it changes nothing @phone", async ({
   browser,
 }) => {
@@ -651,6 +764,8 @@ test("a document's mermaid diagram redraws as it is edited, and a click on it ch
   }
 });
 
+// SLOW(>=2s): one real draw, the typing, and the redraw the page's own debounce runs after it;
+// in WebKit that is 2.3 s, and the row waits out no part of the debounce itself.
 test("an edited document diagram redraws once typing pauses, and its last drawing stays until then @phone", async ({
   browser,
 }) => {
@@ -703,9 +818,10 @@ test("an edited document diagram redraws once typing pauses, and its last drawin
   }
 });
 
-// The document twin of the comment row above, on the same hold (`holdWorkerSource`): the editor
-// hands the source to the worker chunk, the page keeps answering, and the shipped limit refuses it
-// with the reason above its source. An editor drawing on the page's thread fails at the hold.
+// The document twin of the comment row above, on the same hold (`holdWorkerSource`) and the same
+// clock: the editor hands the source to the worker chunk, the page keeps answering while the
+// clock runs at real speed, and the shipped limit, fired by the fast-forward, refuses it with the
+// reason above its source. An editor drawing on the page's thread fails at the hold.
 test("a document diagram too large to draw in time shows the reason and its source, and the page keeps responding @phone", async ({
   browser,
 }) => {
@@ -720,12 +836,14 @@ test("a document diagram too large to draw in time shows the reason and its sour
   try {
     const page = await alice.newPage();
     const holds = await holdWorkerSource(page);
+    await page.clock.install();
     await page.goto(`/issues/${issue.key}/spec`);
     await expect(documentEditor(page)).toContainText("Large document:");
     const status = documentEditor(page).locator(".proof-mermaid-status");
     await expectHeldAndResponsive(page, holds);
     // The samples ran while the worker still held the source, before the time limit refused it.
     await expect(status).toBeHidden();
+    await page.clock.fastForward(5_000);
     await expect(status).toHaveText(
       "Unable to render Mermaid diagram: it did not finish within 5 seconds"
     );
@@ -739,6 +857,8 @@ test("a document diagram too large to draw in time shows the reason and its sour
   }
 });
 
+// SLOW(>=2s): one real draw of the 21-node chain, which must be taller than the viewport for the
+// link's landing to be worth proving; the worker draws it for real and no timer is waited on.
 test("a block link below a diagram lands on its block once the diagram draws @phone", async ({
   browser,
 }) => {
@@ -769,6 +889,13 @@ test("a block link below a diagram lands on its block once the diagram draws @ph
   }
 });
 
+/** The margin a pull back is read after, in Node: long enough for a smooth scroll started by a
+ *  focus re-run to have moved the offset the sampler before it read. */
+const PULL_BACK_MARGIN_MS = 250;
+
+// SLOW(>=2s): one real draw of the 21-node chain, which must be taller than the viewport for the
+// pull back to be worth proving; the worker draws it for real and the two reads of the offset
+// are its own stillness sampler, not a wait.
 test("a reader who scrolls after a block link lands is not pulled back once the diagram draws @phone", async ({
   browser,
 }) => {
@@ -804,9 +931,12 @@ test("a reader who scrolls after a block link lands is not pulled back once the 
     expect(scrolled).toBeGreaterThan(0);
     await page.evaluate(() => window.__releaseMermaid?.());
     await expect(diagram).toBeVisible();
-    // A pull back that never happens can only be shown by waiting: the focus re-run follows the
-    // drawn diagram within a frame or two, and 1500 ms also covers its smooth scroll.
-    await page.waitForTimeout(1_500);
+    // A pull back that never happens is shown by the offset holding still: the focus re-run
+    // follows the drawn diagram from the draw's own effect, within a frame or two, so a pull back
+    // either moves the offset the sampler reads or starts a smooth scroll inside the Node-side
+    // margin after it.
+    await settledScrollTop(page);
+    await sleep(PULL_BACK_MARGIN_MS);
     expect(await page.evaluate(() => document.scrollingElement?.scrollTop)).toBe(scrolled);
     await expect(paragraph).not.toBeInViewport();
   } finally {
@@ -814,6 +944,8 @@ test("a reader who scrolls after a block link lands is not pulled back once the 
   }
 });
 
+// SLOW(>=2s): one real draw of the 21-node chain, which must be taller than the viewport for the
+// mark's landing to be worth proving; the worker draws it for real and no timer is waited on.
 test("a past version's highlighted mark lands on its block once a diagram above it draws @phone", async ({
   browser,
 }) => {
@@ -853,6 +985,8 @@ test("a past version's highlighted mark lands on its block once a diagram above 
   }
 });
 
+// SLOW(>=2s): one real draw of the 21-node chain, which must be taller than the viewport for the
+// link's landing to be worth proving; the worker draws it for real and no timer is waited on.
 test("a comment link below a diagram lands on its quote once the diagram draws @phone", async ({
   browser,
 }) => {

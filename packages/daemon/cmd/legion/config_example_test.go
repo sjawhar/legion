@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -25,7 +26,7 @@ func TestShippedLegionYAMLExamplePassesCheckConfig(t *testing.T) {
 // it points to, passes the same check, and names the three roles' overlays.
 func TestShippedLegionYAMLExamplesRoleConfigFilesPassCheckConfig(t *testing.T) {
 	config := checkShippedExample(t, func(example string) string {
-		for _, line := range []string{
+		return uncommentExample(t, example,
 			"# role_config_files:",
 			"#   implementer: [/etc/legion-operator-roles/fallback.yml]",
 			"#   tester: [/etc/legion-operator-roles/fallback.yml]",
@@ -33,15 +34,7 @@ func TestShippedLegionYAMLExamplesRoleConfigFilesPassCheckConfig(t *testing.T) {
 			"        # - name: operator-roles",
 			"        #   config_map: {name: legion-operator-roles}",
 			"        # - {volume: operator-roles, mount_path: /etc/legion-operator-roles}",
-		} {
-			at := strings.Index(example, "\n"+line)
-			if at < 0 {
-				t.Fatalf("the example has no line starting %q", line)
-			}
-			uncommented := strings.Replace(line, "# ", "", 1)
-			example = example[:at+1] + uncommented + example[at+1+len(line):]
-		}
-		return example
+		)
 	})
 	cfg, err := configpkg.LoadForValidation(config, nil)
 	if err != nil {
@@ -50,6 +43,56 @@ func TestShippedLegionYAMLExamplesRoleConfigFilesPassCheckConfig(t *testing.T) {
 	if len(cfg.RoleConfigFiles) != 3 {
 		t.Errorf("RoleConfigFiles = %v, want the implementer's, the tester's and the merger's", cfg.RoleConfigFiles)
 	}
+}
+
+// The example's commented memory block, uncommented with the operator-memory volume and mount it
+// points to, passes the same check, and names the project's mode and overlay. The block's
+// `instructions` stays commented: boot reads that file from the daemon's own disk, and the example
+// names a path only an operator has.
+func TestShippedLegionYAMLExamplesMemoryPassesCheckConfig(t *testing.T) {
+	config := checkShippedExample(t, func(example string) string {
+		example = uncommentExample(t, example,
+			"  # WIDGETS:",
+			"  #   memory:",
+			"  #     mode: on",
+			"  #     config_files: [/etc/legion-memory/memory.yml]",
+			"        # - name: operator-memory",
+			"        #   config_map: {name: legion-operator-memory}",
+			"        # - {volume: operator-memory, mount_path: /etc/legion-memory}",
+		)
+		// The example's two forms of the project entry are alternatives: the empty one it ships
+		// active, and the commented one that carries the optional keys. An operator turning memory
+		// on moves to the second, so this comments the first out, after the uncommenting above, to
+		// which a commented `WIDGETS: {}` would otherwise be the first `# WIDGETS:` line.
+		return strings.Replace(example, "\n  WIDGETS: {}", "\n  # WIDGETS: {}", 1)
+	})
+	cfg, err := configpkg.LoadForValidation(config, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memory := cfg.Projects["WIDGETS"].Memory
+	if memory.Mode != configpkg.MemoryOn || !slices.Equal(memory.ConfigFiles, []string{"/etc/legion-memory/memory.yml"}) {
+		t.Errorf("the WIDGETS memory block = %+v, want mode on with the operator-memory overlay alone", memory)
+	}
+	if memory.InstructionsPath != "" {
+		t.Errorf("the WIDGETS memory instructions = %q, want none: the example leaves that key commented", memory.InstructionsPath)
+	}
+}
+
+// uncommentExample is the example with each named line uncommented, each line the start of one of
+// the example's own commented lines: the file comments a block out line by line, so turning it on
+// is one `# ` removed per line, and a line the example does not hold is the test's own mistake.
+func uncommentExample(t *testing.T, example string, lines ...string) string {
+	t.Helper()
+	for _, line := range lines {
+		at := strings.Index(example, "\n"+line)
+		if at < 0 {
+			t.Fatalf("the example has no line starting %q", line)
+		}
+		uncommented := strings.Replace(line, "# ", "", 1)
+		example = example[:at+1] + uncommented + example[at+1+len(line):]
+	}
+	return example
 }
 
 // checkShippedExample runs `legion start --check-config` on the shipped example as edit leaves

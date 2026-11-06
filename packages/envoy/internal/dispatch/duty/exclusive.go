@@ -23,11 +23,12 @@ type Leases interface {
 // internal/dispatch/docs already fills - a document's room, a project's rank allocation, an agent's
 // artifacts and the migration runner are each a single key (the enumeration in docs/copied_asks.go,
 // at lockProjectCopies) - so a lease can never collide with one of those, whatever its name hashes
-// to. Within the two-key space the only other namespaces are the copy locks'
-// (docs.copiedAsksLockNamespace, "COPY") and the test hooks' (the api package's
-// testHookLockNamespace, "HOOK", taken only under DISPATCH_TEST_HOOKS), each a first key of its
-// own, so a lease's second key, its name's hashtext, separates the leases from each other and from
-// nothing else.
+// to. Within the two-key space the other namespaces are the copy locks'
+// (docs.copiedAsksLockNamespace, "COPY"), the test hooks' (the api package's
+// testHookLockNamespace, "HOOK", taken only under DISPATCH_TEST_HOOKS), a conditional edit's
+// admission's (docs.conditionalEditQueueLockNamespace) and the issue dependencies' (api's
+// lockProjectIssueDependencies), each a first key of its own, so a lease's second key, its name's
+// hashtext, separates the leases from each other and from nothing else.
 const leaseNamespace int32 = 0x4C4F4F50
 
 // takeLease tries for a lease without queueing behind its holder, and freeLease gives it back. Both
@@ -142,6 +143,14 @@ const leaseCallTimeout = 5 * time.Second
 func leaseCall() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), leaseCallTimeout)
 }
+
+// ExclusiveFunc is Exclusive's signature. A loop that gates its passes on a lease takes one of
+// these and is handed Exclusive itself (RunWoken, the webhook redelivery sweep's Run), and a test
+// of that loop's schedule hands it a lease of its own making instead: the schedule is then a loop,
+// a fake clock and nothing else, which is what lets it run inside a synctest bubble, where a
+// Postgres connection may not go (a bubbled goroutine blocked on a socket never blocks durably,
+// so the clock never advances past the statement it waits on).
+type ExclusiveFunc func(ctx context.Context, leases Leases, name string, due time.Time, period time.Duration, pass func(context.Context)) bool
 
 // Exclusive runs pass exactly when this process takes the lease named name and that loop's period
 // is not already served, and reports whether it ran. It is the once-per-period guard a periodic

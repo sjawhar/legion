@@ -1,5 +1,0 @@
-kind: Changed
-body: The shared GitHub push golden (`fixtures/github-envelopes/push.json`) no longer carries `changed_paths`, `changed_paths_truncated` or `forced`, which the Envoy listener has stopped sending.
-time: 2026-11-02T09:45:02.164969888Z
-custom:
-    Issue: pr2675

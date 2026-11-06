@@ -68,7 +68,7 @@ func TestThePagePrintsTheRecordAfterTheBrokersOwnSignIn(t *testing.T) {
 		"Session (as the enrollment stated it) enrollment-session-1",
 		"Session the request names (its own unsigned claim, not verified) claimed-session-2",
 		"Reason deploy the billing service",
-		"Lasts once approved until the session ends",
+		"Lasts once approved for 12h0m0s",
 		"Approver " + ada,
 		"State pending",
 		"SECOND_SECRET",
@@ -115,7 +115,7 @@ func TestThePagePrintsTheRecordAfterTheBrokersOwnSignIn(t *testing.T) {
 		sentences []string
 	}{
 		{first, []string{
-			"Approve gives this session the value of these secrets until the session ends.",
+			"Approve gives this session the value of these secrets for 12h0m0s.",
 			"Deny refuses them, and so does leaving the request until it expires.",
 		}},
 		{second, []string{

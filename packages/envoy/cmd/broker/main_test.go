@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -56,14 +57,18 @@ func signInClientSecretFile(t *testing.T) string {
 	return path
 }
 
+// testMachineLoginURL is the page a person types a machine login's code into, as every broker
+// these tests start that serves the device grant names it (BROKER_MACHINE_LOGIN_URL). It is not
+// in productionEnv: the setting is optional, and the rows that need the device grant ask for it
+// by name, so the broker every other row starts is the one that serves none.
+const testMachineLoginURL = "https://dispatch.example/credentials/machine"
+
 // productionEnv is the configuration every broker needs besides its addresses and database: the
-// namespace it serves, the key every secret there is on, the page a machine login's code is
-// typed on, and the four settings a person signs in to its approval page with, which it refuses
-// to start without.
+// namespace it serves, the key every secret there is on, and the four settings a person signs
+// in to its approval page with, which it refuses to start without.
 func productionEnv(t *testing.T) []string {
 	t.Helper()
 	return []string{
-		"BROKER_MACHINE_LOGIN_URL=https://dispatch.example/credentials/machine",
 		"BROKER_SECRETS_PREFIX=" + testSecretsPrefix,
 		"BROKER_SECRETS_KMS_KEY_ARN=" + testSecretsKMSKeyARN,
 		"BROKER_SIGNIN_ISSUER=" + testSignInIssuer,
@@ -196,7 +201,7 @@ func buildBroker(t *testing.T) string {
 	t.Helper()
 	binPath := filepath.Join(t.TempDir(), "broker")
 	build := exec.Command("go", "build", "-o", binPath, ".")
-	build.Env = append(os.Environ(), "GOTOOLCHAIN=go1.27.1")
+	build.Env = append(os.Environ(), "GOTOOLCHAIN=go1.27.3")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("go build ./cmd/broker: %v\n%s", err, out)
 	}
@@ -446,6 +451,55 @@ func listeningIn(log string) (addr, boot string, ok bool) {
 		offset = end
 	}
 	return "", "", false
+}
+
+// rereadRateLine is what one of a broker's "broker reread rate" lines says: the replica count
+// the process counted at a beat of its serving clock, and the shared reread bucket it derived
+// from that count (api.RereadRate.SetReplicas). A process logs one at its first beat and again
+// whenever the count it sees changes, so the LAST such line is the sizing it serves at now.
+type rereadRateLine struct {
+	Replicas int
+	Every    time.Duration
+	Burst    int
+}
+
+// rereadRatePattern reads a whole "broker reread rate" line: the message and the three values
+// that follow it, in the order api.RereadRate logs them.
+//
+// It matches the message and the first key together because the warning a count above
+// api.MaxSupportedReplicas logs opens with the same words and carries replicas too, and what
+// tells the two apart is that the warning's message goes on ("above the replica count this
+// sizing supports") where this one ends. The optional quote covers both handlers a broker can
+// be started with: cmd/broker logs through slog's default handler, which writes the message
+// bare, and a TextHandler writes it as msg="broker reread rate".
+//
+// every is whatever the handler wrote a time.Duration as (2.25s), which time.ParseDuration
+// reads back.
+var rereadRatePattern = regexp.MustCompile(`broker reread rate"? replicas=(\d+) every=(\S+) burst=(\d+)`)
+
+// rereadRateIn finds the last complete "broker reread rate" line in log and answers what it
+// says. Only a line a newline closes counts, for listeningIn's own reason: this reads a buffer
+// the child's output is still being copied into, and half a line would hand back half a
+// duration — 2.2s for a broker sized at 2.25s — as the rate it derived.
+func rereadRateIn(log string) (rate rereadRateLine, ok bool) {
+	complete := strings.LastIndexByte(log, '\n') + 1
+	for offset := 0; offset < complete; {
+		end := offset + strings.IndexByte(log[offset:], '\n') + 1
+		line := log[offset:end]
+		offset = end
+		m := rereadRatePattern.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		replicas, replicasErr := strconv.Atoi(m[1])
+		every, everyErr := time.ParseDuration(m[2])
+		burst, burstErr := strconv.Atoi(m[3])
+		if replicasErr != nil || everyErr != nil || burstErr != nil {
+			continue
+		}
+		rate, ok = rereadRateLine{Replicas: replicas, Every: every, Burst: burst}, true
+	}
+	return rate, ok
 }
 
 // AwaitExit waits up to within for the broker to exit and answers what its exit was: nil for a

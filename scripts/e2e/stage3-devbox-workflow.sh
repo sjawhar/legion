@@ -30,12 +30,12 @@
 # to start otherwise (require_proof_human, lib/workflow.sh).
 # Legion's two role Apps are this deployment's own by default, and four inputs for another
 # deployment's: LEGION_E2E_IMPLEMENT_APP_ID and LEGION_E2E_REVIEW_APP_ID, each App's numeric id, and
-# LEGION_E2E_IMPLEMENT_APP_KEY_NAME and LEGION_E2E_REVIEW_APP_KEY_NAME, the secrets broker keys holding
-# their private keys (lib/github-apps.sh). `prerequisites` proves each key is its id's App before the
-# run writes anything, whichever pair it took. The App private keys are resolved through
-# private_key_command by the daemon, and by lib/app-logins.ts once to prove each App and read its bot
-# login from GitHub (read_app_logins, lib/workflow.sh); they never enter this shell, a pane, an argv,
-# or this transcript.
+# LEGION_E2E_IMPLEMENT_APP_SECRET and LEGION_E2E_REVIEW_APP_SECRET, the secrets broker github-app
+# secrets that release their installation tokens (lib/github-apps.sh). `prerequisites` proves each
+# App from its token before the run writes anything, whichever pair it took. The tokens are
+# released through each App's token_command to the daemon, and once to lib/app-logins.ts to prove
+# each App and read its bot login from GitHub (read_app_logins, lib/workflow.sh); they never enter
+# this shell, a pane, an argv, or this transcript.
 set -Eeuo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -496,7 +496,10 @@ production_audit() {
   audited=1
   sessions=$(rig_sessions_json)
   printf '%s\n' "$sessions" >"$evidence/rig-sessions.json"
-  envoy=$(curl -fsS --max-time 10 "$prod_envoy_url/v1/sessions") || { printf 'could not read %s/v1/sessions\n' "$prod_envoy_url"; return 1; }
+  # include=unresponsive, because the default answers live sessions alone (dispatch://INFRA-392):
+  # a rig session that leaked and then stopped answering is the one this audit most needs to find,
+  # and without the parameter it would be absent from the list and the audit would pass over it.
+  envoy=$(curl -fsS --max-time 10 "$prod_envoy_url/v1/sessions?include=unresponsive") || { printf 'could not read %s/v1/sessions\n' "$prod_envoy_url"; return 1; }
   envoy=$(jq -c --argjson ids "$sessions" --arg work "$work" '[.[] | select((.session_id as $s | $ids | index($s)) or ((.dir // "") | startswith($work)))]' <<<"$envoy")
   printf '%s\n' "$envoy" >"$evidence/production-envoy-rig-sessions.json"
   if [ "$envoy" != "[]" ]; then

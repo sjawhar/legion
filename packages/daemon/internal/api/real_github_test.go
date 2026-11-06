@@ -2,7 +2,6 @@ package api
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -85,20 +84,19 @@ func TestRealGitHubCredentialSurface(t *testing.T) {
 }
 
 // githubAppsLib is the live proofs' App lib, scripts/e2e/lib/github-apps.sh: the one place this
-// deployment's App pair, the checks on the four inputs that override it, and the private-key
-// command are written.
+// deployment's App pair, the checks on the four inputs that override it, and the token command
+// are written.
 var githubAppsLib = filepath.Join("..", "..", "..", "..", "scripts", "e2e", "lib", "github-apps.sh")
 
-// liveProofAppInputs is the five inputs githubAppsLib reads, each overriding one default: the two
-// Apps' ids and key names, and the key runner both key commands run.
+// liveProofAppInputs is the four inputs githubAppsLib reads, each overriding one default: the two
+// Apps' ids and the names of the secrets broker's github-app secrets that mint their tokens.
 var liveProofAppInputs = []string{
-	"LEGION_E2E_IMPLEMENT_APP_ID", "LEGION_E2E_IMPLEMENT_APP_KEY_NAME",
-	"LEGION_E2E_REVIEW_APP_ID", "LEGION_E2E_REVIEW_APP_KEY_NAME",
-	"LEGION_E2E_APP_KEY_RUNNER",
+	"LEGION_E2E_IMPLEMENT_APP_ID", "LEGION_E2E_IMPLEMENT_APP_SECRET",
+	"LEGION_E2E_REVIEW_APP_ID", "LEGION_E2E_REVIEW_APP_SECRET",
 }
 
 // liveProofApp is one role's App as githubAppsLib resolves it.
-type liveProofApp struct{ id, keyName, keyCommand string }
+type liveProofApp struct{ id, secret, tokenCommand string }
 
 // runGitHubAppsLib runs script in bash with lib as $1 and args after it, in environ less the
 // variables that make bash run other code or trace its own: an exported SHELLOPTS with xtrace
@@ -121,8 +119,8 @@ func runGitHubAppsLib(lib string, environ []string, script string, args ...strin
 }
 
 // liveProofApps resolves the implement and review Apps by running githubAppsLib's own
-// require_app_inputs and app_key_command in an environment of environ, so the gated proofs here
-// take the lib's defaults, its input checks and its key command, and no second copy of any of
+// require_app_inputs and app_token_command in an environment of environ, so the gated proofs here
+// take the lib's defaults, its input checks and its token command, and no second copy of any of
 // them exists to drift. A refusal returns the lib's message, which names the input and never its
 // value.
 func liveProofApps(environ []string) (implement, review liveProofApp, err error) {
@@ -130,18 +128,18 @@ func liveProofApps(environ []string) (implement, review liveProofApp, err error)
 }
 
 // liveProofAppsFrom is liveProofApps reading the lib at lib. It refuses anything but exactly six
-// fields, each non-empty and on one line, and a key command that failed. Stray output on a line
+// fields, each non-empty and on one line, and a token command that failed. Stray output on a line
 // of its own is refused with them; stray output with no line break joins a field, which the
-// gated path's GET /app check then refuses, since no key signs for that id.
+// gated path's check then refuses, since no secret mints for that id.
 func liveProofAppsFrom(lib string, environ []string) (implement, review liveProofApp, err error) {
 	const script = `set -euo pipefail
 fail() { printf '%s\n' "$*" >&2; exit 1; }
 source "$1"
 require_app_inputs implement review
 for role in implement review; do
-  id=${role}_app_id key=${role}_app_key_name
-  command=$(app_key_command "${!key}")
-  printf '%s\0%s\0%s\0' "${!id}" "${!key}" "$command"
+  id=${role}_app_id secret=${role}_app_secret
+  command=$(app_token_command "${!secret}")
+  printf '%s\0%s\0%s\0' "${!id}" "${!secret}" "$command"
 done`
 	stdout, stderr, runErr := runGitHubAppsLib(lib, environ, script)
 	if runErr != nil {
@@ -161,10 +159,10 @@ done`
 
 // proveLiveProofApps proves apps, the very block the gated proofs act with, against GitHub as every
 // stage proof does: it writes apps as legion.yaml's `github_apps` block to work/github-apps.yaml and
-// runs the lib's own check_github_apps on that file, so each key signs an App JWT and GitHub's
-// GET /app must answer its configured id and the write permission its role needs, which also
-// refuses the two Apps configured the other way round. It returns the lib's notes, and on a
-// refusal the lib's reason, which names the App by role and id and never the key.
+// runs the lib's own check_github_apps on that file, so each token command's token must be its
+// configured App's (GraphQL viewer, then GET /apps/<slug>) with the write permission its role
+// needs, which also refuses the two Apps configured the other way round. It returns the lib's
+// notes, and on a refusal the lib's reason, which names the App by role and id and never a token.
 func proveLiveProofApps(environ []string, work string, apps config.GitHubApps) (notes string, err error) {
 	block := "github_apps:\n"
 	for _, role := range []struct {
@@ -173,8 +171,8 @@ func proveLiveProofApps(environ []string, work string, apps config.GitHubApps) (
 	}{{"implement", apps.Implement}, {"review", apps.Review}} {
 		// A JSON string is a YAML double-quoted scalar, as the lib's own write_github_apps quotes it.
 		id, _ := json.Marshal(role.app.AppID)
-		command, _ := json.Marshal(role.app.PrivateKeyCommand)
-		block += fmt.Sprintf("  %s:\n    app_id: %s\n    private_key_command: %s\n", role.name, id, command)
+		command, _ := json.Marshal(role.app.TokenCommand)
+		block += fmt.Sprintf("  %s:\n    app_id: %s\n    token_command: %s\n", role.name, id, command)
 	}
 	if err := os.WriteFile(filepath.Join(work, "github-apps.yaml"), []byte(block), 0o600); err != nil {
 		return "", err
@@ -193,10 +191,10 @@ check_github_apps implement review`
 }
 
 // realGitHubApps is Legion's implement and review Apps: the lib's default pair, another
-// deployment's through the same four inputs the stage proofs read, each App's id
-// and the secrets broker key the `agent-secrets` client resolves to its private key, all as
-// liveProofApps reads them from the lib, and the block it returns proved against GitHub before a
-// proof acts as it.
+// deployment's through the same four inputs the stage proofs read, each App's id and the secrets
+// broker github-app secret whose release the token command prints, all as liveProofApps reads them
+// from the lib, and the block it returns proved against GitHub before a proof acts as it. The
+// daemon runs each token command itself (appauth's token mode), so no key is resolved here.
 func realGitHubApps(t *testing.T) config.GitHubApps {
 	t.Helper()
 	// go test's result cache keys a test on the variables it looks up and the files it opens, and
@@ -215,19 +213,15 @@ func realGitHubApps(t *testing.T) config.GitHubApps {
 		t.Fatal(err)
 	}
 	apps := config.GitHubApps{
-		Implement: config.GitHubApp{AppID: implement.id, PrivateKeyCommand: implement.keyCommand},
-		Review:    config.GitHubApp{AppID: review.id, PrivateKeyCommand: review.keyCommand},
+		Implement: config.GitHubApp{AppID: implement.id, TokenCommand: implement.tokenCommand},
+		Review:    config.GitHubApp{AppID: review.id, TokenCommand: review.tokenCommand},
 	}
 	notes, err := proveLiveProofApps(os.Environ(), t.TempDir(), apps)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Log(notes)
-	resolved, err := config.ResolveGitHubApps(apps)
-	if err != nil {
-		t.Fatalf("resolve the GitHub App private-key commands: %v", err)
-	}
-	return resolved
+	return apps
 }
 
 // TestLiveProofAppsReadTheLib proves liveProofApps, ungated: with no input set it answers exactly
@@ -249,7 +243,7 @@ func TestLiveProofAppsReadTheLib(t *testing.T) {
 		t.Fatalf("read the live proofs' App lib: %v", err)
 	}
 	defaults := map[string]string{}
-	for _, match := range regexp.MustCompile(`(?m)^default_((?:implement|review)_app_(?:id|key_name))=(.*)$`).FindAllStringSubmatch(string(lib), -1) {
+	for _, match := range regexp.MustCompile(`(?m)^default_((?:implement|review)_app_(?:id|secret))=(.*)$`).FindAllStringSubmatch(string(lib), -1) {
 		if _, twice := defaults[match[1]]; twice {
 			t.Fatalf("%s assigns default_%s twice", githubAppsLib, match[1])
 		}
@@ -267,58 +261,59 @@ func TestLiveProofAppsReadTheLib(t *testing.T) {
 		role string
 		app  liveProofApp
 	}{{"implement", implement}, {"review", review}} {
-		if check.app.id != defaults[check.role+"_app_id"] || check.app.keyName != defaults[check.role+"_app_key_name"] {
+		if check.app.id != defaults[check.role+"_app_id"] || check.app.secret != defaults[check.role+"_app_secret"] {
 			t.Errorf("with no input the %s App is %s/%s, want the lib's default %s/%s", check.role,
-				check.app.id, check.app.keyName, defaults[check.role+"_app_id"], defaults[check.role+"_app_key_name"])
+				check.app.id, check.app.secret, defaults[check.role+"_app_id"], defaults[check.role+"_app_secret"])
 		}
-		if !strings.HasPrefix(check.app.keyCommand, "agent-secrets "+check.app.keyName+" --reason=legion-live-proof-github-app-key -- sh -c ") {
-			t.Errorf("the %s App's key command reads %q, want `agent-secrets %s --reason=… -- sh -c …`", check.role, check.app.keyCommand, check.app.keyName)
+		if !strings.HasPrefix(check.app.tokenCommand, "agent-secrets "+check.app.secret+" --reason=legion-live-proof-github-app-token ") {
+			t.Errorf("the %s App's token command reads %q, want `agent-secrets %s --reason=… -- …`", check.role, check.app.tokenCommand, check.app.secret)
 		}
 	}
 
 	implement, review, err = liveProofApps(with(
-		"LEGION_E2E_IMPLEMENT_APP_ID=101", "LEGION_E2E_IMPLEMENT_APP_KEY_NAME=EXAMPLE_IMPLEMENT_KEY",
-		"LEGION_E2E_REVIEW_APP_ID=202", "LEGION_E2E_REVIEW_APP_KEY_NAME=EXAMPLE_REVIEW_KEY",
+		"LEGION_E2E_IMPLEMENT_APP_ID=101", "LEGION_E2E_IMPLEMENT_APP_SECRET=EXAMPLE_IMPLEMENT_APP",
+		"LEGION_E2E_REVIEW_APP_ID=202", "LEGION_E2E_REVIEW_APP_SECRET=EXAMPLE_REVIEW_APP",
 	))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := []string{implement.id, implement.keyName, review.id, review.keyName}; !slices.Equal(got, []string{"101", "EXAMPLE_IMPLEMENT_KEY", "202", "EXAMPLE_REVIEW_KEY"}) {
+	if got := []string{implement.id, implement.secret, review.id, review.secret}; !slices.Equal(got, []string{"101", "EXAMPLE_IMPLEMENT_APP", "202", "EXAMPLE_REVIEW_APP"}) {
 		t.Errorf("with every input set the Apps are %v, want the inputs", got)
 	}
-	// The key command is what the proofs sign with, so it must read the input's key, not a default's,
-	// and decode it as the store holds it: Node-style base64, URL-safe and unpadded, perhaps with one
-	// dangling sextet. A stand-in `agent-secrets` puts each value in the command's environment as the
-	// real one does, and the command's output must be the value's bytes.
+	// The token command is what the daemon runs, so it must ask the broker for the input's secret,
+	// narrowed to the owner and to read-only exactly when the daemon's environment asks for them
+	// (appauth.TokenCommandOwner, appauth.TokenCommandReadOnly), and print the release as the
+	// broker hands it over. A stand-in `agent-secrets` records its arguments and puts a release in
+	// the command's environment as the real one does.
 	stub := t.TempDir()
-	if err := os.WriteFile(filepath.Join(stub, "agent-secrets"), []byte("#!/bin/sh\nname=$1\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexport \"$name=$STUB_VALUE\"\nexec \"$@\"\n"), 0o700); err != nil {
+	if err := os.WriteFile(filepath.Join(stub, "agent-secrets"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >\"$STUB_ARGS\"\nname=$1\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexport \"$name=$STUB_VALUE\"\nexec \"$@\"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	release := `{"installations":{"acme":{"installation_id":1,"token":"ghs_stub","expires_at":"2026-11-03T13:00:00Z"}}}`
 	for role, app := range map[string]liveProofApp{"implement": implement, "review": review} {
-		want := "agent-secrets EXAMPLE_" + strings.ToUpper(role) + "_KEY --reason=legion-live-proof-github-app-key -- sh -c "
-		if !strings.HasPrefix(app.keyCommand, want) || !strings.Contains(app.keyCommand, "${EXAMPLE_"+strings.ToUpper(role)+"_KEY}") {
-			t.Errorf("with every input set the %s App's key command reads %q, want `%s…` reading that key", role, app.keyCommand, want)
-		}
-		for _, stored := range []struct {
-			text  string
-			value []byte
+		secret := "EXAMPLE_" + strings.ToUpper(role) + "_APP"
+		for _, ask := range []struct {
+			owner, readOnly, args string
 		}{
-			{base64.RawURLEncoding.EncodeToString([]byte{0xfb, 0xef, 0xbe, 0xff, 0xfe}), []byte{0xfb, 0xef, 0xbe, 0xff, 0xfe}}, // 7 characters, '-' and '_'
-			{base64.RawURLEncoding.EncodeToString([]byte{0xfb, 0xff, 0x3e, 0x01}), []byte{0xfb, 0xff, 0x3e, 0x01}},             // 6 characters
-			{base64.RawURLEncoding.EncodeToString([]byte{0xfb, 0xff, 0x3e}), []byte{0xfb, 0xff, 0x3e}},                         // 4 characters
-			// A dangling sextet after a whole quantum, 5 characters, which a Node-style decode drops.
-			{base64.RawURLEncoding.EncodeToString([]byte{0xfb, 0xff, 0x3e}) + "A", []byte{0xfb, 0xff, 0x3e}},
+			{"", "", secret + " --reason=legion-live-proof-github-app-token -- sh -c printf %s \"$" + secret + "\""},
+			{"acme", "", secret + " --reason=legion-live-proof-github-app-token --github-owner acme -- sh -c printf %s \"$" + secret + "\""},
+			{"acme", "1", secret + " --reason=legion-live-proof-github-app-token --github-owner acme --github-read-only -- sh -c printf %s \"$" + secret + "\""},
 		} {
-			run := exec.Command("sh", "-c", app.keyCommand)
-			run.Env = append(with(), "PATH="+stub+string(os.PathListSeparator)+os.Getenv("PATH"), "STUB_VALUE="+stored.text)
+			args := filepath.Join(t.TempDir(), "args")
+			run := exec.Command("sh", "-c", app.tokenCommand)
+			run.Env = append(with(), "PATH="+stub+string(os.PathListSeparator)+os.Getenv("PATH"), "STUB_VALUE="+release, "STUB_ARGS="+args,
+				"LEGION_GITHUB_OWNER="+ask.owner, "LEGION_GITHUB_READ_ONLY="+ask.readOnly)
 			got, err := run.Output()
-			if err != nil || !bytes.Equal(got, stored.value) {
-				t.Errorf("the %s App's key command decodes stored %q to %x (err %v), want %x", role, stored.text, got, err, stored.value)
+			if err != nil || string(got) != release {
+				t.Errorf("the %s App's token command for owner %q read-only %q printed %q (err %v), want the release", role, ask.owner, ask.readOnly, got, err)
+			}
+			if seen, _ := os.ReadFile(args); strings.TrimSpace(string(seen)) != ask.args {
+				t.Errorf("the %s App's token command for owner %q read-only %q ran agent-secrets %q, want %q", role, ask.owner, ask.readOnly, strings.TrimSpace(string(seen)), ask.args)
 			}
 		}
 	}
 
-	pasted := strings.Repeat("Zm9vYmFy", 9) // 72 base64 characters: a value, not a store key's name
+	pasted := strings.Repeat("Zm9vYmFy", 9) // 72 base64 characters: a value, not a secret's name
 	refuses := func(t *testing.T, input, value string, extra ...string) {
 		t.Helper()
 		_, _, err := liveProofApps(append(with(input+"="+value), extra...))
@@ -326,10 +321,10 @@ func TestLiveProofAppsReadTheLib(t *testing.T) {
 			t.Errorf("%s=%q with %v: err = %v, want a refusal naming the input and not its value", input, value, extra, err)
 		}
 	}
-	refuses(t, "LEGION_E2E_REVIEW_APP_KEY_NAME", pasted)
+	refuses(t, "LEGION_E2E_REVIEW_APP_SECRET", pasted)
 	refuses(t, "LEGION_E2E_IMPLEMENT_APP_ID", "")
 	refuses(t, "LEGION_E2E_IMPLEMENT_APP_ID", "0123")
-	refuses(t, "LEGION_E2E_REVIEW_APP_KEY_NAME", pasted, "SHELLOPTS=braceexpand:hashall:interactive-comments:xtrace")
+	refuses(t, "LEGION_E2E_REVIEW_APP_SECRET", pasted, "SHELLOPTS=braceexpand:hashall:interactive-comments:xtrace")
 
 	t.Run("a UTF-8 locale admits nothing the C locale refuses", func(t *testing.T) {
 		// Under en_US.UTF-8 bash's [0-9] matches fullwidth digits, which is what the lib's local
@@ -341,7 +336,7 @@ func TestLiveProofAppsReadTheLib(t *testing.T) {
 			t.Skip("bash under LC_ALL=en_US.UTF-8 does not match a fullwidth digit with [0-9] here: the en_US.UTF-8 locale is absent, so this case cannot show the guard")
 		}
 		refuses(t, "LEGION_E2E_IMPLEMENT_APP_ID", "３２０２６３６", "LC_ALL=en_US.UTF-8")
-		refuses(t, "LEGION_E2E_REVIEW_APP_KEY_NAME", "K\u00e9Y", "LC_ALL=en_US.UTF-8")
+		refuses(t, "LEGION_E2E_REVIEW_APP_SECRET", "K\u00e9Y", "LC_ALL=en_US.UTF-8")
 	})
 
 	startup := filepath.Join(t.TempDir(), "bash_env")
@@ -378,12 +373,12 @@ func TestLiveProofAppsReadTheLib(t *testing.T) {
 		}
 	})
 
-	t.Run("the GET /app check reads the block the proofs act with", func(t *testing.T) {
+	t.Run("the token check reads the block the proofs act with", func(t *testing.T) {
 		// A stand-in bun takes app-logins.ts's place: it keeps the block it was given and answers as
 		// GitHub agreed, or refuses as a GitHub that answered another id. The block must be the one
 		// the lib's own write_github_apps writes for the same Apps.
 		stub, work, want := t.TempDir(), t.TempDir(), t.TempDir()
-		bun := "#!/bin/sh\ncp \"$4\" \"$STUB_KEEP\"\n[ -z \"$STUB_REFUSE\" ] || { echo 'app-logins: GET /app as the implement App answered another id' >&2; exit 1; }\necho '{\"implement\":\"implement[bot]\",\"review\":\"review[bot]\"}'\n"
+		bun := "#!/bin/sh\ncp \"$4\" \"$STUB_KEEP\"\n[ -z \"$STUB_REFUSE\" ] || { echo 'app-logins: the implement App answered another id' >&2; exit 1; }\necho '{\"implement\":\"implement[bot]\",\"review\":\"review[bot]\"}'\n"
 		if err := os.WriteFile(filepath.Join(stub, "bun"), []byte(bun), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -394,8 +389,8 @@ func TestLiveProofAppsReadTheLib(t *testing.T) {
 			t.Fatal(err)
 		}
 		apps := config.GitHubApps{
-			Implement: config.GitHubApp{AppID: implement.id, PrivateKeyCommand: implement.keyCommand},
-			Review:    config.GitHubApp{AppID: review.id, PrivateKeyCommand: review.keyCommand},
+			Implement: config.GitHubApp{AppID: implement.id, TokenCommand: implement.tokenCommand},
+			Review:    config.GitHubApp{AppID: review.id, TokenCommand: review.tokenCommand},
 		}
 		if _, err := proveLiveProofApps(append(with(), path, "STUB_KEEP="+kept), work, apps); err != nil {
 			t.Fatalf("a GitHub that agrees: %v", err)
@@ -411,7 +406,7 @@ write_github_apps implement review`, want); err != nil {
 		got, _ := os.ReadFile(kept)
 		lib, _ := os.ReadFile(filepath.Join(want, "github-apps.yaml"))
 		if len(got) == 0 || !bytes.Equal(got, lib) {
-			t.Errorf("the GET /app check read\n%s\nwant the block the lib writes for the same Apps\n%s", got, lib)
+			t.Errorf("the token check read\n%s\nwant the block the lib writes for the same Apps\n%s", got, lib)
 		}
 		if _, err := proveLiveProofApps(append(with(), path, "STUB_KEEP="+kept, "STUB_REFUSE=1"), t.TempDir(), apps); err == nil || !strings.Contains(err.Error(), "answered another id") {
 			t.Errorf("a GitHub that refuses: err = %v, want the checker's refusal", err)
@@ -446,9 +441,9 @@ write_github_apps implement review`, want); err != nil {
 			{"the control", wrap + `require_app_inputs() { real_require_app_inputs "$@"; }`, ""},
 			{"a seventh field", wrap + `require_app_inputs() { real_require_app_inputs "$@"; printf 'extra\0'; }`, "printed 7 fields"},
 			{"stray output on a line of its own", wrap + `require_app_inputs() { real_require_app_inputs "$@"; echo debug; }`, "field 1 of the two Apps empty or on more than one line"},
-			{"an empty key command", `app_key_command() { :; }`, "field 3 of the two Apps empty or on more than one line"},
-			{"a key command that failed", `app_key_command() { printf 'agent-secrets %s' "$1"; return 3; }`, "exit status 3"},
-			{"a key command on two lines", `app_key_command() { printf 'agent-secrets %s\nmore' "$1"; }`, "field 3 of the two Apps empty or on more than one line"},
+			{"an empty token command", `app_token_command() { :; }`, "field 3 of the two Apps empty or on more than one line"},
+			{"a token command that failed", `app_token_command() { printf 'agent-secrets %s' "$1"; return 3; }`, "exit status 3"},
+			{"a token command on two lines", `app_token_command() { printf 'agent-secrets %s\nmore' "$1"; }`, "field 3 of the two Apps empty or on more than one line"},
 		} {
 			lib := filepath.Join(t.TempDir(), "github-apps.sh")
 			if err := os.WriteFile(lib, []byte("source "+strconv.Quote(real)+"\n"+scratch.body+"\n"), 0o600); err != nil {

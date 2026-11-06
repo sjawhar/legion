@@ -1,5 +1,0 @@
-kind: Fixed
-body: A document room lock and the files backfill lock are now given back under a five-second bound, and their connection is closed when the unlock is not confirmed. Before, the unlock had no bound, so on a half-open database link it held the room and every writer of that room in the process until TCP gave the connection up.
-time: 2026-11-02T21:16:19.282332371Z
-custom:
-    Issue: pr2687

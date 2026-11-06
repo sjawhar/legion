@@ -81,6 +81,16 @@
       "timeout_minutes": 20,
       "why_hosted": "The daemon refuses to start without tmux on PATH, and CI's tmux is the runner's apt binary; with LEGION_E2E_PG_DSN set the script starts no container of its own, which is how ci.yaml's test job already runs it",
       "jj": false
+    },
+    {
+      "script": "verification-results.sh",
+      "go_version_file": "packages/envoy/go.mod",
+      "apt": ["postgresql-client"],
+      "bun": true,
+      "evidence_variable": "",
+      "timeout_minutes": 20,
+      "why_hosted": "DATABASE_URL is required and must name a loopback host; its prerequisite loop takes go, bun, curl, psql and openssl, and it starts no container",
+      "jj": false
     }
   ],
   "elsewhere": [
@@ -97,6 +107,10 @@
       "needs": "a devbox: tmux, a real Claude Code and Oh My Pi on a model route (LEGION_E2E_MODEL_ROUTE, with a gateway or a key file), and the smoke repository"
     },
     {
+      "script": "clean-session-stop-tmux.sh",
+      "needs": "a Legion pod: tmux, its own model route for both harnesses (LEGION_E2E_MODEL_BASE_URL, LEGION_E2E_MODEL_KEY_FILE, LEGION_E2E_MODEL_ID and LEGION_E2E_CLAUDE_MODEL), the worker image's Oh My Pi and Claude Code pin, and a loopback PostgreSQL (CLEAN_SESSION_STOP_PG_DSN); it starts its own NATS, listener and legion daemon"
+    },
+    {
       "script": "controller-start-tmux.sh",
       "needs": "a devbox: tmux, the pinned Oh My Pi through mise, and its own Postgres and NATS containers, which it fetches from a registry outside this repository's own package (sjawhar/legion#2512)"
     },
@@ -106,7 +120,7 @@
     },
     {
       "script": "dispatch-session-settings.sh",
-      "needs": "a model provider key of its own for each of its two models, ANTHROPIC_API_KEY and OPENAI_API_KEY, which this repository holds as no secret and will not: Sami answered that no API key goes into sjawhar/legion, and that a smoke test which calls a model runs in the deployment repository on workload identity federation (sjawhar/legion#2512)"
+      "needs": "a model provider key of its own for each of its two models, ANTHROPIC_API_KEY and OPENAI_API_KEY, which this repository holds as no secret and will not: Sami answered that no API key goes into cybermonklabs/legion, and that a smoke test which calls a model runs in the deployment repository on workload identity federation (sjawhar/legion#2512)"
     },
     {
       "script": "dispatch-user-turns.sh",
@@ -117,12 +131,20 @@
       "needs": "an issue pod and a model provider, so it is run by hand and never in CI: a loopback Postgres with pgvector (LEGION_TEST_PG_DSN), the model gateway key file (/var/run/model-gateway-key/key, or SESSION_DELIVERY_MODEL_KEY_FILE), go, bun and the checkout's node_modules, jq, curl, socat 1.8.0 or later, setsid, psql, git, tar, pgrep, mkfifo and python3"
     },
     {
+      "script": "envoy-session-states.sh",
+      "needs": "a Legion pod: its own model route for both agent runtimes (LEGION_E2E_MODEL_BASE_URL, LEGION_E2E_MODEL_KEY_FILE, LEGION_E2E_MODEL_ID and LEGION_E2E_CLAUDE_MODEL), the worker image's Oh My Pi and Claude Code pin, and a loopback PostgreSQL with pgvector (ENVOY_SESSION_STATES_PG_DSN); it starts its own NATS, listeners and Dispatch"
+    },
+    {
       "script": "handoff-cutover-github.sh",
       "needs": "gh acting as an App installed on sjawhar/legion-smoke with contents and pull-request write (the implement App), and jq; it pushes branches and opens pull requests there and waits on that repository's Actions queue"
     },
     {
       "script": "multi-repo-acceptance.sh",
       "needs": "a live multi-repository run on the production cluster: it is the operator's acceptance observer, reads that run's daemon, Dispatch, GitHub and kubectl, and starts nothing of its own"
+    },
+    {
+      "script": "parked-decision-devbox.sh",
+      "needs": "a devbox, run from the operator's own Oh My Pi session: a model route (LEGION_E2E_MODEL_ROUTE), docker for its Postgres and NATS containers, Legion's two role Apps, and the proof human's gh, as Stage 3's rig"
     },
     {
       "script": "share-volumes-kind.sh",

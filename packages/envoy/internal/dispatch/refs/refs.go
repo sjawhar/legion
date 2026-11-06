@@ -248,10 +248,10 @@ func Stamp(ctx context.Context, tx pgx.Tx, fromKind, fromID string, eventID int6
 // one paragraph cites forty documents still names every one and every issue beside them, and a
 // reader falls back only for the kind it was not told about. A hundred entries of the longest
 // kind, a block (its node id, its reference and its document's uuid, about 200 bytes), is some
-// 20 KB, so a full event of four kinds stays under 100 KB: about what a comment at
-// contracts.DispatchBodyMax already carries, and far under NATS's 1 MiB maximum payload that the
-// outbox publishes it through. A body citing more is rare enough that carrying an unbounded array
-// on every event is the wrong trade.
+// 20 KB, so a full event of four kinds stays under 100 KB: about what an event at
+// contracts.DispatchEventBodyMax already carries, and far under NATS's 1 MiB maximum payload
+// that the outbox publishes it through. A body citing more is rare enough that carrying an
+// unbounded array on every event is the wrong trade.
 const CountedChangeLimit = 100
 
 // countedKinds is the order CountedChanges lists the kinds it truncated in.
@@ -272,8 +272,10 @@ var countedKinds = [...]string{"issue", "ask", "artifact", "block"}
 // parses and is stored, so every lookup here compares text and a target that resolves to no
 // row is simply not named. A write must never fail because of what its body cites, with one
 // exception: a typed block's `block[]` attribute is a schema field, not prose, and an agent's or
-// API write introducing a pointer to an existing block of a type the attribute's targets do not
-// allow is refused (pmdoc.CheckBlockPointers). A target that does not exist is still accepted.
+// API write introducing a pointer is refused when it names a block of a type the attribute's
+// targets do not allow, a block no document holds, or a block outside the issues and documents
+// the attribute may point into (pmdoc.CheckBlockPointers). A browser's edit is never refused, so
+// a pointer it leaves at a block no document holds stays unresolved.
 func CountedChanges(ctx context.Context, q Queryer, changed []Target) (model.ReferenceChanges, error) {
 	issueKeys := []string{}
 	askIDs := []string{}

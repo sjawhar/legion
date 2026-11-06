@@ -254,9 +254,9 @@ func TestSeedFinishEmbeddingGateReturnsOnceEveryKindIsCovered(t *testing.T) {
 	var logged bytes.Buffer
 	path := filepath.Join(t.TempDir(), "seedfinish.embed.json")
 	cov := &fakeCoverage{steps: []coverageStep{
-		{body: coverageBody(model.SearchCoverageKinds{Issue: kindCounts(10, 5, 0, 120), Comment: kindCounts(100, 20, 0, 300)})},
-		{body: coverageBody(model.SearchCoverageKinds{Issue: kindCounts(15, 0, 0, 0), Comment: kindCounts(110, 10, 0, 330)})},
-		{body: coverageBody(model.SearchCoverageKinds{Issue: kindCounts(15, 0, 0, 0), Comment: kindCounts(120, 0, 0, 0)})},
+		{body: coverageBody(model.SearchCoverageKinds{Issue: kindCounts(10, 5, 0, 120), CommentBlock: kindCounts(100, 20, 0, 300)})},
+		{body: coverageBody(model.SearchCoverageKinds{Issue: kindCounts(15, 0, 0, 0), CommentBlock: kindCounts(110, 10, 0, 330)})},
+		{body: coverageBody(model.SearchCoverageKinds{Issue: kindCounts(15, 0, 0, 0), CommentBlock: kindCounts(120, 0, 0, 0)})},
 	}}
 	f, clock := fakeEmbedFinisher(8*time.Hour, cov, path, &logged)
 	start := *clock
@@ -309,18 +309,18 @@ func TestSeedFinishEmbeddingGateRefusesAKindTheQueueGaveUpOn(t *testing.T) {
 	var logged bytes.Buffer
 	path := filepath.Join(t.TempDir(), "seedfinish.embed.json")
 	cov := &fakeCoverage{steps: []coverageStep{
-		{body: coverageBody(model.SearchCoverageKinds{Issue: kindCounts(10, 0, 0, 0), Comment: kindCounts(100, 4, 3, 90)})},
+		{body: coverageBody(model.SearchCoverageKinds{Issue: kindCounts(10, 0, 0, 0), CommentBlock: kindCounts(100, 4, 3, 90)})},
 	}}
 	f, clock := fakeEmbedFinisher(8*time.Hour, cov, path, &logged)
 	start := *clock
 	err := f.waitEmbedded(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "comment 3") {
+	if err == nil || !strings.Contains(err.Error(), "comment_block 3") {
 		t.Fatalf("error %v, want the 3 comment rows the queue gave up on named", err)
 	}
 	if cov.reads != 1 || !clock.Equal(start) {
 		t.Errorf("read coverage %d times over %s, want one read and no waiting", cov.reads, clock.Sub(start))
 	}
-	if record := readCoverageRecord(t, path); !strings.Contains(record.Error, "comment 3") || len(record.Polls) != 1 {
+	if record := readCoverageRecord(t, path); !strings.Contains(record.Error, "comment_block 3") || len(record.Polls) != 1 {
 		t.Errorf("the record holds %d polls and error %q, want one poll and the refusal", len(record.Polls), record.Error)
 	}
 }
@@ -332,12 +332,12 @@ func TestSeedFinishEmbeddingGateRefusesTheBoundNamingEachLackingKind(t *testing.
 	var logged bytes.Buffer
 	path := filepath.Join(t.TempDir(), "seedfinish.embed.json")
 	cov := &fakeCoverage{steps: []coverageStep{
-		{body: coverageBody(model.SearchCoverageKinds{Issue: kindCounts(80, 12, 0, 900), Comment: kindCounts(500, 4, 0, 60)})},
+		{body: coverageBody(model.SearchCoverageKinds{Issue: kindCounts(80, 12, 0, 900), CommentBlock: kindCounts(500, 4, 0, 60)})},
 	}}
 	f, clock := fakeEmbedFinisher(time.Hour, cov, path, &logged)
 	start := *clock
 	err := f.waitEmbedded(context.Background())
-	want := "meaning search still lacks vectors after 3600 s: issue 12 (oldest 900 s), comment 4 (oldest 60 s)"
+	want := "meaning search still lacks vectors after 3600 s: issue 12 (oldest 900 s), comment_block 4 (oldest 60 s)"
 	if err == nil || err.Error() != want {
 		t.Fatalf("error %v, want %q", err, want)
 	}
@@ -440,10 +440,10 @@ func TestSeedFinishRunsTheEmbeddingGateAfterTheBackfillAndBeforeTheVacuum(t *tes
 const coverageJSON = `{"identity":"azure:stub.invalid/embed-v-4-0","place":"azure","model":"embed-v-4-0",
  "total":{"items":10,"current":7,"lacking":3,"failed":0,"oldest_lacking_seconds":42},
  "kinds":{"issue":{"items":4,"current":4,"lacking":0,"failed":0,"oldest_lacking_seconds":null},
-  "document":{"items":2,"current":1,"lacking":1,"failed":0,"oldest_lacking_seconds":42},
-  "comment":{"items":2,"current":1,"lacking":1,"failed":0,"oldest_lacking_seconds":12},
-  "ask":{"items":1,"current":0,"lacking":1,"failed":0,"oldest_lacking_seconds":5},
-  "message":{"items":1,"current":1,"lacking":0,"failed":0,"oldest_lacking_seconds":null}}}`
+  "document_block":{"items":2,"current":1,"lacking":1,"failed":0,"oldest_lacking_seconds":42},
+  "comment_block":{"items":2,"current":1,"lacking":1,"failed":0,"oldest_lacking_seconds":12},
+  "ask_part":{"items":1,"current":0,"lacking":1,"failed":0,"oldest_lacking_seconds":5},
+  "message_block":{"items":1,"current":1,"lacking":0,"failed":0,"oldest_lacking_seconds":null}}}`
 
 // TestDispatchCoverageReadsTheReportAndReportsWhatItCannotRead: the reader asks for the coverage
 // path with the deployment's agent bearer and decodes that body; a non-200 answer and a body
@@ -469,7 +469,7 @@ func TestDispatchCoverageReadsTheReportAndReportsWhatItCannotRead(t *testing.T) 
 	if coverage.Identity == nil || *coverage.Identity != "azure:stub.invalid/embed-v-4-0" || coverage.Total.Lacking != 3 {
 		t.Errorf("read %+v, want the body's identity and its 3 lacking items", coverage)
 	}
-	if lacking := coverageLacking(coverage.Kinds); lacking != "document 1 (oldest 42 s), comment 1 (oldest 12 s), ask 1 (oldest 5 s)" {
+	if lacking := coverageLacking(coverage.Kinds); lacking != "document_block 1 (oldest 42 s), comment_block 1 (oldest 12 s), ask_part 1 (oldest 5 s)" {
 		t.Errorf("the body's lacking kinds read %q", lacking)
 	}
 

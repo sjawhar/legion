@@ -90,14 +90,16 @@ func (r *liveRig) checkPreviousLayout() error {
 		return err
 	}
 	fixture := exec.CommandContext(r.ctx, r.env.previousHarness, "-test.run", "^TestStage4aPreviousLayoutFixture$", "-test.v", "-test.timeout", "30m")
-	// A previous release's harness built before LEGION_E2E_IMPLEMENT_APP_KEY_NAME reads the key's
-	// name from LEGION_E2E_IMPLEMENT_APP_KEY and stops at identity without it, so the fixture is
-	// told both names.
+	// The previous release's harness requires LEGION_E2E_IMPLEMENT_APP_KEY_NAME (and one built
+	// before it LEGION_E2E_IMPLEMENT_APP_KEY) to be set before it starts, though the App overlay the
+	// script builds it with (testdata/previouslayout/live_app_test.go.txt) reads neither: it mints
+	// from LEGION_E2E_IMPLEMENT_APP_TOKEN_COMMAND, which this environment carries on. Both are told
+	// the github-app secret's name, which names no key.
 	fixture.Env = append(slices.DeleteFunc(os.Environ(), func(kv string) bool {
 		return strings.HasPrefix(kv, "LEGION_E2E_IMAGE=") || strings.HasPrefix(kv, "LEGION_E2E_WORK=") || strings.HasPrefix(kv, "LEGION_E2E_FROM=") ||
-			strings.HasPrefix(kv, "LEGION_E2E_IMPLEMENT_APP_KEY=")
+			strings.HasPrefix(kv, "LEGION_E2E_IMPLEMENT_APP_KEY=") || strings.HasPrefix(kv, "LEGION_E2E_IMPLEMENT_APP_KEY_NAME=")
 	}), "LEGION_E2E_IMAGE="+r.env.previousImage, "LEGION_E2E_WORK="+work, "LEGION_E2E_PREVIOUS_LAYOUT_OUT="+out,
-		"LEGION_E2E_IMPLEMENT_APP_KEY="+r.env.appKeyName)
+		"LEGION_E2E_IMPLEMENT_APP_KEY="+r.env.appSecret, "LEGION_E2E_IMPLEMENT_APP_KEY_NAME="+r.env.appSecret)
 	transcript, err := fixture.CombinedOutput()
 	if werr := os.WriteFile(filepath.Join(work, "fixture.log"), transcript, 0o600); werr != nil {
 		return werr

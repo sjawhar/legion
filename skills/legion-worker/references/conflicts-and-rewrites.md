@@ -5,7 +5,7 @@ controller asks you to resolve a conflict, the change needs something only the b
 request is retargeted to a new base, you compare two heads after such a merge, a push is refused
 because the handoff import moved the branch, or you are about to rewrite a commit you already
 pushed.
-Every path it cites is in sjawhar/legion.
+Every path it cites is in cybermonklabs/legion.
 
 ## Reintegrating the base
 
@@ -18,7 +18,7 @@ Every path it cites is in sjawhar/legion.
   base. Otherwise, never reintegrate the base to pick up the default branch or refresh CI. Each
   merge is a new head, reruns CI and can void a review. A single failed CI job is re-run on its
   own (*Never waiting on CI* in `skill://legion-worker/references/pr-body.md`). After any forward merge, build the branch and
-  run its proof again at the merge head, even with no text conflict: a clean merge once changed a
+  record the issue's checks again at the merge head, even with no text conflict: a clean merge once changed a
   function's arity under the branch's own callers. Before you race another tree's pull request on
   shared files, `envoy_publish` to its implementer's role topic, ask when its next push lands, and
   merge once, after it. A forward merge that leaves the branch's diff unchanged is a
@@ -28,6 +28,10 @@ Every path it cites is in sjawhar/legion.
   the fingerprint at the current tip; after pushing the merged branch, record it at the new
   tip; post one PR comment (Legion footer):
   `forward merge <old-tip-sha> → <new-tip-sha>; fingerprint <before> → <after>; unchanged|changed`.
+  The fingerprint answers one question only: whether the branch's own diff changed. It cannot
+  show an instance the merge brought in from the base, so before you push the merge search its
+  head for the class of every finding of every earlier review round and record each search
+  beside the fingerprints.
   In a parent's last round, end that comment with `parent's last round: full test round`, the line
   the tester reads for a full round (`skill://legion-architect/references/acceptance.md`,
   "The last round").
@@ -112,7 +116,7 @@ fingerprint=$(set -o pipefail; jj -R "$LEGION_WORKSPACE" diff --from "fork_point
   unaffected.
 
 Where each role gets its two heads: the implementer — the tip before and after its own forward merge;
-the tester — the head its `E2E` line names and the new head; the reviewer — the `commit_id` of
+the tester — the commit its latest results name and the new head; the reviewer — the `commit_id` of
 its last submitted review (`gh api --paginate repos/{owner}/{repo}/pulls/{n}/reviews --jq '.[] | {commit_id, state, user: .user.login, body}'`, whose pages concatenate in order, so the last line is the last submitted review, and whose body tells a no-fix request that answered a READY refusal from any other)
 and the new head; the merger never computes a fingerprint — it quotes the `--summary` lines
 in READY, and the daemon holds the head to retro's commits.

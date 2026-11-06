@@ -11,11 +11,13 @@ import {
   askgateState,
   consumeMarker,
   openStore,
+  pidNamespace,
   processStart,
   setRecordMode,
   writeAskgateRecord,
 } from "@legion/envoy-client/askgate-marker";
 import { newAsks } from "@legion/envoy-client/askgate-new-asks";
+import { bearerCredential } from "@legion/envoy-client/bearer";
 import { runDispatchCli } from "@legion/envoy-client/dispatch-cli";
 import { DispatchClient, DispatchServiceError } from "@legion/envoy-client/dispatch-http";
 import { sessionDirectory } from "@legion/envoy-client/dispatch-session-directory";
@@ -235,7 +237,12 @@ function bind(opts: BindOptions = {}): BoundGate {
   // The session directory the gate records its mode into (one real process keeps a record per
   // session it binds). A test may share a store and a session across binds to drive the switch case.
   const sessionDir = opts.sessionDir ?? fs.mkdtempSync(path.join(SUITE_TMP, "session-"));
-  const self: AskgateOwner = { pid: process.pid, start: processStart(process.pid), store };
+  const self: AskgateOwner = {
+    pid: process.pid,
+    start: processStart(process.pid),
+    ns: pidNamespace(),
+    store,
+  };
   try {
     openStore(store);
     // The bind, as envoy.ts does it: the mode from OMP_ASKGATE, which an arm does not change here.
@@ -447,7 +454,12 @@ function dispatchServing(
     return body(documentBlocks(doc.markdown));
   }) as typeof fetch;
   const session = (_directory: string, signal: AbortSignal): DispatchSession => ({
-    client: new DispatchClient("https://dispatch.example", "token", fetchImpl, signal),
+    client: new DispatchClient(
+      "https://dispatch.example",
+      bearerCredential("token"),
+      fetchImpl,
+      signal
+    ),
     serverUrls: ["https://dispatch.example"],
   });
   return { requests, session };
@@ -920,8 +932,8 @@ describe("untrusted text (security)", () => {
     expect(context).toMatch(/… \[elided \d+ bytes\]/);
   });
   test("a revise reason holding a full-length rewritten question in non-ASCII text arrives whole", async () => {
-    // 2,000 UTF-16 units (ASK_QUESTION_MAX) of three-byte characters is 6,000 bytes, and the reason
-    // names its failure and quotes the words on top: the recommendation at its end must survive.
+    // 2,000 three-byte characters is 6,000 UTF-8 bytes, and the reason names its failure and
+    // quotes the words on top: the recommendation at its end must survive.
     const reason = `failure 13 (content): "Hi! I hope this finds you well." is a preamble. Send: ${"€".repeat(2_000)} I recommend A.`;
     const g = bind({ complete: reviseWith(reason) });
     const context = (await g.device("t1", "dispatch_comment", COMMENT))?.additionalContext ?? "";
@@ -3390,14 +3402,18 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
       });
       await skipped.bash("s", ASK);
       // The halt is three of the gate's own deadlines in a row, so nothing else of the call may
-      // race that deadline. The real dry run is a process, and it races half of these 20 ms: on a
-      // busy machine it loses, and the call is an `error` rather than a `timeout`. This dry run
-      // answers at once, with what the stub's own prints, and the model call runs until the
-      // deadline aborts it, so the deadline is the only clock the outcome reads.
+      // race that deadline. A real `dispatch … --dry-run` is a Bun process, and the reads get
+      // READ_SHARE (half) of the deadline: on a busy machine the spawn loses that race, the call
+      // is an `error`, whose effect is `none`, and three of those never halt the gate. This dry
+      // run answers at once with what the stub would have printed, and the clock never moves, so
+      // the reads spend none of the deadline however busy the machine is. Nothing the outcome
+      // reads is measured against the wall clock: the review never answers (untilAborted), so the
+      // call's own stop is the only thing that can settle it.
       const halted = bind({
         env: { ...STUB, OMP_ASKGATE_TIMEOUT_MS: "20" },
         cwd: work,
         complete: untilAborted,
+        now: () => 1_000_000,
         dryRun: async () => ({
           exitCode: 0,
           stdout: JSON.stringify({ issue: "X-1", question: QUESTION }, null, 2),
@@ -3419,7 +3435,9 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
         [{ argv: argvDigest(ASK_ARGV), args: null, files: [], outcome: "skipped" }],
         [{ argv: argvDigest(ASK_ARGV), args: null, files: [], outcome: "halted" }],
       ]);
-    });
+      // The row's own bound is a hang guard, the file's convention: its work is three 20 ms
+      // deadlines, far below this.
+    }, 30_000);
 
     test("a rebuttal binds the dry run's arguments, its flag gone from the argv", async () => {
       const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
@@ -5226,6 +5244,7 @@ describe("askgate.ts, the entry", () => {
         configFile: { path: CONFIG_FILE, error: null },
         logger: { warn: (message: string) => warnings.push(message) },
         runtimeLogger: { warn: () => {} },
+        session: () => "gate-session",
       }
     ).loaded;
     const roles = opts.roles ?? { askgate: MODEL };
@@ -5318,6 +5337,7 @@ describe("askgate.ts, the entry", () => {
         configFile: { path: CONFIG_FILE, error: null },
         logger: { warn: () => {} },
         runtimeLogger: { warn: () => {} },
+        session: () => "gate-session",
       }
     );
     const { loaded } = registration;
@@ -5698,7 +5718,7 @@ describe("a marker the gate mints, checked by the real dispatch CLI", () => {
     // The session chose block (gateEnv), so the CLI refuses a write that spends no marker.
     writeAskgateRecord(
       sessionDirectory(env, env.DISPATCH_SESSION_ID),
-      { pid: process.pid, start: processStart(process.pid), store },
+      { pid: process.pid, start: processStart(process.pid), ns: pidNamespace(), store },
       "block"
     );
     const sent: Array<{ path: string; body: unknown }> = [];

@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -443,5 +444,44 @@ func TestAdoptWorkingCopyAsksTheRecordedProcess(t *testing.T) {
 	}
 	if err := g.r.AdoptWorkingCopy(g.ctx, sandboxLocator(workerToken, "uid-pod-stale"), id); err == nil {
 		t.Fatal("a stale locator's adoption was asked")
+	}
+}
+
+// rescueConn is a fake connection whose shim answers the push check with report.
+type rescueConn struct {
+	*fake.Conn
+	report []runtime.WorkspaceRescue
+	asked  []runtime.RescueRequest
+}
+
+func (c *rescueConn) RescueUnpushed(_ context.Context, request runtime.RescueRequest) ([]runtime.WorkspaceRescue, error) {
+	c.asked = append(c.asked, request)
+	return c.report, nil
+}
+
+// The push check goes over the claim's connection, to the recorded process of the running pod
+// only: a locator of a pod that is not the Sandbox's running one asks nothing, and neither does a
+// claim with no connection.
+func TestRescueUnpushedAsksTheRecordedProcess(t *testing.T) {
+	g := newRig(t, nil)
+	report := []runtime.WorkspaceRescue{{Dir: TreeRoot + "/workspaces/sjawhar/legion-smoke/legion-208", Status: runtime.RescueClean}}
+	conn := &rescueConn{Conn: fake.NewConn(), report: report}
+	g.conns.Register(workerToken, conn)
+	loc := g.spawn(workerSpec(t))
+	request := runtime.RescueRequest{Branch: "legion/LEGION-208-rescue-uidpod01", WorkspaceTimeout: time.Minute, Timeout: 2 * time.Minute}
+	got, err := g.r.RescueUnpushed(g.ctx, runtime.Known{Claim: workerToken, Locator: &loc}, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, report) || len(conn.asked) != 1 || conn.asked[0] != request {
+		t.Fatalf("the check answered %+v after %d asks of %+v, want %+v after one ask of %+v", got, len(conn.asked), conn.asked, report, request)
+	}
+	stale := sandboxLocator(workerToken, "uid-pod-stale")
+	if _, err := g.r.RescueUnpushed(g.ctx, runtime.Known{Claim: workerToken, Locator: &stale}, request); err == nil || len(conn.asked) != 1 {
+		t.Fatalf("a stale locator's push check = %v after %d asks, want a refusal and no ask", err, len(conn.asked))
+	}
+	g.conns.Remove(workerToken)
+	if _, err := g.r.RescueUnpushed(g.ctx, runtime.Known{Claim: workerToken, Locator: &loc}, request); err == nil || !strings.Contains(err.Error(), "no connection") {
+		t.Fatalf("a push check with no connection = %v, want a refusal naming it", err)
 	}
 }

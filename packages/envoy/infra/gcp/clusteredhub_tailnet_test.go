@@ -117,7 +117,7 @@ func preStopSeconds(t *testing.T, container map[string]any) float64 {
 // grace period, and kills what is still running at its end. Both containers that hold the
 // Service's connections fit: the tailscale container's hook (drain 5 s, wait 20 s, logout 5 s)
 // and containerboot's 25 s shutdown, and the listener's 25 s wait, which outlasts the hook's
-// drain and wait, and its own 26 s shutdown (cmd/listener/main.go: HTTP 10 s, live lane 3 s, NATS
+// drain and wait, and its own 28 s shutdown (cmd/listener/main.go: HTTP 10 s, role lane 5 s, NATS
 // drain 13 s).
 func TestClusteredNatsHubTailnetShutdownFitsTheGrace(t *testing.T) {
 	m := runClusteredHub(t, clusteredArgs())
@@ -129,7 +129,7 @@ func TestClusteredNatsHubTailnetShutdownFitsTheGrace(t *testing.T) {
 
 	listenerWait := preStopSeconds(t, podContainer(t, template, "listener"))
 	require.Equal(t, 25.0, listenerWait, "the tailscale container's drain and wait")
-	require.Equal(t, 26, gcp.ClusteredHubListenerShutdownSeconds)
+	require.Equal(t, 28, gcp.ClusteredHubListenerShutdownSeconds)
 	require.LessOrEqual(t, listenerWait+float64(gcp.ClusteredHubListenerShutdownSeconds), grace, "the listener's wait and its shutdown")
 }
 

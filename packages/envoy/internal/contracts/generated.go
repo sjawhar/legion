@@ -19,6 +19,7 @@ type Envelope struct {
 	DedupeKey      string          `json:"dedupe_key"`
 	IssuedAt       int64           `json:"issued_at"`
 	ExpiresAt      *int64          `json:"expires_at,omitempty"`
+	KeptAt         *int64          `json:"kept_at,omitempty"`
 	PayloadSummary string          `json:"payload_summary"`
 	PayloadRef     string          `json:"payload_ref,omitempty"`
 	Payload        string          `json:"payload,omitempty"`
@@ -135,11 +136,22 @@ func validateWireNonEmpty(fields map[string]json.RawMessage, field, path string)
 const AgentTopicPrefix = "notifications.agent."
 const RoleTopicPrefix = "notifications.role."
 
+// GithubTopicPrefix begins every GitHub subject, before the repository's owner and name.
+const GithubTopicPrefix = "notifications.github."
+
 // DeliveryDuplicateWindow is how long a repeated delivery is recognised as a duplicate, by the
 // notification stream and by every host that subscribes over core NATS. Generated from
 // DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts, whose doc comment states the retry promise
 // this window bounds, so the stream, the hosts and the dashboard read one number.
 const DeliveryDuplicateWindow = 259200000 * time.Millisecond
+
+// IssueClaimUnresponsiveGrace is how long an issue claim is held for a holder the Envoy registry
+// calls unresponsive: a session that missed its heartbeats keeps the issue it is working until it
+// was last seen longer ago than this, and only then may another agent take or release the claim
+// without a person's force. Generated from ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS in
+// packages/contracts, whose doc comment states the rule, so the server's refusal and the wait a
+// client predicts are one number.
+const IssueClaimUnresponsiveGrace = 1200000 * time.Millisecond
 
 // MintedDedupeKeyPattern is the shape of a dedupe key minted once for its message, by the listener
 // or by the shared transport's idempotency key, which DedupeKeyNamesTheUpstreamEvent counts as
@@ -204,16 +216,21 @@ const DefaultIssuePageLimit = 50
 // server's refusal and the dashboard's title fields cannot drift apart.
 const IssueTitleMax = 1000
 
-// DispatchBodyMax is the longest comment, comment-edit, message and broadcast body the server
-// accepts, in UTF-16 units. Generated from DISPATCH_BODY_MAX in packages/contracts so the server's
-// refusal, the agent tools' pre-send refusal and the dashboard composer cannot drift apart.
-const DispatchBodyMax = 32000
+// DispatchBlockUnits is the longest one block of a comment, comment edit, message, broadcast or
+// ask part may be, in UTF-16 units. Generated from DISPATCH_BLOCK_UNITS in packages/contracts;
+// the server enforces it, names it in its refusal, and publishes it through GET /api/v1/limits.
+const DispatchBlockUnits = 32000
 
-// AskQuestionMax is the longest ask question the server accepts, in UTF-16 units; an approval
-// request's summary gets what its question leaves of it. Generated from ASK_QUESTION_MAX in
-// packages/contracts so the server's refusal, the agent tools' pre-send refusal and the dashboard
-// ask composer cannot drift apart.
-const AskQuestionMax = 2000
+// DispatchItemBlocks is the most blocks one body may hold. Generated from DISPATCH_ITEM_BLOCKS in
+// packages/contracts; the server enforces it, names it in its refusal, and publishes it through
+// GET /api/v1/limits.
+const DispatchItemBlocks = 32768
+
+// DispatchEventBodyMax is the longest body an event carries whole, in UTF-16 units, and the bound
+// on an ask's question and its options together. Generated from DISPATCH_EVENT_BODY_MAX in
+// packages/contracts; the server enforces it, names it in its refusal, and publishes it through
+// GET /api/v1/limits.
+const DispatchEventBodyMax = 32000
 
 // DispatchHandoffBodyMax is the longest phase handoff body, in UTF-8 bytes, that
 // POST /api/v1/issues/{key}/handoffs/{phase} accepts. Generated from DISPATCH_HANDOFF_BODY_MAX in
@@ -295,6 +312,12 @@ const IdempotencyLease = 60000 * time.Millisecond
 const DispatchLoginHeader = "Dispatch-Login"
 const DispatchLoginChanged = "LOGIN_CHANGED"
 
+// DispatchSignInRequired is the code of the 403 for a write by a broker-issued access token that
+// names a session and a service but no person: the machine holding it has signed nobody in.
+// Generated from DISPATCH_SIGN_IN_REQUIRED in packages/contracts so the server's refusal and
+// every client's reading of it cannot drift apart.
+const DispatchSignInRequired = "SIGN_IN_REQUIRED"
+
 func NowMillis() int64 {
 	return time.Now().UnixMilli()
 }
@@ -303,15 +326,15 @@ func AgentSubject(session string) string {
 	return AgentTopicPrefix + session
 }
 
-// githubRepositoryPrefix begins every GitHub subject with its repository's owner and name, each one
+// GithubRepositoryPrefix begins every GitHub subject with its repository's owner and name, each one
 // segment: a name may hold a dot, which a NATS subject splits on. Mirrored on the TS side as
 // `githubRepositoryPrefix`.
-func githubRepositoryPrefix(owner, repo string) string {
-	return "notifications.github." + SanitizeSubjectSegment(owner) + "." + SanitizeSubjectSegment(repo)
+func GithubRepositoryPrefix(owner, repo string) string {
+	return GithubTopicPrefix + SanitizeSubjectSegment(owner) + "." + SanitizeSubjectSegment(repo)
 }
 
 func GithubSubject(owner string, repo string, kind string) string {
-	return githubRepositoryPrefix(owner, repo) + "." + kind
+	return GithubRepositoryPrefix(owner, repo) + "." + kind
 }
 
 func SlackSubject(team string, channel string, kind string) string {
@@ -347,7 +370,7 @@ const SubjectMaxBytes = 4032
 // ref, so a cut segment is never another ref's whole one. A consumer that needs the exact ref reads
 // the payload's ref. Mirrored on the TS side as `githubPushSubject`.
 func GithubPushSubject(owner, repo, refType, refName string) string {
-	prefix := githubRepositoryPrefix(owner, repo) + ".push." + refType + "."
+	prefix := GithubRepositoryPrefix(owner, repo) + ".push." + refType + "."
 	segment := SanitizeSubjectSegment(refName)
 	if len(prefix)+len(segment) <= SubjectMaxBytes {
 		return prefix + segment
@@ -362,17 +385,17 @@ func GithubPushSubject(owner, repo, refType, refName string) string {
 }
 
 func GithubWorkflowSubject(owner, repo, workflowFilename, action string) string {
-	return githubRepositoryPrefix(owner, repo) + ".workflow." + SanitizeSubjectSegment(workflowFilename) + "." + action
+	return GithubRepositoryPrefix(owner, repo) + ".workflow." + SanitizeSubjectSegment(workflowFilename) + "." + action
 }
 
 // GithubJobSubject names a finished GitHub Actions job on the default branch, of a run with no pull
 // request, by its run. Mirrored on the TS side as `githubJobSubject`.
 func GithubJobSubject(owner, repo, runID, action string) string {
-	return githubRepositoryPrefix(owner, repo) + ".job." + SanitizeSubjectSegment(runID) + "." + action
+	return GithubRepositoryPrefix(owner, repo) + ".job." + SanitizeSubjectSegment(runID) + "." + action
 }
 
 func GithubResourceSubject(owner string, repo string, resourceType string, resourceNumber string) string {
-	return githubRepositoryPrefix(owner, repo) + "." + resourceType + "." + resourceNumber
+	return GithubRepositoryPrefix(owner, repo) + "." + resourceType + "." + resourceNumber
 }
 
 const GhostWisprTopicPrefix = "notifications.ghostwispr."

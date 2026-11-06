@@ -64,6 +64,15 @@ var listenerBasePublish = []string{
 	"$JS.API.CONSUMER.CREATE.KV_envoy_ci_state.>",
 	"$JS.API.CONSUMER.DELETE.KV_envoy_ci_state.>",
 	"$JS.FC.KV_envoy_ci_state.>",
+	"$JS.API.STREAM.INFO.KV_envoy_dpop_proofs",
+	"$JS.API.STREAM.CREATE.KV_envoy_dpop_proofs",
+	"$JS.API.STREAM.UPDATE.KV_envoy_dpop_proofs",
+	"$JS.API.DIRECT.GET.KV_envoy_dpop_proofs.>",
+	"$JS.API.STREAM.MSG.GET.KV_envoy_dpop_proofs",
+	"$KV.envoy_dpop_proofs.>",
+	"$JS.API.CONSUMER.CREATE.KV_envoy_dpop_proofs.>",
+	"$JS.API.CONSUMER.DELETE.KV_envoy_dpop_proofs.>",
+	"$JS.FC.KV_envoy_dpop_proofs.>",
 	"$JS.API.STREAM.PURGE.KV_envoy_interests",
 }
 
@@ -96,7 +105,7 @@ func TestListenerPermissions(t *testing.T) {
 }
 
 // The listener-host set is the listener's own, with the subscribe to every notification topic
-// ENVOY_SUBSCRIBE_ALL_TOPICS needs after the role lanes: a user no session shares, so it holds
+// after the role lanes, which no reader is left for: a user no session shares, so it holds
 // none of the session's publish entries.
 func TestListenerHostPermissions(t *testing.T) {
 	require.Equal(t, core.Permissions{
@@ -105,10 +114,10 @@ func TestListenerHostPermissions(t *testing.T) {
 	}, core.ListenerHostPermissions("example-host-a"))
 }
 
-// The one set a listener may hold with ENVOY_SUBSCRIBE_ALL_TOPICS on and consumer delivery both:
-// it carries the session consumers' calls and the plain notifications.> subscribe, which no queue
-// group narrows. The plain host set, which a host's sessions share, carries that subscribe and no
-// consumer call, so a listener connecting as it answers every registration core.
+// The one set a listener may hold with consumer delivery and the plain notifications.>
+// subscribe both, which no queue group narrows. The plain host set, which a host's sessions
+// share, carries that subscribe and no consumer call, so a listener connecting as it answers
+// every registration core.
 func TestListenerHostPermissionsHoldTheConsumerCallsAndEveryTopic(t *testing.T) {
 	grant := core.ListenerHostPermissions("example-host-a")
 	require.Subset(t, grant.Publish.Allow, sessionConsumerPublish)

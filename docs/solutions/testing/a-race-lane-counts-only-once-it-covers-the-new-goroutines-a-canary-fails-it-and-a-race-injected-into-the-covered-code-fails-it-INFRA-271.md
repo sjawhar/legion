@@ -25,11 +25,13 @@ A clean `-race` run counts as race coverage only after the three steps below, ta
 step is what makes the next one mean something. If you skip any of them, a clean run reads as
 coverage when it is none.
 
-1. **Put the packages that gain goroutines into the race lane.** CI's step
-   (`.github/workflows/ci.yaml`, the test job's "Test the concurrent packages under the race detector")
-   runs only the packages it names. A clean result there says nothing about a package it does not
-   name. When a change adds goroutines to a package, add that package to the step in the same
-   pull request.
+1. **Put the packages that gain goroutines into the race lane.** The daemon's race lane runs only
+   the packages it names, and a clean result there says nothing about a package it does not name.
+   To add a package, add it to `DAEMON_RACE_PACKAGES` in `.github/scripts/ci_job_reads.py` and to
+   both daemon steps of `.github/workflows/ci.yaml`: the race step's package list and the plain
+   step's exclusion pattern. `.github/scripts/check-ci-filters.sh` then holds `ci.yaml` to that one
+   list, so the two steps cannot name different sets. When a change adds goroutines to a package,
+   add that package in the same pull request.
 2. **Show the detector can fail.** Under the same toolchain, run a canary: two goroutines
    increment one `int`. It must print `WARNING: DATA RACE` and fail. A clean run from a detector
    you have not seen fail is not evidence.

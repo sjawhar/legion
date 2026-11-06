@@ -26,23 +26,26 @@ func UseBlockSchema(t testing.TB, schema pmdoc.BlockSchema) {
 	t.Cleanup(restore)
 }
 
-// BlockPointerSchema is the block schema in use (the shipped one, its callout included, unless a
-// test swapped it) with two test types in place of any earlier ones of their names: a requirement,
-// and a claim holding claimAttributes. Nil claimAttributes is a serves attribute pointing only at
-// requirements. Called again after UseBlockSchema, it replaces the two.
-func BlockPointerSchema(claimAttributes map[string]pmdoc.BlockAttributeSchema) pmdoc.BlockSchema {
+// BlockPointerSchema is the block schema in use (the shipped one, its callout and its requirement
+// included, unless a test swapped it) with one test type in place of any earlier one of its name:
+// a claim holding claimAttributes. Nil claimAttributes is a serves attribute pointing only at
+// requirements, the shipped type of that name. No shipped type is named claim, so this schema
+// shadows none of them. Called again after UseBlockSchema, it replaces the claim.
+func BlockPointerSchema(claimAttributes pmdoc.BlockAttributes) pmdoc.BlockSchema {
 	var schema pmdoc.BlockSchema
 	if err := json.Unmarshal(pmdoc.SchemaJSON(), &schema); err != nil {
 		panic("pmdoctest: decode the block schema: " + err.Error())
 	}
 	if claimAttributes == nil {
-		claimAttributes = map[string]pmdoc.BlockAttributeSchema{"serves": {Kind: "block[]", Targets: []string{"requirement"}}}
+		claimAttributes = pmdoc.BlockAttributes{{
+			Name:                 "serves",
+			BlockAttributeSchema: pmdoc.BlockAttributeSchema{Kind: pmdoc.BlockAttributeBlockList, Targets: []string{"requirement"}},
+		}}
 	}
 	schema.Types = slices.DeleteFunc(schema.Types, func(typ pmdoc.BlockTypeSchema) bool {
-		return typ.Name == "requirement" || typ.Name == "claim"
+		return typ.Name == "claim"
 	})
 	schema.Types = append(schema.Types,
-		pmdoc.BlockTypeSchema{Name: "requirement", Content: pmdoc.BlockContentParagraphs, Render: "host", Attributes: map[string]pmdoc.BlockAttributeSchema{}},
 		pmdoc.BlockTypeSchema{Name: "claim", Content: pmdoc.BlockContentParagraphs, Render: "host", Attributes: claimAttributes},
 	)
 	return schema

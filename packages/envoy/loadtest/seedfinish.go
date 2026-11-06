@@ -402,11 +402,15 @@ type coverageKind struct {
 }
 
 // coverageKinds is every kind of a coverage body, in the order model.SearchCoverageKinds declares
-// them (internal/dispatch/model/model.go:410-416).
+// them. Since INFRA-370 (migration 20261102233625_block_embedding_windows) a vector covers a
+// window of neighbouring blocks rather than an item's whole text, so what the gate waits on are
+// the window kinds: an issue, and a window of a document's, a comment's or a message's blocks,
+// or of an ask's parts.
 func coverageKinds(kinds model.SearchCoverageKinds) []coverageKind {
 	return []coverageKind{
-		{"issue", kinds.Issue}, {"document", kinds.Document}, {"comment", kinds.Comment},
-		{"ask", kinds.Ask}, {"message", kinds.Message},
+		{"issue", kinds.Issue}, {"document_block", kinds.DocumentBlock},
+		{"comment_block", kinds.CommentBlock}, {"message_block", kinds.MessageBlock},
+		{"ask_part", kinds.AskPart},
 	}
 }
 

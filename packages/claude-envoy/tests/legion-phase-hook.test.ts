@@ -2,8 +2,12 @@ import { expect, test } from "bun:test"
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { EnvoyApiError, type PublishInput } from "@legion/envoy-client/transport"
-import { createLegionDaemonClient } from "@legion/pi-shared/daemon-client"
+import {
+  EnvoyApiError,
+  type PublishInput,
+  type PublishResult,
+} from "@legion/envoy-client/transport"
+import { type ActivityInput, createLegionDaemonClient } from "@legion/pi-shared/daemon-client"
 import type { ClaimCapability } from "@legion/pi-shared/legion-phase-ops"
 import { REMINDER } from "@legion/pi-shared/phase-stall"
 import {
@@ -65,6 +69,8 @@ interface Harness {
   readonly inbox: readonly string[]
   /** Every message published to the Envoy listener, in order. */
   readonly published: readonly PublishInput[]
+  /** Every activity report this endpoint sent the daemon, in order. */
+  readonly reports: readonly ActivityInput[]
   /** Settles the claim's boot, as `startLegionClaim`'s `booted` does. */
   readonly boot: () => void
   readonly lines: readonly string[]
@@ -82,7 +88,12 @@ async function harness(
     /** What the bridge answers the `attempt`th inbox write; queued by default. */
     readonly inboxAnswer?: (attempt: number) => Promise<void>
     /** What the listener answers the `attempt`th publish; accepted by default. */
-    readonly publish?: (input: PublishInput, attempt: number) => Promise<unknown>
+    readonly publish?: (
+      input: PublishInput,
+      attempt: number,
+    ) => Promise<Pick<PublishResult, "kept">>
+    /** Whether the daemon refuses every activity report: the hook still answers its worker. */
+    readonly reportActivityFails?: boolean
   } = {},
 ): Promise<Harness> {
   const directory = await mkdtemp(join(tmpdir(), "claude-envoy-phase-hook-"))
@@ -107,12 +118,17 @@ async function harness(
   const lines: string[] = []
   const inbox: string[] = []
   const published: PublishInput[] = []
+  const reports: ActivityInput[] = []
   const booted = Promise.withResolvers<void>()
   const endpoint = createPhaseHookEndpoint({
     stateFile: file,
     claim: () => options.claim,
     booted: booted.promise,
     readState: (signal) => daemon.state({ signal }),
+    reportActivity: async (input) => {
+      reports.push(input)
+      if (options.reportActivityFails === true) throw new Error("the daemon refused the report")
+    },
     inbox:
       options.inbox === false
         ? undefined
@@ -134,6 +150,7 @@ async function harness(
     recordAtDaemonRead: () => atRead,
     inbox,
     published,
+    reports,
     boot: booted.resolve,
     lines,
     close: async () => {
@@ -189,6 +206,75 @@ test("a turn settling on an open phase is blocked once, with the reminder, and t
       reported: false,
       lastMessage: "Still here.",
     })
+  } finally {
+    await close()
+  }
+})
+
+// INFRA-945: every settle tells the daemon what this session is doing, so the idle rule can
+// decide whether the pane's pod may be released. A turn ending with a background task of the
+// worker's own still running names it; a report the daemon refuses costs the worker nothing.
+test("the Stop hook reports what this session is doing to the daemon", async () => {
+  const { endpoint, reports, close } = await harness({
+    record: recorded("open", 0),
+    claim: implementer,
+  })
+  try {
+    await endpoint.handle({
+      event: "Stop",
+      lastAssistantMessage: "Waiting for the build.",
+      backgroundTasks: JSON.stringify([{ id: "bg_1", status: "running" }]),
+    })
+    expect(reports).toHaveLength(1)
+    expect(reports[0]).toMatchObject({
+      claimToken: "legion-legion-legion-208-implementer",
+      sessionId: SESSION,
+      secret: implementer.secret,
+      activity: {
+        backgroundWork: { running: true, kinds: ["claude-background-task"] },
+      },
+    })
+    expect(Date.parse(String(reports[0]?.activity.at))).not.toBeNaN()
+
+    // The task has ended: the next settle says so, and reports again even though the turn
+    // earned no reminder — a claim with no report after its last turn is never released.
+    await endpoint.handle({ event: "Stop", lastAssistantMessage: "Done.", backgroundTasks: "[]" })
+    expect(reports).toHaveLength(2)
+    expect(reports[1]?.activity.backgroundWork).toEqual({ running: false, kinds: [] })
+    expect(
+      Date.parse(String(reports[1]?.activity.phase.nextReminderAt)),
+      "the second settle's reminder is armed on a timer, and the report says when",
+    ).not.toBeNaN()
+  } finally {
+    await close()
+  }
+})
+
+test("a report the daemon refuses still leaves the worker its reminder", async () => {
+  const { endpoint, reports, lines, close } = await harness({
+    record: recorded("open", 0),
+    claim: implementer,
+    reportActivityFails: true,
+  })
+  try {
+    expect(await endpoint.handle({ event: "Stop", lastAssistantMessage: "Pushed." })).toEqual({
+      decision: "block",
+      reason: REMINDER,
+    })
+    expect(reports).toHaveLength(1)
+    expect(
+      lines.some((line) => line.includes("activity report did not reach the daemon")),
+    ).toBeTrue()
+  } finally {
+    await close()
+  }
+})
+
+test("a session holding no claim reports nothing", async () => {
+  const { endpoint, reports, close } = await harness({ record: recorded("open", 0) })
+  try {
+    expect(await endpoint.handle({ event: "Stop", lastAssistantMessage: "Pushed." })).toEqual({})
+    expect(reports).toEqual([])
   } finally {
     await close()
   }
@@ -405,14 +491,18 @@ test("a tool call that failed is work too, and resets the count", async () => {
   }
 })
 
-test("the architect is told at the threshold, asked again when no session holds the role, and never twice", async () => {
+test("the architect is told at the threshold, asked again when the listener kept nothing, and never twice", async () => {
   const { endpoint, record, inbox, published, close } = await harness({
     record: recorded("open", 1),
     claim: implementer,
     env: { LEGION_STALL_ARCHITECT_AFTER: "2" },
     publish: async (_input, attempt) => {
       if (attempt > 1) return {}
-      // The listener's "no live session holds that role".
+      // The listener's "nothing was kept for that role". The notice is the shared one, which
+      // sends `keep: false` (`createPhaseReminder`, packages/pi-shared/src/phase-reminder.ts),
+      // so the listener keeps nothing for an architect role no session holds: this 404 is the
+      // ordinary answer to it. The architect was not told, and the next delivered reminder
+      // publishes again under the same key.
       throw new EnvoyApiError({
         method: "POST",
         url: "http://listener.test/v1/messages/publish",

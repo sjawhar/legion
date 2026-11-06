@@ -99,15 +99,16 @@ You can read the pull request at any time. Legion's implementer writes its descr
 template, and the later phases fill in their own lines:
 
 - **Outcome** and **Why**: what changes for a user, and the issue it answers.
-- **Proven by** and **E2E (implementer)** / **E2E (tester)**: the command or run that exercised the
-  change on a production-like surface, what it showed, the commit it ran at, and one negative
-  control.
+- **Proven by** and **Checks**: one line per check of the issue's Verification document, each the
+  line Dispatch printed when the result was recorded — the check, when it runs, the verdict, the
+  commit it ran at and the role that ran it.
 - **Look at first** and **Not proven / risk**: written by Legion's reviewer, naming where a wrong
   decision would hurt and every claim left unproven.
-- **Production**: written by the implementer after the merge closes the issue, once your deploy carries the change; `pending deploy of <sha>` until then.
+- The `after_merge` check, recorded by the implementer after the merge closes the issue, once your
+  deploy carries the change; its line reads `not yet run` until then.
 - Any line your repository's own instructions derive from the paths the change touches, such as a
   checklist named for each kind of path: after the approval, the retro recomputes it for the whole
-  change, its notes included, the way those instructions say, before it pushes the notes.
+  change, the way those instructions say.
 
 Legion's reviewer posts its review as the review App. A review from anyone with write access to the
 repository, submitted on GitHub while the issue is in `needs_review`, counts the same way:
@@ -120,7 +121,7 @@ file list shows only the change and the merge brings no handoff onto the default
 ## Merge
 
 When the change is tested, reviewed and approved, the merger sends **READY**. The daemon accepts it
-on the approved head plus retro's notes, reading no check of that head, and posts it on the
+on the approved head, which retro leaves as it is, reading no check of that head, and posts it on the
 Dispatch issue as one message:
 
 ```text
@@ -140,7 +141,8 @@ off, and then it closes. The architect accepted the change before that, when the
 it, with a comment on the issue summarizing the evidence; work still running beneath an issue does
 not hold that acceptance, since the root's close waits for it. After the close the
 implementer checks the change in production, once your deploy carries it, and records what it saw
-on the pull request's `Production:` line; a closed issue takes no further write, so look there.
+as the result of the issue's `after_merge` check, with that result's line on the pull request; a
+closed issue takes a result for such a check and no other write, so look in both places.
 The tree's workspace is kept for three days (`linger_hours`, 72 by default) in case the work
 resumes.
 
@@ -159,7 +161,12 @@ resumes.
 
 A status written by an agent session on a running issue is set back by the daemon, and the
 architect is told who wrote it; only a person's move in the dashboard, the controller's
-`set_status`, or an operator's `legion status`, takes a running tree out.
+`set_status`, or an operator's `legion status`, takes a running tree out. A move of your own
+between the workflow's own statuses — `in_progress`, `testing`, `needs_review`, `retro`, and
+`todo` on a root (on a child, `todo` reruns it) — on a running issue does not stay either: the
+daemon's status repair writes back the status of the phase the issue stands in, at each boot and
+then every `controller_wake_interval_seconds` (an hour by default). `backlog` or `icebox` is how
+you stop the work.
 
 ## What each status means
 
@@ -168,7 +175,7 @@ architect is told who wrote it; only a person's move in the dashboard, the contr
 | `triage` | whoever files the issue | New. A person's `legion` label is queued by the daemon: the issue moves to `todo` itself. A label a session set goes to the controller, which decides whether to admit it now, park it, or leave it to you. |
 | `icebox` | a person or the controller | Parked for the long term. Legion does not run it. |
 | `backlog` | a person or the controller | Should not run now: it waits on a decision or a deploy. Legion does not run it. |
-| `todo` | a person or the controller | Ready. A labelled root is admitted when a slot is free and waits in line until then. A child in `todo` runs under its tree. |
+| `todo` | a person or the controller | Ready. A labelled root is admitted when a slot is free and waits in line until then. A child shows `todo` only until its first phase: the move into planning sets it to `in_progress`. |
 | `in_progress` | the daemon | Admitted: the architect is writing the spec or waiting for your approval, or the planner or implementer is working. Work sent back by a failed test, red CI or a review returns here. |
 | `testing` | the daemon | The implementer opened the pull request and finished; the tester is checking the change. |
 | `needs_review` | the daemon | The tester passed; Legion's reviewer is reviewing, and once it approves the architect reads the evidence and accepts the change or sends it back. Your GitHub review counts now. |

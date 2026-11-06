@@ -24,6 +24,8 @@ import { pageInBound, routeInBound } from "./target-id";
 export type IssueRoute =
   | { key: string; kind: "issue" }
   | ({ key: string; kind: "spec" } & BlockTarget)
+  | { key: string; kind: "verification" }
+  | { key: string; kind: "plan" }
   | { key: string; kind: "conversation" }
   | { key: string; kind: "activity" }
   | { key: string; kind: "decisions" }
@@ -69,6 +71,11 @@ export interface InboxRoute {
    *  the whole memory of that selection, so a link carries the reader's place in the list. */
   item?: string;
   section?: "needs-you";
+  /** The text the Inbox's search box narrows the list by, as typed. It is a field of the route
+   *  rather than a search parameter of its own because `buildInboxPath` rebuilds the whole query
+   *  string from this type and `usePaneSelection` navigates with it on every selection change, so
+   *  a parameter outside the type would be dropped by the next `j`. */
+  q?: string;
   /** Who the listed asks are for. Absent is the page's default, the reader's own work; an empty
    *  array is the cleared filter, every question; a value is a person's lowercase email or the
    *  literal `unassigned`. */
@@ -76,6 +83,8 @@ export interface InboxRoute {
 }
 export type IssueTab =
   | "spec"
+  | "verification"
+  | "plan"
   | "conversation"
   | "children"
   | "artifacts"
@@ -84,6 +93,30 @@ export type IssueTab =
 
 /** The slug of an issue's `decisions.md`, the document its Decisions tab is a view of. */
 export const DECISIONS_DOCUMENT_SLUG = "decisions-md";
+
+/** The issue tabs whose whole route is the tab itself: no block, no slug, no id. Each one is
+ *  parsed from the segment of its own name, built as `<issue>/<kind>`, shown as `<KEY> <kind>`
+ *  and is the tab of its own name, so the chains below hold the five in one arm rather than one
+ *  apiece and a sixth tab is this list. The spec, the conversation and the decisions stay out of
+ *  it: a spec route carries a block, the conversation is written `log` in a reference and
+ *  `conversation` in a path, and the Decisions tab is a view of the issue's `decisions.md`, which
+ *  a reference names as that document. */
+const PLAIN_ISSUE_TABS = ["verification", "plan", "activity", "children", "artifacts"] as const;
+
+type PlainIssueTab = (typeof PLAIN_ISSUE_TABS)[number];
+
+/** The plain tab a path segment names, or `undefined` for anything else. */
+function plainIssueTab(value: string): PlainIssueTab | undefined {
+  return PLAIN_ISSUE_TABS.find((tab) => tab === value);
+}
+
+type PlainIssueRoute = Extract<IssueRoute, { kind: PlainIssueTab }>;
+
+/** Whether the route is one of those tabs, narrowing it for the builders below and leaving the
+ *  rest of the union to the arms that follow. */
+function isPlainIssueRoute(route: DispatchRoute | AgentArtifactRoute): route is PlainIssueRoute {
+  return PLAIN_ISSUE_TABS.some((tab) => tab === route.kind);
+}
 
 const projectKeyPattern = "[A-Z][A-Z0-9]{1,9}";
 const issueKeyPattern = `${projectKeyPattern}-[1-9]\\d*`;
@@ -135,20 +168,14 @@ export function issueTabForRoute(
   route: IssueRoute,
   artifact: Pick<Artifact, "kind" | "primary"> | undefined
 ): IssueTab {
-  if (route.kind === "children") {
-    return "children";
+  if (isPlainIssueRoute(route)) {
+    return route.kind;
   }
   if (route.kind === "conversation") {
     return "conversation";
   }
-  if (route.kind === "activity") {
-    return "activity";
-  }
   if (route.kind === "decisions") {
     return "decisions";
-  }
-  if (route.kind === "artifacts") {
-    return "artifacts";
   }
   if (route.kind === "artifact") {
     return isPrimaryDocumentArtifactRoute(route, artifact) ? "spec" : "artifacts";
@@ -242,17 +269,12 @@ function parseIssueReference(key: string, target: string | undefined): IssueRout
   if (target === "spec") {
     return { key, kind: "spec" };
   }
+  const plain = plainIssueTab(target);
+  if (plain !== undefined) {
+    return { key, kind: plain };
+  }
   if (legacyLogReferencePattern.test(target) || target === "conversation") {
     return { key, kind: "conversation" };
-  }
-  if (target === "activity") {
-    return { key, kind: "activity" };
-  }
-  if (target === "children") {
-    return { key, kind: "children" };
-  }
-  if (target === "artifacts") {
-    return { key, kind: "artifacts" };
   }
   const artifact = target.match(issueArtifactReferencePattern);
   if (artifact !== null) {
@@ -350,20 +372,15 @@ export function parseIssuePath(pathname: string, search = ""): IssueRoute | unde
   if (target === "spec") {
     return { key, kind: "spec" };
   }
+  const plain = plainIssueTab(target);
+  if (plain !== undefined) {
+    return { key, kind: plain };
+  }
   if (target === "conversation") {
     return { key, kind: "conversation" };
   }
-  if (target === "activity") {
-    return { key, kind: "activity" };
-  }
   if (target === "decisions") {
     return { key, kind: "decisions" };
-  }
-  if (target === "children") {
-    return { key, kind: "children" };
-  }
-  if (target === "artifacts") {
-    return { key, kind: "artifacts" };
   }
   const artifact = target.match(/^artifacts?\/([^/?#\s]+)$/);
   if (artifact !== null) {
@@ -595,22 +612,16 @@ export function buildDispatchReference(route: DispatchReferenceRoute): string {
   if (route.kind === "spec") {
     return `${issue}/spec${block}`;
   }
+  if (isPlainIssueRoute(route)) {
+    return `${issue}/${route.kind}`;
+  }
   // The conversation keeps the `log` spelling every reference written before the Activity tab
   // existed used; activity, newer, is spelled as its own path is.
   if (route.kind === "conversation") {
     return `${issue}/log`;
   }
-  if (route.kind === "activity") {
-    return `${issue}/activity`;
-  }
   if (route.kind === "decisions") {
     return `${issue}/artifact/${DECISIONS_DOCUMENT_SLUG}`;
-  }
-  if (route.kind === "children") {
-    return `${issue}/children`;
-  }
-  if (route.kind === "artifacts") {
-    return `${issue}/artifacts`;
   }
   if (route.kind === "artifact") {
     return `${issue}/artifact/${encodeURIComponent(route.slug)}${
@@ -775,6 +786,9 @@ export function shortForm(route: DispatchReferenceRoute): string {
     const base = `${route.project}/${route.slug}`;
     return route.item === undefined ? `${base}${block}` : `${base} ${route.item.kind}${block}`;
   }
+  if (isPlainIssueRoute(route)) {
+    return `${route.key} ${route.kind}`;
+  }
   switch (route.kind) {
     case "issue":
       return route.key;
@@ -782,14 +796,8 @@ export function shortForm(route: DispatchReferenceRoute): string {
       return `${route.key} spec${block}`;
     case "conversation":
       return `${route.key} log`;
-    case "activity":
-      return `${route.key} activity`;
     case "decisions":
       return `${route.key} decisions`;
-    case "children":
-      return `${route.key} children`;
-    case "artifacts":
-      return `${route.key} artifacts`;
     case "artifact":
       return `${route.key} ${route.slug}${block}`;
     case "ask":
@@ -847,20 +855,14 @@ export function buildIssuePath(route: IssueRoute): string {
   if (route.kind === "spec") {
     return `${issue}/spec`;
   }
+  if (isPlainIssueRoute(route)) {
+    return `${issue}/${route.kind}`;
+  }
   if (route.kind === "conversation") {
     return `${issue}/conversation`;
   }
-  if (route.kind === "activity") {
-    return `${issue}/activity`;
-  }
   if (route.kind === "decisions") {
     return `${issue}/decisions`;
-  }
-  if (route.kind === "children") {
-    return `${issue}/children`;
-  }
-  if (route.kind === "artifacts") {
-    return `${issue}/artifacts`;
   }
   if (route.kind === "artifact") {
     const artifact = `${issue}/artifacts/${encodeURIComponent(route.slug)}`;
@@ -912,6 +914,12 @@ export function parseInboxSearch(search: string): InboxRoute {
   if (params.get("section") === "needs-you") {
     route.section = "needs-you";
   }
+  // Neither trimmed nor cut: a reader mid-word has a trailing space that is part of what they
+  // typed, and the box rewrites no address a link arrived with.
+  const q = params.get("q");
+  if (q !== null && q !== "") {
+    route.q = q;
+  }
   // Nothing refuses an email the page has never heard of: the filter is a client-side split of
   // one inbox response, so an unlisted or misspelled person simply matches no row.
   const assignees: string[] = [];
@@ -941,6 +949,9 @@ export function buildInboxPath(route: InboxRoute = {}): string {
   }
   if (route.section !== undefined) {
     query.set("section", route.section);
+  }
+  if (route.q !== undefined) {
+    query.set("q", route.q);
   }
   if (route.assignees !== undefined) {
     if (route.assignees.length === 0) {

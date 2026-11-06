@@ -1,3 +1,4 @@
+import { parseBlockPointerValue } from "@legion/contracts";
 import type { DOMOutputSpec, Node as ProseMirrorNode } from "prosemirror-model";
 
 import type { AskOption, AskUrgency, BlockTypeSchema } from "../../api/types";
@@ -9,6 +10,7 @@ import {
   textPrimaryOnSurface,
 } from "../../theme/classes";
 import { URGENCY_LABELS } from "../inbox/ask-urgency";
+import { buildReferencePath, parseNodeReference, shortForm } from "../refs/routes";
 
 /**
  * `blockId` is the block's own identity rather than one of its schema attributes, so it is the
@@ -23,14 +25,87 @@ function attributeValue(value: unknown): string {
 }
 
 /**
+ * One block a pointer names, as a link to it: the reference's short form as its words, the app
+ * path as its `href`, and the reference itself as `data-dispatch-href`, which is how a link
+ * drawn inside a document reaches the router and the hover card (`ProofDocument`'s click
+ * handler and `RefPreview`'s trigger, the same pair `pictureView` writes for). A pointer that
+ * names nothing is the text it is.
+ */
+function pointerLink(reference: string): DOMOutputSpec {
+  const route = parseNodeReference(reference);
+  if (route === undefined) {
+    return ["span", {}, reference];
+  }
+  return [
+    "a",
+    { "data-dispatch-href": reference, href: buildReferencePath(route) },
+    shortForm(route),
+  ];
+}
+
+/** One attribute the header draws: its name, and the children its value draws as - a spec per
+ *  element, or the plain text a text node carries, which `DOMOutputSpec` itself excludes. */
+interface DrawnAttribute {
+  readonly children: readonly (DOMOutputSpec | string)[];
+  readonly name: string;
+}
+
+/**
+ * The attributes of `node` the header draws, in the node's own order: the author's own, each
+ * with the children its value draws as. A `block[]` attribute draws the blocks it points at,
+ * one link each, separated as its value separates them; one that points at no block draws
+ * nothing at all, since an empty pointer list is not a fact a reader came for the way a check's
+ * blank negative control is. Every other kind draws its value's text.
+ */
+function drawnAttributes(
+  node: ProseMirrorNode,
+  type?: Pick<BlockTypeSchema, "attributes"> | undefined
+): DrawnAttribute[] {
+  return Object.entries(node.attrs).flatMap(([name, value]) => {
+    if (
+      name === BLOCK_IDENTITY_ATTRIBUTE ||
+      type?.attributes[name]?.server === true ||
+      value === null ||
+      value === undefined ||
+      value === ""
+    ) {
+      return [];
+    }
+    if (type?.attributes[name]?.kind !== "block[]") {
+      return [{ children: [attributeValue(value)], name }];
+    }
+    // The node's value is the array the editor's own parser made of the attribute as markdown
+    // wrote it (`parseAttribute`, `@legion/proof-editor`), and markdown and HTML carry those
+    // same references joined by exactly one space, so reading the joined value serves either
+    // shape through the parser the editor, the document service and the Plan tab share, and
+    // accepts exactly the values a writer is allowed to store. One it refuses, which no stored
+    // block holds, points at nothing.
+    const pointers =
+      parseBlockPointerValue(Array.isArray(value) ? value.join(" ") : String(value)) ?? [];
+    return pointers.length === 0
+      ? []
+      : [
+          {
+            children: pointers.flatMap((reference, index) =>
+              index === 0 ? [pointerLink(reference)] : [" ", pointerLink(reference)]
+            ),
+            name,
+          },
+        ];
+  });
+}
+
+/**
  * Draws a document's host-owned typed blocks other than `ask`, which `AskBlockView` owns: the
  * block's kind and the author's own attributes as a header the reader sees, above its content.
  * The header reads as a label rather than a dump: the block's name is an eyebrow, a `kind` is a
  * badge beside it, a `title` is the header's own text, and any other attribute the author wrote
- * follows as a quiet name/value pair. What the author did not write never appears - the block's
+ * follows as a quiet name/value pair, a `block[]` one as a link to each block it points at
+ * (`drawnAttributes`). What the author did not write never appears - the block's
  * identity, and every attribute the type's schema marks `server`, which is where the parser's
  * complaint and a decision's recorded state live. `type` is that schema entry; without one
- * (a node whose type the schema no longer describes) only the identity is hidden. In the editor
+ * (a node whose type the schema no longer describes) only the identity is hidden, and a
+ * `block[]` attribute of such a type reads as the value it is. In the editor
  * it is the node view's drawing (`typedBlockView`), never the node's `toDOM`: HTML of the
  * document - a copy, a drag, or the editor's plain-text paste, which renders the markdown it
  * parsed through `toDOM` - carries only the block's section and content, which is all its parse
@@ -42,17 +117,10 @@ export function renderTypedBlock(
   node: ProseMirrorNode,
   type?: Pick<BlockTypeSchema, "attributes"> | undefined
 ): DOMOutputSpec {
-  const shown = Object.entries(node.attrs).filter(
-    ([name, value]) =>
-      name !== BLOCK_IDENTITY_ATTRIBUTE &&
-      type?.attributes[name]?.server !== true &&
-      value !== null &&
-      value !== undefined &&
-      value !== ""
-  );
-  const title = shown.find(([name]) => name === "title");
-  const kind = shown.find(([name]) => name === "kind");
-  const rest = shown.filter(([name]) => name !== "title" && name !== "kind");
+  const shown = drawnAttributes(node, type);
+  const title = shown.find((attribute) => attribute.name === "title");
+  const kind = shown.find((attribute) => attribute.name === "kind");
+  const rest = shown.filter((attribute) => attribute.name !== "title" && attribute.name !== "kind");
   const badge: DOMOutputSpec[] =
     kind === undefined
       ? []
@@ -60,7 +128,7 @@ export function renderTypedBlock(
           [
             "span",
             { "data-proof-block-attribute": "kind", "data-proof-block-badge": "" },
-            attributeValue(kind[1]),
+            ...kind.children,
           ],
         ];
   const heading: DOMOutputSpec[] =
@@ -70,7 +138,7 @@ export function renderTypedBlock(
           [
             "span",
             { "data-proof-block-attribute": "title", "data-proof-block-title": "" },
-            attributeValue(title[1]),
+            ...title.children,
           ],
         ];
   const others: DOMOutputSpec[] =
@@ -80,9 +148,9 @@ export function renderTypedBlock(
           [
             "dl",
             { "data-proof-block-attributes": "" },
-            ...rest.flatMap(([name, value]) => [
+            ...rest.flatMap(({ children, name }) => [
               ["dt", {}, name],
-              ["dd", { "data-proof-block-attribute": name }, attributeValue(value)],
+              ["dd", { "data-proof-block-attribute": name }, ...children],
             ]),
           ],
         ];

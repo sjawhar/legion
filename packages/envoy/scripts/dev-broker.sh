@@ -193,7 +193,7 @@ DISPLAY_URL="$(printf '%s' "$POSTGRES_URL" | sed -E 's#^(postgres(ql)?://[^:/@?]
 echo "dev-broker: building broker, dev-oidc-issuer, agent-secrets, agent-secrets-helper and agent-secrets-devrelay..." >&2
 mkdir -p "$BIN_DIR"
 for cmd in broker dev-oidc-issuer agent-secrets agent-secrets-helper agent-secrets-devrelay; do
-  ( cd "$ENVOY_DIR" && GOTOOLCHAIN=go1.27.1 go build -o "$BIN_DIR/$cmd" "./cmd/$cmd" )
+  ( cd "$ENVOY_DIR" && GOTOOLCHAIN=go1.27.3 go build -o "$BIN_DIR/$cmd" "./cmd/$cmd" )
 done
 
 # --- Fake Secrets Manager: one agent-tier secret its owner's sessions get without asking, one
@@ -372,7 +372,7 @@ dev-broker: ready.
 
   One agent-tier secret (DEMO_READ_TOKEN, granted without asking) and one human-tier secret
   (DEMO_API_KEY, approver: $APPROVER_LOGIN), both owned by $APPROVER_LOGIN, whose sessions ask
-  for them. A grant lasts until its session ends, or for the --ttl its request names.
+  for them. A grant lasts for the --ttl its request names, else 12 hours.
   Drive it with agent-secrets and agent-secrets-helper in another shell;
   press Ctrl-C here to stop the broker and its issuer.
 

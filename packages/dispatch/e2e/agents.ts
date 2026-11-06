@@ -22,15 +22,17 @@ export interface FakeSession {
   topics?: string[];
 }
 
-/** A request to the harness's fake Envoy. The harness (e2e/harness-start.ts) starts this listener
- *  for local and deployed runs, so fixture state reaches whichever Dispatch server the suite
- *  targets. */
+/** A request to a fake Envoy, by default this process's own lane's. The harness
+ *  (e2e/harness-start.ts) starts that listener for local and deployed runs, so fixture state
+ *  reaches whichever Dispatch server the suite targets; `port` is for the one process that
+ *  addresses every lane's rather than its own (e2e/preflight.ts). */
 async function fixtureRequest(
   path: string,
   method: "GET" | "PATCH" | "PUT",
-  body?: object
+  body?: object,
+  port: number = harnessPorts().fakeEnvoy.port
 ): Promise<Response> {
-  const response = await fetch(`http://127.0.0.1:${harnessPorts().fakeEnvoy.port}${path}`, {
+  const response = await fetch(`http://127.0.0.1:${port}${path}`, {
     body: body === undefined ? undefined : JSON.stringify(body),
     headers: body === undefined ? undefined : { "Content-Type": "application/json" },
     method,
@@ -42,12 +44,12 @@ async function fixtureRequest(
 }
 
 /** Clears all mutable fake Envoy state between e2e rows. */
-export async function resetFakeEnvoy(): Promise<void> {
-  await fixtureRequest("/__fixture/reset", "PUT");
+export async function resetFakeEnvoy(port?: number): Promise<void> {
+  await fixtureRequest("/__fixture/reset", "PUT", undefined, port);
 }
 
-export async function setLiveSessions(rows: FakeSession[]): Promise<void> {
-  await fixtureRequest("/__fixture/sessions", "PUT", rows);
+export async function setLiveSessions(rows: FakeSession[], port?: number): Promise<void> {
+  await fixtureRequest("/__fixture/sessions", "PUT", rows, port);
 }
 
 export async function setSessionSendStatus(sessionID: string, status: 200 | 404): Promise<void> {
@@ -87,6 +89,42 @@ export async function setSessionLive(sessionID: string, live: boolean): Promise<
  *  caller must retry rather than read as an ended session. */
 export async function setSessionRecord(sessionID: string, record: SessionRecord): Promise<void> {
   await fixtureRequest(`/__fixture/sessions/${encodeURIComponent(sessionID)}`, "PATCH", { record });
+}
+
+/** The state the fake listener's record puts a seeded session in. `gone` is not one of them: a
+ *  session the listener holds no record of at all is `setSessionRecord(id, "absent")`. */
+export type SessionState = "live" | "unresponsive";
+
+/** Puts a seeded session past the listener's live window, or back inside it, without reseeding.
+ *  An `unresponsive` session is still listed, still holds its roles and claims and is still
+ *  delivered to; every answer about it carries that state, and `GET /v1/sessions` and the
+ *  per-session route answer for it only when the caller asks with `include=unresponsive`, as
+ *  Dispatch's own listener client always does (dispatch://INFRA-392). Pair it with
+ *  `setSessionLastSeen` wherever the row's age matters: Dispatch dates the silence by that
+ *  heartbeat and adds its claim grace to it. */
+export async function setSessionState(sessionID: string, state: SessionState): Promise<void> {
+  await fixtureRequest(`/__fixture/sessions/${encodeURIComponent(sessionID)}`, "PATCH", { state });
+}
+
+/** The heartbeat every answer reports for a seeded session, in epoch milliseconds, in place of
+ *  the read's own time: what an unresponsive session's silence is dated from, and what Dispatch
+ *  adds `ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS` to for the moment its claim comes free. */
+export async function setSessionLastSeen(sessionID: string, lastSeen: number): Promise<void> {
+  await fixtureRequest(`/__fixture/sessions/${encodeURIComponent(sessionID)}`, "PATCH", {
+    last_seen: lastSeen,
+  });
+}
+
+/** How the fake listener answers its two list reads (`GET /v1/sessions`, `GET /v1/interests/`):
+ *  `ok` from the fixture; `refilling` with the real listener's refilling answer (503,
+ *  `Retry-After: 5`, code `refilling`), which Dispatch reports as `ENVOY_REFILLING`; `down` with a
+ *  503 that carries no code, which Dispatch reports as `ENVOY_UNAVAILABLE`. Every other route
+ *  answers as before, and a session reseed keeps the state; `resetFakeEnvoy` puts it back to
+ *  `ok`. */
+export type ListsState = "ok" | "refilling" | "down";
+
+export async function setListsState(state: ListsState): Promise<void> {
+  await fixtureRequest("/__fixture/lists", "PUT", { state });
 }
 
 export async function getSentMessages(): Promise<Record<string, unknown>[]> {

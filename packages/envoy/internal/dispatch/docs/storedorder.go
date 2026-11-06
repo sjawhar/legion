@@ -1,11 +1,15 @@
 package docs
 
 import (
+	"bytes"
+	"cmp"
 	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -20,8 +24,12 @@ import (
 //     to: true when either side does not render, otherwise whether the rendered markdown differs
 //     (the measure updateChangesMarkdown applies to a live update).
 //  2. Versions. A version's markdown is the render of the fold through its doc_update_version.
-//  3. Pending. No update leaves the fold holding structs it parked: an update stored before one it
-//     depends on was stored out of order.
+//  3. Pending. No update is stored ahead of one it depends on: a row that adds parked structs or
+//     deletions is a mismatch unless a later row carries what it parked again, which the commit
+//     that integrates a peer's stored parked edit does (storeParked, judgeParkedRows). A row
+//     still parked when the history ends is counted as awaiting its predecessor, not reported:
+//     the store cannot tell an edit whose predecessor has not arrived from one whose dependency
+//     was never stored.
 //
 // The fold starts from the document's oldest retained update, its base. Compaction folds older
 // history into that row (Compact) and a rebuild replaces the whole history with one row there
@@ -52,8 +60,8 @@ const (
 	// StoredOrderVersion is a version whose stored markdown is not the render of the fold through
 	// its doc_update_version.
 	StoredOrderVersion StoredOrderMismatchKind = "version"
-	// StoredOrderPending is an update after which the fold holds more parked structs than before
-	// it: an update it depends on is stored after it, or not at all.
+	// StoredOrderPending is an update that adds parked content, stored ahead of an update it
+	// depends on that no later row carries again: a misordered store (judgeParkedRows).
 	StoredOrderPending StoredOrderMismatchKind = "pending"
 )
 
@@ -115,6 +123,12 @@ type StoredOrderReport struct {
 	// VersionsCompacted those created inside the window recording an update below the base,
 	// which a compaction folded into it: nothing of those was compared either.
 	VersionsChecked, VersionsSkipped, VersionsCompacted int
+	// UpdatesAwaitingPredecessor counts the updates after which the fold parks structs no later
+	// row resolves: a peer's edit the room stored ahead of an edit it builds on that has not
+	// arrived (storeParked), or a row whose dependency was never stored, which the store alone
+	// cannot tell apart. A dependency the room held and the store lost also leaves every version
+	// recorded after it rendering text the fold lacks, which the version rule reports.
+	UpdatesAwaitingPredecessor int
 	// Refused says why the document's history cannot be checked; a refused document never passes.
 	Refused    string
 	Mismatches []StoredOrderMismatch
@@ -276,7 +290,10 @@ func renderStoredFold(doc *crdt.Doc) storedRender {
 }
 
 // foldStoredOrder folds the document's updates in version order into one document, reading one row
-// at a time, and checks each update after the base and each version against the fold.
+// at a time, and checks each update after the base and each version against the fold. Each checked
+// row that adds parked content is tracked until its own inserted and deleted clocks integrate,
+// independently of unrelated parked content. Resolved rows are judged individually
+// (judgeParkedRows); unresolved rows are counted as awaiting their predecessor.
 func foldStoredOrder(ctx context.Context, tx pgx.Tx, artifactID string, since time.Time, at map[int64][]storedVersion, report *StoredOrderReport) error {
 	rows, err := tx.Query(ctx, `
 		select version, update, content_changed, created_at from doc_updates where artifact_id = $1 order by version
@@ -291,8 +308,9 @@ func foldStoredOrder(ctx context.Context, tx pgx.Tx, artifactID string, since ti
 	// a since time does not render every row before it.
 	var previous storedRender
 	rendered := false
-	var parked crdt.PendingStats
+	var parked crdt.ContentIDs
 	base := true
+	var waiting, resolved []*parkedRow
 	for rows.Next() {
 		var version int64
 		var update []byte
@@ -310,6 +328,16 @@ func foldStoredOrder(ctx context.Context, tx pgx.Tx, artifactID string, since ti
 			return nil
 		}
 		now := doc.PendingStats()
+		var pending crdt.ContentIDs
+		var clocks crdt.StateVector
+		if now.Items > 0 || now.DeleteRanges > 0 {
+			clocks = doc.StateVector()
+			pending, err = crdt.ContentIDsFromUpdateV1(crdt.EncodeStateAsUpdateV1(doc, clocks))
+			if err != nil {
+				return fmt.Errorf("read parked content at update %d: %w", version, err)
+			}
+			pending.Deletes = crdt.ExcludeIDSet(pending.Deletes, crdt.DeleteSetFromDoc(doc))
+		}
 		recorded := at[version]
 		rendered = checked || len(recorded) > 0
 		var current storedRender
@@ -329,13 +357,32 @@ func foldStoredOrder(ctx context.Context, tx pgx.Tx, artifactID string, since ti
 					Kind: StoredOrderClass, Update: version, StoredClass: stored, ExpectedClass: expected,
 				})
 			}
-			if now.Items > parked.Items || now.DeleteRanges > parked.DeleteRanges {
-				report.Mismatches = append(report.Mismatches, StoredOrderMismatch{
-					Kind: StoredOrderPending, Update: version, ParkedItems: now.Items, ParkedDeleteRanges: now.DeleteRanges,
+			if needed := addedParkedClocks(parked, pending); len(needed) > 0 {
+				waiting = append(waiting, &parkedRow{
+					mismatch: StoredOrderMismatch{
+						Kind: StoredOrderPending, Update: version, ParkedItems: now.Items, ParkedDeleteRanges: now.DeleteRanges,
+					},
+					needed: needed,
 				})
 			}
 		}
-		previous, parked = current, now
+		previous, parked = current, pending
+		if len(waiting) > 0 {
+			if clocks == nil {
+				clocks = doc.StateVector()
+			}
+			unresolved := waiting[:0]
+			for _, row := range waiting {
+				if storedClocksReached(clocks, row.needed) {
+					row.through = version
+					resolved = append(resolved, row)
+				} else {
+					unresolved = append(unresolved, row)
+				}
+			}
+			clear(waiting[len(unresolved):])
+			waiting = unresolved
+		}
 		for _, written := range recorded {
 			report.VersionsChecked++
 			if mismatch, differs := compareStoredVersion(written, current); differs {
@@ -346,7 +393,185 @@ func foldStoredOrder(ctx context.Context, tx pgx.Tx, artifactID string, since ti
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("read the document's stored updates: %w", err)
 	}
+	rows.Close()
+	report.UpdatesAwaitingPredecessor += len(waiting)
+	if len(resolved) == 0 {
+		return nil
+	}
+	return judgeParkedRows(ctx, tx, artifactID, resolved, report)
+}
+
+// addedParkedClocks records the ends of the newly parked runs. Extending a pending delete range
+// adds content even when the pending item and range counts do not increase.
+func addedParkedClocks(was, now crdt.ContentIDs) crdt.StateVector {
+	if now.Inserts == nil && now.Deletes == nil {
+		return nil
+	}
+	var clocks crdt.StateVector
+	for _, ids := range []*crdt.IDSet{crdt.ExcludeIDSet(now.Inserts, was.Inserts), crdt.ExcludeIDSet(now.Deletes, was.Deletes)} {
+		for _, client := range ids.Clients() {
+			ranges := ids.Ranges(client)
+			last := ranges[len(ranges)-1]
+			if clocks == nil {
+				clocks = make(crdt.StateVector)
+			}
+			clocks[client] = max(clocks[client], last.Clock+last.Len)
+		}
+	}
+	return clocks
+}
+
+func storedClocksReached(have, need crdt.StateVector) bool {
+	for client, clock := range need {
+		if have[client] < clock {
+			return false
+		}
+	}
+	return true
+}
+
+// parkedRow is one checked row that added parked content. needed identifies its newly parked
+// runs; through is the first later row whose fold has integrated them all. A deletion resolves
+// once its target clocks integrate, even if another client's structs or deletions still wait.
+type parkedRow struct {
+	mismatch StoredOrderMismatch
+	needed   crdt.StateVector
+	through  int64
+}
+
+// judgeParkedRows advances one shared prefix in omitted-version order. Each comparison copies
+// that prefix and replays only the omitted row's unresolved span, not the older history. Three
+// documents suffice regardless of how many rows wait; suffix work follows the unresolved spans.
+func judgeParkedRows(ctx context.Context, tx pgx.Tx, artifactID string, resolved []*parkedRow, report *StoredOrderReport) error {
+	ordered := slices.Clone(resolved)
+	slices.SortFunc(ordered, func(a, b *parkedRow) int {
+		return cmp.Compare(a.mismatch.Update, b.mismatch.Update)
+	})
+	prefix := newDocumentCopy()
+	defer prefix.Destroy()
+	var through int64
+	differs := make(map[*parkedRow]bool, len(resolved))
+	for _, row := range ordered {
+		before := row.mismatch.Update - 1
+		if err := replayStoredRange(ctx, tx, artifactID, through, before, func(_ int64, update []byte) error {
+			return decodeStoredState(prefix, update)
+		}); err != nil {
+			return err
+		}
+		through = before
+		var err error
+		differs[row], err = compareParkedPrefix(ctx, tx, artifactID, prefix, row)
+		if err != nil {
+			return err
+		}
+	}
+	// Keep the report in resolution order, even when rows resolve in reverse order.
+	for _, row := range resolved {
+		if differs[row] {
+			report.Mismatches = append(report.Mismatches, row.mismatch)
+		}
+	}
 	return nil
+}
+
+func compareParkedPrefix(ctx context.Context, tx pgx.Tx, artifactID string, prefix *crdt.Doc, omitted *parkedRow) (bool, error) {
+	full, without := newDocumentCopy(), newDocumentCopy()
+	defer full.Destroy()
+	defer without.Destroy()
+	// Decode a snapshot rather than copying ygo's pending-queue internals: a queue with
+	// emptied slots must rebuild its coverage from content, not retain those slots in a clone.
+	snapshot := crdt.EncodeStateAsUpdateV1(prefix, nil)
+	for _, doc := range []*crdt.Doc{full, without} {
+		if err := decodeStoredState(doc, snapshot); err != nil {
+			return false, fmt.Errorf("copy the stored prefix: %w", err)
+		}
+	}
+	applies := true
+	err := replayStoredRange(ctx, tx, artifactID, omitted.mismatch.Update-1, omitted.through, func(version int64, update []byte) error {
+		var unsubscribe func()
+		if applies && version == omitted.mismatch.Update {
+			// OnUpdate carries only what integrated, not what parked. Earlier rows' parked
+			// content is already in without; retain this row's immediate changes too, so
+			// only its newly parked content must be supplied again by a later row.
+			unsubscribe = full.OnUpdate(func(integrated []byte, _ any) {
+				applies = decodeStoredState(without, integrated) == nil
+			})
+		}
+		err := decodeStoredState(full, update)
+		if unsubscribe != nil {
+			unsubscribe()
+		}
+		if err != nil {
+			return err
+		}
+		if applies && version != omitted.mismatch.Update {
+			applies = decodeStoredState(without, update) == nil
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return !applies || !sameStoredState(without, full), nil
+}
+
+func replayStoredRange(ctx context.Context, tx pgx.Tx, artifactID string, after, through int64, apply func(int64, []byte) error) error {
+	if after >= through {
+		return nil
+	}
+	rows, err := tx.Query(ctx, `
+		select version, update from doc_updates where artifact_id = $1 and version <= $2 and version > $3 order by version
+	`, artifactID, through, after)
+	if err != nil {
+		return fmt.Errorf("read the document's stored updates again: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var version int64
+		var update []byte
+		if err := rows.Scan(&version, &update); err != nil {
+			return fmt.Errorf("scan a stored document update: %w", err)
+		}
+		if err := apply(version, update); err != nil {
+			return fmt.Errorf("replay the fold through update %d: %w", version, err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read the document's stored updates again: %w", err)
+	}
+	return nil
+}
+
+// sameStoredState compares integrated clocks and deletions, then the encoded parked content.
+// Encoding above the integrated clocks retains parked structs and both integrated and pending
+// deletions, without copying the integrated structs. Equal pending counts alone prove nothing
+// about what a missing predecessor will eventually reveal.
+func sameStoredState(a, b *crdt.Doc) bool {
+	aParked, bParked := a.PendingStats(), b.PendingStats()
+	aClocks, bClocks := a.StateVector(), b.StateVector()
+	if aParked.Items != bParked.Items || aParked.DeleteRanges != bParked.DeleteRanges || !maps.Equal(aClocks, bClocks) {
+		return false
+	}
+	if aParked.Items > 0 || aParked.DeleteRanges > 0 {
+		// Limitation: ygo exposes no decoded pending structs; ContentIDs cannot compare payloads or normalize split runs.
+		return bytes.Equal(crdt.EncodeStateAsUpdateV1(a, aClocks), crdt.EncodeStateAsUpdateV1(b, bClocks))
+	}
+	return sameDeletes(crdt.DeleteSetFromDoc(a), crdt.DeleteSetFromDoc(b))
+}
+
+// sameDeletes reports whether two delete sets cover the same runs. Ranges are normalized, so
+// equal sets compare equal run for run.
+func sameDeletes(was, now *crdt.IDSet) bool {
+	wasClients := was.Clients()
+	if len(wasClients) != len(now.Clients()) {
+		return false
+	}
+	for _, client := range wasClients {
+		if !slices.Equal(was.Ranges(client), now.Ranges(client)) {
+			return false
+		}
+	}
+	return true
 }
 
 // compareStoredVersion compares a version's stored markdown with the fold's render at the update

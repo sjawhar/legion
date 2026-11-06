@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
@@ -146,7 +146,7 @@ func (v *issueVolume) withRemote(t *testing.T, defaultBranch string) *issueVolum
 	} {
 		setup := exec.Command(argv[0], argv[1:]...)
 		setup.Dir = dir
-		setup.Env = append(os.Environ(), "JJ_USER=Legion test", "JJ_EMAIL=legion-test@example.invalid")
+		setup.Env = fixtureenv.Isolated(t.TempDir())
 		if output, err := setup.CombinedOutput(); err != nil {
 			t.Fatalf("%s: %v\n%s", strings.Join(argv, " "), err, output)
 		}
@@ -244,7 +244,7 @@ func (v *issueVolume) jj(t *testing.T, args ...string) string {
 	// so a command with no Dir would open the workspace the test process stands in, which in a
 	// Legion issue pod is a real one.
 	command.Dir = v.root
-	command.Env = append(os.Environ(), "JJ_USER=Legion test", "JJ_EMAIL=legion-test@example.invalid")
+	command.Env = fixtureenv.Isolated(t.TempDir())
 	output, err := command.Output()
 	if err != nil {
 		t.Fatalf("jj %s: %v", strings.Join(args, " "), err)
@@ -258,6 +258,7 @@ func (v *issueVolume) git(t *testing.T, args ...string) string {
 	// Every call names the repository it reads with --git-dir, which is not a working directory:
 	// the helper runs in the volume's root rather than wherever the test process stands.
 	command.Dir = v.root
+	command.Env = fixtureenv.Isolated(t.TempDir())
 	output, err := command.Output()
 	if err != nil {
 		t.Fatalf("git %s: %v", strings.Join(args, " "), err)
@@ -753,12 +754,9 @@ func (v *issueVolume) start(t *testing.T, tag, issue string, env ...string) *ini
 		name, value, _ := strings.Cut(entry, "=")
 		overrides[name] = value
 	}
-	for _, entry := range os.Environ() {
-		name, _, _ := strings.Cut(entry, "=")
-		if _, overridden := overrides[name]; !overridden && !slices.Contains(runtimeOptionalEnv, name) {
-			p.cmd.Env = append(p.cmd.Env, entry)
-		}
-	}
+	// The process under test runs the real git and jj, so it starts from fixtureenv.Isolated, as
+	// the test's own fixtures do, and the volume's overrides come after and win.
+	p.cmd.Env = fixtureenv.Isolated(t.TempDir())
 	for name, value := range overrides {
 		p.cmd.Env = append(p.cmd.Env, name+"="+value)
 	}

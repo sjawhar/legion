@@ -37,6 +37,13 @@ legion start --config legion.yaml --check-config
 | `role_config_files.<role> entry <file> is under no runtime.kubernetes.pod.volume_mounts mount_path: …` (or `… is not among the items volume <name> projects …`) | Under Kubernetes a role's overlay must be a file the operator's mounts carry: mount the ConfigMap holding it, or add the item. |
 | `role_config_files.<role> names <file>, which the <role>'s Oh My Pi could not read: …` | Under tmux the file must exist on the host and be readable by the daemon's user, as every pane is. |
 | `role_config_files.<role> …` (another refusal) | The message names the entry: a role that is not Legion's, an empty list, a relative path, a path named twice or already every role's, the controller without `controller: daemon`, or a role on `claude`. |
+| `projects.<KEY>.memory.mode must be off, on, or random (got "…")` | The mode is one of three words: `off` (the default, and what a project with no `memory` block gets), `on`, or `random`. |
+| `projects.<KEY>.memory is <mode> and names no config_files: …` | A mode other than `off` draws new trees into the memory group, and those trees read their overlays from that key: name at least one, or set `mode: off`. |
+| `projects.<KEY>.memory names config_files, and worker_backends.<role> is claude, which reads no PI_CONFIG_FILES: …` | A block that names overlays hands them to every memory-group tree's roles whatever the mode is, and Claude Code reads no `PI_CONFIG_FILES`: put every issue role on Oh My Pi, or take the overlays out of the block. |
+| `projects.<KEY>.memory.config_files entry <file> is under no runtime.kubernetes.pod.volume_mounts mount_path: …` (or `… is not among the items volume <name> projects …`) | As for a role's overlay: under Kubernetes a memory overlay must be a file the operator's mounts carry, so mount the ConfigMap holding it, or add the item. It is refused at `mode: off` too, since a tree already drawn into the memory group still names it. |
+| `projects.<KEY>.memory.config_files names <file>, which a memory-group role's Oh My Pi could not read: …` | Under tmux the file must exist on the host and be readable by the daemon's user, as every pane is. |
+| `projects.<KEY>.memory.config_files …` or `projects.<KEY>.memory.instructions …` (another refusal) | The message names the entry: an empty list, a relative or unclean path, a path holding `:`, which separates the overlays `PI_CONFIG_FILES` names, or a path named twice. |
+| `memory instructions file <path> could not be read: …` or `memory instructions file <path> is empty` | Boot reads that file from the daemon's own disk and puts its text in every memory-group role's prompt, so give it a readable file with text in it, or take `instructions` out, which appends nothing. Boot reads it whatever the mode is, since a tree already drawn into the memory group is given it. |
 | `<PROJECT> is already running (pid <n>)` (from `legion start` itself) | A daemon for this project is already registered on the machine: `legion status <PROJECT>`, `legion legions`. |
 | `capability <name> is open: <detail>; to record a decision, add to legion.yaml: capabilities.decided.<name>: "<reason>"` (after the `Config OK` line, exit 0) | A report, not a refusal: the deployment leaves a worker capability open. The check names the rows the file alone decides — `resource-limits` while a role lacks CPU and memory in both requests and limits, `secrets` while no broker is configured — and the daemon logs the same line at boot for every open row, `model-fallback` included when the probe read `retry.modelFallback` false under your overlay or could not read it at all (the probe's OK line marks that `model-fallback=unread`, the probe pod's log says why), and `pool-capacity` when the image probe pod was Unschedulable before it scheduled (the detail counts the attempts that waited and quotes the scheduler's reason). Close the gap, or add the `capabilities.decided.<name>: "<reason>"` line it prints to record your decision. `legion state --json` lists every row under `capabilities`, each deployment row carrying `source` (`configuration` or `boot`), and the controller's daily report names each open one. In the daemon's log alone (the check prints no such row), a line without the `; to record a decision` tail — `capability <name> is open: pod <sandbox>/<container> (<role>, <issue>): <fact>`, or `pane <window>:<pane>` under tmux — is a live row (`subagents`, `web-search`, `mcp`, `repository-extensions`, `dispatch-envoy-tools`, `github`) that a running session's own check at its start failed: the daemon logs the fact alone, with the claim, role, issue and locator as the line's attributes, as the session reports ready, then this pod-naming form at boot and at the first controller tick after the set of open rows changed, and `legion state` shows the row `open` with that detail, naming each failing session. The fact is what the session measured inside its Oh My Pi (`web_search is not a registered tool`, `not connected: <server> (<error>)`, `agents the prompts dispatch that the task tool does not resolve: <names>`, `not discovered: <paths>`, `Envoy tools missing: <names>`, `dispatch read failed: <stderr>`, `gh viewer login failed: <stderr>`, or `did not finish within 8 s`). No `capabilities.decided` line applies: fix what the fact names in the session's environment, and the row heals when that process is relaunched with the gap closed or reports anew at its next boot — a session that booted during a Dispatch, GitHub or search-provider outage reads open until then. The session's own report is under `issues.<KEY>.architect.capabilities` or `issues.<KEY>.workers.<role>.claim.capabilities` in `legion state --json`. |
 
@@ -314,11 +321,15 @@ start it by hand. Without `answeredAt`, check, in order:
 4. **An answer the daemon never saw.** When `dispatch read <KEY>` shows the person already
    answered after `since` and none of the above holds, the answer's event never reached the
    daemon, and nothing re-reads a waiting root's asks until the next boot. Restarting the daemon
-   (`legion restart`) catches the root up: the boot applies the root's Dispatch event log after
-   its catch-up cursor, with the root held until the whole window is in, then decides it once.
-   Without a restart, have the person (or anyone acting as them) add a reply in the thread of any
-   ask of the root, one that leaves the turn with the agent: that new act wakes the root on its
-   own event.
+   (`legion restart`) catches the root up from its catch-up cursor: the boot applies the root's
+   Dispatch event log after the cursor, with the root held until the whole window is in, then
+   decides it once. A restart does not read an answer recorded before the root's first catch-up
+   on this release, for a root recorded before the catch-up cursor existed and given no work
+   since: that first catch-up only sets the cursor to the issue's latest sequence and replays
+   nothing, and a boot whose read of the root Dispatch refused leaves it with no cursor, so the
+   next boot's catch-up is that first one. In that case, or without a restart, have the person (or
+   anyone acting as them) add a reply in the thread of any ask of the root, one that leaves the
+   turn with the agent: that new act wakes the root on its own event.
 
 A root whose architect registered its spec while the approval request waits on the person is in
 `awaiting_person` with `waitingOn.kind` `gate`, once nothing else holds its slot; one still
@@ -329,6 +340,60 @@ gives its slot back at that daemon's first boot. The gate stays closed until a p
 spec at its current version; `designGate.approvedVersion` is `null`, or lower than `currentVersion`,
 until someone approves the latest version from the document's header or the Inbox. An approval of an
 earlier version does not count: the spec changed since. The merger's `READY` waits on the same approval.
+
+## A parked tree did not come back after a decision
+
+A root in `backlog` or `icebox` runs again when a person sets it to `todo`, or when the controller
+parked it for a hold of its own and judges that a person's decision gives its work a next step. The
+controller marks such a park with a comment on the root that begins `Parked by Legion while it
+waits on:`. First find whether the daemon relayed the decision. Its JSON log names the issue and
+the root on each of these lines:
+
+- `outbox parked decision sent to the controller` or `workflow: a person's decision on a parked
+  tree goes to the controller`: the controller received the decision.
+- `outbox parked decision not relayed: it names no person`: the gate opened under
+  `gates.design: off`, so no person made the decision.
+- `outbox parked decision not relayed: its root is not parked` or `workflow: a decision on a
+  lingering root someone moved back into the workflow is not relayed`: someone moved the
+  lingering root back to a status of the workflow (`in_progress` and the like), so it is nobody's
+  parked tree.
+- `outbox parked decision not relayed: its tree hears it` or `outbox parked decision not relayed:
+  its root has no record`: the tree runs and its architect hears the decision, or the daemon keeps
+  no record of the root.
+- `outbox parked decision handled before under this key`: the same notice came through again (a
+  re-held copy, or a run of its row again); the first line logged under that key says what became
+  of it.
+- `outbox parked decision kept for its root's start, which waits for its slot` or `workflow: a
+  person's decision on a tree waiting for its slot is kept for its architect's start`: the root was
+  set to `todo` already, so no controller is told, and its architect's start names the decision.
+  The daemon keeps the decision under the issue it was made on, so the architect it is owed to is
+  the one of the tree that issue stands in now: a child handed over into a tree of its own, an
+  orphaned child and a queued root adopted into a live tree each take what was decided on them
+  with them. It is kept until the one start or catch-up that names it has told an architect of
+  that tree — a catch-up at its publish, a start's task at the moment the turn that takes it
+  starts — and one that reaches no architect hands it to a fresh catch-up of that tree's current
+  architect (`outbox start finished without giving its claim the task; the decisions it named are
+  handed over`), or leaves it for the next start while the tree is parked.
+- `supervise: the root of this task's tree has no architect to hear it; the task stays pending`: a
+  root architect's start task met a parked, lingering or waiting tree. It is sent when the tree's
+  next start runs; nothing to do.
+- `supervise: a decision this held task named is owed to another tree now; the task is sent without
+  it`, or `supervise: everything this held task named is owed to another tree now; it is retired
+  rather than sent`: while the task waited, an issue it named left this tree. What left is owed to
+  the tree it stands in now, whose architect is written a catch-up naming it at once; nothing to do.
+- `workflow: a session's reply on a parked tree is not relayed`, `workflow: a session's answer or
+  resolution on a parked tree is not relayed`, or `workflow: a session's decision on a tree waiting
+  for its slot is not kept`: an agent wrote it. It stays on the ask for the person who asked.
+
+Then read the controller's comment that begins `Parked decision read:`, on the root and on the
+issue where the decision was made. For a question, it is a reply on the question's own ask, which
+answers it or says that `todo` on the root brings the architect back to answer. It says what the
+controller judged. The tree stays parked when the park is not the controller's own hold, the park
+with its `Parked by Legion while it waits on:` comment beside it: a person's park, another agent's
+session's, or an operator's `legion status` (the comment names who, and the tree runs when they set
+it to `todo`). It stays parked too when the decision is older than the park, when the root is
+`done` or `triage`, or when the decision only questions the work. When the controller was down,
+its next start walks the parked roots. That walk reads only the last 10 events of each issue.
 
 ## An issue is held
 
@@ -643,7 +708,8 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   read the repository's collaborators, so until it can, no review but the review App's decides a
   round.
 - **`READY` refused.** The merger's `READY` is refused while the pull request's head carries
-  anything above the reviewer's approved head but retro's notes under `docs/solutions/` and the
+  anything above the reviewer's approved head but a commit under `docs/solutions/`, which retro
+  no longer writes, and the
   removal of files under `.legion/` that `legion handoffs import` commits
   (`READY_UNREVIEWED_CHANGE`, naming the paths; also when the head
   is not built on the approved one, GitHub does not know the approved head, or GitHub's compare
@@ -741,6 +807,11 @@ is changed to.
 The daemon owns a running tree's status. A status an agent session writes on a running root is set
 back, and the tree's architect is told who wrote it. A person's move in the Dispatch dashboard, the
 controller's `set_status`, or `legion status` from an operator's shell, is what takes a tree out.
+
+A person's move between the workflow's own statuses on a running issue does not stick either. The
+daemon's status repair runs at each boot and then every `controller_wake_interval_seconds` (an
+hour by default), and writes back the status of the phase the issue stands in. `backlog` or
+`icebox` takes the tree out of the workflow, and the repair leaves it there.
 
 When the daemon's own status writes to Dispatch are failing, `legion state` says so on its
 `pending Dispatch status writes` line:
@@ -884,7 +955,8 @@ notice comes once per handoff commit, from whichever pass finds it first.
   on a quiet project the consumer may have handled every event between `start` and `stream_first`
   before it went missing. Any it had not reached may have been missed: the daemon applied none of
   them, and the two-minute pass heals the pull requests of the GitHub events among them.
-- **`agent-secrets: the token login failed; retrying`** (an error line with the broker's answer).
+- **`agent-secrets: the token login failed; retrying`** (an error line with the cause, the class
+  it was sorted into and the retry schedule that class takes).
   With `runtime.kubernetes.agent_secrets` set, the daemon logs in to the
   [Secrets Broker](/legion/broker/) with its own ServiceAccount token, read from `token_file`, at
   every start and again before each credential expires; pods wait to be enrolled until a login
@@ -897,10 +969,14 @@ notice comes once per handoff commit, from whichever pass finds it first.
   trusts no Kubernetes token issuer), `read the ServiceAccount token` (the file is missing), a
   `404` from a broker too old to have the token route, or a network fault. `.agentSecretsLogin`
   reads `"state": "failed"` until a login succeeds. Nothing needs restarting, and no person is ever
-  asked. When a login got no HTTP answer, or a 5xx answer from the broker or its front door (the
+  asked. The line names the class the failure was sorted into (`class`), the retry schedule that
+  class takes (`schedule`), the wait before the next login (`retry_in`) and the cause (`error`).
+  When a login got no HTTP answer, or a 5xx answer from the broker or its front door (the
   broker is down, out of reach, or cannot reach its database), the daemon retries 2 s later,
   doubling to at most 10 s, so it logs in within about 10 s of the broker serving again. After
-  any other failure it retries 30 s later, doubling to at most 5 minutes.
+  any other failure it retries 30 s later, doubling to at most 5 minutes: a refusal the broker
+  decided, a token file it could not read, and a fault on the daemon's own side — a TLS
+  handshake that failed, or a host name that does not resolve — which no wait of seconds fixes.
 
   ```sh
   legion state --config legion.yaml --json | jq .agentSecretsLogin

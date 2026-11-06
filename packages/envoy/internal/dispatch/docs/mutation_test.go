@@ -702,8 +702,8 @@ func TestReplaceTextAcceptsUnchangedEmptyDocument(t *testing.T) {
 	}
 }
 
-// A joined write whose transaction changes nothing writes nothing, though ygo hands the fork's
-// observers an update for that transaction too: it appends no update, writes no version, leaves
+// A joined write whose transaction changes nothing writes nothing, and ygo hands the fork's
+// observers no update for that transaction: it appends no update, writes no version, leaves
 // the document's owed settlement marked when it was and naming whom it named, and keeps the
 // transaction's fork for the transaction's next write. That holds for an ask-state write naming
 // the state the block already holds and for any rewrite whose edit changes nothing. The write
@@ -735,7 +735,7 @@ func TestAJoinedWriteWhoseTransactionChangesNothingAppendsNoUpdateAndKeepsItsSet
 		}},
 		{name: "a rewrite whose edit changes nothing", answers: ygws.ErrNoChanges, write: func(ctx context.Context) error {
 			return service.applyLive(ctx, artifactID, closer, func(doc *crdt.Doc, _ pmdoc.ValidDocument, _ func(func(*crdt.Transaction))) error {
-				_, _, err := rewriteLive(doc, nil, func(*pmdoc.Node) bool { return false })
+				_, err := rewriteLive(doc, nil, func(*pmdoc.Node) bool { return false })
 				return err
 			})
 		}},

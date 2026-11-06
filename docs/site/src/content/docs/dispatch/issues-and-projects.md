@@ -130,9 +130,17 @@ Filters live in the page address, so a filtered view survives a reload and can b
 link.
 
 An issue an agent is implementing shows **Claimed by** and the agent's name, which opens its
-[live view](/legion/dispatch/agents/#the-live-view). When that agent is no longer running, its
-[running mark](/legion/dispatch/agents/#how-dispatch-shows-an-agent) is a hollow ring, the chip
-says **not running**, and the issue counts as unclaimed.
+[live view](/legion/dispatch/agents/#the-live-view). The claim holds while that agent's session is
+`live`, and while it is `unresponsive` with a last registration less than 20 minutes old: an
+unresponsive session has missed its registration window but is still working, and its issue stays
+claimed. The chip then reads **unresponsive since** the moment the session was last seen, and
+names the moment the issue becomes takeable, 20 minutes after that one. Another agent's take is
+refused until then, naming the same moment; you can take it yourself at any time. From that
+moment the chip reads **takeable now** in the tone of a free issue, and the **Unclaimed** filter
+lists the issue, while the session is still drawn as unresponsive, because it has not ended and
+may yet answer. A session that reads `gone` is unclaimed at once: its
+[running mark](/legion/dispatch/agents/#how-dispatch-shows-an-agent) is a hollow ring and the chip
+reads **not running**.
 
 ## Creating an issue
 
@@ -230,7 +238,17 @@ agents using it stop working at once.
 
 ### The tabs
 
-- **Spec** is the issue's main document. [Documents](/legion/dispatch/documents/) covers it.
+- **Spec** is the issue's main document. [Documents](/legion/dispatch/documents/) covers it. Under
+  the document the spec's requirements are listed, each flagged with what it lacks: a requirement
+  no check serves reads `has no check`, and one no plan task serves reads `has no plan task` once
+  the issue has a plan document.
+- **Verification** is the issue's Verification document and, under it, each check the document
+  marks, with the results recorded against that check, newest first. A check reads **Passed** or
+  **Failed** when its newest result stands at the commit the work is at, **Older** when that
+  result no longer does, **No result** when nothing has been recorded against it, and
+  **Unmarked** when Dispatch could not read the repository to say which.
+- **Plan** is the issue's plan document, the plan review's approval, and each plan task the
+  document marks, with the requirements that task serves and the tasks it needs.
 - **Conversation** is the issue's conversations, one card each: every ask with its replies and
   its answer, every comment thread with its replies, every message thread with its replies. The
   conversation with the newest reply is at the top, so a thread rises when someone answers it,
@@ -249,8 +267,11 @@ agents using it stop working at once.
   claims, document versions, uploads, subscriptions, changes to child issues. It has **Load
   older** at the bottom, a divider for each day, and a mark where your last read ends.
 
-Press `t` and then `s`, `c`, `h`, `a`, or `v` to switch to Spec, Conversation, Children,
-Artifacts, or Activity.
+Press `t` and then `s`, `k`, `p`, `c`, `h`, `a`, or `v` to switch to Spec, Verification, Plan,
+Conversation, Children, Artifacts, or Activity.
+
+An issue with no Verification document, or no plan document, shows on that tab the
+`dispatch artifact` command that makes one.
 
 ### Writing in the Conversation
 

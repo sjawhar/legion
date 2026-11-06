@@ -50,7 +50,7 @@ deleted, and the script header carries the reason so nobody adds it back
 **What replaced it, split by what each image publishes.** `library/golang` writes `GOLANG_VERSION`
 into its config, so the copy runs `crane config --platform linux/amd64` on the row's digest for
 every golang row and refuses one whose bytes carry another Go than its tag names — from
-`ghcr.io/sjawhar/legion/ci@<digest>`, the package's own copy, for a row the package already holds,
+`ghcr.io/cybermonklabs/legion/ci@<digest>`, the package's own copy, for a row the package already holds,
 and from the upstream only before a copy. `oven/bun` publishes its version in no part of its
 config (`PATH`, `BUN_RUNTIME_TRANSPILER_CACHE_PATH`, `BUN_INSTALL_BIN`, and nothing else), so the
 build decides: `packages/envoy/docker/Dockerfile`'s web stage copies `.bun-version` and refuses a

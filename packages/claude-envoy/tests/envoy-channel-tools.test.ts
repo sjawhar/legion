@@ -78,11 +78,90 @@ test("sends Envoy messages through the shared transport", async () => {
     message: "ready",
   })
   expect(result).toEqual({
-    message: "sent evt-sent to ses_receiver",
+    message: "sent evt-sent to ses_receiver (live)",
     event_id: "evt-sent",
     recipient: "ses_receiver",
+    recipient_state: "live",
     confirmed: true,
   })
+})
+
+// The list is what the model reads before it decides a peer is dead: a session past its live
+// window is still running, so it must be asked for and must arrive with the state and the
+// heartbeat that say so (dispatch://INFRA-392).
+test("lists the unresponsive sessions too, each with its state and last_seen", async () => {
+  let requested = ""
+  const client = createEnvoyClient({
+    baseUrl: "http://envoy.test",
+    fetch: async (request) => {
+      requested = String(request)
+      return Response.json([
+        {
+          session_id: "ses_stalled",
+          machine_id: "host-a",
+          dir: "/work",
+          port: 0,
+          title: "Reviewer",
+          topics: [],
+          self_subscribed: true,
+          last_seen: 1_700_000_000_000,
+          state: "unresponsive",
+        },
+      ])
+    },
+  })
+  const runtime: ChannelToolRuntime = { identity, client, session: sessionWith([]) }
+
+  const result = await executeEnvoyTool(runtime, "envoy_sessions", {})
+
+  expect(requested).toBe("http://envoy.test/v1/sessions?include=unresponsive")
+  expect(result).toEqual([
+    expect.objectContaining({
+      session_id: "ses_stalled",
+      state: "unresponsive",
+      last_seen: 1_700_000_000_000,
+    }),
+  ])
+})
+
+test("renders a kept role publish as a success that says no session holds the role yet", async () => {
+  // Nobody holds the role, so the listener kept the message and answered 202 (INFRA-839). The
+  // tool says so in the same words the Oh My Pi plugin uses, and names no holder: the holder a
+  // resolution read never received the message.
+  const client = createEnvoyClient({
+    baseUrl: "http://envoy.test",
+    fetch: async (_request, init) => {
+      const body = JSON.parse(String(init?.body)) as { readonly topic: string }
+      return new Response(
+        JSON.stringify({
+          event_id: "evt-kept",
+          source: "agent",
+          source_event_id: "agent.ses_claude.evt-kept",
+          source_session: "ses_claude",
+          topic: body.topic,
+          dedupe_key: "agent.legion-architect.evt-kept",
+          issued_at: 1,
+          payload_summary: "the worker is stalled",
+          trace_id: "trace-kept",
+          kept: true,
+          kept_reason: "unclaimed",
+        }),
+        { status: 202, headers: { "Content-Type": "application/json" } },
+      )
+    },
+  })
+  const runtime: ChannelToolRuntime = { identity, client, session: sessionWith([]) }
+
+  const result = (await executeEnvoyTool(runtime, "envoy_publish", {
+    topic: "notifications.role.legion-architect",
+    message: "the worker is stalled",
+  })) as { readonly message: string; readonly kept: boolean; readonly kept_reason: string }
+
+  expect(result.message).toBe(
+    "published evt-kept. Envoy kept it for the role: no session holds it yet, and the message waits for the session that claims it next.",
+  )
+  expect(result.kept).toBe(true)
+  expect(result.kept_reason).toBe("unclaimed")
 })
 
 test("a send that is not confirmed names its key, and a resend under that key sends it again", async () => {

@@ -39,6 +39,7 @@ import type {
   CommentDelivery,
   CommentRead,
   CreateAgentMessageInput,
+  CreateAgentTokenInput,
   CreateArtifactInput,
   CreateAskInput,
   CreateBroadcastInput,
@@ -49,6 +50,7 @@ import type {
   CreateMessageInput,
   CreateProjectInput,
   CreateVersionInput,
+  CredentialCapabilities,
   CredentialDecisionResponse,
   CredentialGrantsResponse,
   CredentialPendingResponse,
@@ -58,6 +60,7 @@ import type {
   DeliverySessionGroup,
   DeliverySettings,
   DeliverySettingsInput,
+  DispatchScope,
   DispatchUser,
   DocumentRead,
   DocumentReferenceSummary,
@@ -70,6 +73,8 @@ import type {
   Issue,
   IssueAskRow,
   IssueAskThreadRow,
+  IssueCheckResults,
+  IssueCoverage,
   IssueDecisions,
   IssueDetails,
   IssueReferenceSummary,
@@ -88,6 +93,7 @@ import type {
   ProjectDefaultAssigneeInput,
   RepoProject,
   SearchResponse,
+  SignInsResponse,
   Subscriber,
   Suggestions,
   UpdateDeliverySessionGroupInput,
@@ -347,10 +353,28 @@ export function isAnchorMissing(error: unknown): boolean {
   return error instanceof ApiError && error.status === 409 && error.code === "ANCHOR_MISSING";
 }
 
+// The server refusing a write because its text passes a bound Dispatch holds it to: one block
+// too long, too many blocks, or an ask's question and options too long together. The refusal
+// names what passed which bound, so a page shows those words rather than wording of its own.
+export function isCapExceeded(error: unknown): error is ApiError {
+  return error instanceof ApiError && error.code === "CAP_EXCEEDED";
+}
+
 // A document whose stored history cannot load at all: the state a rebuild from its latest saved
 // version repairs, and retrying the read cannot.
 export function isDocumentUnloadable(error: unknown): boolean {
   return error instanceof ApiError && error.status === 409 && error.code === "DOCUMENT_UNLOADABLE";
+}
+
+/** What every view says while Envoy's agent list refills: the server's own `ENVOY_REFILLING`
+ *  message, shown wherever a view would otherwise say an agent is absent. */
+export const AGENT_LIST_REFILLING = "The agent list is refilling. Try again in a moment.";
+
+// The agents list and the subscriber reads answer this 503 while the Envoy listener refills its
+// copy of the session registry: the list is not known yet, so nothing on it may be read as gone.
+// It is transient, so the shared retry policy keeps retrying it like any other 5xx.
+export function isAgentListRefilling(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 503 && error.code === "ENVOY_REFILLING";
 }
 
 // The retry policy every query in the app shares: an auth outcome (401), a missing architecture
@@ -846,13 +870,15 @@ export class DispatchApiClient {
     await this.remove(`/api/v1/settings/repo-projects/${repoPath(repo)}`, bounds);
   }
 
-  /** Only the projects that name a default; a project left out names nobody. Human-only. */
+  /** Only the projects that name a default; a project left out names nobody. Needs the
+   *  `person` scope. */
   listProjectDefaultAssignees(): Promise<ProjectDefaultAssignee[]> {
     return this.json<ProjectDefaultAssignee[]>("/api/v1/settings/project-default-assignees");
   }
 
   /** Sets the person a project's unowned work lands on, or clears it with `{assignee: null}`.
-   *  Human-only, and a login nobody has signed in as is refused `400 ASSIGNEE_NOT_ALLOWED`. */
+   *  Needs the `person` scope, and a login nobody has signed in as is refused
+   *  `400 ASSIGNEE_NOT_ALLOWED`. */
   putProjectDefaultAssignee(
     project: string,
     input: ProjectDefaultAssigneeInput,
@@ -928,8 +954,22 @@ export class DispatchApiClient {
     return this.json<AgentToken[]>("/api/v1/me/agent-tokens");
   }
 
-  createAgentToken(input: { name: string }, bounds: WriteBounds): Promise<CreatedAgentToken> {
+  createAgentToken(input: CreateAgentTokenInput, bounds: WriteBounds): Promise<CreatedAgentToken> {
     return this.post<CreatedAgentToken>("/api/v1/me/agent-tokens", input, bounds);
+  }
+
+  /** `PATCH /api/v1/me/agent-tokens/{id}`: the whole set of scopes the token is to hold, which
+   *  replaces the set it holds now, answering the updated token. A scope the caller does not hold
+   *  itself is refused, as it is at the mint. */
+  setAgentTokenScopes(
+    id: string,
+    scopes: DispatchScope[],
+    bounds: WriteBounds
+  ): Promise<AgentToken> {
+    return this.send<AgentToken>(
+      { body: { scopes }, method: "PATCH", path: `/api/v1/me/agent-tokens/${pathSegment(id)}` },
+      bounds
+    );
   }
 
   async revokeAgentToken(id: string, bounds: WriteBounds): Promise<void> {
@@ -999,12 +1039,26 @@ export class DispatchApiClient {
     );
   }
 
+  /** `GET /api/v1/issues/{key}/results`: the checks of the issue's Verification document in
+   *  document order, each with every result recorded against it from any issue, newest first,
+   *  and each result's currency as the server judged it against the repository. */
+  getIssueResults(key: string): Promise<IssueCheckResults> {
+    return this.json<IssueCheckResults>(`/api/v1/issues/${pathSegment(key)}/results`);
+  }
+
+  /** `GET /api/v1/issues/{key}/coverage`: what each requirement of the issue's spec lacks. The
+   *  server decides the gaps - a requirement with no plan task is no gap until the issue has a
+   *  plan document - so a reader draws its answer rather than judging again. */
+  getIssueCoverage(key: string): Promise<IssueCoverage> {
+    return this.json<IssueCoverage>(`/api/v1/issues/${pathSegment(key)}/coverage`);
+  }
+
   getInbox(project?: string): Promise<InboxRow[]> {
     return this.json<InboxRow[]>(pathWithQuery("/api/v1/inbox", { project }));
   }
 
   /** `PUT /api/v1/me/asks/{id}/snooze`: fold this inbox row away for the caller until
-   *  `snoozedUntil` (RFC3339). Human-only, like the inbox itself. */
+   *  `snoozedUntil` (RFC3339). Needs the `person` scope, like the inbox itself. */
   snoozeAsk(id: string, snoozedUntil: string, bounds: WriteBounds): Promise<AskSnooze> {
     return this.send<AskSnooze>(askSnoozeRequest(id, snoozedUntil), bounds);
   }
@@ -1051,14 +1105,14 @@ export class DispatchApiClient {
   }
 
   /** `GET /api/v1/me/answers`: the signed-in person's answers and ask replies, newest first,
-   *  one page at a time. Human-only. */
+   *  one page at a time. Needs the `person` scope. */
   listMyAnswers(page: { limit: number; offset: number }): Promise<MyAnswersResponse> {
     return this.json<MyAnswersResponse>(pathWithQuery("/api/v1/me/answers", page));
   }
 
   /** `GET /api/v1/me/replies`: the threads the signed-in person wrote in where someone else has
    *  written since they last read it, newest reply first; `issue` or `artifact` narrows to one
-   *  owner. Human-only. */
+   *  owner. Needs the `person` scope. */
   listMyReplies(page: {
     artifact?: string;
     issue?: string;
@@ -1579,6 +1633,27 @@ export class DispatchApiClient {
    *  with it. */
   async revokeMachineLogin(credentialId: string, bounds: WriteBounds): Promise<void> {
     await this.post(`/api/v1/machine-logins/${pathSegment(credentialId)}/revoke`, {}, bounds);
+  }
+
+  /** `GET /api/v1/signins`: the viewer's own sign-ins on their machines (`agent-secrets login`),
+   *  one per box key they have not revoked. Dispatch names the viewer, so nobody reads another
+   *  person's. */
+  getSignIns(): Promise<SignInsResponse> {
+    return this.json<SignInsResponse>("/api/v1/signins");
+  }
+
+  /** End one of the viewer's own sign-ins: that machine trades no token for them again and the
+   *  access tokens already minted under it end with it, while their sign-ins on other machines
+   *  keep working. */
+  async revokeSignIn(signInId: string, bounds: WriteBounds): Promise<void> {
+    await this.post(`/api/v1/signins/${pathSegment(signInId)}/revoke`, {}, bounds);
+  }
+
+  /** `GET /api/v1/credentials/capabilities`: what the credential pages may offer against this
+   *  deployment's secrets broker, which Dispatch relays from the broker's own RFC 8414 metadata
+   *  because a browser reaches no broker. */
+  getCredentialCapabilities(): Promise<CredentialCapabilities> {
+    return this.json<CredentialCapabilities>("/api/v1/credentials/capabilities");
   }
 }
 

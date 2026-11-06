@@ -29,6 +29,8 @@ test("IssueTabs exposes the Conversation tab at its canonical route", () => {
   try {
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
       "Spec",
+      "Verification",
+      "Plan",
       "Conversation",
       "Children",
       "Artifacts",
@@ -41,6 +43,10 @@ test("IssueTabs exposes the Conversation tab at its canonical route", () => {
     expect(screen.getByTestId("location").textContent).toBe("/issues/CORE-1/artifacts");
     fireEvent.click(screen.getByRole("tab", { name: "Activity" }));
     expect(screen.getByTestId("location").textContent).toBe("/issues/CORE-1/activity");
+    fireEvent.click(screen.getByRole("tab", { name: "Verification" }));
+    expect(screen.getByTestId("location").textContent).toBe("/issues/CORE-1/verification");
+    fireEvent.click(screen.getByRole("tab", { name: "Plan" }));
+    expect(screen.getByTestId("location").textContent).toBe("/issues/CORE-1/plan");
   } finally {
     view.unmount();
   }

@@ -288,6 +288,7 @@ func TestValuesRefusesAChainTheBrokerDidNotWrite(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			m, enr, key, approver := newFixture(t)
+			sessionDefaultFixture(t, m)
 			ctx := context.Background()
 			req, err := m.Create(ctx, enr, signRequest(t, m, key, "why", "DEEL_API_KEY"), "")
 			if err != nil || req.RecordID == nil {

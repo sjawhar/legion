@@ -100,6 +100,19 @@ func TestEveryExchangedFrameRoundTripsItsWireLine(t *testing.T) {
 			AdoptWorkingCopyResult{ID: "r4", OK: false, Error: "no workspace"},
 		},
 		{
+			"rescue-unpushed",
+			`{"type":"rescue-unpushed","id":"r5","branch":"legion/LEGION-484-rescue-9d3f0c7a","workspaceTimeoutMs":120000,"timeoutMs":300000}`,
+			RescueUnpushed{ID: "r5", Branch: "legion/LEGION-484-rescue-9d3f0c7a", WorkspaceTimeoutMs: 120_000, TimeoutMs: 300_000},
+		},
+		{
+			"rescue-unpushed-result",
+			`{"type":"rescue-unpushed-result","id":"r5","ok":true,"workspaces":[{"dir":"/legion/workspaces/acme/widgets/legion-484","status":"rescued","branches":[{"name":"legion/LEGION-484-rescue-9d3f0c7a-1","commit":"c0ffee"}]},{"dir":"/legion/workspaces/acme/widgets/legion-485","status":"error","error":"push refused"}]}`,
+			RescueUnpushedResult{ID: "r5", OK: true, Workspaces: []RescueWorkspace{
+				{Dir: "/legion/workspaces/acme/widgets/legion-484", Status: "rescued", Branches: []RescueBranch{{Name: "legion/LEGION-484-rescue-9d3f0c7a-1", Commit: "c0ffee"}}},
+				{Dir: "/legion/workspaces/acme/widgets/legion-485", Status: "error", Error: "push refused"},
+			}},
+		},
+		{
 			"rpc_chunk",
 			`{"type":"rpc_chunk","chunkId":"agent-end-1","index":0,"count":2,"byteLength":1048577,"data":"eA=="}`,
 			RPCChunk{ChunkID: "agent-end-1", Index: 0, Count: 2, ByteLength: 1_048_577, Data: "eA=="},
@@ -301,6 +314,24 @@ func TestTheFramesTheShippedCodeValidatesRefuseTheirMalformedForms(t *testing.T)
 		{"no jjEmail", AdoptWorkingCopy{ID: "r4", JJUser: "legion", TimeoutMs: 1}},
 		{"no timeout", AdoptWorkingCopy{ID: "r4", JJUser: "legion", JJEmail: "l@example.com"}},
 		{"negative timeout", AdoptWorkingCopy{ID: "r4", JJUser: "legion", JJEmail: "l@example.com", TimeoutMs: -1}},
+	} {
+		if err := tc.frame.Validate(); !errors.Is(err, ErrMalformedFrame) {
+			t.Fatalf("%s: Validate = %v, want ErrMalformedFrame", tc.name, err)
+		}
+	}
+	rescue := RescueUnpushed{ID: "r5", Branch: "legion/LEGION-484-rescue-9d3f0c7a", WorkspaceTimeoutMs: 1, TimeoutMs: 2}
+	if err := rescue.Validate(); err != nil {
+		t.Fatalf("RescueUnpushed.Validate: %v", err)
+	}
+	for _, tc := range []struct {
+		name  string
+		frame RescueUnpushed
+	}{
+		{"no id", RescueUnpushed{Branch: rescue.Branch, WorkspaceTimeoutMs: 1, TimeoutMs: 2}},
+		{"a branch outside legion/", RescueUnpushed{ID: "r5", Branch: "main", WorkspaceTimeoutMs: 1, TimeoutMs: 2}},
+		{"a branch a refspec misreads", RescueUnpushed{ID: "r5", Branch: "legion/x:refs/heads/main", WorkspaceTimeoutMs: 1, TimeoutMs: 2}},
+		{"no workspace bound", RescueUnpushed{ID: "r5", Branch: rescue.Branch, TimeoutMs: 2}},
+		{"a workspace bound above the whole", RescueUnpushed{ID: "r5", Branch: rescue.Branch, WorkspaceTimeoutMs: 3, TimeoutMs: 2}},
 	} {
 		if err := tc.frame.Validate(); !errors.Is(err, ErrMalformedFrame) {
 			t.Fatalf("%s: Validate = %v, want ErrMalformedFrame", tc.name, err)

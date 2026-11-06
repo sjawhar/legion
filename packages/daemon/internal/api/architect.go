@@ -14,6 +14,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/dispatchbody"
+
 	"github.com/sjawhar/legion/daemon/internal/blockers"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/credential"
@@ -64,7 +66,7 @@ type WaveReleaseResponse struct {
 }
 
 // MarshalJSON keeps `released`, `started` and `held` arrays on the wire, empty rather than `null`:
-// the plugin parses this answer through a strict schema.
+// the plugin's parse of this answer refuses a null where it reads an array.
 func (wr WaveReleaseResponse) MarshalJSON() ([]byte, error) {
 	type wire WaveReleaseResponse
 	out := wire(wr)
@@ -173,7 +175,7 @@ func isPhaseWorker(role claim.Role) bool {
 // after Task 3.15. The read authorizes the caller; the fact itself still enters workflow through
 // ApplyFact's one write transaction.
 func (s *server) recordedIssue(ctx context.Context, issue string) (*record.Issue, error) {
-	if s.pool == nil || s.records == nil {
+	if s.pool == nil {
 		return nil, errors.New("record dependencies are unavailable")
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
@@ -279,15 +281,17 @@ func (s *server) gateRegister(w http.ResponseWriter, r *http.Request) {
 			"Dispatch shows %s at version %d, not %d; register the version you requested approval of", artifactID, approval.LatestVersion, req.Version))
 		return
 	}
-	// What this read found of the person's review travels with the registration, so a spec a person
-	// approved or asked changes of before the architect registered is applied at once: the gate
-	// opens, or closes with the architect told. The read's own start is its sequence alone: no time
-	// this read shows is the read's own (the latest review's time is that review's), and every act
-	// Dispatch records after the read carries a later sequence. The approval request the read found
-	// open, and whose turn it waits on, travel with it too, for the registration to mirror.
+	// What this read found of the person's review, and who gave it, travels with the registration,
+	// so a spec a person approved or asked changes of before the architect registered is applied at
+	// once: the gate opens, or closes with the architect told. The read's own start is its sequence
+	// alone: no time this read shows is the read's own (the latest review's time is that review's),
+	// and every act Dispatch records after the read carries a later sequence. The approval request
+	// the read found open, and whose turn it waits on, travel with it too, for the registration to
+	// mirror.
 	changes, reason := approval.ChangesRequestedLatest()
 	fact := intake.GateRegistered{Issue: req.Issue, ArtifactID: artifactID, Version: req.Version, ApprovedVersion: approval.ApprovedLatest(),
-		ChangesRequestedVersion: changes, ChangesReason: reason, DispatchVersion: approval.LatestVersion, Since: record.EventMark{Seq: since},
+		ChangesRequestedVersion: changes, ChangesReason: reason, ReviewedBy: approval.LatestReviewer(),
+		DispatchVersion: approval.LatestVersion, Since: record.EventMark{Seq: since},
 		RequestAsk: approval.AskID, RequestWaitsOnAgent: approval.AskID != "" && approval.WaitingOn == "agent"}
 	review := record.EventMark{Seq: approval.Seq, At: approval.At}
 	if changes != 0 {
@@ -876,7 +880,7 @@ type releasedChild struct {
 // read-only transaction, so releaseOutcome can tell a first phase this request started from one
 // the child was already in.
 func (s *server) readReleasedBefore(ctx context.Context, children []releasedChild) error {
-	if s.pool == nil || s.records == nil {
+	if s.pool == nil {
 		return errors.New("record dependencies are unavailable")
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
@@ -971,7 +975,7 @@ func underTodoChild(children []releasedChild) map[string]bool {
 // record it yet and its write's event is still to start it — or one already running a phase before
 // the request, which holds nothing back.
 func (s *server) releaseOutcome(ctx context.Context, children []releasedChild) ([]string, []HeldChild, error) {
-	if s.pool == nil || s.records == nil {
+	if s.pool == nil {
 		return nil, nil, errors.New("record dependencies are unavailable")
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
@@ -1156,7 +1160,7 @@ func (s *server) signOff(w http.ResponseWriter, r *http.Request) {
 }
 
 // closeRoot ends the architect's tree while its root is admitted and no phase has started
-// (workflow's closeRoot): the root's own architect only, with a reason short enough to post as a
+// (workflow's closeRoot): the root's own architect only, with a reason Dispatch takes as a
 // message.
 func (s *server) closeRoot(w http.ResponseWriter, r *http.Request) {
 	var req RootCloseRequest
@@ -1168,9 +1172,16 @@ func (s *server) closeRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fact := intake.CloseRoot{Issue: req.Issue, Reason: req.Reason}
-	if length := dispatch.MessageBodyLength(fact.Message()); length > record.MessagePostLimit {
+	// The close posts the reason on the issue and writes the status after it (the outbox's status
+	// row), and Dispatch refuses a body past the bounds it publishes, so a reason it would refuse
+	// is refused here, before anything is recorded. Refused on the post instead, the reason would
+	// be on no issue, and the daemon's record would read done while the Dispatch issue kept the
+	// status it had. The text measured is the post the outbox makes, not the reason alone
+	// (record.LongestPost), and the reader is the server's own, so the daemon refuses exactly
+	// what Dispatch refuses (dispatchbody.Check).
+	if over := dispatchbody.Check(record.LongestPost(fact.Message())); over != nil {
 		writeFailure(w, http.StatusBadRequest, "CLOSE_REASON_TOO_LONG",
-			fmt.Sprintf("the reason makes a %d-character message, over the %d one message holds; shorten it", length, record.MessagePostLimit))
+			fmt.Sprintf("the reason makes a message Dispatch refuses: %s; shorten it", over))
 		return
 	}
 	grant, recorded, ok := s.architectForIssue(w, r, req.GrantID, req.Issue)
@@ -1258,7 +1269,7 @@ func (s *server) owns(ctx context.Context, grant credential.Grant, recorded reco
 		}
 		seen[current.Key] = true
 		if tx == nil {
-			if s.pool == nil || s.records == nil {
+			if s.pool == nil {
 				return false, errors.New("record dependencies are unavailable")
 			}
 			var err error

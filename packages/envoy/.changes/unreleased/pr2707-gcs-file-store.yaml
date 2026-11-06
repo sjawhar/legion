@@ -1,5 +1,0 @@
-kind: Added
-body: '`DISPATCH_FILE_STORE_BUCKET=gs://<bucket>` keeps uploaded files in a Google Cloud Storage bucket, reached with Application Default Credentials (on GKE the pod''s Workload Identity principal), which needs `storage.objects.create` and `storage.objects.get` on it and nothing more; a bare value still names an S3 bucket. An upload reads the key''s metadata and writes nothing when the bucket holds it, then writes in one request with `ifGenerationMatch=0` and the body''s CRC32C and MD5, which GCS checks, so no object is overwritten or deleted. `/healthz` probes the bucket by reading a key no upload writes, whose absence is healthy. `envoy-dispatch backfill-files` opens the same store as the server from the same value, and a `gs://` value that is not a Cloud Storage bucket name refuses the boot. An image from before this change reads a `gs://` value as an S3 bucket name and fails every call.'
-time: 2026-11-03T12:00:00Z
-custom:
-    Issue: pr2707

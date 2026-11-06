@@ -19,8 +19,10 @@ If the deployment instructions (the `# Deployment instructions` part of your sys
 `oracle` task agent), send your question to it first with
 `envoy_publish(topic="notifications.role.<name>", expects_reply="required")`, because that role may
 already hold the answer. Then end your turn: the reply arrives as a delivery that starts your next
-one, and research before it duplicates the role's work. If the publish returns an error (no session
-holds the role), put the error in your output and research at once.
+one, and research before it duplicates the role's work. If no session holds the role, the publish
+answers that Envoy kept the question for the session that claims the role next, which is handed it
+once within the hour. Nobody can answer you now, so put that kept answer in your output and
+research at once rather than wait for it.
 
 Run steps 1 and 2, in parallel if you choose, since neither needs the other's result. Run step 3
 when the question names a library, and step 4 when it asks for general practice, each only when

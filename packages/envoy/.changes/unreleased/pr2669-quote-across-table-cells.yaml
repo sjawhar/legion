@@ -1,5 +1,0 @@
-kind: Fixed
-body: 'A document edit whose quote is written as a table row, with " | " between the cells, now says why it matches nothing: " | " is the boundary between two cells, not text a cell holds, and a quote matches inside one table cell. The refusal names the row''s cells, with one operation per cell in the same batch for a find and one cell''s text for an insert or move anchor, where it named nearest blocks ranked against the whole row. A quote that reaches from one cell into the next without the pipes names both cells; a move anchored on such a quote is now refused, as an insert anchored on it already was, rather than moving the block beside the table.'
-time: 2026-11-02T00:00:00Z
-custom:
-    Issue: pr2669

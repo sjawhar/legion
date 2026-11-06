@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { BlockTypeSchema } from "./block-schema.generated";
 import {
   type Actor,
   type Agent,
@@ -6,6 +7,7 @@ import {
   type AnchorInput,
   type AnswerAskInput,
   type ArtifactBlock,
+  ArtifactReviewEventPayloadSchema,
   type ArtifactText,
   type Ask,
   type AskAnsweredEventPayload,
@@ -14,7 +16,6 @@ import {
   type AskRead,
   type AskThread,
   answerNotKept,
-  type BlockTypeSchema,
   type ChangedReference,
   type Comment,
   CommentEventPayloadSchema,
@@ -59,6 +60,23 @@ import {
   type UserStateUpdatedEventPayload,
   type UserThreadStateUpdatedEventPayload,
 } from "./dispatch-api";
+
+test("review event validation preserves approved byte hashes and their provenance", () => {
+  for (const source of ["insert", "backfill"] as const) {
+    expect(
+      ArtifactReviewEventPayloadSchema.parse({
+        artifact_id: "doc-1",
+        version: 3,
+        content_sha256: "a".repeat(64),
+        content_sha256_source: source,
+      })
+    ).toMatchObject({ content_sha256: "a".repeat(64), content_sha256_source: source });
+  }
+  expect(ArtifactReviewEventPayloadSchema.parse({ artifact_id: "doc-1", version: 2 })).toEqual({
+    artifact_id: "doc-1",
+    version: 2,
+  });
+});
 
 test("delivery modes are exactly the closed capability list", () => {
   expect([...DELIVERY_CAPABILITIES]).toEqual(["aside", "btw", "steer"]);
@@ -411,6 +429,7 @@ test("models answer changes, ask answer history, and the answers page", () => {
     route: "role:reviewer",
     route_status: "live",
     route_holder: "session-reviewer",
+    route_status_reason: null,
   } satisfies AskRead;
   const thread = {
     replies: [],
@@ -421,6 +440,7 @@ test("models answer changes, ask answer history, and the answers page", () => {
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
   } satisfies AskThread;
   const page = {
     rows: [

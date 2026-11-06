@@ -71,6 +71,10 @@ describe.skipIf(!envoyStackEnabled)("a NATS connection whose path freezes", () =
           }
         })();
         proxy.stallNext(stalledRedials);
+        // The redials are the connections the proxy appended after this point. Taking them by an
+        // ordinal rather than by acceptedAt >= frozenAt keeps a redial the proxy accepted inside
+        // the freeze's own millisecond, which that comparison bins with the connections before it.
+        const beforeFreeze = proxy.connections.length;
         const frozenAt = proxy.freeze();
         // The client's own writes after the freeze, in chunks below natsd's max_payload: more than
         // the frozen path's kernel buffers take, so they stay queued in its socket. Nothing awaits
@@ -102,7 +106,7 @@ describe.skipIf(!envoyStackEnabled)("a NATS connection whose path freezes", () =
         expect(reconnectMs ?? Number.POSITIVE_INFINITY).toBeLessThan(RECOVERY_BOUND_MS);
         expect(receiveMs).toBeDefined();
         expect(receiveMs ?? Number.POSITIVE_INFINITY).toBeLessThan(RECOVERY_BOUND_MS);
-        const redials = proxy.connections.filter((opened) => opened.acceptedAt >= frozenAt);
+        const redials = proxy.connections.slice(beforeFreeze);
         // The stalled redials never subscribed; the one after them did.
         expect(redials.length).toBeGreaterThan(stalledRedials);
         expect(

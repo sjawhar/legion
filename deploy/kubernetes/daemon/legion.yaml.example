@@ -26,6 +26,10 @@ bind: 0.0.0.0
 advertise_host: legion-daemon-widgets.legion.svc
 daemon_url: http://legion-daemon-widgets.legion.svc:13370
 admission_cap: 4                       # trees running at once
+pod_update_max_open_rounds: 2          # issues holding an open pod-update round at once; a round asks every
+                                       # worker of its issue to push and wait. Leave the key out for no limit
+pod_update_rounds_per_minute: 1        # pod-update rounds one sweep of the daemon opens; a sweep within 50
+                                       # seconds of the last opening opens none. Leave the key out for no limit
 controller: operator                   # who runs the controller: operator (legion controller start,
                                        # the default) or daemon (a pod this daemon launches and keeps;
                                        # under runtime: tmux, a pane in a window of its own)
@@ -50,6 +54,29 @@ projects:
   #     - { repo: acme/widgets, workflow: .github/workflows/deploy.yaml, step: Apply } # default branch
   #                                    # whose Apply step succeeds after a merge wakes that pull
   #                                    # request's open production check
+  #   memory:                          # optional: what each tree this project opens runs with:
+  #     mode: on                       # off (the default, and what a project with no memory block
+  #                                    # gets), on, or random, a fair coin for each tree. The draw is
+  #                                    # made once, when the tree's lifecycle row is first created,
+  #                                    # and the tree keeps it for its whole life; a tree first
+  #                                    # opened before this release has no group and runs without
+  #                                    # memory, and a change of mode reaches only the trees opened
+  #                                    # after it: a tree already drawn into the memory group keeps
+  #                                    # these files under any mode, and only taking them out of
+  #                                    # the block takes them away
+  #     config_files: [/etc/legion-memory/memory.yml] # Oh My Pi overlays every role of a
+  #                                    # memory-group tree names in PI_CONFIG_FILES after pod.env's
+  #                                    # and the role's own (role_config_files), so they outrank
+  #                                    # both; required when mode is on or random. Under runtime:
+  #                                    # kubernetes each file must be in a pod.volume_mounts mount
+  #                                    # below: uncomment the operator-memory volume and mount there
+  #                                    # too, a ConfigMap legion-operator-memory mounted at
+  #                                    # /etc/legion-memory
+  #     instructions: /etc/legion-daemon/memory-instructions.md # optional: a markdown file on the
+  #                                    # daemon's own disk, not a pod mount: the daemon reads it at
+  #                                    # boot and appends its text to every memory-group role's
+  #                                    # system prompt, after the deployment's own instructions.
+  #                                    # mode: on with no instructions appends nothing
 # repository_renames:                  # optional: a repository that moved, which the daemon then
 #   - from: acme/widgets-legacy        # treats as one repository wherever it compares a name —
 #     to: acme/widgets                 # GitHub's events name the new repository while every tree
@@ -123,7 +150,7 @@ github_apps:
 runtime:
   kubernetes:
     namespace: legion
-    image: ghcr.io/sjawhar/legion-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    image: ghcr.io/cybermonklabs/legion-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000
     storage_class: standard            # the issue volumes' class; required, the cluster has no default
     issue_volume: 50Gi                 # each issue pod's own volume (and the daemon-launched controller's); 50Gi is the default
     session_store: postgres            # required: where every pod's Oh My Pi keeps its sessions, a store that
@@ -167,12 +194,26 @@ runtime:
     #                                  # second line). Set it for a daemon built from an unreleased commit
     #                                  # (every Stage 4a/4b run), or to pin a different published pair than
     #                                  # this binary links.
-    # setup: [/bin/sh, -c, '{ omp plugin marketplace update acme-skills || omp plugin marketplace add acme/agent-skills; } && omp plugin install agent-skills@acme-skills --force']
+    # skills_repository: acme/agent-skills
+    #                                  # the Oh My Pi plugin marketplace every issue pod's roles
+    #                                  # install their skills from. Each issue pod clones its
+    #                                  # default branch shallow in an init container of its own,
+    #                                  # with the project's App token, and every role installs from
+    #                                  # that clone before Oh My Pi starts: a pod's skills are that
+    #                                  # branch as of the pod's start, with no image rebuild and no
+    #                                  # fetch in any role's launch (docs/kubernetes.md, Operator
+    #                                  # configuration)
+    # setup: [/bin/sh, -c, '[ -n "${LEGION_CONTROLLER:-}" ] || omp plugin list | grep -q agent-skills || { echo "agent-skills is not installed" >&2; exit 1; }']
     #                                  # a command every role runs before each start of its
     #                                  # Oh My Pi, in its working directory with the role's environment
     #                                  # (its git answers github.com with the role's App token); Oh My Pi
     #                                  # starts only once it exits 0, and a failure counts as a failed
-    #                                  # launch (docs/kubernetes.md, Configuration)
+    #                                  # launch (docs/kubernetes.md, Configuration).
+    #                                  # It must fetch nothing: a clone in a role's launch context ends
+    #                                  # the pod's gVisor sandbox, so install skills with
+    #                                  # skills_repository above and leave this to check they are there.
+    #                                  # The controller's pod installs no skill, so the check skips it
+    #                                  # (LEGION_CONTROLLER is set in the controller's agent alone).
     pod:                               # the model route: deploy/kubernetes/operator-route/pod.yml
       env:
         PI_CONFIG_FILES: /etc/legion-operator/overlay.yml
@@ -201,6 +242,8 @@ runtime:
         #   nfs: {server: nas.internal.example, path: /exports/builds}
         # - name: operator-roles       # role_config_files' overlays (above)
         #   config_map: {name: legion-operator-roles}
+        # - name: operator-memory      # the project's memory.config_files overlays (above)
+        #   config_map: {name: legion-operator-memory}
       volume_mounts:
         - {volume: operator-route, mount_path: /home/legion/.omp/profiles/legion/agent/models.yml, sub_path: models.yml}
         - {volume: operator-route, mount_path: /etc/legion-operator/overlay.yml, sub_path: overlay.yml}
@@ -209,6 +252,7 @@ runtime:
         # - {volume: team-share, mount_path: /mnt/team}                    # read-only by default
         # - {volume: nas, mount_path: /mnt/nas, read_only: false}          # writable
         # - {volume: operator-roles, mount_path: /etc/legion-operator-roles} # role_config_files' overlays
+        # - {volume: operator-memory, mount_path: /etc/legion-memory} # memory.config_files' overlays
 
 # The daemon reports, at boot, in `legion state` and to the controller on every tick, each worker
 # capability the deployment's own configuration closes or leaves open (LEGION-578): the secrets

@@ -12,7 +12,7 @@ Secrets Manager or Google Cloud Secret Manager, and it starts nothing else.
 
 ## What to run
 
-The broker ships as `envoy-broker` in the Envoy image, `ghcr.io/sjawhar/legion/envoy:<commit>`,
+The broker ships as `envoy-broker` in the Envoy image, `ghcr.io/cybermonklabs/legion/envoy:<commit>`,
 which every push to `main` that touches the image's sources publishes (the image's default
 entrypoint is the Envoy listener, so run it with `--entrypoint envoy-broker`). Pin it by digest
 and verify it as [Running Dispatch](/legion/dispatch/running-dispatch/) shows. To build it yourself:
@@ -44,13 +44,43 @@ BROKER_SECRETS_KMS_KEY_ARN=arn:aws:kms:<region>:<account>:key/<key id>
 AWS_REGION=<region>
 ```
 
-`BROKER_API_ACCOUNTS` lists the callers of the broker's named-caller routes, here Dispatch's server
-as the caller `dispatch`, each by its own Kubernetes ServiceAccount: a caller presents its projected
-token for `BROKER_K8S_OIDC_AUDIENCE`, which the broker verifies against `BROKER_K8S_OIDC_ISSUER`,
-so the list needs that pair. No secret is shared between the broker and Dispatch. A token that
-lives longer than an hour from its issue is refused, and an account the list does not name is
-answered `403 ACCOUNT_NOT_LISTED`. Through those routes Dispatch lists what waits on a person and
-relays a person's machine-login decisions and revokes; it decides no secret request
+`BROKER_MACHINE_LOGIN_URL` is the page where a person types a machine login's code, Dispatch's
+`/credentials/machine`. It is optional. With it, the device authorization grant's
+`verification_uri` names that page, so a machine shows its person where to go. Without it there is
+no device grant at all: `POST /v1/oauth/device_authorization` is not mounted and answers `404`,
+and the broker's authorization server metadata leaves the device code out of
+`grant_types_supported`, which is how Dispatch knows to serve no machine-code page. Everything
+else the OAuth provider serves — the token endpoint, the RFC 8693 token exchange, introspection
+and revocation — is served either way. Leave it unset in a deployment where every machine holds a
+cloud identity and nobody ever types a code. The boot line says which of the two this broker is:
+`machine login device grant state=on verification_uri=…`, or `state=off` naming the unset
+variable.
+
+`GET /.well-known/oauth-authorization-server` is that metadata, RFC 8414. It needs no credential,
+since it is what a client reads before it holds one, and nothing in it is a fact a caller could
+not learn by calling the endpoints it names. It names this broker's issuer
+(`BROKER_PUBLIC_URL`), its token, introspection and revocation endpoints, the grants it serves,
+the DPoP signing algorithms it takes, and the subject token types its exchange is configured
+with, so a client reads off one document what this deployment turned on rather than being
+configured with it twice.
+
+`BROKER_API_ACCOUNTS` lists the callers of the broker's named-caller routes, here Dispatch's
+server as the caller `dispatch`, each by its own account. An account is written in one of two
+forms, and the entry's own text says which: a Kubernetes ServiceAccount subject, as above, or
+`google:` and a Google service account's address
+(`listener=google:example-listener@example-project.iam.gserviceaccount.com`). A Kubernetes caller
+presents its projected token for `BROKER_K8S_OIDC_AUDIENCE`, verified against
+`BROKER_K8S_OIDC_ISSUER`, and is looked up by the token's `sub`, so such an entry needs that pair.
+A Google caller presents its machine's own Google identity token for `BROKER_GOOGLE_OIDC_AUDIENCE`
+— the audience every machine of the deployment already holds a token for, so the Envoy listener on
+a machine presents what its metadata server already hands it and mints no second token — verified
+against `BROKER_GOOGLE_OIDC_ISSUER`, and is looked up by the token's `email`, so such an entry
+needs that audience and no cluster at all. A project's default Google accounts and Google-managed
+service agents are refused here as they are in `BROKER_VM_SERVICES`. No secret is shared between
+the broker and its callers. A token that lives longer than an hour from its issue is refused, and
+an account the list does not name is answered `403 ACCOUNT_NOT_LISTED`. Through those routes
+Dispatch lists what waits on a person and relays a person's machine-login decisions, their
+machine-login revokes and their sign-in revokes; it decides no secret request
 ([Network and trust](#network-and-trust)).
 
 The four `BROKER_SIGNIN_*` settings are required, and a broker started without one of them exits
@@ -173,82 +203,172 @@ A service login a person approved through a device code before this broker keeps
 it expires, at most `BROKER_LAUNCHER_CREDENTIAL_SECONDS` (30 days by default) after its approval:
 nothing refreshes it.
 
-A Google Compute Engine VM logs in and enrolls itself with the identity token its metadata server
-signs for the VM's service account, so it holds no stored credential and no person approves it.
-Four settings turn this on, and the broker refuses to start with only some of them:
+A machine holding a Google identity token — a Compute Engine VM, a pod on Google Kubernetes
+Engine, or anything a workload identity pool mints one for — trades that token at the broker's
+token exchange for a Dispatch access token and the machine login that trade mints. It holds no
+stored credential and no person approves it. Five settings describe its fleet, and the broker
+refuses to start with only some of them:
 
-- `BROKER_GOOGLE_OIDC_AUDIENCE`: the audience the VMs ask their metadata server for. The issuer is
-  always Google's, `https://accounts.google.com`, which the broker discovers at startup only when
-  this is set; it then logs one `google vm identity` line naming the issuer, the audience and the
-  VM services. Unset, the broker reads and logs nothing about Google, and refuses kind `vm` with
-  `400 INVALID_KIND`.
+- `BROKER_GOOGLE_OIDC_AUDIENCE`: the audience the machines ask their metadata server for. The
+  issuer is Google's, `https://accounts.google.com`, unless `BROKER_GOOGLE_OIDC_ISSUER` names a
+  stand-in for a dev stack; the broker reads its keys at startup only when the audience is set,
+  and then logs one `google machine identity` line naming the issuer, the audience and the machine
+  services. Unset, the broker reads and logs nothing about Google and takes no such token.
 - `BROKER_VM_SERVICES`: whitespace-separated `<service>=<service account email>` entries. Use a
   dedicated user-managed account for each fleet: the broker refuses a project's default Compute
   Engine or App Engine account, which every workload in the project runs as by default.
-- `BROKER_VM_PROJECTS`: `<service account email>=<project id>`, the one project the fleet's VMs run
-  in.
-- `BROKER_VM_INSTANCES`: `<service account email>=<instance-name glob>`, the names the fleet's VMs
-  have, in Go's `path.Match` syntax.
+- `BROKER_VM_PROJECTS` and `BROKER_VM_INSTANCES`: `<service account email>=<project id>` and
+  `<service account email>=<instance-name glob>`, in Go's `path.Match` syntax. They pin a fleet to
+  one Compute Engine project and the instance names its machines have. The two go together: set
+  both for an account, or neither. An account pinned in neither takes its machines wherever they
+  run, a token carrying no `google.compute_engine` claims included, which is what a workload
+  identity pool and a pod's metadata server mint.
+- `BROKER_VM_EXCHANGE_ACCOUNTS`: `<service account email>=<project>=<person>[=<session>]`, the
+  person and the Dispatch project a fleet writes for. An account `BROKER_VM_SERVICES` lists and
+  this setting does not gets a token that names its service and no person, which Dispatch and the
+  Envoy listener read. Either way it reaches the fleet's Dispatch token alone and never its
+  secrets: the machine login the exchange mints names no person, so a machine reads what its
+  service owns and the shared agent-tier secrets, and a person reaches their own on that machine
+  only by signing in on it.
 
-One fleet's entry, `example-fleet`, whose VMs run as one account in `example-project` and are named
-`example-vm-...`:
+One fleet's entry, `example-fleet`, whose machines run as one account in `example-project`, are
+named `example-vm-...`, and write for one person:
 
 ```sh
 BROKER_GOOGLE_OIDC_AUDIENCE=example-vm-audience
 BROKER_VM_SERVICES=example-fleet=example-fleet@example-project.iam.gserviceaccount.com
 BROKER_VM_PROJECTS=example-fleet@example-project.iam.gserviceaccount.com=example-project
 BROKER_VM_INSTANCES=example-fleet@example-project.iam.gserviceaccount.com=example-vm-*
+BROKER_VM_EXCHANGE_ACCOUNTS=example-fleet@example-project.iam.gserviceaccount.com=EXAMPLE=ada@example.com
 ```
 
-A secret whose owner tag is `example-fleet` then goes to the fleet's VMs at once and to no one else.
-The broker refuses a VM's login (`POST /v1/launcher-credentials/token`) whose token is for another
-audience or does not verify, including one whose email is not verified or that has no
-`google.compute_engine` claims (`401 TOKEN_INVALID`); whose token has expired (`401
-TOKEN_EXPIRED`); and whose account is not listed, whose request names another service, whose
-project is another, or whose instance name the glob does not match (`403 ACCOUNT_NOT_LISTED`, each
-naming what did not match). Each VM holds a launcher credential and an enrollment of its own, keyed
-by `<account>@<project>/<zone>/<instance id>`, so one VM's login never moves another's credential,
-and ending one VM's enrollment leaves the others. A VM's credential expires with its token, an hour
-after the token was minted; its enrollment outlives it while it renews. Dispatch's machine-login
-page lists each VM's login, its host `<project>/<zone>/<instance name>` and no approver, and anyone
-signed in may revoke it, which ends that VM's enrollment; the VM logs in again at its next
-`enroll --vm`. A revoke ends the enrollment, not the VM's identity token: someone who copied that
-token off the VM logs in again with it within its hour, under a new machine login, enrolls a key of
-their own and reads what the VM may read. To end a copied token for certain, take the VM out of its
-fleet and wait out the hour, as [a copied VM token](#a-copied-vm-token) says. To stop a fleet
-logging in, remove its entries and redeploy the broker: each VM's
-credential stops authenticating at its next call, and its next login is refused. Narrowing a fleet,
-by changing its project or its instance-name glob, ends every VM it no longer allows at once: from
-its next call the VM has no session identity, so releasing a grant it holds, opening a request and
-renewing are all refused `401` (`ENROLLMENT_NOT_LIVE` for the renewal, on which `agent-secrets
-renew` stops, exit 76), its credential stops authenticating, a person's approval of a request it
-left pending ends that request denied with no grant, its launcher credential no longer
-authenticates, so a new enrollment under it is refused `401 LAUNCHER_INVALID`, and its next login is
-`403 ACCOUNT_NOT_LISTED`. A value the VM already read before the change stays with it: the broker
-cannot take back a secret it released, so rotate any it must no longer hold. Its enrollment row
-ends with its lease.
+A machine of that fleet then reads the secrets `example-fleet` owns and the shared agent-tier
+ones, and asks for the rest. `ada@example.com` is on the Dispatch token it trades for, not on its
+machine login: her own secrets stay hers until she signs in on that machine.
 
-Whoever can get an identity token for the fleet's account from a VM in that project with a matching
-name logs in as its service. Google Cloud IAM is that boundary: who may run a VM as the account
-(`iam.serviceAccounts.actAs` on it, with `compute.instances.create` in the project), and who may run
-code on a fleet VM, which can fetch the VM's token.
+When she does — `agent-secrets login`, which needs `BROKER_SIGNIN_DEVICE_AUDIENCE` set — that
+sign-in's trade mints a machine login of its own on that box, carrying her rather than the fleet,
+and a session enrolled under it reads her secrets and the shared agent-tier ones and nobody else's.
+It is bound to the box key the command makes there, so her sign-in on one machine is not her
+sign-in on another. Revoking that sign-in (`POST /v1/person-signins/{id}/revoke`, which Dispatch
+relays from her page) ends the access tokens it minted and the machine login with them, so every
+session it enrolled ends at once; the fleet's own machine login, and her sign-ins on other
+machines, are untouched.
+That revoke ends the box key, not her grant at Google: `agent-secrets login` keeps Google's
+refresh token on the machine beside the key, and whoever can read that machine's files can copy
+both and sign in again from elsewhere, as a sign-in of its own that this revoke does not reach.
+To cut off a box you believe is compromised, have her revoke the grant at Google — her Google
+Account's third-party connections page, the entry for the deployment's `agent-secrets login`
+client — which ends every copy of that refresh token at once; the broker's own revoke is for a
+box she has finished with.
+A sign-in belongs to the machine it was made on: the same box key presented with another
+machine's identity token is refused `invalid_grant` naming `agent-secrets login`, since the
+machine login it holds is keyed by the person, the machine and the key together.
+The broker refuses an exchange whose token is for another audience or does not verify, whose email
+Google does not hold verified, whose account no entry lists, or whose Compute Engine project or
+instance name the entry's pins do not allow, each `400 invalid_request` naming what did not match.
 
-A VM runs, with `AGENT_SECRETS_URL` naming the broker:
+Two settings turn a person's sign-in on. `BROKER_SIGNIN_DEVICE_AUDIENCE` is the OAuth client id of
+the device-flow client `agent-secrets login` runs Google's device authorization grant as, which is
+the audience a person's own Google identity token must carry, since Google puts a client's id in
+the `aud` of the ID tokens it mints for it; set it to the same client id the machines are given as
+`AGENT_SECRETS_SIGNIN_CLIENT_ID`. `BROKER_SIGNIN_DOMAIN`, which the approval sign-in already
+needs, is the Workspace domain the person's `hd` claim must name, so a person outside it signs in
+nowhere. The issuer of both the person's token and the machine's is `BROKER_GOOGLE_OIDC_ISSUER`,
+`https://accounts.google.com` unless a dev stack names a stand-in, and the audience setting needs
+`BROKER_GOOGLE_OIDC_AUDIENCE`, whose machines are the boxes a person may sign in on. Unset, the
+broker accepts no person's sign-in and refuses either token type by name.
 
-```sh
-agent-secrets enroll --vm --service example-fleet --audience example-vm-audience --out /var/lib/agent-secrets
-AGENT_SECRETS_KEY_DIR=/var/lib/agent-secrets agent-secrets --reason "git fetch" GITHUB_TOKEN -- sh -c 'test -n "$GITHUB_TOKEN" && echo "GITHUB_TOKEN is set"'
-```
+Each machine holds a launcher credential of its own, keyed by the machine and the key its proof
+presented: `<account>@<project>/<zone>/<instance id>#<key thumbprint>` for a token minted on a
+Compute Engine instance, and `<account>#<key thumbprint>` for one minted anywhere else. The key is
+part of the name because the identity token is a bearer: a copy of it presented with a key of the
+copier's asks for a credential of its own and moves nothing of the machine's. So one machine's
+trade never moves another's credential, and ending one machine's enrollment leaves the others.
+`agent-secrets-helper` keeps that key in `~/.config/agent-secrets/identity-key.pem`, mode 0600,
+beside the machine login a machine that proves no identity keeps, and makes one only at this
+machine's first trade. A restart therefore trades the same subject and moves the one credential
+the machine already holds, so the sessions enrolled under it keep renewing. A machine that makes
+a new key — one whose key file was removed, or a machine rebuilt — leaves its old credential
+behind until that credential's own expiry, and starts a new one at its next trade; the sessions
+enrolled under the old one stop renewing when it lapses, and a box enrolled with
+`agent-secrets enroll --helper` is enrolled again by running that command again.
 
-`enroll --vm` reads the token from
-`http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=<audience>&format=full`
-(`format=full` is what gives the token the VM's project, zone and instance, which the broker
-requires), logs in, enrolls the VM, writes `key.pem` and `enrollment` under `--out`, and prints the
-enrollment id. The directory is the VM's one session identity: keep one per VM. Run again over the
-same directory, it keeps `key.pem`, gets the same live enrollment back and extends its lease, or
-enrolls anew once the old lease has lapsed. Keep the lease alive with `agent-secrets renew --vm`, or
-by running `enroll --vm` again within `BROKER_LEASE_SECONDS`. A new `key.pem` while the VM's
-enrollment is still live is refused `409 ALREADY_ENROLLED` until that lease lapses.
+Only a trade that asks for a credential holds one, and a trade asks unless it says otherwise, so
+`agent-secrets` and the helper hold theirs by doing nothing. A person's sign-in cannot do
+otherwise: a sign-in holds its credential, so a trade of a person's that declined one is refused
+`400 invalid_request`. The clients that
+want a Dispatch token and read no secret — the `dispatch` command, the Oh My Pi and Claude Code
+plugins, `envoy-send` — decline it, since each of them makes a key per process and per session
+and a machine-logins list with a row per command run is a list nobody can read. So the machines
+on that list are the boxes that enrol sessions, not every process that ever traded.
+
+The credential expires with the token it was minted from, an hour after that token was minted, and
+a machine's session renews only while that credential is live: not revoked, not past its expiry,
+and its account still listed for its service. A machine that stops being able to prove its
+identity therefore stops renewing within the hour, and its sessions lapse one
+`BROKER_LEASE_SECONDS` later; a copy of a session's key and enrollment id taken off the box renews
+nothing once the box's login has ended. The broker answers such a renewal `401
+ENROLLMENT_NOT_LIVE` and logs `broker: machine session renewal refused: its machine login has
+ended`. Only a machine's own session is held this way: a person's session on that box renews until
+they revoke the sign-in, which ends it at once, and a pod's renewal proves the pod's own projected
+token.
+
+Dispatch's machine-login page lists each machine's login, its host and no
+approver, and anyone signed in may revoke it, which ends that machine's enrollment; the machine
+trades again at its next call. A revoke ends the enrollment, not the Google identity token: someone
+who copied that token off the machine trades it again within its hour, under a machine login of
+their own key, and reads what that fleet's service may read. To end a copied token for certain, take
+the machine out of its fleet and wait out the hour, as [a copied machine
+token](#a-copied-machine-token) says. To stop a fleet trading, remove its entries and redeploy the
+broker: each machine's credential stops authenticating at its next call, its next trade is
+refused, and its sessions stop renewing.
+
+A revoke alone does not cut off a machine whose key may have been copied. The credential is
+keyed by the machine and the key it proved, and `agent-secrets-helper` keeps that key at
+`~/.config/agent-secrets/identity-key.pem` across restarts, so the box's next trade — within the
+hour, since the credential lives only as long as the identity token it was minted from — mints a
+new live credential bound to that same key, and whoever holds a copy of the file signs launcher
+proofs under the new credential's id. Three steps, in this order, end that:
+
+1. remove `~/.config/agent-secrets/identity-key.pem` on the machine;
+2. restart the helper (`systemctl --user restart agent-secrets-helper.service`, or
+   `agent-secrets-helper install --restart-with-sessions`, which also ends the grants of the
+   sessions registered with it), so it makes a new key and its next trade holds a credential of a
+   subject of its own;
+3. then revoke the old login on the machine-login page, by the credential id the old key held,
+   which ends it and every session it enrolled.
+
+In the other order the revoke is undone: the helper still holds the key, and its next trade
+inserts a live credential on it again, since a revoked row is no longer the one a trade of that
+subject moves. None of this reaches the machine's Google identity token, which is what the trade
+itself proves: a box you believe is compromised comes out of its fleet, as [a copied machine
+token](#a-copied-machine-token) says.
+
+Whoever can get an identity token for the fleet's account logs in as its machines. Google Cloud IAM
+is that boundary: who may run a workload as the account (`iam.serviceAccounts.actAs` on it), and
+who may run code on a machine of the fleet, which can fetch that machine's token.
+
+On the machine itself there is no enrollment command to run and no key to place: `agent-secrets`,
+`agent-secrets-helper` and the Legion controller trade the identity the machine already holds
+whenever they find no key directory, no sign-in and no helper. What they read is
+`AGENT_SECRETS_URL`, the broker's public URL, and `AGENT_SECRETS_MACHINE_IDENTITY`, which says
+which identity this machine proves: `metadata` with `AGENT_SECRETS_MACHINE_AUDIENCE`, a Compute
+Engine machine's own token from its metadata server, which is the fleet above; `kubernetes` with
+`AGENT_SECRETS_MACHINE_TOKEN_FILE`, a pod's projected service-account token; or `pool` with
+`AGENT_SECRETS_POOL_AUDIENCE` and `AGENT_SECRETS_POOL_ACCOUNT`, a token minted through a workload
+identity pool. `AGENT_SECRETS_SESSION` names the session a trade writes under for a caller that
+acts as no session of its own — `agent-secrets`, the helper, a daemon — and is the only name
+such a caller has. A caller that is a session writes under its own session id and reads that
+variable for nothing: an agent session's id is minted when the session starts, and its token
+must name it, since the Envoy listener refuses a subscribe, an unsubscribe, a role claim or a
+send from a session whose token names another. So a fleet whose entry fixes a session, or whose
+pods write under registered names, is a fleet no agent session can trade at: the broker refuses
+the trade, naming what the entry writes as. For a person to sign in there, give the machine the
+device-flow client as `AGENT_SECRETS_SIGNIN_CLIENT_ID` and
+`AGENT_SECRETS_SIGNIN_CLIENT_SECRET_FILE`, the client whose
+id is `BROKER_SIGNIN_DEVICE_AUDIENCE`. With `AGENT_SECRETS_MACHINE_IDENTITY` unset nothing trades
+and every machine works as it did, through a machine login a person approves.
 
 ## Approval sign-in
 
@@ -395,13 +515,13 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
 | Rolling back | Roll forward past a broker that serves kind secrets, never back. A broker before kinds reads no `kind` tag and would serve a kind secret's stored GitHub App key or refresh token as its value. `agent-secrets secret` writes `mint-service-account: kind-secret` beside every kind, which every broker from legion-envoy-v13.19.0 to the release before kinds refuses as `mint-target-malformed`; a broker older than legion-envoy-v13.19.0 reads no such tag and serves the value. A kind secret written without the guard (by hand, or by a deployment that does not set it) is served by every earlier broker. To go back anyway, first disable every kind secret's versions. |
 | The secret store | The agent secrets: every secret whose name starts with `BROKER_SECRETS_PREFIX`, carrying `owner` and `tier` (AWS tags, or Secret Manager annotations), encrypted with the agent-secrets key, and holding a current value. A `kind` tag makes the broker mint a release from that value. [Concepts](/legion/broker/concepts/#owner-and-tier-who-may-have-which-secret) describes the tags, the name each secret is asked for by, and how often the broker rereads them. `BROKER_SECRETS_STORE` names which store, and the two rows below say what each needs. |
 | AWS Secrets Manager (`aws-secrets-manager`) | The broker calls AWS with the SDK's default credential chain (environment, shared config, or the workload's role), in a region (`AWS_REGION`, `AWS_DEFAULT_REGION` or the shared config). It needs `secretsmanager:ListSecrets` (which takes no resource, so on `*`), `secretsmanager:DescribeSecret` (to reread one secret) and `secretsmanager:GetSecretValue` on the namespace's secrets, `kms:Decrypt` on the agent-secrets key (`BROKER_SECRETS_KMS_KEY_ARN`), `kms:ListAliases` (on `*`, called only when a secret names its key by an alias), and, when it signs in to RDS by IAM token, `rds-db:connect` on its database user; nothing else. |
-| Google Cloud Secret Manager (`gcp-secret-manager`) | The broker calls Secret Manager under [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials): on GKE, Workload Identity Federation for the pod's Kubernetes ServiceAccount, with no key file and no Google service account; the boot log's `secret store … credentials=application-default` line says so. Its principal needs `secretmanager.secrets.list` on the project (the listing takes the project as its parent) and `secretmanager.secrets.get`, `secretmanager.versions.get` and `secretmanager.versions.access` on the namespace's secrets: `roles/secretmanager.viewer` on the project and `roles/secretmanager.secretAccessor` with an IAM condition `resource.name.startsWith("projects/<number>/secrets/<id prefix>")` cover them. The condition narrows only the accessor binding, so the broker reads values from the namespace alone; the viewer role reaches every secret's metadata in the project (its annotations, its versions' state and its IAM policy), never a value. A secret is served while its `versions/latest` is `ENABLED`, encrypted with the key `BROKER_SECRETS_KMS_KEY_NAME` names (`replication.automatic.customerManagedEncryption`; a secret on Google's default encryption is refused `not-on-agent-secrets-key`); one with an `expire_time` is scheduled for deletion and left out, as a Secrets Manager secret in its recovery window is, and a grant made before it no longer reads its value, though Secret Manager still would until that time. Every Secret Manager call but reading a value counts against the project's read quota, [600 a minute, shared by everything in the project](https://docs.cloud.google.com/secret-manager/quotas) (reading a value has its own 90,000). The broker's worst case against it is the sum of: a reload every five minutes, one listing plus one call per secret (a 200-secret namespace, about 40 a minute); the public reread route, two each, capped at one reread every 4 seconds across all callers of **each process** (at two processes that is the same 120 metadata reads a minute for the fleet, which is what the per-process figure is derived from — see [Running more than one pod](#running-more-than-one-pod)); each session's rereads for names it was not served, two each, at most one per session every ten seconds; and value releases, a kind secret's among them, one per distinct secret per 30 seconds (two for a secret whose latest version is disabled), since the broker trusts its last check of a secret, readable or not, for that long (so a delete made outside `agent-secrets secret` stops releases at most 30 seconds after Secret Manager's own metadata shows it, which Google documents as eventually consistent; `agent-secrets secret delete` rereads the name, and the broker then releases nothing more). A busy fleet of sessions requesting unknown names can still spend the quota, and other workloads in the same project draw on it too, so give the agent secrets a project of their own. On the metadata calls the broker retries an `UNAVAILABLE` answer and never a `RESOURCE_EXHAUSTED` one, which would only spend more of that quota; reading a value keeps the client library's own retry of both, against its separate quota. On Secret Manager the agent-secrets key gates no caller: Secret Manager's service agent makes the KMS calls, so writing a secret onto the key and reading it need no KMS permission, and being on the key is the namespace's convention, not a second permission check as it is on AWS. Secret Manager makes the KMS calls itself, so the broker needs no KMS permission; the Secret Manager service agent needs `roles/cloudkms.cryptoKeyEncrypterDecrypter` on the key. |
+| Google Cloud Secret Manager (`gcp-secret-manager`) | The broker calls Secret Manager under [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials): on GKE, Workload Identity Federation for the pod's Kubernetes ServiceAccount, with no key file and no Google service account; the boot log's `secret store … credentials=application-default` line says so. Its principal needs `secretmanager.secrets.list` on the project (the listing takes the project as its parent) and `secretmanager.secrets.get`, `secretmanager.versions.get` and `secretmanager.versions.access` on the namespace's secrets: `roles/secretmanager.viewer` on the project and `roles/secretmanager.secretAccessor` with an IAM condition `resource.name.startsWith("projects/<number>/secrets/<id prefix>")` cover them. The condition narrows only the accessor binding, so the broker reads values from the namespace alone; the viewer role reaches every secret's metadata in the project (its annotations, its versions' state and its IAM policy), never a value. A secret is served while its `versions/latest` is `ENABLED`, encrypted with the key `BROKER_SECRETS_KMS_KEY_NAME` names (`replication.automatic.customerManagedEncryption`; a secret on Google's default encryption is refused `not-on-agent-secrets-key`); one with an `expire_time` is scheduled for deletion and left out, as a Secrets Manager secret in its recovery window is, and a grant made before it no longer reads its value, though Secret Manager still would until that time. Every Secret Manager call but reading a value counts against the project's read quota, [600 a minute, shared by everything in the project](https://docs.cloud.google.com/secret-manager/quotas) (reading a value has its own 90,000). The broker's worst case against it is the sum of: a reload every five minutes, one listing plus one call per secret (a 200-secret namespace, about 40 a minute); the public reread route, two each, bounded across all callers of **each process** at one reread every `N² × 1 second`, where `N` is the pods that process counted at its last beat and never fewer than two — one every 4 seconds at two pods, one every 9 at three, one every 16 at four — which holds the whole fleet at the same 120 metadata reads a minute whatever `N` is (see [Running more than one pod](#running-more-than-one-pod)); each session's rereads for names it was not served, two each, at most one per session every ten seconds; and value releases, a kind secret's among them, one per distinct secret per 30 seconds (two for a secret whose latest version is disabled), since the broker trusts its last check of a secret, readable or not, for that long (so a delete made outside `agent-secrets secret` stops releases at most 30 seconds after Secret Manager's own metadata shows it, which Google documents as eventually consistent; `agent-secrets secret delete` rereads the name, and the broker then releases nothing more). A busy fleet of sessions requesting unknown names can still spend the quota, and other workloads in the same project draw on it too, so give the agent secrets a project of their own. On the metadata calls the broker retries an `UNAVAILABLE` answer and never a `RESOURCE_EXHAUSTED` one, which would only spend more of that quota; reading a value keeps the client library's own retry of both, against its separate quota. On Secret Manager the agent-secrets key gates no caller: Secret Manager's service agent makes the KMS calls, so writing a secret onto the key and reading it need no KMS permission, and being on the key is the namespace's convention, not a second permission check as it is on AWS. Secret Manager makes the KMS calls itself, so the broker needs no KMS permission; the Secret Manager service agent needs `roles/cloudkms.cryptoKeyEncrypterDecrypter` on the key. |
 | Kind secrets | A `github-app` secret needs outbound HTTPS access to `api.github.com`, and a `github-owners` tag naming the GitHub accounts it mints for, which the deployment sets when it creates the secret. A `google-login` secret needs outbound HTTPS access to `oauth2.googleapis.com`. The broker reads the stored value for each release, as it reads any secret, and returns only the minted token. It needs no IAM permission to mint these values. A mint GitHub or Google refuses answers the session `502 MINT_FAILED`, naming their reason, and logs `broker: mint failed` (below). A narrowing the secret cannot serve, an account its tag does not list or one GitHub refuses, answers `403 NARROWING_OWNER_NOT_LISTED` or `422 NARROWING_REFUSED` instead and logs `broker: narrowing refused`. |
 | A local stand-in (development only) | `BROKER_FAKE_SECRETS_FILE` names a JSON file the broker reads in place of the store, in Secrets Manager's shape whatever `BROKER_SECRETS_STORE` says, each secret's `kms_key_id` naming the agent-secrets key as the selected store configures it (`BROKER_SECRETS_KMS_KEY_ARN`, or `BROKER_SECRETS_KMS_KEY_NAME` with the GCP store); the [configuration reference](/legion/broker/reference/config/#variables-the-broker-reads) gives its format. |
 | Dispatch | Dispatch's server calls the broker's account routes as its own ServiceAccount: it lists the requests and machine logins waiting on the signed-in person, each secret request with its page on the broker (`approve_url`), which its Inbox links to, and relays a person's machine-login decisions and revokes. Set Dispatch's `DISPATCH_AGENT_SECRETS_URL` to the broker's URL and `DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE` to the path of its projected token for `BROKER_K8S_OIDC_AUDIENCE`, and list that account in the broker's `BROKER_API_ACCOUNTS`. Without the URL, Dispatch hides its credential pages. Deploy a broker with the approval page before a Dispatch whose Inbox links it ([Approval sign-in](#approval-sign-in)). |
 | The sign-in provider | A person's browser signs in to the broker at the provider (Google, under the Workspace's internal consent screen), and the broker reaches its token endpoint and keys over HTTPS at a sign-in, and its discovery document at the first sign-in each process serves (kept once a read succeeds) and at the client check it takes at startup and every hour after. A discovery that could not be read answers the page `503` naming the issuer and logs `approval sign-in: reach the provider`; machines are served as before, and `GET /signin/status` reports `issuer_unreachable` ([What the sign-in is doing](#what-the-sign-in-is-doing)). |
 | Kubernetes (optional) | To enroll pods, and to let a service log in with its token (`BROKER_SERVICE_LOGINS`), `BROKER_K8S_OIDC_ISSUER` and `BROKER_K8S_OIDC_AUDIENCE` name the cluster's service-account token issuer and the audience the pods' and the services' projected tokens carry. The broker fetches the issuer's discovery document at startup and refuses to start if it cannot. |
-| Google Cloud (optional) | To let Compute Engine VMs log in and enroll themselves, `BROKER_GOOGLE_OIDC_AUDIENCE` names the audience of their identity tokens, and `BROKER_VM_SERVICES`, `BROKER_VM_PROJECTS` and `BROKER_VM_INSTANCES` bind each fleet. The broker fetches Google's discovery document at startup and refuses to start if it cannot. |
+| Google Cloud (optional) | To let machines trade their Google identity tokens, `BROKER_GOOGLE_OIDC_AUDIENCE` names the audience of those tokens, and `BROKER_VM_SERVICES`, `BROKER_VM_PROJECTS`, `BROKER_VM_INSTANCES` and `BROKER_VM_EXCHANGE_ACCOUNTS` describe each fleet. The broker fetches Google's discovery document at startup and refuses to start if it cannot. |
 | Envoy (optional) | With `BROKER_ENVOY_URL`, the broker tells a waiting agent session, best effort, when its pending request expires. |
 
 ## Network and trust
@@ -445,31 +565,37 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
   only that no agent secret has the name, says it only to an enrolled session, and never separates a
   secret that does not exist from one the broker refuses; it is what anyone allowed to list the
   namespace reads from the secrets' own names and tags (or annotations).
-  Rereads are limited twice, by fixed limits rather than settings (`RereadLimitFor`,
-  `DefaultRereadOverallLimit` and `GCPRereadOverallLimit` in
-  `packages/envoy/internal/broker/api/limits.go`): each source address gets a burst of 30,
-  refilled one every twice the broker-wide bucket this process mounts — 2 seconds on the default
-  store — and the broker as a whole takes one a second, burst 10, however
-  many addresses the rereads come from — each one takes the policy's writer lock while it reads
-  the secret, so that lock, not the caller, is what the second limit bounds. On Google Secret
-  Manager, where a reread spends two reads of the project's shared metadata quota, that
-  broker-wide limit is one reread every 4 seconds, burst 10, and an address's own is one every 8
-  seconds there. A reread counts against either limit
+  Rereads are limited twice, by limits each pod derives rather than by settings
+  (`RereadOverallFor` and `RereadLimitFor` in
+  `packages/envoy/internal/broker/api/limits.go`): the broker as a whole takes one reread every
+  `N² × 250 ms` on the default store, burst 10, however many addresses the rereads come from —
+  each one takes the policy's writer lock while it reads the secret, so that lock, not the
+  caller, is what this limit bounds — and each source address gets a burst of 30, refilled one
+  every twice that. `N` is how many broker pods the pod serving the call counted at its last
+  beat, never fewer than two, so a two-pod fleet allows one reread a second and an address one
+  every 2 seconds, a three-pod fleet one every 2.25 seconds and an address one every 4.5, and a
+  four-pod fleet one every 4 seconds and an address one every 8. On Google Secret Manager,
+  where a reread spends two reads of the project's shared metadata quota, the same arithmetic
+  runs over a budget four times smaller: one reread every `N² × 1 second` broker-wide, burst
+  10, and an address's own one every twice that — 4 and 8 seconds at two pods, 16 and 32 at
+  four. A reread counts against either limit
   only when both let it run, so one address flooding past its own limit leaves the broker-wide
   one to everyone else. Past either, the broker answers `429 RATE_LIMITED` with a `Retry-After`
-  header naming the limit that refused: 1 second for the broker-wide limit, 4 seconds for Secret
-  Manager's, and for an address's own twice whichever of those this process mounted — 2 seconds on
-  the default store, 8 under Secret Manager.
-  Each of these buckets is one process's, and the broker-wide pair is sized from what the whole
-  fleet spends of the secret store, which is not the same as what it spends in HTTP rereads: one
-  reread the broker accepts costs the store **one read per pod**, because the pod that served it
-  rereads the secret and then tells every other pod to reread it too. So the fleet reads the
-  store `replicas × this rate × replicas` times a second, and each bucket is the fleet's whole
-  budget divided by the replica count **squared**. At two pods: `2 pods × 1 reread/s × 2 store
-  reads = 4 store reads a second`, which is what one pod alone was allowed, and on Secret
-  Manager `2 pods × 0.25 reread/s × 2 store reads × 2 metadata reads = 2 a second`, the same 120
-  metadata reads a minute as before. Read those as the arithmetic rather than as the number two:
-  a third replica divides the fleet's budget by nine, not by four.
+  header naming the limit that refused, at the rate that limit runs at now: at two pods, 1
+  second for the broker-wide limit, 4 seconds for Secret Manager's, and for an address's own
+  twice whichever of those this process mounted — 2 seconds on the default store, 8 under
+  Secret Manager.
+  Each of these buckets is one process's, and the broker-wide pair is derived from what the
+  whole fleet spends of the secret store, which is not the same as what it spends in HTTP
+  rereads: one reread the broker accepts costs the store **one read per pod**, because the pod
+  that served it rereads the secret and then tells every other pod to reread it too. So the
+  fleet reads the store `replicas × this rate × replicas` times a second, and each bucket is
+  the fleet's whole budget divided by the replica count **squared**. At two pods: `2 pods × 1
+  reread/s × 2 store reads = 4 store reads a second`, which is what one pod alone was allowed,
+  and on Secret Manager `2 pods × 0.25 reread/s × 2 store reads × 2 metadata reads = 2 a
+  second`, the same 120 metadata reads a minute as before. Read those as the arithmetic rather
+  than as the number two: a third replica divides the fleet's budget by nine, not by four, and
+  the pod does that division itself.
   Their **burst** is not divided at all: it stays at the budget's ten. A burst is a depth and
   what it has to admit is one person's write burst, a hard floor that the replica count does not
   change, while what it guards — each pod's own transient, its own burst plus every peer's — is a
@@ -482,7 +608,9 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
   on either store and without tightening a deployment for a bucket it does not mount. That
   ordering matters because the route takes no credential and a refusal costs a caller nothing,
   so a caller that merely keeps succeeding at the shared refill rate would otherwise starve the
-  fan-out for everyone. All three are re-derived together when the replica count changes.
+  fan-out for everyone. Each pod re-derives all three whenever the number of pods it counts
+  changes, and logs the rate it moved to (`broker reread rate`,
+  [Health and logs](#health-and-logs)).
   A reread one pod's notification drives on another spends nothing from either bucket, since the
   pod that served the original call already paid for it — which is what makes the figures above
   the whole of the fleet's store traffic rather than a floor under it
@@ -583,7 +711,7 @@ The broker logs text lines to stderr. The ones worth alerting or searching on:
 | `approval sign-in: reach the provider issuer=<issuer> error=…` | At ERROR: the provider's discovery document could not be read at a sign-in, and the page answered `503` naming the issuer. |
 | `broker listening addr=<host:port>` | Startup finished: configuration, migrations and the first read of the namespace all succeeded, and the address is bound. |
 | `broker: fatal error=…` | Startup refused; the error names the variable or dependency. The process exits 1. |
-| `agent secret policy refused name=<secret name> reason=<reason>` | At ERROR, on every namespace read and each refused reread. Reasons include `owner-tag-missing`, `owner-tag-malformed`, `tier-tag-missing`, `tier-tag-malformed`, `name-malformed`, `service-owner-human-tier`, `not-on-agent-secrets-key`, `no-current-value`, `kind-unknown`, `github-owners-missing`, `github-owners-malformed` and `max-grant-malformed`. |
+| `agent secret policy refused name=<secret name> reason=<reason>` | At ERROR, on every namespace read and each refused reread. Reasons include `owner-tag-missing`, `owner-tag-malformed`, `tier-tag-missing`, `tier-tag-malformed`, `name-malformed`, `service-owner-human-tier`, `not-on-agent-secrets-key`, `no-current-value`, `kind-unknown`, `github-owners-missing`, `github-owners-malformed`, `max-grant-malformed` and `default-grant-malformed`. |
 | `agent secret policy load failed; previous policy kept error=…` | At ERROR: a reread of the namespace failed (the secret store out of reach, or refusing the broker; a Secret Manager failure names its gRPC status code alone, never the status message), and the broker keeps serving the policy from its last good read; or, with `name=<NAME>` (the name a request asked for), the request named a secret the broker did not serve and the broker's reread of that one secret failed, so the request is refused `UNKNOWN_SECRET`. A reread of the namespace in flight when the broker shuts down is not one of these and logs nothing. |
 | `broker: <operation> failed error=…` | A request failed with a 500 or 503; the line carries the cause the response does not. A reread whose own request ended before it finished - its caller went away, or it reached the 45-second bound - is not one of these: it answers `503 REQUEST_ENDED` and logs nothing, since anyone can end a request. |
 | `broker: mint failed name=<NAME> kind=<kind> class=<class> error=…` | At ERROR, for each release of a kind secret its minter could not make. `class` says whose fix it is: `stored-value`, the secret's value is not a key or login the kind takes, so its owner stores a new one; `refused`, GitHub or Google answered and refused, such as a Google login that needs a new sign-in or a GitHub App with no installation on a listed account, so its owner signs in again or fixes the App; `upstream`, GitHub or Google could not be asked, answered no usable reply or rate limited the call, or answered a narrowed GitHub token holding more than the narrowing asked, which the broker revokes at GitHub, so check the broker's egress and the upstream's status. A narrowing the caller got wrong is never this line: see `broker: narrowing refused`. The error never holds the stored value, a token or a value from GitHub's answer. The session is answered `502 MINT_FAILED` with the same error. |
@@ -592,8 +720,11 @@ The broker logs text lines to stderr. The ones worth alerting or searching on:
 | `broker sweeper: ended an enrollment whose lease lapsed enrollment_id=… kind=… runtime_id=… slot=… lease_expired_at=… grants_revoked=… requests_cancelled=…` | A session stopped renewing (a pod that is gone, a box whose `agent-secrets renew` stopped) while a broker was serving; the sweep ended it, revoking its grants and cancelling its pending requests. A lease that ran out while no broker was serving is not ended ([when no broker is serving](/legion/broker/concepts/#when-no-broker-is-serving)). |
 | `broker: gave back the time no broker was serving to every lease still running when the last broker served gap=… last_serving_at=… enrollments=…` | At INFO, on the first beat after more than three sweeps in which no broker beat: every broker process was down, or none could reach the database. Each enrollment not revoked whose lease was still running at `last_serving_at` had its lease moved on by `gap`, but no further than `BROKER_LEASE_SECONDS` from now; `enrollments` counts them. Their sessions renew as before. |
 | `broker: the serving clock could not beat; it retries every interval and logs again once it beats error=… timed_out=…` | At WARN: this process could not record its beat, usually because the database is out of reach. A beat may take at most one `BROKER_SWEEP_SECONDS`; `timed_out=true` says it ran out of that (its deadline, or a lock or statement past it), as when another transaction holds this process's row, while the other brokers go on beating. It retries every `BROKER_SWEEP_SECONDS` and logs `broker: the serving clock beats again` once it does. |
+| `broker reread rate replicas=<n> every=<interval> burst=10` | At INFO, at this pod's first beat of the serving clock and then each time the number of pods it counts changes: the limits it now serves `POST /v1/secrets/{name}/reread` at. `every` is how often the broker-wide bucket takes one reread back, and an address's own bucket takes one back every twice that. A pod that has not beaten yet serves at the two-pod rate ([Running more than one pod](#running-more-than-one-pod)). |
+| `broker reread rate above the replica count this sizing supports replicas=<n> every=<interval> store_reads_at_burst=<reads>` | At WARN, beside the line above when a pod counts more than four: the rate is derived the same way, but the burst of 10 is not divided, so a burst at that count reads the secret store `store_reads_at_burst` times at once, which this sizing was not chosen for. A pod logs it once, when its own count first goes above four, and again only if that count changes while it stays above four. A fleet that stays larger has outgrown the budget `limits.go` divides, which is where to change it. |
 | `broker: pod enrollment renewed without its projected token enrollment=… pod_uid=… slot=…` | At WARN: a pod enrollment renewed without its token, and no enrollment naming its pod UID has ever renewed with one, so the broker accepted it; for that pod a token copied out of it still keeps an enrollment alive. It is expected from a pod on a worker image whose `agent-secrets renew` predates `--pod-token-file`. A pod on the current image sends its token from its first renewal, so a line naming such a pod means a holder of an enrollment key for it is renewing outside the cluster before the pod's own first token renewal. List pod images below and replace an older-image pod. If its pod UID is absent or every image is current, end the login that made the line's enrollment, which ends every enrollment it made, once its `subject` shows whether it is a Legion daemon's ([the renew token check](#the-renew-token-check) gives the query and both ways to end it); never pick a machine-login row by its machine name. |
 | `broker: pod enrollment renewal refused: projected token required enrollment=…` | At WARN: a pod enrollment renewed without its token after an enrollment naming the same pod UID, this one or another, had renewed with one, and was refused. One cause is someone holding its key, possibly enrolled under another machine login with a token copied out of the pod, renewing outside the cluster. The other is an old-image pod refused because someone else marked its UID first: whoever holds an unexpired copy of an old-image pod's token and a launcher credential that enrolls pods can enroll a key of their own on that UID and renew it with the copy, which marks the UID, and from then on the real old-image pod, whose renewer sends no token, is refused here until its lease lapses. That is weaker than what the copy already allowed, which was to enroll and renew as the pod. The refused enrollment's pod UID names the pod: list pod images (below). If that pod runs an older image, the copy's rows are the marked rows of that pod UID: end each one's login once its `subject` shows whether it is a Legion daemon's ([the renew token check](#the-renew-token-check)), never picking a machine-login row by its machine name, and replace the pod with a current image. Otherwise the copy is the line's own enrollment, as that section says. A current-image renewer that cannot read its token file sends nothing at all, so the broker logs nothing for it; `agent-secrets renew` prints `ERROR: enrollment <id> cannot read its pod token` instead, which the worker shim relays into the pod's log. Its lease and grants end one `BROKER_LEASE_SECONDS` after its last valid renewal. |
+| `broker: machine session renewal refused: its machine login has ended enrollment=…` | At WARN: a machine's own session asked to renew while the launcher credential its Google identity token minted was no longer live — revoked, past the hour's expiry that token gave it, or its account no longer listed for its service in `BROKER_VM_SERVICES`. The renewal is answered `401 ENROLLMENT_NOT_LIVE` and the session lapses within one `BROKER_LEASE_SECONDS`. It is expected after a fleet is taken out of the settings and after a machine stops trading. A line for a machine that is still running and still listed means something holding that session's key is renewing after its box's login has ended, which is what this refusal is for: see [a copied machine token](#a-copied-machine-token). |
 | `broker draining drain=<drain>` | SIGTERM or SIGINT: from here on `GET /healthz` answers `503 SHUTTING_DOWN` while every other route is served and the listener stays open, for `BROKER_DRAIN_SECONDS`. A second signal ends the wait at once, logged as `broker: a second signal ended the drain early`. |
 | `broker shutting down` | The drain is over: the broker stops accepting, and the requests still in flight get 60 seconds to finish. That is the server's own `WriteTimeout` — the 45-second request deadline plus the 15 seconds a handler needs to write its answer — because it is the longest exchange the broker allows a request past its headers: one admitted in the drain's last instant still gets its whole deadline. Shutdown closes idle connections at once, and one that has gone five seconds without sending its headers counts as idle, so the budget covers the requests in flight rather than every connection open. |
 | `broker: listening for the other pods' secret rereads channel=…` | The reread fan-out's receiving half has its `LISTEN` connection. The boot waits up to five seconds for this line before it binds, so on a healthy pod it comes just before `broker listening`; after that it reappears on every redial. |
@@ -662,13 +793,18 @@ five-minute reload. The promise is therefore "within seconds, except while a pod
 redialing, where the next five-minute reload is the backstop". A reread a notification drives
 spends no rate-limit token: the pod that served the original call already paid for it.
 
-**The reread limits are three numbers derived from one budget, not one number halved.** One
-reread the broker accepts costs the secret store one read on every pod — the pod that served it,
-and each peer the fan-out tells — so the fleet's store traffic is `replicas² × the per-pod rate`,
-and the two broker-wide buckets' **rate** is the fleet's whole budget divided by that: at two pods
-one reread a second, or one every 4 seconds against Google Secret Manager, which leaves the store
-exactly the 4 reads a second, and Secret Manager the 120 metadata reads a minute, that one pod
-alone was allowed. Their **burst** is not divided at all and stays at ten, because a burst is a
+**The reread limits are three numbers each pod derives from one budget, not one number halved.**
+One reread the broker accepts costs the secret store one read on every pod — the pod that served
+it, and each peer the fan-out tells — so the fleet's store traffic is `replicas² × the per-pod
+rate`, and the two broker-wide buckets' **rate** is the fleet's whole budget divided by that: at
+two pods one reread a second, or one every 4 seconds against Google Secret Manager, which leaves
+the store exactly the 4 reads a second, and Secret Manager the 120 metadata reads a minute, that
+one pod alone was allowed. At three pods it is one every 2.25 seconds, or one every 9; at four,
+one every 4 seconds, or one every 16. Each pod does that division itself: its serving clock
+counts the pods beating in `broker_serving` at each beat, a count below two counts as two, and a
+pod whose count changed logs `broker reread rate` and moves both of its buckets without
+emptying or refilling either ([Health and logs](#health-and-logs)).
+Their **burst** is not divided at all and stays at ten, because a burst is a
 depth and what it admits is one person's write burst, which the replica count does not change,
 while what it guards is a transient on each pod's own writer lock — latency, spent once, and
 re-bounded by the rate. A burst momentarily lets the fleet accept `replicas × burst` rereads and
@@ -676,13 +812,34 @@ each costs a read on every pod, so the store sees `replicas² × burst`: 40, 90 
 two, three and four pods, twice that in metadata reads under Secret Manager (80, 180, 320), which
 is 8, 18 and 32 seconds of its 600 a minute — transients, re-bounded immediately by the rate.
 That cost grows with the square of the replica count while the rate is already divided by it, so
-a fleet much larger than two re-derives the burst against the quota rather than carrying ten
-forward unexamined. The **per-address** bucket is derived from them in turn — it refills at half
-the rate of the bucket this process mounts, 2 seconds on the default store and 8 under Secret
-Manager — so no single address can hold the
+four pods is the largest count this sizing was chosen for. Above it the rates are derived the
+same way and every pod logs a warning naming the count and the store reads a burst then costs,
+because a fleet that stays that large wants its budget re-derived against the quota rather than
+carrying ten forward unexamined. The **per-address** bucket is derived from them in turn — it
+refills at half the rate of the bucket this process mounts, 2 seconds on the default store and 8
+under Secret Manager at two pods — so no single address can hold the
 fleet's budget at zero on a route that takes no credential. Every other limiter is per process, so
-a fleet of N pods allows N times each ([Network and trust](#network-and-trust)). All three are
-re-derived together when the replica count changes.
+a fleet of N pods allows N times each ([Network and trust](#network-and-trust)).
+
+**A rolling deploy counts one pod more than the Deployment runs.** The pod a surge adds beats
+beside the pod it replaces, and a pod that has stopped goes on being counted until its row is
+three sweeps old, so a roll of two pods holds the fleet at the three-pod rate for the length of
+the roll and can reach the four-pod rate while a stopped pod's row is still live. Nothing has to
+be set for that: each pod follows the count it sees and goes back to the two-pod rate within a
+few sweeps of the roll finishing. A roll of a four-pod fleet counts five, which is past what this
+sizing was chosen for, and each pod logs the warning above once, when its count first goes above
+four.
+
+**Before you roll a broker, read the lease refusal.** A broker whose `BROKER_LEASE_SECONDS` is
+too short for its `BROKER_SWEEP_SECONDS` exits at boot instead of serving, and that rule is
+stricter than it was: it walks each renewer's own retry schedule rather than counting two thirds
+of the lease, so the shortest lease it accepts is 91 s at a sweep of 1 or 5 seconds, 105 s at
+10, 225 s at 30 and 360 s at 60.
+A pair below that boots a broker of an earlier release and does not boot this one — a 60-second
+lease at the default sweep, or anything from 271 s to 359 s at a sixty-second sweep — so raise
+`BROKER_LEASE_SECONDS` to at least the figure for your sweep and roll that first.
+The refusal prints the figure itself
+([when no broker is serving](/legion/broker/concepts/#when-no-broker-is-serving)).
 
 ## The renew token check
 
@@ -822,35 +979,35 @@ That release refuses every pod renewal without a token, so it also removes what 
 needs: the pod-UID lookup in `Renew` (`podTokenRatcheted`) and its partial index
 `enrollments_pod_token_renewed`.
 
-## A copied VM token
+## A copied machine token
 
-A Google VM's identity token logs in as that VM for up to an hour after it was minted, wherever it
-is presented. A copy's logins show in the audit record as `launcher_credential.token_login` rows
-for the VM's subject from more than one key:
+A machine's Google identity token logs in as that machine for up to an hour after it was minted,
+wherever it is presented. A copy's trades show in the audit record as
+`launcher_credential.token_login` rows for that machine's subject from more than one key:
 
 ```sql
 select at, detail->>'credential_id' as credential_id, detail->>'key_thumbprint' as key,
        detail->>'token_expires_at' as token_expires_at
 from audit
 where kind = 'launcher_credential.token_login'
-  and detail->>'subject' = '<account>@<project>/<zone>/<instance id>'
+  and detail->>'subject' like '<account>%'
 order by at;
 ```
 
-On the VM itself a copy shows as `enroll --vm` runs refused `401 LAUNCHER_INVALID` or `429
-RATE_LIMITED` while nothing else changed. A copy cannot end or take over the VM's live
-enrollment (no machine login ends a VM's enrollment, `403 VM_ENDS_BY_LOGIN_REVOKE`, and a second
-key for a live VM is `409 ALREADY_ENROLLED`), but it can enroll a key of its own while the VM holds
-none. Revoking the VM's login on Dispatch's machine-login page ends every enrollment that login
-made, the VM's and a copy's alike, but not the copied token: within its hour the copy logs in
-again under a new login and enrolls afresh. To end it for certain, take the VM out of the fleet's
-settings and redeploy the broker: change `BROKER_VM_INSTANCES` so the glob no longer matches the
-VM's name, or, for the whole fleet, remove the account's entries from `BROKER_VM_SERVICES`,
-`BROKER_VM_PROJECTS` and `BROKER_VM_INSTANCES`. From then every login and enrollment of that VM,
-the copy's included, is refused at its next call. Find and remove what copied the token before you
-put the VM back: the latest `token_expires_at` above says when the last copied token ends, at most
-an hour after it was minted. Rotate any secret the copy may have read; the broker cannot take back
-a value it released.
+A copy's access token is bound to the copier's own key, so it cannot spend the machine's token, and
+its credential and enrollment are its own: a credential is keyed by the key its proof presented,
+so a copy's trade mints a credential beside the machine's rather than moving the machine's onto
+the copier's key, and ending one ends nothing of the machine's. What it does get is whatever
+the fleet's service may read. Revoking the machine's login on Dispatch's machine-login page ends
+every enrollment that login made, but not the copied token: within its hour the copy trades again
+under a login of its own. To end it for certain, take the machine out of the fleet's settings and
+redeploy the broker: change `BROKER_VM_INSTANCES` so the glob no longer matches the machine's name,
+or, for the whole fleet, remove the account's entries from `BROKER_VM_SERVICES`,
+`BROKER_VM_PROJECTS`, `BROKER_VM_INSTANCES` and `BROKER_VM_EXCHANGE_ACCOUNTS`. From then every
+trade and every call of that machine, the copy's included, is refused. Find and remove what copied
+the token before you put the machine back: the latest `token_expires_at` above says when the last
+copied token ends, at most an hour after it was minted. Rotate any secret the copy may have read;
+the broker cannot take back a value it released.
 
 ## The audit record
 

@@ -1,4 +1,7 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
+
+import { MIN_REFETCH_INTERVAL_MS } from "../web/src/api/query-refresh";
+
 import {
   type FakeSession,
   getSentMessages,
@@ -388,6 +391,10 @@ test("an issue closed and reopened under a docked send leaves that send's compos
 
   try {
     const page = await alice.newPage();
+    // Both status writes below reach the header over the event feed, whose refetch the page holds
+    // to one per second (`MIN_REFETCH_INTERVAL_MS`): a page timer its own clock fires, and 1 s is
+    // nowhere near the send's 30 s deadline, which stays out through the row.
+    await page.clock.install();
     await page.goto(`/issues/${issue.key}/conversation`);
     const form = page.getByRole("form", { name: "Comment composer" });
     const field = form.getByLabel("Comment");
@@ -397,8 +404,10 @@ test("an issue closed and reopened under a docked send leaves that send's compos
     await expect(field).toBeDisabled();
 
     await patchIssue(issue.key, { status: "done" }, { login: "bob" });
+    await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
     await expect(page.getByRole("button", { name: "Reopen" })).toBeVisible();
     await patchIssue(issue.key, { status: "backlog" }, { login: "bob" });
+    await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
     await expect(page.getByRole("button", { name: "Close issue" })).toBeVisible();
     await expect(field).toHaveValue("Through the close");
     await expect(field).toBeDisabled();
@@ -483,11 +492,10 @@ test("a thread's own reply out when the viewport narrows to a phone keeps its dr
 test("E7b and Retry: removing a prefilled mention creates a plain reply, and retries name their target @phone", async ({
   browser,
 }) => {
-  // Two failed sends run end to end here, the seeded mention's and the Retry's, and each waits out
-  // the listener take-over window (listenerTakeoverWindow, 12 s, in
-  // packages/envoy/internal/dispatch/api/envoy_resolve.go) before it settles failed, so the row
-  // needs about 26 s of Playwright's default 30.
-  test.setTimeout(60_000);
+  // Two failed sends run end to end here, the seeded mention's and the Retry's, and each waits
+  // out the listener take-over window before it settles failed: half a second under the
+  // harness's DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW (e2e/run-server.sh), of the twelve seconds
+  // a deployment runs.
   await setLiveSessions([planner]);
   // The mention's first delivery has to FAIL for a retry to be offered at all: a same-mode
   // retry of a delivery that landed is a repeat that is recognised and dropped, so the row no
