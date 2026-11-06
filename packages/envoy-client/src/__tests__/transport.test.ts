@@ -266,6 +266,35 @@ describe("EnvoyClient", () => {
     expect(await recorded.requests[0]?.json()).toEqual({ session_id: "ses_sender", topics: [] });
   });
 
+  test("an unsubscribe names the releasing process, and omits the key without one", async () => {
+    const recorded = recordFetch([new Response("ok"), new Response("ok")]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    await client.unsubscribe({
+      sessionID: "ses_sender",
+      topics: ["notifications.agent.ses_sender"],
+      clientInstanceID: "0f8c2b1a4d6e7f90",
+    });
+    await client.unsubscribe({
+      sessionID: "ses_sender",
+      topics: ["notifications.agent.ses_sender"],
+    });
+
+    expect(await recorded.requests[0]?.json()).toEqual({
+      session_id: "ses_sender",
+      topics: ["notifications.agent.ses_sender"],
+      client_instance_id: "0f8c2b1a4d6e7f90",
+    });
+    const unnamed = (await recorded.requests[1]?.json()) as Record<string, unknown>;
+    // The key is absent, not undefined: a release naming no process frees no claim, and an
+    // older listener sees an unchanged body.
+    expect(Object.hasOwn(unnamed, "client_instance_id")).toBe(false);
+    expect(unnamed).toEqual({
+      session_id: "ses_sender",
+      topics: ["notifications.agent.ses_sender"],
+    });
+  });
+
   test("gets one session interest using the listener response shape", async () => {
     const recorded = recordFetch([
       jsonResponse({
@@ -704,6 +733,31 @@ describe("EnvoyClient", () => {
       session_id: "ses_child",
       role: "controller",
     });
+  });
+
+  test("a claim names the process making it, and omits the key without one", async () => {
+    const interest = { session_id: "ses_sender", machine_id: "host-a", dir: "/work", topics: [] };
+    const recorded = recordFetch([jsonResponse(interest), jsonResponse(interest)]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    await client.setRole({
+      sessionID: "ses_sender",
+      role: "controller",
+      soft: true,
+      clientInstanceID: "0f8c2b1a4d6e7f90",
+    });
+    await client.setRole({ sessionID: "ses_sender", role: "controller", soft: true });
+
+    expect(await recorded.requests[0]?.json()).toEqual({
+      session_id: "ses_sender",
+      role: "controller",
+      soft: true,
+      client_instance_id: "0f8c2b1a4d6e7f90",
+    });
+    const unnamed = (await recorded.requests[1]?.json()) as Record<string, unknown>;
+    // The key is absent, not undefined, so an older listener sees an unchanged body.
+    expect(Object.hasOwn(unnamed, "client_instance_id")).toBe(false);
+    expect(unnamed).toEqual({ session_id: "ses_sender", role: "controller", soft: true });
   });
 
   test("a 409 without the held-role shape stays a typed API error", async () => {
@@ -1398,6 +1452,30 @@ describe("EnvoyClient", () => {
       holder_state: undefined,
     });
     expect(recorded.requests[1]?.url).toBe("http://listener/v1/roles/legion-reviewer");
+  });
+
+  test("a role lookup gives the holder's process, and parses an answer naming none", async () => {
+    const recorded = recordFetch([
+      jsonResponse({
+        role: "controller",
+        holder: "ses_holder",
+        last_seen: 42,
+        state: "live",
+        client_instance_id: "0f8c2b1a4d6e7f90",
+      }),
+      jsonResponse({ role: "controller", holder: "ses_holder", last_seen: 42, state: "live" }),
+    ]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const named = await client.getRole("controller");
+    const unnamed = await client.getRole("controller");
+
+    // The holder's process is what tells a caller that the role is held under its own session
+    // id by another process, which `setRole`'s 409 does not say.
+    expect(named.client_instance_id).toBe("0f8c2b1a4d6e7f90");
+    // A listener predating the field still parses: the caller reads no holding process.
+    expect(unnamed.client_instance_id).toBeUndefined();
+    expect(unnamed).toMatchObject({ role: "controller", holder: "ses_holder" });
   });
 
   test("surfaces listener error text and expected fields without retrying a 400", async () => {

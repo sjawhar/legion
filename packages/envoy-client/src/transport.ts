@@ -119,6 +119,10 @@ const RoleWireSchema = z.object({
   // state as a session row reports it, so both are read and `holder_state` wins.
   state: WireStateSchema,
   holder_state: SessionStateSchema.optional(),
+  // The process the claim names as the role's holder, answered beside the holder's session id
+  // on the 200 and on the 404 that names a lapsed holder. Optional: a listener predating the
+  // field names none, and so does a claim an earlier build wrote.
+  client_instance_id: z.string().optional(),
 });
 
 const RoleHeldWireSchema = z.object({
@@ -311,6 +315,12 @@ export function mergeInterestSources(
 
 export type SessionInfo = z.infer<typeof SessionWireSchema>;
 
+/**
+ * A role lookup's answer. Its `client_instance_id` is the process the holder's claim names,
+ * which is how a caller sees that the role is held under its own session id by another process:
+ * `setRole`'s 409 names the holding session alone, and that session id can be the refused
+ * caller's own, so a refused soft claim reads this lookup to tell the two apart.
+ */
 export type RoleInfo = z.infer<typeof RoleWireSchema>;
 
 /**
@@ -363,6 +373,15 @@ export function newClientInstanceID(): string {
 export type UnsubscribeInput = {
   readonly sessionID: string;
   readonly topics: readonly string[];
+  /**
+   * The client instance handing these interests back: the same id its registration carries
+   * ({@link SubscribeInput.clientInstanceID}). The listener frees only the role claims that
+   * name this process, and never forces one from another, so a second process that resumed
+   * this session id keeps the role it holds. A release that names no process frees no claim at
+   * all; the session's topics are removed either way. Omitted from the wire when absent, so an
+   * older listener sees an unchanged body.
+   */
+  readonly clientInstanceID?: string;
 };
 
 export function expandSubscriptionTopics(topics: readonly string[]): readonly string[] {
@@ -451,6 +470,17 @@ export type SetRoleInput = {
    * client instance keeps the role. Sent only with `soft`.
    */
   readonly previousSessionID?: string;
+  /**
+   * The process making this claim: the same id its registration carries
+   * ({@link SubscribeInput.clientInstanceID}). The listener records it on the
+   * claim as the role's holder, and where the role is already held under this
+   * claimant's own session id it decides on that standing claim alone: the
+   * claim is granted where it names the very process holding it, granted once
+   * nobody has renewed that claim inside the live window, and otherwise
+   * refused 409 naming the holder. Omitted from the wire when absent, so an
+   * older listener sees an unchanged body.
+   */
+  readonly clientInstanceID?: string;
 };
 
 export type SetRoleResult =
@@ -904,6 +934,12 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
         {
           session_id: input.sessionID,
           topics: expandSubscriptionTopics(input.topics),
+          // The process handing the interests back, omitted when the caller names none so an
+          // older listener sees an unchanged body. The listener frees the role claims naming
+          // this process and no others, and forces none.
+          ...(input.clientInstanceID === undefined
+            ? {}
+            : { client_instance_id: input.clientInstanceID }),
         },
         { actingSession: input.sessionID }
       );
@@ -1006,19 +1042,30 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
       );
     },
     setRole: async (input) => {
-      // `soft` and `previous_session_id` are omitted from the wire unless set,
-      // so an older listener sees an unchanged hard-claim request. The listener
-      // decides a soft claim against a live predecessor by the instance id each
+      // `soft`, `previous_session_id` and `client_instance_id` are omitted from
+      // the wire unless set, so an older listener sees an unchanged hard-claim
+      // request. The claim's own `client_instance_id` is the process it is made
+      // for: the listener records it on the claim, and weighs a claim under the
+      // holder's own session id against the standing claim's. A soft claim
+      // against a live predecessor is still decided by the instance id each
       // side's registry entry carries (`SubscribeInput.clientInstanceID`).
       const soft = input.soft === true;
       const previous = soft ? (input.previousSessionID ?? "") : "";
-      const body: { session_id: string; role: string; soft?: true; previous_session_id?: string } =
-        {
-          session_id: input.sessionID,
-          role: input.role,
-          ...(soft ? { soft: true } : {}),
-          ...(previous === "" ? {} : { previous_session_id: previous }),
-        };
+      const body: {
+        session_id: string;
+        role: string;
+        soft?: true;
+        previous_session_id?: string;
+        client_instance_id?: string;
+      } = {
+        session_id: input.sessionID,
+        role: input.role,
+        ...(soft ? { soft: true } : {}),
+        ...(previous === "" ? {} : { previous_session_id: previous }),
+        ...(input.clientInstanceID === undefined
+          ? {}
+          : { client_instance_id: input.clientInstanceID }),
+      };
       let raw: string;
       try {
         raw = await post("/v1/roles/set", body, { actingSession: input.sessionID });
