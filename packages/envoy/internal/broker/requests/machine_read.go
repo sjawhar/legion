@@ -423,6 +423,9 @@ type Grant struct {
 
 // LiveGrants lists this enrollment's own live (not revoked, not expired) grants, soonest to
 // expire first and those that last until the session ends last.
+// The lookup is the grants row's own enrollment_id, which an adoption rewrites, so a grant that
+// followed its session to another box is listed under the enrollment the session proves now and
+// under no other.
 func (m *Machine) LiveGrants(ctx context.Context, enrollmentID string) ([]Grant, error) {
 	rows, err := m.Store.Pool.Query(ctx, `select id, request_id, approver, expires_at from grants g
 		where enrollment_id=$1 and revoked_at is null and `+grantUnexpired("g")+` order by expires_at nulls last, created_at`, enrollmentID)
@@ -470,6 +473,10 @@ type pendingRequestRow struct {
 // pendingRequest returns the oldest pending request for any name sorted names shares. Create holds
 // every matching name's advisory lock before it asks, so a concurrent request cannot pass the
 // lookup and open another record for that name.
+// It reads the requests row's own enrollment_id, so a card that moved with its session is found
+// under the enrollment holding it now: the moved session coalesces onto the card a person is
+// already holding rather than opening a second one, and the box it moved off, which holds the
+// card no longer, is refused nothing.
 func pendingRequest(ctx context.Context, q querier, enrollmentID string, sorted []string) (pendingRequestRow, error) {
 	rows, err := q.Query(ctx, `select r.id, r.lifetime_seconds, array_agg(s.name order by s.name), `+writtenBeforeMigration13("r")+`
 		from requests r join request_secrets s on s.request_id=r.id
@@ -514,6 +521,8 @@ type querier interface {
 // answers the first request whose names are exactly sorted, or "" when none is. Names are compared
 // as sets of whole strings, never as one joined string, so a name containing a separator cannot
 // pass for two names.
+// Which column $1 is compared against is the query's own; every query here names the requests
+// row's own enrollment_id, the column an adoption rewrites.
 func matchingRequest(ctx context.Context, q querier, query, enrollmentID string, lifetime *int, sorted []string) (string, error) {
 	rows, err := q.Query(ctx, query, enrollmentID, lifetime)
 	if err != nil {
@@ -561,6 +570,10 @@ func writtenBeforeMigration13(alias string) string {
 // who already approved it, a policy tightened since then is never bypassed by reuse, and neither
 // is a chain that no longer verifies.
 // No live grant holds a withheld name nobody approved: the withhold ended each one (withhold).
+// The lookup reads the requests row's own enrollment_id, which an adoption rewrites, so a session
+// that enrolled on another box gets back the grant that moved with it instead of asking a person
+// a second time for names it already holds
+// (TestTheMovedSessionAsksAgainAndGetsTheSameGrantBack).
 func (m *Machine) reuseLiveGrant(ctx context.Context, enr enrollmentRow, names []string, lifetime *int, set *policy.Set) (Request, bool, error) {
 	id, err := matchingRequest(ctx, m.Store.Pool, `select r.id, array_agg(s.name) from requests r
 		join request_secrets s on s.request_id=r.id
@@ -665,6 +678,13 @@ type PendingSummary struct {
 // credential_request_events for a sequential scan; it pins nothing about how Postgres joins in
 // req and enr (a hash join over requests and enrollments, measured locally at 5,000 enrollments —
 // free to change with the planner's own cost estimates, and not this test's concern).
+//
+// A session's move re-points its requests row and not the append-only record, so enr is the
+// enrollment that asked. It is read for its session id alone, and an adoption moves a session's
+// rows only to another enrollment of the same session id (the carry pair enroll.Create matches
+// on), so that id is the one the enrollment holding the request names too. Which records are
+// pending comes from the requests rows, which move, so a moved card is listed once and the box it
+// moved off lists it no more.
 const pendingForApproverQuery = `select cr.id, cr.kind, cr.body, cr.created_at, coalesce(req.session_id, ''), coalesce(enr.session_id, '')
 	from credential_requests cr
 	left join requests req on req.record_id = cr.id
@@ -860,6 +880,9 @@ type ApproverGrant struct {
 // GrantsForApprover lists every live grant approver may revoke, newest first: each grant of a
 // session approver operates, approved or automatic, and each grant approver approved on anyone's
 // session.
+// The enrollment each grant is listed under is joined on the grants row's own enrollment_id, so a
+// grant that followed its session to another box is listed once, naming the box the session runs
+// on now.
 func (m *Machine) GrantsForApprover(ctx context.Context, approver string) ([]ApproverGrant, error) {
 	login := record.CanonicalLogin(approver)
 	rows, err := m.Store.Pool.Query(ctx, `select g.id, r.record_id, e.kind, e.runtime_id, coalesce(e.operator,''), e.slot, coalesce(g.approver,''), g.expires_at, g.created_at,

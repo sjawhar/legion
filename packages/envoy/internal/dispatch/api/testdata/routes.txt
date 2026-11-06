@@ -64,6 +64,9 @@ DELETE /api/v1/delivery/session-groups/{id} any
 PATCH /api/v1/delivery/session-groups/{id} any
 GET /api/v1/delivery/timeline any
 GET /api/v1/github/app-installation/{owner}/{repo} any
+GET /api/v1/going/capability any
+POST /api/v1/going/requests any
+GET /api/v1/going/requests/{id}/stream any
 GET /api/v1/handoffs/{id} any
 GET /api/v1/inbox any
 GET /api/v1/issues any

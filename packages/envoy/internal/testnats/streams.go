@@ -47,7 +47,7 @@ func settled(cluster *natsgo.ClusterInfo, n int) bool {
 // left reads them from the info it returns.
 func AwaitSettledStream(t testing.TB, js natsgo.JetStreamContext, stream string) *natsgo.StreamInfo {
 	t.Helper()
-	return awaitInfo(t, fmt.Sprintf("stream %s did not settle", stream),
+	return awaitInfo(t, connectTimeout, fmt.Sprintf("stream %s did not settle", stream),
 		func() (*natsgo.StreamInfo, error) { return js.StreamInfo(stream) },
 		func(info *natsgo.StreamInfo) bool { return settled(info.Cluster, info.Config.Replicas) })
 }
@@ -56,7 +56,16 @@ func AwaitSettledStream(t testing.TB, js natsgo.JetStreamContext, stream string)
 // holds n settled ones (settled), and returns its info.
 func AwaitStreamCopies(t testing.TB, js natsgo.JetStreamContext, stream string, n int) *natsgo.StreamInfo {
 	t.Helper()
-	return awaitInfo(t, fmt.Sprintf("stream %s did not hold %d settled copies", stream, n),
+	return AwaitStreamCopiesWithin(t, js, stream, n, connectTimeout)
+}
+
+// AwaitStreamCopiesWithin is AwaitStreamCopies bounded by within rather than by connectTimeout,
+// for a caller whose own bound for the work it is waiting on is the longer one: a member that was
+// killed or lame-ducked mid-write rejoins and catches its streams up, which takes longer than the
+// connect this package's other waits bound.
+func AwaitStreamCopiesWithin(t testing.TB, js natsgo.JetStreamContext, stream string, n int, within time.Duration) *natsgo.StreamInfo {
+	t.Helper()
+	return awaitInfo(t, within, fmt.Sprintf("stream %s did not hold %d settled copies", stream, n),
 		func() (*natsgo.StreamInfo, error) { return js.StreamInfo(stream) },
 		func(info *natsgo.StreamInfo) bool { return info.Config.Replicas == n && settled(info.Cluster, n) })
 }
@@ -66,7 +75,7 @@ func AwaitStreamCopies(t testing.TB, js natsgo.JetStreamContext, stream string, 
 // stream to n, and returns its info.
 func AwaitConsumerCopies(t testing.TB, js natsgo.JetStreamContext, stream, consumer string, n int) *natsgo.ConsumerInfo {
 	t.Helper()
-	return awaitInfo(t, fmt.Sprintf("consumer %s of %s did not hold %d settled copies", consumer, stream, n),
+	return awaitInfo(t, connectTimeout, fmt.Sprintf("consumer %s of %s did not hold %d settled copies", consumer, stream, n),
 		func() (*natsgo.ConsumerInfo, error) { return js.ConsumerInfo(stream, consumer) },
 		func(info *natsgo.ConsumerInfo) bool { return settled(info.Cluster, n) })
 }
@@ -75,7 +84,7 @@ func AwaitConsumerCopies(t testing.TB, js natsgo.JetStreamContext, stream, consu
 // server_name of a member the test stopped or "" for any, and returns its info.
 func AwaitStreamLeader(t testing.TB, js natsgo.JetStreamContext, stream, not string) *natsgo.StreamInfo {
 	t.Helper()
-	return awaitInfo(t, fmt.Sprintf("stream %s had no leader other than %q", stream, not),
+	return awaitInfo(t, connectTimeout, fmt.Sprintf("stream %s had no leader other than %q", stream, not),
 		func() (*natsgo.StreamInfo, error) { return js.StreamInfo(stream) },
 		func(info *natsgo.StreamInfo) bool {
 			return info.Cluster != nil && info.Cluster.Leader != "" && info.Cluster.Leader != not
@@ -83,18 +92,18 @@ func AwaitStreamLeader(t testing.TB, js natsgo.JetStreamContext, stream, not str
 }
 
 // awaitInfo reads an info every retryInterval until a read succeeds and done holds for it, and
-// returns that info; after connectTimeout it fails the test with failure, the last info and the
-// last error.
-func awaitInfo[T any](t testing.TB, failure string, read func() (*T, error), done func(*T) bool) *T {
+// returns that info; after within it fails the test with failure, the last info and the last
+// error.
+func awaitInfo[T any](t testing.TB, within time.Duration, failure string, read func() (*T, error), done func(*T) bool) *T {
 	t.Helper()
-	deadline := time.Now().Add(connectTimeout)
+	deadline := time.Now().Add(within)
 	for {
 		info, err := read()
 		if err == nil && done(info) {
 			return info
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("%s within %s: %+v (%v)", failure, connectTimeout, info, err)
+			t.Fatalf("%s within %s: %+v (%v)", failure, within, info, err)
 		}
 		time.Sleep(retryInterval)
 	}

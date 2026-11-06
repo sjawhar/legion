@@ -3514,6 +3514,16 @@ func TestListenerDeliveryHandler_FanoutRefusesUnadvertisedDeliveryMode(t *testin
 // a redelivery with the same key cannot emit another refusal.
 func TestListenerDeliveryHandler_FanoutRefusalDedupesAfterExceptionDelivery(t *testing.T) {
 	harness := newListenerDeliveryHarness(t)
+	// Both copies refill from their buckets on a goroutine the harness's registries start
+	// (kvwatch.Watcher.Start), and a write that lands while that first read runs carries no mark
+	// of it, so the sweep ending the read takes it back out of the copy
+	// (kvwatch.Copy.CompleteRead) until the watcher delivers the write's own record. The fan-out
+	// reads both copies for the message below, and a session whose record it cannot read is one
+	// it reports dead and sends no exception for ("listener delivery failed ... no session record
+	// for session ses_incapable", merge-queue job 127694167470), so both reads are waited out
+	// here, before registerFanoutTarget's two writes.
+	waitForRegistry(t, harness.registry)
+	waitForSessions(t, harness.sessions)
 	const (
 		topic     = "notifications.github.owner.repo.issue.4"
 		incapable = "ses_incapable"

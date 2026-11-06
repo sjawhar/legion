@@ -657,11 +657,11 @@ func TestFetchFailsWhatARealGitPrintsForAPermanentFailureAtOnce(t *testing.T) {
 }
 
 // The provisioning token is read as its file stands before every transfer from GitHub, never kept
-// from the fetch's start: the daemon keeps a provisioning pod's Secret fresh while its fetch runs,
-// and the kubelet rewrites the file projected from it in place. Against a real git reaching the
-// stand-in as github.com: a token file rewritten while the fetch waits on the repository cache is
-// the one the delta presents, the stand-in taking that token alone; and one rewritten during a
-// retry's backoff is the one the retry presents.
+// from the fetch's start: the daemon keeps every live issue pod's provisioning Secret fresh,
+// whatever that pod's fetch has already done, and the kubelet rewrites the file projected from it
+// in place. Against a real git reaching the stand-in as github.com: a token file rewritten while
+// the fetch waits on the repository cache is the one the delta presents, the stand-in taking that
+// token alone; and one rewritten during a retry's backoff is the one the retry presents.
 func TestFetchReadsTheProvisioningTokenAsItsFileStandsBeforeEveryTransfer(t *testing.T) {
 	t.Run("rewritten during the wait on the repository cache", func(t *testing.T) {
 		github := newGitHubStandIn(t, false, "ghs_fresh")

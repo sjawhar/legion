@@ -514,7 +514,7 @@ func NewSet(accounts []AccountEntry, workflows []WorkflowEntry, machines []Googl
 		if _, listed := set.accounts[entry.Account]; listed {
 			return nil, fmt.Errorf("exchange: %s: the account is listed twice, and one account writes as one identity", where)
 		}
-		if err := reserve(where, entry.Session, accountPrincipal(entry.Account)); err != nil {
+		if err := reserve(where, entry.Session, AccountPrincipal(entry.Account)); err != nil {
 			return nil, err
 		}
 		set.accounts[entry.Account] = entry
@@ -574,7 +574,7 @@ func NewSet(accounts []AccountEntry, workflows []WorkflowEntry, machines []Googl
 		if _, listed := set.google[entry.Account]; listed {
 			return nil, fmt.Errorf("exchange: %s: the account is listed twice, and one account writes as one identity", where)
 		}
-		if err := reserve(where, entry.Session, googlePrincipal(entry.Account)); err != nil {
+		if err := reserve(where, entry.Session, GooglePrincipal(entry.Account)); err != nil {
 			return nil, err
 		}
 		set.google[entry.Account] = entry
@@ -642,7 +642,7 @@ func (s *Set) Pod(token map[string]any, session string) (Claims, error) {
 	if err != nil {
 		return Claims{}, err
 	}
-	claims := Claims{Session: name, Person: entry.Person, Scope: ProjectScopeNamed, Project: entry.Project, Principal: accountPrincipal(account)}
+	claims := Claims{Session: name, Person: entry.Person, Scope: ProjectScopeNamed, Project: entry.Project, Principal: AccountPrincipal(account)}
 	if entry.Session == "" {
 		claims.Instance = uid
 	}
@@ -781,7 +781,7 @@ func (s *Set) Google(token map[string]any, session string) (Claims, error) {
 	if err != nil {
 		return Claims{}, err
 	}
-	claims := Claims{Session: name, Scope: ProjectScopePerson, Principal: googlePrincipal(identity.Account), Fleet: entry.Service}
+	claims := Claims{Session: name, Scope: ProjectScopePerson, Principal: GooglePrincipal(identity.Account), Fleet: entry.Service}
 	if entry.Person != "" {
 		claims.Person, claims.Scope, claims.Project = entry.Person, ProjectScopeNamed, entry.Project
 	} else {
@@ -883,7 +883,7 @@ func (s *Set) Person(token, actor map[string]any, session string) (Claims, error
 		Session:   name,
 		Person:    login,
 		Scope:     ProjectScopePerson,
-		Principal: personPrincipal(login),
+		Principal: PersonPrincipal(login),
 		Actor:     machine.Account,
 		// The fleet the box belongs to, which the launcher credential the exchange mints for
 		// this sign-in records as its service: a credential keyed by a subject carries one.
@@ -936,22 +936,34 @@ func (s *Set) Machine(credential, approver, session string) (Claims, error) {
 	if err != nil {
 		return Claims{}, err
 	}
-	return Claims{Session: name, Person: approver, Scope: ProjectScopePerson, Principal: personPrincipal(approver)}, nil
+	return Claims{Session: name, Person: approver, Scope: ProjectScopePerson, Principal: PersonPrincipal(approver)}, nil
 }
 
 // The four spellings of a principal, each led by its kind so that no account, workflow, Google
 // account and person ever spell the same string. A workflow's is <repository>/<path>@<ref>, as an
 // operator reads one elsewhere; a path or ref carrying "@" could make two entries spell one
 // string, and NewSet refuses that pair rather than let one's runs hold the other's names.
-func accountPrincipal(account string) string { return "account:" + account }
+//
+// Three of them are exported because a broker grant follows a session name under one principal
+// too: enroll.Service.Create writes one of these into enrollments.carry_principal, and the next
+// enrollment of that name under that principal takes what the last one held. The name a session
+// writes its Dispatch tokens under and the name its grant follows are one name, so one holder
+// has to spell the same either way, which it does only while there is one definition of each
+// spelling.
+
+// AccountPrincipal is a Kubernetes ServiceAccount's spelling: the account a pod's own projected
+// token proves.
+func AccountPrincipal(account string) string { return "account:" + account }
 
 func workflowPrincipal(key workflowKey) string {
 	return "workflow:" + key.repository + "/" + key.workflow + "@" + key.ref
 }
 
-func googlePrincipal(account string) string { return "google:" + account }
+// GooglePrincipal is a Google account's spelling: the fleet a machine's own identity belongs to.
+func GooglePrincipal(account string) string { return "google:" + account }
 
-func personPrincipal(person string) string { return "person:" + person }
+// PersonPrincipal is a person's spelling, by the login that names them.
+func PersonPrincipal(person string) string { return "person:" + person }
 
 // sessionRule is the one sentence that says what a session name may be, so an entry refused at
 // build time and a request refused at exchange time are refused in the same words, and the cap it
