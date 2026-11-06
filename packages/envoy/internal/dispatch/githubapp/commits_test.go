@@ -47,6 +47,12 @@ func TestHasCommitProvesAbsenceFromGitHubsNoCommitMessageAlone(t *testing.T) {
 			errorText: "status 422",
 		},
 		{
+			name:      "a 422 whose body is not JSON",
+			status:    http.StatusUnprocessableEntity,
+			body:      "No commit found for SHA: " + mainCommit,
+			errorText: "status 422",
+		},
+		{
 			name:       "the token is refused the resource",
 			status:     http.StatusForbidden,
 			body:       `{"message":"Resource not accessible by integration"}`,

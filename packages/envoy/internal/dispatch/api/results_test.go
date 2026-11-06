@@ -375,9 +375,10 @@ func resultsGitHub(t *testing.T, repos map[string]bool, compare func(base, head 
 
 // resultsGitHubHolding is resultsGitHub with the commits the repositories hold seeded: held
 // drives `GET /repos/{owner}/{repo}/commits/{sha}`, the read refuseUnknownCommit turns on. A
-// commit held names is 200, and every other commit is the 422 GitHub answers for one no
-// repository holds — the one answer that proves absence. A nil held holds every commit, which
-// is what resultsGitHub passes and what every test that never seeded a commit takes.
+// commit held names is 200, and every other commit is the 422 whose message begins `No commit
+// found for SHA`, the one answer that proves absence — the status alone does not, since GitHub
+// sends it for a validation failure too. A nil held holds every commit, which is what
+// resultsGitHub passes and what every test that never seeded a commit takes.
 //
 // The route is served here rather than left to the mux's own 404, which this codebase reads as
 // "repository unreadable" and stores the result for: a test missing the route would prove
@@ -428,9 +429,10 @@ func resultsGitHubHolding(t *testing.T, repos, held map[string]bool, compare fun
 }
 
 // A result at a commit the repository of the check's issue does not hold is refused, and
-// nothing of it is stored. GitHub's 422 is the one answer that proves absence, so a commit of
-// the right shape that the repository never held — a mistyped head, a commit of a branch
-// nobody pushed — never becomes a row a reader takes for the real head.
+// nothing of it is stored. The one answer that proves absence is GitHub's 422 whose message
+// begins `No commit found for SHA`, so a commit of the right shape that the repository never
+// held — a mistyped head, a commit of a branch nobody pushed — never becomes a row a reader
+// takes for the real head.
 func TestResultAtACommitTheRepositoryDoesNotHoldIsRefused(t *testing.T) {
 	handler, database := resultsGitHubHolding(t, map[string]bool{"acme/widgets": true},
 		map[string]bool{headCommit: true}, func(string, string) string { return "diverged" })

@@ -41,20 +41,40 @@ const session = "verification-results-e2e";
 const repo = "acme/verification-live";
 const hiddenRepo = "acme/verification-hidden";
 
-/** The commits the cases record at. A result's commit is 40 lowercase hex characters, which is
- *  all Dispatch reads of it; the fake GitHub answers for these and no others. `unheld` is the
- *  one the seed below leaves out, so GitHub's proof that the repository does not hold it is
- *  what the refusal case drives. */
-const commits = {
+/** The commits the proof's repository holds, which is every commit a case records against it:
+ *  the record route asks GitHub whether the repository the check's issue resolves to holds a
+ *  result's commit and refuses one it does not, and the seed below gives that repository these
+ *  and nothing else. A result's commit is 40 lowercase hex characters, which is all Dispatch
+ *  reads of it. */
+const heldCommits = {
+  /** The result read back under its check. */
   a2: "1".repeat(40),
+  /** The pull request's first head. */
   headOne: "2".repeat(40),
+  /** The pull request's second head, which ages the result at the first. */
   headTwo: "3".repeat(40),
+  /** The after-merge result the closed issue takes. */
   closed: "4".repeat(40),
+  /** One of the two commits the default-branch check records at, the one the compare calls
+   *  behind. The branch holds it as well, and it is named here so the fixture says what the case
+   *  needs rather than leaning on the compare's seed. */
   behind: "5".repeat(40),
+  /** The other of those two, the one the compare calls diverged. */
   diverged: "6".repeat(40),
+  /** The head of the stranger's pull request. */
+  fork: "9".repeat(40),
+};
+
+/** Every commit the cases name: the ones that repository holds, and three it does not.
+ *  `mainHead` is nobody's result, only the end of the default branch, which the branch below
+ *  holds; `unheld` is the commit the seed leaves out, so that GitHub's answer that the
+ *  repository holds no such commit is what the refusal case drives; and `hidden` is recorded
+ *  against the repository the App is not installed on, where the installation's 404 stops
+ *  Dispatch before it can ask about a commit at all. */
+const commits = {
+  ...heldCommits,
   mainHead: "7".repeat(40),
   hidden: "8".repeat(40),
-  fork: "9".repeat(40),
   unheld: "a".repeat(40),
 };
 
@@ -252,14 +272,10 @@ function summarise(stopped?: string): never {
 // default branch holds the `behind` commit and ends at `mainHead`, and one the App is not
 // installed on, whose every read is GitHub's 404.
 //
-// `commits` holds every commit a case records at, because the record route asks GitHub whether
-// the repository the check's issue resolves to holds a result's commit and refuses one it does
-// not: `a2`, the result read back under its check; `headOne` and `headTwo`, the pull request's
-// two heads; `fork`, the head of the stranger's pull request; `closed`, the after-merge result
-// the closed issue takes; and `behind` and `diverged`, the two the default-branch check records
-// at — `behind` is the branch's as well, and is named here so the fixture says what each case
-// needs rather than leaning on the compare's seed. `mainHead` is nobody's result, only the
-// branch's end, and `unheld` is in neither field: it is the commit the refusal case drives.
+// The first is given `heldCommits` and no commit besides, so every commit a case records against
+// it is held and the one the refusal case drives earns the 422 GitHub answers for a commit a
+// repository does not hold. What each commit is for stands at its own declaration above, which
+// is the one list of them.
 //
 // `commit_pulls` is empty on purpose: the record route's read-through asks GitHub which pull
 // requests name a result's commit, and with no answer there the only thing that can teach
@@ -268,15 +284,7 @@ const seeded = await fetch(new URL("/__fixture/repos", githubUrl), {
   body: JSON.stringify({
     [repo]: {
       branch_commits: { main: [commits.behind, commits.mainHead] },
-      commits: [
-        commits.a2,
-        commits.headOne,
-        commits.headTwo,
-        commits.fork,
-        commits.closed,
-        commits.behind,
-        commits.diverged,
-      ],
+      commits: Object.values(heldCommits),
       contents: "read",
       default_branch: "main",
       installation_id: 256,

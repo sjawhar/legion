@@ -32,16 +32,22 @@
 # person's credential holding the approve scope …` line and every other section runs.
 #
 # The run reads PROJECT's repository mappings once, in its setup, since every result it records
-# names a commit the repository of its issue must hold. Where PROJECT maps no default repository,
-# its issues resolve to none, nothing is ever asked about them, and the commits are the synthetic
-# ones below, the currency section mapping a repository of its own for the one check that needs a
-# pull request. Where PROJECT already maps one, every issue this script writes resolves to that
-# repository, so the setup reads the repository's default-branch head from GitHub with gh and
-# every result is recorded at that head: no check stands down. A repository gh cannot read fails
-# the run, naming it. Where FAKE_GITHUB_PORT is set the setup also gives that repository, that
-# head and its pull request to the fake, since a server reading the fake asks the fake and not
-# GitHub; a server reading the real GitHub needs no such seeding, and a fake-backed run proves
-# this script's fixture and its count rather than a server talking to GitHub.
+# names a commit the repository of its issue must hold. It reads each mapping under the name its
+# repository is called today: a mapping may carry `renamed_to`, the full `owner/name` the
+# repository was renamed to, and Dispatch canonicalises every repository through it, so that is
+# the name Dispatch asks GitHub about and the name this run must drive. The rename rule is one
+# step, so a mapping's own name is the canonical one only where it names no rename. Where PROJECT
+# maps no default repository, its issues resolve to none, nothing is ever asked about them, and
+# the commits are the synthetic ones below, the currency section mapping a repository of its own
+# for the one check that needs a pull request. Where PROJECT already maps one, every issue this
+# script writes resolves to that repository, so the setup reads the repository's default-branch
+# head from GitHub with gh and every result is recorded at that head: no check stands down. A
+# repository gh cannot read fails the run, naming it. Where FAKE_GITHUB_PORT is set the setup
+# gives the fake, once and for the whole run, the one repository the run drives — the mapped one,
+# or the currency section's own — with that head, a look-alike of it and a pull request, since a
+# server reading the fake asks the fake and not GitHub; a server reading the real GitHub needs no
+# such seeding, and a fake-backed run proves this script's fixture and its count rather than a
+# server talking to GitHub.
 #
 # It writes four issues in PROJECT — a root, a child of it, a sibling in another tree and one more
 # whose spec and Verification document are approved together — with a spec, a Verification document
@@ -349,27 +355,34 @@ refused_result() {
 # The commits the run records at, where PROJECT maps no default repository: no issue this script
 # writes resolves to a repository then, so no result's commit is ever asked about, and these are
 # the script's own. Where one is mapped, the setup below replaces all three with that
-# repository's default-branch head and a look-alike of it, both of which GitHub holds.
+# repository's default-branch head, which GitHub holds, and a look-alike of that head, which only
+# the fake GitHub the setup seeds holds.
 commit_one=1111111111111111111111111111111111111111
 commit_two=2222222222222222222222222222222222222222
 # The shape of the incident this rule came of: a commit whose first twelve characters are the
 # head's, so a line printing twelve reads exactly like the head, and whose other twenty-eight are
-# not. The repository holds it, so the result at it is stored rather than refused.
+# not. GitHub holds no such commit; the fake GitHub the setup seeds is given it, so the result at
+# it is stored rather than refused, and the currency section that records it runs against that
+# fake alone.
 commit_lookalike=2222222222223333333333333333333333333333
 # A commit no repository holds, which the record route must refuse.
 readonly commit_unknown=4444444444444444444444444444444444444444
 
 # --- setup ---------------------------------------------------------------------------------------
 
-# PROJECT's default repository, read once and read by every section that records a result. With
-# one mapped, every issue of the project resolves to it, so Dispatch asks GitHub whether it holds
-# the commit each result names and refuses the ones it does not. This run therefore records every
-# result at that repository's own default-branch head, which gh reads from GitHub below: no check
-# stands down, and a repository gh cannot read fails the run by name rather than skipping it.
+# PROJECT's default repository, read once and read by every section that records a result, under
+# the name it is called today: where the mapping carries `renamed_to`, that is the repository's
+# canonical name, the one Dispatch asks GitHub about, and GitHub answers 404 for the installation
+# of a name a repository was renamed away from. The rename rule is one step, so the mapping's own
+# name stands only where it names no rename. With one mapped, every issue of the project resolves
+# to it, so Dispatch asks GitHub whether it holds the commit each result names and refuses the
+# ones it does not. This run therefore records every result at that repository's own
+# default-branch head, which gh reads from GitHub below: no check stands down, and a repository
+# gh cannot read fails the run by name rather than skipping it.
 get "/api/v1/settings/repo-projects"
 want_status 200 setup "the repository mappings answer"
 default_repo="$(jq -r --arg p "$project" \
-  'first(.[] | select(.project == $p and .default) | .repo) // ""' "$work/body")" ||
+  'first(.[] | select(.project == $p and .default) | (.renamed_to // .repo)) // ""' "$work/body")" ||
   fail setup "read the repository mappings" "$(body)"
 readonly default_repo
 
@@ -445,23 +458,30 @@ issue setup "Verification rules, approved with its proof" "$work/both-spec.md"
 both="$key"
 readonly both
 
-# A server reading the harness's fake GitHub asks the fake, not GitHub, whether the mapped
-# repository holds a result's commit, so the fake is given that repository: the head gh named,
-# the look-alike beside it, and pull request 7 of the root issue, which is what makes a result
-# at that head read `current` in the currency section below. A server reading the real GitHub
-# needs no seeding of any kind — it reads the same repository gh did — and a fake-backed run
-# proves this script's fixture and its count rather than a server talking to GitHub.
-if [[ -n "$default_repo" && -n "$fake_github_port" ]]; then
+# The repository the run drives on the fake: the one PROJECT maps, where it maps one, since every
+# issue this script writes then resolves to that repository, and otherwise one of this run's own,
+# which the currency section maps as PROJECT's default.
+currency_repo="${default_repo:-acme/verification-$$}"
+readonly currency_repo
+
+# A server reading the harness's fake GitHub asks the fake, not GitHub, whether that repository
+# holds a result's commit, so the fake is given the repository here, once and for the whole run:
+# the head (the one gh named, where PROJECT maps a repository, and this script's own otherwise),
+# the look-alike beside it, and pull request 7 of the root issue, which is what makes a result at
+# that head read `current` in the currency section below. A server reading the real GitHub needs
+# no seeding of any kind — it reads the same repository gh did — and a fake-backed run proves
+# this script's fixture and its count rather than a server talking to GitHub.
+if [[ -n "$fake_github_port" ]]; then
   curl -sS -o /dev/null -X PUT -H 'Content-Type: application/json' --data-binary "$(
-    jq -cn --arg r "$default_repo" --arg k "$root" --arg sha "$commit_two" \
+    jq -cn --arg r "$currency_repo" --arg k "$root" --arg sha "$commit_two" \
       --arg look "$commit_lookalike" \
       '{($r): {contents: "read", pull_requests: "read", installation_id: 256,
                commit_pulls: {($sha): [7]}, commits: [$look],
                pulls: {"7": {head_sha: $sha, state: "open", title: "\($k) the verification check"}}}}'
   )" "http://127.0.0.1:$fake_github_port/__fixture/repos" 2>"$work/curl" ||
-    fail setup "seed the fake GitHub with $default_repo" "$(<"$work/curl")"
+    fail setup "seed the fake GitHub with $currency_repo" "$(<"$work/curl")"
   seeded_github=1
-  pass setup "seeded the fake GitHub with $default_repo, its head $commit_two, $commit_lookalike and pull request 7"
+  pass setup "seeded the fake GitHub with $currency_repo, its head $commit_two, $commit_lookalike and pull request 7"
 fi
 
 # --- check: a check's attributes, and the `when` the schema does not know ------------------------
@@ -819,27 +839,14 @@ fi
 
 # --- currency: the newest result, printed whole, and a commit the repository does not hold ------
 
-currency_repo="acme/verification-$$"
 if [[ -z "$fake_github_port" ]]; then
   skip currency "a result at the pull request's head reads current: FAKE_GITHUB_PORT is unset; only a server reading the harness's fake GitHub can be told a pull request's head"
 else
-  if [[ -n "$default_repo" ]]; then
-    # The mapped repository is this section's: the setup gave the fake that repository, the head
-    # gh named, the look-alike and pull request 7, and PROJECT already names it, so this section
-    # seeds nothing and maps nothing of its own.
-    currency_repo="$default_repo"
-  else
-    curl -sS -o /dev/null -X PUT -H 'Content-Type: application/json' --data-binary "$(
-      jq -cn --arg r "$currency_repo" --arg k "$root" --arg sha "$commit_two" \
-        --arg look "$commit_lookalike" \
-        '{($r): {contents: "read", pull_requests: "read", installation_id: 256,
-                 commit_pulls: {($sha): [7]}, commits: [$look],
-                 pulls: {"7": {head_sha: $sha, state: "open", title: "\($k) the verification check"}}}}'
-    )" "http://127.0.0.1:$fake_github_port/__fixture/repos" 2>"$work/curl" ||
-      fail currency "seed the fake GitHub" "$(<"$work/curl")"
-    seeded_github=1
-    pass currency "seeded the fake GitHub with $currency_repo, its pull request 7 and $commit_lookalike"
-
+  if [[ -z "$default_repo" ]]; then
+    # PROJECT maps no repository of its own, so this section maps the one the setup gave the fake
+    # — that repository, the head, the look-alike and pull request 7 — and every issue this run
+    # wrote resolves to it from here on. Where PROJECT maps one, it is already this section's, so
+    # nothing is mapped here.
     send PUT "/api/v1/settings/repo-projects/$currency_repo" \
       "$(jq -cn --arg s "$session" --arg p "$project" \
         '{actor: {kind: "session", id: $s}, project: $p, default: true}')"

@@ -15,10 +15,13 @@ import (
 // repository's installation token, through the repositoryRead prologue commitOnBranch and
 // repositoryDefaultBranch share, and makes githubapp.Client.HasCommit's read.
 //
-// A false with no error is GitHub's 422, the one answer that proves the repository does not hold
-// the commit. Every other failure is the error, which says only that Dispatch cannot tell: a
-// malformed repository name, a deployment with no App key, a repository the App cannot read, a
-// rate limit, a 5xx, a transport failure.
+// A false with no error is the one 422 whose message begins `No commit found for SHA`, the
+// only answer that proves the repository does not hold the commit (githubapp.Client.HasCommit
+// and its noCommitForSHA: GitHub answers the same status for a validation failure and for an
+// endpoint it has throttled, so the message is what tells them apart). Every other failure is
+// the error, which says only that Dispatch cannot tell: any other 422, a malformed repository
+// name, a deployment with no App key, a repository the App cannot read, a rate limit, a 5xx, a
+// transport failure.
 func RepositoryHoldsCommit(ctx context.Context, client *githubapp.Client, repoFull, sha string) (bool, error) {
 	owner, repo, token, err := repositoryRead(ctx, client, repoFull)
 	if err != nil {

@@ -136,34 +136,24 @@ func (s *server) recordCheckResult(w http.ResponseWriter, r *http.Request) {
 	// It is the check's issue's repository, not the recording issue's: readThroughPullRequests
 	// and the currency reader both resolve check_issue_key, and a refusal keyed on the
 	// recording issue would disagree with the currency mark about which repository the commit
-	// belongs to. It is that repository's canonical name, for the same reason: the currency
-	// reader asks GitHub about the name a repository is called today (results_currency.go,
-	// currencyReader.repositoryOf), and a refusal asking under a name the repository was
-	// renamed away from reads the 404 GitHub answers for that name's installation, where the
-	// mark reads the commit — so it would store every result of such an issue.
+	// belongs to. It is resolved through the one helper the currency reader resolves through
+	// (results_currency.go, server.checkIssueRepository), under the canonical name the
+	// repository is called today: a refusal asking under a name the repository was renamed
+	// away from reads the 404 GitHub answers for that name's installation, where the mark
+	// reads the commit — so it would store every result of such an issue.
+	//
+	// The App key is checked here and not in the helper: every use of the answer below is a
+	// GitHub round trip, while the currency reader needs the repository even with no App key,
+	// for the default-branch answers it reads from Dispatch's own stored rows.
 	var checkRepo *string
 	if s.deps.GitHub != nil {
-		checkRepo, err = refs.IssueRepository(r.Context(), pool, check.IssueKey)
-		if err != nil {
-			slog.Warn("dispatch: resolve the repository of a recorded result's check",
-				"issue", check.IssueKey, "error", err)
-			checkRepo = nil
-		}
-		if checkRepo != nil {
-			canonical, err := refs.CanonicalRepo(r.Context(), pool, *checkRepo)
-			if err != nil {
-				slog.Warn("dispatch: canonical name of a recorded result's repository",
-					"issue", check.IssueKey, "repo", *checkRepo, "error", err)
-				checkRepo = nil
-			} else {
-				checkRepo = &canonical
-			}
-		}
+		checkRepo = s.checkIssueRepository(r.Context(), pool, check.IssueKey)
 	}
 
-	// Asked here for the reason the resolve above is asked here: it is a GitHub round trip, and
-	// the comment over that resolve records what a slow read under the two issue row locks costs.
-	// Nothing is written before it, so a refusal leaves no row and no event behind.
+	// Asked here for the reason resolveCheck is asked here, before the transaction opens: it is
+	// a GitHub round trip, and the comment over that resolve records what a slow read under the
+	// two issue row locks costs. Nothing is written before it, so a refusal leaves no row and no
+	// event behind.
 	if err := s.refuseUnknownCommit(r.Context(), checkRepo, input.Commit); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -797,7 +787,8 @@ func scanCheckResult(row pgx.Row) (model.CheckResult, error) {
 // refuseUnknownCommit refuses a result at a commit repo definitely does not hold: 400
 // RESULT_COMMIT_UNKNOWN, naming the commit and that `owner/repo`. repo is the repository the
 // check's issue resolves to, which recordCheckResult reads once for this refusal and for the
-// read-through after the write; a nil repo is nothing to ask GitHub about and no refusal.
+// read-through after the write; a nil repo is nothing to ask GitHub about and no refusal. A
+// deployment with no App key resolves none, so the key is not checked again here.
 //
 // It runs before the transaction opens, so a refused result leaves no check_results row and no
 // result.recorded event behind. Dispatch stored a result at a mistyped commit no repository
@@ -810,7 +801,7 @@ func scanCheckResult(row pgx.Row) (model.CheckResult, error) {
 // production check's after-merge result — whose merge commit is on the default branch and is
 // held anyway.
 func (s *server) refuseUnknownCommit(ctx context.Context, repo *string, sha string) error {
-	if s.deps.GitHub == nil || repo == nil {
+	if repo == nil {
 		return nil
 	}
 	held, err := delivery.RepositoryHoldsCommit(ctx, s.deps.GitHub, *repo, sha)
@@ -838,7 +829,7 @@ func (s *server) refuseUnknownCommit(ctx context.Context, repo *string, sha stri
 // It never fails the record: the row is written, and a currency Dispatch could not establish
 // reads as it would have without the call.
 func (s *server) readThroughPullRequests(ctx context.Context, checkIssueKey, sha string, repo *string) {
-	if repo == nil || s.deps.GitHub == nil || s.deps.Store == nil || s.deps.Store.Pool == nil {
+	if repo == nil || s.deps.Store == nil || s.deps.Store.Pool == nil {
 		return
 	}
 	known, err := delivery.HeadAttributedTo(ctx, s.deps.Store.Pool, checkIssueKey, sha)
