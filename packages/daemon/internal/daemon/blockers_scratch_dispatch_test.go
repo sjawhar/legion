@@ -128,8 +128,8 @@ func TestBlockedIssuesAreNotStartedAgainstScratchDispatch(t *testing.T) {
 	//
 	// The wait weakens no judgement below: admission records every root whose todo it has taken
 	// in, the ones it starts under `active` and the ones it passes over under `waiting`
-	// (record.Waiting), so a daemon that started this blocked root reaches this condition too —
-	// through `active`, which the first judgement fails on.
+	// (api.Admission.Waiting), so a daemon that started this blocked root reaches this condition
+	// too — through `active`, which the first judgement fails on.
 	state, body := settled(t, d, "admit the roots nothing blocks and take in the blocked root's todo", func(s api.State) bool {
 		return slices.Contains(s.Admission.Active, blocker) && slices.Contains(s.Admission.Active, free) &&
 			(slices.Contains(s.Admission.Waiting, blocked) || slices.Contains(s.Admission.Active, blocked))

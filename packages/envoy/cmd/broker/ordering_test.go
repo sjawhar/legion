@@ -13,9 +13,9 @@
 // goroutine, so a step recorded as it runs is the order itself, and the one row that does read a
 // duration to decide anything (the drain) reads it one way only - a timer never fires early,
 // however loaded the machine is. The two durations beside it are hang guards, read only where a
-// wait on an event would otherwise hang: the catch-up row's wait for its listener's first
-// LISTEN (listenHangGuard), and the bound it hands boot for a wait that is already over by then
-// (bootListenWait).
+// wait on an event would otherwise hang: the bound the bind row hands boot for a wait that is
+// already over when it begins (bootListenWait), and the one the catch-up row hands it for a wait
+// that is real but reachable by nothing a Postgres that answers at all does (listenHangGuard).
 package main
 
 import (
@@ -84,23 +84,24 @@ func (s *steps) String() string { return strings.Join(s.order(), " -> ") }
 // they log is pinned elsewhere, and a row here reads the order rather than the lines.
 func orderingLog() *slog.Logger { return slog.New(slog.DiscardHandler) }
 
-// bootListenWait is what the boot rows hand boot for the bound on its wait for the first LISTEN.
-// Neither row lets that bound decide anything, because each has the LISTEN in hand before the
-// wait begins: the bind row's StartListener answers onConnected in the call itself, and the
-// catch-up row's holds its return until its real listener has LISTENed. So what this names is a
-// hang guard on a wait that is already over. It was a race until dispatch://INFRA-1248: the
-// catch-up row let these thirty seconds run against a real dial and a real LISTEN, and a
-// merge-queue runner whose listener was redialing on pglisten's backoff reached them, which
-// failed the row for its own setup rather than for the catch-up it is about.
+// bootListenWait is what the bind row hands boot for the bound on its wait for the first LISTEN.
+// That row lets the bound decide nothing, because it has the LISTEN in hand before the wait
+// begins: its StartListener answers onConnected in the call itself, so what this names there is a
+// hang guard on a wait that is already over. The catch-up row's wait is a real one, against a
+// real dial and a real LISTEN on a real Postgres, and it hands boot listenHangGuard instead: it
+// was these thirty seconds until dispatch://INFRA-1248, and a merge-queue runner whose listener
+// was redialing on pglisten's backoff reached them, which failed that row for its own setup
+// rather than for the catch-up it is about.
 const bootListenWait = 30 * time.Second
 
-// listenHangGuard bounds the catch-up row's own wait for its reread listener's first LISTEN,
-// the event that row is named for. It is a hang guard and nothing else: that LISTEN is one dial
-// and one statement on a local Postgres, milliseconds of work, and a listener that has to redial
-// climbs pglisten's backoff - a second, doubling to thirty - so five minutes is several of those
-// ladders and nothing a Postgres that answers at all approaches. A row that reaches it goes on
-// to the read of that LISTEN below and fails there, naming the LISTEN that never came, rather
-// than hanging until go test's own deadline.
+// listenHangGuard is what the catch-up row hands boot for that same bound. There the wait is the
+// whole of what the row reads back, so the bound has to be out of reach of an ordinary slow dial
+// and reachable by a hang alone: that LISTEN is one dial and one statement on a local Postgres,
+// milliseconds of work, and a listener that has to redial climbs pglisten's backoff - a second,
+// doubling to thirty - so five minutes is several of those ladders and nothing a Postgres that
+// answers at all approaches. A row that did reach it would have boot bind on the arm that skips
+// the catch-up, and would fail on the read of that LISTEN below, naming the LISTEN that never
+// came, rather than passing for the wrong reason or hanging until go test's own deadline.
 const listenHangGuard = 5 * time.Minute
 
 // stopDrain is the drain the stop rows run. It is long enough to be told apart from no drain at
@@ -128,6 +129,11 @@ const narrowedOwner = "ada@example.com"
 // the secret store and is held; the retag and a real NOTIFY on a real Postgres are both
 // committed; then the load is released and the LISTEN happens. What the booted process serves
 // must be the narrowed tags.
+//
+// Nothing in the row orders that catch-up: its StartListener returns at once, as brokerBoot's
+// contract says and as production does, and boot's own wait on the first LISTEN is the only
+// thing holding the catch-up and the bind behind that LISTEN. The row reads the order back once
+// boot has returned.
 //
 // The named revert: remove the Catchup call from boot.
 func TestBootLoadsThePolicyAgainAfterTheFirstListen(t *testing.T) {
@@ -165,6 +171,18 @@ func TestBootLoadsThePolicyAgainAfterTheFirstListen(t *testing.T) {
 			// here is dropped as this pod's own reread: if Postgres did deliver the
 			// notification, this listener would reread the secret and the row would pass with
 			// the catch-up gone, which is why the revert run is measured too.
+			//
+			// It starts that listener and returns at once, which is what brokerBoot's contract
+			// asks of it and what production does, so boot's own wait on the first LISTEN is the
+			// only thing ordering the catch-up and the bind behind that LISTEN - the order this
+			// row exists to read back. A fake that held its return until the LISTEN had happened
+			// would do that ordering itself, and the read after the boot could then never fail,
+			// however boot was written.
+			//
+			// OnConnected closes listening before it hands boot its token, so by the time boot's
+			// wait returns through firstListen this row's own channel is already closed and the
+			// read below is exact rather than a race with boot's next statement. Closing it is
+			// once-only because every redial behind the boot runs OnConnected again.
 			StartListener: func(ctx context.Context, current *policy.Current, onConnected func()) {
 				go func() {
 					defer close(listenerStopped)
@@ -176,31 +194,17 @@ func TestBootLoadsThePolicyAgainAfterTheFirstListen(t *testing.T) {
 							return err
 						},
 						OnConnected: func() {
-							onConnected()
 							closeListening()
+							onConnected()
 						},
 					}).Run(ctx)
 				}()
-				// This returns only once that listener's first LISTEN has really happened,
-				// which is the event this row is named for and the one boot waits on next:
-				// OnConnected runs after the LISTEN statement has returned, and it hands boot
-				// its token before it closes listening, so boot's wait is already over when it
-				// begins and no clock picks the arm it takes. In production StartListener
-				// returns at once and boot races the two, which is right there - a pod whose
-				// Postgres never answers has to bind anyway - and is what failed this row on a
-				// loaded runner, where the listener was still redialing when the thirty seconds
-				// ran out and the boot took the arm that skips the catch-up (INFRA-1248).
-				select {
-				case <-listening:
-				case <-listenerStopped:
-					// Run returned having never listened, which only a cancelled context does.
-					// There is nothing left to wait for, and the read of listening below says
-					// so rather than spending the hang guard on it.
-				case <-time.After(listenHangGuard):
-				}
 			},
-			Listen:     func() (net.Listener, error) { return net.Listen("tcp", "127.0.0.1:0") },
-			ListenWait: bootListenWait,
+			Listen: func() (net.Listener, error) { return net.Listen("tcp", "127.0.0.1:0") },
+			// A hang guard rather than a deadline this row spends: an ordinary slow dial stays
+			// well inside it and leaves boot's wait to do the ordering, and only a Postgres that
+			// never answers reaches it.
+			ListenWait: listenHangGuard,
 			Catchup:    func(ctx context.Context, current *policy.Current) error { return current.Refresh(ctx) },
 			Log:        orderingLog(),
 		})
@@ -232,13 +236,16 @@ func TestBootLoadsThePolicyAgainAfterTheFirstListen(t *testing.T) {
 	})
 	defer started.Listener.Close()
 
-	// The LISTEN the row held its StartListener for. Reaching here without it means the wait
-	// above ended on something else - its hang guard, a listener that stopped having never
-	// listened - or that the boot never started a listener at all, and ran on either way.
+	// The order boot ran in, read now that boot has returned. This channel is closed inside that
+	// LISTEN's own OnConnected, ahead of the token boot's wait takes, so a boot that waited for
+	// the LISTEN before its catch-up and its bind has left it closed here. Finding it open means
+	// the boot bound with no LISTEN in place - nothing started that listener, or it never
+	// connected within the bound the row hands boot - which is the arm that skips the catch-up by
+	// design, and nothing below it would be about the catch-up.
 	select {
 	case <-listening:
 	default:
-		t.Fatalf("the boot bound its address without its reread listener's first LISTEN: either nothing started that listener, or it did not connect within the %v this row waits for it, so the boot took the arm that skips the catch-up by design and this row proves nothing about the catch-up", listenHangGuard)
+		t.Fatalf("the boot bound its address without its reread listener's first LISTEN: either nothing started that listener, or it did not connect within the %v boot waits for it, so the boot took the arm that skips the catch-up by design and this row proves nothing about the catch-up", listenHangGuard)
 	}
 	served, ok := started.Policy.Get().Secrets[retaggedWhileBooting]
 	if !ok {
