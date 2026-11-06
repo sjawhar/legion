@@ -121,3 +121,13 @@ afterEach(resetPinState);
 // Whether Dispatch could be reached is the page's to learn afresh: a request one test failed would
 // otherwise make the next test's first answer start every waiting write's backoff over.
 afterEach(resetReachability);
+
+// A fake clock a test installed is put back here as well as in that test's own `finally`, because
+// Bun keeps it across files: a test that installs it and then fails before its `try` - an awaited
+// helper of its own, say - would otherwise leave every later test in the process, and every later
+// file, with timers that never fire, so one regression reads as timeouts everywhere and the real
+// failure is buried. This runs after the hooks above, and `useRealTimers` on a test that
+// installed nothing does nothing.
+afterEach(() => {
+  jest.useRealTimers();
+});
