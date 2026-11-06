@@ -19,6 +19,7 @@ These rules are how a file leaves nothing behind.
   it registers its `afterEach` — or, with `scope: "suite"`, its `afterAll` — where it is called, and `bun:test` takes a hook's scope from the point of the call.
   The fixture's own module body registers no hook, and cannot:
   Bun evaluates an imported module once per process, so a hook there would take the scope of whichever test file imported the fixture first, and every other file's directories would outlive their tests.
+  One directory for a whole file or `describe` is `temporaryDirectory(prefix)` of the same module: the suite-scoped maker, called once, so a caller that needs a single scratch root writes no maker it calls nowhere else.
 
 - Put a variable back with `restoreEnvironment` or `captureEnvironment` (`@legion/test-fixtures/environment`), which set and delete the names themselves.
   A name that held no value is captured as unset and the restore deletes it again;
@@ -26,6 +27,10 @@ These rules are how a file leaves nothing behind.
   Never restore by replacing the whole object (`process.env = { ...saved }`):
   that swaps the runtime's environment for a plain one, and after it `process.env !== Bun.env`, a write reaches neither `Bun.env` nor a child process the test spawns, and the names the test deleted stay deleted in the real environment.
   Under `--parallel`, which implies `--isolate`, the next file gets a fresh `process` and never sees the swap, so the damage shows only where it is hardest to read.
+
+- A suite that runs jj or git takes its isolation from `versionControlEnvironment` (`@legion/test-fixtures/version-control-environment`): a home of the suite's own with a jj configuration file in it, no git configuration at all (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`), no credential prompt, and the identity jj commits as.
+  So neither the developer's `~/.jjconfig.toml`, nor their `~/.gitconfig`, nor the system gitconfig decides a result.
+  A suite whose code under test starts jj with the process's own environment puts those names on `process.env` itself, and hands `versionControlNames` to `restoreEnvironment` so the next file finds its own again.
 
 - Take a port from the kernel: bind port 0, read back the port the listener reports, and hold that listener from the moment it binds, so nothing else on the machine can take the port between the question and the row that asks it (`packages/pi-envoy/extensions/envoy.test.ts:517-545`).
   Never write a port number into a test.

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import { scriptFunctions } from "./script-functions";
 
 // capabilities_probed, taken from stage4b-sandbox-tree.sh by name, is what boot waits on before it
@@ -17,7 +17,7 @@ const fixture = JSON.parse(
   readFileSync(join(root, "packages", "contracts", "fixtures", "daemon-api", "state.json"), "utf8")
 ) as { capabilities: { name: string; status: string; detail: string }[] };
 // The home the bash below runs under, so it reads nothing of the caller's.
-const home = temporaryDirectories("stage4b-boot-capabilities-home", { scope: "suite" })();
+const home = temporaryDirectory("stage4b-boot-capabilities-home");
 
 const imageRows = ["eval-js", "eval-python", "browser", "lsp", "codegraph", "skills", "toolchain"];
 const liveRows = [

@@ -1004,7 +1004,7 @@ exit "$(cat "$PWD/exit-status" 2>/dev/null || echo 0)"
   // The gateway route with the real installer and key command, and a stand-in hawk-token first on
   // PATH that mints a JWT and counts each mint. The key command needs the operator's home and
   // session bus, so it runs on the host; the container gets only the token it printed.
-  describe.skipIf(withoutDocker)("on the gateway route", () => {
+  describe("on the gateway route", () => {
     const gatewayWork = freshDir("judge-gateway-work");
     mkdirSync(path.join(gatewayWork, "runs"), { recursive: true });
     const fakeBin = freshDir("judge-gateway-bin");

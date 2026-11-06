@@ -20,6 +20,10 @@
     "./temporary-tmpdir": {
       "types": "./src/temporary-tmpdir.ts",
       "bun": "./src/temporary-tmpdir.ts"
+    },
+    "./version-control-environment": {
+      "types": "./src/version-control-environment.ts",
+      "bun": "./src/version-control-environment.ts"
     }
   },
   "scripts": {

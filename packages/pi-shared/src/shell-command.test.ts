@@ -1,10 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { skipWithout } from "@legion/test-fixtures/host-tools";
+import { hostTool, skipWithout } from "@legion/test-fixtures/host-tools";
 import { dispatchCommandHead } from "./shell-command";
 
-/** The differential test below feeds a real bash, so a machine without one runs it not at all and
- * says so. Read once, at module scope: a call per row would print the warning per row. */
-const withoutBash = skipWithout("bash");
+/** The real bash the differential test below feeds, resolved once: the corpus runs it hundreds of
+ * times, and a spawn by bare name walks PATH again for every one of them. A machine without a bash
+ * runs the test not at all and says so, once for the file: a call per row would print the warning
+ * per row. */
+const bash = hostTool("bash");
+const withoutBash = skipWithout(...(bash === null ? ["bash"] : []));
 
 /** Whether a real non-interactive bash, fed `command` and then `echo NEXT` over a pipe as the
  * `bash` tool's persistent shell is fed, runs exactly one command and then NEXT. `dispatch` is a
@@ -12,7 +15,7 @@ const withoutBash = skipWithout("bash");
  * `echo NEXT` as body), a second command, or a command bash never ran each print something else. */
 function bashRunsOneCommand(command: string): boolean {
   const script = `dispatch() { echo RAN; }\n${command}\necho NEXT\n`;
-  const run = Bun.spawnSync(["bash", "--noprofile", "--norc"], {
+  const run = Bun.spawnSync([bash ?? "bash", "--noprofile", "--norc"], {
     stdin: new TextEncoder().encode(script),
     stdout: "pipe",
     stderr: "pipe",

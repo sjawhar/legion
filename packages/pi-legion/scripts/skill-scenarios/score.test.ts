@@ -1,9 +1,9 @@
-import { afterAll, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { expect, test } from "bun:test";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import { cliRefusals } from "@legion/envoy-client/dispatch-cli";
-import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import { checkouts, specWork, statesDesign, TestHandoff } from "./score";
 
 // A run whose agent never got a model turn (Oh My Pi exits before its first request, as when the
@@ -12,10 +12,8 @@ import { checkouts, specWork, statesDesign, TestHandoff } from "./score";
 // then did nothing the scenario asks is a failure.
 
 // score.ts reads each label's checkout from <work>/profiles/<label>/checkout, beside <work>/runs.
-const work = mkdtempSync(path.join(tmpdir(), "skill-scenarios-score-"));
+const work = temporaryDirectory("skill-scenarios-score");
 const runs = path.join(work, "runs");
-const pushDirectory = temporaryDirectories("skill-scenarios-push", { scope: "suite" });
-afterAll(() => rmSync(work, { recursive: true, force: true }));
 for (const label of ["head", "base", "cross", "on", "off"]) {
   mkdirSync(path.join(work, "profiles", label), { recursive: true });
   writeFileSync(path.join(work, "profiles", label, "checkout"), `/checkouts/${label}\n`);
@@ -249,7 +247,7 @@ recordRun("tester-proof-rec-2", {
 recordRun("tester-proof-rec-3", { "daemon.log": accepted("h-test", 2) });
 // Pushed a change to the code under the PR's head before completing.
 {
-  const dir = pushDirectory();
+  const dir = temporaryDirectory("skill-scenarios-push");
   const git = (...args: string[]) => {
     const result = Bun.spawnSync(
       ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-C", dir, ...args],

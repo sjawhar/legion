@@ -716,11 +716,13 @@ function processesWith(marker: string): string {
 }
 
 /** Whether no refresher of the session runs for the project directory `home` (its command line
- *  is `bun <bundle> answers-refresh <session> <directory>`) and none holds the lock. */
+ *  is `bun <bundle> answers-refresh <session> <directory>`) and none holds the lock. The lock is
+ *  a file test and the processes are a `pgrep` fork, so the lock decides first: both reads are
+ *  free of side effects, and a poll every 20 ms pays for the fork each time it runs. */
 function noRefresher(home: string, state: string): boolean {
   return (
-    processesWith(`answers-refresh ${SESSION} ${home}`) === "" &&
-    !existsSync(join(state, "sessions", SESSION, "answers-refresh.lock"))
+    !existsSync(join(state, "sessions", SESSION, "answers-refresh.lock")) &&
+    processesWith(`answers-refresh ${SESSION} ${home}`) === ""
   )
 }
 

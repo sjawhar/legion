@@ -7,7 +7,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 
 // Shared fixtures for the multi-repository acceptance observer's tests:
 // scripts/e2e/multi-repo-acceptance.sh reads only structured sources — the daemon's state JSON (a
@@ -27,13 +27,13 @@ export let tokenFile = "";
  * Makes the calling test file's scratch root and registers its removal.
  *
  * Each test file that imports this module calls it once, at its own module scope, before any
- * fixture reads `dir`. `temporaryDirectories` registers the removal where it is called, and Bun
+ * fixture reads `dir`. `temporaryDirectory` registers the removal where it is called, and Bun
  * evaluates this module once per process, at the load of whichever test file imports it first: a
  * call in this module's body would register the removal in that one file's scope and leave every
  * later file's scratch behind.
  */
 export function useScratchDirectory(): void {
-  dir = temporaryDirectories("multi-repo-acceptance-test", { scope: "suite" })();
+  dir = temporaryDirectory("multi-repo-acceptance-test");
   tokenFile = join(dir, "dispatch-token");
   writeFileSync(tokenFile, "dispatch-bearer\n");
 }

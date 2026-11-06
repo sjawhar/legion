@@ -1,11 +1,16 @@
 import { afterEach, expect, test } from "bun:test";
-import { lstat, mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { forgetBrokerClients } from "@legion/envoy-client/broker-credential";
 import { DispatchServiceError } from "@legion/envoy-client/dispatch-http";
 import { restoreEnvironment } from "@legion/test-fixtures/environment";
-import { skipWithout } from "@legion/test-fixtures/host-tools";
+import { hostTool, skipWithout } from "@legion/test-fixtures/host-tools";
+import {
+  versionControlEnvironment,
+  versionControlIdentity,
+  versionControlNames,
+} from "@legion/test-fixtures/version-control-environment";
 import {
   findHandoffReport,
   findPushedBranchHead,
@@ -329,53 +334,31 @@ test("a pane whose Dispatch is the broker's reads the record under its own sessi
 
 // The revsets are jj's, so a fake cannot prove them: one real repository with a bare origin, the
 // round's change committed and the branch pushed, run through PATH's jj, as a pane is. A host
-// with no jj runs neither row and says so, once for the file.
-const withoutJj = skipWithout("jj");
+// with no jj runs neither row and says so, once for the file. The jj the rows below run is the one
+// this walk found, so no spawn of theirs walks PATH again.
+const jjProgram = hostTool("jj");
+const withoutJj = skipWithout(...(jjProgram === null ? ["jj"] : []));
 
 // `isolatedHome` puts these on the test process as well, so the jj that the code under test
 // (`pathJj`) starts reads the test's home rather than the developer's.
-restoreEnvironment([
-  "HOME",
-  "XDG_CONFIG_HOME",
-  "JJ_CONFIG",
-  "JJ_USER",
-  "JJ_EMAIL",
-  "GIT_CONFIG_GLOBAL",
-  "GIT_CONFIG_NOSYSTEM",
-  "GIT_TERMINAL_PROMPT",
-]);
-
-/** The identity the pane's jj commits as, which no configuration of the host supplies. */
-const IDENTITY = { JJ_USER: "Legion Test", JJ_EMAIL: "legion-test@example.invalid" };
+restoreEnvironment(versionControlNames);
 
 /**
- * The environment this file's real jj and git run in, and the one it puts on the test process:
- * a home under `root`, a jj configuration the test wrote, and no git configuration at all, so
- * neither the developer's `~/.jjconfig.toml`, nor their `~/.gitconfig`, nor the system gitconfig
- * decides a result. It reaches the test process too, because `pathJj` — the code under test —
- * starts jj with the process's own environment.
+ * The environment this file's real jj and git run in, and the one it puts on the test process: the
+ * shared isolation fixture over a home under `root`, so neither the developer's
+ * `~/.jjconfig.toml`, nor their `~/.gitconfig`, nor the system gitconfig decides a result. It
+ * reaches the test process too, because `pathJj` — the code under test — starts jj with the
+ * process's own environment.
  */
-async function isolatedHome(root: string): Promise<Record<string, string>> {
-  const home = path.join(root, "home");
-  await mkdir(path.join(home, ".config"), { recursive: true });
-  const config = path.join(home, "jj-config.toml");
-  await writeFile(config, "# The test's own jj configuration: nothing of the developer's.\n");
-  const isolated = {
-    HOME: home,
-    XDG_CONFIG_HOME: path.join(home, ".config"),
-    JJ_CONFIG: config,
-    GIT_CONFIG_GLOBAL: "/dev/null",
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_TERMINAL_PROMPT: "0",
-    ...IDENTITY,
-  };
+function isolatedHome(root: string): Record<string, string> {
+  const isolated = versionControlEnvironment(path.join(root, "home"));
   Object.assign(process.env, isolated);
   return { PATH: process.env.PATH ?? "", ...isolated };
 }
 
 /** Runs jj in `cwd` with the test's own environment, failing on a non-zero exit. */
 async function jj(cwd: string, env: Record<string, string>, ...args: string[]): Promise<string> {
-  const child = Bun.spawn(["jj", ...args], {
+  const child = Bun.spawn([jjProgram ?? "jj", ...args], {
     cwd,
     env,
     stdout: "pipe",
@@ -396,8 +379,8 @@ test.skipIf(withoutJj)(
     const root = await mkdtemp(path.join(tmpdir(), "legion-handoff-record-"));
     scratch.push(root);
     const workspace = path.join(root, "workspace");
-    const childEnv = await isolatedHome(root);
-    const paneEnv = { ...IDENTITY, LEGION_WORKSPACE: workspace, LEGION_ISSUE: ISSUE };
+    const childEnv = isolatedHome(root);
+    const paneEnv = { ...versionControlIdentity, LEGION_WORKSPACE: workspace, LEGION_ISSUE: ISSUE };
     await Bun.spawn(["git", "init", "--bare", "--quiet", path.join(root, "origin.git")], {
       env: childEnv,
     }).exited;
@@ -473,7 +456,7 @@ test.skipIf(withoutJj)(
     const root = await mkdtemp(path.join(tmpdir(), "legion-handoff-lock-"));
     scratch.push(root);
     const workspace = path.join(root, "workspace");
-    const childEnv = await isolatedHome(root);
+    const childEnv = isolatedHome(root);
     await jj(root, childEnv, "git", "init", "--colocate", workspace);
     await writeFile(path.join(workspace, "main.py"), 'print("hi")\n');
     const lock = path.join(workspace, ".git", "index.lock");

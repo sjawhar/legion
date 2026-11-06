@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import type { Server, Subprocess } from "bun";
 
 import type { DispatchProcess } from "../harness-processes";
@@ -116,7 +116,7 @@ const proxyPort = freePort();
 const origin = `http://127.0.0.1:${proxyPort}`;
 let proxy: Subprocess<"ignore", "pipe", "inherit">;
 /** A home for every child this file starts, so none of them reads the caller's. */
-const childHome = temporaryDirectories("round-robin-proxy-home", { scope: "suite" })();
+const childHome = temporaryDirectory("round-robin-proxy-home");
 
 beforeAll(async () => {
   proxy = Bun.spawn(["bun", proxyScript], {

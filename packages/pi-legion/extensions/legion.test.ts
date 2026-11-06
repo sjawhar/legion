@@ -47,6 +47,7 @@ import { hostAgentRegistryMock, testAgentRoster } from "@legion/pi-shared/test/h
 import { restoreEnvironment } from "@legion/test-fixtures/environment";
 import { skipWithout } from "@legion/test-fixtures/host-tools";
 import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
+import { versionControlEnvironment } from "@legion/test-fixtures/version-control-environment";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ConnectionOptions, NatsConnection } from "nats";
 import pkg from "../package.json";
@@ -312,23 +313,10 @@ const skip = skipWithout("jj");
 beforeAll(async () => {
   if (skip) return;
   jjTemplate = await mkdtemp(path.join(os.tmpdir(), "legion-omp-extension-template-"));
-  const jjHome = jjHomeDirectory();
-  const jjConfig = path.join(jjHome, "jj-config.toml");
-  await writeFile(jjConfig, "# The suite's own jj configuration: nothing of the developer's.\n");
   const child = Bun.spawn(["jj", "git", "init", jjTemplate], {
     stdout: "ignore",
     stderr: "pipe",
-    env: {
-      PATH: process.env.PATH ?? "",
-      HOME: jjHome,
-      XDG_CONFIG_HOME: path.join(jjHome, ".config"),
-      JJ_CONFIG: jjConfig,
-      GIT_CONFIG_GLOBAL: "/dev/null",
-      GIT_CONFIG_NOSYSTEM: "1",
-      GIT_TERMINAL_PROMPT: "0",
-      JJ_USER: "Legion Test",
-      JJ_EMAIL: "legion-test@example.invalid",
-    },
+    env: { PATH: process.env.PATH ?? "", ...versionControlEnvironment(jjHomeDirectory()) },
   });
   const exitCode = await child.exited;
   if (exitCode !== 0) {

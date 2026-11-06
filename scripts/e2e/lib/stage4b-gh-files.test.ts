@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import { scriptFunctions } from "./script-functions";
 
 // assert_gh_files, taken from stage4b-sandbox-tree.sh by name, judges a container's gh bundle as
@@ -11,7 +11,7 @@ import { scriptFunctions } from "./script-functions";
 const fn = scriptFunctions(join(import.meta.dir, "..", "stage4b-sandbox-tree.sh"));
 
 // The home the bash below runs under, so it reads nothing of the caller's.
-const home = temporaryDirectories("stage4b-gh-files-home", { scope: "suite" })();
+const home = temporaryDirectory("stage4b-gh-files-home");
 
 function judge(root: string, owner = "config.yml\nhosts.yml\n") {
   const script = [

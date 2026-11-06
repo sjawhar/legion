@@ -56,6 +56,21 @@ export function temporaryDirectories(
 }
 
 /**
+ * Makes one directory for the whole suite, registers its removal in `afterAll`, and returns its
+ * path: the one-shot form of {@link temporaryDirectories}, for a test file or a `describe` body
+ * that needs a single scratch directory every one of its tests reads.
+ *
+ * Call it where {@link temporaryDirectories} is called — at module scope or in a `describe` body,
+ * never inside a test body — for the same reason: it registers the hook where it is called.
+ */
+export function temporaryDirectory(
+  prefix: string,
+  options: Omit<TemporaryDirectoryOptions, "scope"> = {}
+): string {
+  return temporaryDirectories(prefix, { ...options, scope: "suite" })();
+}
+
+/**
  * The template `mkdtemp` adds six random characters to: the prefix, the suffix when the caller
  * named one, and one dash, whether or not the prefix already ends with dashes.
  */

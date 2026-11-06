@@ -133,10 +133,10 @@ const tools = [
 ];
 const found = new Map(tools.map((name) => [name, hostTool(name)] as const));
 const missing = tools.filter((name) => found.get(name) === null);
-// Why a row here can say nothing: a tool the walk found no real binary for would be absent from
-// the run's PATH, and the run would stop at the first line that calls it rather than at the pin;
-// and with no HOME of this process the walk has no second environment to tell a real binary from
-// a version manager's shim.
+// Why the row that runs the rig can say nothing: a tool the walk found no real binary for would be
+// absent from the run's PATH, and the run would stop at the first line that calls it rather than at
+// the pin; and with no HOME of this process the walk has no second environment to tell a real
+// binary from a version manager's shim.
 const reasons: string[] = [];
 if (missing.length > 0) {
   reasons.push(`this host has no real binary on PATH for: ${missing.join(", ")}`);
@@ -148,7 +148,9 @@ if ((process.env.HOME ?? "") === "") {
   );
 }
 const skip = reasons.length > 0;
-if (skip) console.warn(`Skipped the tests in ${import.meta.path}: ${reasons.join("; ")}.`);
+if (skip) {
+  console.warn(`Skipped the test in ${import.meta.path} that runs the rig: ${reasons.join("; ")}.`);
+}
 for (const [name, path] of found) {
   if (path !== null) symlinkSync(path, join(bin, name));
 }
@@ -178,28 +180,27 @@ test.skipIf(skip)(
   90_000
 );
 
-test.skipIf(skip)(
-  "a tool that answers only for this process's own environment is passed over for a real binary",
-  () => {
-    const shims = join(dir, "shims");
-    const real = join(dir, "real");
-    mkdirSync(shims);
-    mkdirSync(real);
-    // A shim as a version manager writes one: it stands for the tool while it can read the
-    // manager's configuration under HOME, or, with nothing pinned there, while another copy of the
-    // tool follows it on PATH. Under the run's own HOME and PATH it has neither, and says so.
-    writeFileSync(
-      join(shims, "probe"),
-      `#!/bin/sh
+// The walk itself, against two probe scripts this row writes: it needs none of the tools above, so
+// a host that has not got them still runs it.
+test("a tool that answers only for this process's own environment is passed over for a real binary", () => {
+  const shims = join(dir, "shims");
+  const real = join(dir, "real");
+  mkdirSync(shims);
+  mkdirSync(real);
+  // A shim as a version manager writes one: it stands for the tool while it can read the
+  // manager's configuration under HOME, or, with nothing pinned there, while another copy of the
+  // tool follows it on PATH. Under the run's own HOME and PATH it has neither, and says so.
+  writeFileSync(
+    join(shims, "probe"),
+    `#!/bin/sh
 case ":$PATH:" in *:${real}:*) exec ${join(real, "probe")} "$@" ;; esac
 [ "$HOME" = ${JSON.stringify(process.env.HOME ?? "")} ] || { echo 'probe is not a valid shim' >&2; exit 1; }
 echo 'probe 1.0'
 `,
-      { mode: 0o755 }
-    );
-    writeFileSync(join(real, "probe"), "#!/bin/sh\necho 'probe 1.0'\n", { mode: 0o755 });
-    expect(hostTool("probe", `${shims}:${real}`)).toBe(join(real, "probe"));
-    expect(hostTool("probe", shims)).toBe(null);
-    expect(hostTool("probe", real)).toBe(join(real, "probe"));
-  }
-);
+    { mode: 0o755 }
+  );
+  writeFileSync(join(real, "probe"), "#!/bin/sh\necho 'probe 1.0'\n", { mode: 0o755 });
+  expect(hostTool("probe", `${shims}:${real}`)).toBe(join(real, "probe"));
+  expect(hostTool("probe", shims)).toBe(null);
+  expect(hostTool("probe", real)).toBe(join(real, "probe"));
+});

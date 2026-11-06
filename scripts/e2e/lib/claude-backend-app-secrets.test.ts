@@ -24,23 +24,14 @@ const dir = mkdtempSync(join(tmpdir(), "claude-backend-key-runner-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 const bin = join(dir, "bin");
-mkdirSync(bin);
 const scratch = join(dir, "tmp");
-mkdirSync(scratch);
+// Where the stand-in `secrets` records that it was asked.
+const asked = join(dir, "secrets-asked");
+const keyFile = join(dir, "anthropic-key");
 function stub(name: string, body: string) {
   writeFileSync(join(bin, name), `#!/bin/sh\n${body}\n`);
   chmodSync(join(bin, name), 0o755);
 }
-for (const name of ["go", "docker", "ss", "tmux", "bun", "mise", "gh", "jj", "pgrep", "claude"]) {
-  stub(name, "exit 0");
-}
-// Anthropic accepts the model key.
-stub("curl", "printf 200");
-// The box's own store holds no App credential, and records that it was asked.
-const asked = join(dir, "secrets-asked");
-stub("secrets", `printf '%s\\n' "$*" >> '${asked}'\necho "no secret named $2" >&2\nexit 1`);
-// The broker's client the tokens come through: runs its command with a release in its environment.
-stub("agent-secrets", 'name=$1; shift; [ "$1" = -- ] && shift; export "$name={}"; exec "$@"');
 // The real programs the run needs on the PATH it is given: each is linked into the run's own bin
 // below. A host missing one of them would run the script against a PATH without it, which fails
 // at whichever line first calls it, so the row is skipped and names what is missing instead.
@@ -90,13 +81,30 @@ const tools = [
   "ps",
   "sha256sum",
 ];
-const skip = skipWithout(...tools);
-for (const name of tools) {
-  const found = hostTool(name);
-  if (found !== null) symlinkSync(found, join(bin, name));
+// Each name is walked once: `found` holds its real binary, or null, and only the names with none
+// reach the gate, which would otherwise walk every one of them again.
+const found = new Map(tools.map((name) => [name, hostTool(name)] as const));
+const skip = skipWithout(...tools.filter((name) => found.get(name) === null));
+
+// Nothing below is read by a run that will not happen, so a host that skips builds none of it.
+if (!skip) {
+  mkdirSync(bin);
+  mkdirSync(scratch);
+  for (const name of ["go", "docker", "ss", "tmux", "bun", "mise", "gh", "jj", "pgrep", "claude"]) {
+    stub(name, "exit 0");
+  }
+  // Anthropic accepts the model key.
+  stub("curl", "printf 200");
+  // The box's own store holds no App credential, and records that it was asked.
+  stub("secrets", `printf '%s\\n' "$*" >> '${asked}'\necho "no secret named $2" >&2\nexit 1`);
+  // The broker's client the tokens come through: runs its command with a release in its
+  // environment.
+  stub("agent-secrets", 'name=$1; shift; [ "$1" = -- ] && shift; export "$name={}"; exec "$@"');
+  for (const [name, path] of found) {
+    if (path !== null) symlinkSync(path, join(bin, name));
+  }
+  writeFileSync(keyFile, "sk-test\n", { mode: 0o600 });
 }
-const keyFile = join(dir, "anthropic-key");
-writeFileSync(keyFile, "sk-test\n", { mode: 0o600 });
 
 test.skipIf(skip)(
   "the prerequisites never ask the box's own secrets store for an App credential",

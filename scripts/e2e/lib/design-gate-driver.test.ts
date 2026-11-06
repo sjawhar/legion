@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 
 const root = fileURLToPath(new URL("../../..", import.meta.url));
 const script = readFileSync(
@@ -12,7 +12,7 @@ const script = readFileSync(
 );
 
 // The home every bash this file starts runs under, so none of them reads the caller's.
-const home = temporaryDirectories("design-gate-driver-home", { scope: "suite" })();
+const home = temporaryDirectory("design-gate-driver-home");
 
 // drive_gated_spec's own requested-versions command, from its `requested_versions=$(jq` line to the
 // line that feeds it the events.

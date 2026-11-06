@@ -183,6 +183,25 @@ const holdsNoToken = (text: string) => {
   for (const token of allTokens) expect(text).not.toContain(token);
 };
 
+/**
+ * Ends the process whose pid the file holds, and answers whether that process was still running.
+ * A command that escapes its caller's session outlives the run that started it, so the test that
+ * starts one has it write its pid down and ends it here.
+ */
+function endRecordedProcess(pidFile: string): boolean {
+  if (!existsSync(pidFile)) return false;
+  const pid = Number.parseInt(readFileSync(pidFile, "utf8").trim(), 10);
+  rmSync(pidFile, { force: true });
+  if (!Number.isInteger(pid) || pid <= 1) return false;
+  try {
+    process.kill(pid, "SIGKILL");
+    return true;
+  } catch {
+    // Already gone: nothing to end.
+    return false;
+  }
+}
+
 describe("app-logins.ts", () => {
   test("prints each App's bot login from GraphQL's viewer, proved by GET /apps/<slug> under its own token", async () => {
     seen.length = 0;
@@ -289,12 +308,24 @@ describe("app-logins.ts", () => {
   });
 
   test("a token command whose escaped descendant holds its output open fails within the drain bound", async () => {
-    const escaped = "setsid sleep 60 >&2 & exit 0";
+    // The descendant leaves the token command's session, so nothing app-logins does ends it: it
+    // records the pid it ends up with — `sh` prints its own, then becomes the `sleep` through
+    // `exec` — and this test ends it once the run it must outlive is over.
+    const pidFile = join(dir, "escaped.pid");
+    const escaped = `setsid sh -c 'echo $$ >${pidFile}; exec sleep 60' >&2 & exit 0`;
     const started = Date.now();
-    const { code, stderr } = await run(config(app("101", escaped), app("202")));
-    expect(code).toBe(1);
-    expect(stderr).toContain("still held its output open");
-    expect(Date.now() - started).toBeLessThan(30_000);
+    let wasRunning = false;
+    try {
+      const { code, stderr } = await run(config(app("101", escaped), app("202")));
+      expect(code).toBe(1);
+      expect(stderr).toContain("still held its output open");
+      expect(Date.now() - started).toBeLessThan(30_000);
+    } finally {
+      wasRunning = endRecordedProcess(pidFile);
+    }
+    // The descendant held the output open for the whole drain: a descendant that ended before the
+    // run did would leave the row proving nothing.
+    expect(wasRunning).toBe(true);
   }, 30_000);
 
   test("output that is no release, an expired token, or no installation is refused without quoting it", async () => {

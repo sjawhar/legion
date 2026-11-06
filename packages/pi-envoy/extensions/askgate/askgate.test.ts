@@ -21,7 +21,10 @@ import { bearerCredential } from "@legion/envoy-client/bearer";
 import { runDispatchCli } from "@legion/envoy-client/dispatch-cli";
 import { DispatchClient, DispatchServiceError } from "@legion/envoy-client/dispatch-http";
 import { sessionDirectory } from "@legion/envoy-client/dispatch-session-directory";
-import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
+import {
+  temporaryDirectories,
+  temporaryDirectory,
+} from "@legion/test-fixtures/temporary-directories";
 import type { DispatchSession } from "../../src/dispatch-session";
 import * as core from "./askgate-core";
 import {
@@ -4661,7 +4664,7 @@ describe("the literal grammar, widened to forms with no expansion", () => {
   describe("a quoted here-document in a command substitution", () => {
     const BODY = "Done.\nSee the note.\n\n- one\n- two";
     // A home of the test's own, so the bash below reads nothing of the caller's.
-    const home = temporaryDirectories("askgate-here-doc", { scope: "suite" })();
+    const home = temporaryDirectory("askgate-here-doc");
     const quoted = (flag: string, text: string) =>
       `dispatch comment --issue X-1 ${flag} "$(cat <<'EOF'\n${text}\nEOF\n)"`;
     /** What bash really hands the CLI for `command`, as argv. */
@@ -4897,7 +4900,7 @@ describe("eval cells that run the dispatch CLI (A1)", () => {
 });
 
 describe("sessions", () => {
-  const temporaryDirectory = temporaryDirectories("askgate");
+  const makeDirectory = temporaryDirectories("askgate");
 
   test("a halt in one session does not carry into the next", async () => {
     const g = bind({ env: { OMP_ASKGATE_TIMEOUT_MS: "20" }, complete: untilAborted });
@@ -4927,7 +4930,7 @@ describe("sessions", () => {
   // a call whose shell had not read it yet, so that write failed. The gate takes no snapshot now;
   // a marker likewise goes only on its own call's end event, or at shutdown.
   test("N5: a session switch keeps each marker until its own call's end event, or until shutdown", async () => {
-    const work = temporaryDirectory("switch");
+    const work = makeDirectory("switch");
     fs.writeFileSync(path.join(work, "note.txt"), "Body from the session before.\n");
     const g = bind({ env: { PATH: "/usr/bin:/bin" }, cwd: work });
     const ids = () =>
@@ -4953,7 +4956,7 @@ describe("sessions", () => {
   // the call runs that program once with `--dry-run`. A refusal that says nothing ran would not
   // be true of a checkout's own `./dispatch`.
   test("a refusal of a command names the dry run that already ran it", async () => {
-    const work = temporaryDirectory("claim");
+    const work = makeDirectory("claim");
     fs.writeFileSync(
       path.join(work, "dispatch"),
       `#!${process.execPath}\nconsole.log(JSON.stringify({ issue: "X-1", body: "hi" }));\n`,

@@ -1,6 +1,6 @@
 import { afterAll } from "bun:test";
 import { captureEnvironment } from "./environment";
-import { temporaryDirectories } from "./temporary-directories";
+import { temporaryDirectory } from "./temporary-directories";
 
 /**
  * Makes one directory for the whole test file, points `TMPDIR` at it, and returns its path: every
@@ -18,7 +18,7 @@ import { temporaryDirectories } from "./temporary-directories";
  * whose `tmpdir()` is a symlink.
  */
 export function temporaryTmpdir(prefix: string): string {
-  const root = temporaryDirectories(prefix, { scope: "suite", real: true })();
+  const root = temporaryDirectory(prefix, { real: true });
   const restore = captureEnvironment(["TMPDIR"]);
   process.env["TMPDIR"] = root;
   afterAll(restore);

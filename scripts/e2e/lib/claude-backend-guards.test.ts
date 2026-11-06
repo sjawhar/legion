@@ -26,11 +26,14 @@ const dir = mkdtempSync(join(tmpdir(), "claude-backend-guards-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 // The stand-in processes are copies of two real programs, so a host without them has nothing to
 // start and every row here is skipped.
-const skip = skipWithout("bash", "sleep");
+// Each program is walked once: `found` holds its real binary, or null, and only a name with none
+// reaches the gate, which would otherwise walk both again.
+const found = new Map(["bash", "sleep"].map((name) => [name, hostTool(name)] as const));
+const skip = skipWithout(...[...found.keys()].filter((name) => found.get(name) === null));
 function tool(name: string): string {
-  const found = hostTool(name);
-  if (found === null) throw new Error(`${name} is not on PATH`);
-  return found;
+  const path = found.get(name) ?? null;
+  if (path === null) throw new Error(`${name} is not on PATH`);
+  return path;
 }
 // The run's legion is a copy of bash, so a process can carry it as its executable (/proc/<pid>/exe)
 // with `claude-bridge` as its first argument: bash runs the script of that name from its working

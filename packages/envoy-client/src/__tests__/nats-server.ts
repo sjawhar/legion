@@ -49,6 +49,9 @@ export async function startNatsServer(nkeyUser?: string): Promise<NatsServer> {
     await docker(
       "run",
       "-d",
+      // A container that dies on its own is gone with it, so the readiness loop's `docker logs`
+      // fails at once instead of spinning to its timeout (docs/testing.md).
+      "--rm",
       "--name",
       name,
       // Capped, as every container the repository's tests start is on a shared host: a test

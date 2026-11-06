@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { skipWithout } from "@legion/test-fixtures/host-tools";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import { connect, type NatsConnection } from "nats";
 import { readLast } from "./nats-stream";
 
@@ -13,7 +13,7 @@ const skip = skipWithout("docker");
 const root = join(import.meta.dir, "..", "..", "..");
 const container = `legion-nats-stream-${randomUUID()}`;
 const stream = `NATS_STREAM_${randomUUID().replaceAll("-", "_")}`;
-const configDirectory = mkdtempSync(join(tmpdir(), "nats-stream-test."));
+const configDirectory = temporaryDirectory("nats-stream-test");
 const config = join(configDirectory, "envoy.json");
 const subjectCount = 10_000;
 const publishBatchSize = 25;
@@ -125,7 +125,6 @@ async function cleanup(): Promise<void> {
   } finally {
     removeContainer?.();
     removeContainer = undefined;
-    rmSync(configDirectory, { recursive: true, force: true });
   }
 }
 
@@ -160,12 +159,9 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
-  // With no docker nothing was started, and the scratch directory this file's module scope made
-  // is all there is to remove.
-  if (skip) {
-    rmSync(configDirectory, { recursive: true, force: true });
-    return;
-  }
+  // With no docker nothing was started, and the fixture's own hook removes the scratch directory
+  // this file's module scope made.
+  if (skip) return;
   await cleanup();
 }, 120_000);
 
