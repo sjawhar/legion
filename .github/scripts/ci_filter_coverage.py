@@ -507,11 +507,12 @@ def reduce_line(line: str) -> tuple:
 # never which version: the module files this check already reads decide that, and go.sum holds
 # each module's hash whichever source serves it. This check's own go commands run with
 # GOPROXY=off over an empty module cache (Go.env below), so a workflow's value never reaches
-# them either. CI_OK_SELECTED_BY, CI_OK_PULL_REQUEST_ONLY and CI_OK_EXEMPT are ci.yaml's ci-ok
-# map and its exemptions: ci-ok-report.sh reads the first two out of that file and hands them to
-# ci-ok.sh, and CI_OK_EXEMPT is read by this check alone.
+# them either. CI_OK_SELECTED_BY, CI_OK_PULL_REQUEST_ONLY, CI_OK_ALWAYS_RUN and CI_OK_EXEMPT are
+# ci.yaml's ci-ok classes: ci-ok-report.sh reads the first three out of that file and hands them
+# to ci-ok.sh, and CI_OK_EXEMPT is read by this check alone.
 ENV_ALLOWED = frozenset({
-    "BROKER_TEST_DATABASE_URL", "CI_OK_EXEMPT", "CI_OK_PULL_REQUEST_ONLY", "CI_OK_SELECTED_BY", "DATABASE_URL",
+    "BROKER_TEST_DATABASE_URL", "CI_OK_ALWAYS_RUN", "CI_OK_EXEMPT", "CI_OK_PULL_REQUEST_ONLY", "CI_OK_SELECTED_BY",
+    "DATABASE_URL",
     "DISPATCH_E2E_FILE_STORE_BUCKET", "DISPATCH_E2E_FILE_STORE_ENDPOINT",
     "DISPATCH_TEST_DATABASE_URL", "ENVOY_INFRA_DOCKER_PLUGIN", "ENVOY_SMOKE_HELD_PORT_IMAGE", "ENVOY_SMOKE_IMAGE",
     "GOPROXY",
@@ -764,8 +765,11 @@ def check_table(document: dict, data, filters: dict, files: set, problems: list)
                             f"{job_id}, which {path} does not have")
     return unreduced
 
-# The jobs ci-ok.sh holds to success on every run, so CI_OK_SELECTED_BY maps neither.
-ALWAYS_RUN = ("changes", "lint")
+# ci.yaml's env entry naming the jobs that run on every change: no `changes` output gates one, so
+# CI_OK_SELECTED_BY maps none of them, and ci-ok.sh holds each to success — a skipped, cancelled
+# or absent one fails the verdict. ci-ok.sh reads the list rather than knowing `changes` and
+# `lint` by name, so a third such job is declared here and judged like them.
+ALWAYS_RUN_LIST = "CI_OK_ALWAYS_RUN"
 # ci.yaml's env entry naming the jobs the merge queue never runs.
 PULL_REQUEST_ONLY_LIST = "CI_OK_PULL_REQUEST_ONLY"
 # ci-ok.sh's lists of CI_OK_SELECTED_BY jobs whose if: admits only some events, as ci.yaml's env
@@ -813,16 +817,21 @@ def check_ci_ok(document: dict, problems: list) -> None:
     the exempt ones: a job outside its needs: ends after the verdict that says nothing about it.
     A job EXEMPT_LIST names is outside all of that: it is no job of
     CI_OK_SELECTED_BY, it needs no report step, and it must carry none, since ci-ok.sh fails a
-    result for a job CI_OK_SELECTED_BY cannot map."""
+    result for a job CI_OK_SELECTED_BY cannot map. Every job of the file is in exactly one of
+    ci-ok's three classes — CI_OK_SELECTED_BY maps it, ALWAYS_RUN_LIST names it, or EXEMPT_LIST
+    does: a job in none is one ci-ok.sh fails on every run whatever the job did, and a job in two
+    is read by whichever class ci-ok.sh reaches first. A job ALWAYS_RUN_LIST names is gated by no
+    output of changes, since ci-ok.sh holds it to success on a run that rightly skipped it."""
     jobs = document.get("jobs") or {}
     env = document.get("env") or {}
     try:
         selected_by = json.loads(str(env.get("CI_OK_SELECTED_BY", "")))
         exempt = json.loads(str(env.get(EXEMPT_LIST, "[]")) or "[]")
+        always_run = json.loads(str(env.get(ALWAYS_RUN_LIST, "")))
         listed = {name: json.loads(str(env.get(name, ""))) for name in EVENT_LISTS}
     except json.JSONDecodeError as error:
-        problems.append(f"::error file={WORKFLOW}::the env's CI_OK_SELECTED_BY, {EXEMPT_LIST} or "
-                        f"{' or '.join(EVENT_LISTS)} is missing or not JSON: {error}")
+        problems.append(f"::error file={WORKFLOW}::the env's CI_OK_SELECTED_BY, {EXEMPT_LIST}, {ALWAYS_RUN_LIST} "
+                        f"or {' or '.join(EVENT_LISTS)} is missing or not JSON: {error}")
         return
     if not (isinstance(selected_by, dict) and all(isinstance(v, str) for v in selected_by.values())):
         problems.append(f"::error file={WORKFLOW}::the env's CI_OK_SELECTED_BY is not a JSON object of job to "
@@ -831,6 +840,9 @@ def check_ci_ok(document: dict, problems: list) -> None:
     if not (isinstance(exempt, list) and all(isinstance(j, str) for j in exempt)):
         problems.append(f"::error file={WORKFLOW}::the env's {EXEMPT_LIST} is not a JSON array of job names")
         return
+    if not (isinstance(always_run, list) and all(isinstance(j, str) for j in always_run)):
+        problems.append(f"::error file={WORKFLOW}::the env's {ALWAYS_RUN_LIST} is not a JSON array of job names")
+        return
     for name, jobs_listed in listed.items():
         if not (isinstance(jobs_listed, list) and all(isinstance(j, str) for j in jobs_listed)):
             problems.append(f"::error file={WORKFLOW}::the env's {name} is not a JSON array of job names")
@@ -838,6 +850,32 @@ def check_ci_ok(document: dict, problems: list) -> None:
     for job_id in sorted(set(exempt) - set(jobs)):
         problems.append(f"::error file={WORKFLOW}::{EXEMPT_LIST} names {job_id}, which is no job of this file; "
                         f"drop it, or name the job it was meant for")
+    for job_id in sorted(set(always_run) - set(jobs)):
+        problems.append(f"::error file={WORKFLOW}::{ALWAYS_RUN_LIST} names {job_id}, which is no job of this file; "
+                        f"drop it, or name the job it was meant for")
+    remedies = (f"map it in CI_OK_SELECTED_BY to the changes output its if: tests, name it in {ALWAYS_RUN_LIST} "
+                f"when it runs on every change and ci-ok must hold it to success, or name it in {EXEMPT_LIST} "
+                f"when it is outside ci-ok's accounting and out of job {VERDICT_JOB}'s needs:")
+    for job_id in sorted(jobs):
+        held = [name for name, yes in (("CI_OK_SELECTED_BY", job_id in selected_by),
+                                       (ALWAYS_RUN_LIST, job_id in always_run),
+                                       (EXEMPT_LIST, job_id in exempt)) if yes]
+        if len(held) == 1:
+            continue
+        if not held:
+            problems.append(f"::error file={WORKFLOW}::job {job_id} is in none of ci-ok's three classes, so "
+                            f"ci-ok.sh fails its result whatever the job did: {remedies}")
+        else:
+            problems.append(f"::error file={WORKFLOW}::job {job_id} is in {len(held)} of ci-ok's three classes "
+                            f"({', '.join(held)}), which judge it differently, and it belongs in exactly one: "
+                            f"{remedies}")
+    for job_id in sorted(set(always_run) & set(jobs)):
+        gate = GATE_REF.search(str((jobs.get(job_id) or {}).get("if", "")))
+        if gate is not None:
+            problems.append(f"::error file={WORKFLOW}::{ALWAYS_RUN_LIST} names {job_id}, whose if: tests "
+                            f"needs.changes.outputs.{gate.group(1)}, so changes gates it rather than selecting "
+                            f"every run of it, and ci-ok.sh would fail every run that rightly skipped it; map it "
+                            f"in CI_OK_SELECTED_BY instead")
     for job_id, job in jobs.items():
         named = str((job or {}).get("name", job_id))
         if job_id in REQUIRED_CHECKS:
@@ -879,7 +917,7 @@ def check_ci_ok(document: dict, problems: list) -> None:
             problems.append(f"::error file={WORKFLOW}::job {VERDICT_JOB} needs {job_id}, but {why}; drop it from "
                             f"its needs:")
     gated = sorted(job_id for job_id, job in jobs.items()
-                   if job_id not in ALWAYS_RUN and job_id not in exempt
+                   if job_id not in always_run and job_id not in exempt
                    and GATE_REF.search(str((job or {}).get("if", ""))))
     expected, list_expected = {}, {name: set() for name in EVENT_LISTS}
     for job_id in gated:

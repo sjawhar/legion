@@ -119,7 +119,8 @@ permissions:
 # weaker check.
 env:
   GOPROXY: https://proxy.golang.org|direct
-  # ci-ok's map of every job but `changes` and lint to the `changes` output its `if:` tests, and
+  # ci-ok's map of every job but those CI_OK_ALWAYS_RUN names to the `changes` output its `if:`
+  # tests, and
   # the list of those jobs whose `if:` also admits only pull_request (ci-ok.sh and ci-ok.jq say how
   # they decide a job's selection). The ci-ok job's step takes both from this env; ci-ok-report.sh,
   # which runs from a composite action this file hands its job's own inputs alone, reads both out
@@ -158,6 +159,19 @@ env:
       "worker-image": "worker_image"
     }
   CI_OK_PULL_REQUEST_ONLY: '["worker-image"]'
+  # The jobs that run on every change: no `changes` output gates one, so CI_OK_SELECTED_BY maps
+  # none of them, and ci-ok passes only when each of them succeeded — a skipped, cancelled or
+  # absent one fails the verdict, since nothing else says the job ran. `changes` is here because
+  # it selects every other job, `lint` because every change is linted. ci-ok.sh reads this list
+  # rather than knowing those two names, and check-ci-filters.sh holds every job of this file to
+  # exactly one of ci-ok's three classes: mapped by CI_OK_SELECTED_BY, named here, or named by
+  # CI_OK_EXEMPT below. The list is written as CI_OK_SELECTED_BY above is, a JSON array over
+  # lines rather than one long one.
+  CI_OK_ALWAYS_RUN: |
+    [
+      "changes",
+      "lint"
+    ]
   # The jobs outside ci-ok's accounting, each for a reason of its own. `cancel-started` exists
   # only to stop a merge-group run the queue has already thrown away, so it runs only on
   # `merge_group`, holds `actions: write`, runs no dependency code, reports no result to ci-ok
@@ -4541,6 +4555,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           SELECTED_BY: ${{ env.CI_OK_SELECTED_BY }}
           PULL_REQUEST_ONLY: ${{ env.CI_OK_PULL_REQUEST_ONLY }}
+          ALWAYS_RUN: ${{ env.CI_OK_ALWAYS_RUN }}
         run: .github/scripts/ci-ok.sh
 
       # A ci-ok the ci-ok-report step posted stays on the head as it was: no re-run updates a

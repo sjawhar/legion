@@ -6,7 +6,9 @@
 # entry's pinned script count as reading every Go file of the repository and every file under a
 # Go module's directory, a why that cites a step must name a workflow file that still holds it,
 # CI_OK_SELECTED_BY must map every job changes gates, it and CI_OK_PULL_REQUEST_ONLY must say what
-# each job's if: tests, every job but changes and those CI_OK_EXEMPT names must end with the ci-ok
+# each job's if: tests, every job of ci.yaml must be in exactly one of ci-ok's three classes
+# (CI_OK_SELECTED_BY, CI_OK_ALWAYS_RUN, CI_OK_EXEMPT) and a CI_OK_ALWAYS_RUN job must be gated by
+# no changes output, every job but changes and those CI_OK_EXEMPT names must end with the ci-ok
 # report step, the ci-ok job must need every job but itself and the exempt ones, each check
 # main's ruleset requires must be the ci.yaml job of that name and no other job may carry one,
 # and a PUSH_WORKFLOWS workflow's
@@ -42,10 +44,13 @@ source "$script_dir/test-lib.sh"
 # fixture <name>: a tree that passes. The app job runs `go test ./cmd/app ./lib`, whose closure is
 # cmd/app and lib (cmd/app imports lib); lib's test reads fixtures/data.json through `..`, which
 # RULES records; mod/other is a package nothing imports. The image job runs only on a pull
-# request, and both end with the ci-ok report step. pr-title and ci-ok are the two jobs named for
+# request, and both end with the ci-ok report step. The lint job is the fixture's always-run one:
+# no output of changes gates it, CI_OK_ALWAYS_RUN names it beside `changes`, and ci-ok holds it
+# to success. pr-title and ci-ok are the two jobs named for
 # a check main's ruleset requires: CI_OK_EXEMPT holds both outside ci-ok's accounting, so neither
 # carries the report step and neither may carry the term that skips a job on a re-run attempt of
-# a merge-group run. The site filter gates no job: site.yaml, which
+# a merge-group run. Every job of the fixture is thus in exactly one of ci-ok's three classes.
+# The site filter gates no job: site.yaml, which
 # PUSH_WORKFLOWS pairs with it, runs on a push whose paths are that filter flattened. The root
 # package.json has the one workspace packages/widget, which WORKSPACES names, since rule 13 holds
 # those two lists to each other; no job here runs Bun, so that manifest is nothing the app gate
@@ -105,6 +110,7 @@ on: [pull_request]
 env:
   CI_OK_SELECTED_BY: '{"app": "app", "image": "image"}'
   CI_OK_PULL_REQUEST_ONLY: '["image"]'
+  CI_OK_ALWAYS_RUN: '["changes", "lint"]'
   CI_OK_EXEMPT: '["ci-ok", "pr-title"]'
 jobs:
   changes:
@@ -160,6 +166,19 @@ jobs:
         with:
           changes: ${{ toJSON(needs.changes) }}
           job-status: ${{ job.status }}
+  lint:
+    needs: changes
+    if: (github.event_name != 'merge_group' || github.run_attempt == '1')
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Lint everything
+        run: echo lint
+      - name: Report ci-ok when this job decides a merge-group run
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
   pr-title:
     if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     runs-on: ubuntu-24.04
@@ -167,7 +186,7 @@ jobs:
       - name: Check the pull request's text
         run: echo text
   ci-ok:
-    needs: [changes, app, image]
+    needs: [changes, app, image, lint]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     steps:
@@ -378,6 +397,49 @@ run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the job" "$(contains "$out" "CI_OK_PULL_REQUEST_ONLY lacks image, whose if: admits only pull_request")"
 
+echo "case: a job in none of ci-ok's three classes"
+# The fixture's lint job runs on every change and no changes output gates it, so dropping it
+# from CI_OK_ALWAYS_RUN leaves it in no class: ci-ok.sh would fail its result on every run, and
+# the author cannot answer that by mapping it, since its if: tests no output of changes.
+root=$(fixture ci-ok-classless)
+replace "$root/.github/workflows/ci.yaml" "CI_OK_ALWAYS_RUN: '[\"changes\", \"lint\"]'" \
+  "CI_OK_ALWAYS_RUN: '[\"changes\"]'"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the job and the three remedies" \
+  "$(contains "$out" "job lint is in none of ci-ok's three classes, so ci-ok.sh fails its result whatever the job did: map it in CI_OK_SELECTED_BY to the changes output its if: tests, name it in CI_OK_ALWAYS_RUN when it runs on every change and ci-ok must hold it to success, or name it in CI_OK_EXEMPT when it is outside ci-ok's accounting and out of job ci-ok's needs:")"
+
+echo "case: a job in two of ci-ok's three classes"
+root=$(fixture ci-ok-two-classes)
+replace "$root/.github/workflows/ci.yaml" "CI_OK_ALWAYS_RUN: '[\"changes\", \"lint\"]'" \
+  "CI_OK_ALWAYS_RUN: '[\"changes\", \"lint\", \"app\"]'"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the job, the two classes and the three remedies" \
+  "$(contains "$out" "job app is in 2 of ci-ok's three classes (CI_OK_SELECTED_BY, CI_OK_ALWAYS_RUN), which judge it differently, and it belongs in exactly one: map it in CI_OK_SELECTED_BY")"
+
+echo "case: CI_OK_ALWAYS_RUN names a job an output of changes gates"
+# A gated job named here would be held to success on every run that rightly skipped it, which is
+# the opposite failure: ci-ok red for ever rather than green on nothing.
+root=$(fixture ci-ok-always-run-gated)
+replace "$root/.github/workflows/ci.yaml" "CI_OK_SELECTED_BY: '{\"app\": \"app\", \"image\": \"image\"}'" \
+  "CI_OK_SELECTED_BY: '{\"image\": \"image\"}'"
+replace "$root/.github/workflows/ci.yaml" "CI_OK_ALWAYS_RUN: '[\"changes\", \"lint\"]'" \
+  "CI_OK_ALWAYS_RUN: '[\"changes\", \"lint\", \"app\"]'"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the job and the output that gates it" \
+  "$(contains "$out" "CI_OK_ALWAYS_RUN names app, whose if: tests needs.changes.outputs.app, so changes gates it rather than selecting every run of it, and ci-ok.sh would fail every run that rightly skipped it; map it in CI_OK_SELECTED_BY instead")"
+
+echo "case: CI_OK_ALWAYS_RUN names a job the file does not have"
+root=$(fixture ci-ok-always-run-gone)
+replace "$root/.github/workflows/ci.yaml" "CI_OK_ALWAYS_RUN: '[\"changes\", \"lint\"]'" \
+  "CI_OK_ALWAYS_RUN: '[\"changes\", \"lint\", \"gone\"]'"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names it" \
+  "$(contains "$out" "CI_OK_ALWAYS_RUN names gone, which is no job of this file; drop it, or name the job it was meant for")"
+
 echo "case: a job whose last step is not the ci-ok report"
 root=$(fixture ci-ok-unreported)
 replace "$root/.github/workflows/ci.yaml" "        if: always()" "        if: success()"
@@ -505,7 +567,7 @@ check "names the check nothing would carry" \
 
 echo "case: the ci-ok job does not need a job of the file"
 root=$(fixture ci-ok-needs-missing)
-replace "$root/.github/workflows/ci.yaml" "    needs: [changes, app, image]" "    needs: [changes, app]"
+replace "$root/.github/workflows/ci.yaml" "    needs: [changes, app, image, lint]" "    needs: [changes, app, lint]"
 run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the job it would judge nothing of" \
@@ -516,7 +578,7 @@ root=$(fixture ci-ok-needs-exempt)
 cancel_job "$root"
 replace "$root/.github/workflows/ci.yaml" "CI_OK_EXEMPT: '[\"ci-ok\", \"pr-title\"]'" \
   "CI_OK_EXEMPT: '[\"ci-ok\", \"pr-title\", \"cancel\"]'"
-replace "$root/.github/workflows/ci.yaml" "    needs: [changes, app, image]" "    needs: [changes, app, image, cancel]"
+replace "$root/.github/workflows/ci.yaml" "    needs: [changes, app, image, lint]" "    needs: [changes, app, image, lint, cancel]"
 run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the exempt job and why the verdict cannot read it" \
@@ -536,7 +598,7 @@ echo "case: the file has no ci-ok job"
 # The job is the last of the fixture, and `replace` reads the file without its trailing newline,
 # so the block to cut starts at the newline before it and ends at its last line.
 root=$(fixture ci-ok-absent)
-replace "$root/.github/workflows/ci.yaml" $'\n  ci-ok:\n    needs: [changes, app, image]\n    if: ${{ always() }}\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Judge every job of this run\n        run: echo verdict' ""
+replace "$root/.github/workflows/ci.yaml" $'\n  ci-ok:\n    needs: [changes, app, image, lint]\n    if: ${{ always() }}\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Judge every job of this run\n        run: echo verdict' ""
 run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the check nothing would carry" \

@@ -67,8 +67,9 @@
 #   HEAD_SHA           the commit ci-ok is for (post-check-run.sh).
 #   GITHUB_REPOSITORY, GITHUB_RUN_ID, GITHUB_SERVER_URL, as Actions sets them.
 #   CI_OK_WORKFLOW     optional: the router's file, .github/workflows/ci.yaml beside this script
-#                      by default (the copy of the commit the run checked out). CI_OK_SELECTED_BY
-#                      and CI_OK_PULL_REQUEST_ONLY are read from it and handed to ci-ok.sh.
+#                      by default (the copy of the commit the run checked out). CI_OK_SELECTED_BY,
+#                      CI_OK_PULL_REQUEST_ONLY and CI_OK_ALWAYS_RUN are read from it and handed
+#                      to ci-ok.sh, which judges a job by the class its name is in.
 #
 # Run from anywhere: JOB=... JOB_STATUS=... CHANGES=... EVENT=... HEAD_SHA=... \
 #   .github/scripts/ci-ok-report.sh
@@ -122,9 +123,11 @@ fi
 
 selected_by=$(yq -r '.env.CI_OK_SELECTED_BY // ""' "$workflow")
 pull_request_only=$(yq -r '.env.CI_OK_PULL_REQUEST_ONLY // ""' "$workflow")
+always_run=$(yq -r '.env.CI_OK_ALWAYS_RUN // ""' "$workflow")
 if ! jq -e 'type == "object"' <<<"$selected_by" >/dev/null 2>&1 \
-  || ! jq -e 'type == "array"' <<<"$pull_request_only" >/dev/null 2>&1; then
-  echo "::error::$workflow's env holds no JSON CI_OK_SELECTED_BY object and CI_OK_PULL_REQUEST_ONLY array"
+  || ! jq -e 'type == "array"' <<<"$pull_request_only" >/dev/null 2>&1 \
+  || ! jq -e 'type == "array"' <<<"$always_run" >/dev/null 2>&1; then
+  echo "::error::$workflow's env holds no JSON CI_OK_SELECTED_BY object and CI_OK_PULL_REQUEST_ONLY and CI_OK_ALWAYS_RUN arrays"
   exit 1
 fi
 
@@ -140,18 +143,20 @@ def ended($job):
         else "skipped" end
     else null end;
 def live($job): [mine($job)[] | select(.status != "completed") | .status] | first // "unlisted";
-{changes: $changes, lint: {result: (ended("lint") // live("lint"))}}
+{changes: $changes}
++ ([$always[] | select(. != "changes") | {key: ., value: {result: (ended(.) // live(.))}}] | from_entries)
 + ([$map | keys_unsorted[] | {key: ., value: {result: (ended(.) // live(.))}}] | from_entries)
 JQ
 if jobs=$(gh_read gh api --paginate \
   "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
   --jq '.jobs[] | {name, status, conclusion}'); then
   needs=$(jq -n --argjson jobs "$(jq -s . <<<"$jobs")" --argjson changes "$CHANGES" \
-    --argjson map "$selected_by" "$program")
+    --argjson map "$selected_by" --argjson always "$always_run" "$program")
 else
   echo "::warning::GitHub refused this run's job list three times, and this merge-group run is already decided: every other job is read as unread, because this run's verdict is failing whatever those jobs go on to do and a group with no ci-ok at all holds the queue for 180 minutes"
-  needs=$(jq -n --argjson changes "$CHANGES" --argjson map "$selected_by" \
-    '{changes: $changes, lint: {result: "unread"}}
+  needs=$(jq -n --argjson changes "$CHANGES" --argjson map "$selected_by" --argjson always "$always_run" \
+    '{changes: $changes}
+     + ([$always[] | select(. != "changes") | {key: ., value: {result: "unread"}}] | from_entries)
      + ([$map | keys_unsorted[] | {key: ., value: {result: "unread"}}] | from_entries)')
 fi
 # This job's own result, which the jobs route cannot give while this step is running.
@@ -160,7 +165,7 @@ needs=$(jq --arg job "$JOB" --arg status "$JOB_STATUS" '.[$job].result = $status
 summary=$(mktemp)
 trap 'rm -f "$summary"' EXIT
 status=0
-verdict=$(NEEDS=$needs EVENT=$EVENT SELECTED_BY=$selected_by \
+verdict=$(NEEDS=$needs EVENT=$EVENT SELECTED_BY=$selected_by ALWAYS_RUN=$always_run \
   PULL_REQUEST_ONLY=$pull_request_only "$script_dir/ci-ok.sh" 2>&1) || status=$?
 echo "$verdict"
 if [ "$status" -eq 0 ]; then

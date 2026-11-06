@@ -7,7 +7,8 @@
 #
 # Each case writes the run's jobs as the jobs route lists them and the `changes` and `job.status`
 # the reporting job saw, and runs the real scripts with a stand-in `gh` first on PATH: it answers
-# the jobs read and records each check run posted. The map is ci-ok.test.sh's four jobs, in a
+# the jobs read and records each check run posted. The map is ci-ok.test.sh's four jobs and the
+# always-run list ci.yaml's own two, in a
 # ci.yaml of the case's own (CI_OK_WORKFLOW); one case reads the real ci.yaml.
 #
 # Run from anywhere: .github/scripts/ci-ok-report.test.sh
@@ -51,6 +52,7 @@ env:
   CI_OK_SELECTED_BY: |
     {"typecheck": "typecheck", "envoy-client": "envoy_client", "worker-image": "worker_image", "docs": "docs"}
   CI_OK_PULL_REQUEST_ONLY: '["worker-image"]'
+  CI_OK_ALWAYS_RUN: '["changes", "lint"]'
 YAML
 
 # What `changes` gave the reporting job on a merge group: typecheck and envoy-client selected,

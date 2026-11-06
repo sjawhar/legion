@@ -64,15 +64,33 @@ its own workflows; this page covers this repository only.
    `checks: write`, which the step needs. It posts nothing but the failing `ci-ok` of a
    merge-group run this job's own result decides, so that a doomed group leaves the queue at the
    first failure; a job without it leaves that group waiting for every other job of the run.
-5. **The job in `CI_OK_SELECTED_BY`** (ci.yaml's `env:`), mapped to the output its `if:` tests
-   (`"<job>": "<filter>"`), and in `CI_OK_PULL_REQUEST_ONLY` too when its `if:` also admits only
-   `github.event_name == 'pull_request'`. A job an event must hold back gets its `changes` output
+5. **The job in one of `ci-ok`'s three classes**, all three in ci.yaml's `env:`, and in exactly
+   one of them:
+
+   - **`CI_OK_SELECTED_BY`**, mapped to the output its `if:` tests (`"<job>": "<filter>"`), and
+     in `CI_OK_PULL_REQUEST_ONLY` too when its `if:` also admits only
+     `github.event_name == 'pull_request'`. This is where a job gated by a `changes` output
+     goes. It costs the job nothing: `ci-ok` passes when `changes` did not select it and it was
+     skipped, and fails when it was selected and did not succeed.
+   - **`CI_OK_ALWAYS_RUN`**, for a job no `changes` output gates, which therefore runs on every
+     change (`changes` and `lint` are the two). It costs every change the job's whole run time,
+     and `ci-ok` passes only when the job succeeded: a skip, a cancellation or an absence from
+     the verdict's `needs:` fails the check. Put a job here only when every change must run it;
+     anything a filter can select belongs in the first class.
+   - **`CI_OK_EXEMPT`**, for a job outside `ci-ok`'s accounting altogether (`cancel-started`,
+     `ci-ok`, `pr-title`). It costs the job its verdict: nothing judges its result, so it must
+     carry no report step and stay out of the `ci-ok` job's `needs:`, and only a job whose
+     result is read elsewhere — its own required check, or nothing at all — may go here.
+
+   A job an event must hold back gets its `changes` output
    set false on that event instead of an `if:` that skips it, so `ci-ok` reads the skip as
    unselected: that is how the nine slow suites are held back on a pull request that does not
    carry the label `full-ci` (`(github.event_name != 'pull_request' ||
    contains(github.event.pull_request.labels.*.name, 'full-ci')) && steps.filter.outputs.<filter>
-   || 'false'`). `ci-ok` fails a job the map does not name, and
-   `check-ci-filters.sh` fails when the map or a list is not exactly what the `if:`s test, or a
+   || 'false'`). `ci-ok` fails a job in none of the three classes, naming all three remedies, and
+   `check-ci-filters.sh` fails when the map or a list is not exactly what the `if:`s test, when a
+   job is in none of the classes or in two, when a job `CI_OK_ALWAYS_RUN` names is gated by a
+   `changes` output after all, or when a
    job outside `CI_OK_EXEMPT` lacks the report step (the section on `ci-ok` below says why).
 6. **The job in the `ci-ok` job's `needs:`**, which is every job of the file but `ci-ok` itself
    and those `CI_OK_EXEMPT` names. A job outside that list ends after a verdict that says nothing
@@ -128,11 +146,18 @@ A job's own check run carries an `external_id` too, a UUID, so the prefix is the
 than the field's presence; and a re-run of the same job supersedes its earlier attempt by
 itself, since `statusCheckRollup` and the default `latest` filter read the newest alone.
 
-The verdict is `.github/scripts/ci-ok.sh`'s. It passes only when `changes` succeeded, lint
-succeeded (it runs on every change), every job `changes` selected succeeded, and every job it
+The verdict is `.github/scripts/ci-ok.sh`'s. It passes only when `changes` succeeded, every job
+`CI_OK_ALWAYS_RUN` names succeeded (each of those runs on every change), every job `changes`
+selected succeeded, and every job it
 did not select succeeded or was skipped. ci-images is one of the selected jobs: the `ci_images`
 filter selects it, and `CI_OK_SELECTED_BY` maps it. A selected job that failed, was cancelled or
-timed out fails it, and it prints every job's result and whether `changes` selected it.
+timed out fails it, and it prints every job's result and whether `changes` selected it. The
+error says which of the three happened, because they are not one fault: a skip is the job's
+`if:` and its filter disagreeing, which the author fixes in one of the two; a cancellation is
+the job cut off — its own `timeout-minutes` (a job its limit cut off reports `cancelled`,
+measured on probe run 41869007039), a cancelled run or a force-cancel — and sends the
+author to the job's log and its limit, not to its filter; a failure is the job's own, and its
+log says what broke.
 
 A skipped job reports success, so accepting any skip is not enough. When `changes` fails, every
 job its filters gate is skipped. GitHub's "Re-run failed jobs" then re-runs `changes`, and
@@ -147,12 +172,15 @@ run is never re-run, and the pull request is tested again when it is queued agai
 `check-ci-filters.sh` fails when `CI_OK_SELECTED_BY` is not exactly {job: the output its `if:`
 tests} for every job whose `if:` tests an output of `changes`, when `CI_OK_PULL_REQUEST_ONLY` is
 not exactly the jobs whose `if:` restricts to `github.event_name == 'pull_request'`, when a job
+of the file is in none of the three classes or in two of them, when a job `CI_OK_ALWAYS_RUN`
+names is gated by a `changes` output after all, when a job
 but `changes` and those `CI_OK_EXEMPT` names does not end with the report step, when a job
 `CI_OK_EXEMPT` names does carry it, when a job other than the verdict job is named `ci-ok` or
 `pr-title`, which would post a required check itself (a skipped job posts a pass), and when the
 `ci-ok` job is missing, is outside `CI_OK_EXEMPT`, or does not need exactly every other
 non-exempt job. A wrong entry would fail a job its `if:` rightly skipped, pass one a re-run left
-skipped, or leave a job out of the verdict altogether.
+skipped, or leave a job out of the verdict altogether; a job in no class is one the verdict
+fails on every run, whatever the job did.
 
 A fork pull request's run gets a read-only token, which can post no check run, and neither
 required check needs one: `ci-ok` and `pr-title` are jobs of ci.yaml, a job's own check run costs

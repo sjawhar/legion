@@ -59,10 +59,17 @@
 #      and pr-title) that is not the job of that name, and either of those two jobs renamed by a
 #      `name:`, since a job posts its own check under its display name and a skipped one posts a
 #      pass; a pr-title job that is missing, since nothing else reports that check on a pull
-#      request or a merge group; and a ci-ok job — the verdict, whose own check run is the other
+#      request or a merge group; a ci-ok job — the verdict, whose own check run is the other
 #      check that ruleset requires — that is missing, that CI_OK_EXEMPT does not name, or whose
 #      needs: is not every job of the file but itself and the exempt ones, since a job outside
-#      that list ends after a verdict that says nothing about it,
+#      that list ends after a verdict that says nothing about it; and a job of the file that is
+#      in none of ci-ok's three classes, or in two of them: CI_OK_SELECTED_BY maps it to the
+#      changes output its if: tests, CI_OK_ALWAYS_RUN names it (it runs on every change, no
+#      changes output gates it, and ci-ok passes only when it succeeded), or CI_OK_EXEMPT names
+#      it (outside ci-ok's accounting), and a job in none is one ci-ok.sh fails on every run
+#      whatever it did while a job in two is read by the wrong class; a CI_OK_ALWAYS_RUN name
+#      that is no job of the file, or whose if: does test an output of changes, since ci-ok.sh
+#      would then hold to success a job changes rightly skipped,
 #   8. a workflow ci_job_reads.py's PUSH_WORKFLOWS pairs with a filter whose on.push.paths do not
 #      name exactly that filter's patterns (anchors flattened), naming each missing and extra one,
 #      or that is missing or has no on.push.paths: it runs on main the work the filter's job runs
