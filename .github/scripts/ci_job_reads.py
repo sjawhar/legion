@@ -415,6 +415,58 @@ go test -count=20 -run '^TestAnUploadHoldsNoIssueLockWhileTheStoreWrites$' ./int
 # form reduces. It leaves this table with the step (dispatch://INFRA-1075).
 CLONE_COST_STEP = "Measure what a test's database clone costs (INFRA-1075)"
 CLONE_COST_SCRIPT = "go test -tags clonecost -v -count=1 -timeout 10m -run '^TestCloneCostMeasurement$' ./internal/dispatch/api/"
+# TEMPORARY, envoy-go's INFRA-1075 request-profile step: three go test calls around a Postgres of
+# its own, so not the simple form. It leaves this table with the step (dispatch://INFRA-1075).
+REQUEST_PROFILE_STEP = "Profile a request and the statements it runs (INFRA-1075)"
+REQUEST_PROFILE_SCRIPT = """\
+set -o pipefail
+out="$RUNNER_TEMP/api-profile"
+mkdir -p "$out"
+image=$(docker inspect -f '{{.Image}}' "${{ job.services.postgres.id }}")
+docker run -d --name api-profile-pg --shm-size=1g -p 5433:5432 -e POSTGRES_PASSWORD=ci "$image" postgres -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c max_connections=500 -c max_prepared_transactions=20 -c shared_preload_libraries=pg_stat_statements -c pg_stat_statements.max=10000 -c pg_stat_statements.track=all
+ready=
+for _ in $(seq 60); do
+  if docker exec api-profile-pg pg_isready -U postgres -q; then ready=yes; break; fi
+  sleep 1
+done
+if [ -z "$ready" ]; then docker logs api-profile-pg; echo "::error::the measurement Postgres never came up"; exit 1; fi
+# In template1 as well as in postgres: every database the harness makes is a copy of
+# template1, and the workload test resets the counters from the database it holds.
+docker exec api-profile-pg psql -U postgres -d template1 -qAtc 'create extension if not exists pg_stat_statements'
+docker exec api-profile-pg psql -U postgres -d postgres -qAtc 'create extension if not exists pg_stat_statements'
+docker exec api-profile-pg psql -U postgres -d postgres -qAtc "select 'the server these numbers are from: ' || version() || '; shared_preload_libraries=' || current_setting('shared_preload_libraries') || '; pg_stat_statements.track=' || current_setting('pg_stat_statements.track')"
+cat <<'TEXT'
+
+======== PART 1 of 4, one request over and over, profiled. The workload test prints
+what each of its requests cost, what the test around them cost, what the server ran for
+them, and a reading of the three. The server's own log lines are filtered out of it.
+TEXT
+go test -tags apiprofile -count=1 -v -timeout 3m -cpuprofile "$out/workload.prof" -o "$out/workload.test" -run '^TestAPIProfileWorkload$' ./internal/dispatch/api/ 2>&1 | grep -vE ' (INFO|WARN|DEBUG) |^=== '
+cat <<'TEXT'
+
+======== PART 2 of 4, go tool pprof -top -cum over that profile, the top 30 by
+cumulative time. A CPU profile sees this Go process alone: the Postgres it talks to is
+a container of its own, and not one microsecond of its CPU is here. The statement
+tables of part 1 are that other half, and the two together are what a request costs.
+TEXT
+go tool pprof -top -cum -nodecount=30 "$out/workload.test" "$out/workload.prof"
+cat <<'TEXT'
+
+======== PART 3 of 4, the same profile focused on the request loop alone
+TEXT
+go tool pprof -top -cum -nodecount=20 -focus TestAPIProfileWorkload "$out/workload.test" "$out/workload.prof"
+cat <<'TEXT'
+
+======== PART 4 of 4, four ordinary database-backed api tests, profiled whole: two
+plain CRUD tests, one document edit and one room settlement. The counters are reset
+first, so the statement tables at the end hold the template migration this package
+makes once, and every clone and drop, which the loop in part 1 leaves out on purpose.
+TEXT
+docker exec api-profile-pg psql -U postgres -d postgres -qAtc "select 'the counters were reset at ' || pg_stat_statements_reset()"
+go test -count=1 -v -timeout 3m -cpuprofile "$out/tests.prof" -o "$out/tests.test" -run '^(TestIssueTitlesAreCappedOnCreateAndRetitle|TestIssueDocumentsTakeTheirRoleFromTheirName|TestRejectedConditionalEditWritesNothingDurable|TestEveryReadServesATreeAtTheDepthBound)$' ./internal/dispatch/api/ 2>&1 | grep -vE ' (INFO|WARN|DEBUG) |^=== '
+go tool pprof -top -cum -nodecount=30 "$out/tests.test" "$out/tests.prof"
+go test -tags apiprofile -count=1 -v -timeout 2m -run '^TestAPIProfileStatements$' ./internal/dispatch/api/ 2>&1 | grep -vE ' (INFO|WARN|DEBUG) |^=== '
+docker rm -f api-profile-pg > /dev/null"""
 PACK_STEP = "Pack envoy binaries"
 PACK_SCRIPT = """\
 for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
@@ -735,6 +787,12 @@ GATES = [
         # TEMPORARY with the step it pins (dispatch://INFRA-1075).
         pinned_step("envoy-go", CLONE_COST_STEP, ENVOY, CLONE_COST_SCRIPT, [
             (ENVOY, ["./internal/dispatch/api/"], "go test -tags clonecost -run … ./internal/dispatch/api/", {"tags": "clonecost"}),
+        ]),
+        # TEMPORARY with the step it pins (dispatch://INFRA-1075).
+        pinned_step("envoy-go", REQUEST_PROFILE_STEP, ENVOY, REQUEST_PROFILE_SCRIPT, [
+            (ENVOY, ["./internal/dispatch/api/"], "go test -tags apiprofile -cpuprofile -run TestAPIProfileWorkload ./internal/dispatch/api/", {"tags": "apiprofile"}),
+            (ENVOY, ["./internal/dispatch/api/"], "go test -cpuprofile -run … ./internal/dispatch/api/", {}),
+            (ENVOY, ["./internal/dispatch/api/"], "go test -tags apiprofile -run TestAPIProfileStatements ./internal/dispatch/api/", {"tags": "apiprofile"}),
         ]),
         # One linux build of the listener per architecture the loop reads from the target list.
         pinned_step("envoy-go", PACK_STEP, ENVOY, PACK_SCRIPT, [
