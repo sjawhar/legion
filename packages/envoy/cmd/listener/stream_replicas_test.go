@@ -4,8 +4,8 @@ import (
 	"os"
 	"strconv"
 	"testing"
+	"time"
 
-	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/bus/bustest"
 	"github.com/sjawhar/envoy/internal/cmdtest"
@@ -76,16 +76,28 @@ func TestAListenerStartKeepsAThreeCopyStreamsCopiesByteLimitAndIDAsItCorrectsThe
 }
 
 // A listener start with ENVOY_NATS_REPLICAS=3 raises the R1 stream an earlier start at the default
-// created, and the durable the listener created and bound on it (startListenerSubscription), which
-// sets no replica count of its own, moves to three copies with it.
+// created, and the durable the lease holder created on it (ensureListenerDurable), which sets no
+// replica count of its own, moves to three copies with it.
 func TestRaisingTheStreamMovesTheListenersDurableToThreeCopies(t *testing.T) {
 	cluster := testnats.StartCluster(t, 3)
 	js := cluster.JetStream(t)
 	first := listenerSettings(t, cluster.URL(), nil)
 	client := startListenerStream(t, first)
 	durable := bus.ListenerDurable(first.MachineID)
-	if _, err := startListenerSubscription(client, durable, func(*natsgo.Msg) {}); err != nil {
-		t.Fatalf("create and bind the listener's durable: %v", err)
+	// The durable is created as the lease holder creates it (ensureListenerDurable), and the
+	// creation is retried, as the receive loop retries it: a lookup of the durable is answered by
+	// whichever member of the cluster the client is connected to, and for a moment after the
+	// stream is created that member can be one whose applied metadata does not hold the new
+	// stream's assignment yet, which is answered "stream not found". With nothing lagging it is
+	// created on the first attempt.
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(100 * time.Millisecond) {
+		_, err := ensureListenerDurable(t.Context(), client, durable)
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("create the listener's durable: %v", err)
+		}
 	}
 	if info := testnats.AwaitSettledStream(t, js, bus.Stream); info.Config.Replicas != 1 || testnats.Copies(info.Cluster) != 1 {
 		t.Fatalf("the default start's stream has replicas %d with %d copies, want 1", info.Config.Replicas, testnats.Copies(info.Cluster))
