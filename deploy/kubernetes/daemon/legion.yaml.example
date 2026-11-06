@@ -194,12 +194,26 @@ runtime:
     #                                  # second line). Set it for a daemon built from an unreleased commit
     #                                  # (every Stage 4a/4b run), or to pin a different published pair than
     #                                  # this binary links.
-    # setup: [/bin/sh, -c, '{ omp plugin marketplace update acme-skills || omp plugin marketplace add acme/agent-skills; } && omp plugin install agent-skills@acme-skills --force']
+    # skills_repository: acme/agent-skills
+    #                                  # the Oh My Pi plugin marketplace every issue pod's roles
+    #                                  # install their skills from. Each issue pod clones its
+    #                                  # default branch shallow in an init container of its own,
+    #                                  # with the project's App token, and every role installs from
+    #                                  # that clone before Oh My Pi starts: a pod's skills are that
+    #                                  # branch as of the pod's start, with no image rebuild and no
+    #                                  # fetch in any role's launch (docs/kubernetes.md, Operator
+    #                                  # configuration)
+    # setup: [/bin/sh, -c, '[ -n "${LEGION_CONTROLLER:-}" ] || omp plugin list | grep -q agent-skills || { echo "agent-skills is not installed" >&2; exit 1; }']
     #                                  # a command every role runs before each start of its
     #                                  # Oh My Pi, in its working directory with the role's environment
     #                                  # (its git answers github.com with the role's App token); Oh My Pi
     #                                  # starts only once it exits 0, and a failure counts as a failed
-    #                                  # launch (docs/kubernetes.md, Configuration)
+    #                                  # launch (docs/kubernetes.md, Configuration).
+    #                                  # It must fetch nothing: a clone in a role's launch context ends
+    #                                  # the pod's gVisor sandbox, so install skills with
+    #                                  # skills_repository above and leave this to check they are there.
+    #                                  # The controller's pod installs no skill, so the check skips it
+    #                                  # (LEGION_CONTROLLER is set in the controller's agent alone).
     pod:                               # the model route: deploy/kubernetes/operator-route/pod.yml
       env:
         PI_CONFIG_FILES: /etc/legion-operator/overlay.yml

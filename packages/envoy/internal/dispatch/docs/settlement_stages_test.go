@@ -100,7 +100,7 @@ func TestSettlementTakeHoldsTheRoomsLiveInstance(t *testing.T) {
 	settleCurrentGeneration(t, service, artifactID)
 
 	settle := stageSettlement(t, service, artifactID)
-	step, outcome := settle.take(context.Background())
+	step, outcome := settle.take(context.Background(), false)
 	requireStageGoesOn(t, "take", step, outcome)
 	if settle.doc == nil || settle.doc != service.srv.GetDoc(artifactID) {
 		t.Fatalf("take held %p, want the room's live instance %p", settle.doc, service.srv.GetDoc(artifactID))
@@ -125,7 +125,7 @@ func TestSettlementReadLockedReadsTheTreeTheSettlementReconciles(t *testing.T) {
 
 	settle := stageSettlement(t, service, artifactID)
 	parent := context.Background()
-	step, outcome := settle.take(parent)
+	step, outcome := settle.take(parent, false)
 	requireStageGoesOn(t, "take", step, outcome)
 	ctx := openStageTransaction(t, settle, parent)
 	step, outcome = settle.readLocked(ctx, parent)
@@ -154,7 +154,7 @@ func TestSettlementApplyStampStampsTheBlockIdsTheDocumentLacks(t *testing.T) {
 
 	settle := stageSettlement(t, service, artifactID)
 	parent := context.Background()
-	step, outcome := settle.take(parent)
+	step, outcome := settle.take(parent, false)
 	requireStageGoesOn(t, "take", step, outcome)
 	ctx := openStageTransaction(t, settle, parent)
 	step, outcome = settle.readLocked(ctx, parent)
@@ -186,7 +186,7 @@ func TestSettlementCommitStampCommitsTheStampAlone(t *testing.T) {
 
 	settle := stageSettlement(t, service, artifactID)
 	parent := context.Background()
-	step, outcome := settle.take(parent)
+	step, outcome := settle.take(parent, false)
 	requireStageGoesOn(t, "take", step, outcome)
 	ctx := openStageTransaction(t, settle, parent)
 	step, outcome = settle.readLocked(ctx, parent)
@@ -225,7 +225,7 @@ func TestSettlementPlanRepairsReconcilesTheAnsweredAskBlock(t *testing.T) {
 
 	settle := stageSettlement(t, service, artifactID)
 	parent := context.Background()
-	step, outcome := settle.take(parent)
+	step, outcome := settle.take(parent, false)
 	requireStageGoesOn(t, "take", step, outcome)
 	ctx := openStageTransaction(t, settle, parent)
 	step, outcome = settle.readLocked(ctx, parent)
@@ -253,7 +253,7 @@ func TestSettlementCommitRepairsWritesTheRepairIntoTheRoom(t *testing.T) {
 
 	settle := stageSettlement(t, service, artifactID)
 	parent := context.Background()
-	step, outcome := settle.take(parent)
+	step, outcome := settle.take(parent, false)
 	requireStageGoesOn(t, "take", step, outcome)
 	ctx := openStageTransaction(t, settle, parent)
 	step, outcome = settle.readLocked(ctx, parent)
@@ -288,7 +288,7 @@ func TestSettlementStagesSettleTheDocumentInOrder(t *testing.T) {
 
 	settle := stageSettlement(t, service, artifactID)
 	parent := context.Background()
-	step, outcome := settle.take(parent)
+	step, outcome := settle.take(parent, false)
 	requireStageGoesOn(t, "take", step, outcome)
 	ctx := openStageTransaction(t, settle, parent)
 	step, outcome = settle.readLocked(ctx, parent)
