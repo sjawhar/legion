@@ -346,8 +346,9 @@ test("a card the session already has is answered without a second write", async 
 // `claude --resume <id>`): a stopped process polls for nothing, so the submit sits in the link's
 // queue and no session has the card. That card leaves no record, and the frame Envoy sends again
 // goes to the session as the first copy should have — the message is never lost to keep it from
-// arriving twice. Its fake mod reports every submit left waiting, as the link does for a request
-// no mod took (`../src/mod-link`).
+// arriving twice. Its fake mod takes no submit and reports none handed, as the link reports
+// nothing for a request no mod polled for, and it drops the one the caller withdrew, as the
+// link drops what its queue still holds (`../src/mod-link`).
 test("a card no mod took is submitted again when Envoy resends it", async () => {
   const nats = new FakeNats()
   const submitted: string[] = []
@@ -358,15 +359,19 @@ test("a card no mod took is submitted again when Envoy resends it", async () => 
       request: <N extends ModCallName>(
         call: N,
         args: ModCallArguments[N],
-        options?: { readonly taken?: (taken: boolean) => void },
+        options?: { readonly signal?: AbortSignal },
       ): Promise<ModCallResults[N]> => {
         if (call !== "prompt.submit") {
           return Promise.reject(new Error(`the card path made an unexpected mod call: ${call}`))
         }
         const { text } = args as ModCallArguments["prompt.submit"]
         submitted.push(text)
-        options?.taken?.(false)
         const held = Promise.withResolvers<ModCallResults[N]>()
+        options?.signal?.addEventListener(
+          "abort",
+          () => held.reject(new Error("prompt.submit was withdrawn before a mod took it")),
+          { once: true },
+        )
         holdingSubmits.push(() => held.resolve({ text } as ModCallResults[N]))
         return held.promise
       },

@@ -59,19 +59,27 @@ export interface ModLink {
    *  oldest dropped past 2048; the iterator ends when the link closes. */
   readonly events: AsyncIterableIterator<ModEvent>
   /** Ask the mod to make one call, and resolve with its answer. Rejects with the mod's own error
-   *  when the call failed, when `timeoutMs` passes with no answer, and when the link closes
-   *  first. `taken` is told whether a mod has the request: `false` while it waits in this
-   *  link's queue with none polling, `true` the moment a polling mod is handed it. A request a
-   *  mod is handed at once reports `true` alone; one that waits reports `false` and then
-   *  `true`; one dropped from the queue unpolled — `timeoutMs` passing, or the link closing —
-   *  reports `false` and nothing after it. It is the one fact that separates a
-   *  `$.prompt.submit` which entered the session from one which never did, since a submit
-   *  resolves only at the end of the turn it starts and a Claude Code that is stopped, or
-   *  gone, writes no row either (`./mod-session`, `show`). */
+   *  when the call failed, when `timeoutMs` passes with no answer, when the link closes first,
+   *  and when `signal` withdraws it.
+   *
+   *  `handed` is called once, the moment a polling mod is handed this request, and not at all
+   *  while it waits in this link's queue: it is the one fact that separates a `$.prompt.submit`
+   *  which entered the session from one which never did, since a submit resolves only at the end
+   *  of the turn it starts and a Claude Code that is stopped, or gone, writes no row either
+   *  (`./mod-session`, `show`). A request nothing has been handed reports nothing at all, so a
+   *  caller that was never called knows the work is still in this process.
+   *
+   *  `signal` withdraws a request that is still queued: it leaves the queue and the call rejects,
+   *  so a mod that polls later is never handed work the caller has given up on. A request a mod
+   *  already holds is left alone — the mod is running it, and its answer is still this call's. */
   readonly request: <N extends ModCallName>(
     call: N,
     args: ModCallArguments[N],
-    options?: { readonly timeoutMs?: number; readonly taken?: (taken: boolean) => void },
+    options?: {
+      readonly timeoutMs?: number
+      readonly handed?: () => void
+      readonly signal?: AbortSignal
+    },
   ) => Promise<ModCallResults[N]>
   /** The session id the mod last reported: its boot id, then whatever a `/clear` moved it to.
    *  Undefined until the mod says hello. */
@@ -114,8 +122,8 @@ interface PendingRequest {
   readonly call: ModCallName
   readonly settle: PromiseWithResolvers<ModResultValue>
   readonly timer: ReturnType<typeof setTimeout>
-  /** Told when a polling mod is handed this request (`ModLink.request`). */
-  readonly taken?: (taken: boolean) => void
+  /** Called once when a polling mod is handed this request (`ModLink.request`). */
+  readonly handed?: () => void
 }
 
 /** A one-consumer stream of what the mod sent. */
@@ -364,11 +372,11 @@ export async function startModLink(options: ModLinkOptions): Promise<ModLink> {
     for (const listener of sessionIdListeners) listener(sessionId)
   }
 
-  /** The requests a polling mod is being handed, each caller told that a mod has its request
-   *  now (`ModLink.request`). This is the moment the work leaves this process: a request still
-   *  in the queue has reached no Claude Code at all. */
+  /** The requests a polling mod is being handed, each caller told once that a mod has its
+   *  request now (`ModLink.request`). This is the moment the work leaves this process: a request
+   *  still in the queue has reached no Claude Code at all, and its caller hears nothing. */
   const handOut = (requests: readonly ModRequest[]): readonly ModRequest[] => {
-    for (const handed of requests) pending.get(handed.id)?.taken?.(true)
+    for (const handed of requests) pending.get(handed.id)?.handed?.()
     return requests
   }
 
@@ -507,6 +515,11 @@ export async function startModLink(options: ModLinkOptions): Promise<ModLink> {
       waiting.settle.reject(new Error("the mod link closed before the mod answered"))
     }
     pending.clear()
+    // The queue goes with them: every request it held has just been rejected, and a mod that
+    // posts one last poll as this server goes down is handed none of it. A request no mod took
+    // leaves the queue when its caller's wait ends or when the link drops, and never sits there
+    // until its own bound is up (INFRA-1026 review).
+    queued.length = 0
     for (const poll of held) {
       clearTimeout(poll.timer)
       poll.answer([])
@@ -526,7 +539,11 @@ export async function startModLink(options: ModLinkOptions): Promise<ModLink> {
     request<N extends ModCallName>(
       call: N,
       args: ModCallArguments[N],
-      requestOptions?: { readonly timeoutMs?: number; readonly taken?: (taken: boolean) => void },
+      requestOptions?: {
+        readonly timeoutMs?: number
+        readonly handed?: () => void
+        readonly signal?: AbortSignal
+      },
     ): Promise<ModCallResults[N]> {
       if (closed) return Promise.reject(new Error("the mod link is closed"))
       const timeoutMs = requestOptions?.timeoutMs ?? MOD_REQUEST_TIMEOUT_MS
@@ -534,26 +551,40 @@ export async function startModLink(options: ModLinkOptions): Promise<ModLink> {
       const settle = Promise.withResolvers<ModResultValue>()
       // One arm of ModRequest per call name, a correlation the compiler cannot follow through `N`.
       const request = { id, call, args } as ModRequest
+      /** This request's place in the queue, taken back, and whether it was still there. Queued
+       *  is where a request waits when no mod is polling, and a mod that connects later would
+       *  run this one - a `session.append` or a `prompt.submit` the listener has long since sent
+       *  again, so the agent would get the message twice (R12 says one time). In a session whose
+       *  mod never connects the queue would instead grow for the life of the process
+       *  (INFRA-1026 review). */
+      const dequeue = (): boolean => {
+        const waiting = queued.indexOf(request)
+        if (waiting === -1) return false
+        queued.splice(waiting, 1)
+        return true
+      }
       const timer = setTimeout(() => {
         pending.delete(id)
-        // Out of the queue as well as out of `pending`: queued is where a request waits when no
-        // mod is polling, and a mod that connects later would run this one - a `session.append`
-        // or a `prompt.submit` the listener has long since sent again, so the agent would get
-        // the message twice (R12 says one time). In a session whose mod never connects the queue
-        // would instead grow for the life of the process (INFRA-1026 review).
-        const waiting = queued.indexOf(request)
-        if (waiting !== -1) queued.splice(waiting, 1)
+        dequeue()
         settle.reject(new Error(`the mod did not answer ${call} within ${timeoutMs} ms`))
       }, timeoutMs)
       timer.unref()
-      const taken = requestOptions?.taken
-      pending.set(id, { call, settle, timer, ...(taken === undefined ? {} : { taken }) })
+      /** The caller has given up on this request: it leaves the queue, so no later poll is
+       *  handed work nobody is waiting for. One a mod already holds is left where it is - the
+       *  mod is running it, and its answer is still this call's. */
+      const withdraw = (): void => {
+        if (!dequeue()) return
+        pending.delete(id)
+        clearTimeout(timer)
+        settle.reject(new Error(`${call} was withdrawn before a mod took it`))
+      }
+      const handed = requestOptions?.handed
+      pending.set(id, { call, settle, timer, ...(handed === undefined ? {} : { handed }) })
       queued.push(request)
       wake()
-      // Still queued: no mod polled for it, so nothing of this request has left this process
-      // yet, and the caller is told so. A `$.prompt.submit` waiting here has entered no
-      // session, which is what a card's frame turns on (`./mod-session`, `show`).
-      if (queued.includes(request)) taken?.(false)
+      const signal = requestOptions?.signal
+      if (signal?.aborted === true) withdraw()
+      else signal?.addEventListener("abort", withdraw, { once: true })
       // The mod answers the call it was asked for, so the value is that call's own.
       return settle.promise as Promise<ModCallResults[N]>
     },

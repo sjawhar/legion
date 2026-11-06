@@ -535,6 +535,10 @@ test("the prompt at a row no request read carries the message's words and its Di
   }
 })
 
+// A submit answers only at the end of the turn it starts, so the mod is handed one prompt at a
+// time: a message that arrives while one is in flight is a row of the turn that prompt starts,
+// which the model reads at that turn's next request, where a second prompt would leave this
+// process a whole turn later (INFRA-1026 review, round ten; `../src/mod-session`, `inTurn`).
 test("the server hands the mod one prompt at a time, since a submit lasts the turn it starts", async () => {
   const open: PromiseWithResolvers<void>[] = []
   const mod = fakeMod({
@@ -544,6 +548,7 @@ test("the server hands the mod one prompt at a time, since a submit lasts the tu
       await held.promise
       return { text: args.text }
     },
+    "session.append": () => ({ uuid: "row-two" }),
   })
   const session = await harness({
     link: mod.link,
@@ -554,10 +559,20 @@ test("the server hands the mod one prompt at a time, since a submit lasts the tu
     await session.router.route(frame(personSends("two", { attempt: 2, eventId: "evt-2" })))
     await settled()
 
-    // The second waits behind the first rather than entering beside it.
-    expect(mod.madeOf("prompt.submit")).toHaveLength(1)
+    // The second is a row of the turn the first is starting, not a prompt beside it.
+    expect(mod.madeOf("prompt.submit").map((args) => args.text)).toEqual(["message 1"])
+    expect(mod.madeOf("session.append")).toEqual([
+      { message: { type: "user", content: [{ type: "text", text: "message 2" }] } },
+    ])
+
+    // That turn reports itself, makes a request after the row, and ends: the row was read, so
+    // nothing is submitted to point the model at it.
+    session.observe({ kind: "turn-start", turnId: "turn-1" })
+    session.observe({ kind: "step-request", turnId: "turn-1", index: 0 })
+    session.observe({ kind: "turn-complete", turnId: "turn-1", stopReason: "answer" })
     open[0]?.resolve()
-    await waitFor(async () => mod.madeOf("prompt.submit").length === 2, "the second prompt")
+    await settled()
+    expect(mod.madeOf("prompt.submit")).toHaveLength(1)
   } finally {
     for (const held of open) held.resolve()
     await rm(session.directory, { recursive: true, force: true })

@@ -148,22 +148,22 @@ test("a card an idle session writes no row for rejects, so its frame goes unansw
 })
 
 /** A session whose mod holds every `$.prompt.submit` open, as one a running turn took does
- *  (it answers at that turn's end), and which reports the submit taken or left waiting in the
- *  link's queue as `taken` says; a link reporting neither is one that does not report at all.
+ *  (it answers at that turn's end), and whose link reports the submit handed to a polling mod
+ *  when `handed` says to; a link that calls nothing has handed it to no mod at all.
  *  Its bound for the prompt's row is a tenth of a second, as `driven`'s is. */
-function holdingSubmits(taken?: boolean): ModSession {
+function holdingSubmits(handed = false): ModSession {
   return modSession({
     link: {
       connected: () => true,
       request<N extends ModCallName>(
         call: N,
         _args: ModCallArguments[N],
-        options?: { readonly taken?: (reported: boolean) => void },
+        options?: { readonly handed?: () => void },
       ): Promise<ModCallResults[N]> {
         if (call !== "prompt.submit") {
           return Promise.reject(new Error(`the card path made an unexpected mod call: ${call}`))
         }
-        if (taken !== undefined) options?.taken?.(taken)
+        if (handed) options?.handed?.()
         return new Promise<ModCallResults[N]>(() => undefined)
       },
     },
@@ -195,8 +195,11 @@ test("show's rejection says whether the submit that carried the card entered the
   expect(raced.message).toBe("the session wrote no row for the prompt within 100 ms")
   expect(raced.entered).toBe(true)
 
-  // Nothing took it: it is still waiting in the link's queue, and no session has it.
-  const stopped = await refusal(holdingSubmits(false).show({ content: BLOCKS, text: CARD }))
+  // Nothing took it: it is still waiting in the link's queue, and no session has it. A link
+  // that calls nothing reports no mod either, and the call is the whole of the evidence: a
+  // card counted as entered on less than it is a card Envoy's resend answers rather than
+  // submits, so it would reach the model no times at all (R12; k7's second clause).
+  const stopped = await refusal(holdingSubmits().show({ content: BLOCKS, text: CARD }))
   expect(stopped.message).toBe("the session wrote no row for the prompt within 100 ms")
   expect(stopped.entered).toBe(false)
 
@@ -205,12 +208,6 @@ test("show's rejection says whether the submit that carried the card entered the
   const dropped = await refusal(refused.session.show({ content: BLOCKS, text: CARD }))
   expect(dropped.message).toBe("the session dropped the prompt: the conversation is compacting")
   expect(dropped.entered).toBe(false)
-
-  // A link that reports neither cannot show that the submit never left this process, so the
-  // card counts as having entered: showing one card twice is the harm R12 forbids, and the
-  // link this runs on always reports (`../src/mod-link`).
-  const quiet = await refusal(holdingSubmits().show({ content: BLOCKS, text: CARD }))
-  expect(quiet.entered).toBe(true)
 })
 
 test("the card's frame is answered once the prompt's own row is seen, and not before", async () => {
