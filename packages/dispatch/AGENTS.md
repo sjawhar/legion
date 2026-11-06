@@ -248,9 +248,11 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   where the session took it. When the stream tags it with its Dispatch id (`dispatchTurns` in
   `features/agent-view/conversation.ts`), the view hides Dispatch's stored copy only when the
   streamed row says what the person wrote (`turnSaysBody`: each of the row's lines is the body's
-  next line, except a bracketed word the body has no line left for, which is the stream naming a
-  block it did not render, such as a picture's `[image]`), and still names its author when that is
-  not the viewer. A turn the stream missed shows twice, as the streamed message and stored copy;
+  next line, and only after every one of them is matched may the row add a bracketed word naming
+  a block it did not render, such as a picture's `[image]`, at most one per picture the body
+  embeds; a bracketed word of the row's own, before those lines or past that count, leaves the
+  stored copy showing), and still names its author when that is not the viewer.
+  A turn the stream missed shows twice, as the streamed message and stored copy;
   so does a prompt template or file command whose streamed message is its expansion rather than
   the stored `/name …`.
   `packages/pi-envoy/AGENTS.md` says which turns the session leaves untagged. The live view's

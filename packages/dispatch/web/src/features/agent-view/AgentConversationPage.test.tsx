@@ -566,46 +566,6 @@ test("a streamed turn that adds a bracketed word of its own hides nothing", asyn
   ).toEqual(["Should I deploy?", "Should I deploy?[yes]"]);
 });
 
-// A person's message that carries a picture reaches the session as the text the person wrote and
-// the picture beside it, which the stream names `[image]` in a part of its own
-// (`conversationParts` in `@legion/pi-shared/agent-stream`). The person sent one message, so the
-// stored copy still gives way: the picture makes the row say more than the body, never something
-// else (INFRA-1026).
-test("a person's message with a picture shows once, not beside its stored copy", async () => {
-  const at = Date.parse("2026-09-27T21:16:16Z");
-  renderLiveView({
-    agentState: {},
-    messages: [{ message: message("m1", "Look at this"), replies: [] }],
-    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
-    replay: [
-      {
-        kind: "message",
-        message: {
-          at,
-          dispatchMessageId: "m1",
-          id: `u${at}`,
-          parts: [
-            { text: "Look at this", type: "text" },
-            { text: "[image]", type: "text" },
-          ],
-          role: "user",
-          streaming: false,
-        },
-        seq: 1,
-        v: 1,
-      } as const satisfies AgentStreamFrame,
-    ],
-  });
-
-  const thread = await screen.findByTestId("agent-thread");
-  await within(thread).findByText("[image]");
-  expect(
-    within(thread)
-      .getAllByTestId("agent-message-user")
-      .map((node) => node.textContent)
-  ).toEqual(["Look at this[image]"]);
-});
-
 // A person writes a bracketed word of their own - `[ack]`, `[done]`, `[LGTM]` - and the session
 // streams it back as the one text part it is. The placeholder rule reads that part as the stream
 // naming a block it did not render, drops it, and leaves the turn saying nothing, so Dispatch's
@@ -629,34 +589,21 @@ test("a person's message that is a bracketed word of their own shows once", asyn
   ).toEqual(["[ack]"]);
 });
 
-// The two cases at once: a person sends the bracketed word `[ack]` with a picture attached, so the
-// session streams the person's `[ack]` and the stream's own `[image]` beside it. Driven live on a
-// Claude Code 2.1.310 session, where it drew two `agent-message-user` rows like the plain `[ack]`
-// did; the body's own lines say which of the two `[...]` lines the person wrote (INFRA-1026).
+// The two cases at once: a person sends the bracketed word `[ack]` with a picture attached, so
+// the body is `[ack]` and the picture's markdown the composer appends to it (`withPictureLines`,
+// `packages/envoy-client/src/dispatch-pictures.ts`), and the session streams the person's `[ack]`
+// and the stream's own `[image]` beside it. Driven live on a Claude Code 2.1.310 session, where
+// it drew two `agent-message-user` rows like the plain `[ack]` did; the body's own lines say
+// which of the two `[...]` lines the person wrote, and the picture it embeds is what accounts
+// for the other (INFRA-1026).
 test("a person's message that is a bracketed word with a picture shows once", async () => {
   const at = Date.parse("2026-09-27T21:16:16Z");
+  const picture = "dispatch://agent/f376a3a9-6e75-461b-806b-22dea4e83ddf/artifact/i3-blue96-png@v1";
   renderLiveView({
     agentState: {},
-    messages: [{ message: message("m1", "[ack]"), replies: [] }],
+    messages: [{ message: message("m1", `[ack]\n\n![blue](${picture})`), replies: [] }],
     putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
-    replay: [
-      {
-        kind: "message",
-        message: {
-          at,
-          dispatchMessageId: "m1",
-          id: `u${at}`,
-          parts: [
-            { text: "[ack]", type: "text" },
-            { text: "[image]", type: "text" },
-          ],
-          role: "user",
-          streaming: false,
-        },
-        seq: 1,
-        v: 1,
-      } as const satisfies AgentStreamFrame,
-    ],
+    replay: [pictureTurn(1, at, "m1", "[ack]")],
   });
 
   const thread = await screen.findByTestId("agent-thread");

@@ -388,9 +388,10 @@ export function sessionSettingsView(
  * A part the stream writes for a block it does not render: the block's kind in brackets, which
  * is what `conversationParts` (`@legion/pi-shared/agent-stream`) puts there for a picture
  * (`[image]`) and for any other kind a later build meets. A person writes such a word too -
- * `[ack]`, `[done]`, `[LGTM]` - so the brackets alone say nothing about who wrote it: only a
- * line the person's own body has nothing to account for is the stream naming what the message
- * carried (`turnSaysBody`).
+ * `[ack]`, `[done]`, `[LGTM]` - so the brackets alone say nothing about who wrote it: a line
+ * reads as the stream naming what the message carried only where it follows every line of the
+ * person's own body and a picture that body embeds is left to account for it (`turnSaysBody`),
+ * which is where the publisher writes one, one part per block and after the person's text.
  */
 const PLACEHOLDER_PART = /^\[[A-Za-z][\w-]*\]$/;
 
@@ -424,20 +425,30 @@ function comparedLines(text: string): string[] {
 /**
  * Whether a streamed turn says exactly what the person wrote, so Dispatch's stored copy of that
  * message gives way to the streamed row (INFRA-1026). The turn's lines are read against the
- * body's own lines in order (`comparedLines`): each must be the body line that comes next, except
- * a placeholder line the body has no line left for, which is the stream naming what the message
- * carried rather than a word the person wrote. So a message carrying a picture, which reaches the
+ * body's own lines in order (`comparedLines`): each must be the body line that comes next, and
+ * only once every one of them is matched may a line be a placeholder part instead, at most as
+ * many of those as the body embeds pictures. The bus is open to any client, so a streamed row is
+ * a claim: the only placeholder parts the publisher writes for a person's own message are the
+ * ones naming the blocks the message carried, one per picture and after the person's text
+ * (`conversationParts` in `@legion/pi-shared/agent-stream`), so a row that puts a bracketed word
+ * of its own before the person's lines, or more of them than the body has pictures, says words
+ * the person never wrote and hides nothing. A message carrying a picture, which reaches the
  * session as the person's text and the picture beside it, says its body still: the `[image]` is
- * the stream's, and the markdown the person's body held is no line of either side. A body that is
- * the bracketed word `[ack]` says itself, picture or no picture, because the body has that line
- * of its own.
+ * the stream's, the markdown the body held is no line of either side, and the picture it stood
+ * as is what accounts for that line. A body that is the bracketed word `[ack]` says itself,
+ * picture or no picture, because the body has that line of its own.
  */
 export function turnSaysBody(turn: DispatchTurn, body: string): boolean {
   const lines = comparedLines(body);
+  let pictures = [...body.matchAll(pictureSyntax())].length;
   let next = 0;
   for (const line of comparedLines(turn.text)) {
-    if (line === lines[next]) next += 1;
-    else if (!PLACEHOLDER_PART.test(line)) return false;
+    if (line === lines[next]) {
+      next += 1;
+      continue;
+    }
+    if (next < lines.length || pictures === 0 || !PLACEHOLDER_PART.test(line)) return false;
+    pictures -= 1;
   }
   return next === lines.length;
 }

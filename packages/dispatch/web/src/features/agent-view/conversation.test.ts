@@ -18,6 +18,7 @@ import {
   sessionCommands,
   sessionSettingsView,
   toThreadMessages,
+  turnSaysBody,
 } from "./conversation";
 
 function message(
@@ -215,6 +216,42 @@ describe("a user message a person's Dispatch message became", () => {
       "u30",
       "a40",
     ]);
+  });
+});
+
+// Whether a streamed row says what the person wrote is what decides their stored copy gives way,
+// and any bus client can publish that row, so it may say no more than the body and what the
+// stream names of the blocks the message carried: a placeholder part only after every line of
+// the body is matched, and at most one per picture the body embeds, which is how
+// `conversationParts` (`@legion/pi-shared/agent-stream`) writes them (INFRA-1026).
+describe("a streamed row read against the body it says it delivered", () => {
+  const picture = (name: string) => `![${name}](dispatch://agent/s1/artifact/i3-${name}96-png@v1)`;
+  const row = (text: string) => ({ dispatchMessageId: "m-1", text });
+
+  test("a bracketed word no picture accounts for is a word the person never wrote", () => {
+    expect(turnSaysBody(row("Ship it?\n[shipped]"), "Ship it?")).toBe(false);
+  });
+
+  test("a placeholder before the body's own lines names no block the stream dropped", () => {
+    const body = `Look at this ${picture("blue")}`;
+    expect(turnSaysBody(row("[image]\nLook at this"), body)).toBe(false);
+  });
+
+  test("the row names at most as many blocks as the body embeds pictures", () => {
+    const two = `Look at these ${picture("blue")} ${picture("red")}`;
+    expect(turnSaysBody(row("Look at these\n[image]\n[image]"), two)).toBe(true);
+    const one = `Look at this ${picture("blue")}`;
+    expect(turnSaysBody(row("Look at this\n[image]\n[image]"), one)).toBe(false);
+  });
+
+  test("a bracketed word the body holds is the body's own line, picture or no picture", () => {
+    expect(turnSaysBody(row("[ack]"), "[ack]")).toBe(true);
+    expect(turnSaysBody(row("[ack]\n[image]"), `[ack] ${picture("blue")}`)).toBe(true);
+  });
+
+  test("a row carrying the picture's markdown says its body, both sides read the same way", () => {
+    const body = `Look at this ${picture("blue")}`;
+    expect(turnSaysBody(row(body), body)).toBe(true);
   });
 });
 
