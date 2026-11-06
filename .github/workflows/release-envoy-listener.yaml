@@ -27,6 +27,7 @@ on:
       - "packages/pi-legion/package.json"
       - "packages/pi-shared/package.json"
       - "packages/claude-envoy/package.json"
+      - "packages/test-fixtures/package.json"
       - "docs/site/package.json"
       - ".dockerignore"
       - ".bun-version"

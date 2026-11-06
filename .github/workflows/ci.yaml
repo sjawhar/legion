@@ -102,7 +102,9 @@ env:
       "test": "test",
       "docs": "docs",
       "contracts": "contracts",
+      "test-fixtures": "test_fixtures",
       "conflicts-script": "conflicts_script",
+      "broker-client": "broker_client",
       "envoy-client": "envoy_client",
       "pi-shared": "pi_shared",
       "pi-envoy": "pi_envoy",
@@ -144,7 +146,9 @@ jobs:
       docs: ${{ github.event_name != 'push' && steps.filter.outputs.docs || 'false' }}
       worker_image: ${{ steps.filter.outputs.worker_image }}
       contracts: ${{ steps.filter.outputs.contracts }}
+      test_fixtures: ${{ steps.filter.outputs.test_fixtures }}
       conflicts_script: ${{ steps.filter.outputs.conflicts_script }}
+      broker_client: ${{ steps.filter.outputs.broker_client }}
       envoy_client: ${{ steps.filter.outputs.envoy_client }}
       pi_shared: ${{ steps.filter.outputs.pi_shared }}
       pi_envoy: ${{ steps.filter.outputs.pi_envoy }}
@@ -208,6 +212,7 @@ jobs:
               - 'package.json'
               - 'bun.lock'
               - 'patches/**'
+              - 'packages/broker-client/package.json'
               - 'packages/contracts/package.json'
               - 'packages/envoy-client/package.json'
               - 'packages/pi-envoy/package.json'
@@ -216,6 +221,7 @@ jobs:
               - 'packages/claude-envoy/package.json'
               - 'packages/proof-editor/package.json'
               - 'packages/dispatch/package.json'
+              - 'packages/test-fixtures/package.json'
               - 'packages/envoy/internal/dispatch/pmdoc/gen/package.json'
               - 'docs/site/package.json'
               - '.bun-version'
@@ -578,6 +584,8 @@ jobs:
               - 'packages/envoy-client/src/**'
               - 'packages/envoy-client/bin/dispatch.ts'
               - 'packages/pi-shared/src/**'
+              # tests/ import @legion/test-fixtures.
+              - 'packages/test-fixtures/src/**'
               # scripts/build.ts:115-128 generates legion/ from pi-legion's agents and the skills
               # the prepack script stages for it, and :16 writes dist/THIRD_PARTY_NOTICES.
               - 'packages/pi-legion/agents/**'
@@ -628,6 +636,8 @@ jobs:
               # changelog-fold.test.sh copies pi-legion's changie config and changelog (its line 53).
               - 'packages/pi-legion/.changie.yaml'
               - 'packages/pi-legion/CHANGELOG.md'
+              # The bun tests of this job's scripts import @legion/test-fixtures.
+              - 'packages/test-fixtures/src/**'
             # docs/site's lint, typecheck, screenshots and build, with the sources its reference
             # generators and its screenshot harness read. docs-site.yaml holds those steps, and
             # both the docs job here and docs-pages.yaml's build job call it. docs-pages.yaml
@@ -720,6 +730,16 @@ jobs:
               - 'packages/envoy/internal/dispatch/pmdoc/schema/**'
               - 'packages/envoy/internal/contracts/generated.go'
               - 'packages/envoy/internal/dispatch/pmdoc/schema_generated.go'
+              # src/*.test.ts import @legion/test-fixtures.
+              - 'packages/test-fixtures/src/**'
+            # The shared test fixtures every other Bun package's tests import: its own sources and
+            # tests (it imports nothing outside itself), and the Bun install, the Bun it runs and
+            # Biome, whose root config packages/test-fixtures/biome.json extends.
+            test_fixtures:
+              - '.github/workflows/ci.yaml'
+              - *bun_install
+              - *biome
+              - 'packages/test-fixtures/**'
             # The conflict measurement script's lint, typecheck and tests: its own directory (tests
             # and fixtures included; it imports nothing outside it), the Bun install and Bun it runs
             # (the root manifest and lockfile pin its TypeScript and Bun types), and Biome.
@@ -728,12 +748,26 @@ jobs:
               - *bun_install
               - *biome
               - 'scripts/conflicts/**'
+            # The secrets broker's TypeScript client: its own sources and tests (it imports nothing
+            # first-party outside itself but the fixtures its tests use), the Bun install and the
+            # Bun it runs, and Biome.
+            broker_client:
+              - '.github/workflows/ci.yaml'
+              - *bun_install
+              - *biome
+              - 'packages/broker-client/**'
+              # src/__tests__ import @legion/test-fixtures.
+              - 'packages/test-fixtures/src/**'
             envoy_client:
               - '.github/workflows/ci.yaml'
               - *bun_install
               - *biome
               - 'packages/envoy-client/**'
               - 'packages/contracts/src/**'
+              # src/broker-credential.ts:21-22 imports @legion/broker-client/*.
+              - 'packages/broker-client/src/**'
+              # src/__tests__ import @legion/test-fixtures.
+              - 'packages/test-fixtures/src/**'
               # src/__tests__/delivery.test.ts:16-17 and dispatch-config.test.ts:5.
               - 'packages/contracts/fixtures/dispatch-targeted-delivery.json'
               - 'packages/contracts/fixtures/dispatch-public-url.json'
@@ -751,6 +785,8 @@ jobs:
               - 'packages/pi-shared/**'
               - 'packages/envoy-client/src/**'
               - 'packages/contracts/src/**'
+              # src/*.test.ts and test/*.ts import @legion/test-fixtures.
+              - 'packages/test-fixtures/src/**'
               # src/daemon-client.test.ts:15 and its neighbours read the daemon API fixtures.
               - 'packages/contracts/fixtures/daemon-api/**'
               # test/skills-partition.test.ts stages each plugin's skills with the prepack script
@@ -778,6 +814,8 @@ jobs:
               - 'packages/envoy-client/bin/dispatch.ts'
               - 'packages/envoy-client/scripts/build-dispatch-cli.sh'
               - 'packages/contracts/src/**'
+              # Its tests import @legion/test-fixtures.
+              - 'packages/test-fixtures/src/**'
               # extensions/envoy.test.ts:172-173.
               - 'packages/contracts/fixtures/dispatch-targeted-delivery.json'
               - 'skills/**'
@@ -804,6 +842,8 @@ jobs:
               - 'packages/pi-shared/test/**'
               - 'packages/envoy-client/src/**'
               - 'packages/contracts/src/**'
+              # Its tests import @legion/test-fixtures.
+              - 'packages/test-fixtures/src/**'
               # extensions/legion.test.ts:1009 and src/capability-report.test.ts:768-776.
               - 'packages/contracts/fixtures/daemon-api/**'
               - 'packages/contracts/fixtures/capability-redaction.json'
@@ -848,6 +888,8 @@ jobs:
               - 'packages/dispatch/**'
               - 'packages/proof-editor/**'
               - 'packages/contracts/src/**'
+              # Its tests import @legion/test-fixtures.
+              - 'packages/test-fixtures/src/**'
               # web/src/features/delivery/lib/applyDelta.test.ts:2-4 and
               # web/src/features/doc/decision-blocks.test.ts:10.
               - 'packages/contracts/fixtures/live/**'
@@ -1202,6 +1244,7 @@ jobs:
               - 'packages/pi-legion/package.json'
               - 'packages/pi-shared/package.json'
               - 'packages/claude-envoy/package.json'
+              - 'packages/test-fixtures/package.json'
               - 'docs/site/package.json'
               - 'packages/contracts/**'
               - 'packages/dispatch/**'
@@ -1299,6 +1342,7 @@ jobs:
               - 'packages/claude-envoy/**'
               - 'packages/proof-editor/package.json'
               - 'packages/dispatch/package.json'
+              - 'packages/test-fixtures/package.json'
               - 'docs/site/package.json'
               - 'packages/daemon/**'
               - 'packages/pi-envoy/**'
@@ -2061,6 +2105,36 @@ jobs:
           changes: ${{ toJSON(needs.changes) }}
           job-status: ${{ job.status }}
 
+  # The shared test fixtures package has no build: nothing imports it at run time, and its
+  # consumers read its sources through the workspace.
+  test-fixtures:
+    needs: changes
+    if: needs.changes.outputs.test_fixtures == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-bun
+      - run: bun install --frozen-lockfile
+      - name: Lint the shared test fixtures
+        run: bun run lint
+        working-directory: packages/test-fixtures
+      - name: Typecheck the shared test fixtures
+        run: bun run typecheck
+        working-directory: packages/test-fixtures
+      - name: Test the shared test fixtures
+        run: bun run test
+        working-directory: packages/test-fixtures
+
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
+
   conflicts-script:
     needs: changes
     if: needs.changes.outputs.conflicts_script == 'true'
@@ -2078,6 +2152,36 @@ jobs:
         run: bunx tsc --noEmit -p scripts/conflicts
       - name: Test the conflict measurement script
         run: bun test scripts/conflicts
+
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
+
+  # The secrets broker's TypeScript client, which packages/envoy-client's broker credential
+  # imports. It has no build: its consumers read its sources through the workspace.
+  broker-client:
+    needs: changes
+    if: needs.changes.outputs.broker_client == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-bun
+      - run: bun install --frozen-lockfile
+      - name: Lint the broker client
+        run: bun run lint
+        working-directory: packages/broker-client
+      - name: Typecheck the broker client
+        run: bun run typecheck
+        working-directory: packages/broker-client
+      - name: Test the broker client
+        run: bun run test
+        working-directory: packages/broker-client
 
       - name: Report ci-ok when this is the run's last job
         if: always()
