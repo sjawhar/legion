@@ -158,7 +158,8 @@ So a test whose jj child names no directory opens and writes that clone, and the
 A Legion issue pod hands every process its live workspace (`LEGION_WORKSPACE`), its git configuration (`GIT_CONFIG_*`), its GitHub credential and more.
 A test that let git or jj inherit them read and pushed the pod's own work: the shim's rescue test, run with no `LEGION_WORKSPACE` of its own, pushed the pod's workspace to the real origin as `legion/WIDGETS-42-rescue-…` branches.
 
-- A `packages/daemon` package whose tests run git or jj, as children or in-process through the code under test, calls `fixtureenv.Guard` in its `TestMain`, after any branch where the test binary runs as a helper child, and holds `fixtureenv.RequireGuarded` in a test.
+- A `packages/daemon` package whose tests run git or jj, as children or in-process through the code under test, calls `fixtureenv.MustGuard` in its `TestMain`, after any branch where the test binary runs as a helper child.
+  MustGuard is Guard with a `TestMain`'s only answer to a failure: it prints it and ends the process with status 1, which `packages/daemon/internal/fixtureenv`'s own test holds, with the guarantee Guard gives every package (`fixtureenv.RequireGuarded` stays for the test that needs the check in its own body).
   Guard unsets every `LEGION_*`, `GIT_*`, `JJ_*`, `GH_*` and `GITHUB_*` variable, `SSH_AUTH_SOCK` and `SSH_ASKPASS`, keeping the tests' own inputs (`LEGION_TEST_*`, `LEGION_E2E*`, `GITHUB_ACTIONS`, and the names the package passes), and sets `GIT_ALLOW_PROTOCOL=file`, which a repository's own `protocol.<name>.allow` cannot override.
   Code under test that names its own transport, as provisioning's `GIT_ALLOW_PROTOCOL=https` does, still uses it.
   Guard does the same under the `e2e` build tag, whose untagged tests are the same fixtures.

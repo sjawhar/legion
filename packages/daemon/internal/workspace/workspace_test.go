@@ -22,7 +22,7 @@ import (
 const testTimeout = 30 * time.Second
 
 // TestMain takes out of the process every variable that could lead git or jj to a workspace,
-// remote or credential not the test's own (fixtureenv.Guard), and gives the process a home of the
+// remote or credential not the test's own (fixtureenv.MustGuard), and gives the process a home of the
 // package's own (fixtureenv.Home), so every real jj and
 // git these tests run — provisioning's, which reads the process's environment, and the fixtures',
 // which run under fixtureenv.Isolated of that same home (setupEnvironment) — reads none of the
@@ -33,10 +33,7 @@ const testTimeout = 30 * time.Second
 // that sets a home of its own afterward (newLocalRunner's) still wins: os.Environ() is read fresh
 // by every exec.Command.
 func TestMain(m *testing.M) {
-	if err := fixtureenv.Guard(); err != nil {
-		fmt.Fprintln(os.Stderr, "TestMain:", err)
-		os.Exit(1)
-	}
+	fixtureenv.MustGuard()
 	home, err := os.MkdirTemp("", "legion-test-home")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "TestMain:", err)
@@ -52,10 +49,6 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	os.RemoveAll(home)
 	os.Exit(code)
-}
-
-func TestTheTestProcessIsGuarded(t *testing.T) {
-	fixtureenv.RequireGuarded(t)
 }
 
 // setupEnvironment is the environment of a fixture command: fixtureenv.Isolated under the home
