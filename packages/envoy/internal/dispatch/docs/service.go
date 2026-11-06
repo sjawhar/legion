@@ -2767,13 +2767,17 @@ func (s *Service) recheckResidentIssues(ctx context.Context) {
 // refuseClosedIssueAppend is a browser's append the gate refused because the document's issue is
 // closed and the room took the update later than closeMargin after the close (ErrIssueClosed); an
 // update the room took before then is stored (observedBeforeClose), and never reaches
-// here. When room's record still holds the issue open, the issue closed without this process
-// hearing it - its listener redialing, which outlasts the margin - and the room is closed for its
-// issue here, as the notification would close it (setRoomIssueOpen), so it stops taking edits and
-// its browsers reconnect read-only. That runs on a goroutine of its own: this is ygo's persistence
-// worker, which the close waits for. A record already marked closed is being closed for its issue,
-// whose close hands the room's last updates here, and an update among them the room took that late
-// is dropped.
+// here. The issue closed without this process hearing it - its listener redialing, which outlasts
+// the margin - and the room is closed for its issue here, as the notification would close it
+// (setRoomIssueOpen), so it stops taking edits and its browsers reconnect read-only. That runs on
+// a goroutine of its own: this is ygo's persistence worker, which the close waits for. A record
+// that already reads closed is no proof that a close is under way: a load that read the issue
+// after it closed writes that flag itself, with no close behind it (onLoadDocument, websocket.go),
+// and that room admits writers until a close runs. So this close is a notified one
+// (setRoomIssueOpen's notified), which closes the room whatever the record holds; one made behind
+// a close already under way, which hands the room's last updates here, waits for that close and
+// then finds the room gone (closeRoomForIssue). A record that read the issue open is the only one
+// that is news, so it is the only one logged.
 func (s *Service) refuseClosedIssueAppend(room string) {
 	state := s.lockExistingState(room)
 	if state == nil {
@@ -2781,10 +2785,9 @@ func (s *Service) refuseClosedIssueAppend(room string) {
 	}
 	closed := state.closed
 	s.unlockState(room, state)
-	if closed {
-		return
+	if !closed {
+		slog.Info("dispatch: closing a document room whose issue closed before this process heard of it", "room", room)
 	}
-	slog.Info("dispatch: closing a document room whose issue closed before this process heard of it", "room", room)
 	// Shutdown joins the close, as it does a failed room's eviction (failRoomLocked); one that
 	// begins after Shutdown stopped accepting work runs unjoined, since the room still must close.
 	tracked := s.addUnlessStopping(&s.evictWG)
@@ -2792,7 +2795,7 @@ func (s *Service) refuseClosedIssueAppend(room string) {
 		if tracked {
 			defer s.evictWG.Done()
 		}
-		s.setRoomIssueOpen(store.WithTransactionTracking(context.Background()), room, false, false)
+		s.setRoomIssueOpen(store.WithTransactionTracking(context.Background()), room, false, true)
 	}()
 }
 
@@ -2839,13 +2842,12 @@ func (s *Service) closeRoomOnReplacedHistory(room string, instance *roomInstance
 	}()
 }
 
-// setRoomIssueOpen gives room's record open, its issue's state, and when the record held the other
-// state closes the room, so every browser reconnects with the scope the issue now allows: ygo fixes
-// a connection's read-only flag when it connects (sjawhar/ygo provider/websocket/peer.go), so a
-// connected browser's scope can change only by reconnecting. The close removes this process's
-// browsers' awareness first, relayed to the other processes (roomServer.beforeClose). A room a
-// caller is inside - a write's publish, a read, a browser's join - is closed once that caller has
-// left (roomServer.closeRoom).
+// setRoomIssueOpen gives room's record open, its issue's state, and closes the room, so every
+// browser reconnects with the scope the issue now allows: ygo fixes a connection's read-only flag
+// when it connects (sjawhar/ygo provider/websocket/peer.go), so a connected browser's scope can
+// change only by reconnecting. The close removes this process's browsers' awareness first,
+// relayed to the other processes (roomServer.beforeClose). A room a caller is inside - a write's
+// publish, a read, a browser's join - is closed once that caller has left (roomServer.closeRoom).
 //
 // Closing also ends what the record has armed - the generation bump ends a settlement whose timer
 // already fired, the timer's stop the one still armed - since a closed issue's rooms settle nothing
@@ -2862,7 +2864,13 @@ func (s *Service) closeRoomOnReplacedHistory(room string, instance *roomInstance
 // again. A notified reopen also closes a room whose record already reads open: a record a
 // connection's own registration (addConnection) or a load after the reopen committed made holds
 // the default open flag while a browser on the room was admitted read-only before the reopen, and
-// only a reconnect gives that browser the writable scope. A recheck reads only rooms that hold a
+// only a reconnect gives that browser the writable scope. A notified close likewise closes a room
+// whose record already reads closed: that flag is no proof that a close is under way, since a load
+// that read the issue after it closed writes it itself, with no close behind it (onLoadDocument,
+// websocket.go), so the room admits writers until a close runs. Only the close runs again: the
+// bookkeeping below - the generation bump, the settle timer's stop, the latest edit source moved
+// to the pending-settlement row, restoreLastActor - ran when the record took the state it holds,
+// and a repeat notification must not run it twice. A recheck reads only rooms that hold a
 // record and closes only those whose record holds the other state, so a LISTEN that stands again
 // closes no room the issue's state already matches. Its ctx is the room-sync lane's or a close's
 // own, holding no transaction, so the rooms are recorded and closed one at a time.
@@ -2876,6 +2884,9 @@ func (s *Service) setRoomIssueOpen(ctx context.Context, room string, open, notif
 	}
 	if state.closed == !open && !(open && notified) {
 		s.unlockState(room, state)
+		if !open && notified {
+			s.closeRoomForIssue(ctx, room)
+		}
 		return
 	}
 	state.closed = !open
