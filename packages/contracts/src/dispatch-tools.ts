@@ -1580,9 +1580,8 @@ export const dispatchToolSpecs = [
       "searches by keywords only and says why. When it could not search at all it says why and " +
       "names the dispatch search to run instead. exclude_issues leaves each named issue's own " +
       "items out of the results, at most 50 of them, so a draft under a parent can leave out " +
-      "that parent and its children without changing how rare the text's words are; the single " +
-      "exclude_issue, which released clients send, leaves its issue out of the word statistics " +
-      "too, as a check on that issue's own write does; keywords_only skips meaning search.",
+      "that parent and its children without changing how rare the text's words are; " +
+      "keywords_only skips meaning search.",
     arguments: (z) => ({
       project: z.string().describe("Project key to search within, such as CORE."),
       title: z

@@ -525,8 +525,11 @@ export async function runDispatchCli(
       entry = { tool, error: text };
       // An argument the executor refuses (a ref naming another owner, a picture that is not
       // there, an id that matches no ask) is the same usage error as one the parse refuses, and
-      // `--dry-run` finds exactly these with the call's own check: both exit 2, so a dry run and
-      // its call stay one answer. Everything else here is Dispatch's own refusal or failure.
+      // exits 2 alike. `--dry-run` runs the call's own check (checkDispatchCall), so it finds
+      // the refusals that need nothing from Dispatch, and those exit 2 from the dry run and from
+      // its call: the two stay one answer. One that needs a read, such as an ask id prefix
+      // matching no ask, only the call reaches. Everything else here is Dispatch's own refusal
+      // or failure.
       code = error instanceof ToolInputError ? USAGE : REFUSED;
     }
   }

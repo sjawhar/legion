@@ -665,7 +665,7 @@ func reportNearCopyReplay(
 	t.Logf("corpus: %s; creates replayed: %d; marked duplicates: %d; term statistics refreshed %d times, every %v of replayed time",
 		os.Getenv("DISPATCH_NEARCOPY_CORPUS"), total, len(marked), refreshes, SearchTermStatsInterval)
 	t.Logf("distortions a later reader must know: in a project with no term statistics the gate prices every "+
-		"lexeme at the rarest priced document frequency and reads N as 0, since it prices rather than probes; "+
+		"lexeme at document frequency 1, nothing being priced, and reads N as 0, since it prices rather than probes; "+
 		"document frequency is counted per project while the index scan is not; every lexeme an issue key "+
 		"contributes is dropped; the picker keeps at most %d terms, spends at most %d document frequency, "+
 		"and drops a term in more than a tenth of the project or under %d items; a text left with fewer "+

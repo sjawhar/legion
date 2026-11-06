@@ -673,8 +673,10 @@ const (
 // df comes from the project's statistics (refreshSearchTermStats). A lexeme they do not hold, or
 // whose df the excluded owner's items bring to zero, is probed live, the relatedProbeLimit most
 // frequent in the text, and a hit counts as df 1, or is priced instead where the caller asks for
-// that (priceUnknownTerms). A project with no statistics starts their refresh
-// (ensureSearchTermStats) and is picked in probe mode, every lexeme probed and N taken as 0.
+// that (priceUnknownTerms). A project with no statistics is picked with N taken as 0: a probe
+// caller starts their refresh (ensureSearchTermStats) and probes every lexeme, while a price
+// caller starts no refresh and probes nothing, so no lexeme is priced and each is taken at df 1,
+// the fallback rarest when nothing is priced.
 // Each chosen term's surface is read from title alone (relatedTermsSQL).
 func (s *server) pickRelatedTerms(
 	ctx context.Context, q queryer, project, text, title string, exclude relatedExclusion, probe bool,

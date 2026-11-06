@@ -260,9 +260,9 @@ type scoredDuplicate struct {
 type duplicateGateResult struct {
 	// Unanswered is why the gate's read did not answer, in the words the create tells the filer
 	// (model.Suggestions.NearCopyCheck); empty exactly when it answered. The create goes in
-	// either way - a forced one records that it was forced with no issues named, an unforced one
-	// is told this - because refusing a create whose check was slow or broken would turn one bad
-	// read into a project that cannot be written to.
+	// either way and is told this, forced or not, a forced one also recording that it was forced
+	// with no issues named, because refusing a create whose check was slow or broken would turn
+	// one bad read into a project that cannot be written to.
 	Unanswered string
 	// Candidates are the project's open non-ancestor issues whose score reaches
 	// duplicateNudgeScore, best score first, at most duplicateCandidateLimit.

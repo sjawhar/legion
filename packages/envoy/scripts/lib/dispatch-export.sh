@@ -42,10 +42,10 @@ dispatch_export_open() {
 # thousands of reads over several minutes, so a Dispatch that restarts in the middle of one must
 # not end it: curl retries a refused connection for about two minutes before the read fails.
 #
-# A 404 returns 4 and says nothing, because a caller reading an issue to find out whether it
-# exists expects one and reports it itself; every other non-2xx is named on stderr and returns 1.
-# A caller that expects no 404 still stops on it, since both returns are nonzero under `set -e`
-# and `pipefail`.
+# Every non-2xx is named on stderr. A 404 returns 4 and every other status returns 1, because a
+# caller reading an issue to find out whether it exists expects a 404 and counts it itself, while
+# a caller that expects none still stops on it: both returns are nonzero under `set -e` and
+# `pipefail`.
 get() {
   local _get_status
   _get_status="$(curl --silent --show-error --retry 12 --retry-delay 10 --retry-all-errors \
@@ -53,7 +53,10 @@ get() {
     -H "@$workdir/auth" -o "$workdir/body" -w '%{http_code}' "${base}$1")"
   case "$_get_status" in
     2??) cat "$workdir/body" ;;
-    404) return 4 ;;
+    404)
+      printf 'GET %s answered %s\n' "$1" "$_get_status" >&2
+      return 4
+      ;;
     *)
       printf 'GET %s answered %s\n' "$1" "$_get_status" >&2
       return 1

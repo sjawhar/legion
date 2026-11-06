@@ -202,8 +202,8 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	// The near-copy gate, run once for every create it covers whatever `force` says: a forced
 	// create's record of what it went past must be the refusal an unforced create would have met,
 	// and two reads would drift. The gate bounds and logs its own read (duplicateGate), and a read
-	// that does not answer refuses nothing: the create goes in, a forced one recording that it was
-	// forced with no issues named and an unforced one told that no near-copy check was made.
+	// that does not answer refuses nothing: the create goes in and is told that no near-copy check
+	// was made, forced or not, a forced one also recording that it was forced with no issues named.
 	//
 	// A create naming a GitHub issue runs no gate at all: it imports an issue somebody else
 	// already filed and refusing it would leave that issue unimported. It takes the zero
