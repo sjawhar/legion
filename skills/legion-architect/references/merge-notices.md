@@ -1,15 +1,15 @@
-# The merge notices: what each one means and what you do
+# The notices the daemon writes when a write of its own did not go through
 
 Part of `skill://legion-architect`. Read the section for the notice that woke you. Each of
 `merge-refused`, `merge-stalled`, `merge-removed` and `merge-waiting` is the daemon reporting on
-the merge it submitted for an accepted READY, and each reaches the architect that owns the issue.
-The wake-routing table, in `skill://legion-architect/references/wake-routing.md`, gives each
-notice its move in one sentence; the section here is what that sentence stands on — what the
-notice's `reason` names, what the daemon has and has not stopped doing, and what you read before
-you ask a person.
+the merge it submitted for an accepted READY, and `message-refused` on a message it was posting
+on an issue; each reaches the architect that owns the issue. The wake-routing table, in
+`skill://legion-architect/references/wake-routing.md`, gives each notice its move in one
+sentence; the section here is what that sentence stands on — what the notice's `reason` names,
+what the daemon has and has not stopped doing, and what you read before you ask a person.
 
-In every one of the four the issue stays in `awaiting_merge`, where no worker holds a phase and a
-backward move is refused, so what a repository rule needs is a person's to give.
+In every one of the four merge notices the issue stays in `awaiting_merge`, where no worker holds
+a phase and a backward move is refused, so what a repository rule needs is a person's to give.
 
 ## `merge-refused`
 
@@ -61,3 +61,31 @@ only a person can give, or a merge queue that has not landed it. Act on what you
 or a repository rule needs is a person's: ask one with `dispatch ask`, naming the pull request at
 READY's head and what GitHub waits on; the merge closes the issue when GitHub completes it,
 whoever unblocks it. Never bypass a rule.
+
+## `message-refused`
+
+Its `reason` names the issue, Dispatch's own answer, and what the write carried: a message, with
+how long it was and its first line, or a status write, with the status and whether it was set.
+Dispatch refused that write the way it would refuse every attempt, so the daemon makes it no
+more.
+
+A close reason and a READY packet are checked against Dispatch's own bounds at the call that
+carries them — `close_root` answers `CLOSE_REASON_TOO_LONG` and `handoff_complete` answers
+`READY_PACKET_TOO_LONG`, each naming the bound and how far over the text is — so this notice is a
+refusal those checks did not predict.
+
+On a status write the daemon writes the status all the same, retrying it on the row's backoff
+until Dispatch takes it, so the status is set unless Dispatch refused the status itself — the
+reason says which. With the status set, only the reason beside it is on no issue: the issue's
+lifecycle stands and nothing waits on you. With the status refused, the issue keeps the status
+it had while the daemon's own record reads the one the write carried, and no retry of the
+daemon's closes that gap: ask a person with `dispatch ask` to set on the issue the status the
+reason names, saying what the record reads. The reason beside such a write may be on the issue
+already, which the notice says. On a message the message is on no issue and nothing else about
+the issue changed: no phase moved, and no worker was told.
+
+Either way, what a person still needs is yours to post on the issue with `dispatch comment`. A
+refused READY packet is nobody's to send again: the issue is in `awaiting_merge`, where no worker
+holds a phase, and its merger's phase is over, so a completion from it is refused. Write that
+comment yourself, naming the pull request at READY's head and where its verification stands; the
+merge the daemon submits is unaffected and closes the issue when GitHub completes it.

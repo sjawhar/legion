@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/rank"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -167,7 +168,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Before the duplicate check, which reads the new title against every title in the project.
-	if length := len16(input.Title); length > contracts.IssueTitleMax {
+	if length := itemblocks.Units16(input.Title); length > contracts.IssueTitleMax {
 		capExceeded(w, "title", length, contracts.IssueTitleMax)
 		return
 	}

@@ -19,10 +19,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
-const (
-	maxAskQuestion16 = contracts.AskQuestionMax
-	maxAskOptions    = 8
-)
+const maxAskOptions = 8
 
 const (
 	askHintLimit         = 8
@@ -64,8 +61,17 @@ func validateAskQuestion(question string) error {
 	if strings.TrimSpace(question) == "" {
 		return errorf(http.StatusBadRequest, "INVALID_ASK", "ask question is required")
 	}
-	if length := len16(question); length > maxAskQuestion16 {
-		return capExceededError("question", length, maxAskQuestion16)
+	return nil
+}
+
+// validateAskWording holds an ask's question and every option's label and description, together,
+// to contracts.DispatchEventBodyMax UTF-16 units. They share one bound because they travel
+// together: an ask.answered event carries the wording, the labels the human selected and the
+// answer's text at once, and that is the largest event Dispatch publishes. A bound on the
+// question alone would leave the options free to carry the same text past what the event takes.
+func validateAskWording(question string, options []model.AskOption) error {
+	if units := docs.AskWordingUnits(question, options); units > contracts.DispatchEventBodyMax {
+		return capExceededError("question and options", units, contracts.DispatchEventBodyMax)
 	}
 	return nil
 }
@@ -156,6 +162,10 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		input.Options = []model.AskOption{}
 	}
 	if err := validateAskOptions(input.Options); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := validateAskWording(input.Question, input.Options); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -448,6 +458,12 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	if input.Urgency != nil {
 		ask.Urgency = requestedUrgency
+	}
+	// The bound is on the ask as it will be stored, not on the fields this request named: an
+	// edit that sends options alone is held against the question the row already holds.
+	if err := validateAskWording(ask.Question, ask.Options); err != nil {
+		s.writeHandlerError(w, err)
+		return
 	}
 	// The block is the text's source of truth. Write it first, then take the row's values from
 	// what the block parses back to, so trimming can never leave the two disagreeing and the
