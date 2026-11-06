@@ -411,25 +411,18 @@ func (r *throughputRig) roleArrivals() []int64 {
 // count of destinations is checked last, so a publisher that reaches fewer still reports its rate
 // and order.
 //
-// The burst case puts a batch of messages on one issue, the shape whose events share every
-// destination, so each destination takes them one round trip after another, and logs the drain
-// time: from the outbox's start until every event is marked published. It holds no rate floor;
+// The burst cases put a batch of messages on one issue, the shape whose events share every
+// destination, so each destination takes them one round trip after another, and log the drain
+// time: from the outbox's start until every event is marked published. They hold no rate floor;
 // the drain time is the reading.
 //
-// One round-trip time, one busy case and one burst. The matrix this test once ran - two latencies
-// times idle, busy and burst for each load, fourteen sub-runs over 2*batchSize events each - cost
-// 55 s of the package's 248 s in CI run 41703055842 and read nothing the cases kept here do not
-// (dispatch://INFRA-1075). What each dropped sub-run checked, and where it is still checked:
-// the 50 ms latency read the same rate floor and the same per-destination order as 150 ms does,
-// one round trip apart, and 150 ms is the harsher of the two; the busy pool, which is the pool
-// contention the outbox must publish through, is kept once, on the messages load, since the pool
-// the batches queue on is the same whatever the load seeds; and the burst's second latency read
-// the same single-issue serialization at another round trip. The backlog itself keeps main's
-// size, 2*batchSize, so a scan reads a full batch of rows more than once while it drains: the
-// floor below is a rate over the whole run, start-up included, so a shorter backlog reads a
-// lower rate against the same number. This pull request cut it to 60 and CI run 42119624087
-// read 24.0 events/s against the floor of 25; at main's size the same machine has the same
-// start-up cost to amortise over three times the events (dispatch://INFRA-1075).
+// Its loads, its latencies, its sizes and its floor are main's. This pull request cut them to
+// save the package's seconds - one latency rather than two, one busy case, one burst, a backlog
+// of 60 rather than 2*batchSize and a burst of 40 rather than batchSize - and run 42087780580
+// then read 24.0 events/s against the floor of 25, because the floor is a rate over the whole
+// run and a third of the events amortises the same start-up over a third of the window. What a
+// load test measures is a property of how much it loads, so the sizes are back as main has them
+// and dispatch://INFRA-985 owns every number here (dispatch://INFRA-1075).
 //
 // Serial: it measures the process. It holds the outbox to a rate and to an arrival order under a
 // fixed round trip, and every parallel test's CPU and Postgres work counts against both
@@ -438,11 +431,9 @@ func TestOutboxThroughputUnderRemoteLatency(t *testing.T) {
 	const (
 		backlogIssues = 20
 		backlogCount  = 2 * batchSize
-		burstCount    = 40
+		burstCount    = batchSize
 		minRate       = 25.0
 		waitTime      = 3 * time.Minute
-		// rtt is a remote hub's round trip, the latency this test is about.
-		rtt = 150 * time.Millisecond
 	)
 	for _, load := range []struct {
 		name string
@@ -467,17 +458,21 @@ func TestOutboxThroughputUnderRemoteLatency(t *testing.T) {
 	} {
 		t.Run(load.name, func(t *testing.T) {
 			for _, tc := range []struct {
+				rtt   time.Duration
 				busy  bool
 				burst bool
 			}{
-				{false, false},
-				{true, false},
-				{false, true},
+				{50 * time.Millisecond, false, false},
+				{50 * time.Millisecond, true, false},
+				{50 * time.Millisecond, false, true},
+				{150 * time.Millisecond, false, false},
+				{150 * time.Millisecond, true, false},
+				{150 * time.Millisecond, false, true},
 			} {
-				if (tc.burst || tc.busy) && !load.burst {
+				if tc.burst && !load.burst {
 					continue
 				}
-
+				rtt := tc.rtt
 				shape := rtt.String() + " idle pool"
 				if tc.busy {
 					shape = rtt.String() + " busy pool"
