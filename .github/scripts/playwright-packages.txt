@@ -4,10 +4,10 @@
 # is above the install step that reads this file in .github/workflows/dispatch-browser.yaml.
 #
 # Two steps read it, the shard job's and the alone job's "Install the lane's Playwright
-# browsers", each with `packages=$(cat ...)`. The shell reads this file, not apt, so these `#`
-# lines never reach apt: `$packages` is left unquoted there and splits into words, one package
-# per line here. Both steps then hold this list against Playwright's own with
-# .github/scripts/playwright-deps-current.sh.
+# browsers", each with a `grep` that drops these `#` lines and the blank ones. That filter is
+# load-bearing: the shell reads this file, not apt, and `$packages` is left unquoted there and
+# splits into words, so a comment line reaches apt as one package name per word. Both steps then
+# hold this list against Playwright's own with .github/scripts/playwright-deps-current.sh.
 #
 # On a Playwright upgrade, re-derive the list as the union of the `tools`, `chromium`, `firefox`
 # and `webkit` entries of the ubuntu24.04-x64 table in playwright-core's lib/coreBundle.js, less

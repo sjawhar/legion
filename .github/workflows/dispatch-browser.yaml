@@ -295,7 +295,12 @@ jobs:
           # the alone job's copy install the same set. $GITHUB_WORKSPACE is the checkout root,
           # reached that way because the step's working-directory is packages/dispatch, as the
           # list check at the end of this step is reached.
-          packages=$(cat "$GITHUB_WORKSPACE/.github/scripts/playwright-packages.txt")
+          # The `#` head comment and the blank lines are stripped here rather than left to apt:
+          # the shell reads this file and `$packages` is unquoted below, so every word of a
+          # comment line would otherwise reach apt as a package name
+          # (`E: Unable to locate package subtracting`, which failed every leg of run
+          # 42314019622).
+          packages=$(grep -vE '^[[:space:]]*(#|$)' "$GITHUB_WORKSPACE/.github/scripts/playwright-packages.txt")
           # A bounded attempt, retried: the attempt count, then what the log calls the phase,
           # then the command. Each failed attempt prints the phase, that attempt's exit status
           # and how many attempts are left; `timeout` exits 124 when it killed the command, so
@@ -655,7 +660,9 @@ jobs:
           # the shard job's copy install the same set. $GITHUB_WORKSPACE is the checkout root,
           # reached that way because the step's working-directory is packages/dispatch, as the
           # list check at the end of this step is reached.
-          packages=$(cat "$GITHUB_WORKSPACE/.github/scripts/playwright-packages.txt")
+          # The `#` head comment and the blank lines go here, not to apt, for the reason the
+          # shard job's copy of this line gives.
+          packages=$(grep -vE '^[[:space:]]*(#|$)' "$GITHUB_WORKSPACE/.github/scripts/playwright-packages.txt")
           # A bounded attempt, retried: the attempt count, then what the log calls the phase,
           # then the command. Each failed attempt prints the phase, that attempt's exit status
           # and how many attempts are left; `timeout` exits 124 when it killed the command, so
