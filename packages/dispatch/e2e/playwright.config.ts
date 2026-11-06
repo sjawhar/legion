@@ -22,11 +22,20 @@ import { plainHttpHost, plainHttpOrigin } from "./plain-http-origin";
 // open the plain-HTTP name, which only that project maps, and the origin rows' first assertion
 // fails on loopback by design.
 const plainHttpSpecs = /plain-http-(origin|proxy)\.e2e\.ts/;
-// The `iphone` project runs only tests tagged `@phone`; which tests take the tag is in
-// `packages/dispatch/AGENTS.md`, "Phone acceptance". An untagged test drops out with no failure.
-// The regex is anchored so `@phone` matches only as a whole whitespace-separated token, never
-// inside a longer one such as `@phones` or `x@phone`.
-const phoneTagged = /(^|\s)@phone(\s|$)/;
+// The `iphone`, `webkit` and `firefox` projects run only the rows tagged `@phone`, `@webkit` and
+// `@firefox`, written at the end of the test's title. Which tests take `@phone` is in
+// `packages/dispatch/AGENTS.md`, "Phone acceptance"; each engine tag names a row that exercises
+// one engine behaviour the comment above those projects lists, and a comment above the row names
+// which; a row that only repeats an assertion Chromium already made carries no tag. An untagged
+// test drops out with no failure. The pattern is anchored so a tag matches only as a whole
+// whitespace-separated token, never inside a longer one such as `@phones`, `x@phone`,
+// `@webkit-iphone` or `@firefox-alone`.
+function tagged(tag: string): RegExp {
+  return new RegExp(`(^|\\s)@${tag}(\\s|$)`);
+}
+const phoneTagged = tagged("phone");
+const webkitTagged = tagged("webkit");
+const firefoxTagged = tagged("firefox");
 // Specs of two Dispatch processes behind the round-robin proxy (e2e/round-robin-proxy.ts), each
 // named `*.multiprocess.e2e.ts`. The default run ignores them, since they need both processes and
 // the proxy's own routes; two-process mode (DISPATCH_E2E_PROCESSES=2, `bun run e2e:multiprocess`)
@@ -193,26 +202,38 @@ const parallelProjects = [
     grep: phoneTagged,
     use: { ...devices["iPhone 13"], browserName: "chromium" as const },
   },
-  // A caret beside a collaborator's cursor behaves per engine, the issue picker's keyboard-step
-  // rule and the header session pickers' (the live view's model and thinking pickers) rest on
-  // each engine dispatching a closed select's `change` in the key's own task, deep links meet
-  // each engine's chunk cancellation and the margin hold's frame and scroll order,
-  // IndexedDB-backed document recovery must run in the engines people use, a body's Mermaid
-  // diagram draws through each engine's SVG parser, shadow DOM and the ELK layout running in
-  // it, and a long body's formatting arrives from a Web Worker whose chunk, deadline and late
-  // paint each engine schedules its own way, in a body that grows under its own paint as a turn
-  // streams (`heavy-streamed-turn`) and in one a reader opens, which is `heavy-bodies` and runs
-  // in `webkit-alone` below, since its rows are read from the clock. So those specs also run in
-  // WebKit. So does the
-  // one-socket invariant (`live-socket`): a tab holds one live socket in every engine, and
-  // WebKit is the one iOS Safari uses for every subscription its row opens. The keyed write
-  // path (`keyed-writes`, `keyed-send`) runs here and in Firefox too: each engine has its own
-  // way of failing a request, aborting one, keeping a tab's storage across a reload and
-  // asking before it unloads, and a write must land once through all of them.
+  // WebKit runs the rows a WebKit decision can change, and nothing else: it selects by the
+  // `@webkit` tag, so each row it runs carries that tag and a comment naming the clause below it
+  // exercises. Every clause here names one engine behaviour and the rows that exercise it.
+  // Where a caret lands beside a collaborator's own caret: `collab-cursor`'s three rows.
+  // A closed select's `change` dispatched inside the key's own task, which the Agents issue
+  // picker's and the live header pickers' keyboard-step rule rests on: the six rows of
+  // `keyboard-agents-picker` that step a select from the keyboard or leave one without Enter,
+  // and all five of `keyboard-session-pickers`.
+  // The engine's cancellation of a chunk the navigation away from it left downloading, and the
+  // margin hold's frame and scroll order: six `deep-links` rows - the held chunk's, the press
+  // raced against the landing's own frames, the two hidden-editor rows that run with the page's
+  // animation frames held, the per-frame scroll of a past version's landing, and the placement
+  // the margin's own scroll must not move.
+  // IndexedDB-backed recovery of an edit the server has not taken: three `offline-edits` rows -
+  // the edit restored across a reload, the acknowledged one cleared, and two tabs holding two
+  // connections to one store.
+  // The SVG parser, the shadow DOM and the ELK layout a diagram draws through: `mermaid`'s one
+  // row.
+  // A Web Worker's chunk, its deadline and a paint that arrives after it: `heavy-streamed-turn`'s
+  // row, where the body grows under its own paint as a turn streams. The body a reader opens is
+  // `heavy-bodies`, which runs in `webkit-alone` below, since its rows are read from the clock.
+  // The one-socket invariant: `live-socket`'s row that a tab holds one live socket for every live
+  // view, since WebKit is the engine iOS Safari opens every subscription in.
+  // The keyed write path's request failure, its abort, a tab's storage across a reload and the
+  // ask before a tab unloads: five `keyed-writes` rows and two `keyed-send` rows.
+  // Without a `testMatch` the project would see every spec in this directory, so it names the
+  // same `testIgnore` as `chromium`: no tagged row may sit in a plain-HTTP, multiprocess or
+  // clock-read spec, and `heavy-bodies.e2e.ts` belongs to `webkit-alone` alone.
   {
     name: "webkit",
-    testMatch:
-      /(collab-cursor|deep-links|heavy-streamed-turn|keyboard-agents-picker|keyboard-session-pickers|keyed-send|keyed-writes|live-socket|mermaid|offline-edits)\.e2e\.ts/,
+    testIgnore: [plainHttpSpecs, multiprocessSpecs, clockSpecs],
+    grep: webkitTagged,
     use: { ...devices["Desktop Safari"] },
   },
   // The live view's phone layout (its keyboard cap, gutter and scroll locks), its model
@@ -220,6 +241,10 @@ const parallelProjects = [
   // header's model and thinking pickers on a phone, what the Conversation's floating pills
   // cover on a phone, and the one-socket invariant also run in WebKit, the engine iOS Safari
   // uses; only those rows, since the rest of each spec is engine-agnostic.
+  // This project keeps its file `testMatch` and its title `grep` rather than an engine tag: 13
+  // rows is already as narrow as a tag would make it, and Playwright reads an array of regexes
+  // as OR (`createTitleMatcher` answers on the first that matches), so a tag beside the titles
+  // below would widen the project rather than narrow it.
   {
     name: "webkit-iphone",
     testMatch:
@@ -227,23 +252,45 @@ const parallelProjects = [
     grep: /on a phone the live view|a document-scrolling route|covers none of|a capped model name|on a phone the delivery page|the header shows the session's reported model|a tab holds one live socket for every live view/,
     use: { ...devices["iPhone 13"] },
   },
-  // Firefox's native editing mishandles text typed over what follows a block's last line break,
-  // the issue picker's and the header session pickers' keyboard-step rule rests on the engine's
-  // select dispatch, offline document recovery owns browser storage, a click on a link
-  // inside the editor meets the engine's focus rule (Firefox focuses the editing host, not the
-  // link), a body's Mermaid diagram draws through the engine's SVG parser, shadow DOM and
-  // the ELK layout running in it, and a long body's formatting arrives from a Web Worker whose
-  // chunk, deadline and late paint the engine schedules its own way - in `heavy-streamed-turn`
-  // here, and in `heavy-bodies` in `firefox-alone` below. Those specs, the whole
-  // deep-links spec, the one-socket invariant (`live-socket`, which holds in every engine) and
-  // the keyed write path run in Firefox too.
+  // Firefox runs the rows a Firefox decision can change, and nothing else: it selects by the
+  // `@firefox` tag, so each row it runs carries that tag and a comment naming the clause below it
+  // exercises. Every clause here names one engine behaviour and the rows that exercise it.
+  // Native editing over what follows a block's last line break, which this engine mishandles:
+  // `code-line-replace`'s two rows.
+  // The engine's focus rule for a click on a link inside the editor, where Firefox focuses the
+  // editing host rather than the link: `picture-link-click`'s one row.
+  // A closed select's `change` dispatched inside the key's own task, which the Agents issue
+  // picker's and the live header pickers' keyboard-step rule rests on: the six rows of
+  // `keyboard-agents-picker` that step a select from the keyboard or leave one without Enter,
+  // and all five of `keyboard-session-pickers`.
+  // The engine's cancellation of a chunk the navigation away from it left downloading, and the
+  // margin hold's frame and scroll order: six `deep-links` rows - the held chunk's, the press
+  // raced against the landing's own frames, the two hidden-editor rows that run with the page's
+  // animation frames held, the per-frame scroll of a past version's landing, and the placement
+  // the margin's own scroll must not move.
+  // IndexedDB-backed recovery of an edit the server has not taken: three `offline-edits` rows -
+  // the edit restored across a reload, the acknowledged one cleared, and two tabs holding two
+  // connections to one store.
+  // The SVG parser, the shadow DOM and the ELK layout a diagram draws through: `mermaid`'s one
+  // row.
+  // A Web Worker's chunk, its deadline and a paint that arrives after it: `heavy-streamed-turn`'s
+  // row, where the body grows under its own paint as a turn streams. The body a reader opens is
+  // `heavy-bodies`, which runs in `firefox-alone` below, since its rows are read from the clock.
+  // The one-socket invariant: `live-socket`'s row that a tab holds one live socket for every live
+  // view, which must hold in every engine people read in.
+  // The keyed write path's request failure, its abort, a tab's storage across a reload and the
+  // ask before a tab unloads: five `keyed-writes` rows and two `keyed-send` rows.
+  // The `testIgnore` is `chromium`'s, for the reason given above `webkit`.
   {
     name: "firefox",
-    testMatch:
-      /(code-line-replace|deep-links|heavy-streamed-turn|keyboard-agents-picker|keyboard-session-pickers|keyed-send|keyed-writes|live-socket|mermaid|offline-edits|picture-link-click)\.e2e\.ts/,
+    testIgnore: [plainHttpSpecs, multiprocessSpecs, clockSpecs],
+    grep: firefoxTagged,
     use: { ...devices["Desktop Firefox"] },
   },
-
+  // The one row of `shell.e2e.ts` that follows a Download link before a chunk fails. It keeps its
+  // file `testMatch` and its title `grep` rather than an engine tag, for the reason given above
+  // `webkit-iphone`: one row is as narrow as a tag would make it, and a tag added beside the
+  // title below would be read as OR and widen the project.
   {
     name: "firefox-download-navigation",
     testMatch: /shell\.e2e\.ts/,
@@ -303,6 +350,11 @@ const parallelProjects = [
  * `webkit`, for the reasons written above those projects, and runs here in all three;
  * `heavy-document-writes.e2e.ts`, which drives no browser, and `nested-directive.e2e.ts` ran in
  * `chromium` alone and run in `chromium-alone` alone.
+ *
+ * These three select by `testMatch` alone, where `webkit` and `firefox` select by an engine tag:
+ * their axis is the file, not a behaviour. Every row of a clock-read file runs here whatever it
+ * asserts, because what puts it here is that its claim is a wall-clock time, and
+ * `heavy-bodies.e2e.ts` carries no engine tag at all - the two tagged projects ignore it.
  */
 const aloneProjects = [
   {

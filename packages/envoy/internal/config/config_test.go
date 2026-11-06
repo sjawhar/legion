@@ -3,12 +3,13 @@ package config
 import (
 	"fmt"
 	"net"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/fixtureenv"
 )
 
 // listeningDescriptor opens a listening loopback socket and returns its descriptor number and
@@ -129,12 +130,12 @@ func loadWith(t *testing.T, values map[string]string) (Service, error) {
 	t.Setenv("ENVOY_MACHINE_ID", "test-machine")
 	t.Setenv("NATS_URLS", "nats://127.0.0.1:4222")
 	for _, name := range []string{"ENVOY_NATS_REPLICAS", "ENVOY_STREAM_MAX_BYTES", "ENVOY_SESSION_MAX_AGE"} {
-		// t.Setenv restores the variable after the test; Unsetenv then leaves it unset for this one.
-		t.Setenv(name, "")
 		if value, ok := values[name]; ok {
 			t.Setenv(name, value)
-		} else if err := os.Unsetenv(name); err != nil {
-			t.Fatalf("unset %s: %v", name, err)
+		} else {
+			// fixtureenv.Unset leaves the variable unset for this test and has Go put the value
+			// the process held back after it.
+			fixtureenv.Unset(t, name)
 		}
 	}
 	return Load(9020)

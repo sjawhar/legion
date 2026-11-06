@@ -716,9 +716,9 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   round.
 - **`READY` refused.** The merger's `READY` is refused while the pull request's head carries
   anything above the reviewer's approved head but a commit under `docs/solutions/`, which retro
-  no longer writes, and the
-  removal of files under `.legion/` that `legion handoffs import` commits
-  (`READY_UNREVIEWED_CHANGE`, naming the paths; also when the head
+  no longer writes, and a change whose every path is under `.legion/`, where handoffs were
+  committed before they moved to the Dispatch issue and which nothing writes or reads now, so that
+  nobody reviews one (`READY_UNREVIEWED_CHANGE`, naming the paths; also when the head
   is not built on the approved one, GitHub does not know the approved head, or GitHub's compare
   gives no file list or lists 300 files, the most it lists), or
   the review round recorded no approval (`READY_NOT_APPROVED`): either way the issue goes back to

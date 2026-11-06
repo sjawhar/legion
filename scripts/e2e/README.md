@@ -242,20 +242,12 @@ Each item below names a script, then what it proves.
 - `handoff-records.sh`
 
   a phase's handoff is a record on its Dispatch issue (sjawhar/legion#2354), driven against the real Dispatch server this checkout builds, on a database of its own, and the whole daemon booted with `dispatch_url` at it, over a PostgreSQL the caller names and a `nats-server` of the run's own, through the real `dispatch` CLI and `POST /legion/v1/handoff/complete`:
-  a 40 KB body reads back byte for byte and two writes are versions 1 and 2, a body one byte over the cap refused by the CLI and 413 `CAP_EXCEEDED` by Dispatch;
+  a 40 KB body reads back byte for byte and two writes are versions 1 and 2, a body one byte over the cap refused 413 `CAP_EXCEEDED` by Dispatch, which owns every bound, both through the CLI and sent raw;
   a record another session wrote is refused `HANDOFF_SESSION_MISMATCH` and the planner's own moves the issue on;
-  `legion handoffs import`'s record, under the daemon's session, is refused the tester, which rewrites it, and the reviewer's task names the rewrite;
+  a record the daemon's own session wrote, as the issues carry from before handoffs moved to Dispatch, is refused the tester, which rewrites it, and the reviewer's task names the rewrite;
   a round-1 record named in round 2 is refused `HANDOFF_NOT_NEW`;
   with Dispatch stopped the write fails and the completion is refused `DISPATCH_READ_FAILED`, and once it is back both land and the issue's handoff list holds the record.
   No GitHub, no cluster
-
-- `handoff-cutover-github.sh`
-
-  on `sjawhar/legion-smoke`, as the implement App, what handoffs leaving git do to GitHub's required check `gate`:
-  a `.legion/`-only commit with the `skip-checks: true` trailer, and the pull request opened on it, get no `gate` check run and no workflow run within 10 minutes (today's behaviour, the negative control);
-  the commit `legion handoffs import` makes removing `.legion/` (the same Git Data API calls) gets one;
-  and a pull request whose only commit is empty, with no trailer, is opened by GitHub and its head gets one (D13).
-  Its scratch workflow runs are cancelled and its branches and pull requests closed and deleted on exit
 
 - `envoy-session-delivery.sh`
 
@@ -273,7 +265,7 @@ Each item below names a script, then what it proves.
 - `TestRealGitHubReadyHoldsTheHeadToRetrosCommits`
 
   the daemon's `POST /legion/v1/handoff/complete` with `ready: true`, over a real Postgres and as the real implement App, holds a pull request's head to its review round's approved head plus retro's commits:
-  GitHub's compare of the two must show nothing outside `docs/solutions/` but files removed under `.legion/`, or READY is refused `READY_UNREVIEWED_CHANGE` naming the paths.
+  GitHub's compare of the two must show nothing outside `docs/solutions/` but a change whose every path is under `.legion/`, or READY is refused `READY_UNREVIEWED_CHANGE` naming the paths.
   Devbox only
 
 ## On a GitHub-hosted runner
@@ -4111,67 +4103,21 @@ Every handoff is written and read with the real `dispatch` CLI (`bun packages/en
 | step | driven by | read back as |
 | :--- | :--- | :--- |
 | `a6-a-40kb-handoff-reads-back-byte-identical-two-writes-are-versions-1-and-2` | two `handoff-write`s of 41 KB bodies (JSON objects with a proof list, non-ASCII text and literal escapes a re-encoding would change, ending in a newline) on the fifth issue, which no daemon holds | versions 1 and 2; `handoff-read` (the newest) and `handoff-read --version 1` print one metadata line, then each body byte for byte (sha256 printed) |
-| `a6-control-a-body-one-byte-over-the-cap-is-refused` | `handoff-write` of a 262145-byte body, then the same body posted raw with the agent's bearer | the CLI exits non-zero having called nothing, naming 1 byte over the 262144-byte limit; Dispatch answers 413 `CAP_EXCEEDED`; the issue still lists versions 2 and 1 |
+| `a6-control-a-body-one-byte-over-the-cap-is-refused` | `handoff-write` of a 262145-byte body, then the same body posted raw with the agent's bearer | the CLI exits non-zero carrying Dispatch's 413 `CAP_EXCEEDED`, which names 1 byte over the 262144-byte limit, since the server owns every bound and the CLI checks no length of its own; the raw post answers 413 `CAP_EXCEEDED`; the issue still lists versions 2 and 1 |
 | `a3-a-record-another-session-wrote-is-refused-at-completion` | a `plan` record written under another session; the planner's completion naming it | 403 `HANDOFF_SESSION_MISMATCH` naming both sessions; for three seconds the issue stays in `planning` |
 | `a3-control-the-planners-own-record-moves-the-issue-to-implementing` | the planner's own `handoff-write` and the same completion naming that record | 200 and the issue in `implementing` |
-| `a7-the-imports-record-is-refused-the-tester-writes-it-again-and-the-reviewer-is-told-it` | `legion handoffs import` itself (`handoffimport.Run`) against the running daemon's state, the real Dispatch and a GitHub stand-in whose `legion/<testing issue>` carries `.legion/<KEY>/{plan,implement,test}.json`; the tester's completion naming the imported `test` record; the tester's `handoff-read` and `handoff-write` of the body it read; its completion naming that record with verdict `pass` | the import prints `imported v1` for each file, `removal deferred: <KEY> is in testing; run the import again once the phase ends` for that branch (the daemon is the records' release, and the issue is in testing) and `no branch` for the rest, and sent the stand-in reads alone, no write; the record is the file byte for byte under `legion-daemon:<PROJECT>`; the completion is refused 403 `HANDOFF_SESSION_MISMATCH` naming that session and the tester's, the issue still in `testing`; the rewrite is version 2 under the tester's session with the same body; the pass moves the issue to `reviewing`, and the reviewer the daemon starts is prompted with a task naming `Handoff: test version 2 (dispatch handoff-read --issue <KEY> --phase test --version 2)`, which its own `handoff-read --version 2` reads as the tester's |
+| `a7-a-record-the-daemons-session-wrote-is-refused-the-tester-writes-it-again-and-the-reviewer-is-told-it` | a `test` record posted to Dispatch's own handoff route with the daemon's session `legion-daemon:<PROJECT>` as its actor, the author of the records the issues carry from before handoffs moved to Dispatch (the `dispatch` CLI is this proof's worker side and refuses a session id with a colon in it); the tester's completion naming that record; the tester's `handoff-read` and `handoff-write` of the body it read; its completion naming the rewrite with verdict `pass` | Dispatch holds the record as version 1 under that session, the body byte for byte; the completion is refused 403 `HANDOFF_SESSION_MISMATCH` naming that session and the tester's, the issue still in `testing`; the rewrite is version 2 under the tester's session with the same body; the pass moves the issue to `reviewing`, and the reviewer the daemon starts is prompted with a task naming `Handoff: test version 2 (dispatch handoff-read --issue <KEY> --phase test --version 2)`, which its own `handoff-read --version 2` reads as the tester's |
 | `handoff-not-new-the-implementers-round-1-record-is-refused-in-round-2` | the implementer's round-1 record and completion; the tester the daemon starts, prompted with its task, failing the round with its own record; the implementer's round-2 completion naming its round-1 record; then a new record and its completion | `testing`, then `implementing` again with the implementer prompted its round-2 task; 409 `HANDOFF_NOT_NEW` naming the round-1 record with the issue still `implementing`; the control 200 and `testing` |
 | `a10-control-with-dispatch-up-the-first-write-succeeds` | the planner's first `handoff-write` with Dispatch up | version 1 |
 | `a10-with-dispatch-stopped-the-write-fails-and-the-completion-is-refused` | the Dispatch process stopped (SIGINT); the planner's `handoff-write`; its completion naming the version 1 that exists | the CLI exits non-zero naming the failed connection (`Unable to connect`); 502 `DISPATCH_READ_FAILED` naming the refused dial; the issue still `planning` |
 | `a10-dispatch-restarted-the-retried-write-and-the-completion-land` | Dispatch started again on the same database and port; the same `handoff-write`; its completion | version 2; 200 and `implementing`; `GET /api/v1/issues/<KEY>/handoffs`, the list Conversation reads, holds version 2 by the planner's session newest, then version 1 |
 
 What the proof stands in for lies outside the records:
-the broker is a native `nats-server`; GitHub is two REST stand-ins, the daemon's (each repository with default branch `main`, nothing else) and the import's (one branch carrying `.legion/`, read through the contents API, its removal deferred;
-the handoffimport unit tests hold the removal itself, and P7, `handoff-cutover-github.sh`, makes it on GitHub itself);
+the broker is a native `nats-server`; GitHub is one REST stand-in, the daemon's (each repository with default branch `main`, nothing else);
 the Apps' tokens are placeholders; Envoy's listener is the package's `noticeListener`;
 and no agent runs: each claim is launched by the package's fake runtime, which provisions its own workspace.
 The issues, pull requests, slots and the claims the boot relaunches are seeded through the store, as every daemon test seeds its fixture.
 `HANDOFF_RECORDS_EVIDENCE_DIR` (default a fresh directory under `TMPDIR`, kept and printed) keeps the transcript, the `nats-server`'s log, the daemon's own, Dispatch's (`dispatch.log`) and the driver's output.
-
-## handoff-cutover-github.sh
-
-```sh
-bash scripts/e2e/handoff-cutover-github.sh     # → "handoff cutover github e2e: PASS in <n>s", exit 0, in about 12 minutes
-```
-
-sjawhar/legion#2354's proof, on GitHub itself, of what moving the handoffs out of git does to a branch's required checks (its A8 and A9's GitHub half, and the plan's D13), on `sjawhar/legion-smoke`, whose `main` requires the check `gate` (the `gate` job of `.github/workflows/fail-on-demand.yml`, run on every push and pull request;
-the `prerequisites` check reads the requirement from `GET /repos/<repo>/rules/branches/main`).
-It needs `gh` acting as an App installed on the smoke repository with contents and pull-request write
-— the implement App, as an issue pod's `gh` acts for owner `sjawhar` through `GH_CONFIG_DIR` — and `jq`; no clone, no Legion binary.
-Every write is a `gh api` call, so no token is printed or leaves `gh`.
-GitHub fills a repository's `permissions` for a user's token only:
-for an App installation token every one reads `false`, so when `push` does, `prerequisites` holds instead that the installation lists the repository, and the first branch write is the push itself, whose refusal ends the run with GitHub's words.
-
-Each item below names a check, then what it holds.
-
-- `prerequisites`
-
-  `gh` acts as an App (`[bot]`) that may push to the repository, and `main` requires `gate`
-
-- `negative-control`
-
-  a branch pushed at a code commit gets a `gate` check run;
-  a `.legion/`-only commit above it, whose message ends with two empty lines and `skip-checks: true` (the handoff push of the release before sjawhar/legion#2354), pushed by a non-forced ref update, and a pull request opened on it get no `gate` check run in any status and no workflow run for the whole wait (600 s)
-
-- `import-removal`
-
-  the removal `legion handoffs import` makes under the records' daemon, by the same Git Data API calls (`ghbranch.Head`, `branch.removalSet`, `branch.removalCommit` and `branch.move` in `packages/daemon/internal/handoffimport/handoffimport.go`):
-  the branch's ref, its head's root tree, `.legion/`'s recursive tree, a tree on the root tree deleting each path under `.legion/` (sha null), a commit of it on the head with the import's message and no trailer, and PATCH of the ref with `force: false`;
-  the new head carries no `.legion/`, is the pull request's head, and gets a `gate` check run
-
-- `empty-root-pull-request`
-
-  D13: a branch whose only commit above `main` is empty (`main`'s tree) and carries no trailer, as a root whose code all lands through its children pushes;
-  GitHub opens a pull request on it (1 commit, 0 changed files) and its head gets a `gate` check run.
-  A refusal to open it fails the run naming GitHub's answer and says to report it to the architect rather than work around it
-
-What each check holds is whether GitHub started the required check on a head: a `gate` check run on it, in any status.
-A push GitHub skips gets no workflow run and no check run at all, while one it runs checks for is queued the moment it is pushed;
-on the smoke account's Actions queue a result then took 20 to 40 minutes on 2026-10-27, so the run does not wait for the conclusion, and prints each check run's status as it saw it.
-Each head is polled every 15 s for at most `HANDOFF_CUTOVER_WAIT` seconds (default 600).
-The run's branches are `handoff-cutover/<run>/negative` and `handoff-cutover/<run>/root`, and its pull requests are titled with the run id;
-on any exit the workflow runs on its branches that have not finished are cancelled, so they hold no runner of the queue other proofs share, both pull requests are closed and both branches deleted, each failure to do so named.
-`HANDOFF_CUTOVER_EVIDENCE_DIR` (default a fresh directory under `TMPDIR`, kept and printed) keeps the transcript, the ruleset read and each head's `gate` check runs as GitHub answered them.
 
 ## envoy-session-delivery.sh
 
