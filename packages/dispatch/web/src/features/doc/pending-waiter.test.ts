@@ -10,6 +10,7 @@ const nothingPending: PendingState = {
   readOnly: false,
   rebuiltAt: undefined,
   stored: true,
+  unsent: false,
 };
 
 /** Runs `body` on a fake clock: a wait's bound is advanced rather than waited out. */

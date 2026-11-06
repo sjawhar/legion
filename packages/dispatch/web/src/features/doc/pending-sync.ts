@@ -16,7 +16,23 @@ export interface PendingState {
   rebuiltAt: number | undefined;
   /** Whether this browser has an IndexedDB store for these edits. */
   stored: boolean;
+  /**
+   * Whether the rows this browser holds have waited longer than `UNSENT_NOTICE_MS` for the
+   * server to take one of its frames: the edits are saved here and have not reached Dispatch.
+   */
+  unsent: boolean;
 }
+
+/**
+ * How long the rows this browser holds may wait for the server to take one of its frames before
+ * a person is told the edits have not reached Dispatch. One frame's round trip on this pod is
+ * 31 ms at the median of a keystroke, 176 ms at the 90th percentile and 539 ms at the 99th, and
+ * no single frame a room sends is larger than 64 KiB, so two seconds is close to four of the
+ * slowest round trips and longer than the wait any one frame costs: typing never reaches it, and
+ * a handover or an acknowledgement that has stopped always does. The wait starts over every time
+ * the server takes a frame, so a person typing steadily is never named either.
+ */
+export const UNSENT_NOTICE_MS = 2_000;
 
 export interface PendingSync {
   /** Starts a fresh acknowledgement sequence for a newly opened socket. */
@@ -323,8 +339,19 @@ export function startPendingSync({
   let recordedThrough = 0;
   let recorded: RecordedUpdate[] = [];
   let sent: SentFrame[] = [];
-  // The frame this socket's server last answered as not applied.
   let refused: SentFrame | undefined;
+  // Whether the rows this browser holds have waited out `UNSENT_NOTICE_MS` without the server
+  // taking a frame, and the timer that is counting that wait down.
+  let unsent = false;
+  let unsentWait: ReturnType<typeof setTimeout> | undefined;
+  /** Starts the wait over: the server has taken a frame, or this browser holds no row. */
+  const restartUnsentWait = (): void => {
+    if (unsentWait !== undefined) {
+      clearTimeout(unsentWait);
+      unsentWait = undefined;
+    }
+    unsent = false;
+  };
 
   const ready = store
     .catch((error: unknown) => {
@@ -365,18 +392,30 @@ export function startPendingSync({
         // asks for a fresh one as soon as it settles, whether the store takes the row or
         // refuses it (`record`).
         if (countedThrough !== recordedThrough) continue;
+        if (count === 0) {
+          // Everything this browser held has reached the server, so nothing is waiting.
+          restartUnsentWait();
+        } else if (!unsent && unsentWait === undefined) {
+          unsentWait = setTimeout(() => {
+            unsentWait = undefined;
+            unsent = true;
+            void report();
+          }, UNSENT_NOTICE_MS);
+        }
         const state: PendingState = {
           count,
           readOnly,
           rebuiltAt,
           stored: edits !== undefined,
+          unsent,
         };
         if (
           lastState === undefined ||
           lastState.count !== state.count ||
           lastState.readOnly !== state.readOnly ||
           lastState.rebuiltAt !== state.rebuiltAt ||
-          lastState.stored !== state.stored
+          lastState.stored !== state.stored ||
+          lastState.unsent !== state.unsent
         ) {
           lastState = state;
           onChange(state);
@@ -616,6 +655,17 @@ export function startPendingSync({
       const handled: PendingKey[] = [];
       const rerecorded: Promise<void>[] = [];
       for (const row of restored) {
+        // The admission this restore began for can turn read-only while it runs - the issue
+        // closed, and this socket was admitted again read-only. From then on no local update is
+        // a person's edit to store (`onUpdate`), so applying the rows left would record nothing
+        // in their place while `handled` still took them out of the store: the person's only
+        // copy of an edit, gone, with nothing sent and no word said. The rows left stay for the
+        // next writable admission, which this forgets having settled so that `synced` restores
+        // them rather than take the admission as one it has already answered.
+        if (readOnly !== admittedReadOnly) {
+          syncedReadOnly = undefined;
+          break;
+        }
         handled.push(row.key);
         if (addsParking(scratch, row.update)) {
           rebuiltAt = Math.min(rebuiltAt ?? row.at, row.at);
@@ -701,6 +751,9 @@ export function startPendingSync({
         await Promise.all(recorded.map((record) => record.written));
         return applied;
       }
+      // The server took a frame of this browser's, so whatever is still saved here has not been
+      // waiting on a silent server: the wait starts over.
+      restartUnsentWait();
       try {
         if (entry.kind === "update") {
           await clearUpdate(entry);
@@ -741,6 +794,7 @@ export function startPendingSync({
         return;
       }
       destroyed = true;
+      restartUnsentWait();
       derived = [];
       doc.off("update", onUpdate);
       void ready.then((edits) => edits?.close());

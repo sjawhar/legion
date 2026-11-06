@@ -5,6 +5,7 @@ import * as Y from "yjs";
 import type { PendingEdits, PendingKey } from "./pending-edits";
 import {
   artifactId,
+  chainOntoEnd,
   closeStores,
   frame,
   NAME,
@@ -22,7 +23,12 @@ import {
   typeParagraph,
   updateFrame,
 } from "./pending-fixture";
-import { type PendingState, type PendingSync, startPendingSync } from "./pending-sync";
+import {
+  type PendingState,
+  type PendingSync,
+  startPendingSync,
+  UNSENT_NOTICE_MS,
+} from "./pending-sync";
 import { createPendingWaiter } from "./pending-waiter";
 
 /** Stands in for the provider: updates it applies from the server carry it as their origin. */
@@ -185,6 +191,55 @@ test("an acknowledgement of 0 clears nothing", async () => {
   expect(await rowsOf(artifact)).toEqual([[artifact, doc.clientID, 1]]);
 });
 
+test("a row the server never answers is named once it has waited out the round trip", async () => {
+  // The one row here that waits on the real clock. A faked one cannot drive this: the suite runs
+  // ygo against `fake-indexeddb`, whose transactions settle on the real timer queue, so faking
+  // it stops the store this wait is measured through rather than the wait. It waits
+  // `UNSENT_NOTICE_MS` and no longer.
+  const { artifact, doc, states, sync, type } = await scripted();
+  sync.socketOpened();
+  sync.frameWritten(updateFrame(type("typed")));
+  await waitFor(async () => expect(await rowsOf(artifact)).toEqual([[artifact, doc.clientID, 1]]));
+  // Inside the wait the person is told nothing: this is what every keystroke looks like.
+  expect(states.every((state) => !state.unsent)).toBe(true);
+
+  // The server answers nothing at all, as a stalled handover leaves it.
+  await waitFor(() => expect(states.at(-1)?.unsent).toBe(true), { timeout: UNSENT_NOTICE_MS * 3 });
+  expect(states.at(-1)).toEqual({
+    count: 1,
+    readOnly: false,
+    rebuiltAt: undefined,
+    stored: true,
+    unsent: true,
+  });
+
+  // The row lands, and the notice goes with it.
+  await sync.frameReceived(syncStatusFrame(true));
+  await waitFor(() =>
+    expect(states.at(-1)).toEqual({
+      count: 0,
+      readOnly: false,
+      rebuiltAt: undefined,
+      stored: true,
+      unsent: false,
+    })
+  );
+});
+
+test("rows the server keeps taking are never named", async () => {
+  const { artifact, states, sync, type } = await scripted();
+  sync.socketOpened();
+  // Typing with a row always outstanding, each frame answered at once: nothing ever waits out
+  // `UNSENT_NOTICE_MS`, so the sentence never appears.
+  for (let keystroke = 0; keystroke < 3; keystroke += 1) {
+    sync.frameWritten(updateFrame(type("a")));
+    sync.frameWritten(updateFrame(type("b")));
+    await sync.frameReceived(syncStatusFrame(true));
+  }
+  await waitFor(async () => expect((await rowsOf(artifact)).length).toBe(3));
+  expect(states.every((state) => !state.unsent)).toBe(true);
+});
+
 test("a too-large refusal drops the refused update's row alone, after a not-applied answer kept it", async () => {
   const { artifact, doc, sync, type } = await scripted();
   sync.socketOpened();
@@ -282,6 +337,7 @@ test("a read-only first sync applies nothing and keeps the saved edits", async (
     readOnly: true,
     rebuiltAt: undefined,
     stored: true,
+    unsent: false,
   });
 });
 
@@ -302,6 +358,7 @@ test("a read-only admission stores none of the editor's own updates", async () =
     readOnly: true,
     rebuiltAt: undefined,
     stored: true,
+    unsent: false,
   });
 });
 
@@ -328,6 +385,7 @@ test("a read-only load drops the heading id an earlier read-only load stored onc
       readOnly: true,
       rebuiltAt: undefined,
       stored: true,
+      unsent: false,
     })
   );
 });
@@ -378,6 +436,7 @@ test("a read-only first sync drops a saved row the server already holds", async 
     readOnly: true,
     rebuiltAt: undefined,
     stored: true,
+    unsent: false,
   });
 });
 
@@ -405,6 +464,7 @@ test("a read-only first sync keeps a saved row that changes an object attribute"
     readOnly: true,
     rebuiltAt: undefined,
     stored: true,
+    unsent: false,
   });
 });
 
@@ -431,6 +491,7 @@ test("a read-only first sync drops a saved row that only splits the same text in
     readOnly: true,
     rebuiltAt: undefined,
     stored: true,
+    unsent: false,
   });
 });
 
@@ -454,6 +515,7 @@ test("a read-only first sync drops a saved row that inserts and deletes the same
     readOnly: true,
     rebuiltAt: undefined,
     stored: true,
+    unsent: false,
   });
 });
 
@@ -473,6 +535,7 @@ test("a read-only first sync keeps a saved row that writes a margin record", asy
     readOnly: true,
     rebuiltAt: undefined,
     stored: true,
+    unsent: false,
   });
 });
 
@@ -492,6 +555,7 @@ test("a read-only first sync keeps a saved row that writes a root other than the
     readOnly: true,
     rebuiltAt: undefined,
     stored: true,
+    unsent: false,
   });
 });
 
@@ -517,6 +581,7 @@ test("a connection first admitted read-only and later writable stores and counts
       readOnly: false,
       rebuiltAt: undefined,
       stored: true,
+      unsent: false,
     })
   );
 });
@@ -590,6 +655,7 @@ test("a restore that merges is recorded under the new client and the old rows ar
     readOnly: false,
     rebuiltAt: undefined,
     stored: true,
+    unsent: false,
   });
 });
 
@@ -625,6 +691,84 @@ test("a stale row does not let a later row from the same lost history through", 
   expect(doc.store.pendingStructs).toBeNull();
   expect(await rowsOf(artifact)).toEqual([[artifact, doc.clientID, 1]]);
   expect(states.at(-1)?.rebuiltAt).toBeDefined();
+});
+
+/** The paragraph the rows below chain onto: its last character is the left origin of both the
+ *  paste a browser made offline and the chain the server's history grew after it, which is what
+ *  makes the paste's apply meet the whole chain (`docs.Service.TangleBeyondOneApplyForTest`). */
+const TANGLE_POINT = "This paragraph is where the tangle starts.";
+/** Long enough to be the tangle the hook writes and short enough to build in one apply; the hook
+ *  writes 40,000, and the rows below hold at 400 because nothing here counts the chain. */
+const TANGLE_CHAIN = 400;
+
+test("a pending paste replays into a document chained onto at the place it anchors", async () => {
+  const artifact = artifactId();
+  const server = serverWith(TANGLE_POINT, 100);
+  // Offline, in an earlier page, a person pasted at the end of that text: the row names its last
+  // character as its left origin and nothing as its right.
+  await savedEdit(artifact, server, "tangled paste");
+  // The server's history grew a chain of one-character items at that same place while the page
+  // was away, each of a client of its own from 100,000 on.
+  chainOntoEnd(server, TANGLE_CHAIN);
+  const { doc, states, sync } = await scripted(artifact, Y.encodeStateAsUpdate(server));
+
+  await admit(sync, false);
+
+  // The row is applied and sent: it is re-recorded under this tab's client for the provider to
+  // write, and nothing about the chain makes it read as typed against a rebuilt history.
+  expect(paragraphText(doc).toString()).toContain("tangled paste");
+  expect(await rowsOf(artifact)).toEqual([[artifact, doc.clientID, 1]]);
+  expect(states.at(-1)).toEqual({
+    count: 1,
+    readOnly: false,
+    rebuiltAt: undefined,
+    stored: true,
+    unsent: false,
+  });
+});
+
+test("a pending paste a restore can no longer record is kept and named, not deleted in silence", async () => {
+  const artifact = artifactId();
+  const server = serverWith(TANGLE_POINT, 100);
+  await savedEdit(artifact, server, "tangled paste");
+  chainOntoEnd(server, TANGLE_CHAIN);
+  // The issue closes while the writable admission's restore is in flight - reading the rows out
+  // of IndexedDB and judging them against a chained document takes long enough for a socket to
+  // be admitted again - so from here on this admission stores no local update.
+  let readmit: ((readOnly: boolean) => void) | undefined;
+  const { doc, states, sync } = await scripted(
+    artifact,
+    Y.encodeStateAsUpdate(server),
+    (store) => ({
+      ...store,
+      async restoreRows() {
+        const rows = await store.restoreRows();
+        readmit?.(true);
+        return rows;
+      },
+    })
+  );
+  readmit = (readOnly) => sync.authenticated(readOnly);
+
+  await admit(sync, false);
+
+  // A person's unsent edit is either applied and sent, or kept and named. This one cannot be
+  // sent, so it stays the edit's only copy and is counted, which names it to the person ("1 edit
+  // saved in this browser can't be sent: this document is read-only.", `connection.ts`).
+  expect(await rowsOf(artifact)).not.toEqual([]);
+  expect(states.at(-1)).toEqual({
+    count: 1,
+    readOnly: true,
+    rebuiltAt: undefined,
+    stored: true,
+    unsent: false,
+  });
+
+  // The issue reopens: the writable admission after it replays the paste and sends it.
+  readmit = undefined;
+  await admit(sync, false);
+  expect(paragraphText(doc).toString()).toContain("tangled paste");
+  expect(await rowsOf(artifact)).toEqual([[artifact, doc.clientID, 1]]);
 });
 
 test("a first sync deletes every row it handled in one IndexedDB write", async () => {
@@ -811,7 +955,13 @@ test("a count taken before a row was written is never reported, and answers no w
 
   // The report that comes once the server has taken that row does answer it, so the wait was
   // waiting for the one thing the dropped report could not say.
-  waiter.report(artifact, { count: 0, readOnly: false, rebuiltAt: undefined, stored: true });
+  waiter.report(artifact, {
+    count: 0,
+    readOnly: false,
+    rebuiltAt: undefined,
+    stored: true,
+    unsent: false,
+  });
   await waitFor(() => expect(answered).toBe(true));
 });
 

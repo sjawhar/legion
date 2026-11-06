@@ -1,3 +1,10 @@
+import {
+  createEncoder,
+  toUint8Array,
+  writeUint8,
+  writeVarString,
+  writeVarUint,
+} from "lib0/encoding";
 import * as Y from "yjs";
 
 import { openPendingEdits, type PendingEdits, type PendingKey } from "./pending-edits";
@@ -161,4 +168,50 @@ export function serverWith(text: string, clientId: number): Y.Doc {
   server.clientID = clientId;
   typeInto(server, text);
   return server;
+}
+
+/** The id of the last character of `text`: what an insert at its end names as its left origin. */
+function lastCharacterId(text: Y.XmlText): Y.ID {
+  let last: Y.Item | undefined;
+  for (let item = text._start; item !== null; item = item.right) {
+    if (!item.deleted) {
+      last = item;
+    }
+  }
+  if (last === undefined) {
+    throw new Error("the text holds no character");
+  }
+  return Y.createID(last.id.client, last.id.clock + last.length - 1);
+}
+
+/** A string item's content reference, and the info bit that says it names a left origin. */
+const STRING_ITEM = 4;
+const HAS_LEFT_ORIGIN = 0x80;
+
+/**
+ * Chains `count` one-character items onto the end of `doc`'s first paragraph, each of a client of
+ * its own from `firstClient` on so none merges with its neighbour, as the server's tangle hook
+ * writes them (`docs.Service.TangleBeyondOneApplyForTest`, `writeChain`): the first names the
+ * text's last character as its left origin, each later one the item before it, and none names a
+ * right origin. That last character is the left origin a paste made at the end of that text
+ * before the chain arrived names too, so the paste's apply meets the whole chain. Written as wire
+ * bytes rather than typed, so a chain of tens of thousands costs one apply.
+ */
+export function chainOntoEnd(doc: Y.Doc, count: number, firstClient = 100_000): void {
+  let origin = lastCharacterId(paragraphText(doc));
+  const update = createEncoder();
+  writeVarUint(update, count); // client groups: one for each item of the chain
+  for (let index = 0; index < count; index += 1) {
+    const client = firstClient + index;
+    writeVarUint(update, 1); // structs in the group
+    writeVarUint(update, client);
+    writeVarUint(update, 0); // first clock
+    writeUint8(update, STRING_ITEM | HAS_LEFT_ORIGIN);
+    writeVarUint(update, origin.client);
+    writeVarUint(update, origin.clock);
+    writeVarString(update, "a");
+    origin = Y.createID(client, 0);
+  }
+  writeVarUint(update, 0); // no delete set
+  Y.applyUpdate(doc, toUint8Array(update));
 }

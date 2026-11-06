@@ -60,12 +60,13 @@ test("a read-only Hocuspocus admission signals a schema reload", () => {
   expect(isSchemaReadOnly(undefined)).toBe(false);
 });
 
-test("pending document labels describe retained, read-only, rebuilt, and unretained edits", () => {
+test("pending document labels describe retained, read-only, rebuilt, unsent, and unretained edits", () => {
   const retained = {
     count: 2,
     readOnly: false,
     rebuiltAt: undefined,
     stored: true,
+    unsent: false,
   };
   expect(connectionLabel("offline", pendingNotice("offline", retained))).toBe(
     "offline · 2 edits saved in this browser, not sent yet."
@@ -84,6 +85,25 @@ test("pending document labels describe retained, read-only, rebuilt, and unretai
   expect(pendingNotice("offline", { ...retained, count: 1 })).toBe(
     "1 edit saved in this browser, not sent yet."
   );
+  // Rows that have waited out `UNSENT_NOTICE_MS` on a connected, writable socket are named; the
+  // same rows inside that wait are not, which is what keeps the sentence off ordinary typing.
+  const unsent = { ...retained, unsent: true };
+  expect(pendingNotice("connected", unsent)).toBe(
+    "2 edits saved in this browser, not sent to Dispatch yet. Dispatch keeps trying."
+  );
+  expect(connectionLabel("connected", pendingNotice("connected", unsent))).toBe(
+    "connected · 2 edits saved in this browser, not sent to Dispatch yet. Dispatch keeps trying."
+  );
+  expect(pendingNotice("connected", { ...unsent, count: 1 })).toBe(
+    "1 edit saved in this browser, not sent to Dispatch yet. Dispatch keeps trying."
+  );
+  // The read-only sentence and the offline one are unchanged by it, and rows that have landed
+  // are named by nothing.
+  expect(pendingNotice("connected", { ...unsent, readOnly: true })).toBe(
+    "2 edits saved in this browser can't be sent: this document is read-only."
+  );
+  expect(pendingNotice("offline", unsent)).toBe("2 edits saved in this browser, not sent yet.");
+  expect(pendingNotice("connected", { ...unsent, count: 0 })).toBeUndefined();
 });
 
 /** A socket already open, as the browser's is once it connects; the test plays the server. */
@@ -594,7 +614,7 @@ test("a document whose browser keeps no edits says so, and still connects", asyn
       await waitFor(() => expect(OpenSocket.opened).toHaveLength(1));
       await waitFor(() =>
         expect(pending).toEqual([
-          { count: 0, readOnly: false, rebuiltAt: undefined, stored: false },
+          { count: 0, readOnly: false, rebuiltAt: undefined, stored: false, unsent: false },
         ])
       );
     });

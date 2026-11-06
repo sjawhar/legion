@@ -42,6 +42,14 @@ export function pendingNotice(
     if (pending.count > 0) {
       return `${savedEdits(pending.count)} saved in this browser, not sent yet.`;
     }
+    return undefined;
+  }
+  // The socket is up and this admission can send, yet what this browser holds has sat there
+  // longer than a frame's round trip without the server taking one (`UNSENT_NOTICE_MS`): the
+  // handover or the acknowledgements have stopped. The person is told the edits are kept and
+  // still going out, which is what they can act on - keep the tab open - rather than why.
+  if (connection === "connected" && pending.unsent && pending.count > 0) {
+    return `${savedEdits(pending.count)} saved in this browser, not sent to Dispatch yet. Dispatch keeps trying.`;
   }
   return undefined;
 }
