@@ -486,7 +486,7 @@ func TestRunSkipsAnUnfollowedSession(t *testing.T) {
 	stop := run(t, database, publisher, broker)
 	defer stop()
 
-	waitFor(t, time.Second, "reply publication", func() bool {
+	waitFor(t, eventWait, "reply publication", func() bool {
 		return publishedAt(t, database, event.ID) != nil
 	})
 	items := publisher.all()
