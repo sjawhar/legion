@@ -3547,16 +3547,17 @@ jobs:
     needs: changes
     if: needs.changes.outputs.envoy_go_race_docs == 'true'
     runs-on: ubuntu-24.04
-    # The step's -timeout 27m must fire before the runner cancels the job, so a hung test prints
+    # The step's -timeout 29m must fire before the runner cancels the job, so a hung test prints
     # the dump that names it. Both numbers come from this job's own green runs, the slowest of
-    # them 127770782204: 950 s in the package, after main took in #2414's tests and the package
-    # went from 953 services built to 1068, against 927 s in 127053239518 and 798 s in
-    # 127015089405, and 55 s of checkout, setup and compile before any of them. The step's
+    # them 128148376484: 1022 s in the package, against 950 s in 127770782204 and 927 s in
+    # 127053239518, and 55 s of checkout, setup and compile before any of them. The package has
+    # grown twice under this pull request, first when main took in #2414's tests (953 services
+    # built to 1068) and again on the merge of #2870, which moved work into this lane. The step's
     # deadline is the smallest whole minute at which the slowest package time is at most 60 % of
     # it, and this limit is six minutes above that. Measure again before changing either, and
     # from the slowest run rather than the newest: a package that has grown past 60 % of its
     # deadline is a deadline to raise, not a flake to re-run.
-    timeout-minutes: 33
+    timeout-minutes: 35
     services:
       postgres:
         # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
@@ -3602,7 +3603,7 @@ jobs:
       # and the count of services the tests left alive is the half of this job that no detector
       # of Go's reports.
       - name: Test the document service under the cleanup detector
-        run: GODEBUG=checkfinalizers=1 go test -v -count=1 -timeout 27m ./internal/dispatch/docs/
+        run: GODEBUG=checkfinalizers=1 go test -v -count=1 -timeout 29m ./internal/dispatch/docs/
         working-directory: packages/envoy
 
       - name: Report ci-ok when this is the run's last job

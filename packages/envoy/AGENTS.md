@@ -699,7 +699,7 @@ A running Dispatch process keeps one service for its whole life, so there the cy
 a pointer to a field of the service, such as a listing, counts as the service, and dies with that one allocation.
 The rule covers the cleanup's argument alike, so an argument reaching the document is the same cycle:
 `keepInstance` once passed its `*roomLoad`, which reaches a document by two routes through `roomInstance.unstored`: each `queuedClass`'s `UpdateCredit` carries the `service`, and it carries the `state` whose `roomState.reservedFor` is a `*crdt.Doc`, so it holds the load weakly too and passes an empty struct.
-`envoy-go-docs-finalizers` runs `GODEBUG=checkfinalizers=1 go test -v -count=1 -timeout 27m ./internal/dispatch/docs/` on the same `envoy_go_race_docs` filter, and fails on `is reachable from cleanup or cleanup argument` and then `fatal error: detected possible issues with cleanups and/or finalizers`;
+`envoy-go-docs-finalizers` runs `GODEBUG=checkfinalizers=1 go test -v -count=1 -timeout 29m ./internal/dispatch/docs/` on the same `envoy_go_race_docs` filter, and fails on `is reachable from cleanup or cleanup argument` and then `fatal error: detected possible issues with cleanups and/or finalizers`;
 its `-v` also carries this package's leak line, `docs: <built> services built, <alive> still alive after <duration>`, which names each test that built a service and never shut it down, so a test that builds a `*Service` gives it a `t.Cleanup` that shuts it down.
 This package is the only one of the repository that registers a cleanup today, and one added in another package comes with a detector job of its own, in the same pull request;
 `docs/testing.md` states the rule in full.
