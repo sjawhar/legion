@@ -53,7 +53,10 @@
 // one ephemeral mark at the end of the history and one on the newest message, and never more
 // than the four Anthropic allows; openai-responses takes an explicit prompt cache breakpoint at
 // the end of the history; openai-chat takes none. A caller that wants none of them anywhere
-// sets Request.NoCache, since caching is on unless the caller turns it off.
+// sets Request.NoCache, which takes off the marks this package places and nothing else: a
+// provider's own caching is not the field's to turn off, openai-responses keeps the implicit
+// breakpoint it puts after the newest message, and on openai-chat, which this package never
+// marks, the field changes nothing at all.
 //
 // # The structured reply
 //

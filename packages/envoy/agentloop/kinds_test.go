@@ -216,8 +216,9 @@ func TestAzureAnthropicSendsTheDeploymentNameAndTheBearerToken(t *testing.T) {
 	}
 }
 
-// An azure-anthropic run marks the cache as an anthropic-messages run does: one mark kept at the
-// end of the replayed history and one on the newest message, moved there as the run goes on.
+// An azure-anthropic run of a request that sets no cache field marks the cache as an
+// anthropic-messages run does: one mark kept at the end of the replayed history and one on the
+// newest message, moved there as the run goes on.
 func TestAzureAnthropicMarksTheCacheLikeAnthropic(t *testing.T) {
 	t.Parallel()
 	s := newStandIn(t,

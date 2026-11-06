@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 
 	"github.com/grafana/ai-sdk/provider"
@@ -236,21 +237,34 @@ func withCacheMark(options provider.ProviderOptions) provider.ProviderOptions {
 	return marked
 }
 
-// markAnthropicHistory puts Anthropic's ephemeral cache mark on the last of the run's first
-// history messages, so the next model call of the run, and the next run within the cache's life,
-// reads the conversation from the cache. The run places it unless the caller turns the marks off
-// with Request.NoCache.
+// markAnthropicHistory puts Anthropic's ephemeral cache mark at the end of the run's first
+// history messages, so the next model call of the run, and the next run within the cache's
+// life, reads the conversation from the cache. The provider gives a message's mark to that
+// message's last block alone and drops it on a thinking block, so the mark goes on the last
+// message of the history whose last part is not reasoning: a turn the model cut off at its
+// limit, which ends in thinking, would otherwise take the mark and lose it. A history every
+// message of which ends in reasoning goes unmarked, and the newest message's mark, which the
+// run places itself, is then the call's only one. The run places it unless the caller turns
+// the marks off with Request.NoCache.
 func markAnthropicHistory(messages []provider.Message, history int) {
-	if history > 0 {
-		messages[history-1].ProviderOptions = withCacheMark(messages[history-1].ProviderOptions)
+	for i := history - 1; i >= 0; i-- {
+		m := messages[i]
+		if len(m.Content) == 0 || m.Content[len(m.Content)-1].Type == provider.ContentPartTypeReasoning {
+			continue
+		}
+		messages[i].ProviderOptions = withCacheMark(m.ProviderOptions)
+		return
 	}
 }
 
 // markOpenAIHistory puts an explicit prompt cache breakpoint at the end of the run's first
 // history messages, on the last part of the last of them that can carry one (a user message's
 // text or file, a tool result): the implicit breakpoint sits after the newest message only, so
-// without it a later run would not read the conversation from the cache. The run places it
-// unless the caller turns the marks off with Request.NoCache.
+// without it a later run would not read the conversation from the cache. A tool result whose
+// output is content, which is how a result holding an image goes over, takes the breakpoint on
+// the last of those content values: the provider reads a content output's breakpoint from each
+// value's own options and never from the part's. The run places it unless the caller turns the
+// marks off with Request.NoCache.
 func markOpenAIHistory(messages []provider.Message, history int) {
 	breakpoint := provider.BuildProviderOptions(openai.OpenAIPartOptions{PromptCacheBreakpoint: &openai.PromptCacheBreakpoint{Mode: "explicit"}})
 	for i := history - 1; i >= 0; i-- {
@@ -259,12 +273,30 @@ func markOpenAIHistory(messages []provider.Message, history int) {
 			continue
 		}
 		last := len(m.Content) - 1
-		switch m.Content[last].Type {
-		case provider.ContentPartTypeText, provider.ContentPartTypeFile, provider.ContentPartTypeToolResult:
-			content := append([]provider.ContentPart(nil), m.Content...)
-			content[last].ProviderOptions = breakpoint
-			messages[i].Content = content
-			return
+		part := m.Content[last]
+		switch part.Type {
+		case provider.ContentPartTypeText, provider.ContentPartTypeFile:
+			part.ProviderOptions = breakpoint
+		case provider.ContentPartTypeToolResult:
+			output := part.Output
+			if output == nil || output.Type != provider.ToolOutputContent {
+				part.ProviderOptions = breakpoint
+				break
+			}
+			if len(output.Content) == 0 {
+				continue
+			}
+			values := slices.Clone(output.Content)
+			values[len(values)-1].ProviderOptions = breakpoint
+			marked := *output
+			marked.Content = values
+			part.Output = &marked
+		default:
+			continue
 		}
+		content := slices.Clone(m.Content)
+		content[last] = part
+		messages[i].Content = content
+		return
 	}
 }

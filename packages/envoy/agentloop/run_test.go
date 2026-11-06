@@ -213,12 +213,13 @@ func threeCallAnthropic() []reply {
 	}
 }
 
-// Across a three-call Anthropic run every request carries two cache marks, never above four: one
-// on the end of the replayed history, kept on every call, and one on the newest message, moved
-// there from the one before; the last call offers no tool; the model's effort and adaptive,
-// summarized thinking reach every call; the history's signed thinking goes as the caller handed
-// it over, the first call's thinking goes back with its signature in the second, and the tool is
-// given both calls in the order the model asked for them.
+// Across a three-call Anthropic run of a request that sets no cache field every request carries
+// two cache marks, never above four: one on the end of the replayed history, kept on every
+// call, and one on the newest message, moved there from the one before; the last call offers no
+// tool; the model's effort and adaptive, summarized thinking reach every call; the history's
+// signed thinking goes as the caller handed it over, the first call's thinking goes back with
+// its signature in the second, and the tool is given both calls in the order the model asked
+// for them.
 func TestAnthropicMarksTheCacheMovesTheNewestMarkAndForcesTheReplyOnTheLastCall(t *testing.T) {
 	t.Parallel()
 	s := newStandIn(t, threeCallAnthropic()...)
@@ -311,11 +312,11 @@ func inputItems(t *testing.T, r recorded) []map[string]any {
 	return body.Input
 }
 
-// An OpenAI Responses run replays every reasoning item of the history with its id and encrypted
-// content byte for byte, runs stateless at the model's effort within the run's output token
-// bound, marks the end of the history for the cache once, sends the first call's reasoning back
-// in the second, offers no tool on the last call, and reports each call's output items as the
-// API sent them.
+// An OpenAI Responses run of a request that sets no cache field replays every reasoning item of
+// the history with its id and encrypted content byte for byte, runs stateless at the model's
+// effort within the run's output token bound, marks the end of the history for the cache once,
+// sends the first call's reasoning back in the second, offers no tool on the last call, and
+// reports each call's output items as the API sent them.
 func TestOpenAIResponsesReplaysReasoningItemsByteForByteAndSendsTheStepsReasoningBack(t *testing.T) {
 	t.Parallel()
 	stepOne := []string{
@@ -399,10 +400,99 @@ func TestOpenAIResponsesReplaysReasoningItemsByteForByteAndSendsTheStepsReasonin
 	}
 }
 
+// anthropicCutOffHistory is a conversation on Anthropic whose model turn ends in thinking, as a
+// turn the provider cut off at its limit does: nothing follows the thinking block.
+func anthropicCutOffHistory() []Message {
+	return []Message{
+		{Role: User, Blocks: []Block{{Kind: TextBlock, Text: "Write the plan."}}},
+		{Role: Assistant, Blocks: []Block{
+			{Kind: TextBlock, Text: "Working on it."},
+			{Kind: ThinkingBlock, Text: "The plan needs a migration.", Signature: historySignature},
+		}},
+	}
+}
+
+// A history whose last turn ends in thinking still has its end marked for the cache: Anthropic
+// puts a message's mark on that message's last block alone and drops it on a thinking block, so
+// the mark goes on the last message of the history that can carry one.
+func TestAHistoryEndingInThinkingIsStillMarked(t *testing.T) {
+	t.Parallel()
+	s := newStandIn(t, anthropicStream("end_turn", anthropicUsage{Input: 10, Output: 5}, anthropicText("The note says plum.")))
+	f := newFixture(t, s, AnthropicMessages, 1)
+	f.req.History = anthropicCutOffHistory()
+	result, err := Run(context.Background(), f.req)
+	if err != nil || result.Fault != "" {
+		t.Fatalf("result %+v, %v", result, err)
+	}
+	got := s.requests()
+	if len(got) != 1 {
+		t.Fatalf("%d model calls, want 1", len(got))
+	}
+	if n := countKey(got[0].decoded(t), "cache_control"); n != 2 {
+		t.Errorf("the call carries %d cache marks, want 2", n)
+	}
+	// The wire's messages: the history's request (0) and its cut-off model turn (1), then
+	// the new question (2), which is the newest message. The model turn ends in thinking and
+	// cannot carry a mark, so the history's goes on the request before it.
+	if marks := marked(t, got[0]); !reflect.DeepEqual(marks, []int{0, 2}) {
+		t.Errorf("the call marks messages %v, want [0 2] (the history's last message that can carry a mark and the newest message)", marks)
+	}
+}
+
+// A history whose last tool result holds an image still carries the explicit breakpoint: the
+// openai provider reads a content output's breakpoint from each content value's own options and
+// never from the tool result part's, so the mark goes on the last of the result's content
+// values, which is where the provider reads it.
+func TestABreakpointOnAToolResultHoldingAnImageReachesTheWire(t *testing.T) {
+	t.Parallel()
+	s := newStandIn(t, openaiStream(openaiUsage{Input: 1000, Cached: 900, Output: 20}, "", openaiMessage("msg_1", "The diagram says plum.")))
+	f := newFixture(t, s, OpenAIResponses, 1)
+	f.req.History = []Message{
+		{Role: User, Blocks: []Block{{Kind: TextBlock, Text: "Read diagram.gif."}}},
+		{Role: Assistant, Blocks: []Block{
+			{Kind: ReasoningBlock, Text: "Reading the diagram", ItemID: "rs_h1", Encrypted: openaiHistoryOne},
+			{Kind: ToolCallBlock, ToolCallID: "call_h1", Name: toolName, Input: json.RawMessage(`{"path":"diagram.gif"}`)},
+		}},
+		{Role: ToolRole, Blocks: []Block{{
+			Kind: ToolResultBlock, ToolCallID: "call_h1", Name: toolName,
+			Content: []Block{
+				{Kind: TextBlock, Text: "the diagram"},
+				{Kind: ImageBlock, MediaType: "image/gif", Data: diagramData},
+			},
+		}}},
+	}
+	result, err := Run(context.Background(), f.req)
+	if err != nil || result.Fault != "" {
+		t.Fatalf("result %+v, %v", result, err)
+	}
+	got := s.requests()
+	if len(got) != 1 {
+		t.Fatalf("%d model calls, want 1", len(got))
+	}
+	if n := countKey(got[0].decoded(t), "prompt_cache_breakpoint"); n != 1 {
+		t.Errorf("the call carries %d prompt cache breakpoints, want 1", n)
+	}
+	var values []map[string]any
+	for _, item := range inputItems(t, got[0]) {
+		if item["type"] != "function_call_output" {
+			continue
+		}
+		output, _ := item["output"].([]any)
+		for _, value := range output {
+			values = append(values, value.(map[string]any))
+		}
+	}
+	if len(values) != 2 {
+		t.Fatalf("the tool result's content values are %v, want the text and the image", values)
+	}
+	if last := values[1]; last["type"] != "input_image" || last["prompt_cache_breakpoint"] == nil {
+		t.Errorf("the tool result's last content value is %v, want the image carrying the breakpoint", last)
+	}
+}
+
 // cacheCall makes a one-call run on kind with that protocol's replayed history, opting out of
-// the cache where optOut says so and setting no cache field at all otherwise, and is the request
-// the provider was given.
-func cacheCall(t *testing.T, kind Kind, optOut bool) recorded {
+// the cache, and is the request the provider was given.
+func cacheCall(t *testing.T, kind Kind) recorded {
 	t.Helper()
 	var s *standIn
 	var history []Message
@@ -415,9 +505,7 @@ func cacheCall(t *testing.T, kind Kind, optOut bool) recorded {
 	}
 	f := newFixture(t, s, kind, 1)
 	f.req.History = history
-	if optOut {
-		f.req.NoCache = true
-	}
+	f.req.NoCache = true
 	result, err := Run(context.Background(), f.req)
 	if err != nil || result.Fault != "" {
 		t.Fatalf("result %+v, %v", result, err)
@@ -429,59 +517,21 @@ func cacheCall(t *testing.T, kind Kind, optOut bool) recorded {
 	return got[0]
 }
 
-// A caller opts out of the cache rather than into it, so a request that asks for nothing still
-// carries the marks the provider wants: on anthropic-messages the pair of them, at the end of
-// the replayed history and on the newest message, and on openai-responses the explicit
-// breakpoint on the last part of the history that can carry one.
-func TestARequestThatAsksForNothingStillMarksTheCache(t *testing.T) {
-	t.Parallel()
-	t.Run(string(AnthropicMessages), func(t *testing.T) {
-		t.Parallel()
-		r := cacheCall(t, AnthropicMessages, false)
-		if n := countKey(r.decoded(t), "cache_control"); n != 2 {
-			t.Errorf("the call carries %d cache marks, want 2", n)
-		}
-		// The wire's messages: the history's request and model turn (0, 1), then the
-		// new question (2), which is the newest message.
-		if marks := marked(t, r); !reflect.DeepEqual(marks, []int{1, 2}) {
-			t.Errorf("the call marks messages %v, want [1 2] (the history's end and the newest message)", marks)
-		}
-	})
-	t.Run(string(OpenAIResponses), func(t *testing.T) {
-		t.Parallel()
-		r := cacheCall(t, OpenAIResponses, false)
-		if n := countKey(r.decoded(t), "prompt_cache_breakpoint"); n != 1 {
-			t.Errorf("the call carries %d prompt cache breakpoints, want 1", n)
-		}
-		var breakpoints []string
-		for _, item := range inputItems(t, r) {
-			if countKey(item, "prompt_cache_breakpoint") > 0 {
-				breakpoints = append(breakpoints, item["type"].(string)+":"+item["call_id"].(string))
-			}
-		}
-		if !reflect.DeepEqual(breakpoints, []string{"function_call_output:call_h1"}) {
-			t.Errorf("the call's cache breakpoints %v, want one on the history's last tool result", breakpoints)
-		}
-	})
-}
-
-// A request that sets NoCache carries no mark anywhere: neither Anthropic's cache_control, at
-// the history's end or on the newest message, nor an OpenAI Responses prompt cache breakpoint.
+// A request that sets NoCache carries none of the marks this package places: on the kinds
+// Anthropic serves no cache_control, at the history's end or on the newest message, and on
+// openai-responses no explicit prompt cache breakpoint. Each kind is asked for its own
+// protocol's mark, the only one the package would ever put on it.
 func TestOptingOutOfTheCacheSendsNoMark(t *testing.T) {
 	t.Parallel()
-	for _, kind := range []Kind{AnthropicMessages, OpenAIResponses} {
+	for _, kind := range []Kind{AnthropicMessages, AzureAnthropic, OpenAIResponses} {
 		t.Run(string(kind), func(t *testing.T) {
 			t.Parallel()
-			r := cacheCall(t, kind, true)
-			body := r.decoded(t)
-			if n := countKey(body, "cache_control"); n != 0 {
-				t.Errorf("the call carries %d cache marks, want none", n)
+			key := "cache_control"
+			if kind == OpenAIResponses {
+				key = "prompt_cache_breakpoint"
 			}
-			if n := countKey(body, "prompt_cache_breakpoint"); n != 0 {
-				t.Errorf("the call carries %d prompt cache breakpoints, want none", n)
-			}
-			if marks := marked(t, r); len(marks) != 0 {
-				t.Errorf("the call marks messages %v, want none", marks)
+			if n := countKey(cacheCall(t, kind).decoded(t), key); n != 0 {
+				t.Errorf("the call carries %d %s marks, want none", n, key)
 			}
 		})
 	}
@@ -651,8 +701,8 @@ func TestARunPastItsTimeBoundIsAFault(t *testing.T) {
 	}
 }
 
-// The run's cost is every call's tokens at the model's prices, its cache writes and reads
-// included, and every step carries its own call's.
+// The cost of a run of a request that sets no cache field is every call's tokens at the model's
+// prices, its cache writes and reads included, and every step carries its own call's.
 func TestTheCostSumsEveryCallWithItsCacheWrites(t *testing.T) {
 	t.Parallel()
 	s := newStandIn(t, threeCallAnthropic()...)
