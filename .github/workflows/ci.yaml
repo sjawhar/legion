@@ -1869,6 +1869,11 @@ jobs:
       - name: Test the e2e proof selector
         run: .github/scripts/select-e2e-proofs.test.sh
 
+      # The lister the build-tag steps take their `-run` from, over fixture packages and over
+      # this repository's own tagged test files.
+      - name: Test the build-tag test lister
+        run: .github/scripts/go-tagged-tests.test.sh
+
       - name: Test ci-ok's verdict
         run: .github/scripts/ci-ok.test.sh
 
