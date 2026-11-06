@@ -223,7 +223,7 @@ func TestABackstopSurvivesTheDaemonAndFiresOnce(t *testing.T) {
 
 // A path that takes a released claim over forgets the pod's wake marks and its open backstops,
 // so no later backstop acts on it.
-func TestForgettingAPodsWakesDropsItsBackstops(t *testing.T) {
+func TestTakingAReleasedPodOverCancelsItsBackstops(t *testing.T) {
 	store := migratedStore(t)
 	ctx := context.Background()
 	at := time.Now().UTC()
@@ -231,9 +231,9 @@ func TestForgettingAPodsWakesDropsItsBackstops(t *testing.T) {
 		Role: claim.RoleImplementer, DueAt: at}); err != nil {
 		t.Fatalf("arm the backstop: %v", err)
 	}
-	inTx(t, store, func(tx pgx.Tx) error {
-		return ForgetPodWakes(ctx, tx, "legion", rootIssue)
-	})
+	if err := store.CancelPodBackstopsOf(ctx, "legion", rootIssue); err != nil {
+		t.Fatalf("cancel the pod's backstops: %v", err)
+	}
 	if open, err := store.DuePodBackstops(ctx, "legion", at.Add(time.Hour)); err != nil || len(open) != 0 {
 		t.Fatalf("backstops after the take-over = %+v, %v; want none", open, err)
 	}
@@ -328,6 +328,60 @@ func TestTakingAWakeRecordsItAgainstTheNewestReleaseOnce(t *testing.T) {
 	}
 }
 
+// A release closes the resumes of the pod it stops, and closing is its own column: the role can
+// be woken again afterwards, the records report no first turn for the closed row, and the stranded
+// and stuck reports pass it over, since a wake of a pod that is gone is nothing either warns
+// about. Writing first_turn_at to close a row, as this branch first did, reports a turn the daemon
+// never saw: the release records serve that field and the plugin measures each wake's wait by it.
+func TestClosingAResumeWritesNoFirstTurnAndFreesTheRole(t *testing.T) {
+	store := migratedStore(t)
+	ctx := context.Background()
+	at := time.Now().UTC().Truncate(time.Millisecond)
+	if _, err := store.RecordPodRelease(ctx, PodRelease{Project: "legion", Issue: rootIssue,
+		Generation: 1, Roles: []string{"implementer"}, At: at.Add(-time.Hour)}); err != nil {
+		t.Fatalf("record the release: %v", err)
+	}
+	if taken, err := store.TakePodWake(ctx, "legion", rootIssue, claim.RoleImplementer, pods.WakeDelivery, at); err != nil || !taken {
+		t.Fatalf("TakePodWake = %t, %v; want the wake taken", taken, err)
+	}
+
+	inTx(t, store, func(tx pgx.Tx) error {
+		return CloseOpenResumes(ctx, tx, "legion", rootIssue)
+	})
+
+	if _, found, err := store.OpenPodResume(ctx, "legion", rootIssue, claim.RoleImplementer); err != nil || found {
+		t.Fatalf("OpenPodResume after the close = %t, %v; want none", found, err)
+	}
+	if taken, err := store.TakePodWake(ctx, "legion", rootIssue, claim.RoleImplementer, pods.WakeBackstop, at.Add(time.Hour)); err != nil || !taken {
+		t.Fatalf("the wake after the close = %t, %v; want it taken: the closed resume holds nothing back", taken, err)
+	}
+	records, err := store.PodReleaseRecords(ctx, "legion", at.Add(-2*time.Hour))
+	if err != nil {
+		t.Fatalf("read the release records: %v", err)
+	}
+	if len(records.Resumes) != 2 || !records.Resumes[0].FirstTurnAt.IsZero() {
+		t.Fatalf("resumes = %+v, want the closed one reported with no first turn", records.Resumes)
+	}
+	stuck, err := store.StuckPodResumes(ctx, "legion", at.Add(2*time.Hour))
+	if err != nil {
+		t.Fatalf("read the stuck resumes: %v", err)
+	}
+	stranded, err := store.UnfinishedPodResumes(ctx, "legion", at.Add(2*time.Hour))
+	if err != nil {
+		t.Fatalf("read the unfinished resumes: %v", err)
+	}
+	for _, read := range []struct {
+		what    string
+		resumes []PodResume
+	}{{"stuck", stuck}, {"stranded", stranded}} {
+		for _, r := range read.resumes {
+			if r.ID == records.Resumes[0].ID {
+				t.Errorf("the %s report lists the closed resume %d, want it passed over", read.what, r.ID)
+			}
+		}
+	}
+}
+
 // R5: a wake resumes one role, so it cancels that role's backstop and no other's. A released
 // tester waiting on a deploy run has nothing but its own backstop to bring it back, and a pod
 // woken for its architect may be held again — by an unanswered question to a person, by
@@ -357,8 +411,8 @@ func TestAWakeCancelsTheWokenRolesBackstopAlone(t *testing.T) {
 
 	// A path that takes the whole released pod over leaves none of them: nothing of that pod is
 	// a wake's any more.
-	if err := store.ForgetPodWakesOf(ctx, "legion", rootIssue); err != nil {
-		t.Fatalf("forget the pod's wakes: %v", err)
+	if err := store.CancelPodBackstopsOf(ctx, "legion", rootIssue); err != nil {
+		t.Fatalf("cancel the pod's backstops: %v", err)
 	}
 	if open, err := store.DuePodBackstops(ctx, "legion", at.Add(2*time.Hour)); err != nil || len(open) != 0 {
 		t.Fatalf("open backstops after the take-over = %+v, %v; want none", open, err)

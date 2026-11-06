@@ -76,13 +76,18 @@ func oneReleasedClaim(ctx context.Context, tx pgx.Tx, where, project, value, wha
 	return claims[0], true, nil
 }
 
-// CloseOpenResumes closes every resume of issue no first turn has stamped, at the moment given:
-// what the transaction that marks a release writes, so the role's next wake records a resume of
-// its own rather than meeting the one left open by a pod that has come and gone. A resume closed
-// here reports as one whose first turn the daemon did not see, which is what it is.
-func CloseOpenResumes(ctx context.Context, tx pgx.Tx, project, issue string, at time.Time) error {
-	_, err := tx.Exec(ctx, `update pod_resumes set first_turn_at = $3
-		where project = $1 and issue = $2 and first_turn_at is null`, project, issue, at)
+// CloseOpenResumes closes every resume of issue no first turn has stamped: what the transaction
+// that marks a release writes, so the role's next wake records a resume of its own rather than
+// meeting the one left open by a pod that has come and gone.
+//
+// Closing is its own column (closed_at), never a first turn: first_turn_at is the turn the daemon
+// observed, which the release records serve as firstTurnAt and the plugin's statistics measure the
+// wake's wait by, and a resume closed here is precisely one whose first turn the daemon never saw.
+// Written at the transaction's own now(), as the release's mark is, so the close and the mark it
+// belongs to carry one time.
+func CloseOpenResumes(ctx context.Context, tx pgx.Tx, project, issue string) error {
+	_, err := tx.Exec(ctx, `update pod_resumes set closed_at = now()
+		where project = $1 and issue = $2 and first_turn_at is null and closed_at is null`, project, issue)
 	if err != nil {
 		return fmt.Errorf("close the open resumes of %s: %w", issue, err)
 	}
@@ -94,7 +99,7 @@ func CloseOpenResumes(ctx context.Context, tx pgx.Tx, project, issue string, at 
 // that has nothing left to do: another role of the same pod may be waiting on a deploy run with
 // nothing but its own backstop to bring it back, and a pod woken for one role may be held again
 // before it ever reaches that other role's work. A path that takes the whole released pod over
-// (ForgetPodWakes) names no role, because no backstop of it is left to act on.
+// (CancelPodBackstopsOf) names no role, because no backstop of it is left to act on.
 func CancelPodBackstops(ctx context.Context, tx pgx.Tx, project, issue string, role claim.Role) error {
 	_, err := tx.Exec(ctx, `delete from pod_wake_backstops
 		where project = $1 and issue = $2 and not fired and ($3 = '' or role = $3)`,
@@ -105,16 +110,13 @@ func CancelPodBackstops(ctx context.Context, tx pgx.Tx, project, issue string, r
 	return nil
 }
 
-// ForgetPodWakes drops every open backstop of issue, which is what a path that takes a released
-// claim over does, so no later backstop acts on it.
-func ForgetPodWakes(ctx context.Context, tx pgx.Tx, project, issue string) error {
-	return CancelPodBackstops(ctx, tx, project, issue, "")
-}
-
-// ForgetPodWakesOf is ForgetPodWakes in a transaction of its own, for a caller outside one: the
-// outbox's stops, which take a released claim over row by row.
-func (s *Store) ForgetPodWakesOf(ctx context.Context, project, issue string) error {
-	return s.Tx(ctx, func(tx pgx.Tx) error { return ForgetPodWakes(ctx, tx, project, issue) })
+// CancelPodBackstopsOf cancels every open backstop of issue in a transaction of its own, for a
+// caller outside one: the outbox's stops, which take a released claim over row by row, and its
+// arming of a release's backstops, which drops what the release before it armed. Dropping the
+// backstops is the whole of what taking a released pod over leaves to do, since a wake's own
+// record is the resume the index holds (TakePodWake).
+func (s *Store) CancelPodBackstopsOf(ctx context.Context, project, issue string) error {
+	return s.Tx(ctx, func(tx pgx.Tx) error { return CancelPodBackstops(ctx, tx, project, issue, "") })
 }
 
 // TakePodWake takes one wake outside any fact transaction, for the wakes the outbox takes: a
@@ -245,7 +247,7 @@ func LatestPodRelease(ctx context.Context, tx pgx.Tx, project, issue string) (in
 func (s *Store) OpenPodResume(ctx context.Context, project, issue string, role claim.Role) (int64, bool, error) {
 	var id int64
 	err := s.pool.QueryRow(ctx, `select id from pod_resumes
-		where project = $1 and issue = $2 and role = $3 and first_turn_at is null
+		where project = $1 and issue = $2 and role = $3 and first_turn_at is null and closed_at is null
 		order by id desc limit 1`, project, issue, string(role)).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, false, nil
@@ -390,10 +392,13 @@ func (p *PodRecords) ReleasedClaimBySession(ctx context.Context, tx pgx.Tx, sess
 // The index decides it inside the caller's transaction, so the workflow's four wakes and the
 // outbox's delivery wake, which runs in a transaction of its own, are held to it alike; a read
 // could be overtaken between its answer and the insert, and this cannot. A wake refused here
-// leaves nothing behind: no mark to spend, no row, and the cause is not lost, since the message
-// or settlement that wakes a role still reaches it once the pod is back. The release's own
-// transaction closes the resumes left open (CloseOpenResumes), so a pod that came back and whose
-// role took no turn the daemon saw holds nothing back at the next release.
+// writes nothing of its own, and the cause is not lost, since the message or settlement that
+// wakes a role still reaches it once the pod is back — but the resume that refused it stands,
+// so a caller whose claim is still not running resumes it all the same rather than reading the
+// refusal as a pod already on its way (the outbox's wakeForDelivery, the workflow's wakeReleased
+// through the start row it queues). The release's own transaction closes the resumes left open
+// (CloseOpenResumes), so a pod that came back and whose role took no turn the daemon saw holds
+// nothing back at the next release.
 //
 // Every wake runs through here — the four the workflow applies inside a fact's transaction and
 // the delivery wake the outbox takes in one of its own (Store.TakePodWake) — so there is one

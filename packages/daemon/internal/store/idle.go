@@ -145,7 +145,7 @@ func (s *Store) ReleaseIdleIssue(ctx context.Context, project, issue string, dec
 		// the next one. Closing them here, in the transaction that marks the release, is what
 		// lets the next wake of each role take its own (store's TakePodWake, one open resume per
 		// role).
-		if err := CloseOpenResumes(ctx, tx, project, issue, time.Now().UTC()); err != nil {
+		if err := CloseOpenResumes(ctx, tx, project, issue); err != nil {
 			return err
 		}
 		marked = true

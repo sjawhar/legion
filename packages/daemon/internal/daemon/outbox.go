@@ -164,7 +164,7 @@ type outboxTrees interface {
 	ReserveWorkflowTreeCleanup(ctx context.Context, project, tree string, rootGeneration uint64) (treelifecycle.Lifecycle, bool, error)
 	CleanupReservedTree(ctx context.Context, project, tree string, epoch uint64, releaser store.TreeReleaser) error
 	TakePodWake(ctx context.Context, project, issue string, role claim.Role, kind string, at time.Time) (bool, error)
-	ForgetPodWakesOf(ctx context.Context, project, issue string) error
+	CancelPodBackstopsOf(ctx context.Context, project, issue string) error
 	ReleasedClaimsIn(ctx context.Context, project, issue string) ([]supervise.Claim, error)
 	ArmPodBackstop(ctx context.Context, backstop store.PodWakeBackstop) error
 }
@@ -1197,7 +1197,7 @@ func (r *outbox) deliverNotice(ctx context.Context, row record.OutboxRow, payloa
 	// A notice whose owning architect's pod was released is that architect's still (holdsRole),
 	// and this is the wake that brings it back for it: the row waits on its backoff, as it waits
 	// for an architect that is relaunching, and publishes once the woken session holds its role.
-	if woken, err := r.wakeForDelivery(ctx, architect, record.OutboxKey(row.ID), "a notice of "+row.Issue); err != nil {
+	if woken, err := r.wakeForDelivery(ctx, architect, "a notice of "+row.Issue); err != nil {
 		return err
 	} else if woken {
 		return fmt.Errorf("%w: %s's pod was released and is coming back for notice row %d", errNoticeWaits, architect, row.ID)
@@ -1285,7 +1285,7 @@ func (r *outbox) phaseEnded(ctx context.Context, row record.OutboxRow, payload r
 	// intact and its pod is one wake away, so the row wakes it and waits on its backoff rather
 	// than finishing undelivered. This runs before the publish, which would otherwise answer
 	// ErrNoHolder and drop the message the woken role is owed.
-	if woken, err := r.wakeForDelivery(ctx, token, record.OutboxKey(row.ID), "the end of "+row.Issue+"'s "+string(payload.From)+" phase"); err != nil {
+	if woken, err := r.wakeForDelivery(ctx, token, "the end of "+row.Issue+"'s "+string(payload.From)+" phase"); err != nil {
 		return err
 	} else if woken {
 		return wait.Errorf("the end of %s's %s phase waits for its %s's released pod to come back", row.Issue, payload.From, payload.Role)
@@ -1554,8 +1554,8 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		}
 		// A linger, a park, a hand-over and a close all stop a claim through this one row, and
 		// each takes a released claim over: the machine re-stamps the suspension's source and
-		// this drops the wake marks and the backstop the release left behind, so no later wake
-		// acts on a claim this suspension now owns. The bundle stays: the issue comes back.
+		// this drops the backstop the release left behind, so no later backstop acts on a claim
+		// this suspension now owns. The bundle stays: the issue comes back.
 		r.takeOverRelease(ctx, row.Issue)
 		return nil
 	case "release":
@@ -1618,7 +1618,7 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 			return fmt.Errorf("close the issue of claim %s: %w", token, err)
 		}
 		// The issue is done, so nothing will restore the bundle its release saved and nothing
-		// should: it goes with the wake marks and the backstop.
+		// should: it goes with the backstop.
 		r.dropReleasedWork(ctx, row.Issue)
 		return nil
 	case "tree_close":
@@ -1848,7 +1848,7 @@ func (r *outbox) bundleIssueWorkspace(ctx context.Context, row record.OutboxRow,
 // before it: a notice or a phase-ended message runs on a lane of its own, and the wake it makes
 // can resume a role between the two reads. So the inner answer is what is carried out — a
 // cancel there cancels, and a release that is over by then does nothing — and a pod that still
-// stands is never recorded as released, nor given a backstop, nor stripped of its wake marks.
+// stands is never recorded as released, nor given a backstop, nor stripped of its backstops.
 //
 // A teardown of a release that is over acts on nothing and undoes nothing: a role stop that
 // cancelled this release has already resumed what it suspended, and a release that finished
@@ -1910,8 +1910,8 @@ func (r *outbox) releaseIssue(ctx context.Context, row record.OutboxRow, payload
 		"issue", row.Issue, "tree", payload.Tree, "generation", payload.Generation, "bundle", savedBytes)
 	r.recordPodRelease(ctx, row.Issue, payload.Generation, decision.Suspended, savedBytes)
 	// The pod is gone, so the backstop is armed now and not before: a release that stopped short
-	// left the pod standing and needs none. Arming forgets the previous release's wake marks
-	// too, so a head that settled before this release can wake the pod again.
+	// left the pod standing and needs none. Arming cancels the previous release's backstops too,
+	// since that pod is gone and its backstop has nothing left to bring back.
 	issue, err := r.issue(ctx, row.Issue)
 	if err != nil {
 		return err

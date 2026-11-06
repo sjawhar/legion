@@ -15,6 +15,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/pods"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
@@ -405,6 +406,64 @@ func TestABoundaryWhoseClaimRunsNothingStillAnswersADeliveryAroundTheMark(t *tes
 	}
 	if len(records.Holds) != 1 || records.Holds[0].Reason != workflow.IdleHoldOvertaken.String() {
 		t.Fatalf("holds = %+v, want the one %s", records.Holds, workflow.IdleHoldOvertaken)
+	}
+}
+
+// A wake the role's open resume refuses resumes a claim that is still released all the same, and
+// this is the case that makes it necessary: the delivery wake commits its take and then resumes
+// the claim in process, so a resume the store refuses, or a daemon that restarts between the two,
+// leaves the role released with its resume open. Only a release closes an open resume, and a pod
+// that is fully released is never released again, so without this the role's every later wake —
+// a delivery, a CI settlement, a role message, its own backstop — would read that resume as a pod
+// already on its way and resume nothing, for as long as the issue lives.
+//
+// The take is made here without the resume behind it, which is what both shapes leave in the
+// record: a resume that failed after its take committed, and a daemon that came back up between
+// the two and reads the claim released with the resume open. The wake that meets it takes no wake
+// of its own — the resume already recorded is still the role's one open resume — and brings the
+// claim back.
+func TestAWakeResumesAClaimLeftReleasedUnderAnOpenResume(t *testing.T) {
+	rig := newIdleRig(t)
+	ctx := context.Background()
+	rig.w.releaseIdlePod(ctx, rig.issue.Key)
+	rig.drain(t)
+	if got := rig.machine.Claim(); !got.Released() {
+		t.Fatalf("the claim after the release = %s by %s, want it released", got.State, got.SuspendedBy)
+	}
+
+	taken, err := rig.st.TakePodWake(ctx, "legion", rig.issue.Key, claim.RoleImplementer,
+		pods.WakeDelivery, time.Now().UTC())
+	if err != nil || !taken {
+		t.Fatalf("take the wake whose resume never ran = %t, %v; want it taken", taken, err)
+	}
+	resume, open, err := rig.st.OpenPodResume(ctx, "legion", rig.issue.Key, claim.RoleImplementer)
+	if err != nil || !open {
+		t.Fatalf("the open resume after that take = %d, %t, %v; want the one it recorded", resume, open, err)
+	}
+
+	woken, err := rig.runner.wakeForDelivery(ctx, rig.token, "a notice of "+rig.issue.Key)
+	if err != nil || !woken {
+		t.Fatalf("the wake meeting the open resume = %t, %v; want the claim woken", woken, err)
+	}
+	if got := rig.machine.Claim(); got.Released() {
+		t.Fatalf("the claim after the wake that met the open resume = %s by %s, want it resumed: no release will ever close that resume",
+			got.State, got.SuspendedBy)
+	}
+	// The heal takes no wake of its own: the resume the first take recorded is still the one
+	// open, so the records hold one resume of this release rather than two.
+	again, open, err := rig.st.OpenPodResume(ctx, "legion", rig.issue.Key, claim.RoleImplementer)
+	if err != nil || !open || again != resume {
+		t.Fatalf("the open resume after the heal = %d, %t, %v; want the first take's %d", again, open, err, resume)
+	}
+	// And a wake that meets the open resume of a role whose process is running resumes nothing:
+	// that pod is back, which is what the refusal means when the claim is no longer released.
+	before := len(rig.rt.CallsOf("Resume"))
+	woken, err = rig.runner.wakeForDelivery(ctx, rig.token, "a second notice of "+rig.issue.Key)
+	if err != nil || woken {
+		t.Fatalf("the wake of a running claim = %t, %v; want it to wake nothing", woken, err)
+	}
+	if after := len(rig.rt.CallsOf("Resume")); after != before {
+		t.Fatalf("resumes after the wake of a running claim = %d, want the %d it already had", after, before)
 	}
 }
 
