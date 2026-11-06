@@ -379,11 +379,15 @@ every third-party package they inline, written from Bun's metafile by
 
 ## Updates
 
-The marketplace entry declares no `version`, so its `npm` source fetches `latest`, and the
-committed `.claude-plugin/plugin.json` declares none either. Claude Code names an installed
-plugin by the `version` of that manifest and never by the version the registry served, so
-`release.yaml`'s `claude_envoy_build` writes the release's version into the
-`.claude-plugin/plugin.json` it packs, beside the one it writes into `package.json`, and its
+The marketplace entry declares no `version` of its own, and the committed
+`.claude-plugin/plugin.json` declares none either; the entry's `npm` source declares
+`version: ">=1.0.0"`, a range that keeps an install off the 0.0.0 placeholder a person published
+so that trusted publishing could attach to the package, and otherwise takes `latest`, which the
+resolver prefers while it satisfies the range.
+Claude Code names an installed plugin by the `version` of the `.claude-plugin/plugin.json` it
+installed and never by the version the registry served, so `release.yaml`'s `claude_envoy_build`
+writes the release's version into the `.claude-plugin/plugin.json` it packs, beside the one it
+writes into `package.json`, and its
 tarball check refuses a tarball without it: a package published with none is cached under the
 name `unknown` and no later release reads as an update (measured on Claude Code 2.1.311). The
 version a session reports is therefore the version that was published, which is what makes this
@@ -396,7 +400,8 @@ Claude Code session loads. Claude Code's background auto-update does the same on
 `/plugin` **Marketplaces**, or set `"autoUpdate": true` beside `source` on the marketplace's
 `extraKnownMarketplaces` entry, in whichever settings file declares it. A `version` committed in
 either file would hold every install at that string until someone changed it, so a test holds
-both committed files to none.
+both committed files to none; the range is a field of the entry's source, not a version of the
+entry.
 A checkout's `package.json` version names no release either, for the same reason: the build job
 writes the release's version into the manifest it packs.
 Each release publishes its own changelog entries into its GitHub release body, rendered from the

@@ -600,8 +600,9 @@ jobs:
   # builds dist/ and legion/ with packages/claude-envoy/scripts/verify-build.sh — the one
   # statement of what the published plugin must hold, which ci.yaml runs on every pull request —
   # puts that checked build into the checkout and packs it with the rest of the package.
-  # .claude-plugin/marketplace.json names this package as an `npm` source with no version, so
-  # Claude Code installs whatever `latest` carries.
+  # .claude-plugin/marketplace.json names this package as an `npm` source with the range
+  # `>=1.0.0`, so Claude Code installs the newest release and never the 0.0.0 placeholder that
+  # `latest` points at until the first one.
   claude_envoy_build:
     # Only main publishes, as pi_envoy_build says.
     if: github.ref == 'refs/heads/main'

@@ -413,8 +413,9 @@ test("the committed manifests declare no version the release would have to bump;
   // it under that name and sees no later release as an update (measured on 2.1.311). So
   // release.yaml's claude_envoy_build writes the release's version into the manifest it packs,
   // and the committed one declares none — a string committed here would hold every install at it
-  // until someone changed it, and the release writes it anyway. The marketplace entry declares
-  // none either, so an install takes the newest release the source's range allows.
+  // until someone changed it, and the release writes it anyway. The entry in the marketplace
+  // declares no `version` of its own either, which is what leaves the packed manifest to name
+  // an install; the range on the entry's npm source is a field of its own, below.
   expect(plugin).not.toHaveProperty("version")
   expect(marketplaceEntries).toHaveLength(1)
   expect(marketplaceEntries[0]).not.toHaveProperty("version")
@@ -425,18 +426,21 @@ test("the committed manifests declare no version the release would have to bump;
 test("the marketplace entry installs the plugin from npm, by name, above the placeholder", () => {
   // release.yaml's claude_envoy_build packs this package and its publish job uploads that tarball
   // to npm, so the registry name is package.json's own, read here rather than written twice. The
-  // range leaves out 0.0.0, the placeholder a person published so that trusted publishing could
-  // attach to the package at all: npm's `latest` is that placeholder until the first release, and
-  // it holds no plugin, so an install before then must fail by name rather than install nothing.
-  // 1.0.0 is what the version step computes for the first release (release-bump.sh over
-  // CLAUDE_ENVOY_VERSION_ARGS from the placeholder's 0.0.0), so the range admits every release
-  // and nothing else.
+  // source's `version` is a range, not the version of an install: it leaves out 0.0.0, the
+  // placeholder a person published so that trusted publishing could attach to the package at all,
+  // and takes `latest`, which the resolver prefers while it satisfies the range. npm's `latest`
+  // is that placeholder until the first release, and it holds no plugin, so an install before
+  // then must fail by name rather than install nothing. 1.0.0 is what the version step computes
+  // for the first release (release-bump.sh over CLAUDE_ENVOY_VERSION_ARGS from the placeholder's
+  // 0.0.0). Those two are what the range is for, so they are what is asserted, rather than the
+  // string that happens to hold them.
   expect(marketplaceEntries).toHaveLength(1)
-  expect(marketplaceEntries[0]?.source).toEqual({
-    source: "npm",
-    package: pkg.name,
-    version: ">=1.0.0",
-  })
+  const source = marketplaceEntries[0]?.source
+  expect(source?.source).toBe("npm")
+  expect(source?.package).toBe(pkg.name)
+  const range = source?.version ?? ""
+  expect(Bun.semver.satisfies("0.0.0", range)).toBe(false)
+  expect(Bun.semver.satisfies("1.0.0", range)).toBe(true)
 })
 
 test("the Oh My Pi manifest declares no MCP server", () => {

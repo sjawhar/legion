@@ -510,9 +510,10 @@ run_check "$root"
 check "exits 1" "$(is "$status" 1)"
 check "names the value" "$(contains "$out" "must set 'persist-credentials: false', the boolean.*(found true)")"
 
-# Rule 6, on each side of its line: the same step before and after its job's checkout. The script
-# it runs is in the checkout, so before it the step exits 127, which is what left every legion
-# release's "## Worker image" section unwritten.
+# Rule 6, on each side of its line: the same step before and after its job's checkout, at each of
+# the three paths that name the one script, and twice in one job. The script it runs is in the
+# checkout, so before it the step exits 127, which is what left every legion release's
+# "## Worker image" section unwritten.
 echo "case: a step runs release-push.sh before its job's checkout"
 root=$(fixture release-push-before-checkout)
 mutate "$root/$RELEASE" "      - uses: actions/checkout@$SHA"$'\n' $'      - name: Read the tag\n        run: .github/scripts/release-push.sh tagged pi-envoy-v\n'"      - uses: actions/checkout@$SHA"$'\n' 2
@@ -527,6 +528,35 @@ root=$(fixture release-push-after-checkout)
 add_publish_step "$root" $'      - name: Read the tag\n        run: .github/scripts/release-push.sh tagged pi-envoy-v\n'
 run_check "$root"
 check "exits 0" "$(is "$status" 0)"
+
+echo "case: a step runs ./release-push.sh before its job's checkout"
+root=$(fixture dot-slash-release-push-before-checkout)
+mutate "$root/$RELEASE" "      - uses: actions/checkout@$SHA"$'\n' $'      - name: Read the tag\n        run: ./release-push.sh tagged pi-envoy-v\n'"      - uses: actions/checkout@$SHA"$'\n' 2
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the job and the step at its line" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^      - name: Read the tag$'): job 'pi_envoy_publish' step 'Read the tag' runs .github/scripts/release-push.sh, but no actions/checkout before it puts the script in the workspace, so the step would exit 127 and the job would carry on\$")"
+check "reports that one problem only" "$(contains "$out" '^1 release credential problem(s)$')"
+
+echo "case: a step runs a bare release-push.sh before its job's checkout"
+root=$(fixture bare-release-push-before-checkout)
+mutate "$root/$RELEASE" "      - uses: actions/checkout@$SHA"$'\n' $'      - name: Read the tag\n        run: release-push.sh tagged pi-envoy-v\n'"      - uses: actions/checkout@$SHA"$'\n' 2
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the job and the step at its line" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^      - name: Read the tag$'): job 'pi_envoy_publish' step 'Read the tag' runs .github/scripts/release-push.sh, but no actions/checkout before it puts the script in the workspace, so the step would exit 127 and the job would carry on\$")"
+check "reports that one problem only" "$(contains "$out" '^1 release credential problem(s)$')"
+
+echo "case: two steps run release-push.sh before their job's checkout"
+root=$(fixture two-release-push-before-checkout)
+mutate "$root/$RELEASE" "      - uses: actions/checkout@$SHA"$'\n' $'      - name: Read the tag\n        run: ./release-push.sh tagged pi-envoy-v\n      - name: Read the other tag\n        run: release-push.sh tagged pi-legion-v\n'"      - uses: actions/checkout@$SHA"$'\n' 2
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the first step at its line" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^      - name: Read the tag$'): job 'pi_envoy_publish' step 'Read the tag' runs .github/scripts/release-push.sh, but no actions/checkout")"
+check "names the second step at its line" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^      - name: Read the other tag$'): job 'pi_envoy_publish' step 'Read the other tag' runs .github/scripts/release-push.sh, but no actions/checkout")"
+check "reports both" "$(contains "$out" '^2 release credential problem(s)$')"
 
 echo "case: the deploy key as a checkout's ssh-key"
 root=$(fixture ssh-key)

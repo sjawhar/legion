@@ -194,3 +194,30 @@ test("a pack that fails after its prepack is repaired by --restore, which the re
   await ran(["bash", join(copy, "scripts", "pack-skills.sh"), "--restore"], copy)
   expect(await links(copy)).toEqual(tracked())
 })
+
+// Which entry that is no link the refusal may send to --restore, and which it may not: --restore
+// rm -rf's the entry, so the advice puts back a staged copy of the repository's skill and would
+// delete anything else, a directory a developer wrote among it.
+test("an entry that is a staged copy of the repository's skill is refused with --restore", async () => {
+  const copy = await copyPackage("staged-copy")
+  const name = skillNames[0] as string
+  await rm(join(copy, "skills", name))
+  await cp(join(repoRoot, "skills", name), join(copy, "skills", name), { recursive: true })
+  const refused = await run(["bash", join(copy, "scripts", "pack-skills.sh")], copy)
+  expect(refused.exitCode).toBe(1)
+  expect(refused.stderr).toContain(`skills/${name} is a staged copy of`)
+  expect(refused.stderr).toContain("bash scripts/pack-skills.sh --restore")
+})
+
+test("an entry a developer wrote is refused without --restore, naming the link it must be", async () => {
+  const copy = await copyPackage("own-directory")
+  const name = skillNames[0] as string
+  await rm(join(copy, "skills", name))
+  await Bun.write(join(copy, "skills", name, "SKILL.md"), "---\nname: mine\n---\n")
+  const refused = await run(["bash", join(copy, "scripts", "pack-skills.sh")], copy)
+  expect(refused.exitCode).toBe(1)
+  expect(refused.stderr).toContain(`skills/${name} is neither a link nor a staged copy of`)
+  expect(refused.stderr).toContain(`it must be the link ../../../skills/${name}`)
+  expect(refused.stderr).not.toContain("--restore")
+  expect(await links(copy)).toEqual({ ...tracked(), [name]: null })
+})

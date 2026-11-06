@@ -17,12 +17,7 @@
 # rather than deleting them, and the list of skills is read off the links rather than written out
 # a second time here.
 #
-# The links are tracked, so a prepack that stops halfway is a working copy with deleted links and
-# copied directories in their place, which the next pack refuses: every entry is checked before
-# any of them is swapped, and a trap puts back every link this run swapped on any exit. The trap
-# is disarmed where the swap loop finishes, since the pack that follows a prepack needs the real
-# directories; from there the postpack is what puts the links back, and where no postpack runs —
-# bun runs none when the pack itself fails — `--restore` puts them back by hand.
+# Where no postpack runs — bun runs none when a pack fails — `--restore` puts the links back.
 #
 # npm and bun both run these with the package root as the working directory, as that script's
 # header says, so the package is $PWD and the repository $PWD/../..:
@@ -63,21 +58,25 @@ repo_skills=$(cd ../../skills && pwd -P)
 shopt -s nullglob
 entries=(skills/*)
 [ ${#entries[@]} -gt 0 ] || refuse "skills/ is empty; the links in it are what this package ships"
-names=()
-for entry in "${entries[@]}"; do
-  names+=("${entry#skills/}")
-done
+names=("${entries[@]#skills/}")
 
 if $restore; then
   link_back "${names[@]}"
   exit 0
 fi
 
-# Every entry's three conditions, all of them before the first swap below: a refusal on a later
-# entry would otherwise leave the entries before it staged as copied directories.
+# Every entry's conditions, all of them before the first swap below: a refusal on a later entry
+# would otherwise leave the entries before it staged as copied directories.
 for name in "${names[@]}"; do
-  [ -L "skills/$name" ] || refuse \
-    "skills/$name is not a link; an earlier pack staged it and its postpack never put the link back: bash scripts/pack-skills.sh --restore puts the links back"
+  if [ ! -L "skills/$name" ]; then
+    # --restore rm -rf's the entry, so it is advice only where the entry is a staged copy of the
+    # repository's skill and holds nothing of its own. A directory a developer wrote themselves is
+    # their own work, and the refusal for it says what the entry must be instead.
+    diff -r -q "$repo_skills/$name" "skills/$name" > /dev/null 2>&1 || refuse \
+      "skills/$name is neither a link nor a staged copy of $repo_skills/$name: it must be the link ../../../skills/$name, which is how this package names the skills it ships"
+    refuse \
+      "skills/$name is a staged copy of $repo_skills/$name rather than a link: an earlier pack staged it and its postpack never put the link back: bash scripts/pack-skills.sh --restore puts the links back"
+  fi
   target=$(readlink "skills/$name")
   [ "$target" = "../../../skills/$name" ] || refuse \
     "skills/$name points at $target, not ../../../skills/$name: this package ships the repository's skills"

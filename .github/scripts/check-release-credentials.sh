@@ -56,8 +56,7 @@
 #    `actions/checkout` before that step. The script is in the checkout and nowhere else, so
 #    without one the step exits 127 and the job carries on: that is what left every legion
 #    release's "## Worker image" section unwritten until release.yaml's worker_image_release,
-#    a job that checked nothing out, got its checkout. It is read in rule 3's walk of the steps,
-#    which is where a step learns whether a checkout came before it.
+#    a job that checked nothing out, got its checkout.
 #
 # "Runs dependency code" is a tripwire over named patterns, not a proof that no other code runs: a
 # step runs dependency code when its `uses:` starts with one of DEPENDENCY_USES, when the shell its
@@ -388,9 +387,10 @@ def command_of(words: list[str]) -> list[list[str]]:
 
 
 def is_release_push(command: str) -> bool:
-    """Whether the command word runs release-push.sh: its name after what a path relative to the
-    checkout sheds, so `.github/scripts/release-push.sh`, `./release-push.sh` and a bare
-    `release-push.sh` all read as the one script. Rules 3 and 6 and dependency_command ask it."""
+    """Whether the command word names release-push.sh, at any path: what it is left with after a
+    path relative to the checkout sheds its prefix, so `.github/scripts/release-push.sh`,
+    `./release-push.sh` and a bare `release-push.sh` all read as the one script. dependency_command
+    asks it of a `fold-notes`, and rule 6 of a step that needs a checkout before it."""
     return PATH_PREFIX.sub("", command).rsplit("/", 1)[-1] == "release-push.sh"
 
 
@@ -423,6 +423,9 @@ def dependency_command(words: list[str]) -> str | None:
     path = PATH_PREFIX.sub("", command)
     if is_release_push(command) and words[1:2] == ["fold-notes"]:
         return f"'{command} fold-notes' (it runs changie)"
+    # The exemption is the checkout's own path, not the name is_release_push counts at any path:
+    # release-push.sh's other commands are no dependency code, and a script under some other
+    # scripts/ directory is not this one, whatever it is called.
     if DEPENDENCY_PATH.search(path) and path != RELEASE_PUSH:
         return f"'{command}'"
     return None
@@ -540,6 +543,13 @@ def line_of(step: Mapping, fallback: int) -> int:
     return min(step.lines.values(), default=fallback)
 
 
+def is_checkout(step: Mapping) -> bool:
+    """Whether the step checks the repository out: its `uses:` names actions/checkout, owner and
+    repository compared lower-cased, as GitHub resolves them. Rules 3 and 6 ask it."""
+    uses = step.get("uses")
+    return isinstance(uses, str) and uses.lower().startswith("actions/checkout@")
+
+
 problems: list[str] = []
 credentialed_jobs = 0
 build_jobs = 0
@@ -569,35 +579,36 @@ def check_job(
         if (found := dependency_code(step, job, workflow))
     ]
 
-    # 3. Every checkout leaves no token behind, whatever the job holds, and 6. release-push.sh
-    # is in the checkout, so a checkout comes before the step that runs it. One walk of the
-    # steps, since what rule 6 asks of a step is which checkouts came before it. For rule 6 only
-    # the steps the tokeniser reads are looked at: another shell's body is not its to parse.
-    checked_out = False
+    # 3. Every checkout leaves no token behind, whatever the job holds.
     for index, step in enumerate(steps):
-        uses = step.get("uses")
-        if isinstance(uses, str) and uses.lower().startswith("actions/checkout@"):
-            checked_out = True
-            with_ = step.get("with")
-            if isinstance(with_, Mapping) and "persist-credentials" in with_:
-                value = with_["persist-credentials"]
-                if value is False:
-                    continue
-                line = with_.lines.get("persist-credentials", line_of(step, job_line))
-                found = f"found {json.dumps(value)}"
-                if isinstance(value, str):
-                    found += ", a string"
-            else:
-                line = line_of(step, job_line)
-                found = "it is not set"
-            problem(
-                path, line,
-                f"job '{name}' {describe(step, index)} must set 'persist-credentials: false', the "
-                f"boolean, so no token is left in the checkout ({found})",
-            )
+        if not is_checkout(step):
             continue
+        with_ = step.get("with")
+        if isinstance(with_, Mapping) and "persist-credentials" in with_:
+            value = with_["persist-credentials"]
+            if value is False:
+                continue
+            line = with_.lines.get("persist-credentials", line_of(step, job_line))
+            found = f"found {json.dumps(value)}"
+            if isinstance(value, str):
+                found += ", a string"
+        else:
+            line = line_of(step, job_line)
+            found = "it is not set"
+        problem(
+            path, line,
+            f"job '{name}' {describe(step, index)} must set 'persist-credentials: false', the "
+            f"boolean, so no token is left in the checkout ({found})",
+        )
+
+    # 6. release-push.sh is in the checkout, so a checkout comes before the step that runs it:
+    # the steps before the job's first checkout are the ones that would run it without one. Of
+    # those, only the steps the tokeniser reads: another shell's body is not its to parse.
+    for index, step in enumerate(steps):
+        if is_checkout(step):
+            break
         run = step.get("run")
-        if checked_out or not isinstance(run, str):
+        if not isinstance(run, str):
             continue
         if shell_of(step, job, workflow)[0] not in SHELLS:
             continue

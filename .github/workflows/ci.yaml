@@ -586,7 +586,8 @@ jobs:
               - 'skills/**'
               - 'scripts/third-party-notices.ts'
               # tests/envoy-channel-server.test.ts holds the marketplace entry to this package's
-              # own name and to no version.
+              # own name, to no `version` of its own, and to a source range that leaves out the
+              # 0.0.0 placeholder and admits the first release.
               - '.claude-plugin/marketplace.json'
             # The daemon's tests (every package once: the four concurrent packages under the race
             # detector, the rest in the plain step, and the daemon
