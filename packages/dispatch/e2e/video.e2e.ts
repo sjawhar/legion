@@ -484,3 +484,60 @@ test("an MP4 reference draws a player from a bytes route that answers it inline,
     await alice.close();
   }
 });
+
+test("a video named by the picture line in a turn whose summary is unread plays, and leaves no dead link", async ({
+  browser,
+}) => {
+  const planner = {
+    capabilities: ["aside", "btw", "steer"],
+    dir: "/workspaces/planner",
+    machine_id: "planner-host",
+    roles: ["planner"],
+    session_id: sessionIds.planner,
+    title: "Planner",
+  };
+  await setLiveSessions([planner]);
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const artifacts = `/api/v1/agents/${planner.session_id}/artifacts`;
+    await uploadVersion(page, artifacts, "clip.webm", "video/webm", TINY_WEBM);
+    await uploadVersion(page, artifacts, "panel.png", "image/png", TINY_PNG);
+    const clipRef = `dispatch://agent/${planner.session_id}/artifact/clip-webm@v1`;
+    const panelRef = `dispatch://agent/${planner.session_id}/artifact/panel-png@v1`;
+
+    await page.goto("/agents");
+    await page
+      .getByRole("region", { name: "Agents" })
+      .getByRole("button", { name: "No Dispatch activity (1)" })
+      .click();
+    const row = agentRow(page, planner.session_id);
+    await row.getByRole("button", { exact: true, name: "Planner" }).click();
+    const field = row.getByRole("textbox", { name: "Comment" });
+    // The pinned picture line, which is the line `dispatch artifact` prints for an upload and a
+    // paste writes. Nothing on this page has read the artifact's summary when the turn is
+    // drawn, so the line draws from the address it names before anything knows the address is a
+    // video's: the browser refuses those bytes as a picture, and the player must still arrive
+    // when the summary lands, at that same address.
+    await field.fill(`![clip.webm](${clipRef})\n\n![panel.png](${panelRef})`);
+    await expectPosted(page, `/api/v1/agents/${planner.session_id}/messages`, () =>
+      field.press("Control+Enter")
+    );
+
+    const conversation = row.getByRole("list", { name: "Conversation with Planner" });
+    const line = conversation.locator(`[data-dispatch-picture="${clipRef}"]`);
+    await expectPlayer(line.locator("video"), `${artifacts}/clip-webm/versions/1`);
+    await expectPlays(line.locator("video"));
+    // The reader is left with no plain link where the refused picture was, and no element the
+    // browser never drew.
+    await expect(line.locator("img")).toHaveCount(0);
+    // The negative control: the picture line beside it is a picture.
+    await expectDrawn(
+      conversation.locator(`[data-dispatch-picture="${panelRef}"] img`),
+      `${artifacts}/panel-png/versions/1`
+    );
+    await expect(conversation.locator("video")).toHaveCount(1);
+  } finally {
+    await alice.close();
+  }
+});

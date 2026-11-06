@@ -19,9 +19,11 @@ import { isPlainClick, openPictureViewer, type PictureViewer } from "./picture-v
  * and its duration, and the reader asks for the rest. Once the browser refuses the address - a
  * version it cannot decode, a version the server does not serve - the element goes and
  * `fallback` is drawn in its place, so no place shows a broken-image glyph or an element
- * reporting a `naturalWidth` of zero. The address that failed is kept, not a flag: a reference
- * names the latest version, so a version uploaded since gets its own load instead of inheriting
- * the last one's failure.
+ * reporting a `naturalWidth` of zero. What failed is kept as the address and what was drawn
+ * from it, not a flag: a reference names the latest version, so a version uploaded since gets
+ * its own load instead of inheriting the last one's failure, and a picture that failed at an
+ * address a summary then answers for as a video gets its player, since a video's bytes are not
+ * the picture that the browser refused.
  */
 export function ArtifactMedia({
   caption,
@@ -68,9 +70,9 @@ export function ArtifactMedia({
    *  name it and go with it when the browser refuses it, since `fallback` then says it all. */
   words?: ReactNode;
 }): ReactNode {
-  const [failedSrc, setFailedSrc] = useState<string>();
+  const [failed, setFailed] = useState<{ kind: "picture" | "video"; src: string }>();
   const picture = useRef<HTMLImageElement>(null);
-  const drawn = src !== failedSrc;
+  const drawn = failed?.src !== src || failed.kind !== kind;
   /** A plain click opens the picture at full size; the listener is the element's own, so it runs
    *  before anything listening above the placeholder link (the browser's navigation, the body's
    *  link handling) and keeps the click from them. A modified click is the link's, which opens
@@ -102,8 +104,8 @@ export function ArtifactMedia({
   }
   const sizeClassName = variant === "block" ? pictureClassName : pictureThumbnailClassName;
   const classes = className === undefined ? sizeClassName : `${sizeClassName} ${className}`;
-  // The address that failed is what the element reports, so a load of a newer version that
-  // follows is its own.
+  // What failed is the element's own address and what it drew, so a load of a newer version,
+  // or of the same address as the other kind, is its own.
   if (kind === "video") {
     return (
       // Dispatch stores an uploaded video's bytes and nothing else, so there is no caption
@@ -113,7 +115,7 @@ export function ArtifactMedia({
         aria-label={caption === "" ? undefined : caption}
         className={classes}
         controls
-        onError={() => setFailedSrc(src)}
+        onError={() => setFailed({ kind, src })}
         preload="metadata"
         src={src}
       />
@@ -128,7 +130,7 @@ export function ArtifactMedia({
       className={classes}
       height={height}
       loading="lazy"
-      onError={() => setFailedSrc(src)}
+      onError={() => setFailed({ kind, src })}
       ref={picture}
       src={src}
       width={width}

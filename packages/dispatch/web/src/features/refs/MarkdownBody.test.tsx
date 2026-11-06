@@ -302,6 +302,39 @@ describe("Dispatch pictures", () => {
     }
   });
 
+  // A pinned picture line to a video draws from the bytes the reference names before any
+  // summary is read, and a browser refuses a video's bytes as a picture. The summary then says
+  // the address is a video's, at that same address: the failure belonged to the picture that
+  // was drawn, not to the address, so the player takes its place instead of the reader being
+  // left with the link for good.
+  test("a pinned picture line whose bytes fail as a picture draws the player its summary answers", async () => {
+    const read = Promise.withResolvers<IssueReferenceSummary>();
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockReturnValue(read.promise);
+    const view = render(
+      withQueries(<MarkdownBody markdown="![clip.mp4](dispatch://CORE-1/artifact/clip-mp4@v1)" />)
+    );
+
+    try {
+      const drawn = await within(view.container).findByRole("img", { name: "clip.mp4" });
+      expect(drawn.getAttribute("src")).toBe("/api/v1/issues/CORE-1/artifacts/clip-mp4/versions/1");
+      fireEvent.error(drawn);
+      await waitFor(() => expect(view.container.querySelector("img")).toBeNull());
+
+      act(() => read.resolve(issueSummary([clip])));
+      const player = await waitFor(() => {
+        const element = view.container.querySelector("video");
+        if (element === null) throw new Error("the line that failed as a picture draws no player");
+        return element;
+      });
+      expect(player.getAttribute("src")).toBe(
+        "/api/v1/issues/CORE-1/artifacts/clip-mp4/versions/1"
+      );
+    } finally {
+      getIssueSummary.mockRestore();
+      view.unmount();
+    }
+  });
+
   test("a picture line that pins no version and names a document reads as its reference", async () => {
     const notes: IssueReferenceSummaryDocument = {
       height: null,
