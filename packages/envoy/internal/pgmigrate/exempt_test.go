@@ -78,9 +78,11 @@ func TestTableSizeExemptionReadsStatementsAsPostgresParsesThem(t *testing.T) {
 // each row names the setting it answers for. A text whose literals hold no backslash reads the
 // same under both, and redactedQuery answers it with the shape intact. A backslash before a
 // closing quote is read as that quote's escape with the setting off and as a plain byte with it
-// on, which moves where every later literal starts, so the two readings disagree over which
-// bytes are a value: the answer covers the literals of both, which can swallow the shape between
-// them - a comma, or a whole literal - and leaves no part of any value behind under either.
+// on, which moves where every later literal starts - and, with them, where a comment opened in
+// the bytes between them starts - so the two readings disagree over which bytes are a value:
+// the answer covers the literals and the comments of both, which can swallow the shape between
+// them - a comma, or a whole literal - and leaves no part of any value behind under either. A
+// comment both readings read as a comment is the one space it has always been.
 func TestRedactedQueryKeepsTheShapeAndDropsEveryValue(t *testing.T) {
 	for name, tc := range map[string]struct {
 		// setting is the holder's standard_conforming_strings the row answers for: "on", the
@@ -111,6 +113,24 @@ func TestRedactedQueryKeepsTheShapeAndDropsEveryValue(t *testing.T) {
 		"on: a path before another literal":          {"on", `select 'C:\' , 'ghp_SECRET' , 'b'`, "select ??"},
 		"on: a path in an insert's values":           {"on", `insert into t values ('C:\', 'ghp_SECRET')`, "insert into t values (??"},
 		"on: a path in a set, with a where after it": {"on", `update t set a = 'x\', b = 'ghp_SECRET' where c = 'y'`, "update t set a = ??"},
+		// A comment one reading opens inside what the other reads as a literal hides a value
+		// as surely as a literal does: Postgres ran none of its text, and whoever wrote the
+		// statement put in it whatever they liked. With the setting off the literal here ends
+		// at the quote after Brien and a block comment follows it; with it on, the comment's
+		// user='alice' is read as a literal, a word and a literal. The answer covers the other
+		// reading's comments as well as its literals, so neither printing of alice survives.
+		"off: a block comment the carried literal opens": {"off", `select 'O\'Brien' /*user='alice'*/`, "select ??"},
+		"off: a line comment the carried literal opens":  {"off", `select 'x\', '-- ', ghp_TOKEN`, "select ??"},
+		// The same disagreement where nothing closes what it opens: with the setting on the
+		// literal the backslash's quote opens is unterminated and takes the rest of the text,
+		// and with it off the comment does, so one ? covers the tail under either reading.
+		"off: a line comment to the end of the text":  {"off", `select 'a\' -- ghp_LINE`, "select ?"},
+		"off: a block comment over the rest of a set": {"off", `update t set a = 'b\' /* ghp_BLOCK */ where c = 1`, "update t set a = ?"},
+		// The space before that ? is this reading's own and lies outside every span of the
+		// other, so it is printed as the one space it is: a comment of the other reading over
+		// bytes this reading prints nothing for hides nothing and adds no ? of its own, which
+		// is why a comment both readings read as a comment still collapses to a space.
+		"off: a line comment opened between two literals": {"off", `select 'a\' , '-- x' , ghp_S`, "select ? ?"},
 	} {
 		if got := redactedQuery(tc.in); got != tc.want {
 			t.Errorf("%s (standard_conforming_strings %s): redactedQuery(%q) = %q, want %q", name, tc.setting, tc.in, got, tc.want)

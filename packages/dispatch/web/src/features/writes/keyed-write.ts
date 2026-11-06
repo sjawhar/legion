@@ -12,6 +12,7 @@ import {
   RequestTimeoutError,
   UnreadableAnswerError,
   type WriteBounds,
+  type WriteMethod,
   type WriteRequest,
 } from "../../api/client";
 import { onReachable, type Reachable, routeOf } from "../../api/reachability";
@@ -75,6 +76,32 @@ export function expiredRetryNote(made: string): string {
 export function keyExpired(key: string, now: number): boolean {
   const minted = keyMintedAt(key);
   return minted !== undefined && now - minted >= IDEMPOTENCY_KEY_TTL_MS;
+}
+
+/**
+ * Whether `key` is spent by `now`: a request has already gone out under it, that request is one
+ * that goes under its key (`goesUnderKey`), and Dispatch has forgotten the key (`keyExpired`).
+ * Another request under a spent key would be a second write of the person's action rather than
+ * a repeat of the first, which is why no attempt may go out under one.
+ *
+ * `carried` is what the key has carried: the request of an attempt that went out under it, or
+ * `null` where none has. A key that has carried nothing is never spent however old it is -
+ * Dispatch has never seen it, so there is nothing under it a request now would repeat - and a
+ * key whose request was a `PUT` or a `DELETE` is never spent either, since neither sends a key
+ * and making one again is the same change however late.
+ *
+ * This is the one place that question is answered: the retry loop asks it before each attempt
+ * (`writeUnderKey`, from what it is told the key has carried and from its own attempts) and a
+ * kept refusal asks it of the request kept with the write (`refusalFrom`, `null` where the write
+ * sent nothing, since a write's request is kept as its first attempt goes out). Neither decides
+ * on its own, so the two cannot answer the same write differently.
+ */
+export function keySpent(
+  carried: { readonly method: WriteMethod } | null,
+  key: string,
+  now: number
+): boolean {
+  return carried !== null && goesUnderKey(carried.method) && keyExpired(key, now);
 }
 
 /** A write that stopped trying before Dispatch confirmed it: the reader pressed Stop trying. Not
@@ -212,13 +239,16 @@ function pause(
 }
 
 /** How one keyed write is tried: `login` is the person who pressed it, sent on every attempt so
- *  Dispatch refuses it under anyone else's session; `planned` is the request it was kept as before
- *  any attempt of it went out, which every attempt must make; `signal` stops the trying; `sent` is
- *  told each attempt's request as it goes out; `uploading` is told how much of an upload's body
- *  each attempt has sent; `failed` is told each attempt that ended without Dispatch's verdict;
- *  `unauthorized` is told each attempt Dispatch answers `401`, and answers whether the page's
- *  sign-in check, read again, still names the person who pressed it. */
+ *  Dispatch refuses it under anyone else's session; `carried` is the request that has already
+ *  gone out under this write's key, which whoever holds the page's writes knows and this loop
+ *  cannot (`Writes`), `null` where the key has carried none; `planned` is the request it was
+ *  kept as before any attempt of it went out, which every attempt must make; `signal` stops the
+ *  trying; `sent` is told each attempt's request as it goes out; `uploading` is told how much of
+ *  an upload's body each attempt has sent; `failed` is told each attempt that ended without
+ *  Dispatch's verdict; `unauthorized` is told each attempt Dispatch answers `401`, and answers
+ *  whether the page's sign-in check, read again, still names the person who pressed it. */
 export interface KeyedWriteOptions {
+  readonly carried?: { readonly method: WriteMethod } | null;
   readonly failed?: () => void;
   readonly login?: string;
   readonly planned?: WriteRequest;
@@ -263,22 +293,26 @@ export class OneRequestPerWriteError extends Error {
  * `planned` as if it was (`OneRequestPerWriteError`). `signal` stops the trying between attempts -
  * a wait ends at once, an attempt in flight is let finish, since it may already have reached
  * Dispatch and its answer is still the write's - and the write then rejects with
- * `SendStoppedError`. A write that goes under its key (`goesUnderKey`) and whose key Dispatch no
- * longer holds (`keyExpired`) ends with `SendExpiredError` before the attempt that would go under
- * it - its first, or the one after a wait - since that attempt would be a new write to Dispatch
- * rather than a repeat of the first. A `PUT` or a `DELETE` sends no key, so Dispatch keeps
- * nothing under one for it and the age of its key stops nothing. A write whose method is not
- * known yet - its first attempt builds its own request, and none of it has gone out here - is
- * held to the check: the page cannot tell it from one that sends a key, and an earlier page may
- * have sent under this one already.
+ * `SendStoppedError`. A write whose key is spent (`keySpent`) ends with `SendExpiredError`
+ * before the attempt that would go under it - its first, or the one after a wait - since that
+ * attempt would be a new write to Dispatch rather than a repeat of the first. The key is spent
+ * by what it has carried: `carried`, the request that went out under it before this call, and
+ * then the request of this call's own first attempt, told as it goes out. A key that has
+ * carried nothing stops nothing, however old it is, and neither does one a `PUT` or a `DELETE`
+ * went under, since those send no key at all.
  */
 export async function writeUnderKey<T>(
   attempt: (bounds: WriteBounds) => Promise<T>,
   key: string,
-  { failed, login, planned, sent, signal, unauthorized, uploading }: KeyedWriteOptions = {}
+  { carried, failed, login, planned, sent, signal, unauthorized, uploading }: KeyedWriteOptions = {}
 ): Promise<T | null> {
   let backoff = FIRST_BACKOFF_MS;
   let first: WriteRequest | undefined = planned;
+  // What has gone out under this write's key: what the caller knows went out before this call,
+  // and then this call's own attempts, each told as it goes out. A request told here may not
+  // have reached Dispatch - the connection can fail after it leaves - which is the point: from
+  // then on the key may name something there, and its age decides the write.
+  let underKey: { readonly method: WriteMethod } | null = carried ?? null;
   // Whether an attempt went out that the page has no answer to: a resent `DELETE` then finds the
   // thing already gone.
   let unanswered = false;
@@ -287,6 +321,7 @@ export async function writeUnderKey<T>(
     else if (request.method !== first.method || request.path !== first.path) {
       throw new OneRequestPerWriteError(first, request);
     }
+    underKey = request;
     sent?.(request);
   };
   // Whether Dispatch became reachable again on this write's route - its method and path - since
@@ -306,13 +341,10 @@ export async function writeUnderKey<T>(
   let unauthorizedWhileSignedIn = false;
   try {
     for (;;) {
-      // Dispatch keeps a key a day from its first request: once it has forgotten this one, an
-      // attempt under it would be a second write of the person's action rather than a repeat.
-      // Only a write that sends the key reaches that memory; a `PUT` or a `DELETE` sends none and
-      // is the same change however often it is made. A write whose request is not known yet is
-      // held to the check, since the page cannot tell it from one that sends a key.
-      const sendsKey = first === undefined || goesUnderKey(first.method);
-      if (sendsKey && keyExpired(key, Date.now())) throw new SendExpiredError();
+      // Dispatch keeps a key a day from its first request: once it has forgotten a key something
+      // has already gone out under, another request under it would be a second write of the
+      // person's action rather than a repeat (`keySpent`).
+      if (keySpent(underKey, key, Date.now())) throw new SendExpiredError();
       try {
         return await attempt({
           deadlineMs: KEYED_SEND_ATTEMPT_MS,

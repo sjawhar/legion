@@ -2,7 +2,13 @@ import { DISPATCH_LOGIN_CHANGED } from "@legion/contracts";
 import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import { useRef, useSyncExternalStore } from "react";
 
-import { ApiError, api, type WriteBounds, type WriteRequest } from "../../api/client";
+import {
+  ApiError,
+  api,
+  type WriteBounds,
+  type WriteMethod,
+  type WriteRequest,
+} from "../../api/client";
 import type { AuthenticatedUser } from "../../api/types";
 import { newSendKey } from "../../lib/send-key";
 import { indexedDbFiles, type KeptFiles } from "./kept-files";
@@ -290,6 +296,15 @@ let watcher: ((store: Writes) => void) | undefined;
  * `409 LOGIN_CHANGED`).
  */
 export class Writes {
+  /** The method of the request each of this page's send keys has already carried. A write's key
+   *  is spent only where something has gone out under it (`keySpent`), and no entry can answer
+   *  that for its key: a composer's Retry is a press of its own, under the refused send's key,
+   *  in an entry that has sent nothing yet, and the entry it replaces is gone. So the store
+   *  keeps the fact under the key it belongs to - set as each attempt goes out, and read again
+   *  from the kept records a reload takes up, each of which holds the request its write last
+   *  went out as - and tells the retry loop (`writeUnderKey`'s `carried`). A key is kept for as
+   *  long as the page lives, since what went out under it never stops having gone out. */
+  readonly #carried = new Map<string, WriteMethod>();
   readonly #client: QueryClient;
   readonly #kept: WriteStorage;
   readonly #files: KeptFiles;
@@ -664,6 +679,10 @@ export class Writes {
     this.#resumed = true;
     const now = Date.now();
     for (const kept of this.#kept.load(login)) {
+      // The record holds the request its write last went out as, so one holding a request is a
+      // key something has gone out under; one holding none is a write that sent nothing, and
+      // its key is as good as the day it was minted.
+      if (kept.request !== null) this.#carried.set(kept.key, kept.request.method);
       const kind = kinds.get(kept.kind);
       if (kind === undefined || !kind.kept(kept.detail)) {
         this.#kept.forget(kept.key);
@@ -803,10 +822,14 @@ export class Writes {
             }
           }, SEND_DEADLINE_MS)
         : undefined;
+    const carried = this.#carried.get(entry.write.key);
     writeUnderKey(entry.attempt, entry.write.key, {
+      carried: carried === undefined ? null : { method: carried },
       login: entry.write.login,
       planned: entry.request ?? undefined,
       sent: (request) => {
+        // The request is going out under this key now, whatever becomes of this entry.
+        this.#carried.set(entry.write.key, request.method);
         if (!current()) return;
         entry.request = request;
         if (entry.write.sent) this.#keep(entry);

@@ -1,16 +1,5 @@
-import {
-  ApiError,
-  goesUnderKey,
-  WRITE_METHODS,
-  type WriteMethod,
-  type WriteRequest,
-} from "../../api/client";
-import {
-  keyExpired,
-  SendExpiredError,
-  SendInterruptedError,
-  SendStoppedError,
-} from "./keyed-write";
+import { ApiError, WRITE_METHODS, type WriteMethod, type WriteRequest } from "../../api/client";
+import { keySpent, SendExpiredError, SendInterruptedError, SendStoppedError } from "./keyed-write";
 
 /**
  * Where every write to Dispatch waits out a reload (`write-store.ts`). Every `POST` and `PATCH`
@@ -212,20 +201,18 @@ export function keptRefusal(error: Error): KeptRefusal {
 
 /** The refusal `kept` names, rebuilt as the error the write was refused with. `key` is the key of
  *  the write it refused, `request` the one it was kept as, and `now` the time it is read back: a
- *  write that ended without Dispatch's verdict under a key Dispatch has forgotten since
- *  (`keyExpired`) comes back expired, since a Retry of it is now a new write rather than the same
- *  one asked again. Only a write that goes under its key comes back that way (`goesUnderKey`): a
- *  `PUT` or a `DELETE` sends no key, so Dispatch keeps nothing under one for it and a Retry is
- *  the same change again however late it is made. Nor does one kept with no request at all: a
- *  write's request is kept as its first attempt goes out, so one kept without a request sent
- *  nothing, and Dispatch has never seen its key. */
+ *  write that ended without Dispatch's verdict under a key Dispatch has forgotten since comes
+ *  back expired, since a Retry of it is now a new write rather than the same one asked again.
+ *  Which writes those are is `keySpent`'s to say, the same question the retry loop asks before
+ *  each attempt: a `PUT` or a `DELETE` sends no key, and one kept with no request at all sent
+ *  nothing, so Dispatch has never seen its key. */
 export function refusalFrom(
   kept: KeptRefusal,
   key: string,
   request: KeptRequest | null,
   now: number
 ): Error {
-  const spent = request !== null && goesUnderKey(request.method) && keyExpired(key, now);
+  const spent = keySpent(request, key, now);
   switch (kept.kind) {
     case "interrupted":
       return spent ? new SendExpiredError() : new SendInterruptedError();

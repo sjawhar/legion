@@ -42,6 +42,23 @@ async function bytesOf(file: File): Promise<number[]> {
   return [...new Uint8Array(await file.arrayBuffer())];
 }
 
+/** An upload whose bytes arrive only once `release` is called: the window `put` reads its file
+ *  in, which a `delete` of the same key can land inside. */
+function slowUpload(): { file: File; release: () => void } {
+  const read = upload();
+  const { promise, resolve } = Promise.withResolvers<void>();
+  const file = {
+    arrayBuffer: async () => {
+      await promise;
+      return await read.arrayBuffer();
+    },
+    lastModified: LAST_MODIFIED,
+    name: NAME,
+    type: TYPE,
+  } as unknown as File;
+  return { file, release: resolve };
+}
+
 function settled<T>(request: IDBRequest<T>): Promise<T> {
   const { promise, resolve, reject } = Promise.withResolvers<T>();
   request.onsuccess = () => resolve(request.result);
@@ -166,4 +183,19 @@ test("a file let go is not there to resume with", async () => {
 
   expect(await files.get("k5")).toBeUndefined();
   expect(await rowOf("k5")).toBeUndefined();
+});
+
+// A delete while the put is still reading the file's bytes is the write landing, or the reader
+// discarding it: the file is gone, and a put that began before it must not write the row back,
+// which would keep a file for a write that no longer exists until `keepOnly` reaps it.
+test("a file let go while its put is reading the bytes is not written back", async () => {
+  const { file, release } = slowUpload();
+  const kept = files.put("k6", "alice", file);
+
+  await files.delete("k6");
+  release();
+  await kept;
+
+  expect(await rowOf("k6")).toBeUndefined();
+  expect(await files.get("k6")).toBeUndefined();
 });

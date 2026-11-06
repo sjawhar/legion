@@ -242,21 +242,24 @@ func endOfDollarQuote(text string, i int) (int, bool) {
 	return end + 1 + closing + len(delimiter), true
 }
 
-// backslashReadingLiterals returns, in order, the spans a session with standard_conforming_strings
-// off reads as a string, dollar-quoted or Unicode-escaped literal: the reading in which a
-// backslash inside a plain literal escapes the byte after it, so that a backslash before a quote
-// carries that literal on to the next quote and moves where every literal after it starts.
-func backslashReadingLiterals(text string) []sqlToken {
-	var literals []sqlToken
+// backslashReadingSpans returns, in order, the spans a session with standard_conforming_strings
+// off reads as something other than structure: a string, dollar-quoted or Unicode-escaped
+// literal, or a comment. That is the reading in which a backslash inside a plain literal escapes
+// the byte after it, so that a backslash before a quote carries that literal on to the next quote
+// and moves where every literal after it starts - and where every comment after it starts with
+// them, since a -- or a /* inside what the other reading is reading as a literal opens a comment
+// here, and a comment's text can hold anything.
+func backslashReadingSpans(text string) []sqlToken {
+	var spans []sqlToken
 	for i := 0; i < len(text); {
 		kind, end, _ := nextSQLToken(text, i, true)
 		switch kind {
-		case sqlString, sqlDollarString, sqlUnicodeEscape:
-			literals = append(literals, sqlToken{kind: kind, start: i, end: end})
+		case sqlString, sqlDollarString, sqlUnicodeEscape, sqlComment:
+			spans = append(spans, sqlToken{kind: kind, start: i, end: end})
 		}
 		i = end
 	}
-	return literals
+	return spans
 }
 
 // redactedQuery is a session's query text with its literals, numbers and comments taken out, for a
@@ -271,41 +274,61 @@ func backslashReadingLiterals(text string) []sqlToken {
 // The holder session owns standard_conforming_strings and its query text does not carry it, so no
 // one reading of that text can be trusted: a backslash before a closing quote ends the literal
 // under the default reading, the setting on, and carries it on to the next quote under the other,
-// which moves where the next literal of the statement starts. A reading chosen literal by literal
-// would therefore resume inside a literal of the reading Postgres used, and print its bytes. So
-// the whole text is read twice instead: the tokens are the default reading's, as they always
-// were, and backslashReadingLiterals reads the text again as a session with the setting off reads
-// it. A byte inside a literal of either reading is a value and is never printed; a byte this loop
-// prints lies outside every literal of both readings, which is structure Postgres read as
-// structure whichever setting the holder had. That is what makes the output safe to report.
+// which moves where the next literal of the statement starts, and with it where a comment opened
+// in the bytes between them starts. A reading chosen literal by literal would therefore resume
+// inside a literal or a comment of the reading Postgres used, and print its bytes. So the whole
+// text is read twice instead: the tokens are the default reading's, as they always were, and
+// backslashReadingSpans reads the text again as a session with the setting off reads it.
+//
+// The rule this loop holds is that a byte is printed only where both readings read it as
+// structure, which is to say outside every literal and every comment of either. The default
+// reading's own literals and numbers each print one ?, its own comments and space one space; and
+// a token any part of which the other reading holds inside a literal or a comment prints one ?
+// standing for that whole span, after which every token starting before the span's end prints
+// nothing. The one number printed as itself, a parameter's, is printed only where the $ before it
+// was printed as itself, so no $ swallowed into a ? carries a number out of one. What is left to
+// print is structure, or a name - a word, a quoted identifier - which is a name under both
+// readings and which this report keeps on purpose.
+//
+// Which of ? and one space a disagreement becomes follows from what each reading saw. The other
+// reading holding the bytes inside a literal makes them ?, a literal being where a value is, even
+// where this reading reads space or a comment there. The other reading holding them inside a
+// comment makes them ? only where this reading would have printed them: over this reading's own
+// space or comment it hides nothing that was going to be printed, and those bytes stay the one
+// space they have always been, so a comment both readings read as a comment collapses as it did
+// before.
 //
 // Two properties follow. A query whose literals hold no backslash is redacted byte for byte as
 // the default reading alone redacts it, because the two readings then agree on where every
-// literal ends. A query whose literal holds one can lose shape - a comma, or a whole literal,
-// swallowed into the single ? that covers the other reading's longer literal - and loses no
-// value.
+// literal and every comment ends. A query whose literal holds one can lose shape - a comma, a
+// whole literal, or a comment's one space, swallowed into the single ? that covers the other
+// reading's longer literal or the comment that literal's end opens - and loses no value.
 func redactedQuery(text string) string {
-	literals := backslashReadingLiterals(text)
+	spans := backslashReadingSpans(text)
 	var out strings.Builder
 	space := false
 	previous := sqlToken{kind: sqlSpace}
 	covered := 0 // the end of the text the ? last written stands for
-	literal := 0 // the first literal of the other reading that can still reach a token
+	span := 0    // the first span of the other reading that can still reach a token
 	for i := 0; i < len(text); {
 		kind, end, _ := nextSQLToken(text, i, false)
 		if i < covered {
 			// This token's bytes sit inside a ? already written, so it prints nothing at all.
-			// previous is left as the token last read outside a ?, which no skipped token can
-			// follow unbroken, so a $ swallowed into a ? leaves no number printed after it.
 			i = end
 			continue
 		}
-		for literal < len(literals) && literals[literal].end <= i {
-			literal++
+		for span < len(spans) && spans[span].end <= i {
+			span++
 		}
-		covers := literal < len(literals) && literals[literal].start < end
+		// Whether the other reading holds any of this token's bytes inside a literal or a
+		// comment, and whether that span is a literal, which is where a value can be.
+		hidden := span < len(spans) && spans[span].start < end
+		hiddenValue := hidden && spans[span].kind != sqlComment
 		switch {
-		case !covers && (kind == sqlSpace || kind == sqlComment):
+		case !hiddenValue && (kind == sqlSpace || kind == sqlComment):
+			// This reading prints none of these bytes itself, so a comment of the other reading
+			// over them hides nothing that was going to be printed: they are the one space they
+			// are when the two readings agree.
 			space = true
 		default:
 			if space && out.Len() > 0 {
@@ -313,11 +336,12 @@ func redactedQuery(text string) string {
 			}
 			space = false
 			switch {
-			case covers:
-				// The other reading holds these bytes inside a literal: one ? stands for all
-				// of that literal, and every token starting before its end prints nothing.
+			case hidden:
+				// The other reading holds these bytes inside a literal or a comment: one ?
+				// stands for all of that span, and every token starting before its end prints
+				// nothing.
 				out.WriteByte('?')
-				covered = max(literals[literal].end, end)
+				covered = max(spans[span].end, end)
 			case kind == sqlNumber && previous.kind == sqlOther && previous.end == i && text[i-1] == '$':
 				out.WriteString(text[i:end])
 			case kind == sqlNumber:
@@ -329,9 +353,13 @@ func redactedQuery(text string) string {
 				out.WriteByte('?')
 			default:
 				out.WriteString(text[i:end])
+				// previous is the token last printed as itself. A token printed as ? or left to
+				// a space leaves it behind, and no token fits between a token and one starting
+				// where it ends, so the $ a parameter's number is printed after is always the $
+				// immediately before it and always one printed as itself.
+				previous = sqlToken{kind: kind, start: i, end: end}
 			}
 		}
-		previous = sqlToken{kind: kind, start: i, end: end}
 		i = end
 	}
 	return out.String()

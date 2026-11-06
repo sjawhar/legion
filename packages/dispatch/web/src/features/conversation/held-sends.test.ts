@@ -581,17 +581,29 @@ test("a send held for a sign-out in another tab says so, and goes on once releas
   });
 });
 
-// A message under a key Dispatch has forgotten is never sent under it: its pending turn says so
-// in the refusal's own words - a Retry of it is a new message, which can be delivered a second
-// time - and offers Retry and Discard, as a stopped send's turn does.
+// A message under a key Dispatch has forgotten is never sent under it again. The key counts
+// only once something has gone out under it - this attempt tells its request as
+// `api.createAgentMessage` does, then ends without Dispatch's verdict - so the attempt that
+// would follow is the one the spent key stops: the pending turn says so in the refusal's own
+// words - a Retry of it is a new message, which can be delivered a second time - and offers
+// Retry and Discard, as a stopped send's turn does.
 test("a send whose key has run out says so on its turn, with Retry and Discard", async () => {
-  const createAgentMessage = spyOn(api, "createAgentMessage").mockResolvedValue(sentMessage);
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockImplementation(
+    (sessionID, input, bounds) => {
+      bounds.sent?.({
+        body: input,
+        method: "POST",
+        path: `/api/v1/agents/${sessionID}/messages`,
+      });
+      return Promise.reject(new ApiError(503, { code: "UNAVAILABLE", error: "down" }));
+    }
+  );
   const { held } = heldOf();
   const sends = { discard: () => {}, retry: () => {}, stop: () => {} };
   try {
     held.send(agentKey, { ...agentSend, sendKey: keyMinted(Date.now() - IDEMPOTENCY_KEY_TTL_MS) });
-    await waitFor(() => expect(held.get(agentKey)?.status).toBe("refused"));
-    expect(createAgentMessage).not.toHaveBeenCalled();
+    await waitFor(() => expect(held.get(agentKey)?.status).toBe("refused"), { timeout: 5_000 });
+    expect(createAgentMessage).toHaveBeenCalledTimes(1);
     const spent = held.get(agentKey);
     expect(spent?.status === "refused" && spent.refusal).toBeInstanceOf(SendExpiredError);
 

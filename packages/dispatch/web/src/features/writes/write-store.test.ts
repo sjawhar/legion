@@ -1402,6 +1402,64 @@ test("a resumed write whose key Dispatch has forgotten makes no attempt", async 
   });
 });
 
+/** A write that builds its own request at each attempt, as a composer's send does: a reload
+ *  takes it up whether or not a request ever went out under its key. */
+let composedAttempts = 0;
+const composedWrite = defineWriteKind<null>({
+  kept: (value): value is null => value === null,
+  name: "test-composed",
+  resume: () => (bounds) => {
+    composedAttempts += 1;
+    bounds.sent?.(patch);
+    return Promise.resolve({ key: "CORE-1" });
+  },
+});
+
+// The key stops only a write something has already gone out under. One kept with no request sent
+// nothing - a write's request is kept as its first attempt goes out - so Dispatch has never seen
+// its key, however old the key is. Pressed longer ago than a page makes a write again on its own,
+// it comes back interrupted, and its first Retry makes the attempt, under that same key: it is
+// not refused as expired first, for the reader to press Retry a second time under a new key.
+test("a resumed write that sent nothing makes its attempt on the first Retry", async () => {
+  await onFakeClock(async () => {
+    const tab = keptTab();
+    try {
+      const spent = keyMinted(Date.now() - IDEMPOTENCY_KEY_TTL_MS);
+      composedAttempts = 0;
+      tab.storage.setItem(
+        `dispatch.write:${spent}`,
+        JSON.stringify({
+          detail: null,
+          key: spent,
+          kind: composedWrite.name,
+          label: "A message",
+          login: "alice",
+          presentation: "composer",
+          pressedAt: Date.now() - KEPT_SEND_RESUME_MS - 1,
+          request: null,
+          sent: false,
+          state: { status: "sending" },
+          target: null,
+          version: 1,
+        })
+      );
+      const writes = new Writes(signedIn(), tab.page(), memoryFiles());
+      writes.resume("alice");
+      await settle();
+      const resumed = row(writes);
+      expect(resumed?.status === "refused" && resumed.refusal).toBeInstanceOf(SendInterruptedError);
+      expect(composedAttempts).toBe(0);
+
+      writes.retry(resumed?.id ?? 0);
+      await settle();
+      expect(composedAttempts).toBe(1);
+      expect(row(writes)).toBeUndefined();
+    } finally {
+      tab.close();
+    }
+  });
+});
+
 // A `PUT` sends no key: Dispatch keeps nothing under one for it, and making it again is the same
 // change. So a tab that slept past the key's lifetime makes that write again rather than ending
 // it and telling the reader a Retry may save it a second time.

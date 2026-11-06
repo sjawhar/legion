@@ -7,7 +7,7 @@ import type { ReactNode } from "react";
 import { keptTab, keyMinted } from "../../__tests__/kept-sends-harness";
 import { answerSends } from "../../__tests__/send-answers";
 import { ApiError, api, type WriteBounds } from "../../api/client";
-import { expiredRetryNote, SEND_DEADLINE_MS } from "./keyed-write";
+import { expiredRetryNote, FIRST_BACKOFF_MS, SEND_DEADLINE_MS } from "./keyed-write";
 import { PendingWritesIndicator } from "./PendingWritesIndicator";
 import { plainWrite, type Writes, writesOf } from "./write-store";
 
@@ -253,34 +253,49 @@ test("an upload in progress reads Uploading… N% until an attempt fails", async
   }
 });
 
-// A write whose key Dispatch has forgotten is never asked again under it: the indicator says the
-// key ran out and what a Retry of it would do - save the change a second time if the first one
-// was saved - and offers Retry and Discard, as it does for any refusal.
+// A write whose key Dispatch has forgotten is never asked again under it. The key matters only
+// once something has gone out under it - this attempt tells its request as `api.patchIssue`
+// does, and then ends without Dispatch's verdict - so the attempt that would follow is the one
+// the spent key stops. The indicator says the key ran out and what a Retry of it would do -
+// save the change a second time if the first one was saved - and offers Retry and Discard, as
+// it does for any refusal.
 test("a write whose key has run out says a Retry saves it again, with Retry and Discard", async () => {
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue({ key: "CORE-1" } as never);
+  const spent = keyMinted(Date.now() - IDEMPOTENCY_KEY_TTL_MS);
+  jest.useFakeTimers();
   const { client, unmount } = mountIndicator();
   const writes = writesOf(client);
+  let attempts = 0;
 
   try {
     void writes
       .run({
         detail: null,
-        key: keyMinted(Date.now() - IDEMPOTENCY_KEY_TTL_MS),
+        key: spent,
         kind: plainWrite,
         label: "CORE-1 set to done",
         presentation: "indicator",
-        write: (bounds) => api.patchIssue("CORE-1", { status: "done" }, bounds),
+        write: (bounds) => {
+          attempts += 1;
+          bounds.sent?.({
+            body: { status: "done" },
+            method: "PATCH",
+            path: "/api/v1/issues/CORE-1",
+          });
+          return Promise.reject(refusal);
+        },
       })
       .catch(() => undefined);
     await settle();
+    await tick(FIRST_BACKOFF_MS);
+    await settle();
 
-    const indicator = await screen.findByTestId("pending-writes");
+    const indicator = screen.getByTestId("pending-writes");
     expect(
       within(indicator).getByText(
         `Not saved: CORE-1 set to done — Dispatch has not confirmed it. ${expiredRetryNote("saved")}`
       )
     ).toBeTruthy();
-    expect(patchIssue).not.toHaveBeenCalled();
+    expect(attempts).toBe(1);
     expect(within(indicator).getByRole("button", { name: "Retry" })).toBeTruthy();
 
     fireEvent.click(within(indicator).getByRole("button", { name: "Discard" }));
@@ -288,6 +303,7 @@ test("a write whose key has run out says a Retry saves it again, with Retry and 
     expect(screen.queryByTestId("pending-writes")).toBeNull();
   } finally {
     unmount();
-    patchIssue.mockRestore();
+    jest.advanceTimersByTime(1);
+    jest.useRealTimers();
   }
 });

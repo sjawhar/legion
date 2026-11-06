@@ -285,21 +285,26 @@ test("a broadcast held for a sign-out in another tab says so, and goes on once r
   }
 });
 
-// A broadcast whose key Dispatch has forgotten is never asked under it: the row says the sending
-// ended and, in the refusal's own words, that a Retry is a new broadcast which can be delivered a
-// second time, and it offers Retry and Discard as a stopped row does.
+// A broadcast whose key Dispatch has forgotten is never asked under it again. The key counts
+// only once something has gone out under it - this attempt tells its request as
+// `api.createBroadcast` does, then ends without Dispatch's verdict - so the attempt that would
+// follow is the one the spent key stops: the row says the sending ended and, in the refusal's
+// own words, that a Retry is a new broadcast which can be delivered a second time, and it
+// offers Retry and Discard as a stopped row does.
 test("a broadcast whose key has run out says so, with Retry and Discard", async () => {
   const client = signedIn();
-  const createBroadcast = spyOn(api, "createBroadcast").mockImplementation(async (input) =>
-    created(input)
-  );
+  const createBroadcast = spyOn(api, "createBroadcast").mockImplementation((input, bounds) => {
+    bounds.sent?.({ body: input, method: "POST", path: "/api/v1/broadcasts" });
+    return Promise.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+  });
   const writes = new Writes(client, keptTab().page(), memoryFiles());
   try {
     enqueueBroadcast(writes, press("Ship it.", keyMinted(Date.now() - IDEMPOTENCY_KEY_TTL_MS)));
-    await waitFor(() =>
-      expect(broadcastRows(writes.rows()).map((row) => row.status)).toEqual(["failed"])
+    await waitFor(
+      () => expect(broadcastRows(writes.rows()).map((row) => row.status)).toEqual(["failed"]),
+      { timeout: 5_000 }
     );
-    expect(createBroadcast).not.toHaveBeenCalled();
+    expect(createBroadcast).toHaveBeenCalledTimes(1);
     const view = render(
       createElement(
         QueryClientProvider,

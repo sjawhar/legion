@@ -44,9 +44,6 @@ interface KeptFileRowBefore {
   readonly file: File;
 }
 
-/** What both shapes name, which is all `keepOnly` reads. */
-type AnyKeptFileRow = KeptFileRow | KeptFileRowBefore;
-
 /** Every field either shape may hold: what a row is read as before its shape is known. */
 type EitherKeptFileRow = Partial<KeptFileRow & KeptFileRowBefore>;
 
@@ -138,43 +135,72 @@ export function indexedDbFiles(): KeptFiles {
       database.close();
     }
   };
+  // The puts whose row is not written yet, each with the key it is for. A `put` must read its
+  // file's bytes before it can open a transaction - the await of `File.arrayBuffer()` would end
+  // one - so a `delete` of that key, and the sweep that ends a person's rows, mark every put of
+  // theirs on the way past, and a marked put writes nothing. The mark is read inside the put's
+  // own transaction, so a removal made before that moment is seen here and one made after opens
+  // its transaction later and takes the row out again: either way the row is gone. It answers
+  // for this page's removals, the only ones ordered against its puts at all; another tab's rows
+  // are `keepOnly`'s to reap, as they were.
+  const putting = new Set<{ readonly key: string; discarded: boolean }>();
   return {
     delete: async (key) => {
+      for (const pending of putting) {
+        if (pending.key === key) pending.discarded = true;
+      }
       await run("readwrite", (store) => settled(store.delete(key)));
     },
     get: async (key) => fileFrom(await run("readonly", (store) => settled(store.get(key)))),
     keepOnly: async (login, now = Date.now()) => {
       await run("readwrite", async (store) => {
-        const rows = (await settled(store.getAll())) as AnyKeptFileRow[];
-        await Promise.all(
-          rows
-            .filter((row) => row.login !== login || now - row.at > IDEMPOTENCY_KEY_TTL_MS)
-            .map((row) => settled(store.delete(row.key)))
+        // Both shapes name the three fields this reads, so a row of either answers for them.
+        const rows = (await settled(store.getAll())) as Pick<KeptFileRow, "at" | "key" | "login">[];
+        const swept = rows.filter(
+          (row) => row.login !== login || now - row.at > IDEMPOTENCY_KEY_TTL_MS
         );
+        // A put still reading its bytes would write its row back behind the sweep, as it would
+        // behind a `delete`, so the sweep marks those puts the same way.
+        const gone = new Set(swept.map((row) => row.key));
+        for (const pending of putting) {
+          if (gone.has(pending.key) || login === undefined) pending.discarded = true;
+        }
+        await Promise.all(swept.map((row) => settled(store.delete(row.key))));
       });
     },
-    // Reading the bytes comes before the row is written, so a row lands later than it did when
-    // it held the `File` itself; `put` still answers once the row is committed, or once there is
-    // nothing kept, and a file the browser can no longer read - one moved or deleted since the
-    // press - is let go like any other IndexedDB failure.
+    // Reading the bytes comes before the row is written, so a row lands later than it did in the
+    // release before this one, which stored the `File` and read nothing; a `delete` of the key
+    // in that window leaves the file let go rather than kept, since a put that wrote its row
+    // back would keep the file of a write that has landed or been discarded until `keepOnly`
+    // reaps it. `put` still answers once the row is committed, or once there is nothing kept,
+    // and a file the browser can no longer read - one moved or deleted since the press - is let
+    // go like any other IndexedDB failure.
     put: async (key, login, file) => {
       const at = Date.now();
-      let bytes: ArrayBuffer;
+      const pending = { discarded: false, key };
+      putting.add(pending);
       try {
-        bytes = await file.arrayBuffer();
-      } catch {
-        return;
+        let bytes: ArrayBuffer;
+        try {
+          bytes = await file.arrayBuffer();
+        } catch {
+          return;
+        }
+        const row: KeptFileRow = {
+          at,
+          bytes,
+          key,
+          lastModified: file.lastModified,
+          login,
+          name: file.name,
+          type: file.type,
+        };
+        await run("readwrite", (store) =>
+          pending.discarded ? Promise.resolve(undefined) : settled(store.put(row))
+        );
+      } finally {
+        putting.delete(pending);
       }
-      const row: KeptFileRow = {
-        at,
-        bytes,
-        key,
-        lastModified: file.lastModified,
-        login,
-        name: file.name,
-        type: file.type,
-      };
-      await run("readwrite", (store) => settled(store.put(row)));
     },
   };
 }

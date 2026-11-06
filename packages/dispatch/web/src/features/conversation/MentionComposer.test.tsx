@@ -2263,13 +2263,20 @@ test("a send kept failing shows Stop trying once late, which stops it for Retry 
   }
 });
 
-// A stopped send waits for the reader, and a day later Dispatch has forgotten its key: the Retry
-// sends nothing under that key. The composer says what happened in the refusal's own words - a
-// Retry is a new message, delivered a second time if the first one was - and keeps the draft,
-// Retry and Discard draft.
+// A stopped send waits for the reader, and a day later Dispatch has forgotten the key its
+// attempts went out under: the Retry sends nothing under that key. The composer says what
+// happened in the refusal's own words - a Retry is a new message, delivered a second time if the
+// first one was - and keeps the draft, Retry and Discard draft. As `api.createAgentMessage` does,
+// each attempt tells its request before anything goes out: that is how the key is known to have
+// carried one, and the Retry is a press of its own whose entry has sent nothing yet.
 test("a stopped send the reader comes back to a day later says its key has run out", async () => {
-  const createAgentMessage = spyOn(api, "createAgentMessage").mockRejectedValue(
-    new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" })
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockImplementation(
+    (sessionID, input, bounds) => {
+      bounds.sent?.({ body: input, method: "POST", path: `/api/v1/agents/${sessionID}/messages` });
+      return Promise.reject(
+        new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" })
+      );
+    }
   );
   jest.useFakeTimers();
   const { view } = renderComposer({ owner: { kind: "session", sessionId: "A" } });
