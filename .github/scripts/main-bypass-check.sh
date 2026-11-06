@@ -1,27 +1,39 @@
 #!/usr/bin/env bash
 # main-bypass-check is the decision half of the bypass check
-# (.github/workflows/main-bypass-check.yaml) and performs none of it: given the commits of a push
-# to main and, for each commit, the ci.yaml merge-group runs at it and its ci-ok check runs, it
-# says whether a commit reached main untested and names the first one. The workflow's step starts
-# ci.yaml on that line; this script makes no GitHub call and reads every fact from its
-# environment, so a test drives it from fixtures with no network.
+# (.github/workflows/main-bypass-check.yaml) and performs none of it: given the head of a push to
+# main, the ci.yaml merge-group runs at that head and its ci-ok check runs, it says whether the
+# head reached main untested. The workflow's step starts ci.yaml on that line; this script makes
+# no GitHub call and reads every fact from its environment, so a test drives it from fixtures
+# with no network.
 #
 # What there is to catch: the merge queue tests every change on the tree it lands as, and ci.yaml
 # runs on no push (its header says why), so a commit that reached main another way — an admin
 # merge, a direct push, a ruleset bypass — was tested by nothing at all. This decision is what
 # finds one, and the run the workflow then starts is what tests it.
 #
-# When a commit counts as tested, both of:
+# Why the push's head alone answers for the whole push: a ci.yaml merge-group run at the head
+# tested the tree that head names, which holds every commit under it, so nothing a push whose
+# head the queue tested carries went untested. And the queue lands a group by pushing that
+# group's head onto main, every commit it lands being the head of a group it tested, so a push
+# that came from the queue has such a head. A push carrying anything the queue never saw
+# therefore arrives with a head that is the head of no passing merge-group run, which is what
+# this reads.
+#
+# When the head counts as tested, both of:
 #   1. it is the head of a ci.yaml merge-group run, and
 #   2. it carries a ci-ok check run that concluded success.
 # Neither alone is enough: a merge-group run that failed or was cancelled leaves no passing ci-ok,
 # and a passing ci-ok on a commit that is the head of no merge-group run came from somewhere else.
 # A ci-ok posted by the bypass check's own dispatched run never satisfies rule 1, because such a
 # run's commit is the head of no merge-group run. That is deliberate, and it starts no second
-# dispatch, because the next push carries different commits.
+# dispatch, because this check runs on a push alone and the run it dispatches pushes nothing.
 #
-# A commit whose own message carries a skip marker is passed over, whatever its checks. The
-# markers are GitHub's own set, from its "Skipping workflow runs" page: `[skip ci]`, `[ci skip]`,
+# A head whose own message carries a skip marker is passed over, whatever its checks. GitHub
+# reads those markers on the push's head too, and starts no workflow at all for such a push, this
+# one included, so a marked head rarely reaches this decision; the rule is kept here because the
+# only thing it can do wrong is start the most expensive run in this repository for a commit that
+# asked for no CI at all. The markers are GitHub's own set, from its "Skipping workflow runs"
+# page: `[skip ci]`, `[ci skip]`,
 # `[no ci]`, `[skip actions]` and `[actions skip]` anywhere in the message, and the trailer
 # `skip-checks:true` or `skip-checks: true` at the end of it. The page's rule for that trailer,
 # in its words: "The trailers section should be included at the end of your commit message and be
@@ -52,44 +64,41 @@
 # and misses nothing.
 #
 # Its inputs, from the step's env:
-#   COMMITS  a JSON array of the push's commits, oldest first, each {"id": "<sha>", "message":
-#            "<the whole message>"}; any other field is ignored. From
-#            `.commits` of the push payload, read from $GITHUB_EVENT_PATH, or from the compare
-#            API when GitHub cut that array short (the workflow says when and how).
-#   RUNS     a JSON object mapping each commit's sha to the ci.yaml merge-group runs at that
-#            commit, each {"conclusion": "success|failure|cancelled|null", "headSha": "…",
-#            "workflowName": "…"}; a sha with no such run maps to []. From, over the shas of
-#            COMMITS:
-#              gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-#                --commit "$sha" --json conclusion,headSha,workflowName
-#            The `--workflow ci.yaml` is what holds that list to this repository's router; this
-#            script reads each run's headSha and puts its workflowName in the reasoning.
-#   CI_OK    a JSON object mapping each commit's sha to its ci-ok check runs, each {"name": "…",
-#            "conclusion": "success|failure|…|null"}; a sha with no ci-ok maps to []. From, over
-#            the same shas:
-#              gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?check_name=ci-ok&filter=all&per_page=100" \
-#                --jq '[.check_runs[] | {name, conclusion}]'
-#            `filter=all` is required: the default, `latest`, returns one check run per name, and
-#            a commit can carry two — a failing one from the run whose job failed, and a passing
-#            one from a later run of the same group. `per_page=100` is required too: the default
-#            page holds the 30 newest check runs of the commit, and a commit the queue tested
-#            more than once can carry more than that.
-# RUNS and CI_OK must hold a reading for every commit of COMMITS, so that a gather that read
-# nothing is a refusal here rather than a commit silently read as untested.
+#   HEAD_SHA      the sha of the push's head, from `github.event.after`.
+#   HEAD_MESSAGE  that commit's whole message, from `github.event.head_commit.message`: read for
+#                 the skip marker, and its subject quoted in the reasoning. A payload that
+#                 carries no head_commit leaves it empty, which holds no marker, so the head is
+#                 read by its runs and checks like any other — the side that starts the run.
+#   RUNS          a JSON array of the ci.yaml merge-group runs at HEAD_SHA, each {"conclusion":
+#                 "success|failure|cancelled|null", "headSha": "…", "workflowName": "…"}; a head
+#                 with no such run is []. From:
+#                   gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+#                     --commit "$HEAD_SHA" --json conclusion,headSha,workflowName
+#                 The `--workflow ci.yaml` is what holds that list to this repository's router;
+#                 this script reads each run's headSha and puts its workflowName in the reasoning.
+#   CI_OK         a JSON array of HEAD_SHA's ci-ok check runs, each {"name": "…", "conclusion":
+#                 "success|failure|…|null"}; a head with no ci-ok is []. From:
+#                   gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/check-runs?check_name=ci-ok&filter=all&per_page=100" \
+#                     --jq '[.check_runs[] | {name, conclusion}]'
+#                 `filter=all` is required: the default, `latest`, returns one check run per name,
+#                 and a commit can carry two — a failing one from the run whose job failed, and a
+#                 passing one from a later run of the same group. `per_page=100` is required too:
+#                 the default page holds the 30 newest check runs of the commit, and a commit the
+#                 queue tested more than once can carry more than that.
 #
-# It prints one line on stdout, `dispatch <sha>`, naming the first commit of the push that was not
-# tested; a push whose commits were all tested or all carry a marker prints nothing. The reasoning
-# — every commit it read, what was read for it, and what that made of it — goes to stderr, which
-# the workflow puts in the job log and the job summary. It exits 0 whenever it could decide, and
-# non-zero only on a bad input, which it names.
+# What it no longer reads: the push's other commits, the merge-group runs and ci-ok check runs at
+# each of them, and the compare API, which the walk fell back to for a payload GitHub had cut at
+# its documented 2048-commit cap. The head answers for all of them, so the check costs two API
+# calls per push where the walk cost two per commit.
 #
-# The decision stops at that first untested commit: every commit after it is read, since the
-# workflow gathers both readings for every commit of the push and this script holds them all,
-# but none of them is judged and the reasoning names none of them — one dispatched run tests
-# main's tip, which contains every commit of the push, so what they carry changes nothing.
+# It prints one line on stdout, `dispatch <sha>`, naming the head when it reached main untested;
+# a head the queue tested, or one carrying a skip marker, prints nothing. The reasoning — what
+# was read of the head and what that made of it — goes to stderr, which the workflow puts in the
+# job log and the job summary. It exits 0 whenever it could decide, and non-zero only on a bad
+# input, which it names.
 #
 # Run from anywhere:
-#   COMMITS=... RUNS=... CI_OK=... .github/scripts/main-bypass-check.sh
+#   HEAD_SHA=... HEAD_MESSAGE=... RUNS=... CI_OK=... .github/scripts/main-bypass-check.sh
 # Its tests are in main-bypass-check.test.sh, which ci.yaml's test job runs.
 set -euo pipefail
 shopt -s inherit_errexit
@@ -99,28 +108,21 @@ fail() {
   exit 1
 }
 
-for input in COMMITS RUNS CI_OK; do
+for input in HEAD_SHA RUNS CI_OK; do
   if [ -z "${!input:-}" ]; then
     fail "main-bypass-check.sh needs $input in its environment"
   fi
 done
+# HEAD_MESSAGE is the one input that may be empty: a payload with no head_commit carries no
+# message, and no message carries no marker.
+HEAD_MESSAGE=${HEAD_MESSAGE:-}
 
-jq -e 'type == "array" and all(.[];
-  type == "object" and (.id | type) == "string" and (.message | type) == "string")' \
-  <<<"$COMMITS" >/dev/null 2>&1 ||
-  fail "COMMITS is not a JSON array of the push's commits, each with a string id and a string message: $COMMITS"
-bad_shas=$(jq -r '[.[] | select((.id | test("^[0-9a-f]{7,40}$")) | not) | .id] | join(", ")' <<<"$COMMITS")
-[ -z "$bad_shas" ] || fail "COMMITS holds an id that is no commit sha: $bad_shas"
+[[ $HEAD_SHA =~ ^[0-9a-f]{7,40}$ ]] || fail "HEAD_SHA is no commit sha: $HEAD_SHA"
 
 for input in RUNS CI_OK; do
-  jq -e 'type == "object" and all(.[]; type == "array" and all(.[]; type == "object"))' \
-    <<<"${!input}" >/dev/null 2>&1 ||
-    fail "$input is not a JSON object mapping a commit sha to an array of what was read for it: ${!input}"
+  jq -e 'type == "array" and all(.[]; type == "object")' <<<"${!input}" >/dev/null 2>&1 ||
+    fail "$input is not a JSON array of what was read at the push's head: ${!input}"
 done
-unread=$(jq -r --argjson runs "$RUNS" --argjson ci_ok "$CI_OK" \
-  '[.[] | .id as $id | select(($runs | has($id) | not) or ($ci_ok | has($id) | not)) | $id] | unique | join(", ")' <<<"$COMMITS")
-[ -z "$unread" ] ||
-  fail "RUNS and CI_OK need a reading for every commit of COMMITS, and one of them holds none for: $unread"
 
 # One row per line, tab-separated: `out` and the token for stdout, or `log` and a line of the
 # reasoning for stderr, in the order the caller must act on them.
@@ -154,7 +156,11 @@ def skip_marker:
     + [$message | skip_trailer | select(. != null)]
   | first;
 
-def subject: split("\n") | first // "";
+# A payload that carried no message leaves nothing to quote, and the reasoning says so rather
+# than printing an empty pair of brackets.
+def subject:
+  (split("\n") | first // "")
+  | if . == "" then "no commit message in the push payload" else . end;
 
 def runs_said($heads):
   if ($heads | length) == 0 then
@@ -173,41 +179,24 @@ def checks_said($checks):
       | map(.conclusion // "not finished") | join(", "))"
   end;
 
-[.[]
- | . as $commit
- | ($commit.message | skip_marker) as $marker
- | [$runs[$commit.id][] | select(.headSha == $commit.id)] as $heads
- | $ci_ok[$commit.id] as $checks
- | {commit: $commit, marker: $marker, heads: $heads, checks: $checks,
-    tested: (($heads | length) > 0 and ($checks | any(.conclusion == "success")))}]
-as $read
-| ([$read | to_entries[]
-    | select(.value.marker == null and (.value.tested | not)) | .key] | first) as $first
-| (if ($read | length) == 0 then
-     ["log", "this push carries no commit, so there is nothing to read and nothing is started"]
-   else
-     ($read[0:(($first // (($read | length) - 1)) + 1)][]
-      | if .marker != null then
-          ["log", "commit \(.commit.id) (\(.commit.message | subject)) carries the skip marker \(.marker), so no run was ever expected for it: passed over"]
-        elif .tested then
-          ["log", "commit \(.commit.id) (\(.commit.message | subject)): \(runs_said(.heads)) and \(checks_said(.checks)): tested"]
-        else
-          ["log", "commit \(.commit.id) (\(.commit.message | subject)): \(runs_said(.heads)) and \(checks_said(.checks)): not tested"]
-        end)
-   end),
-  (if $first == null then
-     (if ($read | length) == 0 then
-        empty
-      else
-        ["log", "every commit of this push was tested on the merge queue or carries a skip marker: no run is started"]
-      end)
-   else
-     ["log", "commit \($read[$first].commit.id) reached this branch untested, so ci.yaml is started on this branch by workflow_dispatch: that run tests the branch's tip, which contains it. The \((($read | length) - $first - 1)) commit(s) after it are left unjudged, because that one run tests them too."],
-     ["out", "dispatch \($read[$first].commit.id)"]
-   end)
+($message | skip_marker) as $marker
+| [$runs[] | select(.headSha == $sha)] as $heads
+| (($heads | length) > 0 and ($ci_ok | any(.conclusion == "success"))) as $tested
+| if $marker != null then
+    ["log", "commit \($sha) (\($message | subject)) carries the skip marker \($marker), so no run was ever expected for it: passed over"],
+    ["log", "this push's head carries a skip marker, so no run is started"]
+  elif $tested then
+    ["log", "commit \($sha) (\($message | subject)): \(runs_said($heads)) and \(checks_said($ci_ok)): tested"],
+    ["log", "this push's head was tested on the merge queue: no run is started"]
+  else
+    ["log", "commit \($sha) (\($message | subject)): \(runs_said($heads)) and \(checks_said($ci_ok)): not tested"],
+    ["log", "commit \($sha) reached this branch untested, so ci.yaml is started on this branch by workflow_dispatch: that run tests the branch's tip, which contains it."],
+    ["out", "dispatch \($sha)"]
+  end
 | @tsv
 JQ
-rows=$(jq -r --argjson runs "$RUNS" --argjson ci_ok "$CI_OK" "$program" <<<"$COMMITS")
+rows=$(jq -rn --arg sha "$HEAD_SHA" --arg message "$HEAD_MESSAGE" \
+  --argjson runs "$RUNS" --argjson ci_ok "$CI_OK" "$program")
 
 while IFS=$'\t' read -r kind text; do
   case $kind in

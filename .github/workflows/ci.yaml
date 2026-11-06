@@ -676,8 +676,9 @@ jobs:
               # workflow_paths.py, check-pr-text.sh, release-bump.sh, ci_filter_coverage.py where a
               # checker sources them).
               - '.github/scripts/*'
-              # main-bypass-check.test.sh:239-246 reads the bypass check's own workflow and holds
-              # every run: step of it to a shell with pipefail.
+              # main-bypass-check.test.sh:198-210 reads the bypass check's own workflow and holds
+              # every run: step of it to a shell with pipefail, and :216-227 holds the decision's
+              # HEAD_SHA and HEAD_MESSAGE to the push payload's head.
               - '.github/workflows/main-bypass-check.yaml'
               # mirror-ci-images.test.sh:322-351 builds its ordering fixture from the repository's
               # own image rows.

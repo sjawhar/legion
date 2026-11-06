@@ -3,11 +3,17 @@ name: CI (main bypass check)
 # The backstop for a commit that reached main without the merge queue: an administrator's merge, a
 # direct push, a ruleset bypass. ci.yaml runs on no push (its header says why), so nothing else in
 # this repository would test such a commit at all. On every push to main this workflow reads the
-# push's commits, decides for each whether the merge queue tested it
-# (.github/scripts/main-bypass-check.sh), and on the first one it did not, starts ci.yaml on main
-# by workflow_dispatch, where `changes` selects every job. That one run tests main's tip, which
-# contains the commit, so one run answers for the whole push; the job summary holds what the check
-# read of every commit it looked at.
+# push's head alone, decides whether the merge queue tested it
+# (.github/scripts/main-bypass-check.sh), and when it did not, starts ci.yaml on main by
+# workflow_dispatch, where `changes` selects every job. That one run tests main's tip, which
+# contains the head, so one run answers for the whole push; the job summary holds what the check
+# read of the head.
+#
+# Why the head alone answers for the push: a ci.yaml merge-group run at the head tested the tree
+# that head names, which holds every commit the push carried, and the queue lands a group by
+# pushing that group's own tested head onto main. So a push whose head is the head of a passing
+# merge-group run carries nothing untested, and a push carrying anything the queue never saw
+# arrives with a head that is the head of no such run. The script's header sets that out.
 #
 # A workflow_dispatch made with this job's GITHUB_TOKEN does create a run, unlike most events that
 # token causes (docs.github.com, "Triggering a workflow from a workflow"), and `actions: write` is
@@ -21,18 +27,20 @@ name: CI (main bypass check)
 # gets a check of its own. A coalescing group here would drop exactly the push a bypass arrived in.
 #
 # What it deliberately does not do:
-#   * it starts at most one run per push, named for the first untested commit; it does not test a
-#     commit in isolation, and it does not judge the commits after that one;
+#   * it starts at most one run per push, named for the push's head; it does not test a commit in
+#     isolation, and it reads no other commit of the push — neither their merge-group runs nor
+#     their ci-ok check runs, and it no longer falls back to the compare API for a payload GitHub
+#     cut at its documented 2048-commit cap, since the head answers for all of them;
 #   * it reverts nothing, reopens nothing and blocks nothing. It makes the missing CI run, and
 #     what that run reports is for a person to act on;
-#   * it passes over a commit whose own message carries one of GitHub's skip markers (the script's
-#     header lists them);
+#   * it passes over a head whose own message carries one of GitHub's skip markers (the script's
+#     header lists them). GitHub reads those markers on the push's head too and starts no workflow
+#     at all for such a push, this one included — a release or changelog push says that way that
+#     it needs no CI — so that reading rarely has anything to pass over;
 #   * it never answers its own dispatch. The ci-ok that dispatched run posts sits on a commit that
 #     is the head of no merge-group run, so this check reads that commit as untested — and starts
-#     nothing for it, because the next push carries different commits, not that one;
-#   * a push whose own head commit carries a skip marker starts no workflow at all, this one
-#     included; that is GitHub's behaviour, and the marker is how a release or changelog push says
-#     it needs no CI.
+#     nothing for it, because only a push starts this check and the run it dispatches pushes
+#     nothing.
 on:
   push:
     branches: [main]
@@ -40,7 +48,7 @@ on:
 jobs:
   bypass-check:
     runs-on: ubuntu-24.04
-    # The checkout, two API reads per commit of the push, and at most one dispatch.
+    # The checkout, two API reads at the push's head, and at most one dispatch.
     timeout-minutes: 10
     # The dispatch of ci.yaml needs `actions: write`, and `gh run list` needs no more than that;
     # nothing here needs another scope. The checkout needs no `contents: read`, because this
@@ -50,8 +58,8 @@ jobs:
     permissions:
       actions: write
     steps:
-      # The job reads nothing of the tree but .github/scripts/main-bypass-check.sh and the
-      # push-commits.sh beside it, so the .github cone is the whole checkout it needs.
+      # The job reads nothing of the tree but .github/scripts/main-bypass-check.sh, so the
+      # .github cone is the whole checkout it needs.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           sparse-checkout: .github
@@ -59,59 +67,32 @@ jobs:
 
       # `shell: bash` runs the step as `bash --noprofile --norc -eo pipefail {0}`; naming no
       # shell would run it as `bash -e {0}`, which has no `pipefail` (docs.github.com, "Workflow
-      # syntax for GitHub Actions", the default shell table). Every read below ends in a `jq -s`,
-      # which exits 0 on an empty input, so without `pipefail` a `gh` that GitHub answered with a
-      # 502 or a rate limit handed the decision an empty push, and this job went green having
-      # started nothing — the one outcome this backstop exists to prevent. Under `pipefail` a
-      # refused compare read ends the step, and so does a refusal on the last head of either
-      # gather; a head refused earlier in a gather leaves its sha out of RUNS or CI_OK, and
-      # main-bypass-check.sh then fails naming that commit, because a gather that read nothing is
-      # a refusal here and never a commit silently read as untested. No read in the step wants a
-      # pipeline's last stage to hide an earlier failure.
-      - name: Start ci.yaml when a commit of this push was never tested
+      # syntax for GitHub Actions", the default shell table). Both reads below are single
+      # commands, which `-e` alone already ends the step on, and `shell: bash` is what keeps that
+      # true of a pipeline a later change adds: a `gh` that GitHub answered with a 502 or a rate
+      # limit at the head of a pipeline must end the step, because the alternative is a decision
+      # handed an empty reading, going green having started nothing — the one outcome this
+      # backstop exists to prevent. main-bypass-check.test.sh holds every `run:` step of this
+      # workflow to that shell.
+      - name: Start ci.yaml when this push's head was never tested
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          PUSHED_BEFORE: ${{ github.event.before }}
-          PUSHED_AFTER: ${{ github.event.after }}
+          HEAD_SHA: ${{ github.event.after }}
+          HEAD_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
-          # The push's commits, read from the event file by
-          # .github/scripts/push-commits.sh, whose header says what that read takes and
-          # refuses; main-bypass-check.test.sh runs that same file over the payload shapes, so
-          # the read this job makes is the read that test holds.
-          COMMITS=$(.github/scripts/push-commits.sh)
-          payload_commits=$(jq 'length' <<<"$COMMITS")
-          # The fallback for a payload GitHub cut: an array of exactly 2048 commits is at that
-          # documented cap, so the push may hold more, and the range is read again from the
-          # compare API, page by page. A push longer than the 250 commits that API lists is read
-          # as that many: one untested commit anywhere in the list starts the one run that tests
-          # main's tip, so a longer read would change no decision this check can make.
-          if [ "$payload_commits" -ge 2048 ]; then
-            echo "the payload holds $payload_commits commits, the cap GitHub documents, so this push may hold more: reading $PUSHED_BEFORE...$PUSHED_AFTER from the compare API"
-            COMMITS=$(gh api --paginate "repos/$GITHUB_REPOSITORY/compare/$PUSHED_BEFORE...$PUSHED_AFTER" \
-              --jq '.commits[] | {id: .sha, message: .commit.message}' | jq -s -c '.')
-          fi
-          export COMMITS
-          # Both readings are made for every commit, the ones carrying a skip marker included: the
-          # marker rule lives in the decision script alone, and two extra API calls for a release
-          # commit are cheaper than a second copy of that rule here.
-          RUNS=$(jq -r '.[].id' <<<"$COMMITS" |
-            while read -r sha; do
-              gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
-                --commit "$sha" --limit 20 --json conclusion,headSha,workflowName |
-                jq -c --arg sha "$sha" '{($sha): .}'
-            done | jq -s -c 'add // {}')
+          # The merge-group runs at the push's head. `--workflow ci.yaml` is what holds the list
+          # to this repository's router; the decision reads each run's headSha itself, so a run
+          # this filter returned for another commit is no run of this head.
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --commit "$HEAD_SHA" --limit 20 --json conclusion,headSha,workflowName)
           export RUNS
           # filter=all, because the default returns one check run per name and a commit can carry
           # two: a failing ci-ok from the run whose job failed, and a passing one from a later run
           # of the same group. per_page=100, because the default page holds the 30 newest check
           # runs of the commit, and a commit the queue tested more than once can carry more.
-          CI_OK=$(jq -r '.[].id' <<<"$COMMITS" |
-            while read -r sha; do
-              gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?check_name=ci-ok&filter=all&per_page=100" \
-                --jq '[.check_runs[] | {name, conclusion}]' |
-                jq -c --arg sha "$sha" '{($sha): .}'
-            done | jq -s -c 'add // {}')
+          CI_OK=$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/check-runs?check_name=ci-ok&filter=all&per_page=100" \
+            --jq '[.check_runs[] | {name, conclusion}]')
           export CI_OK
 
           set +e
@@ -120,7 +101,7 @@ jobs:
           set -e
           cat "$RUNNER_TEMP/reasoning"
           {
-            echo "## What this push carried"
+            echo "## What this push's head carried"
             echo
             sed 's/^/- /' "$RUNNER_TEMP/reasoning"
           } >>"$GITHUB_STEP_SUMMARY"

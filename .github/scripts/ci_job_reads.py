@@ -454,9 +454,9 @@ GATES = [
                               "test-lib.sh and runs its checker (with workflow_paths.py, check-pr-text.sh, ci_filter_coverage.py, "
                               "ci_job_reads.py, ci_ts_programs.py or release-bump.sh where a checker reads them)"),
         (".github/workflows/main-bypass-check.yaml",
-         at("test", "Test the main bypass check's decision") + ": main-bypass-check.test.sh:239-251 reads the "
-         "workflow and holds every run: step of it to a shell with pipefail, and :322-324 holds its COMMITS to "
-         "push-commits.sh"),
+         at("test", "Test the main bypass check's decision") + ": main-bypass-check.test.sh:198-210 reads the "
+         "workflow and holds every run: step of it to a shell with pipefail, and :216-227 holds the decision's "
+         "HEAD_SHA and HEAD_MESSAGE to the push payload's head"),
         (".github/ci-images.yaml", f"{at('test', 'Test the CI image mirror')}: mirror-ci-images.test.sh:322-351 builds "
                                    "its ordering fixture from the repository's own rows"),
         (".github/e2e-scripts.json", f"{at('test', 'Test the e2e proof selector')}: select-e2e-proofs.test.sh runs the "
