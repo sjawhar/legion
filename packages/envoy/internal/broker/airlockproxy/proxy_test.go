@@ -239,6 +239,26 @@ func (c *logCapture) calls() []logLine {
 	return calls
 }
 
+// callsAtLeast is the same, once there are n of them. The proxy writes a call's line after its
+// answer has been copied to the client, so a client whose own read of the body has returned can
+// still be ahead of that write by a few instructions: a row that reads calls()[0] straight after
+// its request passes on an idle machine and panics on a loaded one, which is how this wait came
+// to be written. It fails the row rather than hanging when the line never comes.
+func (c *logCapture) callsAtLeast(t *testing.T, n int) []logLine {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		calls := c.calls()
+		if len(calls) >= n {
+			return calls
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the proxy wrote %d lines for a call to a bound host; want at least %d", len(calls), n)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // rig is one row's whole world: the proxy, what it dials, what it may resolve, the stand-in
 // service behind the bound host, two tunnel services, and the log.
 type rig struct {
@@ -911,7 +931,7 @@ func TestEachCallToABoundHostLogsOneLine(t *testing.T) {
 	r.get(client, "https://"+boundHost+"/v1/things?token=secret-query", "Authorization", "Bearer "+workerPlaceholder)
 	r.do(client, http.MethodDelete, "https://"+boundHost+"/v1/things", "", "Authorization", "Bearer "+workerPlaceholder)
 
-	calls := r.logs.calls()
+	calls := r.logs.callsAtLeast(t, 2)
 	if len(calls) != 2 {
 		t.Fatalf("the proxy logged %d lines for two calls to a bound host; want one each", len(calls))
 	}
@@ -993,7 +1013,7 @@ func TestOneRequestIsHandledForOneNameOfTheGrant(t *testing.T) {
 	if want := "Token " + betaValue; seen[0].Header.Get("X-Beta") != want {
 		t.Fatalf("the service saw X-Beta %q; want %q: the request carried beta's placeholder, so it is handled for beta", seen[0].Header.Get("X-Beta"), want)
 	}
-	if secret := r.logs.calls()[0].fields["secret"]; secret != betaName {
+	if secret := r.logs.callsAtLeast(t, 1)[0].fields["secret"]; secret != betaName {
 		t.Fatalf("the call logged the secret %v; want %s", secret, betaName)
 	}
 
@@ -1007,7 +1027,7 @@ func TestOneRequestIsHandledForOneNameOfTheGrant(t *testing.T) {
 	if got := seen[1].Header.Get("X-Plain"); got != "nothing of this grant" {
 		t.Errorf("the service saw X-Plain %q; want it unchanged", got)
 	}
-	if secret := r.logs.calls()[1].fields["secret"]; secret != alphaName {
+	if secret := r.logs.callsAtLeast(t, 2)[1].fields["secret"]; secret != alphaName {
 		t.Fatalf("the call logged the secret %v; want %s, the first candidate in name order", secret, alphaName)
 	}
 
@@ -1267,7 +1287,7 @@ func TestAGitHubAppInstallationsTokenIsSwappedForItsOwnSlotsPlaceholder(t *testi
 	if got, want := seen[0].Header.Get("Authorization"), "Bearer "+zedToken; got != want {
 		t.Fatalf("the service saw Authorization %q; want %q: the request carried zed's placeholder", got, want)
 	}
-	line := r.logs.calls()[0]
+	line := r.logs.callsAtLeast(t, 1)[0]
 	if line.fields["secret"] != appName || line.fields["slot"] != zedSlot {
 		t.Fatalf("the call logged %v; want secret %s and slot %s", line.fields, appName, zedSlot)
 	}
@@ -1283,7 +1303,7 @@ func TestAGitHubAppInstallationsTokenIsSwappedForItsOwnSlotsPlaceholder(t *testi
 	if got, want := seen[1].Header.Get("Authorization"), "Bearer "+acmeToken; got != want {
 		t.Fatalf("the service saw Authorization %q; want %q: the request carried acme's placeholder", got, want)
 	}
-	if slot := r.logs.calls()[1].fields["slot"]; slot != acmeSlot {
+	if slot := r.logs.callsAtLeast(t, 2)[1].fields["slot"]; slot != acmeSlot {
 		t.Fatalf("the call logged the slot %v; want %s", slot, acmeSlot)
 	}
 
@@ -1294,7 +1314,7 @@ func TestAGitHubAppInstallationsTokenIsSwappedForItsOwnSlotsPlaceholder(t *testi
 	if got := seen[2].Header.Get("X-Plain"); got != "nothing of this grant" {
 		t.Errorf("the service saw X-Plain %q; want it unchanged", got)
 	}
-	if slot := r.logs.calls()[2].fields["slot"]; slot != acmeSlot {
+	if slot := r.logs.callsAtLeast(t, 3)[2].fields["slot"]; slot != acmeSlot {
 		t.Fatalf("the call logged the slot %v; want %s, the first candidate in slot order", slot, acmeSlot)
 	}
 }
@@ -1305,7 +1325,7 @@ func TestTheLogLineNamesNoSlotForAValueSlot(t *testing.T) {
 	r := newRig(t, Options{})
 	client := r.client(workerPlaceholder)
 	r.get(client, "https://"+boundHost+"/v1/things", "Authorization", "Bearer "+workerPlaceholder)
-	line := r.logs.calls()[0]
+	line := r.logs.callsAtLeast(t, 1)[0]
 	if _, named := line.fields["slot"]; named {
 		t.Fatalf("the call line names a slot for a stored secret: %v", line.fields)
 	}

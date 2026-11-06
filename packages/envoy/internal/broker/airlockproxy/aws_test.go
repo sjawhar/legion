@@ -204,7 +204,7 @@ func TestAnAWSCallIsSignedAgainWithTheRealKey(t *testing.T) {
 					if c.hashed && seen[0].Header.Get("X-Amz-Content-Sha256") != "" {
 						t.Errorf("the proxy added X-Amz-Content-Sha256 %q; want the hash in the signature alone", seen[0].Header.Get("X-Amz-Content-Sha256"))
 					}
-					if line := r.logs.calls(); len(line) != 1 || line[0].fields["secret"] != awsName || line[0].fields["allowed"] != true {
+					if line := r.logs.callsAtLeast(t, 1); len(line) != 1 || line[0].fields["secret"] != awsName || line[0].fields["allowed"] != true {
 						t.Errorf("the call logged %v; want one allowed line for %s", line, awsName)
 					}
 				})
@@ -345,7 +345,7 @@ func TestTheThreeAWSShapesTheAirlockRefuses(t *testing.T) {
 			if seen := r.requests(); len(seen) != 0 {
 				t.Fatalf("the service was sent %d calls; want none", len(seen))
 			}
-			if line := r.logs.calls(); len(line) != 1 || line[0].fields["allowed"] != false {
+			if line := r.logs.callsAtLeast(t, 1); len(line) != 1 || line[0].fields["allowed"] != false {
 				t.Errorf("the refusal logged %v; want one refused line", line)
 			}
 		})
