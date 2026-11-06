@@ -53,6 +53,7 @@ var goingMutatingRoutesWithNoTool = []string{
 	"POST /api/v1/credential-requests/{id}/approve",
 	"POST /api/v1/credential-requests/{id}/deny",
 	"POST /api/v1/delivery/session-groups",
+	"POST /api/v1/going/requests",
 	"POST /api/v1/issues/{key}/artifacts/{slug}/versions",
 	"POST /api/v1/machine-logins/{id}/revoke",
 	"POST /api/v1/me/agent-tokens",

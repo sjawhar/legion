@@ -878,9 +878,12 @@ func TestAMergeTheQueueFailsSendsTheIssueBackToImplementing(t *testing.T) {
 	if err := pool.QueryRow(context.Background(), "select phase from issues where key = 'LEGION-208'").Scan(&at); err != nil || at != string(phase.Implementing) {
 		t.Fatalf("LEGION-208 in %q (%v), want implementing", at, err)
 	}
+	// A start of a phase worker is two rows (workflow.StartOrOwe): the relaunch, which carries no
+	// task and brings the implementer's session back at once, and the row that carries the task
+	// and waits for the issue's admission slot. The task is the one this asserts about.
 	var task string
 	if err := pool.QueryRow(context.Background(), `select payload->>'task' from outbox where kind = 'supervise'
-		and payload->>'op' = 'start' and payload->>'role' = 'implementer'`).Scan(&task); err != nil {
+		and payload->>'op' = 'start' and payload->>'role' = 'implementer' and coalesce(payload->>'task', '') <> ''`).Scan(&task); err != nil {
 		t.Fatalf("read the implementer's start: %v", err)
 	}
 	for _, want := range []string{failedMergeGroupRun, "integration", "failed_checks", "#42"} {

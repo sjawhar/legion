@@ -105,8 +105,9 @@ func TestSharedRulesSitInCommonOnceAndRoleRulesInTheirCores(t *testing.T) {
 	}
 	contains("core/common.md", readSource, true)
 	contains("core/common.md", noDefer, true)
-	// The four roles that compose common.md do not repeat it; the oracle composes alone and keeps
-	// the read-first rule itself, never the hardening ledger (it changes nothing).
+	// The four roles that compose common.md do not repeat it; core/oracle.md is joined to no
+	// common part and composed for no role, so it keeps the read-first rule itself, never the
+	// hardening ledger (it changes nothing).
 	for _, role := range composedWithCommon {
 		contains("core/"+role+".md", readSource, false)
 		contains("core/"+role+".md", noDefer, false)
@@ -343,12 +344,15 @@ func TestNoPartKeepsItsWorkInTheForegroundAndEveryDispatchNamesWait(t *testing.T
 	}
 }
 
-// dispatch://INFRA-332's four role-prompt rules, each pinned by the sentence that carries it. A
-// pin fails when a later edit deletes the rule; it does not show that an agent follows it, which
-// the issue's session runs measure. Each sentence sits in the core its role composes, so the rule
-// reaches that role and no other: the simplify pass and the class search are the implementer's,
-// the procedure and can-fail rules the tester's, the open-decision rule the planner's, and the
-// planner's WAITING line is phase mechanics, so it lives in its residue rather than its core.
+// dispatch://INFRA-332's four role-prompt rules and dispatch://INFRA-924's fifth, each pinned by
+// the sentence that carries it. A pin fails when a later edit deletes the rule; it does not show
+// that an agent follows it, which each issue's session runs measure. Each of the first four
+// sentences sits in the core its role composes, so the rule reaches that role and no other: the
+// simplify pass and the class search are the implementer's, the procedure and can-fail rules the
+// tester's, the open-decision rule the planner's, and the planner's WAITING line is phase
+// mechanics, so it lives in its residue rather than its core. R5 is the exception: Compose names
+// core/oracle.md for no role, and it is pinned beside core/common.md to keep one wording of that
+// rule in the prompt tree, which a later core would copy from.
 func TestEveryRolePartCarriesItsGuidanceRule(t *testing.T) {
 	for _, pin := range []struct{ file, rule string }{
 		// R1: the simplify pass covers every file of the diff and reports what it sees.
@@ -367,6 +371,12 @@ func TestEveryRolePartCarriesItsGuidanceRule(t *testing.T) {
 		{"core/planner.md", "do not complete the phase, and do not choose for them so the plan can be finished"},
 		{"core/planner.md", "An open decision in a finished plan is a gap the implementation inherits."},
 		{"planner.md", "end the turn with a line that begins WAITING, naming the decision"},
+		// R5: a claim cites the file and the symbol or the text it was read at, never a line, in the
+		// core every phase worker but the merger composes and in the oracle core the composer joins for
+		// no role, which is where a later core would copy the sentence from (dispatch://INFRA-924).
+		{"core/common.md", "A claim about how a system behaves cites the file and the symbol or the text you read it at; an uncited claim is an assumption and is written as one."},
+		{"core/oracle.md", "A claim about how a system behaves cites the file and the symbol or the text you read it at; an uncited claim is an assumption and is written as one."},
+		{"core/oracle.md", "Findings cite the file and the symbol, or text quoted from it."},
 	} {
 		if !strings.Contains(rolePart(t, pin.file), pin.rule) {
 			t.Errorf("%s does not contain %q", pin.file, pin.rule)
@@ -376,5 +386,15 @@ func TestEveryRolePartCarriesItsGuidanceRule(t *testing.T) {
 	// let a plan complete with four decisions open (dispatch://INFRA-206).
 	if strings.Contains(rolePart(t, "core/planner.md"), "and saying so is its answer") {
 		t.Error("core/planner.md still answers a decision its owner must make by naming it")
+	}
+	// The forms R5 retires. A part carrying one again would give a retro two orders that disagree
+	// (dispatch://INFRA-924).
+	for _, file := range []string{"core/common.md", "core/oracle.md"} {
+		text := rolePart(t, file)
+		for _, retired := range []string{"file and line", "file:line"} {
+			if strings.Contains(text, retired) {
+				t.Errorf("%s still contains %q", file, retired)
+			}
+		}
 	}
 }

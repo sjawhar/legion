@@ -1,4 +1,4 @@
-import { afterAll, afterEach } from "bun:test";
+import { afterAll, afterEach, jest } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 // happy-dom has no IndexedDB; the store of a document's unsent edits (`pending-edits.ts`) runs on
 // this in-memory one, which keeps IndexedDB's transaction ordering.
@@ -18,6 +18,18 @@ import { guardWritesToNetwork, writesThatReachedNetwork } from "./network-guard"
 import { resetRouteAnswers } from "./send-answers";
 
 GlobalRegistrator.register();
+
+// Testing Library reads a global `jest` to tell whether fake timers are installed:
+// `jestFakeTimersAreEnabled` (@testing-library/dom@10.4.1, dist/@testing-library/dom.esm.js:171)
+// begins `if (typeof jest !== 'undefined' && jest !== null)`. Bun's `jest` is a module binding
+// from `bun:test` and no global, so without this line every `waitFor` and `findBy*` under
+// `jest.useFakeTimers()` takes the real-clock path and polls timers the test is holding still:
+// a wait whose node is already there passes by its first synchronous check, and a wait that
+// needs the clock to move can never end. That is what dispatch://INFRA-983 measured on a 2-core
+// pod, where four of its files fail 16 tests without this line; on the pod this line was written
+// in, nothing discriminates it, so `testing-library-fake-timers.test.tsx` holds it in place by
+// asserting the global rather than by timing a wait, and says so.
+(globalThis as unknown as { jest: typeof jest }).jest = jest;
 
 // Unit tests have no Dispatch server to answer GET /api/v1/schema/blocks, so the session cache
 // starts already holding the checked-in server schema: every MarkdownBody, ask card, and
@@ -109,3 +121,13 @@ afterEach(resetPinState);
 // Whether Dispatch could be reached is the page's to learn afresh: a request one test failed would
 // otherwise make the next test's first answer start every waiting write's backoff over.
 afterEach(resetReachability);
+
+// A fake clock a test installed is put back here as well as in that test's own `finally`, because
+// Bun keeps it across files: a test that installs it and then fails before its `try` - an awaited
+// helper of its own, say - would otherwise leave every later test in the process, and every later
+// file, with timers that never fire, so one regression reads as timeouts everywhere and the real
+// failure is buried. This runs after the hooks above, and `useRealTimers` on a test that
+// installed nothing does nothing.
+afterEach(() => {
+  jest.useRealTimers();
+});
