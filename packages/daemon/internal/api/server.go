@@ -67,13 +67,10 @@ type Options struct {
 	// the claim registration route registers a session on, and the grants route authenticates
 	// the registered session against.
 	Controller ControllerStore
-	// DesignGate is the project's `gates.design` as one word, which the controller secret route
-	// answers (config.Gates.Policy).
-	DesignGate config.DesignGate
 	// Steps are the design-gate steps the deployment gates (config.Gates.Steps), in the order it
-	// named them: what register_gate resolves a registration's step against. A nil list takes the
-	// shipped default, the one step spec, as workflow.Config.Steps does; the empty list gates no
-	// step.
+	// named them: what register_gate resolves a registration's step against, and what the
+	// controller secret route answers `legion controller start`. A nil list takes the shipped
+	// default, the one step spec, as workflow.Config.Steps does; the empty list gates no step.
 	Steps []record.DesignStep
 	// ControllerLaunched is the daemon launching the project's controller itself (`controller:
 	// daemon`): one controller runs per project, so the controller secret route refuses the operator
@@ -239,7 +236,6 @@ type server struct {
 	operatorSet     bool
 	operatorHash    [sha256.Size]byte
 	controller      ControllerStore
-	designGate      config.DesignGate
 	// steps is Options.Steps, resolved: the deployment's design-gate steps, nil never.
 	steps []record.DesignStep
 	// controllerLaunched is Options.ControllerLaunched.
@@ -310,7 +306,6 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		project:            opts.Project,
 		dispatchProject:    opts.DispatchProject,
 		controller:         opts.Controller,
-		designGate:         opts.DesignGate,
 		steps:              opts.Steps,
 		controllerLaunched: opts.ControllerLaunched,
 		pluginRelaunchable: opts.PluginRelaunchable,

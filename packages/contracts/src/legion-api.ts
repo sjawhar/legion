@@ -736,11 +736,13 @@ export const LegionControllerRegisterResponse = z.object({
 export type LegionControllerRegistration = z.output<typeof LegionControllerRegisterResponse>;
 
 /** `api.ControllerSecretResponse`, the body of `POST /legion/v1/controller/secret`: the controller
- * capability the operator's bearer bought, and the project's `gates.design`, which
- * `legion controller start` tells the controller. The CLI reads it; the plugin never does. */
+ * capability the operator's bearer bought, and the design-gate steps the project gates
+ * (`gates.design`), in the order it gates them, which `legion controller start` tells the
+ * controller (contract 50). The list is empty for a deployment that gates no step and is never
+ * absent. The CLI reads it; the plugin never does. */
 export const LegionControllerSecretResponse = z.object({
   secret: nonEmptyString,
-  designGate: z.enum(["root-issues", "off"]),
+  designGateSteps: z.array(legionDesignStep),
 });
 
 /** `api.ControllerCredentialResponse`, the answer of `POST /legion/v1/controller/github-credential`:

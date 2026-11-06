@@ -765,9 +765,13 @@ func TestControllerRegisterResponseGolden(t *testing.T) {
 	})
 }
 
-// What `legion controller start` fetches with the operator's bearer.
+// What `legion controller start` fetches with the operator's bearer: the capability and the
+// design-gate steps the deployment gates, in the order it gates them.
 func TestControllerSecretResponseGolden(t *testing.T) {
-	golden(t, "controller-secret.json", ControllerSecretResponse{Secret: "Q2FwYWJpbGl0eUZvclRoZUNvbnRyb2xsZXI", DesignGate: config.DesignGateRootIssues})
+	golden(t, "controller-secret.json", ControllerSecretResponse{
+		Secret:          "Q2FwYWJpbGl0eUZvclRoZUNvbnRyb2xsZXI",
+		DesignGateSteps: []record.DesignStep{record.DesignStepCriteria, record.DesignStepSpec},
+	})
 }
 
 // What `legion controller start` fetches for the review App's read-only tokens, one per owner,

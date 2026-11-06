@@ -559,4 +559,8 @@ package api
 // as a caller below 49 is served them without the memory draw and one below 46 without the claim
 // views' update rounds; the three compose, and every reader from 50 on takes the field as
 // optional.
+// `POST /legion/v1/controller/secret` answers the same list as `designGateSteps` in place of the
+// one word `designGate`, which 50 drops: `legion controller start` is built from this daemon's
+// own tree, so the two always ship together, and a `legion` of this release refuses an answer
+// that names no list at all.
 const DaemonAPIVersion = 50

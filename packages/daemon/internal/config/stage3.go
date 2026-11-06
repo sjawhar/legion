@@ -63,16 +63,6 @@ func (g Gates) Steps() []record.DesignStep {
 	return g.Design
 }
 
-// Policy is the deployment's list as the one word the controller secret route still answers
-// (api.ControllerSecretResponse): `off` where it gates no step, `root-issues` where it gates any.
-// The word cannot say which steps, so a deployment of several reads as `root-issues` there.
-func (g Gates) Policy() DesignGate {
-	if len(g.Design) == 0 {
-		return DesignGateOff
-	}
-	return DesignGateRootIssues
-}
-
 // Project is a Dispatch project prefix's configuration: its optional merge-queue role, merge rules,
 // the Slack channels whose @-mentions reach its controller, and the deploy workflows whose runs
 // wake its production checks. Its repositories are Dispatch's mapping (Settings → Repositories →
