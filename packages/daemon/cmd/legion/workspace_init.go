@@ -22,6 +22,11 @@ const workspaceProvisionUsage = "legion workspace-init provision --issue <KEY> -
 // provisionTokenFileEnv points `workspace-init fetch` at the mounted provisioning token.
 const provisionTokenFileEnv = "LEGION_PROVISION_TOKEN_FILE"
 
+// provisionBudget is the slow-command budget `provision` gives every provisioning command but the
+// issue's checkout, which takes workspace.CheckoutTimeout of its own (workspace.Provision,
+// Request.CheckoutBound); a test shortens it to prove the checkout is not bounded by this one.
+var provisionBudget = workspace.CommandTimeout
+
 // secretFileFromEnv is the secret file the environment variable name points at, once it reads
 // (config.ReadSecretPointer); an error when name is not set or its file does not read.
 func secretFileFromEnv(name string) (string, error) {
@@ -151,7 +156,7 @@ func workspaceInit(ctx context.Context, issue, repo, defaultBranch, root, creden
 	if err := workspace.RemoveStaleGitLocks(located, time.Now(), log); err != nil {
 		return err
 	}
-	run := workspace.NewRunner(workspace.CommandTimeout, tools)
+	run := workspace.NewRunner(provisionBudget, tools)
 	provisioned, err := workspace.Provision(ctx, run, workspace.Request{
 		StateDir: root, Repo: repository, Issue: issue, DefaultBranch: defaultBranch, CredentialHelper: credentialHelper,
 		Source: workspace.FromFeed(feed), Log: log,
