@@ -275,6 +275,48 @@ func TestAnthropicMarksTheCacheMovesTheNewestMarkAndForcesTheReplyOnTheLastCall(
 	}
 }
 
+// anthropicCarriedOn is a conversation on Anthropic that already ends in the question to
+// answer, as the history of a caller that carries every turn it has and asks for nothing new
+// does.
+func anthropicCarriedOn() []Message {
+	return append(anthropicHistory(), Message{Role: User, Blocks: []Block{{Kind: TextBlock, Text: "What does note.txt say?"}}})
+}
+
+// A run whose Input is empty keeps the history's cache mark on every call: the newest message
+// of the first call is the history's own last message, which carries the mark the run put at
+// the history's end, and the moved newest-message mark lands on the turns the run itself adds.
+// A later call takes no mark off a message of the history.
+func TestAnthropicKeepsTheHistorysMarkWhenTheInputIsEmpty(t *testing.T) {
+	t.Parallel()
+	s := newStandIn(t, threeCallAnthropic()...)
+	f := newFixture(t, s, AnthropicMessages, 3)
+	f.req.History = anthropicCarriedOn()
+	f.req.Input = nil
+	result, err := Run(context.Background(), f.req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Fault != "" || result.Text != "The note says plum." {
+		t.Fatalf("result %+v, want the answer and no fault", result)
+	}
+	got := s.requests()
+	if len(got) != 3 {
+		t.Fatalf("%d model calls, want 3", len(got))
+	}
+	// The wire's messages: the history's request, model turn and question (0, 1, 2), the
+	// last of which is the newest message of the first call, then each call's turn and the
+	// tool result answering it.
+	wantMarks := [][]int{{2}, {2, 4}, {2, 6}}
+	for i, r := range got {
+		if n := countKey(r.decoded(t), "cache_control"); n > 4 {
+			t.Errorf("call %d carries %d cache marks, want no more than the four Anthropic allows", i+1, n)
+		}
+		if marks := marked(t, r); !reflect.DeepEqual(marks, wantMarks[i]) {
+			t.Errorf("call %d marks messages %v, want %v (the history's end and the newest message)", i+1, marks, wantMarks[i])
+		}
+	}
+}
+
 // The encrypted reasoning of the OpenAI Responses history, as the caller kept it.
 const (
 	openaiHistoryOne = "gAAAAhist+/one=="

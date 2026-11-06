@@ -64,7 +64,7 @@ func Run(ctx context.Context, req Request) (Result, error) {
 	}
 
 	r := &run{
-		req: req, kind: kind,
+		req: req, kind: kind, history: len(history),
 		indexes: make(map[string]int, len(req.Tools)), next: req.FirstToolIndex + 1,
 	}
 	opts := []aisdk.StreamOption{
@@ -239,8 +239,9 @@ type run struct {
 	// cancel ends the run's own context, which is how a callback's error stops the run.
 	cancel context.CancelFunc
 
-	// newest is the newest message's index in a step's messages, set on the first step.
-	newest int
+	// history is how many of a step's first messages are the request's own history, as the
+	// run converted it before the first call. The marks a step moves are the ones after it.
+	history int
 
 	mu sync.Mutex
 	// steps are the model calls that finished, in order; text and reason are the last of
@@ -370,9 +371,11 @@ func (r *run) failure() error {
 
 // prepareStep offers no tool on the last allowed call, so that call must answer, and on the
 // kinds Anthropic serves, where the run places cache marks, moves the newest message's mark:
-// the history's end keeps the one Run put there, the newest message gets one, and the one an
-// earlier step put on its newest message is taken off (the SDK carries a step's message
-// overrides into later steps; Anthropic allows four marks).
+// the history's end keeps the one Run put there, because the step takes a mark off no message
+// of the history, the newest message gets one, and the one an earlier step put on its newest
+// message is taken off (the SDK carries a step's message overrides into later steps; Anthropic
+// allows four marks). Where the request's Input is empty, the first call's newest message is
+// the history's own last message, which keeps the history's mark for the whole run.
 func (r *run) prepareStep(state aisdk.PrepareStepState) (*aisdk.PrepareStepResult, error) {
 	result := &aisdk.PrepareStepResult{}
 	if state.StepNumber == r.req.Bounds.Calls-1 {
@@ -381,11 +384,8 @@ func (r *run) prepareStep(state aisdk.PrepareStepState) (*aisdk.PrepareStepResul
 	if !anthropicKind(r.kind) || r.req.NoCache || len(state.Messages) == 0 {
 		return result, nil
 	}
-	if state.StepNumber == 0 {
-		r.newest = len(state.Messages) - 1
-	}
 	messages := slices.Clone(state.Messages)
-	for i := r.newest; i < len(messages); i++ {
+	for i := afterHistory(messages, r.history); i < len(messages); i++ {
 		if _, marked := messages[i].ProviderOptions["anthropic"].(anthropic.AnthropicCacheControl); marked {
 			options := maps.Clone(messages[i].ProviderOptions)
 			delete(options, "anthropic")
@@ -396,6 +396,21 @@ func (r *run) prepareStep(state aisdk.PrepareStepState) (*aisdk.PrepareStepResul
 	messages[last].ProviderOptions = withCacheMark(messages[last].ProviderOptions)
 	result.Messages = messages
 	return result, nil
+}
+
+// afterHistory is the index, in a step's messages, of the first message after the run's own
+// history, which is how far into them a step's marks reach. A step is given the system prompt
+// the SDK puts before the run's messages, and the history the request handed over sits after
+// it; no message of the request's own is a system message.
+func afterHistory(messages []provider.Message, history int) int {
+	after := history
+	for _, m := range messages {
+		if m.Role != provider.RoleSystem {
+			break
+		}
+		after++
+	}
+	return after
 }
 
 // stepFinished keeps one model call that finished and gives it to the caller's OnStep. The

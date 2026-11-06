@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
-	"slices"
 	"strings"
 
 	"github.com/grafana/ai-sdk/provider"
@@ -237,15 +236,26 @@ func withCacheMark(options provider.ProviderOptions) provider.ProviderOptions {
 	return marked
 }
 
+// withBreakpoint is options with OpenAI's explicit prompt cache breakpoint added. The run
+// places the marks unless the caller turns them off with Request.NoCache.
+func withBreakpoint(options provider.ProviderOptions) provider.ProviderOptions {
+	marked := make(provider.ProviderOptions, len(options)+1)
+	maps.Copy(marked, options)
+	marked["openai"] = openai.OpenAIPartOptions{PromptCacheBreakpoint: &openai.PromptCacheBreakpoint{Mode: "explicit"}}
+	return marked
+}
+
 // markAnthropicHistory puts Anthropic's ephemeral cache mark at the end of the run's first
 // history messages, so the next model call of the run, and the next run within the cache's
 // life, reads the conversation from the cache. The provider gives a message's mark to that
 // message's last block alone and drops it on a thinking block, so the mark goes on the last
 // message of the history whose last part is not reasoning: a turn the model cut off at its
 // limit, which ends in thinking, would otherwise take the mark and lose it. A history every
-// message of which ends in reasoning goes unmarked, and the newest message's mark, which the
-// run places itself, is then the call's only one. The run places it unless the caller turns
-// the marks off with Request.NoCache.
+// message of which ends in reasoning goes unmarked, and where Input is not empty the newest
+// message's mark, which the run places itself, is then the call's only one. Where Input is
+// empty the newest message is that same history message, whose mark the provider drops as
+// well, and the call carries no mark at all. The run places the marks unless the caller turns
+// them off with Request.NoCache.
 func markAnthropicHistory(messages []provider.Message, history int) {
 	for i := history - 1; i >= 0; i-- {
 		m := messages[i]
@@ -263,40 +273,27 @@ func markAnthropicHistory(messages []provider.Message, history int) {
 // without it a later run would not read the conversation from the cache. A tool result whose
 // output is content, which is how a result holding an image goes over, takes the breakpoint on
 // the last of those content values: the provider reads a content output's breakpoint from each
-// value's own options and never from the part's. The run places it unless the caller turns the
-// marks off with Request.NoCache.
+// value's own options and never from the part's. The messages are the ones toProvider built
+// for this run, which leaves out a message that converts to no part and gives every tool
+// result an output of its own, so the mark goes on the part as it stands. The run places it
+// unless the caller turns the marks off with Request.NoCache.
 func markOpenAIHistory(messages []provider.Message, history int) {
-	breakpoint := provider.BuildProviderOptions(openai.OpenAIPartOptions{PromptCacheBreakpoint: &openai.PromptCacheBreakpoint{Mode: "explicit"}})
 	for i := history - 1; i >= 0; i-- {
 		m := messages[i]
-		if m.Role != provider.RoleUser && m.Role != provider.RoleTool || len(m.Content) == 0 {
+		if m.Role != provider.RoleUser && m.Role != provider.RoleTool {
 			continue
 		}
-		last := len(m.Content) - 1
-		part := m.Content[last]
-		switch part.Type {
-		case provider.ContentPartTypeText, provider.ContentPartTypeFile:
-			part.ProviderOptions = breakpoint
-		case provider.ContentPartTypeToolResult:
-			output := part.Output
-			if output == nil || output.Type != provider.ToolOutputContent {
-				part.ProviderOptions = breakpoint
-				break
-			}
-			if len(output.Content) == 0 {
-				continue
-			}
-			values := slices.Clone(output.Content)
-			values[len(values)-1].ProviderOptions = breakpoint
-			marked := *output
-			marked.Content = values
-			part.Output = &marked
+		part := &m.Content[len(m.Content)-1]
+		switch {
+		case part.Type == provider.ContentPartTypeToolResult && part.Output.Type == provider.ToolOutputContent:
+			value := &part.Output.Content[len(part.Output.Content)-1]
+			value.ProviderOptions = withBreakpoint(value.ProviderOptions)
+		case part.Type == provider.ContentPartTypeText, part.Type == provider.ContentPartTypeFile,
+			part.Type == provider.ContentPartTypeToolResult:
+			part.ProviderOptions = withBreakpoint(part.ProviderOptions)
 		default:
 			continue
 		}
-		content := slices.Clone(m.Content)
-		content[last] = part
-		messages[i].Content = content
 		return
 	}
 }
