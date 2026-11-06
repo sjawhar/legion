@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/airlock"
 	"github.com/sjawhar/envoy/internal/broker/policy"
@@ -291,7 +292,9 @@ func TestTheReleasedShapeOfEachKind(t *testing.T) {
 			m, enr, key, _ := newPlaceholderFixture(t, airlock.Rules{Secrets: []airlock.SecretRule{rule("SHAPE_KEY", c.entryKind)}})
 			retag(t, m, c.secret)
 			if c.minted != "" {
-				m.Minters = map[string]Minter{c.secret.Tags[policy.TagKind]: func(context.Context, secrets.MintRequest) (string, error) { return c.minted, nil }}
+				m.Minters = map[string]Minter{c.secret.Tags[policy.TagKind]: func(context.Context, secrets.MintRequest) (secrets.Minted, error) {
+					return secrets.Minted{Value: c.minted}, nil
+				}}
 			}
 			_, grantID := grantOf(t, m, enr, key, "read the secret", "SHAPE_KEY")
 			release, err := m.Values(t.Context(), grantID, enr, nil)
@@ -321,7 +324,9 @@ func TestTheReleasedShapeOfAnAzureLogin(t *testing.T) {
 	const azureMint = `{"tenant_id":"tenant","client_id":"client","federated_token":"real-federated-token","expires_at":"2100-01-01T00:00:00Z"}`
 	m, enr, key, _ := newPlaceholderFixture(t, airlock.Rules{Secrets: []airlock.SecretRule{rule("AZURE_LOGIN", "azure")}})
 	retag(t, m, policytest.KindSecret("AZURE_LOGIN", fixtureOperator, policy.TierHuman, policy.KindAzureLogin, `{"tenant_id":"tenant","client_id":"client"}`))
-	m.Minters = map[string]Minter{policy.KindAzureLogin: func(context.Context, secrets.MintRequest) (string, error) { return azureMint, nil }}
+	m.Minters = map[string]Minter{policy.KindAzureLogin: func(context.Context, secrets.MintRequest) (secrets.Minted, error) {
+		return secrets.Minted{Value: azureMint}, nil
+	}}
 	request, err := m.Create(t.Context(), enr, signRequest(t, m, key, "sign in to Azure", "AZURE_LOGIN"), "")
 	if err != nil || request.RecordID == nil {
 		t.Fatalf("Create = %+v, %v; want a pending request", request, err)
@@ -349,6 +354,116 @@ func TestTheReleasedShapeOfAnAzureLogin(t *testing.T) {
 		t.Errorf("released login = %v, want %v: the federated token replaced and every other field as minted", got, want)
 	}
 	holdsNothingOf(t, release, "real-federated-token")
+}
+
+// TestAirlockValuesAnswersEachSlotsRealValue: a placeholder stands for one slot, not for a
+// name's whole released value, so what the proxy is given is the real value behind each slot -
+// one per field of an AWS pair, one per installation of a github-app - and the slots are the
+// ones the release mints placeholders for. The expiry a minter reported comes with them, which
+// is what the proxy mints again before.
+func TestAirlockValuesAnswersEachSlotsRealValue(t *testing.T) {
+	const (
+		awsStored  = `{"access_key_id":"AKIAREALKEYID","secret_access_key":"real-secret-access-key","session_token":"real-session-token","region":"us-west-2"}`
+		githubMint = `{"installations":{"Acme":{"installation_id":42,"token":"ghs_acme_token","expires_at":"2100-01-01T00:00:00Z"},` +
+			`"Zed":{"installation_id":43,"token":"ghs_zed_token","expires_at":"2100-01-01T00:00:00Z"}}}`
+		azureMint = `{"tenant_id":"tenant","client_id":"client","federated_token":"real-federated-token","expires_at":"2100-01-01T00:00:00Z"}`
+	)
+	minted := time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		name      string
+		entryKind string
+		secret    secrets.LocalSecret
+		mint      string
+		// approve is for a kind whose release refuses an automatic grant (azure-login).
+		approve  bool
+		want     map[string]string
+		wantKind string
+	}{
+		{
+			name:   "a stored secret",
+			secret: policytest.Secret("SHAPE_KEY", fixtureOperator, policy.TierAgent, "stored-real-value"),
+			want:   map[string]string{SlotValue: "stored-real-value"},
+		},
+		{
+			name:      "a stored AWS key pair",
+			entryKind: "aws",
+			secret:    policytest.Secret("SHAPE_KEY", fixtureOperator, policy.TierAgent, awsStored),
+			want: map[string]string{
+				SlotAWSAccessKeyID:     "AKIAREALKEYID",
+				SlotAWSSecretAccessKey: "real-secret-access-key",
+				SlotAWSSessionToken:    "real-session-token",
+			},
+		},
+		{
+			name:     "a GitHub App of two installations",
+			secret:   policytest.KindSecret("SHAPE_KEY", fixtureOperator, policy.TierAgent, policy.KindGitHubApp, "stored-app-key"),
+			mint:     githubMint,
+			want:     map[string]string{SlotGitHubPrefix + "acme": "ghs_acme_token", SlotGitHubPrefix + "zed": "ghs_zed_token"},
+			wantKind: policy.KindGitHubApp,
+		},
+		{
+			name:      "an Azure login",
+			entryKind: "azure",
+			secret:    policytest.KindSecret("SHAPE_KEY", fixtureOperator, policy.TierHuman, policy.KindAzureLogin, `{"tenant_id":"tenant","client_id":"client"}`),
+			mint:      azureMint,
+			approve:   true,
+			want:      map[string]string{SlotAzureFederated: "real-federated-token"},
+			wantKind:  policy.KindAzureLogin,
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m, enr, key, _ := newPlaceholderFixture(t, airlock.Rules{Secrets: []airlock.SecretRule{rule("SHAPE_KEY", c.entryKind)}})
+			retag(t, m, c.secret)
+			wantExpires := time.Time{}
+			if c.mint != "" {
+				wantExpires = minted
+				m.Minters = map[string]Minter{c.secret.Tags[policy.TagKind]: func(context.Context, secrets.MintRequest) (secrets.Minted, error) {
+					return secrets.Minted{Value: c.mint, Expires: minted}, nil
+				}}
+			}
+			var grantID string
+			if c.approve {
+				request, err := m.Create(t.Context(), enr, signRequest(t, m, key, "sign in", "SHAPE_KEY"), "")
+				if err != nil || request.RecordID == nil {
+					t.Fatalf("Create = %+v, %v; want a pending request", request, err)
+				}
+				decision, err := m.ApplyDecision(t.Context(), *request.RecordID, true, fixtureOperator)
+				if err != nil || decision.GrantID == "" {
+					t.Fatalf("ApplyDecision = %+v, %v; want a grant", decision, err)
+				}
+				grantID = decision.GrantID
+			} else {
+				_, grantID = grantOf(t, m, enr, key, "read the secret", "SHAPE_KEY")
+			}
+
+			values, err := m.AirlockValues(t.Context(), grantID)
+			if err != nil {
+				t.Fatalf("AirlockValues: %v", err)
+			}
+			held, named := values["SHAPE_KEY"]
+			if !named || len(values) != 1 {
+				t.Fatalf("AirlockValues = %v; want SHAPE_KEY alone", values)
+			}
+			if !maps.Equal(held.Slots, c.want) {
+				t.Fatalf("slots = %v, want %v: the real value behind each slot", held.Slots, c.want)
+			}
+			if held.Kind != c.wantKind {
+				t.Errorf("kind = %q, want %q", held.Kind, c.wantKind)
+			}
+			if !held.Expires.Equal(wantExpires) {
+				t.Errorf("expiry = %v, want %v: the minter's own, and none for a stored value", held.Expires, wantExpires)
+			}
+			// The slots the proxy holds values for are exactly the slots the release mints
+			// placeholders for, which is what one walk of the value rather than two buys.
+			release, err := m.Values(t.Context(), grantID, enr, nil)
+			if err != nil {
+				t.Fatalf("Values: %v", err)
+			}
+			if got, want := slices.Sorted(maps.Keys(release.Airlock.Names["SHAPE_KEY"].Slots)), slices.Sorted(maps.Keys(c.want)); !slices.Equal(got, want) {
+				t.Fatalf("the release's slots = %v, want the ones the proxy holds values for, %v", got, want)
+			}
+		})
+	}
 }
 
 // TestTheProxyPasswordIsTheFirstPairInSortedOrder: a grant of two airlock names opens its

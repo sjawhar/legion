@@ -29,8 +29,8 @@ func TestAMalformedMintedSourceIsNamedAndReleasesNothing(t *testing.T) {
 	machine, _, _, _ := newFixture(t)
 	for _, source := range []string{"mint:github-app", "mint::" + policytest.ID("X")} {
 		value, err := machine.release(t.Context(), requestedSecret{name: "X", source: source}, policy.Secret{}, nil)
-		if !errors.Is(err, policy.ErrKindSourceMalformed) || value != "" {
-			t.Fatalf("release(%q) = %q, %v; want ErrKindSourceMalformed and no value", source, value, err)
+		if !errors.Is(err, policy.ErrKindSourceMalformed) || value.Value != "" {
+			t.Fatalf("release(%q) = %q, %v; want ErrKindSourceMalformed and no value", source, value.Value, err)
 		}
 	}
 }
@@ -40,9 +40,9 @@ func TestAgentKindSecretIsGrantedAtOnceAndMintsForEachRelease(t *testing.T) {
 	retag(t, machine, requestKindSecret("GITHUB_APP_KEY", policy.KindGitHubApp, policy.TierAgent, ""))
 	calls := 0
 	machine.Minters = map[string]Minter{
-		policy.KindGitHubApp: func(context.Context, secrets.MintRequest) (string, error) {
+		policy.KindGitHubApp: func(context.Context, secrets.MintRequest) (secrets.Minted, error) {
 			calls++
-			return "minted-token-" + string(rune('0'+calls)), nil
+			return secrets.Minted{Value: "minted-token-" + string(rune('0'+calls))}, nil
 		},
 	}
 
@@ -70,9 +70,9 @@ func TestAGitHubAppReleaseMintsForTheOwnersThePolicyServesNow(t *testing.T) {
 	retag(t, machine, secret)
 	var got []string
 	machine.Minters = map[string]Minter{
-		policy.KindGitHubApp: func(_ context.Context, req secrets.MintRequest) (string, error) {
+		policy.KindGitHubApp: func(_ context.Context, req secrets.MintRequest) (secrets.Minted, error) {
 			got = req.GitHubOwners
-			return "minted", nil
+			return secrets.Minted{Value: "minted"}, nil
 		},
 	}
 	request, err := machine.Create(t.Context(), enrollmentID, signRequest(t, machine, key, "read App key", "APP_KEY"), "")
@@ -101,7 +101,9 @@ func TestHumanKindSecretWaitsForApprovalThenMints(t *testing.T) {
 	machine, enrollmentID, key, approver := newFixture(t)
 	retag(t, machine, requestKindSecret("GOOGLE_LOGIN_KEY", policy.KindGoogleLogin, policy.TierHuman, ""))
 	machine.Minters = map[string]Minter{
-		policy.KindGoogleLogin: func(context.Context, secrets.MintRequest) (string, error) { return "access-token", nil },
+		policy.KindGoogleLogin: func(context.Context, secrets.MintRequest) (secrets.Minted, error) {
+			return secrets.Minted{Value: "access-token"}, nil
+		},
 	}
 
 	request, err := machine.Create(t.Context(), enrollmentID, signRequest(t, machine, key, "read login", "GOOGLE_LOGIN_KEY"), "")
@@ -155,7 +157,10 @@ func TestPlainToKindRetagEndsTheGrant(t *testing.T) {
 	retag(t, machine, plain)
 	calls := 0
 	machine.Minters = map[string]Minter{
-		policy.KindGitHubApp: func(context.Context, secrets.MintRequest) (string, error) { calls++; return "minted", nil },
+		policy.KindGitHubApp: func(context.Context, secrets.MintRequest) (secrets.Minted, error) {
+			calls++
+			return secrets.Minted{Value: "minted"}, nil
+		},
 	}
 	first, err := machine.Create(t.Context(), enrollmentID, signRequest(t, machine, key, "read", "PLAIN_TO_KIND"), "")
 	if err != nil || first.GrantID == nil {
@@ -180,9 +185,9 @@ func TestDeletedKindSecretStopsReleasing(t *testing.T) {
 	retag(t, machine, requestKindSecret("DELETE_KIND_KEY", policy.KindGoogleLogin, policy.TierAgent, ""))
 	calls := 0
 	machine.Minters = map[string]Minter{
-		policy.KindGoogleLogin: func(context.Context, secrets.MintRequest) (string, error) {
+		policy.KindGoogleLogin: func(context.Context, secrets.MintRequest) (secrets.Minted, error) {
 			calls++
-			return "access-token", nil
+			return secrets.Minted{Value: "access-token"}, nil
 		},
 	}
 	request, err := machine.Create(t.Context(), enrollmentID, signRequest(t, machine, key, "read login", "DELETE_KIND_KEY"), "")
@@ -214,13 +219,13 @@ func TestKindRetagEndsTheGrantAndPreventsReuse(t *testing.T) {
 			retag(t, machine, secret)
 			calls := 0
 			machine.Minters = map[string]Minter{
-				policy.KindGitHubApp: func(context.Context, secrets.MintRequest) (string, error) {
+				policy.KindGitHubApp: func(context.Context, secrets.MintRequest) (secrets.Minted, error) {
 					calls++
-					return "minted-token", nil
+					return secrets.Minted{Value: "minted-token"}, nil
 				},
-				policy.KindGoogleLogin: func(context.Context, secrets.MintRequest) (string, error) {
+				policy.KindGoogleLogin: func(context.Context, secrets.MintRequest) (secrets.Minted, error) {
 					calls++
-					return "access-token", nil
+					return secrets.Minted{Value: "access-token"}, nil
 				},
 			}
 			first, err := machine.Create(t.Context(), enrollmentID, signRequest(t, machine, key, "read App key", "RETAG_KIND_KEY"), "")
@@ -258,7 +263,9 @@ func TestKindSecretWithoutAMinterDoesNotReleaseItsStoredValue(t *testing.T) {
 func TestAMaxGrantAddedLaterBoundsLiveGrantsAndPendingApprovals(t *testing.T) {
 	machine, enrollmentID, key, approver := newFixture(t)
 	machine.Minters = map[string]Minter{
-		policy.KindGoogleLogin: func(context.Context, secrets.MintRequest) (string, error) { return "access-token", nil },
+		policy.KindGoogleLogin: func(context.Context, secrets.MintRequest) (secrets.Minted, error) {
+			return secrets.Minted{Value: "access-token"}, nil
+		},
 	}
 	retag(t, machine,
 		requestKindSecret("AGENT_LOGIN", policy.KindGoogleLogin, policy.TierAgent, ""),
@@ -314,8 +321,12 @@ func TestAKindChangedAwayAndBackLeavesTheGrantEnded(t *testing.T) {
 			secret := requestKindSecret("BACK_KIND_KEY", policy.KindGitHubApp, policy.TierAgent, "")
 			retag(t, machine, secret)
 			machine.Minters = map[string]Minter{
-				policy.KindGitHubApp:   func(context.Context, secrets.MintRequest) (string, error) { return "minted-token", nil },
-				policy.KindGoogleLogin: func(context.Context, secrets.MintRequest) (string, error) { return "access-token", nil },
+				policy.KindGitHubApp: func(context.Context, secrets.MintRequest) (secrets.Minted, error) {
+					return secrets.Minted{Value: "minted-token"}, nil
+				},
+				policy.KindGoogleLogin: func(context.Context, secrets.MintRequest) (secrets.Minted, error) {
+					return secrets.Minted{Value: "access-token"}, nil
+				},
 			}
 			first, err := machine.Create(t.Context(), enrollmentID, signRequest(t, machine, key, "read App key", "BACK_KIND_KEY"), "")
 			if err != nil || first.GrantID == nil {
@@ -356,7 +367,9 @@ func TestAKindChangedAwayAndBackLeavesTheGrantEnded(t *testing.T) {
 func TestAMaxGrantLoweredBelowAGrantAndRaisedBackLeavesItEnded(t *testing.T) {
 	machine, enrollmentID, key, _ := newFixture(t)
 	machine.Minters = map[string]Minter{
-		policy.KindGoogleLogin: func(context.Context, secrets.MintRequest) (string, error) { return "access-token", nil },
+		policy.KindGoogleLogin: func(context.Context, secrets.MintRequest) (secrets.Minted, error) {
+			return secrets.Minted{Value: "access-token"}, nil
+		},
 	}
 	retag(t, machine, requestKindSecret("BOUNDED_LOGIN", policy.KindGoogleLogin, policy.TierAgent, "1h"))
 	long, err := machine.Create(t.Context(), enrollmentID, signRequestFor(t, machine, key, 60*60, "BOUNDED_LOGIN"), "")
@@ -393,8 +406,8 @@ func TestAFailedMintIsNamedAndReleasesNothing(t *testing.T) {
 	machine, enrollmentID, key, _ := newFixture(t)
 	retag(t, machine, requestKindSecret("LAPSED_LOGIN", policy.KindGoogleLogin, policy.TierAgent, ""))
 	machine.Minters = map[string]Minter{
-		policy.KindGoogleLogin: func(context.Context, secrets.MintRequest) (string, error) {
-			return "", errors.New("Google login needs a new sign-in: invalid_grant (invalid_rapt)")
+		policy.KindGoogleLogin: func(context.Context, secrets.MintRequest) (secrets.Minted, error) {
+			return secrets.Minted{}, errors.New("Google login needs a new sign-in: invalid_grant (invalid_rapt)")
 		},
 	}
 	request, err := machine.Create(t.Context(), enrollmentID, signRequest(t, machine, key, "read login", "LAPSED_LOGIN"), "")

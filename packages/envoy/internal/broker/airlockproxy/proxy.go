@@ -14,8 +14,9 @@
 //
 // What this package adds to those two functions is everything around them: who the connection
 // is (the grant), where it may dial (address.go), what the request looks like as a
-// airlock.Request, which of a grant's names one request is handled for, where the real values
-// come from and how often they are read, and the line each call to a bound host logs.
+// airlock.Request, which (name, slot) pair of a grant one request is handled for, where the
+// real values come from, how long they are held and what ends them, and the line each call to a
+// bound host logs.
 package airlockproxy
 
 import (
@@ -61,9 +62,10 @@ type GrantSource interface {
 	// AirlockConnection is what one connection's password proves: the live grant behind it and
 	// every name it may carry. Its refusals are this port's 407s.
 	AirlockConnection(ctx context.Context, placeholder string) (requests.AirlockConnection, error)
-	// AirlockValues runs the full release checks and answers each name's real value. The proxy
-	// calls it on a grant's first connection on this pod and keeps what it answered.
-	AirlockValues(ctx context.Context, grantID string) (map[string]string, error)
+	// AirlockValues runs the full release checks and answers the real value of every slot of
+	// every name, with when each name must be read or minted again. The proxy calls it on a
+	// grant's first connection on this pod and keeps what it answered.
+	AirlockValues(ctx context.Context, grantID string) (map[string]requests.AirlockSecret, error)
 }
 
 // Options is what a Server is built from.
@@ -83,6 +85,10 @@ type Options struct {
 	Log *slog.Logger
 	// Dial is how every upstream connection is made; nil is a net.Dialer. A test replaces it.
 	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
+	// Now is the clock the proxy reads to tell a minted value that is about to stop working
+	// from one that is not (mintAgainBefore); nil is time.Now. A test drives it rather than
+	// waiting out a token's life.
+	Now func() time.Time
 }
 
 // Server is the broker's proxy port: one HTTP CONNECT proxy whose password is a placeholder of a
@@ -94,6 +100,7 @@ type Server struct {
 	idle   time.Duration
 	log    *slog.Logger
 	dial   func(ctx context.Context, network, addr string) (net.Conn, error)
+	now    func() time.Time
 
 	// resolve answers the addresses a host has, the ones refuseLocalAddress reads. It is
 	// net.DefaultResolver's lookup in production and a map in a test, which is how a test
@@ -120,7 +127,9 @@ type Server struct {
 	openMu sync.Mutex
 	open   map[io.Closer]struct{}
 
-	// values is each grant's real values, read once per grant on this pod.
+	// values is each grant's real values, read once per grant on this pod and held until the
+	// reread of one of its names drops it (DropName) or a minted value nears its expiry
+	// (grantValues, mintAgainBefore).
 	valuesMu sync.Mutex
 	values   map[string]*grantValues
 }
@@ -147,6 +156,7 @@ func New(o Options) *Server {
 		idle:    o.Idle,
 		log:     o.Log,
 		dial:    o.Dial,
+		now:     o.Now,
 		resolve: resolveHost,
 		innerLn: newChanListener(),
 		open:    map[io.Closer]struct{}{},
@@ -158,6 +168,9 @@ func New(o Options) *Server {
 	if s.dial == nil {
 		dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
 		s.dial = dialer.DialContext
+	}
+	if s.now == nil {
+		s.now = time.Now
 	}
 	s.upstream = &http.Transport{
 		// Through the same seam as every other dial, so one replacement in a test covers a

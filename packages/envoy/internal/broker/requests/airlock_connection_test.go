@@ -29,7 +29,9 @@ func twoNameGrant(t *testing.T, reason string) (m *Machine, enrollmentID, grantI
 		policytest.Secret("AWS_KEY", fixtureOperator, policy.TierAgent, `{"access_key_id":"AKIAONE","secret_access_key":"real-secret"}`),
 		policytest.KindSecret("LOGIN_KEY", fixtureOperator, policy.TierAgent, policy.KindGoogleLogin, `{"type":"authorized_user"}`),
 	)
-	m.Minters = map[string]Minter{policy.KindGoogleLogin: func(context.Context, secrets.MintRequest) (string, error) { return "real-access-token", nil }}
+	m.Minters = map[string]Minter{policy.KindGoogleLogin: func(context.Context, secrets.MintRequest) (secrets.Minted, error) {
+		return secrets.Minted{Value: "real-access-token"}, nil
+	}}
 	_, grantID = grantOf(t, m, enrollmentID, key, reason, "AWS_KEY", "LOGIN_KEY")
 	release, err := m.Values(t.Context(), grantID, enrollmentID, nil)
 	if err != nil {
@@ -135,8 +137,15 @@ func TestAirlockValuesAnswersTheRealValuesOfTheAirlocksNames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AirlockValues: %v", err)
 	}
-	if want := map[string]string{"AUTO_TOKEN": "auto-v1"}; !maps.Equal(values, want) {
-		t.Fatalf("AirlockValues = %v, want %v: the airlock's name alone, as its real value", values, want)
+	if len(values) != 1 {
+		t.Fatalf("AirlockValues = %v, want the airlock's name alone: the session already holds the rest", values)
+	}
+	held := values["AUTO_TOKEN"]
+	if want := map[string]string{SlotValue: "auto-v1"}; !maps.Equal(held.Slots, want) {
+		t.Fatalf("AUTO_TOKEN's slots = %v, want %v: a stored secret is its value slot alone", held.Slots, want)
+	}
+	if !held.Expires.IsZero() || held.Kind != "" {
+		t.Fatalf("AUTO_TOKEN = %+v; want no expiry and no kind: a stored value is read again only when its name is", held)
 	}
 }
 

@@ -186,18 +186,27 @@ type AirlockName struct {
 	Hosts []string          // the entry's hosts, which the command keeps off its NO_PROXY
 }
 
-// airlockShape is one airlock name's released value with the real value already taken out of it:
-// the slots the value fills, and how to put each slot's placeholder where its own value was.
-type airlockShape struct {
-	// slots are the name's slots, sorted, which is the order the proxy password is chosen in.
-	slots []string
+// airlockSplit is one airlock name's value taken apart, which one walk of that value answers
+// both halves of: the real value behind each slot, which the proxy swaps into a request, and
+// how to put each slot's placeholder where its own value was, which the release hands the
+// session. One walk rather than two, because two readings of the same JSON by the same rules
+// are two things that can drift: a slot the release mints a placeholder for and the proxy
+// holds no value behind is a request the proxy cannot carry.
+type airlockSplit struct {
+	// values is the real value behind each slot. The proxy answers AirlockValues from it and
+	// nothing else holds it: a release discards it with the rest of the real value.
+	values map[string]string
 	// fill answers what the session holds for this name, taking each slot's placeholder from
 	// bySlot.
 	fill func(bySlot map[string]string) (string, error)
 }
 
-// airlockShapeOf reads value, the real value a release of an airlock name read or minted, and
-// answers the shape the session gets in its place. The shape is today's released shape with
+// slots are the name's slots, sorted, which is the order the proxy password is chosen in.
+func (s airlockSplit) slots() []string { return sortedKeys(s.values) }
+
+// airlockSplitOf reads value, the real value a release of an airlock name read or minted, and
+// answers which slots that value fills, what each of them holds, and the shape the session gets
+// in its place. The shape is today's released shape with
 // placeholders where the secret was, so a consumer that works today works unchanged:
 //
 //   - a stored secret and a google-login access token are one string, so they are the value
@@ -212,46 +221,52 @@ type airlockShape struct {
 // value that does not hold what its kind releases — no object, a missing or non-string token — is
 // an error rather than a release, since the one other answer would be to release the real value
 // the rules hold back.
-func airlockShapeOf(entry *airlock.SecretRule, kind, value string) (airlockShape, error) {
+func airlockSplitOf(entry *airlock.SecretRule, kind, value string) (airlockSplit, error) {
 	switch {
 	case kind == policy.KindGitHubApp:
-		return githubAppShape(value)
+		return githubAppSplit(value)
 	case kind == policy.KindAzureLogin:
-		return objectShape(value, map[string]string{"federated_token": SlotAzureFederated}, nil)
+		return objectSplit(value, map[string]string{"federated_token": SlotAzureFederated}, nil)
 	case kind == "" && entry.Kind == airlockKindAWS:
-		return objectShape(value, map[string]string{"access_key_id": SlotAWSAccessKeyID, "secret_access_key": SlotAWSSecretAccessKey},
+		return objectSplit(value, map[string]string{"access_key_id": SlotAWSAccessKeyID, "secret_access_key": SlotAWSSecretAccessKey},
 			map[string]string{"session_token": SlotAWSSessionToken})
 	default:
-		return valueShape(), nil
+		return valueSplit(value), nil
 	}
 }
 
-// valueShape is the shape of a value that is one string: the value slot's placeholder, alone.
-func valueShape() airlockShape {
-	return airlockShape{slots: []string{SlotValue}, fill: func(bySlot map[string]string) (string, error) { return bySlot[SlotValue], nil }}
+// valueSplit is the split of a value that is one string: the value slot, holding the whole of it.
+func valueSplit(value string) airlockSplit {
+	return airlockSplit{
+		values: map[string]string{SlotValue: value},
+		fill:   func(bySlot map[string]string) (string, error) { return bySlot[SlotValue], nil },
+	}
 }
 
-// objectShape is the shape of a JSON object whose fields hold the secrets: required names every
+// objectSplit is the split of a JSON object whose fields hold the secrets: required names every
 // field that must be a string, optional every field that is one when it is there, each against
-// the slot that stands for it. Every other field of the object is released as it was.
-func objectShape(value string, required, optional map[string]string) (airlockShape, error) {
+// the slot that stands for it. Each such field's own string is what its slot holds, and every
+// other field of the object is released as it was.
+func objectSplit(value string, required, optional map[string]string) (airlockSplit, error) {
 	doc, err := jsonObject(value)
 	if err != nil {
-		return airlockShape{}, err
+		return airlockSplit{}, err
 	}
-	holes := map[string]string{} // field -> slot
+	holes := map[string]string{}  // field -> slot
+	values := map[string]string{} // slot -> the field's own string
 	for field, slot := range required {
-		if _, ok := jsonString(doc[field]); !ok {
-			return airlockShape{}, fmt.Errorf("its value holds no %s string, which the airlock stands a placeholder in for", field)
+		held, ok := jsonString(doc[field])
+		if !ok {
+			return airlockSplit{}, fmt.Errorf("its value holds no %s string, which the airlock stands a placeholder in for", field)
 		}
-		holes[field] = slot
+		holes[field], values[slot] = slot, held
 	}
 	for field, slot := range optional {
-		if _, ok := jsonString(doc[field]); ok {
-			holes[field] = slot
+		if held, ok := jsonString(doc[field]); ok {
+			holes[field], values[slot] = slot, held
 		}
 	}
-	return airlockShape{slots: sortedValues(holes), fill: func(bySlot map[string]string) (string, error) {
+	return airlockSplit{values: values, fill: func(bySlot map[string]string) (string, error) {
 		filled := maps.Clone(doc)
 		for field, slot := range holes {
 			filled[field] = jsonStringOf(bySlot[slot])
@@ -260,31 +275,34 @@ func objectShape(value string, required, optional map[string]string) (airlockSha
 	}}, nil
 }
 
-// githubAppShape is the shape of a github-app secret's minted installations: each installation's
-// token replaced by the placeholder of its owner's slot, every other field of the document and of
+// githubAppSplit is the split of a github-app secret's minted installations: one slot per
+// installation, holding that installation's own token, and a shape with each token replaced by
+// the placeholder of its owner's slot, every other field of the document and of
 // each installation as the minter wrote it. The slot lower-cases the owner, where the document
 // keeps the key GitHub answered with.
-func githubAppShape(value string) (airlockShape, error) {
+func githubAppSplit(value string) (airlockSplit, error) {
 	doc, err := jsonObject(value)
 	if err != nil {
-		return airlockShape{}, err
+		return airlockSplit{}, err
 	}
 	var installations map[string]map[string]json.RawMessage
 	if json.Unmarshal(doc["installations"], &installations) != nil {
-		return airlockShape{}, errors.New("its minted value holds no installations object, which the airlock stands a placeholder in for")
+		return airlockSplit{}, errors.New("its minted value holds no installations object, which the airlock stands a placeholder in for")
 	}
-	slotOf := map[string]string{} // installation key -> slot
+	slotOf := map[string]string{} // slot -> installation key
+	values := map[string]string{} // slot -> that installation's own token
 	for owner, installation := range installations {
-		if _, ok := jsonString(installation["token"]); !ok {
-			return airlockShape{}, fmt.Errorf("its minted installation %q holds no token string, which the airlock stands a placeholder in for", owner)
+		token, ok := jsonString(installation["token"])
+		if !ok {
+			return airlockSplit{}, fmt.Errorf("its minted installation %q holds no token string, which the airlock stands a placeholder in for", owner)
 		}
 		slot := SlotGitHubPrefix + strings.ToLower(owner)
 		if other, clash := slotOf[slot]; clash {
-			return airlockShape{}, fmt.Errorf("its minted installations %q and %q are the same owner, so one placeholder would stand for both", other, owner)
+			return airlockSplit{}, fmt.Errorf("its minted installations %q and %q are the same owner, so one placeholder would stand for both", other, owner)
 		}
-		slotOf[slot] = owner
+		slotOf[slot], values[slot] = owner, token
 	}
-	return airlockShape{slots: sortedKeys(slotOf), fill: func(bySlot map[string]string) (string, error) {
+	return airlockSplit{values: values, fill: func(bySlot map[string]string) (string, error) {
 		filled := maps.Clone(installations)
 		for slot, owner := range slotOf {
 			installation := maps.Clone(filled[owner])
@@ -338,31 +356,29 @@ func marshalObject(doc map[string]json.RawMessage) (string, error) {
 	return string(out), nil
 }
 
-// sortedKeys and sortedValues are a map's keys and values, sorted, so a shape's slots are in one
-// order whatever the map iteration gave.
+// sortedKeys is a map's keys, sorted, so a split's slots are in one order whatever the map
+// iteration gave.
 func sortedKeys(m map[string]string) []string { return slices.Sorted(maps.Keys(m)) }
-
-func sortedValues(m map[string]string) []string { return slices.Sorted(maps.Values(m)) }
 
 // airlockRelease mints each airlock name's placeholders, writes proxy as those names' delivery,
 // and answers what the session is told: where the proxy is, the certificate to trust it by, the
 // password its connections open with, and each name's released value, slots and hosts.
-func (m *Machine) airlockRelease(ctx context.Context, grantID string, expires *time.Time, shapes map[string]airlockShape) (*AirlockRelease, error) {
+func (m *Machine) airlockRelease(ctx context.Context, grantID string, expires *time.Time, splits map[string]airlockSplit) (*AirlockRelease, error) {
 	want := map[string][]string{}
-	for name, shape := range shapes {
-		want[name] = shape.slots
+	for name, split := range splits {
+		want[name] = split.slots()
 	}
 	minted, err := m.mintPlaceholders(ctx, grantID, expires, want)
 	if err != nil {
 		return nil, err
 	}
 	released := &AirlockRelease{ProxyURL: m.AirlockProxyURL, CACertificate: m.AirlockCACertificate, Names: map[string]AirlockName{}}
-	for name, shape := range shapes {
+	for name, split := range splits {
 		slots := map[string]string{}
-		for _, slot := range shape.slots {
+		for _, slot := range split.slots() {
 			slots[slot] = minted[name][slot]
 		}
-		value, err := shape.fill(slots)
+		value, err := split.fill(slots)
 		if err != nil {
 			return nil, fmt.Errorf("release %s behind the airlock: %w", name, err)
 		}
@@ -374,7 +390,7 @@ func (m *Machine) airlockRelease(ctx context.Context, grantID string, expires *t
 	// to "what did this grant actually hand over".
 	if _, err := m.Store.Pool.Exec(ctx, `update request_secrets set delivery='proxy'
 		where request_id = (select request_id from grants where id=$1) and name = any($2)`,
-		grantID, slices.Sorted(maps.Keys(shapes))); err != nil {
+		grantID, slices.Sorted(maps.Keys(splits))); err != nil {
 		return nil, err
 	}
 	return released, nil
@@ -487,29 +503,48 @@ func IssueKeyInReason(reason string) string {
 	return issueKeyPattern.FindString(reason)
 }
 
+// AirlockSecret is one airlock name as the proxy holds it: the real value behind each of its
+// slots, when the broker must read or mint it again, and the policy kind that says what the
+// slots are.
+type AirlockSecret struct {
+	Slots   map[string]string // slot -> the real value that slot's placeholder stands for
+	Expires time.Time         // zero for a stored value, which no clock ends
+	Kind    string
+}
+
 // AirlockValues runs the full release checks of Values - the record chain, the policy
-// re-evaluation, the max-grant, the airlock fingerprint - and answers each airlock name's real
-// value. The proxy calls it on a grant's first connection on its own pod.
+// re-evaluation, the max-grant, the airlock fingerprint - and answers the real value of each
+// slot of each airlock name, which is what the proxy swaps into a request: a placeholder stands
+// for one slot, not for a name's whole released value, so a github-app name answers one token
+// per installation and an AWS pair one string per field. The split is the one the release makes
+// (airlockSplitOf), so no slot the session holds a placeholder for is a slot this answers
+// nothing for. The proxy calls it on a grant's first connection on its own pod.
 //
 // It takes no enrollment: the connection's placeholder is what proves the grant, and
 // AirlockConnection has already checked that the grant and its enrollment are live. A grant the
 // checks refuse is ended exactly as Values ends it, since they are the same checks.
-func (m *Machine) AirlockValues(ctx context.Context, grantID string) (map[string]string, error) {
+func (m *Machine) AirlockValues(ctx context.Context, grantID string) (map[string]AirlockSecret, error) {
 	checked, err := m.checkRelease(ctx, grantID, "")
 	if err != nil {
 		return nil, err
 	}
-	values := map[string]string{}
+	values := map[string]AirlockSecret{}
 	released := []string{}
 	for _, g := range checked.granted {
-		if m.Airlock.Lookup(g.name) == nil {
+		entry := m.Airlock.Lookup(g.name)
+		if entry == nil {
 			continue
 		}
-		value, err := m.readValue(ctx, grantID, checked.enrollmentID, g, checked.set.Secrets[g.name], nil)
+		minted, err := m.readValue(ctx, grantID, checked.enrollmentID, g, checked.set.Secrets[g.name], nil)
 		if err != nil {
 			return nil, err
 		}
-		values[g.name] = value
+		kind := checked.set.Secrets[g.name].Kind()
+		split, err := airlockSplitOf(entry, kind, minted.Value)
+		if err != nil {
+			return nil, fmt.Errorf("release %s behind the airlock: %w", g.name, err)
+		}
+		values[g.name] = AirlockSecret{Slots: split.values, Expires: minted.Expires, Kind: kind}
 		released = append(released, g.name)
 	}
 	if err := m.recheckStoredSources(ctx, grantID, checked.granted); err != nil {

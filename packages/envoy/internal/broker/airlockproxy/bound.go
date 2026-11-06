@@ -1,11 +1,12 @@
 // packages/envoy/internal/broker/airlockproxy/bound.go
-// One request on a bound host: the airlock.Request it is read as, the one name of the grant it
-// is handled for, the real values behind that name, the decision and the swap
+// One request on a bound host: the airlock.Request it is read as, the one (name, slot) pair of
+// the grant it is handled for, the real value behind that pair, the decision and the swap
 // (airlock.Decide and airlock.Rewrite, which decide and swap everything here), what goes
 // upstream, and the line the call logs.
 package airlockproxy
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -14,32 +15,106 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"slices"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/airlock"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 )
 
-// grantValues is one grant's real values on this pod, read once. The mutex is the read itself:
-// two connections of one grant arriving together take it in turn, and the second reads what the
-// first answered rather than running the release checks again.
+// mintAgainBefore is how close to its expiry a minted value may come before the proxy reads the
+// grant again, which mints it again. Five minutes, so that no call starts on a token about to
+// end: a request the proxy carries may run for minutes - a long poll, a large upload - and a
+// token that lapses in the middle of one fails the call rather than being retried.
+const mintAgainBefore = 5 * time.Minute
+
+// grantValues is one grant's real values on this pod, read once and then held until a name's
+// own reread drops it (DropName) or a minted value comes within mintAgainBefore of its expiry.
 type grantValues struct {
+	// read is the read itself: two connections of one grant arriving together take it in turn,
+	// and the second reads what the first answered rather than running the release checks
+	// again.
+	read sync.Mutex
+
+	// mu guards the two fields below, and is never held across a read of the broker: a reread
+	// that drops a name (DropName) runs on the pod's own reread path and must not wait behind
+	// one grant's release checks.
 	mu sync.Mutex
 	// values is nil until the read has succeeded. A read that failed leaves it nil, so a
 	// refusal the broker may not repeat - a database that did not answer - is not held against
 	// the next connection, while a refusal it will repeat costs one more read and the same
-	// answer.
-	values map[string]string
+	// answer. It is replaced, never written to: a caller is reading the map it was handed.
+	values map[string]requests.AirlockSecret
+	// drops counts the drops this grant has seen, and keptAt the count values was read at.
+	// They differ exactly while the held answer is older than the last reread of one of its
+	// names, which is what makes the next request read again - a read that began before a
+	// drop landed included, since such an answer is its own request's and no later one's.
+	drops, keptAt uint64
+}
+
+// held is the grant's values when they may still be used, and the drop count the read that took
+// them began at. They may not be used when no read has succeeded, when a name of the grant has
+// been reread since, or when a minted value is
+// within mintAgainBefore of its expiry: that one name is what the read is for, but the read is
+// of the whole grant, since AirlockValues answers a grant and not a name.
+func (g *grantValues) held(now time.Time) (map[string]requests.AirlockSecret, uint64, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.values == nil || g.keptAt != g.drops {
+		return nil, g.drops, false
+	}
+	for _, secret := range g.values {
+		if !secret.Expires.IsZero() && secret.Expires.Sub(now) < mintAgainBefore {
+			return nil, g.drops, false
+		}
+	}
+	return g.values, g.drops, true
+}
+
+// keep holds what one read answered, unless a name was dropped while that read ran: such an
+// answer is the request that asked for it and no later one's.
+func (g *grantValues) keep(values map[string]requests.AirlockSecret, drops uint64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.drops != drops {
+		return
+	}
+	g.values, g.keptAt = values, drops
+}
+
+// drop takes name out of this grant's values and leaves every other name of it in place.
+func (g *grantValues) drop(name string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	_, held := g.values[name]
+	if !held && g.values != nil && g.keptAt == g.drops {
+		// A whole answer this name was never part of, with no read behind it: this reread is
+		// no business of this grant's, and ending the answer would cost it a release check
+		// for nothing.
+		return
+	}
+	if held {
+		// Copied rather than written to, since a request is reading the map it was handed.
+		values := maps.Clone(g.values)
+		delete(values, name)
+		g.values = values
+	}
+	// Counted even where nothing was deleted: a read may be running that is about to hold
+	// this name's old value, and the count is what makes such an answer its own request's.
+	g.drops++
 }
 
 // valuesFor is the grant's real values: AirlockValues once per grant per pod, as its own
-// contract asks, and the answer kept for every later connection and request of that grant.
+// contract asks, and the answer kept for every later connection and request of that grant until
+// something ends it - the reread of one of its names, or a minted value coming within
+// mintAgainBefore of its expiry.
 //
 // The map holds one entry per grant this pod has served. A grant's values are a handful of
 // strings and a pod is rolled by every deployment and by every change to the rules file, so
 // nothing evicts them; what ends a grant's reach is the connection check, which refuses a
 // placeholder whose grant has ended whatever this map still holds.
-func (s *Server) valuesFor(ctx context.Context, grantID string) (map[string]string, error) {
+func (s *Server) valuesFor(ctx context.Context, grantID string) (map[string]requests.AirlockSecret, error) {
 	s.valuesMu.Lock()
 	held, ok := s.values[grantID]
 	if !ok {
@@ -48,10 +123,11 @@ func (s *Server) valuesFor(ctx context.Context, grantID string) (map[string]stri
 	}
 	s.valuesMu.Unlock()
 
-	held.mu.Lock()
-	defer held.mu.Unlock()
-	if held.values != nil {
-		return held.values, nil
+	held.read.Lock()
+	defer held.read.Unlock()
+	values, drops, fresh := held.held(s.now())
+	if fresh {
+		return values, nil
 	}
 	values, err := s.grants.AirlockValues(ctx, grantID)
 	if err != nil {
@@ -60,10 +136,22 @@ func (s *Server) valuesFor(ctx context.Context, grantID string) (map[string]stri
 	if values == nil {
 		// A grant that released no airlock name at all: held as an answer, so the release
 		// checks run once for it too.
-		values = map[string]string{}
+		values = map[string]requests.AirlockSecret{}
 	}
-	held.values = values
+	held.keep(values, drops)
 	return values, nil
+}
+
+// DropName drops name's value from every grant this pod holds values for, leaving the rest of
+// each grant's names in place: a later request of such a grant reads its values again, and mints
+// again what the new version of name needs minting from. The broker calls it wherever one
+// secret's name is reread, since the reread is the only signal a stored value has a new version.
+func (s *Server) DropName(name string) {
+	s.valuesMu.Lock()
+	defer s.valuesMu.Unlock()
+	for _, held := range s.values {
+		held.drop(name)
+	}
 }
 
 // serveBound answers one request on a connection the proxy decrypted: the whole of what the
@@ -101,22 +189,22 @@ func (s *Server) serveBound(w http.ResponseWriter, r *http.Request) {
 		// of nothing can produce: the rules are read once at boot. Refused rather than
 		// forwarded, since a connection to a bound host that carries no name has no business
 		// on it.
-		s.refuse(w, info, r, "", http.StatusForbidden, "no name of this grant is bound to "+info.host)
+		s.refuse(w, info, r, pair{}, http.StatusForbidden, "no name of this grant is bound to "+info.host)
 		return
 	}
-	name := chooseName(candidates, info.grant, request)
-	held := info.grant.Names[name]
-	placeholder := held.Slots[requests.SlotValue]
-	if placeholder == "" {
-		// The seam for the kinds whose released value is more than one string. A stored
-		// secret and a google-login's access token fill the value slot alone, and the swap is
-		// that one string. A name of kind "aws" is three slots and a signature rather than a
-		// header; an "azure-login" is a federated token that has to be exchanged for an access
-		// token; a "github-app" is one slot per installation owner, chosen by what the request
-		// asks for. Each needs a step the proxy does not carry yet, so such a name is refused
-		// here, naming its kind, rather than forwarded with nothing swapped - which would send
-		// the command's placeholder to the service and read as the service's refusal.
-		s.refuse(w, info, r, name, http.StatusForbidden, fmt.Sprintf("the airlock does not yet carry %s, a secret of kind %q: it has no value slot", name, held.Kind))
+	chosen := choosePair(candidates, info.grant, request)
+	placeholder := info.grant.Names[chosen.name].Slots[chosen.slot]
+	if entry := s.rules.Lookup(chosen.name); entry != nil && entry.Kind != "" {
+		// The seam for the two entry kinds whose value is not a string a header carries. An
+		// entry of kind "aws" is a key pair the call has to be signed with rather than a
+		// header it carries; one of kind "azure" is a federated token that has to be exchanged
+		// for an access token first. Each needs a step the proxy does not carry yet, so such a
+		// name is refused here, naming its kind, rather than forwarded with nothing swapped -
+		// which would send the command's placeholder to the service and read as the service's
+		// refusal. Every other entry - a stored secret, a google-login's access token, a
+		// github-app installation's - is one slot's string in one header, which is what the
+		// swap below does.
+		s.refuse(w, info, r, chosen, http.StatusForbidden, fmt.Sprintf("the airlock does not yet carry %s, a secret of kind %q", chosen.name, entry.Kind))
 		return
 	}
 	values, err := s.valuesFor(r.Context(), info.grant.GrantID)
@@ -128,18 +216,26 @@ func (s *Server) serveBound(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, requests.ErrGrantNotLive) {
 			status = http.StatusProxyAuthRequired
 		}
-		s.refuse(w, info, r, name, status, err.Error())
+		s.refuse(w, info, r, chosen, status, err.Error())
 		return
 	}
-	value, ok := values[name]
+	secret, ok := values[chosen.name]
 	if !ok {
-		s.refuse(w, info, r, name, http.StatusForbidden, "the broker released no value for "+name)
+		s.refuse(w, info, r, chosen, http.StatusForbidden, "the broker released no value for "+chosen.name)
+		return
+	}
+	value, ok := secret.Slots[chosen.slot]
+	if !ok {
+		// The grant holds a placeholder for a slot the broker's read of this name no longer
+		// fills: a github-app whose installation on that owner has gone since the release.
+		// Refused rather than forwarded, for the reason the kind seam above is refused.
+		s.refuse(w, info, r, chosen, http.StatusForbidden, "the broker released no "+chosen.slot+" value for "+chosen.name)
 		return
 	}
 
-	grant := airlock.Grant{Secret: name, Placeholder: placeholder}
+	grant := airlock.Grant{Secret: chosen.name, Placeholder: placeholder}
 	if allowed, why := airlock.Decide(s.rules, grant, value, request); !allowed {
-		s.refuse(w, info, r, name, http.StatusForbidden, why)
+		s.refuse(w, info, r, chosen, http.StatusForbidden, why)
 		return
 	}
 	rewritten := airlock.Rewrite(s.rules, grant, value, request)
@@ -147,7 +243,7 @@ func (s *Server) serveBound(w http.ResponseWriter, r *http.Request) {
 		// Decide and Rewrite take the one decision (airlock.check), so this is unreachable;
 		// refusing rather than forwarding is what keeps it unreachable and harmless if the two
 		// ever part.
-		s.refuse(w, info, r, name, http.StatusForbidden, "the swap refused a request the decision allowed")
+		s.refuse(w, info, r, chosen, http.StatusForbidden, "the swap refused a request the decision allowed")
 		return
 	}
 
@@ -181,7 +277,7 @@ func (s *Server) serveBound(w http.ResponseWriter, r *http.Request) {
 		ErrorHandler: s.badGateway(info.host, r.URL.Path),
 	}
 	proxy.ServeHTTP(answer, r)
-	s.log.Info(callMessage, s.callFields(info, r, name, answer.status, "")...)
+	s.log.Info(callMessage, s.callFields(info, r, chosen, answer.status, "")...)
 }
 
 // callMessage is the message of the one line a call to a bound host logs. Every such call logs
@@ -190,8 +286,8 @@ const callMessage = "airlock proxy: a call to a bound host"
 
 // refuse answers a request the airlock will not carry and logs the same line a carried one logs.
 // Nothing reaches the service: the refusal is written here, on the connection the proxy opened.
-func (s *Server) refuse(w http.ResponseWriter, info connInfo, r *http.Request, name string, status int, reason string) {
-	s.log.Info(callMessage, s.callFields(info, r, name, status, reason)...)
+func (s *Server) refuse(w http.ResponseWriter, info connInfo, r *http.Request, chosen pair, status int, reason string) {
+	s.log.Info(callMessage, s.callFields(info, r, chosen, status, reason)...)
 	http.Error(w, "airlock: "+reason, status)
 }
 
@@ -200,11 +296,11 @@ func (s *Server) refuse(w http.ResponseWriter, info connInfo, r *http.Request, n
 // exists so that neither is ever written down, and a log line is the first place one would
 // leak. The reason is there for a refusal alone, so a line reads as allowed or as refused and
 // why.
-func (s *Server) callFields(info connInfo, r *http.Request, name string, status int, reason string) []any {
+func (s *Server) callFields(info connInfo, r *http.Request, chosen pair, status int, reason string) []any {
 	fields := []any{
 		"enrollment", info.grant.EnrollmentID,
 		"grant", info.grant.GrantID,
-		"secret", name,
+		"secret", chosen.name,
 		"issue", info.grant.Issue,
 		"host", info.host,
 		"method", r.Method,
@@ -213,33 +309,52 @@ func (s *Server) callFields(info connInfo, r *http.Request, name string, status 
 		"status", status,
 		"allowed", reason == "",
 	}
+	if chosen.slot != "" && chosen.slot != requests.SlotValue {
+		// Which of the name's values the call used, where the name has more than one: a
+		// github-app secret holds one token per installation, and an operator reading this
+		// line has to know which account's token went to the service, not only which secret
+		// it came from. A name whose value is the one "value" slot says nothing by naming it.
+		fields = append(fields, "slot", chosen.slot)
+	}
 	if reason != "" {
 		fields = append(fields, "reason", reason)
 	}
 	return fields
 }
 
-// candidates is every name of the grant whose entry binds the CONNECT host, sorted. Sorted
-// because the choice below takes the first of them, and a map's order would make which secret a
-// request is handled for depend on the run.
-func (s *Server) candidates(grant requests.AirlockConnection, host string) []string {
-	var names []string
-	for name := range grant.Names {
-		if entry := s.rules.Lookup(name); entry != nil && airlock.HostBound(entry.Hosts, host) {
-			names = append(names, name)
+// pair is one (name, slot) of a grant: which secret a request may be handled for, and which of
+// that secret's values. A github-app name has one slot per installation and no value slot, so
+// the pair rather than the name is what says which token a request's placeholder stands for.
+type pair struct{ name, slot string }
+
+// candidates is every (name, slot) pair of the grant whose name's entry binds the CONNECT host,
+// sorted by name and then by slot. Sorted because the choice below takes the first of them, and
+// a map's order would make which value a request is handled for depend on the run.
+func (s *Server) candidates(grant requests.AirlockConnection, host string) []pair {
+	var pairs []pair
+	for name, held := range grant.Names {
+		entry := s.rules.Lookup(name)
+		if entry == nil || !airlock.HostBound(entry.Hosts, host) {
+			continue
+		}
+		for slot := range held.Slots {
+			pairs = append(pairs, pair{name: name, slot: slot})
 		}
 	}
-	slices.Sort(names)
-	return names
+	slices.SortFunc(pairs, func(a, b pair) int {
+		return cmp.Or(strings.Compare(a.name, b.name), strings.Compare(a.slot, b.slot))
+	})
+	return pairs
 }
 
-// chooseName is the one name a request is handled for: the first candidate a header of the
-// request already carries a placeholder of, and otherwise the first candidate.
+// choosePair is the one (name, slot) pair a request is handled for: the first candidate a header
+// of the request already carries the placeholder of, and otherwise the first candidate.
 //
-// Why one name at all. The decision and the swap are over one grant and one secret
+// Why one pair at all. The decision and the swap are over one grant and one secret
 // (airlock.Grant), and the model that is proved is over that pair, so a request is decided for
 // one secret or it is decided by something other than the model. Two secrets of one grant can
-// be bound to one host - two GitHub tokens of different reach both bind api.github.com - so
+// be bound to one host - two GitHub tokens of different reach both bind api.github.com - and so
+// can two slots of one secret, since a github-app name holds one token per installation, so
 // which one a request is for cannot come from the host. What the request itself says is which
 // placeholder it put in a header, and that is what is read here (airlock.Carries, the same
 // function the model calls carries).
@@ -248,16 +363,15 @@ func (s *Server) candidates(grant requests.AirlockConnection, host string) []str
 // candidate: the entry's hosts, method and path rules apply to it, and it is forwarded with
 // nothing swapped. That is what makes an entry's allow list a bound on the whole connection
 // rather than on the requests that happen to ask for a swap.
-func chooseName(candidates []string, grant requests.AirlockConnection, request *airlock.Request) string {
-	for _, name := range candidates {
-		for _, placeholder := range grant.Names[name].Slots {
-			if placeholder == "" {
-				continue
-			}
-			for _, header := range request.Headers {
-				if airlock.Carries(placeholder, header[1]) {
-					return name
-				}
+func choosePair(candidates []pair, grant requests.AirlockConnection, request *airlock.Request) pair {
+	for _, candidate := range candidates {
+		placeholder := grant.Names[candidate.name].Slots[candidate.slot]
+		if placeholder == "" {
+			continue
+		}
+		for _, header := range request.Headers {
+			if airlock.Carries(placeholder, header[1]) {
+				return candidate
 			}
 		}
 	}

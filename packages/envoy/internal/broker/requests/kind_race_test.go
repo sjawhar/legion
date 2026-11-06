@@ -44,7 +44,10 @@ func TestAPlainGrantRacingAKindRetagNeverReleasesWhatTheKindStores(t *testing.T)
 			retag(t, machine, policytest.Secret("RACED_LOGIN", fixtureOperator, tier, "ordinary-value"))
 			minted := 0
 			machine.Minters = map[string]Minter{
-				policy.KindGoogleLogin: func(context.Context, secrets.MintRequest) (string, error) { minted++; return "access-token", nil },
+				policy.KindGoogleLogin: func(context.Context, secrets.MintRequest) (secrets.Minted, error) {
+					minted++
+					return secrets.Minted{Value: "access-token"}, nil
+				},
 			}
 			request, err := machine.Create(t.Context(), enrollmentID, signRequest(t, machine, key, "read", "RACED_LOGIN"), "")
 			if err != nil {

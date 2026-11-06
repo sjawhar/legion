@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"math/big"
 	"net"
 	"net/http"
@@ -37,6 +38,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -86,13 +88,19 @@ func testConnection() requests.AirlockConnection {
 	}
 }
 
+// storedValues is one grant's values as the fake answers them: one name, one value slot, no
+// expiry, which is what a stored secret's release looks like.
+func storedValues(name, value string) map[string]requests.AirlockSecret {
+	return map[string]requests.AirlockSecret{name: {Slots: map[string]string{requests.SlotValue: value}}}
+}
+
 // fakeGrants is the proxy's GrantSource: the two reads of requests.Machine, answered from maps a
 // row writes, and a count of how often the values were read.
 type fakeGrants struct {
 	mu          sync.Mutex
 	connections map[string]requests.AirlockConnection
 	refusals    map[string]error
-	values      map[string]map[string]string
+	values      map[string]map[string]requests.AirlockSecret
 	valuesErr   error
 	valueCalls  map[string]int
 	connCalls   int
@@ -102,7 +110,7 @@ func newFakeGrants() *fakeGrants {
 	return &fakeGrants{
 		connections: map[string]requests.AirlockConnection{workerPlaceholder: testConnection()},
 		refusals:    map[string]error{},
-		values:      map[string]map[string]string{testGrantID: {workerName: workerValue}},
+		values:      map[string]map[string]requests.AirlockSecret{testGrantID: storedValues(workerName, workerValue)},
 		valueCalls:  map[string]int{},
 	}
 }
@@ -121,14 +129,25 @@ func (f *fakeGrants) AirlockConnection(_ context.Context, placeholder string) (r
 	return conn, nil
 }
 
-func (f *fakeGrants) AirlockValues(_ context.Context, grantID string) (map[string]string, error) {
+func (f *fakeGrants) AirlockValues(_ context.Context, grantID string) (map[string]requests.AirlockSecret, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.valueCalls[grantID]++
 	if f.valuesErr != nil {
 		return nil, f.valuesErr
 	}
-	return f.values[grantID], nil
+	// A copy, as the broker's own read answers a map of its own: a row that changes what the
+	// next read answers must not change the map a held answer is still being read from.
+	held := map[string]requests.AirlockSecret{}
+	maps.Copy(held, f.values[grantID])
+	return held, nil
+}
+
+// setValues replaces what the next read of grantID answers.
+func (f *fakeGrants) setValues(grantID string, values map[string]requests.AirlockSecret) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.values[grantID] = values
 }
 
 func (f *fakeGrants) valueReads(grantID string) int {
@@ -751,12 +770,15 @@ func TestTheIdleLimitEndsAQuietConnectionAndKeepsABusyOne(t *testing.T) {
 	const idle = 400 * time.Millisecond
 	t.Run("a connection with no byte is ended", func(t *testing.T) {
 		r := newRig(t, Options{Idle: idle})
+		// began is taken before the CONNECT, because the idle clock starts when the proxy
+		// accepts the connection, not when the 200 reaches this test: measured from after the
+		// answer, a tunnel ended on time reads as ended a millisecond early.
+		began := time.Now()
 		answer, conn, reader := r.connectRaw(net.JoinHostPort(echoHost, "443"), basic(workerPlaceholder))
 		if answer.StatusCode != http.StatusOK {
 			t.Fatalf("CONNECT answered %d; want 200", answer.StatusCode)
 		}
 		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		began := time.Now()
 		if _, err := reader.ReadByte(); !errors.Is(err, io.EOF) && err == nil {
 			t.Fatalf("the quiet tunnel answered a byte after %v; want it closed", time.Since(began))
 		} else if err != nil && errors.Is(err, os.ErrDeadlineExceeded) {
@@ -909,7 +931,10 @@ func TestOneRequestIsHandledForOneNameOfTheGrant(t *testing.T) {
 			betaName:  {Slots: map[string]string{requests.SlotValue: betaPlaceholder}},
 		},
 	}
-	r.grants.values[testGrantID] = map[string]string{alphaName: alphaValue, betaName: betaValue}
+	r.grants.values[testGrantID] = map[string]requests.AirlockSecret{
+		alphaName: {Slots: map[string]string{requests.SlotValue: alphaValue}},
+		betaName:  {Slots: map[string]string{requests.SlotValue: betaValue}},
+	}
 	client := r.client(alphaPlaceholder)
 
 	// The request carries beta's placeholder and no other, so it is handled for beta: beta's
@@ -956,27 +981,28 @@ func TestOneRequestIsHandledForOneNameOfTheGrant(t *testing.T) {
 	}
 }
 
-// TestANameWhoseKindNeedsMoreThanAValueIsRefused: the kinds whose released value is more than one
-// string - aws, azure-login, a github-app installation - are the next task's. Until then such a
-// name is refused, naming its kind, rather than forwarded with the command's placeholder in it.
-func TestANameWhoseKindNeedsMoreThanAValueIsRefused(t *testing.T) {
-	r := newRig(t, Options{})
-	r.grants.connections[workerPlaceholder] = requests.AirlockConnection{
-		GrantID: testGrantID, EnrollmentID: testEnrollID, RequestID: testRequest, Issue: testIssue,
-		Names: map[string]requests.AirlockGrantName{
-			workerName: {Kind: "azure-login", Slots: map[string]string{requests.SlotAzureFederated: workerPlaceholder}},
-		},
-	}
-	client := r.client(workerPlaceholder)
-	answer, body := r.get(client, "https://"+boundHost+"/v1/things", "Authorization", "Bearer "+workerPlaceholder)
-	if answer.StatusCode != http.StatusForbidden || !strings.Contains(body, `kind "azure-login"`) {
-		t.Fatalf("the call answered %d %q; want 403 naming the kind the airlock does not yet carry", answer.StatusCode, body)
-	}
-	if seen := r.requests(); len(seen) != 0 {
-		t.Fatalf("the service was sent %d requests; want none", len(seen))
-	}
-	if r.grants.valueReads(testGrantID) != 0 {
-		t.Fatalf("the proxy read the grant's values for a name it cannot carry; want no read")
+// TestANameWhoseEntryKindNeedsMoreThanAHeaderIsRefused: the two entry kinds whose value is not a
+// string a header carries - "aws", which has to sign the call, and "azure", whose federated
+// token has to be exchanged first - are the next task's. Until then such a name is refused,
+// naming its kind, rather than forwarded with the command's placeholder in it.
+func TestANameWhoseEntryKindNeedsMoreThanAHeaderIsRefused(t *testing.T) {
+	for _, kind := range []string{"aws", "azure"} {
+		t.Run(kind, func(t *testing.T) {
+			rules := testRules()
+			rules.Secrets[0].Kind = kind
+			r := newRig(t, Options{Rules: rules})
+			client := r.client(workerPlaceholder)
+			answer, body := r.get(client, "https://"+boundHost+"/v1/things", "Authorization", "Bearer "+workerPlaceholder)
+			if answer.StatusCode != http.StatusForbidden || !strings.Contains(body, `kind "`+kind+`"`) {
+				t.Fatalf("the call answered %d %q; want 403 naming the kind the airlock does not yet carry", answer.StatusCode, body)
+			}
+			if seen := r.requests(); len(seen) != 0 {
+				t.Fatalf("the service was sent %d requests; want none", len(seen))
+			}
+			if r.grants.valueReads(testGrantID) != 0 {
+				t.Fatalf("the proxy read the grant's values for a name it cannot carry; want no read")
+			}
+		})
 	}
 }
 
@@ -1017,5 +1043,252 @@ func TestARequestThatIsNoProxyRequestIsRefused(t *testing.T) {
 	body := bodyOf(t, answer)
 	if answer.StatusCode != http.StatusBadRequest || !strings.Contains(body, "not a proxy request") {
 		t.Fatalf("an ordinary request to the proxy port answered %d %q; want 400", answer.StatusCode, body)
+	}
+}
+
+// testClock is the clock a row drives Options.Now with: read on the proxy's goroutines and set
+// on the test's, so it is taken under a mutex.
+type testClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *testClock) read() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *testClock) set(now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = now
+}
+
+// cachedNames is the names a grant's held values still carry, which is what DropName changes.
+// Read through the same mutex the proxy's own paths take.
+func cachedNames(s *Server, grantID string) []string {
+	s.valuesMu.Lock()
+	held := s.values[grantID]
+	s.valuesMu.Unlock()
+	if held == nil {
+		return nil
+	}
+	held.mu.Lock()
+	defer held.mu.Unlock()
+	return slices.Sorted(maps.Keys(held.values))
+}
+
+// TestAMintedValueIsMintedAgainBeforeItExpires: a minted token the proxy holds until it lapses
+// would be handed to a call that then fails on it, so a value within mintAgainBefore of its
+// expiry is read - and so minted - again. A value further off than that is not, since the read
+// costs the whole of the release checks.
+func TestAMintedValueIsMintedAgainBeforeItExpires(t *testing.T) {
+	const (
+		firstToken  = "ya29.the-first-access-token"
+		secondToken = "ya29.the-second-access-token"
+	)
+	clock := &testClock{now: time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)}
+	expires := clock.read().Add(time.Hour)
+	r := newRig(t, Options{Now: clock.read})
+	r.grants.setValues(testGrantID, map[string]requests.AirlockSecret{
+		workerName: {Slots: map[string]string{requests.SlotValue: firstToken}, Expires: expires, Kind: "google-login"},
+	})
+	client := r.client(workerPlaceholder)
+	call := func(path string) string {
+		t.Helper()
+		answer, body := r.get(client, "https://"+boundHost+path, "Authorization", "Bearer "+workerPlaceholder)
+		if answer.StatusCode != http.StatusOK {
+			t.Fatalf("the call to %s answered %d %q; want 200", path, answer.StatusCode, body)
+		}
+		seen := r.requests()
+		return seen[len(seen)-1].header.Get("Authorization")
+	}
+
+	if got, want := call("/v1/first"), "Bearer "+firstToken; got != want {
+		t.Fatalf("the service saw Authorization %q; want %q", got, want)
+	}
+	// Six minutes off its expiry: further than mintAgainBefore, so the held value stands and
+	// the release checks are not run again.
+	clock.set(expires.Add(-6 * time.Minute))
+	r.grants.setValues(testGrantID, map[string]requests.AirlockSecret{
+		workerName: {Slots: map[string]string{requests.SlotValue: secondToken}, Expires: expires.Add(time.Hour), Kind: "google-login"},
+	})
+	if got, want := call("/v1/second"), "Bearer "+firstToken; got != want {
+		t.Fatalf("the service saw Authorization %q six minutes before the expiry; want the held %q", got, want)
+	}
+	if calls := r.grants.valueReads(testGrantID); calls != 1 {
+		t.Fatalf("AirlockValues ran %d times while the token had six minutes left; want once", calls)
+	}
+
+	// Four minutes off: inside mintAgainBefore, so the grant is read again and the call goes
+	// out on the token that read minted.
+	clock.set(expires.Add(-4 * time.Minute))
+	if got, want := call("/v1/third"), "Bearer "+secondToken; got != want {
+		t.Fatalf("the service saw Authorization %q four minutes before the expiry; want the freshly minted %q", got, want)
+	}
+	if calls := r.grants.valueReads(testGrantID); calls != 2 {
+		t.Fatalf("AirlockValues ran %d times; want twice: once for the first call and once inside the five minutes", calls)
+	}
+
+	// And the second answer is held in its turn: its own expiry is an hour further off.
+	if got, want := call("/v1/fourth"), "Bearer "+secondToken; got != want {
+		t.Fatalf("the service saw Authorization %q; want the held %q", got, want)
+	}
+	if calls := r.grants.valueReads(testGrantID); calls != 2 {
+		t.Fatalf("AirlockValues ran %d times; want twice: the second answer is held as the first was", calls)
+	}
+}
+
+// TestDropNameDropsOneNameAndKeepsTheGrantsOthers: a reread says one secret has a new version,
+// and says nothing about the rest of a grant, so the drop is of that name alone - and the next
+// request reads the grant's values again, which is what puts the new version in front of it.
+func TestDropNameDropsOneNameAndKeepsTheGrantsOthers(t *testing.T) {
+	const (
+		alphaName        = "ALPHA_TOKEN"
+		betaName         = "BETA_TOKEN"
+		alphaPlaceholder = requests.PlaceholderPrefix + "alphaalphaalphaalphaalphaalpha01"
+		betaPlaceholder  = requests.PlaceholderPrefix + "betabetabetabetabetabetabetabe01"
+	)
+	rules := airlock.Rules{Secrets: []airlock.SecretRule{
+		{Name: alphaName, Hosts: []string{boundHost}, Headers: []string{"authorization"}},
+		{Name: betaName, Hosts: []string{boundHost}, Headers: []string{"x-beta"}},
+	}}
+	r := newRig(t, Options{Rules: rules})
+	r.grants.connections[alphaPlaceholder] = requests.AirlockConnection{
+		GrantID: testGrantID, EnrollmentID: testEnrollID, RequestID: testRequest, Issue: testIssue,
+		Names: map[string]requests.AirlockGrantName{
+			alphaName: {Slots: map[string]string{requests.SlotValue: alphaPlaceholder}},
+			betaName:  {Slots: map[string]string{requests.SlotValue: betaPlaceholder}},
+		},
+	}
+	r.grants.setValues(testGrantID, map[string]requests.AirlockSecret{
+		alphaName: {Slots: map[string]string{requests.SlotValue: "alpha-v1"}},
+		betaName:  {Slots: map[string]string{requests.SlotValue: "beta-v1"}},
+	})
+	client := r.client(alphaPlaceholder)
+	r.get(client, "https://"+boundHost+"/v1/things", "Authorization", "Bearer "+alphaPlaceholder)
+	if want := []string{alphaName, betaName}; !slices.Equal(cachedNames(r.proxy, testGrantID), want) {
+		t.Fatalf("the grant holds %v; want %v after its first request", cachedNames(r.proxy, testGrantID), want)
+	}
+
+	// A name no grant on this pod holds changes nothing, and a held one leaves the rest.
+	r.proxy.DropName("A_NAME_NO_GRANT_HOLDS")
+	if want := []string{alphaName, betaName}; !slices.Equal(cachedNames(r.proxy, testGrantID), want) {
+		t.Fatalf("the grant holds %v after a reread of another secret; want %v", cachedNames(r.proxy, testGrantID), want)
+	}
+	r.proxy.DropName(betaName)
+	if want := []string{alphaName}; !slices.Equal(cachedNames(r.proxy, testGrantID), want) {
+		t.Fatalf("the grant holds %v after beta was reread; want %v: the drop is of that name alone", cachedNames(r.proxy, testGrantID), want)
+	}
+	if calls := r.grants.valueReads(testGrantID); calls != 1 {
+		t.Fatalf("AirlockValues ran %d times; want once: a drop reads nothing by itself", calls)
+	}
+
+	// The next request reads the grant's values again, and carries what that read answered.
+	r.grants.setValues(testGrantID, map[string]requests.AirlockSecret{
+		alphaName: {Slots: map[string]string{requests.SlotValue: "alpha-v1"}},
+		betaName:  {Slots: map[string]string{requests.SlotValue: "beta-v2"}},
+	})
+	r.get(client, "https://"+boundHost+"/v1/other", "X-Beta", "Token "+betaPlaceholder)
+	if calls := r.grants.valueReads(testGrantID); calls != 2 {
+		t.Fatalf("AirlockValues ran %d times; want twice: the request after a drop reads the grant again", calls)
+	}
+	seen := r.requests()
+	if got, want := seen[len(seen)-1].header.Get("X-Beta"), "Token beta-v2"; got != want {
+		t.Fatalf("the service saw X-Beta %q; want %q, the version the reread brought", got, want)
+	}
+	// And the read that followed the drop put every name back.
+	if want := []string{alphaName, betaName}; !slices.Equal(cachedNames(r.proxy, testGrantID), want) {
+		t.Fatalf("the grant holds %v; want %v", cachedNames(r.proxy, testGrantID), want)
+	}
+}
+
+// TestAGitHubAppInstallationsTokenIsSwappedForItsOwnSlotsPlaceholder: a github-app name holds
+// one token per installation and no value slot, so what a request is handled for is the (name,
+// slot) pair whose placeholder it carries - the owner the command asked for - and the value
+// swapped in is that installation's own token.
+func TestAGitHubAppInstallationsTokenIsSwappedForItsOwnSlotsPlaceholder(t *testing.T) {
+	const (
+		appName    = "GITHUB_APP_KEY"
+		acmeSlot   = requests.SlotGitHubPrefix + "acme"
+		zedSlot    = requests.SlotGitHubPrefix + "zed"
+		acmeHolder = requests.PlaceholderPrefix + "acmeacmeacmeacmeacmeacmeacmeac01"
+		zedHolder  = requests.PlaceholderPrefix + "zedzedzedzedzedzedzedzedzedzed01"
+		acmeToken  = "ghs_the-real-acme-installation-token"
+		zedToken   = "ghs_the-real-zed-installation-token"
+	)
+	rules := airlock.Rules{Secrets: []airlock.SecretRule{{
+		Name:    appName,
+		Hosts:   []string{boundHost},
+		Headers: []string{"authorization"},
+		Allow:   []airlock.Allow{{Method: http.MethodGet, PathPrefix: "/v1/"}},
+	}}}
+	r := newRig(t, Options{Rules: rules})
+	r.grants.connections[acmeHolder] = requests.AirlockConnection{
+		GrantID: testGrantID, EnrollmentID: testEnrollID, RequestID: testRequest, Issue: testIssue,
+		Names: map[string]requests.AirlockGrantName{
+			appName: {Kind: "github-app", Slots: map[string]string{acmeSlot: acmeHolder, zedSlot: zedHolder}},
+		},
+	}
+	r.grants.setValues(testGrantID, map[string]requests.AirlockSecret{
+		appName: {Kind: "github-app", Slots: map[string]string{acmeSlot: acmeToken, zedSlot: zedToken}},
+	})
+	client := r.client(acmeHolder)
+
+	// zed's placeholder: zed's token, and the line names the slot so an operator reads which
+	// installation the call used.
+	r.get(client, "https://"+boundHost+"/v1/repos", "Authorization", "Bearer "+zedHolder)
+	seen := r.requests()
+	if len(seen) != 1 {
+		t.Fatalf("the service saw %d requests; want one", len(seen))
+	}
+	if got, want := seen[0].header.Get("Authorization"), "Bearer "+zedToken; got != want {
+		t.Fatalf("the service saw Authorization %q; want %q: the request carried zed's placeholder", got, want)
+	}
+	line := r.logs.calls()[0]
+	if line.fields["secret"] != appName || line.fields["slot"] != zedSlot {
+		t.Fatalf("the call logged %v; want secret %s and slot %s", line.fields, appName, zedSlot)
+	}
+	for _, never := range []string{acmeToken, zedToken, acmeHolder, zedHolder} {
+		if strings.Contains(fmt.Sprint(line.fields), never) {
+			t.Errorf("the call line names a value or a placeholder: %v", line.fields)
+		}
+	}
+
+	// acme's placeholder on the same connection: acme's token, for the same reason.
+	r.get(client, "https://"+boundHost+"/v1/issues", "Authorization", "Bearer "+acmeHolder)
+	seen = r.requests()
+	if got, want := seen[1].header.Get("Authorization"), "Bearer "+acmeToken; got != want {
+		t.Fatalf("the service saw Authorization %q; want %q: the request carried acme's placeholder", got, want)
+	}
+	if slot := r.logs.calls()[1].fields["slot"]; slot != acmeSlot {
+		t.Fatalf("the call logged the slot %v; want %s", slot, acmeSlot)
+	}
+
+	// A request that carries no placeholder of the grant is still decided, for the first
+	// candidate pair in (name, slot) order, and forwarded with nothing swapped.
+	r.get(client, "https://"+boundHost+"/v1/plain", "X-Plain", "nothing of this grant")
+	seen = r.requests()
+	if got := seen[2].header.Get("X-Plain"); got != "nothing of this grant" {
+		t.Errorf("the service saw X-Plain %q; want it unchanged", got)
+	}
+	if slot := r.logs.calls()[2].fields["slot"]; slot != acmeSlot {
+		t.Fatalf("the call logged the slot %v; want %s, the first candidate in slot order", slot, acmeSlot)
+	}
+}
+
+// TestTheLogLineNamesNoSlotForAValueSlot: every name whose value is one string fills the value
+// slot, which says nothing, so the line carries the slot only where the name has more than one.
+func TestTheLogLineNamesNoSlotForAValueSlot(t *testing.T) {
+	r := newRig(t, Options{})
+	client := r.client(workerPlaceholder)
+	r.get(client, "https://"+boundHost+"/v1/things", "Authorization", "Bearer "+workerPlaceholder)
+	line := r.logs.calls()[0]
+	if _, named := line.fields["slot"]; named {
+		t.Fatalf("the call line names a slot for a stored secret: %v", line.fields)
+	}
+	if line.fields["secret"] != workerName {
+		t.Fatalf("the call line's secret = %v; want %s", line.fields["secret"], workerName)
 	}
 }

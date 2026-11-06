@@ -9,15 +9,18 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 const googleTokenURL = "https://oauth2.googleapis.com/token"
 
 // GoogleLogin exchanges the refresh token in a google-login secret for a Google access token.
-// TokenURL and HTTP let tests replace Google's token endpoint and its transport.
+// TokenURL and HTTP let tests replace Google's token endpoint and its transport, and Now the
+// clock the minted token's expiry is measured from, as GitHubApp has.
 type GoogleLogin struct {
 	TokenURL string
 	HTTP     *http.Client
+	Now      func() time.Time
 }
 
 type googleLoginSecret struct {
@@ -29,6 +32,10 @@ type googleLoginSecret struct {
 
 type googleTokenResponse struct {
 	AccessToken string `json:"access_token"`
+	// ExpiresIn is how many seconds from now Google's answer says the access token lasts. An
+	// answer that carries none leaves it zero, and the token is minted with no expiry: the
+	// proxy then holds it until the policy's own reread replaces it.
+	ExpiresIn int64 `json:"expires_in"`
 }
 
 type googleTokenError struct {
@@ -51,18 +58,20 @@ func googleSubtype(subtype string) string {
 	return "unknown"
 }
 
-// Mint returns the bare Google access token. It never puts a stored credential or returned token
-// in an error, and every error wraps one of ErrMintStoredValue, ErrMintRefused or ErrMintUpstream.
-func (m GoogleLogin) Mint(ctx context.Context, req MintRequest) (string, error) {
+// Mint returns the bare Google access token and when it stops working: Google's own expires_in,
+// seconds from the moment of the answer, and no expiry at all for an answer that carries none.
+// It never puts a stored credential or returned token in an error, and every error wraps one of
+// ErrMintStoredValue, ErrMintRefused or ErrMintUpstream.
+func (m GoogleLogin) Mint(ctx context.Context, req MintRequest) (Minted, error) {
 	const what = "refresh Google login"
 	var secret googleLoginSecret
 	// encoding/json's syntax errors quote the offending byte, so neither decode wraps its error:
 	// the stored credential and Google's answer both hold secrets.
 	if json.Unmarshal([]byte(req.Value), &secret) != nil {
-		return "", fmt.Errorf("%w: decode Google login secret: not a JSON object of its fields", ErrMintStoredValue)
+		return Minted{}, fmt.Errorf("%w: decode Google login secret: not a JSON object of its fields", ErrMintStoredValue)
 	}
 	if secret.Type != "authorized_user" || secret.ClientID == "" || secret.ClientSecret == "" || secret.RefreshToken == "" {
-		return "", fmt.Errorf("%w: Google login secret must be an authorized_user credential", ErrMintStoredValue)
+		return Minted{}, fmt.Errorf("%w: Google login secret must be an authorized_user credential", ErrMintStoredValue)
 	}
 	endpoint := cmp.Or(m.TokenURL, googleTokenURL)
 	form := url.Values{
@@ -73,28 +82,39 @@ func (m GoogleLogin) Mint(ctx context.Context, req MintRequest) (string, error) 
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
-		return "", fmt.Errorf("%w: create Google token request: %w", ErrMintUpstream, err)
+		return Minted{}, fmt.Errorf("%w: create Google token request: %w", ErrMintUpstream, err)
 	}
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	// Read before the call, so the expiry below is measured from no later than the moment the
+	// answer describes.
+	now := time.Now
+	if m.Now != nil {
+		now = m.Now
+	}
+	asked := now()
 	payload, err := mintCall(m.HTTP, request, what, "Google", http.StatusOK, mintResponseLimit)
 	if status := (*mintStatusError)(nil); errors.As(err, &status) {
 		var tokenError googleTokenError
 		if json.Unmarshal(payload, &tokenError) == nil && tokenError.Code == "invalid_grant" {
 			if tokenError.Subtype != "" {
-				return "", fmt.Errorf("%w: Google login needs a new sign-in: invalid_grant (%s)", ErrMintRefused, googleSubtype(tokenError.Subtype))
+				return Minted{}, fmt.Errorf("%w: Google login needs a new sign-in: invalid_grant (%s)", ErrMintRefused, googleSubtype(tokenError.Subtype))
 			}
-			return "", fmt.Errorf("%w: Google login needs a new sign-in: invalid_grant", ErrMintRefused)
+			return Minted{}, fmt.Errorf("%w: Google login needs a new sign-in: invalid_grant", ErrMintRefused)
 		}
 	}
 	if err != nil {
-		return "", err
+		return Minted{}, err
 	}
 	var token googleTokenResponse
 	if json.Unmarshal(payload, &token) != nil {
-		return "", fmt.Errorf("%w: decode Google token response: not a JSON object of its fields", ErrMintUpstream)
+		return Minted{}, fmt.Errorf("%w: decode Google token response: not a JSON object of its fields", ErrMintUpstream)
 	}
 	if token.AccessToken == "" {
-		return "", fmt.Errorf("%w: Google returned no access token", ErrMintUpstream)
+		return Minted{}, fmt.Errorf("%w: Google returned no access token", ErrMintUpstream)
 	}
-	return token.AccessToken, nil
+	minted := Minted{Value: token.AccessToken}
+	if token.ExpiresIn > 0 {
+		minted.Expires = asked.Add(time.Duration(token.ExpiresIn) * time.Second)
+	}
+	return minted, nil
 }

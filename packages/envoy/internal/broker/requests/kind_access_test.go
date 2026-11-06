@@ -21,7 +21,10 @@ func TestAKindSecretIsNeverReleasedToAnotherOperator(t *testing.T) {
 	retag(t, machine, requestKindSecret("OWNERS_APP_KEY", policy.KindGitHubApp, policy.TierAgent, ""))
 	var calls atomic.Int32
 	machine.Minters = map[string]Minter{
-		policy.KindGitHubApp: func(context.Context, secrets.MintRequest) (string, error) { calls.Add(1); return "minted-token", nil },
+		policy.KindGitHubApp: func(context.Context, secrets.MintRequest) (secrets.Minted, error) {
+			calls.Add(1)
+			return secrets.Minted{Value: "minted-token"}, nil
+		},
 	}
 	const other = "bob@example.com"
 	otherEnr, otherKey := newEnrollment(t, machine.Store, "session", "box-other-"+t.Name(), new(other), nil)
@@ -53,9 +56,9 @@ func TestAHumanTierGitHubAppSecretWaitsForItsOwnerThenMints(t *testing.T) {
 	retag(t, machine, requestKindSecret("HUMAN_APP_KEY", policy.KindGitHubApp, policy.TierHuman, ""))
 	var owners []string
 	machine.Minters = map[string]Minter{
-		policy.KindGitHubApp: func(_ context.Context, req secrets.MintRequest) (string, error) {
+		policy.KindGitHubApp: func(_ context.Context, req secrets.MintRequest) (secrets.Minted, error) {
 			owners = req.GitHubOwners
-			return "minted-token", nil
+			return secrets.Minted{Value: "minted-token"}, nil
 		},
 	}
 	request, err := machine.Create(t.Context(), enrollmentID, signRequest(t, machine, key, "read the App key", "HUMAN_APP_KEY"), "")
@@ -82,8 +85,8 @@ func TestConcurrentReleasesOfOneKindSecretAllMint(t *testing.T) {
 	retag(t, machine, requestKindSecret("BUSY_APP_KEY", policy.KindGitHubApp, policy.TierAgent, ""))
 	var calls atomic.Int32
 	machine.Minters = map[string]Minter{
-		policy.KindGitHubApp: func(context.Context, secrets.MintRequest) (string, error) {
-			return fmt.Sprintf("minted-token-%d", calls.Add(1)), nil
+		policy.KindGitHubApp: func(context.Context, secrets.MintRequest) (secrets.Minted, error) {
+			return secrets.Minted{Value: fmt.Sprintf("minted-token-%d", calls.Add(1))}, nil
 		},
 	}
 	request, err := machine.Create(t.Context(), enrollmentID, signRequest(t, machine, key, "read the App key", "BUSY_APP_KEY"), "")

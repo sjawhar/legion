@@ -226,6 +226,22 @@ func main() {
 		airlockCA, err = airlockproxy.NewAuthority(cfg.AirlockCACertFile, cfg.AirlockCAKeyFile)
 		fatal(err)
 	}
+	// The proxy port's own server, built far below once the boot has bound its socket, and nil
+	// for a deployment with no airlock. It is declared here because the two reread paths below
+	// — this pod's own, and a peer's notification — are wired before it is built and have to
+	// reach it.
+	var airlockProxy *airlockproxy.Server
+	// dropAirlockName is what one reread of a secret's name does to the proxy: it drops that
+	// name's value from every grant the proxy holds values for, so the next request of such a
+	// grant reads the value again and mints again from it. The reread of the name is the
+	// signal, not the policy version: a new version of a secret's value moves neither the
+	// policy's version nor the set of names it serves, so nothing else this process sees says
+	// that the value the proxy is holding is the old one.
+	dropAirlockName := func(name string) {
+		if airlockProxy != nil {
+			airlockProxy.DropName(name)
+		}
+	}
 	// The whole stop budget, logged as soon as the configuration naming its first half is loaded,
 	// because a deployment's terminationGracePeriodSeconds has to cover it and nothing in this
 	// repository can check that it does: the guard this repository would otherwise write — a test
@@ -343,6 +359,10 @@ func main() {
 				OnConnected: onConnected,
 				Refresh: func(ctx context.Context, name string) error {
 					_, err := current.RefreshOne(ctx, name)
+					// A peer served the reread, so this pod's airlock proxy may be holding
+					// the old value of that name: dropped whatever the reread answered,
+					// since the reread of the name is the signal (dropAirlockName).
+					dropAirlockName(name)
 					return err
 				},
 			}).Run(serving)
@@ -543,6 +563,11 @@ func main() {
 		Approval:           page,
 		Draining:           draining.Load,
 		NotifyReread: func(ctx context.Context, name string) {
+			// This pod served the reread itself, on the 200 path alone, so the value behind
+			// the name may be a new version: dropped from the airlock proxy's own cache
+			// before the peers are told, since the reread of the name is the signal
+			// (dropAirlockName).
+			dropAirlockName(name)
 			if err := notify(ctx, name); err != nil {
 				slog.Warn("broker: the other pods were not told to reread a secret", "secret", name, "error", err)
 			}
@@ -557,7 +582,6 @@ func main() {
 	// The airlock's proxy port, for a deployment that has one: the same rules file every
 	// release reads, the same request machine the API decides with - the proxy's two reads are
 	// its AirlockConnection and AirlockValues - and the authority built at the top of main.
-	var airlockProxy *airlockproxy.Server
 	if started.AirlockListener != nil {
 		airlockProxy = airlockproxy.New(airlockproxy.Options{
 			Rules:  rules,

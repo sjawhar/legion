@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
@@ -27,8 +28,52 @@ func TestGoogleLoginMintExchangesRefreshToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
-	if got != "access-token" {
-		t.Fatalf("Mint = %q, want bare access token", got)
+	if got.Value != "access-token" {
+		t.Fatalf("Mint = %q, want bare access token", got.Value)
+	}
+}
+
+// TestGoogleLoginMintReportsTheExpiryGoogleGave: the airlock's proxy mints again five minutes
+// before a token's expiry, so the minter has to pass Google's own expires_in on, as seconds from
+// the moment it asked. An answer that carries none says nothing about when the token ends, and
+// the minted expiry is zero: no clock ends such a value.
+func TestGoogleLoginMintReportsTheExpiryGoogleGave(t *testing.T) {
+	now := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
+	for name, row := range map[string]struct {
+		answer string
+		want   time.Time
+	}{
+		"an hour":              {`{"access_token":"access-token","expires_in":3599}`, now.Add(3599 * time.Second)},
+		"no expires_in":        {`{"access_token":"access-token"}`, time.Time{}},
+		"a zero expires_in":    {`{"access_token":"access-token","expires_in":0}`, time.Time{}},
+		"a null expires_in":    {`{"access_token":"access-token","expires_in":null}`, time.Time{}},
+		"a negative expiry":    {`{"access_token":"access-token","expires_in":-10}`, time.Time{}},
+		"a string expires_in":  {`{"access_token":"access-token","expires_in":"3600"}`, time.Time{}},
+		"an expiry of one day": {`{"access_token":"access-token","expires_in":86400}`, now.Add(24 * time.Hour)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(row.answer))
+			}))
+			defer server.Close()
+			value := `{"type":"authorized_user","client_id":"client-id","client_secret":"client-secret","refresh_token":"refresh-token"}`
+			got, err := (secrets.GoogleLogin{TokenURL: server.URL, HTTP: server.Client(), Now: func() time.Time { return now }}).
+				Mint(t.Context(), secrets.MintRequest{Value: value})
+			// A string expires_in is no number Google ever sends and the whole answer fails to
+			// decode, which is an upstream failure rather than a token with no expiry.
+			if name == "a string expires_in" {
+				if secrets.MintErrorClass(err) != "upstream" {
+					t.Fatalf("Mint = %+v, %v (class %s); want an upstream failure", got, err, secrets.MintErrorClass(err))
+				}
+				return
+			}
+			if err != nil || got.Value != "access-token" {
+				t.Fatalf("Mint = %+v, %v; want the access token", got, err)
+			}
+			if !got.Expires.Equal(row.want) {
+				t.Fatalf("Mint's expiry = %v, want %v", got.Expires, row.want)
+			}
+		})
 	}
 }
 

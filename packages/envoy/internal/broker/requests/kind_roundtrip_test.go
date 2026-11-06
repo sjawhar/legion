@@ -29,14 +29,14 @@ func TestAKindChangedAwayAndBackWithNoReleaseBetweenLeavesTheGrantAsItWas(t *tes
 			var githubCalls, googleCalls int
 			var minted []string
 			machine.Minters = map[string]Minter{
-				policy.KindGitHubApp: func(_ context.Context, req secrets.MintRequest) (string, error) {
+				policy.KindGitHubApp: func(_ context.Context, req secrets.MintRequest) (secrets.Minted, error) {
 					githubCalls++
 					minted = append(minted, req.Value)
-					return "github-installation-token", nil
+					return secrets.Minted{Value: "github-installation-token"}, nil
 				},
-				policy.KindGoogleLogin: func(context.Context, secrets.MintRequest) (string, error) {
+				policy.KindGoogleLogin: func(context.Context, secrets.MintRequest) (secrets.Minted, error) {
 					googleCalls++
-					return "google-access-token", nil
+					return secrets.Minted{Value: "google-access-token"}, nil
 				},
 			}
 			grant, err := machine.Create(t.Context(), enrollmentID, signRequest(t, machine, key, "read App key", "QUIET_KIND_KEY"), "")
@@ -84,12 +84,12 @@ func TestAMaxGrantLoweredAndRaisedWithNoReleaseBetweenLeavesTheGrantAsItWas(t *t
 	machine, enrollmentID, key, _ := newFixture(t)
 	var calls int
 	machine.Minters = map[string]Minter{
-		policy.KindGoogleLogin: func(_ context.Context, req secrets.MintRequest) (string, error) {
+		policy.KindGoogleLogin: func(_ context.Context, req secrets.MintRequest) (secrets.Minted, error) {
 			calls++
 			if req.Value != "stored-value" {
 				t.Errorf("the Google login minter was handed %q; want the secret's stored value", req.Value)
 			}
-			return "google-access-token", nil
+			return secrets.Minted{Value: "google-access-token"}, nil
 		},
 	}
 	retag(t, machine, requestKindSecret("QUIET_BOUNDED_LOGIN", policy.KindGoogleLogin, policy.TierAgent, "1h"))

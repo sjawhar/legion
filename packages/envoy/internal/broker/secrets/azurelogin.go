@@ -40,34 +40,35 @@ type azureLoginRelease struct {
 }
 
 // Mint returns a JSON document for an Azure federated sign-in only for the configured human-tier
-// secret; a disabled or mismatched release is refused. A malformed identity is a stored-value
-// failure; an unreadable, malformed or expired projected token is an upstream failure for the
-// broker's operator. Errors never quote stored fields, token bytes or file paths.
-func (m AzureLogin) Mint(_ context.Context, req MintRequest) (string, error) {
+// secret, and the projected token's own expiry with it; a disabled or mismatched release is
+// refused. A malformed identity is a stored-value failure; an unreadable, malformed or expired
+// projected token is an upstream failure for the broker's operator. Errors never quote stored
+// fields, token bytes or file paths.
+func (m AzureLogin) Mint(_ context.Context, req MintRequest) (Minted, error) {
 	if m.SecretName == "" || req.Name != m.SecretName || !req.HumanTier {
-		return "", fmt.Errorf("%w: Azure login requires the configured human-tier secret", ErrMintRefused)
+		return Minted{}, fmt.Errorf("%w: Azure login requires the configured human-tier secret", ErrMintRefused)
 	}
 	var identity azureLoginSecret
 	if json.Unmarshal([]byte(req.Value), &identity) != nil || strings.TrimSpace(identity.TenantID) == "" || strings.TrimSpace(identity.ClientID) == "" {
-		return "", fmt.Errorf("%w: Azure login secret must name tenant_id and client_id", ErrMintStoredValue)
+		return Minted{}, fmt.Errorf("%w: Azure login secret must name tenant_id and client_id", ErrMintStoredValue)
 	}
 	data, err := os.ReadFile(cmp.Or(m.TokenFile, DefaultAzureTokenFile))
 	if err != nil {
-		return "", fmt.Errorf("%w: read Azure projected token file", ErrMintUpstream)
+		return Minted{}, fmt.Errorf("%w: read Azure projected token file", ErrMintUpstream)
 	}
 	token := strings.TrimSpace(string(data))
 	if !oidc.LooksLikeJWT(token) {
-		return "", fmt.Errorf("%w: Azure projected token is not a JWT", ErrMintUpstream)
+		return Minted{}, fmt.Errorf("%w: Azure projected token is not a JWT", ErrMintUpstream)
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(token[strings.IndexByte(token, '.')+1 : strings.LastIndexByte(token, '.')])
 	if err != nil {
-		return "", fmt.Errorf("%w: Azure projected token payload is not base64url", ErrMintUpstream)
+		return Minted{}, fmt.Errorf("%w: Azure projected token payload is not base64url", ErrMintUpstream)
 	}
 	var claims struct {
 		Expiry int64 `json:"exp"`
 	}
 	if json.Unmarshal(payload, &claims) != nil || claims.Expiry <= 0 {
-		return "", fmt.Errorf("%w: Azure projected token must carry an exp claim in seconds", ErrMintUpstream)
+		return Minted{}, fmt.Errorf("%w: Azure projected token must carry an exp claim in seconds", ErrMintUpstream)
 	}
 	expires := time.Unix(claims.Expiry, 0).UTC()
 	now := m.Now
@@ -75,14 +76,14 @@ func (m AzureLogin) Mint(_ context.Context, req MintRequest) (string, error) {
 		now = time.Now
 	}
 	if !now().Before(expires) {
-		return "", fmt.Errorf("%w: Azure projected token has expired", ErrMintUpstream)
+		return Minted{}, fmt.Errorf("%w: Azure projected token has expired", ErrMintUpstream)
 	}
 	encoded, err := json.Marshal(azureLoginRelease{
 		TenantID: identity.TenantID, ClientID: identity.ClientID,
 		FederatedToken: token, ExpiresAt: expires,
 	})
 	if err != nil {
-		return "", fmt.Errorf("%w: Azure projected token expiry cannot be encoded", ErrMintUpstream)
+		return Minted{}, fmt.Errorf("%w: Azure projected token expiry cannot be encoded", ErrMintUpstream)
 	}
-	return string(encoded), nil
+	return Minted{Value: string(encoded), Expires: expires}, nil
 }

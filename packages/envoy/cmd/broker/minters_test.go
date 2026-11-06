@@ -46,13 +46,13 @@ func TestEachKindReachesItsOwnMinter(t *testing.T) {
 		t.Fatal(err)
 	}
 	minted, err := minters[policy.KindGitHubApp](context.Background(), secrets.MintRequest{Value: string(app), GitHubOwners: []string{"acme-org"}})
-	if err != nil || !strings.Contains(minted, "github-installation-token") {
-		t.Fatalf("github-app minter = %q, %v; want the GitHub endpoint's installation token", minted, err)
+	if err != nil || !strings.Contains(minted.Value, "github-installation-token") {
+		t.Fatalf("github-app minter = %q, %v; want the GitHub endpoint's installation token", minted.Value, err)
 	}
 	login := `{"type":"authorized_user","client_id":"c","client_secret":"s","refresh_token":"r"}`
 	minted, err = minters[policy.KindGoogleLogin](context.Background(), secrets.MintRequest{Value: login})
-	if err != nil || minted != "google-access-token" {
-		t.Fatalf("google-login minter = %q, %v; want the Google endpoint's access token", minted, err)
+	if err != nil || minted.Value != "google-access-token" {
+		t.Fatalf("google-login minter = %q, %v; want the Google endpoint's access token", minted.Value, err)
 	}
 }
 
@@ -77,7 +77,7 @@ func TestRequestMachineReleasesAzureLoginFromTheConfiguredFile(t *testing.T) {
 		t.Fatalf("Mint: %v", err)
 	}
 	var value map[string]string
-	if json.Unmarshal([]byte(got), &value) != nil || len(value) != 4 || value["tenant_id"] != "tenant" || value["client_id"] != "client" || value["federated_token"] != token || value["expires_at"] != "2100-01-01T00:00:00Z" {
+	if json.Unmarshal([]byte(got.Value), &value) != nil || len(value) != 4 || value["tenant_id"] != "tenant" || value["client_id"] != "client" || value["federated_token"] != token || value["expires_at"] != "2100-01-01T00:00:00Z" {
 		t.Fatal("request machine did not release the Azure login from its configured token file")
 	}
 }

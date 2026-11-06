@@ -174,31 +174,31 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narr
 	}
 	values := map[string]string{}
 	released := []string{}
-	shapes := map[string]airlockShape{}
+	splits := map[string]airlockSplit{}
 	for _, g := range checked.granted {
-		value, err := m.readValue(ctx, grantID, enrollmentID, g, checked.set.Secrets[g.name], narrowing)
+		minted, err := m.readValue(ctx, grantID, enrollmentID, g, checked.set.Secrets[g.name], narrowing)
 		if err != nil {
 			return Release{}, err
 		}
 		released = append(released, g.name)
 		if entry := m.Airlock.Lookup(g.name); entry != nil {
-			shape, err := airlockShapeOf(entry, checked.set.Secrets[g.name].Kind(), value)
+			split, err := airlockSplitOf(entry, checked.set.Secrets[g.name].Kind(), minted.Value)
 			if err != nil {
 				return Release{}, fmt.Errorf("release %s behind the airlock: %w", g.name, err)
 			}
 			// The real value goes no further than this loop: the session is given the
-			// placeholders airlockRelease mints for the slots the shape found.
-			shapes[g.name] = shape
+			// placeholders airlockRelease mints for the slots the split found.
+			splits[g.name] = split
 			continue
 		}
-		values[g.name] = value
+		values[g.name] = minted.Value
 	}
 	if err := m.recheckStoredSources(ctx, grantID, checked.granted); err != nil {
 		return Release{}, err
 	}
 	release := Release{Values: values, Expires: checked.expires}
-	if len(shapes) > 0 {
-		if release.Airlock, err = m.airlockRelease(ctx, grantID, checked.expires, shapes); err != nil {
+	if len(splits) > 0 {
+		if release.Airlock, err = m.airlockRelease(ctx, grantID, checked.expires, splits); err != nil {
 			return Release{}, err
 		}
 	}
@@ -213,21 +213,22 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narr
 	return release, nil
 }
 
-// readValue is one granted name's value with the refusals every release answers: a name the
+// readValue is one granted name's value and, for a minted kind, when that value stops working,
+// with the refusals every release answers: a name the
 // store no longer holds (ErrSecretNotInStore), a narrowing the minter refused, which is logged as
 // a refused narrowing and handed back as it is, and any other failure named with the secret.
-func (m *Machine) readValue(ctx context.Context, grantID, enrollmentID string, g requestedSecret, served policy.Secret, narrowing *secrets.GitHubNarrowing) (string, error) {
-	value, err := m.release(ctx, g, served, narrowing)
+func (m *Machine) readValue(ctx context.Context, grantID, enrollmentID string, g requestedSecret, served policy.Secret, narrowing *secrets.GitHubNarrowing) (secrets.Minted, error) {
+	minted, err := m.release(ctx, g, served, narrowing)
 	if errors.Is(err, secrets.ErrNotFound) {
-		return "", fmt.Errorf("%w: %s", ErrSecretNotInStore, g.name)
+		return secrets.Minted{}, fmt.Errorf("%w: %s", ErrSecretNotInStore, g.name)
 	}
 	if errors.Is(err, secrets.ErrMintNarrowingRefused) {
 		slog.Warn(NarrowingRefusedMessage, "grant", grantID, "enrollment", enrollmentID, "name", g.name, "error", err)
 	}
 	if err != nil {
-		return "", fmt.Errorf("read %s: %w", g.name, err)
+		return secrets.Minted{}, fmt.Errorf("read %s: %w", g.name, err)
 	}
-	return value, nil
+	return minted, nil
 }
 
 // narrowingRefusal is why narrowing cannot reach granted, with the name it refuses for: the grant
@@ -324,8 +325,10 @@ func (m *Machine) endGrant(ctx context.Context, grantID string, reason error) er
 	return reason
 }
 
-// release is one granted name's value. A stored secret reads its frozen source and ignores the
-// policy metadata and narrowing. A kind source reads its frozen store source (on Secret
+// release is one granted name's value, and when that value stops working for a kind whose
+// minter says. A stored secret reads its frozen source and ignores the
+// policy metadata and narrowing; it carries no expiry, since nothing but a new stored version
+// ends it. A kind source reads its frozen store source (on Secret
 // Manager its deletion verdict is cached for 30 s, as for every secret), then passes that value
 // and the name, tier and GitHub owners from the policy snapshot Values checked to the minter.
 // An Azure login also requires this name's grant decision to be approval, never automatic.
@@ -333,37 +336,38 @@ func (m *Machine) endGrant(ctx context.Context, grantID string, reason error) er
 // (secrets.ErrMintNarrowingRefused) is returned as it is,
 // for Values to log as a refused narrowing, and is no mint failure. A deleted secret stops
 // releasing once the policy drops it: `agent-secrets secret delete` rereads the name at once.
-func (m *Machine) release(ctx context.Context, g requestedSecret, served policy.Secret, narrowing *secrets.GitHubNarrowing) (string, error) {
+func (m *Machine) release(ctx context.Context, g requestedSecret, served policy.Secret, narrowing *secrets.GitHubNarrowing) (secrets.Minted, error) {
 	kind, source, minted, err := policy.ParseKindSource(g.source)
 	if err != nil {
-		return "", fmt.Errorf("secret %s: %w", g.name, err)
+		return secrets.Minted{}, fmt.Errorf("secret %s: %w", g.name, err)
 	}
 	if !minted {
-		return m.Secrets.Read(ctx, source)
+		stored, err := m.Secrets.Read(ctx, source)
+		return secrets.Minted{Value: stored}, err
 	}
 	if kind == policy.KindAzureLogin && g.decision != policy.Approval {
-		return "", fmt.Errorf("%w: %w: Azure login requires a person's approval", ErrMintFailed, secrets.ErrMintRefused)
+		return secrets.Minted{}, fmt.Errorf("%w: %w: Azure login requires a person's approval", ErrMintFailed, secrets.ErrMintRefused)
 	}
 	mint := m.Minters[kind]
 	if mint == nil {
-		return "", fmt.Errorf("secret %s is a minted kind %q, but this broker has no token minter for it", g.name, kind)
+		return secrets.Minted{}, fmt.Errorf("secret %s is a minted kind %q, but this broker has no token minter for it", g.name, kind)
 	}
 	value, err := m.Secrets.Read(ctx, source)
 	if err != nil {
-		return "", err
+		return secrets.Minted{}, err
 	}
 	token, err := mint(ctx, secrets.MintRequest{
 		Name: g.name, HumanTier: served.Tier == policy.TierHuman, Value: value,
 		GitHubOwners: served.GitHubOwnerLogins(), GitHubNarrowing: narrowing,
 	})
 	if errors.Is(err, secrets.ErrMintNarrowingRefused) {
-		return "", err
+		return secrets.Minted{}, err
 	}
 	if err != nil {
 		// The minter's error names its class and why, never the stored value or a token, so the
 		// line is safe to log; the session sees the same words as MINT_FAILED.
 		slog.Error(MintFailedMessage, "name", g.name, "kind", kind, "class", secrets.MintErrorClass(err), "error", err)
-		return "", fmt.Errorf("%w: %w", ErrMintFailed, err)
+		return secrets.Minted{}, fmt.Errorf("%w: %w", ErrMintFailed, err)
 	}
 	return token, nil
 }
