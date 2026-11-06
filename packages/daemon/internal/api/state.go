@@ -533,9 +533,12 @@ type CheckView struct {
 	Last        bool           `json:"last"`
 }
 
-// CheckWakeView is what woke a production check's latest look: Kind names the cause (`merge` or
-// `bound`; a check whose look was woken before the daemon stopped reading production can hold one
-// of the causes that are gone), Detail the cause's own detail, and At when.
+// CheckWakeView is what woke a production check's latest look: Kind names the cause (`merge` for
+// the look the close opens, `check wake` for one the checking agent's own wake_at or the retry of
+// a look nobody reported starts, and `bound` for the last look; a check whose look was woken
+// before the daemon stopped reading production can hold one of the causes that are gone), Detail
+// the cause's own detail — for `check wake`, the summary the agent's report gave or the retry's
+// own words — and At when.
 type CheckWakeView struct {
 	Kind   string    `json:"kind"`
 	Detail string    `json:"detail"`

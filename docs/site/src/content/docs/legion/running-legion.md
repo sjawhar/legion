@@ -867,7 +867,7 @@ Closing the terminal leaves the project without one, and the daemon logs
   admission: 3 active, 1 waiting, cap 4; 9 issues
   blocked on Dispatch links: none
   roots waiting on a person: 1, 0 answered and waiting for a slot — WIDGETS-9 waits on ask 7f3c2a10, unanswered
-  open production checks: 1; the oldest, WIDGETS-12 #42 at 4b7d2a1, look 1 woken by merge at 2026-10-03T10:15:02Z, next look 2026-10-03T14:15:02Z
+  open production checks: 1; the oldest, WIDGETS-12 #42 at 4b7d2a1, worked by the tester, look 1 woken by merge at 2026-10-03T10:15:02Z, next look 2026-10-03T14:15:02Z
   pending Dispatch status writes: none
   held lifecycle rows: none
   claims nothing will wake: none
@@ -884,10 +884,13 @@ Closing the terminal leaves the project without one, and the daemon logs
   idle.
 
   The `open production checks` line counts the closed issues whose production check is still
-  open and names the oldest: its pull request, merge commit, which look it is on, what woke that
-  look (`merge`, `check wake` — the time the checking agent named for itself, or the retry of a
-  look nobody reported — or `bound`) and when, and when its next look is due (`none` when no
-  check is open).
+  open and names the oldest: its pull request, merge commit, the role working it, which look it
+  is on, what woke that look (`merge`, `check wake` — the time the checking agent named for
+  itself, or the retry of a look nobody reported — or `bound`) and when, and when its next look
+  is due (`none` when no check is open).
+  The role is on the line because a check opened before the release that gave the project
+  `production_check` is worked by the implementer, and one opened after it by the role that
+  setting names.
 
   The `webhook App missing` lines name each served repository Dispatch's GitHub App is not known
   to be installed on, one line each with why (`webhook App missing on <repo>: <reason>`), or say

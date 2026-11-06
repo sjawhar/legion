@@ -41,7 +41,7 @@ flowchart LR
   merger --> ready["READY on<br/>the issue"]
   ready --> merge["The daemon submits the merge;<br/>the repository's rules land it"]
   merge --> done["The merge<br/>closes the issue"]
-  done --> production["Production check<br/>(the implementer, on the pull request)"]
+  done --> production["Production check<br/>(the role production_check names, on the pull request)"]
 ```
 
 ## Where to go next

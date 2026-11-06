@@ -727,8 +727,9 @@ const (
 	MergeabilityConflicting Mergeability = "CONFLICTING"
 )
 
-// ProductionCheck is an issue's production check: the work after the close in which the
-// implementer drives the merged change in production and reports what it saw. There is one record
+// ProductionCheck is an issue's production check: the work after the close in which the role the
+// project's `production_check` named at the open, which Role records, drives the merged change in
+// production and reports what it saw. There is one record
 // per issue, opened at the merge; a later merge of the same issue — a rerun's, after a re-entry or
 // a reopen inside the linger closed the first — replaces it (workflow.openCheck) and counts its
 // looks from one again, so OpenedAt is the check instance's identity (ID): what tells the two
@@ -795,7 +796,7 @@ func (c ProductionCheck) NamedBy(openedAt time.Time) bool {
 type CheckOutcome string
 
 const (
-	// CheckRecorded is a look's pass: the implementer drove the change in production and
+	// CheckRecorded is a look's pass: the check's own role drove the change in production and
 	// recorded it on the pull request.
 	CheckRecorded CheckOutcome = "recorded"
 	// CheckDefect is a look's fail: the change misbehaved in production, asked about in a Dispatch ask.

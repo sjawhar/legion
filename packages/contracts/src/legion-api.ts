@@ -198,8 +198,11 @@ const legionSlotView = z.object({
 });
 
 /** `api.CheckWakeView` — what woke a production check's latest look: `kind` names the cause
- * (`merge` or `bound`; a check whose look was woken before the daemon stopped reading production
- * can hold one of the causes that are gone), `detail` the cause's own detail, `at` when. */
+ * (`merge` for the look the close opens, `check wake` for one the checking agent's own `wake_at`
+ * or the retry of a look nobody reported starts, and `bound` for the last look; a check whose
+ * look was woken before the daemon stopped reading production can hold one of the causes that
+ * are gone), `detail` the cause's own detail — for `check wake`, the summary the agent's report
+ * gave or the retry's own words — `at` when. */
 const legionCheckWakeView = z.object({
   kind: nonEmptyString,
   detail: z.string(),

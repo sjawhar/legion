@@ -1854,7 +1854,7 @@ func (r *outbox) linger(ctx context.Context, row record.OutboxRow, payload recor
 // at the look the row names, with that look open, and the issue out of the workflow. A check closed
 // since (a report, its last look), a check a later merge replaced, a look its bound or a hold ended,
 // a later look's start, or an issue running again (reopened inside its linger since the row was
-// queued: a look would resume the implementer and relaunch the Sandbox under the run; the look ends
+// queued: a look would resume the check's own role and relaunch the Sandbox under the run; the look ends
 // at its own bound) leave the row nothing to start, and it finishes without acting, logged with why.
 func (r *outbox) checkLookHolds(ctx context.Context, row record.OutboxRow, payload record.SuperviseRequest, issue record.Issue) (*record.ProductionCheck, error) {
 	check, err := r.productionCheck(ctx, row.Issue)
@@ -1882,16 +1882,16 @@ func (r *outbox) checkLookHolds(ctx context.Context, row record.OutboxRow, paylo
 	return nil, nil
 }
 
-// checkLookHeld is a check start that met an operator's suspension of the implementer
+// checkLookHeld is a check start that met an operator's suspension of the check's own role
 // (supervise.Claim.RuleHolds): a phase start waits for the operator's resume, but a look cannot
-// run while the operator holds the implementer, and its bound would end it anyway, so the look
+// run while the operator holds that role, and its bound would end it anyway, so the look
 // ends now as one nobody reported (intake.CheckLookEnded, cause `operator hold`, of check, the
 // one checkLookHolds read) and the row finishes without acting. The event is the issue, the check
 // (record.ProductionCheck.ID) and the look: the same look held twice is one fact, and a later
 // check's look 1 another than the replaced check's.
 func (r *outbox) checkLookHeld(ctx context.Context, row record.OutboxRow, payload record.SuperviseRequest, check record.ProductionCheck) error {
 	r.log.Info("production check start finishes without acting", "row", row.ID, "issue", row.Issue, "look", payload.CheckLook,
-		"why", "the operator suspended the implementer; the look ends")
+		"why", "the operator suspended the check's role; the look ends")
 	if _, err := intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("check-look-hold:%s:%s:%d", row.Issue, check.ID(), payload.CheckLook),
 		intake.CheckLookEnded{Issue: row.Issue, Look: payload.CheckLook, Cause: "operator hold", OpenedAt: check.OpenedAt}, r.handlers...); err != nil {
 		return fmt.Errorf("end look %d of %s's production check on the operator's hold: %w", payload.CheckLook, row.Issue, err)

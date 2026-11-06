@@ -734,8 +734,11 @@ func openChecks(issues map[string]api.Issue) []issueCheck {
 }
 
 // checksSummary is the one line an operator reads for the production checks still open: how many,
-// and the oldest — its issue, pull request and merge commit, which look it is on, what woke that
-// look and when, and when its next look is due.
+// and the oldest — its issue, pull request and merge commit, the role working it, which look it
+// is on, what woke that look and when, and when its next look is due. The role is on the line
+// because a check opened before the release that gave the project `production_check` carries the
+// implementer, and one opened after it the role that setting names, and an operator reading the
+// oldest check cannot tell them apart otherwise.
 func checksSummary(checks []issueCheck) string {
 	if len(checks) == 0 {
 		return "open production checks: none"
@@ -752,8 +755,8 @@ func checksSummary(checks []issueCheck) string {
 	if wake := oldest.check.LastWake; wake != nil {
 		look += fmt.Sprintf(" woken by %s at %s", wake.Kind, wake.At.UTC().Format(time.RFC3339))
 	}
-	return fmt.Sprintf("open production checks: %d; the oldest, %s #%d at %s, %s, next look %s",
-		len(checks), oldest.issue, oldest.check.PullRequest, merge, look, oldest.check.NextWakeAt.UTC().Format(time.RFC3339))
+	return fmt.Sprintf("open production checks: %d; the oldest, %s #%d at %s, worked by the %s, %s, next look %s",
+		len(checks), oldest.issue, oldest.check.PullRequest, merge, oldest.check.Role, look, oldest.check.NextWakeAt.UTC().Format(time.RFC3339))
 }
 
 // issueRound is one update round an issue has open, and the claims in it, by role: the round a
