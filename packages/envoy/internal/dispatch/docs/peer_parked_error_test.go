@@ -63,7 +63,7 @@ func TestAPeerApplyErrorStillStoresWhatTheRoomParked(t *testing.T) {
 			room.Transact(typeParagraph(room, "seed"))
 			replica := service.keepReplica(room, room.OpenUpdateLog(), nil, nil)
 			instance := &roomInstance{}
-			replica.classify = func(logged crdt.LoggedUpdate, seq uint64, changed bool, asks func() map[string]struct{}) (bool, bool) {
+			replica.classify = func(logged crdt.LoggedUpdate, seq uint64, changed bool, asks func() map[string]struct{}) (bool, bool, bool) {
 				return service.classifyDrained("r", instance, logged, seq, changed, asks)
 			}
 			room.OnAfterTransaction(func(txn *crdt.Transaction) {

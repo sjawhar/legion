@@ -85,6 +85,10 @@ test("the injected dispatch-first context holds the blocker and accepted-request
 // The three Dispatch skills are read by every session with Dispatch, so their length is a cost on
 // each one. Every file of the three staged skills counts, frontmatter included, as `wc -w` counts:
 // whitespace-separated tokens.
+//
+// The budget does not move: a rule that must go in is paid for by cutting the lines that duplicate
+// another skill or say what the new rule says (2026-11-03, "The conversation", which the three
+// skills made room for at 1,998 words).
 test("the three Dispatch skills total fewer than 2,000 words", () => {
   const words = ["dispatch", "dispatch-first", "dispatch-writing-specs"]
     .flatMap((skill) => files(path.join(staged, skill)))

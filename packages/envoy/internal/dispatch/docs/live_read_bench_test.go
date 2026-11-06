@@ -219,7 +219,7 @@ func BenchmarkKeystrokeBesideReads(b *testing.B) {
 // keystroke it rides on, whose latency there is measured with the hook in it.
 //
 // The room is residentRoomDocument's, a document of a room's shape at the same size
-// (room_heap_test.go, residentRoomMarkdown). benchmarkLiveDocument, which
+// (room_heap_test.go, roomMarkdownOfSize). benchmarkLiveDocument, which
 // BenchmarkKeystrokeBesideReads types into, is a document a room holds as well: its paragraphs run
 // on in words, and its room publishes a measurement for the hook to weigh, 537,191 bytes before
 // the benchmark's first keystroke. What the hook costs turns on the measurement and the update, not

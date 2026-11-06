@@ -415,6 +415,19 @@ func (b *roomBudget) closeServerRoom() {
 	b.opening = ""
 }
 
+// opened reports whether the opening still names room: the server's own work that booked it is
+// inside the room it opened, so a close of that room is premature however empty the room's state
+// reads (Service.closeIfOpenedOverBudget). That work records what holds the room inside its own
+// Apply, after the load that charges and marks the room, and ygo's hooks take and release the
+// room's state in between - the awareness relay's RoomActivated runs inside getOrCreateRoom, a
+// load ahead of every caller's callback - so the state alone cannot tell a room its opener has
+// let go of from one its opener has not reached yet.
+func (b *roomBudget) opened(room string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.opening == room
+}
+
 // load charges room's newly loaded instance at stateBytes, the bytes of the stored state the
 // load decoded, at both copies (roomWeight): the room's two documents hold that state, and what
 // the room commits after it the room's update observer adds as it drains

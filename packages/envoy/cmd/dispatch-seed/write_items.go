@@ -190,6 +190,22 @@ func (r *seedRun) askAnswer(ask askPlan, options []model.AskOption) model.AskAns
 // whose node id starts `ask/`. The view reads the two as edges to a comment_block and to an
 // ask_block, telling them apart by that prefix.
 func (r *seedRun) writeComments(ctx context.Context) error {
+	var hasAnswers bool
+	if err := r.database.Pool.QueryRow(ctx, `select exists (
+		select 1 from information_schema.columns
+		where table_schema = current_schema() and table_name = 'comments' and column_name = 'answers'
+	)`).Scan(&hasAnswers); err != nil {
+		return fmt.Errorf("read whether comments carries answers: %w", err)
+	}
+	columns := "id, issue_key, artifact_id, author, body, anchor, reply_to, resolved, created_at, ask_id, replies_to_block, edited_at"
+	parameters := "$1, $2, $3, $4::jsonb, $5, $6::jsonb, $7, $8, $9, $10, $11, $12"
+	argumentCount := 12
+	if hasAnswers {
+		columns += ", answers"
+		parameters += ", $13"
+		argumentCount++
+	}
+	insert := "insert into comments (" + columns + ") values (" + parameters + ")"
 	return r.inBatches(ctx, "comments", len(r.plan.comments), batchItems, func(ctx context.Context, tx pgx.Tx, from, to int) error {
 		mentions := newMentionRows("comment")
 		for index := from; index < to; index++ {
@@ -231,15 +247,16 @@ func (r *seedRun) writeComments(ctx context.Context) error {
 			if comment.ReplyTo >= 0 {
 				replyTo = &r.plan.comments[comment.ReplyTo].ID
 			}
+			answers := replyTo
+			if comment.RepliesTo >= 0 {
+				answers = &r.plan.comments[comment.RepliesTo].ID
+			}
 			if comment.Edited {
 				editedAt = comment.CreatedAt.Add(time.Hour)
 			}
-			if _, err := tx.Exec(ctx, `
-				insert into comments (id, issue_key, artifact_id, author, body, anchor, reply_to, resolved,
-				                      created_at, ask_id, replies_to_block, edited_at)
-				values ($1, $2, $3, $4::jsonb, $5, $6::jsonb, $7, $8, $9, $10, $11, $12)
-			`, comment.ID, issueKey, artifactID, seedActor, body, anchor, replyTo, index%5 == 0,
-				comment.CreatedAt, askID, repliesTo, editedAt); err != nil {
+			arguments := [...]any{comment.ID, issueKey, artifactID, seedActor, body, anchor, replyTo, index%5 == 0,
+				comment.CreatedAt, askID, repliesTo, editedAt, answers}
+			if _, err := tx.Exec(ctx, insert, arguments[:argumentCount]...); err != nil {
 				return fmt.Errorf("comment %s: %w", comment.ID, err)
 			}
 			if comment.Edited {

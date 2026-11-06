@@ -4529,11 +4529,18 @@ func (h *memoryHarness) storedStates(t *testing.T, states ...[]byte) []string {
 	ctx := context.Background()
 	versioned := docs.NewPgVersioned(h.database)
 	for index, state := range states {
+		// The head the replacement is judged against: RebuildTx replaces a history only while
+		// the head it reads is still the one its caller loaded, and the server is stopped here,
+		// so nothing moves it between this read and the write below.
+		loaded, err := versioned.Load(ctx, ids[index])
+		if err != nil {
+			t.Fatalf("read the head of state %d: %v", index, err)
+		}
 		tx, err := h.database.Pool.Begin(ctx)
 		if err != nil {
 			t.Fatalf("begin storing state %d: %v", index, err)
 		}
-		if _, err := versioned.RebuildTx(ctx, tx, ids[index], state); err != nil {
+		if _, err := versioned.RebuildTx(ctx, tx, ids[index], loaded.Version, state); err != nil {
 			_ = tx.Rollback(ctx)
 			t.Fatalf("store state %d, %d bytes: %v", index, len(state), err)
 		}
@@ -4590,11 +4597,18 @@ func (h *memoryHarness) agentRewrittenDocument(t *testing.T) string {
 	setup.stop(t)
 	state := h.storedState(t, artifactID)
 	ctx := context.Background()
+	versioned := docs.NewPgVersioned(h.database)
+	// The head the replacement is judged against (see storeHistory above): the server is stopped
+	// here, so nothing moves it between this read and the write below.
+	loaded, err := versioned.Load(ctx, artifactID)
+	if err != nil {
+		t.Fatalf("read the head of the agent-rewritten document: %v", err)
+	}
 	tx, err := h.database.Pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin re-storing the agent-rewritten document's state: %v", err)
 	}
-	if _, err := docs.NewPgVersioned(h.database).RebuildTx(ctx, tx, artifactID, state); err != nil {
+	if _, err := versioned.RebuildTx(ctx, tx, artifactID, loaded.Version, state); err != nil {
 		_ = tx.Rollback(ctx)
 		t.Fatalf("re-store the agent-rewritten document's %d-byte state: %v", len(state), err)
 	}

@@ -56,8 +56,9 @@ func describeError(err error) string {
 }
 
 // A room is driven through the corpus (driveCorpusRooms), read at each point the driver compares
-// at: before the room's first transaction, when the replica holds no state and both reads take
-// their copy from the room itself, and after each of its browser edits.
+// at: before the room's first transaction, when the replica holds no state and the read point
+// takes its copy from the room itself and starts the replica from it, which the tree read then
+// walks, and after each of its browser edits.
 func TestTheSettlementTreeReadMatchesTheReadPointsTreeAcrossTheCorpus(t *testing.T) {
 	reads, documents := driveCorpusRooms(t, func(at corpusRoom) {
 		if err := settlementTreeReads(t, at); err != nil {

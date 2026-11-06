@@ -192,7 +192,11 @@ func TestCommentAndAskReadsStandWhenTheAnchorDocumentCannotBeRead(t *testing.T) 
 // commit fails the room with a cause that holds context.Canceled. That cancellation is the
 // writer's, so a live read of the same document still answers 200 without the position, while a
 // read whose own request has gone away fails. The two reads meet the same error; only the request
-// differs.
+// differs. A read that fails because its own request ended is answered 503
+// DOC_SERVICE_UNAVAILABLE rather than 500: a call the server could not serve in time may be made
+// again, where a 500 names a fault of the server's and tells its caller not to (INFRA-179,
+// endedWithACancelledContext). The 200 above is unchanged, since the room's own state decides it
+// whatever cancelled anything.
 func TestAnAnchoredReadDecidesCancellationByItsOwnRequest(t *testing.T) {
 	writer, database, _ := newTestServer(t, testServerOptions{})
 	issue := createInteractionIssue(t, writer, "TEST", "Cancelled writer", "Intro.\n\nThe quoted line.\n")
@@ -235,8 +239,10 @@ func TestAnAnchoredReadDecidesCancellationByItsOwnRequest(t *testing.T) {
 		request.Header.Set("X-Dispatch-User", "alice")
 		cancelled := httptest.NewRecorder()
 		gone.ServeHTTP(cancelled, request)
-		if cancelled.Code != http.StatusInternalServerError || !strings.Contains(cancelled.Body.String(), `"code":"`+codeInternal+`"`) {
-			t.Fatalf("cancelled GET %s: status=%d body=%s, want 500 %s", read.path, cancelled.Code, cancelled.Body.String(), codeInternal)
+		if cancelled.Code != http.StatusServiceUnavailable ||
+			!strings.Contains(cancelled.Body.String(), `"code":"`+codeDocServiceUnavailable+`"`) {
+			t.Fatalf("cancelled GET %s: status=%d body=%s, want 503 %s", read.path, cancelled.Code,
+				cancelled.Body.String(), codeDocServiceUnavailable)
 		}
 	}
 }

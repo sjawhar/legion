@@ -7,4 +7,8 @@ The language-neutral source of truth for event envelopes, subjects, the Dispatch
 
 It holds the related-item check's result types (`Suggestions` with its outcome and search mode, `SearchAsk`, `DecisionBlockCheck`, `RelatedChecksReport`) and the `dispatch_related` spec, which runs the check on a text without writing anything.
 
+It also holds the refusal codes the server and every client must spell alike, among them `DISPATCH_SIGN_IN_REQUIRED` (`SIGN_IN_REQUIRED`), the `403` for a write by an access token the secrets broker issued that names a session and a service but no person: `bun run gen:go` writes it into the Go package as `contracts.DispatchSignInRequired`, as it does `DISPATCH_LOGIN_CHANGED`, so the server's refusal and a client's reading of it cannot drift apart.
+
 Its `fixtures/daemon-api/` goldens are the daemon's own state answer, written by `packages/daemon/internal/api`'s golden test: `settings.repository_renames` is among them, the `{from, to}` pairs a deployment tells the daemon to treat as one repository, `[]` when it configures none. `src/legion-api.ts`'s `legionSettings` stays loose, so a new settings key needs no schema change.
+
+`src/legion-api.ts`'s `legionIssue` is a `z.strictObject`, so the state's memory fields are mirrored there: `memoryGroup` (`memory` or `none`), `memoryDrawMode` (`off`, `on` or `random`) and `memoryDrawnAt`, each optional and absent together while nothing has drawn for the issue's tree (daemon API contract 49). The `memory` block a project's settings carry needs no schema change, since `legionSettings` stays loose, and the `fixtures/daemon-api/` goldens carry both.

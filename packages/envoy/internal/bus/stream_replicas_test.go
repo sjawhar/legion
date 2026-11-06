@@ -33,6 +33,16 @@ func startClusterJetStream(t *testing.T) (*testnats.Cluster, nats.JetStreamConte
 	return cluster, cluster.JetStream(t)
 }
 
+// clusterConn is a connection to cluster, closed when the test ends: EnsureKeyValue and
+// OpenKeyValue take the connection their bucket's jetstream handle is opened on (KeyValue), which
+// a JetStream context alone cannot name.
+func clusterConn(t *testing.T, cluster *testnats.Cluster) *nats.Conn {
+	t.Helper()
+	conn := testnats.Connect(t, cluster.URL())
+	t.Cleanup(conn.Close)
+	return conn
+}
+
 // startOnCluster runs a start of a deployed program on cluster: ConnectOwningStream with options.
 func startOnCluster(t *testing.T, cluster *testnats.Cluster, options ...ConnectOption) *Client {
 	t.Helper()
@@ -172,7 +182,8 @@ func TestAStartRaisesAnR1StreamToThreeCopiesKeepingItsMessagesAndMovingItsConsum
 // changes nothing else about the bucket's stream, whatever else the opener's configuration says.
 // OpenKeyValue, the rebuild path, raises nothing, and a bucket is never lowered.
 func TestEnsureKeyValueRaisesAnR1BucketToThreeCopiesChangingNothingElse(t *testing.T) {
-	_, js := startClusterJetStream(t)
+	cluster, js := startClusterJetStream(t)
+	conn := clusterConn(t, cluster)
 	const bucket = "envoy_raise_test"
 	created, err := js.CreateKeyValue(&nats.KeyValueConfig{
 		Bucket:      bucket,
@@ -192,14 +203,14 @@ func TestEnsureKeyValueRaisesAnR1BucketToThreeCopiesChangingNothingElse(t *testi
 	before := testnats.AwaitSettledStream(t, js, "KV_"+bucket)
 
 	counting := &countingJetStream{JetStreamContext: js}
-	if _, err := OpenKeyValue(counting, bucket); err != nil {
+	if _, err := OpenKeyValue(conn, counting, bucket); err != nil {
 		t.Fatalf("open the bucket for a rebuild: %v", err)
 	}
 	if writes := counting.written(); len(writes) != 0 {
 		t.Fatalf("OpenKeyValue wrote %v, want nothing", writes)
 	}
 
-	kv, err := EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: bucket, TTL: 7 * 24 * time.Hour, Storage: nats.FileStorage, Replicas: 3})
+	kv, err := EnsureKeyValue(conn, js, &nats.KeyValueConfig{Bucket: bucket, TTL: 7 * 24 * time.Hour, Storage: nats.FileStorage, Replicas: 3})
 	if err != nil {
 		t.Fatalf("ensure the bucket at three copies: %v", err)
 	}
@@ -218,7 +229,7 @@ func TestEnsureKeyValueRaisesAnR1BucketToThreeCopiesChangingNothingElse(t *testi
 		t.Fatalf("get after the raise = %v, %v; want value", entry, err)
 	}
 
-	if _, err := EnsureKeyValue(counting, &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 1}); err != nil {
+	if _, err := EnsureKeyValue(conn, counting, &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 1}); err != nil {
 		t.Fatalf("ensure the bucket at one copy: %v", err)
 	}
 	if writes := counting.written(); len(writes) != 0 {
@@ -405,7 +416,7 @@ func TestTwoStartsRaisingOneStreamAtOnceBothSucceed(t *testing.T) {
 	cluster, js := startClusterJetStream(t)
 	startOnCluster(t, cluster, WithReplicas(1))
 	const bucket = "envoy_race_test"
-	if _, err := EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 1}); err != nil {
+	if _, err := EnsureKeyValue(clusterConn(t, cluster), js, &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 1}); err != nil {
 		t.Fatalf("create the R1 bucket: %v", err)
 	}
 
@@ -421,7 +432,7 @@ func TestTwoStartsRaisingOneStreamAtOnceBothSucceed(t *testing.T) {
 				return
 			}
 			defer client.Close()
-			_, errs[i] = EnsureKeyValue(client.JS(), &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 3})
+			_, errs[i] = EnsureKeyValue(client.Conn, client.JS(), &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 3})
 		}()
 	}
 	wg.Wait()
@@ -444,7 +455,7 @@ func TestARefusedRaiseNamesTheReplicaSetting(t *testing.T) {
 	cluster, js := startClusterJetStream(t)
 	startOnCluster(t, cluster, WithReplicas(1))
 	const bucket = "envoy_refused_test"
-	if _, err := EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 1}); err != nil {
+	if _, err := EnsureKeyValue(clusterConn(t, cluster), js, &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 1}); err != nil {
 		t.Fatalf("create the R1 bucket: %v", err)
 	}
 
@@ -457,7 +468,7 @@ func TestARefusedRaiseNamesTheReplicaSetting(t *testing.T) {
 	if !strings.HasPrefix(err.Error(), ReplicasEnvVar+"=5: ") || !errors.As(err, &apiErr) {
 		t.Fatalf("start error = %q, want the server's refusal naming %s=5", err, ReplicasEnvVar)
 	}
-	_, err = EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 5})
+	_, err = EnsureKeyValue(clusterConn(t, cluster), js, &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 5})
 	if want := "raise KV_" + bucket + ": " + ReplicasEnvVar + "=5: "; err == nil || !strings.HasPrefix(err.Error(), want) || !errors.As(err, &apiErr) {
 		t.Fatalf("raise the bucket to five copies = %v, want the server's refusal starting %q", err, want)
 	}
@@ -475,7 +486,7 @@ func TestOneServerStoppedAStartOfAThreeCopyDeploymentWritesNothing(t *testing.T)
 	cluster, js := startClusterJetStream(t)
 	startOnCluster(t, cluster, WithReplicas(3), WithStreamMaxBytes(testStreamMaxBytes))
 	const bucket = "envoy_stopped_test"
-	if _, err := EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 3}); err != nil {
+	if _, err := EnsureKeyValue(clusterConn(t, cluster), js, &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 3}); err != nil {
 		t.Fatalf("create the bucket: %v", err)
 	}
 	testnats.AwaitSettledStream(t, js, Stream)
@@ -494,14 +505,14 @@ func TestOneServerStoppedAStartOfAThreeCopyDeploymentWritesNothing(t *testing.T)
 	if err := ensureStreamWithConfig(counting, &cfg); err != nil {
 		t.Fatalf("ensure the stream with one server stopped: %v", err)
 	}
-	if _, err := EnsureKeyValue(counting, &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 3}); err != nil {
+	if _, err := EnsureKeyValue(clusterConn(t, cluster), counting, &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 3}); err != nil {
 		t.Fatalf("ensure the bucket with one server stopped: %v", err)
 	}
 	if writes := counting.written(); len(writes) != 0 {
 		t.Fatalf("a start with one server stopped wrote %v, want nothing", writes)
 	}
 
-	_, err := EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: "envoy_new_test", Storage: nats.FileStorage, Replicas: 3})
+	_, err := EnsureKeyValue(clusterConn(t, cluster), js, &nats.KeyValueConfig{Bucket: "envoy_new_test", Storage: nats.FileStorage, Replicas: 3})
 	if err == nil || !strings.HasPrefix(err.Error(), ReplicasEnvVar+"=3: ") {
 		t.Fatalf("create a three-copy bucket with one server stopped = %v, want a refusal naming %s=3", err, ReplicasEnvVar)
 	}
@@ -572,7 +583,7 @@ func TestASecondStartOnASingleServerWritesNothing(t *testing.T) {
 	}
 	t.Cleanup(client.Close)
 	const bucket = "envoy_single_test"
-	if _, err := EnsureKeyValue(client.JS(), &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 1}); err != nil {
+	if _, err := EnsureKeyValue(client.Conn, client.JS(), &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 1}); err != nil {
 		t.Fatalf("create the bucket: %v", err)
 	}
 	counting := &countingJetStream{JetStreamContext: client.JS()}
@@ -580,7 +591,7 @@ func TestASecondStartOnASingleServerWritesNothing(t *testing.T) {
 	if err := ensureStreamWithConfig(counting, &cfg); err != nil {
 		t.Fatalf("second start: %v", err)
 	}
-	if _, err := EnsureKeyValue(counting, &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 1}); err != nil {
+	if _, err := EnsureKeyValue(client.Conn, counting, &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 1}); err != nil {
 		t.Fatalf("second open of the bucket: %v", err)
 	}
 	if writes := counting.written(); len(writes) != 0 {

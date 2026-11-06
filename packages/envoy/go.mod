@@ -1,6 +1,6 @@
 module github.com/sjawhar/envoy
 
-go 1.27.1
+go 1.27.3
 
 require (
 	authelia.com/provider/oauth2 v0.3.3
@@ -136,9 +136,11 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260706201446-f0a921348800 // indirect
 )
 
-// The sjawhar/ygo fork is upstream ygo v1.55.0, through upstream main 510c2cf5, plus fixes, each
-// carried until upstream ships it; its release notes list every member with its upstream pull
-// request. Thirteen wait in open upstream pull requests: pre-integration refusals change nothing,
+// The sjawhar/ygo fork keeps the upstream module path; consume its published tag through a
+// remote versioned replacement. The fork is upstream ygo v1.55.0, through upstream main
+// 510c2cf5, plus fixes, each carried until upstream ships it; RELEASE_NOTES.md in the tagged
+// fork lists every member with its upstream pull request. Thirteen wait in open upstream pull
+// requests: pre-integration refusals change nothing,
 // and a partly applied update relays the bytes the room integrated and parked (#340, which
 // replaces #334, #341, #344, #345, #352, #356 and #357); when a non-local transaction advances a
 // document's own client clock, the document takes a new client ID at commit, so every write fork
@@ -170,10 +172,11 @@ require (
 // room is that room's replica cloned (warmFork, forkPoint). Server.OnPeerUpdate, upstream ygo
 // #304, is in upstream v1.55.0; the document service sets it to weigh each browser's update
 // (weighPeerUpdate).
-// v1.55.1-sami.6 adds what this branch's memory work is built on: Doc.StructCount, the per-apply
+// v1.55.1-sami.7 adds what this branch's memory work is built on: Doc.StructCount, the per-apply
 // ApplyBudget (Decoded, Structs, Bytes) with its rollback, WithAllowedRoots as a containment rule
 // over everything an apply adds or deletes, RefusedUpdateError's counts, ParseUpdateMeta and
 // ErrPendingCap, which together replaced 899 lines of update decoder in this package
-// (dispatch://INFRA-179). It also brings sami.2's and sami.3's breaking changes with it:
-// Content.Len answers uint64 and Content.Splice takes one.
-replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.55.1-sami.6
+// (dispatch://INFRA-179), and the linear state handover split this branch's write path needs. It
+// also brings sami.2's and sami.3's breaking changes with it: Content.Len answers uint64 and
+// Content.Splice takes one.
+replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.55.1-sami.7

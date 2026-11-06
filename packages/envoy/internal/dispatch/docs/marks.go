@@ -150,7 +150,11 @@ func markQuoteInTxn(txn *crdt.Transaction, fragment *crdt.YXmlFragment, doc *pmd
 // room looked up again once that Apply returned can have been evicted in between. The wait ends
 // with one last read rather than on the subscription alone, so a mark written into a room
 // instance that replaced the subscribed one - which another process's eviction can leave behind -
-// is still found.
+// is still found. Each look reads docTree, which is never older than the stored head: a mark a
+// browser on another process placed and that process stored is found at once, from the store
+// while this room's catch-up has not applied it. One stored after a look wakes the next look
+// through the room's update, a catch-up batch (roomCatchUps) when another process stored it, or a
+// browser's update on this process.
 //
 // It loads a room for a document none holds only while the room budget has an opening for it
 // (roomBudget.openServerRoom), since a burst of these - one for each mark a swarm of agents
@@ -672,6 +676,9 @@ func loadAnchorRefreshedCommentPayload(ctx context.Context, tx pgx.Tx, id string
 		return model.CommentEventPayload{}, fmt.Errorf("load refreshed comment %q artifact: %w", id, err)
 	}
 	payload.Comment = comment
+	// A body is bounded block by block, so it can be longer than one event carries: the event
+	// takes its first part and says so, and a reader gets the rest from the comment itself.
+	payload.Body, payload.BodyTruncated = model.EventBody(comment.Body)
 	return payload, nil
 }
 

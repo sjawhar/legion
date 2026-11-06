@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
@@ -78,13 +79,15 @@ func nearACap(ctx context.Context, doc *crdt.Doc) (why string, near bool, err er
 // browser's edit is refused by the room's totals, and only a rebuild leaves it small. A write
 // that only deletes can land, since a delete range splits an item only where one of its ends
 // falls inside that item, so a range covering whole items splits none of them and adds no struct
-// (sjawhar/ygo v1.55.1-sami.1, crdt/yarray.go:829-846), and it leaves the state as large as it
+// (sjawhar/ygo v1.55.1-sami.7, crdt/yarray.go:829-846), and it leaves the state as large as it
 // was: the document's own text is what a trim shortens, not its history. Supplied markdown does
 // not widen this: a history further from both caps is refused with or without it, and is trimmed
 // by a write.
 //
 // Every refusal comes before the first write: a room resident in this server whose document is far
-// from both caps, a history that loads and is not near a cap, a closed issue (for supplied
+// from both caps, a room resident in another envoy-dispatch process (a holds query,
+// roomQueries.ask), a history that loads and is not near a cap, a history another rebuild or an
+// append moved past the one this rebuild loaded (RebuildTx), a closed issue (for supplied
 // markdown, which changes the document), and markdown that is not a Proof document, drops an open
 // ask block, or introduces a block pointer at a block the attribute may not name
 // (refuseBlockPointers, against the latest version). Supplied markdown is caller text: it is
@@ -147,12 +150,15 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	// fails on it, since it cannot load, or, once the rebuild commits, reads the rebuilt head:
 	// versions only increase, so its room holds the rebuilt update and none it would mistake for it.
 	//
-	// This check is this server's rooms alone, and that is all it can be: the other
-	// envoy-dispatch process's rooms are not in this server's. What covers them is the stale-room
-	// gate. RebuildTx replaces the whole history with one update at head+1, so an instance over
-	// there no longer stands at the head, and its next durable write is refused
-	// (ErrRoomBehindHead): its settlement closes the room (reloadRoomBehindHead), and its
-	// browser's append fails it outright, and either way the reload reads the rebuilt document.
+	// The other envoy-dispatch processes' rooms are asked the same through a holds query below: a
+	// member that answers it holds a room of the document refuses the rebuild as this server's
+	// room does. A member that does not answer within the query's wait, or a room that loads
+	// there after it answered, is covered by room sync instead. RebuildTx replaces the whole
+	// history with one update at head+1 and announces it, so an instance over there finds its
+	// stored history replaced (historyReplaced): its catch-up closes and reloads the room
+	// (roomCatchUps.closeReplaced), and until then its settlement and its browser's append are
+	// refused (ErrRoomBehindHead) and lead to the same close, and the reload reads the rebuilt
+	// document.
 	if live := s.srv.GetDoc(artifactID); live != nil {
 		// The check decodes the room's whole state, so it waits for its grant of the copy-heap
 		// bound within this request (nearACap): a wait this request ends leaves the rebuild to
@@ -177,7 +183,16 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 			return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: document %s is being written in this server; retry", ErrServiceUnavailable, artifactID)
 		}
 	}
-	history, why, retired, err := s.rebuildSource(ctx, artifactID)
+	answers, _, err := s.roomQueries.ask(ctx, tx, artifactID, roomQueryHolds)
+	if err != nil {
+		return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: ask the other processes whether they hold the document: %v", ErrServiceUnavailable, err)
+	}
+	for _, answer := range answers {
+		if answer.holds {
+			return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: document %s is live in another server process; close its editors and retry two minutes later, or replace it from markdown instead", ErrDocumentLive, artifactID)
+		}
+	}
+	history, loaded, why, retired, err := s.rebuildSource(ctx, artifactID)
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, err
 	}
@@ -210,7 +225,7 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, err
 	}
-	if err := pmdoc.AskContentError(tree); err != nil {
+	if err := validateWrittenAskBlocks(tree); err != nil {
 		return RebuildReport{}, VersionResult{}, &ErrInvalidAskBlock{Reason: err}
 	}
 	if err := s.refuseDroppedAskBlocks(ctx, artifactID, tree); err != nil {
@@ -263,7 +278,11 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 		return RebuildReport{}, VersionResult{}, fmt.Errorf("seed rebuilt document tree: %w", err)
 	}
 
-	report, err := s.persistence.RebuildTx(ctx, tx, artifactID, seed)
+	// RebuildTx replaces the history only if its head is still the one loaded above, which is the
+	// history validated as one that cannot load: a second rebuild of the document on another
+	// process that loaded the same history waits on the owner row above until this one commits,
+	// then finds the head moved and is refused.
+	report, err := s.persistence.RebuildTx(ctx, tx, artifactID, loaded, seed)
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, err
 	}
@@ -314,21 +333,22 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 }
 
 // rebuildSource is what a rebuild of artifactID starts from: the stored history decoded (nil for
-// one that does not decode), why it must be rebuilt - how near a cap it stands (nearACap), or the
-// decode's refusal - and the clients it retires. A history that loads and stands near no cap is
-// ErrDocumentLoads. The read's fold, its decode (loadDecodedHistory) and the check's re-scan of
-// it run under one slot of the pod's load concurrency, whose wait ends with ctx, held here
+// one that does not decode), the version that history stood at, which RebuildTx replaces only
+// while the head is still it, why it must be rebuilt - how near a cap it stands (nearACap), or
+// the decode's refusal - and the clients it retires. A history that loads and stands near no cap
+// is ErrDocumentLoads. The read's fold, its decode (loadDecodedHistory) and the check's re-scan
+// of it run under one slot of the pod's load concurrency, whose wait ends with ctx, held here
 // rather than by the read, since the check runs inside it, and given back once the history is
 // the rebuild's.
-func (s *Service) rebuildSource(ctx context.Context, artifactID string) (*crdt.Doc, string, map[crdt.ClientID]uint64, error) {
+func (s *Service) rebuildSource(ctx context.Context, artifactID string) (*crdt.Doc, persistence.Version, string, map[crdt.ClientID]uint64, error) {
 	ctx, _, done := withLoadSlot(ctx)
 	defer done()
 	read, err := loadDecodedHistory(ctx, s.persistence, artifactID, s.maxPendingItems, nil)
 	if err != nil {
-		return nil, "", nil, fmt.Errorf("%w: load document before rebuild: %v", ErrServiceUnavailable, err)
+		return nil, 0, "", nil, fmt.Errorf("%w: load document before rebuild: %v", ErrServiceUnavailable, err)
 	}
 	if read.refused != nil {
-		return nil, read.refused.Error(), undecodableHistoryClients(read.loaded.Update), nil
+		return nil, read.loaded.Version, read.refused.Error(), undecodableHistoryClients(read.loaded.Update), nil
 	}
 	// An empty history decodes into no document at all (decodeStoredCopy); what a rebuild of it
 	// starts from is the empty document a room's load of it would hold.
@@ -338,12 +358,12 @@ func (s *Service) rebuildSource(ctx context.Context, artifactID string) (*crdt.D
 	}
 	why, near, err := nearACap(ctx, history)
 	if err != nil {
-		return nil, "", nil, fmt.Errorf("%w: weigh document %s before its rebuild: %v", ErrServiceUnavailable, artifactID, err)
+		return nil, 0, "", nil, fmt.Errorf("%w: weigh document %s before its rebuild: %v", ErrServiceUnavailable, artifactID, err)
 	}
 	if !near {
-		return nil, "", nil, fmt.Errorf("%w: document %s", ErrDocumentLoads, artifactID)
+		return nil, 0, "", nil, fmt.Errorf("%w: document %s", ErrDocumentLoads, artifactID)
 	}
-	return history, why, historyClients(history), nil
+	return history, read.loaded.Version, why, historyClients(history), nil
 }
 
 // rebuiltSeed writes tree into a fresh document, as encodeDocumentTree does, with the retired

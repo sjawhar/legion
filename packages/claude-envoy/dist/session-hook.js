@@ -13603,6 +13603,7 @@ function serviceSubjectLabel(subject) {
   }
   return subject;
 }
+var ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS = 20 * 60 * 1000;
 var MAX_ISSUE_BLOCKERS = 20;
 var ISSUE_TITLE_MAX = 1000;
 var PROJECT_NAME_MAX = 80;
@@ -13686,7 +13687,9 @@ var ArtifactReviewEventPayloadSchema = object({
   version: number2().int().optional(),
   actor: object({ kind: string2(), id: string2() }).passthrough().optional(),
   reason: string2().nullish(),
-  ask_id: string2().nullish()
+  ask_id: string2().nullish(),
+  content_sha256: string2().optional(),
+  content_sha256_source: _enum2(["insert", "backfill"]).optional()
 });
 var askEventPayloadFields = {
   id: string2().optional(),
@@ -13775,6 +13778,8 @@ var CommentEventPayloadSchema = object({
   project_key: string2().optional(),
   artifact_slug: string2().optional(),
   body: string2().optional(),
+  body_truncated: boolean2().optional(),
+  payload_omitted: boolean2().optional(),
   reply_to: string2().nullish(),
   ask_id: string2().nullish(),
   ask_question: string2().optional(),
@@ -13800,6 +13805,8 @@ var CommentEventPayloadSchema = object({
 var MessageEventPayloadSchema = object({
   id: string2().optional(),
   body: string2().optional(),
+  body_truncated: boolean2().optional(),
+  payload_omitted: boolean2().optional(),
   target: string2().nullish(),
   in_reply_to: string2().nullish(),
   reply_body: string2().optional(),
@@ -13926,14 +13933,37 @@ var AGENT_STREAM_LIMITS = {
   commandDescriptionChars: 200
 };
 // ../contracts/src/claim-holds.ts
-function claimHolds(claim, titles) {
+var HOLDING_OF = {
+  gone: "lapsed",
+  live: "holds",
+  unknown: "unknown",
+  unresponsive: "unresponsive"
+};
+function claimHolds(claim, titles, liveness = {}) {
   if (claim.actor.kind !== "session") {
     return "holds";
+  }
+  const state = liveness.holder_state;
+  if (state != null) {
+    return HOLDING_OF[state];
   }
   if (titles === undefined) {
     return "unknown";
   }
   return titles.has(claim.actor.id) ? "holds" : "lapsed";
+}
+function claimTakeableAt(liveness, lastSeen = undefined) {
+  if (liveness.takeable_at != null) {
+    return liveness.takeable_at;
+  }
+  if (liveness.holder_state !== "unresponsive") {
+    return null;
+  }
+  const seen = liveness.last_seen == null ? lastSeen : Date.parse(liveness.last_seen);
+  if (seen === undefined || !Number.isFinite(seen) || seen <= 0) {
+    return null;
+  }
+  return new Date(seen + ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS).toISOString();
 }
 // ../contracts/src/dispatch-href.ts
 function hasControlCharacter(value) {
@@ -14122,12 +14152,14 @@ function componentsArgument(z) {
   }).describe("Attach the issue to architecture components. Attach the root before decomposing it; children inherit unless they choose.");
 }
 var SPEC_WRITING_POINTER = "Write a spec as skill://dispatch-writing-specs says.";
-function imagesArgument(z, owner, cap) {
-  return z.array(z.string({ min: 1 }), { min: 1 }).describe(`Optional local picture files to show inline: PNG, JPEG, GIF or WebP (by their bytes, not their name), each at most 25 MiB. Each is uploaded to ${owner} and appended after a blank line as one ![<file name>](dispatch://\u2026@vN) line, in this order; those lines count toward ${cap}.`).optional();
+function imagesArgument(z, owner) {
+  return z.array(z.string({ min: 1 }), { min: 1 }).describe(`Optional local picture files to show inline: PNG, JPEG, GIF or WebP (by their bytes, not their name), each at most 25 MiB. Each is uploaded to ${owner} and appended after a blank line as one ![<file name>](dispatch://\u2026@vN) line, in this order; those lines count toward the bound Dispatch holds the text to, which it names in its refusal.`).optional();
 }
 var ASK_URGENCIES = ["low", "med", "high", "blocking"];
-var ASK_QUESTION_MAX = 2000;
-var DISPATCH_BODY_MAX = 32000;
+var DISPATCH_BLOCK_UNITS = 32000;
+var DISPATCH_ITEM_BLOCKS = 32768;
+var BODY_BLOCK_RULE = `Each block (a paragraph, list, quote, table or code block) holds at most ${DISPATCH_BLOCK_UNITS} ` + `characters and a body at most ${DISPATCH_ITEM_BLOCKS} blocks; Dispatch refuses a longer one and ` + "names it, and `dispatch limits` prints the bounds.";
+var ASK_BOUND_RULE = "Dispatch bounds an ask's question and its options together, refuses a longer one and names " + "the bound, and `dispatch limits` prints it. An ask is short and asks one thing; its reasoning " + "goes in the document, not in the question.";
 var DISPATCH_HANDOFF_BODY_MAX = 262144;
 var HANDOFF_PHASE_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
 var HANDOFF_PHASE_RULE_WORDS = "a lowercase letter, then up to 31 lowercase letters, digits or hyphens, such as implement";
@@ -14146,16 +14178,12 @@ function handoffProblem(value) {
     return HANDOFF_PHASE_RULE;
   if (typeof body !== "string")
     return;
-  const bytes = new TextEncoder().encode(body).length;
-  if (bytes > DISPATCH_HANDOFF_BODY_MAX) {
-    return `body is ${bytes - DISPATCH_HANDOFF_BODY_MAX} bytes over the ${DISPATCH_HANDOFF_BODY_MAX}-byte limit (${bytes}/${DISPATCH_HANDOFF_BODY_MAX})`;
-  }
   if (!isJsonObjectText(body)) {
     return 'body is not one JSON object: a handoff body is a JSON object such as {"schemaVersion":1}';
   }
   return;
 }
-var HANDOFF_RULE = `${HANDOFF_PHASE_RULE}; the body is one JSON object of at most ${DISPATCH_HANDOFF_BODY_MAX} bytes.`;
+var HANDOFF_RULE = `${HANDOFF_PHASE_RULE}; the body is one JSON object.`;
 var handoffValidation = {
   check: (value) => handoffProblem(value) === undefined,
   message: HANDOFF_RULE,
@@ -14178,7 +14206,12 @@ var ISSUE_STATUSES = [
   "retro",
   "done"
 ];
-var ISSUE_ROUTE_STATUSES = ["live", "no_holder", "unknown"];
+var ISSUE_ROUTE_STATUSES = [
+  "live",
+  "holder_unresponsive",
+  "no_holder",
+  "unknown"
+];
 var DOC_EDIT_OPS = [
   "replace",
   "delete",
@@ -14220,7 +14253,7 @@ var dispatchToolSpecs = [
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE),
       status: z.enum(ISSUE_STATUSES).describe("New lifecycle status.").optional(),
-      reason: z.string({ max: DISPATCH_BODY_MAX }).describe(`Required with status done, and only with it: why the issue is closing, at most ${DISPATCH_BODY_MAX} characters. Posted on the issue as a message before it closes.`).optional(),
+      reason: z.string().describe(`Required with status done, and only with it: why the issue is closing. Posted on the issue as a message before it closes. ${BODY_BLOCK_RULE}`).optional(),
       title: z.string({ min: 1, max: ISSUE_TITLE_MAX }).describe("Replacement title, at most 1,000 characters.").optional(),
       labels: z.array(z.string({ min: 1, max: 40 }), { max: 20 }).describe("Replacement label set, at most 20 labels of up to 40 characters; replaces every existing label.").optional(),
       priority: z.number({ int: true, min: 0, max: 3 }).nullable().optional().describe("Coarse priority: 0 is P0 (highest) through 3 is P3 (lowest); null clears it."),
@@ -14266,13 +14299,13 @@ var dispatchToolSpecs = [
         }
       ]
     },
-    description: "Open a to-do or permission only a human can give, or a decision that has no document to " + "live in. A question about the design an issue's document records is not this tool: write " + "it into that document as a decision block (dispatch doc-edit inserting an ask block at the " + "end of the section it concerns), at every phase, approved spec or not; the block reaches " + "the Inbox and its answer lands next to its context. Never give an ask an Approve option: a " + "document is approved through dispatch request-approval. Do not use this tool for a status " + "update or discussion; use dispatch message instead. Never create an issue to park a " + "question: the question is an ask on the issue it concerns. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " For an action only a human can perform, state what it changes and risks as constraints. " + "Anything that requires a human to do, including a credential or grant renewal, is an ask, " + "never a message. Measure what you can first, and put the measurement and the size of the " + "population it covers in the question; drop an option that cannot fix most of that " + "population, never offer it cut down, and keep an option not to act (Hold). Set urgency high " + "when your work halts on the answer, and keep working on everything else. " + "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". ` + `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters, ` + `the lines images appends included, and has at most 8 options. ${RELATED_CHECK_RESULT} ` + `An ask among the related items says whether it is answered, by whom and with which options. ${OWNER_REFERENCE}`,
+    description: "Open a to-do or permission only a human can give, or a decision that has no document to " + "live in. A question about the design an issue's document records is not this tool: write " + "it into that document as a decision block (dispatch doc-edit inserting an ask block at the " + "end of the section it concerns), at every phase, approved spec or not; the block reaches " + "the Inbox and its answer lands next to its context. Never give an ask an Approve option: a " + "document is approved through dispatch request-approval. Do not use this tool for a status " + "update or discussion; use dispatch message instead. Never create an issue to park a " + "question: the question is an ask on the issue it concerns. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " For an action only a human can perform, state what it changes and risks as constraints. " + "Anything that requires a human to do, including a credential or grant renewal, is an ask, " + "never a message. Measure what you can first, and put the measurement and the size of the " + "population it covers in the question; drop an option that cannot fix most of that " + "population, never offer it cut down, and keep an option not to act (Hold). Set urgency high " + "when your work halts on the answer, and keep working on everything else. " + "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". ` + `A quote anchor is pinned to its block. ${ASK_BOUND_RULE} The lines images appends count ` + `toward that bound, and an ask has at most 8 options. ${RELATED_CHECK_RESULT} ` + `An ask among the related items says whether it is answered, by whom and with which options. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
       artifact: z.string().describe("Project document artifact id, slug, or filename.").optional(),
       ref: z.string().describe("Optional dispatch:// reference (issue, document, block, message, or ask); appended to the question and rendered as a link.").optional(),
-      question: z.string({ max: ASK_QUESTION_MAX }).describe(`${ASK_QUESTION_CONTRACT} At most ${ASK_QUESTION_MAX} characters.`),
+      question: z.string().describe(`${ASK_QUESTION_CONTRACT} ${ASK_BOUND_RULE}`),
       options: z.array(z.object({
         label: z.string().describe("Selectable option label."),
         description: z.string().optional().describe("What this option costs.")
@@ -14284,7 +14317,7 @@ var dispatchToolSpecs = [
         quote: z.string().describe("Exact text the decision concerns."),
         occurrence: z.number({ int: true, min: 0 }).describe("Zero-based occurrence of the quote.").optional()
       }).describe("Optional document location for the question.").optional(),
-      images: imagesArgument(z, "the issue (or the project document's project)", `the ${ASK_QUESTION_MAX}-character question limit`)
+      images: imagesArgument(z, "the issue (or the project document's project)")
     }),
     validation: documentOwnerValidation(true)
   },
@@ -14307,7 +14340,7 @@ var dispatchToolSpecs = [
     description: "Edit an open question in place. Use it to correct or refine the same decision; retract the " + "old ask and open a new one when the decision itself changes. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " Previous text remains in the event log. Only the asking session can edit it; answered or " + "resolved asks cannot be edited. An ask that lives as an `ask` block in a document is written " + "in the document too, changing only the fields you name - pass urgency alone and the " + "question's wording, formatting, links and comment anchors are untouched - so the edit " + "writes a document version and closes a spec's design gate until that version is approved; " + "text the block cannot carry back unchanged is refused, naming the field - an option label " + 'containing ": ", the separator between a label and its description, is one example.',
     arguments: (z) => ({
       ask: z.string().describe("Ask id (uuid); an 8+ hex prefix unique among this session's own open asks works too."),
-      question: z.string({ max: ASK_QUESTION_MAX }).optional().describe(`${ASK_QUESTION_CONTRACT} Replaces the ask's question; at most ${ASK_QUESTION_MAX} characters.`),
+      question: z.string().optional().describe(`${ASK_QUESTION_CONTRACT} Replaces the ask's question. ${ASK_BOUND_RULE}`),
       options: z.array(z.object({
         label: z.string().describe("Selectable option label."),
         description: z.string().optional().describe("What this option costs.")
@@ -14359,7 +14392,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_comment",
     example: { issue: "DSP-1", body: "Looks good." },
-    description: "Add review feedback to an issue or project document quote, or reply to a question asked with dispatch ask. " + "Do not use it for an exact replacement; use " + `dispatch suggest instead. A quote anchor is pinned to its block. A reply under an open ask asks for clarification, not an answer: answer it with reply_to_ask, or reword the ask with dispatch edit-ask, rather than opening a second ask. Body is at most ${DISPATCH_BODY_MAX} characters, the lines images appends included. ${OWNER_REFERENCE}`,
+    description: "Add review feedback to an issue or project document quote, or reply to a question asked with dispatch ask. " + "Do not use it for an exact replacement; use " + `dispatch suggest instead. A quote anchor is pinned to its block. A reply under an open ask asks for clarification, not an answer: answer it with reply_to_ask, or reword the ask with dispatch edit-ask, rather than opening a second ask. ${BODY_BLOCK_RULE} The lines images appends count toward it. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -14367,11 +14400,11 @@ var dispatchToolSpecs = [
       ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
       quote: z.string().describe("Optional exact quoted document text.").optional(),
       occurrence: z.number({ int: true, min: 0 }).describe("Optional zero-based occurrence of quote.").optional(),
-      body: z.string({ max: DISPATCH_BODY_MAX }).describe(`Review comment, at most ${DISPATCH_BODY_MAX} characters.`),
+      body: z.string().describe(`Review comment. ${BODY_BLOCK_RULE}`),
       reply_to: z.string().describe("A comment id (uuid); replying to any comment in a thread continues that thread (an " + "ask's clarification thread included). A block reference to one block of the comment " + "(dispatch://KEY/comment/<id>#b-<block id>) replies to that comment and names the " + "passage the reply answers. To reply to an ask, use reply_to_ask with the ask id, or " + "with a reference to one of its parts, instead.").optional(),
       reply_to_ask: z.string().describe("Optional ask id to reply to, threading this comment under that question. A block " + "reference to one part of the ask (dispatch://KEY/ask/<id>#b-<part id>, the id an " + "option or the answer carries) threads under that ask and names the part the reply " + "answers. Mutually exclusive with reply_to.").optional(),
       turn: z.enum(["agent", "human"]).describe("Only with reply_to_ask: who holds the turn after this reply. agent: a progress note - " + "you keep the turn and the ask stays 'Waiting on agents' for the human; human (default): " + "you need the human to act - the ask returns to 'Waiting on you'. human does not " + "apply to an approval request a newer version moved: it stays with you until dispatch " + "request-approval hands it back at the current version.").optional(),
-      images: imagesArgument(z, "the issue (or the project document's project)", `the ${DISPATCH_BODY_MAX}-character body limit`)
+      images: imagesArgument(z, "the issue (or the project document's project)")
     }),
     validation: commentValidation
   },
@@ -14383,7 +14416,7 @@ var dispatchToolSpecs = [
       quote: "old wording",
       replace_with: "new wording"
     },
-    description: "Propose an exact replacement for quoted document text. Do not use it for general feedback; use " + `dispatch comment instead. Optional explanation is at most ${DISPATCH_BODY_MAX} characters. ${OWNER_REFERENCE}`,
+    description: "Propose an exact replacement for quoted document text. Do not use it for general feedback; use " + `dispatch comment instead. ${BODY_BLOCK_RULE} ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -14391,7 +14424,7 @@ var dispatchToolSpecs = [
       ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
       quote: z.string().describe("Exact document text to replace."),
       replace_with: z.string().describe("Replacement text; a CR LF or a lone carriage return in it is written as a line feed."),
-      body: z.string({ max: DISPATCH_BODY_MAX }).describe(`Optional rationale, at most ${DISPATCH_BODY_MAX} characters.`).optional(),
+      body: z.string().describe(`Optional rationale. ${BODY_BLOCK_RULE}`).optional(),
       occurrence: z.number({ int: true, min: 0 }).describe("Optional zero-based occurrence of quote.").optional()
     }),
     validation: documentOwnerValidation(true, true)
@@ -14399,12 +14432,12 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_message",
     example: { issue: "DSP-1", body: "Implementation started." },
-    description: "Post a note humans must read now: a reply to a human's message or a deliverable that landed. A to-do only a human can " + "complete is an ask (dispatch ask), so it reaches their inbox. Never progress or status updates - Dispatch is a high-signal " + "record, not a log. Not a design decision (write it as a decision block in the document) or document feedback (dispatch comment). " + "To answer a human's direct message to this session - one sent from the Agents page, which names no issue - pass that message's bare id as " + "in_reply_to and no issue; the reply lands in that conversation. Another call with the same in_reply_to and new text posts a follow-up, " + "threaded under this session's first reply; the same text again posts nothing. dispatch read --message <id> reads " + "that conversation back. " + "Every other message names its issue; keep --issue whenever the frame you answer gave one. A BTW, Aside or Steer " + "frame carries a reply_with command: answer with it, on that issue. On Oh My Pi an Agents-page Send or Aside " + "arrives as a user message: answer in the conversation, with no dispatch message. " + `Body is at most ${DISPATCH_BODY_MAX} characters, the lines images appends included. ${ISSUE_REFERENCE}`,
+    description: "Post a note humans must read now: a reply to a human's message or a deliverable that landed. A to-do only a human can " + "complete is an ask (dispatch ask), so it reaches their inbox. Never progress or status updates - Dispatch is a high-signal " + "record, not a log. Not a design decision (write it as a decision block in the document) or document feedback (dispatch comment). " + "To answer a human's direct message to this session - one sent from the Agents page, which names no issue - pass that message's bare id as " + "in_reply_to and no issue; the reply lands in that conversation. Another call with the same in_reply_to and new text posts a follow-up, " + "threaded under this session's first reply; the same text again posts nothing. dispatch read --message <id> reads " + "that conversation back. " + "Every other message names its issue; keep --issue whenever the frame you answer gave one. A BTW, Aside or Steer " + "frame carries a reply_with command: answer with it, on that issue. On Oh My Pi an Agents-page Send or Aside " + "arrives as a user message: answer in the conversation, with no dispatch message. " + `${BODY_BLOCK_RULE} The lines images appends count toward it. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(`${ISSUE_REFERENCE} Omit it only when in_reply_to answers a human's direct message to this session.`).optional(),
-      body: z.string({ max: DISPATCH_BODY_MAX }).describe(`Update text, at most ${DISPATCH_BODY_MAX} characters.`),
+      body: z.string().describe(`Update text. ${BODY_BLOCK_RULE}`),
       in_reply_to: z.string().describe("Optional message id or dispatch://KEY/message/<id> reference to reply to, threading " + "this message under it so the reply stays with the original in the Conversation. " + "A block reference to one block of the message (dispatch://KEY/message/<id>#b-<block id>) " + "replies to that message and names the passage the reply answers. " + "A bare id with no issue answers a human's direct message to this session; a " + "dispatch://KEY/message/<id> names the issue its message lives on, so that form is a " + "reply on that issue.").optional(),
-      images: imagesArgument(z, "the issue (a reply to a direct message: your own conversation, dispatch://agent/<your session id>)", `the ${DISPATCH_BODY_MAX}-character body limit`)
+      images: imagesArgument(z, "the issue (a reply to a direct message: your own conversation, dispatch://agent/<your session id>)")
     }),
     validation: messageValidation
   },
@@ -14539,7 +14572,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_read",
     example: { issue: "DSP-1" },
-    description: "Read an issue or document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " + "issue plus artifact (one of its documents), project plus artifact, or project alone, which lists the project's documents on no issue and nothing more; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). A document summary names its issue, reference, versions and approval. " + "An issue read lists every document, picture and file the issue holds under `Documents:`, each by slug, filename and kind. " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + "An issue whose spec marks requirements carries one `Coverage:` line per gap, `Coverage: R3 has no check` or " + "`Coverage: R3 has no plan task` (the second only once the issue has a plan document), counting the `check` and " + "`plan_task` blocks of every document of the issue and of its descendants; a spec that marks none reads " + "`Coverage: the spec marks no requirements`. Nothing is refused for a gap. " + `An issue read, and its dispatch://KEY/log, lists the issue's last ${DEFAULT_ISSUE_READ_EVENTS} events, oldest first; ` + "--events N lists the last N, and --all-events every one. " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "A block read prints `Block:`, `Type:` for a block of a document, `Document:`, every attribute a typed block carries " + "(a `check`'s serves, surface, run, when and negative_control; a `plan_task`'s serves and needs), `Changed in version:` " + "and `Text:`, then those two sections; a pinned one adds " + "the block's text at that version and whether it is unchanged, changed or removed since, and an absent block, unpinned, " + "reads `No block <id> in <document>.` " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " + "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch doc-read shows it again. " + OWNER_REFERENCE,
+    description: "Read an issue or document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " + "issue plus artifact (one of its documents), project plus artifact, or project alone, which lists the project's documents on no issue and nothing more; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). A document summary names its issue, reference, versions and approval. " + "An issue read lists every document, picture and file the issue holds under `Documents:`, each by slug, filename and kind. " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + "An issue whose spec marks requirements carries one `Coverage:` line per gap, `Coverage: R3 has no check` or " + "`Coverage: R3 has no plan task` (the second only once the issue has a plan document), counting the `check` and " + "`plan_task` blocks of every document of the issue and of its descendants; a spec that marks none reads " + "`Coverage: the spec marks no requirements`. Nothing is refused for a gap. " + `An issue read, and its dispatch://KEY/log, lists the issue's last ${DEFAULT_ISSUE_READ_EVENTS} events, oldest first; ` + "--events N lists the last N, and --all-events every one. " + "A comment reply chain names the comment each nested reply answers as `Answers: <comment id>`. " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "A block read prints `Block:`, `Type:` for a block of a document, `Document:`, every attribute a typed block carries " + "(a `check`'s serves, surface, run, when and negative_control; a `plan_task`'s serves and needs), `Changed in version:` " + "and `Text:`, then those two sections; a pinned one adds " + "the block's text at that version and whether it is unchanged, changed or removed since, and an absent block, unpinned, " + "reads `No block <id> in <document>.` " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " + "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch doc-read shows it again. " + OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -14603,7 +14636,7 @@ var dispatchToolSpecs = [
       label: z.string().describe("Optional label filter.").optional(),
       priority: z.array(z.number({ int: true, min: 0, max: 3 }).nullable(), { min: 1, max: 5 }).describe("Optional priority filter: one or more of 0 (P0, highest) through 3 (P3, lowest), and null " + "for an issue with no priority; an issue matching any listed value is returned.").optional(),
       updated_since: z.string().describe("Optional RFC3339 timestamp; only issues updated at or after it.").optional(),
-      route_status: z.enum(ISSUE_ROUTE_STATUSES).describe("Optional: only open issues whose route is in this state. live: a running session holds " + "the role or is the routed session. no_holder: nobody running holds the role, or the " + "session is not running, right now. unknown: the Envoy listener did not answer.").optional(),
+      route_status: z.enum(ISSUE_ROUTE_STATUSES).describe("Optional: only open issues whose route is in this state. live: a running session holds " + "the role or is the routed session. holder_unresponsive: that session has missed its " + "heartbeats without ending, so the route still reaches it and its messages wait. " + "no_holder: nobody running holds the role, or the session is gone, right now. " + "unknown: the Envoy listener did not answer.").optional(),
       limit: z.number({ int: true, min: 1, max: MAX_ISSUE_PAGE_LIMIT }).describe(`Maximum rows, 1-${MAX_ISSUE_PAGE_LIMIT}; default ${DEFAULT_ISSUE_PAGE_LIMIT}.`).optional(),
       offset: z.number({ int: true, min: 0 }).describe("Rows to skip before the page; nonnegative integer; default 0.").optional(),
       all: z.boolean().describe("Take every matching issue in one unpaged read, so no row is missed or repeated while " + "the list changes. Refused with limit or offset.").optional()
@@ -14662,7 +14695,14 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_whoami",
     example: {},
-    description: "Who Dispatch takes this session for: {session, owner, service, project}. session is the session Dispatch records your writes as. It is the session your credential proved, and the tool says so when that is not the session you run in. owner is the lowercase email of the person you act for, and is the first choice of assignee for issues you create. owner is null under the shared token. With a null owner, a create with no assignee falls back to the parent's assignee and then to the project's default assignee. service is the subject of the verified service-account token that authenticated you, or null. project is the one project key your credential may write, or null when it names none.",
+    description: "Who Dispatch takes this session for: {session, owner, service, project}. session is the session Dispatch records your writes as. It is the session your credential proved, and the tool says so when that is not the session you run in. owner is the lowercase email of the person you act for, and is the first choice of assignee for issues you create. owner is null under the shared token and under a broker token that names a service and no person. With a null owner, a create with no assignee falls back to the parent's assignee and then to the project's default assignee. service is the subject of the verified service-account token that authenticated you, or the fleet a broker token naming no person belongs to, or null. A broker token that names a service may read and is refused every write with SIGN_IN_REQUIRED, which names the command a person signs in on that machine with. project is the one project key your credential may write, or null when it names none.",
+    arguments: () => ({}),
+    strict: true
+  },
+  {
+    name: "dispatch_limits",
+    example: {},
+    description: "The bounds this Dispatch server holds a write to, read from the server itself: how long one block of a body may be and how many blocks a body may hold, how many options an ask may have and how long an ask's question and options are together, how long a body an event carries whole may be, and how many bytes a request, a document and a handoff body may hold. Dispatch refuses a text over a bound and names the block or the field it passed; no tool and no command cuts or refuses your text before the server reads it, so these numbers are what decides whether a write is taken.",
     arguments: () => ({}),
     strict: true
   },
@@ -15029,6 +15069,11 @@ function dedupeKeyNamesItsEvent(envelope) {
       return false;
   }
 }
+// ../contracts/src/envoy-session.ts
+var SESSION_HEARTBEAT_MS = 90000;
+var LISTENER_CALL_TIMEOUT_MS = 5000;
+var LISTENER_CALL_RETRY_DELAY_MS = 250;
+var LISTENER_CALL_ATTEMPTS = 2;
 // ../contracts/src/subject.ts
 var AGENT_TOPIC_PREFIX = "notifications.agent.";
 var ROLE_TOPIC_PREFIX = "notifications.role.";
@@ -16141,20 +16186,23 @@ function excerpt(text, token) {
 }
 
 class DispatchClient {
-  token;
   fetchImpl;
   writeRetry;
   #baseUrl;
   #resolvedIssues = new Map;
   #signal;
+  #credential;
   #madeAt;
-  constructor(baseUrl, token, fetchImpl = fetch, signal, writeRetry = DISPATCH_WRITE_RETRY) {
-    this.token = token;
+  constructor(baseUrl, credential, fetchImpl = fetch, signal, writeRetry = DISPATCH_WRITE_RETRY) {
     this.fetchImpl = fetchImpl;
     this.writeRetry = writeRetry;
+    this.#credential = credential;
     this.#baseUrl = baseUrl.replace(/\/+$/, "");
     this.#signal = requestSignal(signal);
     this.#madeAt = this.#now();
+  }
+  get token() {
+    return this.#credential.secret();
   }
   async issue(input) {
     const answer = await this.#jsonAnswer("POST", ["api", "v1", "issues"], input);
@@ -16270,6 +16318,9 @@ class DispatchClient {
   }
   async whoami() {
     return this.#json("GET", ["api", "v1", "whoami"]);
+  }
+  async limits() {
+    return this.#json("GET", ["api", "v1", "limits"]);
   }
   async inbox(assignee) {
     return this.#json("GET", ["api", "v1", "inbox"], undefined, { assignee });
@@ -16566,16 +16617,14 @@ class DispatchClient {
     return this.#response(method, url, response);
   }
   async#send(method, url, body, accept = "application/json", signal, callerKey) {
-    const headers = {
-      Accept: accept,
-      Authorization: `Bearer ${this.token}`
-    };
+    const headers = { Accept: accept };
+    let presented = await this.#credential.headers(method, url);
     if (body !== undefined)
       headers["Content-Type"] = body.type;
     if (method !== "POST" && method !== "PATCH") {
       return this.fetchImpl(url, {
         method,
-        headers,
+        headers: { ...headers, ...presented },
         signal: signal === undefined ? this.#signal : AbortSignal.any([this.#signal, signal]),
         ...body === undefined ? {} : { body: body.content }
       });
@@ -16596,7 +16645,10 @@ class DispatchClient {
       let answer;
       let thrown;
       try {
-        answer = await writeAnswer(await this.#attempt(url, method, headers, body, silenceMs), key);
+        if (attempt > 1)
+          presented = await this.#credential.headers(method, url);
+        const sent = { ...headers, ...presented };
+        answer = await writeAnswer(await this.#attempt(url, method, sent, body, silenceMs), key);
         if (answer.echoed)
           KEYED_LAYER_SEEN.set(this.#baseUrl, this.#now());
         if (!answer.again)
@@ -16696,9 +16748,10 @@ class DispatchClient {
   }
   async#probeKeyedLayer() {
     try {
-      const response = await this.fetchImpl(`${this.#baseUrl}/healthz`, {
+      const probe = `${this.#baseUrl}/healthz`;
+      const response = await this.fetchImpl(probe, {
         method: "GET",
-        headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
+        headers: { Accept: "application/json", ...await this.#credential.headers("GET", probe) },
         signal: AbortSignal.any([this.#signal, AbortSignal.timeout(KEY_LAYER_PROBE_MS)])
       });
       if (!isJson(response))
@@ -16894,6 +16947,529 @@ function parseDispatchRef(ref) {
 // ../envoy-client/src/dispatch-picture-tools.ts
 import { basename, resolve as resolvePath } from "path";
 
+// ../../node_modules/.bun/@toon-format+toon@4.1.1/node_modules/@toon-format/toon/dist/index.mjs
+var NULL_LITERAL = "null";
+var DELIMITERS = {
+  comma: ",",
+  tab: "\t",
+  pipe: "|"
+};
+var DEFAULT_DELIMITER = DELIMITERS.comma;
+function escapeString(value) {
+  return value.replace(/\\/g, `\\\\`).replace(/"/g, `\\"`).replace(/\n/g, `\\n`).replace(/\r/g, `\\r`).replace(/\t/g, `\\t`).replace(/[\u0000-\u001F]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+var FETCH_LINE = Symbol("fetch-line");
+function isBooleanOrNullLiteral(token) {
+  return token === "true" || token === "false" || token === "null";
+}
+function setOwnProperty(target, key, value) {
+  if (key === "__proto__") {
+    Object.defineProperty(target, key, {
+      value,
+      enumerable: true,
+      writable: true,
+      configurable: true
+    });
+    return;
+  }
+  target[key] = value;
+}
+var COMMENT_LINE_PATTERN = new RegExp(`(?:^\uFEFF?|\\n) *#`);
+var RawString = class {
+  constructor(value) {
+    if (COMMENT_LINE_PATTERN.test(value))
+      throw new TypeError(`Raw string must not contain a line starting with "#": ${JSON.stringify(value)}`);
+    this.value = value;
+  }
+};
+function isRawString(value) {
+  return value instanceof RawString;
+}
+var SURROGATE_PATTERN = /[\uD800-\uDFFF]/;
+function normalizeValue(value) {
+  if (value === null)
+    return null;
+  if (isRawString(value))
+    return value;
+  if (typeof value === "object" && value !== null && "toJSON" in value && typeof value.toJSON === "function") {
+    const next = value.toJSON();
+    if (next !== value)
+      return normalizeValue(next);
+  }
+  if (typeof value === "string") {
+    assertNoLoneSurrogate(value, "string value");
+    return value;
+  }
+  if (typeof value === "boolean")
+    return value;
+  if (typeof value === "number") {
+    if (Object.is(value, -0))
+      return 0;
+    if (!Number.isFinite(value))
+      return null;
+    return value;
+  }
+  if (typeof value === "bigint") {
+    if (value >= Number.MIN_SAFE_INTEGER && value <= Number.MAX_SAFE_INTEGER)
+      return Number(value);
+    return value.toString();
+  }
+  if (value instanceof Date)
+    return value.toISOString();
+  if (Array.isArray(value))
+    return value.map(normalizeValue);
+  if (value instanceof Set)
+    return Array.from(value).map(normalizeValue);
+  if (value instanceof Map)
+    return Object.fromEntries(Array.from(value, ([k, v]) => [String(k), normalizeValue(v)]));
+  if (isPlainObject2(value)) {
+    const encodedValues = {};
+    for (const key in value)
+      if (Object.hasOwn(value, key)) {
+        assertNoLoneSurrogate(key, "object key");
+        setOwnProperty(encodedValues, key, normalizeValue(value[key]));
+      }
+    return encodedValues;
+  }
+  return null;
+}
+function assertNoLoneSurrogate(value, context) {
+  if (!SURROGATE_PATTERN.test(value))
+    return;
+  for (let index = 0;index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code < 55296 || code > 57343)
+      continue;
+    const isHighSurrogate = code <= 56319;
+    const next = value.charCodeAt(index + 1);
+    if (isHighSurrogate && next >= 56320 && next <= 57343) {
+      index++;
+      continue;
+    }
+    throw new TypeError(`Cannot encode ${context} containing an unpaired surrogate U+${code.toString(16).toUpperCase()} at index ${index}`);
+  }
+}
+function isJsonPrimitive(value) {
+  return value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean";
+}
+function isEncodablePrimitive(value) {
+  return isJsonPrimitive(value) || isRawString(value);
+}
+function isJsonArray(value) {
+  return Array.isArray(value);
+}
+function isJsonObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) && !isRawString(value);
+}
+function isEmptyObject(value) {
+  return Object.keys(value).length === 0;
+}
+function isPlainObject2(value) {
+  if (value === null || typeof value !== "object")
+    return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === null || prototype === Object.prototype;
+}
+function isArrayOfPrimitives(value) {
+  return value.length === 0 || value.every((item) => isEncodablePrimitive(item));
+}
+function isArrayOfArrays(value) {
+  return value.length === 0 || value.every((item) => isJsonArray(item));
+}
+function isArrayOfObjects(value) {
+  return value.length === 0 || value.every((item) => isJsonObject(item));
+}
+var NUMERIC_LIKE_PATTERN = /^[+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?$/i;
+function assertValidDelimiter(delimiter) {
+  if (!Object.values(DELIMITERS).includes(delimiter))
+    throw new TypeError(`Invalid delimiter ${JSON.stringify(delimiter)}. Valid delimiters are: comma (,), tab (\\t), pipe (|)`);
+}
+function isValidUnquotedKey(key) {
+  return /^[A-Z_][\w.]*$/i.test(key);
+}
+function isSafeUnquoted(value, delimiter = DEFAULT_DELIMITER) {
+  if (!value)
+    return false;
+  if (/^[ \t]|[ \t]$/.test(value))
+    return false;
+  if (isBooleanOrNullLiteral(value) || isNumericLike(value))
+    return false;
+  if (value.includes(":"))
+    return false;
+  if (value.includes('"') || value.includes("\\"))
+    return false;
+  if (/[[\]{}]/.test(value))
+    return false;
+  if (/[\u0000-\u001F]/.test(value))
+    return false;
+  if (value.includes(delimiter))
+    return false;
+  if (value.startsWith("-"))
+    return false;
+  if (value.startsWith("#"))
+    return false;
+  return true;
+}
+function isNumericLike(value) {
+  return NUMERIC_LIKE_PATTERN.test(value);
+}
+function encodePrimitive(value, delimiter) {
+  if (isRawString(value))
+    return value.value;
+  if (value === null)
+    return NULL_LITERAL;
+  if (typeof value === "boolean")
+    return String(value);
+  if (typeof value === "number")
+    return String(value);
+  return encodeStringLiteral(value, delimiter);
+}
+function encodeStringLiteral(value, delimiter = DEFAULT_DELIMITER) {
+  if (isSafeUnquoted(value, delimiter))
+    return value;
+  return `"${escapeString(value)}"`;
+}
+function encodeKey(key) {
+  if (isValidUnquotedKey(key))
+    return key;
+  return `"${escapeString(key)}"`;
+}
+function encodeAndJoinPrimitives(values, delimiter = DEFAULT_DELIMITER) {
+  return values.map((v) => encodePrimitive(v, delimiter)).join(delimiter);
+}
+function formatHeader(length, options) {
+  const key = options?.key;
+  const fields = options?.fields;
+  const delimiter = options?.delimiter ?? ",";
+  let header = "";
+  if (key != null)
+    header += encodeKey(key);
+  header += `[${length}${options?.keyed ? ":" : ""}${delimiter !== DEFAULT_DELIMITER ? delimiter : ""}]`;
+  if (fields)
+    header += `{${formatFieldSegment(fields, delimiter)}}`;
+  header += ":";
+  return header;
+}
+function formatFieldSegment(fields, delimiter) {
+  return fields.map((field) => encodeKey(field.name) + (field.children ? `{${formatFieldSegment(field.children, delimiter)}}` : "")).join(delimiter);
+}
+function extractTabularFields(rows) {
+  if (rows.length === 0)
+    return;
+  const firstKeys = Object.keys(rows[0]);
+  if (firstKeys.length === 0)
+    return;
+  for (const row of rows) {
+    if (Object.keys(row).length !== firstKeys.length)
+      return;
+    for (const key of firstKeys)
+      if (!Object.hasOwn(row, key))
+        return;
+  }
+  const fieldNodes = [];
+  for (const key of firstKeys) {
+    const fieldNode = classifyColumn(key, rows.map((row) => row[key]));
+    if (!fieldNode)
+      return;
+    fieldNodes.push(fieldNode);
+  }
+  return fieldNodes;
+}
+function extractKeyedTabularFields(value) {
+  const entryValues = Object.values(value);
+  if (entryValues.length < 2)
+    return;
+  if (!entryValues.every((entryValue) => isJsonObject(entryValue) && !isEmptyObject(entryValue)))
+    return;
+  return extractTabularFields(entryValues);
+}
+function collectRowLeaves(row, fields) {
+  const leaves = [];
+  collectLeafValues(row, fields, leaves);
+  return leaves;
+}
+function classifyColumn(name, values) {
+  if (values.every((value) => isEncodablePrimitive(value)))
+    return { name };
+  if (!values.every((value) => isJsonObject(value) && !isEmptyObject(value)))
+    return;
+  const children = extractTabularFields(values);
+  if (!children)
+    return;
+  return {
+    name,
+    children
+  };
+}
+function collectLeafValues(row, fields, leaves) {
+  for (const field of fields) {
+    const value = row[field.name];
+    if (field.children)
+      collectLeafValues(value, field.children, leaves);
+    else
+      leaves.push(value);
+  }
+}
+function* encodeJsonValue(value, options, depth) {
+  if (isEncodablePrimitive(value)) {
+    const encodedPrimitive = encodePrimitive(value, options.delimiter);
+    if (encodedPrimitive !== "")
+      yield encodedPrimitive;
+    return;
+  }
+  if (isJsonArray(value))
+    yield* encodeArrayLines(undefined, value, depth, options);
+  else if (isJsonObject(value)) {
+    const keyedFields = extractKeyedTabularFields(value);
+    if (keyedFields) {
+      yield* encodeKeyedObjectLines(undefined, value, keyedFields, depth, options);
+      return;
+    }
+    yield* encodeObjectLines(value, depth, options);
+  }
+}
+function* encodeObjectLines(value, depth, options) {
+  for (const [key, val] of Object.entries(value))
+    yield* encodeKeyValuePairLines(key, val, depth, options);
+}
+function* encodeKeyValuePairLines(key, value, depth, options) {
+  const encodedKey = encodeKey(key);
+  if (isEncodablePrimitive(value))
+    yield indentedLine(depth, `${encodedKey}: ${encodePrimitive(value, options.delimiter)}`, options.indentSize);
+  else if (isJsonArray(value))
+    yield* encodeArrayLines(key, value, depth, options);
+  else if (isJsonObject(value)) {
+    const keyedFields = extractKeyedTabularFields(value);
+    if (keyedFields) {
+      yield* encodeKeyedObjectLines(key, value, keyedFields, depth, options);
+      return;
+    }
+    yield indentedLine(depth, `${encodedKey}:`, options.indentSize);
+    if (!isEmptyObject(value))
+      yield* encodeObjectLines(value, depth + 1, options);
+  }
+}
+function* encodeKeyedObjectLines(key, value, fields, depth, options) {
+  const entries = Object.entries(value);
+  yield indentedLine(depth, formatHeader(entries.length, {
+    key,
+    fields,
+    delimiter: options.delimiter,
+    keyed: true
+  }), options.indentSize);
+  yield* encodeKeyedEntryRowsLines(entries, fields, depth + 1, options);
+}
+function* encodeKeyedEntryRowsLines(entries, fields, depth, options) {
+  for (const [entryKey, entryValue] of entries) {
+    const leaves = collectRowLeaves(entryValue, fields);
+    yield indentedLine(depth, `${encodeKey(entryKey)}: ${encodeAndJoinPrimitives(leaves, options.delimiter)}`, options.indentSize);
+  }
+}
+function* encodeArrayLines(key, value, depth, options) {
+  if (value.length === 0) {
+    yield indentedLine(depth, key != null ? `${encodeKey(key)}: []` : "[]", options.indentSize);
+    return;
+  }
+  if (isArrayOfPrimitives(value)) {
+    yield indentedLine(depth, encodeInlineArrayLine(value, options.delimiter, key), options.indentSize);
+    return;
+  }
+  if (isArrayOfArrays(value)) {
+    if (value.every((arr) => isArrayOfPrimitives(arr))) {
+      yield* encodeArrayOfArraysAsListItemsLines(key, value, depth, options);
+      return;
+    }
+  }
+  if (isArrayOfObjects(value)) {
+    const fields = extractTabularFields(value);
+    if (fields)
+      yield* encodeArrayOfObjectsAsTabularLines(key, value, fields, depth, options);
+    else
+      yield* encodeMixedArrayAsListItemsLines(key, value, depth, options);
+    return;
+  }
+  yield* encodeMixedArrayAsListItemsLines(key, value, depth, options);
+}
+function* encodeArrayOfArraysAsListItemsLines(prefix, values, depth, options) {
+  yield indentedLine(depth, formatHeader(values.length, {
+    key: prefix,
+    delimiter: options.delimiter
+  }), options.indentSize);
+  for (const arr of values)
+    if (isArrayOfPrimitives(arr)) {
+      const arrayLine = encodeInlineArrayLine(arr, options.delimiter);
+      yield indentedListItem(depth + 1, arrayLine, options.indentSize);
+    }
+}
+function encodeInlineArrayLine(values, delimiter, prefix) {
+  const header = formatHeader(values.length, {
+    key: prefix,
+    delimiter
+  });
+  const joinedValue = encodeAndJoinPrimitives(values, delimiter);
+  if (values.length === 0)
+    return header;
+  return `${header} ${joinedValue}`;
+}
+function* encodeArrayOfObjectsAsTabularLines(prefix, rows, fields, depth, options) {
+  yield indentedLine(depth, formatHeader(rows.length, {
+    key: prefix,
+    fields,
+    delimiter: options.delimiter
+  }), options.indentSize);
+  yield* writeTabularRowsLines(rows, fields, depth + 1, options);
+}
+function* writeTabularRowsLines(rows, fields, depth, options) {
+  for (const row of rows)
+    yield indentedLine(depth, encodeAndJoinPrimitives(collectRowLeaves(row, fields), options.delimiter), options.indentSize);
+}
+function* encodeMixedArrayAsListItemsLines(prefix, items, depth, options) {
+  yield indentedLine(depth, formatHeader(items.length, {
+    key: prefix,
+    delimiter: options.delimiter
+  }), options.indentSize);
+  for (const item of items)
+    yield* encodeListItemValueLines(item, depth + 1, options);
+}
+function* encodeObjectAsListItemLines(obj, depth, options) {
+  if (isEmptyObject(obj)) {
+    yield indentedLine(depth, "-", options.indentSize);
+    return;
+  }
+  const entries = Object.entries(obj);
+  const [firstKey, firstValue] = entries[0];
+  const restEntries = entries.slice(1);
+  if (isJsonArray(firstValue) && isArrayOfObjects(firstValue)) {
+    const fields = extractTabularFields(firstValue);
+    if (fields) {
+      yield indentedListItem(depth, formatHeader(firstValue.length, {
+        key: firstKey,
+        fields,
+        delimiter: options.delimiter
+      }), options.indentSize);
+      yield* writeTabularRowsLines(firstValue, fields, depth + 2, options);
+      if (restEntries.length > 0)
+        yield* encodeObjectLines(Object.fromEntries(restEntries), depth + 1, options);
+      return;
+    }
+  }
+  if (isJsonObject(firstValue)) {
+    const keyedFields = extractKeyedTabularFields(firstValue);
+    if (keyedFields) {
+      const keyedEntries = Object.entries(firstValue);
+      yield indentedListItem(depth, formatHeader(keyedEntries.length, {
+        key: firstKey,
+        fields: keyedFields,
+        delimiter: options.delimiter,
+        keyed: true
+      }), options.indentSize);
+      yield* encodeKeyedEntryRowsLines(keyedEntries, keyedFields, depth + 2, options);
+      if (restEntries.length > 0)
+        yield* encodeObjectLines(Object.fromEntries(restEntries), depth + 1, options);
+      return;
+    }
+  }
+  const encodedKey = encodeKey(firstKey);
+  if (isEncodablePrimitive(firstValue))
+    yield indentedListItem(depth, `${encodedKey}: ${encodePrimitive(firstValue, options.delimiter)}`, options.indentSize);
+  else if (isJsonArray(firstValue))
+    if (firstValue.length === 0)
+      yield indentedListItem(depth, `${encodedKey}: []`, options.indentSize);
+    else if (isArrayOfPrimitives(firstValue))
+      yield indentedListItem(depth, `${encodedKey}${encodeInlineArrayLine(firstValue, options.delimiter)}`, options.indentSize);
+    else {
+      yield indentedListItem(depth, `${encodedKey}${formatHeader(firstValue.length, { delimiter: options.delimiter })}`, options.indentSize);
+      for (const item of firstValue)
+        yield* encodeListItemValueLines(item, depth + 2, options);
+    }
+  else if (isJsonObject(firstValue)) {
+    yield indentedListItem(depth, `${encodedKey}:`, options.indentSize);
+    if (!isEmptyObject(firstValue))
+      yield* encodeObjectLines(firstValue, depth + 2, options);
+  }
+  if (restEntries.length > 0)
+    yield* encodeObjectLines(Object.fromEntries(restEntries), depth + 1, options);
+}
+function* encodeListItemValueLines(value, depth, options) {
+  if (isEncodablePrimitive(value))
+    yield indentedListItem(depth, encodePrimitive(value, options.delimiter), options.indentSize);
+  else if (isJsonArray(value))
+    if (isArrayOfPrimitives(value))
+      yield indentedListItem(depth, encodeInlineArrayLine(value, options.delimiter), options.indentSize);
+    else {
+      yield indentedListItem(depth, formatHeader(value.length, { delimiter: options.delimiter }), options.indentSize);
+      for (const item of value)
+        yield* encodeListItemValueLines(item, depth + 1, options);
+    }
+  else if (isJsonObject(value))
+    yield* encodeObjectAsListItemLines(value, depth, options);
+}
+function indentedLine(depth, content, indentSize) {
+  return " ".repeat(indentSize * depth) + content;
+}
+function indentedListItem(depth, content, indentSize) {
+  return indentedLine(depth, "- " + content, indentSize);
+}
+function applyReplacer(root, replacer) {
+  const replacedRoot = replacer("", root, []);
+  if (replacedRoot === undefined)
+    return transformChildren(root, replacer, []);
+  return transformReplaced(root, replacedRoot, replacer, []);
+}
+function transformReplaced(original, replaced, replacer, path) {
+  if (isRawString(replaced) && !isEncodablePrimitive(original))
+    return transformChildren(original, replacer, path);
+  return transformChildren(normalizeValue(replaced), replacer, path);
+}
+function transformChildren(value, replacer, path) {
+  if (isJsonObject(value))
+    return transformObject(value, replacer, path);
+  if (isJsonArray(value))
+    return transformArray(value, replacer, path);
+  return value;
+}
+function transformObject(obj, replacer, path) {
+  const result = {};
+  for (const [key, value] of Object.entries(obj)) {
+    const childPath = [...path, key];
+    const replacedValue = replacer(key, value, childPath);
+    if (replacedValue === undefined)
+      continue;
+    setOwnProperty(result, key, transformReplaced(value, replacedValue, replacer, childPath));
+  }
+  return result;
+}
+function transformArray(arr, replacer, path) {
+  const result = [];
+  for (let i = 0;i < arr.length; i++) {
+    const value = arr[i];
+    const childPath = [...path, i];
+    const replacedValue = replacer(String(i), value, childPath);
+    if (replacedValue === undefined)
+      continue;
+    result.push(transformReplaced(value, replacedValue, replacer, childPath));
+  }
+  return result;
+}
+function encode3(input, options) {
+  return Array.from(encodeLines(input, options)).join(`
+`);
+}
+function encodeLines(input, options) {
+  const normalizedValue = normalizeValue(input);
+  const resolvedOptions = resolveOptions(options);
+  return encodeJsonValue(resolvedOptions.replacer ? applyReplacer(normalizedValue, resolvedOptions.replacer) : normalizedValue, resolvedOptions, 0);
+}
+function resolveOptions(options) {
+  const delimiter = options?.delimiter ?? DEFAULT_DELIMITER;
+  assertValidDelimiter(delimiter);
+  return {
+    indentSize: options?.indentSize ?? options?.indent ?? 2,
+    delimiter,
+    replacer: options?.replacer
+  };
+}
+
 // ../envoy-client/src/dispatch-pictures.ts
 var PICTURE_UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
 var PICTURE_SHOWN_MAX_BYTES = 3750000;
@@ -16948,146 +17524,831 @@ function picturesNewestFirst(texts) {
   return [...new Set(ordered.flatMap(({ item }) => pictureAddresses(item.text)))];
 }
 
-// ../envoy-client/src/tool-input-errors.ts
-class ToolInputError extends Error {
-  tool;
-  problems;
-  constructor(tool, problems) {
-    const count = problems.length;
-    const cli = isDispatchTool(tool);
-    const help = cli ? [
-      `Allowed flags: ${commandFlags(tool).join(", ")}`,
-      `Example: ${commandLine(tool, exampleFor(tool))}`
-    ] : [];
-    super([
-      `${cli ? `dispatch ${commandName(tool)}` : tool} was not called: ${count} problem${count === 1 ? "" : "s"}`,
-      ...problems.map((problem) => `- ${problem}`),
-      ...help.map((line) => `- ${line}`)
-    ].join(`
-`));
-    this.name = "ToolInputError";
-    this.tool = tool;
-    this.problems = problems;
-  }
+// ../envoy-client/src/human-edit.ts
+function humanEditHead(edit) {
+  const editors = edit.editors ?? [];
+  const by = editors.length === 0 ? "" : `, edited by ${editors.join(", ")}`;
+  return `${edit.name ?? "document"} v${edit.from_version ?? "?"} to v${edit.to_version ?? "?"}${by}`;
 }
-function isDispatchTool(tool) {
-  return dispatchToolSpecs.some((spec) => spec.name === tool);
-}
-function exampleFor(tool) {
-  const spec = dispatchToolSpecs.find((candidate) => candidate.name === tool);
-  return { ...spec?.example };
-}
-function unwrap(schema) {
-  let current = schema;
-  while (current !== undefined) {
-    const def = current.def;
-    if (!("innerType" in def) || !(def.type === "optional" || def.type === "nullable" || def.type === "default"))
-      break;
-    current = def.innerType;
-  }
-  return current;
-}
-function shapeOf(schema) {
-  const unwrapped = unwrap(schema);
-  if (unwrapped === undefined)
-    return;
-  const def = unwrapped.def;
-  return def.type === "object" && "shape" in def ? def.shape : undefined;
-}
-function schemaAt(schema, path) {
-  let current = schema;
-  for (const key of path) {
-    const unwrapped = unwrap(current);
-    if (unwrapped === undefined)
-      return;
-    const def = unwrapped.def;
-    if (def.type === "object" && "shape" in def) {
-      current = shapeOf(unwrapped)?.[String(key)];
-    } else if (def.type === "array" && "element" in def) {
-      current = def.element;
-    } else {
-      return;
+var HUMAN_EDIT_DIFF_CUT_NOTE = "(diff cut at 4,096 bytes)";
+var HUMAN_EDIT_DIFF_MAX = 4096;
+function humanEditDiffBlock(diff, cut) {
+  if (diff === undefined || diff === "")
+    return cut === true ? HUMAN_EDIT_DIFF_CUT_NOTE : "";
+  const bytes = new TextEncoder;
+  let shown = diff;
+  let note = cut === true;
+  if (bytes.encode(shown).length > HUMAN_EDIT_DIFF_MAX) {
+    let kept = "";
+    let size = 0;
+    for (const line of shown.split(`
+`).slice(0, -1)) {
+      size += bytes.encode(`${line}
+`).length;
+      if (size > HUMAN_EDIT_DIFF_MAX)
+        break;
+      kept += `${line}
+`;
     }
+    shown = kept;
+    note = true;
   }
-  return unwrap(current);
+  if (shown === "")
+    return HUMAN_EDIT_DIFF_CUT_NOTE;
+  const longestRun = Math.max(0, ...(shown.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = "`".repeat(Math.max(3, longestRun + 1));
+  const body = shown.endsWith(`
+`) ? shown : `${shown}
+`;
+  return `${fence}diff
+${body}${fence}${note ? `
+${HUMAN_EDIT_DIFF_CUT_NOTE}` : ""}`;
 }
-function describeInput(value) {
-  if (value === null)
-    return "null";
-  if (Array.isArray(value))
-    return "an array";
-  switch (typeof value) {
-    case "number":
-    case "boolean":
-      return String(value);
-    case "string":
-      return "a string";
-    case "object":
-      return "an object";
-    default:
-      return typeof value;
-  }
+
+// ../envoy-client/src/delivery.ts
+var KNOWN_SOURCES = EnvelopeSchema.shape.source.enum;
+var FOREIGN_SESSION_ID = /\b01a0[0-9a-f]{4}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}\b/g;
+var AskAuthorPayloadSchema = object({
+  author: object({ kind: string2(), id: string2() }).passthrough()
+});
+var InboundSenderSchema = object({
+  session_id: string2().optional(),
+  machine: string2().optional(),
+  cwd: string2().optional(),
+  title: string2().optional(),
+  roles: array(string2()).optional()
+});
+var InboundEnvelopeSchema = object({
+  event_id: string2().optional(),
+  source: string2(),
+  source_event_id: string2().optional(),
+  source_session: string2().optional(),
+  topic: string2().optional(),
+  dedupe_key: string2().optional(),
+  issued_at: number2().int().optional(),
+  expires_at: number2().int().optional(),
+  kept_at: number2().int().optional(),
+  payload_summary: string2().optional(),
+  payload: string2().optional(),
+  sender: InboundSenderSchema.optional(),
+  in_reply_to: string2().optional(),
+  supersedes: string2().optional(),
+  urgency: string2().optional(),
+  expects_reply: string2().optional()
+}).passthrough();
+function tolerantShape(shape) {
+  return Object.fromEntries(Object.entries(shape).map(([key, schema]) => [key, _catch2(schema, undefined)]));
 }
-function describeExpected(expected, schema) {
-  switch (expected) {
-    case "int":
-      return "an integer";
-    case "object": {
-      const shape = shapeOf(schema);
-      const keys = shape === undefined ? [] : Object.entries(shape).map(([key, field]) => `${key}${field.def.type === "optional" ? "?" : ""}`);
-      return keys.length === 0 ? "an object" : `an object {${keys.join(", ")}}`;
-    }
-    case "array":
-      return "an array";
-    default:
-      return `a ${expected}`;
-  }
+var TolerantInboundEnvelopeSchema = object({
+  ...tolerantShape(InboundEnvelopeSchema.shape),
+  source: InboundEnvelopeSchema.shape.source.optional().catch(undefined),
+  sender: object(tolerantShape(InboundSenderSchema.shape)).optional().catch(undefined)
+}).passthrough();
+function dispatchReplyPath(resource, id) {
+  const collection = resource === "message" ? "messages" : "comments";
+  return `/api/v1/${collection}/${encodeURIComponent(id)}/reply`;
 }
-function pathText(path, cliTool) {
-  const [head, ...rest] = path.map(String);
-  if (cliTool === undefined || head === undefined)
-    return path.map(String).join(".");
-  let flag = fieldFlag(cliTool, head);
-  let index = 0;
-  for (;index < rest.length && /^\d+$/.test(rest[index]); index++) {
-    flag += `[${rest[index]}]`;
-  }
-  const tail = rest.slice(index).map((segment) => /^\d+$/.test(segment) ? `[${segment}]` : `.${segment}`).join("").replace(/^\./, "");
-  return tail === "" ? flag : `${flag} ${tail}`;
-}
-function formatZodIssues(issues, schema, tool) {
-  const cliTool = isDispatchTool(tool) ? tool : undefined;
-  const allowed = Object.keys(shapeOf(schema) ?? {}).join(", ");
-  return issues.flatMap((issue) => {
-    const path = pathText(issue.path, cliTool);
-    switch (issue.code) {
-      case "invalid_type":
-        return issue.input === undefined ? [`${path} is required (${issue.expected})`] : [
-          `${path} must be ${describeExpected(issue.expected, schemaAt(schema, issue.path))}, not ${describeInput(issue.input)}`
-        ];
-      case "unrecognized_keys": {
-        if (cliTool !== undefined && issue.path.length === 0) {
-          return issue.keys.map((key) => `unknown flag ${fieldFlag(cliTool, key)}`);
-        }
-        const here = Object.keys(shapeOf(schemaAt(schema, issue.path)) ?? {}).join(", ") || allowed;
-        const where = path === "" ? "" : ` in ${path}`;
-        return issue.keys.map((key) => `unknown field "${key}"${where}; allowed: ${here}`);
-      }
-      case "invalid_value":
-        return [
-          `${path} must be one of ${issue.values.map(String).join("|")}; got ${JSON.stringify(issue.input)}`
-        ];
-      case "too_big":
-        if (issue.origin === "array" && Array.isArray(issue.input)) {
-          return [`${path} has ${issue.input.length} items; the limit is ${issue.maximum}`];
-        }
-        return [`${path} ${issue.message}`];
-      case "custom":
-        return [issue.message];
-      default:
-        return [path === "" ? issue.message : `${path}: ${issue.message}`];
-    }
+async function postDeliveryReply(config, sessionId, delivery, result) {
+  const client = new DispatchClient(config.url, config.credential);
+  await client.deliveryReply(delivery.resource, delivery.id, {
+    actor: { kind: "session", id: sessionId },
+    attempt: delivery.attempt,
+    ...delivery.replyFields,
+    ...result
   });
+}
+function expectsLaneReceipt(frame) {
+  return frame.reply !== undefined && frame.reply !== "" && frame.subject === frame.directSubject && frame.envelopeTopic !== undefined && frame.envelopeTopic !== frame.directSubject;
+}
+async function* readArrivals(subscription, now = Date.now) {
+  const source = subscription[Symbol.asyncIterator]();
+  const arrived = [];
+  let stopped;
+  let left = false;
+  let wake;
+  const signal = () => {
+    wake?.();
+    wake = undefined;
+  };
+  (async () => {
+    try {
+      for (;; ) {
+        const read = await source.next();
+        if (read.done === true || left)
+          break;
+        arrived.push({ message: read.value, receivedAt: now() });
+        signal();
+      }
+      stopped = { failed: false };
+    } catch (error) {
+      stopped = { error, failed: true };
+    }
+    signal();
+  })();
+  try {
+    for (;; ) {
+      const next = arrived.shift();
+      if (next !== undefined) {
+        yield next;
+        continue;
+      }
+      if (stopped?.failed === true)
+        throw stopped.error;
+      if (stopped !== undefined)
+        return;
+      const { promise, resolve } = Promise.withResolvers();
+      wake = resolve;
+      await promise;
+    }
+  } finally {
+    if (stopped === undefined) {
+      left = true;
+      Promise.resolve(source.return?.()).catch(() => {
+        return;
+      });
+    }
+  }
+}
+var DedupeIdentitySchema = object({
+  event_id: string2().min(1).optional(),
+  dedupe_key: string2().min(1).optional(),
+  source: string2().optional(),
+  source_event_id: string2().optional()
+});
+var DELIVERY_DEDUPE_KEY_LIMIT = 250000;
+var DELIVERY_EVENT_ID_LIMIT = 1e4;
+function createDeliveryDedupe(now = Date.now) {
+  const keys = new Map;
+  let events = new Map;
+  let olderEvents = new Map;
+  const pendingKeys = new Map;
+  const pendingEvents = new Map;
+  let claims = 0;
+  return {
+    claim(frame) {
+      const eventId = frame?.event_id;
+      if (eventId !== undefined && (events.has(eventId) || olderEvents.has(eventId))) {
+        return;
+      }
+      const key = frame?.dedupe_key;
+      const named = frame !== undefined && key !== undefined && dedupeKeyNamesItsEvent(frame);
+      const at = now();
+      if (named) {
+        const claimedAt = keys.get(key);
+        if (claimedAt !== undefined && at - claimedAt < DELIVERY_DUPLICATE_WINDOW_MS) {
+          return;
+        }
+        for (const [oldest, deliveredAt] of keys) {
+          if (at - deliveredAt < DELIVERY_DUPLICATE_WINDOW_MS)
+            break;
+          keys.delete(oldest);
+        }
+        keys.delete(key);
+        if (keys.size >= DELIVERY_DEDUPE_KEY_LIMIT) {
+          const oldest = keys.keys().next();
+          if (oldest.done !== true)
+            keys.delete(oldest.value);
+        }
+        keys.set(key, at);
+      }
+      const claim = ++claims;
+      if (eventId !== undefined) {
+        if (events.size >= DELIVERY_EVENT_ID_LIMIT / 2) {
+          olderEvents = events;
+          events = new Map;
+        }
+        events.set(eventId, claim);
+        pendingEvents.set(eventId, claim);
+      }
+      if (named)
+        pendingKeys.set(key, claim);
+      let open = true;
+      const close = () => {
+        if (!open)
+          return;
+        open = false;
+        if (eventId !== undefined && pendingEvents.get(eventId) === claim) {
+          pendingEvents.delete(eventId);
+        }
+        if (named && pendingKeys.get(key) === claim)
+          pendingKeys.delete(key);
+      };
+      let released = false;
+      return {
+        release() {
+          close();
+          if (released)
+            return;
+          released = true;
+          if (named && keys.get(key) === at)
+            keys.delete(key);
+          if (eventId === undefined)
+            return;
+          if (events.get(eventId) === claim)
+            events.delete(eventId);
+          if (olderEvents.get(eventId) === claim)
+            olderEvents.delete(eventId);
+        },
+        settle: close
+      };
+    },
+    pending(frame) {
+      const eventId = frame.event_id;
+      const key = frame.dedupe_key;
+      return eventId !== undefined && pendingEvents.has(eventId) || key !== undefined && dedupeKeyNamesItsEvent(frame) && pendingKeys.has(key);
+    }
+  };
+}
+function isCommentTargetedDelivery(delivery) {
+  return "comment_id" in delivery;
+}
+var DispatchTargetedFrameSchema = object({
+  event: DispatchEventSchema,
+  delivery: DispatchTargetedDeliverySchema
+}).superRefine(({ event, delivery }, context) => {
+  if (event.type === "message.created" && !isCommentTargetedDelivery(delivery) && DispatchTargetedMessagePayloadSchema.safeParse(event.payload).success) {
+    return;
+  }
+  if (event.type === "comment.created" && isCommentTargetedDelivery(delivery) && DispatchTargetedCommentPayloadSchema.safeParse(event.payload).success) {
+    return;
+  }
+  context.addIssue({
+    code: "custom",
+    message: event.type === "comment.created" ? "targeted delivery requires a complete comment.created event" : "targeted delivery requires a complete message.created event"
+  });
+});
+var RecoverableDispatchDeliveryFailureSchema = object({
+  event: object({
+    type: _enum2(["message.created", "comment.created"]),
+    issue_key: string2().nullable(),
+    payload: object({ id: string2(), body: string2().optional() }).passthrough()
+  }).passthrough(),
+  delivery: DispatchTargetedDeliverySchema
+}).refine(({ event, delivery }) => event.type === "comment.created" ? isCommentTargetedDelivery(delivery) : !isCommentTargetedDelivery(delivery) && DispatchTargetedResourceIDSchema.safeParse(event.payload.id).success, { message: "delivery resource must match its event type" });
+function eventPictures(event) {
+  let text;
+  if (event.type.startsWith("message.")) {
+    const parsed = MessageEventPayloadSchema.safeParse(event.payload);
+    text = parsed.success ? parsed.data.body : undefined;
+  } else if (event.type.startsWith("comment.")) {
+    const parsed = CommentEventPayloadSchema.safeParse(event.payload);
+    text = parsed.success ? parsed.data.body : undefined;
+  } else if (event.type.startsWith("ask.")) {
+    const parsed = (event.type === "ask.edited" ? AskEditedEventPayloadSchema : AskEventPayloadSchema).safeParse(event.payload);
+    if (parsed.success) {
+      switch (event.type) {
+        case "ask.answered":
+          text = parsed.data.answer?.text;
+          break;
+        case "ask.resolved":
+          text = parsed.data.resolution?.reason;
+          break;
+        case "ask.opened":
+        case "ask.edited":
+          text = parsed.data.question;
+          break;
+      }
+    }
+  }
+  return typeof text === "string" ? pictureAddresses(text) : [];
+}
+function carriedItem(event) {
+  const resource = event.type.startsWith("comment.") || event.type.startsWith("suggestion.") ? "comment" : event.type.startsWith("message.") ? "message" : undefined;
+  if (resource === undefined || !isObject2(event.payload))
+    return;
+  const id = event.payload["id"];
+  if (typeof id !== "string" || id === "")
+    return;
+  return { resource, id, issueKey: event.issue_key };
+}
+function bodyWasCut(payload) {
+  return isObject2(payload) && (payload["body_truncated"] === true || payload["payload_omitted"] === true);
+}
+function wholeItemRoute(item) {
+  return `GET /api/v1/${item.resource === "comment" ? "comments" : "messages"}/${item.id}`;
+}
+function carriedBodyNote(event) {
+  if (!bodyWasCut(event.payload))
+    return;
+  const what = isObject2(event.payload) && event.payload["payload_omitted"] === true ? "this event carries no body: it was too large for the bus" : "the body is its first part only";
+  const item = carriedItem(event);
+  return item === undefined ? what : `${what}; read it whole with ${wholeItemRoute(item)}`;
+}
+async function wholeCarriedBody(client, item, session) {
+  try {
+    if (item.resource === "comment") {
+      const read = await client.getComment(item.id);
+      return [read.comment, ...read.replies].find((comment) => comment.id === item.id)?.body;
+    }
+    const read = item.issueKey === null ? session === undefined ? undefined : await client.getMessageThread(item.id, session) : await client.getMessage(item.issueKey, item.id);
+    return read === undefined ? undefined : [read.message, ...read.replies].find((message) => message.id === item.id)?.body;
+  } catch {
+    return;
+  }
+}
+function senderLabel(envelope) {
+  const sender = envelope.source_session ?? envelope.source ?? "unknown";
+  return envelope.sender?.title === undefined ? sender : `${sender} (${envelope.sender.title})`;
+}
+function replyWith(envelope) {
+  if (envelope.source !== "agent" || envelope.source_session === undefined)
+    return;
+  return {
+    tool: "envoy_send",
+    args: {
+      session_id: envelope.source_session,
+      ...envelope.event_id === undefined ? {} : { in_reply_to: envelope.event_id },
+      message: "..."
+    }
+  };
+}
+var DISPATCH_PAYLOAD_SCHEMAS = {
+  "issue.created": IssueEventPayloadSchema,
+  "issue.updated": IssueEventPayloadSchema,
+  "issue.closed": IssueEventPayloadSchema,
+  "artifact.created": ArtifactCreatedEventPayloadSchema,
+  "artifact.version": ArtifactVersionEventPayloadSchema,
+  "artifact.human_edited": ArtifactHumanEditedEventPayloadSchema,
+  "ask.opened": AskEventPayloadSchema,
+  "ask.anchor_refreshed": AskEventPayloadSchema,
+  "ask.edited": AskEditedEventPayloadSchema,
+  "ask.handed_back": AskEventPayloadSchema,
+  "ask.answered": AskEventPayloadSchema,
+  "ask.resolved": AskEventPayloadSchema,
+  "comment.created": CommentEventPayloadSchema,
+  "comment.anchor_refreshed": CommentEventPayloadSchema,
+  "comment.resolved": CommentEventPayloadSchema,
+  "comment.reopened": CommentEventPayloadSchema,
+  "comment.edited": CommentEventPayloadSchema,
+  "suggestion.accepted": CommentEventPayloadSchema,
+  "suggestion.rejected": CommentEventPayloadSchema,
+  "message.created": MessageEventPayloadSchema,
+  "message.delivery": MessageDeliveryEventPayloadSchema,
+  "message.answered": MessageEventPayloadSchema,
+  "child.status": ChildStatusEventPayloadSchema
+};
+function topicDocument(topic) {
+  if (topic?.startsWith(DISPATCH_DOCUMENT_TOPIC_PREFIX) !== true)
+    return;
+  const [project, slug] = topic.slice(DISPATCH_DOCUMENT_TOPIC_PREFIX.length).split(".", 3);
+  return project !== undefined && project !== "" && slug !== undefined && slug !== "" ? { project, slug } : undefined;
+}
+function dispatchOwner(event, topic) {
+  if (event.issue_key !== null)
+    return event.issue_key;
+  const document = topicDocument(topic);
+  if (document !== undefined)
+    return `${document.project} / ${document.slug}`;
+  return event.artifact_id ?? "unknown";
+}
+function dispatchCommentReplyWith(event, topic, comment) {
+  if (comment === undefined || comment.id === undefined)
+    return;
+  const reply = comment.ask_id;
+  const thread = reply === undefined || reply === null || reply === "" ? "reply_to" : "reply_to_ask";
+  const threadID = thread === "reply_to" ? comment.id : String(reply);
+  if (event.issue_key !== null) {
+    return {
+      command: commandLine("dispatch_comment", {
+        issue: event.issue_key,
+        [thread]: threadID,
+        body: "..."
+      })
+    };
+  }
+  let project = comment.project_key;
+  let artifact = comment.artifact_slug;
+  if (project === undefined || project === "" || artifact === undefined || artifact === "") {
+    [project, artifact] = dispatchOwner(event, topic).split(" / ", 2);
+  }
+  if (project === undefined || project === "" || artifact === undefined || artifact === "")
+    return;
+  return {
+    command: commandLine("dispatch_comment", {
+      project,
+      artifact,
+      [thread]: threadID,
+      body: "..."
+    })
+  };
+}
+function askResolutionText(resolution) {
+  if (resolution === null || resolution === undefined)
+    return;
+  const kind = resolution.kind ?? "resolved";
+  const reason = resolution.reason ?? "";
+  return reason === "" ? kind : `${kind}: ${reason}`;
+}
+function dispatchCompact(event, comment) {
+  if (event.type === "artifact.human_edited") {
+    const edit = ArtifactHumanEditedEventPayloadSchema.safeParse(event.payload);
+    if (!edit.success)
+      return;
+    return { askId: undefined, record: { edit: humanEditHead(edit.data) } };
+  }
+  if (event.type === "comment.created") {
+    if (comment?.ask_id === undefined || comment.ask_id === null)
+      return;
+    const question = dispatchAskQuestion(comment);
+    return {
+      askId: comment.ask_id,
+      record: {
+        ...question === undefined ? {} : { question },
+        reply: comment.body ?? "",
+        ...comment.ask_state === undefined ? {} : { state: comment.ask_state },
+        ...comment.ask_waiting_on === undefined ? {} : { waiting_on: comment.ask_waiting_on }
+      }
+    };
+  }
+  if (!event.type.startsWith("ask."))
+    return;
+  const ask = (event.type === "ask.edited" ? AskEditedEventPayloadSchema : AskEventPayloadSchema).safeParse(event.payload);
+  if (!ask.success)
+    return;
+  let record = { question: textHead(ask.data.question ?? "") };
+  switch (event.type) {
+    case "ask.opened":
+    case "ask.edited": {
+      const options = (ask.data.options ?? []).map((option) => option.label ?? "").filter((label) => label !== "");
+      const quote = ask.data.anchor?.quote;
+      const { project, slug } = ask.data.anchor_artifact ?? {};
+      const document = project !== undefined && project !== "" && slug !== undefined && slug !== "" ? `${project}/${slug}` : undefined;
+      const previous = "previous" in ask.data && ask.data.previous !== undefined ? textHead(ask.data.previous.question) : undefined;
+      record = {
+        ...record,
+        ...options.length === 0 ? {} : { options },
+        ...quote === undefined || quote === "" ? {} : { quote: textHead(quote) },
+        ...document === undefined ? {} : { document },
+        ...previous === undefined ? {} : { previous }
+      };
+      break;
+    }
+    case "ask.answered": {
+      const previousAnswer = ask.data.previous_answer;
+      record = {
+        ...record,
+        answer: askAnswerText(ask.data.answer),
+        ...previousAnswer === null || previousAnswer === undefined ? {} : { previous_answer: askAnswerText(previousAnswer) }
+      };
+      break;
+    }
+    case "ask.resolved": {
+      const resolved = askResolutionText(ask.data.resolution);
+      record = resolved === undefined ? record : { ...record, resolved };
+      break;
+    }
+    default:
+      break;
+  }
+  return { askId: ask.data.id, record };
+}
+function dispatchPayload(event) {
+  const schema = DISPATCH_PAYLOAD_SCHEMAS[event.type];
+  if (schema === undefined)
+    return event.payload;
+  const parsed = schema.safeParse(event.payload);
+  return parsed.success ? parsed.data : event.payload;
+}
+function hasTarget(value) {
+  return isObject2(value) && "target" in value;
+}
+function dispatchPayloadForReader(event, sessionID) {
+  const payload = dispatchPayload(event);
+  if (!hasTarget(payload))
+    return payload;
+  const target = payload.target;
+  return target === `session:${sessionID}` ? { ...payload, target: `you (${target})` } : payload;
+}
+function dispatchAskQuestion(comment) {
+  return comment?.ask_question !== undefined && comment.ask_question !== "" ? textHead(comment.ask_question) : undefined;
+}
+function dispatchReplyRef(event, topic, inReplyTo, comment) {
+  let kind;
+  let document = topicDocument(topic);
+  if (event.type.startsWith("ask.")) {
+    kind = "ask";
+  } else if (event.type.startsWith("message.")) {
+    kind = "message";
+  } else if (event.type === "comment.created") {
+    if (comment === undefined || comment.ask_id === undefined || comment.ask_id === null) {
+      return inReplyTo;
+    }
+    kind = "ask";
+    const { project_key: project, artifact_slug: slug } = comment;
+    if (project !== undefined && project !== "" && slug !== undefined && slug !== "") {
+      document = { project, slug };
+    }
+  } else {
+    return inReplyTo;
+  }
+  if (event.issue_key !== null) {
+    return dispatchChildRef(dispatchIssueRef(event.issue_key), kind, inReplyTo);
+  }
+  if (document === undefined)
+    return inReplyTo;
+  return dispatchChildRef(dispatchDocumentRef(document.project, document.slug), kind, inReplyTo);
+}
+function isObject2(value) {
+  return typeof value === "object" && value !== null;
+}
+function withWholeBody(event, body) {
+  if (body === undefined || !isObject2(event.payload) || !bodyWasCut(event.payload))
+    return event;
+  const { body_truncated: _cut, payload_omitted: _omitted, ...carried } = event.payload;
+  return { ...event, payload: { ...carried, body } };
+}
+function parseDispatchFrame(rawPayload, wholeBody) {
+  let value;
+  try {
+    value = JSON.parse(rawPayload);
+  } catch {
+    return { raw: rawPayload };
+  }
+  if (isObject2(value) && "delivery" in value) {
+    const targeted = DispatchTargetedFrameSchema.safeParse(value);
+    if (targeted.success) {
+      const wireFrame = value;
+      return {
+        event: withWholeBody(targeted.data.event, wholeBody),
+        notify: wireFrame.event.notify,
+        quiet: wireFrame.event.quiet,
+        delivery: targeted.data.delivery
+      };
+    }
+    const recoverable = RecoverableDispatchDeliveryFailureSchema.safeParse(value);
+    if (recoverable.success) {
+      const delivery = recoverable.data.delivery;
+      const commentDelivery = isCommentTargetedDelivery(delivery);
+      const resource = commentDelivery ? "comment" : "message";
+      const id = commentDelivery ? delivery.comment_id : recoverable.data.event.payload.id;
+      return {
+        raw: value,
+        rejectedDelivery: {
+          resource,
+          id,
+          attempt: delivery.attempt,
+          mode: delivery.mode,
+          replyPath: dispatchReplyPath(resource, id),
+          replyFields: commentDelivery ? { target: delivery.target } : {},
+          issueKey: recoverable.data.event.issue_key,
+          body: recoverable.data.event.payload.body ?? ""
+        },
+        malformedDelivery: true
+      };
+    }
+    return { raw: value, malformedDelivery: true };
+  }
+  const parsed = DispatchEventSchema.safeParse(value);
+  if (!parsed.success)
+    return { raw: value };
+  const wireEvent = value;
+  return {
+    event: withWholeBody(parsed.data, wholeBody),
+    notify: wireEvent.notify,
+    quiet: wireEvent.quiet,
+    delivery: undefined
+  };
+}
+function inboundTimestamp(milliseconds) {
+  if (milliseconds === undefined)
+    return "unknown";
+  const date = new Date(Math.floor(milliseconds / 1000) * 1000);
+  return Number.isNaN(date.getTime()) ? "unknown" : date.toISOString().replace(".000Z", "Z");
+}
+function renderInbound(raw, sessionID, subject, wholeBody) {
+  let value;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return {
+      skip: false,
+      content: encode3({
+        envoy: { topic: subject ?? "unknown", unrecognised: "payload was not JSON" }
+      })
+    };
+  }
+  const parsed = InboundEnvelopeSchema.safeParse(value);
+  const parseIssues = parsed.success ? [] : parsed.error.issues.map((issue) => issue.path.join(".") || "envelope");
+  let envelope;
+  if (parsed.success) {
+    envelope = parsed.data;
+  } else {
+    const tolerant = TolerantInboundEnvelopeSchema.safeParse(value);
+    if (!tolerant.success) {
+      return {
+        skip: false,
+        content: encode3({ envoy: { unrecognised: parseIssues.join(", ") || "envelope" } })
+      };
+    }
+    const data = tolerant.data;
+    envelope = { ...data, source: data.source ?? "unknown" };
+  }
+  let dispatchEvent;
+  let dispatchActor;
+  let dispatchIssue;
+  let dispatchReply;
+  let delivery;
+  let rejectedDelivery;
+  let malformedDelivery = false;
+  let pictures = [];
+  let bodyNote;
+  let cutItem;
+  let inReplyTo = envelope.in_reply_to;
+  let askAuthor;
+  let trailer = "";
+  const dispatchRendered = envelope.source === "dispatch" && envelope.payload !== undefined;
+  if (envelope.source === "dispatch") {
+    const topic = subject ?? envelope.topic;
+    if (envelope.payload === undefined) {
+      dispatchIssue = "payload";
+    } else {
+      const frame = parseDispatchFrame(envelope.payload, wholeBody);
+      if ("event" in frame) {
+        const quiet = frame.quiet === undefined ? frame.notify === false : frame.quiet === true;
+        if (quiet && topic?.startsWith(DISPATCH_TOPIC_PREFIX) === true) {
+          return { skip: true, content: "", envelope };
+        }
+        if (frame.event.actor.kind === "session" && frame.event.actor.id === sessionID) {
+          return { skip: true, content: "", envelope };
+        }
+        if (frame.event.type === "subscription.removed") {
+          const removed = SubscriptionRemovedEventPayloadSchema.safeParse(frame.event.payload);
+          if (!removed.success || removed.data.session_id !== sessionID) {
+            return { skip: true, content: "", envelope };
+          }
+          const who = removed.data.by?.id ?? "someone";
+          return {
+            skip: false,
+            content: `Unsubscribed from ${dispatchOwner(frame.event, topic)} by ${who}`,
+            envelope
+          };
+        }
+        if (frame.event.type === "ask.follower_added" || frame.event.type === "ask.follower_removed") {
+          const follower = AskFollowerEventPayloadSchema.safeParse(frame.event.payload);
+          if (!follower.success || follower.data.session_id !== sessionID) {
+            return { skip: true, content: "", envelope };
+          }
+          const who = follower.data.by?.id ?? "someone";
+          const owner = dispatchOwner(frame.event, topic);
+          const ask = follower.data.ask_id ?? "?";
+          return {
+            skip: false,
+            content: frame.event.type === "ask.follower_added" ? `Now following ask ${ask} on ${owner} (added by ${who}): its answer and replies reach you directly; ${commandLine("dispatch_follow", { ask, action: "unfollow" })} to stop.` : `No longer following ask ${ask} on ${owner} (removed by ${who}).`,
+            envelope
+          };
+        }
+        const comment = frame.event.type === "comment.created" ? CommentEventPayloadSchema.safeParse(frame.event.payload) : undefined;
+        const commentPayload = comment?.success === true ? comment.data : undefined;
+        const compact = dispatchCompact(frame.event, commentPayload);
+        if (frame.event.type.startsWith("ask.")) {
+          const asked = AskAuthorPayloadSchema.safeParse(frame.event.payload);
+          if (asked.success && asked.data.author.kind === "session") {
+            askAuthor = asked.data.author.id;
+          }
+        }
+        if (inReplyTo !== undefined) {
+          inReplyTo = dispatchReplyRef(frame.event, topic, inReplyTo, commentPayload);
+        }
+        dispatchReply = dispatchCommentReplyWith(frame.event, topic, commentPayload);
+        if (frame.event.type === "message.created") {
+          const message = DispatchTargetedMessagePayloadSchema.safeParse(frame.event.payload);
+          const requested = DispatchTargetedDeliverySchema.safeParse(frame.delivery);
+          if (message.success && requested.success && !isCommentTargetedDelivery(requested.data)) {
+            delivery = {
+              resource: "message",
+              id: message.data.id,
+              attempt: requested.data.attempt,
+              mode: requested.data.mode,
+              replyPath: dispatchReplyPath("message", message.data.id),
+              replyFields: {},
+              issueKey: frame.event.issue_key,
+              body: message.data.body,
+              ...message.data.body_truncated === true ? { bodyTruncated: true } : {},
+              ...typeof message.data.broadcast_id === "string" ? { broadcastId: message.data.broadcast_id } : {}
+            };
+            dispatchReply = {
+              command: commandLine("dispatch_message", {
+                ...frame.event.issue_key === null ? {} : { issue: frame.event.issue_key },
+                in_reply_to: message.data.id,
+                body: "..."
+              })
+            };
+          }
+        } else if (frame.event.type === "comment.created") {
+          const comment = DispatchTargetedCommentPayloadSchema.safeParse(frame.event.payload);
+          const requested = DispatchTargetedDeliverySchema.safeParse(frame.delivery);
+          if (comment.success && requested.success && isCommentTargetedDelivery(requested.data)) {
+            delivery = {
+              resource: "comment",
+              id: requested.data.comment_id,
+              attempt: requested.data.attempt,
+              mode: requested.data.mode,
+              replyPath: dispatchReplyPath("comment", requested.data.comment_id),
+              replyFields: { target: requested.data.target },
+              issueKey: frame.event.issue_key,
+              body: comment.data.body,
+              ...comment.data.body_truncated === true ? { bodyTruncated: true } : {}
+            };
+          }
+        }
+        const compactRecord = compact === undefined ? undefined : inReplyTo !== undefined || compact.askId === undefined ? compact.record : {
+          ask: dispatchReplyRef(frame.event, topic, compact.askId, commentPayload),
+          ...compact.record
+        };
+        dispatchEvent = {
+          owner: dispatchOwner(frame.event, topic),
+          type: frame.event.type,
+          actor: frame.event.actor,
+          ...compactRecord ?? { payload: dispatchPayloadForReader(frame.event, sessionID) }
+        };
+        dispatchActor = frame.event.actor;
+        bodyNote = carriedBodyNote(frame.event);
+        if (bodyWasCut(frame.event.payload))
+          cutItem = carriedItem(frame.event);
+        pictures = eventPictures(frame.event);
+        if (frame.event.type === "artifact.human_edited") {
+          const edit = ArtifactHumanEditedEventPayloadSchema.safeParse(frame.event.payload);
+          if (edit.success)
+            trailer = humanEditDiffBlock(edit.data.diff, edit.data.diff_truncated);
+        }
+      } else {
+        dispatchEvent = frame.raw;
+        rejectedDelivery = frame.rejectedDelivery;
+        malformedDelivery = frame.malformedDelivery === true;
+      }
+    }
+  }
+  let parsedPayload;
+  if (!dispatchRendered && envelope.payload !== undefined && (envelope.source === "github" || envelope.payload !== envelope.payload_summary)) {
+    try {
+      parsedPayload = JSON.parse(envelope.payload);
+    } catch {
+      parsedPayload = envelope.payload;
+    }
+  }
+  const payloadSummary = envelope.payload_summary ?? "unknown";
+  const message = !dispatchRendered && envelope.payload !== undefined && envelope.payload !== envelope.payload_summary ? parsedPayload : undefined;
+  const summaryIsHead = typeof message === "string" && envelope.payload_summary !== undefined && message.startsWith(envelope.payload_summary.endsWith("\u2026") ? envelope.payload_summary.slice(0, -1) : envelope.payload_summary);
+  let foreignSession;
+  for (const part of [envelope.payload_summary ?? "", envelope.payload ?? ""]) {
+    for (const match of part.matchAll(FOREIGN_SESSION_ID)) {
+      if (match[0] !== envelope.source_session && match[0] !== sessionID && match[0] !== askAuthor) {
+        foreignSession = match[0];
+        break;
+      }
+    }
+    if (foreignSession !== undefined)
+      break;
+  }
+  const role = envelope.sender?.roles?.[0];
+  const reply = dispatchReply ?? replyWith(envelope);
+  const sourceIssue = parseIssues.includes("source") || KNOWN_SOURCES[envelope.source] !== undefined ? undefined : `source=${envelope.source}`;
+  const unrecognised = [
+    ...parseIssues,
+    ...sourceIssue === undefined ? [] : [sourceIssue],
+    ...dispatchIssue === undefined ? [] : [dispatchIssue]
+  ].join(", ") || undefined;
+  const rendered = {
+    ...envelope.topic === agentSubject(sessionID) ? { to: `you (${sessionID})` } : {},
+    from: senderLabel(envelope),
+    at: inboundTimestamp(envelope.issued_at),
+    id: envelope.event_id ?? "unknown",
+    ...envelope.kept_at === undefined ? {} : { kept_at: inboundTimestamp(envelope.kept_at) },
+    ...envelope.expires_at === undefined ? {} : { by: inboundTimestamp(envelope.expires_at) },
+    ...envelope.urgency === undefined ? {} : { urgency: envelope.urgency },
+    ...envelope.expects_reply === undefined ? {} : { expects_reply: envelope.expects_reply },
+    ...inReplyTo === undefined ? {} : { re: inReplyTo },
+    ...envelope.supersedes === undefined ? {} : { supersedes: envelope.supersedes },
+    ...reply === undefined ? {} : { reply_with: reply },
+    ...role === undefined ? {} : {
+      reply_role: {
+        tool: "envoy_publish",
+        args: { topic: `notifications.role.${role}`, message: "..." }
+      }
+    },
+    ...dispatchRendered ? { dispatch: dispatchEvent } : {
+      ...summaryIsHead ? {} : { summary: payloadSummary },
+      ...message === undefined ? {} : { message }
+    },
+    ...bodyNote === undefined ? {} : { body_note: bodyNote },
+    ...foreignSession === undefined ? {} : {
+      note: `body names session ${foreignSession}; the sender is ${envelope.source_session ?? "unknown"}`
+    },
+    ...unrecognised === undefined ? {} : { unrecognised }
+  };
+  return {
+    skip: false,
+    content: trailer === "" ? encode3({ envoy: rendered }) : `${encode3({ envoy: rendered })}
+
+${trailer}`,
+    envelope,
+    ...dispatchActor === undefined ? {} : { dispatchActor },
+    ...delivery === undefined ? {} : { delivery },
+    ...rejectedDelivery === undefined ? {} : { rejectedDelivery },
+    ...malformedDelivery ? { malformedDelivery: true } : {},
+    ...pictures.length === 0 ? {} : { pictures },
+    ...cutItem === undefined ? {} : { cutItem }
+  };
 }
 
 // ../envoy-client/src/dispatch-picture-tools.ts
@@ -17130,21 +18391,9 @@ async function localPicture(path, cwd) {
   }
   return { path, name: basename(absolute), file: Bun.file(absolute, { type }) };
 }
-function uploadSlug(name) {
-  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-  return slug === "" ? "artifact" : slug;
-}
-async function textWithPictures(tool, text, pictures, limit, owner, upload, actor) {
+async function textWithPictures(text, pictures, owner, upload, actor) {
   if (pictures.length === 0)
     return text;
-  const counted = `${limit.text} plus ${pictures.length} ${pictures.length === 1 ? "picture" : "pictures"}`;
-  const fix = `${limit.shorten} or send fewer pictures`;
-  const predicted = withPictureLines(text, pictures.map((picture) => pictureLine(picture.name, `dispatch://${owner}/artifact/${uploadSlug(picture.name)}@v1`)));
-  if (predicted.length > limit.cap) {
-    throw new ToolInputError(tool, [
-      `${counted} ${overCapMessage(predicted.length, limit.cap)}; ${fix}`
-    ]);
-  }
   const lines = [];
   const addresses = [];
   for (const picture of pictures) {
@@ -17161,11 +18410,7 @@ async function textWithPictures(tool, text, pictures, limit, owner, upload, acto
     addresses.push(address);
     lines.push(pictureLine(picture.name, address));
   }
-  const posted = withPictureLines(text, lines);
-  if (posted.length > limit.cap) {
-    throw new Error(`${counted} ${overCapMessage(posted.length, limit.cap)} with the addresses Dispatch gave ` + `the uploads (${addresses.join(", ")}), so nothing was posted; ${fix}.`);
-  }
-  return posted;
+  return withPictureLines(text, lines);
 }
 var AGENT_ARTIFACT_REF = new RegExp(`^dispatch://agent/(${SESSION_ID_PATTERN})/artifact/([^/@]+)(?:@v(\\d+))?$`, "u");
 function parseAgentArtifactRef(ref) {
@@ -17220,6 +18465,23 @@ function eventTexts(event) {
       texts = [];
   }
   return texts.filter((text) => typeof text === "string" && text !== "").map((text) => ({ text, at: event.created_at }));
+}
+async function eventTextsWhole(client, events) {
+  const reads = new Map;
+  const whole = await Promise.all(events.map(async (event) => {
+    const item = bodyWasCut(event.payload) ? carriedItem(event) : undefined;
+    if (item === undefined)
+      return eventTexts(event);
+    const key = `${item.resource}:${item.id}`;
+    let read = reads.get(key);
+    if (read === undefined) {
+      read = wholeCarriedBody(client, item);
+      reads.set(key, read);
+    }
+    const body = await read;
+    return body === undefined ? eventTexts(event) : [{ text: body, at: event.created_at }];
+  }));
+  return whole.flat();
 }
 function shownPictureLine(index, address, name, mimeType, bytes) {
   return `- image ${index}: ${address} (${name}, ${mimeType}, ${bytes.toLocaleString("en-US")} bytes)`;
@@ -17398,47 +18660,6 @@ function subscriptionRemovedTopics(raw, sessionID) {
   if (!parsedPayload.success || parsedPayload.data.session_id !== sessionID)
     return;
   return parsedPayload.data.topics ?? [];
-}
-
-// ../envoy-client/src/human-edit.ts
-function humanEditHead(edit) {
-  const editors = edit.editors ?? [];
-  const by = editors.length === 0 ? "" : `, edited by ${editors.join(", ")}`;
-  return `${edit.name ?? "document"} v${edit.from_version ?? "?"} to v${edit.to_version ?? "?"}${by}`;
-}
-var HUMAN_EDIT_DIFF_CUT_NOTE = "(diff cut at 4,096 bytes)";
-var HUMAN_EDIT_DIFF_MAX = 4096;
-function humanEditDiffBlock(diff, cut) {
-  if (diff === undefined || diff === "")
-    return cut === true ? HUMAN_EDIT_DIFF_CUT_NOTE : "";
-  const bytes = new TextEncoder;
-  let shown = diff;
-  let note = cut === true;
-  if (bytes.encode(shown).length > HUMAN_EDIT_DIFF_MAX) {
-    let kept = "";
-    let size = 0;
-    for (const line of shown.split(`
-`).slice(0, -1)) {
-      size += bytes.encode(`${line}
-`).length;
-      if (size > HUMAN_EDIT_DIFF_MAX)
-        break;
-      kept += `${line}
-`;
-    }
-    shown = kept;
-    note = true;
-  }
-  if (shown === "")
-    return HUMAN_EDIT_DIFF_CUT_NOTE;
-  const longestRun = Math.max(0, ...(shown.match(/`+/g) ?? []).map((run) => run.length));
-  const fence = "`".repeat(Math.max(3, longestRun + 1));
-  const body = shown.endsWith(`
-`) ? shown : `${shown}
-`;
-  return `${fence}diff
-${body}${fence}${note ? `
-${HUMAN_EDIT_DIFF_CUT_NOTE}` : ""}`;
 }
 
 // ../envoy-client/src/search-answer.ts
@@ -17909,7 +19130,7 @@ async function readSessionAnswers(options) {
   }
   let read = current.inFlight;
   if (read === undefined) {
-    const client = new DispatchClient(url, dispatch.token, options.fetchImpl ?? fetch);
+    const client = new DispatchClient(url, dispatch.credential, options.fetchImpl ?? fetch);
     const started = client.sessionAnswers(session, {
       maxChars: SESSION_ANSWERS_MAX_CHARS,
       signal: AbortSignal.timeout(READ_TIMEOUT_MS)
@@ -17972,6 +19193,148 @@ async function readSessionAnswers(options) {
 }
 async function sessionAnswersSettled(session) {
   await Promise.all(Array.from(state.sessions.get(session)?.values() ?? [], (entry) => entry.inFlight));
+}
+
+// ../envoy-client/src/tool-input-errors.ts
+class ToolInputError extends Error {
+  tool;
+  problems;
+  constructor(tool, problems) {
+    const count = problems.length;
+    const cli = isDispatchTool(tool);
+    const help = cli ? [
+      `Allowed flags: ${commandFlags(tool).join(", ")}`,
+      `Example: ${commandLine(tool, exampleFor(tool))}`
+    ] : [];
+    super([
+      `${cli ? `dispatch ${commandName(tool)}` : tool} was not called: ${count} problem${count === 1 ? "" : "s"}`,
+      ...problems.map((problem) => `- ${problem}`),
+      ...help.map((line) => `- ${line}`)
+    ].join(`
+`));
+    this.name = "ToolInputError";
+    this.tool = tool;
+    this.problems = problems;
+  }
+}
+function isDispatchTool(tool) {
+  return dispatchToolSpecs.some((spec) => spec.name === tool);
+}
+function exampleFor(tool) {
+  const spec = dispatchToolSpecs.find((candidate) => candidate.name === tool);
+  return { ...spec?.example };
+}
+function unwrap(schema) {
+  let current = schema;
+  while (current !== undefined) {
+    const def = current.def;
+    if (!("innerType" in def) || !(def.type === "optional" || def.type === "nullable" || def.type === "default"))
+      break;
+    current = def.innerType;
+  }
+  return current;
+}
+function shapeOf(schema) {
+  const unwrapped = unwrap(schema);
+  if (unwrapped === undefined)
+    return;
+  const def = unwrapped.def;
+  return def.type === "object" && "shape" in def ? def.shape : undefined;
+}
+function schemaAt(schema, path) {
+  let current = schema;
+  for (const key of path) {
+    const unwrapped = unwrap(current);
+    if (unwrapped === undefined)
+      return;
+    const def = unwrapped.def;
+    if (def.type === "object" && "shape" in def) {
+      current = shapeOf(unwrapped)?.[String(key)];
+    } else if (def.type === "array" && "element" in def) {
+      current = def.element;
+    } else {
+      return;
+    }
+  }
+  return unwrap(current);
+}
+function describeInput(value) {
+  if (value === null)
+    return "null";
+  if (Array.isArray(value))
+    return "an array";
+  switch (typeof value) {
+    case "number":
+    case "boolean":
+      return String(value);
+    case "string":
+      return "a string";
+    case "object":
+      return "an object";
+    default:
+      return typeof value;
+  }
+}
+function describeExpected(expected, schema) {
+  switch (expected) {
+    case "int":
+      return "an integer";
+    case "object": {
+      const shape = shapeOf(schema);
+      const keys = shape === undefined ? [] : Object.entries(shape).map(([key, field]) => `${key}${field.def.type === "optional" ? "?" : ""}`);
+      return keys.length === 0 ? "an object" : `an object {${keys.join(", ")}}`;
+    }
+    case "array":
+      return "an array";
+    default:
+      return `a ${expected}`;
+  }
+}
+function pathText(path, cliTool) {
+  const [head, ...rest] = path.map(String);
+  if (cliTool === undefined || head === undefined)
+    return path.map(String).join(".");
+  let flag = fieldFlag(cliTool, head);
+  let index = 0;
+  for (;index < rest.length && /^\d+$/.test(rest[index]); index++) {
+    flag += `[${rest[index]}]`;
+  }
+  const tail = rest.slice(index).map((segment) => /^\d+$/.test(segment) ? `[${segment}]` : `.${segment}`).join("").replace(/^\./, "");
+  return tail === "" ? flag : `${flag} ${tail}`;
+}
+function formatZodIssues(issues, schema, tool) {
+  const cliTool = isDispatchTool(tool) ? tool : undefined;
+  const allowed = Object.keys(shapeOf(schema) ?? {}).join(", ");
+  return issues.flatMap((issue) => {
+    const path = pathText(issue.path, cliTool);
+    switch (issue.code) {
+      case "invalid_type":
+        return issue.input === undefined ? [`${path} is required (${issue.expected})`] : [
+          `${path} must be ${describeExpected(issue.expected, schemaAt(schema, issue.path))}, not ${describeInput(issue.input)}`
+        ];
+      case "unrecognized_keys": {
+        if (cliTool !== undefined && issue.path.length === 0) {
+          return issue.keys.map((key) => `unknown flag ${fieldFlag(cliTool, key)}`);
+        }
+        const here = Object.keys(shapeOf(schemaAt(schema, issue.path)) ?? {}).join(", ") || allowed;
+        const where = path === "" ? "" : ` in ${path}`;
+        return issue.keys.map((key) => `unknown field "${key}"${where}; allowed: ${here}`);
+      }
+      case "invalid_value":
+        return [
+          `${path} must be one of ${issue.values.map(String).join("|")}; got ${JSON.stringify(issue.input)}`
+        ];
+      case "too_big":
+        if (issue.origin === "array" && Array.isArray(issue.input)) {
+          return [`${path} has ${issue.input.length} items; the limit is ${issue.maximum}`];
+        }
+        return [`${path} ${issue.message}`];
+      case "custom":
+        return [issue.message];
+      default:
+        return [path === "" ? issue.message : `${path}: ${issue.message}`];
+    }
+  });
 }
 
 // ../envoy-client/src/dispatch-execute.ts
@@ -18102,6 +19465,7 @@ var issueFreeTools = {
   dispatch_open_asks: true,
   dispatch_answers: true,
   dispatch_whoami: true,
+  dispatch_limits: true,
   dispatch_inbox: true,
   dispatch_architecture_sync: true
 };
@@ -18217,16 +19581,12 @@ function askUrgency(args) {
   const value = args.urgency;
   return ASK_URGENCIES.find((urgency) => urgency === value);
 }
-function questionWithRef(question, ref) {
+function askQuestionWithRef(args) {
+  const question = stringArg(args, "question");
+  const ref = optionalString(args, "ref");
   return ref === undefined || question.includes(ref) ? question : `${question}
 
 Ref: ${ref}`;
-}
-function askQuestionWithRef(args) {
-  return questionWithRef(stringArg(args, "question"), optionalString(args, "ref"));
-}
-function askQuestionProblem(withRef) {
-  return withRef.length > ASK_QUESTION_MAX ? `question plus ref ${overCapMessage(withRef.length, ASK_QUESTION_MAX)}; shorten the question or drop the ref` : undefined;
 }
 var pictureSendingTools = {
   dispatch_ask: true,
@@ -18420,16 +19780,6 @@ function itemReplyTo(args, field) {
 function argumentProblems(tool, args) {
   const problems = [];
   switch (tool) {
-    case "dispatch_ask": {
-      const question = optionalString(args, "question");
-      const ref = optionalString(args, "ref");
-      if (question !== undefined && ref !== undefined && question.length <= ASK_QUESTION_MAX) {
-        const problem = askQuestionProblem(questionWithRef(question, ref));
-        if (problem !== undefined)
-          problems.push(problem);
-      }
-      break;
-    }
     case "dispatch_edit_ask":
     case "dispatch_resolve_ask":
     case "dispatch_follow": {
@@ -18994,17 +20344,18 @@ function approvalLine(artifact) {
   const approval = artifact.approval;
   if (approval === undefined || approval.state === "draft")
     return;
+  const content = approval.content_sha256 === undefined ? "" : `, content sha256:${approval.content_sha256}${approval.content_sha256_source === "backfill" ? " (hashed after approval)" : ""}`;
   switch (approval.state) {
     case "awaiting": {
       const turn = approval.waiting_on === undefined ? "" : `, waiting on ${approval.waiting_on}`;
       return `Approval: awaiting${turn} (requested by ${approval.requested_by?.id ?? "unknown"}, ask ${approval.ask_id ?? "?"})`;
     }
     case "approved":
-      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}`;
+      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}${content}`;
     case "stale":
-      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}, changed since (now v${approval.latest_version}) - the human's own answer to a decision block carries the approval when that answer is the whole change since v${approval.version}; for any other change, request approval again once the human has agreed to every point in this version, with a --summary naming what changed since v${approval.version}`;
+      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}, changed since (now v${approval.latest_version}) - the human's own answer to a decision block carries the approval when that answer is the whole change since v${approval.version}; for any other change, request approval again once the human has agreed to every point in this version, with a --summary naming what changed since v${approval.version}${content}`;
     case "changes_requested":
-      return `Approval: changes requested on v${approval.version} by ${approval.by?.id ?? "unknown"}: ${approval.reason ?? ""}`;
+      return `Approval: changes requested on v${approval.version} by ${approval.by?.id ?? "unknown"}: ${approval.reason ?? ""}${content}`;
   }
 }
 function componentsLine(components) {
@@ -19019,21 +20370,49 @@ function componentsLine(components) {
       return "Components: unassigned";
   }
 }
-function claimText(claim, titles) {
-  const holding = claimHolds(claim, titles);
-  const marker = holding === "unknown" ? " \xB7 liveness unknown" : holding === "lapsed" ? " \xB7 not running" : "";
+function claimText(claim, agents, read = {}) {
+  const titles = agents?.titles;
+  const liveness = holderLiveness(claim, agents, read);
+  const holding = claimHolds(claim, titles, liveness);
+  const takeableAt = claimTakeableAt(liveness);
+  const unresponsive = liveness.holder_state === "unresponsive" && liveness.last_seen != null ? ` \xB7 unresponsive since ${liveness.last_seen}${takeableAt === null ? "" : `, takeable at ${takeableAt}`}` : " \xB7 unresponsive";
+  const marker = holding === "unknown" ? " \xB7 liveness unknown" : holding === "lapsed" ? " \xB7 not running" : holding === "unresponsive" ? unresponsive : "";
   return `${actorLabel(claim.actor, titles)} since ${claim.at}${marker}`;
 }
-async function liveSessionTitles(client, needed) {
+function holderLiveness(claim, agents, read) {
+  if (claim.actor.kind !== "session")
+    return read;
+  const row = agents?.liveness.get(claim.actor.id);
+  if (row === undefined)
+    return read;
+  const holderState = read.holder_state ?? row.holder_state;
+  const lastSeen = read.last_seen ?? row.last_seen;
+  const takeableAt = read.takeable_at ?? row.takeable_at;
+  return {
+    ...holderState === undefined ? {} : { holder_state: holderState },
+    ...lastSeen === undefined ? {} : { last_seen: lastSeen },
+    ...takeableAt === undefined ? {} : { takeable_at: takeableAt }
+  };
+}
+async function liveAgents(client, needed) {
   if (!needed) {
     return;
   }
   try {
     const agents = await client.listAgents();
-    return new Map(agents.map((agent) => [agent.session_id, agent.title]));
+    return {
+      titles: new Map(agents.map((agent) => [agent.session_id, agent.title])),
+      liveness: new Map(agents.map((agent) => [agent.session_id, agentLiveness(agent)]))
+    };
   } catch {
     return;
   }
+}
+function agentLiveness(agent) {
+  return {
+    ...agent.state === undefined ? {} : { holder_state: agent.state },
+    ...agent.last_seen > 0 ? { last_seen: new Date(agent.last_seen).toISOString() } : {}
+  };
 }
 function holdsSession(claim) {
   return claim?.actor.kind === "session";
@@ -19047,8 +20426,9 @@ function routeText(issue, titles) {
   const holder = issue.route_holder ?? null;
   const reach = {
     live: routeHeldBySession(issue) && holder !== null ? ` (held by ${titles?.get(holder) ?? holder})` : "",
+    holder_unresponsive: issue.route.startsWith("role:") ? ` (its holder${holder === null ? "" : ` ${titles?.get(holder) ?? holder}`} is unresponsive: messages wait for it)` : " (that session is unresponsive: messages wait for it)",
     no_holder: issue.route.startsWith("role:") ? " (nobody holds it right now)" : " (that session is not running right now)",
-    unknown: " (the Envoy listener did not answer, so whether it reaches anyone is unknown)"
+    unknown: issue.route_status_reason === "refilling" ? " (the Envoy listener's agent list is refilling, so whether it reaches anyone is unknown; try again in a moment)" : " (the Envoy listener did not answer, so whether it reaches anyone is unknown)"
   };
   return issue.route + (issue.route_status == null ? "" : reach[issue.route_status]);
 }
@@ -19106,7 +20486,7 @@ function refuseUnsavedRepository(verb, issue, repo) {
   const lost = repo === "" ? "the repository was not cleared" : `${repo} was not saved`;
   throw new Error(`Dispatch ${verb} ${issue.key} without its repository: this Dispatch server predates repository fields, so ${lost}; upgrade the server`);
 }
-function issueSummary(issue, events, references, graph, linkBase, coverage, titles) {
+function issueSummary(issue, events, references, graph, linkBase, coverage, agents) {
   const asks = issue.open_asks;
   const spec = issue.artifacts?.find((artifact) => artifact.primary);
   const specApproval = spec === undefined ? undefined : approvalLine(spec);
@@ -19127,11 +20507,11 @@ function issueSummary(issue, events, references, graph, linkBase, coverage, titl
     `Link: ${new URL(`/issues/${encodeURIComponent(issue.key)}`, linkBase).toString()}`,
     `Status: ${issue.status}`,
     `Assignee: ${issue.assignee ?? "unassigned"}`,
-    `Claimed by: ${issue.claim === null ? "nobody" : claimText(issue.claim, titles)}`,
+    `Claimed by: ${issue.claim === null ? "nobody" : claimText(issue.claim, agents, issue)}`,
     ...issue.priority === null ? [] : [`Priority: P${issue.priority}`],
     `Labels: ${issue.labels.length === 0 ? "none" : issue.labels.join(", ")}`,
     componentsLine(issue.components),
-    `Route: ${routeText(issue, titles)}`,
+    `Route: ${routeText(issue, agents?.titles)}`,
     repositoryLine(issue),
     `Progress: ${progressText(issue.progress, ", ") || "none"}`,
     ...specApproval === undefined ? [] : [`Spec ${specApproval.replace(/^Approval/, "approval")}`],
@@ -19514,6 +20894,7 @@ function commentSummary({ comment, replies }, graph) {
     `${reply.id} \xB7 ${actorText(reply.author)}`,
     ...anchorLines(reply),
     ...replyBlockLines(reply),
+    ...reply.answers != null && reply.answers !== comment.id ? [`Answers: ${reply.answers}`] : [],
     `Body: ${reply.body}`
   ]);
   return [
@@ -19873,7 +21254,7 @@ async function checkDispatchCall(input) {
   };
 }
 async function executeDispatchTool(input) {
-  const { url: configUrl, token: configToken } = input.config;
+  const { url: configUrl, credential } = input.config;
   const linkBase = input.config.publicUrl ?? configUrl;
   const baseFetch = input.fetchImpl ?? fetch;
   const fetchImpl = Object.assign(async (...args) => {
@@ -19896,7 +21277,7 @@ async function executeDispatchTool(input) {
     throw new ToolInputError(input.tool, checked.problems);
   const ownerArguments = checked.owner;
   const pictures = checked.pictures;
-  const dispatchClient = () => new DispatchClient(configUrl, configToken, fetchImpl, input.signal, input.writeRetry);
+  const dispatchClient = () => new DispatchClient(configUrl, credential, fetchImpl, input.signal, input.writeRetry);
   if (input.tool === "dispatch_open_asks") {
     const client = dispatchClient();
     const project = optionalString(ownerArguments.args, "project");
@@ -19940,12 +21321,32 @@ async function executeDispatchTool(input) {
     const project = identity.kind === "agent" ? identity.project ?? null : null;
     const session = proved ?? sessionId;
     const unowned = "no owner, so an issue you create without an assignee takes its parent's assignee, else the project's default assignee, else nobody.";
-    const acting = owner !== null ? `Session ${session} acts for ${owner}: issues you create without an assignee are assigned to ${owner}.` : service !== null ? `Session ${session} runs as service ${serviceSubjectLabel(service)}: ${unowned}` : `Session ${session} runs under the shared token: ${unowned}`;
+    const signInNeeded = owner === null && service !== null && proved !== null;
+    const acting = owner !== null ? `Session ${session} acts for ${owner}: issues you create without an assignee are assigned to ${owner}.` : service !== null ? signInNeeded ? `Session ${session} runs as service ${serviceSubjectLabel(service)} and no person, so it may read but Dispatch refuses every write it makes: run \`agent-secrets login\` on this machine to write as yourself.` : `Session ${session} runs as service ${serviceSubjectLabel(service)}: ${unowned}` : `Session ${session} runs under the shared token: ${unowned}`;
     const elsewhere = proved !== null && proved !== sessionId ? ` Your credential names session ${proved}, which is not this host session (${sessionId}): Dispatch records every write you make as ${proved}.` : "";
     const writable = project !== null ? ` It may write project ${project} and no other.` : "";
     return {
       text: acting + elsewhere + writable,
       details: { session, owner, service, project }
+    };
+  }
+  if (input.tool === "dispatch_limits") {
+    const limits = await dispatchClient().limits();
+    const count = (value) => value.toLocaleString("en-US");
+    return {
+      text: [
+        `One block of a body - a paragraph, list, quote, table or code block: ${count(limits.block_units)} characters (UTF-16 units).`,
+        `Blocks in one body: ${count(limits.item_blocks)}.`,
+        `An ask's question and its options together: ${count(limits.ask_units)} characters (UTF-16 units).`,
+        `Options on one ask: ${count(limits.ask_options)}.`,
+        `The body an event carries whole: ${count(limits.event_body_units)} characters (UTF-16 units); a longer body reaches a reader cut, and the item itself holds the rest.`,
+        `One request: ${count(limits.request_bytes)} bytes.`,
+        `One markdown document: ${count(limits.document_bytes)} bytes.`,
+        `One handoff body: ${count(limits.handoff_bytes)} bytes.`,
+        "Dispatch holds every write to these bounds and refuses a longer text, naming the block or the field that passed one."
+      ].join(`
+`),
+      details: { ...limits }
     };
   }
   if (input.tool === "dispatch_inbox") {
@@ -19998,18 +21399,18 @@ async function executeDispatchTool(input) {
       throw new Error("issue is required");
     return owner.issue;
   };
-  const postWithPictures = (text, limit, owner, upload) => textWithPictures(input.tool, text, pictures, limit, owner, (picture) => upload(picture).catch((error) => {
+  const postWithPictures = (text, owner, upload) => textWithPictures(text, pictures, owner, (picture) => upload(picture).catch((error) => {
     if (!(error instanceof DispatchWriteLandedError))
       throw error;
     throw new Error(`${error.message} That was a picture uploaded before this call's own write, so nothing else was written: run the call again, which uploads it as its next version.`, { cause: error });
   }), actor);
-  const writePictures = (resolved, text, limit) => {
+  const writePictures = (resolved, text) => {
     if (resolved?.owner.kind === "project") {
       const { project } = resolved.owner;
-      return postWithPictures(text, limit, project, (upload) => client.projectArtifact(project, upload));
+      return postWithPictures(text, project, (upload) => client.projectArtifact(project, upload));
     }
     const issueKey = issue();
-    return postWithPictures(text, limit, issueKey, (upload) => client.artifact(issueKey, upload));
+    return postWithPictures(text, issueKey, (upload) => client.artifact(issueKey, upload));
   };
   const hostSession = input.sessionId?.trim();
   const shown = hostSession ? shownPictures(hostSession) : undefined;
@@ -20313,10 +21714,11 @@ async function executeDispatchTool(input) {
         route: row.route ?? null,
         route_status: row.route_status ?? null,
         route_holder: row.route_holder ?? null,
+        route_status_reason: row.route_status_reason ?? null,
         updated_at: row.updated_at,
         progress: row.progress
       }));
-      const titles = await liveSessionTitles(client, rows.some((row) => holdsSession(row.claim)));
+      const agents = await liveAgents(client, rows.some((row) => holdsSession(row.claim)));
       const isPartial = offset !== 0 || rows.length !== total;
       const showing = !isPartial ? "" : rows.length === 0 ? `showing 0-0 of ${total}` : pageSummaryText(offset, rows.length, total);
       return {
@@ -20324,7 +21726,7 @@ async function executeDispatchTool(input) {
           `${rows.length} ${rows.length === 1 ? "issue" : "issues"} in ${project}` + (isPartial ? ` (${showing})` : ""),
           ...rows.map((row) => {
             const progress = progressText(row.progress, " \xB7 ");
-            return `${row.key} [${row.status}]${row.priority === null ? "" : ` P${row.priority}`} ${row.title}` + (row.open_asks === 0 ? "" : ` \xB7 ${row.open_asks} open ${row.open_asks === 1 ? "ask" : "asks"}`) + (row.claim === null ? "" : ` \xB7 claimed by ${claimText(row.claim, titles)}`) + (progress === "" ? "" : ` \xB7 ${progress}`) + (row.route === null || row.route_status === "live" || row.route_status === null ? "" : ` \xB7 route ${routeText(row)}`);
+            return `${row.key} [${row.status}]${row.priority === null ? "" : ` P${row.priority}`} ${row.title}` + (row.open_asks === 0 ? "" : ` \xB7 ${row.open_asks} open ${row.open_asks === 1 ? "ask" : "asks"}`) + (row.claim === null ? "" : ` \xB7 claimed by ${claimText(row.claim, agents)}`) + (progress === "" ? "" : ` \xB7 ${progress}`) + (row.route === null || row.route_status === "live" || row.route_status === null ? "" : ` \xB7 route ${routeText(row)}`);
           })
         ].join(`
 `),
@@ -20419,13 +21821,7 @@ async function executeDispatchTool(input) {
       const multiple = optionalBoolean(args, "multiple");
       const urgency = askUrgency(args);
       const anchored = anchorArgs && resolved ? anchor(resolved.artifact, anchorArgs) : undefined;
-      const withRef = askQuestionWithRef(args);
-      const refAppended = withRef !== stringArg(args, "question");
-      const question = await writePictures(resolved, withRef, {
-        cap: ASK_QUESTION_MAX,
-        text: refAppended ? "question plus ref" : "question",
-        shorten: refAppended ? "shorten the question, drop the ref" : "shorten the question"
-      });
+      const question = await writePictures(resolved, askQuestionWithRef(args));
       const askInput = {
         question,
         ...Array.isArray(options) ? { options } : {},
@@ -20489,11 +21885,7 @@ async function executeDispatchTool(input) {
       }
       const replyToBlock = replyTo?.block ?? replyToAskTarget?.block;
       const requestedTurn = optionalString(args, "turn");
-      const body = await writePictures(resolved, stringArg(args, "body"), {
-        cap: DISPATCH_BODY_MAX,
-        text: "body",
-        shorten: "shorten the body"
-      });
+      const body = await writePictures(resolved, stringArg(args, "body"));
       const commentInput = {
         body,
         ...anchored === undefined ? {} : { anchor: anchored },
@@ -20563,11 +21955,6 @@ async function executeDispatchTool(input) {
       const target = messageInReplyTo(args);
       const inReplyTo = target?.id;
       const written = stringArg(args, "body");
-      const bodyLimit = {
-        cap: DISPATCH_BODY_MAX,
-        text: "body",
-        shorten: "shorten the body"
-      };
       if (owner === null && inReplyTo !== undefined) {
         let body = written;
         if (pictures.length > 0) {
@@ -20575,7 +21962,7 @@ async function executeDispatchTool(input) {
           if (!sessionId) {
             throw new Error("host session id is required to send pictures in a direct-message reply");
           }
-          body = await postWithPictures(written, bodyLimit, `agent/${sessionId}`, (upload) => client.agentArtifact(sessionId, upload));
+          body = await postWithPictures(written, `agent/${sessionId}`, (upload) => client.agentArtifact(sessionId, upload));
         }
         const reply = await client.messageReply(inReplyTo, { body, attempt: 1, actor }, { followUp: true });
         if (reply.duplicate === true && reply.body === body) {
@@ -20604,7 +21991,7 @@ async function executeDispatchTool(input) {
         };
       }
       const issueKey = issue();
-      const body = await postWithPictures(written, bodyLimit, issueKey, (upload) => client.artifact(issueKey, upload));
+      const body = await postWithPictures(written, issueKey, (upload) => client.artifact(issueKey, upload));
       const message = await client.message(issueKey, {
         body,
         ...inReplyTo === undefined ? {} : { in_reply_to: inReplyTo },
@@ -20720,6 +22107,7 @@ Document token: ${listed.token}`,
       const approval = approvalLine(resolved.artifact);
       const trailer = [
         ..."token" in document && document.token !== undefined ? [`Document token: ${document.token}`] : [],
+        ..."sha256" in document && document.sha256 !== undefined ? [`Content: sha256:${document.sha256}`] : [],
         ...approval === undefined ? [] : [approval]
       ];
       return {
@@ -21106,7 +22494,7 @@ ${handoff.body}`,
       };
       if (ownerArguments.ref?.kind === "log") {
         const read = await client.read(issueKey, readEvents);
-        const pictures = await picturesOf(read.events.flatMap(eventTexts));
+        const pictures = await picturesOf(await eventTextsWhole(client, read.events));
         return {
           text: [logSummary(read.issue, read.events), ...pictures.lines].join(`
 `),
@@ -21124,18 +22512,18 @@ ${handoff.body}`,
       const readPromise = client.read(issueKey, readEvents);
       const referencesPromise = issueReferencesOrUnavailable(client, issueKey);
       const read = await readPromise;
-      const [references, graph, titles, pictures, coverage] = await Promise.all([
+      const [references, graph, agents, pictures, coverage] = await Promise.all([
         referencesPromise,
         graphSections(client, dispatchIssueRef(read.issue.key)),
-        liveSessionTitles(client, holdsSession(read.issue.claim) || routeHeldBySession(read.issue)),
+        liveAgents(client, holdsSession(read.issue.claim) || routeHeldBySession(read.issue)),
         picturesOf([
           ...read.issue.open_asks.map((ask) => ({ text: ask.question, at: ask.created_at })),
-          ...read.events.flatMap(eventTexts)
+          ...await eventTextsWhole(client, read.events)
         ]),
         issueCoverageOrReason(client, read.issue.key)
       ]);
       return {
-        text: issueSummary(read.issue, read.events, references, [...pictures.lines, ...graph], linkBase, coverage, titles),
+        text: issueSummary(read.issue, read.events, references, [...pictures.lines, ...graph], linkBase, coverage, agents),
         details: { issue: read.issue.key },
         ...showImages(pictures),
         ...repositoryFieldsWarnings(read.issue)
@@ -21628,6 +23016,13 @@ function readEnvoyConfig(filePath, env, options) {
 }
 
 // ../envoy-client/src/bearer.ts
+function bearerCredential(token) {
+  return {
+    scheme: "Bearer",
+    headers: () => ({ Authorization: `Bearer ${token}` }),
+    secret: () => token
+  };
+}
 function bearerSource(env, section, written) {
   const pointer = nonEmpty(env[`${section}_TOKEN_FILE`]);
   if (pointer !== undefined) {
@@ -21658,8 +23053,2440 @@ function fileBearer(bearer, url, section, env, commands = "run") {
   return fileValue(bearer.token, bearer.field, bearer.path, env, commands);
 }
 
+// ../../node_modules/.bun/jose@6.2.9/node_modules/jose/dist/webapi/lib/buffer_utils.js
+var encoder2 = new TextEncoder;
+var decoder = new TextDecoder;
+var strictDecoder = new TextDecoder("utf-8", { fatal: true });
+var MAX_INT32 = 2 ** 32;
+function concat(...buffers) {
+  const size = buffers.reduce((acc, { length }) => acc + length, 0);
+  const buf = new Uint8Array(size);
+  let i = 0;
+  for (const buffer of buffers) {
+    buf.set(buffer, i);
+    i += buffer.length;
+  }
+  return buf;
+}
+function encode4(string) {
+  const bytes = new Uint8Array(string.length);
+  for (let i = 0;i < string.length; i++) {
+    const code = string.charCodeAt(i);
+    if (code > 127) {
+      throw new TypeError("non-ASCII string encountered in encode()");
+    }
+    bytes[i] = code;
+  }
+  return bytes;
+}
+
+// ../../node_modules/.bun/jose@6.2.9/node_modules/jose/dist/webapi/lib/crypto_key.js
+var unusable = (name, prop = "algorithm.name") => new TypeError(`CryptoKey does not support this operation, its ${prop} must be ${name}`);
+function checkUsage(key, usage) {
+  if (usage && !key.usages.includes(usage)) {
+    throw new TypeError(`CryptoKey does not support this operation, its usages must include ${usage}.`);
+  }
+}
+function checkModulusLength(alg, key) {
+  const { modulusLength } = key.algorithm;
+  if (typeof modulusLength !== "number" || modulusLength < 2048) {
+    throw new TypeError(`${alg} requires key modulusLength to be 2048 bits or larger`);
+  }
+}
+function checkCryptoKey(key, expected, usage) {
+  const algorithm = key.algorithm;
+  if (algorithm.name !== expected.name) {
+    throw unusable(expected.name);
+  }
+  if (expected.hash && algorithm.hash?.name !== expected.hash) {
+    throw unusable(expected.hash, "algorithm.hash");
+  }
+  if (expected.namedCurve && algorithm.namedCurve !== expected.namedCurve) {
+    throw unusable(expected.namedCurve, "algorithm.namedCurve");
+  }
+  if (expected.length !== undefined && algorithm.length !== expected.length) {
+    throw unusable(expected.length, "algorithm.length");
+  }
+  checkUsage(key, usage);
+}
+
+// ../../node_modules/.bun/jose@6.2.9/node_modules/jose/dist/webapi/lib/invalid_key_input.js
+function message(msg, actual, ...types) {
+  if (types.length > 2) {
+    const last = types.pop();
+    msg += `one of type ${types.join(", ")}, or ${last}.`;
+  } else if (types.length === 2) {
+    msg += `one of type ${types[0]} or ${types[1]}.`;
+  } else {
+    msg += `of type ${types[0]}.`;
+  }
+  if (actual == null) {
+    msg += ` Received ${actual}`;
+  } else if (typeof actual === "function" && actual.name) {
+    msg += ` Received function ${actual.name}`;
+  } else if (typeof actual === "object" && actual != null) {
+    if (actual.constructor?.name) {
+      msg += ` Received an instance of ${actual.constructor.name}`;
+    }
+  }
+  return msg;
+}
+var invalidKeyInput = (actual, ...types) => message("Key must be ", actual, ...types);
+var withAlg = (alg, actual, ...types) => message(`Key for the ${alg} algorithm must be `, actual, ...types);
+
+// ../../node_modules/.bun/jose@6.2.9/node_modules/jose/dist/webapi/util/errors.js
+class JOSEError extends Error {
+  static code = "ERR_JOSE_GENERIC";
+  code = "ERR_JOSE_GENERIC";
+  constructor(message, options) {
+    super(message, options);
+    this.name = this.constructor.name;
+    Error.captureStackTrace?.(this, this.constructor);
+  }
+}
+class JOSENotSupported extends JOSEError {
+  static code = "ERR_JOSE_NOT_SUPPORTED";
+  code = "ERR_JOSE_NOT_SUPPORTED";
+}
+class JWSInvalid extends JOSEError {
+  static code = "ERR_JWS_INVALID";
+  code = "ERR_JWS_INVALID";
+}
+
+class JWTInvalid extends JOSEError {
+  static code = "ERR_JWT_INVALID";
+  code = "ERR_JWT_INVALID";
+}
+
+// ../../node_modules/.bun/jose@6.2.9/node_modules/jose/dist/webapi/lib/is_key_like.js
+var isCryptoKey = (key) => {
+  if (key?.[Symbol.toStringTag] === "CryptoKey")
+    return true;
+  try {
+    return key instanceof CryptoKey;
+  } catch {
+    return false;
+  }
+};
+var isKeyObject = (key) => key?.[Symbol.toStringTag] === "KeyObject";
+var isKeyLike = (key) => isCryptoKey(key) || isKeyObject(key);
+
+// ../../node_modules/.bun/jose@6.2.9/node_modules/jose/dist/webapi/lib/base64.js
+function encodeBase64(input) {
+  if (Uint8Array.prototype.toBase64) {
+    return input.toBase64();
+  }
+  const CHUNK_SIZE = 32768;
+  const arr = [];
+  for (let i = 0;i < input.length; i += CHUNK_SIZE) {
+    arr.push(String.fromCharCode.apply(null, input.subarray(i, i + CHUNK_SIZE)));
+  }
+  return btoa(arr.join(""));
+}
+function decodeBase64(encoded) {
+  if (Uint8Array.fromBase64) {
+    return Uint8Array.fromBase64(encoded);
+  }
+  const binary = atob(encoded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0;i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+// ../../node_modules/.bun/jose@6.2.9/node_modules/jose/dist/webapi/util/base64url.js
+var invalid = "The input to be decoded is not correctly encoded.";
+function decode3(input) {
+  if (Uint8Array.fromBase64) {
+    try {
+      return Uint8Array.fromBase64(typeof input === "string" ? input : decoder.decode(input), {
+        alphabet: "base64url"
+      });
+    } catch (cause) {
+      throw new TypeError(invalid, { cause });
+    }
+  }
+  let encoded = input;
+  if (encoded instanceof Uint8Array) {
+    encoded = decoder.decode(encoded);
+  }
+  if (encoded.includes("+") || encoded.includes("/")) {
+    throw new TypeError(invalid);
+  }
+  encoded = encoded.replace(/-/g, "+").replace(/_/g, "/");
+  try {
+    return decodeBase64(encoded);
+  } catch {
+    throw new TypeError(invalid);
+  }
+}
+function encode5(input) {
+  let unencoded = input;
+  if (typeof unencoded === "string") {
+    unencoded = encoder2.encode(unencoded);
+  }
+  if (Uint8Array.prototype.toBase64) {
+    return unencoded.toBase64({ alphabet: "base64url", omitPadding: true });
+  }
+  return encodeBase64(unencoded).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+}
+
+// ../../node_modules/.bun/jose@6.2.9/node_modules/jose/dist/webapi/lib/type_checks.js
+function isObject3(input) {
+  if (typeof input !== "object" || input === null || Object.prototype.toString.call(input) !== "[object Object]") {
+    return false;
+  }
+  const prototype = Object.getPrototypeOf(input);
+  if (prototype === null) {
+    return true;
+  }
+  let proto = prototype;
+  while (Object.getPrototypeOf(proto) !== null) {
+    proto = Object.getPrototypeOf(proto);
+  }
+  return prototype === proto;
+}
+function isDisjoint(...headers) {
+  const parameters = new Set;
+  for (const header of headers) {
+    if (!header)
+      continue;
+    for (const parameter of Object.keys(header)) {
+      if (parameters.has(parameter)) {
+        return false;
+      }
+      parameters.add(parameter);
+    }
+  }
+  return true;
+}
+var isJWK = (key) => isObject3(key) && typeof key.kty === "string";
+var isPrivateJWK = (key) => key.kty !== "oct" && (key.kty === "AKP" && typeof key.priv === "string" || typeof key.d === "string");
+var isPublicJWK = (key) => key.kty !== "oct" && key.d === undefined && key.priv === undefined;
+var isSecretJWK = (key) => key.kty === "oct" && typeof key.k === "string";
+
+// ../../node_modules/.bun/jose@6.2.9/node_modules/jose/dist/webapi/lib/helpers.js
+var unprotected = Symbol();
+function assertNotSet(value, name) {
+  if (value) {
+    throw new TypeError(`${name} can only be called once`);
+  }
+}
+
+// ../../node_modules/.bun/jose@6.2.9/node_modules/jose/dist/webapi/lib/jwk_to_key.js
+async function jwkToKey(entry, jwk) {
+  if (jwk.kty === "RSA" && "oth" in jwk && jwk.oth !== undefined) {
+    throw new JOSENotSupported('RSA JWK "oth" (Other Primes Info) Parameter value is not supported');
+  }
+  if (!entry.kty.includes(jwk.kty)) {
+    throw new JOSENotSupported('Invalid or unsupported JWK "alg" (Algorithm) Parameter value');
+  }
+  const algorithm = entry.resolve?.({ kty: jwk.kty, crv: jwk.crv }) ?? entry.subtle;
+  const isPrivate = !!(jwk.d || jwk.priv);
+  const keyData = { ...jwk };
+  if (keyData.kty !== "AKP") {
+    delete keyData.alg;
+  }
+  delete keyData.use;
+  return crypto.subtle.importKey("jwk", keyData, algorithm, jwk.ext ?? !isPrivate, jwk.key_ops ?? entry.usages[isPrivate ? 1 : 0]);
+}
+
+// ../../node_modules/.bun/jose@6.2.9/node_modules/jose/dist/webapi/lib/key.js
+var tag = (key) => key[Symbol.toStringTag];
+var jwkMatchesOp = (entry, key, usage) => {
+  const { alg } = entry;
+  if (key.use !== undefined) {
+    const expected = usage === "sign" || usage === "verify" ? "sig" : "enc";
+    if (key.use !== expected) {
+      throw new TypeError(`Invalid key for this operation, its "use" must be "${expected}" when present`);
+    }
+  }
+  if (key.alg !== undefined && key.alg !== alg) {
+    throw new TypeError(`Invalid key for this operation, its "alg" must be "${alg}" when present`);
+  }
+  if (Array.isArray(key.key_ops)) {
+    const expectedKeyOp = usage === "encrypt" || usage === "decrypt" ? entry.ops?.[usage === "encrypt" ? 0 : 1] : usage;
+    if (expectedKeyOp && !key.key_ops.includes(expectedKeyOp)) {
+      throw new TypeError(`Invalid key for this operation, its "key_ops" must include "${expectedKeyOp}" when present`);
+    }
+  }
+};
+function checkKeyType(entry, key, usage) {
+  const { alg, secret } = entry;
+  const privateKey = usage === "decrypt" || usage === "sign";
+  if (secret && key instanceof Uint8Array)
+    return [BYTES, key];
+  if (isJWK(key)) {
+    if (secret ? !isSecretJWK(key) : !(privateKey ? isPrivateJWK(key) : isPublicJWK(key))) {
+      throw new TypeError(secret ? `JSON Web Key for symmetric algorithms must have JWK "kty" (Key Type) equal to "oct" and the JWK "k" (Key Value) present` : `JSON Web Key for this operation must be a ${privateKey ? "private" : "public"} JWK`);
+    }
+    jwkMatchesOp(entry, key, usage);
+    return [JWK, key];
+  }
+  if (!isKeyLike(key)) {
+    throw new TypeError(secret ? withAlg(alg, key, "CryptoKey", "KeyObject", "JSON Web Key", "Uint8Array") : withAlg(alg, key, "CryptoKey", "KeyObject", "JSON Web Key"));
+  }
+  if (secret) {
+    if (key.type !== "secret") {
+      throw new TypeError(`${tag(key)} instances for symmetric algorithms must be of type "secret"`);
+    }
+  } else {
+    if (key.type === "secret") {
+      throw new TypeError(`${tag(key)} instances for asymmetric algorithms must not be of type "secret"`);
+    }
+    const expectedType = privateKey ? "private" : "public";
+    if ((key.type === "public" || key.type === "private") && key.type !== expectedType) {
+      const operation = usage === "sign" ? "signing" : usage === "verify" ? "verifying" : `${usage.slice(0, -1)}tion`;
+      throw new TypeError(`${tag(key)} instances for asymmetric algorithm ${operation} must be of type "${expectedType}"`);
+    }
+  }
+  return isCryptoKey(key) ? [CRYPTO, key] : [KEYOBJECT, key];
+}
+var BYTES = 0;
+var CRYPTO = 1;
+var KEYOBJECT = 2;
+var JWK = 3;
+var cache;
+var nist = {
+  __proto__: null,
+  prime256v1: "P-256",
+  secp384r1: "P-384",
+  secp521r1: "P-521"
+};
+function cached2(key, alg, value) {
+  cache ||= new WeakMap;
+  const entry = cache.get(key);
+  if (value) {
+    if (entry) {
+      entry[alg] = value;
+    } else {
+      cache.set(key, { __proto__: null, [alg]: value });
+    }
+  }
+  return value ?? entry?.[alg];
+}
+var handleJWK = async (key, jwk, entry) => cached2(key, entry.alg) ?? cached2(key, entry.alg, await jwkToKey(entry, { ...jwk, alg: entry.alg }));
+var handleKeyObject = (keyObject, entry) => {
+  const hit = cached2(keyObject, entry.alg);
+  if (hit)
+    return hit;
+  const isPublic = keyObject.type === "public";
+  const usages = entry.usages[isPublic ? 0 : 1];
+  const { asymmetricKeyType } = keyObject;
+  const crv = nist[keyObject.asymmetricKeyDetails?.namedCurve];
+  const params = entry.resolve?.({ crv, asymmetricKeyType }) ?? entry.subtle;
+  return cached2(keyObject, entry.alg, keyObject.toCryptoKey(params, isPublic, usages));
+};
+async function prepareKey(entry, key, usage) {
+  const tagged = checkKeyType(entry, key, usage);
+  switch (tagged[0]) {
+    case BYTES:
+    case CRYPTO:
+      return tagged[1];
+    case JWK: {
+      const key = tagged[1];
+      if (key.k) {
+        return decode3(key.k);
+      }
+      if (!Object.isFrozen(key)) {
+        const { key_ops } = key;
+        if (Array.isArray(key_ops))
+          Object.freeze(key_ops);
+        Object.freeze(key);
+      }
+      return handleJWK(key, key, entry);
+    }
+    case KEYOBJECT: {
+      const keyObject = tagged[1];
+      if (keyObject.type === "secret") {
+        return keyObject.export();
+      }
+      if ("toCryptoKey" in keyObject && typeof keyObject.toCryptoKey === "function") {
+        return handleKeyObject(keyObject, entry);
+      }
+      return handleJWK(keyObject, keyObject.export({ format: "jwk" }), entry);
+    }
+  }
+}
+
+// ../../node_modules/.bun/jose@6.2.9/node_modules/jose/dist/webapi/lib/key_descriptor.js
+function table(entries) {
+  const out = { __proto__: null };
+  for (const alg in entries) {
+    out[alg] = { ...entries[alg], alg };
+  }
+  return out;
+}
+
+// ../../node_modules/.bun/jose@6.2.9/node_modules/jose/dist/webapi/lib/jwe_algorithms.js
+var wrap = [
+  ["encrypt", "wrapKey"],
+  ["decrypt", "unwrapKey"]
+];
+var derive = [[], ["deriveBits"]];
+var none = [[], []];
+function rsaes(bits) {
+  return {
+    kty: ["RSA"],
+    subtle: { name: "RSA-OAEP", hash: `SHA-${bits}` },
+    usages: wrap,
+    ops: ["wrapKey", "unwrapKey"]
+  };
+}
+function ecdh() {
+  return {
+    kty: ["EC", "OKP"],
+    subtle: { name: "ECDH" },
+    resolve: ({ kty, crv, asymmetricKeyType }) => {
+      if (crv === "X25519" || asymmetricKeyType === "x25519") {
+        return { name: "X25519" };
+      }
+      if (kty === "OKP") {
+        throw new JOSENotSupported('Invalid or unsupported JWK "alg" (Algorithm) Parameter value');
+      }
+      return { name: "ECDH", namedCurve: crv };
+    },
+    usages: derive,
+    ops: [undefined, "deriveBits"]
+  };
+}
+function aeskw(bits, gcm = false) {
+  return {
+    kty: ["oct"],
+    secret: true,
+    subtle: { name: gcm ? "AES-GCM" : "AES-KW", length: bits },
+    usages: none,
+    ops: gcm ? ["encrypt", "decrypt"] : ["wrapKey", "unwrapKey"]
+  };
+}
+function pbes2() {
+  return {
+    kty: ["oct"],
+    secret: true,
+    subtle: { name: "PBKDF2" },
+    usages: none,
+    ops: ["deriveBits", "deriveBits"]
+  };
+}
+var JWE = table({
+  dir: {
+    kty: ["oct"],
+    secret: true,
+    subtle: { name: "AES-GCM" },
+    usages: none,
+    ops: ["encrypt", "decrypt"]
+  },
+  "RSA-OAEP": rsaes(1),
+  "RSA-OAEP-256": rsaes(256),
+  "RSA-OAEP-384": rsaes(384),
+  "RSA-OAEP-512": rsaes(512),
+  "ECDH-ES": ecdh(),
+  "ECDH-ES+A128KW": ecdh(),
+  "ECDH-ES+A192KW": ecdh(),
+  "ECDH-ES+A256KW": ecdh(),
+  A128KW: aeskw(128),
+  A192KW: aeskw(192),
+  A256KW: aeskw(256),
+  A128GCMKW: aeskw(128, true),
+  A192GCMKW: aeskw(192, true),
+  A256GCMKW: aeskw(256, true),
+  "PBES2-HS256+A128KW": pbes2(),
+  "PBES2-HS384+A192KW": pbes2(),
+  "PBES2-HS512+A256KW": pbes2()
+});
+var contentOps = ["encrypt", "decrypt"];
+function contentEncryption(bits, cbc = false) {
+  return {
+    kty: ["oct"],
+    secret: true,
+    subtle: { name: cbc ? "AES-CBC" : "AES-GCM", length: bits },
+    usages: none,
+    ops: contentOps,
+    cekBits: bits,
+    ivBits: cbc ? 128 : 96,
+    cbc
+  };
+}
+var ENC = table({
+  A128GCM: contentEncryption(128),
+  A192GCM: contentEncryption(192),
+  A256GCM: contentEncryption(256),
+  "A128CBC-HS256": contentEncryption(256, true),
+  "A192CBC-HS384": contentEncryption(384, true),
+  "A256CBC-HS512": contentEncryption(512, true)
+});
+
+// ../../node_modules/.bun/jose@6.2.9/node_modules/jose/dist/webapi/lib/options.js
+var JWS_RECOGNIZED = { __proto__: null, b64: true };
+function validateCritDuplicates(Err, protectedHeader) {
+  const { crit } = protectedHeader ?? {};
+  if (Array.isArray(crit) && new Set(crit).size !== crit.length) {
+    throw new Err('"crit" (Critical) Header Parameter MUST NOT contain duplicate values');
+  }
+}
+function validateCrit(Err, recognizedDefault, recognizedOption, protectedHeader, joseHeader) {
+  if (joseHeader.crit !== undefined && protectedHeader?.crit === undefined) {
+    throw new Err('"crit" (Critical) Header Parameter MUST be integrity protected');
+  }
+  if (!protectedHeader || protectedHeader.crit === undefined) {
+    return [];
+  }
+  if (!Array.isArray(protectedHeader.crit) || protectedHeader.crit.length === 0 || protectedHeader.crit.some((input) => typeof input !== "string" || input.length === 0)) {
+    throw new Err('"crit" (Critical) Header Parameter MUST be an array of non-empty strings when present');
+  }
+  const recognized = recognizedOption === undefined ? recognizedDefault : { __proto__: null, ...recognizedOption, ...recognizedDefault };
+  for (const parameter of protectedHeader.crit) {
+    if (!(parameter in recognized)) {
+      throw new JOSENotSupported(`Extension Header Parameter "${parameter}" is not recognized`);
+    }
+    if (!Object.hasOwn(joseHeader, parameter) || joseHeader[parameter] === undefined) {
+      throw new Err(`Extension Header Parameter "${parameter}" is missing`);
+    }
+    if (recognized[parameter] && (!Object.hasOwn(protectedHeader, parameter) || protectedHeader[parameter] === undefined)) {
+      throw new Err(`Extension Header Parameter "${parameter}" MUST be integrity protected`);
+    }
+  }
+  return protectedHeader.crit;
+}
+
+// ../../node_modules/.bun/jose@6.2.9/node_modules/jose/dist/webapi/lib/signing.js
+async function getSigKey(entry, key, usage) {
+  if (key instanceof Uint8Array) {
+    return crypto.subtle.importKey("raw", key, entry.subtle, false, [
+      usage
+    ]);
+  }
+  checkCryptoKey(key, entry.subtle, usage);
+  if (entry.minRsaBits)
+    checkModulusLength(entry.alg, key);
+  return key;
+}
+async function sign(entry, key, data) {
+  const cryptoKey = await getSigKey(entry, key, "sign");
+  const signature = await crypto.subtle.sign(entry.signing, cryptoKey, data);
+  return new Uint8Array(signature);
+}
+
+// ../../node_modules/.bun/jose@6.2.9/node_modules/jose/dist/webapi/lib/jws_algorithms.js
+var sig = [["verify"], ["sign"]];
+function hmac(bits) {
+  const subtle = { name: "HMAC", hash: `SHA-${bits}` };
+  return { kty: ["oct"], secret: true, subtle, signing: subtle, usages: sig };
+}
+function rsa(bits, saltLength) {
+  const name = saltLength ? "RSA-PSS" : "RSASSA-PKCS1-v1_5";
+  const subtle = { name, hash: `SHA-${bits}` };
+  return {
+    kty: ["RSA"],
+    subtle,
+    signing: saltLength ? { ...subtle, saltLength } : subtle,
+    usages: sig,
+    minRsaBits: 2048
+  };
+}
+function ecdsa(crv, bits) {
+  return {
+    kty: ["EC"],
+    crv,
+    subtle: { name: "ECDSA", namedCurve: crv },
+    signing: { name: "ECDSA", hash: `SHA-${bits}` },
+    usages: sig
+  };
+}
+function eddsa() {
+  const subtle = { name: "Ed25519" };
+  return {
+    kty: ["OKP"],
+    crv: "Ed25519",
+    subtle,
+    signing: subtle,
+    usages: sig
+  };
+}
+function mldsa(bits) {
+  const name = `ML-DSA-${bits}`;
+  const subtle = { name };
+  return {
+    kty: ["AKP"],
+    subtle,
+    signing: subtle,
+    usages: sig
+  };
+}
+var JWS = table({
+  HS256: hmac(256),
+  HS384: hmac(384),
+  HS512: hmac(512),
+  RS256: rsa(256),
+  RS384: rsa(384),
+  RS512: rsa(512),
+  PS256: rsa(256, 32),
+  PS384: rsa(384, 48),
+  PS512: rsa(512, 64),
+  ES256: ecdsa("P-256", 256),
+  ES384: ecdsa("P-384", 384),
+  ES512: ecdsa("P-521", 512),
+  EdDSA: eddsa(),
+  Ed25519: eddsa(),
+  "ML-DSA-44": mldsa(44),
+  "ML-DSA-65": mldsa(65),
+  "ML-DSA-87": mldsa(87)
+});
+function jwsAlgorithm(alg) {
+  const entry = typeof alg === "string" ? JWS[alg] : undefined;
+  if (!entry) {
+    throw new JOSENotSupported(`alg ${alg} is not supported either by JOSE or your javascript runtime`);
+  }
+  return entry;
+}
+
+// ../../node_modules/.bun/jose@6.2.9/node_modules/jose/dist/webapi/lib/jwt_claims_set.js
+var epoch = (date) => Math.floor(date.getTime() / 1000);
+var multipliers = {
+  s: 1,
+  m: 60,
+  h: 3600,
+  d: 86400,
+  w: 604800,
+  y: 31557600
+};
+var REGEX = /^(\+|\-)? ?(\d+|\d+\.\d+) ?(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h|days?|d|weeks?|w|years?|yrs?|y)(?: (ago|from now))?$/i;
+function secs(str) {
+  const matched = REGEX.exec(str);
+  if (!matched || matched[4] && matched[1]) {
+    throw new TypeError("Invalid time period format");
+  }
+  const value = parseFloat(matched[2]);
+  const numericDate = Math.round(value * multipliers[matched[3][0].toLowerCase()]);
+  if (matched[1] === "-" || matched[4] === "ago") {
+    return -numericDate;
+  }
+  return numericDate;
+}
+function validateInput(label, input) {
+  if (!Number.isFinite(input)) {
+    throw new TypeError(`Invalid ${label} input`);
+  }
+  return input;
+}
+function numericDate(value, label) {
+  if (typeof value === "number")
+    return validateInput(label, value);
+  if (value instanceof Date)
+    return validateInput(label, epoch(value));
+  return epoch(new Date) + secs(value);
+}
+class JWTClaimsBuilder {
+  #payload;
+  constructor(payload) {
+    if (!isObject3(payload)) {
+      throw new TypeError("JWT Claims Set MUST be an object");
+    }
+    this.#payload = structuredClone(payload);
+  }
+  data() {
+    return encoder2.encode(JSON.stringify(this.#payload));
+  }
+  get iss() {
+    return this.#payload.iss;
+  }
+  set iss(value) {
+    this.#payload.iss = value;
+  }
+  get sub() {
+    return this.#payload.sub;
+  }
+  set sub(value) {
+    this.#payload.sub = value;
+  }
+  get aud() {
+    return this.#payload.aud;
+  }
+  set aud(value) {
+    this.#payload.aud = value;
+  }
+  set jti(value) {
+    this.#payload.jti = value;
+  }
+  set nbf(value) {
+    this.#payload.nbf = numericDate(value, "setNotBefore");
+  }
+  set exp(value) {
+    this.#payload.exp = numericDate(value, "setExpirationTime");
+  }
+  set iat(value) {
+    if (value === undefined) {
+      this.#payload.iat = epoch(new Date);
+    } else if (typeof value === "string") {
+      this.#payload.iat = validateInput("setIssuedAt", epoch(new Date) + secs(value));
+    } else {
+      this.#payload.iat = numericDate(value, "setIssuedAt");
+    }
+  }
+}
+
+// ../../node_modules/.bun/jose@6.2.9/node_modules/jose/dist/webapi/lib/jws_sign.js
+function unencodedPayload(protectedHeader) {
+  return protectedHeader?.b64 === false && Array.isArray(protectedHeader.crit) && protectedHeader.crit.includes("b64");
+}
+async function createSignature(input, key) {
+  const { protectedHeader, unprotectedHeader } = input;
+  if (!protectedHeader && !unprotectedHeader) {
+    throw new JWSInvalid("either setProtectedHeader or setUnprotectedHeader must be called before #sign()");
+  }
+  if (!isDisjoint(protectedHeader, unprotectedHeader)) {
+    throw new JWSInvalid("JWS Protected and JWS Unprotected Header Parameter names must be disjoint");
+  }
+  const joseHeader = { ...protectedHeader, ...unprotectedHeader };
+  validateCritDuplicates(JWSInvalid, protectedHeader);
+  const extensions = validateCrit(JWSInvalid, JWS_RECOGNIZED, input.crit, protectedHeader, joseHeader);
+  let b64 = true;
+  if (extensions.includes("b64")) {
+    b64 = protectedHeader.b64;
+    if (typeof b64 !== "boolean") {
+      throw new JWSInvalid('The "b64" (base64url-encode payload) Header Parameter must be a boolean');
+    }
+  }
+  const { alg } = joseHeader;
+  if (typeof alg !== "string" || !alg) {
+    throw new JWSInvalid('JWS "alg" (Algorithm) Header Parameter missing or invalid');
+  }
+  const entry = jwsAlgorithm(alg);
+  let payloadS;
+  let payloadB;
+  if (b64) {
+    const encoded = input.encoded ??= [];
+    encoded[0] ??= encode5(input.payload);
+    encoded[1] ??= encode4(encoded[0]);
+    payloadS = encoded[0];
+    payloadB = encoded[1];
+  } else {
+    payloadB = input.payload;
+    payloadS = "";
+  }
+  let protectedHeaderString;
+  let protectedHeaderBytes;
+  if (protectedHeader) {
+    protectedHeaderString = encode5(JSON.stringify(protectedHeader));
+    protectedHeaderBytes = encode4(protectedHeaderString);
+  } else {
+    protectedHeaderString = "";
+    protectedHeaderBytes = new Uint8Array;
+  }
+  const data = concat(protectedHeaderBytes, encode4("."), payloadB);
+  const k = await prepareKey(entry, key, "sign");
+  const signature = await sign(entry, k, data);
+  const jws = {
+    signature: encode5(signature),
+    payload: payloadS
+  };
+  if (protectedHeader) {
+    jws.protected = protectedHeaderString;
+  }
+  if (unprotectedHeader) {
+    jws.header = unprotectedHeader;
+  }
+  return jws;
+}
+
+// ../../node_modules/.bun/jose@6.2.9/node_modules/jose/dist/webapi/jws/flattened/sign.js
+class FlattenedSign {
+  #payload;
+  #protectedHeader;
+  #unprotectedHeader;
+  constructor(payload) {
+    if (!(payload instanceof Uint8Array)) {
+      throw new TypeError("payload must be an instance of Uint8Array");
+    }
+    this.#payload = payload;
+  }
+  setProtectedHeader(protectedHeader) {
+    assertNotSet(this.#protectedHeader, "setProtectedHeader");
+    this.#protectedHeader = protectedHeader;
+    return this;
+  }
+  setUnprotectedHeader(unprotectedHeader) {
+    assertNotSet(this.#unprotectedHeader, "setUnprotectedHeader");
+    this.#unprotectedHeader = unprotectedHeader;
+    return this;
+  }
+  async sign(key, options) {
+    return createSignature({
+      payload: this.#payload,
+      protectedHeader: this.#protectedHeader,
+      unprotectedHeader: this.#unprotectedHeader,
+      crit: options?.crit
+    }, key);
+  }
+}
+
+// ../../node_modules/.bun/jose@6.2.9/node_modules/jose/dist/webapi/jws/compact/sign.js
+class CompactSign {
+  #flattened;
+  #protectedHeader;
+  constructor(payload) {
+    this.#flattened = new FlattenedSign(payload);
+  }
+  setProtectedHeader(protectedHeader) {
+    this.#flattened.setProtectedHeader(protectedHeader);
+    this.#protectedHeader = protectedHeader;
+    return this;
+  }
+  async sign(key, options) {
+    if (unencodedPayload(this.#protectedHeader)) {
+      throw new TypeError("use the flattened module for creating JWS with b64: false");
+    }
+    const jws = await this.#flattened.sign(key, options);
+    return `${jws.protected}.${jws.payload}.${jws.signature}`;
+  }
+}
+
+// ../../node_modules/.bun/jose@6.2.9/node_modules/jose/dist/webapi/jwt/sign.js
+class SignJWT {
+  #protectedHeader;
+  #jwt;
+  constructor(payload = {}) {
+    this.#jwt = new JWTClaimsBuilder(payload);
+  }
+  setIssuer(issuer) {
+    this.#jwt.iss = issuer;
+    return this;
+  }
+  setSubject(subject) {
+    this.#jwt.sub = subject;
+    return this;
+  }
+  setAudience(audience) {
+    this.#jwt.aud = audience;
+    return this;
+  }
+  setJti(jwtId) {
+    this.#jwt.jti = jwtId;
+    return this;
+  }
+  setNotBefore(input) {
+    this.#jwt.nbf = input;
+    return this;
+  }
+  setExpirationTime(input) {
+    this.#jwt.exp = input;
+    return this;
+  }
+  setIssuedAt(input) {
+    this.#jwt.iat = input;
+    return this;
+  }
+  setProtectedHeader(protectedHeader) {
+    this.#protectedHeader = protectedHeader;
+    return this;
+  }
+  async sign(key, options) {
+    const sig = new CompactSign(this.#jwt.data());
+    sig.setProtectedHeader(this.#protectedHeader);
+    if (unencodedPayload(this.#protectedHeader)) {
+      throw new JWTInvalid("JWTs MUST NOT use unencoded payload");
+    }
+    return sig.sign(key, options);
+  }
+}
+// ../../node_modules/.bun/jose@6.2.9/node_modules/jose/dist/webapi/lib/key_algorithm.js
+var algArgument = '"alg" (Algorithm)';
+function unsupportedAlg(source = 'JWK "alg" (Algorithm) Parameter') {
+  throw new JOSENotSupported(`Invalid or unsupported ${source} value`);
+}
+function keyAlgorithm(alg, source) {
+  return (typeof alg === "string" ? JWS[alg] ?? JWE[alg] : undefined) ?? unsupportedAlg(source);
+}
+
+// ../../node_modules/.bun/jose@6.2.9/node_modules/jose/dist/webapi/key/export.js
+function omitUndefinedProperties(jwk) {
+  return Object.fromEntries(Object.entries(jwk).filter(([, value]) => value !== undefined));
+}
+async function keyToJWK(key) {
+  if (isKeyObject(key)) {
+    if (key.type === "secret") {
+      key = key.export();
+    } else {
+      return key.export({ format: "jwk" });
+    }
+  }
+  if (key instanceof Uint8Array) {
+    return {
+      kty: "oct",
+      k: encode5(key)
+    };
+  }
+  if (!isCryptoKey(key)) {
+    throw new TypeError(invalidKeyInput(key, "CryptoKey", "KeyObject", "Uint8Array"));
+  }
+  if (!key.extractable) {
+    throw new TypeError("non-extractable CryptoKey cannot be exported as a JWK");
+  }
+  const { ext, key_ops, alg, use, ...jwk } = omitUndefinedProperties(await crypto.subtle.exportKey("jwk", key));
+  if (jwk.kty === "AKP") {
+    jwk.alg = alg;
+  }
+  return jwk;
+}
+function exportJWK(key) {
+  return keyToJWK(key);
+}
+// ../../node_modules/.bun/jose@6.2.9/node_modules/jose/dist/webapi/key/generate_key_pair.js
+function getModulusLengthOption(options) {
+  const modulusLength = options?.modulusLength ?? 2048;
+  if (typeof modulusLength !== "number" || modulusLength < 2048) {
+    throw new JOSENotSupported("Invalid or unsupported modulusLength option provided, 2048 bits or larger keys must be used");
+  }
+  return modulusLength;
+}
+async function generateKeyPair(alg, options) {
+  const entry = keyAlgorithm(alg, algArgument);
+  if (entry.secret) {
+    unsupportedAlg(algArgument);
+  }
+  let algorithm;
+  if (entry.resolve) {
+    const crv = options?.crv ?? "P-256";
+    switch (crv) {
+      case "P-256":
+      case "P-384":
+      case "P-521":
+        algorithm = { name: "ECDH", namedCurve: crv };
+        break;
+      case "X25519":
+        algorithm = { name: "X25519" };
+        break;
+      default:
+        throw new JOSENotSupported("Invalid or unsupported crv option provided, supported values are P-256, P-384, P-521, and X25519");
+    }
+  } else {
+    if (entry.crv !== undefined && options?.crv !== undefined && options.crv !== entry.crv) {
+      throw new JOSENotSupported(`Invalid or unsupported crv option provided, the only supported value for ${alg} is ${entry.crv}`);
+    }
+    algorithm = entry.kty[0] === "RSA" ? {
+      ...entry.subtle,
+      publicExponent: Uint8Array.of(1, 0, 1),
+      modulusLength: getModulusLengthOption(options)
+    } : entry.subtle;
+  }
+  return crypto.subtle.generateKey(algorithm, options?.extractable ?? false, [
+    ...entry.usages[1],
+    ...entry.usages[0]
+  ]);
+}
+// ../broker-client/src/dpop.ts
+var ALGORITHM = "ES256";
+function targetUri(url) {
+  const parsed = new URL(url);
+  parsed.search = "";
+  parsed.hash = "";
+  return parsed.toString();
+}
+async function accessTokenHash(accessToken) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(accessToken));
+  return Buffer.from(digest).toString("base64url");
+}
+async function newDpopKey() {
+  const { privateKey, publicKey } = await generateKeyPair(ALGORITHM, { extractable: false });
+  const publicJwk = await exportJWK(publicKey);
+  return {
+    publicJwk,
+    async proof(request) {
+      const claims = {
+        jti: crypto.randomUUID(),
+        htm: request.method.toUpperCase(),
+        htu: targetUri(request.url),
+        iat: Math.floor(Date.now() / 1000)
+      };
+      if (request.nonce !== undefined && request.nonce !== "")
+        claims["nonce"] = request.nonce;
+      if (request.accessToken !== undefined && request.accessToken !== "") {
+        claims["ath"] = await accessTokenHash(request.accessToken);
+      }
+      return await new SignJWT(claims).setProtectedHeader({ typ: "dpop+jwt", alg: ALGORITHM, jwk: publicJwk }).sign(privateKey);
+    }
+  };
+}
+
+// ../broker-client/src/metadata-identity.ts
+import { Agent, request } from "http";
+
+// ../broker-client/src/wire.ts
+var TOKEN_PATH = "/v1/oauth/token";
+var GRANT_TYPE_TOKEN_EXCHANGE = "urn:ietf:params:oauth:grant-type:token-exchange";
+var EXCHANGE_CLIENT_ID = "dispatch-token-exchange";
+var FORM_SESSION = "session";
+var FORM_LAUNCHER_CREDENTIAL = "launcher_credential";
+var FORM_LAUNCHER_CREDENTIAL_DECLINED = "false";
+var SUBJECT_TOKEN_TYPE_KUBERNETES = "urn:envoy:params:oauth:token-type:kubernetes-service-account";
+var SUBJECT_TOKEN_TYPE_GOOGLE = "urn:envoy:params:oauth:token-type:google-identity";
+var ACTOR_TOKEN_TYPE_MACHINE = "urn:envoy:params:oauth:token-type:machine-google-identity";
+var TOKEN_TYPE_DPOP = "DPoP";
+
+// ../broker-client/src/metadata-identity.ts
+var METADATA_HOST_VAR = "GCE_METADATA_HOST";
+var DEFAULT_METADATA_HOST = "metadata.google.internal";
+var IDENTITY_PATH = "/computeMetadata/v1/instance/service-accounts/default/identity";
+var TIMEOUT_MS = 1e4;
+var MAX_ANSWER_BYTES = 1 << 20;
+var agent = new Agent({ keepAlive: false });
+function tokenUrl(audience, env) {
+  const host = (env[METADATA_HOST_VAR] ?? "").trim() || DEFAULT_METADATA_HOST;
+  return `http://${host}${IDENTITY_PATH}?audience=${encodeURIComponent(audience)}&format=full`;
+}
+function get(url, signal) {
+  const { promise, resolve, reject } = Promise.withResolvers();
+  const call = request(url, {
+    agent,
+    method: "GET",
+    headers: { "Metadata-Flavor": "Google" },
+    timeout: TIMEOUT_MS,
+    ...signal === undefined ? {} : { signal }
+  }, (answer) => {
+    const chunks = [];
+    let read = 0;
+    answer.on("data", (chunk) => {
+      read += chunk.length;
+      if (read <= MAX_ANSWER_BYTES)
+        chunks.push(chunk);
+    });
+    answer.on("end", () => resolve({ status: answer.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }));
+    answer.on("error", reject);
+  });
+  call.on("timeout", () => call.destroy(new Error(`no answer within ${TIMEOUT_MS} ms`)));
+  call.on("error", reject);
+  call.end();
+  return promise;
+}
+function metadataIdentity(audience, env = process.env) {
+  return {
+    async read(signal) {
+      const url = tokenUrl(audience, env);
+      let answer;
+      try {
+        answer = await get(url, signal);
+      } catch (error) {
+        throw new Error(`the metadata server at ${url} could not be reached (${METADATA_HOST_VAR} names its host): ${error.message}`);
+      }
+      if (answer.status < 200 || answer.status > 299) {
+        throw new Error(`the metadata server at ${url} answered HTTP ${answer.status}`);
+      }
+      const token = answer.body.trim();
+      if (token === "") {
+        throw new Error(`the metadata server at ${url} answered an empty identity token`);
+      }
+      return { token, tokenType: SUBJECT_TOKEN_TYPE_GOOGLE };
+    },
+    describe: () => `this machine's Google identity token for ${audience} (${METADATA_HOST_VAR} names the metadata server)`
+  };
+}
+
+// ../broker-client/src/projected-token.ts
+import { readFile } from "fs/promises";
+function projectedToken(path) {
+  return {
+    async read(signal) {
+      let contents;
+      try {
+        contents = await readFile(path, {
+          encoding: "utf8",
+          ...signal === undefined ? {} : { signal }
+        });
+      } catch (error) {
+        throw new Error(`read the projected service-account token ${path}: ${error.message}`);
+      }
+      const token = contents.trim();
+      if (token === "")
+        throw new Error(`the projected service-account token ${path} is empty`);
+      return { token, tokenType: SUBJECT_TOKEN_TYPE_KUBERNETES };
+    },
+    describe: () => `the projected service-account token ${path}`
+  };
+}
+
+// ../../node_modules/.bun/oauth4webapi@3.8.8/node_modules/oauth4webapi/build/index.js
+var USER_AGENT;
+if (typeof navigator === "undefined" || !navigator.userAgent?.startsWith?.("Mozilla/5.0 ")) {
+  const NAME = "oauth4webapi";
+  const VERSION = "v3.8.8";
+  USER_AGENT = `${NAME}/${VERSION}`;
+}
+function looseInstanceOf(input, expected) {
+  if (input == null) {
+    return false;
+  }
+  try {
+    return input instanceof expected || Object.getPrototypeOf(input)[Symbol.toStringTag] === expected.prototype[Symbol.toStringTag];
+  } catch {
+    return false;
+  }
+}
+var ERR_INVALID_ARG_VALUE = "ERR_INVALID_ARG_VALUE";
+var ERR_INVALID_ARG_TYPE = "ERR_INVALID_ARG_TYPE";
+function CodedTypeError(message, code, cause) {
+  const err = new TypeError(message, { cause });
+  Object.assign(err, { code });
+  return err;
+}
+var allowInsecureRequests = Symbol();
+var clockSkew = Symbol();
+var clockTolerance = Symbol();
+var customFetch = Symbol();
+var modifyAssertion = Symbol();
+var jweDecrypt = Symbol();
+var jwksCache = Symbol();
+var encoder3 = new TextEncoder;
+var decoder2 = new TextDecoder;
+function buf(input) {
+  if (typeof input === "string") {
+    return encoder3.encode(input);
+  }
+  return decoder2.decode(input);
+}
+var encodeBase64Url;
+if (Uint8Array.prototype.toBase64) {
+  encodeBase64Url = (input) => {
+    if (input instanceof ArrayBuffer) {
+      input = new Uint8Array(input);
+    }
+    return input.toBase64({ alphabet: "base64url", omitPadding: true });
+  };
+} else {
+  const CHUNK_SIZE = 32768;
+  encodeBase64Url = (input) => {
+    if (input instanceof ArrayBuffer) {
+      input = new Uint8Array(input);
+    }
+    const arr = [];
+    for (let i = 0;i < input.byteLength; i += CHUNK_SIZE) {
+      arr.push(String.fromCharCode.apply(null, input.subarray(i, i + CHUNK_SIZE)));
+    }
+    return btoa(arr.join("")).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+  };
+}
+var decodeBase64Url;
+if (Uint8Array.fromBase64) {
+  decodeBase64Url = (input) => {
+    try {
+      return Uint8Array.fromBase64(input, { alphabet: "base64url" });
+    } catch (cause) {
+      throw CodedTypeError("The input to be decoded is not correctly encoded.", ERR_INVALID_ARG_VALUE, cause);
+    }
+  };
+} else {
+  decodeBase64Url = (input) => {
+    try {
+      const binary = atob(input.replace(/-/g, "+").replace(/_/g, "/").replace(/\s/g, ""));
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0;i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      return bytes;
+    } catch (cause) {
+      throw CodedTypeError("The input to be decoded is not correctly encoded.", ERR_INVALID_ARG_VALUE, cause);
+    }
+  };
+}
+function b64u(input) {
+  if (typeof input === "string") {
+    return decodeBase64Url(input);
+  }
+  return encodeBase64Url(input);
+}
+
+class UnsupportedOperationError extends Error {
+  code;
+  constructor(message, options) {
+    super(message, options);
+    this.name = this.constructor.name;
+    this.code = UNSUPPORTED_OPERATION;
+    Error.captureStackTrace?.(this, this.constructor);
+  }
+}
+
+class OperationProcessingError extends Error {
+  code;
+  constructor(message, options) {
+    super(message, options);
+    this.name = this.constructor.name;
+    if (options?.code) {
+      this.code = options?.code;
+    }
+    Error.captureStackTrace?.(this, this.constructor);
+  }
+}
+function OPE(message, code, cause) {
+  return new OperationProcessingError(message, { code, cause });
+}
+function isJsonObject2(input) {
+  if (input === null || typeof input !== "object" || Array.isArray(input)) {
+    return false;
+  }
+  return true;
+}
+function prepareHeaders(input) {
+  if (looseInstanceOf(input, Headers)) {
+    input = Object.fromEntries(input.entries());
+  }
+  const headers = new Headers(input ?? {});
+  if (USER_AGENT && !headers.has("user-agent")) {
+    headers.set("user-agent", USER_AGENT);
+  }
+  if (headers.has("authorization")) {
+    throw CodedTypeError('"options.headers" must not include the "authorization" header name', ERR_INVALID_ARG_VALUE);
+  }
+  return headers;
+}
+function signal(url, value) {
+  if (value !== undefined) {
+    if (typeof value === "function") {
+      value = value(url.href);
+    }
+    if (!(value instanceof AbortSignal)) {
+      throw CodedTypeError('"options.signal" must return or be an instance of AbortSignal', ERR_INVALID_ARG_TYPE);
+    }
+    return value;
+  }
+  return;
+}
+function assertNumber(input, allow0, it, code, cause) {
+  try {
+    if (typeof input !== "number" || !Number.isFinite(input)) {
+      throw CodedTypeError(`${it} must be a number`, ERR_INVALID_ARG_TYPE, cause);
+    }
+    if (input > 0)
+      return;
+    if (allow0) {
+      if (input !== 0) {
+        throw CodedTypeError(`${it} must be a non-negative number`, ERR_INVALID_ARG_VALUE, cause);
+      }
+      return;
+    }
+    throw CodedTypeError(`${it} must be a positive number`, ERR_INVALID_ARG_VALUE, cause);
+  } catch (err) {
+    if (code) {
+      throw OPE(err.message, code, cause);
+    }
+    throw err;
+  }
+}
+function assertString(input, it, code, cause) {
+  try {
+    if (typeof input !== "string") {
+      throw CodedTypeError(`${it} must be a string`, ERR_INVALID_ARG_TYPE, cause);
+    }
+    if (input.length === 0) {
+      throw CodedTypeError(`${it} must not be empty`, ERR_INVALID_ARG_VALUE, cause);
+    }
+  } catch (err) {
+    if (code) {
+      throw OPE(err.message, code, cause);
+    }
+    throw err;
+  }
+}
+function assertApplicationJson(response) {
+  assertContentType(response, "application/json");
+}
+function notJson(response, ...types) {
+  let msg = '"response" content-type must be ';
+  if (types.length > 2) {
+    const last = types.pop();
+    msg += `${types.join(", ")}, or ${last}`;
+  } else if (types.length === 2) {
+    msg += `${types[0]} or ${types[1]}`;
+  } else {
+    msg += types[0];
+  }
+  return OPE(msg, RESPONSE_IS_NOT_JSON, response);
+}
+function assertContentType(response, contentType) {
+  if (getContentType(response) !== contentType) {
+    throw notJson(response, contentType);
+  }
+}
+function getClockSkew(client) {
+  const skew = client?.[clockSkew];
+  return typeof skew === "number" && Number.isFinite(skew) ? skew : 0;
+}
+function getClockTolerance(client) {
+  const tolerance = client?.[clockTolerance];
+  return typeof tolerance === "number" && Number.isFinite(tolerance) && Math.sign(tolerance) !== -1 ? tolerance : 30;
+}
+function epochTime() {
+  return Math.floor(Date.now() / 1000);
+}
+function assertAs(as) {
+  if (typeof as !== "object" || as === null) {
+    throw CodedTypeError('"as" must be an object', ERR_INVALID_ARG_TYPE);
+  }
+  assertString(as.issuer, '"as.issuer"');
+}
+function assertClient(client) {
+  if (typeof client !== "object" || client === null) {
+    throw CodedTypeError('"client" must be an object', ERR_INVALID_ARG_TYPE);
+  }
+  assertString(client.client_id, '"client.client_id"');
+}
+function ClientSecretPost(clientSecret) {
+  assertString(clientSecret, '"clientSecret"');
+  return (_as, client, body, _headers) => {
+    body.set("client_id", client.client_id);
+    body.set("client_secret", clientSecret);
+  };
+}
+function None() {
+  return (_as, client, body, _headers) => {
+    body.set("client_id", client.client_id);
+  };
+}
+var URLParse = URL.parse ? (url, base) => URL.parse(url, base) : (url, base) => {
+  try {
+    return new URL(url, base);
+  } catch {
+    return null;
+  }
+};
+function checkProtocol(url, enforceHttps) {
+  if (enforceHttps && url.protocol !== "https:") {
+    throw OPE("only requests to HTTPS are allowed", HTTP_REQUEST_FORBIDDEN, url);
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw OPE("only HTTP and HTTPS requests are allowed", REQUEST_PROTOCOL_FORBIDDEN, url);
+  }
+}
+function validateEndpoint(value, endpoint, useMtlsAlias, enforceHttps) {
+  let url;
+  if (typeof value !== "string" || !(url = URLParse(value))) {
+    throw OPE(`authorization server metadata does not contain a valid ${useMtlsAlias ? `"as.mtls_endpoint_aliases.${endpoint}"` : `"as.${endpoint}"`}`, value === undefined ? MISSING_SERVER_METADATA : INVALID_SERVER_METADATA, { attribute: useMtlsAlias ? `mtls_endpoint_aliases.${endpoint}` : endpoint });
+  }
+  checkProtocol(url, enforceHttps);
+  return url;
+}
+function resolveEndpoint(as, endpoint, useMtlsAlias, enforceHttps) {
+  if (useMtlsAlias && as.mtls_endpoint_aliases && endpoint in as.mtls_endpoint_aliases) {
+    return validateEndpoint(as.mtls_endpoint_aliases[endpoint], endpoint, useMtlsAlias, enforceHttps);
+  }
+  return validateEndpoint(as[endpoint], endpoint, useMtlsAlias, enforceHttps);
+}
+function isDPoPNonceError(err) {
+  if (err instanceof WWWAuthenticateChallengeError) {
+    return err.cause.some((challenge) => challenge.scheme === "dpop" && challenge.parameters.error === "use_dpop_nonce");
+  }
+  if (err instanceof ResponseBodyError) {
+    return err.error === "use_dpop_nonce";
+  }
+  return false;
+}
+class ResponseBodyError extends Error {
+  cause;
+  code;
+  error;
+  status;
+  error_description;
+  response;
+  constructor(message, options) {
+    super(message, options);
+    this.name = this.constructor.name;
+    this.code = RESPONSE_BODY_ERROR;
+    this.cause = options.cause;
+    this.error = options.cause.error;
+    this.status = options.response.status;
+    this.error_description = options.cause.error_description;
+    Object.defineProperty(this, "response", { enumerable: false, value: options.response });
+    Error.captureStackTrace?.(this, this.constructor);
+  }
+}
+
+class AuthorizationResponseError extends Error {
+  cause;
+  code;
+  error;
+  error_description;
+  constructor(message, options) {
+    super(message, options);
+    this.name = this.constructor.name;
+    this.code = AUTHORIZATION_RESPONSE_ERROR;
+    this.cause = options.cause;
+    this.error = options.cause.get("error");
+    this.error_description = options.cause.get("error_description") ?? undefined;
+    Error.captureStackTrace?.(this, this.constructor);
+  }
+}
+
+class WWWAuthenticateChallengeError extends Error {
+  cause;
+  code;
+  response;
+  status;
+  constructor(message, options) {
+    super(message, options);
+    this.name = this.constructor.name;
+    this.code = WWW_AUTHENTICATE_CHALLENGE;
+    this.cause = options.cause;
+    this.status = options.response.status;
+    this.response = options.response;
+    Object.defineProperty(this, "response", { enumerable: false });
+    Error.captureStackTrace?.(this, this.constructor);
+  }
+}
+var tokenMatch = "[a-zA-Z0-9!#$%&\\'\\*\\+\\-\\.\\^_`\\|~]+";
+var token68Match = "[a-zA-Z0-9\\-\\._\\~\\+\\/]+={0,2}";
+var quotedMatch = '"((?:[^"\\\\]|\\\\[\\s\\S])*)"';
+var quotedParamMatcher = "(" + tokenMatch + ")\\s*=\\s*" + quotedMatch;
+var paramMatcher = "(" + tokenMatch + ")\\s*=\\s*(" + tokenMatch + ")";
+var schemeRE = new RegExp("^[,\\s]*(" + tokenMatch + ")");
+var quotedParamRE = new RegExp("^[,\\s]*" + quotedParamMatcher + "[,\\s]*(.*)");
+var unquotedParamRE = new RegExp("^[,\\s]*" + paramMatcher + "[,\\s]*(.*)");
+var token68ParamRE = new RegExp("^(" + token68Match + ")(?:$|[,\\s])(.*)");
+function parseWwwAuthenticateChallenges(response) {
+  if (!looseInstanceOf(response, Response)) {
+    throw CodedTypeError('"response" must be an instance of Response', ERR_INVALID_ARG_TYPE);
+  }
+  const header = response.headers.get("www-authenticate");
+  if (header === null) {
+    return;
+  }
+  const challenges = [];
+  let rest = header;
+  while (rest) {
+    let match = rest.match(schemeRE);
+    const scheme = match?.["1"].toLowerCase();
+    if (!scheme) {
+      return;
+    }
+    const afterScheme = rest.substring(match[0].length);
+    if (afterScheme && !afterScheme.match(/^[\s,]/)) {
+      return;
+    }
+    const spaceMatch = afterScheme.match(/^\s+(.*)$/);
+    const hasParameters = !!spaceMatch;
+    rest = spaceMatch ? spaceMatch[1] : undefined;
+    const parameters = {};
+    let token68;
+    if (hasParameters) {
+      while (rest) {
+        let key;
+        let value;
+        if (match = rest.match(quotedParamRE)) {
+          [, key, value, rest] = match;
+          if (value.includes("\\")) {
+            value = value.replace(/\\([\s\S])/g, "$1");
+          }
+          parameters[key.toLowerCase()] = value;
+          continue;
+        }
+        if (match = rest.match(unquotedParamRE)) {
+          [, key, value, rest] = match;
+          parameters[key.toLowerCase()] = value;
+          continue;
+        }
+        if (match = rest.match(token68ParamRE)) {
+          if (Object.keys(parameters).length) {
+            break;
+          }
+          [, token68, rest] = match;
+          break;
+        }
+        return;
+      }
+    } else {
+      rest = afterScheme || undefined;
+    }
+    const challenge = { scheme, parameters };
+    if (token68) {
+      challenge.token68 = token68;
+    }
+    challenges.push(challenge);
+  }
+  if (!challenges.length) {
+    return;
+  }
+  return challenges;
+}
+async function parseOAuthResponseErrorBody(response) {
+  if (response.status > 399 && response.status < 500) {
+    assertReadableResponse(response);
+    assertApplicationJson(response);
+    try {
+      const json = await response.clone().json();
+      if (isJsonObject2(json) && typeof json.error === "string" && json.error.length) {
+        return json;
+      }
+    } catch {}
+  }
+  return;
+}
+async function checkOAuthBodyError(response, expected, label) {
+  if (response.status !== expected) {
+    checkAuthenticationChallenges(response);
+    let err;
+    if (err = await parseOAuthResponseErrorBody(response)) {
+      await response.body?.cancel();
+      throw new ResponseBodyError("server responded with an error in the response body", {
+        cause: err,
+        response
+      });
+    }
+    throw OPE(`"response" is not a conform ${label} response (unexpected HTTP status code)`, RESPONSE_IS_NOT_CONFORM, response);
+  }
+}
+function assertDPoP(option) {
+  if (!branded.has(option)) {
+    throw CodedTypeError('"options.DPoP" is not a valid DPoPHandle', ERR_INVALID_ARG_VALUE);
+  }
+}
+var skipSubjectCheck = Symbol();
+function getContentType(input) {
+  return input.headers.get("content-type")?.split(";")[0];
+}
+async function authenticatedRequest(as, client, clientAuthentication, url, body, headers, options) {
+  await clientAuthentication(as, client, body, headers);
+  headers.set("content-type", "application/x-www-form-urlencoded;charset=UTF-8");
+  return (options?.[customFetch] || fetch)(url.href, {
+    body,
+    headers: Object.fromEntries(headers.entries()),
+    method: "POST",
+    redirect: "manual",
+    signal: signal(url, options?.signal)
+  });
+}
+async function tokenEndpointRequest(as, client, clientAuthentication, grantType, parameters, options) {
+  const url = resolveEndpoint(as, "token_endpoint", client.use_mtls_endpoint_aliases, options?.[allowInsecureRequests] !== true);
+  parameters.set("grant_type", grantType);
+  const headers = prepareHeaders(options?.headers);
+  headers.set("accept", "application/json");
+  if (options?.DPoP !== undefined) {
+    assertDPoP(options.DPoP);
+    await options.DPoP.addProof(url, headers, "POST");
+  }
+  const response = await authenticatedRequest(as, client, clientAuthentication, url, parameters, headers, options);
+  options?.DPoP?.cacheNonce(response, url);
+  return response;
+}
+var idTokenClaims = new WeakMap;
+var jwtRefs = new WeakMap;
+function getValidatedIdTokenClaims(ref) {
+  if (!ref.id_token) {
+    return;
+  }
+  const claims = idTokenClaims.get(ref);
+  if (!claims) {
+    throw CodedTypeError('"ref" was already garbage collected or did not resolve from the proper sources', ERR_INVALID_ARG_VALUE);
+  }
+  return claims;
+}
+async function processGenericAccessTokenResponse(as, client, response, additionalRequiredIdTokenClaims, decryptFn, recognizedTokenTypes) {
+  assertAs(as);
+  assertClient(client);
+  if (!looseInstanceOf(response, Response)) {
+    throw CodedTypeError('"response" must be an instance of Response', ERR_INVALID_ARG_TYPE);
+  }
+  await checkOAuthBodyError(response, 200, "Token Endpoint");
+  assertReadableResponse(response);
+  const json = await getResponseJsonBody(response);
+  assertString(json.access_token, '"response" body "access_token" property', INVALID_RESPONSE, {
+    body: json
+  });
+  assertString(json.token_type, '"response" body "token_type" property', INVALID_RESPONSE, {
+    body: json
+  });
+  json.token_type = json.token_type.toLowerCase();
+  if (json.expires_in !== undefined) {
+    let expiresIn = typeof json.expires_in !== "number" ? parseFloat(json.expires_in) : json.expires_in;
+    assertNumber(expiresIn, true, '"response" body "expires_in" property', INVALID_RESPONSE, {
+      body: json
+    });
+    json.expires_in = expiresIn;
+  }
+  if (json.refresh_token !== undefined) {
+    assertString(json.refresh_token, '"response" body "refresh_token" property', INVALID_RESPONSE, {
+      body: json
+    });
+  }
+  if (json.scope !== undefined && typeof json.scope !== "string") {
+    throw OPE('"response" body "scope" property must be a string', INVALID_RESPONSE, { body: json });
+  }
+  if (json.id_token !== undefined) {
+    assertString(json.id_token, '"response" body "id_token" property', INVALID_RESPONSE, {
+      body: json
+    });
+    const requiredClaims = [];
+    if (client.require_auth_time === true) {
+      requiredClaims.push("auth_time");
+    }
+    if (client.default_max_age !== undefined) {
+      assertNumber(client.default_max_age, true, '"client.default_max_age"');
+      requiredClaims.push("auth_time");
+    }
+    if (additionalRequiredIdTokenClaims?.length) {
+      requiredClaims.push(...additionalRequiredIdTokenClaims);
+    }
+    const { claims, jwt } = await validateIdTokenClaims(as, client, json.id_token, requiredClaims, decryptFn);
+    validateIdTokenAuthorizedParty(client, claims);
+    validateIdTokenAuthTimeClaim(claims);
+    jwtRefs.set(response, jwt);
+    idTokenClaims.set(json, claims);
+  }
+  if (recognizedTokenTypes?.[json.token_type] !== undefined) {
+    recognizedTokenTypes[json.token_type](response, json);
+  } else if (json.token_type !== "dpop" && json.token_type !== "bearer") {
+    throw new UnsupportedOperationError("unsupported `token_type` value", { cause: { body: json } });
+  }
+  return json;
+}
+function checkAuthenticationChallenges(response) {
+  let challenges;
+  if (challenges = parseWwwAuthenticateChallenges(response)) {
+    throw new WWWAuthenticateChallengeError("server responded with a challenge in the WWW-Authenticate HTTP Header", { cause: challenges, response });
+  }
+}
+function validateAudience(expected, result) {
+  if (Array.isArray(result.claims.aud)) {
+    if (!result.claims.aud.includes(expected)) {
+      throw OPE('unexpected JWT "aud" (audience) claim value', JWT_CLAIM_COMPARISON, {
+        expected,
+        claims: result.claims,
+        claim: "aud"
+      });
+    }
+  } else if (result.claims.aud !== expected) {
+    throw OPE('unexpected JWT "aud" (audience) claim value', JWT_CLAIM_COMPARISON, {
+      expected,
+      claims: result.claims,
+      claim: "aud"
+    });
+  }
+  return result;
+}
+function validateIssuer(as, result) {
+  const expected = as[_expectedIssuer]?.(result) ?? as.issuer;
+  if (result.claims.iss !== expected) {
+    throw OPE('unexpected JWT "iss" (issuer) claim value', JWT_CLAIM_COMPARISON, {
+      expected,
+      claims: result.claims,
+      claim: "iss"
+    });
+  }
+  return result;
+}
+var branded = new WeakSet;
+var nopkce = Symbol();
+var jwtClaimNames = {
+  aud: "audience",
+  c_hash: "code hash",
+  client_id: "client id",
+  exp: "expiration time",
+  iat: "issued at",
+  iss: "issuer",
+  jti: "jwt id",
+  nonce: "nonce",
+  s_hash: "state hash",
+  sub: "subject",
+  ath: "access token hash",
+  htm: "http method",
+  htu: "http uri",
+  cnf: "confirmation",
+  auth_time: "authentication time"
+};
+function validatePresence(required, result) {
+  for (const claim of required) {
+    if (result.claims[claim] === undefined) {
+      throw OPE(`JWT "${claim}" (${jwtClaimNames[claim]}) claim missing`, INVALID_RESPONSE, {
+        claims: result.claims
+      });
+    }
+  }
+  return result;
+}
+function validateStringClaim(claim, result) {
+  if (typeof result.claims[claim] !== "string") {
+    throw OPE(`unexpected JWT "${claim}" (${jwtClaimNames[claim]}) claim type`, INVALID_RESPONSE, {
+      claims: result.claims
+    });
+  }
+  return result;
+}
+function validateIdTokenClaims(as, client, idToken, requiredClaims, decryptFn) {
+  return validateJwt(idToken, checkSigningAlgorithm.bind(undefined, client.id_token_signed_response_alg, as.id_token_signing_alg_values_supported, "RS256"), getClockSkew(client), getClockTolerance(client), decryptFn).then(validatePresence.bind(undefined, ["aud", "exp", "iat", "iss", "sub", ...requiredClaims])).then(validateIssuer.bind(undefined, as)).then(validateAudience.bind(undefined, client.client_id)).then(validateStringClaim.bind(undefined, "sub"));
+}
+function validateIdTokenAuthTimeClaim(claims) {
+  if (claims.auth_time !== undefined) {
+    assertNumber(claims.auth_time, true, 'ID Token "auth_time" (authentication time)', INVALID_RESPONSE, { claims });
+  }
+}
+function validateIdTokenAuthorizedParty(client, claims) {
+  if (Array.isArray(claims.aud) && claims.aud.length !== 1) {
+    if (claims.azp === undefined) {
+      throw OPE('ID Token "aud" (audience) claim includes additional untrusted audiences', JWT_CLAIM_COMPARISON, { claims, claim: "aud" });
+    }
+    if (claims.azp !== client.client_id) {
+      throw OPE('unexpected ID Token "azp" (authorized party) claim value', JWT_CLAIM_COMPARISON, {
+        expected: client.client_id,
+        claims,
+        claim: "azp"
+      });
+    }
+  }
+}
+var expectNoNonce = Symbol();
+var skipAuthTimeCheck = Symbol();
+var WWW_AUTHENTICATE_CHALLENGE = "OAUTH_WWW_AUTHENTICATE_CHALLENGE";
+var RESPONSE_BODY_ERROR = "OAUTH_RESPONSE_BODY_ERROR";
+var UNSUPPORTED_OPERATION = "OAUTH_UNSUPPORTED_OPERATION";
+var AUTHORIZATION_RESPONSE_ERROR = "OAUTH_AUTHORIZATION_RESPONSE_ERROR";
+var PARSE_ERROR = "OAUTH_PARSE_ERROR";
+var INVALID_RESPONSE = "OAUTH_INVALID_RESPONSE";
+var RESPONSE_IS_NOT_JSON = "OAUTH_RESPONSE_IS_NOT_JSON";
+var RESPONSE_IS_NOT_CONFORM = "OAUTH_RESPONSE_IS_NOT_CONFORM";
+var HTTP_REQUEST_FORBIDDEN = "OAUTH_HTTP_REQUEST_FORBIDDEN";
+var REQUEST_PROTOCOL_FORBIDDEN = "OAUTH_REQUEST_PROTOCOL_FORBIDDEN";
+var JWT_TIMESTAMP_CHECK = "OAUTH_JWT_TIMESTAMP_CHECK_FAILED";
+var JWT_CLAIM_COMPARISON = "OAUTH_JWT_CLAIM_COMPARISON_FAILED";
+var JSON_ATTRIBUTE_COMPARISON = "OAUTH_JSON_ATTRIBUTE_COMPARISON_FAILED";
+var MISSING_SERVER_METADATA = "OAUTH_MISSING_SERVER_METADATA";
+var INVALID_SERVER_METADATA = "OAUTH_INVALID_SERVER_METADATA";
+async function genericTokenEndpointRequest(as, client, clientAuthentication, grantType, parameters, options) {
+  assertAs(as);
+  assertClient(client);
+  assertString(grantType, '"grantType"');
+  return tokenEndpointRequest(as, client, clientAuthentication, grantType, new URLSearchParams(parameters), options);
+}
+async function processGenericTokenEndpointResponse(as, client, response, options) {
+  return processGenericAccessTokenResponse(as, client, response, undefined, options?.[jweDecrypt], options?.recognizedTokenTypes);
+}
+function assertReadableResponse(response) {
+  if (response.bodyUsed) {
+    throw CodedTypeError('"response" body has been used already', ERR_INVALID_ARG_VALUE);
+  }
+}
+async function validateJwt(jws, checkAlg, clockSkew, clockTolerance, decryptJwt) {
+  let { 0: protectedHeader, 1: payload, length } = jws.split(".");
+  if (length === 5) {
+    if (decryptJwt !== undefined) {
+      jws = await decryptJwt(jws);
+      ({ 0: protectedHeader, 1: payload, length } = jws.split("."));
+    } else {
+      throw new UnsupportedOperationError("JWE decryption is not configured", { cause: jws });
+    }
+  }
+  if (length !== 3) {
+    throw OPE("Invalid JWT", INVALID_RESPONSE, jws);
+  }
+  let header;
+  try {
+    header = JSON.parse(buf(b64u(protectedHeader)));
+  } catch (cause) {
+    throw OPE("failed to parse JWT Header body as base64url encoded JSON", PARSE_ERROR, cause);
+  }
+  if (!isJsonObject2(header)) {
+    throw OPE("JWT Header must be a top level object", INVALID_RESPONSE, jws);
+  }
+  checkAlg(header);
+  if (header.crit !== undefined) {
+    throw new UnsupportedOperationError('no JWT "crit" header parameter extensions are supported', {
+      cause: { header }
+    });
+  }
+  let claims;
+  try {
+    claims = JSON.parse(buf(b64u(payload)));
+  } catch (cause) {
+    throw OPE("failed to parse JWT Payload body as base64url encoded JSON", PARSE_ERROR, cause);
+  }
+  if (!isJsonObject2(claims)) {
+    throw OPE("JWT Payload must be a top level object", INVALID_RESPONSE, jws);
+  }
+  const now = epochTime() + clockSkew;
+  if (claims.exp !== undefined) {
+    if (typeof claims.exp !== "number") {
+      throw OPE('unexpected JWT "exp" (expiration time) claim type', INVALID_RESPONSE, { claims });
+    }
+    if (claims.exp <= now - clockTolerance) {
+      throw OPE('unexpected JWT "exp" (expiration time) claim value, expiration is past current timestamp', JWT_TIMESTAMP_CHECK, { claims, now, tolerance: clockTolerance, claim: "exp" });
+    }
+  }
+  if (claims.iat !== undefined) {
+    if (typeof claims.iat !== "number") {
+      throw OPE('unexpected JWT "iat" (issued at) claim type', INVALID_RESPONSE, { claims });
+    }
+  }
+  if (claims.iss !== undefined) {
+    if (typeof claims.iss !== "string") {
+      throw OPE('unexpected JWT "iss" (issuer) claim type', INVALID_RESPONSE, { claims });
+    }
+  }
+  if (claims.nbf !== undefined) {
+    if (typeof claims.nbf !== "number") {
+      throw OPE('unexpected JWT "nbf" (not before) claim type', INVALID_RESPONSE, { claims });
+    }
+    if (claims.nbf > now + clockTolerance) {
+      throw OPE('unexpected JWT "nbf" (not before) claim value', JWT_TIMESTAMP_CHECK, {
+        claims,
+        now,
+        tolerance: clockTolerance,
+        claim: "nbf"
+      });
+    }
+  }
+  if (claims.aud !== undefined) {
+    if (typeof claims.aud !== "string" && !Array.isArray(claims.aud)) {
+      throw OPE('unexpected JWT "aud" (audience) claim type', INVALID_RESPONSE, { claims });
+    }
+  }
+  return { header, claims, jwt: jws };
+}
+function checkSigningAlgorithm(client, issuer, fallback, header) {
+  if (client !== undefined) {
+    if (typeof client === "string" ? header.alg !== client : !client.includes(header.alg)) {
+      throw OPE('unexpected JWT "alg" header parameter', INVALID_RESPONSE, {
+        header,
+        expected: client,
+        reason: "client configuration"
+      });
+    }
+    return;
+  }
+  if (Array.isArray(issuer)) {
+    if (!issuer.includes(header.alg)) {
+      throw OPE('unexpected JWT "alg" header parameter', INVALID_RESPONSE, {
+        header,
+        expected: issuer,
+        reason: "authorization server metadata"
+      });
+    }
+    return;
+  }
+  if (fallback !== undefined) {
+    if (typeof fallback === "string" ? header.alg !== fallback : typeof fallback === "function" ? !fallback(header.alg) : !fallback.includes(header.alg)) {
+      throw OPE('unexpected JWT "alg" header parameter', INVALID_RESPONSE, {
+        header,
+        expected: fallback,
+        reason: "default value"
+      });
+    }
+    return;
+  }
+  throw OPE('missing client or server configuration to verify used JWT "alg" header parameter', undefined, { client, issuer, fallback });
+}
+var skipStateCheck = Symbol();
+var expectNoState = Symbol();
+async function getResponseJsonBody(response, check = assertApplicationJson) {
+  let json;
+  try {
+    json = await response.json();
+  } catch (cause) {
+    check(response);
+    throw OPE('failed to parse "response" body as JSON', PARSE_ERROR, cause);
+  }
+  if (!isJsonObject2(json)) {
+    throw OPE('"response" body must be a top level object', INVALID_RESPONSE, { body: json });
+  }
+  return json;
+}
+var _nodiscoverycheck = Symbol();
+var _expectedIssuer = Symbol();
+
+// ../../node_modules/.bun/openid-client@6.8.7/node_modules/openid-client/build/index.js
+var headers;
+var USER_AGENT2;
+if (typeof navigator === "undefined" || !navigator.userAgent?.startsWith?.("Mozilla/5.0 ")) {
+  const NAME = "openid-client";
+  const VERSION = "v6.8.7";
+  USER_AGENT2 = `${NAME}/${VERSION}`;
+  headers = { "user-agent": USER_AGENT2 };
+}
+var int2 = (config) => {
+  return props.get(config);
+};
+var props;
+var tbi;
+function ClientSecretPost2(clientSecret) {
+  if (clientSecret !== undefined) {
+    return ClientSecretPost(clientSecret);
+  }
+  tbi ||= new WeakMap;
+  return (as, client, body, headers) => {
+    let auth;
+    if (!(auth = tbi.get(client))) {
+      assertString2(client.client_secret, '"metadata.client_secret"');
+      auth = ClientSecretPost(client.client_secret);
+      tbi.set(client, auth);
+    }
+    return auth(as, client, body, headers);
+  };
+}
+function assertString2(input, it) {
+  if (typeof input !== "string") {
+    throw CodedTypeError2(`${it} must be a string`, ERR_INVALID_ARG_TYPE2);
+  }
+  if (input.length === 0) {
+    throw CodedTypeError2(`${it} must not be empty`, ERR_INVALID_ARG_VALUE2);
+  }
+}
+function None2() {
+  return None();
+}
+var customFetch2 = customFetch;
+var ERR_INVALID_ARG_VALUE2 = "ERR_INVALID_ARG_VALUE";
+var ERR_INVALID_ARG_TYPE2 = "ERR_INVALID_ARG_TYPE";
+function CodedTypeError2(message, code, cause) {
+  const err = new TypeError(message, { cause });
+  Object.assign(err, { code });
+  return err;
+}
+class ClientError extends Error {
+  code;
+  constructor(message, options) {
+    super(message, options);
+    this.name = this.constructor.name;
+    this.code = options?.code;
+    Error.captureStackTrace?.(this, this.constructor);
+  }
+}
+var decoder3 = new TextDecoder;
+function e(msg, cause, code) {
+  return new ClientError(msg, { cause, code });
+}
+function errorHandler(err) {
+  if (err instanceof TypeError || err instanceof ClientError || err instanceof ResponseBodyError || err instanceof AuthorizationResponseError || err instanceof WWWAuthenticateChallengeError) {
+    throw err;
+  }
+  if (err instanceof OperationProcessingError) {
+    switch (err.code) {
+      case HTTP_REQUEST_FORBIDDEN:
+        throw e("only requests to HTTPS are allowed", err, err.code);
+      case REQUEST_PROTOCOL_FORBIDDEN:
+        throw e("only requests to HTTP or HTTPS are allowed", err, err.code);
+      case RESPONSE_IS_NOT_CONFORM:
+        throw e("unexpected HTTP response status code", err.cause, err.code);
+      case RESPONSE_IS_NOT_JSON:
+        throw e("unexpected response content-type", err.cause, err.code);
+      case PARSE_ERROR:
+        throw e("parsing error occured", err, err.code);
+      case INVALID_RESPONSE:
+        throw e("invalid response encountered", err, err.code);
+      case JWT_CLAIM_COMPARISON:
+        throw e("unexpected JWT claim value encountered", err, err.code);
+      case JSON_ATTRIBUTE_COMPARISON:
+        throw e("unexpected JSON attribute value encountered", err, err.code);
+      case JWT_TIMESTAMP_CHECK:
+        throw e("JWT timestamp claim value failed validation", err, err.code);
+      default:
+        throw e(err.message, err, err.code);
+    }
+  }
+  if (err instanceof UnsupportedOperationError) {
+    throw e("unsupported operation", err, err.code);
+  }
+  if (err instanceof DOMException) {
+    switch (err.name) {
+      case "OperationError":
+        throw e("runtime operation error", err, UNSUPPORTED_OPERATION);
+      case "NotSupportedError":
+        throw e("runtime unsupported operation", err, UNSUPPORTED_OPERATION);
+      case "TimeoutError":
+        throw e("operation timed out", err, "OAUTH_TIMEOUT");
+      case "AbortError":
+        throw e("operation aborted", err, "OAUTH_ABORT");
+    }
+  }
+  throw new ClientError("something went wrong", { cause: err });
+}
+function getServerHelpers(metadata) {
+  return {
+    supportsPKCE: {
+      __proto__: null,
+      value(method = "S256") {
+        return metadata.code_challenge_methods_supported?.includes(method) === true;
+      }
+    }
+  };
+}
+function addServerHelpers(metadata) {
+  Object.defineProperties(metadata, getServerHelpers(metadata));
+}
+var kEntraId = Symbol();
+
+class Configuration {
+  constructor(server, clientId, metadata, clientAuthentication) {
+    if (typeof clientId !== "string" || !clientId.length) {
+      throw CodedTypeError2('"clientId" must be a non-empty string', ERR_INVALID_ARG_TYPE2);
+    }
+    if (typeof metadata === "string") {
+      metadata = { client_secret: metadata };
+    }
+    if (metadata?.client_id !== undefined && clientId !== metadata.client_id) {
+      throw CodedTypeError2('"clientId" and "metadata.client_id" must be the same', ERR_INVALID_ARG_VALUE2);
+    }
+    const client = {
+      ...structuredClone(metadata),
+      client_id: clientId
+    };
+    client[clockSkew] = metadata?.[clockSkew] ?? 0;
+    client[clockTolerance] = metadata?.[clockTolerance] ?? 30;
+    let auth;
+    if (clientAuthentication) {
+      auth = clientAuthentication;
+    } else {
+      if (typeof client.client_secret === "string" && client.client_secret.length) {
+        auth = ClientSecretPost2(client.client_secret);
+      } else {
+        auth = None2();
+      }
+    }
+    let c = Object.freeze(client);
+    const clone = structuredClone(server);
+    if (kEntraId in server) {
+      clone[_expectedIssuer] = ({ claims: { tid } }) => server.issuer.replace("{tenantid}", tid);
+    }
+    let as = Object.freeze(clone);
+    props ||= new WeakMap;
+    props.set(this, {
+      __proto__: null,
+      as,
+      c,
+      auth,
+      tlsOnly: true,
+      jwksCache: {}
+    });
+  }
+  serverMetadata() {
+    const metadata = structuredClone(int2(this).as);
+    addServerHelpers(metadata);
+    return metadata;
+  }
+  clientMetadata() {
+    const metadata = structuredClone(int2(this).c);
+    return metadata;
+  }
+  get timeout() {
+    return int2(this).timeout;
+  }
+  set timeout(value) {
+    int2(this).timeout = value;
+  }
+  get [customFetch2]() {
+    return int2(this).fetch;
+  }
+  set [customFetch2](value) {
+    int2(this).fetch = value;
+  }
+}
+Object.freeze(Configuration.prototype);
+function getHelpers(response) {
+  let exp = undefined;
+  if (response.expires_in !== undefined) {
+    const now = new Date;
+    now.setSeconds(now.getSeconds() + response.expires_in);
+    exp = now.getTime();
+  }
+  return {
+    expiresIn: {
+      __proto__: null,
+      value() {
+        if (exp) {
+          const now = Date.now();
+          if (exp > now) {
+            return Math.floor((exp - now) / 1000);
+          }
+          return 0;
+        }
+        return;
+      }
+    },
+    claims: {
+      __proto__: null,
+      value() {
+        return getValidatedIdTokenClaims(response);
+      }
+    }
+  };
+}
+function addHelpers(response) {
+  Object.defineProperties(response, getHelpers(response));
+}
+function allowInsecureRequests2(config) {
+  int2(config).tlsOnly = false;
+}
+function checkConfig(input) {
+  if (!(input instanceof Configuration)) {
+    throw CodedTypeError2('"config" must be an instance of Configuration', ERR_INVALID_ARG_TYPE2);
+  }
+  if (Object.getPrototypeOf(input) !== Configuration.prototype) {
+    throw CodedTypeError2("subclassing Configuration is not allowed", ERR_INVALID_ARG_VALUE2);
+  }
+}
+function signal2(timeout) {
+  return timeout ? AbortSignal.timeout(timeout * 1000) : undefined;
+}
+function retryable(err, options) {
+  if (options?.DPoP && options.flag !== retry) {
+    return isDPoPNonceError(err);
+  }
+  return false;
+}
+var retry = Symbol();
+async function genericGrantRequest(config, grantType, parameters, options) {
+  checkConfig(config);
+  const { as, c, auth, fetch: fetch2, tlsOnly, timeout, decrypt, nonRepudiation } = int2(config);
+  const response = await genericTokenEndpointRequest(as, c, auth, grantType, new URLSearchParams(parameters), {
+    [customFetch]: fetch2,
+    [allowInsecureRequests]: !tlsOnly,
+    DPoP: options?.DPoP,
+    headers: new Headers(headers),
+    signal: signal2(timeout)
+  }).catch(errorHandler);
+  let recognizedTokenTypes;
+  if (grantType === "urn:ietf:params:oauth:grant-type:token-exchange") {
+    recognizedTokenTypes = { n_a: () => {} };
+  }
+  const p = processGenericTokenEndpointResponse(as, c, response, {
+    [jweDecrypt]: decrypt,
+    recognizedTokenTypes
+  });
+  let result;
+  try {
+    result = await p;
+  } catch (err) {
+    if (retryable(err, options)) {
+      return genericGrantRequest(config, grantType, parameters, {
+        ...options,
+        flag: retry
+      });
+    }
+    errorHandler(err);
+  }
+  result.id_token && await nonRepudiation?.(response);
+  addHelpers(result);
+  return result;
+}
+
+// ../broker-client/src/token-client.ts
+var DEFAULT_RENEW_BEFORE_MS = 5 * 60000;
+var TOO_MANY_REQUESTS = 429;
+var INVALID_DPOP_PROOF = "invalid_dpop_proof";
+var USE_DPOP_NONCE = "use_dpop_nonce";
+
+class BrokerRefusedError extends Error {
+  status;
+  code;
+  description;
+  constructor(status, code, description) {
+    super(description === "" ? `the secrets broker refused this machine's identity: HTTP ${status} ${code}` : `the secrets broker refused this machine's identity: HTTP ${status} ${code}: ${description}`);
+    this.status = status;
+    this.code = code;
+    this.description = description;
+    this.name = "BrokerRefusedError";
+  }
+  get permanent() {
+    return this.status !== TOO_MANY_REQUESTS && this.code !== INVALID_DPOP_PROOF && this.code !== USE_DPOP_NONCE;
+  }
+}
+function statusOf(error) {
+  let cause = error;
+  for (let depth = 0;depth < 4; depth += 1) {
+    if (cause instanceof Response)
+      return cause.status;
+    if (typeof cause !== "object" || cause === null || !("cause" in cause))
+      return 0;
+    cause = cause.cause;
+  }
+  return 0;
+}
+function withoutTrailingSlashes(url) {
+  let end = url.length;
+  while (end > 0 && url[end - 1] === "/")
+    end -= 1;
+  return url.slice(0, end);
+}
+
+class BrokerTokenClient {
+  #brokerUrl;
+  #key;
+  #subject;
+  #actor;
+  #session;
+  #launcherCredential;
+  #renewBeforeMs;
+  #now;
+  #fetch;
+  #nonce = "";
+  #held = null;
+  #trading = null;
+  constructor(options) {
+    const brokerUrl = withoutTrailingSlashes(options.brokerUrl.trim());
+    if (brokerUrl === "")
+      throw new Error("broker client: no broker URL");
+    this.#brokerUrl = brokerUrl;
+    this.#key = options.key;
+    this.#subject = options.subject;
+    this.#actor = options.actor;
+    this.#session = options.session ?? "";
+    this.#launcherCredential = options.launcherCredential ?? true;
+    this.#renewBeforeMs = options.renewBeforeMs ?? DEFAULT_RENEW_BEFORE_MS;
+    this.#now = options.now ?? Date.now;
+    this.#fetch = options.fetch ?? fetch;
+  }
+  get key() {
+    return this.#key;
+  }
+  describe() {
+    return this.#subject.describe();
+  }
+  async token(signal) {
+    const held = this.#held;
+    if (held !== null && this.#now() < held.expiresAt.getTime() - this.#renewBeforeMs)
+      return held;
+    if (this.#trading !== null)
+      return await this.#trading;
+    const trading = this.#renew(signal);
+    this.#trading = trading;
+    try {
+      return await trading;
+    } finally {
+      this.#trading = null;
+    }
+  }
+  async#renew(signal) {
+    try {
+      const token = await this.#trade(signal);
+      this.#held = token;
+      return token;
+    } catch (error) {
+      const held = this.#held;
+      if (!(error instanceof BrokerRefusedError && error.permanent) && held !== null && this.#now() < held.expiresAt.getTime()) {
+        return held;
+      }
+      this.#held = null;
+      throw error;
+    }
+  }
+  async#trade(signal) {
+    const subject = await this.#subject.read(signal);
+    const form = {
+      subject_token: subject.token,
+      subject_token_type: subject.tokenType
+    };
+    if (this.#session !== "")
+      form[FORM_SESSION] = this.#session;
+    if (!this.#launcherCredential) {
+      form[FORM_LAUNCHER_CREDENTIAL] = FORM_LAUNCHER_CREDENTIAL_DECLINED;
+    }
+    if (this.#actor !== undefined) {
+      let actor;
+      try {
+        actor = await this.#actor.read(signal);
+      } catch (error) {
+        const said = error instanceof Error ? error.message : String(error);
+        throw new Error(`read the machine this person signed in on: ${said}`, { cause: error });
+      }
+      form["actor_token"] = actor.token;
+      form["actor_token_type"] = actor.tokenType === SUBJECT_TOKEN_TYPE_GOOGLE ? ACTOR_TOKEN_TYPE_MACHINE : actor.tokenType;
+    }
+    const endpoint = this.#brokerUrl + TOKEN_PATH;
+    const raw = { body: undefined };
+    const config = new Configuration({ issuer: this.#brokerUrl, token_endpoint: endpoint }, EXCHANGE_CLIENT_ID, {}, None2());
+    allowInsecureRequests2(config);
+    config[customFetch2] = (url, options) => this.#send(url, options, signal, raw);
+    let answered;
+    try {
+      answered = await genericGrantRequest(config, GRANT_TYPE_TOKEN_EXCHANGE, form);
+    } catch (error) {
+      throw this.#refusal(endpoint, error);
+    }
+    return this.#read(endpoint, answered, raw.body);
+  }
+  #refusal(endpoint, error) {
+    if (error instanceof ResponseBodyError && error.status >= 400 && error.status < 500) {
+      return new BrokerRefusedError(error.status, error.error, error.error_description ?? "");
+    }
+    const status = statusOf(error);
+    const message = error instanceof Error ? error.message : String(error);
+    const said = status === 0 ? message : `HTTP ${status}: ${message}`;
+    return new Error(`trade ${this.#subject.describe()} at ${endpoint}: ${said}`, {
+      cause: error
+    });
+  }
+  async#send(url, options, signal, raw) {
+    const send = async () => {
+      const headers = new Headers(options.headers);
+      headers.set("DPoP", await this.#key.proof({ method: options.method, url, nonce: this.#nonce }));
+      const signals = [options.signal, signal].filter((one) => one !== undefined);
+      const body = options.body;
+      return await this.#fetch(url, {
+        method: options.method,
+        headers,
+        body,
+        redirect: options.redirect,
+        ...signals.length === 0 ? {} : { signal: AbortSignal.any(signals) }
+      });
+    };
+    let answer = await send();
+    const given = answer.headers.get("DPoP-Nonce") ?? "";
+    if (given !== "")
+      this.#nonce = given;
+    if (answer.status === 400 && given !== "") {
+      const body = await answer.clone().json().catch(() => null);
+      const asked = typeof body === "object" && body !== null && "error" in body && body.error === "use_dpop_nonce";
+      if (asked)
+        answer = await send();
+    }
+    raw.body = await answer.clone().json().catch(() => {
+      return;
+    });
+    return answer;
+  }
+  #read(endpoint, answered, raw) {
+    const written = typeof raw === "object" && raw !== null && "token_type" in raw ? raw.token_type : undefined;
+    const tokenType = typeof written === "string" ? written : "";
+    if (tokenType.toLowerCase() !== TOKEN_TYPE_DPOP.toLowerCase()) {
+      throw new Error(`the broker at ${endpoint} answered token_type ${JSON.stringify(tokenType)}, and this grant mints DPoP-bound tokens alone`);
+    }
+    if (answered.refresh_token !== undefined && answered.refresh_token !== "") {
+      throw new Error(`the broker at ${endpoint} answered a refresh token, which this grant never issues; a renewal trades a fresh identity token instead`);
+    }
+    const seconds = answered.expires_in ?? 0;
+    if (!(seconds > 0)) {
+      throw new Error(`the broker at ${endpoint} answered no usable expires_in (${JSON.stringify(answered.expires_in)})`);
+    }
+    const expiresAtText = typeof answered["credential_expires_at"] === "string" ? answered["credential_expires_at"] : "";
+    let credentialExpiresAt = null;
+    if (expiresAtText !== "") {
+      credentialExpiresAt = new Date(expiresAtText);
+      if (Number.isNaN(credentialExpiresAt.getTime())) {
+        throw new Error(`the broker at ${endpoint} answered a credential_expires_at that is no RFC 3339 time (${JSON.stringify(expiresAtText)})`);
+      }
+    }
+    return {
+      accessToken: answered.access_token,
+      tokenType,
+      expiresAt: new Date(this.#now() + seconds * 1000),
+      credentialId: typeof answered["credential_id"] === "string" ? answered["credential_id"] : "",
+      credentialExpiresAt
+    };
+  }
+}
+
+// ../broker-client/src/environment.ts
+var BROKER_URL_VAR = "AGENT_SECRETS_URL";
+var IDENTITY_VAR = "AGENT_SECRETS_MACHINE_IDENTITY";
+var MACHINE_TOKEN_FILE_VAR = "AGENT_SECRETS_MACHINE_TOKEN_FILE";
+var MACHINE_AUDIENCE_VAR = "AGENT_SECRETS_MACHINE_AUDIENCE";
+var SESSION_VAR = "AGENT_SECRETS_SESSION";
+var IDENTITY_KUBERNETES = "kubernetes";
+var IDENTITY_METADATA = "metadata";
+var IDENTITY_POOL = "pool";
+function value(env, name) {
+  return (env[name] ?? "").trim();
+}
+function required2(env, name, kind) {
+  const named = value(env, name);
+  if (named === "")
+    throw new Error(`${name} is required by ${IDENTITY_VAR}=${kind}`);
+  return named;
+}
+function machineIdentity(env) {
+  const kind = value(env, IDENTITY_VAR);
+  switch (kind) {
+    case "":
+      return;
+    case IDENTITY_KUBERNETES:
+      return projectedToken(required2(env, MACHINE_TOKEN_FILE_VAR, kind));
+    case IDENTITY_METADATA:
+      return metadataIdentity(required2(env, MACHINE_AUDIENCE_VAR, kind));
+    case IDENTITY_POOL:
+      throw new Error(`${IDENTITY_VAR}=${IDENTITY_POOL} is traded by the Go client alone (agent-secrets), which federates at the workload identity pool; this process can prove ${IDENTITY_KUBERNETES} or ${IDENTITY_METADATA}`);
+    default:
+      throw new Error(`${IDENTITY_VAR}="${kind}" names no identity this machine can prove; it takes ${IDENTITY_KUBERNETES} or ${IDENTITY_METADATA}`);
+  }
+}
+function tradeSession(env, own = "") {
+  const acting = own.trim();
+  return acting !== "" ? acting : value(env, SESSION_VAR);
+}
+async function brokerTokenClient(env, own = "") {
+  const brokerUrl = value(env, BROKER_URL_VAR);
+  const subject = machineIdentity(env);
+  if (brokerUrl === "" || subject === undefined)
+    return;
+  return new BrokerTokenClient({
+    brokerUrl,
+    key: await newDpopKey(),
+    subject,
+    session: tradeSession(env, own),
+    launcherCredential: false
+  });
+}
+
+// ../envoy-client/src/broker-credential.ts
+function sessionName(naming) {
+  if (naming === undefined)
+    return "";
+  return (typeof naming === "string" ? naming : naming()).trim();
+}
+function brokerRouteConfigured(env) {
+  if ((env[BROKER_URL_VAR] ?? "").trim() === "") {
+    return { traded: false, gap: `${BROKER_URL_VAR} names no secrets broker to trade it at` };
+  }
+  if ((env[IDENTITY_VAR] ?? "").trim() === IDENTITY_POOL) {
+    return {
+      traded: false,
+      gap: `${IDENTITY_VAR}=${IDENTITY_POOL} is traded by the Go client alone (agent-secrets), never by this process`
+    };
+  }
+  if (machineIdentity(env) === undefined) {
+    return { traded: false, gap: `${IDENTITY_VAR} names no identity this machine proves` };
+  }
+  return { traded: true };
+}
+var CLIENTS = new Map;
+function forgetBrokerSession(session) {
+  CLIENTS.delete(session.trim());
+}
+function clientFor(env, own) {
+  const session = tradeSession(env, own);
+  const key = JSON.stringify([
+    env.AGENT_SECRETS_URL,
+    env.AGENT_SECRETS_MACHINE_IDENTITY,
+    env.AGENT_SECRETS_MACHINE_TOKEN_FILE,
+    env.AGENT_SECRETS_MACHINE_AUDIENCE
+  ]);
+  const held = CLIENTS.get(session) ?? new Map;
+  CLIENTS.set(session, held);
+  const made = held.get(key) ?? brokerTokenClient(env, session);
+  held.set(key, made);
+  return made;
+}
+function brokerCredential(env, session) {
+  let held = "";
+  return {
+    scheme: "DPoP",
+    async headers(method, url, acting) {
+      const client = await clientFor(env, (acting ?? "").trim() || sessionName(session));
+      if (client === undefined) {
+        throw new Error("AGENT_SECRETS_URL and AGENT_SECRETS_MACHINE_IDENTITY no longer name a broker and an identity to trade");
+      }
+      const token = await client.token();
+      held = token.accessToken;
+      return {
+        Authorization: `DPoP ${token.accessToken}`,
+        DPoP: await client.key.proof({ method, url, accessToken: token.accessToken })
+      };
+    },
+    secret: () => held
+  };
+}
+
 // ../envoy-client/src/dispatch-config.ts
 var DEFAULT_SERVER_URL = "http://localhost:8766";
+function withoutTrailingSlashes2(url) {
+  let end = url.length;
+  while (end > 0 && url[end - 1] === "/")
+    end -= 1;
+  return url.slice(0, end);
+}
 function checkoutPair(checkout, serverUrl) {
   const { token } = checkout.dispatch;
   if (token === undefined) {
@@ -21706,9 +25533,9 @@ function dispatchSettings(env, config, options = {}) {
   if (!target.enabled)
     return target;
   const { url, source } = target;
-  let token;
+  let credential;
   try {
-    token = source.kind === "variable" ? source.token : fileBearer(source, url, "DISPATCH", env, options.commands);
+    credential = source.kind === "broker" ? brokerCredential(env, options.session) : bearerCredential(source.kind === "variable" ? source.token : fileBearer(source, url, "DISPATCH", env, options.commands));
   } catch (error) {
     return offWithError(messageFor(error));
   }
@@ -21720,7 +25547,7 @@ function dispatchSettings(env, config, options = {}) {
   return {
     enabled: true,
     url,
-    token,
+    credential,
     ...publicUrl === undefined ? {} : { publicUrl: publicUrl.replace(/\/+$/, "") }
   };
 }
@@ -21728,9 +25555,20 @@ function dispatchUrl(env, config) {
   const target = dispatchTarget(env, config);
   return target.enabled ? target.url : undefined;
 }
+function brokerRouteForced(env) {
+  const written = (env.DISPATCH_TOKEN_BROKER ?? "").trim();
+  if (written === "")
+    return false;
+  if (written === "1")
+    return true;
+  return offWithError(`DISPATCH_TOKEN_BROKER is "${written}" and takes 1: set it to 1 where this session's Dispatch credential is this machine's own identity traded at the secrets broker, and leave it unset where a bearer is read as usual`);
+}
 function dispatchTarget(env, config) {
   if (config.kind === "failed")
     return offWithError(config.error);
+  const forced = brokerRouteForced(env);
+  if (typeof forced !== "boolean")
+    return forced;
   const explicitUrl = nonEmpty(env.DISPATCH_URL);
   const checkoutFile = explicitUrl === undefined ? config.checkout : null;
   if (checkoutFile?.kind === "invalid")
@@ -21754,13 +25592,28 @@ function dispatchTarget(env, config) {
   if (explicitUrl !== undefined && httpUrl2(explicitUrl) === undefined) {
     return offWithError("DISPATCH_URL must be an http or https URL");
   }
-  let source;
-  try {
-    source = checkout !== null && checkoutServer !== undefined ? checkoutPair(checkout, checkoutServer) : bearerSource(env, "DISPATCH", () => writtenToken(config, checkout));
-  } catch (error) {
-    return offWithError(messageFor(error));
+  let source = { kind: "none" };
+  if (!forced) {
+    try {
+      source = checkout !== null && checkoutServer !== undefined ? checkoutPair(checkout, checkoutServer) : bearerSource(env, "DISPATCH", () => writtenToken(config, checkout));
+    } catch (error) {
+      return offWithError(messageFor(error));
+    }
   }
   if (source.kind === "none") {
+    let route;
+    try {
+      route = brokerRouteConfigured(env);
+    } catch (error) {
+      return offWithError(messageFor(error));
+    }
+    if (route.traded) {
+      const brokered = withoutTrailingSlashes2(explicitUrl ?? own.serverUrl ?? DEFAULT_SERVER_URL);
+      return { enabled: true, url: brokered, source: { kind: "broker" } };
+    }
+    if (forced) {
+      return offWithError(`DISPATCH_TOKEN_BROKER is set, so this session's Dispatch credential is this machine's own identity traded at the secrets broker, and ${route.gap}: Dispatch is off rather than written with whatever bearer this box holds`);
+    }
     return offWithError(explicitUrl === undefined ? `${config.path}: dispatch is enabled and no token is: set dispatch.token, or DISPATCH_TOKEN or DISPATCH_TOKEN_FILE` : `DISPATCH_URL is set and no token is: set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or dispatch.token in ${config.path}`);
   }
   const url = (explicitUrl ?? (source.kind === "file" ? source.server : own.serverUrl ?? DEFAULT_SERVER_URL)).replace(/\/+$/, "");
@@ -21769,10 +25622,17 @@ function dispatchTarget(env, config) {
 
 // ../envoy-client/src/envoy-settings.ts
 var DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
-var DEFAULT_HEARTBEAT_MS = 90000;
+var DEFAULT_HEARTBEAT_MS = SESSION_HEARTBEAT_MS;
 var MIN_PASS_DEADLINE_MS = 30000;
 var MIN_INTERVAL_MS = 25;
 var MAX_INTERVAL_MS = 2147483647;
+var REGISTRATION_SETTLE_MS = 5000;
+var SHUTDOWN_SETTLE_MS = 250;
+var HEARTBEAT_RETRY_MIN_MS = 20000;
+var HEARTBEAT_RETRY_MAX_MS = 40000;
+function heartbeatRetryDelayMs(draw = Math.random) {
+  return Math.round(HEARTBEAT_RETRY_MIN_MS + draw() * (HEARTBEAT_RETRY_MAX_MS - HEARTBEAT_RETRY_MIN_MS));
+}
 function namedInterval(raw) {
   const parsed = Number(raw);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
@@ -21837,7 +25697,7 @@ function envoySettings(env, config, options = {}) {
   }
   const listener = section.url ?? DEFAULT_ENVOY_URL;
   const url = namedUrl ?? listener;
-  let token;
+  let credential;
   try {
     const source = bearerSource(env, "ENVOY", () => section.token === undefined ? undefined : {
       token: section.token,
@@ -21846,7 +25706,11 @@ function envoySettings(env, config, options = {}) {
       server: listener,
       checkout: false
     });
-    token = source.kind === "none" ? undefined : source.kind === "variable" ? source.token : fileBearer(source, url, "ENVOY", env);
+    if (source.kind === "none") {
+      credential = brokerRouteConfigured(env).traded ? brokerCredential(env, options.session) : undefined;
+    } else {
+      credential = bearerCredential(source.kind === "variable" ? source.token : fileBearer(source, url, "ENVOY", env));
+    }
   } catch (error) {
     return offWithError(messageFor(error));
   }
@@ -21869,7 +25733,7 @@ function envoySettings(env, config, options = {}) {
   return {
     enabled: true,
     url: normalizeEnvoyUrl(url),
-    token,
+    credential,
     inbound,
     heartbeatMs,
     passDeadlineMs: Math.min(Math.max(namedPassDeadlineMs ?? MIN_PASS_DEADLINE_MS, heartbeatMs), MAX_INTERVAL_MS),
@@ -21944,8 +25808,8 @@ function sessionSettings(file, env, options) {
     return { dispatch: off, envoy: off, notice: `${file.error}: Dispatch and Envoy are off` };
   }
   const config = readEnvoyConfig(file.path, env, options);
-  const dispatch = dispatchSettings(env, config);
-  const envoy = envoySettings(env, config, { nats: options.nats });
+  const dispatch = dispatchSettings(env, config, { session: options.session });
+  const envoy = envoySettings(env, config, { nats: options.nats, session: options.session });
   return {
     dispatch,
     envoy,
@@ -21957,7 +25821,10 @@ function sessionDispatchSettings(file, env, options) {
     return { dispatch: offWithError(file.error), warnings: [], missing: null };
   const config = readEnvoyConfig(file.path, env, options);
   return {
-    dispatch: dispatchSettings(env, config, { commands: options.commands }),
+    dispatch: dispatchSettings(env, config, {
+      commands: options.commands,
+      session: options.session
+    }),
     warnings: config.kind === "read" ? config.warnings : [],
     missing: config.kind === "read" ? config.missing : null
   };
@@ -21970,15 +25837,21 @@ function sessionDispatchUrl(file, env, options) {
 function sessionEnvoySettings(file, env, options) {
   if (file.path === null)
     return offWithError(file.error);
-  return envoySettings(env, readEnvoyConfig(file.path, env, options), { nats: options.nats });
+  return envoySettings(env, readEnvoyConfig(file.path, env, options), {
+    nats: options.nats,
+    session: options.session
+  });
 }
 
 // src/claude-session.ts
 function configuredValue(value) {
   return value !== undefined && value.trim().length > 0 ? value : undefined;
 }
+function configuredSessionId(environment) {
+  return configuredValue(environment.ENVOY_SESSION_ID) ?? configuredValue(environment.CLAUDE_CODE_SESSION_ID);
+}
 function claudeSessionId(environment) {
-  const id = configuredValue(environment.ENVOY_SESSION_ID) ?? configuredValue(environment.CLAUDE_CODE_SESSION_ID);
+  const id = configuredSessionId(environment);
   if (id !== undefined)
     return id;
   throw new Error("Envoy channel requires ENVOY_SESSION_ID or CLAUDE_CODE_SESSION_ID; Claude Code did not provide a session identity");
@@ -21988,7 +25861,7 @@ function claudeProjectDirectory(environment, fallback) {
 }
 
 // src/session-identity.ts
-import { readFile } from "fs/promises";
+import { readFile as readFile2 } from "fs/promises";
 import { basename as basename2, join as join6 } from "path";
 
 // src/session-state.ts
@@ -22095,7 +25968,7 @@ class UnparseableRoleRecordError extends Error {
 async function readPersistedRole(roleFile) {
   let bytes;
   try {
-    bytes = await readFile(roleFile, "utf8");
+    bytes = await readFile2(roleFile, "utf8");
   } catch (error) {
     if (hasErrnoCode(error, "ENOENT"))
       return;
@@ -22117,7 +25990,7 @@ async function writeSessionHandoff(file, sessionId) {
 }
 async function readSessionHandoff(file) {
   try {
-    const id = (await readFile(file, "utf8")).trim();
+    const id = (await readFile2(file, "utf8")).trim();
     return id.length === 0 ? undefined : id;
   } catch (error) {
     if (hasErrnoCode(error, "ENOENT"))
@@ -22216,14 +26089,15 @@ async function openAsks(raw) {
   }
   const directory = claudeProjectDirectory({ CLAUDE_PROJECT_DIR: process.env["CLAUDE_PROJECT_DIR"] }, input.cwd ?? process.cwd());
   const { dispatch, warnings, missing } = sessionDispatchSettings(chosen, process.env, {
-    cwd: directory
+    cwd: directory,
+    session: input.session_id
   });
   for (const warning of warnings)
     process.stdout.write(`envoy: ${warning}
 `);
   if (dispatch.enabled) {
     try {
-      const snapshot = await new DispatchClient(dispatch.url, dispatch.token, fetch, AbortSignal.timeout(OPEN_ASKS_TIMEOUT_MS)).openAsks(input.session_id);
+      const snapshot = await new DispatchClient(dispatch.url, dispatch.credential, fetch, AbortSignal.timeout(OPEN_ASKS_TIMEOUT_MS)).openAsks(input.session_id);
       process.stdout.write(`Dispatch authored-ask summary:
 ${formatOpenAsksSummary(snapshot, dispatch.publicUrl ?? dispatch.url)}
 `);
@@ -22345,7 +26219,11 @@ async function refreshedAnswers(session, cwd, dispatchUrl, startedAt, by) {
 }
 async function answersMessage(session, cwd, startedAt, by) {
   const file = sessionConfigFile("claude", process.env);
-  let { dispatch } = sessionDispatchSettings(file, process.env, { cwd, commands: "kept" });
+  let { dispatch } = sessionDispatchSettings(file, process.env, {
+    cwd,
+    commands: "kept",
+    session
+  });
   let dispatchUrl;
   if (!dispatch.enabled && dispatch.error !== null) {
     dispatchUrl = sessionDispatchUrl(file, process.env, { cwd });
@@ -22409,7 +26287,7 @@ async function answersRefresh(session, cwd) {
     try {
       const file = sessionConfigFile("claude", process.env);
       const dispatchUrl = sessionDispatchUrl(file, process.env, { cwd }) ?? null;
-      const { dispatch } = sessionDispatchSettings(file, process.env, { cwd });
+      const { dispatch } = sessionDispatchSettings(file, process.env, { cwd, session });
       const read = await readSessionAnswers({
         session,
         dispatch,

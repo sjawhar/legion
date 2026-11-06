@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/persistence"
 	"github.com/reearth/ygo/provider/websocket"
 	ygsync "github.com/reearth/ygo/sync"
 
@@ -99,7 +100,9 @@ func longEditedTypedTo(t *testing.T, structs uint64) []byte {
 }
 
 // storeHistory makes state the whole stored history of artifactID, as one update at the next
-// version, the way a rebuild stores its seed (RebuildTx).
+// version, the way a rebuild stores its seed (RebuildTx). The head is read under the room's lock
+// the write takes, since RebuildTx replaces a history only while its head is the one its caller
+// judged.
 func storeHistory(t *testing.T, service *Service, artifactID string, state []byte) {
 	t.Helper()
 	ctx := context.Background()
@@ -108,7 +111,11 @@ func storeHistory(t *testing.T, service *Service, artifactID string, state []byt
 		t.Fatal(err)
 	}
 	defer tx.Rollback(ctx)
-	if _, err := service.persistence.RebuildTx(ctx, tx, artifactID, state); err != nil {
+	head, err := lockedHead(ctx, tx, artifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.persistence.RebuildTx(ctx, tx, artifactID, persistence.Version(head), state); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -838,12 +845,24 @@ func TestABrowserHoldingAHistoryARebuildReplacedIsClosedThoughItsMessageWillNotR
 // long-edited one typed on to one keystroke short of it, a browser that read the document hands
 // its whole state back, and another reconnects holding it: both are admitted and stay connected,
 // the room's state as it was. A third reconnects with an edit it typed offline, which deletes
-// nothing and adds one struct with the two splits it can cause: every one of these rooms refuses
-// it and is left as it was, so no handoff and no edit takes a room past the cap. The reason
-// differs with what refuses it - the struct cap's DOC_TOO_LARGE where the room's own count
-// leaves no room for the edit, and the state cap's DOC_NEEDS_REBUILD where it does, since a
-// document at the decode cap holds more state than one room may (maxRoomStateBytes) and takes
-// no insert at all until it is rebuilt. Measured on 2026-10-28, both documents at the cap load
+// nothing and adds one struct with the two splits it can cause, and what answers it is what the
+// room has room for, so that no handoff and no edit takes a room PAST the cap:
+//
+//   - A room at the cap has no struct left to give, so the edit is refused DOC_TOO_LARGE and
+//     the room is left as it was.
+//   - A room a keystroke short of the cap has exactly the three structs the edit adds, so the
+//     edit is taken and the room ends AT the cap, which is a room that still loads: its whole
+//     state is one update of maxUpdateItems structs, which is what ygo decodes. Nothing else
+//     refuses it either, and the state cap is why: measured here, that room holds 14,427,249
+//     bytes of state against the 16,777,216 one room may hold (maxRoomStateBytes), with
+//     1,048,573 structs and a struct allowance of three. The cap is a quarter of the message
+//     floor and the floor was raised to 64 MiB so that a document at the decode cap can still
+//     take a byte from a browser and still hand its state back
+//     (TestTheHeaviestStateAtTheDecodeCapFitsTheRoomsStateCapAndTheFloor, which is the other
+//     half of this). Under the 13.5 MB cap it had before, this document could take no insert at
+//     all until it was rebuilt, which is a person's document that stops working.
+//
+// Measured on 2026-10-28, both documents at the cap load
 // at 1,048,576 structs exactly, the long-edited one's handoff carrying 1,345 delete ranges and
 // the agent's 32,793; the long-edited one took 33 s here, the one a keystroke short 30 s, and
 // the agent's 229 s, which runs with DISPATCH_REBUILD_AGENT_REWRITES=1, as its rebuild does. The
@@ -866,9 +885,9 @@ func TestAWholeStateHandoffOfADocumentAtTheDecodeCapIsAdmitted(t *testing.T) {
 		name  string
 		gate  string
 		state func(t *testing.T) []byte
-		// edits is whether the room's own struct count leaves room for the offline edit, and
-		// reason the close that edit meets: the struct cap's where it does not, the state cap's
-		// where it does.
+		// edits is whether the room's own struct count leaves room for the offline edit: where
+		// it does the edit is taken and the room ends at the cap, and where it does not the
+		// edit is refused with reason, the close that refuses it.
 		edits  bool
 		reason string
 	}{
@@ -882,7 +901,7 @@ func TestAWholeStateHandoffOfADocumentAtTheDecodeCapIsAdmitted(t *testing.T) {
 		{"a long-edited document typed on until the cap", "", longEditedAtCapState, false, contracts.DocumentTooLargeCloseReason},
 		{"a long-edited document typed on until a keystroke short of the cap", "", func(t *testing.T) []byte {
 			return longEditedTypedTo(t, maxUpdateItems-editAdds)
-		}, true, contracts.DocumentNeedsRebuildCloseReason},
+		}, true, ""},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			if row.gate != "" && os.Getenv(row.gate) == "" {
@@ -956,6 +975,20 @@ func TestAWholeStateHandoffOfADocumentAtTheDecodeCapIsAdmitted(t *testing.T) {
 			into := firstText(editing.GetXmlFragment(fragmentName))
 			docstest.Transact(editing, func(txn *crdt.Transaction) { into.Insert(txn, into.Len(), "offline", nil) })
 			edited := docstest.Dial(t, url, http.Header{"X-Dispatch-User": []string{"carol"}}, artifactID, editing)
+			if row.edits {
+				// The three structs the edit adds are the three the room has left, so the room
+				// takes it, keeps the browser and ends at the cap rather than past it.
+				awaitAnswer(t, edited, "the document to a browser carrying an offline edit")
+				confirmed(edited, "the browser that reconnected with an offline edit")
+				waitFor(t, 30*time.Second, "the offline edit to reach the document", func() bool {
+					text, err := service.Text(context.Background(), artifactID)
+					return err == nil && strings.Contains(text, "offline")
+				})
+				if after := countRoomStructs(live); after > maxUpdateItems {
+					t.Fatalf("the edit left the room at %d structs, past the %d cap", after, maxUpdateItems)
+				}
+				return
+			}
 			select {
 			case <-edited.Ended:
 			case <-time.After(time.Minute):

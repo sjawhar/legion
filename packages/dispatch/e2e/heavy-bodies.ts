@@ -4,7 +4,7 @@
 // alone would leave the other comparing a different body against the same numbers
 // (sjawhar/legion#2519). This module imports neither Playwright nor a browser module, so a spec
 // loads it for its shapes alone.
-import { DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
+import { DISPATCH_BLOCK_UNITS } from "@legion/contracts/dispatch-tools";
 
 /** `head` followed by `filler` repeated, cut to exactly `length` characters. */
 export function padTo(head: string, filler: string, length: number): string {
@@ -21,37 +21,16 @@ export function nestedByIndentation(count: number): string {
   return body;
 }
 
-/**
- * A heavy shape at the count the document write row writes (`heavy-document-writes.e2e.ts`), and
- * the same shape at half that count. That row times both writes, so what a body costs and what
- * half of it costs are read side by side; one generator spells the two, so the small body stays
- * the large one's own shape however either is changed (sjawhar/legion#2519).
- */
-export function atBothSizes(
-  shape: (count: number) => string,
-  count: number
-): { full: string; half: string } {
-  return { full: shape(count), half: shape(Math.round(count / 2)) };
-}
-
-/** 8,000 list items, and 4,000 of them: the shape a reader meets most, and the one no parse fix
- *  brings under a second on the page's own thread. */
-export const plainListSizes = atBothSizes((items) => "- x\n".repeat(items), 8_000);
-export const plainList = plainListSizes.full;
-export const nestedThenBlankLines = padTo(nestedByIndentation(100), "\n", DISPATCH_BODY_MAX);
-export const nestedThenTextLines = padTo(nestedByIndentation(100), "x\n", DISPATCH_BODY_MAX);
+/** 8,000 list items: the shape a reader meets most, and the one no parse fix brings under a
+ *  second on the page's own thread. */
+export const plainList = "- x\n".repeat(8_000);
+export const nestedThenBlankLines = padTo(nestedByIndentation(100), "\n", DISPATCH_BLOCK_UNITS);
+export const nestedThenTextLines = padTo(nestedByIndentation(100), "x\n", DISPATCH_BLOCK_UNITS);
 export const lazyQuote = `> x\n${"x\n".repeat(15_998)}`;
 export const lazyListItem = `- x\n${"x\n".repeat(15_998)}`;
-export const bracketRunSizes = atBothSizes(
-  (pairs) => "[".repeat(pairs) + "]".repeat(pairs),
-  15_000
-);
-export const bracketRun = bracketRunSizes.full;
+export const bracketRun = `${"[".repeat(15_000)}${"]".repeat(15_000)}`;
 export const calloutBracketRun = `:::callout[${"[".repeat(15_000)}${"]".repeat(14_989)}`;
 export const markerChain = `${"- ".repeat(15_999)}x`;
 /** 49 items nested on one line, which Go accepts (49 lists and 49 items is 98 of its 100
- *  blocks), then blank lines to the cap, and the same markers padded to half of it. */
-export const nested49ThenBlankLinesSizes = atBothSizes(
-  (length) => padTo(`${"- ".repeat(49)}x\n`, "\n", length),
-  DISPATCH_BODY_MAX
-);
+ *  blocks), then blank lines to the cap. */
+export const nested49ThenBlankLines = padTo(`${"- ".repeat(49)}x\n`, "\n", DISPATCH_BLOCK_UNITS);

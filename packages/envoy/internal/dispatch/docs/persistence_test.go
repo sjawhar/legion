@@ -16,6 +16,13 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
+// TestMain runs the package's tests and then reports the services they left alive
+// (service_leak_test.go): the memory a test that never shuts its service down holds for the rest
+// of the binary's run. A service still alive fails the run - the exit code stays storetest.Main's
+// when that is already non-zero, and becomes non-zero when the tests passed and a service is
+// still alive. The fix such a run asks for is a t.Cleanup on the test the report names, shutting
+// down the service that test built.
+//
 // The package's tests run in one process, and many of them drive a room's load from inside a
 // write's fork read, through a hook of the service's (afterForkRead) or a store that loads the
 // room inside the read it answers (roomDuringColdReadStore): a nesting no pod makes, where a
@@ -27,7 +34,11 @@ import (
 // of their own (useLoadSlots).
 func TestMain(m *testing.M) {
 	podLoadSlots.Store(newLoadSlots(BoundsForLimit(productionGoMemoryLimitBytes).LoadSlots))
-	os.Exit(storetest.Main(m))
+	code := storetest.Main(m)
+	if reportLeakedServices() && code == 0 {
+		code = 1
+	}
+	os.Exit(code)
 }
 
 func createDocument(t *testing.T, database *store.Store, markdown string) string {

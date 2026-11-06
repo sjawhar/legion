@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/jackc/pgx/v5"
 
@@ -30,7 +31,7 @@ const (
 )
 
 // ReviewColumns selects one artifact_reviews row in the order ScanReview reads it.
-const ReviewColumns = `id::text, artifact_id::text, version, state, kind, actor, reason, ask_id::text, created_at, event_seq`
+const ReviewColumns = `id::text, artifact_id::text, version, state, kind, actor, reason, ask_id::text, created_at, event_seq, content_sha256, content_sha256_source`
 
 // ReviewOrder sorts a document's reviews newest first by the order their events committed: the
 // event sequence each review kept on its document's owner, then, for a review recorded before the
@@ -52,7 +53,7 @@ const ReviewOrder = `event_seq desc nulls last, created_at desc, artifact_review
 func ScanReview(row pgx.Row) (model.ArtifactReview, error) {
 	var review model.ArtifactReview
 	var actor []byte
-	if err := row.Scan(&review.ID, &review.ArtifactID, &review.Version, &review.State, &review.Kind, &actor, &review.Reason, &review.AskID, &review.CreatedAt, &review.EventSeq); err != nil {
+	if err := row.Scan(&review.ID, &review.ArtifactID, &review.Version, &review.State, &review.Kind, &actor, &review.Reason, &review.AskID, &review.CreatedAt, &review.EventSeq, &review.ContentSHA256, &review.ContentSHA256Source); err != nil {
 		return model.ArtifactReview{}, err
 	}
 	if err := json.Unmarshal(actor, &review.Actor); err != nil {
@@ -88,6 +89,9 @@ func WriteReview(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifact
 	if err != nil {
 		return model.ArtifactReview{}, model.Event{}, fmt.Errorf("insert artifact review: %w", err)
 	}
+	if review.ContentSHA256 == nil {
+		slog.Warn("dispatch: review recorded with no content hash: the version names no stored text", "artifact", artifact.ID, "version", version, "review", review.ID)
+	}
 	eventType := "artifact.approved"
 	if state == "changes_requested" {
 		eventType = "artifact.changes_requested"
@@ -95,13 +99,15 @@ func WriteReview(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifact
 	event, err := broker.Append(ctx, tx, documentAskEvent(
 		artifactOwner{IssueKey: artifact.IssueKey}, artifact.ID, eventType, actor,
 		model.ArtifactReviewEventPayload{
-			ArtifactID: artifact.ID,
-			Name:       artifact.Name,
-			Version:    version,
-			Kind:       kind,
-			Actor:      actor,
-			Reason:     reason,
-			AskID:      askID,
+			ArtifactID:          artifact.ID,
+			Name:                artifact.Name,
+			Version:             version,
+			Kind:                kind,
+			Actor:               actor,
+			Reason:              reason,
+			AskID:               askID,
+			ContentSHA256:       review.ContentSHA256,
+			ContentSHA256Source: review.ContentSHA256Source,
 		},
 	))
 	if err != nil {
@@ -113,6 +119,40 @@ func WriteReview(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifact
 	}
 	review.EventSeq = &seq
 	return review, event, nil
+}
+
+// ReviewHashFill counts rows pinned at boot and rows whose version has no stored text.
+type ReviewHashFill struct{ Filled, Unhashable int }
+
+// FillReviewContentHashes pins old reviews in bounded batches. The update trigger
+// derives the true hash and marks its provenance backfill; an existing pin never moves.
+func FillReviewContentHashes(ctx context.Context, q Queryer) (ReviewHashFill, error) {
+	var result ReviewHashFill
+	for {
+		rows, err := q.Query(ctx, `
+			update artifact_reviews set content_sha256 = artifact_version_text_sha256(artifact_id, version)
+			where id in (
+				select id from artifact_reviews
+				where content_sha256 is null and artifact_version_text_sha256(artifact_id, version) is not null
+				limit 500
+			)`)
+		if err != nil {
+			return result, fmt.Errorf("fill review content hashes: %w", err)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return result, fmt.Errorf("fill review content hashes: %w", err)
+		}
+		filled := int(rows.CommandTag().RowsAffected())
+		result.Filled += filled
+		if filled == 0 {
+			break
+		}
+	}
+	if err := q.QueryRow(ctx, `select count(*) from artifact_reviews where content_sha256 is null`).Scan(&result.Unhashable); err != nil {
+		return result, fmt.Errorf("count unhashable reviews: %w", err)
+	}
+	return result, nil
 }
 
 // latestApprovedReviewQuery selects the newest approval of the document $1 names. Like

@@ -1,4 +1,17 @@
-import { type BearerSource, bearerSource, type FileBearer, fileBearer } from "./bearer";
+import {
+  type BearerSource,
+  bearerCredential,
+  bearerSource,
+  type FileBearer,
+  fileBearer,
+  type RequestCredential,
+} from "./bearer";
+import {
+  type BrokerRoute,
+  type BrokerSessionName,
+  brokerCredential,
+  brokerRouteConfigured,
+} from "./broker-credential";
 import {
   type CheckoutEnvoyConfig,
   type CommandMode,
@@ -21,17 +34,25 @@ const DEFAULT_SERVER_URL = "http://localhost:8766";
 export type DispatchEnvironment = EnvoyConfigEnvironment & {
   readonly DISPATCH_TOKEN?: string | undefined;
   readonly DISPATCH_TOKEN_FILE?: string | undefined;
+  readonly DISPATCH_TOKEN_BROKER?: string | undefined;
   readonly DISPATCH_PUBLIC_URL?: string | undefined;
 };
 
-/** Dispatch on: its URL and bearer token, both resolved, and `publicUrl`, Dispatch's dashboard as
- * people open it (DISPATCH_PUBLIC_URL), set only when the variable is: a Legion pod reaches Dispatch
- * at an in-cluster `url` nobody outside the cluster can open, so every link the `dispatch` command
- * prints is resolved against `publicUrl` when it is set, and against `url` otherwise. */
+/** Dispatch on: its URL and the credential every request presents, and `publicUrl`, Dispatch's
+ * dashboard as people open it (DISPATCH_PUBLIC_URL), set only when the variable is: a Legion pod
+ * reaches Dispatch at an in-cluster `url` nobody outside the cluster can open, so every link the
+ * `dispatch` command prints is resolved against `publicUrl` when it is set, and against `url`
+ * otherwise. */
 export interface ActiveDispatchConfig {
   readonly enabled: true;
   readonly url: string;
-  readonly token: string;
+  /**
+   * What every request presents: the bearer a variable or a file gave (`bearerCredential`), or
+   * the access token this machine traded its own identity for at the secrets broker, presented
+   * under the `DPoP` scheme with a fresh proof of this process's key on each request
+   * (`brokerCredential`). One field, so no caller can present half of it.
+   */
+  readonly credential: RequestCredential;
   readonly publicUrl?: string;
 }
 
@@ -39,6 +60,17 @@ export interface ActiveDispatchConfig {
 export type DispatchConfigResolution = ActiveDispatchConfig | SectionOff;
 
 type ValidCheckout = Extract<CheckoutEnvoyConfig, { readonly kind: "valid" }>;
+
+/**
+ * `url` without the slashes it ends in, counted from the right. A `/\/+$/` replace reads the same
+ * string once per position its unanchored search starts at, which costs a URL of n slashes O(n²)
+ * (CodeQL js/polynomial-redos); this reads it once.
+ */
+function withoutTrailingSlashes(url: string): string {
+  let end = url.length;
+  while (end > 0 && url[end - 1] === "/") end -= 1;
+  return url.slice(0, end);
+}
 
 /** A checkout's own server and the token written beside it, which only that server gets. Throws
  * when the checkout names no token. */
@@ -139,24 +171,46 @@ export function lostDispatchUrlNotice(
  * token is refused; the chosen file's runs here, only once Dispatch is about to use it, unless
  * `options.commands` is `kept`: then only an outcome a run already kept in this process answers,
  * and with none Dispatch is off with an error saying the command has not run (`fileValue`).
- * Dispatch is on only when both URL and bearer token resolve; off, it says why: a `notice` when
- * nothing names it or a file turns it off, an `error` otherwise. Nothing naming it while a token
- * variable is set is said as the `DISPATCH_URL` the shell lost (`lostDispatchUrlNotice`).
+ * Dispatch is on when its URL resolves and a credential does: one of those bearers, or — when no
+ * bearer is configured at all — this machine's own identity traded at the secrets broker
+ * (`AGENT_SECRETS_URL` with `AGENT_SECRETS_MACHINE_IDENTITY`, `brokerCredential`), which is a
+ * DPoP-bound access token rather than a bearer, traded under `options.session`. The bearers are
+ * resolved first and unchanged, so a session that has one keeps behaving exactly as it did. Off,
+ * it says why: a `notice` when nothing names it or a file turns it off, an `error` otherwise.
+ * Nothing naming it while a token variable is set is said as the `DISPATCH_URL` the shell lost
+ * (`lostDispatchUrlNotice`).
+ *
+ * `DISPATCH_TOKEN_BROKER=1` turns that last route from a fallback into the only one: no bearer is
+ * read at all — not `DISPATCH_TOKEN`, not `DISPATCH_TOKEN_FILE`, not the chosen file's
+ * `dispatch.token` — and a machine that can trade nothing turns Dispatch off with an error saying
+ * so, rather than presenting whatever bearer the box happens to hold. It is a deployment's word
+ * about the session it launches, which `legion controller start` sets under `dispatch_token_broker`
+ * so that the operator's own envoy.json cannot write Dispatch as the operator. Any other value is
+ * a mistake in the deployment, refused rather than read as on or as off.
  */
 export function dispatchSettings(
   env: DispatchEnvironment,
   config: EnvoyConfig,
-  options: { readonly commands?: CommandMode | undefined } = {}
+  options: {
+    readonly commands?: CommandMode | undefined;
+    /** The session a broker trade writes under (`BrokerSessionName`), for a caller that acts as
+     * one. Nothing else reads it: a bearer route resolves the same whatever it says. */
+    readonly session?: BrokerSessionName | undefined;
+  } = {}
 ): DispatchConfigResolution {
   const target = dispatchTarget(env, config);
   if (!target.enabled) return target;
   const { url, source } = target;
-  let token: string;
+  let credential: RequestCredential;
   try {
-    token =
-      source.kind === "variable"
-        ? source.token
-        : fileBearer(source, url, "DISPATCH", env, options.commands);
+    credential =
+      source.kind === "broker"
+        ? brokerCredential(env, options.session)
+        : bearerCredential(
+            source.kind === "variable"
+              ? source.token
+              : fileBearer(source, url, "DISPATCH", env, options.commands)
+          );
   } catch (error) {
     return offWithError(messageFor(error));
   }
@@ -171,7 +225,7 @@ export function dispatchSettings(
   return {
     enabled: true,
     url,
-    token,
+    credential,
     ...(publicUrl === undefined ? {} : { publicUrl: publicUrl.replace(/\/+$/, "") }),
   };
 }
@@ -189,8 +243,22 @@ export function dispatchUrl(env: DispatchEnvironment, config: EnvoyConfig): stri
   return target.enabled ? target.url : undefined;
 }
 
-/** Where Dispatch's token comes from: a variable, or a file with the server written beside it. */
-type TokenSource = Exclude<BearerSource, { readonly kind: "none" }>;
+/** Where Dispatch's credential comes from: a variable, a file with the server written beside it,
+ * or the secrets broker, which this machine's own identity is traded at. */
+type TokenSource = Exclude<BearerSource, { readonly kind: "none" }> | { readonly kind: "broker" };
+
+/** `DISPATCH_TOKEN_BROKER`'s value as a question dispatchTarget can ask: true where the deployment
+ * has said this session's Dispatch credential is this machine's own identity and nothing else,
+ * false where it says nothing, and a refusal for any other value, which is a deployment that meant
+ * one of the two and wrote neither. */
+function brokerRouteForced(env: DispatchEnvironment): boolean | SectionOff {
+  const written = (env.DISPATCH_TOKEN_BROKER ?? "").trim();
+  if (written === "") return false;
+  if (written === "1") return true;
+  return offWithError(
+    `DISPATCH_TOKEN_BROKER is "${written}" and takes 1: set it to 1 where this session's Dispatch credential is this machine's own identity traded at the secrets broker, and leave it unset where a bearer is read as usual`
+  );
+}
 
 /** Dispatch as `dispatchSettings` resolves it up to its token: its URL and the token's source, or
  * off saying why. Reads a `DISPATCH_TOKEN_FILE`, never runs a `!` command. */
@@ -199,6 +267,8 @@ function dispatchTarget(
   config: EnvoyConfig
 ): SectionOff | { readonly enabled: true; readonly url: string; readonly source: TokenSource } {
   if (config.kind === "failed") return offWithError(config.error);
+  const forced = brokerRouteForced(env);
+  if (typeof forced !== "boolean") return forced;
   const explicitUrl = nonEmpty(env.DISPATCH_URL);
   const checkoutFile = explicitUrl === undefined ? config.checkout : null;
   if (checkoutFile?.kind === "invalid") return offWithError(checkoutFile.error);
@@ -232,17 +302,37 @@ function dispatchTarget(
     return offWithError("DISPATCH_URL must be an http or https URL");
   }
 
-  let source: BearerSource;
-  try {
-    // A checkout's server goes only with the token written beside it.
-    source =
-      checkout !== null && checkoutServer !== undefined
-        ? checkoutPair(checkout, checkoutServer)
-        : bearerSource(env, "DISPATCH", () => writtenToken(config, checkout));
-  } catch (error) {
-    return offWithError(messageFor(error));
+  // Forced, no bearer is resolved at all: not a variable, not the chosen file's `dispatch.token`,
+  // not a checkout's pair. The broker route follows below, and nothing else does.
+  let source: BearerSource = { kind: "none" };
+  if (!forced) {
+    try {
+      // A checkout's server goes only with the token written beside it.
+      source =
+        checkout !== null && checkoutServer !== undefined
+          ? checkoutPair(checkout, checkoutServer)
+          : bearerSource(env, "DISPATCH", () => writtenToken(config, checkout));
+    } catch (error) {
+      return offWithError(messageFor(error));
+    }
   }
   if (source.kind === "none") {
+    // No bearer at all: this machine may still have an identity of its own to trade.
+    let route: BrokerRoute;
+    try {
+      route = brokerRouteConfigured(env);
+    } catch (error) {
+      return offWithError(messageFor(error));
+    }
+    if (route.traded) {
+      const brokered = withoutTrailingSlashes(explicitUrl ?? own.serverUrl ?? DEFAULT_SERVER_URL);
+      return { enabled: true, url: brokered, source: { kind: "broker" } };
+    }
+    if (forced) {
+      return offWithError(
+        `DISPATCH_TOKEN_BROKER is set, so this session's Dispatch credential is this machine's own identity traded at the secrets broker, and ${route.gap}: Dispatch is off rather than written with whatever bearer this box holds`
+      );
+    }
     return offWithError(
       explicitUrl === undefined
         ? `${config.path}: dispatch is enabled and no token is: set dispatch.token, or DISPATCH_TOKEN or DISPATCH_TOKEN_FILE`

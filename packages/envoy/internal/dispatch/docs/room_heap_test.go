@@ -518,12 +518,12 @@ func residentRoomState(t *testing.T, size int) (state []byte, rendering pmdoc.Do
 }
 
 // residentRoomDocument is a live document of about size bytes of markdown a room can hold
-// (residentRoomMarkdown), typed over as the live benchmarks' document is (benchmarkLiveDocument):
+// (roomMarkdownOfSize), typed over as the live benchmarks' document is (benchmarkLiveDocument):
 // 2,000 keystrokes typed and deleted across it, so its delete set is a document's that people
 // have edited. It is bounded as a room's document is (boundRoomDocument).
 func residentRoomDocument(tb testing.TB, size int) *crdt.Doc {
 	tb.Helper()
-	tree, err := pmdoc.Parse(residentRoomMarkdown(tb, size))
+	tree, err := pmdoc.Parse(roomMarkdownOfSize(tb, size))
 	if err != nil {
 		tb.Fatal(err)
 	}
@@ -544,7 +544,7 @@ func residentRoomDocument(tb testing.TB, size int) *crdt.Doc {
 	return boundRoomDocument(live)
 }
 
-// residentRoomMarkdown is markdown of at least size bytes in the shape this package's live
+// roomMarkdownOfSize is markdown of at least size bytes in the shape this package's live
 // benchmarks type into - headings, marked paragraphs, lists, tables and code
 // (benchmarkLiveDocument) - with paragraphs long enough that a room can hold a megabyte of it.
 // That shape as the benchmarks build it makes 0.28 elements a byte, where a document at
@@ -555,7 +555,7 @@ func residentRoomDocument(tb testing.TB, size int) *crdt.Doc {
 // 0.055 an element a byte, under a fifth of the bound's own; what the markdown measures is
 // checked here rather than assumed, since a shape past either half of the bound would measure a
 // room no document could fill.
-func residentRoomMarkdown(tb testing.TB, size int) string {
+func roomMarkdownOfSize(tb testing.TB, size int) string {
 	tb.Helper()
 	padding := " " + strings.Repeat("word ", 279) + "word"
 	var markdown, next strings.Builder

@@ -187,7 +187,9 @@ func TestAPeerUpdateIsWeighedAgainstTheRoomsLastMeasurement(t *testing.T) {
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			service, room, replica := peerUpdateRoom(t, row.markdown, row.leastBytes)
-			service.budget.full.Store(row.busy)
+			if row.busy {
+				fillRoomBudget(t, &service.budget)
+			}
 			update := row.update(t, room)
 			before := crdt.EncodeStateAsUpdateV1(room, nil)
 			applied, called := false, false
@@ -1043,7 +1045,7 @@ func TestEveryRefusalOfTheHookCarriesItsOwnCodeAndReason(t *testing.T) {
 			name: "a keystroke while the room budget is full", code: contracts.DocumentBusyCloseCode, reason: contracts.DocumentBusyCloseReason, applies: true,
 			refusal: func(t *testing.T) (*Service, *crdt.Doc, []byte, any) {
 				service, room, replica := peerUpdateRoom(t, ordinary, 0)
-				service.budget.full.Store(true)
+				fillRoomBudget(t, &service.budget)
 				return service, room, peerTyping(t, room, "y"), replica
 			},
 		},
@@ -1200,7 +1202,7 @@ func TestEveryRefusalThatClosesABrowserLogsWhyItRefusedIt(t *testing.T) {
 			},
 			refusal: func(t *testing.T) (*Service, *crdt.Doc, []byte, any) {
 				service, room, replica := peerUpdateRoom(t, ordinary, 0)
-				service.budget.full.Store(true)
+				fillRoomBudget(t, &service.budget)
 				return service, room, peerTyping(t, room, "y"), replica
 			},
 		},

@@ -774,9 +774,19 @@ export function getArtifact(id: string, options: ApiOptions = {}): Promise<Artif
   );
 }
 
+/**
+ * `POST /api/v1/artifacts/{id}/approval-requests`: the request that asks a person to approve the
+ * document's latest settled version, with an optional summary of what they are approving.
+ *
+ * `include_verification` asks for the issue's Verification document beside that document, each at
+ * its own current settled version, so one card names both. The route takes it only on the issue's
+ * primary document - its spec - and refuses it on any other with `409 NOT_SPEC_DOCUMENT`, and only
+ * where that issue holds a `verification.md` with a settled version, refusing an issue that holds
+ * none with `409 NO_VERIFICATION_DOCUMENT`.
+ */
 export function requestApproval(
   id: string,
-  input: { summary?: string } = {},
+  input: { summary?: string; include_verification?: boolean } = {},
   options: ApiOptions = {}
 ): Promise<{ ask: Ask; artifact_id: string; version: number }> {
   return request(

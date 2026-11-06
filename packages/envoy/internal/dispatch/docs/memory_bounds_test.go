@@ -56,7 +56,7 @@ func TestTheMemoryBoundsAtTheProductionPodsLimit(t *testing.T) {
 		RoomBudget:        17_179_869_185,
 		DocumentReadCache: 268_435_456,
 		LoadSlots:         16,
-		PeerWriteQueue:    62_914_560,
+		PeerWriteQueue:    73_400_320,
 	}
 	got := BoundsForLimit(productionGoMemoryLimitBytes)
 	if got != want {
@@ -122,6 +122,14 @@ func TestAServiceAtTheProductionLimitAdmitsFarMoreRoomsThanTheCalibration(t *tes
 		t.Run(row.name, func(t *testing.T) {
 			restorePodLoadSlots(t)
 			service := New(Deps{GoMemoryLimit: row.limit})
+			// The service this row builds is shut down with the row, as every service a test of
+			// this package builds is: one left alive holds its rooms and their documents in
+			// memory for the rest of the binary's run, which fails the run (service_leak_test.go).
+			t.Cleanup(func() {
+				if err := service.Shutdown(context.Background()); err != nil {
+					t.Errorf("shutdown document service: %v", err)
+				}
+			})
 			if service.budget.limit != BoundsForLimit(row.limit).RoomBudget {
 				t.Fatalf("the service's budget holds %d bytes at a %d-byte limit, want %d",
 					service.budget.limit, row.limit, BoundsForLimit(row.limit).RoomBudget)

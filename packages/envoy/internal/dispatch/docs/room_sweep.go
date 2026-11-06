@@ -130,6 +130,13 @@ func (s *Service) sweepRooms() {
 // (evictWG), and is logged with the budget's figures before and after it as the sweep's are. A
 // room an Apply is inside its callback on is left marked, for the end of that Apply to look at
 // again.
+//
+// A room the budget's opening still names is left marked too (roomBudget.opened), whatever its
+// state reads: the work that booked the opening has not let the room go, and it records what
+// holds the room inside its own Apply, after the load that marks it. ygo takes and releases the
+// room's state in between - the awareness relay's RoomActivated runs inside getOrCreateRoom,
+// during the load and before any caller's callback - and this is called from each such release,
+// which would otherwise read the room as unused and close the room its opener is about to use.
 func (s *Service) closeIfOpenedOverBudget(room string) {
 	if s.budget.marked.Load() == 0 || !s.budget.isMarked(room) {
 		return
@@ -138,7 +145,8 @@ func (s *Service) closeIfOpenedOverBudget(room string) {
 	if state == nil {
 		return
 	}
-	if state.released || s.srv.GetDoc(room) == nil || !s.unusedLocked(state) || !s.budget.takeMark(room) {
+	if state.released || s.srv.GetDoc(room) == nil || !s.unusedLocked(state) ||
+		s.budget.opened(room) || !s.budget.takeMark(room) {
 		state.mu.Unlock()
 		return
 	}
