@@ -402,9 +402,15 @@ Chromium with iPhone 13 viewport, touch, and user-agent emulation. A deployed ru
 `@phone` tests. `webkit` runs `e2e/collab-cursor.e2e.ts`, since where a caret lands beside a
 collaborator's cursor differs by engine, and `firefox` runs `e2e/code-line-replace.e2e.ts`, since
 Firefox's own editing mishandles text typed over what follows a block's last line break; both also
-run `e2e/deep-links.e2e.ts`, `e2e/keyboard-agents-picker.e2e.ts`,
-`e2e/keyboard-session-pickers.e2e.ts` and `e2e/offline-edits.e2e.ts`, and `firefox` runs
-`e2e/picture-link-click.e2e.ts` too. `firefox-download-navigation` runs the one row of
+run `e2e/deep-links.e2e.ts`, `e2e/heavy-streamed-turn.e2e.ts`,
+`e2e/keyboard-agents-picker.e2e.ts`, `e2e/keyboard-session-pickers.e2e.ts`,
+`e2e/keyed-send.e2e.ts`, `e2e/keyed-writes.e2e.ts`, `e2e/live-socket.e2e.ts`,
+`e2e/mermaid.e2e.ts` and `e2e/offline-edits.e2e.ts`, and `firefox` runs
+`e2e/picture-link-click.e2e.ts` too.
+`webkit` also runs `e2e/picture-address.e2e.ts` and `e2e/video.e2e.ts`, since the engine decides
+both: whether a browser sent to a version's own address draws the file or hands it over as a
+download, and which containers and codecs a `<video>` plays.
+`firefox-download-navigation` runs the one row of
 `e2e/shell.e2e.ts` that follows a Download link before a chunk fails. `webkit-iphone` runs the
 phone-layout rows of `e2e/agent-view.e2e.ts`, `e2e/agent-view-settings.e2e.ts` and
 `e2e/delivery-live.e2e.ts`, and the rows of `e2e/phone-conversation.e2e.ts` that check what the

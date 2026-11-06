@@ -2633,8 +2633,10 @@ Each item below names a path with its method and identity, then its purpose.
 - `/api/v1/issues/{key}/summary` (GET; cookie, trusted header, or bearer)
 
   What a reference to an issue shows, read without the full issue:
-  `{key, project, title, status, documents}`, `documents` every artifact of the issue in the order the issue read lists them, each `{id, slug, name, kind, latest_version, primary}`, `primary` marking the spec, which a reference to a block of the spec names.
-  One query for the issue and one for its artifacts, with no version history, approval, child or open-ask read.
+  `{key, project, title, status, documents}`, `documents` every artifact of the issue in the order the issue read lists them, each `{id, slug, name, kind, latest_version, mime, width, height, primary}`, `primary` marking the spec, which a reference to a block of the spec names.
+  `mime` is the content type the latest version is stored under, which tells a video from a picture, and `width` and `height` are that version's own size in pixels, so a reference reserves a picture's box before its bytes arrive.
+  `mime` is null for an artifact with no version and for a version stored under no type, and `width` and `height` are null together for everything that is not a decoded picture.
+  One query for the issue and one for its artifacts, the latest version's number, type and size read in one lateral join, with no version history, approval, child or open-ask read.
   `404 NOT_FOUND` for no such issue.
 
 - `/api/v1/issues/{key}/asks` (POST; cookie, trusted header, or bearer)
@@ -2891,8 +2893,11 @@ Each item below names a path with its method and identity, then its purpose.
   Read a document version or download a blob.
   `{id}` must be a UUID.
   A file whose bytes are in the bucket is `502 FILE_STORE_UNAVAILABLE` when the bucket does not answer, `503` on a server with no bucket configured.
-  A file or image version, whoever owns it, is served with `Cache-Control: private, max-age=31536000, immutable` beside its `ETag` (the bytes' sha256), since a version's bytes never change and the route is authenticated;
+  A file or image version, whoever owns it, is served with `Cache-Control: private, max-age=31536000, immutable` beside its `ETag` (the bytes' sha256, quoted), since a version's bytes never change and the route is authenticated;
   a document version, and every error, carries no cache header.
+  Every file and image answer also carries `Accept-Ranges: bytes`, so a player knows it may seek, and `Content-Disposition` with the artifact's own name, written both as `filename` and as `filename*`:
+  `inline` for `image/png`, `image/jpeg`, `image/gif`, `image/webp`, `video/mp4` and `video/webm`, the types a browser draws where the reader is, and `attachment` for every other type, which the browser saves under that name.
+  A reader sent to one of those addresses - a link pasted into the address bar, a picture opened in a tab of its own - therefore sees the picture or the player rather than a download.
 
 - `/api/v1/artifacts/{id}/versions` (POST; cookie, trusted header, or bearer)
 
@@ -2991,7 +2996,8 @@ Each item below names a path with its method and identity, then its purpose.
 - `/api/v1/projects/{key}/artifacts/{slug}/summary` (GET; cookie, trusted header, or bearer)
 
   What a reference to a project document shows, read without its versions:
-  `{id, project, slug, name, kind, latest_version}`, `{slug}` (a slug or unambiguous filename) resolved as the project document read resolves it (`404 ARTIFACT_NOT_FOUND`, `400 ARTIFACT_REFERENCE_AMBIGUOUS`).
+  `{id, project, slug, name, kind, latest_version, mime, width, height}`, the latest version's content type and its own size in pixels read with its number in the one lateral join the issue summary uses, and null on the same terms.
+  `{slug}` (a slug or unambiguous filename) is resolved as the project document read resolves it (`404 ARTIFACT_NOT_FOUND`, `400 ARTIFACT_REFERENCE_AMBIGUOUS`).
 
 - `/api/v1/projects/{key}/artifacts/{slug}/text` (GET; cookie, trusted header, or bearer)
 

@@ -1,0 +1,5 @@
+kind: Added
+body: '`dispatch artifact` answers an upload a browser draws - a picture or a video - with the markdown line that draws it, pinned to the version it just made, under the first line it has always printed, so the line can be pasted straight into a body. A read of a body that names a video passes over it in silence instead of saying why it was not shown.'
+time: 2026-11-06T06:59:53.606966813Z
+custom:
+    Issue: pr2850

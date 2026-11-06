@@ -1,0 +1,5 @@
+kind: Added
+body: 'A picture or a video version is served under the artifact''s own name with `Content-Disposition: inline` and answers byte ranges, so a browser sent to its address draws or plays it where the reader is; every other type is still handed over as a download. A reference summary now carries the latest version''s content type and a picture''s own width and height, which an upload reads from the picture''s header, and `envoy-dispatch backfill-dimensions` records the size of the pictures stored before it did.'
+time: 2026-11-06T06:59:42.889234974Z
+custom:
+    Issue: pr2850
