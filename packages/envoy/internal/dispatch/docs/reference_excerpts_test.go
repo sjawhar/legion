@@ -312,7 +312,9 @@ func TestTwentyFailingDocumentsDoNotHoldBackATwentyFirstsExcerpts(t *testing.T) 
 
 // Once the reconciliation has stored every owed excerpt, it makes no statement at all - no batch
 // on a timer, no lease attempt - over a window longer than the two-second step the timer it
-// replaced took, and its last pass asked for no timer.
+// replaced took, and its last pass asked for no timer. This row is the one that runs
+// referenceExcerptSchedule end to end, through RunReferenceExcerptReconciliation: the window it
+// watches is what proves the production gap arms no pass of its own.
 func TestTheExcerptReconciliationMakesNoStatementOnceDrained(t *testing.T) {
 	database := storetest.Open(t)
 	documents := owedDocuments(t, database, 3)
@@ -360,8 +362,12 @@ func TestAMentionOwedAnExcerptWakesTheReconciliation(t *testing.T) {
 	counted := &store.Store{Pool: storetest.Traced(t, database.Pool, counter, nil)}
 	service := newExcerptService(t, counted, nil)
 	leases := excerptLeases(t, counted)
+	// The gap is this row's own, a tenth of the server's: what it reads is that the wake runs a
+	// pass and the excerpt it left owed is stored, never how long the gap between passes is
+	// (TestTheExcerptReconciliationMakesNoStatementOnceDrained runs the server's).
+	schedule := excerptSchedule{minGap: 200 * time.Millisecond, retryBase: referenceExcerptSchedule.retryBase}
 	started := time.Now()
-	runExcerpts(t, func(ctx context.Context) { service.RunReferenceExcerptReconciliation(ctx, leases, wake) })
+	runExcerpts(t, func(ctx context.Context) { service.runReferenceExcerptReconciliation(ctx, leases, wake, schedule) })
 	select {
 	case <-connected:
 	case <-time.After(roomWait(t)):
@@ -370,7 +376,7 @@ func TestAMentionOwedAnExcerptWakesTheReconciliation(t *testing.T) {
 	waitFor(t, roomWait(t), "the boot pass to store the excerpt", func() bool { return !isOwed(t, database, document) })
 	// The hub's signal after its LISTEN earns one more pass, no sooner than the gap after the
 	// boot pass began; after it the loop is idle.
-	time.Sleep(time.Until(started.Add(referenceExcerptSchedule.minGap + time.Second)))
+	time.Sleep(time.Until(started.Add(schedule.minGap + time.Second)))
 	storetest.AwaitQuiet(t, counter, 500*time.Millisecond, 10*time.Second)
 
 	ctx := context.Background()

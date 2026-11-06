@@ -103,7 +103,7 @@ func TestShutdownJoinsTheSettlementItsLastBrowserLeavingStarted(t *testing.T) {
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), roomWait(t))
 	defer cancelShutdown()
 	shutdown := make(chan error, 1)
-	go func() { shutdown <- service.Shutdown(shutdownCtx) }()
+	go func() { shutdown <- service.shutdown(shutdownCtx, shutdownTestBudget) }()
 	// Shutdown's own settlement of the room waits on the owner row the held one holds until the
 	// drain budget ends; a Shutdown still running a little after that is waiting on the held
 	// settlement.
@@ -111,7 +111,7 @@ func TestShutdownJoinsTheSettlementItsLastBrowserLeavingStarted(t *testing.T) {
 	case err := <-shutdown:
 		t.Errorf("Shutdown returned (%v) while the settlement the browser's leaving started was still committing its stamp", err)
 		shutdown <- err
-	case <-time.After(ShutdownDrainBudget + 2*time.Second):
+	case <-time.After(shutdownTestBudget + 2*time.Second):
 	}
 	pause.let()
 	select {
@@ -163,11 +163,11 @@ func TestShutdownSettlesEveryOtherRoomWhileOneRoomsQueuedAppendIsHeld(t *testing
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), roomWait(t))
 	defer cancelShutdown()
 	shutdown := make(chan error, 1)
-	go func() { shutdown <- service.Shutdown(shutdownCtx) }()
+	go func() { shutdown <- service.shutdown(shutdownCtx, shutdownTestBudget) }()
 	var shutdownErr error
 	select {
 	case shutdownErr = <-shutdown:
-	case <-time.After(ShutdownDrainBudget + 5*time.Second):
+	case <-time.After(shutdownTestBudget + 5*time.Second):
 		t.Fatal("Shutdown did not return once its drain budget ended")
 	}
 	appends.let()
@@ -229,7 +229,7 @@ func TestShutdownSettlesABurstOfAppendsIncludingOneRecordedAfterItsScan(t *testi
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), roomWait(t))
 	defer cancelShutdown()
 	shutdown := make(chan error, 1)
-	go func() { shutdown <- service.Shutdown(shutdownCtx) }()
+	go func() { shutdown <- service.shutdown(shutdownCtx, shutdownBurstTestBudget) }()
 	waitFor(t, 10*time.Second, "Shutdown to have scanned the room", func() bool {
 		return service.shuttingDown(artifactID)
 	})
@@ -240,9 +240,11 @@ func TestShutdownSettlesABurstOfAppendsIncludingOneRecordedAfterItsScan(t *testi
 	waitFor(t, 10*time.Second, "both appends to be recorded as outstanding", func() bool {
 		return service.room(artifactID).durableAppends.Load() >= 2
 	})
-	// Both appends stay queued past the pre-fix 5 s drain budget, and land with time to spare
-	// inside the 9 s per-room budget this round widened it to.
-	time.Sleep(7 * time.Second)
+	// Both appends stay queued past the five ninths of the budget the pre-fix one was, and land
+	// with the rest of it to spare. What is left of the budget has to cover two appends and the
+	// settlement after them, so this row runs on two thirds of production's rather than the third
+	// the others take.
+	time.Sleep(shutdownBurstTestBudget*5/9 + 200*time.Millisecond)
 	first.let()
 	select {
 	case <-second.entered:
@@ -269,8 +271,9 @@ func TestShutdownSettlesABurstOfAppendsIncludingOneRecordedAfterItsScan(t *testi
 // does not make Shutdown return the settlements-unconfirmed error, as long as the per-room worker
 // returns within the document service's whole deadline: documentShutdownTimeout's 5 s reserve past
 // ShutdownDrainBudget comfortably outlasts the 3.4 s overrun service_test.go's own measurement
-// found (a 1 MiB document settling in 4.5 s against a 5 s budget), and the test runs budget,
-// reserve and overrun alike on the shutdownTestScale clock. Shutdown's wait for its
+// found (a 1 MiB document settling in 4.5 s against a 5 s budget). This row is the one that runs
+// the drain budget end to end at production's value, through Shutdown itself: the rows above
+// pass a budget of their own to s.shutdown. Shutdown's wait for its
 // per-room workers (waitGroup(ctx, &workers)) runs under the whole outer deadline, not the drain
 // budget alone, because a render or commit already under way when the budget ends does not stop
 // for it; drainCtx having already expired by the time this one tries to commit still leaves it to
@@ -372,6 +375,18 @@ func TestShutdownLeavesASettlementThatMustWriteIntoItsRoomToResume(t *testing.T)
 		t.Errorf("the document owes no settlement (%v), want it left to resume", err)
 	}
 }
+
+// shutdownTestBudget is the drain budget the rows above that must wait one out pass to
+// s.shutdown, a third of production's: every relation they check is a fraction of the budget - a
+// settlement held past it, a pair of appends queued past five ninths of it - so the third keeps
+// each one while the test waits three seconds instead of nine. The burst row's budget is two
+// thirds, since what is left of it has to cover two appends and the settlement after them.
+// TestShutdownReturnsNilForARenderStillRunningPastItsDrainBudget runs the production budget end
+// to end, through Shutdown.
+const (
+	shutdownTestBudget      = ShutdownDrainBudget / 3
+	shutdownBurstTestBudget = ShutdownDrainBudget * 2 / 3
+)
 
 // newShutdownTestService is a document service whose settlements wait an hour, so a test's
 // Shutdown is the one that runs them, and whose browsers name their person in X-Dispatch-User.

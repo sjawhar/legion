@@ -73,7 +73,10 @@ func startEditNoticeHub(t *testing.T, database *store.Store) <-chan struct{} {
 // With no notice due - one held, naming nobody, and one an hour off - the sweep makes no statement
 // at all after its boot pass, over a window longer than the five-second period of the timer it
 // replaced: no sweep on a timer and no lease attempt. Its pass asks to run again at the hour-off
-// notice's due time, the one timer it keeps.
+// notice's due time, the one timer it keeps. This row is the one that runs
+// editNoticeSweepSchedule end to end, through RunEditNotices: the window it watches is what
+// proves the production gap arms no sweep of its own. The rows below pass a gap of their own to
+// runEditNotices.
 func TestEditNoticeSweepMakesNoStatementWithNothingDue(t *testing.T) {
 	database := storetest.Open(t)
 	ctx := context.Background()

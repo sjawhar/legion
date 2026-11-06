@@ -779,6 +779,14 @@ const ShutdownDrainBudget = 9 * time.Second
 // ctx, and is cancelled once ctx ends; either way Shutdown returns only after the queue's worker
 // has, so nothing of it outlives the store's pools, which its caller closes next.
 func (s *Service) Shutdown(ctx context.Context) error {
+	return s.shutdown(ctx, ShutdownDrainBudget)
+}
+
+// shutdown is Shutdown with the drain budget in the call rather than read from the constant, so a
+// test whose work outlasts the budget on purpose spends seconds of its own instead of waiting out
+// production's nine. Nothing outside this package reaches it: every real caller goes through
+// Shutdown, which passes ShutdownDrainBudget.
+func (s *Service) shutdown(ctx context.Context, drainBudget time.Duration) error {
 	s.compactions.shutDown()
 	defer s.compactions.awaitStopped(ctx)
 	// loadedRoom is a room as Shutdown found it: the generation its settlement runs at, and
@@ -799,7 +807,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		return true
 	})
 	s.stopAllSettleTimers()
-	drainCtx, cancelDrain := context.WithTimeout(ctx, ShutdownDrainBudget)
+	drainCtx, cancelDrain := context.WithTimeout(ctx, drainBudget)
 	defer cancelDrain()
 	rooms := make([]string, 0, len(loaded))
 	for _, room := range loaded {
