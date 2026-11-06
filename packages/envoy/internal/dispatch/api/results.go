@@ -85,6 +85,12 @@ type checkResultInput struct {
 	Screenshots     []string     `json:"screenshots"`
 }
 
+// checkResultRecorded is the body POST /api/v1/issues/{key}/results answers.
+type checkResultRecorded struct {
+	Line   string            `json:"line"`
+	Result model.CheckResult `json:"result"`
+}
+
 // POST /api/v1/issues/{key}/results  (any authenticated actor)
 //
 // Records one result against one check. {key} is the recording issue, which need not be the
@@ -206,10 +212,17 @@ func (s *server) recordCheckResult(w http.ResponseWriter, r *http.Request) {
 	// the pull request row landed would show this result older until something else happened.
 	s.readThroughPullRequests(r.Context(), check.IssueKey, result.CommitSHA)
 	s.publish(event)
-	WriteJSON(w, http.StatusCreated, map[string]any{
-		"result": result,
-		"line":   checkResultLine(check, result),
+	WriteJSON(w, http.StatusCreated, checkResultRecorded{
+		Line:   checkResultLine(check, result),
+		Result: result,
 	})
+}
+
+// issueCheckResults is the body GET /api/v1/issues/{key}/results answers.
+type issueCheckResults struct {
+	Checks                 []model.CheckBlock `json:"checks"`
+	Issue                  string             `json:"issue"`
+	VerificationArtifactID string             `json:"verification_artifact_id"`
 }
 
 // GET /api/v1/issues/{key}/results  (any authenticated caller)
@@ -231,7 +244,7 @@ func (s *server) listCheckResults(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	body := map[string]any{"issue": issueKey, "verification_artifact_id": artifact.ID, "checks": []model.CheckBlock{}}
+	body := issueCheckResults{Checks: []model.CheckBlock{}, Issue: issueKey, VerificationArtifactID: artifact.ID}
 	if !held {
 		WriteJSON(w, http.StatusOK, body)
 		return
@@ -257,7 +270,7 @@ func (s *server) listCheckResults(w http.ResponseWriter, r *http.Request) {
 		}
 		checks[index].Results = results
 	}
-	body["checks"] = checks
+	body.Checks = checks
 	WriteJSON(w, http.StatusOK, body)
 }
 

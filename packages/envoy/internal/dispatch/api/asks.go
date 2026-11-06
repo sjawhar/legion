@@ -817,6 +817,13 @@ func parseAskListThread(r *http.Request) (bool, error) {
 	return true, nil
 }
 
+// askRead is the body GET /api/v1/asks/{id} answers: the single-ask read is a thread with the
+// ask beside it.
+type askRead struct {
+	Ask model.Ask `json:"ask"`
+	askThread
+}
+
 func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) || !requireUUIDPath(w, r, "ask") {
 		return
@@ -865,10 +872,7 @@ func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	// The single-ask read is a thread with the ask beside it, so it and every Inbox or ask-list
 	// thread serialise through one definition and carry the same keys.
-	WriteJSON(w, http.StatusOK, struct {
-		Ask model.Ask `json:"ask"`
-		askThread
-	}{Ask: ask, askThread: askThread{
+	WriteJSON(w, http.StatusOK, askRead{Ask: ask, askThread: askThread{
 		Replies: replies, Edits: edits, Answers: answers, Followers: followers, askReach: reaches[ask.ID],
 	}})
 }

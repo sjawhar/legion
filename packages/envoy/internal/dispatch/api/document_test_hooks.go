@@ -58,6 +58,17 @@ func writeDocumentTestHookError(w http.ResponseWriter, err error) {
 	}
 }
 
+// residentRooms is the body GET /api/v1/artifacts/_test/rooms answers.
+type residentRooms struct {
+	Rooms []string `json:"rooms"`
+}
+
+// liveWritePauseState is the body the GET and the DELETE of
+// /api/v1/artifacts/{id}/_test/live-write-pauses/{point} answer.
+type liveWritePauseState struct {
+	Parked bool `json:"parked"`
+}
+
 // listResidentRooms answers {"rooms": [artifact id, ...]}: the documents this process holds a
 // room of now.
 func (s *server) listResidentRooms(w http.ResponseWriter, r *http.Request) {
@@ -65,7 +76,7 @@ func (s *server) listResidentRooms(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string][]string{"rooms": hooks.ResidentRooms()})
+	WriteJSON(w, http.StatusOK, residentRooms{Rooms: hooks.ResidentRooms()})
 }
 
 // getRoomCounters answers {"room_failures": n, "lock_waiting_compactions": n, "room_closes": n,
@@ -150,9 +161,9 @@ func (s *server) awaitLiveWriteParked(w http.ResponseWriter, r *http.Request) {
 	err := hooks.AwaitLiveWriteParked(ctx, r.PathValue("id"), docs.LiveWritePausePoint(r.PathValue("point")))
 	switch {
 	case err == nil:
-		WriteJSON(w, http.StatusOK, map[string]bool{"parked": true})
+		WriteJSON(w, http.StatusOK, liveWritePauseState{Parked: true})
 	case errors.Is(err, context.DeadlineExceeded):
-		WriteJSON(w, http.StatusOK, map[string]bool{"parked": false})
+		WriteJSON(w, http.StatusOK, liveWritePauseState{Parked: false})
 	default:
 		writeDocumentTestHookError(w, err)
 	}
@@ -170,5 +181,5 @@ func (s *server) releaseLiveWritePause(w http.ResponseWriter, r *http.Request) {
 		writeDocumentTestHookError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string]bool{"parked": parked})
+	WriteJSON(w, http.StatusOK, liveWritePauseState{Parked: parked})
 }

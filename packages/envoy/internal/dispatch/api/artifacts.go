@@ -171,6 +171,13 @@ func (s *server) refuseUploadToAClosedIssue(handler http.HandlerFunc) http.Handl
 	}
 }
 
+// artifactUploadResponse is the body POST /api/v1/issues/{key}/artifacts,
+// POST /api/v1/projects/{key}/artifacts and POST /api/v1/agents/{session_id}/artifacts answer.
+type artifactUploadResponse struct {
+	Artifact model.Artifact `json:"artifact"`
+	Version  model.Version  `json:"version"`
+}
+
 func (s *server) uploadArtifactFor(w http.ResponseWriter, r *http.Request, target artifactTarget) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxArtifactBlobSize+(1<<20))
 	requestType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
@@ -692,7 +699,7 @@ func (s *server) storeArtifact(
 		advice.documentBlocks = blocks
 		advice.SupersededApproval = superseded
 	}
-	responsePayload := map[string]any{"artifact": artifact, "version": version}
+	responsePayload := artifactUploadResponse{Artifact: artifact, Version: version}
 	if target.IssueKey != nil {
 		WriteJSON(w, http.StatusCreated, withAdvice(responsePayload, advice))
 	} else if blocks != nil || superseded != nil {
@@ -717,6 +724,15 @@ func (s *server) getArtifact(w http.ResponseWriter, r *http.Request) {
 	// (`GET /api/v1/references?to=`, and `GET /api/v1/artifacts/{id}/references` for agents),
 	// so this read does not pay for them.
 	WriteJSON(w, http.StatusOK, artifact)
+}
+
+// artifactText is the body GET /api/v1/artifacts/{id}/text,
+// GET /api/v1/issues/{key}/artifacts/{slug}/text and
+// GET /api/v1/projects/{key}/artifacts/{slug}/text answer.
+type artifactText struct {
+	Markdown string `json:"markdown"`
+	Token    string `json:"token"`
+	Version  *int   `json:"version"`
 }
 
 func (s *server) getArtifactText(w http.ResponseWriter, r *http.Request) {
@@ -746,7 +762,7 @@ func (s *server) getArtifactText(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{"markdown": markdown, "version": version, "token": token})
+	WriteJSON(w, http.StatusOK, artifactText{Markdown: markdown, Token: token, Version: version})
 }
 
 func (s *server) getArtifactBlocks(w http.ResponseWriter, r *http.Request) {
@@ -856,6 +872,13 @@ func (s *server) blockReferences(ctx context.Context, artifactID string) (map[st
 	return references, nil
 }
 
+// artifactVersionText is the body the document arm of GET …/artifacts/…/versions/{number}
+// answers, on all three artifact patterns.
+type artifactVersionText struct {
+	Markdown string `json:"markdown"`
+	model.Version
+}
+
 func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
@@ -880,10 +903,7 @@ func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {
 		hash := sha256.Sum256([]byte(markdown))
 		sha := hex.EncodeToString(hash[:])
 		version.SHA256 = &sha
-		WriteJSON(w, http.StatusOK, struct {
-			Markdown string `json:"markdown"`
-			model.Version
-		}{Markdown: markdown, Version: version})
+		WriteJSON(w, http.StatusOK, artifactVersionText{Markdown: markdown, Version: version})
 		return
 	}
 	var content []byte
@@ -1016,6 +1036,22 @@ type editArtifactInput struct {
 	Actor        *model.Actor            `json:"actor"`
 }
 
+// editArtifactResponse is the body POST /api/v1/artifacts/{id}/edits and its issue and project
+// artifact patterns answer.
+type editArtifactResponse struct {
+	Applied int  `json:"applied"`
+	Changed bool `json:"changed"`
+	// LostOps are which operations the live document did not hold once this write reached it: a
+	// concurrent change that landed after the version was rendered and before the publish is
+	// past undoing, so the edit reports it rather than refusing (LEGION-269). null means the
+	// check reached no verdict - the publish failed and the room is reloading, or the room
+	// holds a tree too deep to read - which is not the same statement as the empty list.
+	LostOps      []int          `json:"lost_ops"`
+	Token        string         `json:"token"`
+	UnchangedOps []int          `json:"unchanged_ops"`
+	Version      *model.Version `json:"version"`
+}
+
 func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
@@ -1142,18 +1178,13 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	if unchanged == nil {
 		unchanged = []int{}
 	}
-	responsePayload := map[string]any{
-		"applied":       edit.Applied,
-		"version":       version,
-		"changed":       edit.Changed,
-		"unchanged_ops": unchanged,
-		// Which operations the live document did not hold once this write reached it: a
-		// concurrent change that landed after the version was rendered and before the publish is
-		// past undoing, so the edit reports it rather than refusing (LEGION-269). null means the
-		// check reached no verdict - the publish failed and the room is reloading, or the room
-		// holds a tree too deep to read - which is not the same statement as the empty list.
-		"lost_ops": lostOps(ledger, artifact.ID),
-		"token":    edit.Token,
+	responsePayload := editArtifactResponse{
+		Applied:      edit.Applied,
+		Changed:      edit.Changed,
+		LostOps:      lostOps(ledger, artifact.ID),
+		Token:        edit.Token,
+		UnchangedOps: unchanged,
+		Version:      version,
 	}
 	// The ask blocks the edit added, read from the documents the batch was applied to: whether an
 	// operation's markdown makes a block depends on where it lands and on the parser's reading of

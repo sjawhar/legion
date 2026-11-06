@@ -40,7 +40,7 @@ func (s *server) armSlowWrite(w http.ResponseWriter, r *http.Request) {
 	} else {
 		s.slowWrites.Store(route, time.Duration(input.DelayMS)*time.Millisecond)
 	}
-	WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	WriteJSON(w, http.StatusOK, testHookOK{OK: true})
 }
 
 // slowedByTestHook is handler behind the slow-write hook's delay for the request's method and path,

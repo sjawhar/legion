@@ -796,6 +796,35 @@ func documentErrorCode(err error) string {
 	return ""
 }
 
+// editPreconditionCurrent is the `current` object of editPreconditionError: the document token
+// and the block tokens the write found, which a caller re-reads its precondition from.
+type editPreconditionCurrent struct {
+	Blocks   []model.EditBlockPrecondition `json:"blocks"`
+	Document string                        `json:"document"`
+}
+
+// editPreconditionError is the 409 PRECONDITION_FAILED body every document write answers a
+// precondition the document no longer meets.
+type editPreconditionError struct {
+	Code       string                           `json:"code"`
+	Current    editPreconditionCurrent          `json:"current"`
+	Error      string                           `json:"error"`
+	Mismatches []model.EditPreconditionMismatch `json:"mismatches"`
+}
+
+// editLostError is the 409 EDIT_LOST_TO_CONCURRENT_CHANGE body a document write answers when a
+// concurrent browser change removed its text before it could be versioned. A write refused for
+// an accepted comment names that comment in Suggestion and no operation index; any other names
+// the operations in LostOps. Both are pointers, so the body carries exactly the one that
+// applies, as the two map literals behind it did.
+type editLostError struct {
+	Code         string        `json:"code"`
+	Error        string        `json:"error"`
+	LostOps      *[]int        `json:"lost_ops,omitempty"`
+	Participants []model.Actor `json:"participants"`
+	Suggestion   *string       `json:"suggestion,omitempty"`
+}
+
 func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 	var apiErr *apiError
 	if errors.As(err, &apiErr) {
@@ -846,11 +875,14 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 				})
 			}
 		}
-		WriteJSON(w, http.StatusConflict, map[string]any{
-			"error":      preconditionFailed.Error(),
-			"code":       "PRECONDITION_FAILED",
-			"current":    map[string]any{"document": preconditionFailed.CurrentDocument, "blocks": currentBlocks},
-			"mismatches": preconditionFailed.Mismatches,
+		WriteJSON(w, http.StatusConflict, editPreconditionError{
+			Code: "PRECONDITION_FAILED",
+			Current: editPreconditionCurrent{
+				Blocks:   currentBlocks,
+				Document: preconditionFailed.CurrentDocument,
+			},
+			Error:      preconditionFailed.Error(),
+			Mismatches: preconditionFailed.Mismatches,
 		})
 		return
 	}
@@ -859,15 +891,15 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 	// document and decide again.
 	var lostEdit *docs.ErrEditLost
 	if errors.As(err, &lostEdit) {
-		body := map[string]any{
-			"error":        lostEdit.Error(),
-			"code":         "EDIT_LOST_TO_CONCURRENT_CHANGE",
-			"participants": participantsOrEmpty(lostEdit.Participants),
+		body := editLostError{
+			Code:         "EDIT_LOST_TO_CONCURRENT_CHANGE",
+			Error:        lostEdit.Error(),
+			Participants: participantsOrEmpty(lostEdit.Participants),
 		}
 		if lostEdit.Suggestion != "" {
-			body["suggestion"] = lostEdit.Suggestion
+			body.Suggestion = &lostEdit.Suggestion
 		} else {
-			body["lost_ops"] = lostEdit.Ops
+			body.LostOps = &lostEdit.Ops
 		}
 		WriteJSON(w, http.StatusConflict, body)
 		return
@@ -953,13 +985,21 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 	slog.Error("dispatch: API handler failed", "error", err)
 }
 
+// ambiguousTargetError is the 409 TARGET_AMBIGUOUS body a write answers a quote or heading
+// anchor that resolved in several places.
+type ambiguousTargetError struct {
+	Candidates []pmdoc.Candidate `json:"candidates"`
+	Code       string            `json:"code"`
+	Error      string            `json:"error"`
+}
+
 // writeAmbiguousTarget serves a quote that resolved in several places: the caller picks one by
 // the candidates' positions, or narrows the quote.
 func writeAmbiguousTarget(w http.ResponseWriter, message string, candidates []pmdoc.Candidate) {
-	WriteJSON(w, http.StatusConflict, map[string]any{
-		"error":      message,
-		"code":       "TARGET_AMBIGUOUS",
-		"candidates": candidates,
+	WriteJSON(w, http.StatusConflict, ambiguousTargetError{
+		Candidates: candidates,
+		Code:       "TARGET_AMBIGUOUS",
+		Error:      message,
 	})
 }
 
@@ -1492,8 +1532,14 @@ func WriteJSON(w http.ResponseWriter, status int, body any) {
 	}
 }
 
+// errorBody is the body of every refusal writeError answers, on every route.
+type errorBody struct {
+	Code  string `json:"code"`
+	Error string `json:"error"`
+}
+
 func writeError(w http.ResponseWriter, code string, status int, message string) {
-	WriteJSON(w, status, map[string]string{"error": message, "code": code})
+	WriteJSON(w, status, errorBody{Code: code, Error: message})
 }
 
 func encodeJSON(value any) ([]byte, error) {

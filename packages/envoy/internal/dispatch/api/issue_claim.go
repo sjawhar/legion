@@ -139,15 +139,23 @@ func (c *claimConflict) Error() string {
 	)
 }
 
+// issueClaimedError is the 409 body POST and DELETE /api/v1/issues/{key}/claim answer a request
+// the issue's claim refused: ISSUE_CLAIMED, and the CLAIM_CONTENDED a bounded cycle ends on.
+type issueClaimedError struct {
+	Claim *model.IssueClaim `json:"claim"`
+	Code  string            `json:"code"`
+	Error string            `json:"error"`
+}
+
 // writeClaimError answers a claim refusal: the 409 ISSUE_CLAIMED body carries the claim
 // itself, and every other failure follows the usual handler mapping.
 func (s *server) writeClaimError(w http.ResponseWriter, err error) {
 	var conflict *claimConflict
 	if errors.As(err, &conflict) {
-		WriteJSON(w, http.StatusConflict, map[string]any{
-			"error": conflict.Error(),
-			"code":  "ISSUE_CLAIMED",
-			"claim": conflict.claim,
+		WriteJSON(w, http.StatusConflict, issueClaimedError{
+			Claim: &conflict.claim,
+			Code:  "ISSUE_CLAIMED",
+			Error: conflict.Error(),
 		})
 		return
 	}
@@ -693,10 +701,10 @@ func (s *server) answerContendedClaim(w http.ResponseWriter, r *http.Request, ke
 		message = claimHolder(current.Actor, "") + " holds the claim on " + key +
 			" as of this read; it changed twice while this request ran, so nothing was applied — read the issue and try again"
 	}
-	WriteJSON(w, http.StatusConflict, map[string]any{
-		"error": message,
-		"code":  "CLAIM_CONTENDED",
-		"claim": current,
+	WriteJSON(w, http.StatusConflict, issueClaimedError{
+		Claim: current,
+		Code:  "CLAIM_CONTENDED",
+		Error: message,
 	})
 }
 

@@ -540,9 +540,15 @@ func routeIndexEntries(routes []apiRoute) []routeIndexEntry {
 	return entries
 }
 
+// routeIndex is the body GET /api/v1 answers.
+type routeIndex struct {
+	Docs   string            `json:"docs"`
+	Routes []routeIndexEntry `json:"routes"`
+}
+
 // routeIndexBody is the body GET /api/v1 answers.
-func routeIndexBody(entries []routeIndexEntry) map[string]any {
-	return map[string]any{"routes": entries, "docs": routeIndexDocs}
+func routeIndexBody(entries []routeIndexEntry) routeIndex {
+	return routeIndex{Docs: routeIndexDocs, Routes: entries}
 }
 
 func (s *server) getRouteIndex(w http.ResponseWriter, _ *http.Request) {

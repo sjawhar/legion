@@ -453,6 +453,22 @@ type approvalRequestInput struct {
 	IncludeVerification bool `json:"include_verification"`
 }
 
+// approvalRequestResponse is the body POST /api/v1/artifacts/{id}/approval-requests answers.
+type approvalRequestResponse struct {
+	Ask        *model.Ask             `json:"ask"`
+	ArtifactID string                 `json:"artifact_id"`
+	Version    int                    `json:"version"`
+	Approval   model.ArtifactApproval `json:"approval"`
+	// Coverage is one line per requirement of the spec with no check, as the approver reads
+	// them (coverage.go); never a missing plan task, since the plan comes after the
+	// approval, and empty for any document that is not an issue's spec. A gap refuses
+	// nothing: the request is recorded as it always was.
+	Coverage []string `json:"coverage"`
+	// CoverageUnread says the spec's coverage could not be read, so the empty Coverage is
+	// no answer about it. The request is recorded either way.
+	CoverageUnread bool `json:"coverage_unread,omitempty"`
+}
+
 // POST /api/v1/artifacts/{id}/approval-requests  {summary?, include_verification?}  (any
 // authenticated actor)
 func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request) {
@@ -546,20 +562,6 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		s.writeHandlerError(w, err)
 		return
 	}
-	type response struct {
-		Ask        *model.Ask             `json:"ask"`
-		ArtifactID string                 `json:"artifact_id"`
-		Version    int                    `json:"version"`
-		Approval   model.ArtifactApproval `json:"approval"`
-		// Coverage is one line per requirement of the spec with no check, as the approver reads
-		// them (coverage.go); never a missing plan task, since the plan comes after the
-		// approval, and empty for any document that is not an issue's spec. A gap refuses
-		// nothing: the request is recorded as it always was.
-		Coverage []string `json:"coverage"`
-		// CoverageUnread says the spec's coverage could not be read, so the empty Coverage is
-		// no answer about it. The request is recorded either way.
-		CoverageUnread bool `json:"coverage_unread,omitempty"`
-	}
 	if err := s.attachApproval(r.Context(), tx, &artifact); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -573,7 +575,7 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if settled {
-		WriteJSON(w, http.StatusOK, response{Ask: nil, ArtifactID: artifact.ID, Version: version,
+		WriteJSON(w, http.StatusOK, approvalRequestResponse{Ask: nil, ArtifactID: artifact.ID, Version: version,
 			Approval: *artifact.Approval, Coverage: coverage, CoverageUnread: coverageUnread})
 		return
 	}
@@ -621,7 +623,7 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 	if len(events) > 0 {
 		status = http.StatusCreated
 	}
-	WriteJSON(w, status, response{Ask: ask, ArtifactID: artifact.ID, Version: version,
+	WriteJSON(w, status, approvalRequestResponse{Ask: ask, ArtifactID: artifact.ID, Version: version,
 		Approval: *artifact.Approval, Coverage: coverage, CoverageUnread: coverageUnread})
 }
 

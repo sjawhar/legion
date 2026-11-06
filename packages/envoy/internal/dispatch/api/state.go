@@ -21,6 +21,10 @@ type userIssueState struct {
 	Seq         int64    `json:"seq"`
 }
 
+// userState is the body GET /api/v1/me/state answers: the caller's state for each issue it
+// holds one for, by issue key.
+type userState map[string]userIssueState
+
 func (s *server) getUserState(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.actingPerson(w, r)
 	if !ok {
@@ -35,7 +39,7 @@ func (s *server) getUserState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer rows.Close()
-	state := map[string]userIssueState{}
+	state := userState{}
 	for rows.Next() {
 		var key string
 		var value userIssueState
@@ -69,6 +73,14 @@ type userIssueStateInput struct {
 	// (actSessionFromBody); a client that has always sent one is not refused for an unknown
 	// key either (decodeJSON).
 	Actor *model.Actor `json:"actor"`
+}
+
+// userStateStaleError is the 409 STATE_STALE body PUT /api/v1/me/issues/{key}/state answers a
+// write whose seq is not newer than the stored row's.
+type userStateStaleError struct {
+	Code  string         `json:"code"`
+	Error string         `json:"error"`
+	State userIssueState `json:"state"`
 }
 
 func (s *server) putUserState(w http.ResponseWriter, r *http.Request) {
@@ -116,10 +128,10 @@ func (s *server) putUserState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if input.Seq != nil && *input.Seq <= value.Seq {
-		WriteJSON(w, http.StatusConflict, map[string]any{
-			"code":  "STATE_STALE",
-			"error": "user state was updated by another write",
-			"state": value,
+		WriteJSON(w, http.StatusConflict, userStateStaleError{
+			Code:  "STATE_STALE",
+			Error: "user state was updated by another write",
+			State: value,
 		})
 		return
 	}
@@ -193,6 +205,10 @@ type userAgentState struct {
 	UnreadReplies int     `json:"unread_replies"`
 }
 
+// userAgentStates is the body GET /api/v1/me/agents/state answers: the caller's state for each
+// agent conversation it holds one for, by session id.
+type userAgentStates map[string]userAgentState
+
 // agentStateCutoffSkew is how far ahead of the server clock a Clear or a read mark may land. The
 // client stamps the cutoff with its own clock, and a browser a few seconds fast must not be
 // refused.
@@ -218,13 +234,13 @@ const userAgentStatesQuery = `
 // not nil. The read mark and the viewer's own direct messages are matched on the canonical
 // login, so one person is one viewer however their identity source spells them; the Clear
 // (user_agent_state, migration 0033) is keyed on the raw actor id.
-func (s *server) loadUserAgentStates(ctx context.Context, login string, sessionID *string) (map[string]userAgentState, error) {
+func (s *server) loadUserAgentStates(ctx context.Context, login string, sessionID *string) (userAgentStates, error) {
 	rows, err := s.deps.Store.Pool.Query(ctx, userAgentStatesQuery, unreadDirectRepliesArgs(login, sessionID)...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	states := map[string]userAgentState{}
+	states := userAgentStates{}
 	for rows.Next() {
 		var session string
 		var clearedBefore, readThrough *time.Time

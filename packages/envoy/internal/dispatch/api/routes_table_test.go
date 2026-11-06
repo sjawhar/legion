@@ -16,11 +16,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-type routeIndex struct {
-	Routes []routeIndexEntry `json:"routes"`
-	Docs   string            `json:"docs"`
-}
-
 func TestRouteIndexListsEveryRouteSortedByPathThenMethod(t *testing.T) {
 	mux := http.NewServeMux()
 	Register(mux, t.Context(), Deps{AgentTokens: sharedAgentTokens(t, "agent-token")})

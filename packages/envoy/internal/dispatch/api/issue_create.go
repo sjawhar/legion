@@ -37,6 +37,14 @@ func parseIssuePriority(raw json.RawMessage) (priority *int, provided bool, err 
 	return &value, true, nil
 }
 
+// issueDuplicateError is the 409 POSSIBLE_DUPLICATE body POST /api/v1/issues answers an
+// unforced create whose title overlaps an existing issue's.
+type issueDuplicateError struct {
+	Candidates []model.DuplicateCandidate `json:"candidates"`
+	Code       string                     `json:"code"`
+	Error      string                     `json:"error"`
+}
+
 // createIssueInput is the body of POST /api/v1/issues.
 type createIssueInput struct {
 	Project    string          `json:"project"`
@@ -225,10 +233,10 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if len(candidates) > 0 {
-				WriteJSON(w, http.StatusConflict, map[string]any{
-					"error":      fmt.Sprintf("possible duplicate of %s: %s", candidates[0].Key, candidates[0].Title),
-					"code":       "POSSIBLE_DUPLICATE",
-					"candidates": candidates,
+				WriteJSON(w, http.StatusConflict, issueDuplicateError{
+					Candidates: candidates,
+					Code:       "POSSIBLE_DUPLICATE",
+					Error:      fmt.Sprintf("possible duplicate of %s: %s", candidates[0].Key, candidates[0].Title),
 				})
 				return
 			}
