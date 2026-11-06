@@ -409,9 +409,9 @@ test("a picture line the browser cannot draw, at a version or not, shows a link;
 // version's bytes and opens its document's dashboard page. The same document's page URL or
 // `dispatch://` reference left as text (bare, in angle brackets, or a link whose words are its
 // target) is text, which the server cites only within those bytes, so it stays the plain link it is.
-test("a long-named picture in a comment draws, its link to a long-named document opens it, and the bare page URL stays a plain link @phone", async ({
+test("a long-named picture in a comment draws, its link to a long-named document opens it, and the bare page URL stays a plain link", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Long names" });
   const alice = await asUser(browser, "alice");
@@ -455,10 +455,8 @@ test("a long-named picture in a comment draws, its link to a long-named document
     // page's own clock is what spends it.
     await page.clock.install();
     await page.goto(`/issues/${issue.key}/conversation`);
-    const turn = page.locator(`[data-turn="comment:${comment.id}"]`);
-    await turn.getByRole("button", { name: "Expand thread" }).click();
-    const thread =
-      testInfo.project.name === "iphone" ? page.getByRole("dialog", { name: "Thread" }) : turn;
+    const thread = page.locator(`[data-turn="comment:${comment.id}"]`);
+    await thread.getByRole("button", { name: "Expand thread" }).click();
 
     // The source is asserted before the picture is waited on: one the browser cannot fetch
     // (`dispatch://…`) would fail as an image that never loads rather than naming its source.
@@ -489,11 +487,9 @@ test("a long-named picture in a comment draws, its link to a long-named document
       await expect(paragraph).toHaveText(`${label} ${words}`);
       await expect(paragraph.getByRole("link")).toHaveCount(0);
       await expect(paragraph.locator("[data-dispatch-href],[data-dispatch-ref]")).toHaveCount(0);
-      if (testInfo.project.name !== "iphone") {
-        await paragraph.hover();
-        await page.clock.runFor(2 * REF_PREVIEW_OPEN_DELAY_MS);
-        await expect(page.getByRole("tooltip")).toHaveCount(0);
-      }
+      await paragraph.hover();
+      await page.clock.runFor(2 * REF_PREVIEW_OPEN_DELAY_MS);
+      await expect(page.getByRole("tooltip")).toHaveCount(0);
     }
     await page.mouse.move(0, 0);
     // The link reads as the document's name, so it wraps past the window's height; the click lands

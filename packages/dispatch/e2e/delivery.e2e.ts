@@ -88,35 +88,16 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("the Delivery sidebar nav entry opens the delivery timeline @phone", async ({ browser }) => {
+test("the Delivery sidebar nav entry opens the delivery timeline", async ({ browser }) => {
   await seedDeliveryFixture();
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
 
   // Start from another page (the Inbox, at "/") rather than navigating to /delivery directly,
   // so this exercises the Sidebar's own "Delivery" rail link (`features/sidebar/Sidebar.tsx`)
-  // rather than only the route itself. Below `xl` (a phone viewport) the sidebar is a sheet
-  // behind its own "Menu" control (app.tsx) -- that button's accessible name is its
-  // `aria-label` ("Open navigation"), not its visible "Menu" text, since an aria-label
-  // overrides text content for accessible-name computation. A one-shot `isVisible()` check here
-  // races the SPA's first render under load (CI's iphone project flaked on exactly this): wait
-  // for either the Menu button or the link itself to actually appear before deciding, rather
-  // than reading visibility once before the page has necessarily finished mounting.
+  // rather than only the route itself.
   await page.goto("/");
-  const menuButton = page.getByRole("button", { name: "Open navigation" });
   const deliveryLink = page.getByRole("link", { name: "Delivery" });
-  // Promise.race never cancels its losing branch: on a desktop-viewport run the mobile-only
-  // "Open navigation" button never renders, so that waitFor keeps polling toward its own default
-  // timeout after the race settles, risking an unhandled rejection ("Target closed") once
-  // context.close() below tears the page down while it is still pending. Each branch catches its
-  // own eventual rejection so a loser that never resolves never surfaces one.
-  await Promise.race([
-    menuButton.waitFor({ state: "visible" }).catch(() => {}),
-    deliveryLink.waitFor({ state: "visible" }).catch(() => {}),
-  ]);
-  if (await menuButton.isVisible()) {
-    await menuButton.click();
-  }
   await expect(deliveryLink).toBeVisible();
   await deliveryLink.click();
 
