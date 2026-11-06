@@ -2,6 +2,7 @@ import { afterAll, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { skipWithout } from "@legion/test-fixtures/host-tools";
 import { scriptFunctions } from "./script-functions";
 
 // stop_agent_daemons (parked-decision-devbox.sh), the teardown of what the run's Oh My Pi sessions
@@ -13,15 +14,18 @@ import { scriptFunctions } from "./script-functions";
 // of its own with OMP_DAEMON_RUNTIME_DIR set, and runs two members: a service working outside the
 // run's directory, found by that variable, and a helper working inside it. tmux kill-server ends
 // the pane and leaves all three alive, as the brokers outlived cleanup-is-complete in the devbox
-// run at 6512c7fc. Where no tmux is on PATH (CI installs it after this job's step), the pane is a
-// session of its own that the test ends as kill-server ends a pane: SIGHUP, then SIGKILL, to the
-// pane's session.
+// run at 6512c7fc. The pane the stand-in broker starts is a real tmux pane, and the teardown this
+// test is about is tmux kill-server's, so a host with no tmux (CI installs it after this job's
+// step) runs nothing here and says what is missing.
 const e2e = join(import.meta.dir, "..");
 const root = join(e2e, "..", "..");
 const scriptPath = join(e2e, "parked-decision-devbox.sh");
 const fn = scriptFunctions(scriptPath);
 const set = readFileSync(scriptPath, "utf8").match(/^set -.*$/m)?.[0];
 if (set === undefined) throw new Error(`${scriptPath} has no top-level set line`);
+
+// Read once, at module scope: a call inside the test body would print the warning per row.
+const skip = skipWithout("tmux");
 
 const dir = mkdtempSync(join(tmpdir(), "parked-decision-teardown-test."));
 const started: number[] = [];
@@ -124,18 +128,21 @@ ${body}`,
   return { code: ran.exitCode, stdout: ran.stdout.toString(), stderr: ran.stderr.toString() };
 }
 
-test("stops a detached broker's session that outlives tmux kill-server, and nothing it cannot tie to one", async () => {
-  const work = join(dir, "work");
-  const ws = join(work, "ws");
-  const home = join(work, "home");
-  const runtime = join(home, ".local/state/omp/profiles/p/run/daemons/0123456789abcdef");
-  const stale = join(work, "state/omp/profiles/p/run/daemons/fedcba9876543210");
-  for (const d of [ws, home, runtime, stale, join(work, "tmux")]) mkdirSync(d, { recursive: true });
-  // The stand-in broker lives outside $work, so only its working directory ties it to the run.
-  const broker = join(dir, "fake-broker.sh");
-  writeFileSync(
-    broker,
-    `#!/usr/bin/env bash
+test.skipIf(skip)(
+  "stops a detached broker's session that outlives tmux kill-server, and nothing it cannot tie to one",
+  async () => {
+    const work = join(dir, "work");
+    const ws = join(work, "ws");
+    const home = join(work, "home");
+    const runtime = join(home, ".local/state/omp/profiles/p/run/daemons/0123456789abcdef");
+    const stale = join(work, "state/omp/profiles/p/run/daemons/fedcba9876543210");
+    for (const d of [ws, home, runtime, stale, join(work, "tmux")])
+      mkdirSync(d, { recursive: true });
+    // The stand-in broker lives outside $work, so only its working directory ties it to the run.
+    const broker = join(dir, "fake-broker.sh");
+    writeFileSync(
+      broker,
+      `#!/usr/bin/env bash
 runtime=$1 home=$2
 (cd / && exec sleep 300) &
 (cd "$home" && exec sleep 301) &
@@ -143,114 +150,91 @@ printf '{"pid":%s,"domain":"test"}\\n' "$$" >"$runtime/broker.pid.next"
 mv "$runtime/broker.pid.next" "$runtime/broker.pid"
 wait
 `,
-    { mode: 0o755 }
-  );
-  const pane = `setsid -f env OMP_DAEMON_RUNTIME_DIR=${runtime} ${broker} ${runtime} ${home}; exec sleep 600`;
+      { mode: 0o755 }
+    );
+    const pane = `setsid -f env OMP_DAEMON_RUNTIME_DIR=${runtime} ${broker} ${runtime} ${home}; exec sleep 600`;
 
-  // A process of the run that no broker started, in a session of its own: the teardown must leave it
-  // for cleanup-is-complete's wait to name.
-  const bystander = Bun.spawn(["setsid", "sleep", "303"], {
-    cwd: ws,
-    stdout: "ignore",
-    stderr: "ignore",
-  });
-  // A broker.pid naming a pid whose session holds nothing of the run: a pid the kernel gave to
-  // another session leader after the broker ended.
-  const stranger = Bun.spawn(["setsid", "sleep", "304"], {
-    cwd: dir,
-    stdout: "ignore",
-    stderr: "ignore",
-  });
-  started.push(bystander.pid, stranger.pid);
-  writeFileSync(join(stale, "broker.pid"), JSON.stringify({ pid: stranger.pid, domain: "test" }));
-  await until("the bystander and the stranger to lead sessions of their own", () =>
-    [bystander.pid, stranger.pid].every((pid) => alive(pid) && sessionOf(pid) === pid)
-  );
+    // A process of the run that no broker started, in a session of its own: the teardown must leave it
+    // for cleanup-is-complete's wait to name.
+    const bystander = Bun.spawn(["setsid", "sleep", "303"], {
+      cwd: ws,
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    // A broker.pid naming a pid whose session holds nothing of the run: a pid the kernel gave to
+    // another session leader after the broker ended.
+    const stranger = Bun.spawn(["setsid", "sleep", "304"], {
+      cwd: dir,
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    started.push(bystander.pid, stranger.pid);
+    writeFileSync(join(stale, "broker.pid"), JSON.stringify({ pid: stranger.pid, domain: "test" }));
+    await until("the bystander and the stranger to lead sessions of their own", () =>
+      [bystander.pid, stranger.pid].every((pid) => alive(pid) && sessionOf(pid) === pid)
+    );
 
-  const tmux = Bun.which("tmux");
-  const env = { PATH: process.env.PATH ?? "", HOME: home, TMUX_TMPDIR: join(work, "tmux") };
-  const pidFile = join(runtime, "broker.pid");
-  // The stand-in broker the pane starts leads a session of its own and names it in broker.pid.
-  // Ending that session is registered before the pane that starts it, so a wait below that times
-  // out before the test has read the pid still leaves no member of the broker's session running.
-  // Before the file is there the broker's command line, which names the run's runtime directory,
-  // is the only hold on it, `setsid -f` having already taken it out of the pane's session.
-  teardowns.push(() => {
-    const leaders = existsSync(pidFile)
-      ? [Number(JSON.parse(readFileSync(pidFile, "utf8")).pid)]
-      : namingPids(runtime);
-    for (const pid of leaders) {
-      try {
-        killSession(sessionOf(pid));
-      } catch {}
-    }
-  });
-  let paneSession: number | undefined;
-  let panePid: number;
-  if (tmux) {
+    const env = { PATH: process.env.PATH ?? "", HOME: home, TMUX_TMPDIR: join(work, "tmux") };
+    const pidFile = join(runtime, "broker.pid");
+    // The stand-in broker the pane starts leads a session of its own and names it in broker.pid.
+    // Ending that session is registered before the pane that starts it, so a wait below that times
+    // out before the test has read the pid still leaves no member of the broker's session running.
+    // Before the file is there the broker's command line, which names the run's runtime directory,
+    // is the only hold on it, `setsid -f` having already taken it out of the pane's session.
+    teardowns.push(() => {
+      const leaders = existsSync(pidFile)
+        ? [Number(JSON.parse(readFileSync(pidFile, "utf8")).pid)]
+        : namingPids(runtime);
+      for (const pid of leaders) {
+        try {
+          killSession(sessionOf(pid));
+        } catch {}
+      }
+    });
     const made = Bun.spawnSync(
-      [tmux, "-L", "teardown", "-f", "/dev/null", "new-session", "-d", "-c", ws, pane],
+      ["tmux", "-L", "teardown", "-f", "/dev/null", "new-session", "-d", "-c", ws, pane],
       { env }
     );
     // The server this started holds the pane; it outlives a test body that never reaches its own
     // kill-server, so the kill is registered here, where the server exists.
     teardowns.push(() => {
-      Bun.spawnSync([tmux, "-L", "teardown", "kill-server"], { env });
+      Bun.spawnSync(["tmux", "-L", "teardown", "kill-server"], { env });
     });
     expect(made.stderr.toString()).toBe("");
-    panePid = Number(
-      Bun.spawnSync([tmux, "-L", "teardown", "display-message", "-p", "#{pane_pid}"], {
+    const panePid = Number(
+      Bun.spawnSync(["tmux", "-L", "teardown", "display-message", "-p", "#{pane_pid}"], {
         env,
       }).stdout.toString()
     );
-  } else {
-    const shell = Bun.spawn(["setsid", "bash", "-c", pane], {
-      cwd: ws,
-      stdout: "ignore",
-      stderr: "ignore",
-    });
-    // With no tmux the pane is a session of its own: ending it is what kill-server is above.
-    teardowns.push(() => killSession(shell.pid));
-    paneSession = shell.pid;
-    panePid = shell.pid;
-  }
-  await until("the stand-in broker to write broker.pid", () => existsSync(pidFile));
-  const leader: number = JSON.parse(readFileSync(pidFile, "utf8")).pid;
-  await until("the broker and its two members", () => membersOf(leader).length === 3);
-  const members = membersOf(leader);
+    await until("the stand-in broker to write broker.pid", () => existsSync(pidFile));
+    const leader: number = JSON.parse(readFileSync(pidFile, "utf8")).pid;
+    await until("the broker and its two members", () => membersOf(leader).length === 3);
+    const members = membersOf(leader);
 
-  // The pane goes, as cleanup-is-complete's kill-server takes it.
-  if (tmux) {
-    Bun.spawnSync([tmux, "-L", "teardown", "kill-server"], { env });
-  } else if (paneSession !== undefined) {
-    for (const signal of ["SIGHUP", "SIGKILL"] as const) {
-      for (const pid of membersOf(paneSession)) {
-        try {
-          process.kill(pid, signal);
-        } catch {}
-      }
-    }
-  }
-  await until("the pane to end", () => !alive(panePid));
-  // The red half: the broker's whole session outlives the pane, and run_processes, the check's own
-  // reading, still names the members that work inside $work.
-  expect(members.every(alive)).toBe(true);
-  const before = harness(work, "run_processes || true")
-    .stdout.split("\n")
-    .filter(Boolean)
-    .map(Number);
-  expect(before).toContain(leader);
+    // The pane goes, as cleanup-is-complete's kill-server takes it.
+    Bun.spawnSync(["tmux", "-L", "teardown", "kill-server"], { env });
+    await until("the pane to end", () => !alive(panePid));
+    // The red half: the broker's whole session outlives the pane, and run_processes, the check's own
+    // reading, still names the members that work inside $work.
+    expect(members.every(alive)).toBe(true);
+    const before = harness(work, "run_processes || true")
+      .stdout.split("\n")
+      .filter(Boolean)
+      .map(Number);
+    expect(before).toContain(leader);
 
-  const stopped = harness(work, "stop_agent_daemons");
-  expect({ code: stopped.code, stderr: stopped.stderr }).toEqual({ code: 0, stderr: "" });
-  await until("every member of the broker's session to end", () => !members.some(alive));
-  // What no broker of the run ties to the run is left alone, and the check still names the one that
-  // works inside $work.
-  expect(alive(bystander.pid)).toBe(true);
-  expect(alive(stranger.pid)).toBe(true);
-  const after = harness(work, "run_processes || true")
-    .stdout.split("\n")
-    .filter(Boolean)
-    .map(Number);
-  expect(after).toEqual([bystander.pid]);
-}, 30_000);
+    const stopped = harness(work, "stop_agent_daemons");
+    expect({ code: stopped.code, stderr: stopped.stderr }).toEqual({ code: 0, stderr: "" });
+    await until("every member of the broker's session to end", () => !members.some(alive));
+    // What no broker of the run ties to the run is left alone, and the check still names the one that
+    // works inside $work.
+    expect(alive(bystander.pid)).toBe(true);
+    expect(alive(stranger.pid)).toBe(true);
+    const after = harness(work, "run_processes || true")
+      .stdout.split("\n")
+      .filter(Boolean)
+      .map(Number);
+    expect(after).toEqual([bystander.pid]);
+  },
+  30_000
+);

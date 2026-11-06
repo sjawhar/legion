@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { forgetBrokerClients } from "@legion/envoy-client/broker-credential";
 import { DispatchServiceError } from "@legion/envoy-client/dispatch-http";
 import { restoreEnvironment } from "@legion/test-fixtures/environment";
+import { skipWithout } from "@legion/test-fixtures/host-tools";
 import {
   findHandoffReport,
   findPushedBranchHead,
@@ -327,8 +328,9 @@ test("a pane whose Dispatch is the broker's reads the record under its own sessi
 });
 
 // The revsets are jj's, so a fake cannot prove them: one real repository with a bare origin, the
-// round's change committed and the branch pushed, run through PATH's jj, as a pane is.
-const jjOnPath = Bun.which("jj");
+// round's change committed and the branch pushed, run through PATH's jj, as a pane is. A host
+// with no jj runs neither row and says so, once for the file.
+const withoutJj = skipWithout("jj");
 
 // `isolatedHome` puts these on the test process as well, so the jj that the code under test
 // (`pathJj`) starts reads the test's home rather than the developer's.
@@ -373,7 +375,7 @@ async function isolatedHome(root: string): Promise<Record<string, string>> {
 
 /** Runs jj in `cwd` with the test's own environment, failing on a non-zero exit. */
 async function jj(cwd: string, env: Record<string, string>, ...args: string[]): Promise<string> {
-  const child = Bun.spawn([jjOnPath as string, ...args], {
+  const child = Bun.spawn(["jj", ...args], {
     cwd,
     env,
     stdout: "pipe",
@@ -388,7 +390,7 @@ async function jj(cwd: string, env: Record<string, string>, ...args: string[]): 
   return stdout.trim();
 }
 
-test.skipIf(jjOnPath === null)(
+test.skipIf(withoutJj)(
   "against a real jj workspace, the report refuses an unpushed round and names the pushed tip once pushed",
   async () => {
     const root = await mkdtemp(path.join(tmpdir(), "legion-handoff-record-"));
@@ -465,7 +467,7 @@ test.skipIf(jjOnPath === null)(
 // A git lock an interrupted git or jj left in the workspace fails every jj that snapshots a change
 // into the working copy (jj rewrites the git index then), and nothing under a running pod removes
 // it. The failure names the lock and its age, and the lock stays.
-test.skipIf(jjOnPath === null)(
+test.skipIf(withoutJj)(
   "a jj that fails on a stale git lock names it, its age, and when it goes",
   async () => {
     const root = await mkdtemp(path.join(tmpdir(), "legion-handoff-lock-"));

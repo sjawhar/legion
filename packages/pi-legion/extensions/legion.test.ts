@@ -10,6 +10,7 @@ import {
   spyOn,
   test,
 } from "bun:test";
+import { readFileSync } from "node:fs";
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -44,6 +45,7 @@ import type {
 import { DEFAULT_STALL_LIMITS } from "@legion/pi-shared/stall-limits";
 import { hostAgentRegistryMock, testAgentRoster } from "@legion/pi-shared/test/host-registry";
 import { restoreEnvironment } from "@legion/test-fixtures/environment";
+import { skipWithout } from "@legion/test-fixtures/host-tools";
 import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ConnectionOptions, NatsConnection } from "nats";
@@ -166,7 +168,63 @@ const environmentKeys = [
   "OMP_PROFILE",
   "PI_CODING_AGENT_DIR",
 ] as const;
-restoreEnvironment(environmentKeys);
+
+/** The names the Envoy entry writes for a pane this file starts, rather than a test: `PATH`,
+ *  which it puts its own `bin/` first on when it loads, and the two a session's `dispatch`
+ *  command reads (packages/pi-envoy/AGENTS.md). They go back with the keys above and are never
+ *  deleted with them: the baseline below is "not a Legion pane", and a process with no `PATH`
+ *  finds none of the programs these tests run. */
+const entryEnvironmentKeys = ["PATH", "DISPATCH_HOST", "DISPATCH_SESSION_ID"] as const;
+restoreEnvironment([...environmentKeys, ...entryEnvironmentKeys]);
+
+// The probe for the defect the restore above fixes: when this file ends, every name this Bun
+// process started with holds the value it started with. `/proc/self/environ` is the kernel's copy
+// of the process's own envp, which no `setenv` rewrites, so it says what the caller handed this
+// process however many names a test has set since — a pod's live LEGION_* and DISPATCH_* among
+// them. It is read rather than `process.env` because the two are the same thing only until the
+// first test runs, and a list of names that forgot one would compare that name with itself.
+//
+// `bun test` runs a package's files in one process and `afterAll` hooks run in the order they
+// were registered, so this one runs after the restore above and sees what the next file would
+// read. It is registered here, and not in a file of its own, because Bun runs a directory's test
+// files in the order the filesystem lists them, which no file name decides: in
+// packages/pi-legion/extensions, eight files named a- to h- ran in the order e, d, c, h, a, f, b,
+// g, which is what `readdirSync` returns there.
+const startingEnvironment = readStartingEnvironment();
+if (startingEnvironment === undefined) {
+  console.warn(
+    `Skipped the environment probe in ${import.meta.path}. This host has no /proc/self/environ, ` +
+      "which is the one record of what this process started with. Run the tests on Linux for it."
+  );
+}
+
+afterAll(() => {
+  if (startingEnvironment === undefined) return;
+  const changed = [...startingEnvironment]
+    .filter(([name, value]) => process.env[name] !== value)
+    .map(
+      ([name, value]) =>
+        `${name} started as ${JSON.stringify(value)} and now holds ${JSON.stringify(process.env[name])}`
+    );
+  expect(changed).toEqual([]);
+});
+
+/** Each name this process started with and its value, or undefined where the host keeps no such
+ *  record. An entry with no `=`, and the empty entry a trailing separator leaves, are no name. */
+function readStartingEnvironment(): Map<string, string> | undefined {
+  let environ: string;
+  try {
+    environ = readFileSync("/proc/self/environ", "utf8");
+  } catch {
+    return undefined;
+  }
+  const started = new Map<string, string>();
+  for (const entry of environ.split("\0")) {
+    const equals = entry.indexOf("=");
+    if (equals > 0) started.set(entry.slice(0, equals), entry.slice(equals + 1));
+  }
+  return started;
+}
 
 // The Envoy entry picks its envoy.json when its module loads: a file that holds no section, so
 // these panes take Dispatch and Envoy from the variables each test sets, never from the caller's
@@ -245,7 +303,14 @@ const jjHomeDirectory = temporaryDirectories("legion-jj-home", { scope: "suite" 
  * `jj` process, whose run time is the machine's load, would otherwise spend. */
 let jjTemplate = "";
 
+// The template the beforeAll below builds is `jj git init`'s, and every workspace a row here runs
+// in is a copy of it, so a host with no jj builds nothing and runs none of them. Read once, at
+// module scope: a call per row would print the warning per row. The environment probe above is
+// registered before this gate and still runs when the rows do not.
+const skip = skipWithout("jj");
+
 beforeAll(async () => {
+  if (skip) return;
   jjTemplate = await mkdtemp(path.join(os.tmpdir(), "legion-omp-extension-template-"));
   const jjHome = jjHomeDirectory();
   const jjConfig = path.join(jjHome, "jj-config.toml");
@@ -278,7 +343,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await rm(jjTemplate, { force: true, recursive: true });
+  // The template was never built when the file skipped, and there is nothing to remove.
+  if (jjTemplate !== "") await rm(jjTemplate, { force: true, recursive: true });
   await rm(envoyConfigDirectory, { force: true, recursive: true });
 });
 
@@ -840,7 +906,7 @@ async function bootPane(options: Parameters<typeof claimPane>[0]): Promise<Claim
 const daemonRequests = <T extends { readonly path: string }>(requests: readonly T[]) =>
   requests.filter((request) => request.path.startsWith("/legion/"));
 
-describe("Legion OMP extension", () => {
+describe.skipIf(skip)("Legion OMP extension", () => {
   test("classifies controllers, root architects, sub-architects, phase workers, and ordinary sessions", () => {
     // The root architect's own issue key equals the tree's.
     expect(
@@ -3229,7 +3295,7 @@ async function startRefusedController(
   return { notices: value, errors };
 }
 
-describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
+describe.skipIf(skip)("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
   // Oh My Pi holds every send a session_start handler makes and drains them at the end of its
   // startup, and an Envoy card starts its own turn, so a role claim made there would let a card
   // take the first turn: the operator's controller claims nothing until its start command runs.
@@ -5349,7 +5415,7 @@ function registrationBeforeClaim(
   return registration.body;
 }
 
-describe("a Legion session's title", () => {
+describe.skipIf(skip)("a Legion session's title", () => {
   test("a phase worker is titled by its role and issue before its role claim registers it with Envoy", async () => {
     const worker = await bootPane({ role: "implementer" });
 
@@ -5446,7 +5512,7 @@ describe("a Legion session's title", () => {
   });
 });
 
-describe("the recreated-workspace notice", () => {
+describe.skipIf(skip)("the recreated-workspace notice", () => {
   const notices = (pane: ClaimPane) =>
     pane.sentMessages.flatMap((message, i) =>
       "customType" in message && message.customType === "legion-workspace-recreated"
