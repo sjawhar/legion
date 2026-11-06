@@ -21,7 +21,8 @@ var errLockNotHeld = errors.New("the unlock reports this session did not hold th
 // unlock is a statement that answers pg_advisory_unlock's boolean, run with args. conn goes back
 // to its pool once Postgres answers true. Every session-level advisory lock Dispatch takes on a
 // pooled connection is given back this way: a loop's lease (freeLeaseOn), a document room's lock
-// (internal/dispatch/docs, lockRoom) and the files backfill's lock (internal/dispatch/files).
+// (internal/dispatch/docs, lockRoom and a room's batch of browser updates, appendRoomTx) and the
+// files backfill's lock (internal/dispatch/files).
 //
 // The unlock runs under a leaseCall of its own, never the holder's context, for two reasons. A
 // lock must be given back after its holder's context has ended too. And an unbounded unlock on a

@@ -36,6 +36,12 @@ type PgVersioned struct {
 	// Nil outside tests; tests use it to hold a reader of the cursor and the head in that window
 	// (TestAWriteDoesNotForkFromTheStoreInsideAnAppendsCursorWindow).
 	afterAppendCommit func(room string, version persistence.Version)
+	// beforeAppendUnlock runs on a room append's own connection, holding the document's session
+	// lock, just before that lock is given back (appendRoomTx's finish). Nil outside tests; a
+	// test unlocks the room there itself, so the append's unlock answers false, which is the
+	// case duty.FreeSessionLock closes the connection for
+	// (TestARoomAppendWhoseUnlockDoesNotFreeTheLockClosesItsConnection).
+	beforeAppendUnlock func(room string, conn *pgxpool.Conn)
 	// storedHistoryHeld runs when the gate admits a browser's append on a stored history that was
 	// replaced under its room and still holds every item the update builds on
 	// (storedHistoryHolds), inside the append's transaction. Nil outside tests; tests count the

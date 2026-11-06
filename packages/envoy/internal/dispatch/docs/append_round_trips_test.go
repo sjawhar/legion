@@ -265,17 +265,18 @@ func statementLabel(sql string) string {
 	return sql
 }
 
-// pipelineLabel names a pipeline by the label of its first statement: the three a room's batch
-// sends under the document's lock and the fourth a standing prune checkpoint costs it
-// (appendRoomTx).
+// pipelineLabel names a pipeline by the label of its first statement: the two a room's batch
+// sends under the document's lock, the one a standing prune checkpoint costs it and the rollback
+// a failed path sends before its unlock (appendRoomTx). The unlock is no pipeline of its own: it
+// is one statement, sent through duty.FreeSessionLock, and statementLabel names it.
 func pipelineLabel(first string) string {
 	switch first {
 	case "pg_advisory_lock":
 		return "the append's opening (one batch)"
 	case "the append's insert":
 		return "the append's writes (one batch)"
-	case "rollback", "pg_advisory_unlock":
-		return "the append's end (one batch)"
+	case "rollback":
+		return "the append's rollback (one batch)"
 	case "the prune checkpoint read":
 		return "the append's prune recovery (one batch)"
 	}
@@ -314,14 +315,15 @@ func tracedRoomService(t *testing.T) (*Service, string, *roundTripRecorder) {
 // advisory lock the room's batch holds on a connection of the room-appends pool: the opening
 // pipeline, which takes the lock, begins the transaction and reads the gate; the writes
 // pipeline, the insert of the batch's rows with the writes they owe and the commit; and the end,
-// the unlock (appendRoomTx). The transaction-level lock is not among them: the session already
-// holds the document's lock on this very connection, so taking it again would grant what the
-// session has - and a prune's recovery is not, since no checkpoint stands, which is the one case
-// that costs a fourth trip. A prepare is one of the trips the list below names, a statement's
-// own and a pipeline's alike, and the measured keystroke runs on a connection the warm-up
-// keystroke has already prepared every statement of, so it makes none: a statement new to that
-// connection, in a pipeline or beside it, adds a trip the list does not hold and fails this
-// test, as a fourth pipeline does.
+// the unlock alone, a statement of its own rather than a pipeline, since nothing is left open to
+// roll back before it (appendRoomTx, duty.FreeSessionLock). The transaction-level lock is not
+// among them: the session already holds the document's lock on this very connection, so taking
+// it again would grant what the session has - and a prune's recovery is not, since no checkpoint
+// stands, which is the one case that costs a fourth trip. A prepare is one of the trips the list
+// below names, a statement's own and a pipeline's alike, and the measured keystroke runs on a
+// connection the warm-up keystroke has already prepared every statement of, so it makes none: a
+// statement new to that connection, in a pipeline or beside it, adds a trip the list does not
+// hold and fails this test, as a fourth pipeline does.
 func TestAWarmBrowserKeystrokeFlushesInThreeRoundTrips(t *testing.T) {
 	service, artifactID, recorder := tracedRoomService(t)
 	// The first keystroke warms the room, the pool and the store's prepared statements; the
@@ -340,7 +342,7 @@ func TestAWarmBrowserKeystrokeFlushesInThreeRoundTrips(t *testing.T) {
 	want := []string{
 		"the append's opening (one batch)",
 		"the append's writes (one batch)",
-		"the append's end (one batch)",
+		"pg_advisory_unlock",
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("a warm keystroke's store made %d round trips:\n\t%s\nwant %d:\n\t%s",

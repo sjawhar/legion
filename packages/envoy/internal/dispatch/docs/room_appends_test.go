@@ -8,10 +8,12 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
 
@@ -1095,4 +1097,59 @@ func TestAnAppendFinishesAStrandedPruneAndStoresOnTheHeadItLeaves(t *testing.T) 
 			}
 		})
 	}
+}
+
+// Every holder of a document's session-level advisory lock gives it back through
+// duty.FreeSessionLock - the writers that take it on a connection of a shared pool (lockRoom)
+// and a room's batch on one of the room-appends pool (appendRoomTx's finish): the unlock is
+// bounded, its answer is read, and a connection whose lock did not free is closed rather than
+// returned to its pool, where the next batch could take a lock the session already holds and
+// unlock it twice over.
+//
+// Here the room's lock is given back on the append's own connection just before the append's own
+// unlock (beforeAppendUnlock), so that unlock answers false on a connection that is otherwise
+// healthy: nothing failed, nothing is closed, and the only sign that what the session holds is
+// unknown is the answer the append used to throw away. The append still returns, and its
+// connection must leave the room-appends pool destroyed, its backend ending with it.
+func TestARoomAppendWhoseUnlockDoesNotFreeTheLockClosesItsConnection(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	versioned := NewPgVersioned(database)
+	artifactID := createDocument(t, database, "one")
+	appends, err := database.Pool.RoomAppends()
+	if err != nil {
+		t.Fatalf("open the room-appends pool: %v", err)
+	}
+	var backend atomic.Int32
+	var took atomic.Bool
+	versioned.beforeAppendUnlock = func(room string, conn *pgxpool.Conn) {
+		if room != artifactID || !took.CompareAndSwap(false, true) {
+			return
+		}
+		var pid int32
+		if err := conn.QueryRow(ctx, `select pg_backend_pid()`).Scan(&pid); err != nil {
+			t.Errorf("read the backend of the append's connection: %v", err)
+			return
+		}
+		backend.Store(pid)
+		var freed bool
+		if err := conn.QueryRow(ctx, `select pg_advisory_unlock(hashtext($1))`, room).Scan(&freed); err != nil || !freed {
+			t.Errorf("take the room's lock off the append's connection: freed %v, %v", freed, err)
+		}
+	}
+	appendUpdates(t, versioned, artifactID, newProofHistory(t, 404).write("one\n"))
+
+	if !took.Load() {
+		t.Fatal("the append never reached the unlock of the room's lock")
+	}
+	if held := appends.Stat().TotalConns(); held != 0 {
+		t.Fatalf("the room-appends pool holds %d connections after an unlock that answered false, want none: a connection whose locks are unknown went back to the pool", held)
+	}
+	waitFor(t, roomWait(t), "the backend of the append's connection to end with it", func() bool {
+		var running bool
+		if err := database.Pool.QueryRow(ctx, `select exists (select 1 from pg_stat_activity where pid = $1)`, backend.Load()).Scan(&running); err != nil {
+			t.Fatalf("read the state of the append backend: %v", err)
+		}
+		return !running
+	})
 }

@@ -279,9 +279,14 @@ func foldAppended(base int64, versions []persistence.Version) int64 {
 // browser update stored after a live write it was measured without, the ones the room's shadow
 // measures), as the one insert statement of one row per update that every append of a room writes
 // (AppendRoomUpdatesTx, appendWrites, whose UpdateCredit.take writes each credit's authors), gated
-// on that instance's cursor as any append of the room is (appendingCursor). It records them on
-// flush, and the transaction's commit marks them stored and lands their credits (markStored); a
-// transaction that rolls back marks nothing, and the room's persistence stores them later.
+// on that instance's cursor as any append of the room is (appendingCursor). It records on flush
+// what the append stored and no more - the gate cuts a browser's run at the first update its
+// document's closed issue no longer admits, and stores the prefix before it (gateAppend) - and
+// the transaction's commit marks those stored and lands their credits (markStored); a
+// transaction that rolls back marks nothing, and the room's persistence stores them later. The
+// refused rest is left as the room's own batch path leaves it (appendRoomTx): queued, unstored
+// and unmarked, for its own call to meet the gate again, which refuses it and closes the room
+// for its issue.
 //
 // Every flush runs on a transaction or a session that already holds the room's advisory lock,
 // taken before the head it is gated on was read: the room's own persistence worker holds the
@@ -302,11 +307,11 @@ func (s *Service) flushThrough(ctx context.Context, tx pgx.Tx, flush *RoomFlush,
 	if len(updates) == 0 {
 		return nil
 	}
-	first, err := s.persistence.AppendRoomUpdatesTx(ctx, tx, flush.room, flush, updates)
+	first, stored, err := s.persistence.AppendRoomUpdatesTx(ctx, tx, flush.room, flush, updates)
 	if err != nil {
 		return err
 	}
-	flush.appendedRun(taking, updates, first)
+	flush.appendedRun(taking[:stored], updates[:stored], first)
 	return nil
 }
 

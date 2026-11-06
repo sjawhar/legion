@@ -13,9 +13,11 @@ import (
 )
 
 // appendUpdateTxClass appends one update inside tx under the gate: a run of one
-// (appendUpdatesTx), with no credit and no flush gating it.
+// (appendUpdatesTx), with no credit and no flush gating it. The version returned is the one it
+// stored; a run of one is stored whole or refused.
 func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool, kind appendKind) (persistence.Version, error) {
-	return p.appendUpdatesTx(ctx, tx, room, []BrowserUpdate{{Update: update, ContentChanged: contentChanged}}, kind, nil, false)
+	version, _, err := p.appendUpdatesTx(ctx, tx, room, []BrowserUpdate{{Update: update, ContentChanged: contentChanged}}, kind, nil, false)
+	return version, err
 }
 
 // AppendRoomUpdatesTx appends inside tx the run of updates a room of this process has already
@@ -32,27 +34,31 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 // session-level one on the room's own persistence worker's connection and the transaction-level
 // one on every other writer's, taken before the head the flush is gated on was read
 // (Service.flushThrough states the rule and names the callers). A second acquisition would cost a
-// round trip and grant what the caller holds. The version returned is the first the run stored.
-func (p *PgVersioned) AppendRoomUpdatesTx(ctx context.Context, tx pgx.Tx, room string, flush *RoomFlush, updates []BrowserUpdate) (persistence.Version, error) {
-	last, err := p.appendUpdatesTx(ctx, tx, room, updates, appendBrowser, flush, true)
-	if err != nil {
-		return 0, err
-	}
-	return last - persistence.Version(len(updates)) + 1, nil
+// round trip and grant what the caller holds.
+//
+// It answers the first version the run stored and how many of the run it stored, which is what
+// the caller records (Service.flushThrough): the gate admits a prefix of a browser's run and no
+// more, cutting it at the first update its document's closed issue no longer admits (gateAppend).
+// The refused rest is left exactly as the room's own batch path leaves it (appendRoomTx): queued,
+// unstored and unmarked, for its own call to meet the gate again, which refuses it and closes the
+// room for its issue.
+func (p *PgVersioned) AppendRoomUpdatesTx(ctx context.Context, tx pgx.Tx, room string, flush *RoomFlush, updates []BrowserUpdate) (persistence.Version, int, error) {
+	return p.appendUpdatesTx(ctx, tx, room, updates, appendBrowser, flush, true)
 }
 
 // appendUpdatesTx appends updates inside tx under the gate, at consecutive versions from the head
 // it reads: the document's advisory lock where the caller holds none (roomLocked), the gate's read
 // (readAppendGate), a crashed prune's recovery where one stands, the gate's verdict (gateAppend)
-// and the append's writes (appendWrites), each statement run in tx in turn. The version returned
-// is the last the run stored.
-func (p *PgVersioned) appendUpdatesTx(ctx context.Context, tx pgx.Tx, room string, updates []BrowserUpdate, kind appendKind, flush *RoomFlush, roomLocked bool) (persistence.Version, error) {
+// and the append's writes (appendWrites), each statement run in tx in turn. It answers the first
+// version the run stored and how many of the run it stored, which the gate's prefix rule can
+// leave short of the run it was handed.
+func (p *PgVersioned) appendUpdatesTx(ctx context.Context, tx pgx.Tx, room string, updates []BrowserUpdate, kind appendKind, flush *RoomFlush, roomLocked bool) (persistence.Version, int, error) {
 	if err := ctx.Err(); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if !roomLocked {
 		if err := lockDocumentRoom(ctx, tx, room); err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 	}
 	// One read answers the gate's three questions and carries the prune checkpoint with it: a
@@ -60,14 +66,14 @@ func (p *PgVersioned) appendUpdatesTx(ctx context.Context, tx pgx.Tx, room strin
 	// is read again after it, since the recovery deletes the rows above the ceiling.
 	read, err := readAppendGate(ctx, tx, room)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if read.pruneCeiling != nil {
 		if _, err := p.recoverPruneTx(ctx, tx, room); err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 		if read, err = readAppendGate(ctx, tx, room); err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 	}
 	through, gated := appendingThrough(ctx, room, flush)
@@ -76,23 +82,26 @@ func (p *PgVersioned) appendUpdatesTx(ctx context.Context, tx pgx.Tx, room strin
 		var replaced bool
 		head, admitted, replaced, err = gateAppend(ctx, tx, room, through, kind, updates, read, p.maxPendingItems)
 		if err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 		if replaced {
 			p.markRunReplaced(room, roomCursorFrom(ctx), flush)
 		}
 	}
+	// A closed issue admits only the updates the room took in time, a prefix of the run
+	// (gateAppend): the rest are not stored here and are left queued, as the room's own batch
+	// path leaves them (appendRoomTx).
 	updates = updates[:admitted]
-	statements, version, err := p.appendWrites(ctx, room, head, updates, true)
+	statements, _, err := p.appendWrites(ctx, room, head, updates, true)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	for _, statement := range statements {
 		if err := statement.exec(ctx, tx); err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 	}
-	return version, nil
+	return persistence.Version(head + 1), len(updates), nil
 }
 
 // markRunReplaced marks the room instance an admitted run was made in as standing on a replaced
