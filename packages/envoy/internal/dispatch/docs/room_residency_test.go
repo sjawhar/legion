@@ -596,6 +596,46 @@ func listedReplica(t *testing.T, service *Service, artifactID string) (weak.Poin
 	return key, replica
 }
 
+// A room's load leaves behind what it read of the durable history (roomLoads), and that record
+// goes in the collection that takes the document the load read, through the cleanup keepInstance
+// attaches to it. Nothing else clears it for a room whose load succeeded: beginRoomLoad only
+// replaces the record of a room that loads again, so a room evicted and never loaded again keeps
+// its own, and every other delete is a failed load's (onLoadDocument's deferred delete, and
+// failRoomLoad, reached from onLoadDocument and from the socket's load path), which an eviction
+// does not take. A running Dispatch process keeps one service for its whole life, so a record
+// the cleanup fails to take is one more for every room the process ever loads.
+func TestAnEvictedRoomsLoadRecordGoesWithIt(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	ctx := context.Background()
+	// The warm loads the room, which is what records the load: keepInstance runs on the load's
+	// own goroutine (onLoadDocument), so the record stands by the time the room is resident.
+	if err := service.warmLiveDocument(ctx, artifactID); err != nil {
+		t.Fatal(err)
+	}
+	live := service.srv.GetDoc(artifactID)
+	if live == nil {
+		t.Fatal("the warmed room holds no document")
+	}
+	key := weak.Make(live)
+	if _, recorded := service.roomLoads.Load(artifactID); !recorded {
+		t.Fatal("the resident room's load left no record, so this test would say nothing about the record going")
+	}
+
+	if err := service.Evict(ctx, artifactID); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 30*time.Second, "the evicted room's document to be collected", func() bool {
+		runtime.GC()
+		return key.Value() == nil
+	})
+	waitFor(t, 30*time.Second, "the evicted room's load record to go: a running Dispatch process keeps one service for its whole life, so a record left behind is one more for every room the process ever loads", func() bool {
+		_, recorded := service.roomLoads.Load(artifactID)
+		return !recorded
+	})
+}
+
 // A tree a read of a resident room returns is its reader's to change. The read walks the replica
 // the room's update observer keeps (readLive), which every later read walks too, so a tree that held the
 // replica's own mark attributes or attribute values would carry its reader's edit into the next
