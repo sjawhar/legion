@@ -26,6 +26,9 @@ header says what is proved).
   PUSH_WORKFLOWS  filter -> a workflow that runs that filter's job's work on a push to main in a
             workflow of its own, selected by its `on.push.paths`, which must equal the filter: the
             filter decides the pull request's and merge group's run, the paths main's.
+  TAG_RUNS  one entry per step that runs a package under a build tag and passes -run: the job
+            whose untagged run of that package that -run leans on, whose filter must therefore
+            cover every file the tag step's filter covers.
 
 A Read's glob is expanded over the repository's files; a why cites the step (at()) or the
 source line that reads it. at()'s third argument is the workflow file that holds the step, and
@@ -36,9 +39,12 @@ they are complete.
 """
 
 import json
+import os
+import re
 from pathlib import Path
+from typing import NamedTuple
 
-from ci_filter_coverage import Read, at, exact, gate, run
+from ci_filter_coverage import Read, TagRun, at, exact, gate, go_skips_dir, run
 
 ENVOY = "packages/envoy"
 DAEMON = "packages/daemon"
@@ -331,12 +337,8 @@ def go_notices_runs():
     return out
 
 
-# The steps of envoy-go, envoy-smoke and listener-server-change whose go commands are not in the
-# simple form, pinned whole.
-UNIT_TEST_STEP = "Unit test envoy Go package"
-UNIT_TEST_SCRIPT = """\
-go test -count=1 -timeout 20m ./internal/dispatch/api
-go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -count=1 -timeout 20m"""
+# The steps whose go commands are not in the simple form, pinned whole: envoy-go's pack step,
+# envoy-smoke's schema step, and the tag steps below.
 PACK_STEP = "Pack envoy binaries"
 PACK_SCRIPT = """\
 for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
@@ -354,10 +356,44 @@ SCHEMA_SCRIPT = (
     "# shellcheck disable=SC2016 # ${VERSION} is Pulumi's placeholder, not a shell expansion\n"
     """pulumi package get-schema "$RUNNER_TEMP/pr" | jq -e '.version == "1.2.3" and .pluginDownloadURL == "https://github.com/cybermonklabs/legion/releases/download/envoy-infra-v${VERSION}"'"""
 )
-# The soak's `-run` is not a flag the simple form reduces, and it moves no closure: the whole
-# cmd/listener package compiles under the serverchange tag, whichever test the run selects.
+# The six steps that run only what their build tag adds. A tag adds files to a package and
+# subtracts none, so `go test -tags T ./pkg` would run the untagged tests another job already
+# ran: each step takes its -run from .github/scripts/go-tagged-tests.sh, which reads the names
+# off the source at run time. The assignment is a line of its own, so that under bash -e an empty
+# or refused list fails the step instead of running -run "", which matches every test. That
+# substitution and quote are outside the simple form, so each step is pinned whole here. A -run
+# moves no closure: the whole package compiles under the tag, whichever tests the run selects, so
+# each entry's Run is the plain tagged go test the step ran before.
+TAGGED_TESTS = ".github/scripts/go-tagged-tests.sh"
+NATS_MATRIX_STEP = "Test the container-backed NATS matrix (natslive)"
+NATS_MATRIX_SCRIPT = f"""\
+pattern=$(../../{TAGGED_TESTS} natslive ./internal/testnats)
+go test -count=1 -tags natslive -run "$pattern" ./internal/testnats/"""
+# One call per package, never one union -run over the three: a name an untagged test of one
+# package shares with a natslive test of another would then run a second time unremarked.
+INFRA_NATSLIVE_STEP = "Live tests of envoy-infra against nats-server (natslive)"
+INFRA_NATSLIVE_PACKAGES = ["./core", "./seed", "./gcp"]
+INFRA_NATSLIVE_SCRIPT = f"""\
+for pkg in {" ".join(INFRA_NATSLIVE_PACKAGES)}; do
+  pattern=$(../../../{TAGGED_TESTS} natslive "$pkg")
+  go test -timeout 30m -tags natslive -run "$pattern" "$pkg"
+done"""
+MEMORY_STEP = "Memory tests of the Dispatch server"
+MEMORY_SCRIPT = f"""\
+pattern=$(../../{TAGGED_TESTS} memory ./cmd/dispatch)
+go test -tags memory -count=1 -timeout 60m -v -run "$pattern" ./cmd/dispatch"""
+DISPATCH_MP_STEP = "Two-process tests of the Dispatch server"
+DISPATCH_MP_SCRIPT = f"""\
+pattern=$(../../{TAGGED_TESTS} multiprocess ./cmd/dispatch)
+go test -tags multiprocess -count=1 -timeout 20m -v -run "$pattern" ./cmd/dispatch"""
+BROKER_MP_STEP = "Two-process tests of the secrets broker"
+BROKER_MP_SCRIPT = f"""\
+pattern=$(../../{TAGGED_TESTS} multiprocess ./cmd/broker)
+go test -tags multiprocess -count=1 -timeout 20m -v -run "$pattern" ./cmd/broker"""
 SOAK_STEP = "Server-change soak of the listener"
-SOAK_SCRIPT = "go test -tags serverchange -count=1 -timeout 15m -v -run TestServerChange ./cmd/listener"
+SOAK_SCRIPT = f"""\
+pattern=$(../../{TAGGED_TESTS} serverchange ./cmd/listener)
+go test -tags serverchange -count=1 -timeout 15m -v -run "$pattern" ./cmd/listener"""
 
 
 # The four packages the test job's race step runs, and which its plain step therefore leaves out.
@@ -372,6 +408,241 @@ DAEMON_PLAIN_PATTERN = "/(" + "|".join(DAEMON_RACE_PACKAGES) + ")$"
 DAEMON_PLAIN_SCRIPT = f"""\
 set -o pipefail
 go list ./... | grep -Ev '{DAEMON_PLAIN_PATTERN}' | xargs go test -count=1 -timeout 15m"""
+
+
+# ---------------------------------------------------------------- the envoy race lane
+# The three jobs that run packages/envoy's concurrent packages under the race detector, declared
+# once: each job's step name, its -timeout, and the packages the step names, in the order it names
+# them. Everything the lane decides is built from this list - the three steps' own texts, the
+# envoy-go unit step's `grep -Ev`, which leaves out exactly what the lane runs, and the -run lists
+# of the plain step that runs what a race build cannot (RACE_IMPOSSIBLE_SCRIPT below) - and
+# check-ci-filters.sh fails when ci.yaml's text for any of them differs from the text built here,
+# so a package added to the lane reaches all of them or the check goes red. internal/dispatch/pmdoc
+# is not in the lane: it runs plain only.
+class RacePackage(NamedTuple):
+    """A package of the lane, named under packages/envoy. A `tree` package is the one a step names
+    as `./<name>/...`, that directory and every package under it; any other is `./<name>/`, the
+    package alone."""
+
+    name: str
+    tree: bool = False
+
+
+class RaceJob(NamedTuple):
+    """One job of the lane: the ci.yaml job, its race step's name and -timeout, and its packages."""
+
+    job: str
+    step: str
+    timeout: str
+    packages: tuple
+
+
+ENVOY_RACE_LANE = (
+    RaceJob("envoy-go-race",
+            "Race-test delivery, the store, the bus, the listener, the registry store, the session cache and kvwatch",
+            "30m", (RacePackage("internal/dispatch/delivery", tree=True), RacePackage("internal/dispatch/store", tree=True),
+                    RacePackage("internal/bus"), RacePackage("cmd/listener"), RacePackage("internal/store"),
+                    RacePackage("internal/session"), RacePackage("internal/kvwatch", tree=True))),
+    RaceJob("envoy-go-race-api", "Race-test the Dispatch API", "30m", (RacePackage("internal/dispatch/api"),)),
+    RaceJob("envoy-go-race-docs", "Race-test the document service", "60m", (RacePackage("internal/dispatch/docs"),)),
+)
+RACE_JOBS = {job.job: job for job in ENVOY_RACE_LANE}
+
+
+def race_pkgs(job):
+    """The package arguments of a race job's step, in the order it names them."""
+    return [f"./{p.name}/..." if p.tree else f"./{p.name}/" for p in job.packages]
+
+
+def race_step(job):
+    """The one go command of a race job's step, pinned to the text this declaration builds."""
+    pkgs = race_pkgs(job)
+    text = f"go test -race -timeout {job.timeout} " + " ".join(pkgs)
+    return step_run(job.job, job.step, text, ENVOY, pkgs, race=True)
+
+
+# The unit step runs the module less two things: the lane's packages, which the three race jobs
+# run under the detector, and internal/integration, which envoy-go's integration step runs. Its
+# `grep -Ev` is `/integration`, then, in the lane's own order, each package in the form go list's
+# import paths need - a tree matching the package and everything under it, any other the package
+# alone.
+UNIT_TEST_STEP = "Unit test envoy Go package"
+UNIT_TEST_PATTERN = "|".join(
+    ["/integration"] + [f"/{p.name}($|/)" if p.tree else f"/{p.name}$" for job in ENVOY_RACE_LANE for p in job.packages])
+UNIT_TEST_SCRIPT = f"go list ./... | grep -Ev '{UNIT_TEST_PATTERN}' | xargs go test -count=1 -timeout 20m"
+
+
+# A test of a Go file: `go help test`'s Test, Fuzz and Example functions, whose name goes on with
+# no lower-case letter. TestMain is the package's entry point, not a test.
+GO_TEST_FUNC = re.compile(r"^func ((?:Test|Fuzz|Example)(?:[^\Wa-z]\w*)?)\(", re.M)
+# Every top-level function declaration, test or not: a gofmt'd file puts the `func` of one in
+# column 0. Where its body ends is not a line pattern - a one-line body writes no closing brace
+# in column 0 - so go_top_level_spans() counts braces from the declaration's own `{`.
+GO_TOP_FUNC = re.compile(r"^func\b", re.M)
+GO_BRACE = re.compile(r"[{}]")
+GO_BUILD_LINE = re.compile(r"^//go:build +(.+?) *$", re.M)
+RACE_ENABLED = re.compile(r"\braceEnabled\b")
+RACE_ENABLED_DECLARATION = re.compile(r"^const +raceEnabled\b|^\t*raceEnabled +=", re.M)
+
+
+def go_code_only(text: str) -> str:
+    """`text` with every comment, string and rune literal blanked out and its newlines kept, so a
+    name found in what is left is an identifier the compiler reads, at its own offset."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+        elif text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            end = -1 if end < 0 else end + 2
+        elif text[i] in "\"'`":
+            quote, end = text[i], i + 1
+            while end < n and text[end] != quote:
+                end += 2 if quote != "`" and text[end] == "\\" else 1
+            end = min(end + 1, n)
+        else:
+            out.append(text[i])
+            i += 1
+            continue
+        end = n if end < 0 else end
+        out.append("".join(c if c == "\n" else " " for c in text[i:end]))
+        i = end
+    return "".join(out)
+
+
+def go_top_level_spans(code: str, path) -> list:
+    """Each top-level function declaration of `code` as (start, end): the offset of its `func`,
+    and the offset of the `}` closing its own body, counted forward from the first `{` of the
+    declaration. `code` has been through go_code_only, so no brace of a comment, a string or a
+    rune literal is counted, and a one-line body ends on its own line rather than running to the
+    next closing brace in column 0. A declaration with no body - no `{` before the next
+    declaration, as an assembly stub has - has no span, so nothing is attributed to it. A
+    declaration whose braces never balance raises: the rest of the file is not its body, and a
+    file this cannot parse must make ci-filters red rather than be guessed at."""
+    starts = [m.start() for m in GO_TOP_FUNC.finditer(code)]
+    spans = []
+    for i, start in enumerate(starts):
+        limit = starts[i + 1] if i + 1 < len(starts) else len(code)
+        opened = code.find("{", start, limit)
+        if opened < 0:
+            continue
+        depth = 0
+        for brace in GO_BRACE.finditer(code, opened):
+            depth += 1 if brace.group() == "{" else -1
+            if depth == 0:
+                spans.append((start, brace.start()))
+                break
+        else:
+            raise ValueError(f"{path}:{code.count(chr(10), 0, start) + 1}: the braces of this top-level "
+                             "declaration never balance, so ci_job_reads.py cannot find where its body ends; "
+                             "the file is not one race_impossible_tests_of() can read")
+    return spans
+
+
+def race_impossible_tests_of(path: Path) -> set:
+    """The tests of one _test.go file that only a plain run covers: every test of a file the race
+    build does not compile (`//go:build !race`), and every test whose body reads raceEnabled, the
+    constant behind which a test runs smaller under the detector, so the plain run is its full-size
+    one. The constant's own declaration, and any mention of it in a comment or a string, count for
+    nothing. Raises on a //go:build that names race in a form this does not read, on a file whose
+    braces go_top_level_spans() cannot balance, and on a raceEnabled no top-level test encloses:
+    the read is attributed to the top-level function whose body - its own, up to the brace that
+    closes it - holds it, and only when that function is itself a test, so a read in a helper,
+    at package level or in a function literal outside any declaration - which a later test may be
+    the one caller of - makes ci-filters red rather than giving a test that does not run smaller
+    the plain run and dropping the one that does."""
+    text = path.read_text()
+    found = GO_BUILD_LINE.search(text)
+    constraint = found.group(1) if found else ""
+    if constraint not in ("", "race", "!race") and re.search(r"\brace\b", constraint):
+        raise ValueError(f"{path}: `//go:build {constraint}` names race in a form ci_job_reads.py does not read; "
+                         "teach race_impossible_tests_of() the form, or the plain step loses the file's tests")
+    # A file the race build compiles and that nowhere writes raceEnabled, in code or in a comment,
+    # names no test here and refuses nothing, so it never reaches the blanking pass below. That is
+    # almost every file of the lane: 610 of them, 10.9 MB, which this guard takes from 3.0 s to
+    # 0.56 s on each import of this module, one per check-ci-filters.sh run and five more per run
+    # of its test.
+    if constraint != "!race" and not RACE_ENABLED.search(text):
+        return set()
+    code = go_code_only(text)
+    # A file the race build alone compiles has no test a plain run can name, so every raceEnabled
+    # of it but the declaration is unattributable, as the empty list below makes it.
+    tests = [] if constraint == "race" else [(m.start(), m.group(1)) for m in GO_TEST_FUNC.finditer(code)
+                                             if m.group(1) != "TestMain"]
+    names = {name for _, name in tests} if constraint == "!race" else set()
+    enclosing = dict(tests)  # the start of a top-level test -> its name
+    spans = go_top_level_spans(code, path)
+    # Each declaration's own line, read from the declaration rather than from the use, so a file
+    # that declares the constant and also reads it in a test has that read attributed, not passed
+    # over.
+    declarations = [(m.start(), code.find("\n", m.start())) for m in RACE_ENABLED_DECLARATION.finditer(code)]
+    for use in RACE_ENABLED.finditer(code):
+        if any(start <= use.start() < (len(code) if end < 0 else end) for start, end in declarations):
+            continue
+        holder = next((start for start, end in spans if start <= use.start() <= end), None)
+        if holder not in enclosing:
+            raise ValueError(f"{path}:{code.count(chr(10), 0, use.start()) + 1}: raceEnabled is read where no "
+                             "top-level test encloses it, so ci_job_reads.py cannot say which test runs smaller "
+                             "under the detector; move the read into the test that runs smaller for it, or teach "
+                             "race_impossible_tests_of() the idiom")
+        names.add(enclosing[holder])
+    return names
+
+
+def race_lane_packages(root) -> list:
+    """Every package directory the lane's steps run, in the order its steps name them: a package
+    alone for an exact entry, and for a tree its directory and every directory with .go files
+    under it, passing over what go passes over (go_skips_dir, the rule pattern_dirs walks a
+    `/...` pattern by). Each is (the path under `root`, the directory)."""
+    root, seen, found = Path(root), set(), []
+    for job in ENVOY_RACE_LANE:
+        for package in job.packages:
+            base = root / package.name
+            if not base.is_dir():
+                raise ValueError(f"the race lane names {package.name}, which is no directory under {root}")
+            directories = [base]
+            if package.tree:
+                for current, subdirs, names in os.walk(base):
+                    here = Path(current)
+                    subdirs[:] = sorted(s for s in subdirs if not go_skips_dir(here, s))
+                    if here != base and any(n.endswith(".go") for n in names):
+                        directories.append(here)
+            for directory in directories:
+                under = directory.relative_to(root).as_posix()
+                if under not in seen:
+                    seen.add(under)
+                    found.append((under, directory))
+    return found
+
+
+def race_impossible_tests(root) -> dict:
+    """Per package of the lane under `root`, in the lane's own order, the tests only a plain run
+    covers (race_impossible_tests_of). A package that has none is left out."""
+    found = {}
+    for under, directory in race_lane_packages(root):
+        names = set()
+        for path in sorted(directory.glob("*_test.go")):
+            names |= race_impossible_tests_of(path)
+        if names:
+            found[under] = names
+    return found
+
+
+def race_impossible_script(packages) -> str:
+    """envoy-go's plain run of the tests the detector makes impossible: one `go test` per package
+    of `packages` (race_impossible_tests), each naming that package's own tests, anchored and
+    sorted, in its -run."""
+    lines = []
+    for under, names in packages.items():
+        lines.append(f"go test -count=1 -timeout 10m -run '^({'|'.join(sorted(names))})$' ./{under}")
+    return "\n".join(lines)
+
+
+# The step as the lane and packages/envoy's own source make it, so a test added under
+# `//go:build !race` or behind raceEnabled changes this text and ci.yaml stops matching it.
+RACE_IMPOSSIBLE_STEP = "Test what the race build cannot run at all or at full size"
+RACE_IMPOSSIBLE_PACKAGES = race_impossible_tests(ENVOY)
+RACE_IMPOSSIBLE_SCRIPT = race_impossible_script(RACE_IMPOSSIBLE_PACKAGES)
 
 
 RUN_SERVER = "packages/dispatch/e2e/run-server.sh"
@@ -637,16 +908,19 @@ GATES = [
     gate("envoy_go", "envoy-go", runs=[
         step_run("envoy-go", "Integration test envoy (a real NATS server, in the test process)",
                  "go test ./internal/integration/ -timeout 300s -count=1", ENVOY, ["./internal/integration/"]),
-        step_run("envoy-go", "Test the container-backed NATS matrix (natslive)", "go test -count=1 -tags natslive ./internal/testnats/", ENVOY,
-                 ["./internal/testnats/"], tags="natslive"),
         step_run("envoy-go", "Build envoy services", "go build ./cmd/dispatch ./cmd/listener", ENVOY, ["./cmd/dispatch", "./cmd/listener"],
                  mode="build"),
     ], exact=[
-        # The API package first, on its own (582cb2a2: its Postgres-backed tests' cleanup queues
-        # on the service's one checkpointer beside the other package binaries), then ./... but it
-        # and internal/integration, which the integration step tests: counted as all of ./....
+        # One go test per package of the plain run the race lane cannot make (RACE_IMPOSSIBLE_*),
+        # each selecting that package's own tests with -run.
+        pinned_step("envoy-go", RACE_IMPOSSIBLE_STEP, ENVOY, RACE_IMPOSSIBLE_SCRIPT, [
+            (ENVOY, [f"./{under}"], f"go test -run of what the race build cannot run in ./{under}", {})
+            for under in RACE_IMPOSSIBLE_PACKAGES
+        ]),
+        # ./... but the race lane's packages and internal/integration, which the integration step
+        # tests: a Run cannot name "./... but those", so the entry declares the superset ./...,
+        # which over-declares and so keeps this gate's wide patterns justified.
         pinned_step("envoy-go", UNIT_TEST_STEP, ENVOY, UNIT_TEST_SCRIPT, [
-            (ENVOY, ["./internal/dispatch/api"], "go test -count=1 -timeout 20m ./internal/dispatch/api", {}),
             (ENVOY, ["./..."], "go list ./... piped into go test, counted as go test ./...", {}),
         ]),
         # One linux build of the listener per architecture the loop reads from the target list.
@@ -654,6 +928,10 @@ GATES = [
             (ENVOY, ["./cmd/listener"], f"GOOS=linux GOARCH={arch} go build ./cmd/listener",
              {"mode": "build", "env": {"GOOS": "linux", "GOARCH": arch}})
             for arch in targets(GO_TARGETS, "envoy")
+        ]),
+        # Only what the natslive tag adds to internal/testnats; the unit step ran the rest.
+        pinned_step("envoy-go", NATS_MATRIX_STEP, ENVOY, NATS_MATRIX_SCRIPT, [
+            (ENVOY, ["./internal/testnats/"], "go test -tags natslive ./internal/testnats/", {"tags": "natslive"}),
         ]),
     ], reads=reads(
         (f"{ENVOY}/**", f"{at('envoy-go', 'Check Go formatting')}: gofmt -l . in packages/envoy reads every .go file under it, infra included; the script tests below live here too"),
@@ -670,6 +948,7 @@ GATES = [
         (f"{ENVOY}/loadtest/common.sh", "packages/envoy/loadtest/common.test.sh sources it; run-step.sh and run-series.sh source it"),
         (NOTICES, f"{at('envoy-go', 'Pack envoy binaries')} runs it"),
         (GO_TARGETS, f"{at('envoy-go', 'Pack envoy binaries')}: jq -r '.envoy[]'"),
+        (TAGGED_TESTS, f"{at('envoy-go', NATS_MATRIX_STEP)} takes its -run from it"),
     ) + setup_go("envoy-go", f"{ENVOY}/go.mod") + bun_job("envoy-go") + CI_SELF),
 
 
@@ -677,63 +956,62 @@ GATES = [
         step_run("envoy-infra-go", "Vet envoy-infra, its live-test tags included", "go vet -tags pulumilive,natslive ./...", INFRA, ["./..."],
                  tags="pulumilive,natslive", mode="vet"),
         step_run("envoy-infra-go", "Unit test envoy-infra", "go test ./...", INFRA, ["./..."]),
-        step_run("envoy-infra-go", "Live tests of envoy-infra against nats-server (natslive)", "go test -timeout 30m -tags natslive ./core/ ./seed/ ./gcp/", INFRA,
-                 ["./core/", "./seed/", "./gcp/"], tags="natslive"),
+    ], exact=[
+        # One go test per package, each running only what the natslive tag adds to it.
+        pinned_step("envoy-infra-go", INFRA_NATSLIVE_STEP, INFRA, INFRA_NATSLIVE_SCRIPT, [
+            (INFRA, [pkg], f"go test -tags natslive {pkg}", {"tags": "natslive"})
+            for pkg in INFRA_NATSLIVE_PACKAGES
+        ]),
     ], reads=reads(
         (f"{INFRA}/**", f"{at('envoy-infra-go', 'Check Go formatting')}: gofmt -l . in packages/envoy/infra reads every .go file under it"),
         (".github/actions/pull-test-images/**", at("envoy-infra-go", "Pull the NATS and Postgres test container images")),
         (f"{ENVOY}/internal/testnats/nats.go", f"{at('envoy-infra-go', 'Pull the NATS and Postgres test container images')}: consts Image, HubImage"),
         (f"{ENVOY}/internal/testpg/testpg.go", f"{at('envoy-infra-go', 'Pull the NATS and Postgres test container images')}: const Image"),
+        (TAGGED_TESTS, f"{at('envoy-infra-go', INFRA_NATSLIVE_STEP)} takes each call's -run from it"),
     ) + setup_go("envoy-infra-go", f"{INFRA}/go.mod") + CI_SELF),
 
-    gate("envoy_go_race", "envoy-go-race", runs=[
-        step_run("envoy-go-race", "Race-test delivery, the store, the bus, the listener, the registry store, the session cache and kvwatch",
-                 "go test -race -timeout 30m ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/ ./cmd/listener/ ./internal/store/ ./internal/session/ ./internal/kvwatch/...",
-                 ENVOY, ["./internal/dispatch/delivery/...", "./internal/dispatch/store/...", "./internal/bus/",
-                         "./cmd/listener/", "./internal/store/", "./internal/session/", "./internal/kvwatch/..."], race=True),
-    ], reads=setup_go("envoy-go-race", f"{ENVOY}/go.mod") + CI_SELF),
+    # The lane's three jobs: each step's text and packages come from ENVOY_RACE_LANE, which the
+    # envoy-go unit step and its plain companion are built from too.
+    gate("envoy_go_race", "envoy-go-race", runs=[race_step(RACE_JOBS["envoy-go-race"])],
+         reads=setup_go("envoy-go-race", f"{ENVOY}/go.mod") + CI_SELF),
 
-    gate("envoy_go_race_pmdoc", "envoy-go-race-pmdoc", runs=[
-        step_run("envoy-go-race-pmdoc", "Race-test pmdoc",
-                 "go test -race -timeout 40m ./internal/dispatch/pmdoc/...",
-                 ENVOY, ["./internal/dispatch/pmdoc/..."], race=True),
+    gate("envoy_go_race_api", "envoy-go-race-api", runs=[race_step(RACE_JOBS["envoy-go-race-api"])],
+         reads=setup_go("envoy-go-race-api", f"{ENVOY}/go.mod") + CI_SELF),
+
+    gate("envoy_go_race_docs", "envoy-go-race-docs", runs=[race_step(RACE_JOBS["envoy-go-race-docs"])],
+         reads=setup_go("envoy-go-race-docs", f"{ENVOY}/go.mod") + CI_SELF),
+
+    gate("dispatch_memory", "dispatch-memory", exact=[
+        pinned_step("dispatch-memory", MEMORY_STEP, ENVOY, MEMORY_SCRIPT, [
+            (ENVOY, ["./cmd/dispatch"], "go test -tags memory ./cmd/dispatch", {"tags": "memory"}),
+        ]),
     ], reads=reads(
-        (f"{ENVOY}/internal/dispatch/pmdoc/schema/blocks.json", "packages/envoy/internal/dispatch/pmdoc/gen/decode.ts:16, differential.ts:21, edit-blocks.ts:21"),
-        ("packages/proof-editor/src/**", "packages/envoy/internal/dispatch/pmdoc/gen/decode.ts:6, differential.ts:12-13, edit-blocks.ts:10 import @legion/proof-editor"),
-    ) + setup_go("envoy-go-race-pmdoc", f"{ENVOY}/go.mod") + bun_job("envoy-go-race-pmdoc") + CI_SELF),
+        (TAGGED_TESTS, f"{at('dispatch-memory', MEMORY_STEP)} takes its -run from it"),
+    ) + setup_go("dispatch-memory", f"{ENVOY}/go.mod") + CI_SELF),
 
-    gate("envoy_go_race_api", "envoy-go-race-api", runs=[
-        step_run("envoy-go-race-api", "Race-test the Dispatch API",
-                 "go test -race -timeout 30m ./internal/dispatch/api/",
-                 ENVOY, ["./internal/dispatch/api/"], race=True),
-    ], reads=setup_go("envoy-go-race-api", f"{ENVOY}/go.mod") + CI_SELF),
-
-    gate("envoy_go_race_docs", "envoy-go-race-docs", runs=[
-        step_run("envoy-go-race-docs", "Race-test the document service",
-                 "go test -race -timeout 60m ./internal/dispatch/docs/", ENVOY,
-                 ["./internal/dispatch/docs/"], race=True),
-    ], reads=setup_go("envoy-go-race-docs", f"{ENVOY}/go.mod") + CI_SELF),
-
-    gate("dispatch_memory", "dispatch-memory", runs=[
-        step_run("dispatch-memory", "Memory tests of the Dispatch server", "go test -tags memory -count=1 -timeout 60m -v ./cmd/dispatch",
-                 ENVOY, ["./cmd/dispatch"], tags="memory"),
-    ], reads=setup_go("dispatch-memory", f"{ENVOY}/go.mod") + CI_SELF),
-
-    gate("dispatch_multiprocess", "dispatch-multiprocess", runs=[
-        step_run("dispatch-multiprocess", "Two-process tests of the Dispatch server",
-                 "go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/dispatch", ENVOY, ["./cmd/dispatch"], tags="multiprocess"),
-    ], reads=setup_go("dispatch-multiprocess", f"{ENVOY}/go.mod") + CI_SELF),
+    gate("dispatch_multiprocess", "dispatch-multiprocess", exact=[
+        pinned_step("dispatch-multiprocess", DISPATCH_MP_STEP, ENVOY, DISPATCH_MP_SCRIPT, [
+            (ENVOY, ["./cmd/dispatch"], "go test -tags multiprocess ./cmd/dispatch", {"tags": "multiprocess"}),
+        ]),
+    ], reads=reads(
+        (TAGGED_TESTS, f"{at('dispatch-multiprocess', DISPATCH_MP_STEP)} takes its -run from it"),
+    ) + setup_go("dispatch-multiprocess", f"{ENVOY}/go.mod") + CI_SELF),
 
     gate("listener_server_change", "listener-server-change", exact=[
         pinned_step("listener-server-change", SOAK_STEP, ENVOY, SOAK_SCRIPT, [
             (ENVOY, ["./cmd/listener"], "go test -tags serverchange ./cmd/listener", {"tags": "serverchange"}),
         ]),
-    ], reads=setup_go("listener-server-change", f"{ENVOY}/go.mod") + CI_SELF),
+    ], reads=reads(
+        (TAGGED_TESTS, f"{at('listener-server-change', SOAK_STEP)} takes its -run from it"),
+    ) + setup_go("listener-server-change", f"{ENVOY}/go.mod") + CI_SELF),
 
-    gate("broker_multiprocess", "broker-multiprocess", runs=[
-        step_run("broker-multiprocess", "Two-process tests of the secrets broker",
-                 "go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/broker", ENVOY, ["./cmd/broker"], tags="multiprocess"),
-    ], reads=setup_go("broker-multiprocess", f"{ENVOY}/go.mod") + CI_SELF),
+    gate("broker_multiprocess", "broker-multiprocess", exact=[
+        pinned_step("broker-multiprocess", BROKER_MP_STEP, ENVOY, BROKER_MP_SCRIPT, [
+            (ENVOY, ["./cmd/broker"], "go test -tags multiprocess ./cmd/broker", {"tags": "multiprocess"}),
+        ]),
+    ], reads=reads(
+        (TAGGED_TESTS, f"{at('broker-multiprocess', BROKER_MP_STEP)} takes its -run from it"),
+    ) + setup_go("broker-multiprocess", f"{ENVOY}/go.mod") + CI_SELF),
 
 
     # The listener image this job builds and smokes is left to check-image-trigger-paths.sh,
@@ -827,6 +1105,29 @@ GATES = [
         (".github/scripts/ci_images.py", "both scripts read a row's upstream with it"),
         (".github/actions/install-crane/**", at("ci-images", "./.github/actions/install-crane")),
     ) + CI_SELF),
+]
+
+# One entry per step of ci.yaml that runs a package under a build tag and passes -run: the job
+# whose untagged run of that package the -run leans on, which check-ci-filters.sh holds to running
+# in every run the tag step runs (check_tag_runs). The note says which step runs the untagged
+# tests, the judgement the check cannot derive. The last two entries pair a job with itself: the
+# untagged run is a step of the same job, so the filters are the same one and the subset holds
+# trivially; they are here all the same, so the rule covers every -run step and a later move of
+# one to another job is caught.
+TAG_RUNS = [
+    TagRun("dispatch_memory", "dispatch-memory", MEMORY_STEP, "envoy_go", "envoy-go",
+           f"envoy-go's \"{UNIT_TEST_STEP}\" runs ./cmd/dispatch's untagged tests"),
+    TagRun("dispatch_multiprocess", "dispatch-multiprocess", DISPATCH_MP_STEP, "envoy_go", "envoy-go",
+           f"envoy-go's \"{UNIT_TEST_STEP}\" runs ./cmd/dispatch's untagged tests"),
+    TagRun("broker_multiprocess", "broker-multiprocess", BROKER_MP_STEP, "envoy_go", "envoy-go",
+           f"envoy-go's \"{UNIT_TEST_STEP}\" runs ./cmd/broker's untagged tests"),
+    # envoy-go's unit step leaves /cmd/listener$ out, since the lane runs it under the detector.
+    TagRun("listener_server_change", "listener-server-change", SOAK_STEP, "envoy_go_race", "envoy-go-race",
+           f"envoy-go-race's \"{RACE_JOBS['envoy-go-race'].step}\" runs ./cmd/listener's untagged tests"),
+    TagRun("envoy_go", "envoy-go", NATS_MATRIX_STEP, "envoy_go", "envoy-go",
+           f"envoy-go's own \"{UNIT_TEST_STEP}\" runs ./internal/testnats's untagged tests"),
+    TagRun("envoy_infra_go", "envoy-infra-go", INFRA_NATSLIVE_STEP, "envoy_infra_go", "envoy-infra-go",
+           f"envoy-infra-go's own \"Unit test envoy-infra\" runs {', '.join(INFRA_NATSLIVE_PACKAGES)} untagged"),
 ]
 
 EXCLUDED = {
