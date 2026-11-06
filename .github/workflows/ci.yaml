@@ -113,7 +113,6 @@ env:
       "envoy-go": "envoy_go",
       "envoy-infra-go": "envoy_infra_go",
       "envoy-go-race": "envoy_go_race",
-      "envoy-go-race-pmdoc": "envoy_go_race_pmdoc",
       "envoy-go-race-api": "envoy_go_race_api",
       "envoy-go-race-docs": "envoy_go_race_docs",
       "dispatch-memory": "dispatch_memory",
@@ -155,7 +154,6 @@ jobs:
       envoy_go: ${{ steps.filter.outputs.envoy_go }}
       envoy_infra_go: ${{ steps.filter.outputs.envoy_infra_go }}
       envoy_go_race: ${{ steps.filter.outputs.envoy_go_race }}
-      envoy_go_race_pmdoc: ${{ steps.filter.outputs.envoy_go_race_pmdoc }}
       envoy_go_race_api: ${{ steps.filter.outputs.envoy_go_race_api }}
       envoy_go_race_docs: ${{ steps.filter.outputs.envoy_go_race_docs }}
       dispatch_memory: ${{ steps.filter.outputs.dispatch_memory }}
@@ -952,6 +950,8 @@ jobs:
               # Its pack step writes each archive's notices, for each target the list names.
               - 'scripts/go-third-party-notices.sh'
               - '.github/go-release-targets.json'
+              # Its natslive step takes that tag's test list from this script at run time.
+              - '.github/scripts/go-tagged-tests.sh'
             # The envoy-infra module's own workspace (packages/envoy/infra/go.work binds it and
             # packages/envoy), the envoy packages its tests compile, and the Dispatch server and
             # listener infra/core/permissions_live_test.go:298-299 builds in the root workspace.
@@ -974,44 +974,23 @@ jobs:
               # The image pull before its tests, of the consts in testnats/nats.go and
               # testpg/testpg.go.
               - '.github/actions/pull-test-images/**'
+              # Its natslive step takes that tag's test list from this script at run time.
+              - '.github/scripts/go-tagged-tests.sh'
             # The shared race job: the closure of `go test -race` over delivery, the Dispatch
             # store, the bus, the listener, the registry store, the session cache and kvwatch (`go
             # list -deps -test -race` in packages/envoy). internal/dispatch/store's
             # search_text_test.go:102-120 walks every .md file under packages/envoy, so this
             # filter keeps the wide root rather than the package list that closure would give. No
-            # bun_install anchor: no test of these packages runs bun, so the Bun install sits on
-            # the pmdoc race job with the package that needs it.
+            # bun_install anchor: no test of these packages runs bun.
             envoy_go_race:
               - '.github/workflows/ci.yaml'
               - *go_workspace
               - 'packages/envoy/**'
+              # listener-server-change takes its -run from this script, and this is the job that
+              # runs cmd/listener's untagged tests, so it must run whenever the script changes.
+              - '.github/scripts/go-tagged-tests.sh'
               # The fixture cmd/listener/api_test.go:191,436,480 reads.
               - 'packages/contracts/fixtures/dispatch-targeted-delivery.json'
-            # The pmdoc race job: the closure of `go test -race ./internal/dispatch/pmdoc/...`,
-            # and the Bun install its tests need. pmdoc's tests run pmdoc/gen, which imports the
-            # proof editor (internal/dispatch/pmdoc/update_test.go:236-239,
-            # render_readback_test.go:32), so the editor's package is here too, and
-            # heavy_bodies_test.go:36 reads the bound one block of a body stands inside
-            # (contracts.DispatchBlockUnits), so the contracts package is too.
-            envoy_go_race_pmdoc:
-              - '.github/workflows/ci.yaml'
-              - *bun_install
-              - *go_workspace
-              - 'packages/envoy/internal/contracts/**'
-              - 'packages/envoy/internal/cputest/*'
-              - 'packages/envoy/internal/dispatch/docs/crafted/*'
-              - 'packages/envoy/internal/dispatch/docs/docstest/*'
-              - 'packages/envoy/internal/dispatch/pmdoc/**'
-              - 'packages/envoy/internal/stacktest/*'
-              - 'packages/proof-editor/**'
-              # The editor's src/block-pointers.ts (through src/block-schema.ts) imports
-              # @legion/contracts.
-              - 'packages/contracts/src/**'
-              # pmdoc's schema.go and pointers.go import internal/dispatch/model and
-              # internal/dispatch/text, whose tests' testdata the race run reads too.
-              - 'packages/envoy/internal/dispatch/model/*'
-              - 'packages/envoy/internal/dispatch/text/*'
-              - 'packages/envoy/internal/dispatch/text/testdata/**'
             # The API race job. internal/dispatch/api's lock_level_test.go:120-133 walks every
             # non-test .go file under packages/envoy (event_insert_guard_test.go:32 and
             # review_write_guard_test.go:44 use the same walk), so this filter keeps the wide root
@@ -1079,12 +1058,16 @@ jobs:
               - *go_workspace
               - *dispatch_command_tests
               - 'packages/envoy/internal/testnats/*'
+              # The step takes the memory tag's test list from this script at run time.
+              - '.github/scripts/go-tagged-tests.sh'
             # `go test -tags multiprocess ./cmd/dispatch`, the same closure as dispatch_memory.
             dispatch_multiprocess:
               - '.github/workflows/ci.yaml'
               - *go_workspace
               - *dispatch_command_tests
               - 'packages/envoy/internal/testnats/*'
+              # The step takes the multiprocess tag's test list from this script at run time.
+              - '.github/scripts/go-tagged-tests.sh'
             # The server-change soak (listener-server-change): `go test -tags serverchange
             # ./cmd/listener`. The listener's own packages, and what its test binary compiles
             # beyond them - the in-process NATS and Postgres helpers, the builder of the binary it
@@ -1150,6 +1133,8 @@ jobs:
               - 'packages/envoy/migrationid/*'
               # cmd/listener/api_test.go:191,436,480, which the soak's run compiles too.
               - 'packages/contracts/fixtures/dispatch-targeted-delivery.json'
+              # The soak step takes the serverchange tag's test list from this script at run time.
+              - '.github/scripts/go-tagged-tests.sh'
             # `go test -tags multiprocess ./cmd/broker`, and the agent-secrets binary
             # cmd/broker/outage_test.go:317-318 builds.
             broker_multiprocess:
@@ -1193,6 +1178,8 @@ jobs:
               - 'packages/envoy/internal/ratelimit/*'
               - 'packages/envoy/internal/redact/*'
               - 'packages/envoy/migrationid/*'
+              # The step takes the multiprocess tag's test list from this script at run time.
+              - '.github/scripts/go-tagged-tests.sh'
             # Every file packages/envoy/docker/Dockerfile builds from, so envoy-smoke runs whenever
             # the image it smokes changes, every file the held-port image built on top of it reads
             # (packages/envoy/infra/host/heldportwrapper/Dockerfile and its .dockerignore), and what
@@ -1885,6 +1872,11 @@ jobs:
       # repository's own .github/e2e-scripts.json and scripts/e2e/.
       - name: Test the e2e proof selector
         run: .github/scripts/select-e2e-proofs.test.sh
+
+      # The lister the build-tag steps take their `-run` from, over fixture packages and over
+      # this repository's own tagged test files.
+      - name: Test the build-tag test lister
+        run: .github/scripts/go-tagged-tests.test.sh
 
       - name: Test ci-ok's verdict
         run: .github/scripts/ci-ok.test.sh
@@ -3016,9 +3008,12 @@ jobs:
     runs-on: ubuntu-24.04
     # Each go test step's -timeout must fire before the runner cancels the job, so a hung test
     # prints the dump that names it. A timed-out step fails the job, so the bound is the steps
-    # before it at their measured times plus its own limit: about 1 minute of setup, then the unit
-    # step's two 20-minute runs, which is 41; after the unit step's measured 35 minutes, natslive's
-    # default 10 is 46, and the shell tests' 7 plus the integration step's 5 is 48.
+    # before it at their measured times plus its own limit: about 1 minute of setup, then the
+    # plain race-impossible step's three 10-minute runs, which is 31; after that step's measured
+    # 2 minutes the unit step's own 20 is 23; after the unit step, which runs strictly fewer
+    # packages than the 35 minutes it measured before the race lane's left it and so cannot
+    # exceed that, natslive's default 10 is 48, and the shell tests' 7 and the integration step's
+    # 5 are less.
     timeout-minutes: 60
     services:
       postgres:
@@ -3090,24 +3085,52 @@ jobs:
             packages/envoy/internal/testnats/nats.go Image
             packages/envoy/internal/testnats/nats.go HubImage
             packages/envoy/internal/tests3/seaweedfs.go Image
-      # The API package owns the largest set of Postgres-backed tests. Running it with the other
-      # package binaries makes all of their per-test database cleanup queue on the service's one
-      # checkpointer, so run it before the rest of the module. Alone it takes close to go test's
-      # default ten minutes (523 s on a workstation), and the documents package about nine with the
-      # rest, so every package here gets 20. The API package's live-feed and delivery-hub tests also
-      # wait for the event log's safe horizon, which any open transaction on this job's Postgres
-      # delays.
+      # The tests the race detector makes impossible, which the race job of each of these packages
+      # therefore cannot make, so envoy-go keeps a plain run of exactly them: internal/bus counts
+      # HoldsSeed's allocations, which the race runtime's own allocations would be counted into;
+      # the API's two guards read the module's source, to which the detector adds nothing; and the
+      # documents package measures the heap a room keeps, which the detector's shadow memory and
+      # instrumentation move. Those are out of the race build altogether (//go:build !race), and
+      # the two render-reuse storms run fewer seeds and fewer edits under it (raceEnabled), so this
+      # is their full-size run. It comes before the unit step for the reason the API package's own
+      # run did: run beside the other package binaries, its Postgres-backed tests and the
+      # room-memory measurements queue their per-test database cleanup on the service's one
+      # checkpointer, and the API's live-feed and delivery-hub tests wait for the event log's safe
+      # horizon, which any open transaction on this job's Postgres delays. The three -run lists are
+      # derived in .github/scripts/ci_job_reads.py from the race lane's own packages and those
+      # files' //go:build !race and raceEnabled, so a test added to either and missing here fails
+      # the ci-filters job naming this step. Measured over three runs on a two-vCPU pod: the bus
+      # under a tenth of a second, the API 8 to 10 s, the documents package 92 to 127 s, so 10
+      # minutes each is ample.
+      - name: Test what the race build cannot run at all or at full size
+        run: |
+          go test -count=1 -timeout 10m -run '^(TestHoldsSeedAllocatesAtMostOneCopyPerDecoding)$' ./internal/bus
+          go test -count=1 -timeout 10m -run '^(TestCopyLockComesBeforeEveryPendingRowAndEvent|TestCopyLockOrderGuardFollowsTheLockTakers|TestEveryKeyedWriteCommitsInsideATransactionTheMarkHooks|TestTheKeyedWriteGuardSeesWhatItGuards)$' ./internal/dispatch/api
+          go test -count=1 -timeout 10m -run '^(TestARoomFedOnlyByAgentWritesKeepsMemoryWithinTheBound|TestRenderReuseARandomisedEditStorm|TestRenderReuseAReplicaReplaysTheRoomsFormattingExactly|TestUploadsOverOpenAnchorsKeepMemoryWithinTheBound|TestUploadsToARoomInUseKeepMemoryWithinTheBound)$' ./internal/dispatch/docs
+        working-directory: packages/envoy
+      # Everything the three race jobs run is left out here, since they run it under the detector,
+      # and so is internal/integration, which the integration step below tests. The pattern is
+      # built in .github/scripts/ci_job_reads.py from the same list those jobs' own steps are built
+      # from, so what this step leaves out and what the lane runs cannot drift apart. What is left
+      # is the rest of the module, the two longest packages of it (the API's and the documents
+      # service's) now among the ones the lane runs, so its 20 minutes are ample.
       - name: Unit test envoy Go package
         run: |
-          go test -count=1 -timeout 20m ./internal/dispatch/api
-          go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -count=1 -timeout 20m
+          go list ./... | grep -Ev '/integration|/internal/dispatch/delivery($|/)|/internal/dispatch/store($|/)|/internal/bus$|/cmd/listener$|/internal/store$|/internal/session$|/internal/kvwatch($|/)|/internal/dispatch/api$|/internal/dispatch/docs$' | xargs go test -count=1 -timeout 20m
         working-directory: packages/envoy
       # internal/testnats runs its server in the test process, so the untagged step above starts
       # no container. The two-image matrix, which proves a rendered authorization on nats:2.10 and
       # on the image the hub runs, is the one thing an in-process server cannot reproduce: it sits
-      # behind the natslive tag, and this step is where it runs (INFRA-250).
+      # behind the natslive tag, and this step is where it runs (INFRA-250). It runs only the
+      # tests that tag adds: `-tags natslive ./internal/testnats/` would re-run the package's
+      # untagged tests, which the unit step above already ran, so the -run comes from
+      # .github/scripts/go-tagged-tests.sh, which reads the names off the source at run time. The
+      # assignment is a line of its own: under bash -e it carries the script's exit status, so an
+      # empty or refused list fails the step instead of running -run "", which matches every test.
       - name: Test the container-backed NATS matrix (natslive)
-        run: go test -count=1 -tags natslive ./internal/testnats/
+        run: |
+          pattern=$(../../.github/scripts/go-tagged-tests.sh natslive ./internal/testnats)
+          go test -count=1 -tags natslive -run "$pattern" ./internal/testnats/
         working-directory: packages/envoy
       - name: Isolation test for dev-broker.sh (fakes docker/go/curl; no real Postgres or network)
         run: bash scripts/dev-broker.test.sh
@@ -3182,7 +3205,10 @@ jobs:
   # workspace. Vet compiles the files behind the live-test tags (pulumilive, natslive) too. The unit
   # tests start no container; the natslive files run in a step of their own against real
   # nats-server and Postgres, on testnats.Image, testnats.HubImage and testpg.Image, pulled first
-  # for the reason .github/actions/pull-test-images gives. The gcp natslive tests pull no image:
+  # for the reason .github/actions/pull-test-images gives. That step runs only the tests the tag
+  # adds, one call per package: the unit step above already ran every untagged test of core, seed
+  # and gcp, so each call takes its -run from .github/scripts/go-tagged-tests.sh, which reads the
+  # names off the source at run time. The gcp natslive tests pull no image:
   # they install helm, nats-server, the config reloader and the exporter with go install, at the
   # versions the clustered hub runs, and render the vendored chart in gcp/testdata. The per-target
   # compile runs in the lint job's notices step.
@@ -3236,7 +3262,15 @@ jobs:
       - name: Live tests of envoy-infra against nats-server (natslive)
         # gcp's live tests build helm, nats-server, the config reloader and the exporter with go
         # install first, minutes on a cold cache, so the package gets more than go test's 10 m.
-        run: go test -timeout 30m -tags natslive ./core/ ./seed/ ./gcp/
+        # One call per package, never one union -run over the three: a name an untagged test of
+        # one package shares with a natslive test of another would then run a second time with
+        # nothing to say so. Each assignment is a line of its own, so under bash -e an empty or
+        # refused list fails the step instead of running -run "", which matches every test.
+        run: |
+          for pkg in ./core ./seed ./gcp; do
+            pattern=$(../../../.github/scripts/go-tagged-tests.sh natslive "$pkg")
+            go test -timeout 30m -tags natslive -run "$pattern" "$pkg"
+          done
         working-directory: packages/envoy/infra
       - if: github.event_name == 'push' && success() && steps.go-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -3262,32 +3296,42 @@ jobs:
   # lock and its epoch in the registry store and the watchers' completeness and rescans in kvwatch
   # (INFRA-141), the session cache, whose reads take its shared lock beside watcher writes and the
   # expiry timer's callback as kvwatch's resume point is read while a replaced watcher still
-  # applies, pmdoc (LEGION-571: its own flakes under -race and load, not a race in production
-  # code, cost three review rounds because nothing ran this package under -race before a PR
-  # claimed it), the Dispatch API and the document service - all under the race detector. A read
+  # applies, the Dispatch API and the document service - all under the race detector. A read
   # that walks a live document without its lock races the room's peers, which no ordinary run
   # shows: envoy-go's unit-test step runs without -race (LEGION-499). The lane sits beside
   # envoy-go because -race runs these packages several times slower, and each job carries a
   # package deadline of its own, since go test's ten-minute default is a whole package's.
+  # envoy-go runs none of these packages plain any more (INFRA-1408): its unit step leaves out
+  # exactly what the lane runs, and the one plain run it keeps of them is the step named "Test
+  # what the race build cannot run at all or at full size", which runs the handful of
+  # assertions the detector makes impossible or shrinks and nothing else.
   #
-  # The lane is four jobs: envoy-go-race (delivery, the Dispatch store, the bus, the listener, the
-  # registry store, the session cache and kvwatch), envoy-go-race-pmdoc, envoy-go-race-api and
-  # envoy-go-race-docs, whose own comment below says why the document service runs alone.
+  # The lane is three jobs: envoy-go-race (delivery, the Dispatch store, the bus, the listener,
+  # the registry store, the session cache and kvwatch), envoy-go-race-api and envoy-go-race-docs,
+  # whose own comment below says why the document service runs alone.
   #
-  # pmdoc and api sit apart because isolation is what made them fast: sharing a runner, the race
-  # binaries contended for the four vCPUs, and alone pmdoc fell from 1563.552 s to 1023.519 s and
-  # api from 1099.487 s to 746.718 s. The packages left in envoy-go-race are cheap enough to share
-  # one: the two heaviest of those measured there, the bus at 286.931 s and the listener at
-  # 365.787 s (run 40926978371), are a quarter and a third of the lane's bar of 1080 s, which is
-  # 60 % of a 30-minute step's own timeout, so a runner each would buy nothing and cost about
-  # 8,000 replayed runner minutes. Running the heavy packages apart also reads each one's seconds
-  # as its own job's, and leaves the others' numbers standing when one is red.
+  # api sits apart because isolation is what made it fast: sharing a runner, the race binaries
+  # contended for the four vCPUs, and alone api fell from 1099.487 s to 746.718 s. The packages
+  # left in envoy-go-race are cheap enough to share one: the two heaviest of those measured
+  # there, the bus at 286.931 s and the listener at 365.787 s (run 40926978371), are a quarter
+  # and a third of the lane's bar of 1080 s, which is 60 % of a 30-minute step's own timeout, so
+  # a runner each would buy nothing and cost about 8,000 replayed runner minutes. Running a heavy
+  # package apart also reads its seconds as its own job's, and leaves the others' numbers
+  # standing when one is red.
   #
-  # Only pmdoc installs Bun: its tests shell out to the generated TypeScript fixtures under
-  # internal/dispatch/pmdoc/gen (envoy-go's own "Check pmdoc fixtures are up to date" step), and
-  # render_readback_test.go refuses to run without bun in CI. Not that freshness check itself - a
-  # stale fixture is envoy-go's failure to catch, not a race. delivery's and the bus's NATS runs in
-  # the test process (internal/testnats), so no job here needs a container runtime of its own.
+  # pmdoc is not in this lane: its tests run plain only, in envoy-go's unit-test step
+  # (INFRA-1408). It sat here because LEGION-571's flakes - pmdoc's own under -race and load, not
+  # a race in production code - cost three review rounds when nothing ran the package under -race
+  # before a PR claimed it. Its product code is still race-instrumented wherever a race job
+  # compiles it, since envoy-go-race-docs imports pmdoc; what went is the second, race-built run
+  # of pmdoc's own tests.
+  #
+  # No job of this lane installs Bun: pmdoc's tests, which shell out to the generated TypeScript
+  # fixtures under internal/dispatch/pmdoc/gen and refuse to run without bun in CI
+  # (render_readback_test.go), were the only ones here that needed it, and they run in envoy-go
+  # now, beside its own "Check pmdoc fixtures are up to date" step. delivery's and the bus's NATS
+  # runs in the test process (internal/testnats), so no job here needs a container runtime of its
+  # own.
   #
   # Delivery, the Dispatch store, the bus, the listener, the registry store, the session cache and
   # kvwatch share this runner. The Dispatch store's tests (store_test.go:28, storetest.go:44) and
@@ -3327,41 +3371,6 @@ jobs:
           cache: false
       - name: Race-test delivery, the store, the bus, the listener, the registry store, the session cache and kvwatch
         run: go test -race -timeout 30m ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/ ./cmd/listener/ ./internal/store/ ./internal/session/ ./internal/kvwatch/...
-        working-directory: packages/envoy
-
-      - name: Report ci-ok when this is the run's last job
-        if: always()
-        uses: ./.github/actions/ci-ok-report
-        with:
-          changes: ${{ toJSON(needs.changes) }}
-          job-status: ${{ job.status }}
-
-  # pmdoc under the race detector, on a runner of its own (the lane's comment above says why). The
-  # one race job that installs Bun: its tests run pmdoc/gen's TypeScript through it. No Postgres:
-  # the package talks to no database. Its step is the one in the lane whose deadline is 40 minutes
-  # and not 30: the package measured 1023.519 s isolated, 94.8 % of the lane's bar of 1080 s,
-  # which is 60 % of a 30-minute step's timeout, and 1210 s under contention, so at 30 minutes it
-  # has no headroom at all; at 40 minutes its bar is 1440 s and it uses 71 % of it.
-  envoy-go-race-pmdoc:
-    needs: changes
-    if: needs.changes.outputs.envoy_go_race_pmdoc == 'true'
-    runs-on: ubuntu-24.04
-    # The step's -timeout 40m must fire before the runner cancels the job, so a hung test prints
-    # the dump that names it: about 1 minute of setup, up to 5 minutes to compile the race
-    # binaries, then the step's own 40 minutes, which is 46.
-    timeout-minutes: 50
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-bun
-      - run: bun install --frozen-lockfile
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: packages/envoy/go.mod
-          cache: false
-      - name: Race-test pmdoc
-        run: go test -race -timeout 40m ./internal/dispatch/pmdoc/...
         working-directory: packages/envoy
 
       - name: Report ci-ok when this is the run's last job
@@ -3423,8 +3432,8 @@ jobs:
   # spent on main at 14d907b6 (job 123461966609) - and sharing a 30-minute step with the other
   # five groups left it no headroom: that step died on go test's own deadline at job 123503246603.
   # Its own filter is the closure of this one package, not packages/envoy/**, so a change
-  # elsewhere in the module does not start this job. No Bun: no test file here runs it, and
-  # envoy-go-race's Bun is pmdoc's. It runs under -race because a read that walks a live document
+  # elsewhere in the module does not start this job. No Bun: no test file here runs it, and no
+  # job of this lane installs it. It runs under -race because a read that walks a live document
   # without its lock races the room's peers, which no ordinary run shows
   # (TestReadsOfALiveDocumentRunBesideItsPeers, internal/dispatch/docs/live_read_race_test.go:39,
   # LEGION-499).
@@ -3490,7 +3499,12 @@ jobs:
   # row starts a Dispatch server, drives it over HTTP and the document websocket and reads its
   # resident memory from /proc, and together they run past go test's default ten-minute deadline,
   # which took envoy-go red at 600 s (run 37116639565). They build only under the `memory` tag, so
-  # envoy-go's unit run leaves them out and this job runs them with a deadline of its own.
+  # envoy-go's unit run leaves them out and this job runs them with a deadline of its own. It runs
+  # only the tests the tag adds: `-tags memory ./cmd/dispatch` would run the package's untagged
+  # tests a second time, envoy-go's unit step having run them already, so the -run comes from
+  # .github/scripts/go-tagged-tests.sh, which reads the names off the source at run time. The
+  # assignment is a line of its own: under bash -e it carries the script's exit status, so an
+  # empty or refused list fails the step instead of running -run "", which matches every test.
   dispatch-memory:
     needs: changes
     if: needs.changes.outputs.dispatch_memory == 'true'
@@ -3519,7 +3533,9 @@ jobs:
           go-version-file: packages/envoy/go.mod
           cache: false
       - name: Memory tests of the Dispatch server
-        run: go test -tags memory -count=1 -timeout 60m -v ./cmd/dispatch
+        run: |
+          pattern=$(../../.github/scripts/go-tagged-tests.sh memory ./cmd/dispatch)
+          go test -tags memory -count=1 -timeout 60m -v -run "$pattern" ./cmd/dispatch
         working-directory: packages/envoy
 
       - name: Report ci-ok when this is the run's last job
@@ -3537,7 +3553,12 @@ jobs:
   # step runs under go test's default ten-minute package deadline, which the memory tests
   # already took red at 600 s (run 37116639565), and one row here waits out a durable hand-over
   # or a maintenance loop's tick, tens of seconds each. Each row's NATS runs in its own test
-  # process (internal/testnats), so the job needs no container runtime of its own.
+  # process (internal/testnats), so the job needs no container runtime of its own. It runs only
+  # the tests the tag adds: `-tags multiprocess ./cmd/dispatch` would run the package's untagged
+  # tests a second time, envoy-go's unit step having run them already, so the -run comes from
+  # .github/scripts/go-tagged-tests.sh, which reads the names off the source at run time. The
+  # assignment is a line of its own: under bash -e it carries the script's exit status, so an
+  # empty or refused list fails the step instead of running -run "", which matches every test.
   dispatch-multiprocess:
     needs: changes
     if: needs.changes.outputs.dispatch_multiprocess == 'true'
@@ -3566,7 +3587,9 @@ jobs:
           go-version-file: packages/envoy/go.mod
           cache: false
       - name: Two-process tests of the Dispatch server
-        run: go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/dispatch
+        run: |
+          pattern=$(../../.github/scripts/go-tagged-tests.sh multiprocess ./cmd/dispatch)
+          go test -tags multiprocess -count=1 -timeout 20m -v -run "$pattern" ./cmd/dispatch
         working-directory: packages/envoy
 
       - name: Report ci-ok when this is the run's last job
@@ -3580,13 +3603,19 @@ jobs:
   # drives two real envoy-listener binaries over a three-server NATS cluster, with a session
   # stand-in moved between the servers by lame-duck shutdowns and forced kills and three senders
   # publishing through the listener, and holds every message to reaching its session or failing
-  # its sender. It builds only under the `serverchange` tag, so envoy-go's unit run leaves it
-  # out, and it is a job of its own because it outlives that step: it sends for at least a minute
-  # and waits out each server's restart and the JetStream catch-up after it, which, beside the
-  # listener's other tests, is past what envoy-go's unit step holds under go test's default
-  # ten-minute package deadline. It runs the soak alone (-run TestServerChange), since envoy-go
-  # runs the package's untagged tests already; the cluster runs in the test process
-  # (internal/testnats), so it needs no container runtime and no database.
+  # its sender. It builds only under the `serverchange` tag, so no untagged run of the package
+  # builds it, and it is a job of its own because it is slow and serial: it sends for at least a
+  # minute and waits out each server's restart and the JetStream catch-up after it, which, beside
+  # the listener's other tests, would hold up the job that runs them - envoy-go-race, which runs
+  # cmd/listener under the race detector, where it would be slower still. It runs only the tests
+  # the serverchange tag adds, since envoy-go-race runs the package's untagged tests already
+  # (envoy-go's unit step leaves /cmd/listener$ out, for the lane to run under the detector): the
+  # -run comes from .github/scripts/go-tagged-tests.sh, which reads the names off the source at
+  # run time, so a second serverchange test added later runs here instead of being left out of a
+  # hand-written list. The assignment is a line of its own: under bash -e it carries the script's
+  # exit status, so an empty or refused list fails the step instead of running -run "", which
+  # matches every test. The cluster runs in the test process (internal/testnats), so the job needs
+  # no container runtime and no database.
   listener-server-change:
     needs: changes
     if: needs.changes.outputs.listener_server_change == 'true'
@@ -3611,7 +3640,9 @@ jobs:
           key: go-envoy-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-{0}-', runner.os) || '' }}
       - name: Server-change soak of the listener
-        run: go test -tags serverchange -count=1 -timeout 15m -v -run TestServerChange ./cmd/listener
+        run: |
+          pattern=$(../../.github/scripts/go-tagged-tests.sh serverchange ./cmd/listener)
+          go test -tags serverchange -count=1 -timeout 15m -v -run "$pattern" ./cmd/listener
         working-directory: packages/envoy
       - if: github.event_name == 'push' && success() && steps.go-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -3644,7 +3675,12 @@ jobs:
   # Postgres service and shape this copies, so that each runs only on what it reads: the broker's
   # closure (broker_multiprocess) shares little with the Dispatch server's
   # (dispatch_multiprocess). They need no NATS and no test-container pull - the broker starts
-  # nothing in a container - so neither step is here.
+  # nothing in a container - so neither step is here. The step runs only the tests the tag adds:
+  # `-tags multiprocess ./cmd/broker` would run the package's untagged tests a second time,
+  # envoy-go's unit step having run them already, so the -run comes from
+  # .github/scripts/go-tagged-tests.sh, which reads the names off the source at run time. The
+  # assignment is a line of its own: under bash -e it carries the script's exit status, so an
+  # empty or refused list fails the step instead of running -run "", which matches every test.
   broker-multiprocess:
     needs: changes
     if: needs.changes.outputs.broker_multiprocess == 'true'
@@ -3673,7 +3709,9 @@ jobs:
           go-version-file: packages/envoy/go.mod
           cache: false
       - name: Two-process tests of the secrets broker
-        run: go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/broker
+        run: |
+          pattern=$(../../.github/scripts/go-tagged-tests.sh multiprocess ./cmd/broker)
+          go test -tags multiprocess -count=1 -timeout 20m -v -run "$pattern" ./cmd/broker
         working-directory: packages/envoy
 
       - name: Report ci-ok when this is the run's last job
