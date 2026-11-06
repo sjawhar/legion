@@ -973,19 +973,24 @@ test("on a phone, a thread open over the Conversation holds the issue's read mar
   }
 });
 
-/** Sweeps the band above the turns in the page: at every 4 px step it scrolls, lets two frames
- *  pass so the pill's own scroll listener and the render React queues for it have both landed,
- *  and records where a tap at the centre of each control above the turns - the issue's header,
- *  its tabs and the All / Open / Closed filter - does not reach it as it should: a tab must take
- *  its own tap, and no control may lose its tap to `Jump to latest`. Controls whose centre is off
- *  screen, or clipped out of view by a scrolling ancestor (the issue tablist scrolls sideways at
- *  this width, so a tab past its edge is not on screen to tap at all), are not tapped. A step
- *  away from where the page settled that draws no pill is recorded too. */
+/** Sweeps the band from the top of the page down to `end` in the page: at every 4 px step it
+ *  scrolls, lets two frames pass so the pill's own scroll listener and the render React queues
+ *  for it have both landed, and records where a tap at the centre of a control does not reach
+ *  it as it should: a tab must take its own tap, and no control may lose its tap to `Jump to
+ *  latest`. Every control above the turns is tapped - the issue's header, its tabs and the All
+ *  / Open / Closed filter - and inside the turns the two that decide a suggestion, Accept and
+ *  Reject, which are what the pill took while it sat at the head of the list. The pill floats
+ *  at the foot now, where the list scrolls behind it as it does behind any floating control, so
+ *  a turn's quiet actions - Copy reference, Reply, Pin - pass under it and are not tapped.
+ *  Controls whose centre is off screen, or clipped out of view by a scrolling ancestor (the
+ *  issue tablist scrolls sideways at this width, so a tab past its edge is not on screen to tap
+ *  at all), are not tapped either. A step away from where the page settled that draws no pill is
+ *  recorded too. */
 async function tapsLostAcrossBand(
   page: Page,
-  band: { settled: number; turnsTop: number }
+  band: { end: number; settled: number }
 ): Promise<string[]> {
-  return page.evaluate(async ({ settled, turnsTop }) => {
+  return page.evaluate(async ({ end, settled }) => {
     const turns = document.querySelector('[aria-label="Conversation turns"]');
     if (turns === null) throw new Error("expected the Conversation's turns");
     const frame = () =>
@@ -995,7 +1000,7 @@ async function tapsLostAcrossBand(
     const pillBox = () =>
       document.querySelector('[data-testid="jump-to-latest"]')?.getBoundingClientRect();
     const lost: string[] = [];
-    for (let top = 1; top <= turnsTop; top += 4) {
+    for (let top = 1; top <= end; top += 4) {
       window.scrollTo(0, top);
       // One frame carries the scroll into layout and runs the pill's listener; a step that
       // changes whether the pill shows takes one more for the render React queued for it.
@@ -1014,7 +1019,10 @@ async function tapsLostAcrossBand(
         const box = control.getBoundingClientRect();
         const x = box.left + box.width / 2;
         const y = box.top + box.height / 2;
-        if (pill?.contains(control) || box.width === 0 || box.bottom > turnsTopNow) continue;
+        const label = control.getAttribute("aria-label");
+        const decides = label === "Accept suggestion" || label === "Reject suggestion";
+        if (pill?.contains(control) || box.width === 0) continue;
+        if (box.bottom > turnsTopNow && !decides) continue;
         if (x < 0 || x >= window.innerWidth || y < 0 || y >= window.innerHeight) continue;
         let clipped = false;
         for (
@@ -1045,20 +1053,33 @@ async function tapsLostAcrossBand(
   }, band);
 }
 
-// On a phone the issue's header, its tabs and the filters sit above the turns, the latest turn
+// On a phone the issue's header, its tabs and the filters sit above the turns, the newest turn
 // just under them, so a reader scrolling back up passes a band where they are on screen while
-// `Jump to latest` shows. The pill never rises above where the turns begin, so a tap on a tab, or
-// on any control above the turns, reaches it everywhere in that band.
+// `Jump to latest` shows. The pill is fixed at the foot there, above the docked composer, so
+// every control above the turns keeps its own tap through that band, and so does a decision on
+// a card: the newest card's Accept and Reject, the pair the pill took for itself while it sat
+// at the head of the list.
 // SLOW(>=2s): the band is swept 4 px at a time, a frame per step, and every control above the
-// turns is hit-tested at each one.
-test("on a phone, Jump to latest covers none of the issue's tabs or the controls above the turns @phone", async ({
+// turns, with the suggestion's decisions under it, is hit-tested at each one.
+test("on a phone, Jump to latest covers none of the issue's tabs, the controls above the turns, or a card's Accept and Reject @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({ project: "CORE", title: "Pill over the tabs" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "The quick brown fox",
+    title: "Pill over the tabs",
+  });
   for (let index = 0; index < 15; index += 1) {
     await createMessage(issue.key, { body: `Older turn ${index}` }, session);
   }
+  // The newest turn, so it is the first card under the band: a collapsed suggestion, whose
+  // Accept and Reject sit in the content column, where the pill was painted over them.
+  await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "quick" },
+    body: "Suggested replacement.",
+    suggestion: { replace_with: "swift" },
+  });
   const alice = await asUser(browser, "alice");
 
   try {
@@ -1068,18 +1089,24 @@ test("on a phone, Jump to latest covers none of the issue's tabs or the controls
     await expect(page.getByText("Older turn 14")).toBeVisible();
     const jump = page.getByTestId("jump-to-latest");
     const turns = page.getByRole("list", { name: "Conversation turns" });
+    await expect(page.getByRole("button", { name: "Accept suggestion" })).toBeVisible();
     // Where the page settled on the latest turn, the one place in the band with no pill.
     const settled = await page.evaluate(() => window.scrollY);
-    const turnsTop = await turns.evaluate(
-      (list) => list.getBoundingClientRect().top + window.scrollY
-    );
+    // The band ends where the newest card has passed under the pill, so every control on that
+    // card is hit-tested on its way, not only the header row the card opens with.
+    const end = await turns.evaluate((list) => {
+      const first = list.firstElementChild;
+      if (first === null) throw new Error("expected a first turn");
+      const box = first.getBoundingClientRect();
+      return box.bottom + window.scrollY;
+    });
     // Both ends of the band keep Playwright's own visibility check; the sweep between them runs
     // in the page, one round trip rather than three per step.
     await page.evaluate(() => window.scrollTo(0, 1));
     if (Math.abs(1 - settled) > 1) await expect(jump).toBeVisible();
-    const lost = await tapsLostAcrossBand(page, { settled, turnsTop });
-    await page.evaluate((y) => window.scrollTo(0, y), turnsTop);
-    if (Math.abs(turnsTop - settled) > 1) await expect(jump).toBeVisible();
+    const lost = await tapsLostAcrossBand(page, { end, settled });
+    await page.evaluate((y) => window.scrollTo(0, y), end);
+    if (Math.abs(end - settled) > 1) await expect(jump).toBeVisible();
     expect(lost).toEqual([]);
   } finally {
     await alice.close();

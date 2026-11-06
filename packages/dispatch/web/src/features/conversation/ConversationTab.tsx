@@ -1222,26 +1222,23 @@ export function ConversationTab({
           ))}
         </fieldset>
       </div>
-      {/* The pill takes an edge the docked composer leaves free, so it never covers the
-          composer's controls. Below `sm` the composer sits at the foot of the screen and grows
-          upward (a refusal's Retry or Discard draft with it), so the pill takes the top: it sits
-          where the cards begin, and sticks at the top of the screen once they scroll under it, so
-          it never rises over what is above them - the issue's header, its tabs and the filter.
-          Its box has no height, and `-mb-3` takes back the section's gap, so it moves nothing. From
-          `sm` the composer sticks to the top and the pill floats at the foot. A thread opened
-          full-screen covers the Conversation the pill acts on, and its own composer sits at the
-          foot, so the pill waits for Back. */}
+      {/* The pill floats at an edge the docked composer leaves free, out of the content column
+          at every width, so it covers neither the composer's controls nor the cards it would
+          otherwise sit over. Below `sm` the composer sits at the foot of the screen and grows
+          upward (a refusal's Retry or Discard draft with it), so the pill rides above whatever
+          height it publishes in `--foot-composer-inset` (`web/src/hooks/useFootInset.ts`), and
+          never below the phone's bottom bar; from `sm` the composer sticks to the top and the
+          pill keeps the foot it has there. A thread opened full-screen covers the Conversation
+          the pill acts on, and its own composer sits at the foot, so the pill waits for Back. */}
       {visible && phoneThread === undefined && !follow.atTop && shown.length > 0 ? (
-        <div className="sticky top-4 z-20 -mb-3 flex h-0 items-start justify-center sm:contents">
-          <button
-            className={`min-h-11 rounded-full px-4 text-sm font-semibold whitespace-nowrap shadow-lg sm:fixed sm:right-6 sm:bottom-36 sm:z-20 xl:bottom-24 ${primaryButtonBg} ${primaryButtonHoverBg}`}
-            data-testid="jump-to-latest"
-            onClick={follow.jumpToLatest}
-            type="button"
-          >
-            Jump to latest{unreadCount === 0 ? "" : ` · ${unreadCount} new`}
-          </button>
-        </div>
+        <button
+          className={`fixed right-6 bottom-[max(5rem,calc(var(--foot-composer-inset,0px)_+_1rem))] z-20 min-h-11 rounded-full px-4 text-sm font-semibold whitespace-nowrap shadow-lg sm:bottom-36 xl:bottom-24 ${primaryButtonBg} ${primaryButtonHoverBg}`}
+          data-testid="jump-to-latest"
+          onClick={follow.jumpToLatest}
+          type="button"
+        >
+          Jump to latest{unreadCount === 0 ? "" : ` · ${unreadCount} new`}
+        </button>
       ) : null}
       <ol
         aria-hidden={phoneThread === undefined ? undefined : true}
