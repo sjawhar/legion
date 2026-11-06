@@ -245,7 +245,7 @@ func TestTheBackgroundWaitWaitsForWorkStartedWhileItWaits(t *testing.T) {
 // handler's own context, and is mounted only under test hooks. A run whose context ends during the
 // delay never reaches its handler.
 func TestTheSlowWriteHookDelaysEveryKeyedRunOfItsPath(t *testing.T) {
-	handler, database, _ := newTestServer(t, testServerOptions{testHooks: true})
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{testHooks: true})
 	issue := createTestIssue(t, handler, "SLOW", "Slow writes")
 	path := "/api/v1/issues/" + issue + "/comments"
 	for name, body := range map[string]map[string]any{
@@ -266,6 +266,9 @@ func TestTheSlowWriteHookDelaysEveryKeyedRunOfItsPath(t *testing.T) {
 		}
 	}
 	arm(700)
+	// The bounds on the armed runs are lower ones, which a loaded runner cannot break: load can
+	// only lengthen what a run takes, so it cannot bring one in under its arm, and keyedHandlerLimit
+	// is ten minutes, so it cannot turn one into a 503 either.
 	for _, key := range []string{"slow-1", "slow-2"} {
 		started := time.Now()
 		if created := keyedRequest(t, handler, http.MethodPost, path, map[string]any{"body": key}, "alice", key); created.Code != http.StatusCreated {
@@ -288,11 +291,25 @@ func TestTheSlowWriteHookDelaysEveryKeyedRunOfItsPath(t *testing.T) {
 	if reached || cut.Code != http.StatusServiceUnavailable {
 		t.Fatalf("a run cut off inside the delay: reached=%v status=%d, want 503 with the handler never run", reached, cut.Code)
 	}
+	route := http.MethodPost + " " + path
+	armedRuns, armedWaited := served.slowWriteRunsOn(route)
+	if armedRuns != 2 {
+		t.Fatalf("the hook delayed %d runs of %s, waiting %v altogether, want the two armed runs",
+			armedRuns, route, armedWaited)
+	}
 	arm(0)
-	started := time.Now()
-	if created := keyedRequest(t, handler, http.MethodPost, path, map[string]any{"body": "disarmed"}, "alice", "fast"); created.Code != http.StatusCreated ||
-		time.Since(started) > 500*time.Millisecond {
-		t.Fatalf("a run once disarmed: status=%d after %v, want it at once", created.Code, time.Since(started))
+	if delay, stillArmed := served.slowWrites.Load(route); stillArmed {
+		t.Fatalf("%s is still armed for %v after delay_ms 0, want it disarmed", route, delay)
+	}
+	// No upper bound on how long the disarmed run takes: the row drives the handler in this
+	// process, so go test's own timeout is the guard against it hanging, and a wall-clock budget
+	// here would only fail a loaded runner.
+	if created := keyedRequest(t, handler, http.MethodPost, path, map[string]any{"body": "disarmed"}, "alice", "fast"); created.Code != http.StatusCreated {
+		t.Fatalf("a run once disarmed: status=%d body=%s, want 201", created.Code, created.Body.String())
+	}
+	if runs, waited := served.slowWriteRunsOn(route); runs != armedRuns {
+		t.Fatalf("the disarmed run went through the hook's delay: %s is at %d runs having waited %v, want the %d armed runs' %v untouched",
+			route, runs, waited, armedRuns, armedWaited)
 	}
 	var comments int
 	if err := database.Pool.QueryRow(context.Background(), `select count(*) from comments where issue_key = $1`, issue).Scan(&comments); err != nil {
