@@ -3,8 +3,9 @@
 // (releaseAllRoleClaims), which reads the roles the session holds from the watcher's copy of the
 // bucket and makes no bucket call to find them. The scan of every key of the role bucket that the
 // view replaced is still there as the fallback a view that cannot be served runs
-// (scanAllRoleClaims), and that scan is what answered the route 503 this change was filed on: it
-// costs one pass over the whole bucket, and a round trip per key in it, per deregistration.
+// (releaseAllRoleClaimsByScan), and that scan is what answered the route 503 this change was
+// filed on: it costs one pass over the whole bucket, and a round trip per key in it, per
+// deregistration.
 //
 // These cases are the three the issue's Verification document asks for before the merge. What
 // each turns on is a count or a holder, never a duration, except the one deadline a case needs to
@@ -421,11 +422,11 @@ func TestTheDeregistrationSweepsFallbackGoesPastAClaimItCannotReadAndFailsOnOneI
 		assertInterestMissing(t, reg, session)
 		// The line is the only record that a claim was left unread, so it must name which: an
 		// operator reading it has no other way to tell the role apart from the thousands the
-		// scan did read.
-		if !strings.Contains(logs.String(), "role registry left a claim it could not read to the role reaper") ||
-			!strings.Contains(logs.String(), "role="+unreadable) ||
-			!strings.Contains(logs.String(), "session_id="+session) {
-			t.Fatalf("the sweep's log names neither the unread claim %s nor the session %s:\n%s", unreadable, session, logs.String())
+		// scan did read. Both fields are read off that one line, because the fallback's own INFO
+		// line carries the session too and a check over the whole log would take it for this one.
+		line := logLine(t, logs, "role registry left a claim it could not read to the role reaper while releasing a session's claims")
+		if !strings.Contains(line, "role="+unreadable) || !strings.Contains(line, "session_id="+session) {
+			t.Fatalf("the sweep's line for the unread claim = %s; want it to name the claim %s and the session %s", line, unreadable, session)
 		}
 		// And the claim it could not read is still there for the role reaper, which is what the
 		// line says it was left to.

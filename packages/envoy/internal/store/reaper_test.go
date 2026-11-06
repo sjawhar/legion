@@ -4,28 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
-
-	natsgo "github.com/nats-io/nats.go"
-
-	"github.com/sjawhar/envoy/internal/bus"
 )
-
-// unreadableKeyValue fails the get of one key with err and passes every other call through, the
-// shape of a read a loaded bucket answers with a timeout rather than a refusal: nothing is wrong
-// with the key, so the next pass may well read it.
-type unreadableKeyValue struct {
-	natsgo.KeyValue
-
-	key string
-	err error
-}
-
-func (kv *unreadableKeyValue) Get(key string) (natsgo.KeyValueEntry, error) {
-	if key == kv.key {
-		return nil, kv.err
-	}
-	return kv.KeyValue.Get(key)
-}
 
 // logLine returns the first line of logs carrying msg, for a test that holds what one line says.
 func logLine(t *testing.T, logs *lockedBuffer, msg string) string {
@@ -60,8 +39,9 @@ func TestTheRoleClaimReaperGoesPastAClaimItCouldNotRead(t *testing.T) {
 	for _, role := range roles {
 		putRoleClaim(t, raw, role, "ses_gone")
 	}
-	failing := &unreadableKeyValue{KeyValue: raw, key: unreadable, err: errors.New("read timed out")}
-	reg.roleKV = bus.NewKeyValue(failing, reg.roleKV.WatchHandle(), reg.roleKV.Streams())
+	// The read fails the way a loaded bucket fails one key's: an ordinary error, not a refusal,
+	// so nothing says the next pass cannot read it.
+	countRoleBucketCalls(t, reg, &sweepRoleKeyValue{failGet: map[string]error{unreadable: errors.New("read timed out")}})
 
 	sweep, err := reg.ReapRoleClaims(func(string) bool { return false }, 0)
 	if err != nil {

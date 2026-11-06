@@ -75,10 +75,27 @@ func roleRevisions(kv bus.KeyValue, idle time.Duration, log *slog.Logger) (map[s
 // markers left out: nats.go's Keys runs its legacy watcher (bus.KeyValue says why none may run). An
 // empty bucket lists no key. A scan short of the bucket fails the caller rather than list part of
 // it, where nats.go's Keys would hand over what had arrived when its watcher gave up, so a sweep
-// never takes a partial list for every claim.
+// never takes a partial list for every claim. It is roleKeysUntil run to the end of the bucket:
+// a caller with no context to abandon it by (the role reaper's pass) waits for the whole list.
 func (r *Registry) roleKeys() ([]string, error) {
+	return r.roleKeysUntil(context.Background())
+}
+
+// roleKeysUntil is roleKeys for a caller whose listing may be abandoned: the same scan, refusing
+// at the first key it is handed once ctx has ended. The scan must end there because it has a
+// context of its own (kvwatch.ScanExistingKeys builds one), so a scan its caller walked away from
+// goes on holding an ordered consumer and appending to a slice nobody reads until the bucket's
+// last key arrives or its idle bound elapses (kvwatch.ScanIdleTimeout, 10 s), and the client's
+// retry meanwhile starts a second scan of the whole bucket - against the bucket already too far
+// behind to serve the claim view, which is the only reason this listing runs at all. The error a
+// visit returns ends the scan, and the scan then stops and drains its watcher (kvwatch.drainScan),
+// so the listing costs the bucket nothing past the answer its caller already has.
+func (r *Registry) roleKeysUntil(ctx context.Context) ([]string, error) {
 	var keys []string
 	_, err := kvwatch.ScanExistingKeys(r.roles(), jetstream.AllKeys, "role claims", kvwatch.ScanIdleTimeout, r.logger(), func(entry kvwatch.Entry) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		keys = append(keys, entry.Key)
 		return nil
 	}, jetstream.MetaOnly(), jetstream.IgnoreDeletes())
@@ -330,7 +347,7 @@ func (r *Registry) releaseRoleClaims(ctx context.Context, sessionID string, topi
 // has a holder nothing can tell, so it is left to the role reaper, which deletes it, or skips one
 // no KV call can delete.
 func (r *Registry) releaseRoleClaim(ctx context.Context, sessionID, role string) error {
-	claim, entry, err := r.roleClaim(ctx, role)
+	claim, _, err := r.roleClaim(ctx, role)
 	if errors.Is(err, bus.ErrRefused) {
 		r.logger().Warn("role registry left a stored claim it cannot read to the role reaper", slog.Int("key_bytes", len(role)), slog.String("error", err.Error()))
 		return nil
@@ -338,24 +355,26 @@ func (r *Registry) releaseRoleClaim(ctx context.Context, sessionID, role string)
 	if err != nil {
 		return err
 	}
-	return r.releaseReadRoleClaim(ctx, sessionID, role, claim, entry)
+	return r.releaseReadRoleClaim(ctx, sessionID, role, claim)
 }
 
-// releaseReadRoleClaim deletes the claim a read of role has just returned - entry as roleClaim
-// read it and claim as it decoded it - when sessionID holds it, so a caller that has read the
-// claim already releases it without reading it again. A nil entry is a role no record claims, and
-// a claim naming another holder is not this session's to release; neither is touched. The delete
-// is conditional on the revision read and waits no longer than ctx (bus.Bounded). A delete ctx
+// releaseReadRoleClaim deletes the claim a read of role has just returned, as roleClaim decoded
+// it, when sessionID holds it, so a caller that has read the claim already releases it without
+// reading it again. A zero revision is a role no record claims: roleClaim stamps on every claim
+// the revision it was read at, and the bucket's revisions start at one, so only the zero claim it
+// returns for a key the bucket does not hold carries none. Such a role, and a claim naming
+// another holder, are not this session's to release; neither is touched. The delete is
+// conditional on the revision read and waits no longer than ctx (bus.Bounded). A delete ctx
 // abandoned may still land after this answer, and that is safe: it deletes only the revision it
 // read, sessionID's claim, which the caller asked to release, and a claim written since is kept.
-func (r *Registry) releaseReadRoleClaim(ctx context.Context, sessionID, role string, claim RoleClaim, entry nats.KeyValueEntry) error {
-	if entry == nil || claim.HolderSessionID != sessionID {
+func (r *Registry) releaseReadRoleClaim(ctx context.Context, sessionID, role string, claim RoleClaim) error {
+	if claim.Revision == 0 || claim.HolderSessionID != sessionID {
 		return nil
 	}
 	epoch := r.roleViewEpoch()
 	roles := r.roles()
 	_, answered, err := bus.Bounded(ctx, func() (struct{}, error) {
-		return struct{}{}, roles.Delete(role, nats.LastRevision(entry.Revision()))
+		return struct{}{}, roles.Delete(role, nats.LastRevision(claim.Revision))
 	})
 	if !answered {
 		return fmt.Errorf("release role %s's claim held by %s: %w", role, sessionID, err)
@@ -364,7 +383,7 @@ func (r *Registry) releaseReadRoleClaim(ctx context.Context, sessionID, role str
 		return err
 	}
 	if err == nil {
-		r.forgetRoleHolder(role, entry.Revision(), epoch)
+		r.forgetRoleHolder(role, claim.Revision, epoch)
 	}
 	return nil
 }
@@ -379,18 +398,33 @@ func (r *Registry) releaseReadRoleClaim(ctx context.Context, sessionID, role str
 // a claim. A failure is reported retained, its error naming the release.
 //
 // The claim's read and its conditional delete each wait no longer than ctx (bus.Bounded): an HTTP
-// route passes its request's own context, role delivery and the reaper context.Background(). A
-// delete ctx abandoned may still land after this answer. That is safe to leave running: it deletes
-// the claim only if the bucket still holds the very revision it read, naming sessionID, whom the
-// caller has just found gone from the session bucket, so at worst a lapsed holder's claim is
-// released a moment after the caller was told the bus did not answer, and a fresh claim that
-// landed meanwhile is never touched.
+// route passes its request's own context, role delivery and the reaper context.Background(). It
+// is the read-then-release wrapper over releaseReadExpiredRoleClaim, which a caller holding the
+// claim already (ReapRoleClaims) calls instead.
 func (r *Registry) ReleaseExpiredRoleClaim(ctx context.Context, role, sessionID string, sessionTTL time.Duration) (ExpiredRoleClaimRelease, error) {
-	claim, entry, err := r.roleClaim(ctx, role)
+	claim, _, err := r.roleClaim(ctx, role)
 	if err != nil {
 		return ExpiredRoleClaimRetained, fmt.Errorf("release role %s's expired claim held by %s: %w", role, sessionID, err)
 	}
-	if entry == nil {
+	return r.releaseReadExpiredRoleClaim(ctx, role, sessionID, claim, sessionTTL)
+}
+
+// releaseReadExpiredRoleClaim is ReleaseExpiredRoleClaim over a claim the caller has read
+// already: the holder's grace and the conditional delete, with no read of its own, so a reaper
+// pass that read the claim to find its holder gone spends two bucket calls on an expired claim
+// rather than three (ReapRoleClaims). A zero revision is a role no record claims, as it is for
+// releaseReadRoleClaim, and reports the claim missing.
+//
+// The delete is conditional on the revision the caller's read returned, so a holder that claimed
+// the role again between that read and this delete keeps the role and is reported
+// ExpiredRoleClaimSuperseded, exactly as one that claimed it again after a read made here would
+// be. A delete ctx abandoned may still land after this answer. That is safe to leave running: it
+// deletes the claim only if the bucket still holds the very revision that read returned, naming
+// sessionID, whom the caller has just found gone from the session bucket, so at worst a lapsed
+// holder's claim is released a moment after the caller was told the bus did not answer, and a
+// fresh claim that landed meanwhile is never touched.
+func (r *Registry) releaseReadExpiredRoleClaim(ctx context.Context, role, sessionID string, claim RoleClaim, sessionTTL time.Duration) (ExpiredRoleClaimRelease, error) {
+	if claim.Revision == 0 {
 		return ExpiredRoleClaimMissing, nil
 	}
 	if claim.HolderSessionID != sessionID {
@@ -399,17 +433,17 @@ func (r *Registry) ReleaseExpiredRoleClaim(ctx context.Context, role, sessionID 
 	r.mu.RLock()
 	restoredRevision, restored := r.restoredRoleRevisions[role]
 	r.mu.RUnlock()
-	if restored && restoredRevision == entry.Revision() && sessionTTL > 0 && r.now().Sub(r.openedAt) < sessionTTL {
+	if restored && restoredRevision == claim.Revision && sessionTTL > 0 && r.now().Sub(r.openedAt) < sessionTTL {
 		return ExpiredRoleClaimRetained, nil
 	}
 	epoch := r.roleViewEpoch()
 	roles := r.roles()
-	_, _, err = bus.Bounded(ctx, func() (struct{}, error) {
-		return struct{}{}, roles.Delete(role, nats.LastRevision(entry.Revision()))
+	_, _, err := bus.Bounded(ctx, func() (struct{}, error) {
+		return struct{}{}, roles.Delete(role, nats.LastRevision(claim.Revision))
 	})
 	switch {
 	case err == nil:
-		r.forgetRoleHolder(role, entry.Revision(), epoch)
+		r.forgetRoleHolder(role, claim.Revision, epoch)
 		return ExpiredRoleClaimReleased, nil
 	case errors.Is(err, nats.ErrKeyNotFound):
 		return ExpiredRoleClaimMissing, nil
@@ -432,18 +466,20 @@ func (r *Registry) ReleaseExpiredRoleClaim(ctx context.Context, role, sessionID 
 // and every release that pass makes leaves the view (forgetRoleHolder), so the sweep that follows
 // reads no claim twice. A claim in neither source - one another listener wrote that this
 // listener's watch has not delivered, or a copy up to the stale bound behind the bucket - is left
-// to the role claim reaper (ReapRoleClaims), which releases it once its holder is gone.
+// to the role claim reaper (ReapRoleClaims), which releases it once its holder is gone; a session
+// that deregisters and goes on heartbeating (an unsubscribe-all) never becomes a gone holder, so
+// a claim missed here stands for the rest of that session's life, where the scan of the whole
+// bucket this view replaced released it at the deregistration itself.
 //
 // A view that cannot be served (ErrRoleViewNotReady) names no roles at all, which is not the
 // answer that the session holds none, so a deregistration it refuses falls back to
-// scanAllRoleClaims, the scan of the bucket itself.
+// releaseAllRoleClaimsByScan, the scan of the bucket itself.
 func (r *Registry) releaseAllRoleClaims(ctx context.Context, sessionID string) error {
 	roles, err := r.RolesHeldBy(sessionID)
-	if errors.Is(err, ErrRoleViewNotReady) {
-		return r.scanAllRoleClaims(ctx, sessionID)
-	}
+	// RolesHeldBy refuses only with ErrRoleViewNotReady - RoleViewErr's error is the one error it
+	// has - and the scan is the answer to any refusal, so no refusal releases nothing silently.
 	if err != nil {
-		return err
+		return r.releaseAllRoleClaimsByScan(ctx, sessionID)
 	}
 	for _, role := range roles {
 		if err := r.releaseRoleClaim(ctx, sessionID, role); err != nil {
@@ -453,16 +489,17 @@ func (r *Registry) releaseAllRoleClaims(ctx context.Context, sessionID string) e
 	return nil
 }
 
-// scanAllRoleClaims releases every claim sessionID holds that the role bucket holds a key for,
-// read from one scan of those keys. It is releaseAllRoleClaims' fallback, so it runs only while
-// the role claim view cannot say which roles the session holds, and it logs one INFO line naming
-// the session and carrying RoleViewErr's reason each time it does: a listener whose view is not
-// serving then says so on every deregistration that pays for the scan, rather than only in
-// /healthz.
+// releaseAllRoleClaimsByScan releases every claim sessionID holds that the role bucket holds a
+// key for, read from one scan of those keys. It is releaseAllRoleClaims' fallback, so it runs
+// only while the role claim view cannot say which roles the session holds, and it logs one INFO
+// line naming the session and carrying RoleViewErr's reason each time it does: a listener whose
+// view is not serving then says so on every deregistration that pays for the scan, rather than
+// only in /healthz.
 //
-// The scan itself runs under bus.Bounded, so the fallback waits no longer than the caller's
-// context: roleKeys takes none of its own, and an unbounded scan inside an HTTP handler is what
-// holds a deregistration past the route's budget.
+// The scan itself runs under bus.Bounded over roleKeysUntil, so the fallback waits no longer than
+// the caller's context and the listing it walks away from ends there too: an unbounded scan
+// inside an HTTP handler is what holds a deregistration past the route's budget, and one left
+// running past it reads the bucket for a caller that is gone.
 //
 // Each claim is read on its own. One stored under a key NATS refuses (bus.ErrRefused) has a
 // holder nothing can tell, so it is left to the role reaper and the scan goes on, as
@@ -472,7 +509,7 @@ func (r *Registry) releaseAllRoleClaims(ctx context.Context, sessionID string) e
 // names the role it was reading, the wording the route reports. A claim it did read is the
 // session's to release, and a delete that fails leaves a claim the session holds unreleased, so
 // that error fails the sweep.
-func (r *Registry) scanAllRoleClaims(ctx context.Context, sessionID string) error {
+func (r *Registry) releaseAllRoleClaimsByScan(ctx context.Context, sessionID string) error {
 	// The reason is read again here rather than carried in from the refused read, so the line
 	// names the view's state as of itself; a view that became servable in between leaves none.
 	reason := "the view became servable after the read that refused"
@@ -483,17 +520,21 @@ func (r *Registry) scanAllRoleClaims(ctx context.Context, sessionID string) erro
 		slog.String("session_id", sessionID),
 		slog.String("reason", reason),
 	)
-	keys, answered, err := bus.Bounded(ctx, r.roleKeys)
-	if !answered {
+	keys, answered, err := bus.Bounded(ctx, func() ([]string, error) { return r.roleKeysUntil(ctx) })
+	if !answered || err != nil {
 		return fmt.Errorf("list the role bucket's keys to release %s's claims: %w", sessionID, err)
 	}
-	if err != nil {
-		return err
-	}
 	for _, role := range keys {
-		claim, entry, err := r.roleClaim(ctx, role)
+		claim, _, err := r.roleClaim(ctx, role)
 		if errors.Is(err, bus.ErrRefused) {
-			r.logger().Warn("role registry left a stored claim it cannot read to the role reaper", slog.Int("key_bytes", len(role)), slog.String("error", err.Error()))
+			// The key, not the role, is why the call was refused, and the session says which
+			// deregistration met it: releaseRoleClaim's line is the same refusal on a release of
+			// one named role, and an operator must be able to tell the two apart.
+			r.logger().Warn("role registry left a stored claim it cannot read to the role reaper while releasing a session's claims",
+				slog.String("session_id", sessionID),
+				slog.Int("key_bytes", len(role)),
+				slog.String("error", err.Error()),
+			)
 			continue
 		}
 		if err != nil {
@@ -507,7 +548,7 @@ func (r *Registry) scanAllRoleClaims(ctx context.Context, sessionID string) erro
 			)
 			continue
 		}
-		if err := r.releaseReadRoleClaim(ctx, sessionID, role, claim, entry); err != nil {
+		if err := r.releaseReadRoleClaim(ctx, sessionID, role, claim); err != nil {
 			return err
 		}
 	}

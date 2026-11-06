@@ -131,7 +131,9 @@ func (r *Registry) deleteInterestAt(ctx context.Context, sessionID string) (bool
 // pass. The counts travel together because neither reads on its own: a pass that reaped one
 // claim is an idle fleet or a bucket refusing most of its reads, and only the pair tells those
 // apart. A claim stored under a key NATS refuses on every call is not counted skipped: no pass
-// will ever read or delete it, so Skipped stays the count of what a later pass can still do.
+// will ever read or delete it. Skipped is otherwise the count of what a later pass can still do,
+// short of the stored record this build cannot decode (ErrMalformedRoleClaim), which reads the
+// same every pass and so is counted and logged on each of them for as long as it is stored.
 type RoleClaimSweep struct {
 	Reaped  int
 	Skipped int
@@ -154,6 +156,10 @@ type RoleClaimSweep struct {
 // that lasts leaves them unswept for as long as it does. Listing the bucket (roleKeys) is the one
 // failure that still ends the pass, because a pass over part of the bucket is not the pass over
 // every role its counts would claim it was.
+//
+// An expired claim costs two bucket calls, the read here and the conditional delete: the release
+// is handed the claim this pass read (releaseReadExpiredRoleClaim) rather than reading it again,
+// because a pass runs over the whole bucket on every interval.
 func (r *Registry) ReapRoleClaims(isAlive func(string) bool, sessionTTL time.Duration) (RoleClaimSweep, error) {
 	roles, err := r.roleKeys()
 	if err != nil {
@@ -183,7 +189,7 @@ func (r *Registry) ReapRoleClaims(isAlive func(string) bool, sessionTTL time.Dur
 		if claim.HolderSessionID == "" || isAlive(claim.HolderSessionID) {
 			continue
 		}
-		release, err := r.ReleaseExpiredRoleClaim(context.Background(), role, claim.HolderSessionID, sessionTTL)
+		release, err := r.releaseReadExpiredRoleClaim(context.Background(), role, claim.HolderSessionID, claim, sessionTTL)
 		if err != nil {
 			r.logger().Warn("role reaper skipped a claim it could not release", slog.String("role", role), slog.String("holder_session_id", claim.HolderSessionID), slog.String("error", err.Error()))
 			sweep.Skipped++
@@ -219,6 +225,11 @@ func (r *Registry) StartReaper(ctx context.Context, live func(sessionID string) 
 // channel it returns is closed once it has returned, as StartReaper's is. Each pass logs what it
 // reaped beside what it skipped, since only a reaper whose failures are visible from its own line
 // can be read as the backstop it is (RoleClaimSweep).
+//
+// A pass that skipped anything logs that line at WARN, because a pass goes on past the failures
+// that once ended it with an ERROR: a sweep that read nothing it swept - every role failed, the
+// backstop doing nothing at all - is otherwise an INFO line every interval and nothing above it
+// anywhere.
 func (r *Registry) StartRoleClaimReaper(ctx context.Context, isAlive func(string) bool, interval, sessionTTL time.Duration) <-chan struct{} {
 	return everyInterval(ctx, interval, func() {
 		sweep, err := r.ReapRoleClaims(isAlive, sessionTTL)
@@ -226,7 +237,11 @@ func (r *Registry) StartRoleClaimReaper(ctx context.Context, isAlive func(string
 			r.logger().Error("role claim reaper cycle failed", slog.String("error", err.Error()))
 			return
 		}
-		r.logger().Info("role claim reaper cycle", slog.Int("reaped", sweep.Reaped), slog.Int("skipped", sweep.Skipped))
+		cycle := r.logger().Info
+		if sweep.Skipped > 0 {
+			cycle = r.logger().Warn
+		}
+		cycle("role claim reaper cycle", slog.Int("reaped", sweep.Reaped), slog.Int("skipped", sweep.Skipped))
 	})
 }
 
