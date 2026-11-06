@@ -18,6 +18,7 @@ module: envoy
 related_issues:
   - "#235"
   - "#1269"
+  - "#2404"
 symptoms:
   - "Pulumi deploy timeout waiting for health check"
   - "health endpoint unreachable during NATS connection"
@@ -39,13 +40,14 @@ orchestrators (Pulumi, Kubernetes) time out and kill the container.
 1. config.Load()           — synchronous, fast
 2. net.Listen("tcp", addr) — bind port in main goroutine (deterministic)
 3. Build HTTP mux           — /healthz always available, /v1/* and webhooks each behind a gate
-4. go server.Serve(ln)      — HTTP live immediately, /healthz returns {"status":"starting"}
-5. Slow init in main()      — NATS connect, CI store open, the webhook gate opens, then the
-                              other stores open and their caches warm
+4. go server.Serve(ln)      — HTTP live immediately, /healthz answers 503 {"status":"starting"}
+5. Slow init in main()      — NATS connect (retried every 2 s until NATS answers), CI store open,
+                              the webhook gate opens, then the listener state bucket and the other
+                              stores open and their caches warm
 6. role lane, v1Gate.open,  — the role lane subscribes, the /v1 gate opens onto the stores, the
-   bind, deps.Store            durable binds (polled every 2 s for up to 135 s), then the
-                              atomic publish turns /healthz healthy
-7. log.Fatal(<-fatal)        — block on HTTP server error channel
+   lease and receive loop      delivery lease and the durable's receive loop start, then the
+   start, deps.Store           atomic publish turns /healthz 200, as the active pod or a standby
+7. select on fatal/signal   — block on HTTP server error channel or SIGTERM, then shut down
 ```
 
 **Why `net.Listen` + `server.Serve(ln)` instead of `ListenAndServe`**: `ListenAndServe`
@@ -65,16 +67,18 @@ type listenerDeps struct {
 }
 ```
 
-The listener exits when the interest registry, the session registry or the CI store cannot
-open, so a `listenerDeps` exists only with every store open. The `/v1` handlers take it as a
-plain `*listenerDeps`, and the webhook handlers take the only two things they use, the NATS
-client and the CI store; each is built once, after what it takes is open: no handler loads a
-pointer on each request, and none can be constructed over a dependency that is not there.
+The listener does not serve until the interest registry, the session registry and, with the GitHub
+route, the CI store are open: an open that fails for want of NATS is retried every 2 s, and one the
+NATS user's grant refuses ends the start with an ERROR naming the bucket, so a `listenerDeps`
+exists only with every store open. The `/v1` handlers take it as a plain `*listenerDeps`, and the
+webhook handlers take the only two things they use, the NATS client and the CI store; each is
+built once, after what it takes is open: no handler loads a pointer on each request, and none can
+be constructed over a dependency that is not there.
 
 **Only what answers during startup reads an atomic pointer.** `/healthz` and the metrics
-gauges run before NATS is up, so they read `deps atomic.Pointer[listenerDeps]`, nil until the
-durable binds at the end of phase 6, which is their "starting" sentinel. The NATS consumer
-callback captures the initialized locals directly.
+gauges run before NATS is up, so they read `deps atomic.Pointer[listenerDeps]`, nil until main
+publishes it at the end of phase 6, once the receive loop has started, which is their "starting"
+sentinel. The receive loop delivers through the initialized locals directly.
 
 ## The Starting Gate
 
@@ -105,13 +109,13 @@ listener's only record of a caller it turned away. Once NATS and the CI store ar
 `openWebhooks` builds the webhook handlers and opens the webhook gate onto them. In phase 6, once
 the interest and session caches are warm, the role lane subscribes and `openV1Routes` builds the
 `/v1` routes over the stores and opens the `/v1` gate onto them, logging `envoy-listener /v1 open`
-with `since_listening_ms`. Neither gate waits for the durable consumer's bind: no webhook and no
-`/v1` handler reads the durable, and during a rolling deploy the bind waits out the task being
-replaced while the load balancer already sends the replacement webhooks and callers that resolve
-the listener's name already reach it. GitHub does not redeliver a refused delivery, and a refused
-`/v1` call is a failed Dispatch delivery or a lost publish. The role lane opening early forwards no
-role message twice: both tasks of a machine are one core-NATS queue group, and NATS hands each
-message to one member.
+with `since_listening_ms`. Neither gate waits for the durable consumer: no webhook and no `/v1`
+handler reads the durable, and a machine id runs an active pod and standbys
+(`packages/envoy/cmd/listener/README.md`), every one of which serves the webhooks and `/v1` while
+only the holder of the machine's delivery lease receives the durable. GitHub does not redeliver a
+refused delivery, and a refused `/v1` call is a failed Dispatch delivery or a lost publish. The role
+lane opening on every pod forwards no role message twice: every pod of a machine is in one
+core-NATS queue group, and NATS hands each message to one member.
 
 ```go
 webhookGate, v1Gate := newStartingGate("webhook", logger), newStartingGate("v1", logger)
@@ -123,49 +127,55 @@ mux.Handle("/v1/", apiAuth(apiToken, apiVerifier, logger, v1Gate))
 openWebhooks(webhookGate, hooks, client, ciStore)
 // ... phase 6, once the interest and session caches are warm:
 openV1Routes(v1Gate, ready, cfg.MachineID, logger, listeningAt)
-bind, err := bindListenerDurable(stopping, client, consumer, handler, logger, durableBindInterval, durableBindDeadline)
-// ... then deps.Store(ready)
+deliveryLease.Start(leaseCtx)
+receiver.Start()
+deps.Store(ready)
 ```
 
-`TestTheV1APIIsServedWhileAnotherTaskHoldsTheDurable` runs the listener binary against a durable
-another subscriber holds and requires a webhook, `/v1` and the role lane to be served while
-`/healthz` still says `starting`, until the holder lets go and the listener turns healthy.
-`TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine` runs two listeners of one machine
-id and requires each of 64 role messages to reach its holder once, split across both tasks.
+`TestTheV1APIIsServedWhileAPreLeaseBuildHoldsTheDurable` runs the listener binary against a
+durable another subscriber holds without the lease and requires a webhook, `/v1` and the role lane
+to be served, with `/healthz` 200 as a standby waiting for that binding, until the holder lets go
+and the listener turns active. `TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine`
+runs two listeners of one machine id and requires each of 64 role messages to reach its holder
+once, split across both.
 
-**Publish `deps` last.** Storing `deps` is what turns `/healthz` healthy, so it comes after both
-gates open and after the durable binds: `/healthz` is healthy only when every route serves and the
-durable delivers. Healthy before the bind would let a replacement that cannot bind read as ready,
-and ECS would stop the task still delivering; a 503 instead of `starting` would never let ECS stop
-the old task, so the replacement could never bind.
+**Publish `deps` last.** Storing `deps` is what turns `/healthz` from `503 starting` to `200`, so it
+comes after both gates open and after the receive loop starts: `/healthz` is 200 only when every
+route serves. It does not wait for the lease or the durable: a standby that serves is ready, and a
+readiness probe must send it traffic, or a rolling deploy could never make the replacement ready
+while the old pod still delivers.
 
 ## Health States
 
 | Phase | `/healthz` | Body | Meaning |
 |-------|-----------|------|---------|
-| Starting | 200 | `{"status":"starting"}` | Alive, init in progress — don't restart; webhooks answer 503 until NATS and the CI store are open, `/v1/*` until the interest and session caches are warm too; both are served while the durable consumer binds, which `starting` alone waits for |
-| Healthy | 200 | `{"status":"healthy"}` | NATS connected, fully operational; `/v1/*` and webhooks are open |
-| Degraded | 200 | `{"status":"degraded","error":"..."}` | A KV dependency or the durable-consumer lookup failed transiently; NATS reconnect and the monitor retry |
-| Unhealthy | 503 | `{"status":"unhealthy","error":"..."}` | NATS, the subscription, a KV watcher or the durable consumer is gone |
+| Starting | 503 | `{"status":"starting"}` | Up, init in progress: NATS connecting, caches warming or the OIDC issuer's discovery pending. Webhooks answer 503 until NATS and the CI store are open, `/v1/*` until the interest and session caches are warm too |
+| Active | 200 | `{"status":"healthy","role":"active",...}` | Serving, and this pod receives the durable; the body carries its lag |
+| Standby | 200 | `{"status":"healthy","role":"standby","active_instance":...}` | Serving; another pod of the machine id holds the lease |
+| Degraded | 200 | `{"status":"degraded","error":"..."}` | A KV dependency or the durable's lag read failed transiently (NATS reconnect and the monitor retry), or this pod is the machine's deliverer and does not receive the durable yet: it holds the delivery lease, runs without one, has read no holder at all, or the lease record still names it while its renewals have lapsed. Nothing of the durable reaches a session until it receives, so no such answer is healthy; it stays 200, so a readiness probe keeps the pod in service |
+| Unhealthy | 503 | `{"status":"unhealthy","error":"..."}` | NATS, the role subscription, a KV watcher or, on the active pod, the subscription or the durable consumer is gone |
 
-Returning **200 during startup** is deliberate — it tells the orchestrator "I'm alive, keep
-waiting" without triggering a container restart. Startup is not short. The NATS connect makes up to
-10 attempts with a 5 s timeout each, 1 s apart (`internal/bus/nats.go`), so an unreachable NATS
-keeps the listener `starting` for about a minute before `log.Fatal`. The interest and session
-cache warm-ups are bounded at 30 s each. The durable's bind is polled every 2 s for up to 135 s
-(`bindListenerDurable`, `cmd/listener/durable.go`), so a rolling deploy that waits for the old task's
-binding stays `starting` until the old task stops, while `/v1` and the webhooks already serve.
+Every answer comes within 5 s (`healthzDeadline`): a check still running then makes the answer
+503, so a readiness probe with a longer timeout always gets one.
 
-Because a starting listener answers 200, a start that cannot succeed must end rather than wait:
-a deploy that trusts the 200 would stop the old task for a replacement that never serves. A
-durable the listener refuses (an idle heartbeat or an ack policy NATS cannot change in place) is
-the one subscribe failure no retry can fix, so the listener checks its durable right after the NATS
-connect, before the cache warm-ups, and on a refusal exits 1 at once instead of retrying.
+Returning **503 during startup** is deliberate since #2404: `/healthz` is the readiness of
+every pod of a machine id, and a pod that answered 200 before it served would be sent traffic it
+refuses. Startup is not short, and it never gives up on NATS: the connect is retried every 2 s for
+as long as NATS does not answer, so a listener started before its NATS stays up and `starting`
+rather than exiting. The interest and session cache warm-ups are bounded at 30 s each. A liveness
+probe therefore must not fail on a 503: it checks only that the process answers (curl without
+`-f`, with a time limit above the 5 s deadline), and the readiness probe holds traffic back.
 
-**A 200 is liveness, not readiness.** Anything that calls `/v1` after starting the listener — a
-test harness, an e2e script — waits for the `"healthy"` body, or for a 200 from a `/v1` route,
-never for a bare 200 from `/healthz`. The container smoke waited for a bare 200 and flaked on a
-slow runner: its `/v1` subtests ran inside the 503 window (sjawhar/legion#1269).
+A start that cannot succeed still ends rather than waits: a durable the listener refuses (an idle
+heartbeat or an ack policy NATS cannot change in place) is the one durable failure no retry can
+fix, so the listener checks its durable right after the NATS connect, before the cache warm-ups,
+and on a refusal exits 1 at once; so does a store bucket the NATS user's grant refuses.
+
+**A 200 means the pod serves.** Before #2404 the listener answered 200 `starting` from the
+moment its port was bound, and anything that called `/v1` after starting it had to wait for the
+`"healthy"` body: the container smoke waited for a bare 200 and flaked on a slow runner, its `/v1`
+subtests running inside the 503 window (sjawhar/legion#1269). Waiting for `"healthy"` is still the
+check that also says which role the pod took.
 
 ## Fatal Error Routing
 

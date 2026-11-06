@@ -48,8 +48,8 @@ type SessionLookup interface {
 	// Windows.EntryState in Buckets.
 	EntryState(entry session.SessionEntry) session.State
 	// LastSeen is the last registration this lookup can still name for a session whose record has
-	// gone, and 0 when nothing here can date it.
-	LastSeen(sessionID string) int64
+	// gone, read within ctx, and 0 when nothing here can date it.
+	LastSeen(ctx context.Context, sessionID string) int64
 }
 
 // Windows are the session windows a holder's record is judged by and the clock it is judged at:
@@ -226,7 +226,7 @@ func ResolveHolderFrom(ctx context.Context, claims ClaimStore, firstHolder func(
 	}
 	lastSeen := entry.UpdatedAt
 	if lastSeen == 0 {
-		lastSeen = sessions.LastSeen(holder)
+		lastSeen = sessions.LastSeen(ctx, holder)
 	}
 	// The claim record stands whatever the holder's state: nothing here releases one. So the
 	// revision read is the revision a conditional claim can be made against, on Lapsed as on

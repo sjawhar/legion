@@ -108,8 +108,10 @@ type SessionConsumers struct {
 // ConnectSessionConsumers opens SessionConsumers on a Client of its own, named
 // "envoy-session-consumers" unless options name it: it connects as Connect does, as the NATS user,
 // through the proxy and under the remote-NATS rule the environment names, reconnects forever, and
-// dials a replacement for a connection nats.go gave up on. A pull (Pull) started on a connection
-// that was replaced ends with an error, and its caller pulls again.
+// dials a replacement for a connection nats.go gave up on. A pull (Pull) in progress at a
+// connection event of that client -- a disconnect, a reconnect in place, a close, or a connection
+// dialled to replace a closed one -- ends with ErrSessionPullReconnected, and its caller pulls
+// again (SessionPull.take).
 func ConnectSessionConsumers(urls []string, options ...ConnectOption) (*SessionConsumers, error) {
 	client, err := Connect(urls, append([]ConnectOption{WithName("envoy-session-consumers")}, options...)...)
 	if err != nil {
@@ -129,6 +131,12 @@ func (s *SessionConsumers) SetCreateFault(fault func(consumer string) error) {
 	defer s.pendingMu.Unlock()
 	s.createFault = fault
 }
+
+// ForceReconnect has nats.go reconnect the connection in place, as it does when the server drops
+// it: every pull in progress ends (ErrSessionPullReconnected, SessionPull.take) and its caller
+// pulls again. It is a seam for tests, which measure what a relay does with a lost pull; nothing
+// else calls it.
+func (s *SessionConsumers) ForceReconnect() error { return s.client.Conn.ForceReconnect() }
 
 // Drain drains the connection, letting acks already sent reach the server, within timeout.
 func (s *SessionConsumers) Drain(timeout time.Duration) error { return s.client.Drain(timeout) }

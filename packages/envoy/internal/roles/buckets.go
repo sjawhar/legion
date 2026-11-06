@@ -155,4 +155,4 @@ func (b *Buckets) Holder(ctx context.Context, sessionID string) (session.Session
 // LastSeen is 0 for every session: Dispatch reads the session bucket and keeps no memory of a
 // record that has gone, so a holder whose record the bucket no longer holds is one nothing here
 // can date (Resolution.LastSeen says what a caller makes of that).
-func (b *Buckets) LastSeen(string) int64 { return 0 }
+func (b *Buckets) LastSeen(context.Context, string) int64 { return 0 }

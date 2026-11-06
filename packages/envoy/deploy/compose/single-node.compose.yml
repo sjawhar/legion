@@ -5,7 +5,7 @@ name: envoy-single-node
 
 services:
   nats:
-    image: mirror.gcr.io/library/nats:2.10-alpine
+    image: mirror.gcr.io/library/nats:2.15.1-alpine
     network_mode: host
     # No configuration file: the image's default one opens a cluster port this server has no use
     # for. The monitoring port follows --addr onto loopback.

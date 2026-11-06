@@ -150,20 +150,27 @@ var ListenerLogSignals = []LogSignal{
 			"packages/envoy/AGENTS.md (Operational notes), which keeps its cursor.",
 	},
 	{
-		// A start that gave up binding its durable subscription and exits (cmd/listener/main.go,
-		// after cmd/listener/durable.go's deadline).
+		// A lease holder that has waited durableTakeoverAlarmAfter (135 s) for its durable, which
+		// another subscriber holds push-bound, logged again every durableTakeoverAlarmEvery (5 min)
+		// while that lasts, or whose reads, writes or subscribes of the durable have failed for as
+		// long, which then gives the lease up (cmd/listener/receive.go). The alarm and metric keep
+		// the names of the start-time bind exhaustion this line replaced, so no resource is
+		// replaced.
 		alarm:  "subscribe-exhausted",
 		metric: "SubscribesExhausted",
 		filters: []struct{ name, pattern string }{
-			{"subscribe-exhausted-filter", `{ $.level = "ERROR" && $.msg = "subscribe failed after max attempts, shutting down" }`},
+			{"subscribe-exhausted-filter", `{ $.level = "ERROR" && $.msg = "lease holder cannot deliver from the durable" }`},
 		},
-		description: "An Envoy listener start gave up setting up its durable subscription 135 s after its first " +
-			"attempt (`subscribe failed after max attempts, shutting down`). ECS had already stopped the " +
-			"old task, so every replacement exits 1 the same way once its own bind gives up. Read the " +
-			"line's `error` in %s: `consumer is already bound to a subscription` " +
-			"means something still holds the durable's push binding (find it with `nats consumer " +
-			"info ENVOY_NOTIFICATIONS listener-<machine id>`, push_bound, and stop it); any other " +
-			"error is JetStream failing the consumer lookup, create or update.",
+		description: "An Envoy listener holding its machine's delivery lease has gone 135 s or more without " +
+			"receiving from its durable consumer (`lease holder cannot deliver from the durable`), so " +
+			"nothing on the machine's durable reaches its sessions; read the line's `consumer`, `reason` " +
+			"and `waited_ms` in %s. Reason `another subscriber holds the durable's push binding`: usually " +
+			"a listener build from before the delivery lease still running; the holder repeats the line " +
+			"every 5 min and never exits, so find the binding with `nats consumer info " +
+			"ENVOY_NOTIFICATIONS listener-<machine id>` (push_bound) and stop its process. Any other " +
+			"reason is a failed read, create, update or subscribe of the durable (a JetStream that does " +
+			"not answer, a grant refusing the consumer API): the holder gives the lease up to another " +
+			"task, and takes it back when none has, logging the line for each stuck term.",
 	},
 }
 

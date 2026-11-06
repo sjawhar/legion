@@ -431,13 +431,16 @@ func TestTheRoleLaneKeepsAnUnclaimedRolesMessageWithNoException(t *testing.T) {
 				t.Fatalf("subscribe to the exception lanes: %v", err)
 			}
 			t.Cleanup(func() { _ = probe.Unsubscribe() })
-			delivered := make(chan contracts.Envelope, 8)
+			// The durable takes every subject the stream stores (consumerFilterAll), the kept
+			// lane included, so the copy reaches this subscription; what keeps it out of
+			// delivery is the durable path, which this test runs over every message it takes,
+			// as a listener does. A copy the path delivered would be arbitrated to the role
+			// again, so each message is handed to it and what it did is read below: the
+			// exception probe, the received counter and the forwards.
+			handled := make(chan string, 8)
 			durable, err := startListenerSubscription(harness.client, "listener-kept-"+id.New(), func(message *natsgo.Msg) {
-				var item contracts.Envelope
-				if err := json.Unmarshal(message.Data, &item); err == nil {
-					delivered <- item
-				}
-				_ = message.Ack()
+				harness.handler(message)
+				handled <- message.Subject
 			})
 			if err != nil {
 				t.Fatalf("start the durable subscription: %v", err)
@@ -456,8 +459,16 @@ func TestTheRoleLaneKeepsAnUnclaimedRolesMessageWithNoException(t *testing.T) {
 			}
 			noException(t, probe)
 			select {
-			case back := <-delivered:
-				t.Fatalf("the durable delivered event %s on %s: a kept copy is on no consumer's filter", back.EventID, back.Topic)
+			case subject := <-handled:
+				if subject != bus.KeptRoleSubject(tc.role) {
+					t.Fatalf("the durable delivered %s, want the kept copy's own subject %s alone", subject, bus.KeptRoleSubject(tc.role))
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatalf("the durable delivered nothing, so this test no longer reaches the moment it is about")
+			}
+			select {
+			case subject := <-handled:
+				t.Fatalf("the durable delivered %s as well: the kept copy is the one message this lane stored", subject)
 			case <-time.After(time.Second):
 			}
 			scrape := httptest.NewRecorder()

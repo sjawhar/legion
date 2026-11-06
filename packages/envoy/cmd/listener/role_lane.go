@@ -8,6 +8,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dedupe"
 	"github.com/sjawhar/envoy/internal/logging"
 )
 
@@ -22,13 +23,15 @@ const roleForwardWaitLimit = 4096
 const roleLaneSlowConsumerInterval = 5 * time.Second
 
 // roleForward is one role message the role lane resolved to its holder, every guard passed: item is
-// the message as it arrived and sessionID its holder. Every forward it makes waits for the
+// the message as it arrived, sessionID its holder, and attempt the pair's delivery-ledger attempt
+// the lane claimed for it (settled by finishRoleForward). Every forward it makes waits for the
 // holder's receipt: a role message is forwarded only to a holder that reads live (publishRole,
 // roleTopicDelivery), so no role forward is the stored-only kind an unresponsive recipient of an
 // ad-hoc topic takes (confirmTopicRecipient).
 type roleForward struct {
 	item      contracts.Envelope
 	sessionID string
+	attempt   dedupe.Attempt
 }
 
 // roleForwarder runs the role lane's forwards off its NATS handler, so a holder slow to answer, or

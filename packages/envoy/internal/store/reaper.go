@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"time"
 
@@ -104,25 +103,16 @@ func (r *Registry) Reap(live func(sessionID string) (bool, error), graceWindow t
 // answer, and that is safe: it deletes only the revision it checked.
 func (r *Registry) deleteInterestAt(ctx context.Context, sessionID string) (bool, error) {
 	r.mu.RLock()
-	kv, epoch := r.watcher.Handle()
+	_, epoch := r.watcher.Handle()
 	revision := r.cache.FenceFor(epoch, sessionID)
 	r.mu.RUnlock()
-	if revision == 0 {
-		return true, r.deleteInterest(ctx, sessionID)
-	}
-	_, answered, err := bus.Bounded(ctx, func() (struct{}, error) {
-		return struct{}{}, kv.Delete(sessionID, nats.LastRevision(revision))
-	})
-	if !answered {
-		return false, fmt.Errorf("delete %s's interest record at revision %d: %w", sessionID, revision, err)
-	}
+	err := r.deleteInterestAtRevision(ctx, sessionID, revision)
 	if errors.Is(err, nats.ErrKeyExists) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	r.reconcileDeleted(ctx, kv, epoch, sessionID, revision)
 	return true, nil
 }
 
@@ -130,22 +120,27 @@ func (r *Registry) deleteInterestAt(ctx context.Context, sessionID string) (bool
 // session TTL elapsed. It is intentionally separate from Reap: the interest
 // reaper must not tear down a role during a listener restart grace window. A
 // claim this build cannot read (bus.ErrRefused: one stored under a key NATS
-// refuses, too long or outside its key alphabet) no build can resolve or write
-// again, so it is deleted too; one it cannot delete either (a key outside the
-// alphabet) is skipped, and the sweep goes on.
+// refuses, too long or outside its key alphabet) no build can resolve, so it is
+// deleted too, at the revision the sweep's scan saw, which keeps a claim an
+// earlier build without the key check writes there in the meantime; one it
+// cannot delete either (a key outside the alphabet) is skipped, and the sweep
+// goes on.
 func (r *Registry) ReapRoleClaims(isAlive func(string) bool, sessionTTL time.Duration) (int, error) {
-	roles, err := r.roleKeys()
+	claims, err := r.roleClaimRevisions()
 	if err != nil {
 		return 0, err
 	}
 	reaped := 0
-	for _, role := range roles {
+	for _, stored := range claims {
+		role := stored.role
 		claim, err := r.RoleClaim(context.Background(), role)
 		if errors.Is(err, bus.ErrRefused) {
-			switch err := r.roles().Delete(role); {
+			switch err := r.roles().Delete(role, nats.LastRevision(stored.revision)); {
 			case err == nil:
 				r.logger().Warn("role reaper deleted a claim it cannot read", slog.Int("key_bytes", len(role)))
 				reaped++
+			case errors.Is(err, nats.ErrKeyExists):
+				r.logger().Warn("role reaper kept a claim it cannot read, rewritten since its scan", slog.Int("key_bytes", len(role)))
 			case errors.Is(err, bus.ErrRefused):
 				r.logger().Warn("role reaper skipped a claim it cannot delete", slog.Int("key_bytes", len(role)), slog.String("error", err.Error()))
 			default:

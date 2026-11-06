@@ -1,0 +1,8 @@
+kind: Changed
+body: |-
+    `aws:WebhookListener`'s `subscribe-exhausted` metric filter matches `lease holder cannot deliver
+    from the durable` at ERROR, and its alarm's description says so; the alarm and metric keep their
+    names.
+time: 2026-10-28T10:25:25.93036358Z
+custom:
+    Issue: pr2404

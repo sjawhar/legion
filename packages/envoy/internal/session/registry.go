@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"sort"
 	"sync"
 	"time"
@@ -14,7 +15,16 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/kvwatch"
+	"github.com/sjawhar/envoy/internal/store"
 )
+
+// writeAttempts bounds the compare-and-set attempts of one registration write (SessionRegistry.write).
+const writeAttempts = 5
+
+// ErrWriteConflict is a registration write whose compare-and-set lost to another writer on each of
+// its writeAttempts: every time it wrote, the stored revision had moved since it read. Nothing was
+// written; the caller may retry, and the listener answers it as a 503 with Retry-After.
+var ErrWriteConflict = errors.New("the session registration changed under every write attempt")
 
 type SessionEntry struct {
 	// Port is always 0 for an entry this build writes: a registration naming a serving port is
@@ -70,8 +80,38 @@ type SessionEntry struct {
 	// session as its predecessor takes the role only when the claimant carries the same id, or
 	// when either side carries none: the same conversation continues inside the instance that
 	// held it, while another instance's live session keeps its role however it is named. Empty
-	// for a client that predates the field.
+	// for a client that predates the field. It is the client's own id, not the listener pod's,
+	// and every pod of the machine reads it from this one bucket, so a claim is weighed alike
+	// whichever pod serves the registration or the claim.
 	ClientInstanceID string `json:"client_instance_id,omitempty"`
+
+	// unknown holds the JSON of every key a stored registration carries that SessionEntry does not
+	// name: a field a newer build writes. encodeSessionEntry writes it back beside the known fields,
+	// so a heartbeat through this build keeps it while pods of two builds take turns writing one
+	// session during a roll. It is never modified once decoded, so copies of an entry may share it.
+	unknown map[string]json.RawMessage
+}
+
+// sessionEntryKeys are SessionEntry's JSON keys; any other key of a stored registration is kept in
+// SessionEntry.unknown.
+var sessionEntryKeys = store.JSONKeys(reflect.TypeFor[SessionEntry]())
+
+// decodeSessionEntry reads a stored registration: the fields SessionEntry names, and every other key
+// into its unknown map.
+func decodeSessionEntry(data []byte) (SessionEntry, error) {
+	var entry SessionEntry
+	unknown, err := store.DecodeKeeping(data, &entry, sessionEntryKeys)
+	if err != nil {
+		return SessionEntry{}, err
+	}
+	entry.unknown = unknown
+	return entry, nil
+}
+
+// encodeSessionEntry writes entry for the bucket: its known fields, and the unknown keys it was
+// decoded with.
+func encodeSessionEntry(entry SessionEntry) ([]byte, error) {
+	return store.EncodeKeeping(entry, entry.unknown)
 }
 
 // DeliveryConsumer is SessionEntry.Delivery for a session whose stored messages its session consumer
@@ -108,6 +148,7 @@ type sessionRegistryOpts struct {
 	lastSeenRetention time.Duration
 	log               *slog.Logger
 	now               func() time.Time
+	seen              bus.KeyValue
 }
 
 func WithSessionReplicas(n int) SessionRegistryOption {
@@ -183,15 +224,6 @@ func (c cachedSession) expired(now time.Time) bool {
 	return !c.expiresAt.IsZero() && now.After(c.expiresAt)
 }
 
-type lastSeenSession struct {
-	lastSeen  int64
-	expiresAt time.Time
-}
-
-func (s lastSeenSession) expired(now time.Time) bool {
-	return !s.expiresAt.IsZero() && now.After(s.expiresAt)
-}
-
 // SessionRegistry is a cache-backed view of the envoy_sessions KV bucket. A
 // long-lived WatchAll() goroutine keeps an in-memory cache in sync so List()
 // and Get() answer from memory with no per-key JetStream round-trips. The old
@@ -228,21 +260,23 @@ type SessionRegistry struct {
 	// listener when a pass of its reaper reads one (SetTTL).
 	ttl time.Duration
 	// cache is the copy of the bucket: its rows, revision fence, marks and read epoch
-	// (kvwatch.Copy), which every write site reaches through. A row it removes keeps its last
-	// heartbeat in lastSeen (removedLocked), and one it stores drops it (storedLocked). Its rows
-	// are pointers so that a changed TTL can move every deadline in place with no row copied and
-	// no record decoded again (SetTTL).
-	cache    kvwatch.Copy[*cachedSession]
-	lastSeen map[string]lastSeenSession
-	// followingSince is when the read that last restored following swept the copy
-	// (sessionCache.CompleteRead), and the zero time until the first one does, as in a registry
-	// built from a struct literal, which has no watcher and so misses no record. No row left the
-	// live view before it: a deadline that passed while the copy did not follow its bucket is no
-	// evidence that the session ended, since the copy could not see the heartbeats that renewed
-	// it either, so the retention of such a row's last heartbeat runs from here (departedLocked).
-	followingSince time.Time
+	// (kvwatch.Copy), which every write site reaches through. A row it stores records the
+	// session's last-seen time (storedLocked), and one it removes leaves that record standing
+	// until its own end (removedLocked). Its rows are pointers so that a changed TTL can move
+	// every deadline in place with no row copied and no record decoded again (SetTTL).
+	cache kvwatch.Copy[*cachedSession]
+	// seenLocal is what LastSeen answers a registry with no last-seen bucket from, and is written
+	// only by such a registry (storedLocked): the UpdatedAt of each session's latest registration
+	// this registry wrote or its watcher delivered, until the retention past that registration's
+	// expiry. It is guarded by mu.
+	seenLocal map[string]int64
 
-	// expiries holds the deadline of each cached row and of each lastSeen record, earliest first;
+	// seen is the listener state bucket LastSeen reads a lapsed session's `seen.` record from, the
+	// one answer every pod shares (WithLastSeenBucket); its KeyValue is nil when the registry has
+	// none.
+	seen bus.KeyValue
+
+	// expiries holds the deadline of each cached row and of each last-seen record, earliest first;
 	// expiryIndex finds an id's item so a write moves it in place. expiryTimer is armed for
 	// expiryArmedFor, the earliest deadline when it was last armed, and runs expireDue. A registry
 	// built from a struct literal starts with none of them (scheduleLocked).
@@ -315,7 +349,7 @@ func (r *SessionRegistry) PruneLapsed() {
 		if !cs.expired(now) {
 			continue
 		}
-		r.scheduleLocked(sessionID, expireLastSeen, r.retireLocked(sessionID, cs, now))
+		r.scheduleLocked(sessionID, expireLastSeen, r.lastSeenUntilLocked(sessionID, cs.expiresAt))
 		r.cache.Remove(sessionID)
 		r.changedLocked(sessionID)
 	}
@@ -406,7 +440,8 @@ func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*Se
 		js:                js,
 		maxAge:            opts.maxAge,
 		ttl:               ttl,
-		lastSeen:          map[string]lastSeenSession{},
+		seenLocal:         map[string]int64{},
+		seen:              opts.seen,
 		log:               opts.log,
 	}
 	r.cache = newSessionCopy(r)
@@ -504,18 +539,16 @@ func (c sessionCache) Apply(entry kvwatch.Entry, _ kvwatch.Read) {
 }
 
 // CompleteRead removes every row and fence entry the read found no evidence of: the bucket no
-// longer holds that session. A removed row's last heartbeat is kept for LastSeen, and its record's
-// own deadline is scheduled, as an expired row's are (removedLocked). The copy follows its bucket
-// from here (kvwatch.Watcher.completeRead calls this and only then records that it does), so this
-// is where a row the copy retained past its deadline while it did not follow leaves the live view:
-// the sweep takes away the rows the bucket no longer holds, and the rows it keeps are judged
-// against their age again from now (departedLocked). A recreated bucket's first read is where the
-// rows of the bucket that went are reported gone, since the copy keeps them until the sweep.
+// longer holds that session. A removed row's last-seen record stands until its own end, which is
+// scheduled as an expired row's is (removedLocked). The copy follows its bucket from here
+// (kvwatch.Watcher.completeRead calls this and only then records that it does), so this is where
+// a row the copy retained past its deadline while it did not follow leaves the live view. A
+// recreated bucket's first read is where the rows of the bucket that went are reported gone,
+// since the copy keeps them until the sweep.
 func (c sessionCache) CompleteRead(kvwatch.Read) {
 	r := c.r
 	r.mu.Lock()
 	defer r.unlockAndNotify()
-	r.followingSince = r.now()
 	r.cache.CompleteRead()
 }
 
@@ -529,8 +562,8 @@ func (c sessionCache) CompleteRead(kvwatch.Read) {
 // does keep is answered absent once it is past its deadline (Get) and removed at it (expireDue).
 // Callers hold r.mu.
 func (r *SessionRegistry) decodeLocked(entry kvwatch.Entry) (*cachedSession, bool, error) {
-	var item SessionEntry
-	if err := json.Unmarshal(entry.Value, &item); err != nil {
+	item, err := decodeSessionEntry(entry.Value)
+	if err != nil {
 		return nil, false, err
 	}
 	return &cachedSession{entry: item, expiresAt: r.expiryFor(entry.Created, item.UpdatedAt)}, true, nil
@@ -735,35 +768,137 @@ func (r *SessionRegistry) Put(sessionID string, entry SessionEntry) error {
 	return r.PutWithin(context.Background(), sessionID, entry)
 }
 
-// PutWithin writes sessionID's entry, its bucket write waiting no longer than ctx (bus.Bounded): an
-// HTTP route passes its request's own context. A write ctx abandoned may still land after this
-// answer. That is safe: it writes the entry the caller's retry writes again, it rides the
-// connection ahead of any write this listener sends on it later, so it cannot undo one, and
-// against another listener's write it is last-writer-wins, as every Put already is. The write
-// reaches the cache through the handle's epoch (kvwatch.Copy.Put), so a write made through a
-// handle on a bucket since recreated is dropped rather than fencing out the new bucket's rows.
+// PutWithin writes entry as sessionID's registration, each bucket call waiting no longer than ctx
+// (bus.Bounded): an HTTP route passes its request's own context. Several live processes can hold the
+// same session (shared on-disk state) - a harness can keep a session's state on shared disk - and
+// each heartbeats a claim of its own. The route follows whichever wrote last: the write stamps the
+// entry with the moment it was made (stampClaim), so a reader weighing the route's freshness
+// (ClaimStaleAfter) reads the latest heartbeat, and it is written by compare-and-set (write), so
+// the registration it ran on is the one replaced.
 func (r *SessionRegistry) PutWithin(ctx context.Context, sessionID string, entry SessionEntry) error {
-	// Several live processes can hold the same session (shared on-disk state) - a harness can
-	// keep a session's state on shared disk - and each heartbeats a claim of its own. The route
-	// follows whichever wrote last, and this write stamps the entry with the moment it was made,
-	// so a reader weighing the route's freshness (ClaimStaleAfter) reads the latest heartbeat.
-	entry.UpdatedAt = r.now().UnixMilli()
-	buf, err := json.Marshal(entry)
-	if err != nil {
-		return err
-	}
+	return r.write(ctx, sessionID, func(cur SessionEntry, found bool, now int64) SessionEntry {
+		return stampClaim(cur, found, entry, now)
+	})
+}
+
+// Amend applies change to sessionID's stored registration and writes the result as PutWithin writes
+// it, within ctx, so a change made on a listener whose cache trails the bucket lands on what another
+// listener wrote since, not on its own stale copy. base is the registration change applies to when
+// the bucket holds none (the caller's earlier read, which an expiry or a delete has overtaken), so the
+// write registers the session again.
+func (r *SessionRegistry) Amend(ctx context.Context, sessionID string, base SessionEntry, change func(*SessionEntry)) error {
+	return r.write(ctx, sessionID, func(cur SessionEntry, found bool, now int64) SessionEntry {
+		next := base
+		if found {
+			next = cur
+		}
+		change(&next)
+		return stampClaim(cur, found, next, now)
+	})
+}
+
+// write writes sessionID's registration by compare-and-set on its KV revision, so a write another
+// listener made between this one's read and its write is never overwritten. merge computes the value
+// to write from the stored registration (found false when there is none) and the time.
+// The first attempt merges onto the cache. A cache miss, or a write the bucket refuses because the
+// revision moved (another listener wrote, or MaxAge removed the key under a cached revision), reads
+// the bucket entry and merges onto that: Update at its revision, or Create when there is none. After
+// writeAttempts refused writes it returns ErrWriteConflict, having written nothing.
+//
+// Each bucket call waits no longer than ctx (bus.Bounded). A write ctx abandoned may still land after
+// this answer. That is safe: it is a compare-and-set at the revision it read, so it replaces only that
+// revision and never a write that landed since, and it writes the entry the caller's retry merges
+// again. The write reaches the cache through the handle's epoch (kvwatch.Copy.Put), so a write made
+// through a handle on a bucket since recreated is dropped rather than fencing out the new bucket's
+// rows.
+func (r *SessionRegistry) write(ctx context.Context, sessionID string, merge func(cur SessionEntry, found bool, now int64) SessionEntry) error {
 	kv, epoch := r.watcher.Handle()
-	revision, answered, err := bus.Bounded(ctx, func() (uint64, error) { return kv.Put(sessionID, buf) })
+	cur, revision, found := r.cachedEntry(epoch, sessionID)
+	read := !found
+	for range writeAttempts {
+		if read {
+			var err error
+			if cur, revision, found, err = r.readStored(ctx, kv, epoch, sessionID); err != nil {
+				return err
+			}
+		}
+		read = true
+		entry := merge(cur, found, r.now().UnixMilli())
+		buf, err := encodeSessionEntry(entry)
+		if err != nil {
+			return err
+		}
+		at := revision
+		written, answered, err := bus.Bounded(ctx, func() (uint64, error) {
+			if at == 0 {
+				return kv.Create(sessionID, buf)
+			}
+			return kv.Update(sessionID, buf, at)
+		})
+		if !answered {
+			return fmt.Errorf("write session %s to the bucket: %w", sessionID, err)
+		}
+		if errors.Is(err, nats.ErrKeyExists) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		r.mu.Lock()
+		r.cache.Put(r.watcher, epoch, sessionID, &cachedSession{entry: entry, expiresAt: r.expiryFor(time.Time{}, entry.UpdatedAt)}, written)
+		r.unlockAndNotify()
+		r.recordSeen(ctx, kv, sessionID, written)
+		return nil
+	}
+	return fmt.Errorf("%w: session %s", ErrWriteConflict, sessionID)
+}
+
+// cachedEntry is sessionID's live cached registration and the revision the copy's fence holds for
+// it, read through a handle of epoch. An entry past its deadline reads as absent, as every read
+// reports it (Get), and so does one whose revision belongs to another epoch, so the write reads the
+// bucket and writes at the revision it finds there.
+func (r *SessionRegistry) cachedEntry(epoch uint64, sessionID string) (SessionEntry, uint64, bool) {
+	now := r.now()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	cs, ok := r.cache.Get(sessionID)
+	if !ok || cs.expired(now) {
+		return SessionEntry{}, 0, false
+	}
+	revision := r.cache.FenceFor(epoch, sessionID)
+	if revision == 0 {
+		return SessionEntry{}, 0, false
+	}
+	return cs.entry, revision, true
+}
+
+// readStored reads sessionID's registration from the bucket for a write, within ctx (bus.Bounded), and
+// applies it to the cache as a delivered record is applied (kvwatch.Copy.Apply: Get answers only a
+// stored value, never a delete marker). revision is the one to write at, 0 when the bucket holds no
+// value. A value that does not decode is found false, as the cache, which evicts it, sees no
+// registration either, and the write replaces it at its revision.
+func (r *SessionRegistry) readStored(ctx context.Context, kv bus.KeyValue, epoch uint64, sessionID string) (SessionEntry, uint64, bool, error) {
+	stored, answered, err := bus.Bounded(ctx, func() (nats.KeyValueEntry, error) { return kv.Get(sessionID) })
 	if !answered {
-		return fmt.Errorf("write session %s to the bucket: %w", sessionID, err)
+		return SessionEntry{}, 0, false, fmt.Errorf("read session %s from the bucket: %w", sessionID, err)
+	}
+	if errors.Is(err, nats.ErrKeyNotFound) {
+		return SessionEntry{}, 0, false, nil
 	}
 	if err != nil {
-		return err
+		return SessionEntry{}, 0, false, err
 	}
+	revision := stored.Revision()
 	r.mu.Lock()
-	r.cache.Put(r.watcher, epoch, sessionID, &cachedSession{entry: entry, expiresAt: r.expiryFor(time.Time{}, entry.UpdatedAt)}, revision)
+	_, malformed := r.cache.Apply(r.watcher, epoch, kvwatch.LegacyEntry(stored))
 	r.unlockAndNotify()
-	return nil
+	item, decoded := decodeSessionEntry(stored.Value())
+	if malformed == nil && decoded == nil {
+		return item, revision, true, nil
+	}
+	r.logger().Warn("session registry read a malformed value for a registration write",
+		slog.String("key", sessionID), slog.Uint64("revision", revision), slog.String("error", cmp.Or(malformed, decoded).Error()))
+	return SessionEntry{}, revision, false, nil
 }
 
 // Get returns the entry sessionID's cached record carries, or nats.ErrKeyNotFound when the cache
@@ -884,40 +1019,6 @@ func (r *SessionRegistry) uncachedLocked(entry kvwatch.Entry, now time.Time) (Se
 	return cs.entry, nil
 }
 
-// LastSeen returns a recently expired or explicitly removed session's final
-// heartbeat time. It is retained for the registry's retention (one TTL unless
-// WithLastSeenRetention set longer) after the session left the cache, so callers
-// can report why an otherwise durable reference stopped resolving. A live
-// session answers 0. It takes only the shared lock and changes nothing: an
-// expired entry the expiry timer has not removed yet, which is also a row the copy retains while
-// it does not follow its bucket, answers what its removal will record (its UpdatedAt until the
-// retention past the moment it left the live view, departedLocked), so the answer is the same
-// before and after the removal.
-func (r *SessionRegistry) LastSeen(sessionID string) int64 {
-	now := r.now()
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	if cs, ok := r.cache.Get(sessionID); ok {
-		if !cs.expired(now) {
-			return 0
-		}
-		// A row past its deadline that the copy retains because it does not follow its bucket
-		// answers its last heartbeat for as long as it is retained: no removal has recorded one,
-		// and the read that restores following is what decides whether the session is gone.
-		if !r.following() {
-			return cs.entry.UpdatedAt
-		}
-		if seen, ok := r.lastSeenRecord(cs.entry.UpdatedAt, r.departedLocked(cs, now)); ok && !seen.expired(now) {
-			return seen.lastSeen
-		}
-	}
-	seen, ok := r.lastSeen[sessionID]
-	if !ok || seen.expired(now) {
-		return 0
-	}
-	return seen.lastSeen
-}
-
 // ListEntry is a single entry from List(), keyed by session ID, with the state its record puts
 // its session in. The row's last registration is its SessionEntry.UpdatedAt, which the listener's
 // routes answer as last_seen.
@@ -974,71 +1075,38 @@ func (r *SessionRegistry) List(include ...ListOption) ([]ListEntry, error) {
 
 // storedLocked and removedLocked are what the cache records beside its copy when the copy stores
 // or removes a row (kvwatch.Rows), and where each row's expiry is scheduled. A stored row's
-// session is live, so its last-seen record goes and its own deadline is scheduled. A removed row's
-// last heartbeat is kept for LastSeen, for the retention from the moment it left the live view
-// (departedLocked), which is what its expiry would have recorded, so LastSeen answers the same
-// before and after the removal. Neither walks the whole lastSeen map: a read applies every record
-// of the bucket through them, and each record's own deadline is in the expiry heap, which removes
-// the record for good (expireDue). Each records its session as changed, for OnChange's functions
-// once the caller has released r.mu (unlockAndNotify). Callers hold r.mu for writing.
+// session is live: without the listener state bucket its registration's UpdatedAt becomes this
+// process's last-seen record (seenLocal), whichever process wrote it, and with the bucket there
+// is no such record, since LastSeen answers a lapsed session from the bucket's shared one alone
+// and a per-process record would answer one pod differently from the next. A removed row leaves
+// the last-seen record standing and schedules its end, which is never before the moment LastSeen
+// stops reporting it (lastSeenUntilLocked), so LastSeen answers the same before and after the
+// removal. Neither walks the whole seenLocal map: a read applies every record of the bucket
+// through them, and each record's own deadline is in the expiry heap, which removes the record
+// for good (expireDue). Each records its session as changed, for OnChange's functions once the
+// caller has released r.mu (unlockAndNotify). Callers hold r.mu for writing.
 func (r *SessionRegistry) storedLocked(sessionID string, stored *cachedSession) {
-	delete(r.lastSeen, sessionID)
+	if !r.seen.Opened() && r.ttl > 0 && stored.entry.UpdatedAt > r.seenLocal[sessionID] {
+		if r.seenLocal == nil {
+			r.seenLocal = map[string]int64{}
+		}
+		r.seenLocal[sessionID] = stored.entry.UpdatedAt
+	}
 	r.scheduleLocked(sessionID, expireLive, stored.expiresAt)
 	r.changedLocked(sessionID)
 }
 
 func (r *SessionRegistry) removedLocked(sessionID string, removed *cachedSession) {
-	r.scheduleLocked(sessionID, expireLastSeen, r.retireLocked(sessionID, removed, r.now()))
+	r.scheduleLocked(sessionID, expireLastSeen, r.lastSeenUntilLocked(sessionID, r.departedLocked(removed, r.now())))
 	r.changedLocked(sessionID)
 }
 
-// retireLocked keeps row's final heartbeat for the retention after the moment that row left the
-// live view (departedLocked), and returns the deadline that record expires at, which its caller
-// arms the way its own path arms deadlines: a removal schedules it (scheduleLocked), while the
-// expiry sweep sets it and re-arms once at the end (setExpiryLocked). Callers hold r.mu for
-// writing.
-func (r *SessionRegistry) retireLocked(sessionID string, row *cachedSession, now time.Time) time.Time {
-	left := r.departedLocked(row, now)
-	r.retainLastSeenLocked(sessionID, row.entry.UpdatedAt, left)
-	return left.Add(r.retention())
-}
-
-// departedLocked is the moment row left, or leaves, the live view, from which its last heartbeat
-// is kept for the retention: its own deadline when it is past it, and now when it is not, for a
-// row the bucket no longer holds. A deadline that passed while the copy did not follow its bucket
-// is no such moment: the copy could not see the heartbeats that renewed the row either, so it
-// expired nothing (expireDue), and the row leaves the live view no earlier than the read that
-// restored following (followingSince). Callers hold r.mu.
+// departedLocked is the moment row left, or leaves, the live view, from which its last-seen
+// record's own end is measured: its own deadline when it is past it, and now when it is not, for
+// a row the bucket no longer holds. Callers hold r.mu.
 func (r *SessionRegistry) departedLocked(row *cachedSession, now time.Time) time.Time {
 	if !row.expired(now) {
 		return now
 	}
-	if row.expiresAt.Before(r.followingSince) {
-		return r.followingSince
-	}
 	return row.expiresAt
-}
-
-// retainLastSeenLocked records lastSeen as sessionID's final heartbeat until the retention after
-// left, the time the session left the cache. Callers must hold r.mu for writing.
-func (r *SessionRegistry) retainLastSeenLocked(sessionID string, lastSeen int64, left time.Time) {
-	seen, ok := r.lastSeenRecord(lastSeen, left)
-	if !ok {
-		return
-	}
-	if r.lastSeen == nil {
-		r.lastSeen = map[string]lastSeenSession{}
-	}
-	r.lastSeen[sessionID] = seen
-}
-
-// lastSeenRecord is the record a session whose final heartbeat was lastSeen keeps for the
-// retention after it left the cache at left, or false when none is kept (no TTL, or no heartbeat
-// time). LastSeen answers an expired entry still in the cache from the same record, so it answers
-// the same before and after the entry's removal.
-func (r *SessionRegistry) lastSeenRecord(lastSeen int64, left time.Time) (lastSeenSession, bool) {
-	if r.ttl <= 0 || lastSeen <= 0 {
-		return lastSeenSession{}, false
-	}
-	return lastSeenSession{lastSeen: lastSeen, expiresAt: left.Add(r.retention())}, true
 }

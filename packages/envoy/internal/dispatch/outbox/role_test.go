@@ -47,7 +47,7 @@ func (heldRoles) Holder(context.Context, string) (session.SessionEntry, error) {
 	return session.SessionEntry{SelfSubscribed: true, UpdatedAt: time.Now().UnixMilli()}, nil
 }
 
-func (heldRoles) LastSeen(string) int64 { return 0 }
+func (heldRoles) LastSeen(context.Context, string) int64 { return 0 }
 
 // withHeldRoles is deps whose role routes resolve to roleHolder (heldRoles).
 func withHeldRoles(deps Deps) Deps {

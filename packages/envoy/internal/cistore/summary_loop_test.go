@@ -230,6 +230,63 @@ func TestARecordFallingDueSettlesWithNoOtherChange(t *testing.T) {
 	}
 }
 
+// A listener starts the summary loop again on one store each time it takes the delivery lease
+// back. A loop cancelled while its pass is still publishing detaches only once that pass returns,
+// and the channel StartSummaryLoop returns closes after it has: a loop started then attaches
+// without the second-attach panic, and settles a record written after it started.
+func TestASummaryLoopStartedAfterThePreviousOneIsDoneTakesOverTheStore(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	store := openStore(t, conn)
+	const (
+		debounce = 100 * time.Millisecond
+		tick     = 50 * time.Millisecond
+		owner    = "example-org"
+		repo     = "example-repo"
+		sha      = "abcdef1234567890abcdef1234567890abcdef12"
+	)
+	inPass, release := make(chan struct{}), make(chan struct{})
+	first := &recPub{beforePublish: func() {
+		select {
+		case inPass <- struct{}{}:
+		default:
+		}
+		<-release
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := StartSummaryLoop(ctx, store, first, debounce, tick, metrics.New().NewGauge("held", ""), logging.New("test"))
+	if err := recordCheck(store, owner, repo, "41", sha, "build", "810", "https://example.test/810", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record the first check: %v", err)
+	}
+	select {
+	case <-inPass:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first loop never began publishing")
+	}
+	cancel()
+	select {
+	case <-done:
+		t.Fatal("the first loop reported itself done while its pass was still publishing")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first loop never reported itself done after its pass returned")
+	}
+
+	second := &recPub{}
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	StartSummaryLoop(ctx2, store, second, debounce, tick, metrics.New().NewGauge("held", ""), logging.New("test"))
+	if err := recordCheck(store, owner, repo, "42", sha, "build", "820", "https://example.test/820", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record the second check: %v", err)
+	}
+	waitCacheChecks(t, store, owner, repo, "42", sha, 1)
+	waitPublished(t, second, 1, time.Now().Add(10*time.Second).UnixMilli(), "the second loop's settlement")
+}
+
 // A claim a replica took and never released - the replica died - is reclaimed once it goes stale,
 // and the record settles once, with nothing else written to wake the loop.
 func TestAStaleClaimIsReclaimedWithNoOtherChange(t *testing.T) {

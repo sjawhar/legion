@@ -132,7 +132,14 @@ func answerDone(relayedFrame) []string { return []string{relayReplyReceived, rel
 
 func startSessionStandIn(t *testing.T, url, sessionID string, answer func(relayedFrame) []string) *sessionStandIn {
 	t.Helper()
-	standIn := &sessionStandIn{t: t, conn: testnats.Connect(t, url), frames: make(chan relayedFrame, 256)}
+	return startSessionStandInOn(t, testnats.Connect(t, url), sessionID, answer)
+}
+
+// startSessionStandInOn is startSessionStandIn on a connection the test opened, for a server
+// whose user it must name (a row under a grant of its own).
+func startSessionStandInOn(t *testing.T, conn *natsgo.Conn, sessionID string, answer func(relayedFrame) []string) *sessionStandIn {
+	t.Helper()
+	standIn := &sessionStandIn{t: t, conn: conn, frames: make(chan relayedFrame, 256)}
 	t.Cleanup(standIn.conn.Close)
 	if _, err := standIn.conn.Subscribe(bus.DeliverSubject(sessionID), func(msg *natsgo.Msg) {
 		frame := relayedFrame{msg: msg, arrived: time.Now()}
@@ -740,7 +747,7 @@ func bindTestDurable(t *testing.T, rig *relayRig, name, subject string) {
 	if _, err := rig.harness.client.JS().AddConsumer(bus.Stream, &config); err != nil {
 		t.Fatalf("create the listener's durable: %v", err)
 	}
-	subscription, err := rig.harness.client.Subscribe(subject, jetStreamDeliveryHandler(rig.harness.config), natsgo.Bind(bus.Stream, name), natsgo.ManualAck())
+	subscription, err := rig.harness.client.Subscribe(subject, uncancelled(jetStreamDeliveryHandler(rig.harness.config)), natsgo.Bind(bus.Stream, name), natsgo.ManualAck())
 	if err != nil {
 		t.Fatalf("bind the listener's durable: %v", err)
 	}

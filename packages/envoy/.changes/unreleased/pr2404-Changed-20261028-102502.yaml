@@ -1,0 +1,22 @@
+kind: Changed
+body: |-
+    **Breaking:** `/healthz` is every listener pod's readiness. It answers `503 {"status":"starting"}`
+    until the listener serves (NATS connected, the webhook and `/v1` gates open over warm caches,
+    the receive loop started and, with an OIDC issuer configured, its discovery succeeded), where it
+    answered 200 `starting` from the moment its port was bound; then `200` with `"role":"active"`
+    (with the durable's lag) or `"role":"standby"` (with `active_instance`, the holder). A pod that
+    is the machine's deliverer and does not receive yet - it holds the lease, runs without one,
+    has read no holder at all, or the record still names it while its renewals have lapsed -
+    answers 200 `degraded` rather than `healthy`, since nothing of
+    the durable reaches a session until it receives, and stays ready as a standby does. Every answer
+    comes within 5 s, past which it is `503`; the role lane's health is read from its core
+    subscription. A health check that passed on a 200 before NATS answered now waits for the
+    listener to serve: a readiness probe should give `curl -fsS /healthz` a timeout of 6 s or more, a
+    liveness probe should not fail on a 503 (`--max-time 8`, no `-f`), and a pod needs 30 s or more
+    to stop. A NATS that does not answer at start is waited for, every 2 s, where the start exited
+    after ten tries; so is a store or the listener state bucket whose open fails for want of NATS,
+    and an OIDC issuer whose discovery fails at start is retried in the background (1 s doubling to
+    30 s) where the start exited.
+time: 2026-10-28T10:25:02.402474641Z
+custom:
+    Issue: pr2404

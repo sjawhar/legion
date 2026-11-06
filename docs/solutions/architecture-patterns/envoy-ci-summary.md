@@ -47,30 +47,35 @@ record without `schema` settles only in `[debounce, debounce + 5 min)` after its
 ### The grace
 
 A head that finished just before the old listener was replaced is still owed its settlement, and
-the window must cover the time between the old listener's summary loop stopping (at SIGTERM,
-`summaryCancel` in `cmd/listener`'s main) and the new one's first pass, one tick after it starts.
-Only a listener that mounts the GitHub webhook route runs the summary loop, and the longest such
-gap is a compose deploy of one, which is stop-then-start, on a slow path whose named terms are a
-floor:
+the window must cover the time between the old listener's summary loop stopping and the new one's
+first pass, one tick after it starts. Only a listener that mounts the GitHub webhook route runs the
+summary loop, and of a machine's listeners only the one holding its delivery lease runs it: it
+starts when that listener starts receiving the durable and stops first at its SIGTERM
+(`cmd/listener/README.md`). Where a standby runs beside it, the gap is a take-over, seconds. The
+longest gap is a compose deploy of one listener, which is stop-then-start, on a slow path whose
+named terms are a floor:
 
 | Term | Bound |
 | --- | --- |
 | old listener's stop grace (`stop_grace_period`, `deploy/compose/listener.compose.yml`) | 30 s |
 | `bus.ConnectOwningStream`: a first 5 s dial, then the stream's info and update, each bounded by the 10 s JetStream MaxWait | 25 s |
 | durable check (`listenerDurable`), one JetStream call | 10 s |
+| listener state bucket (`openDeliveryLease`): a first 5 s dial, then the bucket's lookup and create, each bounded by its 2 s request wait | 9 s |
 | interest and session cache gates (`registry.WaitForCacheReady`, `sessions.WaitForCacheReady`) | 60 s |
-| durable bind (`bindListenerDurable`), polled every 2 s until its deadline | 135 s |
-| **floor, before container start and image pull** | **260 s** |
+| delivery lease: an unreleased record (the old listener killed at the end of its grace) is taken after the lease TTL and one standby poll | 6 s |
+| **floor, before container start and image pull** | **140 s** |
 
-`cistore.go` (`handoverGrace`) and `packages/envoy/AGENTS.md` cite this total; update them if it changes.
+`cistore.go` (`handoverGrace`) cites this total; update it if it changes. Before #2404 the
+floor was 260 s: the durable's bind was polled for up to 135 s in place of the lease row.
 
-The degraded path adds terms that are bounded but not counted: `bus.connectWithContext` retries the
-dial up to ten times (about 59 s); `cistore.Open`, `store.Open`'s two buckets and
-`session.OpenSessionRegistry` each wait up to the 10 s MaxWait (40 s); and the bind's deadline
-counts its attempts' own time, so slow JetStream calls add only the attempt in flight at the
-deadline: `listenerDurable`'s ConsumerInfo, an update and the bind, each up to the 10 s MaxWait
-(30 s). Production's ECS rollouts take 0.6 to 20.5 s from SIGTERM to ready, once 58.9 s
-(2026-09-28).
+The degraded path adds terms that are bounded but not counted: `cistore.Open`, `store.Open`'s two
+buckets and `session.OpenSessionRegistry` each wait up to the 10 s MaxWait (40 s), and the lease
+holder reads and may update the durable before it subscribes (`listenerDurable`'s ConsumerInfo and
+an update, each up to the 10 s MaxWait, 20 s). A NATS that does not answer is not bounded at all:
+the start retries the connect, and a store or bucket open that fails for want of a connection,
+every 2 s for as long as it takes, so such a handover is an outage the grace does not cover.
+Production's ECS rollouts took 0.6 to 20.5 s from SIGTERM to ready, once 58.9 s (2026-09-28,
+before #2404).
 
 Every admitted record is at most debounce plus grace old, by construction. The head-gated listener
 keeps leaving non-head records until its SIGTERM, so any width admits the ones it left in its last
@@ -85,8 +90,9 @@ band `[5 s, 305 s)` held no record; over the past week a 305 s band held 0.73 re
 14 at worst, and was empty 54% of the time (a 65 s band: 0.16 and 9); such records replenish at
 about 8.6 an hour.
 
-Five is the smallest round figure above the 260 s floor, leaving 40 s for container start and image
-pull. The residual risk at five minutes is under-admission, not over: a handover slower than the
+Five minutes stays above the 140 s floor with 160 s to spare for container start and image pull; it
+was chosen as the smallest round figure above the 260 s floor the durable's bind once set. The
+residual risk at five minutes is under-admission, not over: a handover slower than the
 grace leaves its head's record held back, silently, until a new check event on that commit stamps
 it, while each extra minute of grace costs only 0.14 of a settlement, and that one correct and
 recent.

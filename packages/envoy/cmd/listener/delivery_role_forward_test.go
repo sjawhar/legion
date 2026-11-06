@@ -19,8 +19,8 @@ import (
 // contracts.DedupeKeyNamesTheUpstreamEvent - is named by that key and is stored once however often
 // it is sent. Any other forward is named by its event id, so two distinct envelopes that share a key
 // their sender chose are two messages, and the stream stores both. Each envelope is delivered by a
-// handler with dedupe and attempt caches of its own, as another listener of the machine's queue
-// group, or this one after a restart, would deliver it again.
+// handler with a delivery ledger of its own, so the lane forwards every send: what the stream
+// keeps of two forwards is this row's subject, not what a ledger stops.
 func TestARoleForwardIsStoredOncePerMessageAndTwoUnderOneChosenKeyTwice(t *testing.T) {
 	chosen := func(name string) contracts.Envelope {
 		item := listenerTestEnvelope("", "shared-key")
@@ -65,9 +65,7 @@ func TestARoleForwardIsStoredOncePerMessageAndTwoUnderOneChosenKeyTwice(t *testi
 
 			for index, item := range tc.sends {
 				cfg := harness.config
-				cfg.dedupeCache, cfg.attemptCache = dedupe.New(10*time.Minute), dedupe.New(5*time.Minute)
-				t.Cleanup(cfg.dedupeCache.Stop)
-				t.Cleanup(cfg.attemptCache.Stop)
+				cfg.ledger = dedupe.NewMemory(deliveryHandlingLimit + ledgerTakeoverMargin)
 				var forwardErr error
 				forwards := 0
 				cfg.forwardRole = inlineForward(func(subject string, item contracts.Envelope, msgID string, timeout time.Duration) error {

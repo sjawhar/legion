@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/subtle"
 	"errors"
 	"fmt"
@@ -11,6 +12,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/brokertoken"
 	"github.com/sjawhar/envoy/internal/config"
@@ -24,14 +27,16 @@ const bearerPrefix = "Bearer "
 // bearer, with an access token the secrets broker issued when one is presented under the DPoP
 // scheme (brokers, brokerauth.go), and, when a verifier is configured, with a projected
 // service-account token issued to its issuer and audience. Exempt paths pass in every
-// configuration; /v1 is open only when neither bearer kind is configured, so an empty shared
-// token beside a configured verifier requires a token rather than opening the tree. An open /v1
-// serves only a request whose Host names this listener (servesHost: a loopback name or address,
-// or one of allowedHosts), so a page that rebinds its own name to an address reaching the
-// listener cannot use it; a listener that requires a bearer checks no Host, since such a page
-// holds no bearer. A bearer the verifier rejects is answered 401 and never falls back to another
-// authentication path; the failure class goes to the log and never to the caller, since naming
-// it would tell an unauthenticated client which credential the listener is configured for.
+// configuration. Until a configured verifier's discovery has succeeded, /v1 answers 503 "service
+// starting", whatever the request carries, and logs the refusal as the starting gates do. /v1 is
+// open only when neither bearer kind is configured, so an empty shared token beside a configured
+// verifier requires a token rather than opening the tree. An open /v1 serves only a request
+// whose Host names this listener (servesHost: a loopback name or address, or one of
+// allowedHosts), so a page that rebinds its own name to an address reaching the listener cannot
+// use it; a listener that requires a bearer checks no Host, since such a page holds no bearer. A
+// bearer the verifier rejects is answered 401 and never falls back to another authentication
+// path; the failure class goes to the log and never to the caller, since naming it would tell an
+// unauthenticated client which credential the listener is configured for.
 //
 // The broker-token branch is taken only on a listener that takes this credential (brokers is
 // nil on one that does not), and there the scheme alone decides it, before both bearer ones:
@@ -55,10 +60,22 @@ const bearerPrefix = "Bearer "
 // listener with no bearer and no ENVOY_API_ALLOW_UNAUTHENTICATED — because a broker token is a
 // credential a caller may hold rather than one this listener can require: every client of /v1
 // that holds none would be locked out by a setting whose purpose is to tell callers apart.
-func apiAuth(token string, verifier *oidc.Verifier, brokers *brokerTokens, allowedHosts []string, logger *logging.Logger, next http.Handler) http.Handler {
+//
+// Every pod of a machine runs this same chain, the active and each standby, so a caller signed
+// in with its machine's identity is answered alike wherever the machine's address takes it.
+func apiAuth(token string, verifier *apiVerifier, brokers *brokerTokens, allowedHosts []string, logger *logging.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isAPIAuthExemptPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
+			return
+		}
+		if !verifier.ready() {
+			logger.Warn("request refused while starting",
+				slog.String("gate", "oidc"),
+				slog.String("method", r.Method),
+				slog.String("path", r.URL.Path),
+			)
+			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
 			return
 		}
 		open := token == "" && verifier == nil
@@ -102,7 +119,7 @@ func apiAuth(token string, verifier *oidc.Verifier, brokers *brokerTokens, allow
 
 		if verifier != nil {
 			if raw, ok := strings.CutPrefix(authorization, bearerPrefix); ok && oidc.LooksLikeJWT(raw) {
-				_, err := verifier.Verify(r.Context(), raw)
+				_, err := verifier.current().Verify(r.Context(), raw)
 				if err == nil {
 					next.ServeHTTP(w, r)
 					return
@@ -115,6 +132,76 @@ func apiAuth(token string, verifier *oidc.Verifier, brokers *brokerTokens, allow
 
 		writeJSONError(w, http.StatusUnauthorized, "unauthorized")
 	})
+}
+
+// apiVerifier verifies /v1's service-account tokens on a listener configured with an OIDC issuer
+// and audience; a nil *apiVerifier is a listener configured with none. Its verifier is nil until
+// the issuer's discovery succeeds (discover), and /v1 and /healthz answer that the listener is
+// starting until then, so an issuer that does not answer at start leaves the listener up and
+// unready rather than ending it.
+type apiVerifier struct {
+	issuer   string
+	audience string
+	verifier atomic.Pointer[oidc.Verifier]
+}
+
+// newAPIVerifier is the verifier of issuer and audience, nil when no issuer is configured. Nothing
+// is discovered yet.
+func newAPIVerifier(issuer, audience string) *apiVerifier {
+	if issuer == "" {
+		return nil
+	}
+	return &apiVerifier{issuer: issuer, audience: audience}
+}
+
+// ready reports whether /v1 can authenticate a request: no issuer is configured, or its discovery
+// has succeeded.
+func (v *apiVerifier) ready() bool {
+	return v == nil || v.verifier.Load() != nil
+}
+
+// current is the discovered verifier, nil before discovery succeeds.
+func (v *apiVerifier) current() *oidc.Verifier {
+	return v.verifier.Load()
+}
+
+// The waits between the discovery reads of an issuer that fails them: oidcDiscoveryFirstRetry after
+// the first failure, twice the last wait after each next one, and never more than
+// oidcDiscoveryMaxRetry.
+const (
+	oidcDiscoveryFirstRetry = time.Second
+	oidcDiscoveryMaxRetry   = 30 * time.Second
+)
+
+// nextDiscoveryRetry is the wait after a failed discovery read that follows a wait of previous.
+func nextDiscoveryRetry(previous time.Duration) time.Duration {
+	return min(2*previous, oidcDiscoveryMaxRetry)
+}
+
+// discover reads the issuer's discovery document, each read bounded by oidc.DiscoveryTimeout,
+// until one succeeds or ctx ends, and then makes its verifier current. A failed read logs one
+// WARN and is retried after a wait that starts at oidcDiscoveryFirstRetry and doubles up to
+// oidcDiscoveryMaxRetry. The verifier's key set refreshes on its own background context, so ctx
+// ending later disables nothing.
+func (v *apiVerifier) discover(ctx context.Context, logger *logging.Logger) {
+	wait := oidcDiscoveryFirstRetry
+	for {
+		verifier, err := oidc.Discover(ctx, v.issuer, v.audience, oidc.DiscoveryTimeout)
+		if err == nil {
+			v.verifier.Store(verifier)
+			logger.Info("listener API oidc discovery succeeded", slog.String("issuer", v.issuer))
+			return
+		}
+		logger.Warn("listener API oidc discovery failed; retrying",
+			slog.String("issuer", v.issuer),
+			slog.String("retry_in", wait.String()),
+			slog.String("error", err.Error()),
+		)
+		if waitUnlessDone(ctx, wait) != nil {
+			return
+		}
+		wait = nextDiscoveryRetry(wait)
+	}
 }
 
 // refuseBrokerToken answers a DPoP presentation this listener did not admit, and logs the one
@@ -230,7 +317,7 @@ func describeListenerAPIAuth(token, issuer string, brokers *brokerTokens) string
 // describeListenerAPIHosts names the Hosts /v1 is served to, for the boot log: any Host when a
 // bearer is required, loopback and ENVOY_ALLOWED_HOSTS otherwise. A list set beside a bearer is
 // said to be unused rather than left to look as if it applied.
-func describeListenerAPIHosts(token string, verifier *oidc.Verifier, allowedHosts []string) string {
+func describeListenerAPIHosts(token string, verifier *apiVerifier, allowedHosts []string) string {
 	if token != "" || verifier != nil {
 		if len(allowedHosts) > 0 {
 			return "any (a bearer is required, so ENVOY_ALLOWED_HOSTS is unused)"
@@ -246,7 +333,7 @@ func describeListenerAPIHosts(token string, verifier *oidc.Verifier, allowedHost
 // validateListenerAPIAuth refuses a listener that would serve /v1 with no credential on an address
 // other than loopback. It judges cfg.ListenHost, which with ENVOY_LISTEN_FD is the inherited
 // socket's own address, so a socket on every interface is refused as ENVOY_LISTEN_HOST=0.0.0.0 is.
-func validateListenerAPIAuth(cfg config.Service, token, allowUnauthenticated string, verifier *oidc.Verifier) error {
+func validateListenerAPIAuth(cfg config.Service, token, allowUnauthenticated string, verifier *apiVerifier) error {
 	if token != "" || verifier != nil || allowUnauthenticated == "1" || isLoopbackHost(cfg.ListenHost) {
 		return nil
 	}

@@ -28,7 +28,7 @@ var cutRewatchCaches = []string{
 //
 // The test asserts four things over the real binary, each read from the output the freeze and the
 // thaw wrote:
-//   - both of the listener's clients report the cut, so the run is in the rewatch path;
+//   - the listener's client reports the cut, so the run is in the rewatch path;
 //   - each of the three caches logs a warm-up line after the thaw, so a rewatch replaced each
 //     watcher;
 //   - an interest another listener writes after the thaw reaches this listener's cache;
@@ -41,11 +41,12 @@ var cutRewatchCaches = []string{
 // branch a rewatch replaced is pinned by the unit test of internal/kvwatch. What this test holds
 // is the whole cut path, every cache's replacement included, to no ERROR at all.
 func TestASilentCutRewatchesTheCachesWithNoErrorLine(t *testing.T) {
+	const instance = "cut-rewatch-pod"
 	server, uri := testnats.Start(t)
-	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "cut-rewatch")
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "cut-rewatch", "ENVOY_INSTANCE_ID="+instance)
 	listener.waitHealthy(t)
 
-	thaw, output := freezeUntilTheClientReportsTheCut(t, server, listener)
+	thaw, output := freezeUntilTheClientReportsTheCut(t, server, listener, instance)
 	thaw()
 
 	// Every cache is rewatched on the reconnect, and each replacement's warm-up line says so.

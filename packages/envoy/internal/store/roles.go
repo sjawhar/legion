@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -34,7 +35,17 @@ type RoleClaim struct {
 	// /v1/roles/<role> reports as claim_revision, so a caller can read a role and then claim
 	// it only while no other claim has landed.
 	Revision uint64 `json:"-"`
+
+	// unknown holds the JSON of every key a stored claim carries that RoleClaim does not name: a
+	// field a newer build writes, which a role claim through this build writes back. It is never
+	// modified once decoded, so copies of a claim may share it.
+	unknown map[string]json.RawMessage
 }
+
+// roleClaimKeys are RoleClaim's JSON keys; any other key of a stored claim is kept in its unknown
+// map, and written back by every rewrite of the claim, so pods of two builds taking turns at one
+// record during a roll do not drop each other's fields.
+var roleClaimKeys = JSONKeys(reflect.TypeFor[RoleClaim]())
 
 // ExpiredRoleClaimRelease reports the conditional-delete outcome for an
 // expired role claim.
@@ -46,29 +57,6 @@ const (
 	ExpiredRoleClaimSuperseded
 	ExpiredRoleClaimRetained
 )
-
-// roleRevisions reads the revision of every role claim kv holds, for the grace a restored claim's
-// holder gets to register again. It takes them from one scan over the bucket's existing keys
-// (kvwatch.ScanExistingKeys), the way the interest, session and CI caches read theirs, so readiness
-// costs one pass over the bucket rather than a round trip per stored claim. A claim whose key this
-// build cannot read gets a revision here; it still gets no grace, because ReleaseExpiredRoleClaim,
-// the only reader of these revisions, reads the claim itself first and cannot.
-//
-// A snapshot short of the bucket is missing claims that are in it, and each one it misses is a
-// restored holder that loses its grace and is released a session TTL early, so an incomplete scan
-// fails the caller, and only a complete one logs. A scan that delivers nothing for idle is one.
-func roleRevisions(kv bus.KeyValue, idle time.Duration, log *slog.Logger) (map[string]uint64, error) {
-	revisions := map[string]uint64{}
-	scan, err := kvwatch.ScanExistingKeys(kv, jetstream.AllKeys, "role revisions", idle, log, func(entry kvwatch.Entry) error {
-		revisions[entry.Key] = entry.Revision
-		return nil
-	}, jetstream.MetaOnly())
-	if err != nil {
-		return nil, err
-	}
-	log.Info("restored role claims", slog.Int("restored", len(revisions)), slog.Int("delete_markers", scan.Markers))
-	return revisions, nil
-}
 
 // roleKeys lists the key of every role claim the role bucket holds, sorted, from one scan of its
 // existing keys (kvwatch.ScanExistingKeys) with what nats.go's Keys watches with, values and delete
@@ -89,21 +77,45 @@ func (r *Registry) roleKeys() ([]string, error) {
 	return keys, nil
 }
 
+// storedRoleClaim is one role claim key the sweep's scan saw, with the revision it saw it at: the
+// revision a delete of a claim this build cannot read is conditioned on, so a claim an earlier
+// build wrote there in between is kept (ReapRoleClaims).
+type storedRoleClaim struct {
+	role     string
+	revision uint64
+}
+
+// roleClaimRevisions is roleKeys with each key's revision, in no order, for a sweep whose deletes
+// are conditional on the revision it read.
+func (r *Registry) roleClaimRevisions() ([]storedRoleClaim, error) {
+	var claims []storedRoleClaim
+	_, err := kvwatch.ScanExistingKeys(r.roles(), jetstream.AllKeys, "role claim reaper", kvwatch.ScanIdleTimeout, r.logger(), func(entry kvwatch.Entry) error {
+		claims = append(claims, storedRoleClaim{role: entry.Key, revision: entry.Revision})
+		return nil
+	}, jetstream.MetaOnly(), jetstream.IgnoreDeletes())
+	if err != nil {
+		return nil, err
+	}
+	return claims, nil
+}
+
 // ErrMalformedRoleClaim is a role claim record the bucket holds and this build cannot read: one
 // that names no holder, or JSON that is not a claim. The bus answered it, so it is not a read that
 // failed, and reading it again returns the same record; each error wrapping it names which.
 var ErrMalformedRoleClaim = errors.New("malformed role claim")
 
-// DecodeRoleClaim reads a stored role claim record: a structured claim naming a holder, or a bare
-// session id an earlier build stored. Any other record is ErrMalformedRoleClaim. Dispatch's outbox
-// reads the role bucket through it too (roles.Buckets), so the two readers cannot drift.
+// DecodeRoleClaim reads a stored role claim record: the fields RoleClaim names, every other key
+// into its unknown map, or a bare session id an earlier build stored. Any other record is
+// ErrMalformedRoleClaim. Dispatch's outbox reads the role bucket through it too (roles.Buckets),
+// so the two readers cannot drift.
 func DecodeRoleClaim(value []byte) (RoleClaim, error) {
 	var claim RoleClaim
-	err := json.Unmarshal(value, &claim)
+	unknown, err := DecodeKeeping(value, &claim, roleClaimKeys)
 	if err == nil {
 		if strings.TrimSpace(claim.HolderSessionID) == "" {
 			return RoleClaim{}, fmt.Errorf("%w: it names no holder", ErrMalformedRoleClaim)
 		}
+		claim.unknown = unknown
 		return claim, nil
 	}
 	if json.Valid(value) {
@@ -360,9 +372,17 @@ func (r *Registry) releaseRoleClaim(ctx context.Context, sessionID, role string)
 }
 
 // ReleaseExpiredRoleClaim drops role only when sessionID remains its holder and
-// a restored claim has exhausted the session registry's TTL. A listener restart
-// therefore gives an existing holder one TTL to register again, while an
-// already-expired holder cannot block a new claimant forever.
+// the claim has no grace left. A claim the bucket held from before the machine's
+// service start (serviceStart) keeps its grace for one session TTL after that
+// start, so a listener restart, or a gap with no pod serving, gives an existing
+// holder one TTL to register again, while an already-expired holder cannot block
+// a new claimant forever. A claim written since the service start gets none.
+// Every pod of a machine reads one service start (WithServiceSince), so every
+// pod answers one claim alike, whenever it started.
+//
+// The claim's age is its KV entry's timestamp, the server's clock, and the
+// window is measured on this process's clock: a skew of seconds between the
+// two, against a session TTL of minutes, moves the window's end by that skew.
 //
 // Its result distinguishes a confirmed deletion from a concurrent removal or
 // replacement, so callers never report that a lost conditional delete released
@@ -386,10 +406,7 @@ func (r *Registry) ReleaseExpiredRoleClaim(ctx context.Context, role, sessionID 
 	if claim.HolderSessionID != sessionID {
 		return ExpiredRoleClaimSuperseded, nil
 	}
-	r.mu.RLock()
-	restoredRevision, restored := r.restoredRoleRevisions[role]
-	r.mu.RUnlock()
-	if restored && restoredRevision == entry.Revision() && sessionTTL > 0 && r.now().Sub(r.openedAt) < sessionTTL {
+	if since := r.serviceStart(); sessionTTL > 0 && entry.Created().Before(since) && r.now().Sub(since) < sessionTTL {
 		return ExpiredRoleClaimRetained, nil
 	}
 	epoch := r.roleViewEpoch()
@@ -534,15 +551,18 @@ func (r *Registry) SetRoleWithPrevious(ctx context.Context, sessionID, machineID
 		return Interest{}, err
 	}
 
+	// The claim replaces the stored one at its revision, keeping the fields a newer build stored in
+	// it that this build does not know.
 	claim := RoleClaim{
 		HolderSessionID:   sessionID,
 		ClaimedAt:         r.now().UnixMilli(),
 		PreviousSessionID: "",
+		unknown:           oldClaim.unknown,
 	}
 	if soft {
 		claim.PreviousSessionID = previousSessionID
 	}
-	data, err := json.Marshal(claim)
+	data, err := EncodeKeeping(claim, claim.unknown)
 	if err != nil {
 		return Interest{}, err
 	}

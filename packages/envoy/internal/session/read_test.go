@@ -277,9 +277,11 @@ func TestASessionDeletedDuringTheReadStaysGone(t *testing.T) {
 	}
 }
 
-// delayingKV is a session bucket handle whose next Put or Get of a key a test delays goes to the
+// delayingKV is a session bucket handle whose next write or Get of a key a test delays goes to the
 // bucket at once and answers only once the test opens its gate, so the answer arrives after
-// whatever the test does in between.
+// whatever the test does in between. A registration is written by compare-and-set (Create or
+// Update, SessionRegistry.write), and a Put is what a test outside the registry makes, so all
+// three take the write gate.
 type delayingKV struct {
 	natsgo.KeyValue
 	mu         sync.Mutex
@@ -307,6 +309,22 @@ func (kv *delayingKV) take(calls map[string]*gate, key string) *gate {
 
 func (kv *delayingKV) Put(key string, value []byte) (uint64, error) {
 	revision, err := kv.KeyValue.Put(key, value)
+	return kv.wrote(key, revision, err)
+}
+
+func (kv *delayingKV) Create(key string, value []byte) (uint64, error) {
+	revision, err := kv.KeyValue.Create(key, value)
+	return kv.wrote(key, revision, err)
+}
+
+func (kv *delayingKV) Update(key string, value []byte, last uint64) (uint64, error) {
+	revision, err := kv.KeyValue.Update(key, value, last)
+	return kv.wrote(key, revision, err)
+}
+
+// wrote holds a write of key at its gate, when the test delayed one, and answers what the bucket
+// answered.
+func (kv *delayingKV) wrote(key string, revision uint64, err error) (uint64, error) {
 	if g := kv.take(kv.puts, key); g != nil {
 		g.pass(func() {})
 	}
@@ -590,7 +608,7 @@ func TestARowPastItsLiveWindowReadsUnresponsiveThroughAReadAndItsSweep(t *testin
 		if _, err := r.Get("ses_old"); !errors.Is(err, natsgo.ErrKeyNotFound) {
 			t.Fatalf("Get(ses_old) %s = %v, want not found", when, err)
 		}
-		if got := r.LastSeen("ses_old"); got != heartbeat.UpdatedAt {
+		if got := r.LastSeen(context.Background(), "ses_old"); got != heartbeat.UpdatedAt {
 			t.Fatalf("LastSeen(ses_old) %s = %d, want its last heartbeat %d", when, got, heartbeat.UpdatedAt)
 		}
 	}

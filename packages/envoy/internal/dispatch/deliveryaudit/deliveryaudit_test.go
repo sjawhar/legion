@@ -101,7 +101,7 @@ func (heldRoles) Holder(context.Context, string) (session.SessionEntry, error) {
 	return session.SessionEntry{SelfSubscribed: true, UpdatedAt: time.Now().UnixMilli()}, nil
 }
 
-func (heldRoles) LastSeen(string) int64 { return 0 }
+func (heldRoles) LastSeen(context.Context, string) int64 { return 0 }
 
 // heardEnvelope is the envelope id the stand-in listener mints for every send to s-heard.
 const heardEnvelope = "envelope-heard-1"

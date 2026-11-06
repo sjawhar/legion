@@ -132,7 +132,7 @@ func (unclaimedRoles) Holder(context.Context, string) (session.SessionEntry, err
 	return session.SessionEntry{}, natsgo.ErrKeyNotFound
 }
 
-func (unclaimedRoles) LastSeen(string) int64 { return 0 }
+func (unclaimedRoles) LastSeen(context.Context, string) int64 { return 0 }
 
 // publishOutbox runs the real outbox until every event that can carry a person's words to a session
 // is published, so each one's published_destinations holds every topic the publisher reached.

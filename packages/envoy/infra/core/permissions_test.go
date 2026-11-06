@@ -15,9 +15,10 @@ import (
 // example-host-a, written out by hand from Envoy's names as they stand: every notification topic
 // (the stream's subjects, the role lanes, every exception lane and any ad-hoc topic), the stream
 // (its stored-message get the read /v1/replay makes) and its own durable, then each bucket in
-// turn, then the interest bucket's purge. HostPermissions and DispatchPermissions are built on it,
-// so neither holds a session consumer's call. TestSessionPermissions's exact list holds none of
-// it: no session gets the replay read or a consumer.
+// turn, the listener state bucket's writes only to the machine's own lease and ledger and to the
+// last-seen records, then the interest bucket's purge. HostPermissions and DispatchPermissions
+// are built on it, so neither holds a session consumer's call. TestSessionPermissions's exact
+// list holds none of it: no session gets the replay read or a consumer.
 var listenerBasePublish = []string{
 	"notifications.>",
 	"$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS",
@@ -73,6 +74,18 @@ var listenerBasePublish = []string{
 	"$JS.API.CONSUMER.CREATE.KV_envoy_dpop_proofs.>",
 	"$JS.API.CONSUMER.DELETE.KV_envoy_dpop_proofs.>",
 	"$JS.FC.KV_envoy_dpop_proofs.>",
+	"$JS.API.STREAM.INFO.KV_envoy_listener",
+	"$JS.API.STREAM.CREATE.KV_envoy_listener",
+	"$JS.API.STREAM.UPDATE.KV_envoy_listener",
+	"$JS.API.DIRECT.GET.KV_envoy_listener.>",
+	"$JS.API.STREAM.MSG.GET.KV_envoy_listener",
+	"$KV.envoy_listener.lease.listener-example-host-a",
+	"$KV.envoy_listener.handback.listener-example-host-a.>",
+	"$KV.envoy_listener.delivery.listener-example-host-a.>",
+	"$KV.envoy_listener.seen.>",
+	"$JS.API.CONSUMER.CREATE.KV_envoy_listener.>",
+	"$JS.API.CONSUMER.DELETE.KV_envoy_listener.>",
+	"$JS.FC.KV_envoy_listener.>",
 	"$JS.API.STREAM.PURGE.KV_envoy_interests",
 }
 
@@ -129,11 +142,15 @@ func TestListenerHostPermissionsHoldTheConsumerCallsAndEveryTopic(t *testing.T) 
 	}
 }
 
-// A space in the machine id is a hyphen in the durable and the queue, as the listener names them.
+// A space in the machine id is a hyphen in the durable, the queue and the listener state keys, as
+// the listener names them.
 func TestListenerPermissionsNameTheDurableAndQueueOfAMachineIDWithASpace(t *testing.T) {
 	p := core.ListenerPermissions("example host")
 	require.Contains(t, p.Publish.Allow, "$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.listener-example-host")
 	require.Contains(t, p.Publish.Allow, "$JS.ACK.ENVOY_NOTIFICATIONS.listener-example-host.>")
+	require.Contains(t, p.Publish.Allow, "$KV.envoy_listener.lease.listener-example-host")
+	require.Contains(t, p.Publish.Allow, "$KV.envoy_listener.handback.listener-example-host.>")
+	require.Contains(t, p.Publish.Allow, "$KV.envoy_listener.delivery.listener-example-host.>")
 	require.Contains(t, p.Subscribe.Allow, "notifications.role.> envoy-listener-example-host")
 }
 

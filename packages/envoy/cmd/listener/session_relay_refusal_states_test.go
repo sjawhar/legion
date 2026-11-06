@@ -110,7 +110,7 @@ func TestARefusalIsReportedOnceWhateverTheSessionsEntrySaid(t *testing.T) {
 			}
 			awaitLogLine(t, rig, "listener delivery mode cannot be read unambiguously", 15*time.Second)
 			awaitFanoutFinished(t, rig, durable, first.Sequence)
-			if got := rig.harness.config.attemptCache.Seen(unreadable.DedupeKey, relayed); got != tc.wantAttempt {
+			if got := ledgerAttempted(t, rig.harness.config, unreadable.DedupeKey, relayed); got != tc.wantAttempt {
 				t.Fatalf("an attempt record of %s is there: %t, want %t", relayed, got, tc.wantAttempt)
 			}
 

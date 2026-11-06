@@ -104,10 +104,13 @@ func TestAPublishWaitingForAReconnectWhoseEventIsDelayedStillReturns(t *testing.
 	t.Cleanup(func() { close(release) })
 
 	server.Stop(t)
+	// The client's connected flag is moved by the connection's own callbacks (noteConnection), and
+	// this row holds the disconnect's, so the outage is read from the connection itself: the flag
+	// reads connected until the held callback runs, which is this row's point.
 	deadline := time.Now().Add(5 * time.Second)
-	for client.Connected() {
+	for conn.Status() == nats.CONNECTED {
 		if time.Now().After(deadline) {
-			t.Fatal("the client still reads connected 5s after its server stopped")
+			t.Fatal("the connection still reads connected 5s after its server stopped")
 		}
 		time.Sleep(5 * time.Millisecond)
 	}

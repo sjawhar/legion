@@ -140,7 +140,7 @@ func TestBucketsJudgeAHolderByItsRegistrationAndNotTheBucketsAge(t *testing.T) {
 	if state := holders.EntryState(entry); state != session.Unresponsive {
 		t.Fatalf("a holder that last registered 10m ago reads %s, want unresponsive on the package's windows", state)
 	}
-	if seen := holders.LastSeen("ses_stalled"); seen != 0 {
+	if seen := holders.LastSeen(context.Background(), "ses_stalled"); seen != 0 {
 		t.Fatalf("LastSeen is %d, want 0: Dispatch remembers no session whose record has gone", seen)
 	}
 	// The windows alone decide the state, so these read the same record through Buckets built

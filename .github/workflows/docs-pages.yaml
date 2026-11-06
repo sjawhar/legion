@@ -136,6 +136,7 @@ on:
       - 'packages/envoy/internal/bus/*'
       - 'packages/envoy/internal/cistore/*'
       - 'packages/envoy/internal/contracts/*'
+      - 'packages/envoy/internal/dedupe/*'
       - 'packages/envoy/internal/dispatch/accesslog/*'
       - 'packages/envoy/internal/dispatch/agentsecrets/*'
       - 'packages/envoy/internal/dispatch/agentstream/*'

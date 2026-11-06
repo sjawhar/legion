@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -47,10 +48,7 @@ func benchRegistry(n int) (r *SessionRegistry, live, all []string, gone string) 
 	r.mu.Lock()
 	for i := range n / 10 {
 		id := fmt.Sprintf("ses_gone_%05d", i)
-		r.lastSeen[id] = lastSeenSession{
-			lastSeen:  now.Add(-time.Minute).UnixMilli(),
-			expiresAt: now.Add(5 * time.Minute),
-		}
+		r.seenLocal[id] = now.Add(-time.Minute).UnixMilli()
 		if gone == "" {
 			gone = id
 		}
@@ -109,7 +107,7 @@ func BenchmarkRegistry(b *testing.B) {
 			r, _, _, gone := benchRegistry(n)
 			b.ReportAllocs()
 			for b.Loop() {
-				if r.LastSeen(gone) == 0 {
+				if r.LastSeen(context.Background(), gone) == 0 {
 					b.Fatalf("LastSeen(%s) = 0, want its last heartbeat", gone)
 				}
 			}

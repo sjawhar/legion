@@ -207,7 +207,7 @@ func (roleClaimStub) EntryState(entry session.SessionEntry) session.State {
 	return roles.Windows{}.EntryState(entry)
 }
 
-func (roleClaimStub) LastSeen(string) int64 { return 0 }
+func (roleClaimStub) LastSeen(context.Context, string) int64 { return 0 }
 
 func (roleClaimStub) TTL() time.Duration { return 5 * time.Minute }
 

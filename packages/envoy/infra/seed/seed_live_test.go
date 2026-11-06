@@ -16,7 +16,7 @@ import (
 
 // The handoff a consumer relies on: the server's authorization takes the public key Generate
 // returned, and a client takes the seed the store holds. That client connects; one with no
-// credential, or with another user's well-formed seed, is refused. On the 2.10 image and the hub's.
+// credential, or with another user's well-formed seed, is refused. On the plain image and the hub's.
 func TestAGeneratedSeedReachesNATS(t *testing.T) {
 	for _, image := range testnats.Images {
 		t.Run(image.Name, func(t *testing.T) {

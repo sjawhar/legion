@@ -56,7 +56,7 @@ func (s sessions) Holder(_ context.Context, sessionID string) (session.SessionEn
 	return entry, nil
 }
 
-func (s sessions) LastSeen(sessionID string) int64 { return s.remembered[sessionID] }
+func (s sessions) LastSeen(_ context.Context, sessionID string) int64 { return s.remembered[sessionID] }
 
 // registered is a record last written age ago.
 func registered(age time.Duration) session.SessionEntry {
