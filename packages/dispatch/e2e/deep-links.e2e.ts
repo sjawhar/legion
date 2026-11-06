@@ -18,6 +18,7 @@ import {
 } from "./api";
 import {
   barAction,
+  documentEditor,
   documentTransport,
   holdFirstRequest,
   markSpan,
@@ -518,7 +519,18 @@ test("a composer opened from the document is in the margin's view after a commen
     await markLanded(page, markId);
     await landingSettled(sheet);
 
-    await selectEditorText(page, "Paragraph 2: surrounding context");
+    // The landing leaves this paragraph 921 px above the viewport, and the action bar is
+    // `position: fixed` beside the selection, so a selection made from there puts the bar above
+    // the viewport too - where Playwright's "scroll into view" moves nothing, a fixed element
+    // having nowhere to be scrolled from. What rescued it was never this row: it was
+    // prosemirror-view scrolling to its own selection when `selectEditorText` focuses the
+    // editor, measured here as a single `window.scrollBy(0, -1062)` from `scrollToSelection` on
+    // the DOMObserver's flush, which happens to leave the document's first paragraphs on screen.
+    // A reader drags over text they are looking at, so this row scrolls to the paragraph first
+    // and the bar is beside something on screen however that focus scroll falls.
+    const selected = "Paragraph 2: surrounding context";
+    await documentEditor(page).getByText(selected).scrollIntoViewIfNeeded();
+    await selectEditorText(page, selected);
     await barAction(page, "Comment");
 
     const composer = sheet.locator("[data-margin-composer]");

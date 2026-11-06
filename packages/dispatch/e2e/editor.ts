@@ -59,7 +59,14 @@ export function actionBar(page: Page): Locator {
   return page.locator(".dispatch-action-bar");
 }
 
+/** Presses one of the selection bar's actions, once the bar is where a press can reach it. The
+ * bar is `position: fixed` and `dispatch-action-bar.ts` places it beside the selection, so a
+ * selection outside the viewport puts the bar outside it too - and Playwright's "scroll into
+ * view" moves nothing for a fixed element, so such a click only retries until the row's budget
+ * ends and reports a button that would not take a press. The wait fails by naming the bar
+ * instead, which is the thing that did not arrive. */
 export async function barAction(page: Page, label: "Comment" | "Suggest" | "Ask"): Promise<void> {
+  await expect(actionBar(page)).toBeInViewport();
   await actionBar(page).getByRole("button", { exact: true, name: label }).click();
 }
 
