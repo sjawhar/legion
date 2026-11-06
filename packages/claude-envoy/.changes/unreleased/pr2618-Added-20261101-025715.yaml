@@ -1,0 +1,5 @@
+kind: Added
+body: The Claude Code backend ships the reviewer's `goal-red-team` agent beside the planner's two checks.
+time: 2026-11-01T02:57:15.006254691Z
+custom:
+    Issue: pr2618

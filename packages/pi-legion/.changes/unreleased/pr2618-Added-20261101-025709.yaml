@@ -1,0 +1,5 @@
+kind: Added
+body: The reviewer dispatches a new `goal-red-team` task agent each round, which judges the change against the issue's goal and every requirement of its spec and reports each one met, unmet or waived.
+time: 2026-11-01T02:57:09.196022699Z
+custom:
+    Issue: pr2618
