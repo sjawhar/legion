@@ -27,6 +27,7 @@ import type {
   CreateProjectInput,
   CreateVersionInput,
   CredentialPendingResponse,
+  DispatchLimits,
   DispatchServiceErrorShape,
   EditArtifactInput,
   EditArtifactResponse,
@@ -1047,6 +1048,12 @@ export class DispatchClient {
 
   async whoami(): Promise<WhoamiResponse> {
     return this.#json("GET", ["api", "v1", "whoami"]);
+  }
+
+  /** `GET /api/v1/limits`: the bounds this server holds a write to, each read from the constant
+   *  that enforces it. The client keeps no copy of them: it prints what the server answers. */
+  async limits(): Promise<DispatchLimits> {
+    return this.#json("GET", ["api", "v1", "limits"]);
   }
 
   /** `GET /api/v1/inbox?assignee=<who>`: the open asks one person's Inbox lists, in the server's

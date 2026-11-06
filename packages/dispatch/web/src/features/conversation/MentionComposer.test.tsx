@@ -4,7 +4,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { type ReactNode, useState } from "react";
 import { MemoryRouter } from "react-router-dom";
 
-import { ApiError, api } from "../../api/client";
+import { AGENT_LIST_REFILLING, ApiError, api } from "../../api/client";
 import type { Agent, Comment, ItemBlock, ItemBlocks, Message } from "../../api/types";
 import { useSending } from "../../hooks/useSending";
 import type { AgentText } from "../refs/AgentName";
@@ -679,6 +679,52 @@ test("an accepted mention survives its target going offline before Send", async 
   }
 });
 
+// A refilling agent list keeps the suggestions an earlier read gave and never says nobody
+// matches: it says the list is refilling instead.
+test("mention suggestions say the agent list is refilling instead of that no agent matches", async () => {
+  const listAgents = spyOn(api, "listAgents").mockRejectedValue(
+    new ApiError(503, { code: "ENVOY_REFILLING", error: "The agent list is refilling." })
+  );
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  queryClient.setQueryData(["agents"], [planner]);
+  const view = render(
+    <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <QueryClientProvider client={queryClient}>
+        <MentionComposer
+          onClose={() => {}}
+          onSent={() => {}}
+          owner={{ issueKey: "CORE-1", kind: "issue" }}
+        />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "@" } });
+    const suggestions = await screen.findByRole("listbox", { name: "Mention suggestions" });
+    expect((await within(suggestions).findByTestId("agent-list-refilling")).textContent).toBe(
+      AGENT_LIST_REFILLING
+    );
+    const kept = within(suggestions).getByRole("option", { name: "Planner" });
+    // The suggestion kept from the earlier read draws its agent's running state as unknown, never
+    // as not running, while the list it would be judged by is refilling.
+    expect(kept.querySelector('[data-agent-name="A"]')?.getAttribute("data-agent-state")).toBe(
+      "unknown"
+    );
+
+    fireEvent.change(field, { target: { value: "@nobody" } });
+    await waitFor(() => expect(within(suggestions).queryAllByRole("option")).toHaveLength(0));
+    expect(within(suggestions).getByTestId("agent-list-refilling")).toBeTruthy();
+    expect(within(suggestions).queryByText("No live agents match.")).toBeNull();
+  } finally {
+    view.unmount();
+    listAgents.mockRestore();
+  }
+});
+
 // INFRA-440 (exclusion E2). Each suggestion is one option inside a listbox, which may own only
 // options, so the agent in it is drawn by `AgentName` with its running state and no link: a
 // session option's name, and a role option's holder in its detail line.
@@ -892,7 +938,7 @@ test("the picker adds no stopped option while the live agents list failed", asyn
       await collaborators.mock.results[0]?.value;
       await Promise.allSettled(listAgents.mock.results.map((result) => result.value));
     });
-    await screen.findByText("No live agents match.");
+    await screen.findByText("Could not load live agents — Envoy listener unreachable.");
     expect(within(listbox).queryByRole("group", { name: "Not running" })).toBeNull();
     expect(within(listbox).queryAllByRole("option")).toHaveLength(0);
   } finally {

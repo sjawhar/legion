@@ -165,6 +165,7 @@ export type {
   IssueChild,
   IssueClaim,
   IssueClaimEventPayload,
+  IssueClaimLiveness,
   IssueCollaboratorAgent,
   IssueCollaboratorLegion,
   IssueCollaboratorPerson,
