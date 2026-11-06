@@ -135,15 +135,41 @@ type Session struct {
 	// (envoy-client's machineID()); MachineID is always the registering listener's own
 	// machine and keeps its routing meaning. The listener falls back to MachineID when a
 	// session's plugin predates this field, so Host is never empty here.
-	Host         string   `json:"host"`
-	Roles        []string `json:"roles"`
-	Capabilities []string `json:"capabilities"`
-	LastSeen     int64    `json:"last_seen"`
+	Host string `json:"host"`
+	// TmuxPlace is where the session's process sits in tmux, as the listener answered it. Nil
+	// for a session in no pane — one in Kubernetes, or any process started outside tmux — and
+	// for one a listener that predates the field answered: both are "Dispatch has no pane to
+	// draw", and neither puts a tmux_place key on an agents row.
+	TmuxPlace    *TmuxPlace `json:"tmux_place,omitempty"`
+	Roles        []string   `json:"roles"`
+	Capabilities []string   `json:"capabilities"`
+	LastSeen     int64      `json:"last_seen"`
 	// State is StateLive, StateUnresponsive or StateGone, as the listener judged this record
 	// when it answered. A listener that predates the field names none, and normalize reads that
 	// as StateLive: every session such a listener answers with is one it holds live, so reading
 	// it as anything else would retire working sessions during a rollout.
 	State string `json:"state"`
+}
+
+// TmuxPlace is a session's pane and the window and tmux session holding it, in the wire names
+// the whole hop shares: the client reads them (packages/envoy-client's readTmuxPlace), the
+// listener stores them (packages/envoy/internal/session's TmuxPlace) and GET /api/v1/agents
+// answers them unchanged, where packages/contracts' TmuxPlace declares them for the pages that
+// draw a machine's tmux layout.
+type TmuxPlace struct {
+	Socket      string `json:"socket"`
+	ServerPID   string `json:"server_pid"`
+	SessionName string `json:"session_name"`
+	WindowID    string `json:"window_id"`
+	WindowIndex int    `json:"window_index"`
+	WindowName  string `json:"window_name"`
+	PaneID      string `json:"pane_id"`
+	PaneIndex   int    `json:"pane_index"`
+	// Layout is tmux's window_layout string, which draws how the window is split. Empty when
+	// the client dropped it for length, so a page that draws the layout must do without it for
+	// a finely split window rather than take the place itself for missing.
+	Layout string `json:"layout,omitempty"`
+	Zoomed bool   `json:"zoomed"`
 }
 
 // normalize fills in what a listener may leave out: the id of the one session that was asked

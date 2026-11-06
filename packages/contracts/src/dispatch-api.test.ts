@@ -57,6 +57,7 @@ import {
   ReplyBlockSchema,
   retriesUnderKey,
   serviceSubjectLabel,
+  type TmuxPlace,
   type UserStateUpdatedEventPayload,
   type UserThreadStateUpdatedEventPayload,
 } from "./dispatch-api";
@@ -166,6 +167,46 @@ test("models Agent activity and open-ask aggregates", () => {
 
   expect(agent.open_asks).toBe(2);
   expect(agent.last_activity).toBe("2026-09-13T13:00:00Z");
+});
+
+// The ten-member place object, written once on this side of the wire. The same literal is the
+// one GET /api/v1/agents must answer key for key in
+// packages/envoy/internal/dispatch/api/agents_test.go (tmuxPlaceWire, asserted there as an exact
+// key set), so the two sides can only agree on these names: a member renamed here alone fails
+// this file's typecheck, and one renamed in Go alone fails that test. Keep the two identical.
+test("carries a session's whole tmux place", () => {
+  const agent = {
+    capabilities: ["btw"],
+    dir: "/workspaces/planner",
+    host: "example-host-a",
+    last_activity: null,
+    last_seen: 1_726_231_200_000,
+    machine_id: "host-a",
+    open_asks: 0,
+    roles: ["planner"],
+    session_id: "planner-session",
+    title: "Planner",
+    tmux_place: {
+      socket: "/tmp/tmux-1000/default",
+      server_pid: "4242",
+      session_name: "legion",
+      window_id: "@7",
+      window_index: 3,
+      window_name: "infra-883",
+      pane_id: "%12",
+      pane_index: 1,
+      layout: "a1b2,180x44,0,0,7",
+      zoomed: true,
+    },
+  } satisfies Agent;
+
+  expect(agent.tmux_place.pane_id).toBe("%12");
+  // A finely split window's layout is dropped by the client; the other nine still name the pane.
+  const dropped: TmuxPlace = { ...agent.tmux_place, layout: undefined };
+  expect(dropped.layout).toBeUndefined();
+  // A session outside tmux carries no place at all, which is not an empty one.
+  const outside = { ...agent, tmux_place: undefined } satisfies Agent;
+  expect(outside.tmux_place).toBeUndefined();
 });
 test("accepts the typed artifact version event payload", () => {
   const event = {

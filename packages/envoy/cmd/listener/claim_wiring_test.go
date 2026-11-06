@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/sjawhar/envoy/internal/session"
 )
 
 // envoy-client's machineID() (ENVOY_MACHINE_ID, falling back to the kernel hostname) names where
@@ -31,6 +33,64 @@ func TestSessionEntryFromSubscribe_DefaultsHostEmpty(t *testing.T) {
 
 	if got.Host != "" {
 		t.Fatalf("expected Host to stay empty for a payload without the field, got %+v", got)
+	}
+}
+
+// A registration carries where its session sits in tmux, and the whole place must reach the
+// entry: Dispatch draws a machine's panes from what the entry holds and from nothing else, so a
+// member lost here is a pane drawn wrong.
+func TestSessionEntryFromSubscribe_CarriesTmuxPlace(t *testing.T) {
+	var body subscribeBody
+	if err := json.Unmarshal([]byte(`{
+		"session_id":"ses_tmux",
+		"tmux_place":{
+			"socket":"/tmp/tmux-1000/default","server_pid":"4242","session_name":"legion",
+			"window_id":"@7","window_index":3,"window_name":"infra-883",
+			"pane_id":"%12","pane_index":1,"layout":"a1b2,180x44,0,0,7","zoomed":true
+		}
+	}`), &body); err != nil {
+		t.Fatalf("decode subscribe body: %v", err)
+	}
+
+	got := sessionEntryFromSubscribe(body, "example-listener", sessionDeliveryOutcome{})
+
+	want := session.TmuxPlace{
+		Socket:      "/tmp/tmux-1000/default",
+		ServerPID:   "4242",
+		SessionName: "legion",
+		WindowID:    "@7",
+		WindowIndex: 3,
+		WindowName:  "infra-883",
+		PaneID:      "%12",
+		PaneIndex:   1,
+		Layout:      "a1b2,180x44,0,0,7",
+		Zoomed:      true,
+	}
+	if got.TmuxPlace == nil || *got.TmuxPlace != want {
+		t.Fatalf("entry place = %+v, want %+v", got.TmuxPlace, want)
+	}
+}
+
+// A session in no pane and a session whose plugin predates the field send the same bytes - no
+// "tmux_place" key - and both must leave the entry's place nil. An empty place would put a pane
+// on the Agents page that no tmux server knows.
+func TestSessionEntryFromSubscribe_DefaultsTmuxPlaceNil(t *testing.T) {
+	for name, payload := range map[string]string{
+		"a session outside tmux":           `{"session_id":"ses_plain","host":"example-host-a"}`,
+		"a plugin that predates the field": `{"session_id":"ses_old","self_subscribed":true}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var body subscribeBody
+			if err := json.Unmarshal([]byte(payload), &body); err != nil {
+				t.Fatalf("decode subscribe body: %v", err)
+			}
+
+			got := sessionEntryFromSubscribe(body, "example-listener", sessionDeliveryOutcome{})
+
+			if got.TmuxPlace != nil {
+				t.Fatalf("entry place = %+v, want nil for a body that names none", got.TmuxPlace)
+			}
+		})
 	}
 }
 

@@ -2373,6 +2373,27 @@ export interface RelatedChecksReport {
  */
 export type AgentSessionState = "live" | "unresponsive";
 
+/**
+ * Where a session's process sits in tmux: its pane, and the window and tmux session holding it,
+ * as the session's own Envoy client read them from the tmux server it is under. `layout` is
+ * tmux's `window_layout` string, which draws how the window is split; it is absent when the
+ * client dropped it because a finely split window had grown it past what a registration carries,
+ * so a reader that draws the layout does without it rather than taking the place for missing.
+ * Mirrors the listener's `session.TmuxPlace`.
+ */
+export interface TmuxPlace {
+  readonly socket: string;
+  readonly server_pid: string;
+  readonly session_name: string;
+  readonly window_id: string;
+  readonly window_index: number;
+  readonly window_name: string;
+  readonly pane_id: string;
+  readonly pane_index: number;
+  readonly layout?: string;
+  readonly zoomed: boolean;
+}
+
 export interface Agent {
   readonly session_id: string;
   readonly title: string;
@@ -2387,6 +2408,14 @@ export interface Agent {
    * so it is never empty.
    */
   readonly host: string;
+  /**
+   * Where the session sits in tmux, as its last registration reported it. Absent for a session
+   * in no pane — one in Kubernetes, or any process started outside tmux — and for one a
+   * listener or Dispatch that predates the field answered: a reader has no pane to draw for it,
+   * and must not read the absence as a session that has stopped. Its `layout` is absent on its
+   * own when the client dropped it for length.
+   */
+  readonly tmux_place?: TmuxPlace;
   readonly roles: string[];
   /**
    * Wire value from the Envoy registry: an open string list. The known values

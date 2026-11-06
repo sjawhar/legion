@@ -2219,6 +2219,105 @@ func TestSessionsHandlerReportsHostWithFallbackToMachineID(t *testing.T) {
 	}
 }
 
+// exampleTmuxPlace is the place the listener's tmux tests register, all ten members named so
+// that a member dropped on the way to an answer shows up as a changed value.
+func exampleTmuxPlace() *session.TmuxPlace {
+	return &session.TmuxPlace{
+		Socket:      "/tmp/tmux-1000/default",
+		ServerPID:   "4242",
+		SessionName: "legion",
+		WindowID:    "@7",
+		WindowIndex: 3,
+		WindowName:  "infra-883",
+		PaneID:      "%12",
+		PaneIndex:   1,
+		Layout:      "a1b2,180x44,0,0,7",
+		Zoomed:      true,
+	}
+}
+
+// GET /v1/sessions answers the whole place of a session that sits in a pane, and leaves the key
+// off a session that does not: a cluster whose sessions run outside tmux pays no bytes per row,
+// and a reader can tell "no pane" from a pane whose members happen to be empty.
+func TestSessionsHandlerAnswersTheTmuxPlaceAndOmitsItForASessionOutsideTmux(t *testing.T) {
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	if err := sessions.Put("ses_paned", session.SessionEntry{SelfSubscribed: true, MachineID: "example-listener", TmuxPlace: exampleTmuxPlace()}); err != nil {
+		t.Fatalf("put the session sitting in a pane: %v", err)
+	}
+	if err := sessions.Put("ses_outside", session.SessionEntry{SelfSubscribed: true, MachineID: "example-listener"}); err != nil {
+		t.Fatalf("put the session outside tmux: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	sessionsHandler(registry, sessions).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/sessions", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
+	}
+	var rows []map[string]json.RawMessage
+	if err := json.NewDecoder(recorder.Body).Decode(&rows); err != nil {
+		t.Fatalf("decode sessions response: %v", err)
+	}
+	byID := make(map[string]map[string]json.RawMessage, len(rows))
+	for _, row := range rows {
+		var sessionID string
+		if err := json.Unmarshal(row["session_id"], &sessionID); err != nil {
+			t.Fatalf("decode a row's session id: %v", err)
+		}
+		byID[sessionID] = row
+	}
+	raw, named := byID["ses_paned"]["tmux_place"]
+	if !named {
+		t.Fatalf("row for ses_paned = %v, want a tmux_place", byID["ses_paned"])
+	}
+	var answered session.TmuxPlace
+	if err := json.Unmarshal(raw, &answered); err != nil {
+		t.Fatalf("decode the answered place: %v", err)
+	}
+	if answered != *exampleTmuxPlace() {
+		t.Fatalf("answered place = %+v, want %+v", answered, *exampleTmuxPlace())
+	}
+	if _, named := byID["ses_outside"]["tmux_place"]; named {
+		t.Fatalf("row for ses_outside = %v, want no tmux_place key at all", byID["ses_outside"])
+	}
+}
+
+// A session leaves tmux when its pane closes or its server dies, and registers again with no
+// place. That registration must clear the place its entry held: the entry is built fresh from
+// each body and written whole, so nothing carries the stale pane forward onto the layout.
+func TestASecondRegistrationWithoutATmuxPlaceClearsTheStoredTmuxPlace(t *testing.T) {
+	_, sessions := setupSessionsTest(t, nil, nil)
+	var placed subscribeBody
+	if err := json.Unmarshal([]byte(`{
+		"session_id":"ses_moved",
+		"tmux_place":{
+			"socket":"/tmp/tmux-1000/default","server_pid":"4242","session_name":"legion",
+			"window_id":"@7","window_index":3,"window_name":"infra-883",
+			"pane_id":"%12","pane_index":1,"layout":"a1b2,180x44,0,0,7","zoomed":true
+		}
+	}`), &placed); err != nil {
+		t.Fatalf("decode the registration that names a pane: %v", err)
+	}
+	if err := sessions.Put("ses_moved", sessionEntryFromSubscribe(placed, "example-listener", sessionDeliveryOutcome{})); err != nil {
+		t.Fatalf("store the registration that names a pane: %v", err)
+	}
+
+	var left subscribeBody
+	if err := json.Unmarshal([]byte(`{"session_id":"ses_moved"}`), &left); err != nil {
+		t.Fatalf("decode the registration that names none: %v", err)
+	}
+	if err := sessions.Put("ses_moved", sessionEntryFromSubscribe(left, "example-listener", sessionDeliveryOutcome{})); err != nil {
+		t.Fatalf("store the registration that names none: %v", err)
+	}
+
+	stored, err := sessions.Get("ses_moved")
+	if err != nil {
+		t.Fatalf("read the session back: %v", err)
+	}
+	if stored.TmuxPlace != nil {
+		t.Fatalf("stored place = %+v, want nil once the session registered with none", stored.TmuxPlace)
+	}
+}
+
 func TestSendHandler_StampsInterestSenderWithoutSessionEntry(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, map[string][]string{
