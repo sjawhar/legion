@@ -1,16 +1,16 @@
 name: Dispatch browser suite
 
 # Every browser job of the Dispatch suite, in one place. ci.yaml's dispatch-browser job calls it
-# for a pull request and a merge group with the pull-request lane, and the nightly workflow calls
-# it with the full lane. The suite used to run whole inside ci.yaml's dispatch job, on one
-# machine, beside that job's lint, typecheck and unit steps; here the rows are spread over four
-# shard machines, the three `-alone` projects get a machine each, and one merge job joins what
-# they wrote into a single report and publishes the run's flake rate.
+# with the pull-request lane on a pull request and the full lane on everything else, and the
+# nightly workflow calls it with the full lane. The suite used to run whole inside ci.yaml's
+# dispatch job, on one machine, beside that job's lint, typecheck and unit steps; here the rows
+# are spread over four shard machines, the three `-alone` projects get a machine each, and one
+# merge job joins what they wrote into a single report and publishes the run's flake rate.
 #
 # Two lanes, one input. `pull-request` runs the two projects a pull request is held to, `chromium`
 # and `iphone`; `full` runs all eight parallel projects, the three `-alone` ones and the
-# two-process job. So a pull request pays for the rows that answer it, and the nightly run pays
-# for the rest.
+# two-process job. So a pull request pays for the rows that answer it, and the merge queue, a
+# push to main and the nightly run pay for the rest, each of which has the wall time for them.
 #
 # A reusable workflow, not a composite action, for the reason docs-site.yaml's head comment
 # gives: `services:` is a job-level key and a composite action's step keys do not include

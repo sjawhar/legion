@@ -42,7 +42,8 @@ on:
   pull_request:
     types: [labeled]
   schedule:
-    # Nightly. No other workflow of this repository is on a schedule.
+    # Nightly. The one other schedule of this repository is dispatch-browser-nightly.yaml's,
+    # hours away at 02:17, so the two nightlies do not contend for runners.
     - cron: "41 4 * * *"
 
 # The jobs clone, download pinned tools and modules, and upload an artifact of the run's own.
