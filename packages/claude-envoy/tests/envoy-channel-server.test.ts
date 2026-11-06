@@ -7,14 +7,17 @@ import { nkeys } from "nats"
 import marketplace from "../../../.claude-plugin/marketplace.json" with { type: "json" }
 import plugin from "../.claude-plugin/plugin.json" with { type: "json" }
 import ompPlugin from "../.omp-plugin/plugin.json" with { type: "json" }
+import type { ModCallArguments, ModCallName, ModCallResults } from "../hooks/mod-protocol"
 import pkg from "../package.json" with { type: "json" }
 import {
+  type ChannelNotifier,
   createChannelDelivery,
   enqueueChannelMessage,
   MCP_SERVER_INFO,
   sessionCapabilities,
   startChannelSession,
 } from "../src/envoy-channel-server"
+import { modSession } from "../src/mod-session"
 import { roleStateFile, SessionIdentity } from "../src/session-identity"
 import {
   deliveryRaw,
@@ -27,6 +30,7 @@ import {
   scratchState,
   sessionOptions,
   settled,
+  waitFor,
 } from "./channel-session-harness"
 import { FakeNatsServer } from "./fake-nats-server"
 import { isolatePaneEnvironment } from "./pane-environment"
@@ -235,6 +239,81 @@ test("a send whose notification failed is delivered when it is sent again", asyn
     // did see the second, so the third is one.
     expect(delivered).toEqual(["evt-retry"])
   } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+// R12 (INFRA-1026): an idle card goes to the session as a `$.prompt.submit`, and its Envoy frame
+// is answered on the row Claude Code writes for that prompt, waited for up to `PROMPT_ROW_MS`
+// (`../src/mod-session`, `show`). When a turn starts in the window between the idle check and the
+// submit landing, Claude Code writes that row only at the turn's end — past the bound — so `show`
+// rejects although the submit entered the session and the card is in it. The sibling test above
+// shows that a frame whose write failed is redelivered, which is right for a stopped process that
+// took nothing (k7's second clause). This one is the other half: the submit here succeeds and is
+// still pending when Envoy resends the frame, so the resend must be answered, not submitted a
+// second time — a second submit puts the one card in front of the model twice (implement handoff
+// v9's documented residual; the architect's R12, one time). Its fake mod holds every
+// `prompt.submit` open, as a running turn does, so the submit is pending across the resend.
+test("a card whose submit entered the session is not submitted again when Envoy resends it", async () => {
+  const nats = new FakeNats()
+  const submitted: string[] = []
+  const holdingSubmits: Array<() => void> = []
+  const claude = modSession({
+    link: {
+      connected: () => true,
+      request: <N extends ModCallName>(
+        call: N,
+        args: ModCallArguments[N],
+      ): Promise<ModCallResults[N]> => {
+        if (call !== "prompt.submit") {
+          return Promise.reject(new Error(`the card path made an unexpected mod call: ${call}`))
+        }
+        const { text } = args as ModCallArguments["prompt.submit"]
+        submitted.push(text)
+        // The submit a running turn took resolves only at that turn's end (`../src/mod-session`),
+        // so it is held open here: pending while the resend arrives.
+        const held = Promise.withResolvers<ModCallResults[N]>()
+        holdingSubmits.push(() => held.resolve({ text } as ModCallResults[N]))
+        return held.promise
+      },
+    },
+    warn: () => undefined,
+    promptRowMs: 40,
+  })
+  const notifier: ChannelNotifier = {
+    notification: async ({ content, blocks }) => {
+      await claude.show({ content: blocks ?? [{ text: content, type: "text" }], text: content })
+    },
+  }
+  const stateDirectory = await scratchState()
+  const session = await startChannelSession(
+    sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
+      connection: nats,
+      notifier,
+    }),
+  )
+
+  try {
+    nats.emit(directSubject, deliveryRaw)
+    await waitFor(async () => submitted.length === 1, "the card's first submit")
+    // `show` now waits up to `promptRowMs` (40 ms) for the prompt's row, which a stolen turn
+    // writes only when it ends. The channel server's own startup and heartbeat waits need real
+    // time (the harness's `waitFor` says so), so this bound is a real timer no fake clock reaches
+    // through the live pipeline; the delay crosses it, after which `show` rejects and, as the
+    // defect stands, the frame's claim is released.
+    await Bun.sleep(80)
+    nats.emit(directSubject, deliveryRaw)
+    await settled()
+    // The stolen turn ends: the held first submit resolves, releasing any second submit queued
+    // behind it, so a resend that was shown reaches the fake mod before the assertion.
+    for (const resolve of holdingSubmits.splice(0)) resolve()
+    await Bun.sleep(60)
+    await settled()
+
+    expect(submitted).toHaveLength(1)
+  } finally {
+    for (const resolve of holdingSubmits) resolve()
     await session.shutdown()
     await rm(stateDirectory, { recursive: true, force: true })
   }
