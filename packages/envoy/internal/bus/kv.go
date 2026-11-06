@@ -331,15 +331,24 @@ func WrapKeyValue(conn *nats.Conn, kv nats.KeyValue) (KeyValue, error) {
 // (awaitBucketApplied): the create's own answer came from the metadata group, and this read goes
 // to whichever member conn is on, which may not have applied it yet. Each read is bounded by
 // RequestTimeout as a lone read is, and every one of them together by bucketAppliedDeadline.
+//
+// Every send of that read, on the create path and off it, is sent again when the server leaves it
+// unanswered (sentAgain), which a member whose meta leader is changing does. A bucket missing and
+// a request unanswered are two different answers and are waited out differently: the first is a
+// member that has not applied the create and is read again until it has, the second is a request
+// that drew nothing and is sent again. Without this, a start that lost one such send ended the
+// program with "open the jetstream handle of KV bucket <name>: context deadline exceeded".
 func wrapKeyValue(conn *nats.Conn, kv nats.KeyValue, created bool) (KeyValue, error) {
 	js, err := jetstream.New(conn)
 	if err != nil {
 		return KeyValue{}, err
 	}
 	open := func() (jetstream.KeyValue, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), RequestTimeout)
-		defer cancel()
-		return js.KeyValue(ctx, kv.Bucket())
+		return sentAgain("KV_"+kv.Bucket()+" STREAM.INFO", func() (jetstream.KeyValue, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), RequestTimeout)
+			defer cancel()
+			return js.KeyValue(ctx, kv.Bucket())
+		})
 	}
 	var watch jetstream.KeyValue
 	if created {
