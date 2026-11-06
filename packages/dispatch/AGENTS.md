@@ -1186,9 +1186,10 @@ issue the page holds now is open, and the socket is connected. It reads the issu
 holds it rather than as the cache held it when the admission arrived, because a reconnect whose
 admission lands before the issue query refreshes would otherwise leave the reader of a reopened
 issue in front of a read-only editor with no way out named. The admission and the connection
-decide the line, not the close or the reopen: each drops the socket only on the server process
-that served it (`SetIssueClosed`), and where it does, the reconnect's admission decides again.
-Typed blocks use
+decide the line, not the close or the reopen. A close drops the socket on every server process
+that holds a room of the document. Migration `20261101181500`'s trigger announces the change, and
+each process closes its rooms of the issue (`issueOpenChanged`). The reconnect's admission
+decides again. Typed blocks use
 `:::name{#block-id key="value"}` container directives. The server owns their schema and version,
 while Dispatch owns host rendering for `render: "host"` types; the SPA must not invent node schemas
 or parse a second directive grammar.

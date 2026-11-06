@@ -307,11 +307,11 @@ func TestAWriteInsideApplyOutlivesTheRoomsLastPeer(t *testing.T) {
 	}
 }
 
-// A document only the API touches - an agent's edit, a read outside any transaction - has no
-// browser to leave its room. ygo stamps such a room idle when the Server.Apply that touched it
-// returns, so its idle sweep evicts the room within the idle timeout and a sweep of the API's last
-// touch, as it evicts a room its last browser left (roomIdleTimeout), and the document reads back
-// what the API wrote.
+// A document only the API touches - a read outside any transaction - has no browser to leave its
+// room. ygo stamps such a room idle when the Server.Apply that touched it returns, so its idle
+// sweep evicts the room within the idle timeout and a sweep of the API's last touch, as it evicts
+// a room its last browser left (roomIdleTimeout), and the document reads back what the API wrote.
+// An agent's edit of a document no room holds loads none at all (publishLiveWrite).
 func TestARoomOnlyTheAPITouchesLeavesWithinTheIdleTimeout(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -337,7 +337,9 @@ func TestARoomOnlyTheAPITouchesLeavesWithinTheIdleTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("agent edit: %v", err)
 	}
-	leaves("agent's edit")
+	if resident() {
+		t.Fatal("the agent's edit of a document no room held loaded its room")
+	}
 
 	if _, err := service.currentToken(ctx, artifactID); err != nil {
 		t.Fatalf("read outside any transaction: %v", err)
@@ -540,8 +542,9 @@ func TestAnEvictedRoomsReplicaGoesWithIt(t *testing.T) {
 	seedServiceText(t, service, artifactID, "before")
 	ctx := context.Background()
 	// A write the room's update observer sees, which makes its replica. The room is resident first,
-	// so the write forks it and its publish is a commit of the room's: a cold write's publish loads
-	// a room that already holds the write, and a transaction that changes nothing commits nothing.
+	// so the write forks it and its publish is a commit of the room's: a write to a document no
+	// room holds publishes into none (publishLiveWrite), and a transaction that changes nothing
+	// commits nothing.
 	if err := service.warmLiveDocument(ctx, artifactID); err != nil {
 		t.Fatal(err)
 	}
@@ -684,12 +687,13 @@ func newRetiringRoomService(t *testing.T) (*Service, *store.Store) {
 
 // A committed write's publish (publishLiveUpdate) applies the write to its room inside a
 // Server.Apply. ygo closes no room a caller is inside (ErrRoomInUse), so a close of the room asked
-// for while the publish is inside - SetIssueClosed's, Evict's, Shutdown's for a room with a
-// connected editor, a failed room's eviction - waits for the publish to leave and closes the room
-// then: the publish returns, its suppression slot does not outlive it, and the room is closed once
-// it has. Before ygo refused such a close, it retired the room's persistence worker under the
-// publish and handed the commit to stranded persistence on the publishing goroutine. The test
-// pauses the publish's commit in an observer, asks for the close there, and lets the commit go on.
+// for while the publish is inside - an issue's close (setRoomIssueOpen), Evict's, Shutdown's for a
+// room with a connected editor, a failed room's eviction - waits for the publish to leave and
+// closes the room then: the publish returns, its suppression slot does not outlive it, and the
+// room is closed once it has. Before ygo refused such a close, it retired the room's persistence
+// worker under the publish and handed the commit to stranded persistence on the publishing
+// goroutine. The test pauses the publish's commit in an observer, asks for the close there, and
+// lets the commit go on.
 func TestAPublishSurvivesACloseOfItsRoomAskedForWhileItRuns(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -699,8 +703,11 @@ func TestAPublishSurvivesACloseOfItsRoomAskedForWhileItRuns(t *testing.T) {
 		close  func(service *Service, artifactID string) error
 	}{
 		{"control: nothing closes the room", false, false, func(*Service, string) error { return nil }},
-		{"SetIssueClosed closes the room", false, true, func(service *Service, _ string) error {
-			service.SetIssueClosed(context.Background(), "DOC-1", true)
+		{"an issue's close closes the room", false, true, func(service *Service, _ string) error {
+			if _, err := service.store.Pool.Exec(context.Background(), `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
+				return err
+			}
+			service.issueOpenChanged(context.Background(), "DOC-1")
 			return nil
 		}},
 		{"Evict closes the room", false, true, func(service *Service, artifactID string) error {
@@ -745,8 +752,8 @@ func TestAPublishSurvivesACloseOfItsRoomAskedForWhileItRuns(t *testing.T) {
 			}
 			seedServiceText(t, service, artifactID, "before")
 			// The room is resident before the write, so the write forks it and its publish is a
-			// commit of the room's: a cold write's publish loads a room that already holds it, and
-			// a transaction that changes nothing commits nothing.
+			// commit of the room's: a write to a document no room holds publishes into none
+			// (publishLiveWrite), and a transaction that changes nothing commits nothing.
 			if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
 				t.Fatalf("load the document's room: %v", err)
 			}
@@ -851,10 +858,11 @@ func TestAPublishSurvivesACloseOfItsRoomAskedForWhileItRuns(t *testing.T) {
 }
 
 // No hooks: a write holds its issue's row, a close of the same issue waits on that row, commits once
-// the write has, and then runs SetIssueClosed, as the issue route does after its own commit
-// (api/issue_patch.go), while the write's Ledger.Commit publishes. The close's CloseRoom waits for
-// the publish's Apply to leave the room before it closes it; the commit returns either way. The
-// longer the document, the longer its room's update observer renders, and the wider that window.
+// the write has, and then the issue's notification closes its rooms (issueOpenChanged), as it does
+// on every process once an issue route's close commits, while the write's Ledger.Commit publishes.
+// The close's CloseRoom waits for the publish's Apply to leave the room before it closes it; the
+// commit returns either way. The longer the document, the longer its room's update observer
+// renders, and the wider that window.
 func TestAWriteSurvivesItsIssueClosingAsItPublishes(t *testing.T) {
 	markdown := func(paragraphs int, tag string) string {
 		var text strings.Builder
@@ -890,7 +898,7 @@ func TestAWriteSurvivesItsIssueClosingAsItPublishes(t *testing.T) {
 						closed <- err
 						return
 					}
-					service.SetIssueClosed(ctx, issueKey, true)
+					service.issueOpenChanged(ctx, issueKey)
 					closed <- nil
 				}()
 				time.Sleep(30 * time.Millisecond)
