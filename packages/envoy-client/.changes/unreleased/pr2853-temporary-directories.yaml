@@ -1,0 +1,3 @@
+kind: Fixed
+body: |-
+  The suites take their temporary directories from `@legion/test-fixtures`, which removes them, so a run leaves none behind; `envoy-config.test.ts` alone left about 250 per run. A container a test starts is removed with its anonymous volumes (`docker rm -f -v`).

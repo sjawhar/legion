@@ -1,0 +1,3 @@
+kind: Changed
+body: |-
+  The `gen-go --check` test skips with a line naming `gofmt` when the host does not have it, instead of failing on the generator's error.

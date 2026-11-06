@@ -1,0 +1,3 @@
+kind: Fixed
+body: |-
+  `dialNats` takes its dial through `setNatsConnectForTests`, so a test no longer replaces the `nats` module for its whole process and `bun run test` is one process again. The row that proves nothing dials nats.js's default `127.0.0.1:4222` skips naming the port when the port is taken, instead of passing silently. The suite restores every environment name and the working directory it changes.
