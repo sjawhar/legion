@@ -88,8 +88,6 @@ function countWholeCacheRefreshes(queryClient: QueryClient): {
   };
 }
 
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-
 function issueUpdated(id: number, title = `title-${id}`): Event {
   return {
     actor: { id: "alice", kind: "user" },
@@ -161,6 +159,7 @@ function signIn(queryClient: QueryClient, eventHead = "0"): void {
 }
 
 test("a drop resumes from the cursor and, when the replay misses the gap, refreshes everything", async () => {
+  jest.useFakeTimers();
   // No jitter below the base: the first retry waits 750 ms.
   const random = spyOn(Math, "random").mockReturnValue(0);
   const queryClient = newClient();
@@ -200,7 +199,7 @@ test("a drop resumes from the cursor and, when the replay misses the gap, refres
       view: { kind: "events" },
     });
     receive(socket, eventFrame(sub, quietEvent(7)));
-    await sleep(150);
+    await advance(150);
     expect(fetches).toEqual({ checks: 1, issues: 1 });
     expect(wholeCache.count()).toBe(0);
 
@@ -225,10 +224,12 @@ test("a drop resumes from the cursor and, when the replay misses the gap, refres
     view.unmount();
     random.mockRestore();
     wholeCache.restore();
+    realClock();
   }
 });
 
 test("a rotation resumes from the cursor and refreshes nothing", async () => {
+  jest.useFakeTimers();
   const queryClient = newClient({ staleTime: Number.POSITIVE_INFINITY });
   const wholeCache = countWholeCacheRefreshes(queryClient);
   const hook = renderHook(() => useEventFeed(), { wrapper: wrapperFor(queryClient) });
@@ -244,11 +245,12 @@ test("a rotation resumes from the cursor and refreshes nothing", async () => {
       view: { kind: "events" },
       resume: { since: "7" },
     });
-    await sleep(300);
+    await advance(300);
     expect(wholeCache.count()).toBe(0);
   } finally {
     hook.unmount();
     wholeCache.restore();
+    realClock();
   }
 });
 
@@ -408,6 +410,7 @@ test("repeated gaps cost one refresh plus a trailing one", async () => {
 });
 
 test("the credential list held null is asked again after a gap", async () => {
+  jest.useFakeTimers();
   const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
   const queryClient = newClient();
   let hook: { unmount: () => void } | undefined;
@@ -420,7 +423,7 @@ test("the credential list held null is asked again after a gap", async () => {
 
     // A rotation is no gap, and asks nothing.
     rotate();
-    await sleep(150);
+    await advance(150);
     expect(getCredentialPending).toHaveBeenCalledTimes(1);
 
     // A gap is the one moment the server may have restarted, perhaps with a broker configured. A
@@ -433,6 +436,7 @@ test("the credential list held null is asked again after a gap", async () => {
   } finally {
     hook?.unmount();
     getCredentialPending.mockRestore();
+    realClock();
   }
 });
 
@@ -504,6 +508,7 @@ test.each(
 });
 
 test("the first subscription resumes from the sign-in check's event head", async () => {
+  jest.useFakeTimers();
   const queryClient = newClient({ staleTime: Number.POSITIVE_INFINITY });
   signIn(queryClient, "41");
   queryClient.setQueryData(["issue", "CORE-1"], { key: "CORE-1" });
@@ -534,13 +539,14 @@ test("the first subscription resumes from the sign-in check's event head", async
     await waitFor(() =>
       expect(queryClient.getQueryState(["issue", "CORE-1"])?.isInvalidated).toBe(true)
     );
-    await sleep(150);
+    await advance(150);
     expect(queryClient.getQueryState(unnamed)?.isInvalidated).toBe(false);
     expect(wholeCache.count()).toBe(0);
     expect(rotate().subscribed("events").resume).toEqual({ since: "43" });
   } finally {
     hook.unmount();
     wholeCache.restore();
+    realClock();
   }
 });
 
@@ -805,6 +811,7 @@ test("a refresh owed to a list removed mid-load is not paid by its replacement, 
 // nothing, so the start refreshes nothing; each replayed event refreshes what it changed. A start
 // whose replay does not cover the gap refreshes everything, as before.
 test("a resume whose replay Dispatch says is complete refreshes nothing, and one that is not refreshes everything", async () => {
+  jest.useFakeTimers();
   const queryClient = newClient({ staleTime: Number.POSITIVE_INFINITY });
   const wholeCache = countWholeCacheRefreshes(queryClient);
   const hook = renderHook(() => useEventFeed({ wholeCacheRefreshMs: 100 }), {
@@ -813,7 +820,7 @@ test("a resume whose replay Dispatch says is complete refreshes nothing, and one
   try {
     const { socket, sub } = openFeed("4");
     receive(socket, eventFrame(sub, issueUpdated(5)));
-    await sleep(150);
+    await advance(150);
 
     // The socket is lost, and the page resumes after the event it applied: Dispatch's log still
     // holds it, so every event after it is replayed.
@@ -823,7 +830,7 @@ test("a resume whose replay Dispatch says is complete refreshes nothing, and one
     act(() => again.open());
     expect(again.subscribed("events").resume).toEqual({ since: "5" });
     receive(again, { type: "events_start", sub, since: "5", replay_complete: true });
-    await sleep(400);
+    await advance(400);
     expect(wholeCache.count()).toBe(0);
 
     // Lost again, and the log was reset under the cursor: Dispatch starts at its new head and
@@ -837,6 +844,7 @@ test("a resume whose replay Dispatch says is complete refreshes nothing, and one
   } finally {
     hook.unmount();
     wholeCache.restore();
+    realClock();
   }
 }, 10_000);
 

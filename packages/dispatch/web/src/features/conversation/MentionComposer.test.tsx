@@ -2320,6 +2320,7 @@ test("a pick in the paste's own task cannot move the upload", async () => {
 // name, so nothing is written into the draft, nothing shows as refused, and the composer says the
 // file was stored and its reference not added - the upload is not made a second time.
 test("a pasted file answered KEY_COMMITTED says it was stored and adds no reference", async () => {
+  jest.useFakeTimers();
   const uploadArtifact = spyOn(api, "uploadArtifact").mockRejectedValue(
     new ApiError(409, { code: "KEY_COMMITTED", error: "already made" })
   );
@@ -2337,9 +2338,10 @@ test("a pasted file answered KEY_COMMITTED says it was stored and adds no refere
     );
     expect(field.value).toBe("See ");
     expect(screen.queryByRole("alert")).toBeNull();
-    await Bun.sleep(20);
+    await tick(20);
     expect(uploadArtifact).toHaveBeenCalledTimes(1);
   } finally {
+    realClock();
     view.unmount();
     uploadArtifact.mockRestore();
   }
