@@ -3,10 +3,12 @@ package agentloop
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -232,5 +234,49 @@ func TestDecideReportsAMalformedBody(t *testing.T) {
 				t.Errorf("result %+v, want %q and no answers: %s", result, FaultMalformed, result.Detail)
 			}
 		})
+	}
+}
+
+// A decision reads a bounded answer: an endpoint that answers with more than the cap is
+// malformed, the detail names the cap, and the caller is not made to hold the body. The same
+// answer within the cap is read as the answer it is, so it is the length and nothing else that
+// the fault reports.
+func TestDecideRefusesAnAnswerPastTheCap(t *testing.T) {
+	t.Parallel()
+	// A whole, valid answer with a padding field, so a body that is refused is refused for
+	// its length rather than for its shape.
+	padded := func(padding int) []byte {
+		answer := map[string]any{
+			"model":   "systemone-standin",
+			"answers": map[string]any{"answered": map[string]any{"type": "noul", "noul": 0.5}},
+			"usage":   map[string]any{"input_tokens": 1, "output_tokens": 1},
+			"padding": strings.Repeat("a", padding),
+		}
+		body, err := json.Marshal(answer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+
+	oversized := newStandIn(t, reply{body: padded(answerLimit)})
+	result, err := Decide(context.Background(), newDecideFixture(t, oversized))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Fault != FaultMalformed || len(result.Answers) != 0 {
+		t.Errorf("result %+v, want %q and no answers: %s", result, FaultMalformed, result.Detail)
+	}
+	if want := fmt.Sprintf("%d MiB", answerLimit>>20); !strings.Contains(result.Detail, want) {
+		t.Errorf("the detail is %q, want the cap, %s, named in it", result.Detail, want)
+	}
+
+	within := newStandIn(t, reply{body: padded(1024)})
+	result, err = Decide(context.Background(), newDecideFixture(t, within))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Fault != "" || len(result.Answers) != 1 {
+		t.Errorf("the answer within the cap: %+v, want the one answer it holds: %s", result, result.Detail)
 	}
 }

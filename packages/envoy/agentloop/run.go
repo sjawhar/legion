@@ -55,10 +55,10 @@ func Run(ctx context.Context, req Request) (Result, error) {
 		return Result{}, err
 	}
 	if req.CacheHistory {
-		switch kind {
-		case AnthropicMessages, AzureAnthropic:
+		switch {
+		case anthropicKind(kind):
 			markAnthropicHistory(messages, len(history))
-		case OpenAIResponses:
+		case kind == OpenAIResponses:
 			markOpenAIHistory(messages, len(history))
 		}
 	}
@@ -122,13 +122,11 @@ func Run(ctx context.Context, req Request) (Result, error) {
 // endpoint that reads a token, a model, and tools that are each named, run something and are
 // named once.
 func (req Request) validate() error {
-	switch {
-	case req.Bounds.Time <= 0 || req.Bounds.Calls <= 0 || req.Bounds.OutputTokens <= 0:
+	if req.Bounds.Time <= 0 || req.Bounds.Calls <= 0 || req.Bounds.OutputTokens <= 0 {
 		return errors.New("agentloop: the request has no time, call or output token bound")
-	case req.Model.Endpoint.Token == nil:
-		return errors.New("agentloop: the request's endpoint reads no token")
-	case req.Model.ID == "":
-		return errors.New("agentloop: the request names no model")
+	}
+	if err := req.Model.validate(); err != nil {
+		return err
 	}
 	named := make(map[string]bool, len(req.Tools))
 	for _, t := range req.Tools {
@@ -169,7 +167,9 @@ func languageModel(req Request, client *http.Client) (provider.LanguageModel, pr
 	case OpenAIChat:
 		// The run's own transport puts the token on every request and adds the
 		// endpoint's query parameters, so the client is given neither headers nor query
-		// parameters of its own: one mechanism, in the transport, for every kind.
+		// parameters of its own: on this protocol the transport is the only thing that
+		// authorizes a call. (On azure-anthropic the provider's own credential
+		// middleware does it instead, and the transport reads no token.)
 		// WithIncludeUsage asks the stream for its token counts, and
 		// WithStructuredOutputs lets a Final reply's schema ride as
 		// response_format.json_schema rather than being downgraded to a bare json_object.
@@ -321,7 +321,7 @@ func (r *run) prepareStep(state aisdk.PrepareStepState) (*aisdk.PrepareStepResul
 	if state.StepNumber == r.req.Bounds.Calls-1 {
 		result.ToolChoice = &provider.ToolChoice{Type: provider.ToolChoiceNone}
 	}
-	if (r.kind != AnthropicMessages && r.kind != AzureAnthropic) || !r.req.CacheHistory || len(state.Messages) == 0 {
+	if !anthropicKind(r.kind) || !r.req.CacheHistory || len(state.Messages) == 0 {
 		return result, nil
 	}
 	if state.StepNumber == 0 {
@@ -410,7 +410,11 @@ func (r *run) finish(result *Result, stream *aisdk.StreamTextResult) {
 	}
 	switch reason.Unified {
 	case provider.FinishReasonLength:
-		result.Fault, result.Detail = FaultLength, fmt.Sprintf("the last reply was cut off at %d output tokens", r.req.Bounds.OutputTokens)
+		// The provider's own reason is in the detail because more than one maps to
+		// length: Anthropic ends a reply this way both for max_tokens, the run's own
+		// bound, and for a prompt past the model's context window.
+		result.Fault, result.Detail = FaultLength, fmt.Sprintf("the provider cut the last reply off for %s, with the run's output token bound at %d",
+			reason.Raw, r.req.Bounds.OutputTokens)
 		return
 	case provider.FinishReasonContentFilter:
 		result.Fault, result.Detail = FaultRefusal, fmt.Sprintf("the provider stopped the last reply: %s", reason.Raw)
@@ -474,10 +478,9 @@ func blocksOf(content []aisdk.ContentPart, kind Kind) []Block {
 		case aisdk.ToolCallContent:
 			blocks = append(blocks, Block{Kind: ToolCallBlock, ToolCallID: part.ToolCallID, Name: part.ToolName, Input: part.Input})
 		case aisdk.ToolResultContent:
-			output := modelOutput(part.Output)
 			blocks = append(blocks, Block{
 				Kind: ToolResultBlock, ToolCallID: part.ToolCallID, Name: part.ToolName,
-				Content: []Block{{Kind: TextBlock, Text: output.Text}}, IsError: output.Type == provider.ToolOutputErrorText,
+				Content: []Block{{Kind: TextBlock, Text: toolText(part.Output)}},
 			})
 		case aisdk.ToolErrorContent:
 			blocks = append(blocks, Block{
@@ -487,6 +490,17 @@ func blocksOf(content []aisdk.ContentPart, kind Kind) []Block {
 		}
 	}
 	return blocks
+}
+
+// toolText is a tool result's output as the model is told it: a tool answers with a JSON string
+// of its output, which is what the SDK sends on as the result's text, and anything else is read
+// as the JSON it is.
+func toolText(output json.RawMessage) string {
+	var text string
+	if json.Unmarshal(output, &text) == nil {
+		return text
+	}
+	return string(output)
 }
 
 // textPhase is the phase an openai-responses text part was produced in, which the provider puts
@@ -557,9 +571,8 @@ func priced(usage provider.Usage, price Price) Usage {
 	return Usage{
 		Input: input, Output: output, CacheWrite: write, CacheRead: read,
 		Reasoning: value(usage.OutputTokens.Reasoning),
-		CostUSD: perMillion(input, price.Input) + perMillion(output, price.Output) +
-			perMillion(write, price.CacheWrite) + perMillion(read, price.CacheRead),
-		Metered: slices.ContainsFunc(counted, func(n *int) bool { return n != nil }),
+		CostUSD:   price.cost(input, output, write, read),
+		Metered:   slices.ContainsFunc(counted, func(n *int) bool { return n != nil }),
 	}
 }
 

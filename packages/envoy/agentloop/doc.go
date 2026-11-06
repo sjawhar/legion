@@ -21,10 +21,13 @@
 // Endpoint.Token returns a token and the kind decides where it goes: X-Api-Key for
 // anthropic-messages; Authorization, as a bearer token, for openai-responses, openai-chat and
 // systemone; and for azure-anthropic the token is handed to the Azure provider's own credential.
-// There is no Endpoint field for an auth scheme. A redirect is never followed, in a run or in a
-// decision, so the token reaches the endpoint the caller named and no other server: a 3xx comes
-// back as the response, which the retry leaves alone and the provider reports, so the run ends
-// in FaultProviderError.
+// There is no Endpoint field for an auth scheme. The token is read again for every HTTP attempt,
+// the retry included, except on azure-anthropic: there the provider's credential middleware sets
+// the header above this package's HTTP client, so the token is read once per model call and the
+// retry below the middleware resends the first attempt's token. A redirect is never followed, in
+// a run or in a decision, so the token reaches the endpoint the caller named and no other
+// server: a 3xx comes back as the response, which the retry leaves alone and the provider
+// reports, so the run ends in FaultProviderError.
 //
 // # The retry
 //

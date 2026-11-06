@@ -20,7 +20,7 @@ import (
 // modelTransport carries every model call of a run. It puts the endpoint's token, read again for
 // the attempt, on each request; adds the endpoint's own query parameters to it; makes the run's
 // one retry, on a 429, a 5xx or a transport error, within the run's time; and, on the protocols
-// that read them back, keeps each response it returns, so an OpenAI Responses turn's output
+// that read them back, keeps the response bodies they read, so an OpenAI Responses turn's output
 // items can be appended byte for byte as the API sent them and a Chat Completions refusal can be
 // read out of the stream that carried it.
 type modelTransport struct {
@@ -30,10 +30,12 @@ type modelTransport struct {
 	query url.Values
 
 	mu sync.Mutex
-	// responses are the bodies of the responses returned, one per model call, in order. They
-	// are kept for the two protocols that read them back, openai-responses through
-	// outputItems and openai-chat through refusal; every other kind keeps none, and reads
-	// none.
+	// responses are the response bodies kept, in the order they were returned, and hold
+	// only what the protocol reads back. openai-responses keeps one per model call, because
+	// outputItems reads each step's own native items out of its own call's body;
+	// openai-chat keeps one, the newest, because refusal reads the last call's body alone,
+	// so an earlier call's is dropped as the next one arrives rather than held for the life
+	// of the run. Every other kind keeps none, and reads none.
 	responses []*bytes.Buffer
 }
 
@@ -123,6 +125,10 @@ func (t *modelTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		if keepsResponses(t.kind) && resp.StatusCode/100 == 2 {
 			kept := &bytes.Buffer{}
 			t.mu.Lock()
+			if t.kind == OpenAIChat {
+				// Only the newest is ever read, so the one before it goes.
+				t.responses = t.responses[:0]
+			}
 			t.responses = append(t.responses, kept)
 			t.mu.Unlock()
 			resp.Body = &keptBody{ReadCloser: resp.Body, kept: kept, mu: &t.mu}
@@ -172,7 +178,9 @@ func (b *keptBody) Read(p []byte) (int, error) {
 }
 
 // outputItems are the output items of each of the first calls OpenAI Responses calls, in order,
-// each byte for byte as its stream's response.output_item.done event carried it.
+// each byte for byte as its stream's response.output_item.done event carried it. It is the
+// reader openai-responses keeps every call's body for, so a run with fewer bodies than calls is
+// a run whose steps cannot all be given their own, which is an error rather than a guess.
 func (t *modelTransport) outputItems(calls int) ([][]json.RawMessage, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -189,15 +197,16 @@ func (t *modelTransport) outputItems(calls int) ([][]json.RawMessage, error) {
 	return items, nil
 }
 
-// refusal is the refusal the last of the run's calls Chat Completions calls carried, or the
-// empty string where it carried none.
+// refusal is the refusal the last of the run's Chat Completions calls carried, or the empty
+// string where it carried none. It reads the newest body, which is the only one openai-chat
+// keeps.
 func (t *modelTransport) refusal(calls int) (string, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if calls <= 0 || len(t.responses) < calls {
-		return "", fmt.Errorf("%d model calls finished but %d responses were kept", calls, len(t.responses))
+	if calls <= 0 || len(t.responses) == 0 {
+		return "", fmt.Errorf("%d model calls finished but no response body was kept", calls)
 	}
-	return chatRefusal(t.responses[calls-1].Bytes()), nil
+	return chatRefusal(t.responses[len(t.responses)-1].Bytes()), nil
 }
 
 // chatRefusal is the refusal a Chat Completions response carries, or the empty string where it

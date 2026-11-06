@@ -16,6 +16,11 @@ import (
 // decidePath is the path a decision is posted to, under the endpoint's base URL.
 const decidePath = "/v1/systemone"
 
+// answerLimit is the most of a decision's answer that is read. An answer is a handful of small
+// objects, so a body this long is an endpoint misbehaving rather than an answer, and the caller
+// is told the answer is malformed rather than made to hold whatever the endpoint sends.
+const answerLimit = 8 << 20
+
 // Question is one question put to System One. Type is the question's shape and decides what
 // Criteria holds: an object of choice names and what each means for a choice question, an ordered
 // array of the score levels for a score question, an object of a true and a false description for
@@ -149,11 +154,16 @@ func Decide(ctx context.Context, req DecideRequest) (DecideResult, error) {
 
 	resp, err := client.Do(post)
 	var raw []byte
+	oversized := false
 	if err == nil {
-		raw, err = io.ReadAll(resp.Body)
+		// One byte past the cap, so a body that reaches it is told from one that fits.
+		raw, err = io.ReadAll(io.LimitReader(resp.Body, answerLimit+1))
 		_ = resp.Body.Close()
-		if err != nil {
+		switch {
+		case err != nil:
 			err = fmt.Errorf("reading the answer: %w", err)
+		case len(raw) > answerLimit:
+			raw, oversized = nil, true
 		}
 	}
 	var result DecideResult
@@ -164,6 +174,8 @@ func Decide(ctx context.Context, req DecideRequest) (DecideResult, error) {
 		result.Fault, result.Detail = FaultTime, fmt.Sprintf("the decision went past %s", req.Bounds.Time)
 	case err != nil:
 		result.Fault, result.Detail = FaultProviderError, err.Error()
+	case oversized:
+		result.Fault, result.Detail = FaultMalformed, fmt.Sprintf("the answer went past the %d MiB a decision reads", answerLimit>>20)
 	case resp.StatusCode/100 != 2:
 		result.Fault, result.Detail = FaultProviderError, fmt.Sprintf("%s: %.500q", resp.Status, raw)
 	default:
@@ -190,11 +202,11 @@ func (req DecideRequest) validate() error {
 		return errors.New("agentloop: the request has no time bound")
 	case req.Model.Endpoint.Kind != SystemOne:
 		return fmt.Errorf("agentloop: no decision is made on the %s protocol", req.Model.Endpoint.Kind)
-	case req.Model.Endpoint.Token == nil:
-		return errors.New("agentloop: the request's endpoint reads no token")
-	case req.Model.ID == "":
-		return errors.New("agentloop: the request names no model")
-	case len(req.Questions) == 0:
+	}
+	if err := req.Model.validate(); err != nil {
+		return err
+	}
+	if len(req.Questions) == 0 {
 		return errors.New("agentloop: the request asks no question")
 	}
 	// Sorted, so a request with more than one such question names the same one every time.
@@ -213,13 +225,7 @@ func (u systemOneUsage) priced(price Price) Usage {
 	return Usage{
 		Input:   u.InputTokens,
 		Output:  u.OutputTokens,
-		CostUSD: perMillion(u.InputTokens, price.Input) + perMillion(u.OutputTokens, price.Output),
+		CostUSD: price.cost(u.InputTokens, u.OutputTokens, 0, 0),
 		Metered: true,
 	}
-}
-
-// perMillion is what a token count costs at a price in USD per million tokens. Every CostUSD this
-// package reports is a sum of these.
-func perMillion(tokens int, price float64) float64 {
-	return float64(tokens) * price * 1e-6
 }

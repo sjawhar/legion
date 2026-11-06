@@ -430,6 +430,30 @@ func TestALastReplyCutOffIsAFault(t *testing.T) {
 	}
 }
 
+// More than one of a provider's own reasons reaches the loop as the same normalized length:
+// Anthropic ends a reply that way both for the run's output token bound and for a prompt past
+// the model's context window, which is no reply cut off at that bound. The detail names the
+// provider's own reason, so a reader of the log can tell the two apart.
+func TestALengthFaultsDetailNamesTheProvidersOwnReason(t *testing.T) {
+	t.Parallel()
+	for _, stopReason := range []string{"max_tokens", "model_context_window_exceeded"} {
+		t.Run(stopReason, func(t *testing.T) {
+			t.Parallel()
+			s := newStandIn(t, anthropicStream(stopReason, anthropicUsage{Input: 7, Output: 11}, anthropicText("The note says")))
+			result, err := Run(context.Background(), newFixture(t, s, AnthropicMessages, 1).req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Fault != FaultLength {
+				t.Fatalf("fault %q, want %q: %s", result.Fault, FaultLength, result.Detail)
+			}
+			if !strings.Contains(result.Detail, stopReason) {
+				t.Errorf("the detail is %q, want the provider's own reason %q in it", result.Detail, stopReason)
+			}
+		})
+	}
+}
+
 // A reply the model refused is a refusal fault, on each protocol's own way of saying so, and
 // whether or not the request asked for a Final object: a refusal is why the run ended, not a
 // reply of the wrong form.

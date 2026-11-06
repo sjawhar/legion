@@ -3,6 +3,7 @@ package agentloop
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/url"
 	"time"
 )
@@ -28,6 +29,13 @@ const (
 	SystemOne Kind = "systemone"
 )
 
+// anthropicKind is whether a protocol speaks Anthropic's Messages shape, directly or through
+// Azure Foundry. The two are converted and cache-marked the same way, and a kind added to the
+// family is added here.
+func anthropicKind(kind Kind) bool {
+	return kind == AnthropicMessages || kind == AzureAnthropic
+}
+
 // Endpoint is where a model is called and how that call is authorized. Every part of it comes
 // from the caller; this package reads nothing of it from the environment.
 type Endpoint struct {
@@ -41,15 +49,30 @@ type Endpoint struct {
 	// Deployment is the Azure deployment name, for a kind that addresses a deployment and
 	// a model separately and when the two differ. Other kinds leave it empty.
 	Deployment string
-	// Token returns the credential for one HTTP attempt. It is called on every attempt, a
-	// retry included, so a caller may read a key that has been rotated or mint a token
-	// scoped to the call.
+	// Token returns the credential for one HTTP attempt. On every kind but
+	// azure-anthropic it is called for each attempt, the one retry included, so a caller
+	// may read a key that has been rotated or mint a token scoped to the call. On
+	// azure-anthropic it is called once per model call: the Azure provider's credential
+	// middleware sets the header above this package's HTTP client, and the retry below it
+	// resends the first attempt's token.
 	Token func(context.Context) (string, error)
 }
 
 // Price is what a model charges, in USD per million tokens, for prompt tokens, reply tokens, a
 // cache write and a cache read. A zero Price leaves every CostUSD at zero.
 type Price struct{ Input, Output, CacheWrite, CacheRead float64 }
+
+// cost is what a call's token counts cost at the price, and is the one place this package
+// prices anything: every Usage.CostUSD, a run's and a decision's alike, comes from here.
+func (p Price) cost(input, output, cacheWrite, cacheRead int) float64 {
+	return perMillion(input, p.Input) + perMillion(output, p.Output) +
+		perMillion(cacheWrite, p.CacheWrite) + perMillion(cacheRead, p.CacheRead)
+}
+
+// perMillion is what a token count costs at a price in USD per million tokens.
+func perMillion(tokens int, price float64) float64 {
+	return float64(tokens) * price * 1e-6
+}
 
 // Model is one model at one endpoint, with what it charges.
 type Model struct {
@@ -61,6 +84,19 @@ type Model struct {
 	ID, Effort string
 	// Price is what the model charges, and is what every Usage.CostUSD is computed from.
 	Price Price
+}
+
+// validate is whether the model is one this package can call at all: it names a model and its
+// endpoint reads a token. Run and Decide make the same two checks, and say the same thing of a
+// model that fails them.
+func (m Model) validate() error {
+	switch {
+	case m.Endpoint.Token == nil:
+		return errors.New("agentloop: the request's endpoint reads no token")
+	case m.ID == "":
+		return errors.New("agentloop: the request names no model")
+	}
+	return nil
 }
 
 // Bounds are the limits of one run. Reaching one ends the run with a Fault rather than an error,
@@ -227,13 +263,16 @@ type Step struct {
 	Native []json.RawMessage
 	// Usage is this call's own, priced.
 	Usage Usage
-	// Finish is the provider's finish reason for the call, in the provider's own words.
+	// Finish is the SDK's normalized finish reason for the call, not the provider's own
+	// word for it: stop, length, content-filter, tool-calls, error or other. A reply the
+	// provider cut at its token limit reads length, whatever the provider called it.
 	Finish string
 }
 
 // Result is the outcome of a run, and every outcome is one: a run that ends on a fault, on its
-// context ending or on a callback's error still reports every step that finished and everything
-// spent up to that point.
+// context ending or on a callback's error still reports every step that finished and what those
+// steps spent. A call cut off in flight reports none of its own tokens, since a call's usage is
+// read only when the call finishes.
 type Result struct {
 	// Text is the last reply's prose, and Value the object that reply was required to be
 	// when Request.Final asked for one.

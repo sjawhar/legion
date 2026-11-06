@@ -124,12 +124,12 @@ func toolOutput(b Block) (*provider.ToolResultOutput, error) {
 // assistantParts is a model turn's blocks for the protocol the turn goes back to, which is the
 // only part of the conversion the protocol decides.
 func assistantParts(blocks []Block, kind Kind) ([]provider.ContentPart, error) {
-	switch kind {
-	case AnthropicMessages, AzureAnthropic:
+	switch {
+	case anthropicKind(kind):
 		return anthropicParts(blocks)
-	case OpenAIResponses:
+	case kind == OpenAIResponses:
 		return openaiResponsesParts(blocks)
-	case OpenAIChat:
+	case kind == OpenAIChat:
 		return openaiChatParts(blocks)
 	default:
 		return nil, fmt.Errorf("a model turn for the %s protocol", kind)
