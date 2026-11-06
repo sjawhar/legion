@@ -14,12 +14,15 @@ import (
 // stream creates unanswered, as a server whose meta leader is changing leaves them: the request
 // never reaches the server and the caller is given the deadline its wait ran out with. Once the
 // unanswered sends are spent every later request reaches the real context, and the counts say how
-// many sends each request took.
+// many sends each request took. With refuseCreate set it answers every create with that error
+// instead, which is how a row tells a refusal from a lost request without asking a particular
+// server version to refuse anything.
 type unansweredJetStream struct {
 	nats.JetStreamContext
 	mu               sync.Mutex
 	unansweredReads  int
 	unansweredCreate int
+	refuseCreate     error
 	reads            int
 	creates          int
 }
@@ -48,7 +51,18 @@ func (js *unansweredJetStream) AddStream(cfg *nats.StreamConfig, opts ...nats.JS
 	if !js.send(&js.unansweredCreate, &js.creates) {
 		return nil, context.DeadlineExceeded
 	}
+	if refusal := js.refusal(); refusal != nil {
+		return nil, refusal
+	}
 	return js.JetStreamContext.AddStream(cfg, opts...)
+}
+
+// refusal is the answer the context gives every create in place of the server's, or nil when the
+// server answers them.
+func (js *unansweredJetStream) refusal() error {
+	js.mu.Lock()
+	defer js.mu.Unlock()
+	return js.refuseCreate
 }
 
 // sent is how many stream reads and how many creates the start has sent through the context.
@@ -102,16 +116,20 @@ func TestACreateTheServerLeavesUnansweredIsSentAgainAndTheStartGoesOn(t *testing
 }
 
 // A create the server refuses is the server's answer, not a lost one, so the start returns it at
-// once and sends it no second time. A single server refuses a create at three copies.
+// once and sends it no second time. The refusal is the context's own and not a particular
+// server's: which create a server refuses changes between versions (nats-server 2.10.29 refuses a
+// three-copy create on one server and 2.15.1 lands it), and what this row holds is that any
+// answer ends the sending.
 func TestARefusedCreateIsSentOnce(t *testing.T) {
 	js := streamTestJetStream(t)
-	refused := &unansweredJetStream{JetStreamContext: js}
-	cfg := parseConnectOptions([]ConnectOption{WithReplicas(3)}).streamConfig()
+	refusal := &nats.APIError{Code: 400, ErrorCode: 10052, Description: "insufficient resources"}
+	refused := &unansweredJetStream{JetStreamContext: js, refuseCreate: refusal}
+	cfg := parseConnectOptions([]ConnectOption(nil)).streamConfig()
 
 	err := ensureStreamWithConfig(refused, &cfg)
 	var apiErr *nats.APIError
-	if err == nil || !errors.As(err, &apiErr) {
-		t.Fatalf("a start creating a three-copy stream on one server = %v, want the server's refusal", err)
+	if err == nil || !errors.As(err, &apiErr) || apiErr.ErrorCode != refusal.ErrorCode {
+		t.Fatalf("a start whose create the server refused = %v, want that refusal back", err)
 	}
 	if _, creates := refused.sent(); creates != 1 {
 		t.Fatalf("creates sent = %d, want 1: a refusal is the server's answer and is not sent again", creates)
