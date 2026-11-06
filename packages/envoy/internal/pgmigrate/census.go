@@ -212,8 +212,8 @@ func Census(ctx context.Context, conn *pgx.Conn, migrations []Migration, version
 	if err != nil {
 		return nil, fmt.Errorf("census: %w", err)
 	}
-	// An event trigger on create function, create trigger, drop function or drop trigger runs
-	// code of its own when they run, which may read any table, so where one is enabled no
+	// Where an enabled event trigger runs on a kind catalogOnlyStatements admits
+	// (ddlEventTriggersQuery), it runs code of its own, which may read any table, so no
 	// migration is exempt from the limit.
 	var ddlEventTriggers string
 	if err := tx.QueryRow(ctx, ddlEventTriggersQuery).Scan(&ddlEventTriggers); err != nil {

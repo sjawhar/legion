@@ -145,9 +145,8 @@ func tableSizeExemption(sql string) (exemption string) {
 			return ""
 		}
 		for node, body := range statement.Stmt {
-			// A node the map does not hold reads as the nil function, which names no kind.
-			catalogOnly := catalogOnlyStatements[node]
-			if catalogOnly == nil {
+			catalogOnly, ok := catalogOnlyStatements[node]
+			if !ok {
 				return ""
 			}
 			kind := catalogOnly(body)
@@ -164,11 +163,13 @@ func tableSizeExemption(sql string) (exemption string) {
 
 // ddlEventTriggersQuery names, sorted and comma-separated, every enabled event trigger on
 // ddl_command_start, ddl_command_end or sql_drop whose tags are unset or name one of the five
-// commands catalogOnlyStatements admits; "" when there are none. A drop fires sql_drop as well
-// as the two ddl_command_ events, so an event trigger on sql_drop would run code of its own on a
-// drop the exemption covers. Census reads this once for the whole database rather than per
-// migration, so an enabled trigger on sql_drop takes the exemption from every migration, one
-// holding no drop included: the reading that refuses, not the one that applies.
+// command tags below, the DDL commands catalogOnlyStatements admits (its set and reset fire no
+// event trigger, and a create function's command tag is CREATE FUNCTION or CREATE PROCEDURE);
+// "" when there are none. A drop fires sql_drop as well as the two ddl_command_ events, so an
+// event trigger on sql_drop would run code of its own on a drop the exemption covers. Census
+// reads this once for the whole database rather than per migration, so such a trigger on
+// sql_drop takes the exemption from every migration, one holding no drop included: the reading
+// that refuses, not the one that applies.
 const ddlEventTriggersQuery = `
 	select coalesce(string_agg(evtname, ', ' order by evtname), '')
 	from pg_event_trigger
