@@ -4,15 +4,16 @@ import "strings"
 
 // The scanner here reads SQL text as Postgres 18's lexer does (src/backend/parser/scan.l): which
 // kind of token starts at each byte, and where a comment, a string literal, a quoted identifier
-// or a dollar-quoted literal ends. Inside a literal that does not itself ask for escapes a
-// backslash escapes the byte after it only when the reading session's
+// or a dollar-quoted literal ends. Inside a plain literal, and inside the N'…' that is one under
+// another name, a backslash escapes the byte after it only when the reading session's
 // standard_conforming_strings is off, and the text does not carry that setting, so nextSQLToken
-// takes it as backslashEscapes. Three readers ask for the setting on, the default
-// (backslashEscapes false): checkCensus's reading of a census file (censusTokens), the census's
-// reading of a migration (readMigration) and its reading of a migration's lock timeouts
-// (migrationLockTimeouts), all of them reading this repository's own migration files, which are
-// written with the setting on. redactedQuery, which reads another session's query text and is
-// told neither setting, reads that text whole under both.
+// takes it as backslashEscapes. No other quoting takes the setting: E'…' escapes either way,
+// U&'…' neither way, and B'…' and X'…' hold no escape at all. Three readers ask for the setting
+// on, the default (backslashEscapes false): checkCensus's reading of a census file
+// (censusTokens), the census's reading of a migration (readMigration) and its reading of a
+// migration's lock timeouts (migrationLockTimeouts), all of them reading this repository's own
+// migration files, which are written with the setting on. redactedQuery, which reads another
+// session's query text and is told neither setting, reads that text whole under both.
 
 // sqlTokenKind is the kind of one token scanSQL reads.
 type sqlTokenKind int
@@ -53,11 +54,25 @@ func scanSQL(text string, visit func(sqlToken) error) error {
 }
 
 // nextSQLToken returns the kind of the token that starts at i, the index after it and, for a
-// quoted identifier, the identifier's decoded name. backslashEscapes reads a literal that does
-// not itself ask for escapes ('…', B'…', X'…', N'…' and U&'…') as a session with
-// standard_conforming_strings off reads it, where a backslash escapes the quote after it and so
-// carries the literal on to the next quote; with it false such a literal ends where the default
-// setting ends it. An E'…' literal escapes under either setting.
+// quoted identifier, the identifier's decoded name. backslashEscapes reads a literal that takes
+// the setting ('…' and N'…') as a session with standard_conforming_strings off reads it, where a
+// backslash escapes the quote after it and so carries the literal on to the next quote; with it
+// false such a literal ends where the default setting ends it. The other quotings do not take
+// the setting: an E'…' literal escapes under either, a U&'…' literal escapes under neither, and
+// B'…' and X'…' hold no escape at all (endOfBitOrHexLiteral). Measured against PostgreSQL 18.6,
+// standard_conforming_strings each way:
+//
+//	select X'41\' , ghp_SECRET , 'x' from from  -> syntax error at or near "from", the second one,
+//	select B'0\' , ghp_SECRET , 'x' from from   -> under both settings: the literal ended at the
+//	                                               quote after the backslash either way.
+//	select 'a\' , ghp_SECRET , 'x' from from    -> on: the same syntax error; off: unterminated
+//	select n'a\' , ghp_SECRET , 'x' from from      hexadecimal string literal at or near
+//	                                               "x' from from", the literal having run on.
+//	select U&'a\' , ghp_SECRET , 'x' from from  -> on: invalid Unicode escape, caret at the
+//	                                               backslash; off: unsafe use of string constant
+//	                                               with Unicode escapes, which is the whole form
+//	                                               refused - both after the literal was lexed to
+//	                                               the quote after the backslash.
 func nextSQLToken(text string, i int, backslashEscapes bool) (sqlTokenKind, int, string) {
 	c := text[i]
 	var next byte
@@ -100,10 +115,12 @@ func nextSQLToken(text string, i int, backslashEscapes bool) (sqlTokenKind, int,
 		switch {
 		case (c == 'e' || c == 'E') && next == '\'':
 			return sqlString, endOfStringLiteral(text, i+1, true), ""
-		case strings.IndexByte("bBxXnN", c) >= 0 && next == '\'':
+		case strings.IndexByte("bBxX", c) >= 0 && next == '\'':
+			return sqlString, endOfBitOrHexLiteral(text, i+1), ""
+		case (c == 'n' || c == 'N') && next == '\'':
 			return sqlString, endOfStringLiteral(text, i+1, backslashEscapes), ""
 		case (c == 'u' || c == 'U') && next == '&' && after == '\'':
-			return sqlUnicodeEscape, endOfStringLiteral(text, i+2, backslashEscapes), ""
+			return sqlUnicodeEscape, endOfStringLiteral(text, i+2, false), ""
 		case (c == 'u' || c == 'U') && next == '&' && after == '"':
 			_, end := quotedIdentifier(text, i+2)
 			return sqlUnicodeEscape, end, ""
@@ -179,6 +196,29 @@ func endOfStringLiteral(text string, i int, backslashEscapes bool) int {
 			}
 			i = continued + 1
 		}
+	}
+	return len(text)
+}
+
+// endOfBitOrHexLiteral returns the index after the bit-string or hex-string literal whose opening
+// quote is at i. scan.l reads B'…' and X'…' in its xb and xh states, whose inside is [^']*:
+// neither a backslash nor a doubled quote is an escape there, under either
+// standard_conforming_strings, so the literal ends at its first quote and only a quote
+// continuation carries it on. PostgreSQL 18.6, under both settings: select B'1”1' answers
+// syntax error at or near "'1'", the bit string having ended at the first quote and '1' being a
+// string constant of its own; select X'41'-- c\n'42' from from answers syntax error at the
+// second from, the continuation having taken '42' into the literal.
+func endOfBitOrHexLiteral(text string, i int) int {
+	for i++; i < len(text); {
+		if text[i] != '\'' {
+			i++
+			continue
+		}
+		continued, ok := quoteContinues(text, i+1)
+		if !ok {
+			return i + 1
+		}
+		i = continued + 1
 	}
 	return len(text)
 }

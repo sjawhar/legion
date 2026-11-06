@@ -82,7 +82,10 @@ func TestTableSizeExemptionReadsStatementsAsPostgresParsesThem(t *testing.T) {
 // the bytes between them starts - so the two readings disagree over which bytes are a value:
 // the answer covers the literals and the comments of both, which can swallow the shape between
 // them - a comma, or a whole literal - and leaves no part of any value behind under either. A
-// comment both readings read as a comment is the one space it has always been.
+// comment both readings read as a comment is the one space it has always been. Only a plain
+// literal and the N'…' that is one under another name take the setting: E'…' escapes under
+// both, U&'…' under neither, and B'…' and X'…' hold no escape at all, so the two readings end
+// those in the same place and a value next to one of them is covered rather than widened over.
 func TestRedactedQueryKeepsTheShapeAndDropsEveryValue(t *testing.T) {
 	for name, tc := range map[string]struct {
 		// setting is the holder's standard_conforming_strings the row answers for: "on", the
@@ -131,6 +134,30 @@ func TestRedactedQueryKeepsTheShapeAndDropsEveryValue(t *testing.T) {
 		// bytes this reading prints nothing for hides nothing and adds no ? of its own, which
 		// is why a comment both readings read as a comment still collapses to a space.
 		"off: a line comment opened between two literals": {"off", `select 'a\' , '-- x' , ghp_S`, "select ? ?"},
+		// Postgres reads B'…' and X'…' in scan.l's xb and xh states, whose inside is [^']*:
+		// neither a backslash nor a doubled quote escapes anything there, under either setting,
+		// so such a literal ends at its first quote and only a quote continuation carries it on.
+		// PostgreSQL 18.6 answers select B'1''1' with syntax error at or near "'1'" under both
+		// settings, and select X'41\' , ghp_SECRET , 'x' from from with syntax error at the
+		// second from under both: the backslash is a byte of the literal, which ended at the
+		// quote after it, and what follows is read as structure. So both readings end a bit or
+		// hex string in the same place, and the literal after one of them is a value of its own.
+		"a hex string and the literal after it":        {"on and off", `select x'ff' , 'ghp_PLAIN'`, "select ? , ?"},
+		"a continuation carries a hex string on":       {"on and off", "select X'41'\n'42' , 'ghp_PLAIN'", "select ? , ?"},
+		"a doubled quote ends a bit string":            {"on and off", `select B'1''1' , 'ghp_PLAIN'`, "select ?? , ?"},
+		"a backslash is a byte in a bit string":        {"on and off", `select b'0\' /* ghp_BLOCK */ , 'x'`, "select ? , ?"},
+		"a name after a bit or hex string is a name":   {"on and off", `select X'\' , ghp_SECRET , '`, "select ? , ghp_SECRET , ?"},
+		"a name after a bit string is a name":          {"on and off", `select B'\' , ghp_SECRET , '`, "select ? , ghp_SECRET , ?"},
+		"a name after a Unicode-escaped string stands": {"on", `select U&'a\' , ghp_SECRET , 'x'`, "select ? , ghp_SECRET , ?"},
+		// The backslash that matters sits in the plain literal the hex string is followed by,
+		// not in the hex string: with the setting off that literal takes it as its quote's
+		// escape and runs on through ghp_SECRET to the next quote, which PostgreSQL 18.6 shows
+		// for select 'a\' , ghp_SECRET , 'x' from from - unterminated hexadecimal string
+		// literal at or near "x' from from", the marker having been swallowed - while with the
+		// setting on the same text answers syntax error at the second from. So the marker is a
+		// value under the off reading and a name under the on reading, and one ? covers it.
+		"off: a hex string before a literal carried on":         {"off", "select X'\\''--\\'\n ghp_SECRET \\'' ;", "select ?? ;"},
+		"off: a hex string before a literal carried to the end": {"off", "select X'\\''--\\'\n ghp_SECRET '' ;", "select ??"},
 	} {
 		if got := redactedQuery(tc.in); got != tc.want {
 			t.Errorf("%s (standard_conforming_strings %s): redactedQuery(%q) = %q, want %q", name, tc.setting, tc.in, got, tc.want)
