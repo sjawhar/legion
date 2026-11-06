@@ -193,6 +193,7 @@ test("Unfurl unfurls a dispatch ask reference with the question, reading no issu
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   };
   const getIssue = spyOn(api, "getIssue");

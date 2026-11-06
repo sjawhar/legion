@@ -22,31 +22,32 @@ func millisText(d time.Duration) string {
 	return grouped.String() + " ms"
 }
 
-// TestSESSIONTESTTheRegistryResolvesTheDeclaredWindows reads the two windows the listener holds a
-// session's registration by, as a registry opened with no lifetime of its own resolves them: the
-// record lifetime a refresh renews, and the window after which a reader treats the process that
-// wrote a role claim as gone. Both are declared once in packages/contracts and generated here, and
-// the pane's refresh interval is set against the lifetime, so a registry that resolved another
-// number would drop live panes however the declaration reads.
+// TestSESSIONTESTTheRegistryResolvesTheDeclaredWindows reads the two windows the listener judges
+// a session's registration by, as a registry opened with no window of its own resolves them: the
+// live window a refresh renews, and the window after which a reader treats the process that
+// wrote a role claim as gone. Both are declared once in packages/contracts and generated here,
+// and the pane's refresh interval is set against the live window, so a registry that resolved
+// another number would read live panes as unresponsive however the declaration reads.
 //
-// The lifetime is read from the registry rather than from the option, because OpenSessionRegistry
-// adopts whatever MaxAge the live bucket reports: against a bucket no earlier test made, which is
-// what the package's NATS hands each test, that is the lifetime it created the bucket with.
+// The live window is read from the registry rather than from the option, because it is what
+// every reader of the registry judges a record's age by (Windows, registry.go): a registry given
+// no WithSessionLiveWindow resolves the package's own declaration.
 func TestSESSIONTESTTheRegistryResolvesTheDeclaredWindows(t *testing.T) {
 	registry, err := OpenSessionRegistry(setupNATS(t).Conn)
 	if err != nil {
 		t.Fatalf("open the session registry: %v", err)
 	}
 
-	if got := registry.TTL(); got != contracts.SessionRecordLifetime {
-		t.Errorf("the registry resolved a record lifetime of %s, but contracts.SessionRecordLifetime is %s",
-			millisText(got), millisText(contracts.SessionRecordLifetime))
+	live, _ := registry.Windows()
+	if live != contracts.SessionLiveWindow {
+		t.Errorf("the registry resolved a live window of %s, but contracts.SessionLiveWindow is %s",
+			millisText(live), millisText(contracts.SessionLiveWindow))
 	}
 	if ClaimStaleAfter != contracts.SessionClaimStale {
 		t.Errorf("ClaimStaleAfter is %s, but contracts.SessionClaimStale is %s",
 			millisText(ClaimStaleAfter), millisText(contracts.SessionClaimStale))
 	}
 
-	t.Logf("the registry resolved a record lifetime of %s (contracts.SessionRecordLifetime)", millisText(registry.TTL()))
+	t.Logf("the registry resolved a live window of %s (contracts.SessionLiveWindow)", millisText(live))
 	t.Logf("ClaimStaleAfter is %s (contracts.SessionClaimStale)", millisText(ClaimStaleAfter))
 }

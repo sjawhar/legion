@@ -1,6 +1,6 @@
 // Package sessiontiming holds the timings of Envoy session registration, for a caller outside
 // this module: the interval at which a pane's pi-envoy plugin refreshes its listener
-// registration, how long the listener keeps a session record after its last write, the window
+// registration, how long a session's last registration keeps it live to the listener, the window
 // after which a role claim is stale, and one listener call's attempts, per-attempt timeout and
 // retry delay.
 //
@@ -18,18 +18,18 @@ package sessiontiming
 
 import "github.com/sjawhar/envoy/internal/contracts"
 
-// Heartbeat is how often a pane refreshes its registration, RecordLifetime how long the listener
-// keeps a session record after its last write, and ClaimStale how long a role claim may go
+// Heartbeat is how often a pane refreshes its registration, LiveWindow how long a session's last
+// registration keeps it live to the listener, and ClaimStale how long a role claim may go
 // unrefreshed before a reader treats its holder as gone. CallTimeout is how long one listener
 // call attempt waits, CallRetryDelay the pause before the next attempt, and CallAttempts how many
 // attempts one call makes. Each is the generated contracts constant itself, so a caller outside
 // this module weighs the same numbers the listener does. The daemon's own code reads the first
 // three; the three call numbers are here because the rule that holds them all together - three
-// refreshes and one whole call strictly inside the record lifetime - is weighed in the daemon's
-// own test, where three of the four copies it checks are unexported.
+// refreshes and one whole call strictly inside the live window - is weighed in the daemon's own
+// test, where all three of the copies it checks are unexported.
 const (
 	Heartbeat      = contracts.SessionHeartbeat
-	RecordLifetime = contracts.SessionRecordLifetime
+	LiveWindow     = contracts.SessionLiveWindow
 	ClaimStale     = contracts.SessionClaimStale
 	CallTimeout    = contracts.ListenerCallTimeout
 	CallRetryDelay = contracts.ListenerCallRetryDelay
