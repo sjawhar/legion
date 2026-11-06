@@ -1,2 +1,7 @@
 [test]
-preload = ["./web/src/__tests__/setup.ts"]
+# Two preloads, in this order: happy-dom's DOM is global before anything that reads it as it is
+# evaluated is evaluated, and only the order of this list guarantees that. A relative import
+# written first inside one file does not: Bun evaluated `@testing-library/jest-dom/matchers`, and
+# the `@testing-library/dom` it pulls in, ahead of a `./register-dom` written above it, which left
+# `screen` bound to no document and every query of it throwing.
+preload = ["./web/src/__tests__/register-dom.ts", "./web/src/__tests__/setup.ts"]

@@ -1,5 +1,8 @@
-import { afterAll, afterEach, jest } from "bun:test";
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
+// The DOM this file's imports read is registered by `register-dom.ts`, the preload before this
+// one: Bun's preload list is the one order that holds, and an import written first inside a file
+// is not (`register-dom.ts` and `bunfig.toml` say why).
+import { afterAll, afterEach, expect, jest } from "bun:test";
+import * as jestDomMatchers from "@testing-library/jest-dom/matchers";
 // happy-dom has no IndexedDB; the store of a document's unsent edits (`pending-edits.ts`) runs on
 // this in-memory one, which keeps IndexedDB's transaction ordering.
 import "fake-indexeddb/auto";
@@ -14,10 +17,13 @@ import { resetReplyDrafts } from "../features/inbox/reply-drafts";
 import { resetPinState } from "../features/issue/pin-write";
 import { resetWriteStorage } from "../features/writes/write-storage";
 import { type Writes, watchWriteStores } from "../features/writes/write-store";
-import { guardWritesToNetwork, writesThatReachedNetwork } from "./network-guard";
+import { forgetTestAnswers, requestsThatReachedNetwork } from "./network";
 import { resetRouteAnswers } from "./send-answers";
 
-GlobalRegistrator.register();
+// The DOM assertions (`toBeInTheDocument`, `toHaveAttribute`, `toHaveFocus`, …): one matcher that
+// says what it asks for and prints the element it read when it fails, in place of a hand-written
+// read of an attribute compared with `toBe`. `jest-dom.d.ts` declares them for `bun:test`.
+expect.extend(jestDomMatchers);
 
 // Testing Library reads a global `jest` to tell whether fake timers are installed:
 // `jestFakeTimersAreEnabled` (@testing-library/dom@10.4.1, dist/@testing-library/dom.esm.js:171)
@@ -38,17 +44,18 @@ GlobalRegistrator.register();
 // first render in its file.
 void blockSchemaCache.load(async () => serverBlockSchema as unknown as BlockSchema);
 
-// A route a test answers (`answerRoute`) is that test's: the next test answers its own.
+// A route a test answers - `answerRoute` above this seam, `answerRequests` at it - is that test's:
+// the next test answers its own.
 afterEach(resetRouteAnswers);
+afterEach(forgetTestAnswers);
 
-// A unit test's write that reaches the network fails its test (`network-guard.ts`: `fetch` and
-// the uploads' `XMLHttpRequest` both), and one a write loop makes after the file's last test -
-// a retry no test is left to fail - fails the file.
-guardWritesToNetwork();
+// A request answered by nothing fails its test (`network.ts`), and one a page swallowed in a
+// `catch`, or a write loop made after the file's last test - a retry no test is left to fail -
+// fails the file.
 const reportReachedNetwork = () => {
-  const reached = writesThatReachedNetwork();
+  const reached = requestsThatReachedNetwork();
   if (reached.length === 0) return;
-  throw new Error(`writes reached the network, answered by nothing: ${reached.join(", ")}`);
+  throw new Error(`requests reached the network, answered by nothing: ${reached.join(", ")}`);
 };
 afterEach(reportReachedNetwork);
 afterAll(reportReachedNetwork);
