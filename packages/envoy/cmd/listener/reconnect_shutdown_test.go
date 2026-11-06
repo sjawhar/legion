@@ -35,7 +35,12 @@ type listenerRelay struct {
 	mu        sync.Mutex
 	trigger   []byte
 	holdAfter int
-	links     []*listenerRelayLink
+	// hook is what pause armed: it runs once, on the relay's own goroutine, before the bytes
+	// completing hookAfter matches of hookTrigger reach the server, and is cleared as it runs.
+	hook        func()
+	hookTrigger []byte
+	hookAfter   int
+	links       []*listenerRelayLink
 
 	swallowed chan struct{}
 }
@@ -124,6 +129,11 @@ func (r *listenerRelay) shouldSwallow(link *listenerRelayLink, data []byte) bool
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	link.seen = append(link.seen, data...)
+	if r.hook != nil && bytes.Count(link.seen, r.hookTrigger) >= r.hookAfter {
+		hook := r.hook
+		r.hook = nil
+		hook()
+	}
 	return r.holdAfter > 0 && bytes.Count(link.seen, r.trigger) >= r.holdAfter
 }
 
@@ -132,6 +142,23 @@ func (r *listenerRelay) arm(trigger string, occurrence int) {
 	defer r.mu.Unlock()
 	r.trigger = []byte(trigger)
 	r.holdAfter = occurrence
+	for _, link := range r.links {
+		link.seen = nil
+	}
+}
+
+// pause holds the protocol line completing the occurrence'th match of trigger, runs hook, and
+// then forwards that line. It is how a test lands a write of its own in the middle of a request
+// the listener is making: the write a hook makes is already in the bucket when the held call
+// reaches the server, with nothing timed and nothing slept. The hook runs on the relay's
+// goroutine with this relay's lock held, so it must reach the server over a connection of its
+// own and call nothing on the relay. Like arm, it starts the count from here, and it runs once.
+func (r *listenerRelay) pause(trigger string, occurrence int, hook func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.hookTrigger = []byte(trigger)
+	r.hookAfter = occurrence
+	r.hook = hook
 	for _, link := range r.links {
 		link.seen = nil
 	}
