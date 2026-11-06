@@ -250,7 +250,7 @@ func (g *github) serve(t *testing.T) string {
 
 // The fake answers a document that declares a variable it never uses, or uses one it never
 // declares, as GitHub's validator does: an error, and no mutation made. Every document this
-// package sends passes that check, so each case above proves its document valid too.
+// package sends passes that check, so each case of this file proves its document valid too.
 func TestTheFakeRefusesAGraphQLDocumentGitHubsValidatorWouldRefuse(t *testing.T) {
 	for _, document := range []string{read, enable, merge, disable, dequeue, removals, moreChecks} {
 		if message := refusedVariables(document); message != "" {

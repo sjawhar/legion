@@ -42,12 +42,10 @@ const (
 	disable = `mutation DisableAutoMerge($id: ID!) { disablePullRequestAutoMerge(input: {pullRequestId: $id}) { clientMutationId } }`
 	dequeue = `mutation DequeuePullRequest($id: ID!) { dequeuePullRequest(input: {id: $id}) { clientMutationId } }`
 	// The enable and the merge pass no commit headline and no commit body, so each repository's own
-	// squash settings decide the message a merge lands with. On this repository
-	// squash_merge_commit_title=PR_TITLE and squash_merge_commit_message=BLANK, so GitHub makes the
-	// subject out of the pull request's own title, with its number, and leaves the body blank.
+	// squash settings decide the message a merge lands with, and this package decides none of it.
 	//
 	// On a merge-queue base GitHub ignores any commit message input anyway
-	// (EnablePullRequestAutoMergeInput says so), so passing one guarded nothing there.
+	// (EnablePullRequestAutoMergeInput says so).
 	enable = `mutation EnableAutoMerge($id: ID!, $head: GitObjectID!, $method: PullRequestMergeMethod!) {
   enablePullRequestAutoMerge(input: {pullRequestId: $id, expectedHeadOid: $head, mergeMethod: $method}) { clientMutationId }
 }`
