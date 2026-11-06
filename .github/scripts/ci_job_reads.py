@@ -452,7 +452,9 @@ GATES = [
     ], reads=CLAUDE_ENVOY_BUILD + reads(
         (".github/scripts/*", f"{at('test', 'Test release scripts')} and the steps after it: each .github/scripts/*.test.sh sources "
                               "test-lib.sh and runs its checker (with workflow_paths.py, check-pr-text.sh, ci_filter_coverage.py, "
-                              "ci_job_reads.py, ci_ts_programs.py or release-bump.sh where a checker reads them)"),
+                              "ci_job_reads.py, ci_ts_programs.py or release-bump.sh where a checker reads them), and "
+                              f"{at('test', 'Test the pull request payload both pr-title checks read (a stand-in gh)')} runs "
+                              "find-pr-payload.sh, which ci.yaml's lint job and pr-title.yaml both find their payload with"),
         (".github/workflows/main-bypass-check.yaml",
          at("test", "Test the main bypass check's decision") + ": main-bypass-check.test.sh:198-210 reads the "
          "workflow and holds every run: step of it to a shell with pipefail, and :216-227 holds the decision's "

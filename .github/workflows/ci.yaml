@@ -9,10 +9,11 @@ name: CI
 # of its own would wait for a runner after the others, behind every job the account started
 # meanwhile. Every job but `changes` ends with the ci-ok-report step
 # (.github/actions/ci-ok-report), and the last job of the run to finish posts ci-ok from it
-# (.github/scripts/ci-ok-report.sh says how); lint posts pr-title on a pull request, where its
-# check-pr-text step runs and the head is the base repository's (pr-title.yaml posts it when the
-# pull request is opened, reopened or edited, a review is submitted or edited, or the merge queue
-# runs its group). The docs site's build on a push to main, and its GitHub Pages
+# (.github/scripts/ci-ok-report.sh says how); lint posts pr-title on a pull request whose head is
+# the base repository's and on the merge queue's group, the two events its check-pr-text step
+# runs on (pr-title.yaml posts it when the pull request is edited and when a review is submitted
+# or edited, the two events this workflow does not run on; its header says why it runs on nothing
+# else). The docs site's build on a push to main, and its GitHub Pages
 # deploy, are docs-pages.yaml's, a workflow of its own whose header says why. Its paths are held
 # to the docs filter below.
 #
@@ -1610,25 +1611,44 @@ jobs:
       # A pull request's title, body and commit messages reach main's squash commit, the
       # generated release notes and GitHub's pages, and its comments and reviews are public on its
       # page, so this job checks them, and that the title is a conventional commit subject, at
-      # every push to a pull request that is not a draft and when a draft is marked ready, and
-      # posts the verdict on the head as pr-title, the check main's ruleset requires.
-      # pr-title.yaml checks them and posts pr-title when the pull request is opened, reopened or
-      # edited, a review is submitted or edited, or the merge queue runs its group. A merge-queue
-      # or dispatched run of this workflow carries no pull request. These run first, so a failed
+      # every push to a pull request that is not a draft, when a draft is marked ready, and on the
+      # merge queue's group, and posts the verdict on the head as pr-title, the check main's
+      # ruleset requires. This post is what satisfies that requirement on a merge group now:
+      # pr-title.yaml no longer runs there, because a check run posted under GITHUB_TOKEN joins
+      # the Actions App's first check suite at that commit, so a second github-actions suite at a
+      # head this workflow runs on takes this run's ci-ok (pr-title.yaml's header holds the
+      # measurement and what it cost). A group carries no pull request, only the queue branch it
+      # runs on, so find-pr-payload.sh reads the pull request that branch names and writes it in
+      # the shape check-pr-text.sh wants; pr-title.yaml finds its payload with the same script, so
+      # neither workflow holds a copy of that logic. pr-title.yaml now runs on an edit and a
+      # review alone, so a pull request opened or reopened on any head gets its pr-title from
+      # this job (a fork's head gets none, and needs none: a fork's token posts no ci-ok either,
+      # and its change merges only once a maintainer takes the branch into this repository). The
+      # race left over is an edit or a review in the seconds before this run's suite exists at
+      # that head, whose run then holds the older suite. A dispatched run carries neither
+      # a pull request nor a group and checks none of this. These steps run first, so a failed
       # check further down cannot keep pr-title from the head; a fork pull request's read-only
       # token posts nothing (.github/actions/ci-ok-report says why that is no loss here).
       - name: Check the pull request's title, body, branch name, commits, comments and reviews
         id: pr-text
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: .github/scripts/check-pr-text.sh
+        run: |
+          payload=$(.github/scripts/find-pr-payload.sh)
+          GITHUB_EVENT_PATH="$payload" .github/scripts/check-pr-text.sh
 
+      # The check lands on the group's commit on a merge group, which is the commit the queue
+      # waits for a report on, and on the head the event names on a pull request. The fork guard
+      # is the pull_request case alone: a merge group carries no head and base repository to
+      # compare, and GitHub reads two absent fields as equal, so the partner clause is what lets
+      # the group post
+      # (docs/solutions/github/a-same-event-id-pair-answers-is-this-a-fork-and-needs-a-partner-clause-pr2734.md).
       - name: Post pr-title on the head
-        if: always() && steps.pr-text.outcome != 'skipped' && github.event.pull_request.head.repo.id == github.event.pull_request.base.repo.id
+        if: always() && steps.pr-text.outcome != 'skipped' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.id == github.event.pull_request.base.repo.id)
         env:
           GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_SHA: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}
           CHECK_NAME: pr-title
           CONCLUSION: ${{ steps.pr-text.outcome == 'success' && 'success' || 'failure' }}
           OUTCOME: ${{ steps.pr-text.outcome }}
@@ -1990,6 +2010,9 @@ jobs:
 
       - name: Test ci-ok's report and the check-run post (a stand-in gh)
         run: .github/scripts/ci-ok-report.test.sh
+
+      - name: Test the pull request payload both pr-title checks read (a stand-in gh)
+        run: .github/scripts/find-pr-payload.test.sh
 
       - name: Test the merge-group cancel decision
         run: .github/scripts/merge-group-cancels.test.sh

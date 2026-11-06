@@ -38,10 +38,12 @@
 # binary and skip it, is stripped first.
 #
 # Usage: GITHUB_EVENT_PATH=<payload> GITHUB_REPOSITORY=<owner>/<repo> .github/scripts/check-pr-text.sh
-# CI runs it in ci.yaml's lint job at every push to a pull request that is not a draft and when a
-# draft is marked ready (lint posts the verdict as pr-title), and in pr-title.yaml when a pull
-# request is opened, reopened or edited, when a review on it is submitted or edited, and when the
-# merge queue runs its group; its tests are in check-private-names.test.sh.
+# CI runs it in ci.yaml's lint job at every push to a pull request that is not a draft, when a
+# draft is marked ready, and on the merge queue's group, where that job finds the queued pull
+# request with find-pr-payload.sh; lint posts the verdict as pr-title on each. It runs in
+# pr-title.yaml when a pull request is edited and when a review on it is submitted or edited,
+# the two events ci.yaml does not run on (that file's header says why it runs on no other); its
+# tests are in check-private-names.test.sh.
 set -euo pipefail
 
 event=${GITHUB_EVENT_PATH:?GITHUB_EVENT_PATH must name the pull request event payload}
