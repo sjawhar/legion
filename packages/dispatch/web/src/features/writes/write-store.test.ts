@@ -2,14 +2,8 @@ import { afterEach, beforeEach, expect, jest, spyOn, test } from "bun:test";
 import { IDEMPOTENCY_KEY_TTL_MS } from "@legion/contracts";
 import { QueryClient, QueryObserver } from "@tanstack/react-query";
 
-import {
-  type KeptTab,
-  keptTab,
-  keyMinted,
-  memoryFiles,
-  onFakeClock,
-  settle,
-} from "../../__tests__/kept-sends-harness";
+import { onFakeClock, settle } from "../../__tests__/fake-clock";
+import { type KeptTab, keptTab, keyMinted, memoryFiles } from "../../__tests__/kept-sends-harness";
 import { answerSends, type SendAnswers } from "../../__tests__/send-answers";
 import {
   ApiError,

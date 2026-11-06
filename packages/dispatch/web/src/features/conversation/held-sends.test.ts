@@ -9,13 +9,12 @@ import {
 import { act, render, renderHook, waitFor } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
 
+import { onFakeClock, settle } from "../../__tests__/fake-clock";
 import {
   type KeptTab,
   keptTab,
   keyMinted,
   memoryFiles,
-  onFakeClock,
-  settle,
   UnloadTarget,
 } from "../../__tests__/kept-sends-harness";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";

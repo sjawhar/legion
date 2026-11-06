@@ -175,10 +175,12 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   one it replaces - a composer's Retry, `supersede` - is kept with nothing sent and no request of
   its own, so the page a reload brings back reads the key's history from that field rather than
   from `sent` and the kept request, and refuses that Retry once the key has run out rather than
-  sending the person's message a second time. The field is optional and the version stands at 1,
-  so an entry an older release wrote still loads - read there as `sent` and its request say,
-  which is what that release decided by - and the deploy drops none of a person's unresumed
-  writes.
+  sending the person's message a second time. Every entry holds the field - a method, or the
+  `null` of a key nothing has gone out under - and the version stands at 1, so an entry an older
+  release wrote still loads, holding none. `WriteStorage.load` is the one place a missing one is
+  converted, to what that release decided by (`sent` and the kept request): past it the field is
+  always there, absence means only "written before the field existed", and the deploy drops none
+  of a person's unresumed writes.
 - `POST /auth/logout` is the one page `POST` outside that content-write path: it carries no
   `Idempotency-Key`, because ending the current session cannot create content twice. `PUT` and
   `DELETE` use the store but carry no key, because repeating either applies the same change.

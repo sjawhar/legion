@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
 
-import { onFakeClock } from "../../__tests__/kept-sends-harness";
+import { onFakeClock } from "../../__tests__/fake-clock";
 import { answerSends } from "../../__tests__/send-answers";
 import { ApiError, NetworkError, type WriteRequest } from "../../api/client";
 import { useSendMarkOnce } from "./useSendMarkOnce";

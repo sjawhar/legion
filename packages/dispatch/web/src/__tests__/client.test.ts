@@ -19,7 +19,7 @@ import {
 } from "../api/client";
 import { QUERY_RETRY_DELAY_MS, queryRetryDelay } from "../api/query-client";
 import { FIRST_BACKOFF_MS, writeUnderKey } from "../features/writes/keyed-write";
-import { onFakeClock, settle } from "./kept-sends-harness";
+import { onFakeClock, settle } from "./fake-clock";
 
 interface RecordedRequest {
   body?: BodyInit | null;

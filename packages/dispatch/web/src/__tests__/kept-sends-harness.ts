@@ -1,25 +1,5 @@
-import { jest } from "bun:test";
-
 import type { KeptFiles } from "../features/writes/kept-files";
 import { WriteStorage } from "../features/writes/write-storage";
-
-/** Lets every promise a write chained run as far as it goes without the clock moving. */
-export async function settle(): Promise<void> {
-  for (let turn = 0; turn < 30; turn += 1) await Promise.resolve();
-}
-
-/** Runs `body` on the fake clock, so a write that waits out a backoff waits no real time. The
- *  clock moves a millisecond before the real one comes back: a timer left at zero delay would
- *  otherwise hang a later test's `waitFor`. */
-export async function onFakeClock(body: () => Promise<void>): Promise<void> {
-  jest.useFakeTimers();
-  try {
-    await body();
-  } finally {
-    jest.advanceTimersByTime(1);
-    jest.useRealTimers();
-  }
-}
 
 /** A browser's kept upload files, in memory: what IndexedDB holds for the page across a reload. */
 export function memoryFiles(): KeptFiles & { readonly rows: Map<string, File> } {

@@ -684,15 +684,11 @@ export class Writes {
       // What the key has carried is the entry's own record of it (`KeptWrite.carried`): the
       // store wrote it from this map as the write was kept, so a write re-pressed under the key
       // of the one it replaced - kept with nothing sent and no request of its own - still says
-      // what its key carried before. An entry of the shape the release before this one wrote
-      // holds no such record, and is read as that release read it: `sent` says whether a request
-      // went out under this key, since the store sets it only as `writeUnderKey` tells it an
-      // attempt's request has gone out, while a write's request is kept from the press, before
-      // its turn comes. So a kept request says only what the write would go out as, and a key
-      // nothing went out under is as good as the day it was minted however old it is.
-      const carried =
-        kept.carried ?? (kept.sent && kept.request !== null ? kept.request.method : undefined);
-      if (carried !== undefined) this.#carried.set(kept.key, carried);
+      // what its key carried before, and `null` is the answer that nothing went out under it.
+      // An entry of the shape the release before this one wrote holds no such record, and
+      // `WriteStorage.load` has already read it as that release read it, so nothing here asks
+      // the question a second way.
+      if (kept.carried !== null) this.#carried.set(kept.key, kept.carried);
       const kind = kinds.get(kept.kind);
       if (kind === undefined || !kind.kept(kept.detail)) {
         this.#kept.forget(kept.key);
@@ -1030,15 +1026,16 @@ export class Writes {
   }
 
   /** Keeps the write `entry` as it stands, for the person who pressed it, with what its key has
-   *  carried: the page after a reload reads that fact back rather than working it out from the
-   *  entry, which a write re-pressed under another's key cannot answer for (`#carried`). */
+   *  carried - `null` where nothing has gone out under it, written like any other answer: the
+   *  page after a reload reads that fact back rather than working it out from the entry, which
+   *  a write re-pressed under another's key cannot answer for (`#carried`). */
   #keep(entry: Entry): void {
     const { write } = entry;
     const state = keptState(write);
     if (write.login === undefined || state === undefined) return;
     const kind = kinds.get(write.kind);
     this.#kept.keep({
-      carried: this.#carried.get(write.key),
+      carried: this.#carried.get(write.key) ?? null,
       detail: kind?.keep === undefined ? write.detail : kind.keep(write.detail),
       key: write.key,
       kind: write.kind,

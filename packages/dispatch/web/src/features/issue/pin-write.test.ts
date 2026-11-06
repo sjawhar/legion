@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient } from "@tanstack/react-query";
 
-import { settle } from "../../__tests__/kept-sends-harness";
+import { settle } from "../../__tests__/fake-clock";
 import { api, NetworkError } from "../../api/client";
 import type { UserIssueState } from "../../api/types";
 import { writesOf } from "../writes/write-store";

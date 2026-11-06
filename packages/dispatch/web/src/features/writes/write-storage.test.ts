@@ -25,6 +25,7 @@ const KEYED_METHOD: WriteMethod = "PATCH";
 
 /** One write as the store keeps it, with every field an entry carries. */
 const kept = (key: string, fields: Partial<KeptWrite> = {}): KeptWrite => ({
+  carried: KEYED_METHOD,
   detail: null,
   key,
   kind: "write",
@@ -51,8 +52,10 @@ test("one versioned format, every write method kept, and an entry that does not 
     JSON.stringify({ ...write, version: 1, ...fields });
   try {
     page.keep(kept("patch", { state: { status: "late", stopping: false } }));
-    page.keep(kept("put", { request: { body: { until: null }, method: "PUT", path: "/x" } }));
-    page.keep(kept("delete", { request: { method: "DELETE", path: "/y" } }));
+    page.keep(
+      kept("put", { carried: "PUT", request: { body: { until: null }, method: "PUT", path: "/x" } })
+    );
+    page.keep(kept("delete", { carried: "DELETE", request: { method: "DELETE", path: "/y" } }));
     expect(tab.kept("patch")).toEqual({
       ...kept("patch", { state: { status: "late", stopping: false } }),
       version: 1,
@@ -81,6 +84,44 @@ test("one versioned format, every write method kept, and an entry that does not 
       "dispatch.write:put",
       "someone-else",
     ]);
+  } finally {
+    tab.close();
+  }
+});
+
+// What a key has carried is written with every write this release keeps, as a method or as the
+// `null` of a key nothing went out under, and the entries the release before this one wrote hold
+// no such field. `load` is the one place those two shapes meet: a missing record is read as that
+// release read it - the kept request where `sent` says one went out under the key, nothing
+// otherwise - and a record that is there is read as written, so nothing after `load` has to tell
+// a key that carried nothing from an entry written before the field existed.
+test("a missing carried is read as what the entry sent, and one that is written is read as written", () => {
+  const tab = keptTab();
+  const entry = (key: string, fields: Record<string, unknown>) =>
+    tab.storage.setItem(
+      `dispatch.write:${key}`,
+      JSON.stringify({ ...kept(key), version: 1, carried: undefined, ...fields })
+    );
+  try {
+    // Two of the older shape, `carried` left out: one that sent its PATCH under its key, one
+    // still waiting its turn, which holds only the request it would go out as.
+    entry("older-sent", { sent: true });
+    entry("older-unsent", { sent: false, state: { status: "queued" } });
+    // Two this release wrote. The first is the write re-pressed under the key of the one it
+    // replaces: nothing sent and no request of its own, while its key carried that earlier
+    // press. The second is a key nothing has gone out under, kept beside a `sent` that says
+    // otherwise - what is written is the record, and the reading above is never reached for it.
+    entry("kept-carried", { carried: "POST", request: null, sent: false });
+    entry("kept-nothing", { carried: null, sent: true });
+
+    const loaded = tab.page().load("alice");
+    const carriedOf = Object.fromEntries(loaded.map((write) => [write.key, write.carried]));
+    expect(carriedOf).toEqual({
+      "kept-carried": "POST",
+      "kept-nothing": null,
+      "older-sent": "PATCH",
+      "older-unsent": null,
+    });
   } finally {
     tab.close();
   }

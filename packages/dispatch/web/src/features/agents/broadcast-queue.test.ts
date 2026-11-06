@@ -5,13 +5,8 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { createElement } from "react";
 import { MemoryRouter } from "react-router-dom";
 
-import {
-  keptTab,
-  keyMinted,
-  memoryFiles,
-  onFakeClock,
-  settle,
-} from "../../__tests__/kept-sends-harness";
+import { onFakeClock, settle } from "../../__tests__/fake-clock";
+import { keptTab, keyMinted, memoryFiles } from "../../__tests__/kept-sends-harness";
 import { ApiError, api } from "../../api/client";
 import type {
   BroadcastCreated,
