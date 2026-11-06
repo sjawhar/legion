@@ -40,27 +40,19 @@ type roleForward struct {
 type roleForwarder struct {
 	// cfg is the delivery configuration the forwards are published (forwardRole) and reported
 	// through.
-	cfg listenerDeliveryHandlerConfig
+	cfg   listenerDeliveryHandlerConfig
+	slots chan struct{}
+	// pending counts the forwards handed over and not yet reported, for wait.
+	pending sync.WaitGroup
 
 	mu sync.Mutex
-	// held counts the forwards this lane holds: a forward is counted as it is queued and
-	// uncounted as its outcome is reported (finish), both under mu, and that one number is the
-	// bound the handler waits at, the gauge outstanding reports and what wait waits out. So a
-	// forward counts as outstanding until its outcome is reported, and a reader that sees the
-	// gauge at n knows every forward past those n has been reported in full.
-	held int
-	// ended is broadcast whenever a forward is uncounted, for the handler waiting at
-	// roleForwardWaitLimit and the shutdown waiting for the last forward.
-	ended *sync.Cond
 	// queues holds each holder's forwards not yet published, in arrival order. A holder has a key
 	// exactly while its worker runs.
 	queues map[string][]roleForward
 }
 
 func newRoleForwarder(cfg listenerDeliveryHandlerConfig) *roleForwarder {
-	f := &roleForwarder{cfg: cfg, queues: map[string][]roleForward{}}
-	f.ended = sync.NewCond(&f.mu)
-	return f
+	return &roleForwarder{cfg: cfg, slots: make(chan struct{}, roleForwardWaitLimit), queues: map[string][]roleForward{}}
 }
 
 // forwarded is the envelope published on the holder's agent subject: the message under the
@@ -88,15 +80,12 @@ func (f roleForward) msgID(subject string) string {
 	return bus.ForwardMsgID(f.item.EventID, subject)
 }
 
-// enqueue counts forward and queues it behind its holder's earlier forwards, starting the
-// holder's worker when it has none. It waits while the lane already holds roleForwardWaitLimit
-// forwards, which the end of one gives way to (finish).
+// enqueue queues forward behind its holder's earlier forwards, starting the holder's worker when it
+// has none, once a slot is free.
 func (f *roleForwarder) enqueue(forward roleForward) {
+	f.slots <- struct{}{}
+	f.pending.Add(1)
 	f.mu.Lock()
-	for f.held >= roleForwardWaitLimit {
-		f.ended.Wait()
-	}
-	f.held++
 	queue, running := f.queues[forward.sessionID]
 	f.queues[forward.sessionID] = append(queue, forward)
 	f.mu.Unlock()
@@ -131,23 +120,16 @@ func (f *roleForwarder) publish(sessionID string) {
 	}
 }
 
-// finish reports forward's outcome and uncounts it: the report comes first and the uncount is
-// its last step, with nothing between, so the gauge never drops before the outcome it stands for
-// is reported.
+// finish reports forward's outcome and frees its slot.
 func (f *roleForwarder) finish(forward roleForward, err error) {
 	finishRoleForward(f.cfg, forward, err)
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.held--
-	f.ended.Broadcast()
+	<-f.slots
+	f.pending.Done()
 }
 
-// outstanding is how many forwards are queued or waiting for their outcome: the forwards counted
-// and not yet reported (held).
+// outstanding is how many forwards are queued or waiting for their outcome.
 func (f *roleForwarder) outstanding() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.held
+	return len(f.slots)
 }
 
 // wait waits, within ctx, for every forward handed over to be reported. The shutdown runs it once
@@ -155,18 +137,7 @@ func (f *roleForwarder) outstanding() int {
 // drains, since the forwards and their exceptions are published through it. It reports whether all
 // were.
 func (f *roleForwarder) wait(ctx context.Context) bool {
-	stop := context.AfterFunc(ctx, func() {
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		f.ended.Broadcast()
-	})
-	defer stop()
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for f.held > 0 && ctx.Err() == nil {
-		f.ended.Wait()
-	}
-	return f.held == 0
+	return waitWithin(ctx, &f.pending)
 }
 
 // startRoleForward is forwardRole over client: a forward to a holder that answers receipts waits
