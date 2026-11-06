@@ -1,0 +1,5 @@
+kind: Fixed
+body: A Dispatch server process no longer gives up on its own first read of the database after two seconds. That read is always cold, because the health pool opens on its first use, and the two seconds are argued for the warm connection a serving process answers /healthz on. It now takes thirty seconds of its own; the warm probe a load balancer polls, and the drain probe a shutdown makes, keep their two.
+time: 2026-11-06T22:36:10.105698497Z
+custom:
+    Issue: pr2887
