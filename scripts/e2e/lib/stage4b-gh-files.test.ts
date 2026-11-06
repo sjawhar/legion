@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import { scriptFunctions } from "./script-functions";
 
 // assert_gh_files, taken from stage4b-sandbox-tree.sh by name, judges a container's gh bundle as
@@ -8,6 +9,9 @@ import { scriptFunctions } from "./script-functions";
 // Secret projection the kubelet rewrites in place when the Secret changes, so beside the owners'
 // directories its root always holds the kubelet's atomic-writer entries.
 const fn = scriptFunctions(join(import.meta.dir, "..", "stage4b-sandbox-tree.sh"));
+
+// The home the bash below runs under, so it reads nothing of the caller's.
+const home = temporaryDirectories("stage4b-gh-files-home", { scope: "suite" })();
 
 function judge(root: string, owner = "config.yml\nhosts.yml\n") {
   const script = [
@@ -21,7 +25,7 @@ function judge(root: string, owner = "config.yml\nhosts.yml\n") {
     "echo OK",
   ].join("\n");
   const result = Bun.spawnSync(["bash", "-c", script], {
-    env: { ...process.env, ROOT: root, OWNER: owner },
+    env: { PATH: process.env.PATH ?? "", HOME: home, ROOT: root, OWNER: owner },
   });
   return { exitCode: result.exitCode, out: result.stdout.toString() };
 }

@@ -122,7 +122,12 @@ describe("the dispatch CLI the package ships", () => {
       ).toBe(0);
       expect(await readdir(path.join(unpacked, "bin"))).toEqual(["dispatch"]);
       const help = Bun.spawnSync([path.join(unpacked, "bin/dispatch"), "--help"], {
-        env: { ...process.env, DISPATCH_HOST: "omp", DISPATCH_SESSION_ID: "pack-check" },
+        env: {
+          PATH: process.env.PATH ?? "",
+          HOME: work,
+          DISPATCH_HOST: "omp",
+          DISPATCH_SESSION_ID: "pack-check",
+        },
       });
       expect(help.exitCode).toBe(0);
       expect(help.stdout.toString()).toStartWith("Usage: dispatch ");

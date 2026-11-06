@@ -8,7 +8,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { skipWithout } from "@legion/test-fixtures/host-tools";
 import { scriptFunctions } from "../../../../scripts/e2e/lib/script-functions";
@@ -29,19 +29,29 @@ const fn = scriptFunctions(path.join(import.meta.dir, "rig.sh"));
 const work = mkdtempSync(path.join(tmpdir(), "skill-scenarios-rig-"));
 afterAll(() => rmSync(work, { recursive: true, force: true }));
 const operatorHome = path.join(work, "operator-home");
-mkdirSync(operatorHome);
+// The home the probes must not reach, with the one thing they look for in it: a judge that could
+// read it would list this directory.
+mkdirSync(path.join(operatorHome, ".ssh"), { recursive: true });
+writeFileSync(path.join(operatorHome, ".ssh", "id_ed25519"), "not a key\n", { mode: 0o600 });
 /** The variables every child process of this file gets: the caller's PATH, a HOME of the test's
- * own, and the caller's mise data and config directories. A tool on PATH can be a mise shim (jq and
- * jj are, on a devbox). Under a fresh HOME such a shim finds neither its installs nor its global
- * config, so it fails. make_omp_home keeps the operator's two directories for the processes it
- * starts for the same reason, and base_env passes MISE_DATA_DIR to every agent. */
+ * own, and the caller's mise data and config directories when the caller names them. A tool on
+ * PATH can be a mise shim (jq and jj are, on a devbox). Under a fresh HOME such a shim finds
+ * neither its installs nor its global config, so it fails. make_omp_home keeps the operator's two
+ * directories for the processes it starts for the same reason, and base_env passes MISE_DATA_DIR
+ * to every agent. A caller that names neither variable gets neither: the developer's own home
+ * decides nothing here. */
+const miseData =
+  process.env.MISE_DATA_DIR ??
+  (process.env.XDG_DATA_HOME === undefined
+    ? undefined
+    : path.join(process.env.XDG_DATA_HOME, "mise"));
 const childEnv = {
   PATH: process.env.PATH ?? "",
   HOME: operatorHome,
-  MISE_DATA_DIR:
-    process.env.MISE_DATA_DIR ??
-    path.join(process.env.XDG_DATA_HOME ?? path.join(homedir(), ".local", "share"), "mise"),
-  XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME ?? path.join(homedir(), ".config"),
+  ...(miseData === undefined ? {} : { MISE_DATA_DIR: miseData }),
+  ...(process.env.XDG_CONFIG_HOME === undefined
+    ? {}
+    : { XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME }),
 };
 
 let profiles = 0;
@@ -859,7 +869,7 @@ exit "$(cat "$PWD/exit-status" 2>/dev/null || echo 0)"
         USER: "rig",
         SKILL_SCENARIOS_WORK: work,
         SKILL_SCENARIOS_JUDGE_OMP: omp,
-        SKILL_SCENARIOS_JUDGE_ENV: `OUTSIDE=${outside} OPERATOR_HOME=${homedir()} WORK=${work}`,
+        SKILL_SCENARIOS_JUDGE_ENV: `OUTSIDE=${outside} OPERATOR_HOME=${operatorHome} WORK=${work}`,
         LEGION_E2E_MODEL_ROUTE: "key-file",
         LEGION_E2E_ANTHROPIC_KEY_FILE: keyFile(0o600),
         ...env,
@@ -969,7 +979,7 @@ exit "$(cat "$PWD/exit-status" 2>/dev/null || echo 0)"
   test("one judge cannot leave a file that a second judge can read", () => {
     const first = judgeDir();
     const env = (word: string) => ({
-      SKILL_SCENARIOS_JUDGE_ENV: `OUTSIDE=${outside} OPERATOR_HOME=${homedir()} WORK=${work} ${word}`,
+      SKILL_SCENARIOS_JUDGE_ENV: `OUTSIDE=${outside} OPERATOR_HOME=${operatorHome} WORK=${work} ${word}`,
     });
     expect(judge("ste", first, "answer.json", env("DROP=one")).exitCode).toBe(0);
     const second = judgeDir();
@@ -1012,7 +1022,7 @@ printf 'eyJhbGciOiJub25lIn0.%s.c2ln\\n' "$payload"
       judge(kind, dir, "answer.json", {
         PATH: `${fakeBin}:${childEnv.PATH}`,
         SKILL_SCENARIOS_WORK: gatewayWork,
-        SKILL_SCENARIOS_JUDGE_ENV: `OUTSIDE=${outside} OPERATOR_HOME=${homedir()} WORK=${gatewayWork}`,
+        SKILL_SCENARIOS_JUDGE_ENV: `OUTSIDE=${outside} OPERATOR_HOME=${operatorHome} WORK=${gatewayWork}`,
         LEGION_E2E_MODEL_ROUTE: "gateway",
         LEGION_E2E_MODEL_GATEWAY_URL: "https://gateway.internal.example/anthropic",
         DBUS_SESSION_BUS_ADDRESS: "unix:path=/nonexistent/bus",
@@ -1084,7 +1094,7 @@ printf 'eyJhbGciOiJub25lIn0.%s.c2ln\\n' "$payload"
         { stdout: "ignore", stderr: "ignore" }
       );
       const result = gatewayJudge("bare", dir, {
-        SKILL_SCENARIOS_JUDGE_ENV: `OUTSIDE=${outside} OPERATOR_HOME=${homedir()} WORK=${gatewayWork} SLEEP=2`,
+        SKILL_SCENARIOS_JUDGE_ENV: `OUTSIDE=${outside} OPERATOR_HOME=${operatorHome} WORK=${gatewayWork} SLEEP=2`,
       });
       watcher.kill();
       expect(result.exitCode).toBe(0);

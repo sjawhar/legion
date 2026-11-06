@@ -138,7 +138,7 @@ ${fn("death_charge")}
 ${fn("hold_end_charged")}
 ${body}`,
     ],
-    { env: { ...process.env, ...env } }
+    { env: { PATH: process.env.PATH ?? "", HOME: dir, ...env } }
   );
   const delivered = existsSync(calls)
     ? readFileSync(calls, "utf8")

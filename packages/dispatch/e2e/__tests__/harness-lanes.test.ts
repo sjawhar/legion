@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -24,7 +25,14 @@ const dispatchPackage = fileURLToPath(new URL("../..", import.meta.url));
 async function run(argv: string[], env: Record<string, string>) {
   const child = Bun.spawn(argv, {
     cwd: dispatchPackage,
-    env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", ...env },
+    env: {
+      PATH: process.env.PATH ?? "",
+      HOME: process.env.HOME ?? "",
+      // The child writes under its temporary directory, which on a machine whose TMPDIR names
+      // the only writable volume is not /tmp.
+      TMPDIR: tmpdir(),
+      ...env,
+    },
     stderr: "pipe",
     stdout: "pipe",
   });

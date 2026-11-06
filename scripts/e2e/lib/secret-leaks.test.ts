@@ -154,8 +154,8 @@ async function verdictFor(
     ["bun", script, "ctx", "legion", "legion.dev/project=legsmoke", podWatch, verdict],
     {
       env: {
-        ...process.env,
         PATH: `${bin}:${process.env.PATH ?? ""}`,
+        HOME: run,
         SECRETS: secretsFile,
         WATCHED: watched,
       },

@@ -3269,7 +3269,7 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
     const began = Date.now();
     const result = await core.spawnDryRun("sleep 5", {
       cwd: work,
-      env: process.env,
+      env: { PATH: process.env.PATH ?? "", HOME: work },
       timeoutMs: 100,
     });
     expect(result.timedOut).toBe(true);
@@ -4357,7 +4357,7 @@ console.log(JSON.stringify({ argv, consumed: consumeMarker([process.env.ASKGATE_
         ]);
         const run = Bun.spawnSync(["bash", "-c", command], {
           cwd: work,
-          env: { ...process.env, ...STUB, ASKGATE_POSTED: posted },
+          env: { ...STUB, HOME: work, ASKGATE_POSTED: posted },
         });
         expect(run.exitCode).toBe(0);
         expect(JSON.parse(fs.readFileSync(posted, "utf8"))).toMatchObject({ question: text });
@@ -4493,17 +4493,22 @@ console.log(JSON.stringify({ argv, consumed: consumeMarker([process.env.ASKGATE_
 describe("the literal grammar, widened to forms with no expansion", () => {
   // A stand-in `dispatch` that prints the argv it gets as one JSON line, so real bash shows what
   // the CLI would receive for each form.
-  const bin = fs.mkdtempSync(path.join(tmpdir(), "askgate-argv-"));
+  const root = fs.mkdtempSync(path.join(tmpdir(), "askgate-argv-"));
+  const bin = path.join(root, "bin");
+  // A home of the test's own: no child here reads the caller's.
+  const home = path.join(root, "home");
+  fs.mkdirSync(bin);
+  fs.mkdirSync(home);
   fs.writeFileSync(
     path.join(bin, "dispatch"),
     `#!${process.execPath}\nconsole.log(JSON.stringify(process.argv.slice(2)));\n`,
     { mode: 0o755 }
   );
-  afterAll(() => fs.rmSync(bin, { recursive: true, force: true }));
+  afterAll(() => fs.rmSync(root, { recursive: true, force: true }));
   /** The argv real bash gives the stand-in for `command`. */
   const bashArgv = (command: string): unknown => {
     const run = Bun.spawnSync(["bash", "-c", command], {
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      env: { PATH: `${bin}:${process.env.PATH}`, HOME: home },
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -4655,12 +4660,15 @@ describe("the literal grammar, widened to forms with no expansion", () => {
   // `--body hi` was always read, and an unquoted delimiter still expands and still is not.
   describe("a quoted here-document in a command substitution", () => {
     const BODY = "Done.\nSee the note.\n\n- one\n- two";
+    // A home of the test's own, so the bash below reads nothing of the caller's.
+    const home = temporaryDirectories("askgate-here-doc", { scope: "suite" })();
     const quoted = (flag: string, text: string) =>
       `dispatch comment --issue X-1 ${flag} "$(cat <<'EOF'\n${text}\nEOF\n)"`;
     /** What bash really hands the CLI for `command`, as argv. */
     const bashArgv = (command: string) =>
       execFileSync("bash", ["-c", command.replace(/^dispatch/, "printf '%s\\0'")], {
         encoding: "utf8",
+        env: { PATH: process.env.PATH ?? "", HOME: home },
       })
         .split("\0")
         .filter((word) => word !== "");

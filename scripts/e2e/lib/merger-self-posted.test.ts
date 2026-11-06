@@ -49,7 +49,7 @@ ${fn("merger_self_posted")}
 merger_self_posted LEGSMOKE-1
 `,
     ],
-    { env: { ...process.env, SESSION: file } }
+    { env: { PATH: process.env.PATH ?? "", HOME: dir, SESSION: file } }
   );
   if (ran.exitCode !== 0)
     throw new Error(`merger_self_posted exited ${ran.exitCode}: ${ran.stderr}`);

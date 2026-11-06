@@ -415,7 +415,7 @@ test.skipIf(!hasTmux)(
           "-e",
           `import { queryTmux } from ${JSON.stringify(source)}; process.stdout.write(JSON.stringify(await queryTmux(${JSON.stringify(socket)}, ${JSON.stringify(pane)}, "#{session_name}\\t#{pid}")))`,
         ],
-        { env: { PATH: process.env["PATH"] ?? "", HOME: process.env["HOME"] ?? "" } },
+        { env: { PATH: process.env["PATH"] ?? "", HOME: directory } },
       )
       expect(child.stdout.toString()).toBe(JSON.stringify(`probe\t${pid}\n`))
     } finally {
@@ -444,7 +444,7 @@ test("queryTmux is bounded even by a tmux that ignores SIGTERM", () => {
         "-e",
         `import { queryTmux } from ${JSON.stringify(source)}; const started = Date.now(); const answer = await queryTmux("/nonexistent/tmux.sock", "%0", "x"); process.stdout.write(\`\${String(answer)} \${Date.now() - started}\`)`,
       ],
-      { env: { ...process.env, PATH: `${directory}:${process.env["PATH"] ?? ""}` } },
+      { env: { PATH: `${directory}:${process.env["PATH"] ?? ""}`, HOME: directory } },
     )
     const ran = Date.now() - started
     const [answer, elapsed] = child.stdout.toString().split(" ")

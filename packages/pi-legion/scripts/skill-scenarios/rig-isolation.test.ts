@@ -10,7 +10,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 // Two runs of one batch, started at the same time as the batch's xargs starts them:
@@ -177,17 +177,23 @@ put(path.join(work, "services/dispatch-token"), "e2e-token\n");
 const tag = `skill-scenarios-${new Bun.CryptoHasher("sha256").update(work).digest("hex").slice(0, 8)}`;
 
 /** The caller's PATH behind the stand-ins, a HOME of the test's own, and the caller's mise data
- * and config directories: jq is a mise shim on a devbox, which finds nothing under a fresh HOME
- * without them. */
+ * and config directories when the caller names them: jq is a mise shim on a devbox, which finds
+ * nothing under a fresh HOME without them. A caller that names neither gets neither, so the
+ * developer's own home decides nothing here. */
+const miseData =
+  process.env.MISE_DATA_DIR ??
+  (process.env.XDG_DATA_HOME === undefined
+    ? undefined
+    : path.join(process.env.XDG_DATA_HOME, "mise"));
 const env = {
   PATH: `${bin}:${process.env.PATH ?? ""}`,
   HOME: path.join(scratch, "home"),
   USER: process.env.USER ?? "rig",
   TMPDIR: scratch,
-  MISE_DATA_DIR:
-    process.env.MISE_DATA_DIR ??
-    path.join(process.env.XDG_DATA_HOME ?? path.join(homedir(), ".local", "share"), "mise"),
-  XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME ?? path.join(homedir(), ".config"),
+  ...(miseData === undefined ? {} : { MISE_DATA_DIR: miseData }),
+  ...(process.env.XDG_CONFIG_HOME === undefined
+    ? {}
+    : { XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME }),
   STUB_DIR: stub,
   SKILL_SCENARIOS_WORK: work,
   SKILL_SCENARIOS_ASKGATE_CASE: "facts",

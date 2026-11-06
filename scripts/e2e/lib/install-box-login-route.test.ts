@@ -295,11 +295,16 @@ describe("the box-login lock", () => {
 });
 
 // The stage proofs themselves, run only as far as their first lines: a refused run must leave no
-// work or evidence directory. The lock is the real fixed file; the test holds it for a moment (or
-// finds a real proof holding it, which refuses the stages the same way).
+// work or evidence directory. The lock is one of the test's own, named in the stage's environment
+// (lib/box-login.sh), so this case neither blocks a live box-login proof of this box nor waits on
+// one.
 describe("a box-login stage proof refused at its first lines", () => {
   const e2e = join(lib, "..");
-  const uid = Bun.spawnSync(["id", "-u"]).stdout.toString().trim();
+  const lockFile = join(dir, "stage-box-login.lock");
+  // A refused stage exits before its `mktemp -d /tmp/legion-e2e…` and prints no directory, so the
+  // only way to see the one it must not have made is to look where it would have made it: the
+  // literal /tmp of stage2-tmux-supervision.sh and stage3-devbox-workflow.sh. The child's own pid
+  // is in every such name, so this read never sees another run's directory.
   const runDirs = (pid: number) =>
     readdirSync("/tmp").filter(
       (name) => name.startsWith(`legion-e2e2.${pid}.`) || name.startsWith(`legion-e2e3.${pid}.`)
@@ -312,6 +317,7 @@ describe("a box-login stage proof refused at its first lines", () => {
         HOME: callerHome,
         LEGION_E2E_MODEL_ROUTE: "box-login",
         STAGE3_EVIDENCE_DIR: evidence,
+        box_login_lock_file: lockFile,
         ...env,
       },
     });
@@ -325,12 +331,8 @@ describe("a box-login stage proof refused at its first lines", () => {
 
   test.each(scripts)("%s takes the lock before it makes any run state", async (script) => {
     const holder = Bun.spawn(
-      [
-        "bash",
-        "-c",
-        `exec 9>>/tmp/legion-e2e-box-login.${uid}.lock; flock -n 9 || true; echo ready; exec sleep 60`,
-      ],
-      { stdout: "pipe" }
+      ["bash", "-c", helpers(lockFile, "take_box_login_lock && echo ready && exec sleep 60")],
+      { stdout: "pipe", env: { PATH: process.env.PATH ?? "", HOME: callerHome } }
     );
     try {
       await holder.stdout.getReader().read();

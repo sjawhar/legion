@@ -168,7 +168,7 @@ wait
   );
 
   const tmux = Bun.which("tmux");
-  const env = { ...process.env, TMUX_TMPDIR: join(work, "tmux") };
+  const env = { PATH: process.env.PATH ?? "", HOME: home, TMUX_TMPDIR: join(work, "tmux") };
   const pidFile = join(runtime, "broker.pid");
   // The stand-in broker the pane starts leads a session of its own and names it in broker.pid.
   // Ending that session is registered before the pane that starts it, so a wait below that times

@@ -69,7 +69,7 @@ async function run(
   env: Record<string, string> = { NODE_EXTRA_CA_CERTS: certFile }
 ): Promise<{ readonly code: number; readonly stdout: string; readonly stderr: string }> {
   const child = Bun.spawn([process.execPath, probe, ...args], {
-    env: { ...process.env, ...env },
+    env: { PATH: process.env.PATH ?? "", HOME: scratch, ...env },
     stderr: "pipe",
     stdout: "pipe",
   });

@@ -20,6 +20,9 @@ import { appTokenSources } from "./app-logins";
 // implement App holds checks: read alone, as the real one does.
 const dir = mkdtempSync(join(tmpdir(), "app-logins-test."));
 const script = join(import.meta.dir, "app-logins.ts");
+// The home every child of this file runs under, so none of them reads the caller's.
+const home = join(dir, "home");
+mkdirSync(home);
 
 interface StandInApp {
   id: number;
@@ -121,12 +124,13 @@ function config(implement: string, review: string): string {
 const app = (id: string, command = `cat ${join(dir, `release-${id}.json`)}`) =>
   `    app_id: "${id}"\n    token_command: ${JSON.stringify(command)}`;
 
-// The run is asynchronous: the stand-in GitHub answers from this test's own event loop. `env` is
-// added to this test's own environment. The helper is given stdin, so a token command that
-// inherited it would read `stdin-leak` where the closed-stdin case expects nothing.
+// The run is asynchronous: the stand-in GitHub answers from this test's own event loop. The child
+// gets PATH, a home of the test's own and `env`, never the caller's whole environment. The helper
+// is given stdin, so a token command that inherited it would read `stdin-leak` where the
+// closed-stdin case expects nothing.
 async function run(path: string, env: Record<string, string> = {}, api = standIn) {
   const child = Bun.spawn(["bun", script, path, api], {
-    env: { ...process.env, ...env },
+    env: { PATH: process.env.PATH ?? "", HOME: home, ...env },
     stdin: new Blob(["stdin-leak"]),
     stdout: "pipe",
     stderr: "pipe",
@@ -155,7 +159,13 @@ bun() { command bun "$@" "$API"; }
 read_app_logins
 ${then}`;
   const child = Bun.spawn(["bash", "-c", shell], {
-    env: { ...process.env, LIB: join(import.meta.dir, "workflow.sh"), work, API: api },
+    env: {
+      PATH: process.env.PATH ?? "",
+      HOME: home,
+      LIB: join(import.meta.dir, "workflow.sh"),
+      work,
+      API: api,
+    },
     stdout: "pipe",
     stderr: "pipe",
   });

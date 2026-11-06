@@ -35,7 +35,8 @@ function clean(label: string, before: Listing, after: Listing, failListing = fal
   ].join("\n");
   const result = Bun.spawnSync(["bash", "-c", script], {
     env: {
-      ...process.env,
+      PATH: process.env.PATH ?? "",
+      HOME: evidence,
       BEFORE_UNLABELLED: lines(before.unlabelled),
       BEFORE_LABELLED: lines(before.labelled),
       AFTER_UNLABELLED: lines(after.unlabelled),

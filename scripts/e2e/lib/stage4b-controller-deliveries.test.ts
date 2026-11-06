@@ -63,7 +63,7 @@ ${fn("controller_deliveries")}
 ${fn("controller_received")}
 ${body}`,
     ],
-    { env: { ...process.env, profile_agent: profileAgent } }
+    { env: { PATH: process.env.PATH ?? "", HOME: dir, profile_agent: profileAgent } }
   );
   expect(result.stderr.toString()).toBe("");
   return { code: result.exitCode, out: result.stdout.toString() };

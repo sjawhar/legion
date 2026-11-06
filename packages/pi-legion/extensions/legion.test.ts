@@ -234,6 +234,10 @@ const temporaryPaths: string[] = [];
 const paneStateDirectory = temporaryDirectories("legion-pane-state");
 const controllerStateDirectory = temporaryDirectories("legion-controller");
 
+/** The home the suite's one `jj git init` runs under, so no configuration of the developer's
+ * decides what the template holds. */
+const jjHomeDirectory = temporaryDirectories("legion-jj-home", { scope: "suite" });
+
 /** The repository every workspace in this file is a copy of: one `jj git init` before the tests.
  * A copy spawns no process, so a test's workspace costs none of bun's 5 s test timeout, which a
  * `jj` process, whose run time is the machine's load, would otherwise spend. */
@@ -241,7 +245,24 @@ let jjTemplate = "";
 
 beforeAll(async () => {
   jjTemplate = await mkdtemp(path.join(os.tmpdir(), "legion-omp-extension-template-"));
-  const child = Bun.spawn(["jj", "git", "init", jjTemplate], { stdout: "ignore", stderr: "pipe" });
+  const jjHome = jjHomeDirectory();
+  const jjConfig = path.join(jjHome, "jj-config.toml");
+  await writeFile(jjConfig, "# The suite's own jj configuration: nothing of the developer's.\n");
+  const child = Bun.spawn(["jj", "git", "init", jjTemplate], {
+    stdout: "ignore",
+    stderr: "pipe",
+    env: {
+      PATH: process.env.PATH ?? "",
+      HOME: jjHome,
+      XDG_CONFIG_HOME: path.join(jjHome, ".config"),
+      JJ_CONFIG: jjConfig,
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_TERMINAL_PROMPT: "0",
+      JJ_USER: "Legion Test",
+      JJ_EMAIL: "legion-test@example.invalid",
+    },
+  });
   const exitCode = await child.exited;
   if (exitCode !== 0) {
     // A spawn killed under the runner exits non-zero with nothing on stderr, so name the code and

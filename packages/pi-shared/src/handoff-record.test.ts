@@ -1,9 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
-import { lstat, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { forgetBrokerClients } from "@legion/envoy-client/broker-credential";
 import { DispatchServiceError } from "@legion/envoy-client/dispatch-http";
+import { restoreEnvironment } from "@legion/test-fixtures/environment";
 import {
   findHandoffReport,
   findPushedBranchHead,
@@ -329,11 +330,52 @@ test("a pane whose Dispatch is the broker's reads the record under its own sessi
 // round's change committed and the branch pushed, run through PATH's jj, as a pane is.
 const jjOnPath = Bun.which("jj");
 
-/** Runs jj in `cwd` as the pane's identity, failing on a non-zero exit. */
-async function jj(cwd: string, identity: NodeJS.ProcessEnv, ...args: string[]): Promise<string> {
+// `isolatedHome` puts these on the test process as well, so the jj that the code under test
+// (`pathJj`) starts reads the test's home rather than the developer's.
+restoreEnvironment([
+  "HOME",
+  "XDG_CONFIG_HOME",
+  "JJ_CONFIG",
+  "JJ_USER",
+  "JJ_EMAIL",
+  "GIT_CONFIG_GLOBAL",
+  "GIT_CONFIG_NOSYSTEM",
+  "GIT_TERMINAL_PROMPT",
+]);
+
+/** The identity the pane's jj commits as, which no configuration of the host supplies. */
+const IDENTITY = { JJ_USER: "Legion Test", JJ_EMAIL: "legion-test@example.invalid" };
+
+/**
+ * The environment this file's real jj and git run in, and the one it puts on the test process:
+ * a home under `root`, a jj configuration the test wrote, and no git configuration at all, so
+ * neither the developer's `~/.jjconfig.toml`, nor their `~/.gitconfig`, nor the system gitconfig
+ * decides a result. It reaches the test process too, because `pathJj` — the code under test —
+ * starts jj with the process's own environment.
+ */
+async function isolatedHome(root: string): Promise<Record<string, string>> {
+  const home = path.join(root, "home");
+  await mkdir(path.join(home, ".config"), { recursive: true });
+  const config = path.join(home, "jj-config.toml");
+  await writeFile(config, "# The test's own jj configuration: nothing of the developer's.\n");
+  const isolated = {
+    HOME: home,
+    XDG_CONFIG_HOME: path.join(home, ".config"),
+    JJ_CONFIG: config,
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_TERMINAL_PROMPT: "0",
+    ...IDENTITY,
+  };
+  Object.assign(process.env, isolated);
+  return { PATH: process.env.PATH ?? "", ...isolated };
+}
+
+/** Runs jj in `cwd` with the test's own environment, failing on a non-zero exit. */
+async function jj(cwd: string, env: Record<string, string>, ...args: string[]): Promise<string> {
   const child = Bun.spawn([jjOnPath as string, ...args], {
     cwd,
-    env: { ...process.env, ...identity },
+    env,
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -352,17 +394,19 @@ test.skipIf(jjOnPath === null)(
     const root = await mkdtemp(path.join(tmpdir(), "legion-handoff-record-"));
     scratch.push(root);
     const workspace = path.join(root, "workspace");
-    const identity = { JJ_USER: "Legion Test", JJ_EMAIL: "legion-test@example.invalid" };
-    const paneEnv = { ...identity, LEGION_WORKSPACE: workspace, LEGION_ISSUE: ISSUE };
-    await Bun.spawn(["git", "init", "--bare", "--quiet", path.join(root, "origin.git")]).exited;
-    await jj(root, identity, "git", "init", workspace);
-    await jj(workspace, identity, "git", "remote", "add", "origin", path.join(root, "origin.git"));
+    const childEnv = await isolatedHome(root);
+    const paneEnv = { ...IDENTITY, LEGION_WORKSPACE: workspace, LEGION_ISSUE: ISSUE };
+    await Bun.spawn(["git", "init", "--bare", "--quiet", path.join(root, "origin.git")], {
+      env: childEnv,
+    }).exited;
+    await jj(root, childEnv, "git", "init", workspace);
+    await jj(workspace, childEnv, "git", "remote", "add", "origin", path.join(root, "origin.git"));
     await writeFile(path.join(workspace, "main.py"), 'print("hi")\n');
-    await jj(workspace, identity, "describe", "-m", "implement: the change");
-    await jj(workspace, identity, "new");
+    await jj(workspace, childEnv, "describe", "-m", "implement: the change");
+    await jj(workspace, childEnv, "new");
     const change = await jj(
       workspace,
-      identity,
+      childEnv,
       "log",
       "-r",
       "@-",
@@ -387,8 +431,8 @@ test.skipIf(jjOnPath === null)(
     );
 
     // Pushed: the branch's tip is reported with the record.
-    await jj(workspace, identity, "bookmark", "set", `legion/${ISSUE}`, "-r", "@-");
-    await jj(workspace, identity, "git", "push", "--bookmark", `legion/${ISSUE}`);
+    await jj(workspace, childEnv, "bookmark", "set", `legion/${ISSUE}`, "-r", "@-");
+    await jj(workspace, childEnv, "git", "push", "--bookmark", `legion/${ISSUE}`);
     await expect(report()).resolves.toEqual({
       commit: change,
       handoffId: RECORD.id,
@@ -397,9 +441,9 @@ test.skipIf(jjOnPath === null)(
 
     // A later commit not yet pushed is refused again.
     await writeFile(path.join(workspace, "main.py"), 'print("bye")\n');
-    await jj(workspace, identity, "describe", "-m", "implement: the fix");
-    await jj(workspace, identity, "new");
-    const fix = await jj(workspace, identity, "log", "-r", "@-", "--no-graph", "-T", "commit_id");
+    await jj(workspace, childEnv, "describe", "-m", "implement: the fix");
+    await jj(workspace, childEnv, "new");
+    const fix = await jj(workspace, childEnv, "log", "-r", "@-", "--no-graph", "-T", "commit_id");
     await expect(report()).rejects.toThrow(
       `the commit this workspace stands on, ${fix}, is not on legion/${ISSUE}@origin`
     );
@@ -427,8 +471,8 @@ test.skipIf(jjOnPath === null)(
     const root = await mkdtemp(path.join(tmpdir(), "legion-handoff-lock-"));
     scratch.push(root);
     const workspace = path.join(root, "workspace");
-    const identity = { JJ_USER: "Legion Test", JJ_EMAIL: "legion-test@example.invalid" };
-    await jj(root, identity, "git", "init", "--colocate", workspace);
+    const childEnv = await isolatedHome(root);
+    await jj(root, childEnv, "git", "init", "--colocate", workspace);
     await writeFile(path.join(workspace, "main.py"), 'print("hi")\n');
     const lock = path.join(workspace, ".git", "index.lock");
     await writeFile(lock, "");

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 import type { HarnessListener } from "../harness-listeners";
@@ -13,7 +14,9 @@ const runSignInIssuer = module("run-signin-issuer.sh");
 
 async function run(argv: string[], env: Record<string, string>) {
   const child = Bun.spawn(argv, {
-    env: { PATH: process.env.PATH ?? "", ...env },
+    // TMPDIR: the child writes under its temporary directory, which on a machine whose TMPDIR
+    // names the only writable volume is not /tmp.
+    env: { PATH: process.env.PATH ?? "", TMPDIR: tmpdir(), ...env },
     stderr: "pipe",
     stdout: "pipe",
   });

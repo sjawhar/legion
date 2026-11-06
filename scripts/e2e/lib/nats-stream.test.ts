@@ -76,12 +76,13 @@ async function startNats(): Promise<void> {
 }
 
 function runLast(subject: string, seconds = budgetSeconds) {
-  const env: Record<string, string | undefined> = {
-    ...process.env,
+  // PATH, a home of the test's own and the config this run wrote: no NATS_NKEY_SEED or
+  // NATS_NKEY_SEED_FILE of the caller's reaches the child, which this server would refuse.
+  const env = {
+    PATH: process.env.PATH ?? "",
+    HOME: configDirectory,
     ENVOY_CONFIG_FILE: config,
   };
-  delete env.NATS_NKEY_SEED;
-  delete env.NATS_NKEY_SEED_FILE;
   const started = performance.now();
   const result = Bun.spawnSync(
     [
