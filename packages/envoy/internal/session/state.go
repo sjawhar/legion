@@ -1,19 +1,29 @@
 package session
 
-import "time"
+import (
+	"time"
+
+	"github.com/sjawhar/envoy/internal/contracts"
+)
 
 // The windows every reader of the session registry judges a record's age against. They are
-// declarations and not settings on purpose: .github/scripts/check-heartbeat-margin.sh reads
-// LiveWindow here to prove that three registration refreshes and one listener call fit inside it,
-// and a gate that read a deployment's environment instead would prove nothing about the tree.
-// WithSessionLiveWindow and WithSessionGoneHorizon move what one registry runs with; these are
-// what a registry given no option, and every reader judging a record against the package's own
-// windows, use.
+// declarations and not settings on purpose: the Go test
+// TestDAEMONTESTTheSessionTimingRuleHoldsAtTheValuesTheBuildUses (packages/daemon/internal/daemon)
+// weighs the session-timing rule over the generated declaration LiveWindow is,
+// contracts.SessionLiveWindow, proving three registration refreshes and one listener call fit
+// inside it, and TestSESSIONTESTTheRegistryResolvesTheDeclaredWindows (session_timing_test.go)
+// holds the window a registry resolves to that declaration; a gate that read a deployment's
+// environment instead would prove nothing about the tree. WithSessionLiveWindow and
+// WithSessionGoneHorizon move what one registry runs with; these are what a registry given no
+// option, and every reader judging a record against the package's own windows, use.
 const (
 	// LiveWindow is how long a session's last registration keeps it live. A pane refreshes its
-	// registration every DEFAULT_HEARTBEAT_MS (packages/envoy-client/src/envoy-settings.ts), so
-	// this leaves two whole refreshes to fail before a working session stops reading live.
-	LiveWindow = 5 * time.Minute
+	// registration every SESSION_HEARTBEAT_MS (packages/contracts/src/envoy-session.ts), so
+	// this leaves two whole refreshes to fail before a working session stops reading live. It is
+	// declared once as SESSION_LIVE_WINDOW_MS (packages/contracts/src/envoy-session.ts) and read
+	// here as the constant generated from it, so the window a pane's refresh interval is derived
+	// from and the window this package judges a record by are one number.
+	LiveWindow = contracts.SessionLiveWindow
 	// GoneHorizon is how long past its last registration a session's record still stands for a
 	// session that is not dead but unresponsive: one that keeps its role and issue claims, has
 	// messages stored for it, and gets no replacement started for it. Only past this is the

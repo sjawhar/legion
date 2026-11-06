@@ -69,6 +69,34 @@ func deployedClusterStream(change func(*nats.StreamConfig)) nats.StreamConfig {
 	return deployed
 }
 
+// keptValueWait is a hang guard on awaitKeptValue's read, not a budget: a copy a raise adds
+// catches up with a one-message stream in milliseconds.
+const keptValueWait = 30 * time.Second
+
+// awaitKeptValue reads key through kv until the bucket answers with want, and fails the test if
+// no read does within keptValueWait.
+//
+// A KV read is a direct get, and nats-server hands a copy the direct-get queue group as soon as
+// that copy is 90% caught up with its leader, rather than when it is current
+// (server/jetstream_cluster.go:2622-2641, v2.10.29), so a read taken just after a raise can be
+// answered "key not found" by a copy that does not hold the key yet. A value the raise kept is
+// committed to the bucket's stream, so a copy that holds it answers; a value a raise dropped is
+// on no copy, and no read answers with it.
+func awaitKeptValue(t *testing.T, kv KeyValue, key, want string) {
+	t.Helper()
+	deadline := time.Now().Add(keptValueWait)
+	for {
+		entry, err := kv.Get(key)
+		if err == nil && string(entry.Value()) == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("get %s after the raise = %v, %v within %s; want %q", key, entry, err, keptValueWait, want)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // On an existing three-copy stream with a byte limit, DiscardOld and an id, a start that changes
 // its subjects, its age or its duplicate window keeps the three copies, the byte limit, the id and
 // every limit it does not own (MaxMsgsPerSubject, MaxMsgSize), and corrects the age, the window and
@@ -185,7 +213,11 @@ func TestEnsureKeyValueRaisesAnR1BucketToThreeCopiesChangingNothingElse(t *testi
 	cluster, js := startClusterJetStream(t)
 	conn := clusterConn(t, cluster)
 	const bucket = "envoy_raise_test"
-	created, err := js.CreateKeyValue(&nats.KeyValueConfig{
+	// The put below writes to the bucket through conn, and the rebuild and the raise after it look
+	// the bucket up through js and open its jetstream handle on conn: three reaches, two
+	// connections, so two members. Created through the cluster, which comes back only once every
+	// member answers for the bucket and can route a write to it.
+	created := cluster.CreateKeyValue(t, conn, &nats.KeyValueConfig{
 		Bucket:      bucket,
 		Description: "deployed by operations",
 		History:     5,
@@ -194,9 +226,6 @@ func TestEnsureKeyValueRaisesAnR1BucketToThreeCopiesChangingNothingElse(t *testi
 		Storage:     nats.FileStorage,
 		Replicas:    1,
 	})
-	if err != nil {
-		t.Fatalf("create the R1 bucket: %v", err)
-	}
 	if _, err := created.Put("key", []byte("value")); err != nil {
 		t.Fatalf("put: %v", err)
 	}
@@ -224,10 +253,7 @@ func TestEnsureKeyValueRaisesAnR1BucketToThreeCopiesChangingNothingElse(t *testi
 	if !reflect.DeepEqual(after.Config, want) {
 		t.Fatalf("bucket stream config = %+v after the raise, want the deployed one with only replicas 3: %+v", after.Config, want)
 	}
-	entry, err := kv.Get("key")
-	if err != nil || string(entry.Value()) != "value" {
-		t.Fatalf("get after the raise = %v, %v; want value", entry, err)
-	}
+	awaitKeptValue(t, kv, "key", "value")
 
 	if _, err := EnsureKeyValue(conn, counting, &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 1}); err != nil {
 		t.Fatalf("ensure the bucket at one copy: %v", err)
@@ -455,9 +481,9 @@ func TestARefusedRaiseNamesTheReplicaSetting(t *testing.T) {
 	cluster, js := startClusterJetStream(t)
 	startOnCluster(t, cluster, WithReplicas(1))
 	const bucket = "envoy_refused_test"
-	if _, err := EnsureKeyValue(clusterConn(t, cluster), js, &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 1}); err != nil {
-		t.Fatalf("create the R1 bucket: %v", err)
-	}
+	// The refused raise below looks the bucket up through js, a connection of its own: created
+	// through the cluster, which comes back only once every member answers for the bucket.
+	cluster.CreateKeyValue(t, clusterConn(t, cluster), &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 1})
 
 	client, err := ConnectOwningStream(cluster.URLs(), WithReplicas(5))
 	if err == nil {

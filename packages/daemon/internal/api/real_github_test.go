@@ -16,6 +16,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
@@ -75,7 +76,7 @@ func TestRealGitHubCredentialSurface(t *testing.T) {
 	clone := exec.Command("git", "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
 		"clone", "https://github.com/sjawhar/legion-smoke", filepath.Join(scratch, "legion-smoke"))
 	clone.Dir = scratch
-	clone.Env = append(realCLIEnvironment(gh, dirs[appauth.Implement]), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0")
+	clone.Env = realCLIEnvironment(gh, dirs[appauth.Implement], t.TempDir())
 	output, err := clone.CombinedOutput()
 	if err != nil {
 		t.Fatalf("clone through gh auth git-credential: %v: %s", err, strings.TrimSpace(string(output)))
@@ -208,6 +209,10 @@ func realGitHubApps(t *testing.T) config.GitHubApps {
 			t.Fatalf("read the live proofs' App lib: %v", err)
 		}
 	}
+	// Both calls below hand the lib the process's own environment, not a fixtureenv.Isolated one:
+	// scripts/e2e/lib/github-apps.sh reads the four LEGION_E2E_*_APP_* inputs, which the package's
+	// guard keeps (main_test.go) and Isolated drops, so an Isolated environment here would
+	// silently fall the lib back to its default App pair and prove Apps no proof then acts as.
 	implement, review, err := liveProofApps(os.Environ())
 	if err != nil {
 		t.Fatal(err)
@@ -486,7 +491,7 @@ func realGh(t *testing.T) string {
 func runRealGh(t *testing.T, gh, configDir string, args ...string) realCommandResult {
 	t.Helper()
 	command := exec.Command(gh, args...)
-	command.Env = realCLIEnvironment(gh, configDir)
+	command.Env = realCLIEnvironment(gh, configDir, t.TempDir())
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr
 	err := command.Run()
@@ -524,12 +529,73 @@ func writeRealGhFiles(t *testing.T, token string) string {
 	return dir
 }
 
-// realCLIEnvironment is a pane's environment as far as gh and git read it: the real gh's directory
-// first on PATH, so git's `gh auth git-credential` helper is that gh, the gh files configDir holds
-// as GH_CONFIG_DIR, and GH_TOKEN, GITHUB_TOKEN and GH_HOST empty so nothing inherited outranks the
-// files.
-func realCLIEnvironment(gh, configDir string) []string {
-	return append(os.Environ(),
+// realCLIEnvironment is a pane's environment as far as gh and git read it, built on
+// fixtureenv.Isolated of home so that nothing this test process was handed — a pod's workspace,
+// its GIT_CONFIG_* block, its credential helper, its token or its home's configuration — reaches
+// the real git and gh the proof runs. Isolated drops every GH_* and GITHUB_* name, so the gh
+// files configDir holds are the only credential left, and the two entries after it are what the
+// proof adds: the real gh's directory first on PATH, so git's `gh auth git-credential` helper is
+// that gh, and GH_CONFIG_DIR itself. GIT_ALLOW_PROTOCOL=https comes last of all because Isolated
+// appends GIT_ALLOW_PROTOCOL=file and a child takes the last value of a key: this proof clones
+// over https from real GitHub, which file would refuse.
+func realCLIEnvironment(gh, configDir, home string) []string {
+	return append(fixtureenv.Isolated(home),
 		"PATH="+filepath.Dir(gh)+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"GH_CONFIG_DIR="+configDir, "GH_TOKEN=", "GITHUB_TOKEN=", "GH_HOST=")
+		"GH_CONFIG_DIR="+configDir,
+		"GIT_ALLOW_PROTOCOL=https")
+}
+
+// TestTheRealGitHubProofEnvironmentIsGuarded holds realCLIEnvironment to handing the real git and
+// gh none of the pod's own reach. It plants a pod's variables with t.Setenv, which is after
+// TestMain's guard already ran, and that is what makes it bite: an environment built from
+// os.Environ() carries whatever the process holds at the call, so only a variable planted after
+// the guard tells such an environment from one built for the test. It is ungated, so CI and a pod
+// both run it, and it names a gh path of its own rather than realGh's, since the environment is
+// all it proves and no gh need be on the machine.
+func TestTheRealGitHubProofEnvironmentIsGuarded(t *testing.T) {
+	planted := map[string]string{
+		"GIT_DIR":            "/legion/repos/acme/widgets/.git",
+		"GIT_WORK_TREE":      "/legion/workspaces/acme/widgets/widgets-42",
+		"GIT_CONFIG_COUNT":   "1",
+		"GIT_CONFIG_KEY_0":   "credential.helper",
+		"GIT_CONFIG_VALUE_0": "!legion git-credential",
+		"GH_TOKEN":           "a pod's token",
+		"LEGION_WORKSPACE":   "/legion/workspaces/acme/widgets/widgets-42",
+	}
+	for name, value := range planted {
+		t.Setenv(name, value)
+	}
+	gh := filepath.Join(t.TempDir(), "bin", "gh")
+	configDir, home := t.TempDir(), t.TempDir()
+	environment := realCLIEnvironment(gh, configDir, home)
+
+	// Every name the pod planted must be gone from the slice, values and all.
+	for _, entry := range environment {
+		key, value, _ := strings.Cut(entry, "=")
+		if want, pod := planted[key]; pod && value == want {
+			t.Errorf("the proof's environment holds %s, which the pod set", entry)
+		}
+	}
+	// A child takes the last value of a key, so each check reads the last entry of its own.
+	last := func(key string) string {
+		value := ""
+		for _, entry := range environment {
+			if found, ok := strings.CutPrefix(entry, key+"="); ok {
+				value = found
+			}
+		}
+		return value
+	}
+	if got := last("GIT_ALLOW_PROTOCOL"); got != "https" {
+		t.Errorf("GIT_ALLOW_PROTOCOL=%q last in the proof's environment, want https: it clones over https from real GitHub", got)
+	}
+	if got := last("GH_CONFIG_DIR"); got != configDir {
+		t.Errorf("GH_CONFIG_DIR=%q, want the proof's own gh files at %q", got, configDir)
+	}
+	if got, _, _ := strings.Cut(last("PATH"), string(os.PathListSeparator)); got != filepath.Dir(gh) {
+		t.Errorf("PATH starts at %q, want the real gh's directory %q, so git's helper is that gh", got, filepath.Dir(gh))
+	}
+	if got := last("HOME"); got != home {
+		t.Errorf("HOME=%q, want the test's own home %q", got, home)
+	}
 }

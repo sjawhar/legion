@@ -826,7 +826,7 @@ func completePullRequest(ctx context.Context, pool *store.Pool, github *githubap
 		Repo: repoFull, URL: fetched.URL, Title: fetched.Title, Body: fetched.Body,
 		HeadRef: fetched.HeadRef, CommitMessages: messages,
 	})
-	issueKey, _, err := resolveStoredIssueKey(ctx, pool, fetched.URL, inputs)
+	issueKey, _, err := resolveStoredIssueKey(ctx, pool, repoFull, fetched.URL, inputs)
 	if err != nil {
 		return err
 	}

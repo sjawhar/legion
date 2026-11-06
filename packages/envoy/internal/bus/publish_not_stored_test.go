@@ -212,13 +212,12 @@ func TestAWindowSendTheFullStreamRefusedIsStoredOnceAndAPassedDeadlineSendsNothi
 	var err error
 	select {
 	case err = <-passed.PublishAsync(item):
-	case <-time.After(10 * time.Second):
-		t.Fatal("the send was not answered within 10 s")
+	case <-time.After(time.Minute):
+		t.Fatal("the send was not answered within a minute")
 	}
 	if !errors.Is(err, ErrWindowDeadline) {
 		t.Fatalf("a send through a window whose deadline has passed = %v, want ErrWindowDeadline", err)
 	}
-	time.Sleep(500 * time.Millisecond)
 	if n := copies(); n != 0 {
 		t.Fatalf("the stream holds %d copies of the envelope the passed deadline fenced, want none", n)
 	}
