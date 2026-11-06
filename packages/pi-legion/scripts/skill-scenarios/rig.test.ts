@@ -546,6 +546,51 @@ describe("next_run", () => {
   });
 });
 
+// Every worker run's Envoy role topics are its Legion project's and its issue's, and worker_boot
+// gives all three worker scenarios the same issue key. So the project is the only thing that keeps
+// one run's Envoy messages out of another's session, and `skills<label>r<n>` does not: it names no
+// scenario. Measured on 2026-11-06, with the batch's NATS given through SKILL_SCENARIOS_NATS_URL
+// and so left running between batches, the retro run retro-threads-text-fixes-head-2 was delivered
+// the Envoy message the reviewer run reviewer-text-findings-text-only-head-2 published 44 minutes
+// earlier, under the project both were given, skillsheadr2: it named the bot thread
+// PRRT_kwDOrig0001, which exists only in the reviewer scenario's world, and the retro agent
+// resolved it. A run that reads another run's instructions measures nothing about its own rule.
+describe("run_project", () => {
+  const project = (scenario: string, runCase: string, label: string, n: string) =>
+    bash(`${fn("run_project")}\nrun_project "$1" "$2" "$3" "$4"`, [scenario, runCase, label, n]);
+
+  // Catches: a project built from the label and the run number alone, which two worker scenarios
+  // of one label and number share, so Envoy delivers each run's messages to both.
+  test("two scenarios of one label and run number get projects of their own", () => {
+    const reviewer = project("reviewer-text-findings", "text-only", "head", "2");
+    const retro = project("retro-threads", "text-fixes", "head", "2");
+    const tester = project("tester-proof", "", "head", "2");
+    expect(reviewer.code).toBe(0);
+    expect(retro.code).toBe(0);
+    expect(tester.code).toBe(0);
+    expect(new Set([reviewer.stdout, retro.stdout, tester.stdout]).size).toBe(3);
+  });
+
+  // Catches: a project that keeps a hyphen or an upper-case letter from the scenario, the case or
+  // the label, which isLegionProjectToken refuses, so no role token can be minted for the run.
+  test("each project is a Legion project token", () => {
+    for (const [scenario, runCase, label] of [
+      ["reviewer-text-findings", "text-only", "head"],
+      ["retro-threads", "code-defect", "base"],
+      ["tester-proof", "", "ablate-R2"],
+    ] as const)
+      expect(project(scenario, runCase, label, "3").stdout.trim()).toMatch(/^[a-z0-9]+$/);
+  });
+
+  // Catches: a project that drops the case, so the two cases of one scenario, which run as two
+  // batches against the same NATS, share their role topics.
+  test("two cases of one scenario get projects of their own", () => {
+    expect(project("retro-threads", "text-fixes", "head", "1").stdout).not.toBe(
+      project("retro-threads", "code-defect", "head", "1").stdout
+    );
+  });
+});
+
 // A cased scenario's case reaches four places that must agree: cmd_batch refuses a case before it
 // starts a service, cmd_run puts it in the run's directory name, the run writes it to
 // <run>/case.txt, and score.ts reads the name and the file and holds them to each other. All four

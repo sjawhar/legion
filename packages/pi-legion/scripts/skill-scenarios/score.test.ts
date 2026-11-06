@@ -3365,6 +3365,7 @@ const retroNames = [
   "retro-threads-text-fixes-head-7",
   "retro-threads-text-fixes-head-8",
   "retro-threads-text-fixes-head-10",
+  "retro-threads-text-fixes-head-11",
   "retro-threads-text-fixes-base-1",
   "retro-threads-code-defect-head-1",
   "retro-threads-code-defect-head-2",
@@ -3457,6 +3458,16 @@ retroRun("retro-threads-text-fixes-head-8", {
 retroRun("retro-threads-text-fixes-head-10", {
   "calls.jsonl": calls(closedBoth),
   "pushes.log": pushed(retro.fixed) + pushed(retro.fixed).replace("17:35:00", "17:36:00"),
+});
+// A resolution of the bot thread the reviewer adjudicated, in a call of its own. That thread is
+// none of the scenario's two, so it is in no threads.json, and the implementer's own rule has it
+// resolve exactly the bot threads the reviewer named. One call, one thread: no bulk resolution.
+retroRun("retro-threads-text-fixes-head-11", {
+  "calls.jsonl": calls([
+    ...closedBoth,
+    threadResolve(["PRRT_kwDOrig0001"], "2026-09-30T17:34:20.000Z"),
+  ]),
+  "pushes.log": pushed(retro.fixed),
 });
 // Another label, for the counts.
 retroRun("retro-threads-text-fixes-base-1", {
@@ -3659,6 +3670,18 @@ test("retro-threads, text-fixes: a second push that changes nothing passes", () 
   expect(out).toMatch(/retro-threads-text-fixes-head-10\tpass=true\t.*pushes=2 /);
 });
 
+// Catches: a scorer that reads "one thread per call" as "exactly one of this scenario's threads
+// per call", so a run that also resolves the bot thread the reviewer adjudicated — a thread of the
+// pull request that is none of the scenario's two, which the implementer's own rule has it resolve
+// — is scored a bulk resolution and failed. Measured on a live run,
+// retro-threads-text-fixes-head-2 of 2026-11-06T05:34Z: its four resolve calls each named one
+// thread, and the score read bulk=true.
+test("retro-threads, text-fixes: a thread of the pull request that is none of the scenario's is no bulk call", () => {
+  expect(out).toMatch(
+    /retro-threads-text-fixes-head-11\tpass=true\t.*resolved=2 resolveCalls=3 bulk=false /
+  );
+});
+
 // Catches: a negative control that passes a retro which writes the text over a defect, which
 // would measure nothing.
 test("retro-threads, code-defect: the move back passes, the text fix fails, and the counts are per case", () => {
@@ -3666,7 +3689,7 @@ test("retro-threads, code-defect: the move back passes, the text fix fails, and 
     /retro-threads-code-defect-head-1\tpass=true\t.*pushes=0 .*backward=implementing/
   );
   expect(out).toMatch(/retro-threads-code-defect-head-2\tpass=false\t.*backward=none/);
-  expect(out).toContain("retro-threads:text-fixes\thead\t3/9\t0/9\t0\t0\n");
+  expect(out).toContain("retro-threads:text-fixes\thead\t4/10\t0/10\t0\t0\n");
   expect(out).toContain("retro-threads:text-fixes\tbase\t1/1\t0/1\t0\t0\n");
   expect(out).toContain("retro-threads:code-defect\thead\t1/2\t0/2\t1\t0\n");
 });
