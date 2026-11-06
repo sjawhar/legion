@@ -85,9 +85,15 @@ test("an Agents row send refused while the reader is on the Inbox is there on th
     await page.keyboard.press("Control+Enter");
     await expect(field).toBeDisabled();
 
-    await page.locator("body").focus();
-    await page.keyboard.press("g");
-    await page.keyboard.press("i");
+    // Away to the Inbox and back by the sidebar's own links, not the `g i` and `g a` chords:
+    // the keymap drops a half-typed chord one second after its first key (`CHORD_TIMEOUT_MS`,
+    // `web/src/features/shell/keymap.ts`), the two keys are two round trips to the engine, and
+    // a loaded lane lands the second one after the chord is gone, where `i` on its own opens
+    // the inbox peek and the reader never leaves `/agents`. Each leg waits on the heading of
+    // the page it opened, so a navigation that did not happen fails by naming it.
+    const navigation = page.getByRole("navigation", { name: "Navigation" });
+    await navigation.getByRole("link", { name: /^Inbox/ }).click();
+    await expect(page.getByRole("heading", { exact: true, level: 1, name: "Inbox" })).toBeVisible();
     await expect(row).toHaveCount(0);
     const refused = page.waitForResponse(
       (response) =>
@@ -97,8 +103,10 @@ test("an Agents row send refused while the reader is on the Inbox is there on th
     );
     refuse();
     await refused;
-    await page.keyboard.press("g");
-    await page.keyboard.press("a");
+    await navigation.getByRole("link", { name: /^Agents/ }).click();
+    await expect(
+      page.getByRole("heading", { exact: true, level: 1, name: "Agents" })
+    ).toBeVisible();
     const planner = row.getByRole("button", { exact: true, name: "Planner" });
     if ((await planner.getAttribute("aria-expanded")) !== "true") await planner.click();
     await expect(row.getByText(`Couldn't send — ${MESSAGE_REFUSED.error}`)).toBeVisible();

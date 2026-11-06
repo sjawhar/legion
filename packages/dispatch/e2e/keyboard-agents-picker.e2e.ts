@@ -922,13 +922,26 @@ test.describe("agents page", () => {
       await expect(toggle).toBeDisabled();
       await expect(reply).toBeDisabled();
 
-      // Away to the Inbox and back, by the global keys, so the app - and the send - stay loaded.
-      await page.locator("body").focus();
-      await page.keyboard.press("g");
-      await page.keyboard.press("i");
+      // Away to the Inbox and back without a reload, so the app - and the send - stay loaded,
+      // by the sidebar's own links rather than the `g i` and `g a` chords. The keymap drops a
+      // half-typed chord one second after its first key (`CHORD_TIMEOUT_MS`,
+      // `web/src/features/shell/keymap.ts`), and the two keys of a chord are two round trips
+      // to the engine: on this page, measured in WebKit on an idle machine, 281-382 ms of
+      // that second passes between the `g` and the `i`. A loaded lane lands the `i` after the
+      // chord is gone, and `i` on its own opens the inbox peek, so the reader never leaves
+      // `/agents`. A link carries no such deadline. Each leg then waits on the page it opens,
+      // by the heading the application gives it, so a navigation that does not happen fails
+      // by naming the page that never opened rather than by a row that would not go away.
+      const navigation = page.getByRole("navigation", { name: "Navigation" });
+      await navigation.getByRole("link", { name: /^Inbox/ }).click();
+      await expect(
+        page.getByRole("heading", { exact: true, level: 1, name: "Inbox" })
+      ).toBeVisible();
       await expect(row).toHaveCount(0);
-      await page.keyboard.press("g");
-      await page.keyboard.press("a");
+      await navigation.getByRole("link", { name: /^Agents/ }).click();
+      await expect(
+        page.getByRole("heading", { exact: true, level: 1, name: "Agents" })
+      ).toBeVisible();
       await row.getByRole("button", { exact: true, name: "Planner" }).click();
 
       await expect(field).toBeDisabled();
