@@ -730,6 +730,16 @@ type Machine struct {
 	// boot's own stale-plugin pass, or raised again by the runtime's next observation of a
 	// process that has died. Each is paced again from an empty bucket, and no wake runs twice.
 	wake *wake
+	// pluginMarkBefore is what PluginRelaunchFor held before the stale-plugin relaunch this
+	// machine is raising marked it for this daemon's contract (markPluginRelaunch), and nil
+	// whenever no such relaunch is being raised. It lives for that one call and no longer: the
+	// wake gate takes it onto the wake it parks, so the mark travels with the launch it names
+	// (reserveWake, wake.pluginMark), and the relaunch's own decider takes it back where the
+	// launch never reached that gate (relaunchMarked). Whoever holds it owns the one restore
+	// there is, which is what keeps a relaunch's mark from being put back by another relaunch's
+	// refusal. It is memory only, as the park is: the mark itself is the claim's and durable,
+	// and a restart reads it as the store holds it.
+	pluginMarkBefore *int
 	// identity is the latest hello2 identity for the claim's current incarnation,
 	// kept until its enrollment lands; enrollmentSent is whether that enrollment has been handed
 	// to the shim over the claim's current connection.

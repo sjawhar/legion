@@ -2206,7 +2206,7 @@ func (m *Machine) takeSlotForUpdate(ctx context.Context, launching bool) error {
 //
 // A claim's own plugin round ends with the relaunch it was opened for: the worker has pushed its
 // work and answered, so the process is replaced now, through the path the stale-plugin lane
-// takes outside a round (replaceProcess). PluginRelaunchFor records the contract this relaunch
+// takes outside a round (relaunchMarked). PluginRelaunchFor records the contract this relaunch
 // is made for, as relaunchStale records it, so a registration that still differs after the
 // relaunch has run is charged rather than relaunched again for free; one that arrives while the
 // relaunch still waits its turn in the wake pacing is neither (staleRegistration).
@@ -2281,8 +2281,7 @@ func endPodUpdate(m *Machine, ctx context.Context, ev Event) error {
 		return nil
 	}
 	m.clearUpdate()
-	m.claim.PluginRelaunchFor = m.deps.PluginContract
-	return m.replaceProcess(ctx, "the process on another plugin contract is replaced now that its worker has pushed its work", ordinaryEnd)
+	return m.relaunchMarked(ctx, "the process on another plugin contract is replaced now that its worker has pushed its work")
 }
 
 // leaveRound is the round going from this claim with no process this machine replaces: the ask

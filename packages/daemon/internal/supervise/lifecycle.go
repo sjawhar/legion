@@ -49,30 +49,19 @@ func (m *Machine) checkLaunch(ctx context.Context) error {
 }
 
 // relaunchRefused is a relaunch checkLaunch refused, relaunch the call that made it
-// (relaunchAfterFailure, launchAfter) and so the one to try again. A claim that records its
-// process, or runs none — a spawn, a resume, a retry — is left as it was, once two things the
-// refused relaunch left on it are put right: the watch its park took off that process, and the
-// plugin mark it made.
+// (relaunchAfterFailure, launchAfter, runWake) and so the one to try again. A claim that records
+// its process, or runs none — a spawn, a resume, a retry — is left exactly as it was: the error
+// goes back to whoever asked for it, and this writes nothing, arms nothing and starts nothing.
 //
-// The process is watched again (watchAgain). The refusal can come at the turn of a launch the
-// pacing held over that process, and the park that held it disarmed the boot interval, the
-// registration deadline, the probe interval and the turn bound of the process it was to replace
-// (parkWake, runWake). The claim keeps that process and the wake is spent, so a booting process
-// whose agent never registers would meet no deadline and a prompt the agent acknowledged would
-// wait for its turn on nothing. A refusal met anywhere else disarmed none of them, and watchAgain
-// leaves an armed timer where it is.
-//
-// PluginRelaunchFor is cleared where it names this daemon's contract. The invariant the mark
-// carries is that it names a relaunch that has happened or is still owed, which is what lets
-// staleRegistration read a registration that still differs after it as the second stale one in a
-// row and charge the claim toward failed (relaunchStale, endPodUpdate). This relaunch neither
-// happened nor is owed — the error is returned to whoever asked for it and nothing retries it —
-// so a process that registers on the old contract afterwards must be relaunched for free, as the
-// first stale registration is. The two branches below keep the mark, because each keeps the
-// relaunch with it: the one that waits for the probe interval still owes it (relaunchLater), and
-// the suspension's process is stopped for the tree's close. Nothing is written here, and nothing
-// need be: a restart reads the claim as the store holds it, and the sweep's next stale-plugin
-// pass raises the relaunch again and marks it anew (refreshPlugin).
+// What one refused relaunch leaves behind is put right by the caller that left it, never here.
+// Two things a relaunch can leave are the watch its park took off the process it was to replace
+// and the plugin mark it made, and both belong to the launch the wake pacing held: its turn is
+// where they are given back (runWake, watchAgain, unmarkPluginRelaunch). This is the refusal of
+// every launch there is — launchAfter's own pre-check, a relaunch after a failure, a refused
+// retry or resume over a claim that runs no process — and those launches park nothing and mark
+// nothing, so arming a timer for one would arm what the fence has just fired, and clearing the
+// mark for one would clear a mark that names another relaunch, which is what the charged second
+// stale registration in a row rests on (staleRegistration).
 //
 // A live claim that records none has already let its process go: a retirement's relaunch whose
 // stop already ended the process (the registration deadline and a prompt retirement check before
@@ -83,10 +72,6 @@ func (m *Machine) checkLaunch(ctx context.Context) error {
 // the relaunch waits (relaunchLater), as a stop that fails does.
 func (m *Machine) relaunchRefused(ctx context.Context, relaunch func(context.Context) error, err error) error {
 	if m.claim.Locator != nil || !slices.Contains(live, m.claim.State) {
-		if m.claim.PluginRelaunchFor == m.deps.PluginContract {
-			m.claim.PluginRelaunchFor = 0
-		}
-		m.watchAgain()
 		return err
 	}
 	if errors.Is(err, treelifecycle.ErrCleanupReserved) {
@@ -101,8 +86,12 @@ func (m *Machine) relaunchRefused(ctx context.Context, relaunch func(context.Con
 // watchAgain arms again what watches the process the claim records, where that is not armed: the
 // timers the claim's state calls for, which are the ones a restart reading this claim back from
 // the store would arm for it (NewMachine), and the bound an acknowledged prompt waits for its
-// turn on. Its one caller is the refusal above, over a claim that keeps its process with the
-// launch that was to replace it gone (relaunchRefused).
+// turn on. Its one caller is the refusal a parked launch's turn meets (runWake), over a claim
+// that keeps its process with the launch that was to replace it gone: the park disarmed the boot
+// interval, the registration deadline, the probe interval and the turn bound of that process
+// (parkWake), the claim keeps it and the wake is spent, so a booting process whose agent never
+// registers would meet no deadline and a prompt the agent acknowledged would wait for its turn
+// on nothing.
 //
 // A claim still coming up is watched by its boot interval and its registration deadline, a
 // registered one by the deadline alone, and a claim whose agent is ready by neither: a live
@@ -112,9 +101,10 @@ func (m *Machine) relaunchRefused(ctx context.Context, relaunch func(context.Con
 // turn has started on (acked, awaitingResult), for the same RPC wait that prompt was given, so
 // one the agent read and never turned on still fails rather than waiting for ever (noTurn).
 //
-// A timer already armed keeps the moment it already holds: a refusal the launch path meets
-// before the pacing's gate disarmed nothing (launchAfter), and arming again there would hand the
-// process a fresh boot interval and a fresh deadline at every refusal.
+// A timer already armed keeps the moment it already holds: the park takes only the four timers
+// above, so whatever the claim still holds is a watch nothing of this launch disturbed, and
+// arming again over it would hand the process a fresh boot interval and a fresh deadline at
+// every refusal.
 func (m *Machine) watchAgain() {
 	if m.claim.Locator == nil {
 		return

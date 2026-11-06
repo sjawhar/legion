@@ -826,6 +826,118 @@ func TestATurnTheReplacedProcessConfirmedIsTakenBackAtTheLaunchsTurn(t *testing.
 	}
 }
 
+// A take-back the store refuses at that turn leaves the claim exactly as it stood, task
+// included. The claim here is idle holding a task its turn confirmed, which is the window Oh My
+// Pi's result has not closed yet: while the daemon waits for that result, no turn that ends is
+// known to be this prompt's, so settle retires nothing (resultPending, turnOver). The launch's
+// turn takes that confirmed task back (interrupted) and the store refuses the write, so the
+// task is still confirmed under the id the store holds — and the wait for the result is still
+// the claim's, because interrupted ends it with the write rather than before it. A claim left
+// confirmed with no wait outstanding is one the next settlement retires as served, and that
+// settlement runs with the very decision the write failed in (Handle, settle): the task would
+// go while its worker was still on it, on the process this turn did not replace.
+//
+// The negative control is that ordering reverted (interrupted's awaitingResult, cleared above
+// the write): the settlement that follows the turn then retires the task, which this test reads
+// where it asks the claim for it.
+func TestATakeBackTheStoreRefusesAtTheTurnRetiresNoTask(t *testing.T) {
+	const task = "implement the plan"
+	h := pacedHarness(t, wakeRate)
+	h.reach(StateReady)
+	h.must(RequestDeliver{Claim: h.token, Task: task, ID: "outbox:7", Row: 7, Generation: 7})
+	sent := h.pending().ID
+
+	// The launch parks over the process the agent is on, and that process takes a turn on the
+	// task it was already handed: the turn starts inside the wait and ends inside it, with Oh
+	// My Pi's result for the prompt still to come.
+	h.observe(runtime.StaleAddress)
+	waiting := h.wantWaitingWake(WakeLaunch)
+	h.must(StreamTurnStart{Claim: h.token, DeliveryID: sent})
+	h.mustQuiet(StreamTurnEnd{Claim: h.token})
+
+	h.wantState(StateIdle)
+	if p := h.pending(); p.ID != sent || p.ConfirmedAt.IsZero() {
+		t.Fatalf("the task after the turn ended is %+v, want %s still confirmed: the prompt's result decides whose turn that was", p, sent)
+	}
+
+	h.store.fail("PutDelivery", errBoom)
+	h.advance(waiting.At.Sub(h.clock.Now()))
+
+	h.wantStarts(h.token, 1)
+	p := h.claim().Pending
+	if p == nil {
+		t.Fatal("the claim holds no task after the take-back its store refused, want the one its worker is on")
+	}
+	if p.ID != sent || p.Task != task || p.ConfirmedAt.IsZero() {
+		t.Fatalf("the task after the refused take-back is %+v, want %s confirmed as the store holds it", p, sent)
+	}
+	if run := h.claim().ServingRun(); run != 7 {
+		t.Fatalf("the claim serves run %d, want the task's 7", run)
+	}
+}
+
+// The mark of a relaunch that same refused take-back abandons goes back with it. A stale-plugin
+// relaunch marks the claim for this daemon's contract where it is decided, before its launch
+// waits its turn (relaunchStale, markPluginRelaunch), and the turn that cannot take the
+// confirmed turn back starts nothing: the process the claim records is kept, the wake is spent
+// and nothing is left to run that launch, so the mark names a relaunch that neither happened
+// nor is owed. Left standing, it would make the next registration of that very process the
+// second stale one in a row and charge it toward failed for a relaunch that never ran
+// (staleRegistration). Put back, that registration is the first this claim has had relaunched,
+// so it is relaunched for free and marked anew.
+//
+// The negative control is the restore reverted in that branch alone (runWake's
+// unmarkPluginRelaunch beside interrupted): the claim then names this daemon's contract for a
+// relaunch that never ran and the re-registration takes the charged path, which this test
+// reads at the mark and at the budgets.
+func TestATakeBackTheStoreRefusesAtTheTurnLeavesNoMarkBehind(t *testing.T) {
+	h := pacedHarness(t, wakeRate)
+	h.reach(StateReady)
+	h.m.deps.PluginContract = 25
+	h.m.deps.PluginRelaunchable = true
+
+	// The agent acknowledges a task, the sweep finds the claim's plugin stale and marks the
+	// relaunch it raises, and that launch waits its turn over the process the agent is on. The
+	// turn of the task starts and ends inside the wait, with Oh My Pi's result still to come,
+	// so the launch's turn finds a confirmed task to take back.
+	h.must(RequestDeliver{Claim: h.token, Task: "implement the plan", ID: "outbox:7", Row: 7, Generation: 7})
+	sent := h.pending().ID
+	h.must(StalePlugin{Claim: h.token, Trigger: "sweep"})
+	waiting := h.wantWaitingWake(WakeLaunch)
+	h.must(StreamTurnStart{Claim: h.token, DeliveryID: sent})
+	h.mustQuiet(StreamTurnEnd{Claim: h.token})
+
+	if got := h.claim(); got.State != StateIdle || got.PluginRelaunchFor != 25 {
+		t.Fatalf("the claim whose stale-plugin relaunch waits is %s marked for %d, want %s marked for 25",
+			got.State, got.PluginRelaunchFor, StateIdle)
+	}
+
+	h.store.fail("PutDelivery", errBoom)
+	h.advance(waiting.At.Sub(h.clock.Now()))
+	h.store.fail("PutDelivery", nil)
+
+	h.wantStarts(h.token, 1)
+	if got := h.claim(); got.PluginRelaunchFor != 0 {
+		t.Errorf("the claim is marked for %d after the take-back its store refused, want 0: the launch that mark names never ran",
+			got.PluginRelaunchFor)
+	}
+
+	// The agent of the process that was never replaced registers again, on the contract it is
+	// still running: the first stale registration this claim has had relaunched, so it is
+	// relaunched for free and refused as every stale registration is.
+	err := h.handle(RequestRegister{Claim: h.token, Generation: h.generation(), Session: session,
+		SessionFile: sessionFile, CapabilityHash: []byte("capability"), PluginContract: 24})
+
+	var refusal claim.Refusal
+	if !errors.As(err, &refusal) || refusal != claim.StalePluginContract(24, 25) {
+		t.Fatalf("the re-registration after the refused take-back = %v, want the stale-plugin refusal naming 24 and 25", err)
+	}
+	h.wantBudgets(Budgets{})
+	if got := h.claim(); got.PluginRelaunchFor != 25 {
+		t.Errorf("the claim after the relaunch that registration raised is marked for %d, want 25", got.PluginRelaunchFor)
+	}
+}
+
 // One death is charged once, however many reports of it arrive. A claim whose relaunch waits its
 // turn still records the process it found dead, so a second report of that same incarnation
 // reaches the judgement every report passes through — the runtime's own sweep makes one every
@@ -1125,16 +1237,16 @@ func (s *unansweredCheckLaunchStore) CheckLaunch(ctx context.Context, c Claim) e
 // A launch refused at its turn over a process the claim still records leaves that process
 // watched. The park disarmed the boot interval and the registration deadline of the process the
 // launch was to replace (parkWake), the wake is spent by the time the recheck refuses, and the
-// refusal keeps the claim exactly as it stands (relaunchRefused): without the timers armed again
-// (watchAgain) a process still booting would have nothing left to retire it, and a pod whose
-// agent never registers would sit in shim_connected for the rest of the tree's life. With them
-// armed, the deadline retires it and relaunches on the claim's own launch budget, which is what
-// an unpaced daemon's refusal left behind.
+// refusal keeps the claim exactly as it stands (runWake, relaunchRefused): without the timers
+// armed again (watchAgain) a process still booting would have nothing left to retire it, and a
+// pod whose agent never registers would sit in shim_connected for the rest of the tree's life.
+// With them armed, the deadline retires it and relaunches on the claim's own launch budget,
+// which is what an unpaced daemon's refusal left behind.
 //
-// The negative control is the arming reverted (relaunchRefused's watchAgain): the claim then
-// stands shim_connected over the booting process with no timer armed for it, and past the
-// deadline nothing has retired that process and nothing is charged, which this test reads at
-// the timers and at the runtime's suspends.
+// The negative control is the arming reverted (runWake's watchAgain): the claim then stands
+// shim_connected over the booting process with no timer armed for it, and past the deadline
+// nothing has retired that process and nothing is charged, which this test reads at the timers
+// and at the runtime's suspends.
 func TestALaunchRefusedAtItsTurnLeavesItsBootingProcessWatched(t *testing.T) {
 	h := pacedHarness(t, wakeRate)
 	h.reach(StateShimConnected)
@@ -1187,9 +1299,9 @@ func TestALaunchRefusedAtItsTurnLeavesItsBootingProcessWatched(t *testing.T) {
 // acknowledged a task and started no turn on it would leave that task pending for ever, where
 // an unpaced daemon's refusal leaves it charged and waiting (noTurn, promptFailed).
 //
-// The negative control is the arming reverted (relaunchRefused's watchAgain): nothing then
-// bounds the acknowledged prompt, so the task keeps its id past the wait and nothing is
-// charged, which this test reads at the pending task and the budgets.
+// The negative control is the arming reverted (runWake's watchAgain): nothing then bounds the
+// acknowledged prompt, so the task keeps its id past the wait and nothing is charged, which
+// this test reads at the pending task and the budgets.
 func TestALaunchRefusedAtItsTurnBindsTheTurnItsAcknowledgedPromptAwaits(t *testing.T) {
 	h := pacedHarness(t, wakeRate)
 	h.reach(StateReady)
@@ -1231,17 +1343,60 @@ func TestALaunchRefusedAtItsTurnBindsTheTurnItsAcknowledgedPromptAwaits(t *testi
 	}
 }
 
+// The other side of the same arming: a refusal met where no wake parked anything arms nothing.
+// A timer is deleted as it fires (fence), so the boot interval of a process the runtime then
+// reports gone is gone by the time the death's relaunch is refused (bootInterval, probe, died,
+// relaunchAfterFailure). Arming it again there would probe a dead process at every boot interval
+// for as long as the refusal lasts, each probe reaching the same refusal and charging nothing,
+// where the claim's registration deadline is the watch that is left: it retires the process and
+// relaunches it on the claim's own launch budget once the store answers again.
+//
+// The negative control is the arming moved to the refusal every launch shares
+// (relaunchRefused's first branch): the boot interval is then armed over the dead process and
+// fires again, which this test reads at the timer and at the runtime's probes.
+func TestARefusalOutsideAWakeArmsNoTimerTheFenceHasFired(t *testing.T) {
+	h := pacedHarness(t, wakeRate)
+	h.reach(StateShimConnected)
+	store := &unansweredCheckLaunchStore{memStore: h.store, failing: true}
+	h.m.deps.Store = store
+
+	// The pod went while the agent was booting, so that is what the runtime answers the probe
+	// the boot interval makes, and the relaunch the death raises meets a store that cannot
+	// answer its lifecycle check.
+	h.rt.ScriptProbe(fake.ProbeResult{Kind: runtime.Gone}, fake.ProbeResult{Kind: runtime.Gone})
+	h.advance(testBoot)
+
+	h.wantCalls("Probe", 1)
+	h.wantStarts(h.token, 1)
+	h.wantBudgets(Budgets{})
+	if _, armed := h.m.timers[TimerBoot]; armed {
+		t.Error("the boot interval that fired into the refusal is armed again, want it left where the fence dropped it")
+	}
+	if _, armed := h.m.timers[TimerRegistration]; !armed {
+		t.Fatal("the registration deadline is not armed, want the watch the refusal never took from the claim")
+	}
+
+	h.advance(testBoot)
+
+	h.wantCalls("Probe", 1)
+	h.wantBudgets(Budgets{})
+	if _, armed := h.m.timers[TimerBoot]; armed {
+		t.Fatal("the boot interval is armed a boot interval later, want nothing of the dead process probing it while the refusal lasts")
+	}
+}
+
 // The other half of the same refusal: the mark a stale-plugin relaunch leaves goes with the
 // relaunch it names. PluginRelaunchFor says what contract the last relaunch was made for, and a
 // registration that still differs once it has run is the second in a row, charged toward failed
 // (relaunchStale, staleRegistration). A relaunch the lifecycle recheck refuses at its turn has
-// not run and nothing is left to run it — the error goes back to whoever asked — so the mark is
-// cleared where it names this daemon (relaunchRefused), and the old process registering
-// afterwards is relaunched for free, as the first stale registration of any claim is.
+// not run and nothing is left to run it — the error goes back to whoever asked — so the mark
+// goes back to what that relaunch found it holding, which for this claim is none at all
+// (runWake, unmarkPluginRelaunch), and the old process registering afterwards is relaunched for
+// free, as the first stale registration of any claim is.
 //
-// The negative control is the clearing reverted (relaunchRefused's PluginRelaunchFor): the
-// claim then names this daemon's contract for a relaunch that never ran, and the
-// re-registration takes the charged path, which this test reads at the mark and at the budgets.
+// The negative control is the restore reverted (runWake's unmarkPluginRelaunch): the claim then
+// names this daemon's contract for a relaunch that never ran, and the re-registration takes the
+// charged path, which this test reads at the mark and at the budgets.
 func TestAStalePluginRelaunchRefusedAtItsTurnLeavesNoMarkBehind(t *testing.T) {
 	h := pacedHarness(t, wakeRate)
 	h.reach(StateReady)
@@ -1262,7 +1417,7 @@ func TestAStalePluginRelaunchRefusedAtItsTurnLeavesNoMarkBehind(t *testing.T) {
 	h.wantState(StateReady)
 	h.wantStarts(h.token, 1)
 	if got := h.claim(); got.PluginRelaunchFor != 0 {
-		t.Fatalf("the claim is marked for %d after its relaunch was refused, want 0: no relaunch happened and none is owed", got.PluginRelaunchFor)
+		t.Fatalf("the claim is marked for %d after its relaunch was refused, want 0: the relaunch found no mark and put none back", got.PluginRelaunchFor)
 	}
 
 	// The agent of the process that was never replaced registers again, on the contract it is
@@ -1285,6 +1440,100 @@ func TestAStalePluginRelaunchRefusedAtItsTurnLeavesNoMarkBehind(t *testing.T) {
 
 	h.wantStarts(h.token, 2)
 	h.wantBudgets(Budgets{})
+}
+
+// The mark of a relaunch that did run is not one a later refusal touches. A claim relaunched
+// onto this daemon's plugin is marked for its contract (relaunchStale), and a process that
+// registers stale after that relaunch has run is the second in a row: it is charged and
+// relaunched by the failure path, never relaunched for free again (staleRegistration,
+// relaunchAfterFailure). That charged relaunch can itself be refused by a store that cannot
+// answer the lifecycle check, and the refusal of it says nothing about the relaunch that ran:
+// the mark stands, so the next stale registration is still the second in a row and is charged.
+// Clearing it there would hand the claim a free relaunch at every refusal, which is the loop on
+// a plugin no launch can move that the mark exists to stop.
+//
+// The negative control is a clear of the mark added to the refusal every launch shares
+// (relaunchRefused's first branch): the third stale registration is then relaunched for free
+// and the budgets read no launch failure, which this test reads at the mark and at the budgets.
+func TestARefusedRelaunchOnTheChargedPathKeepsTheMarkOfTheRelaunchThatRan(t *testing.T) {
+	h := pacedHarness(t, wakeRate)
+	h.reach(StateReady)
+	h.m.deps.PluginContract = 25
+	h.m.deps.PluginRelaunchable = true
+	store := &unansweredCheckLaunchStore{memStore: h.store}
+	h.m.deps.Store = store
+
+	// The first stale registration of this claim: relaunched for free, and marked for the
+	// contract that relaunch is made for. Its turn replaces the process.
+	h.must(StalePlugin{Claim: h.token, Trigger: "sweep"})
+	waiting := h.wantWaitingWake(WakeLaunch)
+	h.advance(waiting.At.Sub(h.clock.Now()))
+
+	h.wantStarts(h.token, 2)
+	h.wantBudgets(Budgets{})
+	if got := h.claim(); got.PluginRelaunchFor != 25 {
+		t.Fatalf("the claim after the relaunch that ran is marked for %d, want 25", got.PluginRelaunchFor)
+	}
+
+	// The process that relaunch started speaks the old contract too — the plugin it was put on
+	// is itself behind this daemon — and registers while the store cannot answer the lifecycle
+	// check, so the charged relaunch it asks for is refused.
+	h.connect()
+	store.failing = true
+	staleRegister := RequestRegister{Claim: h.token, Generation: h.generation(), Session: session,
+		SessionFile: sessionFile, CapabilityHash: []byte("capability"), PluginContract: 24}
+	if err := h.handle(staleRegister); err == nil {
+		t.Fatal("the registration whose charged relaunch the store could not answer = nil, want the refusal")
+	}
+
+	h.wantStarts(h.token, 2)
+	h.wantBudgets(Budgets{})
+	if got := h.claim(); got.PluginRelaunchFor != 25 {
+		t.Errorf("the claim after the refused charged relaunch is marked for %d, want the 25 the relaunch that ran left: the refusal relaunched nothing",
+			got.PluginRelaunchFor)
+	}
+
+	// The store answers again and the same process registers again, still on the old contract.
+	// It is the second stale registration in a row of a relaunch that did run, so it is charged.
+	store.failing = false
+	err := h.handle(RequestRegister{Claim: h.token, Generation: h.generation(), Session: session,
+		SessionFile: sessionFile, CapabilityHash: []byte("capability"), PluginContract: 24})
+
+	var refusal claim.Refusal
+	if !errors.As(err, &refusal) || refusal != claim.StalePluginContract(24, 25) {
+		t.Fatalf("the registration after the store answered again = %v, want the stale-plugin refusal naming 24 and 25", err)
+	}
+	h.wantBudgets(Budgets{LaunchFailures: 1})
+}
+
+// The same mark over a claim that runs no process at all. A claim the charged path walked to
+// failed carries the mark of the relaunch that put its process on this daemon's plugin, and the
+// workflow's retry relaunches it from there (retry, revive). A retry the lifecycle check refuses
+// starts nothing and leaves the claim failed, and the mark of the relaunch that did run is no
+// more the refusal's to clear than it is over a claim that records a process: the next stale
+// registration after the retry does go through must still be read as the second in a row
+// (staleRegistration).
+//
+// The negative control is a clear of the mark added to the refusal every launch shares
+// (relaunchRefused's first branch): the failed claim is then left marked for nothing, which
+// this test reads at the mark.
+func TestARefusedRetryOfAProcesslessClaimKeepsItsPluginMark(t *testing.T) {
+	h := pacedHarness(t, wakeRate)
+	failed := wakeClaim(secondToken, StateFailed)
+	failed.Failure = "launch failures ran out"
+	failed.PluginRelaunchFor = h.deps.PluginContract
+	retried := h.machineFor(failed)
+	retried.deps.Store = &unansweredCheckLaunchStore{memStore: h.store, failing: true}
+
+	if err := h.postTo(retried, RequestRetry{Claim: secondToken}); err == nil {
+		t.Fatal("the retry whose lifecycle check the store could not answer = nil, want the refusal")
+	}
+
+	h.wantStarts(secondToken, 0)
+	if got := retried.Claim(); got.PluginRelaunchFor != h.deps.PluginContract {
+		t.Fatalf("the failed claim after its refused retry is marked for %d, want the %d its last relaunch left: the retry relaunched nothing",
+			got.PluginRelaunchFor, h.deps.PluginContract)
+	}
 }
 
 // A plugin task's wake ends no held suspension. The task waits over a claim whose agent is in a

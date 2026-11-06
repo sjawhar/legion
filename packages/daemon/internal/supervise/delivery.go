@@ -709,19 +709,28 @@ const outOfMemoryTask = "Your pod ran out of memory. Kubernetes ended the contai
 // sweep finds it gone again and this takes the task back then — where a task taken back in memory
 // alone would be skipped by that death, relaunched from a store still holding it confirmed, and
 // retired as served by a restart.
+//
+// The wait for the prompt's result ends with that same write (awaitingResult), after it rather
+// than before: while the task stands confirmed, the wait is what keeps the turn that ends next
+// from being taken for this prompt's (resultPending), and settle retires a confirmed task of a
+// ready or idle claim the moment nothing is waiting on a result for it (turnOver). Ending the
+// wait for a take-back that did not land would leave a claim whose task is confirmed, whose
+// prompt is over as far as this machine is concerned, and whose next settlement retires a task
+// no turn ever finished. A take-back that did land leaves the task unconfirmed, which settle
+// retires in no state at all.
 func (m *Machine) interrupted(ctx context.Context, why string, outOfMemory bool) error {
 	p := m.claim.Pending
 	if p == nil || p.ConfirmedAt.IsZero() {
 		return nil
 	}
 	m.log.Warn("supervise: "+why+"; the task waits for the relaunch", "delivery", p.ID)
-	m.awaitingResult = ""
 	next := *p
 	next.ID, next.ConfirmedAt, next.Interrupted, next.OutOfMemory = rotateTaskID(p.ID), time.Time{}, true, outOfMemory
 	if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, next); err != nil {
 		return err
 	}
 	*p = next
+	m.awaitingResult = ""
 	return nil
 }
 
@@ -774,7 +783,10 @@ func (m *Machine) markUnread(ctx context.Context) error {
 // holds it, so what it established — not confirmed, and not read when taken back unread — holds at
 // once, whether or not the write recording it lands. Only the new id waits for the write, so the
 // claim's id is always one the store holds; a write that fails leaves the delivery unsaved, and
-// settle writes it again under the id it kept (saved).
+// settle writes it again under the id it kept (saved). Ending the wait for the prompt's result
+// before that write is safe here, where interrupted ends it after its own: this clears
+// ConfirmedAt in memory first, so the claim a failed write leaves is one settle reads as a task
+// still waiting rather than as a turn that is over (turnOver, resultPending).
 func (m *Machine) takeBackPending(ctx context.Context, read bool) error {
 	m.disarm(TimerTurn)
 	m.awaitingResult = ""
