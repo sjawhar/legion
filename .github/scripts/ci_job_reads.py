@@ -363,10 +363,13 @@ SOAK_STEP = "Server-change soak of the listener"
 SOAK_SCRIPT = "go test -tags serverchange -count=1 -timeout 15m -v -run TestServerChange ./cmd/listener"
 
 
-# The four packages the test job's race step runs, and which its plain step therefore leaves out.
+# The three packages the test job's race step runs, and which its plain step therefore leaves out.
 # One list: both step texts below are built from it, and check-ci-filters.sh fails when either step
 # in ci.yaml differs from the text built here, so the two steps cannot name different sets.
-DAEMON_RACE_PACKAGES = ["internal/daemon", "internal/record", "internal/sessionproxy", "internal/launcher"]
+# internal/record is not among them: its product code starts no goroutine and uses no sync, so the
+# detector has nothing of the package to find there. Its own tests do start goroutines, and the
+# cover the detector gave those is what this trade gives up.
+DAEMON_RACE_PACKAGES = ["internal/daemon", "internal/sessionproxy", "internal/launcher"]
 DAEMON_RACE_STEP = "Test the concurrent packages under the race detector"
 DAEMON_RACE_PKGS = [f"./{p}/" for p in DAEMON_RACE_PACKAGES]
 DAEMON_RACE_TEXT = "go test -count=1 -race -timeout 30m " + " ".join(DAEMON_RACE_PKGS)

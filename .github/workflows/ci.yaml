@@ -1792,6 +1792,14 @@ jobs:
       # clean up, and its image (testcontainers/ryuk, on Docker Hub) would be one more registry
       # pull a test could fail on.
       TESTCONTAINERS_RYUK_DISABLED: "true"
+      # The fuzz and property counts follow the lane. A pull-request run takes the reduced counts
+      # below; every other lane — a merge group, a push to main — takes the empty string, which
+      # both readers treat as unset (classify's run_fuzz_test.go, the daemon's keptPropertyEnv),
+      # so the full counts live in the Go source alone and the queue still runs them. The number
+      # of seeds falls rather than each seed's depth: a seed that stops early stops reaching the
+      # states the property is about.
+      LEGION_RUN_FUZZ_ITERS: ${{ github.event_name == 'pull_request' && '2000' || '' }}
+      LEGION_KEPT_PROPERTY_RUNS: ${{ github.event_name == 'pull_request' && '8' || '' }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1981,31 +1989,34 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           unshare --user --map-root-user true
 
-      # The step runs every package of the module except the four the race step below tests, so
+      # The step runs every package of the module except the three the race step below tests, so
       # each of those runs once per job, under the detector. `set -o pipefail` is what makes a
       # failed go list, or a pattern that matches every package, fail the step rather than pass it
       # with nothing tested.
       - name: Test the Go daemon
         run: |
           set -o pipefail
-          go list ./... | grep -Ev '/(internal/daemon|internal/record|internal/sessionproxy|internal/launcher)$' | xargs go test -count=1 -timeout 15m
+          go list ./... | grep -Ev '/(internal/daemon|internal/sessionproxy|internal/launcher)$' | xargs go test -count=1 -timeout 15m
         working-directory: packages/daemon
 
       # The outbox's lane registry, lease renewal and held clock are the daemon's first goroutines
-      # that share state with the intake's commit hooks and the API, so the packages the lanes and
-      # their store live in run under the race detector once per job, the plain step above leaving
-      # them out; so do the session proxy and the launcher that wires it, whose accept loop, copy
-      # pairs, pair tracking and bounded drain share state across goroutines. The detector needs
-      # cgo, which the runners have gcc for. The lane tests hold a fake clock, so they are
-      # deterministic under it.
+      # that share state with the intake's commit hooks and the API, so the packages the lanes
+      # live in run under the race detector once per job, the plain step above leaving them out;
+      # so do the session proxy and the launcher that wires it, whose accept loop, copy pairs,
+      # pair tracking and bounded drain share state across goroutines. internal/record is not
+      # here: the lanes' store is the package's subject, but its product code starts no goroutine
+      # and uses no sync, so the detector had only the package's own test goroutines to watch,
+      # and that cover is what leaving it out gives up. It runs in the plain step instead. The
+      # detector needs cgo, which the runners have gcc for. The lane tests hold a fake clock, so
+      # they are deterministic under it.
       #
       # The step carries a package deadline of its own, as the envoy race lanes do: under go test's
-      # ten-minute default, internal/daemon, by far the slowest of the four packages, took up to
+      # ten-minute default, internal/daemon, by far the slowest of the three packages, took up to
       # 570 s on the green runs of 2026-11-02 and 2026-11-03 and ran the ten minutes out on main at
       # 2201840998 (run 41562777668). No single test dominates it: a local run timed 648 tests one
       # after another, the slowest at 44 s. The 30 minutes leave it three times its slowest run.
       - name: Test the concurrent packages under the race detector
-        run: go test -count=1 -race -timeout 30m ./internal/daemon/ ./internal/record/ ./internal/sessionproxy/ ./internal/launcher/
+        run: go test -count=1 -race -timeout 30m ./internal/daemon/ ./internal/sessionproxy/ ./internal/launcher/
         working-directory: packages/daemon
 
       - name: Stage 1 live proof

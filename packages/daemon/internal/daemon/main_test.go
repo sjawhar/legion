@@ -10,10 +10,12 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/testpg"
 )
 
-// TestMain takes out of the process every variable that could lead the tests' real git and jj to a
-// workspace, remote or credential not their own (fixtureenv.MustGuard; LEGION_KEPT_PROPERTY_SEED, which
-// replays a property run, is kept), drops the migrated template isolatedOutboxPool clones its
-// databases from (testpg.Main), removes the directory the tests' Envoy binaries were built into
+// TestMain takes out of the process every variable that could lead the tests' real git and jj to
+// a workspace, remote or credential not their own (fixtureenv.MustGuard), keeping the three the
+// kept-decision property test reads: LEGION_KEPT_PROPERTY_SEED, which replays one run, and
+// LEGION_KEPT_PROPERTY_RUNS and LEGION_KEPT_PROPERTY_STEPS, the counts CI's pull-request lane
+// reduces. It drops the migrated template isolatedOutboxPool clones its databases from
+// (testpg.Main), removes the directory the tests' Envoy binaries were built into
 // (testbuild.Main), and removes the NATS container the package's tests share (testnats.Main).
 //
 // The guard runs for the test process alone. This binary is also the rig's role process, which its
@@ -32,7 +34,7 @@ func TestMain(m *testing.M) {
 	if os.Getenv(idleRigURLVariable) != "" {
 		os.Exit(testnats.Main(m))
 	}
-	fixtureenv.MustGuard("LEGION_KEPT_PROPERTY_SEED")
+	fixtureenv.MustGuard("LEGION_KEPT_PROPERTY_SEED", "LEGION_KEPT_PROPERTY_RUNS", "LEGION_KEPT_PROPERTY_STEPS")
 	os.Exit(testpg.Main("legion_daemon_test", func() int {
 		return testbuild.Main(func() int { return testnats.Main(m) })
 	}))
