@@ -150,7 +150,7 @@ func (b *brokerTokens) open(conn *nats.Conn, replicas int) error {
 	if err != nil {
 		return fmt.Errorf("%s needs JetStream for the spent-proof bucket %s: %w", EnvBrokerURL, bus.DPoPProofBucket, err)
 	}
-	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{
+	kv, err := bus.EnsureKeyValue(conn, js, &nats.KeyValueConfig{
 		Bucket:   bus.DPoPProofBucket,
 		TTL:      spentProofRetention,
 		Storage:  nats.FileStorage,

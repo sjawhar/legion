@@ -1,5 +1,19 @@
 # Changelog
 
+## [main@c5c94dbd542d] - 2026-11-05
+
+### Added
+
+- `ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS` is how long a holder that has stopped answering keeps its
+  issue claim, generated into Go beside its TypeScript declaration so the two languages cannot
+  disagree about when a claim becomes takeable. `IssueClaimHolderState` (`live`, `unresponsive`,
+  `gone`, `unknown`) and `IssueClaimLiveness` (`holder_state`, `last_seen`, `takeable_at`) carry
+  a claim holder's state on an issue read, beside the claim rather than inside it.
+  `ISSUE_ROUTE_STATUSES` gains `holder_unresponsive`, and `IssueRouteReach` gains
+  `route_status_reason` (`refilling` or `unreachable`), which says why a route reads `unknown`:
+  a listener whose agent list is refilling did answer and will judge the route in a moment,
+  where one that is unreachable did not answer at all.
+
 ## [main@87fb43e754ba] - 2026-11-05
 
 ### Changed

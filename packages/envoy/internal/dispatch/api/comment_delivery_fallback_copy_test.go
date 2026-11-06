@@ -9,8 +9,6 @@ import (
 	"testing"
 	"time"
 
-	natsgo "github.com/nats-io/nats.go"
-
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/bus"
@@ -218,13 +216,17 @@ func (claimedRole) ReleaseExpiredRoleClaim(context.Context, string, string, time
 	return envoystore.ExpiredRoleClaimSuperseded, nil
 }
 
-func (claimedRole) Holder(_ context.Context, _ string, live func(session.SessionEntry) bool) (session.SessionEntry, error) {
-	entry := session.SessionEntry{SelfSubscribed: true, UpdatedAt: time.Now().UnixMilli()}
-	if !live(entry) {
-		return session.SessionEntry{}, natsgo.ErrKeyNotFound
-	}
-	return entry, nil
+// Holder, EntryState and LastSeen are roles.SessionLookup: the holder is always a session that
+// registered just now, so every role route this fixture resolves reaches a live holder.
+func (claimedRole) Holder(context.Context, string) (session.SessionEntry, error) {
+	return session.SessionEntry{SelfSubscribed: true, UpdatedAt: time.Now().UnixMilli()}, nil
 }
+
+func (claimedRole) EntryState(entry session.SessionEntry) session.State {
+	return session.StateOf(entry, time.Now(), session.LiveWindow, session.GoneHorizon)
+}
+
+func (claimedRole) LastSeen(string) int64 { return time.Now().UnixMilli() }
 
 func (claimedRole) TTL() time.Duration { return 5 * time.Minute }
 
