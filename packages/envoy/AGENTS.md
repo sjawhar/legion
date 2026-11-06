@@ -57,6 +57,7 @@ Each item below names a task and where its code is, then notes on it.
   This list and the Legion daemon's `repository_renames` in `legion.yaml` (`packages/daemon/internal/ghrepo/renames.go`) are two lists an operator keeps in step:
   they are separate Go modules, and the listener's pod mounts no `legion.yaml`.
   The daemon's list is read-side only and two-way, while this one is publish-side and one-way.
+  Dispatch keeps a third list of its own, `repo_projects.renamed_to`, the name a mapping's repository is called today, which an operator sets through `PUT /api/v1/settings/repo-projects/{owner}/{repo}` and every comparison Dispatch makes of a repository canonicalises through (`packages/envoy/cmd/dispatch/README.md`, migration `20261105075455_repo_projects_renamed_to`).
   A pair can be removed once no live session names the former repository in a topic, which Envoy's session list answers in one read (`GET /v1/sessions`).
 
 - **Listener behavior**: `cmd/listener/main.go`
@@ -196,6 +197,15 @@ Each item below names a task and where its code is, then notes on it.
   `embed`'s `TestEveryWindowFitsTheEmbedder` holds those windows to `MaxInputRunes`.
   `embedqueue/coverage.go` is the coverage pass the server runs once at start (no backfill subcommand), whose identity steps alone run again while another identity's rows remain - and are all a window kind takes, since the indexers own which windows exist - and the report `GET /api/v1/search/coverage` serves (`cmd/dispatch/README.md`, "Search")
 
+- **Model loop**: `agentloop/`
+
+  the one model loop the Legion daemon and Dispatch share, and this module's only import of Grafana's AI SDK for Go:
+  `Run` makes one run of a model and the tools it calls, on anthropic-messages, openai-responses, openai-chat or azure-anthropic, and `Decide` puts one set of System One questions.
+  It is the engine and nothing more:
+  it reads no base URL, no credential and no header from the environment, so every endpoint, model, token and bound arrives in the caller's request (`doc.go`).
+  Its live proof makes one real model call per protocol and one real decision, so it sits behind the `modellive` build tag and CI only vets it:
+  `go test -count=1 -tags modellive ./agentloop/ -run TestLive -v` runs it from this directory, and each test skips unless the operator set its own inputs, which are `AGENTLOOP_LIVE_BASE_URL`, `AGENTLOOP_LIVE_KEY_FILE` and `AGENTLOOP_LIVE_MODEL` for the three runs, and `AGENTLOOP_LIVE_SYSTEMONE_BASE_URL`, `AGENTLOOP_LIVE_SYSTEMONE_KEY_FILE` and `AGENTLOOP_LIVE_SYSTEMONE_MODEL` for the decision
+
 - **Document tree (Proof schema)**: `internal/dispatch/pmdoc/`
 
   render/parse/diff of Proof documents; fixtures from the fork's headless engine
@@ -254,6 +264,14 @@ Each item below names a task and where its code is, then notes on it.
   the issue a result was recorded on counts for nothing here, so a child's pull request never makes a result against a check above it `current`;
   an `after_merge` or `default_branch` result while the repository's default branch carries its commit (`default_branch_commits`, the App's answer cached: a yes for good, a no for five minutes);
   `unknown` when the check's issue resolves to no repository or the App cannot read it.
+  A pull request is attributed to the first issue its five ranked sources name that resolves to the pull request's own repository, not to the first key they name (`attributionCandidates`, `attributionHeld` in `delivery/attribution.go`):
+  a title naming another repository's issue first therefore does not cost the pull request its own, and a pull request no candidate of which resolves to its repository is attributed to nobody, as is one whose head branch is in another repository (`headInOwnRepository`).
+  The hold is the server's own repository-resolution rule spliced into the statement that reads the candidates (`refs.IssueRepoTerms` through `attributionCandidatesQuery`), so an attribution can never disagree with the issue page;
+  one pull request's best 25 candidates are the ones read (`attributionCandidateBound`).
+  Two names of one repository are one repository: six sites go through the canonical name the repository is called today (`refs.CanonicalRepo`, `refs.CanonicalRepoSQL`), which is the `renamed_to` of the old name's `repo_projects` row — both sides of that hold, the repository the results read asks GitHub about, the key every writer of a `pull_request_heads` row uses, the settings route's refusal of a target that is itself renamed, and the CI reconcile, which reads every mapping under the name its repository has now (`internal/dispatch/cireconcile`, `Reconciler.mapped`), so no pass asks GitHub about a name it cannot read;
+  an operator declares that pair through `PUT /api/v1/settings/repo-projects/{owner}/{repo}`, and Dispatch never reads it from GitHub, which answers 404 for the installation of a name a repository was renamed away from.
+  The read of an issue's results also teaches Dispatch a pull request nothing ever told it of:
+  a `before_merge` result whose commit heads no attributed row sends one `GET /repos/{owner}/{repo}/commits/{sha}/pulls` of its own and writes the heads GitHub names (`delivery.ReadThroughCommitPulls`, `currencyReader.readThroughHead`), at most once per repository and commit every `delivery.CommitPullReadStaleAfter` (five minutes), so a result recorded before its own pull request opened stops reading `older`.
   `GET /api/v1/issues/{key}/coverage` answers what each `requirement` block of the issue's spec lacks, counting the `check` and `plan_task` blocks of the issue and of its descendants;
   the same lines end `dispatch read --issue` and the answer to an approval request.
   Shapes: `IssueCheckResults`, `RecordCheckResultInput`, `IssueCoverage` in `packages/contracts/src/dispatch-api.ts`
@@ -2273,7 +2291,9 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   one walk climbs the parent chains of every issue the read answers for at once — its `subjects` term, which is a listing's page, a listing's whole match or the one issue a read names — and each issue takes the nearest issue on its chain (itself first) whose own `repo` is set, else its project's default mapping (`repo_projects.is_default`, at most one per project by the partial unique index `repo_projects_default_per_project`, read for every project of the read in one join), else null.
   A chain stops at the first issue that names a repository or at `refs.IssueDepthCap` (32) links, the most any issue sits below its root (`api`'s `parentDepthCap` is that same number), so it costs at most 33 rows per issue;
   a chain still going at the cap (a loop, or one a direct database write or an earlier release's API built) fails the read (500) rather than answer with the default, and a paged listing walks its own page alone, so such a chain fails the page it is on and no other.
-  `refs.IssueRepository` runs those same terms over a `subjects` term of one key, for the results route and the pull-request head attribution, so neither can name a repository the issue page does not show.
+  `refs.IssueRepository` runs those same terms over a `subjects` term of one key, which the results route reads for the issue of a check, so it starts from the repository the issue page shows;
+  the route then takes that repository's canonical name before it asks GitHub anything (`refs.CanonicalRepo`, `currencyReader.repositoryOf`), so an issue recorded under a name its repository was renamed away from is read under the name GitHub answers for.
+  Delivery's pull-request attribution splices those terms over one pull request's candidate keys instead (`attributionCandidatesQuery`), holding a candidate only where the walk finished and `refs.IssueRepoResolved` is the repository the pull request is in, each side put through that same renaming rule first (`attributionHeld`, `refs.IssueRepoTooDeep`, `refs.CanonicalRepoSQL`), so one walk resolves every candidate and that attribution parts from the page only where an operator has recorded that two names are one repository.
 
 - An earlier release's API could build a chain of any depth, so migration `0113` refuses to apply while any issue sits more than 32 links below its root or in a parent loop:
   its census counts them for the pre-deploy gate, and the migration, holding `repo_projects` and `issues` in ACCESS EXCLUSIVE from before its count to its commit so no earlier release's write commits in between, names up to 20 and the repair (`PATCH` an ancestor with `{"parent": null}` on the release still running).
@@ -2545,52 +2565,18 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
 - `GET /api/v1/issues/{key}/summary` and `GET /api/v1/projects/{key}/artifacts/{slug}/summary` (`api/issue_summary.go`, any authenticated caller) answer what a rendered `dispatch://` reference shows, at a cost a page linking a hundred items can pay on every event that touches them:
   the issue's `{key, project, title, status, documents}`, each document `{id, slug, name, kind, latest_version, primary}` in the order the issue read lists its artifacts (`primary` marks the spec, which a reference to a block of the spec names, so a pinned spec block's link opens that version under the spec's own slug without the full read), from one query for the issue and one for its artifacts (`latest_version` a `max(number)` probe of `artifact_versions` per artifact), and a project document's `{id, project, slug, name, kind, latest_version}`, its slug or unambiguous filename resolved as the project document read resolves it (`resolveDocumentReference`).
   Neither reads a version body, an approval, a child, an open ask or a route roster, as the full reads do.
-- `GET /api/v1/issues/{key}` (`getIssue`, `api/issue_queries.go`) reads the database in two batches,
-  one round trip each on one pooled connection (`store.Pool.SendBatch`) once that connection has
-  prepared their statements (pgx prepares a statement it has not cached in a round trip of its own
-  before the batch, as it does before a single query), where it once spent a statement per part of
-  the answer: six, two more when the issue has documents, two more when it has open asks, and one
-  per artifact. Batch 1 is everything keyed on the issue key alone: the issue row with its progress
-  (`issueRowStatement`), its external links, its artifacts (`issueArtifactsStatement`), its open
-  asks (`listIssueAsksQueryOpen`), its children (`issueChildrenStatement`) and its own
-  `referenced_by_count` (`refs.QueueBacklinkCounts`). A key no issue carries is recorded by the
-  issue row's callback, which returns no error, and answered as that row's `pgx.ErrNoRows` — `404
-  NOT_FOUND` — once the batch has closed: pgx invalidates every statement of a batch whose `Close`
-  answers an error in that connection's statement and description caches
-  (`invalidateCachesOnBatchResultsError`), so a callback that returned the error would cost the
-  connection the read's whole prepared statements on every 404, and the other callbacks, which run
-  against an issue with no row, answer empty lists the read drops. Batch 2 is what only batch 1's
-  answers name: every artifact's versions in one `artifact_id = any($1::uuid[])` statement
-  (`artifactVersionsStatement`, each artifact's own versions still in `order by v.number`), the
-  documents' latest reviews and open approval requests (`latestReviewsStatement`,
-  `openApprovalAsksStatement`), and the open asks' identity events (`events.QueueOpenedEventIDs`),
-  backlink counts and the part ids of their options and answers (`refs.QueueAskPartIDs`); an issue with no artifact and no open ask makes no second round trip. Each
-  batch's results are closed before anything else reads, because a batch holds its connection until
-  then, and a second connection taken while it is held is the nesting `store.ErrNestedAcquire`
-  exists to stop. The pool would not refuse it here: `store.Pool.SendBatch` checks the request's
-  mark when the batch is sent but sets none while the batch is open, so no callback of either batch
-  reads the database. A routed issue's reach is read after both (`routeRosterOrUnknown`): one
-  statement more for the listener's stored answer (`storedRouteRoster`), and a shared listener
-  fetch only when that answer is stale. One
-  queue-and-apply serves every read of the same thing — `queueArtifactDetails` (`api/artifacts.go`)
-  for a list of artifacts' versions, which it queues itself, and their documents' latest reviews and
-  open approval requests, which it nests `queueApprovals` (`api/reviews.go`) for, and
-  `queueAskDetails` (`api/ask_rows.go`) for a list of asks' identity events, backlink counts and part ids —
-  queued beside this read's other statements here and sent as a batch of their own by the loaders
-  every other route calls (`loadArtifactDetails`, `loadAskDetails`), so the two paths cannot drift.
-  One artifact's read is that list of one: `loadArtifactRow` (the lookup by id and the one by
-  `ref_key`) sends `loadArtifactDetails` for the row it scanned, so its versions and its approval
-  cost one round trip after that lookup, and `attachApprovals`, which the approval-request route
-  (`requestArtifactApproval`, through `attachApproval`) calls on its transaction before and after it
-  opens or renews the ask, and which loads no versions, sends `queueApprovals`'s pair as a batch of
-  its own, one round trip too. `api/issue_read_batch_test.go` holds the batched body byte for byte
-  to one built from the loaders the other routes call (`loadIssueWithProgress`, `loadArtifacts`,
-  `queryOwnerAsks` with `issueOpenAsksOf`, `issueChildrenStatement` with `scanIssueChildren`,
-  `refs.BacklinkCounts`); since `loadArtifacts` and `queryOwnerAsks` send the same two
-  queue-and-applies, that comparison checks how `readIssue` puts its batches and its answer
-  together, not the detail statements themselves. The same file counts the read's round trips with a
-  pgx tracer on the server's pool (`storetest.Traced`), counting only the statements of the one
-  request its context marks.
+
+- `GET /api/v1/issues/{key}` (`getIssue`, `api/issue_queries.go`) reads the database in two batches, one round trip each on one pooled connection (`store.Pool.SendBatch`) once that connection has prepared their statements (pgx prepares a statement it has not cached in a round trip of its own before the batch, as it does before a single query), where it once spent a statement per part of the answer: six, two more when the issue has documents, two more when it has open asks, and one per artifact.
+  Batch 1 is everything keyed on the issue key alone: the issue row with its progress (`issueRowStatement`), its external links, its artifacts (`issueArtifactsStatement`), its open asks (`listIssueAsksQueryOpen`), its children (`issueChildrenStatement`) and its own `referenced_by_count` (`refs.QueueBacklinkCounts`).
+  A key no issue carries is recorded by the issue row's callback, which returns no error, and answered as that row's `pgx.ErrNoRows` — `404 NOT_FOUND` — once the batch has closed: pgx invalidates every statement of a batch whose `Close` answers an error in that connection's statement and description caches (`invalidateCachesOnBatchResultsError`), so a callback that returned the error would cost the connection the read's whole prepared statements on every 404, and the other callbacks, which run against an issue with no row, answer empty lists the read drops.
+  Batch 2 is what only batch 1's answers name: every artifact's versions in one `artifact_id = any($1::uuid[])` statement (`artifactVersionsStatement`, each artifact's own versions still in `order by v.number`), the documents' latest reviews and open approval requests (`latestReviewsStatement`, `openApprovalAsksStatement`), and the open asks' identity events (`events.QueueOpenedEventIDs`), backlink counts and the part ids of their options and answers (`refs.QueueAskPartIDs`); an issue with no artifact and no open ask makes no second round trip.
+  Each batch's results are closed before anything else reads, because a batch holds its connection until then, and a second connection taken while it is held is the nesting `store.ErrNestedAcquire` exists to stop.
+  The pool would not refuse it here: `store.Pool.SendBatch` checks the request's mark when the batch is sent but sets none while the batch is open, so no callback of either batch reads the database.
+  A routed issue's reach is read after both (`routeRosterOrUnknown`): one statement more for the listener's stored answer (`storedRouteRoster`), and a shared listener fetch only when that answer is stale.
+  One queue-and-apply serves every read of the same thing — `queueArtifactDetails` (`api/artifacts.go`) for a list of artifacts' versions, which it queues itself, and their documents' latest reviews and open approval requests, which it nests `queueApprovals` (`api/reviews.go`) for, and `queueAskDetails` (`api/ask_rows.go`) for a list of asks' identity events, backlink counts and part ids — queued beside this read's other statements here and sent as a batch of their own by the loaders every other route calls (`loadArtifactDetails`, `loadAskDetails`), so the two paths cannot drift.
+  One artifact's read is that list of one: `loadArtifactRow` (the lookup by id and the one by `ref_key`) sends `loadArtifactDetails` for the row it scanned, so its versions and its approval cost one round trip after that lookup, and `attachApprovals`, which the approval-request route (`requestArtifactApproval`, through `attachApproval`) calls on its transaction before and after it opens or renews the ask, and which loads no versions, sends `queueApprovals`'s pair as a batch of its own, one round trip too.
+  `api/issue_read_batch_test.go` holds the batched body byte for byte to one built from the loaders the other routes call (`loadIssueWithProgress`, `loadArtifacts`, `queryOwnerAsks` with `issueOpenAsksOf`, `issueChildrenStatement` with `scanIssueChildren`, `refs.BacklinkCounts`); since `loadArtifacts` and `queryOwnerAsks` send the same two queue-and-applies, that comparison checks how `readIssue` puts its batches and its answer together, not the detail statements themselves.
+  The same file counts the read's round trips with a pgx tracer on the server's pool (`storetest.Traced`), counting only the statements of the one request its context marks.
 
 - The reference grammar accepts any segment as an id, so `dispatch://CORE-1/ask/hello` parses and is stored like any other target.
   Every lookup that resolves a stored target skips what resolves to nothing rather than failing the write:
@@ -3423,6 +3409,20 @@ that is the rule and not a transitional measure, and it is what lets Dispatch de
   the two session routes answer the bus-unavailable 503 with `Retry-After: 1`, never a holder listed without its role, and a send leaves `sender.roles` out rather than refusing.
   A read kvwatch's own idle wait ended is read again 5 s later (`rereadDelay`), so a timed-out warm-up cannot leave the view refusing for good.
   Within one read epoch every update is fenced by revision (`setOwnRoleHolder` and `forgetRoleHolder`, `internal/store/roles.go`, the two writers of that view), the registry's own claim writes included, so none undoes a later one, and a read of a recreated bucket starts a new epoch rather than emptying the view under the old one.
+
+- A deregistration (`store.Registry.Remove` with no topics, which `DELETE /v1/interests/<session_id>` and `POST /v1/interests/unsubscribe` with an empty topic list reach) releases the session's role claims from two sources, in this order:
+  the role topics of its own interest record (`releaseRoleClaims`), then the roles the role claim view names it the holder of (`releaseAllRoleClaims`).
+  The view is read rather than the bucket because `RolesHeldBy` makes no bucket call, so a deregistration costs the roles its session holds and not the bucket's size:
+  listing every key and reading each claim is one pass over the whole bucket per deregistration, which at the fleet's role count ran out the route's own budget and answered 503 (`read role <role>'s claim: context deadline exceeded`, dispatch://INFRA-1383).
+  Every release the record pass makes leaves the view (`forgetRoleHolder`), so the sweep behind it reads no claim twice.
+  A view that cannot be served falls back to that scan (`releaseAllRoleClaimsByScan`), whose listing is bounded by the request (`bus.Bounded(ctx, …)` over `roleKeysUntil`, which ends the abandoned scan at the next key rather than reading the bucket on for a caller that is gone, as `kvwatch.ScanExistingKeys` of itself does), which logs one INFO line per deregistration naming the view's reason and goes past a claim it cannot read.
+  It fails on three things: a listing that does not answer or fails, a claim read that fails once the request's context has ended (the `read role <role>'s claim: context deadline exceeded` above), and a delete of a claim the session holds.
+  A claim in neither source — one another listener wrote that this listener's watch has not delivered, or a copy within the stale bound behind — is left to the role claim reaper (`ReapRoleClaims`), which releases it once its holder is gone, and a session that deregisters and goes on heartbeating (an unsubscribe-all, which `packages/claude-envoy/scripts/smoke-clear-rebind.sh` drives) never becomes a gone holder, so a claim missed there stands for the rest of that session's life, where the bucket scan this view replaced released it at the deregistration;
+  that reaper logs and skips a role whose read, delete or release failed rather than ending the pass, and its `role claim reaper cycle` line carries `skipped` beside `reaped`.
+  Its pass runs under the reaper loop's own context, so a failure once the listener has ended that context (the shutdown's `kvLoopsCancel`) ends the pass with that error in one line carrying what it had reached, rather than a WARN for each of the thousands of roles behind it.
+  The shutdown waits for that loop to return, up to its shared 10 s shutdown bound, before it drains the bus, so a pass that returns inside that bound fails each call it had left on the ended context alone, against a bus that is still answering.
+  That line is `role claim reaper cycle ended with its loop` at INFO when the loop's own context has ended, because a SIGTERM is an ordered shutdown and not a failure, and `role claim reaper cycle failed` at ERROR for every other failure.
+  The level reads the loop's context rather than the error's identity because neither direction of that identity holds: a listing the shutdown cut short answers the scan's own idle bound when nothing was delivered to it, and a bus too slow for the per-call deadline inside that scan answers `context.DeadlineExceeded` while the loop runs on.
 
 - Each listener collects the interest bucket's delete markers, because nothing else does:
   every delete path leaves one (the reaper for each dead session, an unsubscribe-all, the admin delete), the bucket has no `MaxAge` and keeps one message per subject, and each marker is replayed by every restart's cache warm-up before that listener serves, so uncollected markers grow every restart's time with no deliveries (LEGION-374).

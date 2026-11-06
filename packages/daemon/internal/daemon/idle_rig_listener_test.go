@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/testbuild"
+	"github.com/sjawhar/legion/daemon/internal/testtmp"
 )
 
 // idleRigListener is the real Envoy listener of packages/envoy/cmd/listener, built once per test
@@ -49,11 +50,9 @@ func startIdleRigListener(t *testing.T, natsURL, machine string) *idleRigListene
 func startIdleRigListenerOn(t *testing.T, natsURL, machine string, port int) *idleRigListener {
 	t.Helper()
 	binary := testbuild.EnvoyBinary(t, "./cmd/listener")
-	home, err := os.MkdirTemp("", "lgh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	// The listener's HOME is also where it runs, and the only path the test writes under it is
+	// the log below.
+	home := testtmp.Dir(t, "listener.log")
 	logs := filepath.Join(home, "listener.log")
 	file, err := os.Create(logs)
 	if err != nil {

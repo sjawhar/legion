@@ -14,6 +14,9 @@
     "waiting": [
       "LEGION-209"
     ],
+    "trees": [
+      "LEGION-208"
+    ],
     "blocked": []
   },
   "issues": {
@@ -22,6 +25,7 @@
       "generation": 4,
       "phase": "reviewing",
       "status": "needs_review",
+      "tree": "LEGION-208",
       "repo": "sjawhar/legion-smoke",
       "defaultBranch": "main",
       "workers": {}

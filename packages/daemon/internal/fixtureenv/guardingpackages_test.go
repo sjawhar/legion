@@ -26,6 +26,7 @@ import (
 // this list.
 var guardingPackages = []string{
 	"cmd/legion",
+	"internal/api",
 	"internal/daemon",
 	"internal/fixtureenv",
 	"internal/launcher",
