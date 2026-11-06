@@ -75,6 +75,15 @@ function markdownAtTheBound(): string {
   return markdown;
 }
 
+/** The marker only the last frames of a many-frame sync carry: it is the document's last
+ * paragraph, so a client that stopped at any earlier frame does not hold it. */
+const LAST_PARAGRAPH_MARKER = "the last paragraph of a many-frame document";
+
+/** The same markdown with that marker as its last paragraph. */
+function markdownWithALastParagraph(): string {
+  return `${markdownAtTheBound()}${LAST_PARAGRAPH_MARKER}\n`;
+}
+
 async function documentAtTheBound(title: string) {
   await createProject({ key: "BOUND", name: "Document bounds" });
   const issue = await createIssue({ project: "BOUND", title });
@@ -190,6 +199,53 @@ function postAsPage(page: Page, path: string, data?: object) {
 
 test.beforeEach(async () => {
   await resetDatabase();
+});
+
+// A document whose state needs many sync frames loads whole in the browser and takes an edit.
+// The server answers a browser's SyncStep1 with the room's state as Update frames of about
+// 64 KiB each and then one SyncStep2 carrying only what no Update could (sjawhar/ygo
+// v1.55.1-sami.3), so a client that applied the first frame alone would show an empty document
+// and one that stopped at any frame a truncated one. A document at the bound is about 3 MB of
+// state, forty-odd frames, which is the case this drives: the heading the first frame carries,
+// the marker only the last frames do, the whole markdown's length, and an edit after them that
+// saves. Nothing here is the dashboard's own code: it is y-protocols applying what the server
+// sends, which is why no server-side test can stand for it.
+test("a document whose state needs many sync frames loads whole and takes an edit", async ({
+  browser,
+}) => {
+  test.setTimeout(AT_THE_BOUND_TIMEOUT_MS);
+  await createProject({ key: "BOUND", name: "Document bounds" });
+  const issue = await createIssue({ project: "BOUND", title: "Load a many-frame document" });
+  const markdown = markdownWithALastParagraph();
+  const { artifact } = await createIssueArtifact(issue.key, {
+    content: markdown,
+    name: "many-frames.md",
+  });
+  const path = `/issues/${issue.key}/artifacts/${artifact.slug}`;
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const sockets = await recordDocumentSockets(page);
+    await page.goto(path);
+    await expect(documentEditor(page)).toContainText("At the bound");
+    await expect(connectedDot(page)).toHaveText("connected");
+    // The marker is the document's last paragraph, so a sync that stopped early does not hold
+    // it, and the length holds every frame between the two.
+    await expect(documentEditor(page)).toContainText(LAST_PARAGRAPH_MARKER);
+    const shown = (await documentEditor(page).innerText()).length;
+    expect(shown).toBeGreaterThan(markdown.length * 0.9);
+
+    await typeAtEnd(page, "saved after a many-frame sync");
+    await expect
+      .poll(async () => (await getArtifactText(artifact.id)).markdown)
+      .toContain("saved after a many-frame sync");
+    await expect.poll(() => pendingEditCount(page, artifact.id)).toBe(0);
+    // The whole state arrived over one socket, with no close and no reconnect.
+    expect((await sockets()).closes).toHaveLength(0);
+    expect((await getArtifactText(artifact.id)).markdown).toContain(LAST_PARAGRAPH_MARKER);
+  } finally {
+    await alice.close();
+  }
 });
 
 test("an edit past the document bound is dropped with its reason, and the next edit saves", async ({
