@@ -166,10 +166,14 @@ func TestDelivery_RegistryListReturnsSortedInterests(t *testing.T) {
 
 	// The cache follows the bucket through its watcher: wait for the three upserts to reach it.
 	waitUntil(t, 5*time.Second, "the three interests to reach the cache", func() bool {
-		return len(env.registry.List()) == 3
+		items, err := env.registry.List()
+		return err == nil && len(items) == 3
 	})
 
-	items := env.registry.List()
+	items, err := env.registry.List()
+	if err != nil {
+		t.Fatalf("list interests: %v", err)
+	}
 	if items[0].SessionID != "ses_alpha" {
 		t.Fatalf("expected first item to be ses_alpha, got %s", items[0].SessionID)
 	}

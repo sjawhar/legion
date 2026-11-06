@@ -29,6 +29,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/outbox"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/roles"
 	"github.com/sjawhar/envoy/internal/session"
 	envoystore "github.com/sjawhar/envoy/internal/store"
 )
@@ -88,26 +89,19 @@ func (r *recorder) sent(eventID string) []string {
 
 // heldRoles is the role and session buckets the outbox resolves a role route's holder from
 // (outbox.Deps.RoleClaims and Sessions): every role is held by s-heard, a live self-subscribed
-// session, so a role route is forwarded to it with a Request the recorder takes.
-type heldRoles struct{}
+// session, so a role route is forwarded to it with a Request the recorder takes. It judges that
+// session on the package's own windows, as roles.Buckets does (roles.Windows).
+type heldRoles struct{ roles.Windows }
 
 func (heldRoles) RoleClaim(context.Context, string) (envoystore.RoleClaim, error) {
 	return envoystore.RoleClaim{HolderSessionID: "s-heard"}, nil
 }
 
-func (heldRoles) ReleaseExpiredRoleClaim(context.Context, string, string, time.Duration) (envoystore.ExpiredRoleClaimRelease, error) {
-	return envoystore.ExpiredRoleClaimSuperseded, nil
+func (heldRoles) Holder(context.Context, string) (session.SessionEntry, error) {
+	return session.SessionEntry{SelfSubscribed: true, UpdatedAt: time.Now().UnixMilli()}, nil
 }
 
-func (heldRoles) Holder(_ context.Context, _ string, live func(session.SessionEntry) bool) (session.SessionEntry, error) {
-	entry := session.SessionEntry{SelfSubscribed: true, UpdatedAt: time.Now().UnixMilli()}
-	if !live(entry) {
-		return session.SessionEntry{}, fmt.Errorf("s-heard is not live")
-	}
-	return entry, nil
-}
-
-func (heldRoles) TTL() time.Duration { return 5 * time.Minute }
+func (heldRoles) LastSeen(string) int64 { return 0 }
 
 // heardEnvelope is the envelope id the stand-in listener mints for every send to s-heard.
 const heardEnvelope = "envelope-heard-1"

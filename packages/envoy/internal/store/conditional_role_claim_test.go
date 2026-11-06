@@ -51,13 +51,13 @@ func raceConditionalClaim(t *testing.T, role, seed, winner, claimant string) (*R
 		t.Fatalf("read %s's claim: %v", role, err)
 	}
 
-	racing := &racingUpdateKeyValue{KeyValue: reg.roleKV}
+	racing := &racingUpdateKeyValue{KeyValue: reg.roleKV.Legacy()}
 	racing.beforeFirstUpdate = func() {
 		if _, err := reg.SetRole(winner, "example-host", role, false); err != nil {
 			t.Errorf("the claim that wins the race: %v", err)
 		}
 	}
-	reg.roleKV = bus.KeyValue{KeyValue: racing}
+	reg.roleKV = bus.NewKeyValue(racing, reg.roleKV.WatchHandle(), reg.roleKV.Streams())
 
 	required := read.Revision
 	_, err = reg.SetRoleWithPrevious(context.Background(), claimant, "example-host", role, "", false, &required)

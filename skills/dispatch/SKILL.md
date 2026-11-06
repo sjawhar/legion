@@ -41,7 +41,9 @@ The question and the recommendation, as `skill://dispatch-writing-specs` writes 
 
 ## Issue status is yours to move
 
-Outside Legion, claim your issue (`dispatch claim`) and move it and your children: `in_progress` at implementation, `testing` on a production-like surface, `needs_review` while its PR waits, `done` with `--reason` once driven in production. Never write or route the status of an issue with the `legion` label or under one, and claim one only as a role of its tree, even when its claim reads `· not running`: an outside claim can take the tree out of the workflow. A status write is set back or stands.
+Outside Legion, claim your issue (`dispatch claim`) and move it and your children: `in_progress` at implementation, `testing` on a production-like surface, `needs_review` while its PR waits, `done` with `--reason` once driven in production. Never write or route the status of an issue with the `legion` label or under one, and claim one only as a role of its tree: an outside claim can take the tree out of the workflow. A status write is set back or stands.
+
+`unresponsive` holders keep their claims 20 minutes (`skill://envoy`).
 
 A claim, or `dispatch issue-update --route session:<your id>` (`--route ''` on release), brings a person's answers, comments and messages; for agents' activity, `envoy_subscribe notifications.dispatch.issue.<KEY>.>`, which shows no quiet event.
 

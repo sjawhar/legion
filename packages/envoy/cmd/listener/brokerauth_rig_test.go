@@ -327,7 +327,7 @@ func TestSpentProofsRefuseAProofTheBucketAlreadyHolds(t *testing.T) {
 		t.Fatalf("open JetStream: %v", err)
 	}
 	open := func() spentProofs {
-		kv, err := bus.EnsureKeyValue(js, &natsgo.KeyValueConfig{
+		kv, err := bus.EnsureKeyValue(client.Conn, js, &natsgo.KeyValueConfig{
 			Bucket: bus.DPoPProofBucket, TTL: spentProofRetention, Storage: natsgo.FileStorage, Replicas: 1,
 		})
 		if err != nil {

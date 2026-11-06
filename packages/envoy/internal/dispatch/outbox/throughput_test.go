@@ -612,7 +612,7 @@ func runningOutbox(t *testing.T, database *store.Store, client *bus.Client, publ
 	if err != nil {
 		t.Fatalf("open the outbox's pool: %v", err)
 	}
-	holders := roles.NewBuckets(client)
+	holders := roles.NewBuckets(client, roles.Windows{})
 	outbox := New(Deps{Store: &store.Store{Pool: pool}, Publisher: publisher, Broker: broker, Listen: database.Pool.Listener,
 		RoleClaims: holders, Sessions: holders})
 	ctx, cancel := context.WithCancel(context.Background())
