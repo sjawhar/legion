@@ -5,9 +5,9 @@
 // nothing restarted.
 
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import * as os from "node:os";
+import { writeFileSync } from "node:fs";
 import * as path from "node:path";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import { forgetBrokerClients, forgetBrokerSession } from "../broker-credential";
 import { type DispatchEnvironment, dispatchSettings } from "../dispatch-config";
 import { DispatchClient } from "../dispatch-http";
@@ -22,9 +22,7 @@ afterEach(() => {
   for (const server of servers.splice(0)) server.stop(true);
 });
 
-function tempDir(): string {
-  return mkdtempSync(path.join(os.tmpdir(), "broker-credential-"));
-}
+const tempDir = temporaryDirectories("broker-credential");
 
 /** The config a caller with no envoy.json reads: the neutral file, which does not exist. */
 function noFile(env: DispatchEnvironment) {

@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import { sessionDirectory, sessionStateRoot, writeAtomically } from "../dispatch-session-directory";
 
-const root = () => mkdtempSync(join(tmpdir(), "dispatch-session-directory-"));
+const root = temporaryDirectories("dispatch-session-directory");
 
 describe("session directory", () => {
   test("DISPATCH_STATE_DIR is the root, else XDG_STATE_HOME's dispatch; empty counts as unset", () => {

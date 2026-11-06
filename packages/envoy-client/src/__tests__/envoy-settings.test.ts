@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import * as os from "node:os";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import { type DispatchConfigResolution, dispatchSettings } from "../dispatch-config";
 import { type EnvoyConfig, readEnvoyConfig } from "../envoy-config";
 import {
@@ -35,9 +35,7 @@ function errorOf(config: EnvoyConfig): string {
   return config.error;
 }
 
-function tempDir(): string {
-  return mkdtempSync(path.join(os.tmpdir(), "envoy-settings-"));
-}
+const tempDir = temporaryDirectories("envoy-settings");
 
 /** The configuration read from a file holding `contents`, with no checkout file beside it. */
 function configFrom(contents: unknown) {

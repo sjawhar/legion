@@ -2,14 +2,12 @@ import {
   accessSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
-  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 
 // Shared fixtures for the multi-repository acceptance observer's tests:
 // scripts/e2e/multi-repo-acceptance.sh reads only structured sources — the daemon's state JSON (a
@@ -20,8 +18,25 @@ import { join } from "node:path";
 // and fixture is isolated per test; the host's real dispatch/gh/kubectl/proc are never reachable.
 
 export const script = join(import.meta.dir, "..", "multi-repo-acceptance.sh");
-export const dir = mkdtempSync(join(tmpdir(), "multi-repo-acceptance-test."));
-process.on("exit", () => rmSync(dir, { recursive: true, force: true }));
+
+/** The scratch root every fixture below draws from, and the bearer file under it. */
+export let dir = "";
+export let tokenFile = "";
+
+/**
+ * Makes the calling test file's scratch root and registers its removal.
+ *
+ * Each test file that imports this module calls it once, at its own module scope, before any
+ * fixture reads `dir`. `temporaryDirectories` registers the removal where it is called, and Bun
+ * evaluates this module once per process, at the load of whichever test file imports it first: a
+ * call in this module's body would register the removal in that one file's scope and leave every
+ * later file's scratch behind.
+ */
+export function useScratchDirectory(): void {
+  dir = temporaryDirectories("multi-repo-acceptance-test", { scope: "suite" })();
+  tokenFile = join(dir, "dispatch-token");
+  writeFileSync(tokenFile, "dispatch-bearer\n");
+}
 
 let runs = 0;
 
@@ -241,9 +256,6 @@ export function recordedCalls(base: string): {
       .filter((line) => line !== ""),
   };
 }
-
-export const tokenFile = join(dir, "dispatch-token");
-writeFileSync(tokenFile, "dispatch-bearer\n");
 
 export const fullInputs = (daemonUrl: string, dispatchUrl: string): Record<string, string> => ({
   LEGION_E2E_REPO_T: "acme/widgets",

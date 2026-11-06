@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import * as os from "node:os";
+import { writeFileSync } from "node:fs";
 import * as path from "node:path";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import { connect, nkeys } from "nats";
 import { natsSeedFromEnvironment } from "../envoy-settings";
 import { natsAuthOptions } from "../nats-auth";
@@ -15,13 +15,15 @@ interface TestKeyPair {
 /** nats.js types its `nkeys` export `any`. */
 const testKeys: { createUser(): TestKeyPair; createAccount(): TestKeyPair } = nkeys;
 
+const temporaryDirectory = temporaryDirectories("nats-seed");
+
 function createUser(): { readonly seed: string; readonly publicKey: string } {
   const user = testKeys.createUser();
   return { seed: new TextDecoder().decode(user.getSeed()), publicKey: user.getPublicKey() };
 }
 
 function seedFile(contents: string): string {
-  const file = path.join(mkdtempSync(path.join(os.tmpdir(), "nats-seed-")), "seed");
+  const file = path.join(temporaryDirectory(), "seed");
   writeFileSync(file, contents, { mode: 0o600 });
   return file;
 }
@@ -91,7 +93,7 @@ describe("natsAuthOptions", () => {
   });
 
   test("refuses an unusable seed naming its variable and path, never falling back", () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "nats-seed-"));
+    const dir = temporaryDirectory();
     const missing = path.join(dir, "missing");
     const blank = seedFile(" \n");
     const notASeed = seedFile("SUNOTASEED");

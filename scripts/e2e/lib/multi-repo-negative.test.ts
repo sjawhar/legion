@@ -16,11 +16,14 @@ import {
   run,
   spawnScript,
   stateBody,
+  useScratchDirectory,
 } from "./multi-repo-acceptance-harness";
 
 // The `negative` observations of scripts/e2e/multi-repo-acceptance.sh (no-repo, pr-in-x,
 // repo-edit); the other observations are in multi-repo-acceptance.test.ts. The stubs and fakes
 // they run against are in multi-repo-acceptance-harness.ts.
+useScratchDirectory();
+
 afterEach(() => {
   closeServers();
 });

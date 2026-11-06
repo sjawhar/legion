@@ -43,6 +43,7 @@ import type {
 } from "@legion/pi-shared/pi-types";
 import { DEFAULT_STALL_LIMITS } from "@legion/pi-shared/stall-limits";
 import { hostAgentRegistryMock, testAgentRoster } from "@legion/pi-shared/test/host-registry";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import { logger } from "@oh-my-pi/pi-utils";
 import pkg from "../package.json";
 import { type CapabilityHost, ENVOY_TOOL_NAMES } from "../src/capability-report";
@@ -226,6 +227,8 @@ for (const key of environmentKeys) {
 }
 
 const temporaryPaths: string[] = [];
+const paneStateDirectory = temporaryDirectories("legion-pane-state");
+const controllerStateDirectory = temporaryDirectories("legion-controller");
 
 /** The repository every workspace in this file is a copy of: one `jj git init` before the tests.
  * A copy spawns no process, so a test's workspace costs none of bun's 5 s test timeout, which a
@@ -678,10 +681,9 @@ async function claimPane(options: {
     promptAgents: options.promptAgents ?? [],
   };
   const bootToken = `boot-${sessionId}`;
-  const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-pane-state-"));
+  const stateDir = paneStateDirectory();
   const secretsDir = path.join(stateDir, "secrets");
   await mkdir(secretsDir, { mode: 0o700 });
-  temporaryPaths.push(stateDir);
   const bootTokenFile = path.join(secretsDir, claimToken);
   await writeFile(bootTokenFile, `${bootToken}\n`, { mode: 0o600 });
   process.env.ENVOY_URL = "http://envoy.test";
@@ -2966,10 +2968,9 @@ async function launchedController(options: {
     generation: 2,
     secret: `controller-secret-${options.sessionId}`,
   };
-  const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-controller-"));
+  const stateDir = controllerStateDirectory();
   const secretsDir = path.join(stateDir, "secrets");
   await mkdir(secretsDir, { mode: 0o700 });
-  temporaryPaths.push(stateDir);
   const capabilityFile = path.join(secretsDir, token);
   await writeFile(capabilityFile, "controller-capability\n", { mode: 0o600 });
   process.env.LEGION_CONTROLLER = "1";

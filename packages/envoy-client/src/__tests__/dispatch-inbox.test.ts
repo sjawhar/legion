@@ -1,7 +1,5 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import { runDispatchCli } from "../dispatch-cli";
 import { resetAdviceMemory } from "../dispatch-execute";
 import { forgetKeyedLayerMemory } from "../dispatch-http";
@@ -9,6 +7,8 @@ import { forgetKeyedLayerMemory } from "../dispatch-http";
 // `dispatch inbox` against a stub Dispatch: the three routes the Inbox page reads, answered as the
 // server answers them, so the test pins the lines the command prints rather than the renderer's
 // own idea of them.
+
+const temporaryDirectory = temporaryDirectories("dispatch-inbox");
 
 const VIEWER = "alice@theorem.dev";
 const SNOOZED_ID = "33333333-3333-4333-8333-333333333333";
@@ -154,7 +154,7 @@ beforeEach(() => {
   whoamiAnswer = LISTED;
   inboxAnswer = LISTED;
   pendingAnswer = LISTED;
-  stateDir = mkdtempSync(join(tmpdir(), "dispatch-inbox-"));
+  stateDir = temporaryDirectory();
   resetAdviceMemory();
   forgetKeyedLayerMemory();
 });

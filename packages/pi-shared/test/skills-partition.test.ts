@@ -1,6 +1,7 @@
-import { afterAll, expect, test } from "bun:test";
-import { readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { expect, test } from "bun:test";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import * as path from "node:path";
+import { temporaryTmpdir } from "@legion/test-fixtures/temporary-tmpdir";
 import { REPO_ROOT, stageSkills } from "./skills-guard";
 
 // scripts/pi-plugin-prepack.sh holds the two lists that say which of the repository's skills each
@@ -8,6 +9,12 @@ import { REPO_ROOT, stageSkills } from "./skills-guard";
 // plugin, so a prompt that loads it fails the daemon's boot gate; one in both ships twice, and Oh My
 // Pi would discover two skills of one name. The lists are read the way the pack reads them, by
 // staging each partition, rather than by parsing the script.
+//
+// `stageSkills` leaves the removal of each staging to its caller, and both stagings below run at
+// module scope, where a throw from either would skip a removal registered after it. The suite's
+// own TMPDIR holds them instead: the fixture registers its removal before anything is staged.
+temporaryTmpdir("staged-skills-partition");
+
 const skillsRoot = path.join(REPO_ROOT, "skills");
 const skillDirectories = readdirSync(skillsRoot)
   .filter((entry) => statSync(path.join(skillsRoot, entry)).isDirectory())
@@ -16,12 +23,6 @@ const envoy = stageSkills("@sjawhar/pi-envoy");
 const legion = stageSkills("@sjawhar/pi-legion");
 const envoySkills = readdirSync(envoy).sort();
 const legionSkills = readdirSync(legion).sort();
-
-afterAll(() => {
-  for (const staged of [envoy, legion]) {
-    rmSync(path.dirname(staged), { recursive: true, force: true });
-  }
-});
 
 test("the two partitions together are every skill directory", () => {
   expect([...envoySkills, ...legionSkills].sort()).toEqual(skillDirectories);

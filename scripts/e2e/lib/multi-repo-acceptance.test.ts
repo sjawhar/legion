@@ -18,12 +18,15 @@ import {
   servers,
   spawnScript,
   stateBody,
+  useScratchDirectory,
 } from "./multi-repo-acceptance-harness";
 
 // scripts/e2e/multi-repo-acceptance.sh is the observer for the live multi-repository acceptance
 // run; this file covers every observation but second-owner (multi-repo-second-owner.test.ts) and
 // the `negative` ones (multi-repo-negative.test.ts). The stubs and fakes it runs against are in
 // multi-repo-acceptance-harness.ts.
+useScratchDirectory();
+
 afterEach(() => {
   closeServers();
 });

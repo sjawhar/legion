@@ -3,15 +3,14 @@ import {
   existsSync,
   linkSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionAnswer } from "@legion/contracts";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import { bearerCredential } from "../bearer";
 import type { ActiveDispatchConfig } from "../dispatch-config";
 import type * as SessionAnswersModule from "../session-answers";
@@ -30,7 +29,7 @@ import {
 
 const NOW = Date.parse("2026-10-27T12:00:00.000Z");
 const hoursAgo = (hours: number) => new Date(NOW - hours * 3_600_000).toISOString();
-const stateDir = () => mkdtempSync(join(tmpdir(), "session-answers-"));
+const stateDir = temporaryDirectories("session-answers");
 
 function message(id: string, at: string, text: string): SessionAnswer {
   return {

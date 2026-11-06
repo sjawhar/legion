@@ -21,6 +21,7 @@ import { bearerCredential } from "@legion/envoy-client/bearer";
 import { runDispatchCli } from "@legion/envoy-client/dispatch-cli";
 import { DispatchClient, DispatchServiceError } from "@legion/envoy-client/dispatch-http";
 import { sessionDirectory } from "@legion/envoy-client/dispatch-session-directory";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import type { DispatchSession } from "../../src/dispatch-session";
 import * as core from "./askgate-core";
 import {
@@ -4888,6 +4889,8 @@ describe("eval cells that run the dispatch CLI (A1)", () => {
 });
 
 describe("sessions", () => {
+  const temporaryDirectory = temporaryDirectories("askgate");
+
   test("a halt in one session does not carry into the next", async () => {
     const g = bind({ env: { OMP_ASKGATE_TIMEOUT_MS: "20" }, complete: untilAborted });
     for (const id of ["a", "b", "c", "d"]) await g.device(id, "dispatch_comment", COMMENT);
@@ -4916,7 +4919,7 @@ describe("sessions", () => {
   // a call whose shell had not read it yet, so that write failed. The gate takes no snapshot now;
   // a marker likewise goes only on its own call's end event, or at shutdown.
   test("N5: a session switch keeps each marker until its own call's end event, or until shutdown", async () => {
-    const work = fs.mkdtempSync(path.join(tmpdir(), "askgate-switch-"));
+    const work = temporaryDirectory("switch");
     fs.writeFileSync(path.join(work, "note.txt"), "Body from the session before.\n");
     const g = bind({ env: { PATH: "/usr/bin:/bin" }, cwd: work });
     const ids = () =>
@@ -4937,13 +4940,12 @@ describe("sessions", () => {
     expect(ids()).toEqual(["bg"]);
     await g.event("session_shutdown");
     expect(ids()).toEqual([]);
-    fs.rmSync(work, { recursive: true, force: true });
   }, 30_000);
   // The second re-gate of #2159, non-blocking: `./dispatch` is the literal grammar, and reading
   // the call runs that program once with `--dry-run`. A refusal that says nothing ran would not
   // be true of a checkout's own `./dispatch`.
   test("a refusal of a command names the dry run that already ran it", async () => {
-    const work = fs.mkdtempSync(path.join(tmpdir(), "askgate-claim-"));
+    const work = temporaryDirectory("claim");
     fs.writeFileSync(
       path.join(work, "dispatch"),
       `#!${process.execPath}\nconsole.log(JSON.stringify({ issue: "X-1", body: "hi" }));\n`,
@@ -4965,7 +4967,6 @@ describe("sessions", () => {
     expect((await g.device("device", "dispatch_comment", COMMENT))?.reason).not.toContain(
       "--dry-run"
     );
-    fs.rmSync(work, { recursive: true, force: true });
   }, 30_000);
 });
 

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import * as os from "node:os";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import type { ActiveDispatchConfig, DispatchConfigResolution } from "../dispatch-config";
 import type { SectionOff } from "../envoy-config";
 import type { EnabledEnvoySettings, EnvoySettings } from "../envoy-settings";
@@ -37,9 +37,7 @@ function withToken(
   return { ...rest, token: credential?.secret() } as DispatchWithToken | EnvoyWithToken;
 }
 
-function tempDir(): string {
-  return mkdtempSync(path.join(os.tmpdir(), "session-settings-"));
-}
+const tempDir = temporaryDirectories("session-settings");
 
 function writeFile(file: string, contents: unknown): string {
   mkdirSync(path.dirname(file), { recursive: true });

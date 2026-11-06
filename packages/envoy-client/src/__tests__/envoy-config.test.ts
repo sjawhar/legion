@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import {
   type ActiveDispatchConfig,
   type DispatchConfigResolution,
@@ -62,9 +63,7 @@ function envoySettings(...args: Parameters<typeof resolveEnvoy>): EnvoyWithToken
   return { ...rest, token: credential?.secret() };
 }
 
-function tempDir(): string {
-  return mkdtempSync(path.join(os.tmpdir(), "envoy-config-"));
-}
+const tempDir = temporaryDirectories("envoy-config");
 
 function writeFile(file: string, contents: unknown): string {
   mkdirSync(path.dirname(file), { recursive: true });
