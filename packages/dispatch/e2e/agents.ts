@@ -227,6 +227,22 @@ export async function getUnsubscribeCalls(): Promise<{ session_id: string; topic
   >;
 }
 
+/** Seeds one live session subscribed to `issueKey`, which is what the issue header's
+ *  Subscribers panel lists: the session in the listener's live list, and an interest row naming
+ *  the issue's two notification topics. */
+export async function subscribeSession(issueKey: string): Promise<void> {
+  await setLiveSessions([{ session_id: "e2e-session", title: "e2e-session-title" }]);
+  await setInterests([
+    {
+      session_id: "e2e-session",
+      topics: [
+        `notifications.dispatch.issue.${issueKey}`,
+        `notifications.dispatch.issue.${issueKey}.>`,
+      ],
+    },
+  ]);
+}
+
 // The Agents page's keyboard rows, in `keyboard-agents.e2e.ts`, `keyboard-palette.e2e.ts` and the
 // picker spec the WebKit and Firefox projects also run, share one page: two live sessions, each
 // with Dispatch activity of its own, so both are listed rows rather than folded into `Inactive` or

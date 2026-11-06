@@ -2,7 +2,7 @@ import { expect, type Locator, test } from "@playwright/test";
 
 import { QUERY_RETRY_DELAY_MS } from "../web/src/api/query-client";
 import { MIN_REFETCH_INTERVAL_MS } from "../web/src/api/query-refresh";
-import { getUnsubscribeCalls, setInterests, setLiveSessions } from "./agents";
+import { getUnsubscribeCalls, setInterests, setLiveSessions, subscribeSession } from "./agents";
 import {
   createAsk,
   createComment,
@@ -741,19 +741,6 @@ test("a human can unsubscribe an agent from an issue and the session is told", a
     await alice.close();
   }
 });
-
-async function subscribeSession(issueKey: string): Promise<void> {
-  await setLiveSessions([{ session_id: "e2e-session", title: "e2e-session-title" }]);
-  await setInterests([
-    {
-      session_id: "e2e-session",
-      topics: [
-        `notifications.dispatch.issue.${issueKey}`,
-        `notifications.dispatch.issue.${issueKey}.>`,
-      ],
-    },
-  ]);
-}
 
 test("issue header keeps every control in a shared row on a phone and the whose-turn indicator in view at every width @phone", async ({
   browser,
