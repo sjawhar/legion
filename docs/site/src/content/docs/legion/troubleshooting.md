@@ -424,8 +424,9 @@ is told once, as `provider-errors on <KEY>`, with the run, the model and the cau
 (`supervise: a run of turns that ended in a provider error; the controller is told`). Nothing is
 held and nothing is stopped by that count: the task is still kept and still sent again. The run
 goes back to zero at the first turn of that claim that ends with no provider error, and only then
-can another notice go. The notice is the issue's own, so in a provider outage every claim that
-reaches six is told, each on its own issue.
+can another notice go. The notice is the claim's own — the issue and the role that names it — so
+two claims of one issue each get a notice of their own, and in a provider outage every claim that
+reaches six is told.
 
 When an agent's budget runs out (launches that failed, deaths with work outstanding, prompts it
 never took a turn on) the daemon stops relaunching it and holds the issue. The daemon logs JSON

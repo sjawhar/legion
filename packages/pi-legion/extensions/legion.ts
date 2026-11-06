@@ -58,7 +58,7 @@ import {
 import { createClaimSession } from "../src/claim-session";
 import { classifySession, requiredEnvironment } from "../src/classify";
 import { createControllerSession } from "../src/controller-session";
-import { createModelFallback } from "../src/model-fallback";
+import { createModelFallback, type ModelFallbackContext } from "../src/model-fallback";
 import { applySessionTitle, legionSessionTitle } from "../src/session-title";
 import { daemonLaunchedController } from "../src/slack-channels";
 import { createLegionTool } from "../src/tools";
@@ -169,7 +169,7 @@ export default function legionExtension(pi: PiApi): void {
   // refuses its turn (INFRA-956 R1), the architect and the controller included, so the model
   // fallback gates on the session holding a Legion claim of any kind rather than on
   // `phaseWorkerSession`, which excludes an architect and serves the phase reminder alone.
-  const legionClaimSession = (context: SessionContext): boolean => {
+  const legionClaimSession = (context: CommandContext | SessionContext): boolean => {
     const sessionID = context.sessionManager.getSessionId();
     return (
       claimSession.capability(sessionID) !== undefined ||
@@ -237,11 +237,19 @@ export default function legionExtension(pi: PiApi): void {
 
   // The fallback state of whatever session the pane is on: the record this plugin saved
   // (`restoreFallbackCooldown`), and the fallback the branch itself may already sit on. Read
-  // once the claim is registered at session_start, and again after every session change, and
-  // only for a session that claim is on: the restore's own save appends an entry to that
-  // session's transcript, and a person's own session, or a subagent's, that happens to sit on a
-  // host fallback is no Legion role's to arm or to write into.
-  const restoreModelFallback = (context: SessionContext): void => {
+  // after every claim this process registers — at session_start, after a session change, and
+  // from each of the controller's two claim commands below, which are the only other places one
+  // is registered — and only for a session that claim is on: the restore's own save appends an
+  // entry to that session's transcript, and a person's own session, or a subagent's, that
+  // happens to sit on a host fallback is no Legion role's to arm or to write into.
+  //
+  // A command's context is a `CommandContext`, whose `sessionManager` is the same live object a
+  // session hook's context carries, with only the members pi-shared reads typed on it
+  // (`@legion/pi-shared/pi-types`:460-467): the branch read is the optional one
+  // `ModelFallbackContext` declares, and the restore reads nothing else from the context.
+  const restoreModelFallback = (
+    context: (CommandContext | SessionContext) & ModelFallbackContext
+  ): void => {
     if (!legionClaimSession(context)) return;
     modelFallback.restore(
       restoreFallbackCooldown(context.sessionManager.getBranch?.() ?? []),
@@ -656,6 +664,9 @@ export default function legionExtension(pi: PiApi): void {
       const refusal = envoyPluginRefusal();
       if (refusal !== undefined) throw new Error(refusal);
       await controllerSession.claim(context);
+      // The claim is registered, so this session is the controller's: the arming and the
+      // doubling levels its branch records are read back here, as session_start reads a worker's.
+      restoreModelFallback(context);
       registerLegionTool();
       await activateLegionTool();
     },
@@ -667,6 +678,11 @@ export default function legionExtension(pi: PiApi): void {
     // Why a command and not a claim from session_start: `controllerSession.startCommand`.
     handler: async (_args, context) => {
       await controllerSession.startCommand(context);
+      // The operator-launched controller registers its claim nowhere else, so this is where a
+      // controller resumed on a fallback gets its state back. The command keeps its own refusals
+      // (`controllerSession.startCommand`), and a claim that did not register leaves this
+      // session holding none, which the restore answers by doing nothing.
+      restoreModelFallback(context);
     },
   });
 }

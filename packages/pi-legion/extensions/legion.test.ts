@@ -2982,6 +2982,10 @@ interface LaunchedController {
   readonly tools: RegisteredTool[];
   readonly commands: RegisteredCommand[];
   readonly title: HostTitle;
+  /** Every `pi.appendEntry` the controller's process made, in order. */
+  readonly entries: AppendedEntry[];
+  /** The session's model as the host holds it, for the model fallback. */
+  readonly models: HostModels;
   readonly handlers: Map<string, Handler>;
   readonly context: (sessionId: string, sessionFile?: string) => SessionContext;
   /** The listener lost the role's claim: its role read names no holder until the next claim. */
@@ -3163,6 +3167,8 @@ async function launchedController(options: {
     tools: fixture.tools,
     commands: fixture.commands,
     title: fixture.title,
+    entries: fixture.entries,
+    models: fixture.models,
     handlers: fixture.handlers,
     context: (sessionId, sessionFile = `/tmp/${sessionId}.jsonl`) =>
       sessionContext(sessionId, sessionFile, undefined, fixture.title),
@@ -5677,7 +5683,7 @@ describe("the model fallback", () => {
     role: "fallback",
     resolvedModelIsFallback: true,
   };
-  const armings = (pane: ClaimPane) =>
+  const armings = (pane: { readonly entries: readonly AppendedEntry[] }) =>
     pane.entries
       .filter((saved) => saved.customType === LEGION_FALLBACK_ENTRY)
       .map((saved) => saved.data);
@@ -5882,5 +5888,93 @@ describe("the model fallback", () => {
 
     expect(armings(pane)).toEqual([]);
     expect(pane.models.set).toEqual([]);
+  });
+
+  /** The controller's session as the host hands it: a branch two hours into a host fallback,
+   * and the model reads the runner makes of it. */
+  const controllerFallbackSession = (
+    controller: LaunchedController,
+    sessionId: string
+  ): SessionContext => {
+    const base = controller.context(sessionId);
+    return {
+      ...base,
+      sessionManager: {
+        ...base.sessionManager,
+        getBranch: () => [ranOn, walkedTwoHoursAgo, ...controller.models.changes],
+      },
+      models: {
+        list: () => [],
+        current: () => hostModel(controller.models.current),
+        resolve: (spec) => hostModel(spec),
+      },
+      modelRegistry: {
+        find: () => undefined,
+        hasProvider: () => true,
+        isSelectorSuppressed: () => false,
+      },
+    };
+  };
+
+  // The operator's controller claims nothing at `session_start`: it registers from
+  // `/legion-controller-start`, which Oh My Pi runs after its startup. So that claim is where
+  // its fallback is read back, or nowhere — and with `retry.fallbackRevertPolicy: never` a
+  // controller resumed on a fallback would stay on it for the rest of the run.
+  test("the operator's controller arms its branch's fallback when /legion-controller-start claims it", async () => {
+    const controller = await launchedController({ sessionId: "ses_controller_fallback" });
+    const session = controllerFallbackSession(controller, "ses_controller_fallback");
+    controller.models.current = SONNET;
+
+    // Startup claims nothing, so nothing of this plugin's is written to the transcript there.
+    await controller.handlers.get("session_start")?.({}, session);
+    expect(armings(controller)).toEqual([]);
+
+    expect(await runStartCommand(controller, session)).toEqual([]);
+
+    expect(armings(controller)).toEqual([
+      {
+        arming: {
+          restoreTo: OPUS,
+          entryId: "mc-fallback",
+          dueAt: expect.any(Number),
+          cause: "refusal",
+        },
+        levels: { [OPUS]: 2 },
+      },
+    ]);
+    // Two hours have passed since that entry, so the controller's next request takes it back.
+    await controller.handlers.get("context")?.({ messages: [] }, session);
+    expect(controller.models.set).toEqual([{ provider: "anthropic", id: "claude-opus-5-5" }]);
+  });
+
+  // The other claim a controller registers by hand: a lost claim recovered, or a takeover from a
+  // session the operator started themselves.
+  test("/legion-claim-controller arms the fallback of the session it claims", async () => {
+    const controller = await launchedController({ sessionId: "ses_controller_manual" });
+    const session = controllerFallbackSession(controller, "ses_controller_manual");
+    controller.models.current = SONNET;
+    const claimCommand = controller.commands.find(
+      (command) => command.name === "legion-claim-controller"
+    );
+    if (claimCommand === undefined) throw new Error("controller claim command was not registered");
+
+    await controller.handlers.get("session_start")?.({}, session);
+    expect(armings(controller)).toEqual([]);
+
+    await claimCommand.handler("", commandContext(session));
+
+    expect(armings(controller)).toEqual([
+      {
+        arming: {
+          restoreTo: OPUS,
+          entryId: "mc-fallback",
+          dueAt: expect.any(Number),
+          cause: "refusal",
+        },
+        levels: { [OPUS]: 2 },
+      },
+    ]);
+    await controller.handlers.get("context")?.({ messages: [] }, session);
+    expect(controller.models.set).toEqual([{ provider: "anthropic", id: "claude-opus-5-5" }]);
   });
 });

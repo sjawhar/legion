@@ -7,9 +7,9 @@
 # HTTP model stand-ins of the driver's own. A 529 keeps the task on the claim and the daemon sends
 # it to the same session again after 30 s, 60 s and 120 s; the sixth turn in a row tells the
 # project's controller, once, and holds nothing; an OpenAI `finish_reason: content_filter` with no
-# fallback model left is reported `refused` and goes again after 30 s, holding the issue for
-# nobody; an error the plugin reports `provider-error` that carries neither a retryable mark nor a
-# 429 or 5xx fails the claim and holds its issue for its architect; and `legion claims stop`,
+# fallback model left carries no HTTP status at all, so the task goes again after 30 s, holding the
+# issue for nobody; an HTTP 400, a client error that is neither 408 nor 429, fails the claim and
+# holds its issue for its architect; and `legion claims stop`,
 # `legion claims retry --fresh-session` and `legion claims list` — the built binary against that
 # daemon — drive and read the claims the first and the fourth leave
 # (packages/daemon/internal/daemon/provider_error_retry_live_test.go, which this script builds with

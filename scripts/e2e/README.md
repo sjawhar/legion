@@ -244,8 +244,8 @@ Each item below names a script, then what it proves.
   a turn that ends in a provider error keeps its task, and the operator restarts the claims such turns leave (dispatch://INFRA-956 R2 and R3), driven through the whole daemon `legion start` boots, over a PostgreSQL the caller names and a `nats-server` of the run's own, with three real `omp --mode rpc` panes under the real `legion worker-shim`, each carrying this checkout's two plugins and answered by a model stand-in of the driver's own:
   a 529 keeps the task on the claim and the daemon sends it to the same session again after 30 s, 60 s and 120 s;
   the sixth such turn in a row tells the project's controller, once, and holds nothing;
-  an OpenAI `finish_reason: content_filter` with no fallback model left is reported `refused` and goes again after 30 s, holding the issue for nobody;
-  an error the plugin reports `provider-error` that carries neither a retryable mark nor a 429 or 5xx fails the claim and holds its issue for its architect;
+  an OpenAI `finish_reason: content_filter` with no fallback model left carries no HTTP status at all, so the task goes again after 30 s, holding the issue for nobody;
+  an HTTP 400, a client error that is neither 408 nor 429, fails the claim and holds its issue for its architect;
   and `legion claims stop`, `legion claims retry --fresh-session` and `legion claims list`, the built binary against that daemon, drive and read the claims the first and the fourth leave.
   Needs an Oh My Pi (`LEGION_OMP_PATH`); no cluster and no tmux, so a Legion pod and a devbox both run it
 
@@ -4115,19 +4115,19 @@ The four checks below are [`lib/live-daemon-proof.sh`](#liblive-daemon-proofsh)'
 
 The driver boots the whole daemon through `run`, the function `legion start` calls, over that PostgreSQL and that broker, and seeds three issues of one tree, each standing in the phase of its one worker: a planner, an implementer and a tester.
 Each worker is a real `omp --mode rpc` under the real `legion worker-shim`, started by the package's own local runtime (`internal/daemon/localruntime_live_test.go`), which makes a pane a child process group rather than a tmux window, with this checkout's `@sjawhar/pi-envoy` and `@sjawhar/pi-legion` in an Oh My Pi profile of the run's own.
-The agents register, report ready, take their tasks and report their turn outcomes over the daemon's own HTTP routes and worker stream, as they do in production.
+The agents register, report ready, take their tasks and report each turn's result over the daemon's own HTTP routes and worker stream, as they do in production.
 What stands in is the model endpoint and nothing else: three HTTP stand-ins of the driver's own, one per pane.
 `overloaded` answers every request 529 with `retry-after: 3600`, which is over Oh My Pi's own cap for a retry delay, so one send is one request and the host's retries hide none of the ladder's gaps;
-`filtered` streams text and then ends an OpenAI chat completion `finish_reason: content_filter`, which the plugin reports `refused`, and that role's chain names one model, so no fallback is left;
-`malformed` answers every request 400 with an `invalid_request_error` body, which Oh My Pi reports not retryable with status 400 — neither retryable nor 429 or 5xx — and the plugin reports `provider-error`.
+`filtered` streams text and then ends an OpenAI chat completion `finish_reason: content_filter`, which Oh My Pi reports with no HTTP status at all, and that role's chain names one model, so no fallback is left;
+`malformed` answers every request 400 with an `invalid_request_error` body, which Oh My Pi reports with status 400 — a client error that is neither 408 nor 429.
 Each pane's Oh My Pi overlay sets `retry.enabled: false`, so the host walks no chain of its own and every failed turn reaches the daemon.
 
 | step | driven by | read back as |
 | :--- | :--- | :--- |
 | `step1-a-529-keeps-the-task-and-walks-the-30-60-120-ladder` | one task delivered to the planner, whose stand-in answers 529 | the daemon's five re-sends of that same task to that same session, each at its own armed wait (30 s, 60 s and 120 s of wall clock, then the two driven ones), the claim neither failed nor empty-handed, the issue not held, and the stand-in asked once per send for a request carrying the task itself |
 | `step2-the-sixth-turn-in-a-row-tells-the-controller` | nothing: the sixth turn of that run | exactly one `provider-errors` notice on the project's controller topic, naming the run of six turns, with the issue still in its phase — the notice is the run's one exit, and no attempt limit holds the issue |
-| `step3-a-content-filter-is-reported-refused-and-the-task-goes-again` | one task delivered to the implementer, whose stand-in ends the turn with a content filter | the plugin's report `refused`, the task sent again after 30 s, the claim still holding it, the issue still `implementing` and its architect told nothing |
-| `step4-an-error-that-cannot-clear-fails-the-claim-and-holds-the-issue` | one task delivered to the tester, whose stand-in answers 400 | the plugin's report `provider-error` on an error marked not retryable, the claim failed and the issue held for its architect |
+| `step3-a-content-filter-carries-no-status-and-the-task-goes-again` | one task delivered to the implementer, whose stand-in ends the turn with a content filter | the turn reported with no HTTP status at all, the task sent again after 30 s, the claim still holding it, the issue still `implementing` and its architect told nothing |
+| `step4-an-error-that-cannot-clear-fails-the-claim-and-holds-the-issue` | one task delivered to the tester, whose stand-in answers 400 | the turn reported with status 400, the claim failed and the issue held for its architect |
 | `step5-the-operator-stops-retries-and-reads-the-claims` | `legion claims stop`, then `legion claims retry --fresh-session`, then `legion claims list`, and the same retry of the claim step 4 failed, each the built `legion` against that daemon | the stopped planner retired, its retry running in a session that is not the one it recorded, the task its ladder kept sent to that fresh session, and the failed tester's claim running again |
 
 What the proof stands in for lies outside the rule:
