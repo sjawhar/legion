@@ -187,9 +187,11 @@ type Claim struct {
 	// registration records Session/SessionFile/CapabilityHash (register, reregister).
 	PluginContract int
 	// PluginRelaunchFor is the daemon contract the last stale-plugin relaunch was made for, 0 when
-	// none. It is set at every stale relaunch (refreshPlugin) and cleared when a registration
-	// records the daemon's own contract, so a registration that still differs while it equals the
-	// daemon's contract is the one that is charged rather than relaunched again uncharged.
+	// none. It is set where that relaunch is decided (relaunchStale, endPodUpdate) and cleared
+	// when a registration records the daemon's own contract, so a registration that still differs
+	// while it equals the daemon's contract is the one that is charged rather than relaunched
+	// again uncharged. A relaunch the wake pacing still holds has not run yet, and the
+	// registration that meets it is neither (staleRegistration).
 	PluginRelaunchFor int
 	// UpdateRound is the update round this claim is in, and "" when none is open: the round's
 	// identity and its kind in one string. PodRoundPrefix and the pod's uid is the drift round of
@@ -813,9 +815,10 @@ func NewMachine(ctx context.Context, deps Deps, c Claim) (*Machine, error) {
 // with the claim refusal it violates (claim.StaleGeneration, claim.SameAgentRefusal). Any other
 // event that is stale is logged once and dropped. A suspension of a claim whose agent is in a turn
 // answers ErrSuspendHeld (holdSuspension). A request the wake pacing never makes wait, reaching a
-// claim a paced wake parked, drops that wake before the lookup and is then decided against the
-// claim as it stands: the state the gate found, for a park over no process, and the claim and the
-// process it runs untouched for a park over one (dropWakeFor).
+// claim a paced wake parked with no process, drops that wake before the lookup and is then
+// decided against the state the gate found (dropWakeFor); an operator's task over a launch
+// parked above a process the claim still records runs that launch first, so the row that queues
+// the task is the row of the claim that launch leaves (runParkedLaunchNow).
 //
 // Handle returns when the decision is made, which includes the runtime call it makes: a stop
 // waits out its grace, a resume waits out the previous incarnation. A caller feeding many claims
@@ -845,6 +848,9 @@ func (m *Machine) Handle(ctx context.Context, ev Event) error {
 		m.enrollmentSent = false
 	}
 	dropped := m.dropWakeFor(ev)
+	if err := m.runParkedLaunchNow(ctx, ev); err != nil {
+		return err
+	}
 	k := key{m.claim.State, kindOf(ev)}
 	r, ok := table[k]
 	if !ok {
@@ -1641,10 +1647,12 @@ func (m *Machine) letGo() {
 // with a fresh token at the back of the queue, so a claim with work outstanding would fail before
 // launch_failure_limit real failures. The same holds for every other verdict: a process found
 // stale, displaced, uncertain or alive says nothing the relaunch this wake holds does not already
-// answer. The guard sits here rather than in the fence because four of those five paths are a
-// timer or a closed connection rather than a RuntimeObservation, and all five pass through this
-// one judgement; the park disarms the four timers of the process it waits over (parkWake), so the
-// sweep and a closing connection are the reports that still arrive during the wait.
+// answer. The guard sits here rather than in the fence because three of those paths are a timer
+// or a closed connection rather than a RuntimeObservation, and all of them pass through this one
+// judgement. What still arrives during the wait is the sweep's own observation and a closing
+// connection: the park disarms the four timers of the process it waits over (parkWake), and
+// probe makes no call and arms nothing while the launch waits, so no answer of the runtime's can
+// arm the probe interval inside it either.
 func (m *Machine) judge(ctx context.Context, observation runtime.Observation, alive func(context.Context) error, again TimerKind, after time.Duration) error {
 	if m.launchWaits() {
 		m.log.Info("supervise: an observation of the process a waiting launch replaces decides nothing; its turn replaces that process",
@@ -1683,9 +1691,22 @@ func (m *Machine) judge(ctx context.Context, observation runtime.Observation, al
 // nothing about whether its claim is still the one that opened it. There is nothing to probe and
 // nothing to arm in that case — the claim's own relaunch path, not this probe, decides what
 // happens to it next.
+//
+// A claim whose launch waits its turn over the process this would probe is asked nothing either.
+// What becomes of that process is already decided — the turn lets it go and starts the next
+// (wakeNow, launchNow) — so every answer the runtime could give decides nothing (judge), and
+// the one that reaches no judgement at all, a runtime that cannot answer, would arm the probe
+// interval the park disarmed (parkWake) and ask again at every interval of a wait that is tens
+// of minutes long in a wave. The callers' own timers are not armed again here for the same
+// reason: the launch's turn arms the new process's (armBoot).
 func (m *Machine) probe(ctx context.Context, alive func(context.Context) error, again TimerKind, after time.Duration) error {
 	if m.claim.Locator == nil {
 		m.log.Info("supervise: probed with no process to probe; nothing to do")
+		return nil
+	}
+	if m.launchWaits() {
+		m.log.Info("supervise: the process a waiting launch replaces is not probed; its turn replaces that process",
+			"incarnation", m.claim.Locator.Incarnation, "due", m.wake.at)
 		return nil
 	}
 	observation, err := m.deps.Runtime.Probe(ctx, *m.claim.Locator)

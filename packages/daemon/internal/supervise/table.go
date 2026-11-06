@@ -2205,10 +2205,11 @@ func (m *Machine) takeSlotForUpdate(ctx context.Context, launching bool) error {
 // was opened over, and the sweep reads the round of every claim.
 //
 // A claim's own plugin round ends with the relaunch it was opened for: the worker has pushed its
-// work and answered, so the process is replaced now, through the path the stale-plugin lane used
-// to take at once (replaceProcess). PluginRelaunchFor records the contract this relaunch is made
-// for, as refreshPlugin records it, so a registration that still differs afterwards is charged
-// rather than relaunched again for free (staleRegistration).
+// work and answered, so the process is replaced now, through the path the stale-plugin lane
+// takes outside a round (replaceProcess). PluginRelaunchFor records the contract this relaunch
+// is made for, as relaunchStale records it, so a registration that still differs after the
+// relaunch has run is charged rather than relaunched again for free; one that arrives while the
+// relaunch still waits its turn in the wake pacing is neither (staleRegistration).
 //
 // A plugin round ends for nothing while its worker is in a turn, or while its answer is not
 // standing. That end keeps the claim's process and its pod, so what decides it is the claim as

@@ -189,6 +189,13 @@ func (m *Machine) holdStaleRelaunch(trigger string) {
 // turn is never waited out — and staleRegistration, whose own registration is refused in the same
 // decision. trigger names the pass that found the claim ("boot", "sweep", "registration"), for
 // the line it logs. refreshPlugin states what the relaunch does and what refuses it.
+//
+// PluginRelaunchFor is marked here, with the relaunch decided rather than with the process
+// started: the launch it makes can wait its turn in the wake pacing over the process it
+// replaces (reserveWake), and the mark is what keeps the registration that follows the relaunch
+// from being relaunched again for free (staleRegistration). A registration of the old process
+// that arrives inside that wait is no such registration, and staleRegistration's own guard is
+// where that is read.
 func (m *Machine) relaunchStale(ctx context.Context, trigger string) error {
 	if m.held == nil {
 		if err := m.checkLaunch(ctx); err != nil {
@@ -294,6 +301,19 @@ func refreshStalePlugin(m *Machine, ctx context.Context, ev Event) error {
 // opened for: it is asked like every other worker and answers either with the op or by ending
 // the turn its task starts (answerByTurnEnd), and the round's replacement brings the image
 // (internal/daemon's refreshStalePlugins, which posts no relaunch for it either).
+//
+// A registration that arrives while a launch the pacing holds waits over the process it comes
+// from relaunches nothing and is charged nothing. PluginRelaunchFor is written where the
+// relaunch is decided (relaunchStale, endPodUpdate), and the pacing can hold that relaunch over
+// the live old process for tens of minutes (reserveWake, parkWake); a process that reconnects
+// and re-registers on the old contract inside that wait would otherwise be read here as the
+// second stale registration in a row and walked toward failed for a relaunch that has not run
+// yet. The invariant the charged path rests on is that the mark names a relaunch that has
+// happened, and while launchWaits is true it names one that is still waiting its turn. The
+// registration is still refused, as every stale one is, so the agent exits rather than take
+// work on a contract this daemon does not speak, and the launch's turn replaces its process
+// (wakeNow). It is the guard judge makes of every observation of that same process, for the one
+// report that reaches a decision of its own instead.
 func (m *Machine) staleRegistration(ctx context.Context, got int) error {
 	if got == m.deps.PluginContract {
 		return m.endCurrentPluginRound(ctx)
@@ -307,6 +327,11 @@ func (m *Machine) staleRegistration(ctx context.Context, got int) error {
 		m.log.Error(NoPluginSourceMessage,
 			"incarnation", m.claim.Locator.Incarnation, "pluginContract", got, "daemonApiVersion", m.deps.PluginContract)
 		return nil
+	}
+	if m.launchWaits() {
+		m.log.Info("supervise: a registration on another plugin contract reached a claim whose relaunch waits its turn; that turn replaces this process and nothing is relaunched or charged here",
+			"pluginContract", got, "daemonApiVersion", m.deps.PluginContract, "due", m.wake.at)
+		return claim.StalePluginContract(got, m.deps.PluginContract)
 	}
 	var err error
 	if m.claim.PluginRelaunchFor == m.deps.PluginContract {

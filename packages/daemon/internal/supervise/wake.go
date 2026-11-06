@@ -4,10 +4,12 @@ package supervise
 // plugin wave starts a project's claims at the rate its operator set rather than all at once
 // (dispatch://INFRA-976). One wake is reserved at the gate (reserveWake), parked on the machine
 // until its turn (parkWake) and run when that turn comes (wakeNow); a request a person is waiting
-// on is let through unpaced (exemptWake), and one that reaches a claim a wake parked takes that
-// wake off the machine first and gives it back if it launched nothing (dropWakeFor, reparkWake).
-// Every wake writes one line as it runs, in a shape the daemon's own catch-up lane shares
-// (wakeRan, WakeRanMessage, WakeRanFields).
+// on is let through unpaced (exemptWake). A request that reaches a claim a wake parked over no
+// process takes that wake off the machine first and gives it back if it launched nothing
+// (dropWakeFor, reparkWake), and an operator's task over a launch parked above a process the
+// claim still records runs that launch there and then, unpaced (runParkedLaunchNow). Every wake
+// writes one line as it runs, in a shape the daemon's own catch-up lane shares (wakeRan,
+// WakeRanMessage, WakeRanFields).
 
 import (
 	"context"
@@ -173,15 +175,15 @@ func (m *Machine) reserveWake(ctx context.Context, kind WakeKind, exempt bool, r
 // What that claim does not keep is the four timers that watch the process this wake replaces: its
 // boot interval and its registration deadline (armBoot, armRegistration), the probe interval an
 // uncertain answer armed (judge), and the wait for the turn an acknowledged prompt began (acked).
-// Before this park, a death went straight to a launch and letGo disarmed all four with the
-// process; now the process is kept until the turn, and every one of those timers would fire into
-// the wait — the boot interval of a process that died while it booted charging a launch failure
-// of its own at each one, which is a claim failing before launch_failure_limit real failures
-// (judge's own guard answers what they report, and this keeps them from reporting). The turn
-// replaces the process and arms the new one's timers (launchNow, armBoot), and the runtime's
-// sweep still observes the process meanwhile. TimerSuspend is kept: a suspension held over this
-// claim is still bounded by the deadline its arrival set (holdSuspension), which the wake's turn
-// does not run.
+// The process is kept until the turn, so every one of those timers would otherwise fire into the
+// wait — the boot interval of a process that died while it booted charging a launch failure of
+// its own at each one, which is a claim failing before launch_failure_limit real failures
+// (judge's own guard answers what they report, and this keeps them from reporting, as probe's
+// own guard keeps the probe interval from being armed again inside the wait). The turn replaces
+// the process and arms the new one's timers (launchNow, armBoot), and the runtime's sweep still
+// observes the process meanwhile. TimerSuspend is kept: a suspension held over this claim is
+// still bounded by the deadline its arrival set (holdSuspension), which the wake's turn does not
+// run.
 func (m *Machine) parkWake(ctx context.Context, waiting *wake, after time.Duration) error {
 	m.wake = waiting
 	m.arm(TimerWake, after, "")
@@ -216,8 +218,9 @@ func (m *Machine) parkWake(ctx context.Context, waiting *wake, after time.Durati
 // Nothing is lost: the suspension stops the process, and the launch that resumes the claim
 // installs this daemon's plugin by itself, which is what the round would have asked for.
 //
-// Two things a launch's turn does before it launches, which together close the window over a
-// process the gate left running (reserveWake):
+// Two things a launch does before it launches, which together close the window over a process
+// the gate left running (reserveWake), and which runWake below takes for this turn and for an
+// operator's delivery alike:
 //
 //   - The tree lifecycle is rechecked (checkLaunch), because the turn can be tens of minutes after
 //     the check launchAfter made: an operator's close reserves its tree's cleanup before it stops
@@ -241,6 +244,21 @@ func wakeNow(m *Machine, ctx context.Context, _ Event) error {
 		}
 		return m.endHeld(ctx)
 	}
+	return m.runWake(ctx, waiting, true)
+}
+
+// runWake is everything a wake does once it is off the machine: the lifecycle recheck and the
+// take-back a launch makes first, the one line the wake writes, and the work itself. Its two
+// callers are the turn the pacing gave (wakeNow) and an operator's delivery, which runs a parked
+// launch where it arrives rather than let a person wait for that turn (runParkedLaunchNow); both
+// go through here so that the launch an operator's task starts is the same launch in every
+// step it takes, timers, charges and take-backs included.
+//
+// paced is whether the pacing decided when this wake ran, which is what the line says of it
+// (wakeRan): true of the turn, false of the launch a request pulled forward. The wait reported
+// is the whole of the hold either way — for the turn, the hold the pacing gave it; for a launch
+// a request pulled forward, how long it had been held when that request arrived.
+func (m *Machine) runWake(ctx context.Context, waiting *wake, paced bool) error {
 	if waiting.kind == WakeLaunch {
 		if err := m.checkLaunch(ctx); err != nil {
 			return m.relaunchRefused(ctx, waiting.again, err)
@@ -251,17 +269,18 @@ func wakeNow(m *Machine, ctx context.Context, _ Event) error {
 			}
 		}
 	}
-	m.wakeRan(waiting.kind, true, m.deps.Clock.Now().Sub(waiting.reserved))
+	m.wakeRan(waiting.kind, paced, m.deps.Clock.Now().Sub(waiting.reserved))
 	return waiting.run(ctx)
 }
 
 // wakeRan is the one line a wake writes, where it runs: at Info, so the production handler keeps
 // it, and in one shape whether the wake waited or not, because the operator counts the wakes of a
-// minute from it. kind is which wake it was, paced says whether the pacing could have held this
-// wake at all — false for the controller's own claim, for a request the pacing lets through, and
-// for a daemon whose rate is 0, which is the pacing off — and waitedFor is how long it was held,
-// left out of a wake that was not. rate and burst are the pace it was held to, so one line says
-// both what happened and what the operator set. The claim is the logger's own (NewMachine).
+// minute from it. kind is which wake it was, paced says whether the pacing decided when this
+// wake ran — false for the controller's own claim, for a request the pacing lets through, for a
+// daemon whose rate is 0, which is the pacing off, and for a parked launch an operator's task
+// ran before its turn (runParkedLaunchNow) — and waitedFor is how long it was held, left out of
+// a wake that was not. rate and burst are the pace it was held to, so one line says both what
+// happened and what the operator set. The claim is the logger's own (NewMachine).
 func (m *Machine) wakeRan(kind WakeKind, paced bool, waitedFor time.Duration) {
 	m.log.Info(WakeRanMessage, WakeRanFields(kind, paced, waitedFor, m.deps.WakePace.Rate, m.deps.WakePace.Burst)...)
 }
@@ -285,34 +304,24 @@ func WakeRanFields(kind WakeKind, paced bool, waitedFor time.Duration, rate, bur
 	return append(fields, "paced", paced, "rate", rate, "burst", burst)
 }
 
-// dropWakeFor is an operator's wake never waiting: a request the pacing lets through, reaching a
-// claim a paced wake parked, drops that wake and is then decided against the claim as it stands.
-// Parked over no process, the claim answers an operator's resume "the claim is not suspended" and
-// an operator's forget-session "the claim has a live process or launch", neither of which is true
-// of a claim that is only waiting its turn, and it queues an operator's own task behind that turn
-// where the claim the gate found would have launched for it at once (dropsWaitingWake,
-// deliverResuming).
+// dropWakeFor is an operator's wake never waiting over a claim the gate parked with no process
+// of its own: that park wrote the claim launching (parkWake), so the row the request reaches
+// would decide a claim that is only waiting its turn. An operator's resume is answered "the
+// claim is not suspended" and an operator's forget-session "the claim has a live process or
+// launch", neither of which is true of such a claim, and an operator's own task is queued behind
+// a turn that is tens of minutes away in a wave, where the claim the gate found would have
+// launched for it at once (dropsWaitingWake, deliverResuming). So the wake is taken off the
+// machine and the state the gate found is put back in memory, and the decision that follows
+// writes the claim — a resume, a retry, a spawn and an operator's delivery launch, and a
+// forget-session persists.
 //
-// There are two shapes of park and only one of them restores a state. A park over no process
-// wrote the claim launching (parkWake), so the state the gate found is put back in memory and the
-// decision that follows writes the claim — a resume, a retry, a spawn and an operator's delivery
-// launch, and a forget-session persists. A park over a process still running changed nothing at
-// all, and the state it recorded is the one the gate found rather than the one the claim is in
-// now — a turn may have started since — so nothing is restored there: the claim and its process
-// are left exactly as they stand and the row decides them so.
-//
-// An operator's own delivery is the one request that drops a wake parked over a live process
-// (operatorDelivery). A person is waiting on the task they have just given the claim, and R1
-// lets no request of theirs wait for a paced turn that is tens of minutes away in a wave; holding
-// the send is no answer either, since the task must not reach the process that launch is about to
-// let go (sendPending's launchWaits). With the wake gone no launch waits over this claim, so the
-// task goes to the process the claim records, which is what it is owed: nothing is replacing that
-// process any more. The launch the drop abandons is not owed back to the claim, because whatever
-// raised it raises it again — the stale-plugin sweep at its next tick (refreshPlugin), a stale
-// address at the next observation of it (repoint), and, for the one park whose process is gone
-// rather than running, the runtime's own sweep, which reports that death again and relaunches on
-// it (died). Every other request the pacing lets through meets such a claim as it always did:
-// the claim records a process, and every row already decides it as it stands.
+// A claim parked over a process it still records is dropped for nothing, whatever the request.
+// That park changed neither the claim nor the process, so every row already decides it as it
+// stands, and the wake still holds the only thing that retires that process: a launch whose turn
+// lets it go and arms the next process's timers (wakeNow, parkWake). The one request that may
+// not wait for the turn — an operator's task, which the send holds back while a launch waits
+// (sendPending's launchWaits) — runs that launch where it arrives rather than dropping it
+// (runParkedLaunchNow).
 //
 // The dropped wake's token is not handed back, since the limiter charges on the reserve, so every
 // wake behind it keeps the turn it already holds.
@@ -320,26 +329,66 @@ func WakeRanFields(kind WakeKind, paced bool, waitedFor time.Duration, rate, bur
 // The wake is returned so that a decision which launched nothing can take it up again
 // (reparkWake): a wake that waits must lose nothing, and a refusal, a named ignore or a
 // forget-session leaves the claim exactly where the gate found it, with the launch this wake
-// holds still owed to it. Only a park over no process is given back that way, which is what
-// reparkWake's own guard says.
+// holds still owed to it.
 //
 // A paced request drops nothing: a second wake request takes no second token, and the claim's
 // own wake is the launch it is asking for.
 func (m *Machine) dropWakeFor(ev Event) *wake {
-	live := m.claim.Locator != nil
-	if m.wake == nil || !dropsWaitingWake(ev) || (live && !operatorDelivery(ev)) {
+	if m.wake == nil || m.claim.Locator != nil || !dropsWaitingWake(ev) {
 		return nil
 	}
 	dropped := m.wake
 	request, _ := requestName(ev)
-	m.log.Info("supervise: a request that does not wait reached a claim the wake pacing holds; dropping the wake",
-		"request", request, "kind", dropped.kind, "due", dropped.at, "state", dropped.state, "process", live)
-	if !live {
-		m.claim.State = dropped.state
-	}
+	m.log.Info("supervise: a request that does not wait reached a claim the wake pacing holds over no process; dropping the wake",
+		"request", request, "kind", dropped.kind, "due", dropped.at, "state", dropped.state)
+	m.claim.State = dropped.state
 	m.disarm(TimerWake)
 	m.wake = nil
 	return dropped
+}
+
+// runParkedLaunchNow is an operator's task meeting a launch the pacing parked over the process
+// the claim still records: that launch runs here, unpaced, before the row that queues the task
+// (Handle). Both halves of what the operator is owed hold only this way. A person is waiting on
+// the task they have just given the claim, so it may not wait out a paced turn that is tens of
+// minutes away in a wave; and the task may not reach the process that launch is about to let go,
+// since the launch would kill the turn it had just begun and settle would retire the task as
+// served (sendPending's launchWaits, retirePending). Running the launch here leaves the claim
+// exactly where an unpaced daemon's would have left it — launching, over a process let go, with
+// the next one's timers armed — so the row the task then reaches queues it for the process this
+// launch starts (deliverLater), and it goes at that process's ready.
+//
+// Dropping the wake instead would leave the claim recording a process nothing retires: the park
+// disarmed that process's boot interval, registration deadline, probe interval and turn wait
+// (parkWake), the launch that was to replace it would be gone, and every report of it decides
+// nothing while no launch waits only because one does (judge). A death already charged would be
+// charged again at the next report of it (died, chargeDeath).
+//
+// Three things it does not touch. A plugin-task wake replaces no process and holds no send back,
+// so the claim it parks goes on taking work and the round opens at its own turn (launchWaits,
+// openPluginUpdateIfStale). A request the table refuses or ignores decides nothing, so it starts
+// no launch either: the row is read here, before anything runs, exactly as Handle reads it after.
+// And a claim holding a suspension is left to its hold: the turn of such a claim ends the
+// suspension rather than launching (wakeNow, endHeld), which is not what a task asks for, and the
+// task is queued and kept until the hold lifts whichever process the claim is running
+// (sendPending).
+//
+// The launch takes no second token — the reservation was taken once, at the gate — so the wakes
+// behind it keep the turns they already hold, and the line it writes says the pacing did not
+// decide when it ran (wakeRan, runWake).
+func (m *Machine) runParkedLaunchNow(ctx context.Context, ev Event) error {
+	if !operatorDelivery(ev) || !m.launchWaits() || m.claim.Locator == nil || m.held != nil {
+		return nil
+	}
+	if r, ok := table[key{m.claim.State, kindOf(ev)}]; !ok || r.act == nil {
+		return nil
+	}
+	waiting := m.wake
+	m.wake = nil
+	m.disarm(TimerWake)
+	m.log.Info("supervise: an operator's task reached a claim whose paced launch waits over the process it replaces; that launch runs now and the task goes to the process it starts",
+		"kind", waiting.kind, "due", waiting.at, "state", m.claim.State)
+	return m.runWake(ctx, waiting, false)
 }
 
 // reparkWake takes a dropped wake up again when the decision it was dropped for launched nothing
@@ -350,10 +399,9 @@ func (m *Machine) dropWakeFor(ev Event) *wake {
 // whatever is left of the wait: the token was taken once, so this costs nothing and the wakes
 // behind it keep their turns.
 //
-// A wake dropped over a process that still runs is not taken up again, which is what the locator
-// in the guard below says: an operator's delivery is the one request that drops such a wake, the
-// claim goes on running the process it records, and the lane that raised the launch raises it
-// again (dropWakeFor).
+// A claim that records a process takes no wake back, which is what the locator in the guard
+// below says: every wake dropped here was parked over no process, so a claim recording one is a
+// claim the decision launched (dropWakeFor).
 //
 // A write that fails is logged and changes no verdict: the request is answered as the table
 // answered it, and the claim stands as that answer left it, which is what a refusal leaves today.
@@ -370,16 +418,14 @@ func (m *Machine) reparkWake(ctx context.Context, dropped *wake) {
 	}
 }
 
-// dropsWaitingWake is whether ev is a request the wake pacing never makes wait over a parked
-// claim: every request exemptWake lets through, an operator's forget-session — which launches
-// nothing, but which a claim parked launching would refuse "the claim has a live process or
-// launch", and it has neither — and an operator's own delivery (operatorDelivery). The delivery
-// is here because the claim it reaches is parked in one of two ways, and both make it wait: over
-// no process, where a suspended claim parked by the rule's own resume answers a delivery by
-// queuing it behind that paced turn, while the state the gate found answers it by launching at
-// once (deliverResuming, revive); and over a process still running, where the send is held back
-// for the launch that is to replace it (sendPending's launchWaits). Only this request drops the
-// second kind, which dropWakeFor states.
+// dropsWaitingWake is whether ev is a request the wake pacing never makes wait over a claim it
+// parked with no process: every request exemptWake lets through, an operator's forget-session —
+// which launches nothing, but which a claim parked launching would refuse "the claim has a live
+// process or launch", and it has neither — and an operator's own delivery (operatorDelivery),
+// which a suspended claim parked by the rule's own resume would queue behind that paced turn
+// where the state the gate found launches for it at once (deliverResuming, revive). An
+// operator's delivery over a launch parked above a process the claim still records is none of
+// this: that launch runs where the task arrives instead (runParkedLaunchNow).
 //
 // The daemon's resume by rule is none of them: it meets a parked claim with "the claim runs:
 // nothing to resume" (nothingToDo), which is the truth — the wake the claim waits for is the
