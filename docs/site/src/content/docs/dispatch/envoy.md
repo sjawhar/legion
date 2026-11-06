@@ -488,9 +488,19 @@ limit at all. So a start and the keeper raise a `-1` or `0` to 24000 only on 2.1
 that 1000 is the limit sessions run into, and leave it as it is on an older server, which has no
 such limit to fix; a cap that is already a positive number below 24000 is raised on every server.
 The keeper reads the server's version on each pass, so a stream left as it is has its cap
-written at the first pass after the server is upgraded to 2.15. Setting the cap on a stream the
-server already holds needs nats-server v2.12.5 or later: every server before it refuses an
-update that changes `MaxConsumers` with
+written at the first pass after the server is upgraded to 2.15. That rule assumes a server
+configured as the hub's is: the 1000 is the NATS server's own server-wide default,
+`default_max_consumers`, and nothing in the listener checks it. A server started with
+`jetstream { limits { default_max_consumers: <n> } }`, or an account holding its own
+`max_consumers`, puts that number in place of the 1000; at `-1`, or at a number above 24000, a
+stream with no cap allows more consumers than this binary's cap, so a start and the keeper lower
+it to 24000 rather than raise it. No deployment described here sets either: the hub's
+`nats.conf` carries `max_file_store`, `max_memory_store` and `store_dir` and no `accounts`
+block. An operator who sets one of them and wants a larger limit sets it on the stream instead,
+with `nats stream edit ENVOY_NOTIFICATIONS --max-consumers=<n>` above 24000, which a start and
+the keeper leave as it is. Setting the cap on a stream the server already holds needs
+nats-server v2.12.5 or later: every server before it refuses an update that changes
+`MaxConsumers` with
 `nats: stream configuration update can not change MaxConsumers` (measured on v2.10.29, v2.11.0 and
 v2.12.0). That stops the listener's start with an error naming `max_consumers` and that version,
 and Dispatch's server, which keeps serving, retries the reconcile and logs

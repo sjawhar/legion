@@ -2861,7 +2861,7 @@ jobs:
       - name: Test the container-backed NATS matrix (natslive)
         run: |
           go test -count=1 -tags natslive ./internal/testnats/
-          go test -count=1 -timeout 5m -tags natslive -run '^TestAStartCapsAnUncappedStreamOnTheHubsServerAndIsRefusedOnTheOlderOne$' -v ./internal/bus/
+          go test -count=1 -timeout 5m -tags natslive -run '^TestAnUncappedStreamIsCappedOnTheHubsServerAndLeftAloneOnTheOlderOneWhereALowerCapIsRefused$' -v ./internal/bus/
         working-directory: packages/envoy
       - name: Isolation test for dev-broker.sh (fakes docker/go/curl; no real Postgres or network)
         run: bash scripts/dev-broker.test.sh

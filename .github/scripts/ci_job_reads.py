@@ -342,7 +342,7 @@ go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test 
 NATSLIVE_STEP = "Test the container-backed NATS matrix (natslive)"
 NATSLIVE_SCRIPT = """\
 go test -count=1 -tags natslive ./internal/testnats/
-go test -count=1 -timeout 5m -tags natslive -run '^TestAStartCapsAnUncappedStreamOnTheHubsServerAndIsRefusedOnTheOlderOne$' -v ./internal/bus/"""
+go test -count=1 -timeout 5m -tags natslive -run '^TestAnUncappedStreamIsCappedOnTheHubsServerAndLeftAloneOnTheOlderOneWhereALowerCapIsRefused$' -v ./internal/bus/"""
 PACK_STEP = "Pack envoy binaries"
 PACK_SCRIPT = """\
 for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do

@@ -25,7 +25,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/nats-io/nats.go"
 
@@ -96,24 +95,35 @@ func liveServerJetStream(t *testing.T, image string) (string, nats.JetStreamCont
 
 // What a stream carrying no consumer cap means is the server's, and this test puts both answers
 // to a real server. On the image the hub runs, nats-server 2.15.1, such a stream is capped at the
-// server's own default of 1000: a start raises it to the cap this binary compiles
-// (StreamMaxConsumers), and the keeper of the client it returns puts that cap back after an
-// operator lowers it. On the copy of nats:2.10 the same stream has no limit at all, and the two
-// subtests there hold the two halves of the gate this binary applies:
+// server's own default of 1000, so this binary raises it to the cap it compiles
+// (StreamMaxConsumers); on the copy of nats:2.10 the same stream has no limit at all, so the
+// binary leaves it exactly as it is. The gate between the two is serverDefaultsAnUnsetCap, read
+// from the version the connected server answers, and each case below says which direction of
+// that read it fails on:
 //
-//   - "a stream with no cap" proves the gate itself (serverDefaultsAnUnsetCap): the start writes
-//     no cap change, so it succeeds where a start of the branch without the gate was refused, and
-//     the stream still carries no cap once the keeper has had its periods;
-//   - "a deployed cap below the compiled one" proves the refusal: that stream's cap does bind its
-//     consumers on every server, so the start raises it, the server before streamMaxConsumersFloor
-//     refuses the update, and the refusal names the field, the cap asked for, the first server
-//     that can take the change (refusedSettings) and the server's own words, so an operator
-//     reading it knows both what was refused and what takes it.
+//   - on "hub", the start's raise and the keeper's raise of a cap an operator lowered to a
+//     positive value prove the raise and the keeper's period, and no more: a positive cap below
+//     the compiled one is raised whatever the gate answers;
+//   - on "hub", the keeper's raise of a cap the same operator then takes off altogether proves
+//     the gate's yes, and the keeper's own version read (keepPass) with it. The cap goes back to
+//     the -1 this server answers for a stream that sets none, and only a pass whose read makes
+//     2.15.1 a server that defaults an unset cap writes 24000 over it; a pass that read it
+//     wrongly leaves the stream at -1 and the wait runs out;
+//   - "2.10"/"a stream with no cap is left exactly as it is" proves the gate's no, in both
+//     halves of the pass. The cap stays as it was deployed, and the keeper logged no refusal
+//     while its periods ran: a pass that wrongly sent this server a raise has it refused, which
+//     leaves the cap at -1 for the first assertion to pass as well and is the only reason the
+//     second assertion exists, since that refusal reaches nothing but
+//     `envoy nats keeper could not restore the stream` at WARN;
+//   - "2.10"/"a deployed cap below the compiled one" proves the refusal: that stream's cap does
+//     bind its consumers on every server, so the start raises it, the server before
+//     streamMaxConsumersFloor refuses the update, and the refusal names the field, the cap asked
+//     for, the first server that can take the change (refusedSettings) and the server's own
+//     words, so an operator reading it knows both what was refused and what takes it.
 //
 // Neither the raise nor the refusal can be shown in this process: the module links nats-server
-// v2.10.29, and every in-process fixture deploys the stream already capped. The envoy-go CI job
-// runs this test by name (.github/workflows/ci.yaml), so the name stays as that step spells it.
-func TestAStartCapsAnUncappedStreamOnTheHubsServerAndIsRefusedOnTheOlderOne(t *testing.T) {
+// v2.10.29, and every in-process fixture deploys the stream already capped.
+func TestAnUncappedStreamIsCappedOnTheHubsServerAndLeftAloneOnTheOlderOneWhereALowerCapIsRefused(t *testing.T) {
 	t.Run("hub", func(t *testing.T) {
 		uri, js := liveServerJetStream(t, testnats.HubImage)
 		if deployed := deployStreamWithCap(t, js, 0); deployed != -1 && deployed != 0 {
@@ -141,13 +151,33 @@ func TestAStartCapsAnUncappedStreamOnTheHubsServerAndIsRefusedOnTheOlderOne(t *t
 		if _, err := js.UpdateStream(&lowered); err != nil {
 			t.Fatalf("operator lowering of the cap: %v", err)
 		}
-		awaitKept(t, js, Stream, "the consumer cap", func(info *nats.StreamInfo) bool {
+		raised := awaitKept(t, js, Stream, "the consumer cap", func(info *nats.StreamInfo) bool {
+			return info.Config.MaxConsumers == StreamMaxConsumers
+		})
+
+		// The same operator now takes the cap off instead of lowering it, which is the stream
+		// this binary raises only where the server caps it itself. This server takes a -1 and a
+		// 0 alike and answers -1 for both, normalising the 0 as it reads the update
+		// (server/stream.go:1992 in v2.15.1), so the update carries the -1 it answers, and the
+		// value the keeper reads back is the one a deployment that never set a cap leaves.
+		unset := raised.Config
+		unset.MaxConsumers = -1
+		off, err := js.UpdateStream(&unset)
+		if err != nil {
+			t.Fatalf("operator unsetting of the cap: %v", err)
+		}
+		if off.Config.MaxConsumers != -1 {
+			t.Fatalf("the stream's consumer cap after the operator unset it = %d, want the -1 this server answers for a stream with no cap", off.Config.MaxConsumers)
+		}
+		awaitKept(t, js, Stream, "the consumer cap over a stream the operator uncapped", func(info *nats.StreamInfo) bool {
 			return info.Config.MaxConsumers == StreamMaxConsumers
 		})
 	})
 
 	t.Run("2.10", func(t *testing.T) {
 		t.Run("a stream with no cap is left exactly as it is", func(t *testing.T) {
+			// Captured before the start, so every keeper pass of this subtest logs into it.
+			logs := captureLogs(t)
 			uri, js := liveServerJetStream(t, testnats.Image)
 			deployed := deployStreamWithCap(t, js, 0)
 			if deployed != -1 && deployed != 0 {
@@ -160,15 +190,14 @@ func TestAStartCapsAnUncappedStreamOnTheHubsServerAndIsRefusedOnTheOlderOne(t *t
 			}
 			t.Cleanup(client.Close)
 
-			// Three keeper periods, so the stream is read back after passes the keeper has run
-			// rather than before its first.
-			time.Sleep(3 * testKeepInterval)
-			left, err := js.StreamInfo(Stream)
-			if err != nil {
-				t.Fatalf("read the stream after the start: %v", err)
-			}
-			if left.Config.MaxConsumers != deployed {
-				t.Fatalf("the stream's consumer cap after the start and the keeper = %d, want the %d it was deployed with", left.Config.MaxConsumers, deployed)
+			heldFor(t, js, Stream, "the consumer cap", 6, func(info *nats.StreamInfo) bool {
+				return info.Config.MaxConsumers == deployed
+			})
+			// The cap above is unchanged whether the keeper sent nothing or sent a raise this
+			// server refused, and a refusal reaches no caller: the pass logs it and the next
+			// period tries again (keepPass). So the passes that just ran are read for it here.
+			if refusals := logs.recordsWithMsg(t, "envoy nats keeper could not restore the stream"); len(refusals) != 0 {
+				t.Fatalf("the keeper logged %v, want no pass that sent this server a cap change it refuses", refusals)
 			}
 		})
 
