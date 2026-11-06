@@ -39,14 +39,18 @@
 # stand-ins, and that one setting changed.
 #
 # Usage: packages/envoy/scripts/airlock-check.sh <id> [--keep-stack]
-#        <id> is k1, k2, k3, k4, k5, k8a or k15. k6, k7 and k9 are not implemented here yet and
-#        exit 3. --keep-stack leaves the stack and the work directory up for a person to look
-#        at a failure with. --help prints this usage. A usage error exits 2.
+#        <id> is k1, k2, k3, k4, k5, k6, k7, k8a, k9 or k15. --keep-stack leaves the stack and
+#        the work directory up for a person to look at a failure with. --help prints this usage.
+#        A usage error exits 2.
 #
-# Needs bash, curl, jq, go, python3, openssl, node and psql; k2 also needs gh (the last
-# released agent-secrets comes from a GitHub release) and k15 needs lake from the Lean
+# Needs bash, curl, jq, go, python3, openssl, node and psql; k2 and k7 also need gh (the last
+# released agent-secrets comes from a GitHub release, and k6's and k7's consumers come from
+# sjawhar/dotfiles), k6 and k7 need bun, wget, git, uv and the clients scripts/airlock-clients.sh
+# installs (az, gcloud, pulumi and boto3), k9 needs git, and k15 needs lake from the Lean
 # toolchain this environment names. DEV_BROKER_POSTGRES_URL is passed to dev-airlock.sh as it
 # is, so a pod with no container runtime names its test server there.
+#
+# k9 is a long run: ten minutes of connections and two stacks, about twenty-five minutes in all.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -60,12 +64,12 @@ usage: airlock-check.sh <id> [--keep-stack]
 Runs one before_merge check of dispatch://INFRA-1352/artifact/verification-md and prints, for
 each property the check's outcome sentence names, what it expected beside what it got.
 
-  <id>           k1, k2, k3, k4, k5, k8a or k15 (k6, k7 and k9 exit 3: not yet implemented)
+  <id>           k1, k2, k3, k4, k5, k6, k7, k8a, k9 or k15
   --keep-stack   leave the stack and this run's work directory up, to look at a failure with
   --help         print this
 
-It exits 0 only when every property passed, 1 when one did not, 2 on a usage error and 3 for a
-check this script does not implement yet.
+It exits 0 only when every property passed, 1 when one did not and 2 on a usage error. k9 takes
+about twenty-five minutes; every other check takes a few.
 EOF
 }
 
@@ -102,11 +106,7 @@ if [ -z "$CHECK_ID" ]; then
 fi
 
 case "$CHECK_ID" in
-k1 | k2 | k3 | k4 | k5 | k8a | k15) ;;
-k6 | k7 | k9)
-	echo "airlock-check: check $CHECK_ID is not yet implemented in this script" >&2
-	exit 3
-	;;
+k1 | k2 | k3 | k4 | k5 | k6 | k7 | k8a | k9 | k15) ;;
 *)
 	echo "airlock-check: $CHECK_ID is no check of this document; it holds k1, k2, k3, k4, k5, k6, k7, k8a, k9 and k15" >&2
 	usage >&2
@@ -1090,6 +1090,774 @@ check_k5() {
 }
 
 ###############################################################################################
+# k6
+###############################################################################################
+#
+# k6 drives real clients: the Azure CLI through sjawhar/dotfiles' scripts/az-broker, and the AWS
+# CLI and boto3 against the stack's stand-in AWS service. A Legion issue pod has neither az nor
+# boto3, so the check installs them with scripts/airlock-clients.sh, which pins a version and
+# checks its SHA-256 before anything of it runs, and reads that script's exports.
+#
+# Two things this stack cannot do, each named in the evidence of the property it belongs to
+# rather than dropped:
+#
+#   - `az login` begins by reading the tenant's OpenID configuration
+#     (GET /{tenant}/v2.0/.well-known/openid-configuration), and the stand-in Microsoft endpoint
+#     answers token requests alone and leaves every other path to the service's own fixed text,
+#     so az stops there. The five az-broker runs are made and what they reached is reported, and
+#     the exchange and the swap are then driven as az would have driven them.
+#   - the stand-in AWS service is told no session token (cmd/dev-airlock-stands has no flag for
+#     airlocktest.AWSOptions.SessionToken), while the stack's AWS secret has one, so it refuses
+#     every call that carries one.
+
+# k6_clients reads the exports of scripts/airlock-clients.sh, which installs az and boto3 at a
+# pinned, checked version. Its own lines go to this script's stderr; its stdout is the exports.
+k6_clients() {
+	echo "airlock-check: installing the pinned clients k6 drives (scripts/airlock-clients.sh)..." >&2
+	local exports
+	exports="$(bash "$SCRIPT_DIR/airlock-clients.sh")" || {
+		echo "airlock-check: scripts/airlock-clients.sh could not install the clients" >&2
+		exit 1
+	}
+	eval "$exports"
+	CLIENT_VERSIONS="az $(az version --output json 2>/dev/null | jq -r '."azure-cli"'), boto3 $("$AIRLOCK_BOTO3_PYTHON" -c 'import boto3; print(boto3.__version__)' 2>/dev/null), aws $(aws --version 2>&1 | cut -d' ' -f1)"
+}
+
+# approve_record approves one pending request on the broker's own page, as the person does: the
+# page sends a browser to the stack's issuer, which signs the approver in with no form to fill,
+# and the decision is posted back with an Origin header, which the page requires. curl's own
+# cookie jar cannot be used - both cookies are Secure and this broker is on http - so each
+# Set-Cookie is read out of the headers and sent back by hand.
+approve_record() { # <record id>
+	local rec="$1" d="$WORK_DIR/approve"
+	mkdir -p "$d"
+	curl -sS -D "$d/start" -o /dev/null "$AGENT_SECRETS_URL/approve/$rec"
+	local authorize signin callback session
+	authorize="$(sed -n 's/^Location: //p' "$d/start" | tr -d '\r')"
+	signin="$(sed -n 's/^Set-Cookie: \(__Host-broker-signin=[^;]*\).*/\1/p' "$d/start" | tr -d '\r')"
+	[ -n "$authorize" ] || return 1
+	curl -sS -D "$d/authorize" -o /dev/null "$authorize"
+	callback="$(sed -n 's/^Location: //p' "$d/authorize" | tr -d '\r')"
+	curl -sS -D "$d/callback" -o /dev/null -H "Cookie: $signin" "$callback"
+	session="$(sed -n 's/^Set-Cookie: \(__Host-broker-session=[^;]*\).*/\1/p' "$d/callback" | tr -d '\r')"
+	[ -n "$session" ] || return 1
+	curl -sS -H "Cookie: $session" -o "$d/page.html" "$AGENT_SECRETS_URL/approve/$rec"
+	local field
+	field() { sed -n "s/.*name=\"$1\" value=\"\([^\"]*\)\".*/\1/p" "$d/page.html" | head -n 1; }
+	curl -sS -o "$d/decided.html" -w '%{http_code}' -H "Cookie: $session" -H "Origin: $AGENT_SECRETS_URL" \
+		--data-urlencode "decision=approve" --data-urlencode "record=$(field record)" \
+		--data-urlencode "printed=$(field printed)" --data-urlencode "token=$(field token)" \
+		--data-urlencode "expires=$(field expires)" "$AGENT_SECRETS_URL/approve" >>"$d/decisions"
+	echo >>"$d/decisions"
+}
+
+# approve_watch is the approver sitting at the page while a command waits: it reads the record
+# ids out of the CLI's own stderr, where each pending request prints its page, and approves each
+# one once. A pod session has no operator and the broker takes this decision on its page alone,
+# so this is the only way a human-tier name is released to a check.
+approve_watch() { # <the file the CLI's stderr goes to>
+	local log="$1" seen=" " rec
+	while :; do
+		for rec in $(grep -o '/approve/[0-9a-f]\{64\}' "$log" 2>/dev/null | sed 's|/approve/||' | sort -u); do
+			case "$seen" in *" $rec "*) continue ;; esac
+			seen="$seen$rec "
+			approve_record "$rec" >/dev/null 2>&1 || true
+		done
+		sleep 1
+	done
+}
+
+# k6_azure_wrapper writes the `az` this check puts first on PATH. The stand-in Microsoft
+# endpoint and the stand-in Resource Manager are .test names of this stack's own, and az reaches
+# the endpoints of a cloud, so az has to be told a cloud whose endpoints are those two names.
+# az-broker makes its own AZURE_CONFIG_DIR and logs in at once, leaving no moment to register a
+# cloud in it, so the registration is here: this wrapper registers the cloud in whatever
+# directory az-broker made and then runs the real az with the arguments it was given.
+k6_azure_wrapper() {
+	mkdir -p "$WORK_DIR/k6/bin"
+	cat >"$WORK_DIR/k6/bin/az" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+if [ -n "\${AZURE_CONFIG_DIR:-}" ] && [ ! -f "\$AZURE_CONFIG_DIR/clouds.config" ]; then
+  "$REAL_AZ" cloud register -n airlock --skip-endpoint-discovery \\
+    --endpoint-active-directory "$AIRLOCK_MICROSOFT_URL" \\
+    --endpoint-active-directory-resource-id "$AIRLOCK_AZURE_RESOURCE_URL/" \\
+    --endpoint-active-directory-graph-resource-id "$AIRLOCK_AZURE_RESOURCE_URL/" \\
+    --endpoint-resource-manager "$AIRLOCK_AZURE_RESOURCE_URL/" \\
+    --endpoint-management "$AIRLOCK_AZURE_RESOURCE_URL/" \\
+    --endpoint-gallery "$AIRLOCK_AZURE_RESOURCE_URL/" \\
+    --suffix-storage-endpoint core.windows.net >/dev/null
+  "$REAL_AZ" cloud set -n airlock >/dev/null
+fi
+exec "$REAL_AZ" "\$@"
+EOF
+	chmod +x "$WORK_DIR/k6/bin/az"
+}
+
+# k6_azure runs the five az-broker runs and then the exchange and the five Resource Manager
+# calls, and leaves what it saw in K6_AZ_*.
+k6_azure() {
+	local d="$WORK_DIR/k6"
+	mkdir -p "$d"
+	gh api repos/sjawhar/dotfiles/contents/scripts/az-broker -H 'Accept: application/vnd.github.raw' >"$d/az-broker" || {
+		echo "airlock-check: sjawhar/dotfiles scripts/az-broker could not be fetched" >&2
+		return 1
+	}
+	chmod +x "$d/az-broker"
+	REAL_AZ="$(command -v az)"
+	k6_azure_wrapper
+
+	local microsoft_before
+	microsoft_before="$(records_count microsoft)"
+	: >"$d/cli.err"
+	approve_watch "$d/cli.err" &
+	local watcher=$!
+	HELPER_PIDS+=("$watcher")
+
+	# The five runs. AZ_BROKER_INNER=1 and AZURE_ADMIN are what az-broker's own first hop
+	# produces: that hop is `secret-run AZURE_ADMIN -- az-broker`, and secret-run is check k7's
+	# subject and needs a dotfiles checkout this pod has not got, so the check runs the half of
+	# az-broker that drives az, under the release that hop would have made.
+	local run
+	: >"$d/runs.log"
+	for run in 1 2 3 4 5; do
+		echo "=== run $run ===" >>"$d/runs.log"
+		PATH="$d/bin:$PATH" agent-secrets AIRLOCK_AZURE_LOGIN --ttl 1h --wait 5m -- sh -c '
+			export AZURE_ADMIN="$AIRLOCK_AZURE_LOGIN" AZ_BROKER_INNER=1
+			exec bash '"$d"'/az-broker -- az group list -o json' >>"$d/runs.log" 2>>"$d/cli.err"
+		echo "exit $?" >>"$d/runs.log"
+	done
+	K6_AZ_RUNS="$(grep -c '^exit ' "$d/runs.log")"
+	K6_AZ_FAILED="$(grep -c '^exit [^0]' "$d/runs.log" || true)"
+	K6_AZ_ERROR="$(grep -m1 '^ERROR' "$d/cli.err" | tr -d '\r')"
+	K6_AZ_REACHED="$(records "microsoft" | jq -r --argjson n "$microsoft_before" '[.[$n:][] | .method + " " + .path] | unique | join("; ")')"
+
+	# The exchange and the swap, driven as az would have driven them: the token request az's
+	# library posts once it has read the configuration, and then the five calls to the Resource
+	# Manager, each on a connection of its own so the front gives them to both processes.
+	local exchange_before
+	exchange_before="$(records_count microsoft)"
+	cat >"$d/azure-steps.sh" <<EOF
+set -u
+out=$d/azure-out
+: >"\$out"
+tenant=\$(printf '%s' "\$AIRLOCK_AZURE_LOGIN" | jq -r .tenant_id)
+client=\$(printf '%s' "\$AIRLOCK_AZURE_LOGIN" | jq -r .client_id)
+printf '%s' "\$AIRLOCK_AZURE_LOGIN" | jq -r .federated_token >$d/assertion
+curl -sS -X POST "$AIRLOCK_MICROSOFT_URL/\$tenant/oauth2/v2.0/token" \\
+  --data-urlencode "grant_type=client_credentials" \\
+  --data-urlencode "client_id=\$client" \\
+  --data-urlencode "scope=$AIRLOCK_AZURE_RESOURCE_URL/.default" \\
+  --data-urlencode "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \\
+  --data-urlencode "client_assertion=\$(cat $d/assertion)" >$d/token-answer.json
+jq -r '.access_token // ""' $d/token-answer.json >$d/access
+for i in 1 2 3 4 5; do
+  printf 'arm%s=%s\n' "\$i" "\$(curl -sS -o /dev/null -w %{http_code} -H "Authorization: Bearer \$(cat $d/access)" "$AIRLOCK_AZURE_RESOURCE_URL/subscriptions?api-version=2022-12-01")" >>"\$out"
+done
+EOF
+	agent-secrets AIRLOCK_AZURE_LOGIN --ttl 1h --wait 5m -- bash "$d/azure-steps.sh" >>"$d/runs.log" 2>>"$d/cli.err"
+	kill "$watcher" 2>/dev/null || true
+
+	local recs
+	recs="$(records microsoft | jq --argjson n "$exchange_before" '.[$n:]')"
+	K6_AZ_ASSERTION="$(printf '%s' "$recs" | jq -r '[.[] | select(.path | endswith("/token")) | .body | capture("client_assertion=(?<a>[^&]*)") | .a] | .[0] // ""')"
+	# The form's own percent-encoding: a JWT holds none of the characters a form escapes but
+	# the "=" of its padding, and the comparison is against the stack's own token.
+	K6_AZ_ASSERTION="${K6_AZ_ASSERTION//%3D/=}"
+	K6_AZ_ACCESS="$(cat "$d/access" 2>/dev/null)"
+	mapfile -t K6_AZ_ARM_HEADERS < <(printf '%s' "$recs" | jq -r '.[] | select(.path == "/subscriptions") | .header.Authorization // [] | .[]')
+	K6_AZ_ARM_STATUS="$(tr '\n' ' ' <"$d/azure-out" 2>/dev/null)"
+	K6_AZ_EXCHANGES="$(printf '%s' "$recs" | jq '[.[] | select(.path | endswith("/token"))] | length')"
+	K6_AZ_SERVED="$(for log in "$AIRLOCK_DIR"/broker*.log; do printf '%s:%s ' "${log##*/}" "$(grep -c 'a call to a bound host' "$log")"; done)"
+}
+
+# k6_aws runs the AWS CLI's three calls and boto3's two against the stand-in AWS service.
+k6_aws() {
+	local d="$WORK_DIR/k6"
+	mkdir -p "$d"
+	head -c 102400 /dev/urandom >"$d/100k.bin"
+	# The name has a hyphen in it on purpose: a file called boto3.py in the program's own
+	# directory is what `import boto3` would find.
+	cat >"$d/aws-boto3.py" <<'PY'
+"""k6's two boto3 steps against the stand-in AWS service: a chunk-signed upload, whose seed
+signature covers the streaming payload constant and whose body carries a signature per chunk
+chained from it, and a presigned URL. The airlock refuses both by name, and that refusal is what
+this program reports."""
+
+import hashlib
+import hmac
+import json
+import os
+import ssl
+import sys
+import urllib.request
+
+import boto3
+import botocore
+from botocore.auth import AUTH_TYPE_MAPS, S3SigV4Auth
+
+STREAMING = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"
+ENDPOINT, OUT = sys.argv[1], sys.argv[2]
+BODY = b"k6 chunk-signed upload " * 1024
+result = {"boto3": boto3.__version__, "botocore": botocore.__version__}
+
+
+class ChunkSignedAuth(S3SigV4Auth):
+    """The seed signature of a chunk-signed upload: the canonical request's payload hash is the
+    streaming constant, which is what says every chunk carries a signature of its own."""
+
+    def payload(self, request):
+        return STREAMING
+
+
+def sign(key, message):
+    return hmac.new(key, message.encode(), hashlib.sha256).digest()
+
+
+def text(value):
+    return value.decode() if isinstance(value, bytes) else value
+
+
+def frame(request, **_):
+    """Replace the body with the aws-chunked framing a chunk-signed upload sends: each chunk's
+    signature chained from the seed signature in the Authorization header."""
+    authorization = text(request.headers["Authorization"])
+    credential = authorization.split("Credential=")[1].split(",")[0]
+    seed = authorization.split("Signature=")[1].strip()
+    _, date, region, service, _ = credential.split("/")
+    stamp = text(request.headers["X-Amz-Date"])
+    scope = "/".join([date, region, service, "aws4_request"])
+    secret = os.environ["AWS_SECRET_ACCESS_KEY"]
+    signing = sign(sign(sign(sign(("AWS4" + secret).encode(), date), region), service), "aws4_request")
+    empty = hashlib.sha256(b"").hexdigest()
+    framed, previous = b"", seed
+    for chunk in (BODY, b""):
+        to_sign = "\n".join(
+            ["AWS4-HMAC-SHA256-PAYLOAD", stamp, scope, previous, empty, hashlib.sha256(chunk).hexdigest()]
+        )
+        signature = hmac.new(signing, to_sign.encode(), hashlib.sha256).hexdigest()
+        framed += f"{len(chunk):x};chunk-signature={signature}\r\n".encode() + chunk + b"\r\n"
+        previous = signature
+    request.body = framed
+    request.headers["Content-Length"] = str(len(framed))
+    result["chunks"], result["decoded_length"] = 2, len(BODY)
+
+
+def chunk_headers(params, **_):
+    params["headers"]["Content-Encoding"] = "aws-chunked"
+    params["headers"]["x-amz-decoded-content-length"] = str(len(BODY))
+
+
+def capture(response_dict=None, **_):
+    if response_dict:
+        body = response_dict.get("body") or b""
+        result["chunk_answer"] = f"{response_dict.get('status_code')} {body[:400].decode(errors='replace')}".strip()
+
+
+AUTH_TYPE_MAPS["s3v4"] = ChunkSignedAuth
+signed = botocore.config.Config(signature_version="s3v4")
+client = boto3.client("s3", endpoint_url=ENDPOINT, region_name="us-east-1", config=signed)
+client.meta.events.register("before-call.s3.PutObject", chunk_headers)
+client.meta.events.register("before-send.s3.PutObject", frame)
+client.meta.events.register("response-received.s3.PutObject", capture)
+try:
+    client.put_object(Bucket="airlock-bucket", Key="k6-chunked", Body=BODY)
+    result["chunk_signed"] = "the upload was not refused"
+except Exception as refusal:  # noqa: BLE001 - the refusal is the result
+    result["chunk_signed"] = str(refusal)
+
+AUTH_TYPE_MAPS["s3v4"] = S3SigV4Auth
+plain = boto3.client("s3", endpoint_url=ENDPOINT, region_name="us-east-1", config=signed)
+url = plain.generate_presigned_url("get_object", Params={"Bucket": "airlock-bucket", "Key": "k6-100k.bin"})
+result["presigned_query"] = sorted(part.split("=")[0] for part in url.split("?", 1)[1].split("&"))
+opener = urllib.request.build_opener(
+    urllib.request.ProxyHandler({"https": os.environ["HTTPS_PROXY"]}),
+    urllib.request.HTTPSHandler(context=ssl.create_default_context(cafile=os.environ["AWS_CA_BUNDLE"])),
+)
+try:
+    with opener.open(url, timeout=30) as answer:
+        result["presigned"] = f"{answer.status} {answer.read(400).decode(errors='replace')}"
+except Exception as refusal:  # noqa: BLE001 - the refusal is the result
+    body = refusal.read(400).decode(errors="replace") if hasattr(refusal, "read") else ""
+    result["presigned"] = f"{refusal} {body}".strip()
+
+with open(OUT, "w") as answer:
+    json.dump(result, answer)
+PY
+	local aws_before
+	aws_before="$(records_count aws)"
+	cat >"$d/aws-steps.sh" <<EOF
+set -u
+out=$d/aws-out
+: >"\$out"
+export AWS_DEFAULT_REGION=us-east-1
+say() { printf '%s\n' "\$1" >>"\$out"; }
+say "sts=\$(aws --endpoint-url $AIRLOCK_AWS_URL sts get-caller-identity 2>&1 | tail -n 1 | tr -d '\r')"
+say "ls=\$(aws --endpoint-url $AIRLOCK_AWS_URL s3 ls 2>&1 | tail -n 1 | tr -d '\r')"
+say "cp=\$(aws --endpoint-url $AIRLOCK_AWS_URL s3 cp $d/100k.bin s3://airlock-bucket/k6-100k.bin 2>&1 | tail -n 1 | tr -d '\r')"
+$AIRLOCK_BOTO3_PYTHON $d/aws-boto3.py $AIRLOCK_AWS_URL $d/boto3.json >$d/boto3.log 2>&1
+echo "boto3 exit \$?" >>$d/boto3.log
+EOF
+	agent-secrets AIRLOCK_AWS_KEY --ttl 30m -- bash "$d/aws-steps.sh" >>"$d/runs.log" 2>>"$d/cli.err"
+
+	declare -gA K6AWS
+	local key value
+	while IFS='=' read -r key value; do K6AWS["$key"]="$value"; done <"$d/aws-out"
+	K6_AWS_RECS="$(records aws | jq --argjson n "$aws_before" '.[$n:]')"
+	K6_AWS_CALLS="$(printf '%s' "$K6_AWS_RECS" | jq 'length')"
+	K6_AWS_TOKENS="$(printf '%s' "$K6_AWS_RECS" | jq -r '[.[] | .header["X-Amz-Security-Token"] // [] | .[]] | unique | length')"
+	K6_AWS_KEYIDS="$(printf '%s' "$K6_AWS_RECS" | jq -r '[.[] | .header.Authorization // [] | .[] | capture("Credential=(?<k>[^/]*)/") | .k] | unique | join(",")')"
+	K6_AWS_PLACEHOLDERS="$(printf '%s' "$K6_AWS_RECS" | jq '[.[] | select(((.header | tostring) + .query) | contains("agent-secrets-placeholder"))] | length')"
+	K6_AWS_REFUSED="$(printf '%s' "$K6_AWS_RECS" | jq -r '[.[] | .path] | join(" ")')"
+	K6_AWS_CHUNK="$(jq -r '.chunk_answer // .chunk_signed // ""' "$d/boto3.json" 2>/dev/null)"
+	K6_AWS_PRESIGNED="$(jq -r '.presigned // ""' "$d/boto3.json" 2>/dev/null)"
+	K6_AWS_BOTO3="$(jq -c '{boto3, botocore, chunks, decoded_length, presigned_query}' "$d/boto3.json" 2>/dev/null)"
+	K6_AWS_BOTO3_LOG="$(tail -n 3 "$d/boto3.log" 2>/dev/null | tr '\n' ' ')"
+}
+
+check_k6() {
+	expect "the stand-in token endpoint gets the real federated token"
+	expect "az gets a placeholder access token"
+	expect "the stand-in Resource Manager gets a real access token in Authorization on all five runs, whichever process served each call"
+	expect "the stand-in AWS service accepts each signature of the STS call, the list and the upload, with the real session token, and finds no placeholder in them"
+	expect "the chunk-signed upload and the presigned URL get an error that names them"
+	expect "the negative control, with the exchange and the signing turned off (dev-airlock.sh --no-kind), gives the token endpoint the placeholder and makes the stand-in AWS service reject every signature"
+
+	k6_clients
+	start_stack
+	stack_facts
+	observe "the clients this run drove: $CLIENT_VERSIONS, each installed by scripts/airlock-clients.sh at a pinned version whose SHA-256 it checked"
+
+	k6_azure
+	local federated access_shape
+	federated="$(cat "$AIRLOCK_DIR/azure-identity-token")"
+	access_shape="$(shape "$K6_AZ_ACCESS")"
+	observe "the five az-broker runs: $K6_AZ_RUNS runs, $K6_AZ_FAILED of them non-zero; what they reached on the Microsoft stand-in was $K6_AZ_REACHED, and az said: $K6_AZ_ERROR"
+	observe "the exchange: the token endpoint was asked $K6_AZ_EXCHANGES times and its client_assertion was $(shape "$K6_AZ_ASSERTION") against the stack's own federated token $(shape "$federated") (compared by SHA-256 and length)"
+	observe "the answer the command got carried an access token of $access_shape, which opens 'agent-secrets-placeholder': $(contains agent-secrets-placeholder "$K6_AZ_ACCESS" && echo yes || echo no)"
+	observe "the five Resource Manager calls answered $K6_AZ_ARM_STATUS and their Authorization headers were: $(for h in "${K6_AZ_ARM_HEADERS[@]+"${K6_AZ_ARM_HEADERS[@]}"}"; do printf '%s; ' "$(shape "$h")"; done)"
+	observe "the brokers' own logs of calls to a bound host, which is how many each process served: $K6_AZ_SERVED"
+
+	judge "$([ "$K6_AZ_EXCHANGES" -gt 0 ] && contains "$federated" "$K6_AZ_ASSERTION" && echo 0 || echo 1)" \
+		"the stand-in token endpoint gets the real federated token" \
+		"its client_assertion is the stack's own federated token by SHA-256 and length ($(shape "$K6_AZ_ASSERTION")), over $K6_AZ_EXCHANGES exchanges"
+
+	fail "az gets a placeholder access token — this step cannot run on this stack. Each of the $K6_AZ_RUNS az-broker runs reached the stand-in Microsoft endpoint and stopped at the first call az makes, GET /{tenant}/v2.0/.well-known/openid-configuration ($K6_AZ_REACHED), because airlocktest.MicrosoftStand answers token requests alone (its isTokenRequest) and leaves every other path to the service's own fixed text, so az read '$K6_AZ_ERROR'. It needs cmd/dev-airlock-stands' Microsoft stand to answer the tenant's OpenID configuration document. What az would have been answered was driven in its place: the same token request, posted under the same grant, was answered an access token of $access_shape that opens 'agent-secrets-placeholder' ($(contains agent-secrets-placeholder "$K6_AZ_ACCESS" && echo yes || echo no)), and no real access token reached the command."
+
+	local arm_calls=0 arm_real=0 header
+	for header in "${K6_AZ_ARM_HEADERS[@]+"${K6_AZ_ARM_HEADERS[@]}"}"; do
+		arm_calls=$((arm_calls + 1))
+		contains "agent-secrets-placeholder" "$header" || arm_real=$((arm_real + 1))
+	done
+	judge "$([ "$arm_calls" = 5 ] && [ "$arm_real" = 5 ] && [ "$(echo "$K6_AZ_SERVED" | tr ' ' '\n' | grep -c ':[1-9]')" -ge 2 ] && echo 0 || echo 1)" \
+		"the stand-in Resource Manager gets a real access token in Authorization on all five runs, whichever process served each call" \
+		"$arm_real of $arm_calls calls carried a token that is no placeholder, each answered by whichever broker the front gave its connection to ($K6_AZ_SERVED); the five calls are the ones the azure-access placeholder was spent on, az having stopped at the configuration document"
+
+	k6_aws
+	local aws_secret aws_session
+	aws_secret="$(stored_value "${STACK_SECRETS_PREFIX}airlock-aws-key")"
+	aws_session="$(printf '%s' "$aws_secret" | jq -r .session_token)"
+	observe "the AWS CLI: sts said '${K6AWS[sts]}'; s3 ls said '${K6AWS[ls]}'; s3 cp said '${K6AWS[cp]}'"
+	observe "the stand-in AWS service recorded $K6_AWS_CALLS calls on $K6_AWS_REFUSED; the Credential of each named the key id '$K6_AWS_KEYIDS' and the real key id is '$AIRLOCK_AWS_KEY_ID'; $K6_AWS_PLACEHOLDERS of them carried a placeholder in a header or the query"
+	observe "boto3: $K6_AWS_BOTO3 (its own last lines: $K6_AWS_BOTO3_LOG)"
+	observe "the chunk-signed upload got: $K6_AWS_CHUNK"
+	observe "the presigned URL got: $K6_AWS_PRESIGNED"
+
+	local accepted
+	accepted="$(printf '%s' "$K6_AWS_RECS" | jq '[.[] | select(.path != "")] | length')"
+	if contains "X-Amz-Security-Token" "${K6AWS[sts]}" || contains "403" "${K6AWS[sts]}"; then
+		fail "the stand-in AWS service accepts each signature of the STS call, the list and the upload, with the real session token, and finds no placeholder in them — this step cannot run on this stack. The proxy signed each of the $accepted calls again with the real key: every Credential the stand-in recorded names the real key id ($K6_AWS_KEYIDS against $AIRLOCK_AWS_KEY_ID) and $K6_AWS_PLACEHOLDERS of them carried a placeholder. The stand-in refuses them for the session token alone: dev-airlock.sh's AWS secret holds one ($(shape "$aws_session")) and cmd/dev-airlock-stands has no flag for airlocktest.AWSOptions.SessionToken, so its stand verifies against the empty session token and answers 'X-Amz-Security-Token = ...; want \"\"'. It needs that command to take the session token its own fake secret store hands out. The three calls said: '${K6AWS[sts]}' / '${K6AWS[ls]}' / '${K6AWS[cp]}'."
+	else
+		judge "$([ "$K6_AWS_PLACEHOLDERS" = 0 ] && [ "$accepted" -ge 3 ] && contains "$AIRLOCK_AWS_KEY_ID" "$K6_AWS_KEYIDS" && echo 0 || echo 1)" \
+			"the stand-in AWS service accepts each signature of the STS call, the list and the upload, with the real session token, and finds no placeholder in them" \
+			"$accepted calls verified against the real key id $K6_AWS_KEYIDS, with $K6_AWS_PLACEHOLDERS placeholders among them"
+	fi
+
+	judge "$(contains "refusing a chunk-signed upload" "$K6_AWS_CHUNK" && contains "refusing a presigned URL" "$K6_AWS_PRESIGNED" && echo 0 || echo 1)" \
+		"the chunk-signed upload and the presigned URL get an error that names them" \
+		"the upload was refused '$(printf '%s' "$K6_AWS_CHUNK" | head -c 120)…' and the presigned URL '$(printf '%s' "$K6_AWS_PRESIGNED" | head -c 120)…'"
+
+	stop_stack
+
+	# The negative control: a stack whose every rules entry reads as having no kind, so the azure
+	# exchange and the AWS signing are both off.
+	start_stack --no-kind
+	stack_facts
+	k6_azure
+	k6_aws
+	local control_federated
+	control_federated="$(cat "$AIRLOCK_DIR/azure-identity-token")"
+	control "with --no-kind (BROKER_AIRLOCK_TEST_NO_KIND=true) the token endpoint's client_assertion was $(shape "$K6_AZ_ASSERTION"), against the real federated token $(shape "$control_federated") and a placeholder: it opens 'agent-secrets-placeholder': $(contains agent-secrets-placeholder "$K6_AZ_ASSERTION" && echo yes || echo no)"
+	control "with --no-kind the stand-in AWS service recorded $K6_AWS_CALLS calls, $K6_AWS_PLACEHOLDERS of them carrying a placeholder in a header or the query, and the key ids their Credentials named were '$K6_AWS_KEYIDS' against the real '$AIRLOCK_AWS_KEY_ID'; sts said '${K6AWS[sts]}'"
+	judge "$(contains "agent-secrets-placeholder" "$K6_AZ_ASSERTION" && [ "$K6_AWS_PLACEHOLDERS" = "$K6_AWS_CALLS" ] && [ "$K6_AWS_CALLS" -gt 0 ] && contains "placeholder" "${K6AWS[sts]}" && echo 0 || echo 1)" \
+		"negative control: with the exchange and the signing turned off the token endpoint gets the placeholder and the AWS service rejects every signature" \
+		"the assertion the endpoint got was the grant's placeholder, and all $K6_AWS_PLACEHOLDERS of the $K6_AWS_CALLS calls the stand-in recorded carried a placeholder, where the same runs with the kinds on carry none; the stand-in refused each of them, sts with '${K6AWS[sts]}'"
+
+	stop_stack
+}
+
+###############################################################################################
+# k7
+###############################################################################################
+#
+# k7 drives the consumers as they run, against real services, with fake values: the refusal each
+# real service answers is the evidence, not a failure. The consumers come from sjawhar/dotfiles
+# at main and nothing of them is rewritten; what this check adds around them is a DOTFILES_DIR
+# of its own holding the files they read of each other (scripts/secret-run-reason and
+# agent-secrets/broker-url.sh), because secret-run resolves both relative to its own directory.
+#
+# The names are the consumers' own - GITHUB_ADMIN_PAT, GCLOUD_SAMI, GWS_THEOREM_READ_OAUTH and
+# the rest - and the hosts are the real ones, so this check needs a rules file the stack's does
+# not hold. That is one broker process of this check's own, on the stack's own database, store,
+# certificate authority and stand-ins, with its rules file, its own two ports and its own public
+# URL changed - the same device k4's control uses for one setting, with the public URL changed
+# too because this broker must serve the release as well as the proxy, and a session's proof is
+# verified against the public URL it was signed for. Its whole environment is the first stack
+# broker's own, read out of /proc/<pid>/environ, so nothing of the stack's settings is left out.
+#
+# The pod sets NO_PROXY=* and GIT_CONFIG_COUNT=5 with a GitHub credential helper. NO_PROXY=* is
+# left exactly as it is: the CLI must drop it, and that it does is part of what this check
+# proves. The git credential settings are cleared for the git step alone, which brings its own
+# helper - the one that answers the placeholder - and the proxy in git's own configuration.
+
+# k7_dotfiles fetches the consumers from sjawhar/dotfiles at main and lays them out as a
+# dotfiles checkout, which is how secret-run finds its reason builder and its broker URL file.
+k7_dotfiles() {
+	local d="$WORK_DIR/k7/dotfiles" path
+	mkdir -p "$d/scripts" "$d/agent-secrets" "$d/shims" "$d/gws"
+	for path in scripts/secret-run scripts/secret-run-reason scripts/gcloud-broker scripts/gh-agent-config scripts/public-text-gate shims/gh gws/accounts.json agent-secrets/broker-url.sh; do
+		gh api "repos/sjawhar/dotfiles/contents/$path" -H 'Accept: application/vnd.github.raw' >"$d/$path" || {
+			echo "airlock-check: sjawhar/dotfiles $path could not be fetched" >&2
+			return 1
+		}
+	done
+	chmod +x "$d/scripts/secret-run" "$d/scripts/secret-run-reason" "$d/scripts/gcloud-broker" \
+		"$d/scripts/gh-agent-config" "$d/scripts/public-text-gate" "$d/shims/gh"
+	K7_DOTFILES="$d"
+	K7_FETCHED="$(cd "$d" && find . -type f | sed 's|^\./||' | sort | tr '\n' ' ')"
+}
+
+# k7_broker starts the one broker this check's steps run through: the stack's first broker's own
+# environment with the rules file, the two listening addresses and the public URL replaced.
+k7_broker() {
+	local d="$WORK_DIR/k7" pid api proxy
+	pid="$(sed -n 's/^  broker [0-9]*:.*pid \([0-9]*\),.*/\1/p' "$STACK_LOG" | head -n 1)"
+	api="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+	proxy="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+	K7_API_URL="http://127.0.0.1:$api"
+	K7_PROXY_URL="http://127.0.0.1:$proxy"
+	# The environment is read as NUL-separated entries and handed on as they are, so a value
+	# holding a space or a quote reaches the broker unchanged.
+	python3 - "$pid" "$d/broker.env" <<'PY'
+import sys
+
+pid, out = sys.argv[1], sys.argv[2]
+replaced = {"BROKER_AIRLOCK_RULES_FILE", "BROKER_LISTEN_ADDR", "BROKER_PUBLIC_URL",
+            "BROKER_AIRLOCK_LISTEN_ADDR", "BROKER_AIRLOCK_PROXY_URL"}
+with open(f"/proc/{pid}/environ", "rb") as f:
+    entries = [e for e in f.read().split(b"\0") if e and e.split(b"=", 1)[0].decode() not in replaced]
+with open(out, "wb") as f:
+    f.write(b"\0".join(entries))
+PY
+	: >"$d/broker.log"
+	python3 - "$d/broker.env" "$BROKER_BIN" "$d/rules.json" "$K7_API_URL" "$K7_PROXY_URL" \
+		"127.0.0.1:$api" "127.0.0.1:$proxy" <<'PY' >"$d/broker.log" 2>&1 &
+import os
+import sys
+
+env_file, broker, rules, api_url, proxy_url, api_addr, proxy_addr = sys.argv[1:8]
+with open(env_file, "rb") as f:
+    environ = dict(e.split(b"=", 1) for e in f.read().split(b"\0") if e and b"=" in e)
+environ[b"BROKER_AIRLOCK_RULES_FILE"] = rules.encode()
+environ[b"BROKER_LISTEN_ADDR"] = api_addr.encode()
+environ[b"BROKER_PUBLIC_URL"] = api_url.encode()
+environ[b"BROKER_AIRLOCK_LISTEN_ADDR"] = proxy_addr.encode()
+environ[b"BROKER_AIRLOCK_PROXY_URL"] = proxy_url.encode()
+os.execve(broker, [broker], {k.decode(): v.decode() for k, v in environ.items()})
+PY
+	local started=$!
+	EXTRA_BROKER_PIDS+=("$started")
+	await "k7's broker" 120 "$d/broker.log" 'airlock proxy listening addr=' "$started"
+}
+
+# k7_names is the rules file and the fake secrets this check adds: one name per consumer, bound
+# to the real hosts that consumer calls, and a fake value for each. The stack's own entries are
+# kept, so the seven plain clients still reach S.
+k7_names() {
+	local d="$WORK_DIR/k7"
+	mkdir -p "$d"
+	jq '.secrets += [
+	     {"name": "SLACK_BOT_TOKEN", "hosts": ["slack.com"]},
+	     {"name": "GITHUB_ADMIN_PAT", "hosts": ["api.github.com", "github.com"]},
+	     {"name": "TAILSCALE_API_KEY", "hosts": ["api.tailscale.com"]},
+	     {"name": "GCLOUD_SAMI", "hosts": ["cloudresourcemanager.googleapis.com", "oauth2.googleapis.com", "www.googleapis.com"]},
+	     {"name": "GWS_THEOREM_READ_OAUTH", "hosts": ["www.googleapis.com", "oauth2.googleapis.com"]},
+	     {"name": "GWS_THEOREM_ADMIN_OAUTH", "hosts": ["admin.googleapis.com"]}
+	   ]' "$AIRLOCK_RULES_FILE" >"$d/rules.json"
+	K7_SLACK="xoxb-the-fake-slack-token-$RANDOM$RANDOM"
+	K7_GITHUB="ghp_thefakegithubadminpat$RANDOM$RANDOM"
+	K7_TAILSCALE="tskey-api-the-fake-tailscale-key-$RANDOM$RANDOM"
+	add_fake_secret "${STACK_SECRETS_PREFIX}slack-bot-token" '{"owner":"legion-daemon","tier":"agent"}' "$K7_SLACK"
+	add_fake_secret "${STACK_SECRETS_PREFIX}github-admin-pat" '{"owner":"legion-daemon","tier":"agent"}' "$K7_GITHUB"
+	add_fake_secret "${STACK_SECRETS_PREFIX}tailscale-api-key" '{"owner":"legion-daemon","tier":"agent"}' "$K7_TAILSCALE"
+	# The three Google logins are minted kinds: the broker mints each at the stack's stand-in
+	# Google token endpoint, so what the consumer holds a placeholder for is a minted value.
+	local google login
+	google='{"owner":"legion-daemon","tier":"agent","kind":"google-login"}'
+	login='{"type":"authorized_user","client_id":"the-stand-in-client","client_secret":"the-stand-in-client-secret","refresh_token":"the-stand-in-refresh-token"}'
+	add_fake_secret "${STACK_SECRETS_PREFIX}gcloud-sami" "$google" "$login"
+	add_fake_secret "${STACK_SECRETS_PREFIX}gws-theorem-read-oauth" "$google" "$login"
+	add_fake_secret "${STACK_SECRETS_PREFIX}gws-theorem-admin-oauth" "$google" "$login"
+}
+
+# k7_pulumi writes the Pulumi program the Tailscale provider's getDevices is called from: a YAML
+# program, which needs no language runtime of its own, and a local state directory.
+k7_pulumi() {
+	local d="$WORK_DIR/k7/pulumi"
+	mkdir -p "$d/state"
+	cat >"$d/Pulumi.yaml" <<EOF
+name: airlock-k7
+runtime: yaml
+description: one tailscale:getDevices call, which the real Tailscale API refuses a fake key
+variables:
+  devices:
+    fn::invoke:
+      function: tailscale:index:getDevices
+outputs:
+  devices: \${devices}
+EOF
+}
+
+# k7_steps writes every consumer's own command into one file, as k3's and k4's steps are
+# written, so one grant of the seven names covers them all.
+k7_steps() {
+	local d="$WORK_DIR/k7"
+	cat >"$d/steps.sh" <<EOF
+set -u
+out=$d/out
+: >"\$out"
+say() { printf '%s\n' "\$1" >>"\$out"; }
+export DOTFILES_DIR=$K7_DOTFILES
+export PATH="$K7_DOTFILES/scripts:$K7_DOTFILES/shims:\$PATH"
+# shims/gh builds a gh configuration directory of its own with scripts/gh-agent-config, under
+# XDG_CONFIG_HOME; this run's is under its work directory, never the person's home.
+export XDG_CONFIG_HOME=$d/xdg
+mkdir -p \$XDG_CONFIG_HOME
+say "no_proxy=\$NO_PROXY"
+say "https_proxy=\$(printf '%s' "\$HTTPS_PROXY" | sed 's/:[^:@]*@/:***@/')"
+
+# The slack_post poster: bun, the Bearer a Slack app's token goes in, and auth.test.
+cat >$d/slack.ts <<'TS'
+const answer = await fetch("https://slack.com/api/auth.test", {
+  method: "POST",
+  headers: { authorization: "Bearer " + process.env.SLACK_BOT_TOKEN, "content-type": "application/json" },
+});
+console.log(answer.status, (await answer.text()).slice(0, 200));
+TS
+say "slack=\$(bun run $d/slack.ts 2>&1 | tail -n 1 | tr -d '\r')"
+
+# gh api under secret-run for GITHUB_ADMIN_PAT: the line shims/gh itself prints for an admin
+# action, with that shim first on PATH so the call goes through it.
+say "gh=\$(secret-run --reason 'k7: one gh api call with a fake admin token' GITHUB_ADMIN_PAT -- sh -c 'GH_TOKEN=\$GITHUB_ADMIN_PAT GITHUB_TOKEN=\$GITHUB_ADMIN_PAT exec gh api user' 2>&1 | tail -n 1 | tr -d '\r')"
+
+# pulumi preview of a program whose Tailscale provider calls tailscale:getDevices.
+say "pulumi=\$(cd $d/pulumi && export PULUMI_CONFIG_PASSPHRASE= PULUMI_BACKEND_URL=file://$d/pulumi/state TAILSCALE_API_KEY="\$TAILSCALE_API_KEY" TAILSCALE_TAILNET=example.com && pulumi stack init k7 >/dev/null 2>&1; pulumi preview --stack k7 --non-interactive 2>&1 | grep -iE 'error|refus|unauthor|401|403' | head -n 1 | tr -d '\r')"
+
+# gcloud-broker with gcloud projects list.
+say "gcloud=\$(GCLOUD_BROKER_INNER=1 GCLOUD_SAMI="\$GCLOUD_SAMI" bash $K7_DOTFILES/scripts/gcloud-broker -- gcloud projects list --format=json 2>&1 | grep -iE 'ERROR|reason:' | head -n 1 | tr -d '\r')"
+
+# One gws call under the theorem read tier: that tier's own command out of gws/accounts.json,
+# running the Drive call gws makes, since gws itself is no file of that repository.
+say "gws_tier=\$(jq -r '.theorem.tiers.read.command | @tsv' $K7_DOTFILES/gws/accounts.json 2>&1 | tr '\t' ' ')"
+say "gws=\$(secret-run --reason 'gws theorem read' GWS_THEOREM_READ_OAUTH -- sh -c 'curl -sS -o /dev/null -w %{http_code} -H "Authorization: Bearer \$GWS_THEOREM_READ_OAUTH" "https://www.googleapis.com/drive/v3/about?fields=user"' 2>&1 | tail -n 1 | tr -d '\r')"
+
+# The google-workspace skill's Bearer call to admin.googleapis.com.
+say "admin=\$(curl -sS -o /dev/null -w %{http_code} -H "Authorization: Bearer \$GWS_THEOREM_ADMIN_OAUTH" "https://admin.googleapis.com/admin/directory/v1/users?domain=theorem.dev" 2>&1 | tail -n 1)"
+
+# git push --dry-run through a credential helper that answers the placeholder, with the proxy in
+# git's own configuration. The pod's own GIT_CONFIG_* settings are cleared for this step alone:
+# they name a credential helper of the pod's, which would answer in place of this one.
+rm -rf $d/repo
+git init -q $d/repo
+(cd $d/repo && git -c user.email=k7@airlock.test -c user.name=k7 commit -q --allow-empty -m k7)
+cat >$d/credential-helper <<'HELPER'
+#!/bin/sh
+[ "\$1" = get ] || exit 0
+printf 'username=x\npassword=%s\n' "\$GITHUB_ADMIN_PAT"
+HELPER
+chmod +x $d/credential-helper
+say "git=\$(cd $d/repo && env -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u GIT_CONFIG_VALUE_0 -u GIT_CONFIG_KEY_1 -u GIT_CONFIG_VALUE_1 -u GIT_CONFIG_KEY_2 -u GIT_CONFIG_VALUE_2 -u GIT_CONFIG_KEY_3 -u GIT_CONFIG_VALUE_3 -u GIT_CONFIG_KEY_4 -u GIT_CONFIG_VALUE_4 git -c http.proxy="\$HTTPS_PROXY" -c credential.helper=$d/credential-helper -c http.sslCAInfo="\$GIT_SSL_CAINFO" push --dry-run https://github.com/cybermonklabs/legion HEAD:refs/heads/k7-airlock-never-pushed 2>&1 | tail -n 2 | tr '\n' ' ')"
+
+# The plain clients to S, each with the fake value in the header it uses.
+say "curl=\$(curl -sS -o /dev/null -w %{http_code} -H "Authorization: Bearer \$AIRLOCK_DEMO_TOKEN" $AIRLOCK_S_URL/curl)"
+say "wget=\$(wget -q -O /dev/null --header="Authorization: Bearer \$AIRLOCK_DEMO_TOKEN" $AIRLOCK_S_URL/wget && echo 200 || echo failed)"
+say "node=\$(node -e 'fetch("$AIRLOCK_S_URL/node", {headers: {authorization: "Bearer " + process.env.AIRLOCK_DEMO_TOKEN}}).then(r => console.log(r.status)).catch(e => console.log("error", e.message))')"
+say "bun=\$(bun -e 'const r = await fetch("$AIRLOCK_S_URL/bun", {headers: {authorization: "Bearer " + process.env.AIRLOCK_DEMO_TOKEN}}); console.log(r.status)' 2>&1 | tail -n 1)"
+say "urllib=\$($AIRLOCK_BOTO3_PYTHON -c 'import os, urllib.request
+print(urllib.request.urlopen(urllib.request.Request("$AIRLOCK_S_URL/urllib", headers={"Authorization": "Bearer " + os.environ["AIRLOCK_DEMO_TOKEN"]})).status)' 2>&1 | tail -n 1)"
+say "requests=\$($AIRLOCK_BOTO3_PYTHON -c 'import os, requests
+print(requests.get("$AIRLOCK_S_URL/requests", headers={"Authorization": "Bearer " + os.environ["AIRLOCK_DEMO_TOKEN"]}).status_code)' 2>&1 | tail -n 1)"
+say "go=\$($d/goclient)"
+EOF
+}
+
+check_k7() {
+	expect "each call went through the proxy port and the broker swapped the fake value into the header that the consumer uses"
+	expect "each real service refused the fake value"
+	expect "the gh consumer's own call is refused the fake value by GitHub"
+	expect "S got the fake value in each client's call"
+	expect "the command's exit status is 3, and the CLI's stderr has the line agent-secrets: NAME from …"
+	expect "the negative control, the same runs with a CLI built without the change, shows no call through the proxy port"
+
+	k6_clients
+	start_stack
+	stack_facts
+	k7_dotfiles
+	observe "the consumers, fetched from sjawhar/dotfiles at main: $K7_FETCHED"
+	k7_names
+	k7_broker
+	observe "this check's own broker is the stack's first broker's environment with its rules file, its two ports and its public URL changed: api $K7_API_URL, proxy $K7_PROXY_URL, names $(jq -c '[.secrets[].name]' "$WORK_DIR/k7/rules.json")"
+
+	# A Go client of this run's own for the Go step, built outside the repository as k4's is.
+	mkdir -p "$WORK_DIR/k7/go"
+	cat >"$WORK_DIR/k7/go/go.mod" <<'EOF'
+module airlockk7
+
+go 1.24
+EOF
+	cat >"$WORK_DIR/k7/go/main.go" <<'EOF'
+// One Go client that reads the proxy and the trust bundle from the environment, as any Go
+// program behind the airlock does.
+package main
+
+import (
+	"fmt"
+	"net/http"
+	"os"
+)
+
+func main() {
+	request, err := http.NewRequest("GET", os.Getenv("AIRLOCK_S_URL")+"/go", nil)
+	if err != nil {
+		fmt.Println("error", err)
+		return
+	}
+	request.Header.Set("Authorization", "Bearer "+os.Getenv("AIRLOCK_DEMO_TOKEN"))
+	answer, err := http.DefaultClient.Do(request)
+	if err != nil {
+		fmt.Println("error", err)
+		return
+	}
+	defer answer.Body.Close()
+	fmt.Println(answer.StatusCode)
+}
+EOF
+	(cd "$WORK_DIR/k7/go" && GOTOOLCHAIN=local GOFLAGS=-mod=mod go build -o "$WORK_DIR/k7/goclient" .) >"$WORK_DIR/k7/go/build.log" 2>&1
+	k7_pulumi
+	k7_steps
+
+	local s_before
+	s_before="$(records_count s)"
+	# AGENT_SECRETS_URL is this check's own broker, the one whose rules name the real hosts.
+	AGENT_SECRETS_URL="$K7_API_URL" agent-secrets \
+		SLACK_BOT_TOKEN GITHUB_ADMIN_PAT TAILSCALE_API_KEY GCLOUD_SAMI \
+		GWS_THEOREM_READ_OAUTH GWS_THEOREM_ADMIN_OAUTH AIRLOCK_DEMO_TOKEN \
+		--ttl 30m -- bash "$WORK_DIR/k7/steps.sh" >"$WORK_DIR/k7/cli.out" 2>"$WORK_DIR/k7/cli.err"
+	declare -A K7
+	local key value
+	while IFS='=' read -r key value; do K7["$key"]="$value"; done <"$WORK_DIR/k7/out"
+
+	local recs clients=0 with_value=0 client demo_value
+	recs="$(records s | jq --argjson n "$s_before" '.[$n:]')"
+	demo_value="$(stored_value "${STACK_SECRETS_PREFIX}airlock-demo-token")"
+	for client in curl wget node bun urllib requests go; do
+		clients=$((clients + 1))
+		if [ "$(printf '%s' "$recs" | jq --arg p "/$client" --arg v "$demo_value" '[.[] | select(.path == $p) | .header.Authorization // [] | .[] | select(contains($v))] | length')" -ge 1 ]; then
+			with_value=$((with_value + 1))
+		fi
+	done
+
+	observe "the command's inherited NO_PROXY was ${K7[no_proxy]-} — the pod's own NO_PROXY is '*', which the CLI had to drop — and its proxy was ${K7[https_proxy]-}"
+	observe "slack.com/api/auth.test under bun: ${K7[slack]-}"
+	observe "gh api user under secret-run for GITHUB_ADMIN_PAT: ${K7[gh]-}"
+	observe "pulumi preview with the Tailscale provider calling tailscale:getDevices: ${K7[pulumi]-}"
+	observe "gcloud projects list under gcloud-broker: ${K7[gcloud]-}"
+	observe "the gws theorem read tier (${K7[gws_tier]-}) answered: ${K7[gws]-}"
+	observe "the google-workspace skill's Bearer call to admin.googleapis.com answered: ${K7[admin]-}"
+	observe "git push --dry-run through a credential helper answering the placeholder: ${K7[git]-}"
+	observe "the plain clients to S: curl ${K7[curl]-}, wget ${K7[wget]-}, node ${K7[node]-}, bun ${K7[bun]-}, python urllib ${K7[urllib]-}, python requests ${K7[requests]-}, Go ${K7[go]-}"
+	observe "S recorded the fake value (by SHA-256 and length, $(shape "$demo_value")) in $with_value of the $clients plain clients' calls"
+
+	# Each real service's own refusal. A fake value is refused with an unauthorized answer, and
+	# what each consumer printed of it is what is read here.
+	local refused=0 refusals=""
+	k7_refused() { # <label> <what it said>
+		if printf '%s' "$2" | grep -qiE '401|403|not_authed|invalid_auth|unauthor|unauthenticated|forbid|refus|denied|Bad credentials|permission|authentication failed|invalid username or token|CREDENTIALS_MISSING|ACCESS_TOKEN_TYPE'; then
+			refused=$((refused + 1))
+			refusals="$refusals; $1 refused it"
+		else
+			refusals="$refusals; $1 did NOT refuse it: $2"
+		fi
+	}
+	k7_refused slack "${K7[slack]-}"
+	k7_refused tailscale "${K7[pulumi]-}"
+	k7_refused gcloud "${K7[gcloud]-}"
+	k7_refused gws "${K7[gws]-}"
+	k7_refused admin "${K7[admin]-}"
+	k7_refused git "${K7[git]-}"
+	observe "what each real service answered the fake value${refusals}"
+	observe "the gh consumer: $(printf '%s' "${K7[gh]-}" | head -c 300)"
+
+	# What the broker logged: one line per call to a bound host, which is how a call is known to
+	# have reached the proxy port and been decided there.
+	local logged swapped
+	logged="$(grep -c 'a call to a bound host' "$WORK_DIR/k7/broker.log" || true)"
+	swapped="$(grep -c 'a call to a bound host.*allowed=true' "$WORK_DIR/k7/broker.log" || true)"
+	observe "this check's broker logged $logged calls to a bound host, $swapped of them allowed; the last three:"
+	observe "$(grep 'a call to a bound host' "$WORK_DIR/k7/broker.log" | tail -n 3 | sed 's/^/    /')"
+	judge "$([ "$logged" -ge 10 ] && [ "$swapped" -ge 10 ] && echo 0 || echo 1)" \
+		"each call went through the proxy port and the broker swapped the fake value into the header that the consumer uses" \
+		"$logged calls to a bound host were logged by the proxy, $swapped of them allowed and so swapped"
+	judge "$([ "$refused" = 6 ] && echo 0 || echo 1)" \
+		"each real service refused the fake value" "$refused of the 6 consumers that can run in this pod refused it${refusals}"
+	fail "the gh consumer's own call is refused the fake value by GitHub — this step cannot run in this pod. shims/gh's own admin line is \`secret-run … GITHUB_ADMIN_PAT -- sh -c 'GH_TOKEN=\$GITHUB_ADMIN_PAT exec gh …'\`, and the only gh this pod has is Legion's wrapper (/opt/legion/bin/gh, which runs \`legion gh\`): it refuses a call whose GH_TOKEN is set ('legion gh: GH_TOKEN is set, and gh sends it in place of the token of the owner the command targets, so it sends no token; unset GH_TOKEN') and refuses to run at all when another gh is first on PATH. It needs the real GitHub CLI on PATH. What it said here: $(printf '%s' "${K7[gh]-}" | head -c 200). The same fake value does reach GitHub on this run's git step, where github.com refused it: ${K7[git]-}"
+	judge "$([ "$with_value" = "$clients" ] && echo 0 || echo 1)" \
+		"S got the fake value in each client's call" \
+		"$with_value of $clients clients' calls carried it, compared by SHA-256 and length"
+
+	# The exit status and the CLI's line: a command that exits 3 under the CLI leaves this run
+	# with 3, and the CLI says on its stderr which source each name came from.
+	local three_status three_err
+	set +e
+	AGENT_SECRETS_URL="$K7_API_URL" agent-secrets GITHUB_ADMIN_PAT --ttl 5m -- sh -c 'exit 3' >/dev/null 2>"$WORK_DIR/k7/three.err"
+	three_status=$?
+	set -e
+	three_err="$(tr '\n' ' ' <"$WORK_DIR/k7/three.err")"
+	observe "a command that exits 3 under the CLI left exit $three_status, and the CLI's stderr said: $three_err"
+	judge "$([ "$three_status" = 3 ] && contains "agent-secrets: GITHUB_ADMIN_PAT from " "$three_err" && echo 0 || echo 1)" \
+		"the command's exit status is 3, and the CLI's stderr has the line agent-secrets: NAME from …" \
+		"it exited $three_status and said '$three_err'"
+
+	# The negative control: the last released CLI, which is the CLI without this change. It is
+	# released no value for a name the rules name, so nothing it runs reaches the proxy port.
+	fetch_old_cli
+	local before_control after_control old_out old_status
+	before_control="$(grep -c 'a call to a bound host' "$WORK_DIR/k7/broker.log" || true)"
+	set +e
+	old_out="$(AGENT_SECRETS_URL="$K7_API_URL" "$OLD_CLI" GITHUB_ADMIN_PAT -- sh -c 'curl -sS -o /dev/null -w %{http_code} https://api.github.com/user' 2>&1)"
+	old_status=$?
+	set -e
+	after_control="$(grep -c 'a call to a bound host' "$WORK_DIR/k7/broker.log" || true)"
+	control "the last released agent-secrets ($OLD_CLI_TAG, the CLI without this change) exited $old_status saying '$(printf '%s' "$old_out" | tail -n 1)'"
+	control "the proxy logged $((after_control - before_control)) further calls to a bound host while it ran"
+	judge "$([ "$((after_control - before_control))" = 0 ] && echo 0 || echo 1)" \
+		"negative control: with a CLI built without the change no call goes through the proxy port" \
+		"$((after_control - before_control)) calls to a bound host were logged while the old CLI ran, which exited $old_status"
+
+	stop_stack
+}
+
+###############################################################################################
 # k8a
 ###############################################################################################
 
@@ -1193,6 +1961,605 @@ check_k8a() {
 	judge "$([ "$status" = 0 ] && contains "nothing changed" "$out" && echo 0 || echo 1)" \
 		"negative control: on the valid file the command exits 0 and lists no change" \
 		"it exited $status and said '$(printf '%s' "$out" | tail -n 1)'"
+
+	stop_stack
+}
+
+###############################################################################################
+# k9
+###############################################################################################
+#
+# A ten-minute load, and everything else this check asks of one stack, takes about twenty-five
+# minutes end to end: two stack starts of about three minutes each, ten minutes of connections,
+# a minute of baseline through a plain tunnel, two ninety-second gaps (one here, one in the
+# control) and the upload, the clone and the two broker steps between them.
+#
+# The figures the check names are the broker container's own limits, so they are read of the
+# broker processes and of nothing else: each process's CPU time from utime and stime in
+# /proc/<pid>/stat, against the wall time of the same window, and its peak memory from
+# /proc/<pid>/status' VmRSS, sampled every two seconds across the ten minutes and kept at its
+# highest. Not ru_maxrss: getrusage answers for the calling process and its waited-for children,
+# and these two are dev-airlock.sh's children and not this script's, so no getrusage of this run
+# can see them. Not VmHWM either, which is the kernel's own high-water mark and would need no
+# sampling: a Legion pod runs gVisor, whose /proc/<pid>/status has VmSize, VmRSS and VmData and
+# no VmHWM at all. The sampled maximum is what is reported, and a peak between two samples is
+# what it can miss.
+#
+# GOMAXPROCS=1 for each broker: dev-airlock.sh has no option for it and its start_broker names
+# no GOMAXPROCS, so the brokers inherit it from the environment this script starts the stack
+# with, which is where this check sets it. Each broker's /proc/<pid>/environ is read back to
+# show that it arrived.
+
+# k9_driver writes and builds the one program this check's load needs: a Go client, because the
+# check opens 30,000 connections and a shell cannot. It is built under the work directory with a
+# module of its own, as k4's probe is, so no build of this check touches the workspace's
+# go.work.sum.
+k9_driver() {
+	mkdir -p "$WORK_DIR/k9"
+	cat >"$WORK_DIR/k9/go.mod" <<'EOF'
+module airlockk9
+
+go 1.24
+EOF
+	cat >"$WORK_DIR/k9/main.go" <<'EOF'
+// The load k9 puts through the airlock proxy, and the plain tunnel its baseline goes through.
+// Every mode but "tunnel" opens its connections with a CONNECT to the proxy it is given, so the
+// same program measures the airlock and the plain tunnel and the two figures are comparable.
+package main
+
+import (
+	"bufio"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+)
+
+var (
+	proxyURL = flag.String("proxy", "", "the proxy to CONNECT through, credential and all")
+	host     = flag.String("host", "", "the bound host, which is reached on port 443")
+	caFile   = flag.String("ca", "", "a PEM file of roots to verify the host with")
+	header   = flag.String("header", "", "the Authorization header each request carries")
+	rate     = flag.Int("rate", 50, "connections a second")
+	seconds  = flag.Int("seconds", 600, "how long to keep opening them")
+	size     = flag.Int("size", 50<<20, "how many bytes to upload")
+	gap      = flag.Int("gap", 90, "the gap in seconds between the two events of one answer")
+	listen   = flag.String("listen", "127.0.0.1:0", "where the plain tunnel listens")
+	to       = flag.String("to", "", "the address the plain tunnel dials, whatever host was asked for")
+	out      = flag.String("out", "", "write the JSON result here as well as to stdout")
+)
+
+var pool *x509.CertPool
+
+func main() {
+	if len(os.Args) < 2 {
+		fmt.Fprintln(os.Stderr, "k9: name a mode: load, tunnel, upload, gap or upgrade")
+		os.Exit(2)
+	}
+	mode := os.Args[1]
+	_ = flag.CommandLine.Parse(os.Args[2:])
+	if *caFile != "" {
+		pem, err := os.ReadFile(*caFile)
+		check(err)
+		pool = x509.NewCertPool()
+		pool.AppendCertsFromPEM(pem)
+	}
+	switch mode {
+	case "load":
+		load()
+	case "tunnel":
+		tunnel()
+	case "upload":
+		upload()
+	case "gap":
+		gapMode()
+	case "upgrade":
+		upgrade()
+	default:
+		fmt.Fprintf(os.Stderr, "k9: %s is no mode of this program\n", mode)
+		os.Exit(2)
+	}
+}
+
+func check(err error) {
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "k9:", err)
+		os.Exit(1)
+	}
+}
+
+func say(result map[string]any) {
+	text, _ := json.MarshalIndent(result, "", " ")
+	if *out != "" {
+		_ = os.WriteFile(*out, text, 0o600)
+	}
+	fmt.Println(string(text))
+}
+
+// connect opens one tunnel to the bound host through the proxy and answers the connection the
+// CONNECT left behind.
+func connect(timeout time.Duration) (net.Conn, error) {
+	u, err := url.Parse(*proxyURL)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := net.DialTimeout("tcp", u.Host, timeout)
+	if err != nil {
+		return nil, err
+	}
+	target := *host + ":443"
+	request := "CONNECT " + target + " HTTP/1.1\r\nHost: " + target + "\r\n"
+	if u.User != nil {
+		password, _ := u.User.Password()
+		credential := base64.StdEncoding.EncodeToString([]byte(u.User.Username() + ":" + password))
+		request += "Proxy-Authorization: Basic " + credential + "\r\n"
+	}
+	request += "\r\n"
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+	if _, err := conn.Write([]byte(request)); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	answer, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if answer.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(answer.Body, 300))
+		conn.Close()
+		return nil, fmt.Errorf("the CONNECT answered %d %s", answer.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return conn, nil
+}
+
+// speak is one tunnel with TLS to the bound host on top of it.
+func speak(timeout time.Duration) (net.Conn, *bufio.Reader, error) {
+	raw, err := connect(timeout)
+	if err != nil {
+		return nil, nil, err
+	}
+	conn := tls.Client(raw, &tls.Config{ServerName: *host, RootCAs: pool})
+	_ = raw.SetDeadline(time.Now().Add(timeout))
+	if err := conn.Handshake(); err != nil {
+		raw.Close()
+		return nil, nil, err
+	}
+	return conn, bufio.NewReader(conn), nil
+}
+
+// ask writes one HTTP/1.1 request on an open connection and reads its answer.
+func ask(conn net.Conn, reader *bufio.Reader, method, path string, body []byte, extra string) (*http.Response, error) {
+	request := method + " " + path + " HTTP/1.1\r\nHost: " + *host + "\r\n"
+	if *header != "" {
+		request += "Authorization: Bearer " + *header + "\r\n"
+	}
+	request += extra
+	request += fmt.Sprintf("Content-Length: %d\r\n\r\n", len(body))
+	if _, err := conn.Write(append([]byte(request), body...)); err != nil {
+		return nil, err
+	}
+	return http.ReadResponse(reader, nil)
+}
+
+// one call: a connection of its own, a request on it and the whole answer read.
+func call(timeout time.Duration) error {
+	conn, reader, err := speak(timeout)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+	answer, err := ask(conn, reader, "GET", "/ok", nil, "")
+	if err != nil {
+		return err
+	}
+	defer answer.Body.Close()
+	if _, err := io.Copy(io.Discard, answer.Body); err != nil {
+		return err
+	}
+	if answer.StatusCode != http.StatusOK {
+		return fmt.Errorf("the call answered %d", answer.StatusCode)
+	}
+	return nil
+}
+
+// load opens rate connections a second for seconds seconds and answers what each one took.
+func load() {
+	var mu sync.Mutex
+	took := make([]float64, 0, *rate**seconds)
+	failures := map[string]int{}
+	var wg sync.WaitGroup
+	limit := make(chan struct{}, 400)
+	ticker := time.NewTicker(time.Second / time.Duration(*rate))
+	defer ticker.Stop()
+	deadline := time.Now().Add(time.Duration(*seconds) * time.Second)
+	started := time.Now()
+	for time.Now().Before(deadline) {
+		<-ticker.C
+		limit <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-limit }()
+			at := time.Now()
+			err := call(30 * time.Second)
+			ms := float64(time.Since(at).Microseconds()) / 1000
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				reason := err.Error()
+				if len(reason) > 120 {
+					reason = reason[:120]
+				}
+				failures[reason]++
+				return
+			}
+			took = append(took, ms)
+		}()
+	}
+	wg.Wait()
+	sort.Float64s(took)
+	at := func(q float64) float64 {
+		if len(took) == 0 {
+			return -1
+		}
+		i := int(q * float64(len(took)-1))
+		return took[i]
+	}
+	total := 0
+	for _, n := range failures {
+		total += n
+	}
+	say(map[string]any{
+		"calls": len(took) + total, "failed": total, "failures": failures,
+		"wall_seconds": time.Since(started).Seconds(),
+		"p50_ms":       at(0.5), "p90_ms": at(0.9), "p99_ms": at(0.99), "max_ms": at(1),
+	})
+}
+
+// tunnel is the baseline: a CONNECT proxy that reads no byte of what it carries, so what the
+// airlock adds is the difference between the same calls through this and through it.
+func tunnel() {
+	listener, err := net.Listen("tcp", *listen)
+	check(err)
+	fmt.Println(listener.Addr().String())
+	os.Stdout.Sync()
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		go func() {
+			defer conn.Close()
+			reader := bufio.NewReader(conn)
+			request, err := http.ReadRequest(reader)
+			if err != nil || request.Method != http.MethodConnect {
+				return
+			}
+			// The bound hosts are .test names no resolver answers, so the tunnel is told
+			// where to dial rather than resolving what the CONNECT named.
+			target := request.Host
+			if *to != "" {
+				target = *to
+			}
+			upstream, err := net.DialTimeout("tcp", target, 10*time.Second)
+			if err != nil {
+				_, _ = conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
+				return
+			}
+			defer upstream.Close()
+			if _, err := conn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n")); err != nil {
+				return
+			}
+			done := make(chan struct{}, 2)
+			go func() { _, _ = io.Copy(upstream, reader); done <- struct{}{} }()
+			go func() { _, _ = io.Copy(conn, upstream); done <- struct{}{} }()
+			<-done
+		}()
+	}
+}
+
+func upload() {
+	body := make([]byte, *size)
+	_, _ = rand.Read(body[:4096])
+	at := time.Now()
+	conn, reader, err := speak(60 * time.Second)
+	if err != nil {
+		say(map[string]any{"error": err.Error()})
+		return
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Minute))
+	answer, err := ask(conn, reader, "POST", "/upload", body, "")
+	if err != nil {
+		say(map[string]any{"error": err.Error(), "seconds": time.Since(at).Seconds()})
+		return
+	}
+	read, _ := io.Copy(io.Discard, answer.Body)
+	say(map[string]any{"status": answer.StatusCode, "sent": len(body), "answer_bytes": read,
+		"seconds": time.Since(at).Seconds()})
+}
+
+// gapMode is one answer with a long gap in the middle of it, as the check's streamed answer is:
+// two events on one connection with the gap between them, which is what the idle limit bounds.
+func gapMode() {
+	conn, reader, err := speak(30 * time.Second)
+	if err != nil {
+		say(map[string]any{"error": err.Error()})
+		return
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(time.Duration(*gap+120) * time.Second))
+	first, err := ask(conn, reader, "GET", "/first-event", nil, "")
+	if err != nil {
+		say(map[string]any{"error": "the first event: " + err.Error()})
+		return
+	}
+	_, _ = io.Copy(io.Discard, first.Body)
+	time.Sleep(time.Duration(*gap) * time.Second)
+	second, err := ask(conn, reader, "GET", "/second-event", nil, "")
+	if err != nil {
+		say(map[string]any{"first": first.StatusCode, "second_error": err.Error(), "gap": *gap})
+		return
+	}
+	_, _ = io.Copy(io.Discard, second.Body)
+	say(map[string]any{"first": first.StatusCode, "second": second.StatusCode, "gap": *gap})
+}
+
+// upgrade is one WebSocket upgrade and, when the service answers 101, one frame each way.
+func upgrade() {
+	conn, reader, err := speak(30 * time.Second)
+	if err != nil {
+		say(map[string]any{"error": err.Error()})
+		return
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(60 * time.Second))
+	extra := "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\n" +
+		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+	answer, err := ask(conn, reader, "GET", "/socket", nil, extra)
+	if err != nil {
+		say(map[string]any{"error": err.Error()})
+		return
+	}
+	result := map[string]any{"status": answer.StatusCode, "upgrade": answer.Header.Get("Upgrade")}
+	if answer.StatusCode == http.StatusSwitchingProtocols {
+		if _, err := conn.Write([]byte("a frame from the command\n")); err != nil {
+			result["frames"] = "the command could not write: " + err.Error()
+		} else if line, err := reader.ReadString('\n'); err != nil {
+			result["frames"] = "no frame came back: " + err.Error()
+		} else {
+			result["frames"] = strings.TrimSpace(line)
+		}
+	} else {
+		body, _ := io.ReadAll(io.LimitReader(answer.Body, 200))
+		result["body"] = strings.TrimSpace(string(body))
+	}
+	say(result)
+}
+EOF
+	(cd "$WORK_DIR/k9" && GOTOOLCHAIN=local GOFLAGS=-mod=mod go build -o "$WORK_DIR/k9/k9" .) >"$WORK_DIR/k9/build.log" 2>&1 || {
+		echo "airlock-check: the k9 driver did not build:" >&2
+		cat "$WORK_DIR/k9/build.log" >&2
+		exit 1
+	}
+}
+
+# k9_cpu answers one process's CPU time in seconds, utime and stime of /proc/<pid>/stat added.
+k9_cpu() { # <pid>
+	awk -v ticks="$(getconf CLK_TCK)" '{ sub(/^[0-9]+ \(.*\) /, ""); print ($12 + $13) / ticks }' "/proc/$1/stat" 2>/dev/null || echo 0
+}
+
+# k9_sample_rss appends one line per broker process every two seconds, which is how this check
+# reads a peak resident set on a kernel whose /proc/<pid>/status has no VmHWM (see the block
+# above). It runs until it is killed.
+k9_sample_rss() { # <file> <pid>...
+	local file="$1" pid
+	shift
+	while :; do
+		for pid in "$@"; do
+			awk -v p="$pid" '/^VmRSS:/ { print p, $2 }' "/proc/$pid/status" 2>/dev/null >>"$file"
+		done
+		sleep 2
+	done
+}
+
+# k9_peak_kb is the highest resident set the sampler saw for one process, in kilobytes.
+k9_peak_kb() { # <file> <pid>
+	awk -v p="$2" '$1 == p && $2 > max { max = $2 } END { print max + 0 }' "$1" 2>/dev/null
+}
+
+check_k9() {
+	expect "no call fails in the ten minutes of 50 connections a second"
+	expect "the proxy adds at most 100 milliseconds at the median, against the same calls through a plain tunnel"
+	expect "each broker process's CPU time is at most half its wall time and its peak memory at most 1 GiB"
+	expect "the 50 MiB upload, the answer with a 90-second gap in it and the shallow clone finish"
+	expect "the WebSocket upgrade reaches S with the real value in its header, and frames pass both ways"
+	expect "the stream on the stopped process ends after the drain, and the next call succeeds"
+	expect "the negative control, a stack with the proxy's idle limit at 60 seconds, cuts the answer with the 90-second gap"
+
+	# Each broker with GOMAXPROCS=1: dev-airlock.sh has no option for it, so it is exported into
+	# the environment the stack is started with and each broker inherits it.
+	export GOMAXPROCS=1
+	start_stack
+	stack_facts
+	k9_driver
+
+	local pids pid environs=""
+	mapfile -t pids < <(sed -n 's/^  broker [0-9]*:.*pid \([0-9]*\),.*/\1/p' "$STACK_LOG")
+	for pid in "${pids[@]}"; do
+		environs="$environs $pid:$(tr '\0' '\n' <"/proc/$pid/environ" | grep -c '^GOMAXPROCS=1$')"
+	done
+	observe "the stack's broker processes are ${pids[*]}, and each one's /proc/<pid>/environ holds GOMAXPROCS=1 (pid:matches)$environs"
+
+	release AIRLOCK_DEMO_TOKEN 60m
+	local proxy demo_value
+	proxy="$(proxy_for "${AIRLOCK_PROXY_URL##*://}")"
+	demo_value="$(stored_value "${STACK_SECRETS_PREFIX}airlock-demo-token")"
+
+	# The baseline: the same calls through a tunnel that reads nothing of what it carries. It is
+	# a minute rather than ten: a median needs no more, and the ten minutes are the load's.
+	"$WORK_DIR/k9/k9" tunnel --listen 127.0.0.1:0 --to 127.0.0.2:443 >"$WORK_DIR/k9/tunnel.addr" 2>"$WORK_DIR/k9/tunnel.log" &
+	HELPER_PIDS+=($!)
+	local plain=""
+	for _ in $(seq 1 40); do
+		plain="$(head -n 1 "$WORK_DIR/k9/tunnel.addr" 2>/dev/null)"
+		[ -z "$plain" ] || break
+		sleep 0.25
+	done
+	echo "airlock-check: k9 is measuring the baseline through a plain tunnel for 60 seconds..." >&2
+	"$WORK_DIR/k9/k9" load --proxy "http://$plain" --host s.airlock.test --ca "$AIRLOCK_CA_CERT_FILE" \
+		--rate 50 --seconds 60 --out "$WORK_DIR/k9/baseline.json" >/dev/null 2>"$WORK_DIR/k9/baseline.err"
+
+	local before=() after=() wall_before wall_after rss="$WORK_DIR/k9/rss.log"
+	: >"$rss"
+	k9_sample_rss "$rss" "${pids[@]}" &
+	local sampler=$!
+	HELPER_PIDS+=("$sampler")
+	for pid in "${pids[@]}"; do before+=("$(k9_cpu "$pid")"); done
+	wall_before="$(date +%s.%N)"
+	echo "airlock-check: k9 is opening 50 connections a second through the airlock for ten minutes..." >&2
+	"$WORK_DIR/k9/k9" load --proxy "$proxy" --host s.airlock.test --ca "$AIRLOCK_CA_CERT_FILE" \
+		--header "$PLACEHOLDER" --rate 50 --seconds 600 --out "$WORK_DIR/k9/load.json" \
+		>/dev/null 2>"$WORK_DIR/k9/load.err"
+	wall_after="$(date +%s.%N)"
+	for pid in "${pids[@]}"; do after+=("$(k9_cpu "$pid")"); done
+	kill "$sampler" 2>/dev/null || true
+
+	local calls failed p50 base_p50 added
+	calls="$(jq -r '.calls' "$WORK_DIR/k9/load.json")"
+	failed="$(jq -r '.failed' "$WORK_DIR/k9/load.json")"
+	p50="$(jq -r '.p50_ms' "$WORK_DIR/k9/load.json")"
+	base_p50="$(jq -r '.p50_ms' "$WORK_DIR/k9/baseline.json")"
+	added="$(awk -v a="$p50" -v b="$base_p50" 'BEGIN { printf "%.1f", a - b }')"
+	observe "the ten minutes: $calls calls, $failed of them failed; the median was $p50 ms through the airlock and $base_p50 ms through a plain tunnel over $(jq -r .calls "$WORK_DIR/k9/baseline.json") calls, so the proxy added $added ms at the median"
+	observe "what failed, if anything: $(jq -c '.failures' "$WORK_DIR/k9/load.json")"
+	judge "$([ "$failed" = 0 ] && [ "$calls" -gt 0 ] && echo 0 || echo 1)" \
+		"no call fails in the ten minutes" "$failed of $calls calls failed"
+	judge "$(awk -v x="$added" 'BEGIN { exit !(x <= 100) }' && awk -v b="$base_p50" 'BEGIN { exit !(b > 0) }' && echo 0 || echo 1)" \
+		"the proxy adds at most 100 milliseconds at the median" \
+		"the median was $p50 ms against the plain tunnel's $base_p50 ms over $(jq -r .calls "$WORK_DIR/k9/baseline.json") baseline calls ($(jq -r .failed "$WORK_DIR/k9/baseline.json") of them failed), which is $added ms added"
+
+	local i wall cpu peak limits="" worst_cpu=0 over=0
+	wall="$(awk -v a="$wall_before" -v b="$wall_after" 'BEGIN { printf "%.1f", b - a }')"
+	for i in "${!pids[@]}"; do
+		cpu="$(awk -v a="${before[$i]}" -v b="${after[$i]}" 'BEGIN { printf "%.1f", b - a }')"
+		peak="$(k9_peak_kb "$rss" "${pids[$i]}")"
+		limits="$limits; pid ${pids[$i]}: $cpu s of CPU over $wall s of wall (a share of $(awk -v c="$cpu" -v w="$wall" 'BEGIN { printf "%.2f", c / w }')), peak memory $(awk -v k="$peak" 'BEGIN { printf "%.0f", k / 1024 }') MiB"
+		awk -v c="$cpu" -v w="$wall" 'BEGIN { exit !(c <= w / 2) }' || over=$((over + 1))
+		[ "${peak:-0}" -le 1048576 ] || over=$((over + 1))
+		worst_cpu="$cpu"
+	done
+	observe "each broker process over the ten minutes${limits}"
+	judge "$([ "$over" = 0 ] && echo 0 || echo 1)" \
+		"each process's CPU time is at most half its wall time and its peak memory at most 1 GiB" \
+		"${limits#; } (the last CPU figure read $worst_cpu s)"
+
+	# The upload, the answer with a gap in it, the upgrade and the clone.
+	echo "airlock-check: k9 is uploading 50 MiB, waiting out a 90-second gap and cloning..." >&2
+	"$WORK_DIR/k9/k9" upload --proxy "$proxy" --host s.airlock.test --ca "$AIRLOCK_CA_CERT_FILE" \
+		--header "$PLACEHOLDER" --size $((50 * 1024 * 1024)) --out "$WORK_DIR/k9/upload.json" >/dev/null 2>&1
+	"$WORK_DIR/k9/k9" gap --proxy "$proxy" --host s.airlock.test --ca "$AIRLOCK_CA_CERT_FILE" \
+		--header "$PLACEHOLDER" --gap 90 --out "$WORK_DIR/k9/gap.json" >/dev/null 2>&1
+	local s_mark
+	s_mark="$(records_count s)"
+	"$WORK_DIR/k9/k9" upgrade --proxy "$proxy" --host s.airlock.test --ca "$AIRLOCK_CA_CERT_FILE" \
+		--header "$PLACEHOLDER" --out "$WORK_DIR/k9/upgrade.json" >/dev/null 2>&1
+
+	# The clone goes through the same proxy on an ordinary CONNECT: github.com is no bound host,
+	# so nothing is swapped into it and what is proved is that the tunnel carries a clone.
+	local clone_status clone_out
+	rm -rf "$WORK_DIR/k9/clone"
+	clone_out="$(GIT_CONFIG_COUNT=2 \
+		GIT_CONFIG_KEY_0=http.proxy GIT_CONFIG_VALUE_0="$proxy" \
+		GIT_CONFIG_KEY_1=http.sslCAInfo GIT_CONFIG_VALUE_1="$AIRLOCK_CA_CERT_FILE" \
+		git clone --depth 1 --quiet https://github.com/cybermonklabs/legion "$WORK_DIR/k9/clone" 2>&1 | tail -n 2 | tr '\n' ' ')"
+	clone_status=$?
+	local cloned=0
+	[ -d "$WORK_DIR/k9/clone/.git" ] && cloned=1
+
+	observe "the 50 MiB upload: $(cat "$WORK_DIR/k9/upload.json" | tr -d '\n ')"
+	observe "the answer with a 90-second gap in it: $(cat "$WORK_DIR/k9/gap.json" | tr -d '\n ')"
+	observe "the shallow clone of cybermonklabs/legion through the tunnel exited $clone_status and left a checkout: $cloned ($clone_out)"
+	local upload_ok gap_ok
+	upload_ok="$(jq -r '.status // 0' "$WORK_DIR/k9/upload.json")"
+	gap_ok="$(jq -r '.second // 0' "$WORK_DIR/k9/gap.json")"
+	judge "$([ "$upload_ok" = 200 ] && [ "$gap_ok" = 200 ] && [ "$cloned" = 1 ] && echo 0 || echo 1)" \
+		"the upload, the answer with the gap and the clone finish" \
+		"the upload answered $upload_ok, the second event after the 90-second gap answered $gap_ok, and the clone left a checkout: $cloned"
+
+	local upgrade_recs upgrade_header upgrade_status
+	upgrade_recs="$(records s | jq --argjson n "$s_mark" '.[$n:]')"
+	upgrade_header="$(printf '%s' "$upgrade_recs" | jq -r '[.[] | select(.path == "/socket") | .header.Authorization // [] | .[]] | .[0] // ""')"
+	upgrade_status="$(jq -r '.status // 0' "$WORK_DIR/k9/upgrade.json")"
+	observe "the WebSocket upgrade: $(cat "$WORK_DIR/k9/upgrade.json" | tr -d '\n' | head -c 300); S recorded its Upgrade header as $(printf '%s' "$upgrade_recs" | jq -r '[.[] | select(.path == "/socket") | .header.Upgrade // [] | .[]] | .[0] // ""') and its Authorization as $(shape "$upgrade_header") against the stored $(shape "$demo_value") (compared by SHA-256 and length)"
+	if [ "$upgrade_status" = 101 ]; then
+		judge "$(contains "$demo_value" "$upgrade_header" && contains "the service read" "$(jq -r '.frames // ""' "$WORK_DIR/k9/upgrade.json")" && echo 0 || echo 1)" \
+			"the WebSocket upgrade reaches S with the real value in its header, and frames pass both ways" \
+			"S answered 101 and the frame came back: $(jq -r '.frames // ""' "$WORK_DIR/k9/upgrade.json")"
+	else
+		fail "the WebSocket upgrade reaches S with the real value in its header, and frames pass both ways — the first half ran and the second cannot run on this stack. S got the upgrade request through the proxy and its Authorization carried the real value ($(shape "$upgrade_header") against the stored $(shape "$demo_value"), compared by SHA-256 and length), but dev-airlock.sh's S answers every request from airlocktest.Service's own fixed body and never 101: the 101 and the line protocol the proxy's own upgrade test drives are an Answer installed in Go (internal/broker/airlockproxy/upgrade_test.go's upgradeStandIn), and cmd/dev-airlock-stands installs none. It needs that command to serve an upgrade route. Here S answered $upgrade_status."
+	fi
+
+	# One broker stopped while a connection through it is open, and then the next call. The
+	# connection is this run's own gap connection on the second broker's proxy port, so what is
+	# stopped is the process carrying it.
+	local stopped="${pids[-1]}" after_stop
+	"$WORK_DIR/k9/k9" gap --proxy "http://agent-secrets:$PROXY_PASSWORD@${BROKER_PROXY_ADDRS[-1]}" \
+		--host s.airlock.test --ca "$AIRLOCK_CA_CERT_FILE" --header "$PLACEHOLDER" --gap 8 \
+		--out "$WORK_DIR/k9/stopped.json" >/dev/null 2>&1 &
+	local gap_pid=$!
+	sleep 3
+	kill "$stopped" 2>/dev/null || true
+	wait "$gap_pid" 2>/dev/null || true
+	# Four calls, not one: the stack's proxy front is a round-robin over both brokers' ports
+	# that reads its backends from a file and asks nobody whether a backend is alive, so every
+	# other connection still goes to the stopped process and is reset. In a cluster the Service
+	# drops a terminating pod from its EndpointSlice; here nothing does, so what this reads is
+	# that a call through the front reaches the broker that is still up.
+	local after_stop="" status ok=0 i
+	for i in 1 2 3 4; do
+		status="$(curl -sS -o /dev/null -w '%{http_code}' --noproxy '' --cacert "$AIRLOCK_CA_CERT_FILE" \
+			--proxy "$proxy" -H "Authorization: Bearer $PLACEHOLDER" "$AIRLOCK_S_URL/ok" 2>&1 | tr -d '\n')"
+		after_stop="$after_stop $status"
+		[ "$status" = 200 ] && ok=$((ok + 1))
+	done
+	local still_up=0
+	kill -0 "$stopped" 2>/dev/null && still_up=1
+	observe "with broker $stopped stopped while it carried a connection: that connection answered $(cat "$WORK_DIR/k9/stopped.json" | tr -d '\n ') and the four calls after it answered$after_stop (the stopped process is still up: $still_up)"
+	judge "$([ "$ok" -gt 0 ] && echo 0 || echo 1)" \
+		"the stream on the stopped process ends after the drain, and the next call succeeds" \
+		"the connection on the stopped process ended $(jq -r 'if .second then "with its second event answering " + (.second|tostring) else "with " + (.second_error // .error // "no answer") end' "$WORK_DIR/k9/stopped.json"), and $ok of the four calls after it answered 200 ($after_stop); the ones that did not are the connections the front still handed to the stopped process, which it keeps in its backends file with no health check of its own"
+
+	stop_stack
+
+	# The negative control: a stack of its own whose proxy cuts an idle connection at 60 seconds,
+	# which is what the 90-second gap is measured against.
+	start_stack --idle-seconds 60
+	stack_facts
+	release AIRLOCK_DEMO_TOKEN 30m
+	"$WORK_DIR/k9/k9" gap --proxy "$(proxy_for "${AIRLOCK_PROXY_URL##*://}")" --host s.airlock.test \
+		--ca "$AIRLOCK_CA_CERT_FILE" --header "$PLACEHOLDER" --gap 90 \
+		--out "$WORK_DIR/k9/control-gap.json" >/dev/null 2>&1
+	local control_second
+	control_second="$(jq -r '.second // ""' "$WORK_DIR/k9/control-gap.json")"
+	control "with --idle-seconds 60 the same answer with a 90-second gap in it: $(cat "$WORK_DIR/k9/control-gap.json" | tr -d '\n ')"
+	judge "$([ -z "$control_second" ] && echo 0 || echo 1)" \
+		"negative control: with the idle limit at 60 seconds the answer with the 90-second gap is cut" \
+		"its second event $(jq -r 'if .second then "answered " + (.second|tostring) else "did not arrive: " + (.second_error // .error // "no answer") end' "$WORK_DIR/k9/control-gap.json")"
 
 	stop_stack
 }
@@ -1305,7 +2672,10 @@ k2) check_k2 ;;
 k3) check_k3 ;;
 k4) check_k4 ;;
 k5) check_k5 ;;
+k6) check_k6 ;;
+k7) check_k7 ;;
 k8a) check_k8a ;;
+k9) check_k9 ;;
 k15) check_k15 ;;
 esac
 

@@ -189,35 +189,88 @@ names and one for its control, and last `check <id>: passed` or `check <id>: fai
 DEV_BROKER_POSTGRES_URL="$LEGION_TEST_PG_DSN" packages/envoy/scripts/airlock-check.sh k3
 ```
 
-`<id>` is `k1`, `k2`, `k3`, `k4`, `k5`, `k8a` or `k15`; `k6`, `k7` and `k9` exit 3
-until they are written. `--keep-stack` leaves the stack and the run's work directory
-up to look at a failure with, `--help` prints the usage, and a usage error exits 2.
+`<id>` is `k1`, `k2`, `k3`, `k4`, `k5`, `k6`, `k7`, `k8a`, `k9` or `k15`.
+`--keep-stack` leaves the stack and the run's work directory up to look at a failure
+with, `--help` prints the usage, and a usage error exits 2. `k9` is a long run — ten
+minutes of connections and two stacks, about twenty-five minutes in all; every other
+check takes a few minutes.
 
 No line it prints is a credential: a value is compared by its SHA-256 (the first 16
 hex digits) and its length, and every line that compares one says so, which is a rule
 of the verification document itself.
 
-Two checks need more than the stack. `k1` scans the command's memory, and
+Four checks need more than the stack. `k1` scans the command's memory, and
 `/proc/sys/kernel/yama/ptrace_scope` is 1 in a Legion pod, so only an ancestor of the
 command may read its `/proc/<pid>/mem`: the scan is a small Python program the run
 writes into its work directory, which starts `agent-secrets` itself and scans the
-descendant it started. `k15` needs no stack: it builds the Lean model with `lake`,
-prints its theorem statements and their axioms, runs the comparison fuzz test for ten
-minutes, and runs the six mutants through `airlock-mutants.sh`.
+descendant it started. `k6` and `k7` drive real clients and the real consumers:
+`airlock-clients.sh` below installs `az`, `gcloud`, `pulumi` and `boto3`, and the
+consumers (`scripts/az-broker`, `scripts/secret-run`, `shims/gh`,
+`scripts/gcloud-broker` and the tier commands of `gws/accounts.json`) are fetched from
+`sjawhar/dotfiles` at main with `gh api`. `k15` needs no stack: it builds the Lean
+model with `lake`, prints its theorem statements and their axioms, runs the comparison
+fuzz test for ten minutes, and runs the six mutants through `airlock-mutants.sh`.
 
 Where a check needs a secret the stack does not hold, the run extends the stack's own
-fake Secrets Manager and makes every broker reread it; it writes no rules file of its
-own. A control that needs other rules or another proxy setting — `k4`'s, which turns
-the refusal of a loopback address off for one host — is a second broker process on
-the stack's own database, rules, authority and stand-ins with that one setting
-changed, and the step's `HTTPS_PROXY` pointed at it. `k5`'s control is a second stack
-run under `--keep-values`.
+fake Secrets Manager and makes every broker reread it. A control that needs other
+rules or another proxy setting — `k4`'s, which turns the refusal of a loopback address
+off for one host — is a second broker process on the stack's own database, authority
+and stand-ins with that one setting changed, and the step's `HTTPS_PROXY` pointed at
+it. `k7` goes furthest with that device: its names are the consumers' own and its
+hosts are the real services, so it starts one broker with the stack's first broker's
+whole environment (read out of `/proc/<pid>/environ`) and its rules file, its two
+ports and its public URL changed, and points both `AGENT_SECRETS_URL` and the grant's
+proxy at it. `k5`'s control is a second stack under `--keep-values`, `k6`'s a second
+stack under `--no-kind`, and `k9`'s a second stack under `--idle-seconds 60`.
 
-It needs bash, curl, jq, go, python3, openssl, node and psql; `k2` also needs `gh`,
-which fetches the last released `agent-secrets` from the newest `legion-envoy-v*`
-release, and `k15` needs `lake` from the Lean toolchain the environment names. Each
-bound host listens on one loopback address and port 443, so only one stack runs on a
-machine at a time.
+`k6` approves its own human-tier grant the way a person does: a pod session has no
+operator, so the run signs in at the stack's issuer, which signs the approver in with
+no page to fill, reads the request's page and posts the decision back with an `Origin`
+header. `k9` runs each broker with `GOMAXPROCS=1` by exporting it into the environment
+it starts the stack with, since `dev-airlock.sh` has no option for it, and reads each
+broker's CPU time from `utime` and `stime` in `/proc/<pid>/stat` and its peak memory
+from `VmHWM` in `/proc/<pid>/status`, which is the quantity `getrusage` reports as
+`ru_maxrss` for a process one can wait on — these two are `dev-airlock.sh`'s children,
+not the check's.
+
+It needs bash, curl, jq, go, python3, openssl, node and psql; `k2` and `k7` also need
+`gh` (the last released `agent-secrets` comes from the newest `legion-envoy-v*`
+release, and the consumers come from `sjawhar/dotfiles`), `k6` and `k7` need `bun`,
+`wget`, `git`, `uv` and the clients `airlock-clients.sh` installs, `k9` needs `git`,
+and `k15` needs `lake` from the Lean toolchain the environment names. Each bound host
+listens on one loopback address and port 443, so only one stack runs on a machine at a
+time.
+
+## airlock-clients.sh
+
+Installs the clients checks `k6` and `k7` drive and that a Legion issue pod has not
+got — the Azure CLI, the Google Cloud CLI, Pulumi with the Tailscale provider, and
+boto3 — each at a pinned version whose SHA-256 is checked before anything of it runs,
+under `${TMPDIR:-/tmp}`, and prints the exports a check needs on stdout:
+
+```bash
+eval "$(packages/envoy/scripts/airlock-clients.sh)"
+```
+
+Everything it says about itself goes to stderr and every line of stdout is an export
+(`PATH`, `CLOUDSDK_PYTHON`, `PULUMI_HOME`, `UV_CACHE_DIR`, `AIRLOCK_BOTO3_PYTHON`,
+`AIRLOCK_PULUMI_TAILSCALE_VERSION`, `AIRLOCK_CLIENTS_DIR`), so the line above is the
+whole of how a caller uses it; `airlock-check.sh` runs it that way for `k6` and `k7`.
+A second run finds what the first installed and fetches nothing: each client sits
+beside a stamp file holding the version and the digest the script pins, and a stamp
+that matches is the install. `--dir DIR` installs elsewhere, `--force` fetches again,
+`--help` prints the usage, and a usage error exits 2.
+
+Every fetch is a download with a checksum, this repository's one toolchain pattern
+(`.github/actions/install-elan/action.yml`,
+`packages/daemon/docker/worker.Dockerfile`): the bytes are written to a temporary
+name, their SHA-256 is compared with the pinned digest, and only then are they
+unpacked or installed. A digest that does not match leaves nothing behind and ends the
+run. The two Python clients are pinned that way rather than by `uv run --with
+<package>==<version>`, which pins the version but checks no digest: their wheels are
+fetched and checked, then installed with `uv` into an environment of their own, so the
+client itself is the pinned and checked artifact and `uv` resolves its dependencies
+from that wheel's own requirements.
 
 ## airlock-mutants.sh
 
