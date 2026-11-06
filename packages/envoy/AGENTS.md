@@ -5460,7 +5460,7 @@ The enrollment lock, taken before any request or grant row, means a request raci
 A pending request leaves `pending` without a human only through `store.EndPendingRequests` (the session's cancel, the sweeper's expiry, an enrollment's end):
 one statement moves the request rows and writes each one's audit row and its record's terminal event.
 `ApplyDecision` decides a pending record on the deciding human's login
-— approve mints the grant while the requesting enrollment is still live, deny denies it
+— approve mints the grant while the requesting enrollment may still take one, which is a live row, a dormant one the carry keeps for the session's next enrollment to adopt, or a lapsed one the sweep has not ended yet whose end would leave it dormant (`mayGrant`), and deny denies it
 — re-deriving the record's id, refusing any login but the record's approver whatever the record's state (`record.ErrNotApprover`, `403 NOT_APPROVER`), and an approval by any login the current policy would not have approve one of the request's names (`currentPolicyAdmits`, the same error:
 once a shared human-tier secret is a person's, a request waiting on `anyone` is that person's alone to approve, and one waiting on a person for a secret another person must now approve is no one's;
 a denial releases nothing, so the record's approver may still deny either), re-verifying its embedded request object, and writing the decision event (which records the deciding login), the request transition and the audit row in one transaction;
@@ -5600,6 +5600,7 @@ then it ends, for good, every dormant enrollment whose window has passed (`enrol
 then it expires overdue pending `agent_secret` requests (waking each one's owner through the Envoy wake seam) and overdue pending machine logins.
 It reads fresh from Postgres every time, so a restart resumes exactly where the rows are.
 Lapsed means what proof lookup means by not live (`enrollment_lease_live`, below, is false), so a session that keeps renewing is never ended, and rows a concurrent renew or revoke holds are left to the next tick.
+An approval given between a lapse and the sweep's end of it lands on that row too: `requests.Machine.ApplyDecision` grants on a lapsed enrollment no end has been written against yet when the end the sweep is about to write would leave it dormant — it names a session, records a principal and still holds a live grant or a pending request (`requests.enrollmentWouldGoDormant`, `enroll.endEnrollment`'s own probe character for character) — so the sweep's timing, up to `BROKER_SWEEP_SECONDS`, never decides whether a person's approval grants or is denied.
 Each ended enrollment's live grants are found through `grants_enrollment_live` (migration 0008), so a backlog of lapsed enrollments costs one index lookup each rather than a scan of `grants`.
 
 Time no broker was serving does not count against a lease.

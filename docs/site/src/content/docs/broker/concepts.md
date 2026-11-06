@@ -94,13 +94,23 @@ What an end does to what the enrollment still holds depends on who ended it.
 An end a person makes, revoking the machine login or their sign-in on a box, revokes every grant
 the enrollment held and cancels every request it still had pending, so those leave the approver's
 Inbox and an approval can never land on a session that is gone.
-An end of the box leaves both where they are: when the enrollment names a session and still holds a
-live grant or a pending request, the launcher's own revoke and a lapsed lease mark the row revoked
-and **dormant**, revoking nothing
+An end of the box leaves both where they are: when the enrollment names a session, records the
+principal that session belongs to, and still holds a live grant or a pending request, the
+launcher's own revoke and a lapsed lease mark the row revoked and **dormant**, revoking nothing
 (`packages/envoy/internal/broker/enroll/enroll.go`, `endEnrollment`).
+The row has to record the principal because only the pair, the session name and the principal, is
+ever adopted: a row that records no principal can be taken by no later enrollment, so it ends as
+every end did before the carry, its grants revoked and its pending requests cancelled
+(`enroll.go`, `adopt`).
+Every enrollment made before the broker recorded principals has none, among them every enrollment
+live on the day the carry ships, so each of those ends as it always did and the enrollment that
+replaces it carries.
 A dormant enrollment proves nothing from the moment it goes dormant, as any ended enrollment proves
 nothing, and its next renewal is refused `ENROLLMENT_NOT_LIVE`; what it holds waits for the next
 enrollment of that session name under the same principal to take.
+An approval given while the box is gone still mints a grant: the broker hangs it off the row the
+carry is keeping for that session, and the session's next enrollment takes it with the rest
+(`packages/envoy/internal/broker/requests/machine_state.go`, `ApplyDecision`).
 A box is replaced far more often than the session that runs on it, so an end of the box is no end of
 the session.
 [Requests and grants](#requests-and-grants) says what that next enrollment takes, and what ends a
