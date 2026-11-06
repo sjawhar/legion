@@ -47,7 +47,10 @@ order, each the line `dispatch result` printed when the result was recorded:
 
 The implementer runs the repository's fast local checks for the paths it changed before the push,
 then pushes and completes. It never waits for, watches or polls the pull request's remote CI
-(`gh run watch`, `gh pr checks --watch`, `sleep` around `gh run view`) and never sleeps in a loop.
+(`gh run watch`, `gh pr checks --watch`, `sleep` around `gh run view`) and never sleeps in a loop
+(the step's spaced reads of the pull request's head after a push are the one sleep this rule
+allows, and they read no check; `skill://legion-worker`, *Every role pushes its own commits*,
+gives them).
 Under the Go daemon a check that settles red on the head moves the issue nowhere: the daemon names
 every check GitHub reported, with the conclusion GitHub gave it, in one message to the tree's
 architect, the worker of the issue's current phase and the implementer, and judges none of them.

@@ -2637,6 +2637,8 @@ The launcher starts each role generation through the hidden `legion launcher rol
 Inside them `/var/run/legion/roles` is covered by an empty memory filesystem, and the role's own gh, private, state and agent-secrets directories are bound back at the fixed paths `/var/run/legion/gh`, `/var/run/legion/private`, `/var/run/legion/state` and `/var/run/legion/agent-secrets`;
 its launcher token is bound nowhere, so no role's process reads it, and no role sees a sibling's directories.
 `/home/legion` is an overlay whose lower is the image's and whose upper and work directories are the role's on `role-homes` (a work directory of each generation's own), with every mount the container holds under `/var/run/legion/home` bound back on top at its own path under `/home/legion`, and `/var/run/legion/home` itself then covered.
+The mount carries `userxattr`, so gVisor writes a renamed directory's opaque mark in the `user.overlay.` attribute namespace, which the role's own upper layer keeps and the role may write (`homeOverlayOptions`, `roleinit_linux.go`);
+without it the mark goes to `trusted.overlay.opaque`, which a task in the role's nested user namespace may not write, and gVisor panics when that write is refused, which ends the pod's whole sandbox.
 The lower layer has no mount under it because Linux refuses an overlay over one with mounts locked under it from a more privileged namespace, which every container mount is inside a role's user namespace;
 gVisor allows it today, and the layout does not lean on that.
 `/tmp` and `/var/tmp` are binds of the role's own directories on `role-homes`;
