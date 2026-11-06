@@ -1,0 +1,121 @@
+import { expect, test } from "bun:test";
+import { fileURLToPath } from "node:url";
+
+import {
+  duplicateRows,
+  type ListedRow,
+  type Listing,
+  listedProjects,
+  projectConfigurations,
+  rowsOfListing,
+} from "../configurations";
+import { harnessProcessCount } from "../harness-processes";
+
+// e2e/playwright.config.ts reads the command line as it evaluates: with no harness port set it
+// refuses the run unless that line is a listing, which starts no server and runs no spec
+// (e2e/playwright.config.ts:64-76, :101-128). This file reads the config for its projects' `use`
+// and starts nothing, so it says `--list` as the listings below do, and puts the command line back
+// for whatever test file this worker runs next. The imports are dynamic because a static one would
+// evaluate the config before this line could say so.
+const commandLine = process.argv;
+process.argv = [...commandLine, "--list"];
+const { default: realConfig } = await import("../playwright.config");
+const {
+  default: doubledConfig,
+  doubledProject,
+  doubledSpec,
+} = await import("./fixtures/doubled-project.config");
+process.argv = commandLine;
+
+// The preload (web/src/__tests__/setup.ts) puts happy-dom's Response on globalThis, which cannot
+// read a subprocess's pipe; the listings below read one with Bun's own, as
+// e2e/__tests__/harness-lanes.test.ts:16-18 does.
+const NativeResponse = (await Bun.fetch("data:,")).constructor as typeof Response;
+const dispatchPackage = fileURLToPath(new URL("../..", import.meta.url));
+
+/** What `playwright test --list` reports for the config at `configPath`, relative to
+ *  packages/dispatch. The run starts no server and no browser; it costs about five seconds. */
+async function listing(configPath: string): Promise<Listing> {
+  const child = Bun.spawn(
+    ["bunx", "playwright", "test", "--config", configPath, "--list", "--reporter=json"],
+    {
+      cwd: dispatchPackage,
+      // No harness port or lane reaches the listing, so it is the plain one the config exempts
+      // from its unset-port refusal whatever the shell that started this test holds. The process
+      // count does reach it: that is what chooses the project list
+      // (e2e/playwright.config.ts:363-364), and the configurations below are read from the config
+      // this process imported with the same environment.
+      env: {
+        HOME: process.env.HOME ?? "",
+        PATH: process.env.PATH ?? "",
+        ...(process.env.DISPATCH_E2E_PROCESSES === undefined
+          ? {}
+          : { DISPATCH_E2E_PROCESSES: process.env.DISPATCH_E2E_PROCESSES }),
+      },
+      stderr: "pipe",
+      stdout: "pipe",
+    }
+  );
+  const [code, stderr, stdout] = await Promise.all([
+    child.exited,
+    new NativeResponse(child.stderr).text(),
+    new NativeResponse(child.stdout).text(),
+  ]);
+  if (code !== 0) throw new Error(`listing ${configPath} exited ${code}:\n${stderr}\n${stdout}`);
+  return JSON.parse(stdout) as Listing;
+}
+
+/** The configuration each row runs in. A project the map holds no key for gets a configuration of
+ *  its own, so its rows are never read as repeats of another project's; the assertion on
+ *  `listedProjects` is what names such a project. */
+function keyOfRow(configurations: Map<string, string>): (row: ListedRow) => string {
+  return (row) => configurations.get(row.project) ?? `no configuration for project ${row.project}`;
+}
+
+// Two listings on a two-core runner cost about twelve seconds, so each test may take far longer
+// than Bun's five-second default; a minute and a half is the ceiling at which something is wrong
+// rather than slow.
+const listingTimeout = 90_000;
+
+test(
+  "no row runs twice in one configuration, and every project has one",
+  async () => {
+    const report = await listing("e2e/playwright.config.ts");
+    const rows = rowsOfListing(report);
+    expect(rows.length).toBeGreaterThan(0);
+    const configurations = projectConfigurations(realConfig, harnessProcessCount);
+
+    // A project whose configuration cannot be read fails here rather than passing quietly: its
+    // rows would be compared against no other project's.
+    expect(listedProjects(report).filter((name) => !configurations.has(name))).toEqual([]);
+
+    // The config as it stands has no repeat - that is what this run found when it was first
+    // written - so this assertion proves nothing about the change that brought it. It is the
+    // guard for the project someone adds later in a configuration that already runs the same
+    // file: `e2e/__tests__/fixtures/doubled-project.config.ts` is that project, and the test
+    // below shows this assertion catches it.
+    expect(duplicateRows(rows, keyOfRow(configurations))).toEqual([]);
+  },
+  listingTimeout
+);
+
+test(
+  "a project that repeats another's rows in its configuration is caught",
+  async () => {
+    const report = await listing("e2e/__tests__/fixtures/doubled-project.config.ts");
+    const rows = rowsOfListing(report);
+    const configurations = projectConfigurations(doubledConfig, harnessProcessCount);
+    expect(configurations.get(doubledProject)).toBe(configurations.get("chromium"));
+
+    const repeated = rows.filter((row) => row.file === doubledSpec && row.project === "chromium");
+    expect(repeated.length).toBeGreaterThan(0);
+    const duplicates = duplicateRows(rows, keyOfRow(configurations));
+    expect(duplicates.map((duplicate) => `${duplicate.file} ${duplicate.title}`).sort()).toEqual(
+      repeated.map((row) => `${row.file} ${row.title}`).sort()
+    );
+    for (const duplicate of duplicates) {
+      expect([...duplicate.projects].sort()).toEqual(["chromium", doubledProject].sort());
+    }
+  },
+  listingTimeout
+);
