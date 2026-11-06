@@ -2,8 +2,8 @@
 # Tests for `ci-ok.sh`: ci-ok passes only when `changes` and lint succeeded, every job `changes`
 # selected succeeded, and every job it did not select succeeded or was skipped.
 #
-# ci-ok.sh reads only its environment, so each case hands it a `toJSON(needs)` built here and the
-# SELECTED_BY and PULL_REQUEST_ONLY its ci.yaml step sets, shrunk to four jobs: typecheck,
+# ci-ok.sh reads only its environment, so each case hands it the NEEDS ci-ok-report.sh would build
+# and the SELECTED_BY and PULL_REQUEST_ONLY of ci.yaml's env, shrunk to four jobs: typecheck,
 # envoy-client and docs, each selected by its own output (on a push `changes` sets docs' output
 # false, since docs-pages.yaml builds main's site), and worker-image, which also runs only on a
 # pull request. The script under test is the file CI runs.
@@ -21,8 +21,8 @@ source "$script_dir/test-lib.sh"
 selected_by='{"typecheck": "typecheck", "envoy-client": "envoy_client", "worker-image": "worker_image", "docs": "docs"}'
 pull_request_only='["worker-image"]'
 
-# needs <changes result> <changes outputs> <lint result> [<job>=<result>]...: the toJSON(needs)
-# GitHub hands ci-ok, every other job with no outputs.
+# needs <changes result> <changes outputs> <lint result> [<job>=<result>]...: the NEEDS
+# ci-ok-report.sh hands ci-ok.sh, every other job with no outputs.
 needs() {
   local changes=$1 outputs=$2 lint=$3 pair doc
   shift 3
@@ -41,10 +41,10 @@ selects_docs='{"typecheck": "true", "envoy_client": "false", "worker_image": "tr
 # What `changes` outputs on a push: docs is false there whatever the diff touched.
 push_selects='{"typecheck": "true", "envoy_client": "false", "worker_image": "true", "docs": "false"}'
 
-# run_ci_ok <needs> [<event>] [<draft>]: sets out and status. The event defaults to pull_request.
+# run_ci_ok <needs> [<event>]: sets out and status. The event defaults to pull_request.
 run_ci_ok() {
   set +e
-  out=$(NEEDS=$1 EVENT=${2:-pull_request} DRAFT=${3:-false} SELECTED_BY=$selected_by \
+  out=$(NEEDS=$1 EVENT=${2:-pull_request} SELECTED_BY=$selected_by \
     PULL_REQUEST_ONLY=$pull_request_only "$script_dir/ci-ok.sh" 2>&1)
   status=$?
   set -e
@@ -127,23 +127,16 @@ run_ci_ok "$(needs success "$selects" skipped typecheck=success envoy-client=ski
 check "fails" "$(is "$status" 1)"
 check "names it and why" "$(contains "$out" '^::error::lint ended skipped; lint runs on every change')"
 
-echo "case: a draft pull request"
-run_ci_ok "$(needs skipped '{}' skipped typecheck=skipped envoy-client=skipped worker-image=skipped docs=skipped)" pull_request true
-check "fails" "$(is "$status" 1)"
-check "says to mark it ready" \
-  "$(contains "$out" '^::error::Draft pull request: no test job runs. Mark it ready for review to start them.$')"
-check "and only that" "$(is "$(grep -c '::error::' <<<"$out")" 1)"
-
-echo "case: a needed job SELECTED_BY does not name"
+echo "case: a job SELECTED_BY does not name"
 run_ci_ok "$(needs success "$selects" success typecheck=success envoy-client=skipped worker-image=success docs=skipped \
   contracts=skipped)"
 check "fails" "$(is "$status" 1)"
 check "names it, its result and why" "$(contains "$out" '^::error::contracts ended skipped, and ci-ok does not know what selects it')"
 
-echo "case: a job SELECTED_BY maps that ci-ok does not need"
+echo "case: a job SELECTED_BY maps is absent from NEEDS"
 run_ci_ok "$(needs success "$selects" success typecheck=success worker-image=success docs=skipped)"
 check "fails" "$(is "$status" 1)"
-check "names it as absent" "$(contains "$out" '^::error::envoy-client is absent from ci-ok.s needs')"
+check "names it as absent" "$(contains "$out" '^::error::envoy-client is absent from NEEDS')"
 check "prints it" "$(contains "$out" '^envoy-client: absent ')"
 
 summary "ci-ok.sh fails unless every job changes selected succeeded"

@@ -80,7 +80,7 @@ tells the agent who Dispatch takes it for.
 | Comments | `dispatch comment` comments on a document or replies in a thread. `dispatch suggest` proposes replacement text. `dispatch resolve-comment` resolves a thread. |
 | Messages | `dispatch message` posts a message or replies to one. |
 | Documents | `dispatch doc-read` reads a document, or the text of an uploaded file; with `--blocks` it lists the document's block ids, tokens and table rows that `dispatch doc-edit` addresses. `dispatch doc-edit` edits one in place. `dispatch artifact` uploads a file or a new document. `dispatch request-approval` asks a person to approve a document. |
-| Reading | `dispatch read` reads an issue, ask, comment, message, or document summary; an issue read lists the issue's last 10 events, `--events N` the last N, and `--all-events` every one. `dispatch search` searches everything. `dispatch related --project <KEY>` runs the related-item check a new issue or ask gets on a `--title` and `--text`, and writes nothing. `dispatch whoami` reports who Dispatch takes the agent for. |
+| Reading | `dispatch read` reads an issue, ask, comment, message, or document summary; an issue read lists the issue's last 10 events, `--events N` the last N, and `--all-events` every one. `dispatch search` searches everything. `dispatch related --project <KEY>` runs the related-item check a new issue or ask gets on a `--title` and `--text`, and writes nothing. `dispatch whoami` reports who Dispatch takes the agent for, and the OAuth scopes its credential holds. `dispatch inbox` lists what the Inbox page of the person the agent acts for shows — Needs you, Waiting on agents, Later and Credential requests, each with its count and its rows — read with the agent's own credential, which must hold the `person` scope; it is the person's Dispatch Inbox, not the Envoy tool `envoy_inbox`, which lists what was delivered to this session. |
 | Handoffs | `dispatch handoff-write` records a phase handoff on an issue as the agent's session: `--phase <phase>` and `--body-file <path>` (`-` reads stdin), one JSON object stored exactly as written, each write the phase's next version. `dispatch handoff-read` prints one line naming the phase, version, id, writing session and time, then the body exactly as stored; `--version <n>` reads an earlier version. |
 | Architecture | `dispatch architecture-sync` imports a project's architecture model now, from every source repository with a line for each, or from one with `--repo <owner/name>`. |
 
@@ -146,10 +146,14 @@ starts. When the list leaves older items out, its last line says how many; `disp
 reads them all. The request waits at most 800 ms for the list and carries the last one read when
 Dispatch does not answer.
 
-The server holds every write to a size, and refuses rather than truncates:
+The server holds every write to a size, refuses rather than truncates, and names what passed the
+bound; `dispatch limits` prints every bound the server you write to holds, and no command carries
+a bound of its own:
 
-- an ask's question is at most 2,000 characters, with at most eight options;
-- a comment or message body is at most 32,000 characters;
+- an ask's question and its options together are at most 32,000 characters, with at most eight
+  options;
+- a comment or message body is bounded block by block: each block — a paragraph, list, quote,
+  table or code block — is at most 32,000 characters, and one body holds at most 32,768 blocks;
 - a comment anchored to a document is also projected into that document's margin, which is bounded
   in bytes and not by that character limit: 256 KiB per thread, and 1 MiB per document margin. A
   few long anchored comments therefore fill a thread or a margin where many short ones used to
@@ -303,6 +307,23 @@ dispatch://PROJECT/artifact/<document>/comment/<id>#b-<block>[@v<N>]
 
 `dispatch read` on any of them shows what it is and everything that references it.
 
+Write each id whole. Where one reaches you short, Dispatch still resolves it: 8 or more of the
+characters an id starts with name the one ask, comment, message, document or block that carries
+them, in a reference, in a page address and on the API routes that take an id in their path, and
+what is stored is the whole id. A short id two items share resolves to neither: the API answers
+`409 ID_AMBIGUOUS` with the matches, and the text stays as written.
+
+Two forms need no `dispatch://`. An issue key on its own, `CORE-12`, links to that issue when that
+issue exists, and `#` with a question block's id links to that question of the document the text
+belongs to — its own text, its questions and replies, and comments anchored to it; text on an issue
+but on no document resolves against the issue's spec. Both enter the reference graph, so
+`dispatch read` on the target lists the text that wrote them.
+
+To write a literal `#id` in a document rather than a link to that question, put it in a code
+span: a document keeps no escape of its own, since it stores `\#q2` as `#q2`, and code shows as
+text on every surface. A comment, an ask and an issue message store their body as you wrote it,
+so `\#q2` stays text there.
+
 A comment or message is made of blocks, one per paragraph, list or other top-level block, named
 `b1`, `b2` and so on. `#b-<block>` names one of them, and a link in a comment or issue message
 starts at the block that holds it. A comment block keeps its id when its author moves, rewords or
@@ -333,7 +354,12 @@ carries an `Idempotency-Key` header of its own, and the command asks again under
 attempt fails on the way, gets no answer for 20 seconds while none of its body is going out,
 Dispatch answers 5xx, 408 or 429, or Dispatch is still running an earlier attempt
 (`409 KEY_IN_FLIGHT`): at most five attempts, the last starting within 30 seconds of the first, and
-the whole command within 60. It asks again only of a Dispatch that judges the key: one whose answer
+the whole command within 60. Once an attempt got no answer for 20 seconds or was told
+`409 KEY_IN_FLIGHT`, Dispatch may still be running the write, and it finishes it whatever the
+command does, so the command keeps asking every 3 seconds or less (longer only when Dispatch's
+`Retry-After` asks), starting no ask in the last 5 seconds of its 60, to collect the answer; an
+upload of a megabyte or more, whose every ask sends the whole file again, keeps the five attempts.
+It asks again only of a Dispatch that judges the key: one whose answer
 carried the key back, or whose `/healthz` said `idempotency_keys: true` in the last five minutes,
 whatever its status; any other would make a repeated write twice. Dispatch makes the write once per
 key and answers a repeat with the first answer, so the command never makes a write twice. When the

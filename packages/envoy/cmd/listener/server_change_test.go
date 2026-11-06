@@ -68,10 +68,11 @@ const (
 	serverChangeHeartbeat = 30 * time.Second
 
 	// serverChangeAttemptTimeout and serverChangeRetryDelay are envoy-client's publish attempt and
-	// the wait before its one retry (DEFAULT_TIMEOUT_MS and RETRY_DELAY_MS in
-	// packages/envoy-client/src/transport.ts).
-	serverChangeAttemptTimeout = 5 * time.Second
-	serverChangeRetryDelay     = 250 * time.Millisecond
+	// the wait before its one retry (contracts.ListenerCallTimeout and
+	// contracts.ListenerCallRetryDelay, generated from LISTENER_CALL_TIMEOUT_MS and
+	// LISTENER_CALL_RETRY_DELAY_MS in packages/contracts).
+	serverChangeAttemptTimeout = contracts.ListenerCallTimeout
+	serverChangeRetryDelay     = contracts.ListenerCallRetryDelay
 	// serverChangeReplayTimeout is envoy-client's replay call timeout (REPLAY_TIMEOUT_MS).
 	serverChangeReplayTimeout = 10 * time.Second
 	// serverChangeReplayMaxMessages is the most messages the stand-in asks one replay call for, the
@@ -177,12 +178,10 @@ type serverChangeSoak struct {
 	heartbeatFailures  []string
 }
 
-// serverChangeRun is one way TestServerChange runs: what both listeners start with beyond the
-// cluster, and whether the senders publish through the holder's listener H rather than the
-// sender's S.
+// serverChangeRun is one way TestServerChange runs: whether the senders publish through the
+// holder's listener H rather than the sender's S.
 type serverChangeRun struct {
 	name              string
-	env               []string
 	sendThroughHolder bool
 }
 
@@ -194,16 +193,13 @@ type serverChangeRun struct {
 // without its sender's error, that each repeat carried its first copy's id, that the run did the
 // moves it claims, and that the route stays live when nothing moves.
 //
-// It runs twice. With the live topics lane off, the senders publish through the sender's listener
-// S, so every message crosses the hub. With the lane on in both listeners (liveLaneEnv), the
-// senders publish through H, so the publish route runs on the machine whose live lane receives
-// each ad-hoc publish and records the stand-in in its delivery handlers' dedupe cache as a push it
-// skipped; a route that counted that record as the stand-in's receipt would answer 200 for an
-// ad-hoc message sent while the stand-in is held off, and fail assertion 1.
+// It runs twice, once through each listener: through the sender's listener S, so every message
+// crosses the hub, and through the holder's listener H, so the publish route runs on the machine
+// the stand-in registered through.
 func TestServerChange(t *testing.T) {
 	runs := []serverChangeRun{
-		{name: "live lane off, senders through S"},
-		{name: "live lane on, senders through H", env: liveLaneEnv, sendThroughHolder: true},
+		{name: "senders through S"},
+		{name: "senders through H", sendThroughHolder: true},
 	}
 	for _, run := range runs {
 		t.Run(run.name, func(t *testing.T) { runServerChange(t, run) })
@@ -217,7 +213,7 @@ func runServerChange(t *testing.T, run serverChangeRun) {
 	cluster := testnats.StartCluster(t, 3)
 	binary := cmdtest.Build(t, "envoy-listener")
 	urls := cluster.URLs()
-	env := append([]string{"ENVOY_NATS_REPLICAS=" + strconv.Itoa(serverChangeReplicas)}, run.env...)
+	env := []string{"ENVOY_NATS_REPLICAS=" + strconv.Itoa(serverChangeReplicas)}
 	// Each listener lists the members in another order, so the two do not start on one member.
 	holder := startListenerProcess(t, binary, strings.Join([]string{urls[0], urls[1], urls[2]}, ","), "holder-host", env...)
 	holder.waitHealthy(t)
@@ -810,7 +806,15 @@ func drain[T any](signal chan T) {
 
 // awaitReplicated waits until the notification stream and every KV bucket's stream, the three the
 // listener cannot run without among them, are at three replicas with a leader and both other
-// replicas current and online (testnats.AwaitStreamCopies).
+// replicas current and online (testnats.AwaitStreamCopiesWithin).
+//
+// Each wait is the run's own serverChangeRecovery, not testnats' connect bound: what it waits for
+// is a member that was killed or lame-ducked mid-write rejoining and catching its streams up
+// while the three senders keep publishing, which is the work serverChangeRecovery is the bound
+// for. The thirteen disruptions that passed in the merge-queue run that reported this (job
+// 127449806190) came 6.0 s to 9.1 s apart, the 3 s quiet window between them included, so this
+// wait over every stream took seconds there; on the fourteenth the notification stream was still
+// short of its third settled copy at testnats' 30 s, and the run was thrown out of the queue.
 func (s *serverChangeSoak) awaitReplicated(t *testing.T) {
 	t.Helper()
 	names := []string{bus.Stream}
@@ -825,7 +829,7 @@ func (s *serverChangeSoak) awaitReplicated(t *testing.T) {
 		}
 	}
 	for _, name := range names {
-		testnats.AwaitStreamCopies(t, s.js, name, serverChangeReplicas)
+		testnats.AwaitStreamCopiesWithin(t, s.js, name, serverChangeReplicas, serverChangeRecovery)
 	}
 }
 

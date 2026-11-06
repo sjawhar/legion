@@ -1,8 +1,9 @@
 # shellcheck shell=bash
 # The model endpoint a key file's key is for: Anthropic's own, or the Anthropic-compatible gateway
 # (a LiteLLM proxy, say) LEGION_E2E_MODEL_BASE_URL names. Sourced by claude-backend-tmux.sh and
-# claude-backend-sandbox.sh, whose own note and fail model_key_preflight calls, and by
-# lib/install-key-file-model-route.sh, which checks its --base-url with model_base_url_refusal.
+# claude-backend-sandbox.sh, whose own note and fail model_key_preflight calls, by
+# parked-decision-devbox.sh, which checks LEGION_E2E_MODEL_BASE_URL with model_base_url_refusal, and
+# by lib/install-key-file-model-route.sh, which checks its --base-url with model_base_url_refusal.
 
 # anthropic_base_url is the endpoint when no base URL is named.
 anthropic_base_url=https://api.anthropic.com

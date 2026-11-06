@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionAnswer } from "@legion/contracts";
+import { bearerCredential } from "../bearer";
 import type { ActiveDispatchConfig } from "../dispatch-config";
 import type * as SessionAnswersModule from "../session-answers";
 import {
@@ -24,6 +25,7 @@ import {
   type SessionAnswersRead,
   sessionAnswersFailureLine,
   sessionAnswersSettled,
+  sessionAnswersWords,
 } from "../session-answers";
 
 const NOW = Date.parse("2026-10-27T12:00:00.000Z");
@@ -105,6 +107,29 @@ describe("renderSessionAnswers", () => {
         "Direct message m-1, on no issue",
         "Stop after the migration lands.",
       ].join("\n")
+    );
+  });
+
+  // An agent that answers for its person is recorded as the person, so the item names the agent
+  // beside them: a session reading its list must not take an agent's answer for the person's
+  // own words.
+  test("an item an agent wrote for its person names the agent beside the person", () => {
+    const throughSession = {
+      ...answer,
+      author: {
+        ...answer.author,
+        act: { session: "0123456789abcdef", scopes: ["person" as const] },
+      },
+    };
+    expect(renderSessionAnswerItem(throughSession)).toStartWith(
+      "2026-10-27T11:00:00Z · user ana@example.com, acting through session 0123456789abcdef · answered your ask"
+    );
+    const throughToken = {
+      ...answer,
+      author: { ...answer.author, act: { token_id: "token-1", token_name: "architect" } },
+    };
+    expect(renderSessionAnswerItem(throughToken)).toStartWith(
+      "2026-10-27T11:00:00Z · user ana@example.com, acting through token architect · answered your ask"
     );
   });
 
@@ -246,6 +271,108 @@ describe("renderSessionAnswers", () => {
   });
 });
 
+describe("sessionAnswersWords", () => {
+  const isNew = (before: readonly SessionAnswer[], after: readonly SessionAnswer[]) => {
+    const shown = new Set(sessionAnswersWords(before));
+    return sessionAnswersWords(after).some((word) => !shown.has(word));
+  };
+
+  test("a new item, a changed answer or an edited comment is new", () => {
+    expect(isNew([comment, direct], [answer, comment, direct])).toBe(true);
+    const edited = {
+      ...comment,
+      edited_at: "2026-10-27T11:30:00Z",
+      text: "Step 3 needs the production URL.",
+    };
+    expect(isNew([comment, direct], [edited, direct])).toBe(true);
+    const replaced = {
+      ...answer,
+      at: "2026-10-27T11:40:00Z",
+      selected: ["JSON"],
+      replaced: true as const,
+    };
+    expect(isNew([answer], [replaced])).toBe(true);
+  });
+
+  test("the same items, fewer items, or a changed title or question is nothing new", () => {
+    expect(isNew([answer, comment, direct], [answer, comment, direct])).toBe(false);
+    expect(isNew([answer, comment, direct], [answer, direct])).toBe(false);
+    const retitled = {
+      ...answer,
+      owner: { issue: { key: "CORE-7", title: "A new title" } },
+      ask: { id: "ask-1", question: "Which format, now?" },
+    };
+    expect(isNew([answer], [retitled])).toBe(false);
+  });
+
+  // The key tells what the person wrote from what their agent wrote for them: the same answer
+  // under an act is a different item, so a host carries it rather than passing over it as one
+  // it has already shown.
+  test("the same answer with and without an act are two different keys", () => {
+    const throughToken = {
+      ...answer,
+      author: { ...answer.author, act: { token_id: "token-1", token_name: "architect" } },
+    };
+    const throughSession = {
+      ...answer,
+      author: { ...answer.author, act: { session: "0123456789abcdef" } },
+    };
+    expect(sessionAnswersWords([answer])).not.toEqual(sessionAnswersWords([throughToken]));
+    expect(sessionAnswersWords([throughToken])).not.toEqual(sessionAnswersWords([throughSession]));
+    expect(isNew([answer], [throughToken])).toBe(true);
+  });
+
+  // The words are those of the items the list shows: an item the cap left out was never seen.
+  test("a read's words name only the items its list shows", async () => {
+    const items = Array.from({ length: 12 }, (_, index) =>
+      message(`item-${index}`, hoursAgo(index + 1), `${index}:${"w".repeat(1_000)}`)
+    );
+    const { fetchImpl } = fakeDispatch(() => listed(items));
+    const read = await readSessionAnswers({
+      session: newSession(),
+      dispatch: dispatchAt(),
+      env: envAt(stateDir()),
+      fetchImpl,
+      now: () => NOW,
+    });
+    const shown = items.filter((item) => read.text?.includes(item.text));
+    expect(shown.length).toBeGreaterThan(0);
+    expect(shown.length).toBeLessThan(items.length);
+    expect(read.words).toEqual(sessionAnswersWords(shown));
+  });
+
+  test("a cached list's words are those its own text shows, and an edit to an item it leaves out changes none", async () => {
+    const items = Array.from({ length: 12 }, (_, index) =>
+      message(`item-${index}`, hoursAgo(index + 1), `${index}:${"w".repeat(1_000)}`)
+    );
+    let answer = () => listed(items);
+    const { fetchImpl } = fakeDispatch(() => answer());
+    const options = {
+      session: newSession(),
+      dispatch: dispatchAt(),
+      env: envAt(stateDir()),
+      fetchImpl,
+      now: () => NOW,
+    };
+    const fresh = await readSessionAnswers(options);
+    // The oldest item is past the cap; a person edits it.
+    const edited = items.map((item, index) =>
+      index === items.length - 1 ? { ...item, text: `${item.text} edited` } : item
+    );
+    answer = () => listed(edited);
+    const afterEdit = await readSessionAnswers(options);
+    expect(afterEdit.text).toBe(fresh.text);
+    expect(afterEdit.words).toEqual(fresh.words);
+    // A failed read carries the cache under a longer header.
+    answer = () => json({ code: "INTERNAL", error: "database is down" }, 500);
+    const cached = await readSessionAnswers(options);
+    expect(cached.source).toBe("cache");
+    expect(cached.words).toEqual(
+      sessionAnswersWords(edited.filter((item) => cached.text?.includes(item.text)))
+    );
+  });
+});
+
 describe("renderSessionAnswersList", () => {
   test("prints every item of the 72 hours with no cap", () => {
     const items = Array.from({ length: 12 }, (_, index) =>
@@ -292,7 +419,11 @@ let dispatchCount = 0;
 /** A Dispatch of its own per test: the 404 back-off is process-wide, by URL. */
 function dispatchAt(): ActiveDispatchConfig {
   dispatchCount += 1;
-  return { enabled: true, url: `http://answers-${dispatchCount}.test`, token: "test-token" };
+  return {
+    enabled: true,
+    url: `http://answers-${dispatchCount}.test`,
+    credential: bearerCredential("test-token"),
+  };
 }
 let sessionCount = 0;
 /** A session of its own per test: the read state is process-wide, by session. */
@@ -451,6 +582,7 @@ describe("readSessionAnswers", () => {
       text: renderSessionAnswers(recent, { now: NOW }),
       source: "fresh",
       readAt: new Date(NOW).toISOString(),
+      words: sessionAnswersWords(recent),
     });
     expect(calls.map((call) => call.url.pathname + call.url.search)).toEqual([
       `/api/v1/agents/${session}/answers?max_chars=8000`,
@@ -513,6 +645,7 @@ describe("readSessionAnswers", () => {
         text: undefined,
         source: "fresh",
         readAt: new Date(NOW).toISOString(),
+        words: [],
       });
       fail = true;
       expectFailureLine(await readSessionAnswers({ ...options, deadlineMs }), reason);
@@ -539,6 +672,7 @@ describe("readSessionAnswers", () => {
         text: renderSessionAnswers(recent, { now: later, cached: { readAt, reason: failed } }),
         source: "cache",
         readAt,
+        words: expect.any(Array),
         reason: failed,
       });
       expect(read.text?.split("\n")[0]).toBe(SESSION_ANSWERS_MARKER);
@@ -723,6 +857,7 @@ describe("readSessionAnswers", () => {
       text: renderSessionAnswers([direct], { now: NOW }),
       source: "fresh",
       readAt: new Date(NOW).toISOString(),
+      words: sessionAnswersWords([direct]),
     });
     expect(calls.map((call) => call.url.host)).toEqual([hostOf(a), hostOf(b)]);
     pendingA.resolve(listed(recent));
@@ -908,6 +1043,7 @@ describe("readSessionAnswers", () => {
       }),
       source: "cache",
       readAt,
+      words: expect.any(Array),
       reason: NO_ANSWERS_ROUTE_REASON,
     };
     // The read that meets the 404, with the notice; then a request inside the back-off, which
@@ -973,6 +1109,7 @@ describe("readSessionAnswers", () => {
       text: renderSessionAnswers(recent, { now: NOW, cached: { readAt, reason: notRun } }),
       source: "cache",
       readAt,
+      words: expect.any(Array),
       reason: notRun,
     };
     const failure: SessionAnswersRead = {

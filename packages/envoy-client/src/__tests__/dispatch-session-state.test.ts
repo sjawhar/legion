@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { askgateStore, MARKER_MAX_AGE_MS, processStart } from "../askgate-marker";
+import { askgateStore, MARKER_MAX_AGE_MS, pidNamespace, processStart } from "../askgate-marker";
 import { adviceMemory, resetAdviceMemory } from "../dispatch-execute";
 import { forgetKeyedLayerMemory, keyedLayerMemory, rememberKeyedLayer } from "../dispatch-http";
 import { forgetShownPictures, shownPictures } from "../dispatch-picture-tools";
@@ -117,13 +117,35 @@ describe("per-session state", () => {
       utimesSync(dir, touched, touched);
       return dir;
     };
-    const live = store(askgateStore(r, process.pid, processStart(process.pid)), old);
-    const crashed = store(askgateStore(r, process.pid, "1"), old);
-    const recent = store(askgateStore(r, process.pid, "2"), new Date(now));
+    const ns = pidNamespace();
+    const live = store(askgateStore(r, process.pid, processStart(process.pid), ns), old);
+    const crashed = store(askgateStore(r, process.pid, "1", ns), old);
+    const recent = store(askgateStore(r, process.pid, "2", ns), new Date(now));
     const unknown = store(join(r, "askgate", "notes"), old);
     pruneSessions(r, now);
     expect(existsSync(crashed)).toBe(false);
     expect([live, recent, unknown].map((dir) => existsSync(dir))).toEqual([true, true, true]);
+    rmSync(r, { recursive: true, force: true });
+  });
+
+  // A store named before the owner's pid namespace was kept (`<pid>-<start>`) may be a gone
+  // process's, or a live process's in another namespace, which an agent box started on an earlier
+  // pi-envoy: that one touches its store only when it mints. The pass cannot tell them apart, so it
+  // keeps such a store as long as it keeps an idle session directory.
+  test("pruning keeps a store named with no pid namespace for 14 days, as it may be another namespace's", () => {
+    const r = root();
+    const now = Date.now();
+    const store = (dir: string, touched: Date) => {
+      mkdirSync(join(dir, "markers"), { recursive: true });
+      utimesSync(join(dir, "markers"), touched, touched);
+      utimesSync(dir, touched, touched);
+      return dir;
+    };
+    const idle = store(askgateStore(r, process.pid, "1"), new Date(now - 3 * 3_600_000));
+    const ended = store(askgateStore(r, process.pid, "2"), new Date(now - 15 * 86_400_000));
+    pruneSessions(r, now);
+    expect(existsSync(idle)).toBe(true);
+    expect(existsSync(ended)).toBe(false);
     rmSync(r, { recursive: true, force: true });
   });
 

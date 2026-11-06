@@ -51,7 +51,8 @@
 // same record sent again with another body gets `422 KEY_REUSED` and is not written.
 //
 // How long a write runs: until Dispatch has answered it or the session's shutdown cuts it. The
-// client asks again under the call's key (`DISPATCH_WRITE_RETRY`, 30 s,
+// client asks again under the call's key (`DISPATCH_WRITE_RETRY`, 30 s, or 55 s once Dispatch may
+// be running the write,
 // `packages/envoy-client/src/dispatch-http.ts`), so a slow Dispatch is waited out rather than given
 // up at a stop of the recorder's own.
 //

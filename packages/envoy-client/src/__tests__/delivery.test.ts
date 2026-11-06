@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dispatchIssueSubject, type Envelope } from "@legion/contracts";
 import { decode } from "@toon-format/toon";
+import { bearerCredential } from "../bearer";
 import {
   type DispatchDelivery,
   postDeliveryReply,
@@ -403,7 +404,7 @@ describe("renderInbound dispatch events", () => {
       if (rejected === undefined) throw new Error("missing recoverable rejected delivery");
 
       await postDeliveryReply(
-        { url: `http://127.0.0.1:${server.port}`, token: "reply-token" },
+        { url: `http://127.0.0.1:${server.port}`, credential: bearerCredential("reply-token") },
         reader,
         rejected,
         { error: "Invalid Dispatch targeted delivery frame" }
@@ -451,7 +452,10 @@ describe("renderInbound dispatch events", () => {
         );
         if (rendered.delivery !== undefined) {
           await postDeliveryReply(
-            { url: `http://127.0.0.1:${server.port}`, token: "reply-token" },
+            {
+              url: `http://127.0.0.1:${server.port}`,
+              credential: bearerCredential("reply-token"),
+            },
             reader,
             rendered.delivery,
             { error: "Invalid Dispatch targeted delivery frame" }
@@ -500,7 +504,10 @@ describe("renderInbound dispatch events", () => {
     try {
       for (const delivery of deliveries) {
         await postDeliveryReply(
-          { url: `http://127.0.0.1:${server.port}`, token: "reply-token" },
+          {
+            url: `http://127.0.0.1:${server.port}`,
+            credential: bearerCredential("reply-token"),
+          },
           reader,
           delivery,
           { error: "Invalid Dispatch targeted delivery frame" }
@@ -550,7 +557,10 @@ describe("renderInbound dispatch events", () => {
       issueKey: null,
       body: "status?",
     };
-    const config = { url: `http://127.0.0.1:${server.port}`, token: "reply-token" };
+    const config = {
+      url: `http://127.0.0.1:${server.port}`,
+      credential: bearerCredential("reply-token"),
+    };
 
     try {
       await postDeliveryReply(config, reader, delivery, { body: "green" });
@@ -1558,6 +1568,44 @@ describe("renderInbound non-dispatch envelopes", () => {
     );
   });
 
+  test("renders when a message forwarded from a role's kept lane was kept", () => {
+    // The listener could not deliver this when it was sent, so it kept it until this session
+    // claimed the role. The card says when, so the holder can judge how long it waited.
+    const sender = "01a0bbbb-cccc-7ddd-eeee-0123456789ab";
+    const rendered = renderInbound(
+      JSON.stringify({
+        event_id: "agent-message-kept",
+        source: "agent",
+        source_session: sender,
+        source_event_id: "agent.message-kept",
+        topic: "notifications.role.legion-architect",
+        dedupe_key: "agent-message-kept",
+        issued_at: Date.parse("2026-09-07T04:41:12Z"),
+        kept_at: Date.parse("2026-09-07T04:41:13Z"),
+        payload_summary: "The implementer is stalled.",
+        trace_id: "trace-agent-message-kept",
+      }),
+      reader
+    );
+
+    expect(rendered.content).toBe(
+      [
+        "envoy:",
+        `  from: ${sender}`,
+        '  at: "2026-09-07T04:41:12Z"',
+        "  id: agent-message-kept",
+        '  kept_at: "2026-09-07T04:41:13Z"',
+        "  reply_with:",
+        "    tool: envoy_send",
+        "    args:",
+        `      session_id: ${sender}`,
+        "      in_reply_to: agent-message-kept",
+        "      message: ...",
+        "  summary: The implementer is stalled.",
+      ].join("\n")
+    );
+  });
+
   test("omits a summary duplicated by a longer agent message", () => {
     const sender = "01a0bbbb-cccc-7ddd-eeee-0123456789ab";
     const head = "A".repeat(159);
@@ -1877,5 +1925,44 @@ describe("renderInbound pictures", () => {
       reader
     );
     expect(rendered.pictures).toBeUndefined();
+  });
+});
+
+// A body is bounded block by block, so one event carries its first part alone and says so with
+// `body_truncated`. A host reads that off the delivery (`bodyTruncated`), and the rendered card
+// carries the same note the Go deliverer writes, naming the route that answers the whole item.
+describe("a body an event carried only in part", () => {
+  test("a targeted comment delivery carries bodyTruncated and the note", () => {
+    const rendered = renderInbound(
+      JSON.stringify(
+        envelope({
+          source: "dispatch",
+          payload: targetedCommentFrame({
+            ...targetedComment,
+            body: "The first paragraph.",
+            body_truncated: true,
+          }),
+        })
+      ),
+      reader
+    );
+
+    expect(rendered.delivery?.body).toBe("The first paragraph.");
+    expect(rendered.delivery?.bodyTruncated).toBe(true);
+    const decoded = decode(rendered.content) as { envoy: Record<string, unknown> };
+    expect(decoded.envoy.body_note).toBe(
+      `the body is its first part only; read it whole with GET /api/v1/comments/${targetedCommentID}`
+    );
+  });
+
+  test("a delivery whose body rode whole carries neither", () => {
+    const rendered = renderInbound(
+      JSON.stringify(envelope({ source: "dispatch", payload: targetedCommentFrame() })),
+      reader
+    );
+
+    expect(rendered.delivery?.bodyTruncated).toBeUndefined();
+    const decoded = decode(rendered.content) as { envoy: Record<string, unknown> };
+    expect(decoded.envoy.body_note).toBeUndefined();
   });
 });

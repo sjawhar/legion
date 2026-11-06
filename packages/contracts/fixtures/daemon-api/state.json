@@ -15,6 +15,11 @@
     "waiting": [
       "LEGION-211"
     ],
+    "trees": [
+      "LEGION-208",
+      "LEGION-210",
+      "LEGION-212"
+    ],
     "blocked": [
       {
         "issue": "LEGION-209",
@@ -37,6 +42,7 @@
       "generation": 2,
       "phase": "done",
       "status": "done",
+      "tree": "LEGION-207",
       "repo": "acme/widgets",
       "defaultBranch": "main",
       "workers": {
@@ -79,6 +85,7 @@
       "generation": 3,
       "phase": "implementing",
       "status": "in_progress",
+      "tree": "LEGION-208",
       "repo": "acme/widgets",
       "defaultBranch": "main",
       "architect": {
@@ -126,7 +133,8 @@
                 }
               ]
             },
-            "pluginContract": 0
+            "pluginContract": 0,
+            "updateRound": "pod:7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11"
           },
           "rounds": 2
         },
@@ -146,7 +154,9 @@
                 "generation": 2
               }
             },
-            "pluginContract": 0
+            "pluginContract": 0,
+            "updateRound": "pod:7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
+            "updateHead": "4c1b8e2a6f9d3047b5e1c8a2f6d940b3e7c5a128"
           },
           "handoffRecord": {
             "id": "6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b",
@@ -172,13 +182,29 @@
       "slot": {
         "index": 0,
         "admittedAt": "2026-09-21T18:42:11Z"
-      }
+      },
+      "memoryGroup": "memory",
+      "memoryDrawMode": "random",
+      "memoryDrawnAt": "2026-09-20T11:04:05Z"
+    },
+    "LEGION-209": {
+      "key": "LEGION-209",
+      "generation": 1,
+      "phase": "admitted",
+      "status": "in_progress",
+      "repo": "acme/widgets",
+      "defaultBranch": "main",
+      "workers": {},
+      "memoryGroup": "memory",
+      "memoryDrawMode": "random",
+      "memoryDrawnAt": "2026-09-20T11:04:05Z"
     },
     "LEGION-210": {
       "key": "LEGION-210",
       "generation": 1,
       "phase": "held",
       "status": "in_progress",
+      "tree": "LEGION-210",
       "repo": "zeta/tools",
       "defaultBranch": "release/v7.1",
       "holdReason": "escalated",
@@ -198,6 +224,7 @@
       "generation": 1,
       "phase": "awaiting_person",
       "status": "in_progress",
+      "tree": "LEGION-212",
       "repo": "acme/widgets",
       "defaultBranch": "main",
       "workers": {},
@@ -225,6 +252,11 @@
       "issue": "LEGION-210",
       "role": "implementer",
       "state": "failed"
+    },
+    {
+      "issue": "LEGION-211",
+      "role": "implementer",
+      "state": "suspended"
     }
   ],
   "controllerLocator": {
@@ -414,7 +446,7 @@
       "name": "kubernetes",
       "kubernetes": {
         "namespace": "legion",
-        "image": "ghcr.io/sjawhar/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "image": "ghcr.io/cybermonklabs/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "storage_class": "gp3",
         "issue_volume": "30Gi",
         "scheduling": {
@@ -469,6 +501,7 @@
           "-c",
           "echo fixture-setup"
         ],
+        "skills_repository": "acme/agent-skills",
         "test_postgres": false,
         "repository_cache": {
           "volume": "40Gi",
@@ -482,6 +515,10 @@
             "ephemeral_storage": "2Gi",
             "ephemeral_storage_request": "1Gi"
           }
+        },
+        "idle_release": {
+          "idle_minutes": 10,
+          "backstop_minutes": 60
         }
       }
     },
@@ -526,7 +563,10 @@
             "workflow": ".github/workflows/release.yaml",
             "step": "Apply"
           }
-        ]
+        ],
+        "memory": {
+          "config_files": []
+        }
       },
       "WIDGETS": {
         "merge_queue_role": "merge-queue",
@@ -537,7 +577,10 @@
           ]
         },
         "slack_channels": [],
-        "deploys": []
+        "deploys": [],
+        "memory": {
+          "config_files": []
+        }
       }
     },
     "gates": {
@@ -560,6 +603,10 @@
     },
     "linger_hours": 1.5,
     "production_check_hours": 240,
+    "pod_update_retask_hours": 1,
+    "pod_update_notice_hours": 4,
+    "pod_update_max_open_rounds": 6,
+    "pod_update_rounds_per_minute": 2,
     "review_round_cap": 4,
     "max_fix_attempts": 5,
     "controller": "daemon",
@@ -571,7 +618,13 @@
     "worker_backends": {
       "tester": "omp"
     },
-    "role_config_files": {}
+    "role_config_files": {},
+    "repository_renames": [
+      {
+        "from": "acme/widgets-legacy",
+        "to": "acme/widgets"
+      }
+    ]
   },
   "consumers": [
     {

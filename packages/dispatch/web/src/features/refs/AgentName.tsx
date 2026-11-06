@@ -1,20 +1,28 @@
-import { actorAttribution, actorName, sessionLabel, shortSessionId } from "@legion/contracts";
+import {
+  actorActText,
+  actorAttribution,
+  actorName,
+  sessionLabel,
+  shortSessionId,
+} from "@legion/contracts";
 import { Fragment, type ReactNode, useMemo } from "react";
 import { generatePath, Link } from "react-router-dom";
 
 import type { Actor, AskResolution } from "../../api/types";
 import {
   focusVisibleRing,
+  inlineWarningText,
   linkHoverText,
   linkText,
   liveDotBg,
   offlineDotBorder,
+  stalledDotBorder,
   unknownDotBorder,
 } from "../../theme/classes";
 import { askResolutionBadge, askResolutionReason } from "./actor";
 import { type AgentRegistry, type AgentState, useAgentRegistry } from "./agent-registry";
 import { AGENT_LIVE_PATH } from "./routes";
-import { relativeTimeLabel } from "./Timestamp";
+import { relativeTimeLabel, Timestamp } from "./Timestamp";
 
 /**
  * How Dispatch shows an agent (a session), in one place: named by its current registry title
@@ -93,17 +101,30 @@ const MARK_CLASS = "mr-1 inline-block h-2 w-2 shrink-0 rounded-full align-middle
 
 const AGENT_SPAN_CLASS = "min-w-0 [overflow-wrap:anywhere]";
 
-/** Filled, hollow and dashed: the states read apart without colour. */
+/** Filled, amber-ringed, hollow and dashed: the states read apart without colour. */
 const STATE_MARK_CLASS: Record<AgentState, string> = {
   "not-running": `${MARK_CLASS} border-2 border-solid ${offlineDotBorder}`,
   running: `${MARK_CLASS} ${liveDotBg}`,
   unknown: `${MARK_CLASS} border border-dashed ${unknownDotBorder}`,
+  unresponsive: `${MARK_CLASS} border-2 border-solid ${stalledDotBorder}`,
 };
 
 const STATE_LABEL: Record<AgentState, string> = {
   "not-running": "Not running",
   running: "Running",
   unknown: "Running state unknown",
+  unresponsive: "Unresponsive",
+};
+
+/** What each state's mark says beyond its name. An unresponsive session's whole point is when
+ *  it was last heard from - that is what tells a reader whether to wait for it - so its mark
+ *  says so as a running one's does, and says that it has not ended. */
+const STATE_NOTE: Record<AgentState, string> = {
+  "not-running": "",
+  running: "",
+  unknown: "",
+  unresponsive:
+    " · it has missed its heartbeats without ending: it keeps its roles and claims, and messages are stored for it",
 };
 
 function AgentStateMark({
@@ -114,7 +135,7 @@ function AgentStateMark({
   state: AgentState;
 }): ReactNode {
   const seen =
-    state === "running" && lastSeen !== undefined
+    (state === "running" || state === "unresponsive") && lastSeen !== undefined
       ? relativeTimeLabel(new Date(lastSeen), Date.now())
       : undefined;
   return (
@@ -122,16 +143,53 @@ function AgentStateMark({
       aria-label={STATE_LABEL[state]}
       className={STATE_MARK_CLASS[state]}
       role="img"
-      title={seen === undefined ? STATE_LABEL[state] : `${STATE_LABEL[state]} · seen ${seen}`}
+      title={`${STATE_LABEL[state]}${seen === undefined ? "" : ` · seen ${seen}`}${STATE_NOTE[state]}`}
     />
   );
 }
 
 /**
+ * The visible mark beside an unresponsive session on a surface that lists sessions (the Agents
+ * page's row, its live conversation's header). The state mark alone is a ring a reader must
+ * hover to read, and this state is the one a person has to act on - wait for the session, or
+ * decide it is lost - so it is also said in words, with the heartbeat it was last seen at.
+ * Renders nothing for any other state, so a page of running sessions stays quiet.
+ */
+export function AgentUnresponsiveNote({
+  className,
+  lastSeen,
+  state,
+}: {
+  className?: string;
+  lastSeen: number | undefined;
+  state: AgentState;
+}): ReactNode {
+  if (state !== "unresponsive") {
+    return null;
+  }
+  const seen = lastSeen === undefined ? undefined : new Date(lastSeen).toISOString();
+  return (
+    <span
+      className={`${className === undefined ? "" : `${className} `}shrink-0 text-xs ${inlineWarningText}`}
+      data-testid="agent-unresponsive"
+      title={`This session has missed its heartbeats${seen === undefined ? "" : ` since ${new Date(seen).toLocaleString()}`}. It has not ended: it keeps its roles and claims, and messages sent to it are stored until it answers.`}
+    >
+      Unresponsive
+      {seen === undefined ? null : (
+        <>
+          {" "}
+          · seen <Timestamp at={seen} />
+        </>
+      )}
+    </span>
+  );
+}
+
+/**
  * An agent, as every place in the app shows one. A `user` or `system` actor is its id as plain
- * text (inside the host's control, for `kind="control"`) and reads no registry. A session
- * renders in one `<span data-agent-name data-agent-state>`: its state mark, its name, and its
- * attribution.
+ * text (inside the host's control, for `kind="control"`) and reads no registry; a person an
+ * agent acted for also carries that agent (`actorActText`). A session renders in one
+ * `<span data-agent-name data-agent-state>`: its state mark, its name, and its attribution.
  */
 export function AgentName(props: AgentNameProps): ReactNode {
   if (props.sessionId !== undefined) {
@@ -146,7 +204,10 @@ export function AgentName(props: AgentNameProps): ReactNode {
   }
   const { actor } = props;
   if (actor.kind !== "session") {
-    const named = props.kind === "control" ? props.control(actor.id) : actor.id;
+    // An act an agent made for its person is recorded as the person's, so the person's name
+    // carries the agent beside it, by the one rule every reader of an act follows.
+    const text = actor.kind === "user" ? actorActText(actor.id, actor.act) : actor.id;
+    const named = props.kind === "control" ? props.control(text) : text;
     return props.className === undefined ? named : <span className={props.className}>{named}</span>;
   }
   return (
@@ -251,7 +312,11 @@ export function useAgentText(): AgentText {
   return useMemo(() => {
     const label = (ref: AgentRef) => {
       const { attribution, name } = resolveAgent(ref, registry);
-      return `${name}${attribution}`;
+      // The same name `AgentName` draws, the agent an act was made through included, so a title
+      // or an aria-label never says a person wrote what their agent wrote for them.
+      const acted =
+        "actor" in ref && ref.actor.kind === "user" ? actorActText(name, ref.actor.act) : name;
+      return `${acted}${attribution}`;
     };
     return {
       initials: (actor: Actor) => agentInitials(resolveAgent({ actor }, registry).name),

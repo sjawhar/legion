@@ -335,11 +335,12 @@ func TestAnInjectedSidecarLeavesAPodOfTheEarlierLayout(t *testing.T) {
 
 // A running issue pod of the layout before one container — exactly one container per workflow
 // role — is a pod a pod created now is not: every role recorded there is StaleAddress, before its
-// launcher's state is read, so the supervisor repoints each uncharged. The first relaunch replaces
-// it even when it is an installing launch, which keeps only a pod whose image alone drifted, and
-// the replacement is a fresh pod on the configured image, so that launch installs nothing; the
-// pod it makes runs one container, the siblings' old processes read as the daemon's replacement
-// (Displaced), and a sibling resumes into the same new pod.
+// launcher's state is read, so the supervisor repoints each uncharged. Such a pod's launchers
+// predate the update round's contract and cannot be asked to push first, so the first relaunch
+// replaces it where it stands, an installing launch included, where a launch into a pod that has
+// merely drifted keeps it; the replacement is a fresh pod on the configured image, so that launch
+// installs nothing; the pod it makes runs one container, the siblings' old processes read as the
+// daemon's replacement (Displaced), and a sibling resumes into the same new pod.
 func TestAnIssuePodOfTheEarlierLayoutIsStaleForEveryRoleAndReplacedByTheNextLaunch(t *testing.T) {
 	g := newRig(t, nil)
 	tester, reviewer := workerSpec(t), testSpec(t, otherToken, claim.RoleReviewer, testTree)
@@ -395,7 +396,10 @@ func TestAnIssuePodOfTheEarlierLayoutIsStaleForEveryRoleAndReplacedByTheNextLaun
 
 // A pod of the earlier layout that ended before this daemon replaced it has no `roles` container:
 // each role's Gone names its own container's end and quotes that container's log, as the release
-// that built the pod did, rather than a status and a log of a container the pod never ran.
+// that built the pod did, rather than a status and a log of a container the pod never ran. The
+// tester's own container ended OOMKilled here, and its Gone carries no out-of-memory mark: the
+// note that mark sends is written for a role of an issue pod's one container, which this pod
+// never had (outOfMemory).
 func TestAnEndedPodOfTheEarlierLayoutReportsTheRolesOwnContainer(t *testing.T) {
 	labels := claimLabels(claim.RoleTester)
 	name := SandboxName(workerToken)
@@ -431,6 +435,9 @@ func TestAnEndedPodOfTheEarlierLayoutReportsTheRolesOwnContainer(t *testing.T) {
 		if obs.Kind != runtime.Gone || !strings.Contains(obs.Detail, "pod "+name+" (uid "+recorded+") Failed: ") || !strings.HasSuffix(obs.Detail, want) {
 			t.Errorf("%s: %s %q, want Gone ending %q", token, obs.Kind, obs.Detail, want)
 		}
+		if obs.OutOfMemory {
+			t.Errorf("%s: %q is marked out of memory; a container of the layout before one container is no issue pod's one container", token, obs.Detail)
+		}
 	}
 }
 
@@ -463,7 +470,7 @@ func TestAnIssuePodsRoleIsReadFromItsClaimNotItsContainer(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		record, err := r.recordFor(claim.RoleTester, 1)
+		record, err := r.recordFor(claim.RoleTester, 1, r.enrollsIn(nil, claim.RoleTester))
 		if err != nil {
 			t.Fatal(err)
 		}

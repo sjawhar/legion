@@ -223,7 +223,10 @@ const (
 // gate seed read from Dispatch carries none, and says instead whether that read showed the
 // document's approval request waiting on the agent (RequestWaitsOnAgent), which is what a newer
 // version does to it: a version with neither a mark nor that cannot be placed against a root's
-// wait on its gate, and answers none.
+// wait on its gate, and answers none. Actor is the event's actor: for a review, the person who
+// reviewed, named on the notice the review sends, since that notice goes to the controller when
+// nobody in its tree can hear it (the daemon's parkDecision); the gate seed's read names the
+// reviewer that read found (dispatch.Approval.LatestReviewer).
 type DispatchArtifact struct {
 	Key                 string
 	ArtifactID          string
@@ -252,7 +255,8 @@ func (DispatchArtifact) isFact() {}
 
 // CarriedApprovalReasonPrefix opens the reason of a carried approval: the review Dispatch writes
 // in a person's name when their answer to a decision block was the whole change since the version
-// they approved (packages/envoy/internal/dispatch/docs/approval_carry.go, carryReason, whose
+// they approved, or when a later version's text is the text of the version they approved
+// (packages/envoy/internal/dispatch/docs/approval_carry.go, carryReason and restoreReason, whose
 // format is "Carried forward from the approval of version %d: ..."). The daemon cannot import that
 // package, so it holds the prefix before the version number as a literal of its own.
 const CarriedApprovalReasonPrefix = "Carried forward from the approval of version"
@@ -337,7 +341,9 @@ func (DispatchAskClosed) isFact() {}
 // through a delivery's callback), or Dispatch's ask.handed_back of an approval request (Kind
 // record.AskApproval and its Artifact; a comment names neither), with whose turn it leaves the ask
 // on (WaitingOn: `agent` or `human` on an open ask, a hand-back `human`, and "" on a closed one),
-// the actor who made it, and its event's place in the issue's Dispatch event log (Mark).
+// the actor who made it, its event's place in the issue's Dispatch event log (Mark), and the
+// comment's own id (Comment, empty for a hand-back), which is where in Dispatch a person's reply
+// relayed to the controller was made (workflow's relayParkedDecision).
 type DispatchAskReply struct {
 	Key       string
 	Ask       string
@@ -346,6 +352,7 @@ type DispatchAskReply struct {
 	WaitingOn string
 	Actor     dispatch.Actor
 	Mark      record.EventMark
+	Comment   string
 }
 
 func (DispatchAskReply) isFact() {}
@@ -401,11 +408,14 @@ func (p DispatchConsumerPosition) Reached(target int64) bool {
 }
 
 // IssueStatus is one issue of the daemon's project as Dispatch shows it now: its key, its status,
-// the keys it says it is blocked by, and the Dispatch sequence that view stands at. The periodic
-// turn's re-read carries them on its ControllerTick, and blockers.Mirror writes each through the
-// same sequence-fenced write an event's own row takes, so a view older than an event already
-// applied changes nothing. ClaimedBy and ClaimKnown are DispatchIssue's: the issue read behind
-// this view shows the claim unless it names no actor.
+// the keys it says it is blocked by, its Dispatch parent, and the Dispatch sequence that view
+// stands at. The periodic turn's re-read carries them on its ControllerTick, and blockers.Mirror
+// writes each through the same sequence-fenced write an event's own row takes, so a view older
+// than an event already applied changes nothing — except the parent, which record.PutDispatchIssue
+// also writes for a view at the row's own sequence, the listing that is the only thing to carry
+// the parent of an issue the daemon has never recorded. ClaimedBy and
+// ClaimKnown are DispatchIssue's: the issue read behind this view shows the claim unless it names
+// no actor.
 type IssueStatus struct {
 	Key        string
 	Status     string
@@ -413,12 +423,20 @@ type IssueStatus struct {
 	Seq        int64
 	ClaimedBy  string
 	ClaimKnown bool
+	// Parent is the key of the issue's Dispatch parent, empty for an issue Dispatch shows under
+	// none. The children-first rule reads the mirror's parent column to find what hangs under an
+	// issue (record.ChildWaits), so every observation carries the parent it saw, and empty is
+	// the observation that the issue has no parent: it clears the one the mirror holds
+	// (record.PutDispatchIssue).
+	Parent string
 }
 
 // ControllerTick is the daemon's periodic wake for the project's controller, applied as a
-// synthetic fact every `controller_wake_interval_seconds` and never decoded from an event.
-// Admission is the only handler that acts on it; when it wakes the controller is admission's rule
-// (admit.Admission.wakeController and its callers).
+// synthetic fact every `controller_wake_interval_seconds` and never decoded from an event. Three
+// handlers act on it, in the order the daemon wires them (the workflow runtime's openWorkflow):
+// blockers.Mirror writes what the tick's own Dispatch read saw, the workflow engine runs its
+// status repair (workflow.Engine.correctStatuses), and admission decides whether to wake the
+// controller (admit.Admission.wakeController and its callers).
 type ControllerTick struct {
 	// Observed is what the turn's own re-read of Dispatch saw: the issues anything is currently
 	// waiting on, as Dispatch answers for them now (workflowRuntime.tickController reads them
@@ -799,7 +817,10 @@ func (SignOff) isFact() {}
 // RequestAsk is the approval request the read found open (dispatch.Approval.AskID, "" when none
 // was), and RequestWaitsOnAgent says it waited on the agent (a reply or a newer version since it
 // was handed to the person): the registration writes that request's mirror row as the read found
-// it, at Since.
+// it, at Since. ReviewedBy is who gave the review either version names
+// (dispatch.Approval.LatestReviewer), zero with neither: the notice the registration sends names
+// that person, since it goes to the controller when nobody in the tree can hear it (the daemon's
+// parkDecision).
 type GateRegistered struct {
 	Issue                   string
 	ArtifactID              string
@@ -813,6 +834,7 @@ type GateRegistered struct {
 	Since                   record.EventMark
 	RequestAsk              string
 	RequestWaitsOnAgent     bool
+	ReviewedBy              dispatch.Actor
 }
 
 func (GateRegistered) isFact() {}
@@ -1002,6 +1024,50 @@ type CheckBound struct {
 }
 
 func (CheckBound) isFact() {}
+
+// ListenerWake is one report the Envoy listener publishes on notifications.legion.wake, the one
+// subject whose consumer every daemon runs: the listener alone sees a message published to a
+// role topic with no live holder and a message sent to the agent subject of a session that is
+// gone, and both must bring a released pod back. The listener does not know which daemon owns a
+// session and must not learn: it reports the role token or the session id it saw, every daemon
+// reads the report, and each acts only on a released claim of its own project.
+//
+// Kind is ListenerWakeRole, ListenerWakeAgent or ListenerWakeReady. Role is the claim token of
+// the role topic a message was published to, Session the session a message was sent to, and At
+// the listener's own clock at the report, because the stream's store time is the NATS server's.
+// A ListenerWakeReady report names neither a role nor a session: it is the positive liveness
+// signal R7's gate reads, published at the listener's start and every five minutes after it.
+type ListenerWake struct {
+	Kind    string
+	Role    string
+	Session string
+	At      time.Time
+	// Report is the listener's own id for this report, which makes a redelivered report the same
+	// wake rather than a second one.
+	Report string
+}
+
+func (ListenerWake) isFact() {}
+
+// The kinds a ListenerWake report carries, as the listener writes them on the wire.
+const (
+	ListenerWakeRole  = "role_message"
+	ListenerWakeAgent = "agent_message"
+	ListenerWakeReady = "listener_ready"
+)
+
+// PodBackstopDue is one armed backstop of a released pod coming due (the pod_wake_backstops row
+// at its due_at): the phase worker it names is woken whatever else did or did not happen since
+// the release. It is never decoded from an event — the daemon's own pass reads the due rows and
+// applies one fact per row, under the row's id, so a backstop that came due while the daemon was
+// down fires once after it starts.
+type PodBackstopDue struct {
+	ID    int64
+	Issue string
+	Role  claim.Role
+}
+
+func (PodBackstopDue) isFact() {}
 
 // Handler changes the workflow record inside the caller-owned transaction.
 type Handler interface {

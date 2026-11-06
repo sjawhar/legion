@@ -25,7 +25,14 @@ const deployRunDetail = "sjawhar/legion .github/workflows/envoy.yaml run 4020330
 // facts applied so far stay recorded, and every later one goes through the new engine.
 func withDeploys(t *testing.T, rig checkRig, deploys ...config.Deploy) checkRig {
 	t.Helper()
-	rig.engine = New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, ProductionCheckBound: checkBound, Deploys: deploys, Clock: rig.clock.Now},
+	return withDeploysRenamed(t, rig, ghrepo.Renames{}, deploys...)
+}
+
+// withDeploysRenamed is withDeploys under the deployment's repository equivalence renames
+// (Config.RepositoryRenames): the one line of Config a configured rename changes.
+func withDeploysRenamed(t *testing.T, rig checkRig, renames ghrepo.Renames, deploys ...config.Deploy) checkRig {
+	t.Helper()
+	rig.engine = New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, ProductionCheckBound: checkBound, Deploys: deploys, RepositoryRenames: renames, Clock: rig.clock.Now},
 		slog.New(slog.NewTextHandler(rig.logged, nil)))
 	rig.apply = applyFacts(t, rig.pool, rig.engine)
 	return rig
@@ -81,6 +88,43 @@ func TestADeployRunQueuesACompareForEachOpenCheckOnItsBranch(t *testing.T) {
 			t.Fatalf("check_compare rows of %s after a release run = %+v, want its one", issue, got)
 		}
 	}
+}
+
+// A deploy run of the repository a configured rename moved wakes the checks of the trees recorded
+// under the name it had: the `deploys:` entry names sjawhar/legion, as it was configured before
+// the transfer, GitHub's run names cybermonklabs/legion, and the pair makes the two one repository
+// at both comparisons the wake makes — the deploy the run is of (intake.DeployOf) and the open
+// checks of that repository (sameRepository). With no pair configured the run is of no deploy at
+// all, as today, and a check of a repository of neither name is never the run's.
+func TestADeployRunOfARenamedRepositoryWakesTheChecksRecordedUnderItsOldName(t *testing.T) {
+	run := intake.WorkflowRunCompleted{Repo: "cybermonklabs/legion", Path: ".github/workflows/envoy.yaml", RunID: 40203304600, Attempt: 1, HeadBranch: "main"}
+	t.Run("the pair configured", func(t *testing.T) {
+		rig := withDeploysRenamed(t, childCheckRig(t, ""), renamedLegion, envoyDeploy)
+		openRootCheck(t, rig, "LEGION-301", "acme/widgets", "main", 8)
+		rig.apply("run", run)
+		want := []record.CheckCompare{{Look: 1, Cause: "deploy run", OpenedAt: checkOpened,
+			Deploy: &record.DeployRun{Run: 40203304600, Attempt: 1, Workflow: ".github/workflows/envoy.yaml", Step: "Apply", Branch: "main"}}}
+		if got := checkCompares(t, rig.pool, "LEGION-209"); !reflect.DeepEqual(got, want) {
+			t.Fatalf("check_compare rows of the check recorded on sjawhar/legion = %+v, want one for look 1 carrying the run", got)
+		}
+		if got := checkCompares(t, rig.pool, "LEGION-301"); len(got) != 0 {
+			t.Fatalf("check_compare rows of the acme/widgets check = %+v, want none: the pair widens nothing else", got)
+		}
+		if logged := rig.logged.String(); strings.Count(logged, "a deploy run is compared against the open production checks") != 1 ||
+			!strings.Contains(logged, `repo=cybermonklabs/legion workflow=.github/workflows/envoy.yaml run=40203304600 attempt=1 branch=main checks=1`) {
+			t.Fatalf("the journal holds no one line naming the run and the check it woke:\n%s", logged)
+		}
+	})
+	t.Run("no pair configured", func(t *testing.T) {
+		rig := withDeploysRenamed(t, childCheckRig(t, ""), ghrepo.Renames{}, envoyDeploy)
+		rig.apply("run", run)
+		if got := checkCompares(t, rig.pool, "LEGION-209"); len(got) != 0 {
+			t.Fatalf("check_compare rows of the check recorded on sjawhar/legion = %+v, want none: the run is of no deploy", got)
+		}
+		if strings.Contains(rig.logged.String(), "a deploy run is compared") {
+			t.Fatalf("the journal logs a compare of a run of no deploy:\n%s", rig.logged.String())
+		}
+	})
 }
 
 // A run of a workflow the project names no deploy, a run in a repository it names none in, and any

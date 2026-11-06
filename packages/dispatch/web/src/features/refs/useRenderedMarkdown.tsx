@@ -14,12 +14,18 @@ import { viewPortals } from "../view/ViewPortals";
 import { collectViewSlots, type ViewBlockSlot } from "../view/view-slots";
 import { collectPictureAnchors, DispatchPicture, type PictureAnchor } from "./DispatchPicture";
 import { TextAskCard } from "./markdown-cards";
-import { parsesInTheWorker, renderWithEngine, type SoftBreaks } from "./markdown-engine";
+import {
+  type MarkdownEngine,
+  parsesInTheWorker,
+  renderWithEngine,
+  type SoftBreaks,
+} from "./markdown-engine";
 import { drawMermaidDiagrams } from "./mermaid-diagrams";
 import {
   collectReferenceAnchors,
   linkifyDispatchRefs,
   type ReferenceAnchor,
+  type ReferenceLinking,
   RefLink,
 } from "./RefLink";
 
@@ -129,7 +135,7 @@ export type SliceYield = "page" | undefined;
 export type PaintMarkdownInSlices = (
   element: HTMLElement,
   parsed: ProseMirrorNode,
-  serializer: DOMSerializer
+  engine: MarkdownEngine
 ) => Generator<SliceYield>;
 
 /** How long one slice of off-page work may hold the page's thread before it hands it back. */
@@ -205,6 +211,9 @@ export interface RenderedMarkdownOptions {
   /** `paint`, a piece at a time (`PaintMarkdownInSlices`), for a body the parse worker parsed;
    *  without one such a body is painted in one go, as every other body is. */
   paintInSlices?: PaintMarkdownInSlices;
+  /** What the link pass may link in the painted text (`ReferenceLinking`): what the surface's
+   *  own reading of its source cites and what is known about it (`useTextReferences`). */
+  references: ReferenceLinking;
 }
 
 /** Every anchor a paint leaves for a portal: the reference anchors the link pass found, as
@@ -218,9 +227,10 @@ interface PortalAnchors {
  *  order, and answers what the portals mount into. */
 function portalAnchors(
   element: HTMLElement,
-  decorate: DecorateMarkdown | undefined
+  decorate: DecorateMarkdown | undefined,
+  references: ReferenceLinking
 ): PortalAnchors {
-  linkifyDispatchRefs(element);
+  linkifyDispatchRefs(element, references);
   const found = collectReferenceAnchors(element);
   const anchors = decorate === undefined ? found : decorate(element, found);
   const placeholders = collectPictureAnchors(element);
@@ -401,8 +411,9 @@ export function useRenderedMarkdown(
     decorate,
     onRendered,
     paintInSlices,
+    references,
     softBreaks = "space",
-  }: RenderedMarkdownOptions = {}
+  }: RenderedMarkdownOptions
 ): RenderedMarkdown {
   const onRenderedRef = useRef(onRendered);
   onRenderedRef.current = onRendered;
@@ -480,8 +491,12 @@ export function useRenderedMarkdown(
           element.replaceChildren(document.createTextNode(markdown));
           setAskHosts(NO_ASK_HOSTS);
           setViewSlots(NO_VIEWS);
-          const { pictures: placeholders, references } = portalAnchors(element, decorate);
-          setReferenceAnchors(references);
+          const { pictures: placeholders, references: anchors } = portalAnchors(
+            element,
+            decorate,
+            references
+          );
+          setReferenceAnchors(anchors);
           setPictureAnchors(placeholders);
           return;
         }
@@ -520,8 +535,12 @@ export function useRenderedMarkdown(
             hosts = collectAskHosts(element, parsed);
           }
           setAskHosts(hosts);
-          const { pictures: placeholders, references } = portalAnchors(element, decorate);
-          setReferenceAnchors(references);
+          const { pictures: placeholders, references: anchors } = portalAnchors(
+            element,
+            decorate,
+            references
+          );
+          setReferenceAnchors(anchors);
           setPictureAnchors(placeholders);
           const slots = collectViewSlots(element);
           setViewSlots(slots.length === 0 ? NO_VIEWS : slots);
@@ -576,7 +595,7 @@ export function useRenderedMarkdown(
         // cancel it returns is in hand: `running` is what keeps `painting.current` from being
         // left holding a paint that is already over (sjawhar/legion#2519).
         let running = true;
-        const stop = paintAcrossTasks(inSlices(element, parsed, engine.serializer), {
+        const stop = paintAcrossTasks(inSlices(element, parsed, engine), {
           afterPageBatch() {
             // The batch that has just arrived is laid out here, while it is all of the page that
             // is dirty. Left to the engine, the layout of every batch would fall into whichever
@@ -611,14 +630,14 @@ export function useRenderedMarkdown(
       { keepAPostedParse: true }
     );
     return cancelRender;
-  }, [Card, decorate, markdown, paint, paintInSlices, root, softBreaks]);
+  }, [Card, decorate, markdown, paint, paintInSlices, references, root, softBreaks]);
 
   return {
     isFallback,
     isPending,
     portals: [
-      ...referenceAnchors.map(({ anchor, key, route }) =>
-        createPortal(<RefLink anchor={anchor} route={route} />, anchor, key)
+      ...referenceAnchors.map(({ anchor, key, route, text }) =>
+        createPortal(<RefLink anchor={anchor} route={route} text={text} />, anchor, key)
       ),
       ...pictureAnchors.map(({ anchor, caption, key, route }) =>
         createPortal(

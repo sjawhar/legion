@@ -14,11 +14,19 @@ import type { ComposerAnchor, ComposerKind, ComposerOwner } from "../conversatio
 import { MentionComposer } from "../conversation/MentionComposer";
 import type { SaveCommentEdit } from "../conversation/send-request";
 import { AskCard } from "../inbox/AskCard";
-import { isBareReferenceBody, Unfurl } from "../refs/Unfurl";
+import { textSourceOf } from "../refs/text-references";
+import { Unfurl } from "../refs/Unfurl";
+import { DecisionList } from "./DecisionCard";
 import { marginComposeSendKey, useMargin } from "./margin-context";
 import { ThreadList } from "./ThreadList";
 import type { CommentActionFailure } from "./useCommentActionQueue";
-import type { MarginItemAction, MarginOwner, MarkPlacement, Thread } from "./useMarginItems";
+import type {
+  DecisionMarginItem,
+  MarginItemAction,
+  MarginOwner,
+  MarkPlacement,
+  Thread,
+} from "./useMarginItems";
 
 /** The composer on the open document: the compose the reader has open, or the one the held-send
  *  store holds for the document - out, or refused - from Send on. At most one per document. */
@@ -40,6 +48,7 @@ interface CommentsTabProps {
   asksPending: boolean;
   commentsError: boolean;
   commentsPending: boolean;
+  decisions: readonly DecisionMarginItem[];
   expandedThreadKey: string | undefined;
   editingCommentId: string | undefined;
   savingCommentEditId: string | undefined;
@@ -156,7 +165,7 @@ export function MarginAskCard({
         owner={owner.kind === "document" ? owner : undefined}
         variant="compact"
       />
-      {isBareReferenceBody(ask.question) ? <Unfurl body={ask.question} /> : null}
+      <Unfurl body={ask.question} source={textSourceOf("ask", ask.id)} />
     </div>
   );
 }
@@ -168,6 +177,7 @@ export function CommentsTab({
   asksPending,
   commentsError,
   commentsPending,
+  decisions,
   expandedThreadKey,
   editingCommentId,
   savingCommentEditId,
@@ -276,10 +286,18 @@ export function CommentsTab({
               threads={threads}
               viewerLogin={viewerLogin}
             />
+            <DecisionList
+              blockPlacements={blockPlacements}
+              decisions={decisions}
+              hoveredItemId={hoveredItemId}
+              onSelect={onSelectCard}
+              selectedItemId={selectedItemId}
+            />
             {threads.length === 0 &&
             resolvedThreads.length === 0 &&
             historicalAsks.length === 0 &&
             needsYou.length === 0 &&
+            decisions.length === 0 &&
             !asksPending &&
             !commentsPending &&
             !answeredAsksPending ? (

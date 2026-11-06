@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { SessionAnswer, SessionAnswerRelation } from "@legion/contracts";
+import { actorActText, type SessionAnswer, type SessionAnswerRelation } from "@legion/contracts";
 import type { DispatchConfigResolution } from "./dispatch-config";
 import { DispatchClient, isNoRoute } from "./dispatch-http";
 import { ownerTitle } from "./dispatch-owner";
@@ -20,7 +20,7 @@ import { messageFor } from "./errors";
 /** How far back the list reaches, at the read and again at each render. */
 export const SESSION_ANSWERS_WINDOW_MS = 72 * 3_600_000;
 
-/** The cap on the whole rendered message, in UTF-16 units as `DISPATCH_BODY_MAX` counts. */
+/** The cap on the whole rendered message, in UTF-16 units, as Dispatch counts a text. */
 export const SESSION_ANSWERS_MAX_CHARS = 8_000;
 
 /** How long one model request waits on the read before it carries the last list read. */
@@ -73,15 +73,16 @@ export function isNoAnswersRoute(error: unknown): boolean {
 
 /**
  * One item as both the per-request list and `dispatch answers` print it, in this order: the time
- * the person wrote it, the person and what it is to the session (with `replaces an earlier answer`
- * on an answer that replaced one, and `edited <time>` on an edited comment); its `dispatch://`
- * reference and its issue or document, or that it is a direct message; the ask's question, cut to
- * 200 characters, on an answer and a reply in an ask's thread; on an answer, `Selected:` with the
+ * the person wrote it, the person (with the agent that wrote it for them, through
+ * `actorActText`) and what it is to the session (with `replaces an earlier answer` on an answer
+ * that replaced one, and `edited <time>` on an edited comment); its `dispatch://` reference and
+ * its issue or document, or that it is a direct message; the ask's question, cut to 200
+ * characters, on an answer and a reply in an ask's thread; on an answer, `Selected:` with the
  * options chosen or `none`; then the person's words in full.
  */
 export function renderSessionAnswerItem(item: SessionAnswer): string {
   const relation = `${RELATION_PHRASES[item.relation]}${item.replaced === true ? " (replaces an earlier answer)" : ""}`;
-  const head = [item.at, `user ${item.author.id}`, relation];
+  const head = [item.at, actorActText(`user ${item.author.id}`, item.author.act), relation];
   if (item.edited_at !== undefined) head.push(`edited ${item.edited_at}`);
   const owner = item.owner === null ? undefined : ownerTitle(item.owner);
   const where =
@@ -109,6 +110,31 @@ export function renderSessionAnswerItem(item: SessionAnswer): string {
 function withinWindow(items: readonly SessionAnswer[], now: number): SessionAnswer[] {
   const start = now - SESSION_ANSWERS_WINDOW_MS;
   return items.filter((item) => Date.parse(item.at) >= start);
+}
+
+/**
+ * What the people wrote in each of `items`, one string per item: its kind, id, author and times,
+ * the options chosen and the words. `readSessionAnswers` gives it for the items its list shows, so
+ * a host comparing two reads' sets tells a new item shown, or an answer or comment a person
+ * changed, from a list that only lost items or changed what the session or Dispatch says around
+ * them (an issue's title, an ask's question, a cached list's header).
+ *
+ * The author is the rendered act (`actorActText`), not the person's id alone, so the same words
+ * from the person themselves and from an agent acting for them are two different items: a host
+ * that compared ids would carry the second as if the person had written it.
+ */
+export function sessionAnswersWords(items: readonly SessionAnswer[]): string[] {
+  return items.map((item) =>
+    JSON.stringify([
+      item.kind,
+      item.id,
+      actorActText(item.author.id, item.author.act),
+      item.at,
+      item.edited_at ?? null,
+      item.selected ?? null,
+      item.text,
+    ])
+  );
 }
 
 /** `SESSION_ANSWERS_MAX_CHARS` as the left-out line prints it. */
@@ -153,12 +179,22 @@ export function renderSessionAnswers(
   items: readonly SessionAnswer[],
   options: RenderSessionAnswersOptions
 ): string | undefined {
-  const shown = withinWindow(items, Number(options.now));
+  return renderShown(items, options)?.text;
+}
+
+/** `renderSessionAnswers`'s text, and the items it shows. */
+function renderShown(
+  items: readonly SessionAnswer[],
+  options: RenderSessionAnswersOptions
+): { readonly text: string; readonly shown: readonly SessionAnswer[] } | undefined {
+  const inWindow = withinWindow(items, Number(options.now));
   // A list the server cut short with max_chars left out only items older than every one it sent,
   // so once any item it sent has left the window, every one it left out has too.
   const unsent =
-    shown.length === items.length ? Math.max(0, (options.total ?? items.length) - items.length) : 0;
-  const count = shown.length + unsent;
+    inWindow.length === items.length
+      ? Math.max(0, (options.total ?? items.length) - items.length)
+      : 0;
+  const count = inWindow.length + unsent;
   if (count === 0) return undefined;
   const header =
     options.cached === undefined
@@ -167,7 +203,7 @@ export function renderSessionAnswers(
   const namesCommand = options.withoutCommand !== true;
   const blocks: string[] = [];
   let length = header.length;
-  for (const item of shown) {
+  for (const item of inWindow) {
     const block = renderSessionAnswerItem(item);
     const after = count - blocks.length - 1;
     const needed =
@@ -177,9 +213,12 @@ export function renderSessionAnswers(
     length += 2 + block.length;
   }
   const leftOut = count - blocks.length;
-  return [header, ...blocks, ...(leftOut === 0 ? [] : [leftOutLine(leftOut, namesCommand)])].join(
-    "\n\n"
-  );
+  const text = [
+    header,
+    ...blocks,
+    ...(leftOut === 0 ? [] : [leftOutLine(leftOut, namesCommand)]),
+  ].join("\n\n");
+  return { text, shown: inWindow.slice(0, blocks.length) };
 }
 
 /** What `dispatch answers` prints: every item of the 72 hours before `now`, newest first, in the
@@ -336,6 +375,8 @@ export interface SessionAnswersRead {
   readonly source: "fresh" | "cache" | "failure" | "unavailable" | "off";
   /** When the list shown was read (`fresh` and `cache`). */
   readonly readAt?: string;
+  /** `sessionAnswersWords` of the list shown (`fresh` and `cache`): what the people wrote in it. */
+  readonly words?: readonly string[];
   /** Why the read gave no list (`cache`, `failure`, `unavailable`), or the notice that turns
    *  Dispatch off. */
   readonly reason?: string;
@@ -410,22 +451,28 @@ export async function readSessionAnswers(
     reason: string,
     noRoute = false
   ): SessionAnswersRead => {
-    const text =
+    const rendered =
       cache === undefined
         ? undefined
-        : renderSessionAnswers(cache.items, {
+        : renderShown(cache.items, {
             now: now(),
             total: cache.total,
             cached: { readAt: cache.read_at, reason },
             withoutCommand: noRoute,
           });
-    if (cache === undefined || text === undefined) {
+    if (cache === undefined || rendered === undefined) {
       if (noRoute) return { text: undefined, source: "unavailable", reason };
       // A cache that renders nothing is no list to show: the failure line keeps a read that failed
       // from looking like no person wrote.
       return { text: sessionAnswersFailureLine(reason), source: "failure", reason };
     }
-    return { text, source: "cache", readAt: cache.read_at, reason };
+    return {
+      text: rendered.text,
+      source: "cache",
+      readAt: cache.read_at,
+      words: sessionAnswersWords(rendered.shown),
+      reason,
+    };
   };
   if (!dispatch.enabled) {
     const url = options.dispatchUrl;
@@ -461,7 +508,7 @@ export async function readSessionAnswers(
   }
   let read = current.inFlight;
   if (read === undefined) {
-    const client = new DispatchClient(url, dispatch.token, options.fetchImpl ?? fetch);
+    const client = new DispatchClient(url, dispatch.credential, options.fetchImpl ?? fetch);
     const started = client
       .sessionAnswers(session, {
         maxChars: SESSION_ANSWERS_MAX_CHARS,
@@ -520,13 +567,12 @@ export async function readSessionAnswers(
   }
   if ("noRoute" in outcome) return noRoute();
   if ("failure" in outcome) return carry(current.cache, outcome.failure);
+  const rendered = renderShown(outcome.cache.items, { now: now(), total: outcome.cache.total });
   return {
-    text: renderSessionAnswers(outcome.cache.items, {
-      now: now(),
-      total: outcome.cache.total,
-    }),
+    text: rendered?.text,
     source: "fresh",
     readAt: outcome.cache.read_at,
+    words: sessionAnswersWords(rendered?.shown ?? []),
   };
 }
 

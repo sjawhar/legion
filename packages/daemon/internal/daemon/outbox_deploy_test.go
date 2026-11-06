@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
@@ -169,7 +170,9 @@ func outboxWakeEvents(t *testing.T, pool *pgxpool.Pool) []string {
 // merge, or one of a job the attempt kept from an earlier one — listed under a new id and this
 // attempt, with steps that started before the attempt did — wakes nothing, and the log says why;
 // neither does a run of another workflow, branch or head repository, one a pull request triggered,
-// or one GitHub does not know. A re-run Apply wakes under its new job id. A failed run whose Apply
+// or one GitHub does not know — but a head repository that is the other name of a configured
+// rename of the check's is the check's own repository, which is how a deploy run after a transfer
+// still wakes the check. A re-run Apply wakes under its new job id. A failed run whose Apply
 // succeeded wakes. Any other failure, an attempt naming no start time, and a pull request naming
 // no merge time, is the row's to retry. A check opened without its merge commit has it recorded
 // from the pull request; a check closed since, or one a later merge replaced, reads nothing.
@@ -191,6 +194,8 @@ func TestACheckCompareOfADeployRunWakesTheCheckForEachApplyAfterTheMerge(t *test
 		recorded string
 		unmerged bool
 		run      map[string]any
+		// renames is the deployment's repository equivalence, the zero value configuring none.
+		renames  ghrepo.Renames
 		code     int
 		pages    [][]string
 		closed   bool
@@ -228,6 +233,17 @@ func TestACheckCompareOfADeployRunWakesTheCheckForEachApplyAfterTheMerge(t *test
 		{name: "the head repository is compared without case", recorded: merge, run: map[string]any{"head_repository": map[string]any{"full_name": "Acme/Widgets"}},
 			pages: [][]string{{deployJobJSON(11, "deploy", applied(5*time.Minute))}},
 			reads: []string{pull, run, jobs}, wakes: []wake{{11, "deploy", 5 * time.Minute}}},
+		// GitHub answers head_repository.full_name as the repository is named today, while the
+		// check's record keeps the name it was written under, so after a transfer the run of the
+		// repository the check's moved to is the check's own run — and is refused, as any other
+		// repository's run is, where no pair configures the two as one.
+		{name: "the head repository is the one the check's repository moved to, the pair configured", recorded: merge,
+			renames: ghrepo.MustRenames(renamedWidgets), run: map[string]any{"head_repository": map[string]any{"full_name": "cybermonklabs/widgets"}},
+			pages: [][]string{{deployJobJSON(11, "deploy", applied(5*time.Minute))}},
+			reads: []string{pull, run, jobs}, wakes: []wake{{11, "deploy", 5 * time.Minute}}},
+		{name: "the head repository is the one the check's repository moved to, no pair configured", recorded: merge,
+			run:   map[string]any{"head_repository": map[string]any{"full_name": "cybermonklabs/widgets"}},
+			reads: []string{pull, run}},
 		{name: "a failed run with one successful apply wakes", recorded: merge, run: map[string]any{"conclusion": "failure"},
 			pages: [][]string{{deployJobJSON(11, "deploy-a", applied(5*time.Minute)), deployJobJSON(12, "deploy-b", deployStepJSON("Apply", "failure", 6*time.Minute))}},
 			reads: []string{pull, run, jobs}, wakes: []wake{{11, "deploy-a", 5 * time.Minute}}},
@@ -274,7 +290,7 @@ func TestACheckCompareOfADeployRunWakesTheCheckForEachApplyAfterTheMerge(t *test
 			facts := &outboxFactHandler{}
 			var logged bytes.Buffer
 			runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, tokens: outboxTokens{}, githubAPI: github.url, project: "legion",
-				handlers: []intake.Handler{facts}, log: slog.New(slog.NewJSONHandler(&logged, nil)), now: time.Now}
+				repositories: newRepositories("LEGION", tc.renames), handlers: []intake.Handler{facts}, log: slog.New(slog.NewJSONHandler(&logged, nil)), now: time.Now}
 			named := check.OpenedAt
 			if tc.replaced {
 				named = named.Add(-24 * time.Hour)

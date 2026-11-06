@@ -1,7 +1,6 @@
 package main
 
 import (
-	"os"
 	"strconv"
 	"testing"
 
@@ -10,6 +9,7 @@ import (
 	"github.com/sjawhar/envoy/internal/bus/bustest"
 	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/config"
+	"github.com/sjawhar/envoy/internal/fixtureenv"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -24,12 +24,12 @@ func listenerSettings(t *testing.T, urls string, values map[string]string) confi
 	t.Setenv("ENVOY_MACHINE_ID", "replicas-test")
 	t.Setenv("NATS_URLS", urls)
 	for _, name := range []string{bus.ReplicasEnvVar, bus.StreamMaxBytesEnvVar} {
-		// t.Setenv restores the variable after the test; Unsetenv then leaves it unset for this one.
-		t.Setenv(name, "")
 		if value, ok := values[name]; ok {
 			t.Setenv(name, value)
-		} else if err := os.Unsetenv(name); err != nil {
-			t.Fatalf("unset %s: %v", name, err)
+		} else {
+			// fixtureenv.Unset leaves the variable unset for this test and has Go put the value
+			// the process held back after it.
+			fixtureenv.Unset(t, name)
 		}
 	}
 	cfg, err := config.Load(9020)
@@ -76,15 +76,22 @@ func TestAListenerStartKeepsAThreeCopyStreamsCopiesByteLimitAndIDAsItCorrectsThe
 }
 
 // A listener start with ENVOY_NATS_REPLICAS=3 raises the R1 stream an earlier start at the default
-// created, and the durable the listener created and bound on it (startListenerSubscription), which
-// sets no replica count of its own, moves to three copies with it.
+// created, and the durable the listener's start created and bound on it (bindListenerDurable),
+// which sets no replica count of its own, moves to three copies with it.
 func TestRaisingTheStreamMovesTheListenersDurableToThreeCopies(t *testing.T) {
 	cluster := testnats.StartCluster(t, 3)
 	js := cluster.JetStream(t)
 	first := listenerSettings(t, cluster.URL(), nil)
 	client := startListenerStream(t, first)
 	durable := bus.ListenerDurable(first.MachineID)
-	if _, err := startListenerSubscription(client, durable, func(*natsgo.Msg) {}); err != nil {
+	// The bind is the listener's own (bindListenerDurable, main.go), at its interval and its
+	// deadline, rather than the single attempt startListenerSubscription makes: a lookup of the
+	// durable is answered by whichever member of the cluster the client is connected to, and for
+	// a moment after the stream is created that member can be one whose applied metadata does
+	// not hold the new stream's assignment yet, which is answered "stream not found". The start
+	// waits that out, so the test does; with nothing lagging it binds on the first attempt.
+	if _, err := bindListenerDurable(t.Context(), client, durable, func(*natsgo.Msg) {},
+		listenerRigLogger(t, "durable bind"), durableBindInterval, durableBindDeadline); err != nil {
 		t.Fatalf("create and bind the listener's durable: %v", err)
 	}
 	if info := testnats.AwaitSettledStream(t, js, bus.Stream); info.Config.Replicas != 1 || testnats.Copies(info.Cluster) != 1 {

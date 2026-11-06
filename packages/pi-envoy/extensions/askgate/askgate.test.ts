@@ -11,11 +11,13 @@ import {
   askgateState,
   consumeMarker,
   openStore,
+  pidNamespace,
   processStart,
   setRecordMode,
   writeAskgateRecord,
 } from "@legion/envoy-client/askgate-marker";
 import { newAsks } from "@legion/envoy-client/askgate-new-asks";
+import { bearerCredential } from "@legion/envoy-client/bearer";
 import { runDispatchCli } from "@legion/envoy-client/dispatch-cli";
 import { DispatchClient, DispatchServiceError } from "@legion/envoy-client/dispatch-http";
 import { sessionDirectory } from "@legion/envoy-client/dispatch-session-directory";
@@ -235,7 +237,12 @@ function bind(opts: BindOptions = {}): BoundGate {
   // The session directory the gate records its mode into (one real process keeps a record per
   // session it binds). A test may share a store and a session across binds to drive the switch case.
   const sessionDir = opts.sessionDir ?? fs.mkdtempSync(path.join(SUITE_TMP, "session-"));
-  const self: AskgateOwner = { pid: process.pid, start: processStart(process.pid), store };
+  const self: AskgateOwner = {
+    pid: process.pid,
+    start: processStart(process.pid),
+    ns: pidNamespace(),
+    store,
+  };
   try {
     openStore(store);
     // The bind, as envoy.ts does it: the mode from OMP_ASKGATE, which an arm does not change here.
@@ -447,7 +454,12 @@ function dispatchServing(
     return body(documentBlocks(doc.markdown));
   }) as typeof fetch;
   const session = (_directory: string, signal: AbortSignal): DispatchSession => ({
-    client: new DispatchClient("https://dispatch.example", "token", fetchImpl, signal),
+    client: new DispatchClient(
+      "https://dispatch.example",
+      bearerCredential("token"),
+      fetchImpl,
+      signal
+    ),
     serverUrls: ["https://dispatch.example"],
   });
   return { requests, session };
@@ -920,8 +932,8 @@ describe("untrusted text (security)", () => {
     expect(context).toMatch(/… \[elided \d+ bytes\]/);
   });
   test("a revise reason holding a full-length rewritten question in non-ASCII text arrives whole", async () => {
-    // 2,000 UTF-16 units (ASK_QUESTION_MAX) of three-byte characters is 6,000 bytes, and the reason
-    // names its failure and quotes the words on top: the recommendation at its end must survive.
+    // 2,000 three-byte characters is 6,000 UTF-8 bytes, and the reason names its failure and
+    // quotes the words on top: the recommendation at its end must survive.
     const reason = `failure 13 (content): "Hi! I hope this finds you well." is a preamble. Send: ${"€".repeat(2_000)} I recommend A.`;
     const g = bind({ complete: reviseWith(reason) });
     const context = (await g.device("t1", "dispatch_comment", COMMENT))?.additionalContext ?? "";
@@ -1780,7 +1792,7 @@ console.log(JSON.stringify(args, null, 2));
       {
         script: `dispatch ask --issue X-1 --question-file - --dry-run <<'EOF'\n${QUESTION}EOF`,
         cwd: work,
-        timeoutMs: 10_000,
+        timeoutMs: core.DRY_RUN_TIMEOUT_MS,
       },
     ]);
     const args = { issue: "X-1", question: QUESTION };
@@ -3058,7 +3070,7 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
       expect(g.dryRuns[0]).toMatchObject({
         script: "cd sub >/dev/null && pwd -P",
         cwd: work,
-        timeoutMs: 10_000,
+        timeoutMs: core.DRY_RUN_TIMEOUT_MS,
       });
       // The dry run names the file as the call wrote it: the gate copies nothing.
       expect(g.dryRuns[1]?.script).toBe(
@@ -3067,7 +3079,7 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
       expect(g.dryRuns[2]).toMatchObject({
         script: "cd inner >/dev/null && pwd -P",
         cwd: path.join(work, "sub"),
-        timeoutMs: 10_000,
+        timeoutMs: core.DRY_RUN_TIMEOUT_MS,
       });
       expect(g.dryRuns[3]?.script).toBe(
         "cd inner >/dev/null && dispatch message --issue X-1 --body-file note.txt --dry-run"
@@ -3183,15 +3195,74 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
     ]);
     expect(g.entries[0].reason).toContain("unknown flag --fail");
   });
-  test("a dry-run past its limit is recorded as an error and the command runs", async () => {
+  // A dry run contacts no Dispatch server, so only a busy machine makes it slow: the gate runs a
+  // cut run once more within half the call's deadline, and the review keeps the rest. The clock
+  // here moves only as each stand-in run spends its whole limit.
+  test("a dry-run cut at its limit runs once more within half the deadline, and the call is reviewed", async () => {
+    let clock = 1_000_000;
+    let runs = 0;
+    const g = bind({
+      env: { ...STUB, OMP_ASKGATE: "block" },
+      cwd: work,
+      now: () => clock,
+      dryRun: async (script, runOpts) => {
+        runs += 1;
+        if (runs > 1) return core.spawnDryRun(script, runOpts);
+        clock += runOpts.timeoutMs;
+        return { exitCode: null, stdout: "", stderr: "", timedOut: true };
+      },
+    });
+    expect(await g.bash("b1", ASK)).toBeUndefined();
+    // The deadline is 90 s at a 120 s ceiling: 20 s first, then what is left of its 45 s half.
+    expect(g.dryRuns.map((run) => run.timeoutMs)).toEqual([core.DRY_RUN_TIMEOUT_MS, 25_000]);
+    expect(g.entries).toMatchObject([{ tool: "dispatch_ask", outcome: "verdict" }]);
+    expect(g.calls.filter(isCharter)).toHaveLength(1);
+  }, 30_000);
+  test("a dry-run cut twice runs the call unreviewed and tells the agent why and what to do", async () => {
+    let clock = 1_000_000;
     const g = bind({
       env: { OMP_ASKGATE: "block" },
       cwd: work,
-      dryRun: async () => ({ exitCode: null, stdout: "", stderr: "", timedOut: true }),
+      now: () => clock,
+      dryRun: async (_script, runOpts) => {
+        clock += runOpts.timeoutMs;
+        return { exitCode: null, stdout: "", stderr: "", timedOut: true };
+      },
+    });
+    const result = await g.bash("b1", ASK);
+    expect(result?.block).toBeUndefined();
+    expect(g.dryRuns.map((run) => run.timeoutMs)).toEqual([core.DRY_RUN_TIMEOUT_MS, 25_000]);
+    expect(g.calls).toHaveLength(0);
+    expect(g.entries).toMatchObject([
+      { tool: "dispatch_ask", outcome: "error", deadlineMs: 90_000 },
+    ]);
+    expect(g.entries[0].reason).toBe(
+      "dispatch ask --dry-run did not finish within 20000 ms, nor within 25000 ms when run again"
+    );
+    const note = result?.additionalContext ?? "";
+    expect(note).toContain(g.entries[0].reason ?? "");
+    expect(note).toContain("contacts no Dispatch server");
+    expect(note).toContain("The call ran unreviewed: read back what it posted");
+  });
+  test("at a short deadline the reads keep to half of it, and a run cut there is not run again", async () => {
+    let clock = 1_000_000;
+    const g = bind({
+      env: { OMP_ASKGATE: "block" },
+      cwd: work,
+      // A 30 s ceiling holds the deadline at 25 s, so the reads get 12.5 s.
+      ceiling: 30_000,
+      now: () => clock,
+      dryRun: async (_script, runOpts) => {
+        clock += runOpts.timeoutMs;
+        return { exitCode: null, stdout: "", stderr: "", timedOut: true };
+      },
     });
     expect((await g.bash("b1", ASK))?.block).toBeUndefined();
-    expect(g.entries).toMatchObject([{ tool: "dispatch_ask", outcome: "error" }]);
-    expect(g.entries[0].reason).toContain("10000 ms");
+    expect(g.dryRuns.map((run) => run.timeoutMs)).toEqual([12_500]);
+    expect(g.entries).toMatchObject([{ outcome: "error", deadlineMs: 25_000 }]);
+    expect(g.entries[0].reason).toBe(
+      "dispatch ask --dry-run did not finish within 12500 ms, and the call's deadline left no time to run it again"
+    );
   });
   test("the runner kills a dry-run that outlives its limit", async () => {
     const began = Date.now();
@@ -3322,6 +3393,51 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
         ],
       ]);
     });
+
+    test("a session on another provider, and a halt, mint an argv-only marker: no review stands behind either", async () => {
+      const skipped = bind({
+        env: STUB,
+        cwd: work,
+        primary: { provider: "openai-codex", id: "gpt-5.5" },
+      });
+      await skipped.bash("s", ASK);
+      // The halt is three of the gate's own deadlines in a row, so nothing else of the call may
+      // race that deadline. A real `dispatch … --dry-run` is a Bun process, and the reads get
+      // READ_SHARE (half) of the deadline: on a busy machine the spawn loses that race, the call
+      // is an `error`, whose effect is `none`, and three of those never halt the gate. This dry
+      // run answers at once with what the stub would have printed, and the clock never moves, so
+      // the reads spend none of the deadline however busy the machine is. Nothing the outcome
+      // reads is measured against the wall clock: the review never answers (untilAborted), so the
+      // call's own stop is the only thing that can settle it.
+      const halted = bind({
+        env: { ...STUB, OMP_ASKGATE_TIMEOUT_MS: "20" },
+        cwd: work,
+        complete: untilAborted,
+        now: () => 1_000_000,
+        dryRun: async () => ({
+          exitCode: 0,
+          stdout: JSON.stringify({ issue: "X-1", question: QUESTION }, null, 2),
+          stderr: "",
+          timedOut: false,
+        }),
+      });
+      for (const id of ["a", "b", "c", "d"]) await halted.bash(id, ASK);
+      expect(halted.entries.map((e) => e.outcome)).toEqual([
+        "timeout",
+        "timeout",
+        "timeout",
+        "halted",
+      ]);
+      expect([
+        markersIn(skipped.store),
+        markersIn(halted.store).filter((m) => m.toolCallId === "d"),
+      ]).toMatchObject([
+        [{ argv: argvDigest(ASK_ARGV), args: null, files: [], outcome: "skipped" }],
+        [{ argv: argvDigest(ASK_ARGV), args: null, files: [], outcome: "halted" }],
+      ]);
+      // The row's own bound is a hang guard, the file's convention: its work is three 20 ms
+      // deadlines, far below this.
+    }, 30_000);
 
     test("a rebuttal binds the dry run's arguments, its flag gone from the argv", async () => {
       const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
@@ -3873,7 +3989,9 @@ console.log(JSON.stringify({ argv, consumed: consumeMarker([process.env.ASKGATE_
       expect(g.calls[0].user).toContain(JSON.stringify(`${BRIEF}(the copy in docs)\n`));
       // The directory comes from the command's own cd and then pwd -P, run as the dry run runs.
       expect(g.dryRuns.map((run) => run.script)).toContain("cd docs >/dev/null && pwd -P");
-      expect(g.dryRuns.every((run) => run.cwd === work && run.timeoutMs === 10_000)).toBe(true);
+      expect(
+        g.dryRuns.every((run) => run.cwd === work && run.timeoutMs === core.DRY_RUN_TIMEOUT_MS)
+      ).toBe(true);
     });
     // The second final review of #2159: Oh My Pi at its pin takes a leading `cd X &&` into the
     // call's directory with no CDPATH (`extractLeadingCdTarget`, then `resolveToCwd`), and its
@@ -4261,8 +4379,9 @@ console.log(JSON.stringify({ argv, consumed: consumeMarker([process.env.ASKGATE_
       await expectUnread("dispatch artifact --issue DSP-1 --name brief.md --path brief.md | cat");
     });
     // What Dispatch stores as a markdown document: an upload of inline text (`--content`,
-    // `--content-file`), whatever its name, or a `--path` file the CLI sends as text/markdown (its
-    // name ends in .md or .markdown); and the gate also reviews any upload whose name ends in .md.
+    // `--content-file`), which the CLI takes only under a name ending in .md or .markdown or with
+    // no extension, or a `--path` file the CLI sends as text/markdown (its name ends in .md or
+    // .markdown); and the gate also reviews any upload whose name ends in .md.
     fs.writeFileSync(path.join(work, "notes.txt"), "The person said: ship it on Friday.\n");
     fs.writeFileSync(path.join(work, "name-md.txt"), "brief.md\n");
     fs.writeFileSync(path.join(work, "name-png.txt"), "shot.png\n");
@@ -4297,12 +4416,9 @@ console.log(JSON.stringify({ argv, consumed: consumeMarker([process.env.ASKGATE_
       ])
         await expectUnread(command);
     });
-    test("(l) inline text is a markdown document whatever its name, and so is a --path file named .md", async () => {
+    test("(l) inline text is a markdown document, and so is a --path file named .md", async () => {
       const g = bind({ env: STUB, cwd: work });
-      await g.bash(
-        "u14",
-        "dispatch artifact --issue DSP-1 --name shot.png --content-file notes.txt"
-      );
+      await g.bash("u14", "dispatch artifact --issue DSP-1 --name notes --content-file notes.txt");
       await g.bash("u15", "dispatch artifact --issue DSP-1 --name notes --path brief.md");
       expect(g.calls).toHaveLength(2);
       for (const call of g.calls) expect(call.user).toContain(uploadRule);
@@ -5128,6 +5244,7 @@ describe("askgate.ts, the entry", () => {
         configFile: { path: CONFIG_FILE, error: null },
         logger: { warn: (message: string) => warnings.push(message) },
         runtimeLogger: { warn: () => {} },
+        session: () => "gate-session",
       }
     ).loaded;
     const roles = opts.roles ?? { askgate: MODEL };
@@ -5220,6 +5337,7 @@ describe("askgate.ts, the entry", () => {
         configFile: { path: CONFIG_FILE, error: null },
         logger: { warn: () => {} },
         runtimeLogger: { warn: () => {} },
+        session: () => "gate-session",
       }
     );
     const { loaded } = registration;
@@ -5590,7 +5708,7 @@ describe("a marker the gate mints, checked by the real dispatch CLI", () => {
   const gateEnv = { ...env, OMP_ASKGATE: "block" };
   const BRIEF = "# Brief\n\nShip it on Friday.\n";
   const NOTE = "The acceptance run passed on the staging cluster.\n";
-  const CHANGED = "a file this write posts changed after AskGate reviewed it";
+  const CHANGED = "a file this write posts changed after AskGate read it";
   const LATER = "send this call again in a later message";
 
   /** Posts `command` with the real CLI, as the session whose live record names `store`. */
@@ -5600,7 +5718,7 @@ describe("a marker the gate mints, checked by the real dispatch CLI", () => {
     // The session chose block (gateEnv), so the CLI refuses a write that spends no marker.
     writeAskgateRecord(
       sessionDirectory(env, env.DISPATCH_SESSION_ID),
-      { pid: process.pid, start: processStart(process.pid), store },
+      { pid: process.pid, start: processStart(process.pid), ns: pidNamespace(), store },
       "block"
     );
     const sent: Array<{ path: string; body: unknown }> = [];
@@ -5690,8 +5808,34 @@ describe("a marker the gate mints, checked by the real dispatch CLI", () => {
       const posted = await post(command, g.store);
       expect(posted.code).toBe(1);
       expect(posted.stdout).toContain(`${CHANGED} (\`${form} ${file}\`)`);
-      expect(posted.stdout).toContain("Send the call again in a later message.");
+      expect(posted.stdout).toContain(
+        "Send the call again in a later message than the one that changes the file."
+      );
       expect(posted.sent).toEqual([]);
+    }, 30_000);
+
+  // A session on another provider than the gate's: the gate reviews nothing, so a file that a call
+  // later in the same message changes posts as the CLI reads it, with no refusal naming a review.
+  for (const [form, file, command] of [
+    ["--body-file", "note.md", "dispatch comment --issue DSP-1 --body-file note.md"],
+    ["--path", "brief.md", "dispatch artifact --issue DSP-1 --name brief.md --path brief.md"],
+  ] as const)
+    test(`a ${form} file edited after a call the gate did not review posts its new bytes`, async () => {
+      fs.writeFileSync(path.join(work, file), BRIEF);
+      const g = bind({
+        env: gateEnv,
+        cwd: work,
+        primary: { provider: "openai-codex", id: "gpt-5.5" },
+      });
+      expect((await g.bash("skipped", command))?.block).toBeUndefined();
+      expect(g.entries).toMatchObject([{ outcome: "skipped" }]);
+      expect(g.calls).toHaveLength(0);
+      const edited = `${BRIEF}An edit made in the same message.\n`;
+      fs.writeFileSync(path.join(work, file), edited);
+      const posted = await post(command, g.store);
+      expect(posted.stdout).not.toContain(CHANGED);
+      expect(posted.code).toBe(0);
+      expect(posted.sent).toMatchObject([{ body: form === "--path" ? edited : { body: edited } }]);
     }, 30_000);
 
   test("a file a call earlier in the same message writes is refused with what to do, then posts when sent again", async () => {

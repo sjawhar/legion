@@ -1,15 +1,12 @@
-import {
-  type Attrs,
-  type DOMOutputSpec,
-  DOMSerializer,
-  type Node as ProseMirrorNode,
-} from "prosemirror-model";
+import type { Node as ProseMirrorNode } from "prosemirror-model";
 import { type ReactNode, useRef } from "react";
 
 import { VIEW_FRAME_SLOT } from "../doc/typed-block-drawing";
-import { markdownClassName, type SoftBreaks } from "./markdown-engine";
+import { type MarkdownEngine, markdownClassName, type SoftBreaks } from "./markdown-engine";
 import { drawTaskCheckboxes } from "./task-checkboxes";
+import type { TextSource } from "./text-references";
 import { type PaintMarkdown, type SliceYield, useRenderedMarkdown } from "./useRenderedMarkdown";
+import { useTextReferences } from "./useTextReferences";
 
 /** The first textblock's own inline content (marks intact), plus the flattened plain text of
  * every textblock after it, joined with a single space - see `flattenInline`. */
@@ -186,21 +183,6 @@ const paintBlock: PaintMarkdown = (element, parsed, serializer) => {
 };
 
 /**
- * `DOMSerializer.renderSpec` with the attribute object prosemirror-model's own serializer passes
- * it. Upstream's signature is `renderSpec(doc, structure, xmlNS = null, blockArraysIn)`, and
- * `blockArraysIn` is what makes it refuse a spec array that came out of an attribute object
- * (`suspiciousAttributes`), the guard a node's own `toDOM` is held to everywhere else.
- * prosemirror-model 1.25.11 declares only the first three in `dist/index.d.ts`, so the fourth is
- * passed through this one named type rather than at each call (sjawhar/legion#2519).
- */
-const renderSpecWithAttrs = DOMSerializer.renderSpec as (
-  doc: Document,
-  structure: DOMOutputSpec,
-  xmlNS: string | null,
-  blockArraysIn: Attrs
-) => { dom: HTMLElement; contentDOM?: HTMLElement };
-
-/**
  * One node into `parent`, yielding where the work can be cut: a node holding several block
  * children - a list, a quote, the document itself - is opened with its own `toDOM`, as the
  * serializer would, and its children go in one at a time; everything else, a textblock and its
@@ -209,20 +191,23 @@ const renderSpecWithAttrs = DOMSerializer.renderSpec as (
  *
  * An opened node is opened exactly as `DOMSerializer.serializeNode` opens it: its attributes go
  * to `renderSpec` as the guard wants them, and its own marks wrap what comes back, outermost
- * last, with the children still going into the node's own content hole.
+ * last, with the children still going into the node's own content hole. Both the serializer and
+ * that `renderSpec` come off the engine, so this module names none of prosemirror-model's
+ * classes and the first route parses none of them (`markdown-serializer.ts`).
  */
 function* appendNode(
   parent: Node,
   node: ProseMirrorNode,
-  serializer: DOMSerializer
+  engine: MarkdownEngine
 ): Generator<SliceYield> {
+  const { renderSpec, serializer } = engine;
   const toDOM = serializer.nodes[node.type.name];
   if (node.isTextblock || node.childCount <= 1 || toDOM === undefined) {
     parent.appendChild(serializer.serializeNode(node));
     yield;
     return;
   }
-  const { contentDOM, dom } = renderSpecWithAttrs(document, toDOM(node), null, node.attrs);
+  const { contentDOM, dom } = renderSpec(document, toDOM(node), null, node.attrs);
   let outermost: HTMLElement = dom;
   for (let at = node.marks.length - 1; at >= 0; at -= 1) {
     const mark = node.marks[at];
@@ -230,7 +215,7 @@ function* appendNode(
     if (markToDOM === undefined) {
       continue;
     }
-    const wrap = renderSpecWithAttrs(document, markToDOM(mark, node.isInline), null, mark.attrs);
+    const wrap = renderSpec(document, markToDOM(mark, node.isInline), null, mark.attrs);
     (wrap.contentDOM ?? wrap.dom).appendChild(outermost);
     outermost = wrap.dom;
   }
@@ -240,7 +225,7 @@ function* appendNode(
     return;
   }
   for (let child = 0; child < node.childCount; child += 1) {
-    yield* appendNode(contentDOM, node.child(child), serializer);
+    yield* appendNode(contentDOM, node.child(child), engine);
   }
 }
 
@@ -328,11 +313,11 @@ function* attachNode(parent: Node, node: Node, batch: { left: number }): Generat
 function* paintBlockInSlices(
   element: HTMLElement,
   parsed: ProseMirrorNode,
-  serializer: DOMSerializer
+  engine: MarkdownEngine
 ): Generator<SliceYield> {
   const built = document.createElement("div");
   for (let block = 0; block < parsed.childCount; block += 1) {
-    yield* appendNode(built, parsed.child(block), serializer);
+    yield* appendNode(built, parsed.child(block), engine);
   }
   finishBlock(built);
   yield;
@@ -379,10 +364,11 @@ function* paintBlockInSlices(
  * inside, say, an ask question reads as bold text at the card's own size rather than a
  * page-size h1, and a resolution reason inline in a `text-xs` line stays that size.
  *
- * A picture whose address is a Dispatch artifact at a version (`![shot.png](dispatch://…@v1)`,
- * what a pasted picture is written as) shows through `DispatchPicture`: at the column's width,
- * capped in height, in `block`; as a thumbnail beside its caption in `inline`. A picture on
- * another website renders as Proof renders it.
+ * A picture whose address is a Dispatch artifact (`![shot.png](dispatch://…@v1)`, what a pasted
+ * picture is written as, or the same without `@vN` for its latest version) shows through
+ * `DispatchPicture`: at its own size scaled down to the column, opening at full size on a click,
+ * in `block`; as a thumbnail beside its caption in `inline`. A picture on another website renders
+ * as Proof renders it.
  *
  * Once the schema and Proof's headless engine are loaded (the first body on the page loads
  * them), a body of at most `markdownWorkerThreshold` characters renders synchronously in the
@@ -393,11 +379,17 @@ function* paintBlockInSlices(
  * element a piece at a time (`paintBlockInSlices`), so the 16,000 elements of an 8,000-item list
  * never reach the page in one task. A preview that must clamp its rendered line is
  * `MarkdownPreview`, which parses with the same engine.
+ *
+ * A bare issue key, and a `#` and the id of a question block of `source`'s document, read as
+ * references too, and link where they name something (`useTextReferences`). A caller names the
+ * record this text is in `source`, and the server says which document its `#id`s resolve
+ * against; text that is no record's passes nothing and gets no `#id` links, which is right.
  */
 export function MarkdownBody({
   markdown,
   onRendered,
   softBreaks = "space",
+  source,
   variant = "block",
 }: {
   markdown: string;
@@ -406,12 +398,16 @@ export function MarkdownBody({
    *  Markdown is one paragraph), `"line"` for text whose author meant its lines as lines, such
    *  as a model's streamed turn (`SoftBreaks`). */
   softBreaks?: SoftBreaks;
+  /** The record this text is - the ask, comment, message or document version whose text it is
+   *  (`TextSource`); none for text of no record, which links no `#id`. */
+  source?: TextSource;
   variant?: "block" | "inline";
 }): ReactNode {
   // One ref per tag, since a `<div>` and a `<span>` type their refs differently.
   const blockRoot = useRef<HTMLDivElement>(null);
   const inlineRoot = useRef<HTMLSpanElement>(null);
   const inline = variant === "inline";
+  const references = useTextReferences(markdown, source);
   const { isFallback, isPending, portals } = useRenderedMarkdown(
     inline ? inlineRoot : blockRoot,
     markdown,
@@ -420,6 +416,7 @@ export function MarkdownBody({
       pictures: variant,
       onRendered,
       paintInSlices: inline ? undefined : paintBlockInSlices,
+      references,
       softBreaks,
     }
   );

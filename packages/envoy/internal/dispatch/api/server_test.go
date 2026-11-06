@@ -23,11 +23,13 @@ import (
 	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/brokertoken"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/api/apitest"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
+	"github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
@@ -52,6 +54,9 @@ func sharedAgentTokens(t testing.TB, setting string) *auth.SharedAgentTokens {
 type testServerOptions struct {
 	defaultProject string
 	testHooks      bool
+	// store is the database the server runs on; nil opens one of its own (storetest.Open). A
+	// test that counts a read's round trips passes a traced store (storetest.Traced).
+	store *store.Store
 	// app and githubAPIBase wire the GitHub App access-check client at a fake
 	// GitHub; both nil/empty leaves the client in its "no app credentials"
 	// state (every check answers ErrNoAppKey).
@@ -92,6 +97,10 @@ type testServerOptions struct {
 	// embedder wires meaning search (LEGION-549); nil (every test but the meaning search tests'
 	// own) is the deployment with no embedder configured, where search answers keyword-only.
 	embedder embed.Embedder
+	// answerer answers a going request's question (INFRA-1279); nil (every test but the going
+	// routes' own) is the deployment with no model configured, where a run is recorded and its
+	// stream carries the no-model-configured error.
+	answerer Answerer
 	// files is the uploaded-file store; nil keeps every upload's bytes in Postgres, as a
 	// deployment with no bucket does.
 	files files.Store
@@ -197,7 +206,10 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 	if lifetime == nil {
 		lifetime = t.Context()
 	}
-	database := storetest.Open(t)
+	database := options.store
+	if database == nil {
+		database = storetest.Open(t)
+	}
 	broker := events.NewBroker()
 	var documentPersistence docs.VersionedStore
 	if options.persistence != nil {
@@ -238,6 +250,7 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		BrokerTokens:           brokerTokens,
 		AgentStream:            options.agentStream,
 		Embedder:               options.embedder,
+		Answerer:               options.answerer,
 		Files:                  options.files,
 		DashboardEntry:         options.dashboardEntry,
 	})
@@ -294,6 +307,12 @@ func directServer(deps Deps) *server {
 // listener's do. Dispatch resolves a session through this route rather than through the list,
 // so a stub that served only the list would answer every lookup "no live session"; an id no row
 // names is the listener's own 404, the one absence a caller may act on.
+//
+// A row that names no state or no last_seen is filled in here as a live session seen just now,
+// which is what a real listener answers for a session that is registered and heartbeating: the
+// stubs that predate session state say nothing about either, and a row read as unresponsive
+// (or as last seen at the epoch) would have Dispatch hold claims it should hand on. A row that
+// names them keeps what it names, which is how a test stands up a stalled session.
 func writeSessionRecord(t *testing.T, w http.ResponseWriter, sessionsJSON, sessionID string) {
 	t.Helper()
 	var rows []map[string]any
@@ -303,10 +322,17 @@ func writeSessionRecord(t *testing.T, w http.ResponseWriter, sessionsJSON, sessi
 		return
 	}
 	for _, row := range rows {
-		if row["session_id"] == sessionID {
-			_ = json.NewEncoder(w).Encode(row)
-			return
+		if row["session_id"] != sessionID {
+			continue
 		}
+		if _, named := row["state"]; !named {
+			row["state"] = envoy.StateLive
+		}
+		if _, named := row["last_seen"]; !named {
+			row["last_seen"] = time.Now().UnixMilli()
+		}
+		_ = json.NewEncoder(w).Encode(row)
+		return
 	}
 	w.WriteHeader(http.StatusNotFound)
 	_, _ = w.Write([]byte(`{"error":"no live session ` + sessionID + `"}`))
@@ -503,6 +529,32 @@ func assertCapExceeded(t *testing.T, request string, response *httptest.Response
 	if hint != "" {
 		want += "; " + hint
 	}
+	assertRefusalMessage(t, request, response, want)
+}
+
+// assertBlockCapExceeded requires response to be the 400 CAP_EXCEEDED a body whose block at
+// position (counted from 1) holds units UTF-16 units is refused with, the block being of
+// blockType.
+func assertBlockCapExceeded(t *testing.T, request string, response *httptest.ResponseRecorder, field string, position int, blockType string, units int) {
+	t.Helper()
+	limit := contracts.DispatchBlockUnits
+	want := fmt.Sprintf("%s block %d (%s) is %d characters over the %d-character block limit (%d/%d)",
+		field, position, blockType, units-limit, limit, units, limit)
+	assertRefusalMessage(t, request, response, want)
+}
+
+// assertBlockCountExceeded requires response to be the 400 CAP_EXCEEDED a body of blocks blocks
+// is refused with.
+func assertBlockCountExceeded(t *testing.T, request string, response *httptest.ResponseRecorder, field string, blocks int) {
+	t.Helper()
+	limit := contracts.DispatchItemBlocks
+	want := fmt.Sprintf("%s is %d blocks over the %d-block limit (%d/%d)", field, blocks-limit, limit, blocks, limit)
+	assertRefusalMessage(t, request, response, want)
+}
+
+// assertRefusalMessage requires response to be 400 CAP_EXCEEDED reading want.
+func assertRefusalMessage(t *testing.T, request string, response *httptest.ResponseRecorder, want string) {
+	t.Helper()
 	body := response.Body.String()
 	refusal := decodeBody[struct {
 		Code  string `json:"code"`
@@ -736,6 +788,7 @@ func TestEventNotifyRules(t *testing.T) {
 		{name: "project default assignee", event: model.Event{Type: "settings.project_default_assignee.updated", Actor: user}, want: false},
 		{name: "user state", event: model.Event{Type: "user_state.updated", Actor: user}, want: false},
 		{name: "user thread state", event: model.Event{Type: "user_thread_state.updated", Actor: user}, want: false},
+		{name: "user decision kept", event: model.Event{Type: "decision.kept", Actor: user}, want: false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := broker.Notify(test.event); got != test.want {
@@ -1347,9 +1400,10 @@ func TestBearerReadRoutesDoNotRequireActor(t *testing.T) {
 		})
 	}
 
+	// The inbox is one of the rows the person scope opens, and the shared token holds no scope.
 	inbox := agentRequest(t, handler, http.MethodGet, "/api/v1/inbox", nil, "agent-token")
-	if inbox.Code != http.StatusForbidden || !strings.Contains(inbox.Body.String(), `"code":"HUMAN_ONLY"`) {
-		t.Fatalf("bearer inbox: status=%d body=%s", inbox.Code, inbox.Body.String())
+	if inbox.Code != http.StatusForbidden || !strings.Contains(inbox.Body.String(), `"code":"`+codeScopeRequired+`"`) {
+		t.Fatalf("the shared token's inbox: status=%d body=%s, want 403 %s", inbox.Code, inbox.Body.String(), codeScopeRequired)
 	}
 	anonymous := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key, nil, "")
 	if anonymous.Code != http.StatusUnauthorized {
@@ -1388,8 +1442,8 @@ func TestPerUserIssueStateIsIsolated(t *testing.T) {
 		t.Fatalf("Bob state leaked Alice pin: status=%d body=%s", bob.Code, bob.Body.String())
 	}
 	session := agentRequest(t, handler, http.MethodGet, "/api/v1/me/state", nil, "agent-token")
-	if session.Code != http.StatusForbidden || !strings.Contains(session.Body.String(), `"code":"HUMAN_ONLY"`) {
-		t.Fatalf("session state: status=%d body=%s", session.Code, session.Body.String())
+	if session.Code != http.StatusForbidden || !strings.Contains(session.Body.String(), `"code":"`+codeScopeRequired+`"`) {
+		t.Fatalf("the shared token's state: status=%d body=%s, want 403 %s", session.Code, session.Body.String(), codeScopeRequired)
 	}
 }
 

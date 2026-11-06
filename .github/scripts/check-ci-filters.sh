@@ -39,13 +39,15 @@
 #      longer has,
 #   6. a go command that fails or a first-party package go list cannot load, since its closure
 #      is then unknown, and a `!` pattern under `some` or a brace in a gate's filter,
-#   7. a job whose if: tests an output of changes that ci-ok's needs or its SELECTED_BY does not
-#      name, which leaves that job advisory once ci-ok is the one required check, a SELECTED_BY
-#      in ci-ok's step that is not exactly {job: the output its if: tests} for every job ci-ok
-#      needs but changes and lint, or a PULL_REQUEST_ONLY that is not exactly the jobs
-#      whose if: restricts to github.event_name == 'pull_request': ci-ok.sh fails a job that map
-#      says changes selected unless it succeeded, so a wrong entry fails a job that was rightly
-#      skipped or passes one a failed-only re-run left skipped,
+#   7. a CI_OK_SELECTED_BY in ci.yaml's env that is not exactly {job: the output its if: tests}
+#      for every job whose if: tests an output of changes, or a CI_OK_PULL_REQUEST_ONLY that is
+#      not exactly the jobs whose if: restricts to github.event_name == 'pull_request': ci-ok.sh
+#      fails a job that map says changes selected unless it succeeded, and ci-ok-report.sh waits
+#      for exactly those jobs, so a wrong entry fails a job that was rightly skipped, passes one a
+#      failed-only re-run left skipped, or posts ci-ok before a job reported; a job but changes
+#      whose last step is not the ci-ok-report step, or that calls a workflow with no such step
+#      reporting for it, since a run that job ends never gets ci-ok; and a job named ci-ok or
+#      pr-title, which would post a required check itself,
 #   8. a workflow ci_job_reads.py's PUSH_WORKFLOWS pairs with a filter whose on.push.paths do not
 #      name exactly that filter's patterns (anchors flattened), naming each missing and extra one,
 #      or that is missing or has no on.push.paths: it runs on main the work the filter's job runs
@@ -56,6 +58,19 @@
 #      row it is in: a filter and a declared read that name the same path which does not exist are
 #      consistent with each other and select nothing, so every rule above passes while a change to
 #      the files they mean starts no job. A `!` pattern is exempt, since it names what to leave out.
+#  10. a tag step of ci.yaml that passes `-run` and whose pairing in ci_job_reads.py's TAG_RUNS
+#      is missing or no longer holds. A step that runs a package under a build tag and passes
+#      `-run` runs only the tests the tag adds, so the package's untagged tests must run
+#      elsewhere in every run that step runs. The job that runs them is declared, and its filter
+#      must cover every file the tag step's filter covers; otherwise a change to a file only the
+#      tag step's filter matches runs the tagged tests alone and the untagged ones nowhere. It
+#      fails naming both jobs, the step and those paths (up to 20, with how many more there
+#      are). The table is no entry's to opt into: every `go test` step of ci.yaml that passes
+#      both `-tags` and `-run` must be named by an entry, matched by its job and step name, and
+#      one no entry names fails naming the job and the step, so a tag step added without an
+#      entry, or an entry deleted while its step stays, is held too. Nor can the table go stale:
+#      an entry naming a filter the changes job does not have, a job ci.yaml does not have, a
+#      step that job does not have, or a step whose run: holds no -run is a failure of its own.
 #
 # A claimed go command is reduced only in its simple form, never parsed further: one line of
 # `go test|vet|build`, then relative package paths and only -v, -race, -count=N, -timeout D,

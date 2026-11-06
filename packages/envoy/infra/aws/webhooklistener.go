@@ -59,13 +59,8 @@ type WebhookListenerArgs struct {
 
 	// The listener's remaining environment.
 	ListenHost     string  `pulumi:"listenHost"`              // ENVOY_LISTEN_HOST
-	HostBridge     string  `pulumi:"hostBridge"`              // ENVOY_HOST_BRIDGE
 	NatsReplicas   int     `pulumi:"natsReplicas"`            // ENVOY_NATS_REPLICAS
 	MentionTrigger *string `pulumi:"mentionTrigger,optional"` // ENVOY_GITHUB_MENTION_TRIGGER, with github
-	// ENVOY_SUBSCRIBE_ALL_TOPICS=1 when true, for a NATS user holding HostPermissions or
-	// ListenerHostPermissions (a plain notifications.> subscribe); the listener's start ends on any
-	// other grant. Default false.
-	SubscribeAllTopics bool `pulumi:"subscribeAllTopics,optional"`
 
 	AlarmTopicArn   pulumi.StringInput `pulumi:"alarmTopicArn"` // the SNS topic the alarms page and clear on
 	BaseTags        map[string]string  `pulumi:"baseTags"`      // the component adds `service`
@@ -333,15 +328,13 @@ func (args *WebhookListenerArgs) webhookSecretArns() map[string]pulumi.StringPtr
 // environment returns the inputs the container's environment is made of, with natsUrls.
 func (args *WebhookListenerArgs) environment(natsUrls []string) rendering.ListenerEnv {
 	return rendering.ListenerEnv{
-		MachineID:          args.MachineID,
-		NatsUrls:           natsUrls,
-		ListenHost:         args.ListenHost,
-		HostBridge:         args.HostBridge,
-		SubscribeAllTopics: args.SubscribeAllTopics,
-		NatsReplicas:       args.NatsReplicas,
-		Webhooks:           args.Webhooks,
-		ReviewerAppId:      args.ReviewerAppId,
-		MentionTrigger:     args.MentionTrigger,
+		MachineID:      args.MachineID,
+		NatsUrls:       natsUrls,
+		ListenHost:     args.ListenHost,
+		NatsReplicas:   args.NatsReplicas,
+		Webhooks:       args.Webhooks,
+		ReviewerAppId:  args.ReviewerAppId,
+		MentionTrigger: args.MentionTrigger,
 	}
 }
 

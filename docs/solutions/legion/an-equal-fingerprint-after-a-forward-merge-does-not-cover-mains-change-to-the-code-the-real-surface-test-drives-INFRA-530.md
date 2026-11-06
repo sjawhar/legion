@@ -27,7 +27,7 @@ the code from main that runs under them. After a forward merge whose fingerprint
 - **Compare that list with the files your real-surface test drives.** These are the view, the
   editor and the server route the test loads, not only the files the pull request changes.
 - **Where they overlap, re-run the real-surface test at the new head.** Record the overlap and the
-  run in the handoff's `deviations`. Run it locally, because in sjawhar/legion the browser suite
+  run in the handoff's `deviations`. Run it locally, because in cybermonklabs/legion the browser suite
   runs only in the `dispatch` job (`.github/workflows/envoy-and-contracts.yaml`,
   `bunx playwright test`). That job is not in main's required set, and READY does not wait for
   it. Where they do not overlap, run the bare gates only, as

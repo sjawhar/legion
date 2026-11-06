@@ -1,5 +1,6 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { IDEMPOTENCY_KEY_HEADER, IDEMPOTENCY_KEY_PATTERN } from "@legion/contracts";
+import { bearerCredential } from "../bearer";
 import { DISPATCH_WRITE_RETRY, DispatchClient, forgetKeyedLayerMemory } from "../dispatch-http";
 
 // Every write the `dispatch` command makes carries one key because every request DispatchClient
@@ -47,6 +48,9 @@ const CALLS: Record<ClientMethod, (client: DispatchClient) => Promise<unknown>> 
   sessionAnswers: (client) => client.sessionAnswers("session-1"),
   listAgents: (client) => client.listAgents(),
   whoami: (client) => client.whoami(),
+  limits: (client) => client.limits(),
+  inbox: (client) => client.inbox("me"),
+  credentialPending: (client) => client.credentialPending(),
   createProject: (client) => client.createProject({ key: "DSP", name: "Dispatch" } as never),
   listProjects: (client) => client.listProjects(),
   listArchitectureSources: (client) => client.listArchitectureSources("DSP"),
@@ -54,6 +58,17 @@ const CALLS: Record<ClientMethod, (client: DispatchClient) => Promise<unknown>> 
   syncArchitectureSource: (client) => client.syncArchitectureSource("DSP", "acme/infra"),
   resolveAsk: (client) => client.resolveAsk("ask-1", { answer: "This one.", actor } as never),
   requestApproval: (client) => client.requestApproval("artifact-1", { actor, summary: "Spec" }),
+  planApprove: (client) => client.planApprove("artifact-1", { actor, version: 2 }),
+  recordResult: (client) =>
+    client.recordResult("DSP-1", {
+      actor,
+      check: "k1",
+      role: "implementer",
+      verdict: "pass",
+      commit: "1111111111111111111111111111111111111111",
+    }),
+  issueResults: (client) => client.issueResults("DSP-1"),
+  issueCoverage: (client) => client.issueCoverage("DSP-1"),
   editAsk: (client) => client.editAsk("ask-1", { question: "Which one?", actor } as never),
   comment: (client) => client.comment("DSP-1", { body: "Shipped.", actor }),
   listIssueAsks: (client) => client.listIssueAsks("DSP-1"),
@@ -76,6 +91,8 @@ const CALLS: Record<ClientMethod, (client: DispatchClient) => Promise<unknown>> 
   docRead: (client) => client.docRead("artifact-1"),
   fileVersion: (client) => client.fileVersion("artifact-1", 1),
   artifactBlocks: (client) => client.artifactBlocks("artifact-1"),
+  issueArtifactBlocks: (client) => client.issueArtifactBlocks("DSP-1", "spec"),
+  projectArtifactBlocks: (client) => client.projectArtifactBlocks("DSP", "notes-md"),
   docEdit: (client) =>
     client.docEdit("artifact-1", { ops: [{ op: "delete", find: "old" }], actor } as never),
   nameArtifactVersion: (client) =>
@@ -100,11 +117,13 @@ const CALLS: Record<ClientMethod, (client: DispatchClient) => Promise<unknown>> 
 afterEach(forgetKeyedLayerMemory);
 
 test("every DispatchClient method reaches Dispatch through its one request function, every write keyed", async () => {
-  expect(
-    Object.getOwnPropertyNames(DispatchClient.prototype)
-      .filter((name) => name !== "constructor")
-      .sort()
-  ).toEqual(Object.keys(CALLS).sort());
+  // Every method, which is every own property of the prototype that is one: `token` is an
+  // accessor (the secret the client presents, which a broker credential renews), not a call.
+  const methods = Object.getOwnPropertyNames(DispatchClient.prototype).filter((name) => {
+    const property = Object.getOwnPropertyDescriptor(DispatchClient.prototype, name);
+    return name !== "constructor" && typeof property?.value === "function";
+  });
+  expect(methods.sort()).toEqual(Object.keys(CALLS).sort());
   const global = spyOn(globalThis, "fetch");
   const keys: string[] = [];
   try {
@@ -119,7 +138,7 @@ test("every DispatchClient method reaches Dispatch through its one request funct
       }) as typeof fetch;
       const client = new DispatchClient(
         "http://dispatch.test",
-        "secret",
+        bearerCredential("secret"),
         recording,
         undefined,
         DISPATCH_WRITE_RETRY

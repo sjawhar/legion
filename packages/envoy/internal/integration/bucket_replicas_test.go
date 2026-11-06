@@ -15,9 +15,11 @@ import (
 )
 
 // On a three-copy deployment (an in-process three-server cluster, replica count 3), each of the
-// five buckets Envoy opens is created at three copies by the opener its program calls: interests
-// and role claims (store.Open), sessions (session.OpenSessionRegistry), CI state (cistore.Open) and
-// webhook redelivery (redeliver.OpenState).
+// five buckets a library opener creates is created at three copies by the opener its program
+// calls: interests and role claims (store.Open), sessions (session.OpenSessionRegistry), CI state
+// (cistore.Open) and webhook redelivery (redeliver.OpenState). The sixth bucket Envoy opens, the
+// listener's spent-proof bucket (bus.DPoPProofBucket), has its opener in cmd/listener and is
+// covered by that package's own tests.
 func TestEveryBucketIsCreatedAtThreeCopiesOnAThreeCopyDeployment(t *testing.T) {
 	const replicas = 3
 	cluster := testnats.StartCluster(t, 3)
@@ -43,7 +45,7 @@ func TestEveryBucketIsCreatedAtThreeCopiesOnAThreeCopyDeployment(t *testing.T) {
 		t.Fatalf("open the CI store: %v", err)
 	}
 	t.Cleanup(ci.StopWatch)
-	if _, err := redeliver.OpenState(js, replicas); err != nil {
+	if _, err := redeliver.OpenState(conn, js, replicas); err != nil {
 		t.Fatalf("open the webhook redelivery state: %v", err)
 	}
 

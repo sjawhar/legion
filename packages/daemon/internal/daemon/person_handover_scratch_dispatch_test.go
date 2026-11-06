@@ -70,10 +70,10 @@ const (
 	scratchSession = "session-smoke"
 )
 
-// dispatchAnswerAs sends one request to the scratch Dispatch server as identity — the person's
-// trusted header, or the session's agent bearer — with body as given, and answers its status and
-// body, whatever they are: the request a proof expects Dispatch to refuse goes through here.
-func dispatchAnswerAs(t *testing.T, baseURL, method, path string, body any, identity scratchIdentity) (int, []byte) {
+// dispatchAnswerWith sends one request to the scratch Dispatch server, credential putting on it
+// the headers that say who it is from, with body as given, and answers its status and body,
+// whatever they are: the request a proof expects Dispatch to refuse goes through here.
+func dispatchAnswerWith(t *testing.T, baseURL, method, path string, body any, credential func(*http.Request)) (int, []byte) {
 	t.Helper()
 	var reader io.Reader
 	if body != nil {
@@ -88,14 +88,10 @@ func dispatchAnswerAs(t *testing.T, baseURL, method, path string, body any, iden
 		t.Fatalf("build %s %s: %v", method, path, err)
 	}
 	request.Header.Set("Content-Type", "application/json")
-	if identity == asSession {
-		request.Header.Set("Authorization", "Bearer "+scratchAgentToken)
-	} else {
-		request.Header.Set("X-Dispatch-User", "smoke")
-	}
+	credential(request)
 	response, err := scratchDispatchClient.Do(request)
 	if err != nil {
-		t.Fatalf("%s %s as %s: %v", method, path, identity, err)
+		t.Fatalf("%s %s: %v", method, path, err)
 	}
 	defer response.Body.Close()
 	answer, err := io.ReadAll(response.Body)
@@ -103,6 +99,28 @@ func dispatchAnswerAs(t *testing.T, baseURL, method, path string, body any, iden
 		t.Fatalf("read the answer to %s %s: %v", method, path, err)
 	}
 	return response.StatusCode, answer
+}
+
+// dispatchAnswerAs is dispatchAnswerWith as identity: the person's trusted header, or the
+// session's agent bearer.
+func dispatchAnswerAs(t *testing.T, baseURL, method, path string, body any, identity scratchIdentity) (int, []byte) {
+	t.Helper()
+	credential := signedInAsThePerson
+	if identity == asSession {
+		credential = bearing(scratchAgentToken)
+	}
+	return dispatchAnswerWith(t, baseURL, method, path, body, credential)
+}
+
+// signedInAsThePerson is the person smoke at a browser: the trusted identity header the harness
+// starts the scratch Dispatch with.
+func signedInAsThePerson(request *http.Request) { request.Header.Set("X-Dispatch-User", "smoke") }
+
+// bearing presents token as the request's credential: the scratch server's shared agent token,
+// which holds no OAuth scope and acts as no person, or a personal token of the person's, which
+// acts as the person who minted it.
+func bearing(token string) func(*http.Request) {
+	return func(request *http.Request) { request.Header.Set("Authorization", "Bearer "+token) }
 }
 
 // withSessionActor is body, whatever shape it was given in, as an object naming scratchSession in
@@ -333,32 +351,59 @@ func (r *personHandoverRig) comment(key, body string) {
 	dispatchCall(r.t, r.baseURL, http.MethodPost, "/api/v1/issues/"+key+"/comments", map[string]any{"body": body}, nil)
 }
 
-// approveDocument reviews the latest settled version of artifactID as approved, as identity, and
-// answers Dispatch's status with the review it wrote: 201 for the person's, and 403 HUMAN_ONLY for
-// a bearer's, since Dispatch's review route is a person's alone. The body is the route's own,
-// {state}, under either credential: the route takes no actor, so a bearer is refused for what it
-// is, not for a field it did not expect.
-func (r *personHandoverRig) approveDocument(artifactID string, identity scratchIdentity) (int, scratchReview) {
+// approveDocument reviews the latest settled version of artifactID as approved, under
+// credential, and answers Dispatch's status, the raw answer a refusal is read from, and the
+// review it wrote where it took one: 201 for the person at a browser and for a personal token of
+// theirs holding the approve scope, and 403 OAUTH_SCOPE_REQUIRED for the shared agent token,
+// which holds no scope at all and so settles nothing a person settles. The body is the route's
+// own, {state}, under every credential: the route takes no actor, so a bearer is refused for
+// what its credential holds, not for a field it did not expect.
+func (r *personHandoverRig) approveDocument(artifactID string, credential func(*http.Request)) (int, []byte, scratchReview) {
 	r.t.Helper()
-	status, answer := dispatchAnswerAs(r.t, r.baseURL, http.MethodPost, "/api/v1/artifacts/"+artifactID+"/reviews",
-		map[string]any{"state": "approved"}, identity)
+	status, answer := dispatchAnswerWith(r.t, r.baseURL, http.MethodPost, "/api/v1/artifacts/"+artifactID+"/reviews",
+		map[string]any{"state": "approved"}, credential)
 	var review scratchReview
 	if status == http.StatusCreated {
 		if err := json.Unmarshal(answer, &review); err != nil {
 			r.t.Fatalf("decode the review of %s from %s: %v", artifactID, answer, err)
 		}
 	}
-	return status, review
+	return status, answer, review
 }
 
-// approve is the person's approval of artifactID, which Dispatch must take, answering the review.
+// approve is the person's own approval of artifactID at a browser, which Dispatch must take,
+// answering the review.
 func (r *personHandoverRig) approve(artifactID string) scratchReview {
 	r.t.Helper()
-	status, review := r.approveDocument(artifactID, asPerson)
-	if status != http.StatusCreated || review.State != "approved" || review.Actor.Kind != "user" {
-		r.t.Fatalf("the person's approval of %s = %d, review %+v; want 201 and an approved review in the person's name", artifactID, status, review)
+	return r.approvedBy(artifactID, signedInAsThePerson, "the person's own")
+}
+
+// approvedBy is one approval of artifactID Dispatch must take and record in the person's name,
+// whatever credential made it; whose names the credential in a failure.
+func (r *personHandoverRig) approvedBy(artifactID string, credential func(*http.Request), whose string) scratchReview {
+	r.t.Helper()
+	status, answer, review := r.approveDocument(artifactID, credential)
+	if status != http.StatusCreated || review.State != "approved" || review.Actor != (scratchActor{Kind: "user", ID: "smoke"}) {
+		r.t.Fatalf("%s approval of %s = %d %s; want 201 and an approved review in the person's name", whose, artifactID, status, answer)
 	}
 	return review
+}
+
+// mintPersonalToken mints a personal agent token of the person's holding scopes, through the
+// route a person mints one by at the dashboard, and answers its plaintext: the credential an
+// agent of theirs presents to act as them.
+func (r *personHandoverRig) mintPersonalToken(name string, scopes ...string) string {
+	r.t.Helper()
+	var minted struct {
+		Token  string   `json:"token"`
+		Scopes []string `json:"scopes"`
+	}
+	dispatchCall(r.t, r.baseURL, http.MethodPost, "/api/v1/me/agent-tokens",
+		map[string]any{"name": name, "scopes": scopes}, &minted)
+	if minted.Token == "" || !slices.Equal(minted.Scopes, scopes) {
+		r.t.Fatalf("Dispatch minted the person's token %q holding %v; want a token holding %v", name, minted.Scopes, scopes)
+	}
+	return minted.Token
 }
 
 // reviews lists artifactID's reviews, newest first.
@@ -812,7 +857,8 @@ func TestAPersonsLabelOnATriageRootIsQueuedByTheDaemonAgainstScratchDispatch(t *
 //     cleanup the proof waits out;
 //  2. a second labelled root takes the slot for good, its architect registering its gate: the
 //     running root;
-//  3. a parked labelled root: a bearer's approval of its spec is refused 403 HUMAN_ONLY; a session
+//  3. a parked labelled root: the shared token's approval of its spec is refused 403
+//     OAUTH_SCOPE_REQUIRED, since that token holds no scope at all; a session
 //     uploads a second document, which the person approves, and the daemon applies that approval
 //     writing nothing; the person then approves the spec itself, and within 60 s Dispatch shows the
 //     root todo under the daemon's actor, admission.waiting names it, and the log holds the one
@@ -827,7 +873,7 @@ func TestAPersonsLabelOnATriageRootIsQueuedByTheDaemonAgainstScratchDispatch(t *
 //     answer wrote, in the person's name: the daemon applies it writing nothing;
 //  8. the recorded parked root of step 1, its spec revised by a session, is approved by the person
 //     at the new version: todo within 60 s, admission.waiting names it, and no design-approved
-//     notice is queued for it, since its own gate is not applied;
+//     notice is queued for it, since its own gate only records the approval;
 //  9. the root of step 3, parked again by the person and its spec revised by a session, is approved
 //     again by the person at the new version: todo again, a second queue.
 func TestAPersonsApprovalOfAParkedRootsSpecIsQueuedByTheDaemonAgainstScratchDispatch(t *testing.T) {
@@ -852,14 +898,15 @@ func TestAPersonsApprovalOfAParkedRootsSpecIsQueuedByTheDaemonAgainstScratchDisp
 	// 3. A parked labelled root: the bearer's approval, a non-primary document's, then the spec's.
 	parked := r.create(asSession, "Parked proposal awaiting approval", labelled)
 	r.setStatus(parked.Key, "backlog")
-	if status, _ := r.approveDocument(parked.PrimaryArtifactID, asSession); status != http.StatusForbidden {
-		t.Fatalf("a bearer's approval of %s's spec = %d; want 403 HUMAN_ONLY", parked.Key, status)
+	if status, answer, _ := r.approveDocument(parked.PrimaryArtifactID, bearing(scratchAgentToken)); status != http.StatusForbidden ||
+		!strings.Contains(string(answer), `"code":"OAUTH_SCOPE_REQUIRED"`) {
+		t.Fatalf("the shared token's approval of %s's spec = %d %s; want 403 OAUTH_SCOPE_REQUIRED: it holds no scope and so acts as no person", parked.Key, status, answer)
 	}
 	notes := r.uploadDocument(parked.Key, "notes.md", "# Notes\n\nSide notes, not the spec.\n")
 	notesReview := r.approve(notes)
 	r.applied(r.newestEvent(parked.Key, "artifact.approved", func(e scratchEvent) bool { return e.version() == notesReview.Version }))
 	r.notQueued(parked.Key, "backlog", 0)
-	t.Logf("a bearer's approval of %s's spec was refused, and the person's approval of its second document %s queued nothing", parked.Key, notes)
+	t.Logf("the shared token's approval of %s's spec was refused for the scope it does not hold, and the person's approval of its second document %s queued nothing", parked.Key, notes)
 	first := r.approve(parked.PrimaryArtifactID)
 	r.queuedByThePerson(parked.Key, "approval", 1)
 	t.Logf("the person's approval of %s's spec at version %d queued the root", parked.Key, first.Version)
@@ -919,7 +966,7 @@ func TestAPersonsApprovalOfAParkedRootsSpecIsQueuedByTheDaemonAgainstScratchDisp
 	}
 	r.queuedByThePerson(recorded.Key, "approval", 1)
 	if after := r.designApprovedNotices(recorded.Key); after != noticesBefore {
-		t.Fatalf("the daemon queued %d design-approved notices on %s for the approval that queued its todo; want none: a recorded parked root's own gate is not applied",
+		t.Fatalf("the daemon queued %d design-approved notices on %s for the approval that queued its todo; want none: a recorded parked root's own gate only records the approval",
 			after-noticesBefore, recorded.Key)
 	}
 	t.Logf("the person's approval of the recorded parked root %s at version %d queued it again with no design-approved notice", recorded.Key, review.Version)
@@ -1012,4 +1059,39 @@ func TestABootListingQueuesAPersonsLabelAgainstScratchDispatch(t *testing.T) {
 		t.Fatalf("Dispatch holds %d todo writes of the daemon's on %s; want the first boot's one", todos, booted.Key)
 	}
 	t.Logf("the second boot found %s recorded and wrote nothing more", booted.Key)
+}
+
+// A5. An approval an agent makes with a personal token of the person's, holding the approve
+// scope, is that person's approval: Dispatch records it under the person's own actor, with the
+// act naming the token beside it, so the daemon queues the parked labelled root as that person's
+// handover exactly as their own approval at a browser does (A3). The daemon tells the two apart
+// nowhere: it reads the review's actor, which is a person either way (dispatch.Actor carries its
+// kind and its id and nothing else), which is the consequence this proof pins.
+//
+//  1. a labelled root the person set todo takes the cap's one slot and keeps it, so a queued root
+//     stands visibly in admission.waiting;
+//  2. the person mints a personal token holding person and approve, as they do at the dashboard;
+//  3. a session's labelled root is parked in backlog, and its spec is approved with that token:
+//     Dispatch answers an approved review in the person's name, and within 60 s it shows the root
+//     todo under the daemon's own actor, admission.waiting names it, the daemon logged the one
+//     queue from source approval and left no handover row in its outbox.
+func TestPersonHandoverIsQueuedForAnApprovalMadeWithThePersonsTokenAgainstScratchDispatch(t *testing.T) {
+	r := newPersonHandoverRig(t, 1)
+	r.boot()
+	labelled := map[string]any{"labels": []string{"legion"}}
+
+	// 1. The slot is taken for good by a root the person handed over by hand.
+	occupant := r.create(asSession, "Flagship tree occupies everything", labelled)
+	r.admit(occupant.Key)
+
+	// 2. The person's own token, holding both scopes.
+	token := r.mintPersonalToken("handover-approver", "person", "approve")
+
+	// 3. The parked labelled root, approved with that token.
+	parked := r.create(asSession, "Parked proposal awaiting approval", labelled)
+	r.setStatus(parked.Key, "backlog")
+	review := r.approvedBy(parked.PrimaryArtifactID, bearing(token), "the person's token's")
+	r.queuedByThePerson(parked.Key, "approval", 1)
+	t.Logf("the approval of %s's spec at version %d, made with the person's own token rather than at their browser, queued the root as their handover",
+		parked.Key, review.Version)
 }

@@ -53,9 +53,17 @@ const OPERATIONS: Readonly<Record<LegionToolRole, readonly string[]>> = {
     "park_child",
     "rerun_child",
     "read_record",
+    "read_release_records",
     "handoff_complete",
+    "ready_for_update",
   ],
-  "phase-worker": ["request_backward_move", "read_record", "handoff_complete"],
+  "phase-worker": [
+    "request_backward_move",
+    "read_record",
+    "read_release_records",
+    "handoff_complete",
+    "ready_for_update",
+  ],
   controller: ["read_state", "set_status"],
 };
 
@@ -85,6 +93,7 @@ function toolSchema(pi: PiApi): unknown {
   return z.object({
     op: z.enum([...OPERATIONS.architect, ...OPERATIONS.controller]),
     issue: phase.issue,
+    since: phase.since,
     artifactId: z
       .string()
       .describe(
@@ -99,6 +108,7 @@ function toolSchema(pi: PiApi): unknown {
     summary: phase.summary,
     verdict: phase.verdict,
     ready: phase.ready,
+    round: phase.round,
     status: z.enum(ISSUE_STATUSES).optional(),
   });
 }
@@ -138,12 +148,18 @@ export function createLegionTool(deps: {
   readonly controllerGrant: (sessionId: string) => Promise<LegionGrant>;
   /** Told of each `handoff_complete` that succeeded: the session's phase is complete. */
   readonly onPhaseCompleted: (context: SessionContext) => void;
+  /** Told of each `ready_for_update` that succeeded: the session has answered the daemon's
+   * update task on its pod, and its phase stays open. */
+  readonly onUpdateAnswered: (context: SessionContext) => void;
   /** What a completion of `phase` by `role` reports beside its summary (`findHandoffReport`): for
    * a file-backed phase the role works, the newest Dispatch handoff record of the phase, with the
    * pushed tip of `legion/<issue>@origin` for the implementer; otherwise the commit the workspace
    * stands on. Throws naming the remedy when the phase has no record, Dispatch does not answer, or
    * the implementer's work is not pushed. */
   readonly handoffReport: (phase: LegionPhase, role: LegionRole) => Promise<HandoffReport>;
+  /** The head of `legion/<issue>@origin` an update signal reports, read with the pane's jj
+   * (`findPushedBranchHead`), and `""` when the branch is not on the remote. */
+  readonly branchHead: () => Promise<string>;
   /** The id of the document `issue` carries under `reference` (`spec`, a slug, or a filename),
    * looked up in Dispatch as a `dispatch` command's `--artifact` is; throws naming the reference
    * when none matches, or when it names two documents. */
@@ -157,24 +173,34 @@ export function createLegionTool(deps: {
     session,
     controllerGrant,
     onPhaseCompleted,
+    onUpdateAnswered,
     handoffReport,
+    branchHead,
     resolveDocument,
     restartClock,
   } = deps;
   return {
     name: "legion",
     label: "legion",
-    // No sentence on read_record; after handoff_complete's contract the shared sentence on
-    // request_backward_move (an architect's names the issue it returns from accepting), then the
-    // architect's sign_off and the controller's operations: the exact text tools.test.ts pins, so a
-    // change to the shared template cannot reach an Oh My Pi agent unnoticed.
+    // No sentence on read_record, whose name says what it reads; the shared sentence on
+    // read_release_records before handoff_complete's contract, since the records it answers are
+    // not read from its name; after that contract the shared sentence on request_backward_move
+    // (an architect's names the issue it returns from accepting), then the architect's sign_off
+    // and the controller's operations: the exact text tools.test.ts pins, so a change to the
+    // shared template cannot reach an Oh My Pi agent unnoticed.
     description: legionToolDescription({
       envoyPublish: "envoy_publish",
+      before: PHASE_OP_SENTENCES.readReleaseRecords,
       after:
         PHASE_OP_SENTENCES.requestBackwardMove +
         "sign_off is the architect's acceptance of an issue in accepting, moving it to retro; the daemon refuses it in every " +
-        "other phase (SIGNOFF_OUTSIDE_ACCEPTING), and issues still running beneath it do not hold it: a root's close waits " +
-        "for them instead. " +
+        "other phase (SIGNOFF_OUTSIDE_ACCEPTING) and while an issue beneath it is still in the workflow " +
+        "(SIGNOFF_CHILD_IN_WORKFLOW, naming each one), since a parent's head proves its children's merged work: take each one " +
+        "to done, or out of the workflow with park_child, and sign off again. close_root is refused the same way and with the " +
+        "same code while an issue beneath the root is still in the workflow, since closing it would stop that work mid-turn. " +
+        "release_children and rerun_child are refused for a child whose ancestor is in retro, merging or awaiting_merge " +
+        "(CHILD_UNDER_ACCEPTED_PARENT, naming the ancestor), since that ancestor's approved head cannot carry work released " +
+        "under it now: wait for the ancestor to close, then release it. " +
         "The controller's read_state returns the daemon's whole state and set_status moves an issue to todo, backlog or icebox. ",
     }),
     defaultInactive: true,
@@ -201,13 +227,19 @@ export function createLegionTool(deps: {
         }
         if (active.kind !== "controller" && isPhaseOp(operation)) {
           const answer = await executePhaseOp(
-            { daemon: daemon(), claim: active, handoffReport, restart },
+            { daemon: daemon(), claim: active, handoffReport, branchHead, restart },
             parameters
           );
           // A call that returned without throwing: a completion, and a backward move, which hands
           // the issue to another phase. Either way this session's phase is no longer open.
+          // `ready_for_update` ends no phase: it answers the pod's update task, and the worker
+          // then waits for its process to be replaced rather than working, so the turn it ends
+          // after answering earns no reminder (the `update-answered` input of
+          // `@legion/pi-shared/phase-stall`).
           if (operation === "handoff_complete" || operation === "request_backward_move") {
             onPhaseCompleted(context);
+          } else if (operation === "ready_for_update") {
+            onUpdateAnswered(context);
           }
           return jsonSuccess(answer);
         }

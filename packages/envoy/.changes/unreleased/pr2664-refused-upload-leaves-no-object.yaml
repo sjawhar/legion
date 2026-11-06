@@ -1,9 +1,0 @@
-kind: Fixed
-body: |-
-    A file or image upload refused for its kind (`ARTIFACT_KIND_MISMATCH`), for a new name or reference
-    key past its bound (`INVALID_ARTIFACT`), or for a project that does not exist no longer leaves an
-    object in the file store: the upload makes those refusals before it writes its bytes, and nothing
-    ever deleted such an object.
-time: 2026-11-02T06:10:00.000000000Z
-custom:
-    Issue: pr2664

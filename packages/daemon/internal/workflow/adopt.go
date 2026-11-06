@@ -106,9 +106,9 @@ func (e *Engine) Ancestry(ctx context.Context, tx pgx.Tx, issue record.Issue, ch
 // checks (its linger's close, its supervise rows, its issue suspend), with no linger, hold,
 // pending READY or Dispatch chain (record.Issue.Ancestry: a member waits in no line), no
 // hand-over fence and its generation's facts cleared. A todo record enters the tree's run
-// admitted, as an unrecorded todo child does (enterChild), so an open gate starts its planning,
-// unless it waits on an unfinished Dispatch issue: enterChild then holds it at phase.Admitted
-// (blockers.Holds), and StartUnblockedChildren starts it once nothing holds it. Any other status
+// admitted, as an unrecorded todo child does (enterChild), so it starts its first phase at the
+// slot the waiting line gives it, unless it waits on an unfinished Dispatch issue, which keeps it
+// out of that line until the last of them closes. Any other status
 // keeps it as a parked child at done, which a todo runs again (ReenterChild).
 // The tree's architect is told with a child-status notice. Everything is written in the caller's
 // transaction.
@@ -140,6 +140,20 @@ func (e *Engine) Adopt(ctx context.Context, tx pgx.Tx, issue, root record.Issue,
 		member.Tree, member.Project, member.Generation, member.Phase = root.Tree, root.Project, next, phase.Done
 		member.LingerUntil, member.Hold, member.ReadyPendingVersion, member.Ancestry = nil, nil, nil, nil
 		if err := e.store.PutIssue(ctx, tx, member); err != nil {
+			return err
+		}
+	}
+	// What a person decided on an adopted member while it waited for its slot is kept under that
+	// member, so the tree it now stands in owes it (Store.UnclaimedKept reads by the issue's tree
+	// now). The tree's architect already runs and no ready is coming, so it is written a catch-up
+	// now, as a release's hand-over does (CatchUpTheTreesOwed); an architect that does not hear yet
+	// is written nothing, and its next start or ready names them.
+	decisions, approved, _, err := e.store.UnclaimedKept(ctx, tx, root.Tree)
+	if err != nil {
+		return err
+	}
+	if len(decisions) > 0 || approved > 0 {
+		if err := CatchUpTheTreesOwed(ctx, tx, e.store, e.cfg.DesignGate, []string{root.Tree}, e.now()); err != nil {
 			return err
 		}
 	}

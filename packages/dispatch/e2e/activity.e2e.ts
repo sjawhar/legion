@@ -80,6 +80,8 @@ test("the Activity tab lists the event rows the Conversation does not draw", asy
   }
 });
 
+// SLOW(>=2s): four messages written in the order the dividers read, three events back-dated and
+// the read watermark set, before one cold load of the Activity tab.
 test("Activity breaks its rows by day and marks where the reader stopped", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Dividers" });
@@ -149,17 +151,17 @@ test("Activity breaks its rows by day and marks where the reader stopped", async
     expect(unreadIndex).toBeGreaterThan(thirdIndex);
     expect(unreadIndex).toBeLessThan(secondIndex);
 
-    // Nothing the tab did wrote the reader's watermark.
-    await page.waitForTimeout(2_000);
+    // Nothing the tab did wrote the reader's watermark, and the Conversation is the control:
+    // its own write is what says the page had the chance to make one.
     expect(stateWrites).toBe(0);
+    await page.getByRole("tab", { name: "Conversation" }).click();
+    await expect.poll(() => stateWrites, { intervals: [50, 50, 100, 200, 500] }).toBe(1);
   } finally {
     await alice.close();
   }
 });
 
-test("an Activity row pins into the review margin and unpins from it @phone", async ({
-  browser,
-}, testInfo) => {
+test("an Activity row pins into the review margin and unpins from it", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Pin an event" });
   await patchIssue(issue.key, { status: "in_progress" });
@@ -179,18 +181,55 @@ test("an Activity row pins into the review margin and unpins from it @phone", as
       "true"
     );
 
-    if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: /Open review panel/ }).click();
-    }
     const margin = page.getByTestId("margin-sheet");
     await margin.getByRole("tab", { name: "Pinned" }).click();
     await expect(margin.getByText("Issue updated")).toBeVisible();
     await margin.getByRole("button", { name: "Unpin" }).click();
     await expect(margin.getByText("No pinned items.")).toBeVisible();
-    if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: /Close review panel/ }).click();
-    }
     await expect(row.getByRole("button", { name: "Pin" })).toHaveAttribute("aria-pressed", "false");
+  } finally {
+    await alice.close();
+  }
+});
+
+// A comment body is bounded block by block, so one far longer than an event carries rides as
+// its first part and the event says so. The row a reader opens then shows the part it has and,
+// under it, a link to the comment's own page, which reads the stored body whole. The margin's
+// Pinned tab is where the Activity tab draws an event's body, so the row is pinned first.
+test("an Activity row whose comment event carried the body in part links to the whole comment", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "A comment longer than one event" });
+  // Two 20,000-unit paragraphs: each is inside the 32,000-unit block bound, and together they
+  // are past the 32,000 units one event carries, so the event keeps the first paragraph alone.
+  const first = "A".repeat(20_000);
+  const comment = await createComment(
+    issue.key,
+    { body: `${first}\n\n${"B".repeat(20_000)}` },
+    agent
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/activity`);
+    const row = page
+      .getByRole("list", { name: "Issue activity" })
+      .getByRole("listitem")
+      .filter({ hasText: "commented on" });
+    await expect(row).toHaveCount(1);
+    await row.getByRole("button", { name: "Pin" }).click();
+
+    const margin = page.getByTestId("margin-sheet");
+    await margin.getByRole("tab", { name: "Pinned" }).click();
+    const link = margin.getByRole("link", { name: "Read the whole comment" });
+    await expect(link).toBeVisible();
+
+    await link.click();
+    await expect(page).toHaveURL(
+      new RegExp(`/issues/${issue.key}/comments/${comment.id}(\\?|#|$)`)
+    );
   } finally {
     await alice.close();
   }

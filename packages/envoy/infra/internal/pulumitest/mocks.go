@@ -36,6 +36,10 @@ type Mocks struct {
 	Computed func(args pulumi.MockResourceArgs) (id string, outputs resource.PropertyMap)
 	// CallResult, when not nil, answers an invoke as the resource provider would.
 	CallResult func(args pulumi.MockCallArgs) (resource.PropertyMap, error)
+	// Preview, when set, makes Run a preview (DryRun) and answers every registration as a preview
+	// of a create does: with no ID, so a resource's ID, and every output built on it, is unknown.
+	// A read keeps its ID, since what it reads exists.
+	Preview bool
 
 	mu         sync.Mutex
 	registered []Registration
@@ -62,6 +66,9 @@ func (m *Mocks) NewResource(args pulumi.MockResourceArgs) (string, resource.Prop
 		for k, v := range outputs {
 			state[k] = v
 		}
+	}
+	if m.Preview && args.ReadRPC == nil {
+		id = ""
 	}
 	return id, state, nil
 }
@@ -123,9 +130,14 @@ func (m *Mocks) Types() []string {
 	return types
 }
 
-// Run runs program on m, as project "p" and stack "s", and returns its error.
+// Run runs program on m, as project "p" and stack "s", and returns its error. With Preview set it
+// runs the program as a preview.
 func (m *Mocks) Run(program pulumi.RunFunc) error {
-	return pulumi.RunErr(program, pulumi.WithMocks("p", "s", m))
+	opts := []pulumi.RunOption{pulumi.WithMocks("p", "s", m)}
+	if m.Preview {
+		opts = append(opts, func(info *pulumi.RunInfo) { info.DryRun = true })
+	}
+	return pulumi.RunErr(program, opts...)
 }
 
 // Construct serves the envoy-infra plugin in process with m behind it and constructs the

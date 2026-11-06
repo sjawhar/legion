@@ -4,7 +4,7 @@ description: >-
   image when a test first asks for it. The Docker daemon reports a registry connection reset as
   an internal error, and testcontainers does not retry it. One such reset failed every test that
   shared that container. The pull itself does not retry either. Every image comes from
-  ghcr.io/sjawhar/legion/ci, a registry this repository publishes, so a failed pull is a fault of
+  ghcr.io/cybermonklabs/legion/ci, a registry this repository publishes, so a failed pull is a fault of
   this repository and must be seen. The action reads each image from the Go string constant that
   declares it (testnats.Image and testnats.HubImage, tests3.Image), so the tests and the pull
   never name two images.

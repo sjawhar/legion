@@ -8,11 +8,13 @@ import type {
   Artifact,
   ArtifactBlock,
   ArtifactReferences,
+  ArtifactReview,
   ArtifactText,
   ArtifactUploadResponse,
   ArtifactVersionText,
   Ask,
   AskRead,
+  CheckResultRecorded,
   ClaimedIssue,
   Comment,
   CommentRead,
@@ -24,6 +26,8 @@ import type {
   CreateMessageInput,
   CreateProjectInput,
   CreateVersionInput,
+  CredentialPendingResponse,
+  DispatchLimits,
   DispatchServiceErrorShape,
   EditArtifactInput,
   EditArtifactResponse,
@@ -33,7 +37,10 @@ import type {
   GraphReferences,
   Handoff,
   HandoffSummary,
+  InboxRow,
   Issue,
+  IssueCheckResults,
+  IssueCoverage,
   IssueDetails,
   IssuePriority,
   IssueRead,
@@ -48,6 +55,7 @@ import type {
   MessageReplyResult,
   OpenAsksResponse,
   Project,
+  RecordCheckResultInput,
   RelatedCheckInput,
   ResolveAskInput,
   SearchResponse,
@@ -70,8 +78,14 @@ import {
 } from "@legion/contracts";
 
 import { textHead } from "./ask-answer";
+import type { RequestCredential } from "./bearer";
 
-export type { DispatchServiceErrorShape } from "@legion/contracts";
+export type {
+  CredentialPendingResponse,
+  CredentialPendingRow,
+  CredentialSession,
+  DispatchServiceErrorShape,
+} from "@legion/contracts";
 
 /** The stored bytes of one version of an uploaded file, and the MIME type Dispatch serves them as. */
 export interface ArtifactFileVersion {
@@ -142,7 +156,9 @@ export class DispatchGatewayError extends DispatchServiceError {
  * no answer at all, after an attempt that may have reached Dispatch: its last attempt was cut off
  * for silence, or the call's deadline ended it. This is deliberately no `DispatchServiceError`,
  * which a caller reads as a refusal Dispatch decided. `last` (also the `cause`) is that last
- * refusal, the silence cut or the deadline's timeout.
+ * refusal, the silence cut or the deadline's timeout. Where the call saw Dispatch's keyed layer
+ * judge the write (`keyed`), the message says Dispatch finishes an attempt it received, and that a
+ * resend is a new command's, under a new key, so the write is to be read back first.
  */
 export class DispatchWriteUnsettledError extends Error {
   override readonly name = "DispatchWriteUnsettledError";
@@ -154,27 +170,32 @@ export class DispatchWriteUnsettledError extends Error {
      * What the write got, as the message's first clause, where `last` is no refusal that says it:
      * `<METHOD> <url>` and how it ended. `last`'s own message otherwise.
      */
-    unanswered?: string
+    unanswered?: string,
+    keyed = false
   ) {
     let answer: string;
     let why = "an earlier attempt of the write may have reached Dispatch";
     if (last instanceof DispatchGatewayError) {
       answer = last.answer;
+    } else if (last instanceof DispatchServiceError && last.code === IDEMPOTENCY_KEY_IN_FLIGHT) {
+      // Dispatch's own text tells the caller to ask again under the same key, which the client
+      // already did and a person or agent reading this cannot: the code alone names the answer.
+      answer = last.code;
+      why = "Dispatch was still running an earlier attempt of the write";
     } else if (last instanceof DispatchServiceError) {
       answer = `${last.code}: ${last.message}`;
-      if (last.code === IDEMPOTENCY_KEY_IN_FLIGHT) {
-        why = "Dispatch was still running an earlier attempt of the write";
-      }
     } else {
       answer = unanswered ?? last.message;
       why = "an attempt of the write may have reached Dispatch";
     }
     const tried = attempts === 1 ? "its only attempt" : `the last of ${attempts} attempts`;
-    super(
-      `${answer} (${tried}), and ${why}, so it may or may not have taken effect: check whether ` +
-        "it did before retrying it.",
-      { cause: last }
-    );
+    const next = keyed
+      ? ". Dispatch finishes an attempt it received whatever this command does, so read the " +
+        "write back before you send it again: a new command sends it under a new key."
+      : ": check whether it did before retrying it.";
+    super(`${answer} (${tried}), and ${why}, so it may or may not have taken effect${next}`, {
+      cause: last,
+    });
   }
 }
 
@@ -285,30 +306,50 @@ function requestSignal(signal: AbortSignal | undefined): AbortSignal {
  * in that time - is cut off and asked again like one that failed in transport, so a write Dispatch
  * is slow to finish is asked again under its key (and answered `409 KEY_IN_FLIGHT`, then replayed)
  * rather than waited on for the call's whole deadline, while an upload still going out is never
- * cut. `pause` and `now` are the timer and the monotonic clock, which a test replaces; `now` also
- * dates what the process learns about which Dispatch runs the keyed layer
+ * cut. Once an attempt of a body under `STREAMED_BODY_MIN` was cut off for silence or answered
+ * `409 KEY_IN_FLIGHT`, Dispatch may still be running the write, and its keyed layer finishes that
+ * run whatever the client does, so the write keeps asking until it gets the run's stored answer:
+ * every `inFlightPauseMs` at most, unless a shorter pause of the schedule's or a longer
+ * `Retry-After` applies, with no retry starting once `inFlightWithinMs` has passed. An upload keeps
+ * the schedule alone, since each repeat sends its whole body again. No retry of any write starts
+ * more than `inFlightWithinMs` after the client was made, since the client's deadline counts from
+ * there. `pause` and `now` are the timer and the monotonic clock, which a test replaces; `now`
+ * also dates what the process learns about which Dispatch runs the keyed layer
  * (`KEYED_LAYER_MEMORY_MS`).
  */
 export interface DispatchWriteRetry {
   readonly pausesMs: readonly number[];
   readonly withinMs: number;
   readonly silenceMs: number;
+  readonly inFlightPauseMs: number;
+  readonly inFlightWithinMs: number;
   /** Waits `ms`, or rejects with the signal's reason once it aborts. */
   readonly pause?: (ms: number, signal: AbortSignal) => Promise<void>;
   readonly now?: () => number;
 }
 
 /**
- * At most five attempts, 1, 2, 4 and 8 s apart, none starting more than 30 s after the first, each
- * cut off after 20 s without progress: a write whose every attempt fails at once settles in about
- * 15 s, a `Retry-After` can stretch that to the 30 s bound, and an attempt started then that hears
- * nothing is cut off by 50 s, all inside the call's 60 s deadline, so a Dispatch that is down holds
- * the `dispatch` command, and the session waiting on it, for no longer.
+ * At most five attempts, 1, 2, 4 and 8 s apart, none starting more than 30 s after the first, so a
+ * write whose every attempt fails at once settles in about 15 s and a `Retry-After` can stretch that
+ * to 30 s. A write Dispatch may still be running is asked every 3 s at most (longer only when a
+ * `Retry-After` asks) until 55 s, so an attempt cut off for silence at 20 s still has 35 s in which
+ * Dispatch can finish it, two silent attempts and the ask that collects the answer fit, and the
+ * last ask has 5 s before the client's 60 s deadline.
+ *
+ * Measured from the transcript store over 3,612 `dispatch` write commands that succeeded between
+ * 2026-10-31 21:00Z and 2026-11-02 07:30Z, Dispatch's busiest days so far: p50 1.8 s, p90 10.5 s,
+ * p95 19.6 s, p99 45.5 s, p99.9 62 s, each command timed whole, process start included, so an
+ * upper bound on the write itself. 20 s of silence is that p95, and two silent attempts and the
+ * ask that collects the answer still fit in 55 s (20 + 1 + 20 + 2 = 43 s). Cutting off a healthy
+ * write costs nothing against a Dispatch known to run the keyed layer, which goes on running it
+ * and replays its answer.
  */
 export const DISPATCH_WRITE_RETRY: DispatchWriteRetry = {
   pausesMs: [1_000, 2_000, 4_000, 8_000],
   withinMs: 30_000,
   silenceMs: 20_000,
+  inFlightPauseMs: 3_000,
+  inFlightWithinMs: 55_000,
 };
 
 function pauseFor(ms: number, signal: AbortSignal): Promise<void> {
@@ -490,6 +531,8 @@ interface WriteAnswer {
   readonly again: boolean;
   /** Whether this attempt, or one Dispatch was still running, may have reached Dispatch. */
   readonly reached: boolean;
+  /** Whether it is Dispatch's `409 KEY_IN_FLIGHT`: an earlier attempt still runs under the key. */
+  readonly running: boolean;
   /** Whether it carried back the request's key, so Dispatch's keyed layer judged the request. */
   readonly echoed: boolean;
   /**
@@ -516,7 +559,7 @@ const NULL_BODY_STATUSES: ReadonlySet<number> = new Set([101, 204, 205, 304]);
 async function writeAnswer(response: Response, key: string): Promise<WriteAnswer> {
   const echoed = keyEchoed(response, key);
   if (response.ok || NULL_BODY_STATUSES.has(response.status)) {
-    return { response, again: false, reached: false, echoed, unjudged: false };
+    return { response, again: false, reached: false, running: false, echoed, unjudged: false };
   }
   const { status } = response;
   const text = await response.text();
@@ -529,6 +572,7 @@ async function writeAnswer(response: Response, key: string): Promise<WriteAnswer
     }
   }
   const again = retriesUnderKey(status, shape.code);
+  const running = again && status === 409;
   return {
     response: new Response(text, {
       status,
@@ -536,7 +580,8 @@ async function writeAnswer(response: Response, key: string): Promise<WriteAnswer
       headers: response.headers,
     }),
     again,
-    reached: status >= 500 || (again && status === 409),
+    reached: status >= 500 || running,
+    running,
     echoed,
     unjudged: !echoed && typeof shape.error === "string",
   };
@@ -715,21 +760,41 @@ function excerpt(text: string, token: string): string {
  * JSON HTTP client for Dispatch's native-tool API. Every request goes through `#send`, where each
  * write (POST or PATCH) carries an `Idempotency-Key` of its own and asks again under it as
  * `writeRetry` paces it.
+ *
+ * `credential` is what every request presents: a bearer (`bearerCredential`, src/bearer.ts), or
+ * what this machine trades its own identity for at the secrets broker, presented under the
+ * `DPoP` scheme with a fresh proof of this process's key on every request. A resolved Dispatch
+ * holds exactly one of them (`ActiveDispatchConfig.credential`), so no caller chooses.
  */
 export class DispatchClient {
   readonly #baseUrl: string;
   readonly #resolvedIssues = new Map<string, Promise<string>>();
   readonly #signal: AbortSignal;
+  readonly #credential: RequestCredential;
+  /**
+   * When this client was made, on the write clock (`#now`): its 60 s deadline counts from here, so
+   * no write asks again later than `writeRetry.inFlightWithinMs` after it, however late in the
+   * client's life the write began.
+   */
+  readonly #madeAt: number;
 
   constructor(
     baseUrl: string,
-    readonly token: string,
+    credential: RequestCredential,
     readonly fetchImpl: typeof fetch = fetch,
     signal?: AbortSignal,
     readonly writeRetry: DispatchWriteRetry = DISPATCH_WRITE_RETRY
   ) {
+    this.#credential = credential;
     this.#baseUrl = baseUrl.replace(/\/+$/, "");
     this.#signal = requestSignal(signal);
+    this.#madeAt = this.#now();
+  }
+
+  /** The secret this client presents, which an excerpt of someone else's answer redacts; "" while
+   *  a broker credential has yet to trade for one. */
+  get token(): string {
+    return this.#credential.secret();
   }
 
   /**
@@ -985,6 +1050,29 @@ export class DispatchClient {
     return this.#json("GET", ["api", "v1", "whoami"]);
   }
 
+  /** `GET /api/v1/limits`: the bounds this server holds a write to, each read from the constant
+   *  that enforces it. The client keeps no copy of them: it prints what the server answers. */
+  async limits(): Promise<DispatchLimits> {
+    return this.#json("GET", ["api", "v1", "limits"]);
+  }
+
+  /** `GET /api/v1/inbox?assignee=<who>`: the open asks one person's Inbox lists, in the server's
+   *  own order (the owning issue's priority, then whose turn it is, then the latest activity),
+   *  which no reader re-sorts. `me` is the caller, and keeps the rows on issues assigned to them,
+   *  which is what the Inbox page shows by default. The route reads the caller's own `person`
+   *  scope and refuses a credential without it with 403 OAUTH_SCOPE_REQUIRED. */
+  async inbox(assignee: string): Promise<InboxRow[]> {
+    return this.#json("GET", ["api", "v1", "inbox"], undefined, { assignee });
+  }
+
+  /** `GET /api/v1/credential-requests?approver=me`: the credential requests the caller may
+   *  decide, relayed from the secrets broker, or null from a Dispatch that has no broker
+   *  configured, which is an ordinary deployment rather than a failure. `me` is the only approver
+   *  the route takes. It needs the same `person` scope the Inbox does. */
+  async credentialPending(): Promise<CredentialPendingResponse | null> {
+    return this.#json("GET", ["api", "v1", "credential-requests"], undefined, { approver: "me" });
+  }
+
   /** `POST /api/v1/projects`: create a project. A key that already exists is 409
    *  PROJECT_EXISTS, and a key that is not a project key or an empty name 400 INVALID_PROJECT. */
   async createProject(input: CreateProjectInput): Promise<Project> {
@@ -1101,7 +1189,7 @@ export class DispatchClient {
    */
   async requestApproval(
     artifactID: string,
-    input: { actor: Actor; summary: string }
+    input: { actor: Actor; summary: string; include_verification?: boolean }
   ): Promise<ApprovalRequestResponse & { recorded: boolean }> {
     const answer = await this.#jsonAnswer<ApprovalRequestResponse>(
       "POST",
@@ -1109,6 +1197,36 @@ export class DispatchClient {
       input
     );
     return { ...answer.payload, recorded: answer.status === 201 };
+  }
+
+  /**
+   * Records the plan review's approval of a plan document at `version`. A plan is approved by its
+   * review, never by a person: `requestApproval` on a plan answers 409 `PLAN_APPROVED_BY_REVIEW`,
+   * and this answers 409 `NOT_PLAN_DOCUMENT` on any document whose role is not `plan`.
+   */
+  async planApprove(
+    artifactID: string,
+    input: { actor: Actor; version: number }
+  ): Promise<ArtifactReview> {
+    return this.#json("POST", ["api", "v1", "artifacts", artifactID, "plan-reviews"], input);
+  }
+
+  /**
+   * Records one result of one check of an issue's Verification document, and answers it beside
+   * the pull-request body line it implies. `issue` is the issue the result is recorded on; the
+   * check may be one of an issue above it, and the result is recorded against that issue.
+   */
+  async recordResult(issue: string, input: RecordCheckResultInput): Promise<CheckResultRecorded> {
+    return this.#json(
+      "POST",
+      ["api", "v1", "issues", await this.#resolveIssue(issue), "results"],
+      input
+    );
+  }
+
+  /** Each check of an issue's Verification document with every result recorded against it. */
+  async issueResults(issue: string): Promise<IssueCheckResults> {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "results"]);
   }
 
   async editAsk(id: string, input: EditAskInput): Promise<Ask> {
@@ -1308,6 +1426,23 @@ export class DispatchClient {
 
   async artifactBlocks(id: string): Promise<ArtifactBlock[]> {
     return this.#json("GET", ["api", "v1", "artifacts", id, "blocks"]);
+  }
+
+  /** `GET /api/v1/issues/{key}/artifacts/{slug}/blocks`: the blocks of one issue document named
+   *  by its slug (`spec` for the issue's spec), with no read of the issue to resolve its id. */
+  async issueArtifactBlocks(issue: string, slug: string): Promise<ArtifactBlock[]> {
+    return this.#json("GET", ["api", "v1", "issues", issue, "artifacts", slug, "blocks"]);
+  }
+
+  /** `GET /api/v1/projects/{key}/artifacts/{slug}/blocks`: the same for a project document. */
+  async projectArtifactBlocks(project: string, slug: string): Promise<ArtifactBlock[]> {
+    return this.#json("GET", ["api", "v1", "projects", project, "artifacts", slug, "blocks"]);
+  }
+
+  /** `GET /api/v1/issues/{key}/coverage`: what each requirement of the issue's spec lacks, with
+   *  one `gaps` line per gap. Nothing is ever refused for a gap. */
+  async issueCoverage(key: string): Promise<IssueCoverage> {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(key), "coverage"]);
   }
 
   /** `GET /api/v1/comments/{id}/blocks`: the comment's current blocks with their ids, text,
@@ -1551,33 +1686,62 @@ export class DispatchClient {
     signal?: AbortSignal,
     callerKey?: string
   ): Promise<Response> {
-    const headers: Record<string, string> = {
-      Accept: accept,
-      Authorization: `Bearer ${this.token}`,
-    };
+    // The credential is presented once here, and again for each attempt the write loop makes
+    // below: a key-bound scheme signs one proof per request, so one presentation is one proof
+    // sent, never a second minted and discarded. It is asked before the loop so a credential
+    // that cannot answer throws here, out of the loop's reach, rather than being taken for a
+    // failed attempt.
+    const headers: Record<string, string> = { Accept: accept };
+    let presented = await this.#credential.headers(method, url);
     if (body !== undefined) headers["Content-Type"] = body.type;
     if (method !== "POST" && method !== "PATCH") {
       return this.fetchImpl(url, {
         method,
-        headers,
+        headers: { ...headers, ...presented },
         signal: signal === undefined ? this.#signal : AbortSignal.any([this.#signal, signal]),
         ...(body === undefined ? {} : { body: body.content }),
       });
     }
     const key = callerKey ?? crypto.randomUUID();
     headers[IDEMPOTENCY_KEY_HEADER] = key;
-    const { pausesMs, withinMs, silenceMs, pause = pauseFor } = this.writeRetry;
+    const { pausesMs, withinMs, silenceMs, inFlightPauseMs, inFlightWithinMs } = this.writeRetry;
+    const pause = this.writeRetry.pause ?? pauseFor;
     const request = `${method} ${url}`;
     const started = this.#now();
+    // An upload, a body of `STREAMED_BODY_MIN` or more that goes out as a stream (`attemptBody`),
+    // sends that whole body again on every repeat, so it keeps the schedule alone and never enters
+    // the in-flight asking below.
+    const bodyBytes =
+      body === undefined
+        ? 0
+        : typeof body.content === "string"
+          ? Buffer.byteLength(body.content)
+          : body.content.byteLength;
+    const upload = bodyBytes >= STREAMED_BODY_MIN;
+    // No ask starts later than this: the client's deadline counts from when it was made.
+    const lastAsk = this.#madeAt + inFlightWithinMs;
     let reached = false;
+    // Whether Dispatch may still be running an attempt: one was cut off for silence or answered
+    // 409 KEY_IN_FLIGHT. Its keyed layer finishes that run whatever this call does, so the call
+    // keeps asking for its stored answer under `inFlightWithinMs`.
+    let running = false;
+    // Whether this call ever saw the keyed layer judge the write (an echoed key, or `/healthz`),
+    // which the unsettled message says. Whether it may ask again is decided afresh each time.
+    let sawKeyedLayer = false;
     for (let attempt = 1; ; attempt++) {
       let answer: WriteAnswer | undefined;
       let thrown: unknown;
       try {
-        answer = await writeAnswer(await this.#attempt(url, method, headers, body, silenceMs), key);
+        // Each attempt after the first presents the credential afresh: a resource server that
+        // keeps a replay store refuses a proof it has already seen.
+        if (attempt > 1) presented = await this.#credential.headers(method, url);
+        const sent = { ...headers, ...presented };
+        answer = await writeAnswer(await this.#attempt(url, method, sent, body, silenceMs), key);
         if (answer.echoed) KEYED_LAYER_SEEN.set(this.#baseUrl, this.#now());
         if (!answer.again) return answer.response;
         reached ||= answer.reached;
+        running ||= answer.running && !upload;
+        sawKeyedLayer ||= answer.echoed;
       } catch (error) {
         // A deadline or a cancellation is the caller's limit, never a reason to ask again; the
         // attempt's own silence cut is such a reason, as a transport failure is.
@@ -1586,33 +1750,52 @@ export class DispatchClient {
           !(error instanceof WriteAttemptSilent) &&
           (this.#signal.aborted || name === "AbortError" || name === "TimeoutError")
         ) {
-          throw this.#ended(error, request, attempt, true);
+          throw this.#ended(error, request, attempt, true, sawKeyedLayer);
         }
         thrown = error;
         reached = true;
+        running ||= error instanceof WriteAttemptSilent && !upload;
       }
-      const scheduled = pausesMs[attempt - 1];
+      const scheduled = running
+        ? Math.min(pausesMs[attempt - 1] ?? inFlightPauseMs, inFlightPauseMs)
+        : pausesMs[attempt - 1];
       const wait = Math.max(
         scheduled ?? 0,
         answer === undefined ? 0 : retryAfterMs(answer.response)
       );
+      const latest = Math.min(started + (running ? inFlightWithinMs : withinMs), lastAsk);
       // Only a Dispatch that runs the keyed layer may be asked again: against any other a repeat
-      // would be a second write.
-      const inTime = scheduled !== undefined && this.#now() - started + wait <= withinMs;
-      if (!inTime || !(answer?.echoed || (await this.#runsKeyedLayer(answer?.unjudged ?? false)))) {
+      // would be a second write. The `/healthz` probe takes time of its own, and a timer can fire
+      // late on a loaded host, so the bound is read again after each of them.
+      let again = scheduled !== undefined && this.#now() + wait <= latest;
+      if (again) {
+        again = answer?.echoed || (await this.#runsKeyedLayer(answer?.unjudged ?? false));
+        sawKeyedLayer ||= again;
+        again &&= this.#now() + wait <= latest;
+      }
+      if (again) {
+        try {
+          await pause(wait, this.#signal);
+        } catch (error) {
+          throw this.#ended(error, request, attempt, reached, sawKeyedLayer);
+        }
+        again = this.#now() <= latest;
+      }
+      if (!again) {
+        // An answer the write would have asked again after was read whole and rebuilt from its
+        // text (`writeAnswer`), so it holds no connection and can be read here.
         if (answer !== undefined) {
-          return this.#unsettled(method, url, answer.response, reached, attempt);
+          return this.#unsettled(method, url, answer.response, reached, attempt, sawKeyedLayer);
         }
         if (thrown instanceof WriteAttemptSilent) {
-          throw new DispatchWriteUnsettledError(thrown, attempt, `${request} ${thrown.message}`);
+          throw new DispatchWriteUnsettledError(
+            thrown,
+            attempt,
+            `${request} ${thrown.message}`,
+            sawKeyedLayer
+          );
         }
         throw thrown;
-      }
-      await answer?.response.body?.cancel().catch(() => undefined);
-      try {
-        await pause(wait, this.#signal);
-      } catch (error) {
-        throw this.#ended(error, request, attempt, reached);
       }
     }
   }
@@ -1664,10 +1847,17 @@ export class DispatchClient {
    * What a write throws when its deadline or its caller's cancellation ends it, with `error` the
    * fetch's or the pause's: once an attempt may have reached Dispatch (`mayHaveReached`), the
    * deadline's timeout is a `DispatchWriteUnsettledError` saying the write may or may not have
-   * taken effect; a cancellation, the caller's own, and a timeout before anything reached Dispatch
-   * are thrown as they are.
+   * taken effect (and, where the call saw the keyed layer judge it, `keyed`, that Dispatch finishes
+   * it); a cancellation, the caller's own, and a timeout before anything reached Dispatch are
+   * thrown as they are.
    */
-  #ended(error: unknown, request: string, attempts: number, mayHaveReached: boolean): unknown {
+  #ended(
+    error: unknown,
+    request: string,
+    attempts: number,
+    mayHaveReached: boolean,
+    keyed: boolean
+  ): unknown {
     const reason: unknown = this.#signal.aborted ? this.#signal.reason : error;
     const timedOut =
       (reason instanceof Error || reason instanceof DOMException) && reason.name === "TimeoutError";
@@ -1675,7 +1865,8 @@ export class DispatchClient {
     return new DispatchWriteUnsettledError(
       error,
       attempts,
-      `${request} had no definitive answer when its deadline ended it`
+      `${request} had no definitive answer when its deadline ended it`,
+      keyed
     );
   }
 
@@ -1713,9 +1904,10 @@ export class DispatchClient {
    */
   async #probeKeyedLayer(): Promise<boolean> {
     try {
-      const response = await this.fetchImpl(`${this.#baseUrl}/healthz`, {
+      const probe = `${this.#baseUrl}/healthz`;
+      const response = await this.fetchImpl(probe, {
         method: "GET",
-        headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
+        headers: { Accept: "application/json", ...(await this.#credential.headers("GET", probe)) },
         signal: AbortSignal.any([this.#signal, AbortSignal.timeout(KEY_LAYER_PROBE_MS)]),
       });
       if (!isJson(response)) return false;
@@ -1733,15 +1925,17 @@ export class DispatchClient {
   /**
    * What a write throws once it stops asking with no definitive answer: the last attempt's refusal
    * as `#response` reads it, unless that refusal alone would say the write never took effect while
-   * an attempt may have reached Dispatch (`reached`), when it is a `DispatchWriteUnsettledError`.
-   * `#response` throws for every status `writeAnswer` asks again after.
+   * an attempt may have reached Dispatch (`reached`), when it is a `DispatchWriteUnsettledError`
+   * (which says, where the call saw the keyed layer judge the write, `keyed`, that Dispatch finishes
+   * it). `#response` throws for every status `writeAnswer` asks again after.
    */
   async #unsettled(
     method: string,
     url: string,
     response: Response,
     reached: boolean,
-    attempts: number
+    attempts: number,
+    keyed: boolean
   ): Promise<never> {
     const refusal: unknown = await this.#response(method, url, response).catch(
       (error: unknown) => error
@@ -1751,7 +1945,7 @@ export class DispatchClient {
         refusal instanceof DispatchGatewayError
           ? refusal.mayHaveReachedDispatch
           : refusal.status >= 500;
-      if (!landedAlone) throw new DispatchWriteUnsettledError(refusal, attempts);
+      if (!landedAlone) throw new DispatchWriteUnsettledError(refusal, attempts, undefined, keyed);
     }
     throw refusal;
   }

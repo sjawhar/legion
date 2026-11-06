@@ -2,7 +2,7 @@
 // requests by policy or, for a request that needs a person, on its own approval page, where the
 // approver signs in to the broker itself (BROKER_SIGNIN_*), over a signed credential-request
 // record, and releases granted values. Its HTTP API is documented at
-// https://sjawhar.github.io/legion/broker/reference/api/. The broker holds no Dispatch credential
+// https://cybermonklabs.github.io/legion/broker/reference/api/. The broker holds no Dispatch credential
 // and never opens a Dispatch ask: Dispatch's server lists pending requests and links each to the
 // broker's page, and relays a machine login's decision with its typed code.
 package main
@@ -15,7 +15,6 @@ import (
 	"io"
 	"log/slog"
 	"maps"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -38,6 +37,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/config"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/exchange"
+	"github.com/sjawhar/envoy/internal/broker/leasetime"
 	"github.com/sjawhar/envoy/internal/broker/machine"
 	"github.com/sjawhar/envoy/internal/broker/oauth"
 	"github.com/sjawhar/envoy/internal/broker/oauthstore"
@@ -50,7 +50,6 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/store"
 	"github.com/sjawhar/envoy/internal/broker/wake"
 	"github.com/sjawhar/envoy/internal/oidc"
-	"github.com/sjawhar/envoy/internal/ratelimit"
 	"github.com/sjawhar/envoy/internal/redact"
 )
 
@@ -120,8 +119,8 @@ func main() {
 	// The broker takes no flags; parsing refuses any flag given rather than ignoring it.
 	flag.Parse()
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	ctx, stopNotify := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopNotify()
 	// again carries this process's signals, registered here before any boot work rather than
 	// inside the drain where it used to be, and held for the life of the process: so "stop it
 	// now" works throughout. signal.NotifyContext's own relay goroutine returns as soon as it has
@@ -162,6 +161,28 @@ func main() {
 		slog.Error("broker: a second signal arrived while the broker was still starting up, so it is stopping without a drain: it had not begun serving when that signal was read")
 		os.Exit(1)
 	}()
+
+	// The two settings config.Load reads that no Config field holds, documented here because
+	// broker-refgen takes a setting's description from a Config field's own comment or from a
+	// comment in this command, and these two are locals of Load: the ExchangeGoogleAccounts
+	// entry each one pins is the only thing that reads them.
+
+	// BROKER_VM_PROJECTS: the Google Cloud project each pinned account's machines run in,
+	// whitespace-separated <service account email>=<project id> entries, at most one per account
+	// BROKER_VM_SERVICES lists and none for any other account. An account named here is named in
+	// BROKER_VM_INSTANCES too, or the boot is refused: half a pin says nothing clear about which
+	// machines an entry means. Keyed by account. Needs BROKER_GOOGLE_OIDC_AUDIENCE. Unset, it is
+	// empty, so every listed account takes a machine wherever it runs — including one whose token
+	// carries no Compute Engine claims at all, which is what a token minted through a workload
+	// identity pool and a token from a Kubernetes pod's metadata server both carry.
+
+	// BROKER_VM_INSTANCES: the names each pinned account's machines may have,
+	// whitespace-separated <service account email>=<instance-name glob> entries, at most one per
+	// account BROKER_VM_SERVICES lists and none for any other account. The glob is Go's path.Match
+	// syntax (*, ?, and [...] classes, negated with ^) over the characters of an instance name, such
+	// as example-vm-*. An account named here is named in BROKER_VM_PROJECTS too, or the boot is
+	// refused. Keyed by account. Needs BROKER_GOOGLE_OIDC_AUDIENCE. Unset, it is empty, so no
+	// account is pinned.
 
 	cfg, err := config.Load(os.Getenv)
 	fatal(err)
@@ -234,171 +255,81 @@ func main() {
 	slog.Info("secret store", "store", cfg.SecretsStore, "credentials", credentials)
 	loader := policy.Loader{Store: secretStore, Prefix: cfg.SecretsPrefix, Services: serviceNames(cfg)}
 	// One key source per issuer, read by everything that needs that issuer's keys: the verifiers
-	// discoverVerifiers builds and, for the cluster's issuer, the RFC 8693 exchange below, which
-	// resolves a subject token's own key through the same *oidc.Keys. So the boot makes one
-	// discovery read for the cluster rather than two, one set is held in memory, and a rotation
-	// becomes visible to both at the same moment.
+	// discoverVerifiers builds and, for the cluster's issuer and Google's, the RFC 8693 exchange
+	// below, which resolves a subject token's own key through the same *oidc.Keys. So the boot
+	// makes one discovery read per issuer rather than two, one set is held in memory, and a
+	// rotation becomes visible to both at the same moment.
 	//
 	// Discovery is bounded: an issuer that accepts the connection and never answers refuses the
 	// boot instead of hanging it with no health endpoint serving.
-	pod, vm, k8sKeys, err := discoverVerifiers(ctx, cfg, issuerKeys)
+	discovered, err := discoverVerifiers(ctx, cfg, issuerKeys)
 	fatal(err)
-
-	// The context the work that has to outlive the drain runs on: the five-minute policy reload
-	// below and the reread listener under it. ctx is signal.NotifyContext's, which the first
-	// SIGTERM cancels, and a pod goes on being sent new requests for the whole of its drain —
-	// that is what the drain is for — so for that window it is still one of the pods a reread has
-	// to reach, and a retag that narrows who may have a secret has to be in force there too.
-	// context.WithoutCancel keeps every value ctx carries and drops only its cancellation;
-	// endServing, called once srv.Shutdown has returned - having answered the last request, or
-	// having spent its 60-second allowance - is what ends these loops instead. Everything that legitimately stops at the signal — the request
-	// sweeper below — stays on ctx.
-	serving, endServing := context.WithCancel(context.WithoutCancel(ctx))
-	defer endServing()
-
-	// The policy and its five-minute reload, on serving rather than on ctx so the backstop the
-	// fan-out leans on goes on reloading while the pod drains: stopped at the signal it would
-	// leave the one pod the load balancer is still choosing with neither the fan-out nor the
-	// reload to narrow the tags it serves. One thing about boot changes with it: the first load
-	// no longer ends early on a signal that arrives while it is running, so a pod signalled
-	// mid-boot finishes that load and then returns without draining at all, there being nothing
-	// bound to drain (the return below). NewCurrent's own contract is untouched — its
-	// loop logs no failed-load line once its context has ended, which is now the end of the
-	// shutdown rather than the signal, so the line a deployment alarms on still counts only loads
-	// that failed while the broker was meant to be serving.
-	//
-	// Written down so nobody rediscovers it as a hang: one signal does not interrupt this call.
-	// A store that never answers the first load leaves it running - it runs on serving, which no
-	// signal cancels, and the ctx.Err() check below sits after it returns - so a single SIGTERM
-	// is noted and nothing more until the load ends. That is safe, and it stays as it is. A pod
-	// here has bound nothing, is in no EndpointSlice and serves no caller, so there is no request
-	// to answer and nothing to drain by ending it sooner; what does end it is a second signal,
-	// which the watchdog goroutine at the top of main reads from `again` and answers with
-	// os.Exit(1) (measured: gone within 30 ms of that signal), or the kubelet's SIGKILL at the
-	// end of the grace period.
-	current, err := policy.NewCurrent(serving, loader, policyRefresh)
-	fatal(err)
-	// A signal that arrived while that first load ran leaves nothing to drain. The load runs on
-	// serving and so does not end early, which is deliberate, but a process signalled before it
-	// has bound anything has no caller to answer and no in-flight request to finish: returning
-	// here is the whole of such a process's shutdown. Binding a socket and then running a drain
-	// and a shutdown budget for a server that never served would hold the pod open for the whole
-	// drain and serve nobody - the shutdown budget itself is a maximum rather than a wait, since
-	// srv.Shutdown with nothing in flight returns at once, so what is saved here is the drain,
-	// and what is avoided is a pod in an EndpointSlice that answers no caller.
-	if ctx.Err() != nil {
-		slog.Info("broker: signalled while starting up, before it had bound anything", "stage", "the first policy load")
-		return
-	}
+	pod := discovered.Pod
 
 	// This process's own sender id, minted once at boot. Postgres delivers a notification to every
 	// session listening on the channel, this pod's own included, so without an id stamped on what
 	// it sends a pod would reread every secret it just reread on behalf of a caller. Both halves of
 	// the fan-out take it: the notifier stamps it, and the listener drops what carries it.
 	senderID := uuid.NewString()
-	// firstListen carries the reread listener's first successful LISTEN to the bind below, which
-	// waits for it: a pod the load balancer can reach is a pod a retag has to reach, so a process
-	// that bound before its own LISTEN was in place would spend those milliseconds serving
-	// traffic while a peer's reread of a secret it holds goes to a channel nobody on this pod is
-	// on yet. That wait orders net.Listen against the LISTEN and nothing else. It does nothing for
-	// a notification committed before the LISTEN, while the first policy load above was reading
-	// the namespace - the load was taken before the subscription existed - and the catch-up load
-	// after the wait is what covers that one. OnConnected is what makes the wait mean "listening"
-	// rather than nearly that: pglisten runs it after the LISTEN statement has succeeded, where a
-	// hook on the dial would fire with the LISTEN still in flight. The token is sent without
-	// blocking and the channel is never drained again, so every redial behind the boot costs the
-	// listener nothing.
-	//
-	// The receiving half of the reread fan-out, started after the first policy load (it rereads
-	// into that policy) and before net.Listen, so a pod that cannot hold a LISTEN connection still
-	// serves: Run redials forever on its own and never refuses the boot. What such a pod loses
-	// while it has no connection is the notifications sent in that window — it goes on serving the
-	// tags it last read and catches up at its own five-minute reload (policyRefresh), which is the
-	// fan-out's documented backstop. It runs on serving, not on the signal's own context: a
-	// draining pod is still being sent requests, so it is still a pod a peer's reread has to
-	// reach, and a listener stopped at the signal would leave that pod serving the tags it read
-	// before the retag for the whole of its drain. The shutdown ends it instead.
-	firstListen := make(chan struct{}, 1)
-	go (&reread.Listener{
-		Sender: senderID,
-		Dial:   st.Listener,
-		OnConnected: func() {
-			select {
-			case firstListen <- struct{}{}:
-			default:
-			}
-		},
-		Refresh: func(ctx context.Context, name string) error {
-			_, err := current.RefreshOne(ctx, name)
-			return err
-		},
-	}).Run(serving)
-	// The wait that pairs with it, and the whole of what it promises: either this pod is listening
-	// on the channel before net.Listen binds the socket callers reach it on, or rereadListenWait
-	// has run out. A pod whose dial or whose LISTEN failed waits the bound out and then serves
-	// anyway, the listener redialing behind it, so nothing here can refuse a boot; the bound is
-	// what keeps a Postgres that takes the connection and never answers from holding one.
-	select {
-	case <-firstListen:
-		// The catch-up: one more whole-namespace load into the live policy, taken now that the
-		// LISTEN is in place, so that the subscription exists before the read whose result it is
-		// meant to invalidate. Postgres delivers nothing to a session for a NOTIFY committed before
-		// that session's LISTEN, and the listener's onConnected deliberately catches nothing up, so
-		// without this load the following is lost on this pod until its five-minute reload, with
-		// nothing logged: B starts and begins its first load; A serves a reread of a narrowing
-		// retag and commits its notification, which no session of B's is listening for; B's
-		// LISTEN succeeds. With this load, B then reads the namespace again here and binds with
-		// the retag in force. A notification committed after the LISTEN is delivered instead; the
-		// RefreshOne it drives and this Refresh take the policy's one writer lock, and Refresh
-		// re-describes every name a reread changed within the store's ListLag (Current's recent
-		// anchors), so a reread that lands first is not undone by this load's listing. What this
-		// load reads is the store's listing, as every whole-namespace load does, so a store whose
-		// listing lags a write by up to its ListLag (Store.ListLag) can still show it the tags
-		// from before the retag. That exposure is the store's rather than this ordering's - the
-		// alternative shapes of this fix all share it, since a retag committed before any
-		// subscription is only ever visible through a listing - and it is tracked, with the two
-		// ways to close it and their costs, at dispatch://INFRA-375.
+	started, err := boot(ctx, brokerBoot{
+		// The policy and its five-minute reload, on serving rather than on ctx so the backstop
+		// the fan-out leans on goes on reloading while the pod drains: stopped at the signal it
+		// would leave the one pod the load balancer is still choosing with neither the fan-out
+		// nor the reload to narrow the tags it serves. One thing about boot changes with it: the
+		// first load no longer ends early on a signal that arrives while it is running, so a pod
+		// signalled mid-boot finishes that load and then returns without draining at all, there
+		// being nothing bound to drain. NewCurrent's own contract is untouched — its
+		// loop logs no failed-load line once its context has ended, which is now the end of the
+		// shutdown rather than the signal, so the line a deployment alarms on still counts only
+		// loads that failed while the broker was meant to be serving.
 		//
-		// It costs one extra namespace read per boot, and nothing after: the whole listing - on
-		// Secrets Manager its ListSecrets pages and at most one KMS alias lookup, on Secret
-		// Manager those pages and one GetSecretVersion per secret.
-		//
-		// A failed load does not refuse the boot. The first load succeeded, so the policy is
-		// live and this is a catch-up; the line says what failing it loses, and it is named
-		// apart from the "broker: <operation> failed" lines, which stand for a request answered
-		// 500 or 503. It runs on serving, as the first load does and for the same reasons, so
-		// what the first load's comment writes down about one signal holds here too: a store
-		// that never answers holds the boot until a second signal or the kubelet's SIGKILL.
-		if err := current.Refresh(serving); err != nil {
-			slog.Warn("broker: serving without the boot's catch-up policy load, so a retag another pod served while this one was starting may not be in force here until its five-minute reload", "error", err)
-		}
-		// The same check as the one after the first load, for the same reason: a process
-		// signalled before it has bound anything has nothing to drain.
-		if ctx.Err() != nil {
-			slog.Info("broker: signalled while starting up, before it had bound anything", "stage", "the catch-up policy load")
-			return
-		}
-	case <-time.After(rereadListenWait):
-		// No catch-up here. With no LISTEN in place there is no subscription to order a read
-		// after, so a second namespace read would not close the window, only move where it
-		// starts: a notification sent before the listener connects is lost on this pod whatever
-		// is read now, as this warning says, and its five-minute reload is what catches it up.
-		slog.Warn("broker: binding before the reread listener has had an answer", "waited", rereadListenWait)
-	}
-
-	// Bind now, synchronously, right after every guard that can still refuse to
-	// boot has already run (config, the port-0 public-URL guard, migrations, the first policy
-	// load) — the only way any caller, dev-broker.sh included, can learn which process holds an
-	// address is the log line below, printed only once this exact Listen call has already
-	// succeeded. With a shared fixed
-	// dev port, a losing instance's own readiness curl could see a different, already-running
-	// instance's healthz answer and report "ready" pointing at the wrong broker; splitting
-	// Listen from Serve and logging only after a real bind closes that regardless of how the
-	// address is chosen, and dev-broker.sh's BROKER_LISTEN_ADDR=127.0.0.1:0 makes a same-port
-	// collision between two dev instances impossible in the first place — the kernel never hands
-	// out an address a live listener already holds.
-	listener, err := net.Listen("tcp", cfg.ListenAddr)
+		// Written down so nobody rediscovers it as a hang: one signal does not interrupt this
+		// call. A store that never answers the first load leaves it running - it runs on serving,
+		// which no signal cancels, and the boot's ctx.Err() check sits after it returns - so a
+		// single SIGTERM is noted and nothing more until the load ends. That is safe, and it
+		// stays as it is. A pod here has bound nothing, is in no EndpointSlice and serves no
+		// caller, so there is no request to answer and nothing to drain by ending it sooner; what
+		// does end it is a second signal, which the watchdog goroutine at the top of main reads
+		// from `again` and answers with os.Exit(1) (measured: gone within 30 ms of that signal),
+		// or the kubelet's SIGKILL at the end of the grace period.
+		LoadPolicy: func(serving context.Context) (*policy.Current, error) {
+			return policy.NewCurrent(serving, loader, policyRefresh)
+		},
+		// The receiving half of the reread fan-out, started after the first policy load (it
+		// rereads into that policy) and before the bind, so a pod that cannot hold a LISTEN
+		// connection still serves: Run redials forever on its own and never refuses the boot.
+		// What such a pod loses while it has no connection is the notifications sent in that
+		// window — it goes on serving the tags it last read and catches up at its own five-minute
+		// reload (policyRefresh), which is the fan-out's documented backstop. It runs on serving,
+		// not on the signal's own context: a draining pod is still being sent requests, so it is
+		// still a pod a peer's reread has to reach, and a listener stopped at the signal would
+		// leave that pod serving the tags it read before the retag for the whole of its drain.
+		// The shutdown ends it instead.
+		StartListener: func(serving context.Context, current *policy.Current, onConnected func()) {
+			go (&reread.Listener{
+				Sender:      senderID,
+				Dial:        st.Listener,
+				OnConnected: onConnected,
+				Refresh: func(ctx context.Context, name string) error {
+					_, err := current.RefreshOne(ctx, name)
+					return err
+				},
+			}).Run(serving)
+		},
+		Listen:     listenTCP(cfg.ListenAddr),
+		ListenWait: rereadListenWait,
+		Catchup:    func(serving context.Context, current *policy.Current) error { return current.Refresh(serving) },
+		Log:        slog.Default(),
+	})
 	fatal(err)
+	// A boot signalled before it had bound anything answers no serving context, having logged the
+	// stage it had reached: nothing is bound, nothing is serving and no caller is waiting, so
+	// returning here is the whole of such a process's shutdown. The boot has already ended its
+	// own serving context on that path, so there is nothing to end here either.
+	if started.Serving == nil {
+		return
+	}
+	serving, current, listener := started.Serving, started.Policy, started.Listener
 	// A configured BROKER_PUBLIC_URL with port 0 is never itself dialable, so it can only be
 	// dev-broker.sh's own "derive my public URL from whatever address I actually bind"
 	// convention (its BROKER_PUBLIC_URL mirrors BROKER_LISTEN_ADDR=127.0.0.1:0): resolve it from
@@ -406,7 +337,7 @@ func main() {
 	// audience-consuming construct below (enr.Chain included) is built after this point, so none
 	// ever sees the stale placeholder. refusePortZeroPublicURLInProduction (the dev-vs-production
 	// gate) already refused this above, right after config.Load — before st.Migrate, any AWS
-	// call, and this Listen call — so reaching here means it's safe to apply.
+	// call, and the boot's bind — so reaching here means it's safe to apply.
 	if u, urlErr := url.Parse(cfg.PublicURL); urlErr == nil && u.Port() == "0" {
 		cfg.PublicURL = "http://" + listener.Addr().String()
 	}
@@ -415,13 +346,19 @@ func main() {
 	lease, sweep := time.Duration(cfg.LeaseSeconds)*time.Second, time.Duration(cfg.SweepSeconds)*time.Second
 	enr := &enroll.Service{
 		Store: st, Lease: lease, Pod: pod, ServiceLogins: cfg.ServiceLogins,
-		VM: vm, VMServicesByAccount: cfg.VMServicesByAccount, VMProjects: cfg.VMProjects, VMInstancePatterns: cfg.VMInstancePatterns,
+		VMServicesByAccount: cfg.VMServicesByAccount,
 	}
 	enr.Chain = enroll.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	reqMachine := newRequestMachine(cfg, st, current, secretStore, enr.Replay)
 	credentialLifetime := time.Duration(cfg.LauncherCredentialSeconds) * time.Second
 	oauthStore := oauthstore.New(st.Pool)
 	oauthStore.Reused = enroll.RevokeReusedCredential
+	// The one table that says which principal holds a session name is written by both of the
+	// things that name a session: the token exchange, at every token it mints, and an
+	// enrollment, at every session it enrols (enroll.Service.Sessions). So a name a session
+	// writes its Dispatch tokens under and the name its grant follows have one holder, and a
+	// name another principal holds is refused either way.
+	enr.Sessions = oauthStore
 	// On serving, not ctx, for the same reason the policy's own loads are: this runs after the
 	// bind above, so a SIGTERM arriving here finds a pod the load balancer may already be sending
 	// requests to, and such a pod has to drain rather than die with "context canceled" where its
@@ -437,14 +374,29 @@ func main() {
 	// token. Both halves are optional and the grant is composed either way: a broker told about
 	// no issuer accepts no subject token at all, which the line below says once at boot rather
 	// than leaving an operator to read it out of a refusal.
-	exchangePolicy, err := exchange.NewSet(cfg.ExchangeAccounts, cfg.ExchangeWorkflows)
+	exchangePolicy, err := exchange.NewSet(cfg.ExchangeAccounts, cfg.ExchangeWorkflows, cfg.ExchangeGoogleAccounts, cfg.SignIn.Domain)
 	fatal(err)
 	exchangeConfig := oauth.ExchangeConfig{Policy: exchangePolicy}
 	if cfg.ExchangeK8sAudience != "" {
 		// The key source the account verifier already reads: a subject token is the same
 		// cluster's projected token, for an audience of its own (BROKER_EXCHANGE_K8S_AUDIENCE),
 		// and BROKER_EXCHANGE_K8S_AUDIENCE needs BROKER_K8S_OIDC_ISSUER, so this is never nil.
-		exchangeConfig.Kubernetes = oauth.IssuerConfig{Issuer: cfg.K8sOIDCIssuer, Audience: cfg.ExchangeK8sAudience, Keys: k8sKeys}
+		exchangeConfig.Kubernetes = oauth.IssuerConfig{Issuer: cfg.K8sOIDCIssuer, Audience: cfg.ExchangeK8sAudience, Keys: discovered.K8sKeys}
+	}
+	if cfg.GoogleOIDCAudience != "" {
+		// The key set discoverVerifiers read for Google, for the same reason the cluster's is
+		// shared: BROKER_GOOGLE_OIDC_AUDIENCE is what made it read one, so this is never nil.
+		exchangeConfig.Google = oauth.IssuerConfig{Issuer: cfg.GoogleOIDCIssuer, Audience: cfg.GoogleOIDCAudience, Keys: discovered.GoogleKeys}
+		exchangeConfig.MachineCredentials = machineCredentials(enr)
+	}
+	if cfg.SignInDeviceAudience != "" {
+		// A person signs in through Google, which is also the issuer of the machine's actor
+		// token, so BROKER_SIGNIN_DEVICE_AUDIENCE needs BROKER_GOOGLE_OIDC_AUDIENCE and the two
+		// share the key set read above. What a person may be is BROKER_SIGNIN_DOMAIN's to say,
+		// which the exchange's policy already holds.
+		exchangeConfig.PersonAudience = cfg.SignInDeviceAudience
+		exchangeConfig.PersonSignIns = personSignIns()
+		slog.Info("google person sign-in", "issuer", cfg.GoogleOIDCIssuer, "audience", cfg.SignInDeviceAudience, "domain", cfg.SignIn.Domain)
 	}
 	if cfg.ExchangeGitHubIssuer != "" {
 		// The GitHub issuer has no second reader, so it keeps a key source of its own, read here
@@ -453,13 +405,18 @@ func main() {
 		fatal(err)
 		exchangeConfig.GitHub = oauth.IssuerConfig{Issuer: cfg.ExchangeGitHubIssuer, Audience: cfg.ExchangeGitHubAudience, Keys: keys}
 	}
-	if cfg.ExchangeK8sAudience == "" && cfg.ExchangeGitHubIssuer == "" {
-		slog.Info("token exchange", "state", "unconfigured", "detail", "no subject token issuer is set, so no pod or workflow run exchanges")
+	if cfg.ExchangeK8sAudience == "" && cfg.ExchangeGitHubIssuer == "" && cfg.GoogleOIDCAudience == "" {
+		slog.Info("token exchange", "state", "unconfigured", "detail", "no subject token issuer is set, so no pod, workflow run or machine exchanges")
 	} else {
 		slog.Info("token exchange", "state", "on", "kubernetes", cfg.ExchangeK8sAudience != "", "github", cfg.ExchangeGitHubIssuer != "",
-			"accounts", len(cfg.ExchangeAccounts), "workflows", len(cfg.ExchangeWorkflows))
+			"accounts", len(cfg.ExchangeAccounts), "workflows", len(cfg.ExchangeWorkflows), "machines", len(cfg.ExchangeGoogleAccounts))
 	}
-	// verification_uri is Dispatch's machine-login page, where the person types the code.
+	// verification_uri is Dispatch's machine-login page, where the person types the code. With
+	// no page (BROKER_MACHINE_LOGIN_URL unset) the provider composes no device grant at all:
+	// the broker mounts no device authorization route and its metadata document names no device
+	// code, while the token endpoint, the exchange, introspection and revocation are served as
+	// ever. The line says which of the two this broker is, so an operator reads it off the boot
+	// rather than out of a 404.
 	provider, err := oauth.New(oauth.Config{
 		Secret: oauthSecret, DeviceLifetime: machineLoginPendingTTL,
 		AccessLifetime:  time.Duration(cfg.AccessTokenSeconds) * time.Second,
@@ -468,6 +425,11 @@ func main() {
 		Exchange:  exchangeConfig,
 	}, oauthStore)
 	fatal(err)
+	if provider.DeviceGrant() {
+		slog.Info("machine login device grant", "state", "on", "verification_uri", cfg.MachineLoginURL)
+	} else {
+		slog.Info("machine login device grant", "state", "off", "detail", "BROKER_MACHINE_LOGIN_URL is unset, so no person types a code and POST /v1/oauth/device_authorization is not served")
+	}
 	mach := &machine.Service{
 		Store: st, Enroll: enr, Policy: current,
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second,
@@ -497,7 +459,7 @@ func main() {
 	}
 	sweeper := &requests.Sweeper{
 		Enrollments: enr, Machine: reqMachine, MachineLogins: mach, OAuth: oauthStore,
-		Interval: sweep, Wake: waker,
+		Interval: sweep, SessionCarry: time.Duration(cfg.SessionCarrySeconds) * time.Second, Wake: waker,
 	}
 	go sweeper.Run(ctx)
 	// The client check, beside the sweeper and on the same context: at boot and every hour
@@ -510,12 +472,15 @@ func main() {
 	go runClientChecks(ctx, cfg.SignIn, st)
 
 	mux := http.NewServeMux()
-	// Under the GCP store a reread spends Secret Manager's shared metadata quota, so its overall
-	// cap is the GCP one.
-	var rereadOverall *ratelimit.Limit
+	// Under the GCP store a reread spends Secret Manager's shared metadata quota, so the fleet
+	// budget this process divides is the GCP one. api.RereadRate divides it among the pods the
+	// serving clock counts below, and moves this process's reread buckets whenever that count
+	// changes.
+	rereadBudget := api.DefaultRereadFleetBudget
 	if cfg.SecretsStore == secrets.StoreGCP {
-		rereadOverall = &api.GCPRereadOverallLimit
+		rereadBudget = api.GCPRereadFleetBudget
 	}
+	rereadRate := api.NewRereadRate(rereadBudget, slog.Default())
 	// draining is set once, by the signal handler below, and read by every handler goroutine
 	// GET /healthz runs on, which is why it is atomic rather than a plain bool.
 	var draining atomic.Bool
@@ -526,8 +491,17 @@ func main() {
 	// their own next five-minute reload (policyRefresh) anyway. Neither the caller's 200 nor the
 	// process is worth failing over a notification Postgres would not take.
 	notify := reread.Notifier(st.Pool, senderID)
-	api.Register(mux, api.Deps{PublicURL: cfg.PublicURL, RereadOverallLimit: rereadOverall,
+	// A Google caller's verifier is built only where the broker was told about Google, and it
+	// is an interface field, so it is assigned through a variable rather than inline: a nil
+	// *oidc.Verifier put straight into the field would be an interface that is not nil, and
+	// every Google caller would fault instead of being refused ACCOUNT_TOKENS_OFF.
+	var googleCallers api.GoogleVerifier
+	if discovered.GoogleIdentities != nil {
+		googleCallers = api.GoogleTokens{Verifier: discovered.GoogleIdentities}
+	}
+	api.Register(mux, api.Deps{PublicURL: cfg.PublicURL, RereadRate: rereadRate,
 		APIAccounts: cfg.APIAccounts, AccountTokens: pod,
+		GoogleAPIAccounts: cfg.GoogleAPIAccounts, GoogleAccountTokens: googleCallers,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
 		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),
 		Proof:  &proof.Verifier{Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
@@ -560,61 +534,22 @@ func main() {
 	// leases that run out swept. It beats on serving, not ctx: this pod still answers renewals
 	// through its drain, so it is still a broker serving, and a gap in the beats there would read
 	// as an outage.
-	clock := &enroll.ServingClock{Enrollments: enr, Interval: sweep, NotServingAfter: config.NotServingSweeps * sweep}
+	clock := &enroll.ServingClock{Enrollments: enr, Interval: sweep, NotServingAfter: leasetime.NotServingSweeps * sweep,
+		OnReplicas: rereadRate.SetReplicas}
 	go clock.Run(serving)
 	go func() {
 		if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("broker: serve", "error", err)
-			stop()
+			stopNotify()
 		}
 	}()
 
 	<-ctx.Done()
-	// The drain comes first and the listener stays open through it, rather than the reverse: a pod
-	// leaves its Service's EndpointSlice concurrently with the kubelet beginning termination, not
-	// before it, so for a while after SIGTERM the kubelet is still routing new connections here.
-	// Failing readiness now — GET /healthz answers 503 SHUTTING_DOWN from this point, while every
-	// other route is served exactly as before — and closing the listener only once the drain has
-	// run out is what keeps those connections from being refused by a socket that is already gone.
-	slog.Info("broker draining", "drain", wholeSeconds(drain))
-	draining.Store(true)
-	if drain > 0 {
-		// A second signal ends the drain at once: an operator, or a kubelet that has decided this
-		// pod has to be gone now, must not have to wait out a drain whose whole purpose has
-		// already been served. ctx is no help here — signal.NotifyContext cancelled it with the
-		// first signal — so the second one arrives on drainNow, handed over by the watchdog at the
-		// top of main once it has found serveStarted closed. A zero drain takes neither this
-		// select nor a timer, which would be a wait on something that never fires.
-		timer := time.NewTimer(drain)
-		defer timer.Stop()
-		select {
-		case <-timer.C:
-		case <-drainNow:
-			slog.Info("broker: a second signal ended the drain early")
-		}
-	}
-	slog.Info("broker shutting down")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		slog.Warn("broker: shutdown", "error", err)
-	}
-	// Shutdown has returned, either having answered the last request or having spent the 60
-	// seconds above, so the work kept alive through the drain has nothing left to serve: this is
-	// where the reread listener and the five-minute policy reload stop.
-	//
-	// The order is a dependency, and it is not the one the pool makes: st.Listener hands pglisten
-	// a connection hijacked out of the pool (store.go, conn.Hijack), so st.Close never touches it
-	// and closing the store would not end a LISTEN. What ends it is pglisten's own deferred
-	// close of that connection when its loop returns, which endServing asks for by cancelling
-	// serving. endServing only asks: nothing here waits for that goroutine, and the process
-	// exits with the cancellation delivered and the close in flight, which costs nothing because
-	// Postgres ends a session whose connection goes with the process. The order still matters for
-	// the reload and the pools: endServing stops the loop that would otherwise read through a
-	// pool st.Close is about to shut, and st.Close releases the two pools behind it, each of
-	// whose health checks is a goroutine of its own.
-	endServing()
-	st.Close()
+	stop(context.Background(), brokerStop{
+		Drain: drain, DrainNow: drainNow, Draining: draining.Store,
+		Shutdown: srv.Shutdown, EndServing: started.EndServing, CloseStore: st.Close,
+		Log: slog.Default(),
+	})
 }
 
 // secondSignalFindsServing takes the first two signals off again and then answers whether
@@ -753,18 +688,16 @@ func refusePortZeroPublicURLInProduction(publicURL, fakeSecretsFile string) erro
 
 // newRequestMachine builds the requests.Machine the broker decides every secret request with, from
 // its configuration: the audience and skew every request object is checked against, and, for each
-// service account, the registered service a pod running as it proves, and for each VM service
-// account, the service a VM running as it proves. A grant lasts the lifetime its request signed, or
-// until its session ends.
+// service account, the registered service a pod running as it proves, and for each Google
+// service account, the one a machine of that fleet proves. A grant lasts the lifetime its
+// request signed, or until its session ends.
 func newRequestMachine(cfg config.Config, st *store.Store, current *policy.Current, secretStore secrets.Store, replay func(context.Context, string, time.Time) (bool, error)) *requests.Machine {
 	m := &requests.Machine{
 		Store: st, Policy: current, Secrets: secretStore, PendingTTL: agentSecretPendingTTL,
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Replay: replay,
 		ServicesByAccount:   cfg.ServicesByAccount,
 		VMServicesByAccount: cfg.VMServicesByAccount,
-		VMProjects:          cfg.VMProjects,
-		VMInstancePatterns:  cfg.VMInstancePatterns,
-		Minters:             kindMinters(secrets.GitHubApp{}, secrets.GoogleLogin{}),
+		Minters:             kindMinters(secrets.GitHubApp{}, secrets.GoogleLogin{}, secrets.AzureLogin{TokenFile: cfg.AzureTokenFile, SecretName: cfg.AzureLoginSecret}),
 	}
 	m.Chain = requests.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	return m
@@ -782,39 +715,124 @@ func serviceNames(cfg config.Config) []string {
 // keysFunc is issuerKeys' shape, a seam for a test that must not reach a real issuer.
 type keysFunc func(ctx context.Context, issuer string) (*oidc.Keys, error)
 
+// verifiers are what one boot's discovery of the token issuers the broker trusts produced: a
+// verifier per issuer and the key set behind each, since the RFC 8693 exchange resolves a subject
+// token's own key itself and must read the very set its verifier reads.
+type verifiers struct {
+	// Pod verifies a pod's enrollment token and a service's login token, nil on a broker told
+	// about no cluster.
+	Pod enroll.PodVerifier
+	// K8sKeys is the cluster issuer's published keys, nil where Pod is.
+	K8sKeys *oidc.Keys
+	// GoogleKeys is the Google issuer's published keys, nil on a broker with no Google audience,
+	// which registers no Google subject token type.
+	GoogleKeys *oidc.Keys
+	// GoogleIdentities verifies a listed caller's own Google identity token, against the same
+	// issuer and audience as those keys, nil where GoogleKeys is. It is how a caller on a VM —
+	// the Envoy listener — authenticates on the routes BROKER_API_ACCOUNTS names it for,
+	// holding no Kubernetes token at all.
+	GoogleIdentities *oidc.Verifier
+}
+
 // discoverVerifiers reads the key sets of the token issuers the broker trusts (keysFor, issuerKeys
 // in production) and builds a verifier on each: the cluster's (BROKER_K8S_OIDC_ISSUER and
 // BROKER_K8S_OIDC_AUDIENCE), one verifier for both a pod's enrollment token and a service's login
 // token, which are the same cluster's projected tokens for the same audience, whose key set it
-// also answers for the RFC 8693 exchange; and Google's (config.GoogleOIDCIssuer), for a VM's
-// identity token, only when BROKER_GOOGLE_OIDC_AUDIENCE is set, logging one line that names the
-// issuer, the audience and the VM services. With no Google audience it reads and logs nothing
-// about Google, and answers a nil VM verifier, so the broker enrolls no VM and serves no VM login.
-func discoverVerifiers(ctx context.Context, cfg config.Config, keysFor keysFunc) (enroll.PodVerifier, enroll.VMVerifier, *oidc.Keys, error) {
-	var pod enroll.PodVerifier
-	var k8sKeys *oidc.Keys
+// also answers for the RFC 8693 exchange; and Google's (BROKER_GOOGLE_OIDC_ISSUER), for a
+// machine's identity token, only when BROKER_GOOGLE_OIDC_AUDIENCE is set, whose key set the
+// exchange resolves a machine's subject token against, logging one line that names the issuer,
+// the audience, the machine services and how many machine entries the exchange holds. With no
+// Google audience it reads and logs nothing about Google, and answers no Google keys, so the
+// broker registers no Google subject token type.
+func discoverVerifiers(ctx context.Context, cfg config.Config, keysFor keysFunc) (verifiers, error) {
+	var found verifiers
 	if cfg.K8sOIDCIssuer != "" {
-		var err error
-		if k8sKeys, err = keysFor(ctx, cfg.K8sOIDCIssuer); err != nil {
-			return nil, nil, nil, err
+		keys, err := keysFor(ctx, cfg.K8sOIDCIssuer)
+		if err != nil {
+			return verifiers{}, err
 		}
-		pod = enroll.K8sPodVerifier{Verifier: oidc.NewWithKeys(cfg.K8sOIDCIssuer, cfg.K8sOIDCAudience, k8sKeys)}
+		found.K8sKeys = keys
+		found.Pod = enroll.K8sPodVerifier{Verifier: oidc.NewWithKeys(cfg.K8sOIDCIssuer, cfg.K8sOIDCAudience, keys)}
 	}
 	if cfg.GoogleOIDCAudience == "" {
-		return pod, nil, k8sKeys, nil
+		return found, nil
 	}
-	googleKeys, err := keysFor(ctx, config.GoogleOIDCIssuer)
+	googleKeys, err := keysFor(ctx, cfg.GoogleOIDCIssuer)
 	if err != nil {
-		return nil, nil, nil, err
+		return verifiers{}, err
 	}
 	services := slices.Sorted(maps.Values(cfg.VMServicesByAccount))
-	slog.Info("google vm identity", "issuer", config.GoogleOIDCIssuer, "audience", cfg.GoogleOIDCAudience, "services", strings.Join(slices.Compact(services), ","))
-	return pod, enroll.GoogleVMVerifier{Verifier: oidc.NewWithKeys(config.GoogleOIDCIssuer, cfg.GoogleOIDCAudience, googleKeys)}, k8sKeys, nil
+	slog.Info("google machine identity", "issuer", cfg.GoogleOIDCIssuer, "audience", cfg.GoogleOIDCAudience,
+		"services", strings.Join(slices.Compact(services), ","), "fleets", len(cfg.ExchangeGoogleAccounts))
+	found.GoogleKeys = googleKeys
+	// One verifier on that key set, for a listed caller that holds a Google identity rather
+	// than a Kubernetes one: the audience is BROKER_GOOGLE_OIDC_AUDIENCE, the one every machine
+	// of the deployment already holds a token for, so such a caller presents the token its
+	// metadata server already hands it.
+	found.GoogleIdentities = oidc.NewWithKeys(cfg.GoogleOIDCIssuer, cfg.GoogleOIDCAudience, googleKeys)
+	return found, nil
+}
+
+// machineCredentials is oauth.ExchangeConfig.MachineCredentials over the enrollment service: the
+// launcher credential a trade mints or moves, written in the exchange's own transaction
+// (enroll.Service.IssueTokenLoginTx), so the credential and the access token that names it land
+// together. Both trades that mint one come through here — a machine's own, which carries its
+// fleet's service and no person, and a person's sign-in on such a machine, which carries that
+// person as its operator — so there is one way a credential is minted and not two. A key
+// another live credential holds is oauth.ErrMachineKeyTaken, which the exchange answers
+// invalid_grant.
+func machineCredentials(enr *enroll.Service) oauth.MachineCredentials {
+	return func(ctx context.Context, cred oauth.MachineCredential) (string, error) {
+		tx, ok := oauthstore.TxFrom(ctx)
+		if !ok {
+			return "", errors.New("broker: a machine's launcher credential is minted in the exchange's transaction")
+		}
+		id, err := enr.IssueTokenLoginTx(ctx, tx, enroll.TokenLogin{
+			Subject:      cred.Subject,
+			Service:      cred.Service,
+			Host:         cred.Host,
+			Operator:     cred.Operator,
+			TokenExpires: cred.Expires,
+			Thumbprint:   cred.Thumbprint,
+			JWK:          cred.JWK,
+			Expires:      cred.Expires,
+		})
+		if store.IsUniqueViolation(err) {
+			return "", fmt.Errorf("%w: %v", oauth.ErrMachineKeyTaken, err)
+		}
+		if err != nil {
+			return "", err
+		}
+		return id.String(), nil
+	}
+}
+
+// personSignIns is oauth.ExchangeConfig.PersonSignIns over the broker's store: the sign-in a
+// person's trade belongs to, written in the exchange's own transaction
+// (store.RecordPersonSignIn), so the sign-in and the access token minted under it land
+// together. A box key that person has revoked is store.ErrSignInRevoked, and one whose sign-in
+// was made on another machine is store.ErrSignInMachineChanged; the exchange answers both
+// invalid_grant naming the sign-in command.
+func personSignIns() oauth.PersonSignIns {
+	return func(ctx context.Context, in oauth.PersonSignIn) error {
+		tx, ok := oauthstore.TxFrom(ctx)
+		if !ok {
+			return errors.New("broker: a person's sign-in is recorded in the exchange's transaction")
+		}
+		err := store.RecordPersonSignIn(ctx, tx, in.Person, in.Thumbprint, in.Machine)
+		switch {
+		case errors.Is(err, store.ErrSignInRevoked):
+			return fmt.Errorf("%w: %v", oauth.ErrSignInRevoked, err)
+		case errors.Is(err, store.ErrSignInMachineChanged):
+			return fmt.Errorf("%w: %v", oauth.ErrSignInMachineChanged, err)
+		}
+		return err
+	}
 }
 
 // issuerKeys reads issuer's published signing keys: the source a token's own key is resolved
 // against, both for the verifier that answers whether a token verifies (a projected
-// service-account token, or a Google VM's identity token) and for the RFC 8693 exchange, which
+// service-account token) and for the RFC 8693 exchange, which
 // needs the key itself. It takes the same boot deadline
 // discovery does: an issuer that accepts the connection and never answers refuses the boot rather
 // than hanging it with no health endpoint serving. No key is fetched here; the first token read
@@ -825,14 +843,13 @@ func issuerKeys(ctx context.Context, issuer string) (*oidc.Keys, error) {
 	return oidc.NewKeys(discovery, issuer)
 }
 
-// kindMinters is the broker's minter for each kind: the GitHub App minter for github-app secrets
-// and the Google login minter for google-login ones. Its arguments are the production minters in
-// newRequestMachine; a test passes ones aimed at its own endpoints, so wiring a kind to the wrong
-// minter fails it.
-func kindMinters(githubApp secrets.GitHubApp, googleLogin secrets.GoogleLogin) map[string]requests.Minter {
+// kindMinters is the broker's minter for each kind. Its arguments are the production minters in
+// newRequestMachine; a test passes ones aimed at its own endpoints and projected token file.
+func kindMinters(githubApp secrets.GitHubApp, googleLogin secrets.GoogleLogin, azureLogin secrets.AzureLogin) map[string]requests.Minter {
 	return map[string]requests.Minter{
 		policy.KindGitHubApp:   githubApp.Mint,
 		policy.KindGoogleLogin: googleLogin.Mint,
+		policy.KindAzureLogin:  azureLogin.Mint,
 	}
 }
 

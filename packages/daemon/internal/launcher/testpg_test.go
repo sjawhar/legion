@@ -151,7 +151,7 @@ func TestCheckTestPostgresRunsEveryStepAndStopsTheServer(t *testing.T) {
 	}
 	for _, want := range []string{
 		testPGProgram + " check\n", testPGProgram + " ensure\n",
-		"psql -X -q " + TestPGDSN + " -c create database legion_probe_testpg\n",
+		"psql -X -q " + TestPGDSN + " -c create database legion_probe_testpg strategy file_copy\n",
 		"psql -X -q " + TestPGDSN + " -c drop database legion_probe_testpg with (force)\n",
 		testPGProgram + " stop\n",
 	} {

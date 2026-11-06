@@ -159,7 +159,8 @@ func TestAgentsIncludeGroupedOpenAskCountsAndLastActivity(t *testing.T) {
 }
 
 // A bearer session needs to see who advertises which delivery modes before it targets a
-// message; the issue-less POST /agents/{session}/messages stays human-only.
+// message; the issue-less POST /agents/{session}/messages needs the person scope, which the
+// deployment's shared token does not hold.
 func TestAgentsListsCapabilitiesForBearerCallers(t *testing.T) {
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","last_seen":100,"capabilities":["aside","btw"]}]`))
@@ -183,8 +184,8 @@ func TestAgentsListsCapabilitiesForBearerCallers(t *testing.T) {
 		"body": "hi", "delivery": "btw",
 		"actor": map[string]string{"kind": "session", "id": "s2"},
 	})
-	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"code":"HUMAN_ONLY"`) {
-		t.Fatalf("issue-less targeted message by a bearer: status %d: %s", response.Code, response.Body.String())
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"code":"`+codeScopeRequired+`"`) {
+		t.Fatalf("issue-less targeted message by the shared token: status %d: %s, want 403 %s", response.Code, response.Body.String(), codeScopeRequired)
 	}
 }
 
@@ -416,5 +417,61 @@ func TestAnAgentsListDuringAShutdownDrainListsAHealthyListenersSessions(t *testi
 		if got := agentIDs(t, mux); !reflect.DeepEqual(got, []string{"ses-live"}) {
 			t.Fatalf("agents list %d during the drain = %v, want the listener's [ses-live]", read, got)
 		}
+	}
+}
+
+// answerListRefilling writes the listener's refusal of a list it cannot serve (cmd/listener
+// writeListRefilling), with the given Retry-After ("" sends none).
+func answerListRefilling(w http.ResponseWriter, retryAfter string) {
+	if retryAfter != "" {
+		w.Header().Set("Retry-After", retryAfter)
+	}
+	WriteJSON(w, http.StatusServiceUnavailable, map[string]string{
+		"error": "envoy: the agent list is refilling; try again in a moment", "code": "refilling",
+	})
+}
+
+// requireEnvoyRefilling requires Dispatch's refilling answer: 503 with the given Retry-After and
+// exactly the ENVOY_REFILLING body.
+func requireEnvoyRefilling(t *testing.T, response *httptest.ResponseRecorder, retryAfter string) {
+	t.Helper()
+	want := map[string]string{"code": "ENVOY_REFILLING", "error": "The agent list is refilling. Try again in a moment."}
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s, want 503 ENVOY_REFILLING", response.Code, response.Body.String())
+	}
+	if got := decodeBody[map[string]string](t, response); !reflect.DeepEqual(got, want) {
+		t.Fatalf("body = %v, want %v", got, want)
+	}
+	if got := response.Header().Get("Retry-After"); got != retryAfter {
+		t.Fatalf("Retry-After = %q, want %q", got, retryAfter)
+	}
+}
+
+// A listener refilling its list answered the read, and said the list will be back: the Agents
+// read says so with its own code and the listener's Retry-After (5, the listener's own, when it
+// sent none), never an empty list. Any other 503 is still the listener being unavailable.
+//
+// Each case takes a database of its own, because the listener's answer is stored for every
+// server process to read (route_roster) and the two cases run different listeners: sharing one
+// database would serve the second case the first one's stored silence, with its Retry-After.
+func TestAgentsReportsARefillingListenerAsRefilling(t *testing.T) {
+	for retryAfter, want := range map[string]string{"7": "7", "": "5"} {
+		database := storetest.Open(t)
+		listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			answerListRefilling(w, retryAfter)
+		}))
+		t.Cleanup(listener.Close)
+		response := dispatchRequest(t, agentsHandlerWithStore(t, listener.URL, database), http.MethodGet, "/api/v1/agents", nil, "alice")
+		requireEnvoyRefilling(t, response, want)
+	}
+
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "1")
+		WriteJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "service starting", "code": "starting"})
+	}))
+	t.Cleanup(plain.Close)
+	response := dispatchRequest(t, agentsHandlerWithStore(t, plain.URL, storetest.Open(t)), http.MethodGet, "/api/v1/agents", nil, "alice")
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"ENVOY_UNAVAILABLE"`) {
+		t.Fatalf("a 503 without the refilling code: status %d: %s, want ENVOY_UNAVAILABLE", response.Code, response.Body.String())
 	}
 }

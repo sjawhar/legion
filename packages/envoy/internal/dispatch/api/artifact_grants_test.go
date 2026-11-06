@@ -126,14 +126,23 @@ func grantsChangedEvents(t *testing.T, handler http.Handler, log string) []grant
 	return changes
 }
 
-// TestArtifactGrantsRefuseEveryTokenAndChangeNothing: the four credentials an agent can hold -
-// the shared token, a personal token, a Kubernetes service-account token and an access token
-// the secrets broker scoped to the page file's own project - are each answered 403 HUMAN_ONLY
-// by both writes, and the list and the page file's event log are what they were.
+// TestArtifactGrantsRefuseEveryTokenAndChangeNothing: no token adds or removes a data grant
+// (dispatch://INFRA-682, R9). The four credentials an agent can hold - the shared token, a
+// personal token, a Kubernetes service-account token and an access token the secrets broker
+// scoped to the page file's own project - and a fifth, a personal token minted with `person`
+// and `approve`, are each answered 403 HUMAN_ONLY by both writes, and the list and the page
+// file's event log are what they were.
+//
+// One check refuses all five, the handler's own (grantingPerson), so one code answers them
+// all: a data grant is the person's own act at their own browser, and no scope a person can
+// put on a token makes it that person. The fifth caller is what holds that to more than the
+// mint's default - it names `person` and `approve` on the wire, the whole set its person
+// holds, which is every scope any row of this table asks of a bearer - so its refusal cannot
+// be read as a scope it was missing.
 func TestArtifactGrantsRefuseEveryTokenAndChangeNothing(t *testing.T) {
 	issuer := newServiceTokenIssuer(t)
 	stub := brokertokentest.NewStubBroker(t)
-	handler, _, _ := newTestServer(t, testServerOptions{
+	handler, database, _ := newTestServer(t, testServerOptions{
 		oidc: issuer.verifier(t),
 		brokerTokens: func(database *store.Store) *brokertoken.Verifier {
 			verifier, err := brokertoken.New(brokertoken.Options{
@@ -150,7 +159,8 @@ func TestArtifactGrantsRefuseEveryTokenAndChangeNothing(t *testing.T) {
 		},
 	})
 	// The page file sits in the project the broker token is scoped to, so the project check
-	// admits that caller and it is requireHuman, not the scope, that refuses it.
+	// admits that caller and it is the handler's credential test, not the project, that
+	// refuses it.
 	fixture := seedGrantsFixture(t, handler, brokerTestProject)
 	granted := grantFile(t, handler, fixture.page.Artifact.ID, fixture.dataRef)
 
@@ -162,6 +172,9 @@ func TestArtifactGrantsRefuseEveryTokenAndChangeNothing(t *testing.T) {
 	caller := newBrokerCaller(t)
 	const brokerToken = "a-token-the-broker-issued-for-the-pages-project"
 	stub.Says(brokerToken, liveNamedToken(caller.jkt))
+	// The fifth caller: the credential INFRA-1017 made possible, holding both scopes, which R9
+	// refuses all the same.
+	scoped := personalTokenHolding(t, database, model.ScopePerson, model.ScopeApprove)
 
 	add := grantsRoute(fixture.page.Artifact.ID)
 	remove := add + "/" + granted.ID
@@ -183,6 +196,9 @@ func TestArtifactGrantsRefuseEveryTokenAndChangeNothing(t *testing.T) {
 			handler.ServeHTTP(response, caller.presenting(t, method, target, brokerToken, body))
 			return response
 		}},
+		{"a personal token holding person and approve", func(t *testing.T, method, target string, body any) *httptest.ResponseRecorder {
+			return agentRequest(t, handler, method, target, body, scoped)
+		}},
 	} {
 		t.Run(credential.name, func(t *testing.T) {
 			for _, write := range []struct {
@@ -194,8 +210,8 @@ func TestArtifactGrantsRefuseEveryTokenAndChangeNothing(t *testing.T) {
 				{http.MethodDelete, remove, nil},
 			} {
 				response := credential.send(t, write.method, write.target, write.body)
-				if response.Code != http.StatusForbidden || decodeBody[refusalAnswer](t, response).Code != "HUMAN_ONLY" {
-					t.Errorf("%s %s as %s = %d %s, want 403 HUMAN_ONLY", write.method, write.target, credential.name, response.Code, response.Body.String())
+				if response.Code != http.StatusForbidden || decodeBody[refusalAnswer](t, response).Code != codeHumanOnly {
+					t.Errorf("%s %s as %s = %d %s, want 403 %s", write.method, write.target, credential.name, response.Code, response.Body.String(), codeHumanOnly)
 				}
 				listed := listGrants(t, handler, fixture.page.Artifact.ID)
 				if len(listed) != 1 || listed[0].ID != granted.ID || listed[0].ArtifactID != fixture.data.Artifact.ID {

@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -536,6 +537,113 @@ func TestMissingIssueDocumentRouteListsItsSlugsAndNames(t *testing.T) {
 	}](t, response)
 	if response.Code != http.StatusNotFound || !strings.Contains(raw, `"code":"ARTIFACT_NOT_FOUND"`) || body.Error != want {
 		t.Fatalf("missing document route: status=%d body=%s, want 404 %q", response.Code, raw, want)
+	}
+}
+
+// TestMissingDocumentOnABusyOwnerNamesTheClosestAndCountsTheRest holds the hint for an owner with
+// more documents than it lists: the documents whose slug or filename is nearest the missing
+// reference come first, the newest fill the rest, and the hint says how many the owner holds and
+// which route lists them all.
+func TestMissingDocumentOnABusyOwnerNamesTheClosestAndCountsTheRest(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createArtifactIssue(t, handler)
+	names := []string{"prediction-P1.md"}
+	for index := range 10 {
+		names = append(names, fmt.Sprintf("notes-%d.md", index))
+	}
+	for _, name := range names {
+		created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
+			"name": name, "content": "# " + name + "\n",
+		}, "alice")
+		if created.Code != http.StatusCreated {
+			t.Fatalf("create %s: status=%d body=%s", name, created.Code, created.Body.String())
+		}
+	}
+	for index := range 11 {
+		createProjectDocument(t, handler, "TEST", fmt.Sprintf("runbook-%d.md", index), "# Runbook\n")
+	}
+
+	newest := func(prefix string, from, to int) string {
+		var labels []string
+		for index := from; index >= to; index-- {
+			labels = append(labels, fmt.Sprintf("%s-%d-md (%s-%d.md)", prefix, index, prefix, index))
+		}
+		return strings.Join(labels, ", ")
+	}
+	for _, test := range []struct {
+		target string
+		want   string
+	}{
+		{
+			target: "/api/v1/issues/" + issue.Key + "/artifacts/prediction-P1-md",
+			want: `document "prediction-P1-md" not found by slug; this issue's 12 documents include: ` +
+				"prediction-p1-md (prediction-P1.md), " + newest("notes", 9, 3) +
+				"; GET /api/v1/issues/" + issue.Key + "/artifacts lists them all",
+		},
+		{
+			target: "/api/v1/projects/TEST/artifacts/Runbook-2-md",
+			want: `document "Runbook-2-md" not found by slug; this project's 11 documents include: ` +
+				"runbook-2-md (runbook-2.md), " + newest("runbook", 9, 3) +
+				"; GET /api/v1/projects/TEST/artifacts?unlinked=true lists them all",
+		},
+	} {
+		response := dispatchRequest(t, handler, http.MethodGet, test.target, nil, "alice")
+		raw := response.Body.String()
+		body := decodeBody[struct {
+			Error string `json:"error"`
+		}](t, response)
+		if response.Code != http.StatusNotFound || body.Error != test.want {
+			t.Fatalf("missing document %s: status=%d body=%s\nwant 404 %q", test.target, response.Code, raw, test.want)
+		}
+	}
+}
+
+// TestDocumentsNearestRanksByExactDistanceAndFoldsOnlyASCII holds the ranking envoy-client's
+// documentsNearest repeats (its test of the same cases): a name holding the reference ranks by
+// how much longer it is, so an old short match is not lost behind newer long ones, and only ASCII
+// letters fold, so İ is not i in either ranker.
+func TestDocumentsNearestRanksByExactDistanceAndFoldsOnlyASCII(t *testing.T) {
+	documents := func(names ...string) []model.Artifact {
+		var out []model.Artifact
+		for _, name := range names {
+			out = append(out, model.Artifact{Slug: strings.ReplaceAll(name, ".", "-"), Name: name})
+		}
+		return out
+	}
+	for _, test := range []struct {
+		reference string
+		documents []model.Artifact
+		want      []string
+	}{
+		{
+			reference: "Plan",
+			documents: documents("plan.md", "plan-alpha-archive.md", "plan-beta-archive.md", "plan-gamma-archive.md",
+				"plan-delta-archive.md", "plan-omega-archive.md", "plan-kappa-archive.md", "plan-sigma-archive.md", "plan-theta-archive.md"),
+			want: []string{"plan.md", "plan-beta-archive.md", "plan-theta-archive.md", "plan-sigma-archive.md", "plan-kappa-archive.md",
+				"plan-omega-archive.md", "plan-delta-archive.md", "plan-gamma-archive.md", "plan-alpha-archive.md"},
+		},
+		{
+			// Only the filename holds "plan.", and the slug is far: the slug's capped distance
+			// must not tie the old match with the newer, longer ones.
+			reference: "Plan.",
+			documents: documents("plan.v1.md", "plan.alpha-archive.md", "plan.beta-archive.md", "plan.gamma-archive.md",
+				"plan.delta-archive.md", "plan.omega-archive.md", "plan.kappa-archive.md", "plan.sigma-archive.md", "plan.theta-archive.md"),
+			want: []string{"plan.v1.md", "plan.beta-archive.md", "plan.theta-archive.md", "plan.sigma-archive.md", "plan.kappa-archive.md",
+				"plan.omega-archive.md", "plan.delta-archive.md", "plan.gamma-archive.md", "plan.alpha-archive.md"},
+		},
+		{
+			reference: "İİİİ-md",
+			documents: documents("iiii.md", "notes-0.md", "notes-1.md", "notes-2.md", "notes-3.md", "notes-4.md", "notes-5.md", "notes-6.md", "notes-7.md"),
+			want:      []string{"notes-7.md", "notes-6.md", "notes-5.md", "notes-4.md", "notes-3.md", "notes-2.md", "notes-1.md", "notes-0.md", "iiii.md"},
+		},
+	} {
+		var got []string
+		for _, document := range documentsNearest(test.reference, test.documents) {
+			got = append(got, document.Name)
+		}
+		if strings.Join(got, ",") != strings.Join(test.want, ",") {
+			t.Errorf("documentsNearest(%q) = %v, want %v", test.reference, got, test.want)
+		}
 	}
 }
 

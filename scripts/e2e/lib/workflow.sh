@@ -307,10 +307,12 @@ architect_registers_gate() {
 # enters awaiting_person: legion state shows waitingOn {kind: "gate", gateVersion} with no
 # answeredAt, the root holds no slot (no .slot, absent from .admission.active), and the architect
 # stays live. The person's review answers the wait (waitingOn.answeredAt), and the answered root
-# takes the next free slot ahead of roots that never ran: at planning when an approval opened the
-# gate, at admitted with the same architect session given its task when changes were requested. A
+# goes to the front of the line, with the issues whose work came back and ahead of every issue
+# whose first phase has yet to start: at planning when an approval opened the gate, at admitted
+# with the same architect session given its task when changes were requested. A
 # slot free at the answer is taken in the same transaction, so the answer reads as answeredAt or as
-# the root holding a slot again. Nothing of the root's tree advances until it holds a slot.
+# the root holding a slot again. Nothing of the root's tree advances until the root resumes, and
+# each issue of it that then has work waits for a slot of its own.
 root_awaits_gate() {
   daemon_state | jq -e --arg issue "$1" '.issues[$issue] as $i
     | $i.phase == "awaiting_person" and $i.waitingOn.kind == "gate" and ($i.waitingOn.gateVersion // 0) > 0
@@ -384,19 +386,20 @@ workflow_lib=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 . "$workflow_lib/github-apps.sh"
 # read_app_logins proves the run's two role Apps against GitHub (check_github_apps,
 # lib/github-apps.sh) and sets implement_app_login and review_app_login to the bot login GitHub
-# gives each, `<slug>[bot]` as REST names it, read by lib/app-logins.ts from GET /app under the
-# App's own key, as the daemon reads its own at boot. A proof names no App: an App renamed on GitHub
-# changes what this reads and no script, and a name another App takes over later is never mistaken
-# for Legion's. A stage proof calls it once in its prerequisites, after require_app_inputs and
-# write_github_apps and before its first write anywhere, and the check fails, naming what
-# lib/app-logins.ts could not read or prove, rather than leave a login empty.
+# gives each, `<slug>[bot]` as REST names it, read by lib/app-logins.ts from GraphQL's viewer under
+# an installation token the App's token command releases, and checked against GET /apps/<slug>, as
+# the daemon reads its own at boot. A proof names no App: an App renamed on GitHub changes what
+# this reads and no script, and a name another App takes over later is never mistaken for Legion's.
+# A stage proof calls it once in its prerequisites, after require_app_inputs and write_github_apps
+# and before its first write anywhere, and the check fails, naming what lib/app-logins.ts could not
+# read or prove, rather than leave a login empty.
 implement_app_login=
 review_app_login=
 read_app_logins() {
   check_github_apps implement review
   implement_app_login=$(jq -er .implement <<<"$github_app_logins") || fail "lib/app-logins.ts printed no implement App login: $github_app_logins"
   review_app_login=$(jq -er .review <<<"$github_app_logins") || fail "lib/app-logins.ts printed no review App login: $github_app_logins"
-  note "the implement App acts on GitHub as $implement_app_login and the review App as $review_app_login (GET /app)"
+  note "the implement App acts on GitHub as $implement_app_login and the review App as $review_app_login (GET /apps/<slug>)"
 }
 # role_app ROLE prints the bot login of the App ROLE acts as, as REST names it: the implement App's
 # for the implementer and the merger, the review App's for every other role. role_app_slug ROLE

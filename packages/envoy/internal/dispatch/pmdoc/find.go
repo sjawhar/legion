@@ -195,6 +195,28 @@ func (f *QuoteFinder) Find(quote string, occurrence, near *int) (Range, error) {
 	if err != nil {
 		return Range{}, err
 	}
+	return f.choose(quote, matches, occurrence, near)
+}
+
+// FindListItem answers a quote that opens with a list item's marker (ParseListItemQuote) by the
+// items it selects (listItemQuoteMatches), choosing among them as Find chooses among a quote's
+// matches; a quote that selects no item is Find's miss. Only a document edit asks it, after Find
+// matched nothing: a quote a comment or an ask anchors is text the document held, whose marker
+// is text, so no anchor is ever read as a selector.
+func (f *QuoteFinder) FindListItem(quote string, occurrence *int) (Range, error) {
+	if err := f.prepare(); err != nil {
+		return Range{}, err
+	}
+	item := ParseListItemQuote(quote)
+	if item.Text == "" {
+		return Range{}, quoteNotFound(f.doc, quote)
+	}
+	return f.choose(quote, listItemQuoteMatches(f.doc, f.text, item), occurrence, nil)
+}
+
+// choose is the range quote's matches resolve to: the one the occurrence names, the only one, or
+// the one nearest near; otherwise the miss or the ambiguity Find answers.
+func (f *QuoteFinder) choose(quote string, matches []quoteMatch, occurrence, near *int) (Range, error) {
 	doc, text := f.doc, f.text
 	if len(matches) == 0 {
 		return Range{}, quoteNotFound(doc, quote)
@@ -263,11 +285,23 @@ func nearerFirst(near int) func(left, right quoteMatch) int {
 	}
 }
 
-// matches is every match of quote in the finder's document, preparing the document at the first
-// call: a heading quote's headings, otherwise the plain matcher cascade's.
+// matches is every match of quote in the finder's document: a heading quote's headings, otherwise
+// the plain matcher cascade's.
 func (f *QuoteFinder) matches(quote string) ([]quoteMatch, error) {
+	if err := f.prepare(); err != nil {
+		return nil, err
+	}
+	if marker := atxHeadingMarker.FindString(quote); marker != "" && marker != quote {
+		return headingQuoteMatches(f.doc, f.text, quote[len(marker):]), nil
+	}
+	return quoteMatches(f.text, quote), nil
+}
+
+// prepare validates the finder's document and flattens its text at the first call, and answers
+// what that found every call after.
+func (f *QuoteFinder) prepare() error {
 	if f.doc == nil {
-		return nil, fmt.Errorf("%w: FindQuote wants a document", ErrSchema)
+		return fmt.Errorf("%w: FindQuote wants a document", ErrSchema)
 	}
 	if !f.prepared {
 		f.prepared = true
@@ -278,13 +312,84 @@ func (f *QuoteFinder) matches(quote string) ([]quoteMatch, error) {
 			f.text = buildFlattenedText(f.doc)
 		}
 	}
-	if f.err != nil {
-		return nil, f.err
+	return f.err
+}
+
+// listItemTaskBox is a task item's box, `[ ]` or `[x]`, opening what follows a list marker: the
+// box renders as the item's checkbox, not as text the item holds.
+var listItemTaskBox = regexp.MustCompile(`^\[([ xX])\][ \t]+`)
+
+// ListItemQuote is a quote that opens with a list item's marker read as what the marker selects:
+// an item of a list of Kind whose text starts with Text, and, when a task box (`[ ]`, `[x]`)
+// follows the marker, a task item checked or not as Checked says.
+type ListItemQuote struct {
+	Kind    MarkerKind
+	Checked *bool
+	Text    string
+}
+
+// ParseListItemQuote reads a quote that opens with a list item's marker (`- `, `* `, `+ `, `5. `,
+// `5) `), and a task box after it, as the item they select. A quote opening with no marker, or
+// holding nothing after it, selects no item: its Text is empty.
+func ParseListItemQuote(quote string) ListItemQuote {
+	marker, width := LeadingBlockMarker(quote)
+	if marker.Kind != MarkerOrdered && marker.Kind != MarkerBullet {
+		return ListItemQuote{}
 	}
-	if marker := atxHeadingMarker.FindString(quote); marker != "" && marker != quote {
-		return headingQuoteMatches(f.doc, f.text, quote[len(marker):]), nil
+	item := ListItemQuote{Kind: marker.Kind, Text: quote[width:]}
+	if box := listItemTaskBox.FindStringSubmatch(item.Text); box != nil {
+		checked := box[1] != " "
+		item.Checked = &checked
+		item.Text = item.Text[len(box[0]):]
 	}
-	return quoteMatches(f.text, quote), nil
+	return item
+}
+
+// listItemQuoteMatches is every match of item's text that begins where an item it selects begins
+// its text: the marker selects the item, as a heading quote's marker selects a heading, and the
+// renderer writes it before the item's first paragraph, so the text it is quoted with starts
+// there. The item's number is not matched, only its kind, and a task box only a task item whose
+// box is in that state. Each step of the matcher cascade is kept to those starts before the next
+// is tried, so an exact match elsewhere does not hide an item the text matches with its whitespace
+// normalized.
+func listItemQuoteMatches(doc *Node, text flattenedText, item ListItemQuote) []quoteMatch {
+	type start struct{ from, end int }
+	var starts []start
+	walk(doc, func(node *Node, path []int, pos, end int) bool {
+		if node.Type != "paragraph" || textblockMarker(doc, node, path).Kind != item.Kind {
+			return true
+		}
+		if item.Checked != nil {
+			// textblockMarker found a list item's first paragraph, so its parent is that item.
+			checked, task := nodeAtPath(doc, path[:len(path)-1]).Attrs["checked"].(bool)
+			if !task || checked != *item.Checked {
+				return true
+			}
+		}
+		starts = append(starts, start{from: pos + 1, end: end - 1})
+		return true
+	})
+	if len(starts) == 0 {
+		return nil
+	}
+	atAStart := func(candidates []quoteMatch) []quoteMatch {
+		var matches []quoteMatch
+		for _, match := range candidates {
+			for _, s := range starts {
+				if match.From == s.from && match.To <= s.end {
+					matches = append(matches, match)
+					break
+				}
+			}
+		}
+		return matches
+	}
+	for _, step := range []func(flattenedText, string) []quoteMatch{exactQuoteMatches, normalizedQuoteMatches, markdownQuoteMatches} {
+		if matches := atAStart(step(text, item.Text)); len(matches) > 0 {
+			return matches
+		}
+	}
+	return nil
 }
 
 // TargetSpansBlocks reports whether r is not wholly contained by one
@@ -303,14 +408,30 @@ func TargetSpansBlocks(doc *Node, r Range) bool {
 
 // FindHeading finds the heading whose text, as a read serves it (TextContent), equals title
 // exactly. occurrence is zero-based; without it, repeated titles return ErrTargetAmbiguous.
+// It validates doc first: a nil tree wants a document, and one Validate refuses is Validate's
+// error. It validates the tree rather than the document (ValidateDocument), so a tree that is no
+// document is searched for its headings as it always was, and finds none.
 func FindHeading(doc *Node, title string, occurrence *int) (Range, error) {
 	if doc == nil {
-		return Range{}, fmt.Errorf("%w: FindHeading wants a document", ErrSchema)
+		return Range{}, wantsDocument("FindHeading")
 	}
 	if err := doc.Validate(); err != nil {
 		return Range{}, err
 	}
+	return findHeading(doc, title, occurrence)
+}
 
+// FindHeading is FindHeading over d's tree without validating it again; the zero ValidDocument
+// wants a document, as FindHeading's nil tree does.
+func (d ValidDocument) FindHeading(title string, occurrence *int) (Range, error) {
+	if d.doc == nil {
+		return Range{}, wantsDocument("FindHeading")
+	}
+	return findHeading(d.doc, title, occurrence)
+}
+
+// findHeading is the heading search itself, over a tree its caller has validated.
+func findHeading(doc *Node, title string, occurrence *int) (Range, error) {
 	var matches []Candidate
 	pos := 0
 	for _, child := range doc.Children {
@@ -661,6 +782,8 @@ func markupInRange(marks []inlineMarkup, span range16) inlineMarkup {
 func quoteNotFound(doc *Node, quote string) error {
 	if marker := atxHeadingMarker.FindString(quote); marker != "" {
 		quote = quote[len(marker):]
+	} else if item := ParseListItemQuote(quote); item.Text != "" {
+		quote = item.Text
 	} else if rendered, marked := renderedMarkdownQuote(quote); marked {
 		quote = rendered.value
 	}
@@ -1421,29 +1544,17 @@ func markAttributeID(value any) string {
 	return id
 }
 
-// StripAnchorMarks returns a copy of doc with every mark the rendering does not write
-// (renderedMarkTypes) removed - Proof and Dispatch anchors - coalescing adjacent equal-mark text
-// runs.
+// StripAnchorMarks is a copy of node without the marks the rendering does not write
+// (renderedMarkTypes) - Proof and Dispatch anchors - and with adjacent text runs under equal
+// written marks merged into one that keeps the first run's attributes and children. That is what
+// the rendering reads (writtenTree), with lineBreaks false, so no line break is rewritten, and
+// before any U+0000 is written (nulsWrittenTree): the text and the attributes are node's own
+// bytes. The copy is the caller's, which cloneNode gives whether or not the rendering writes
+// anything otherwise, since callers own and change what they get (docs.asUploaded, the paragraph
+// a docs edit builds, spreadDifferences).
 func StripAnchorMarks(node *Node) *Node {
 	if node == nil {
 		return nil
 	}
-	out := &Node{Type: node.Type, Attrs: cloneAttrs(node.Attrs), Text: node.Text}
-	for _, mark := range node.Marks {
-		if renderedMarkTypes[mark.Type] {
-			out.Marks = append(out.Marks, Mark{Type: mark.Type, Attrs: cloneAttrs(mark.Attrs)})
-		}
-	}
-	for _, child := range node.Children {
-		clean := StripAnchorMarks(child)
-		if len(out.Children) > 0 {
-			previous := out.Children[len(out.Children)-1]
-			if previous.Type == "text" && clean.Type == "text" && marksEqual(previous.Marks, clean.Marks) {
-				previous.Text += clean.Text
-				continue
-			}
-		}
-		out.Children = append(out.Children, clean)
-	}
-	return out
+	return cloneNode(writtenTree(node, false))
 }

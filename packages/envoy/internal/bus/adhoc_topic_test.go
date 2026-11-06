@@ -57,7 +57,7 @@ func TestUsesCoreTransportForRoleLanesAndEveryNotificationTheStreamDoesNotCaptur
 // StreamCaptures reads each stream subject as a literal prefix and `.>`; a subject of any other
 // shape needs a matcher that splits tokens.
 func TestEveryStreamSubjectIsALiteralPrefixAndWildcard(t *testing.T) {
-	for _, subject := range streamSubjects {
+	for _, subject := range streamCarriedSubjects {
 		prefix, ok := strings.CutSuffix(subject, ".>")
 		if !ok || prefix == "" || strings.ContainsAny(prefix, "*>") {
 			t.Errorf("stream subject %q is not a literal prefix followed by .>", subject)

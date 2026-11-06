@@ -1,0 +1,284 @@
+/** `bun e2e/tools/check-slow-rows.ts <report.json> [--slow-ms 2000] [--dir e2e]`: reads INFRA-317's
+ *  acceptance A5 - "every row of the merge-base inventory is under 2 s at the head unless a
+ *  comment in the row names why" - against one run's own Playwright JSON report.
+ *
+ *  A row that must still take `--slow-ms` or more carries a comment of exactly the form
+ *
+ *    // SLOW(>=2s): <reason>
+ *
+ *  directly above its `test(` or `test.describe(` call: the next line that is neither blank nor
+ *  another comment. A marker above a `test.describe(` marks every row of that block; a marker
+ *  above a `test(` inside a loop marks every row that call generates, since every one of them
+ *  reports that call's line.
+ *
+ *  A report is a snapshot of a tree that goes on moving: a marker written above a row moves that
+ *  row down by its own length, and every line added or taken above one moves it too. So a marked
+ *  `test(` whose title is a plain string literal is joined to the rows of that title as well as
+ *  to the rows on its line, and a report taken before an edit still finds the row it measured.
+ *  A row a loop generates has a title built at run time and is found by its line alone, as a
+ *  `test.describe(` block's rows are.
+ *
+ *  Two things fail the check, each printed under its own heading:
+ *
+ *  - a row at or above the threshold with no marker, because A5's claim does not hold for it;
+ *  - a marker every row of which came in under `STALE_BAND_SHARE` of the threshold, because a
+ *    comment that calls a row slow when it is not is a lie the next reader believes. The band is
+ *    why a row that measures 1.9 s on one run keeps its marker: see the constant.
+ *
+ *  A marker in a file the report never ran is neither: no row of that file could have used it.
+ *  Those are counted apart, so a run over some of the suite judges only what it ran.
+ *
+ *  Usage, with a report the run writes itself:
+ *
+ *    PLAYWRIGHT_JSON_OUTPUT_NAME=/tmp/report.json bun e2e/run.ts -- bunx playwright test \
+ *      --config e2e/playwright.config.ts --reporter=list,json
+ *    bun e2e/tools/check-slow-rows.ts /tmp/report.json
+ */
+import { readdirSync, readFileSync } from "node:fs";
+import { basename, join } from "node:path";
+import { parseArgs } from "node:util";
+
+const usage =
+  "usage: bun e2e/tools/check-slow-rows.ts <report.json> [--slow-ms <n>] [--dir <e2e>]\n" +
+  "  <report.json>  a Playwright JSON report (--reporter=json, PLAYWRIGHT_JSON_OUTPUT_NAME)\n" +
+  "  --slow-ms      the threshold a row carries a marker for (default 2000)\n" +
+  "  --dir          the directory whose *.e2e.ts hold the markers (default e2e)";
+
+/** The marker's exact form. The reason is what the row's author wrote after the colon. */
+const markerPattern = /^\s*\/\/\s*SLOW\(>=2s\):\s*(?<reason>.+?)\s*$/u;
+const commentPattern = /^\s*\/\//u;
+const describePattern = /^(?<indent>\s*)test\.describe[.(]/u;
+const testPattern = /^\s*test[.(]/u;
+/** The title of a marked `test(` call, where the call gives it as one plain string literal. */
+const titlePattern = /^\s*test(?:\.[A-Za-z]+)*\(\s*(?<title>"(?:[^"\\]|\\.)*")/u;
+
+export interface Row {
+  readonly project: string;
+  /** As the report names it, relative to Playwright's `testDir`. */
+  readonly file: string;
+  readonly line: number;
+  readonly title: string;
+  readonly ms: number;
+}
+
+export interface Marker {
+  readonly file: string;
+  /** The line the comment itself is on, counted from 1. */
+  readonly line: number;
+  readonly reason: string;
+  /** The first line of the call the marker sits above. */
+  readonly target: number;
+  /** The last line that call covers: the `test(` call's own line, or a block's closing line. */
+  readonly targetEnd: number;
+  readonly kind: "test" | "describe";
+  /** The title the marked `test(` call gives as a literal, which the report's rows of that call
+   *  carry whatever line they are on now. Absent where the call builds its title at run time. */
+  readonly title?: string;
+}
+
+export interface Verdict {
+  readonly rowsRun: number;
+  readonly rowsSlow: number;
+  readonly markersFound: number;
+  /** Markers a row earned: one at or above the threshold, or one inside the band below it. */
+  readonly markersUsed: number;
+  /** Of those, the ones no row of theirs took the threshold for: earned inside the band alone. */
+  readonly markersInBand: number;
+  /** Rows at or above the threshold that no marker covers. */
+  readonly unmarked: readonly Row[];
+  /** Markers in a file the report ran whose every row came in under the band. */
+  readonly stale: readonly Marker[];
+  /** Markers in a file the report never ran: judged by neither rule. */
+  readonly notRun: readonly Marker[];
+}
+
+interface ReportSuite {
+  readonly specs?: readonly ReportSpec[];
+  readonly suites?: readonly ReportSuite[];
+}
+
+interface ReportSpec {
+  readonly file?: string;
+  readonly line?: number;
+  readonly title?: string;
+  readonly tests?: readonly ReportTest[];
+}
+
+interface ReportTest {
+  readonly projectName?: string;
+  readonly results?: readonly { readonly duration?: number; readonly status?: string }[];
+}
+
+/** Every row of a Playwright JSON report, one per (spec, project): the last attempt's time, and
+ *  no row for one that never ran. */
+export function reportRows(report: { readonly suites?: readonly ReportSuite[] }): readonly Row[] {
+  const rows: Row[] = [];
+  const walk = (suite: ReportSuite): void => {
+    for (const spec of suite.specs ?? []) {
+      for (const test of spec.tests ?? []) {
+        const last = test.results?.at(-1);
+        if (last === undefined || last.status === "skipped") continue;
+        rows.push({
+          file: spec.file ?? "",
+          line: spec.line ?? 0,
+          ms: last.duration ?? 0,
+          project: test.projectName ?? "",
+          title: spec.title ?? "",
+        });
+      }
+    }
+    for (const child of suite.suites ?? []) walk(child);
+  };
+  for (const suite of report.suites ?? []) walk(suite);
+  return rows;
+}
+
+/** The last line of the block a `test.describe(` opens at `lines[start]`: the next line that
+ *  closes a call at that call's own indentation. The repository is formatted by Biome, so a
+ *  block's closer is the only `});` back at the opener's column. */
+function blockEnd(lines: readonly string[], start: number, indent: string): number {
+  for (let index = start + 1; index < lines.length; index += 1) {
+    if (lines[index] === `${indent}});`) return index + 1;
+  }
+  return lines.length;
+}
+
+/** Every marker of one spec file's source, each attributed to the call it sits directly above:
+ *  the next line that is neither blank nor another comment. A marker above anything else is left
+ *  out - it marks no row, and the caller counts markers only where they can be used. */
+export function markersIn(file: string, source: string): readonly Marker[] {
+  const lines = source.split("\n");
+  const markers: Marker[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const reason = markerPattern.exec(lines[index])?.groups?.reason;
+    if (reason === undefined) continue;
+    let next = index + 1;
+    while (next < lines.length && (lines[next].trim() === "" || commentPattern.test(lines[next]))) {
+      next += 1;
+    }
+    if (next >= lines.length) continue;
+    const describe = describePattern.exec(lines[next]);
+    if (describe?.groups !== undefined) {
+      markers.push({
+        file,
+        kind: "describe",
+        line: index + 1,
+        reason,
+        target: next + 1,
+        targetEnd: blockEnd(lines, next, describe.groups.indent),
+      });
+      continue;
+    }
+    if (testPattern.test(lines[next])) {
+      const title = titlePattern.exec(lines[next])?.groups?.title;
+      markers.push({
+        file,
+        kind: "test",
+        line: index + 1,
+        reason,
+        target: next + 1,
+        targetEnd: next + 1,
+        ...(title === undefined ? {} : { title: JSON.parse(title) as string }),
+      });
+    }
+  }
+  return markers;
+}
+
+/** A marker and a row meet when the row's `test(` call is the marked one, or sits inside the
+ *  marked `describe` block - by the line the report read it on, or, for a marked call that names
+ *  its title outright, by that title, which the lines around it moving cannot change. */
+function covers(marker: Marker, row: Row): boolean {
+  if (basename(marker.file) !== basename(row.file)) return false;
+  if (row.line >= marker.target && row.line <= marker.targetEnd) return true;
+  return marker.title !== undefined && marker.title === row.title;
+}
+
+/** How much of the threshold a marked row has to reach for its marker to be earned: 1,500 ms at
+ *  the 2,000 ms bar. The bar itself (`--slow-ms`) is unchanged - a row at or above it still
+ *  fails without a marker - and this band moves with it.
+ *
+ *  It exists because a row that sits at the bar cannot be judged by one run. Four of the eight
+ *  rows of `coverage.e2e.ts`, `plan-tab.e2e.ts` and `verification.e2e.ts` live in the 1.5-2.7 s
+ *  band; over 15 one-worker runs of one pod against one unchanged head, the Plan tab row
+ *  measured 1893-2639 ms and the currency row of `verification.e2e.ts` 1685-2069 ms, the pod
+ *  having drifted some 20 % slower and back inside half an hour. Without the band, such a row
+ *  fails this check whichever way it is written - bare when the run is slow, marked when the run
+ *  is fast - so both halves of the verdict report the machine rather than the suite. With it,
+ *  the half that catches a lie still does its work: a marker over a row that really became fast,
+ *  well under the band, is still stale. */
+export const STALE_BAND_SHARE = 0.75;
+
+/** A5, judged: which slow rows carry no marker, and which markers no row of theirs earned. */
+export function judge(rows: readonly Row[], markers: readonly Marker[], slowMs: number): Verdict {
+  const ran = new Set(rows.map((row) => basename(row.file)));
+  const slow = rows.filter((row) => row.ms >= slowMs);
+  const nearlySlow = rows.filter((row) => row.ms >= slowMs * STALE_BAND_SHARE);
+  const unmarked = slow.filter((row) => !markers.some((marker) => covers(marker, row)));
+  const overBar = markers.filter((marker) => slow.some((row) => covers(marker, row)));
+  const earned = markers.filter((marker) => nearlySlow.some((row) => covers(marker, row)));
+  const judged = markers.filter((marker) => ran.has(basename(marker.file)));
+  return {
+    markersFound: markers.length,
+    markersInBand: earned.length - overBar.length,
+    markersUsed: earned.length,
+    notRun: markers.filter((marker) => !ran.has(basename(marker.file))),
+    rowsRun: rows.length,
+    rowsSlow: slow.length,
+    stale: judged.filter((marker) => !earned.includes(marker)),
+    unmarked,
+  };
+}
+
+/** The command line, or the usage and exit 2. `parseArgs` refuses an unknown flag and a flag
+ *  whose value is missing, which is the same bad command line as a value the checks here refuse,
+ *  so both leave the same way. */
+function readArguments(): { report: string; slowMs: number; dir: string } {
+  try {
+    const { positionals, values } = parseArgs({
+      allowPositionals: true,
+      options: { dir: { type: "string" }, "slow-ms": { type: "string" } },
+      strict: true,
+    });
+    const slowMs = Number(values["slow-ms"] ?? 2000);
+    const dir = values.dir ?? "e2e";
+    if (positionals.length !== 1 || !Number.isFinite(slowMs) || slowMs <= 0 || dir === "") {
+      throw new Error(usage);
+    }
+    return { dir, report: positionals[0], slowMs };
+  } catch {
+    console.error(usage);
+    process.exit(2);
+  }
+}
+
+if (import.meta.main) {
+  const { dir, report, slowMs } = readArguments();
+  const rows = reportRows(JSON.parse(readFileSync(report, "utf8")));
+  const markers = readdirSync(dir)
+    .filter((name) => name.endsWith(".e2e.ts"))
+    .sort()
+    .flatMap((name) => markersIn(name, readFileSync(join(dir, name), "utf8")));
+  const verdict = judge(rows, markers, slowMs);
+
+  if (verdict.unmarked.length > 0) {
+    console.error(`rows at or above ${slowMs} ms with no // SLOW(>=2s) comment:`);
+    for (const row of [...verdict.unmarked].sort((a, b) => b.ms - a.ms)) {
+      console.error(`  ${row.project} ${row.file}:${row.line} ${row.title} (${row.ms} ms)`);
+    }
+  }
+  if (verdict.stale.length > 0) {
+    const band = Math.round(slowMs * STALE_BAND_SHARE);
+    console.error(`// SLOW(>=2s) comments whose every row came in under ${band} ms:`);
+    for (const marker of verdict.stale) {
+      console.error(`  ${marker.file}:${marker.line} ${marker.reason}`);
+    }
+  }
+  console.error(
+    `rows run ${verdict.rowsRun}, rows >= ${slowMs} ms ${verdict.rowsSlow}, ` +
+      `markers found ${verdict.markersFound} (${verdict.notRun.length} in files this report did ` +
+      `not run), markers earned ${verdict.markersUsed} (${verdict.markersInBand} by a row inside ` +
+      `the band below ${slowMs} ms rather than at or over it)`
+  );
+  if (verdict.unmarked.length > 0 || verdict.stale.length > 0) process.exit(1);
+}

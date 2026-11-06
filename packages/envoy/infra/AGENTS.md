@@ -100,7 +100,7 @@ versions. Never add the module to the root `go.work`.
   `bus.ListenerDurable`'s `listener-<id>` and `bus.ListenerQueue`'s
   `envoy-listener-<id>`. A seed check that already precedes this rule stays first.
   `core.ListenerConfig.Check` also holds the checks of the listener's environment that the
-  resolver can make (`port`, `listenHost`, `hostBridge`), run once before anything registers;
+  resolver can make (`port`, `listenHost`), run once before anything registers;
   `ListenerConfig.Env` runs `Check` again, so no caller renders a config `Check` refuses, then
   adds `natsUrls`, the one value that may be another resource's output, and checks it, inside the
   `ApplyT` that computes the container's environment.
@@ -113,7 +113,7 @@ versions. Never add the module to the root `go.work`.
   any spelling (`bus.HoldsSeed`), is refused where it enters, before anything quotes or renders
   it, with `core.SeedRefusal`, which names its path and never the value: core refuses one in the
   authorization's names, rule entries and `noAuthUser`, in `Render`'s and `StartScript`'s inputs,
-  and in the listener's `machineId`, `listenHost`, `hostBridge` and NATS URLs; a component refuses
+  and in the listener's `machineId`, `listenHost` and NATS URLs; a component refuses
   one in its name and its own string inputs: host's listed in `host.stringInputs`, the AWS
   components' every plain string by reflection over their args (`aws.seededPlainInput`), and every
   Input once it resolves, by wrapping it before any child takes it (`aws.refuseSeedInputs`), so no
@@ -127,7 +127,7 @@ versions. Never add the module to the root `go.work`.
   in `core` and `rendering.ListenerEnv.Check`'s in `aws/rendering`, and a component's or a
   command's table holds its own plus one row for each core call whose refusals it passes on,
   showing where they go and that each is the `core.InputError` naming its input. host passes on
-  `Check`'s refusals of `machineId`, `port` and `hostBridge` through one call, so it has one row.
+  `Check`'s refusals of `machineId` and `port` through one call, so it has one row.
   A store's tests assert the store's own answers, and `seed_test.go` the modes' messages over them.
   The hub refuses a seed (`bus.HoldsSeed`) in its own name before anything else, as `NewNatsHub`
   itself quotes the name in every refusal and registers the component under it
@@ -145,11 +145,14 @@ versions. Never add the module to the root `go.work`.
   (`TestDispatchRefusesASeedInTheComponentName`); its resolver refuses a seed in every plain
   string input the component carries (`gcp.dispatchSeededInput`, one row each in
   `TestDispatchRefusesAnNKeySeedInAPlainInput`, `azureFederationAudience` among them);
-  `tailnetAuthKey`, `signInClientSecret`, `natsSeedSecret`, `databaseWaitsFor` and the Azure
+  `tailnetAuthKey`, `signInClientSecret`, `natsSeedSecret`, `databaseWaitsFor`, the Azure
   embedder's Pulumi inputs `azureEmbedEndpoint`, `azureEmbedDeployment`, `azureEmbedKeySecret`,
-  `azureTenantId` and `azureClientId` are checked for a seed once they resolve, before any child
+  `azureTenantId` and `azureClientId`, and the answerer's `azureChatEndpoint`,
+  `azureChatDeployment`, `chatEndpoint` and `chatTokenSecret` are checked for a seed once they
+  resolve, before any child
   takes them (`gcp.refuseDispatchSeedInSecret`, `gcp.refuseDispatchSeed`,
   `TestConstructRefusesASeedInADispatchInput`, `TestConstructRefusesASeedInAnAzureInput`,
+  `TestConstructRefusesASeedInAnAnswererInput`,
   `TestDispatchRefusesASeedInDatabaseWaitsFor`, whose value reaches no resource and whose
   dependencies alone order the Cloud SQL instance); the two credentials `tailnetAuthKey` and
   `signInClientSecret` are also refused blank or whitespace-only then, through the one rule both
@@ -165,9 +168,19 @@ versions. Never add the module to the root `go.work`.
   creates at run time, which the component never parses, creates or waits on) enter by reference,
   so their values never enter the component or Pulumi state
   (`TestDispatchHoldsNoBrokerTokenOrAppKeyMaterial`,
-  `TestDispatchGrantsTheAzureKeyAccessorOnlyWithTheKeyForm`); the GitHub App's four inputs come
-  together, each missing one named, and the Azure inputs come with `azureEmbedEndpoint`, its quota
-  and exactly one credential form (`TestDispatchResolverRefusesInvalidInputs`); and `natsUrl` is
+  `TestDispatchGrantsTheAzureKeyAccessorOnlyWithTheKeyForm`); the answerer's bearer token is a
+  third such reference: `chatTokenSecret`, the one input of its group carrying
+  `provider:"secret"`, a Secret Manager resource path read through the SecretProviderClass
+  `<hostname>-chat-token` with a per-secret accessor member of its own, so the token's own value
+  never enters the component either
+  (`TestDispatchRegistersTheChatTokenSecretOnlyWithTheEndpointForm`); the GitHub App's four
+  inputs come
+  together, each missing one named, the Azure embedder's inputs come with `azureEmbedEndpoint`,
+  its quota and exactly one credential form, and the answerer's come with one of
+  `azureChatEndpoint`, which needs its quota, its deployment and the shared keyless sign-in, and
+  `chatEndpoint`, which needs `chatTokenSecret` and `chatModel` and is refused beside
+  `azureChatEndpoint`; the shared sign-in itself is taken with either Azure endpoint and refused
+  with neither (`TestDispatchResolverRefusesInvalidInputs`); and `natsUrl` is
   checked inside the `ApplyT` that renders the listener container's environment, where core's
   `Env` refusals — which name core's own inputs, `natsUrls` and `socks5Proxy` — are mapped onto
   `natsUrl`, each a `core.InputError` naming it, wrapped with the component's type and name and
@@ -210,7 +223,7 @@ versions. Never add the module to the root `go.work`.
   and its `THIRD_PARTY_NOTICES` in one directory, `envoy-infra-<os>-<arch>/`, which mise's
   `github:` backend strips on install. A mise pin names that archive per platform with a tool alias
   (`README.md`, "The command"), since the same tag carries the plugin's archives and
-  `github:sjawhar/legion` the `legion` command's. Changing either side breaks every consumer's
+  `github:cybermonklabs/legion` the `legion` command's. Changing either side breaks every consumer's
   install. A version is cut only from what the plugin and the command build from: the workflow's
   version step lists, with `go list -deps ./cmd/...` for each target, the directories of the
   workspace's modules either compiles in, and adds those modules' `go.mod` and `go.sum`, the
@@ -345,24 +358,17 @@ tag, so a plain `go test ./...`, as that `build` job runs it, starts none. Each 
 on a real server: its users connect, a client with no credential is refused, the grants hold),
 `seed/seed_live_test.go` (a generated seed connects, and a client without it is refused) and
 `core/permissions_live_test.go` (the listener, built from `packages/envoy/cmd/listener` under the
-root `go.work`, reaches `"status":"healthy"` as one user holding `HostPermissions` with
-`SubscribeAllTopics` on, a session as the same user receives a send, a role message and a publish
-to an ad-hoc topic, a session on a serving port at `127.0.0.1` is answered `core` with the reason
-`no_grant`, since that set holds no session consumer's call, and receives that topic, published
-over NATS by another session, through the listener's subscription to every notification topic, and
+root `go.work`, reaches `"status":"healthy"` as one user holding `HostPermissions`, a session as
+the same user receives a send, a role message and a publish to an ad-hoc topic, and
 the server refuses nothing the set allows, the session consumers' calls the listener probes once
 aside; without the durable's consumer create the listener never reaches `"status":"healthy"`; as a
 hub with a listener renders its users, the listener reaches
 `"status":"healthy"` as a user holding `ListenerPermissions` while a session with no credential,
 the server's `no_auth_user` holding `SessionPermissions`, registers, receives a send, a role
 message and a publish to an ad-hoc topic, and is refused a publish to another session's subject;
-the listener holding `ListenerPermissions` with `SubscribeAllTopics` on exits 1 at its start with
-an ERROR naming `ENVOY_SUBSCRIBE_ALL_TOPICS`, the server's one refusal its subscription to
-`notifications.>` (`TestListenerPermissionsRefuseTheSubscriptionToEveryTopicOnRealServers`); the
-listener holding `ListenerHostPermissions`, a listener's own user, with `SubscribeAllTopics` on
-reaches `"status":"healthy"`, answers a registration `consumer`, relays a send on the session's
-relay subject and pushes to a session's serving port a topic the stream does not store, the
-server refusing nothing but the publish provoked at the end
+the listener holding `ListenerHostPermissions`, a listener's own user, reaches
+`"status":"healthy"`, answers a registration `consumer` and relays a send on the session's
+relay subject, the server refusing nothing but the publish provoked at the end
 (`TestListenerHostPermissionsOnRealServers`); a
 user holding `SessionPermissions` alone publishes a reply and is refused a subscribe to `_INBOX.>`;
 and, as a hub with a listener renders its users, the listener's user creates, pulls, acks,

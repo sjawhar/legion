@@ -11,7 +11,7 @@ import {
   mintAgentToken,
   patchIssue,
 } from "./api";
-import { marginCard, openedThreadCard, setSheet } from "./editor";
+import { marginCard } from "./editor";
 import { askCard } from "./inbox-pane";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -63,7 +63,9 @@ interface Seeded {
 
 /** Real session writes from three sessions while all three are listed, then two of them leave
  *  the listener's list before any page loads. The running agent's claim is written with a
- *  personal token, so its label carries the owner suffix. */
+ *  personal token, so its label carries the owner suffix. The writes no row reads in order - the
+ *  two claims, the three messages, the two asks - go together; the two margin comments stay in
+ *  order behind them, since each anchors into the same spec. */
 async function seed(): Promise<Seeded> {
   await createProject({ key: "AGT", name: "Agents" });
   const runIssue = await createIssue({
@@ -78,33 +80,31 @@ async function seed(): Promise<Seeded> {
   ]);
   await setLiveSessions(liveSessions);
   const token = await mintAgentToken("agent-name-e2e", "alice");
-  await claimIssue(runIssue.key, { ...writer(runId, runStamped), token });
-  await claimIssue(stopIssue.key, writer(stopId, stopStamped));
-  const runMessage = await createMessage(
-    runIssue.key,
-    { body: "Message from the running agent" },
-    writer(runId, runStamped)
-  );
-  const stopMessage = await createMessage(
-    runIssue.key,
-    { body: "Message from the stopped agent" },
-    writer(stopId, stopStamped)
-  );
-  const untitledMessage = await createMessage(
-    runIssue.key,
-    { body: "Message from the untitled agent" },
-    writer(untitledId)
-  );
-  const runAsk = await createAsk(
-    runIssue.key,
-    { question: "Question from the running agent" },
-    writer(runId, runStamped)
-  );
-  const stopAsk = await createAsk(
-    runIssue.key,
-    { question: "Question from the stopped agent" },
-    writer(stopId, stopStamped)
-  );
+  const [, , runMessage, stopMessage, untitledMessage, runAsk, stopAsk] = await Promise.all([
+    claimIssue(runIssue.key, { ...writer(runId, runStamped), token }),
+    claimIssue(stopIssue.key, writer(stopId, stopStamped)),
+    createMessage(
+      runIssue.key,
+      { body: "Message from the running agent" },
+      writer(runId, runStamped)
+    ),
+    createMessage(
+      runIssue.key,
+      { body: "Message from the stopped agent" },
+      writer(stopId, stopStamped)
+    ),
+    createMessage(runIssue.key, { body: "Message from the untitled agent" }, writer(untitledId)),
+    createAsk(
+      runIssue.key,
+      { question: "Question from the running agent" },
+      writer(runId, runStamped)
+    ),
+    createAsk(
+      runIssue.key,
+      { question: "Question from the stopped agent" },
+      writer(stopId, stopStamped)
+    ),
+  ]);
   const runComment = await createComment(
     runIssue.key,
     { anchor: { artifact: "spec", quote: "comments here" }, body: "Margin from the running agent" },
@@ -170,26 +170,21 @@ function messageTurn(page: Page, id: string): Locator {
   return page.locator(`[data-turn="message:${id}"]`);
 }
 
-async function openMarginThread(page: Page, project: string, commentId: string): Promise<Locator> {
-  await setSheet(page, project, true);
-  await marginCard(page, commentId).locator('button[aria-expanded="false"]').first().click();
-  return openedThreadCard(page, project, commentId);
-}
-
-async function closeMarginThread(page: Page, project: string): Promise<void> {
-  if (project === "iphone") {
-    await page.keyboard.press("Escape");
-    await expect(page.getByRole("dialog", { name: "Thread" })).toHaveCount(0);
-  }
+async function openMarginThread(page: Page, commentId: string): Promise<Locator> {
+  const card = marginCard(page, commentId);
+  await card.locator('button[aria-expanded="false"]').first().click();
+  return card;
 }
 
 test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("Claimed by, a Conversation turn, an Inbox ask card and a margin comment show the agent's current name, whether it runs, and a live link @phone", async ({
+// SLOW(>=2s): the seed's session writes and four page views - the issue, the Conversation, the
+// Inbox and the margin - which are the four places the row holds the component to.
+test("Claimed by, a Conversation turn, an Inbox ask card and a margin comment show the agent's current name, whether it runs, and a live link", async ({
   browser,
-}, testInfo) => {
+}) => {
   const seeded = await seed();
   const alice = await asUser(browser, "alice");
   try {
@@ -249,19 +244,16 @@ test("Claimed by, a Conversation turn, an Inbox ask card and a margin comment sh
 
     // Margin comments, each in its opened thread.
     await page.goto(`/issues/${seeded.runIssue}/spec`);
-    const runThread = await openMarginThread(page, testInfo.project.name, seeded.runComment);
+    const runThread = await openMarginThread(page, seeded.runComment);
     await expectAgent(runThread, runId, { hidden: runStamped, name: runCurrent, running: true });
-    await closeMarginThread(page, testInfo.project.name);
-    const stopThread = await openMarginThread(page, testInfo.project.name, seeded.stopComment);
+    const stopThread = await openMarginThread(page, seeded.stopComment);
     await expectAgent(stopThread, stopId, { name: stopStamped, running: false });
   } finally {
     await alice.close();
   }
 });
 
-test("the live link opens that agent's conversation, running or not @phone", async ({
-  browser,
-}, testInfo) => {
+test("the live link opens that agent's conversation, running or not", async ({ browser }) => {
   const seeded = await seed();
   const alice = await asUser(browser, "alice");
   try {
@@ -276,7 +268,7 @@ test("the live link opens that agent's conversation, running or not @phone", asy
     await expect(page.getByRole("heading", { level: 1 })).toHaveText(runCurrent);
 
     await page.goto(`/issues/${seeded.runIssue}/spec`);
-    const stopThread = await openMarginThread(page, testInfo.project.name, seeded.stopComment);
+    const stopThread = await openMarginThread(page, seeded.stopComment);
     const stopLink = agentIn(stopThread, stopId).locator(`a[href="${livePath(stopId)}"]`);
     await expect(stopLink).toBeVisible();
     await stopLink.click();
@@ -365,16 +357,16 @@ test("on a phone the ask card's asker reads its whole name beside Waiting on you
   }
 });
 
-test("the page reads the agent list once, asks nothing per agent, and shows a rename and a stop without a reload @phone", async ({
+test("the page reads the agent list once, asks nothing per agent, and shows a rename and a stop without a reload", async ({
   browser,
-}, testInfo) => {
+}) => {
   // The open page learns of a rename and then of a stop only from the shell's 15 s registry
-  // poll, so this row waits for up to two polls of 30 s each on top of its seeding.
-  test.setTimeout(120_000);
+  // poll, which this row's page clock fires: no row-level timeout is needed for it.
   const seeded = await seed();
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
+    await page.clock.install();
     const registryReads: string[] = [];
     const perAgentReads: string[] = [];
     page.on("request", (request) => {
@@ -395,22 +387,23 @@ test("the page reads the agent list once, asks nothing per agent, and shows a re
     await expect(agentIn(messageTurn(page, seeded.untitledMessage), untitledId)).toBeVisible();
     expect(registryReads).toHaveLength(1);
     expect(perAgentReads).toEqual([]);
-    if (testInfo.project.name === "iphone") {
-      const widths = await page.evaluate(() => ({
-        client: document.documentElement.clientWidth,
-        scroll: document.documentElement.scrollWidth,
-      }));
-      expect(widths.scroll).toBe(widths.client);
-    }
 
-    // The listener renames the running agent, then drops it: the open page follows both.
+    // The listener renames the running agent, then drops it: the open page follows both. The page
+    // learns of each only on the shell's 15 s registry poll, which the clock fires rather than
+    // the row waiting it out; each jump also trips the live socket's own 15 s silence check, so
+    // the tab reconnects, which changes neither count below (a reconnect reads no agent).
     await setLiveSessions([{ session_id: runId, title: "Running agent (renamed)" }]);
-    await expect(claim).toContainText("Running agent (renamed)", { timeout: 30_000 });
+    await page.clock.fastForward(15_000);
+    // TanStack's notifyManager batches its delivery on a zero-delay page timer.
+    await page.clock.runFor(1);
+    await expect(claim).toContainText("Running agent (renamed)");
     await expect(agentIn(messageTurn(page, seeded.runMessage), runId)).toContainText(
       "Running agent (renamed)"
     );
     await setSessionLive(runId, false);
-    await expect(claim).toHaveAttribute("data-agent-state", "not-running", { timeout: 30_000 });
+    await page.clock.fastForward(15_000);
+    await page.clock.runFor(1);
+    await expect(claim).toHaveAttribute("data-agent-state", "not-running");
     await expect(claim.getByRole("img", { exact: true, name: "Not running" })).toBeVisible();
     expect(perAgentReads).toEqual([]);
   } finally {
@@ -418,29 +411,48 @@ test("the page reads the agent list once, asks nothing per agent, and shows a re
   }
 });
 
-test("a claimed List row and Board card open their issue by keyboard, and the claim's agent link opens the agent @phone", async ({
+// The narrow-screen half of the row above: the claim chip and the agent turns carry a session's
+// whole name, and on a phone that name is the widest thing the Conversation draws, so this is
+// where one that cannot wrap would widen the page. What the walk above counts - one registry
+// read, no per-agent read, a rename and a stop - is the same work at any width.
+test("a claimed issue's Conversation fits a phone screen with its agent turns @phone", async ({
   browser,
 }, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "a page fits a phone screen only at a phone width");
   const seeded = await seed();
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    const phone = testInfo.project.name === "iphone";
-    if (!phone) {
-      await page.setViewportSize({ height: 900, width: 1920 });
-    }
+    await page.goto(`/issues/${seeded.runIssue}/conversation`);
+    await expect(agentIn(page.getByTestId("issue-claim"), runId)).toHaveAttribute(
+      "data-agent-state",
+      "running"
+    );
+    await expect(agentIn(messageTurn(page, seeded.stopMessage), stopId)).toBeVisible();
+    const widths = await page.evaluate(() => ({
+      client: document.documentElement.clientWidth,
+      scroll: document.documentElement.scrollWidth,
+    }));
+    expect(widths.scroll).toBe(widths.client);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a claimed List row and Board card open their issue by keyboard, and the claim's agent link opens the agent", async ({
+  browser,
+}) => {
+  const seeded = await seed();
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize({ height: 900, width: 1920 });
     await page.goto("/projects/AGT");
     await page.getByRole("button", { name: "Board" }).click();
     const card = page.locator(`[data-board-card="${seeded.runIssue}"]`);
     const cardAgent = agentIn(card, runId);
     await expect(cardAgent).toHaveAttribute("data-agent-state", "running");
     const cardLink = cardAgent.locator(`a[href="${livePath(runId)}"]`);
-    if (phone) {
-      // A tap on the agent link navigates; it never starts a card drag.
-      await cardLink.tap();
-      await expect(page).toHaveURL(new RegExp(`${livePath(runId)}$`));
-      return;
-    }
     await card.focus();
     await page.keyboard.press("o");
     await expect(page).toHaveURL(new RegExp(`/issues/${seeded.runIssue}$`));
@@ -467,6 +479,29 @@ test("a claimed List row and Board card open their issue by keyboard, and the cl
     await agentIn(row, runId)
       .locator(`a[href="${livePath(runId)}"]`)
       .click();
+    await expect(page).toHaveURL(new RegExp(`${livePath(runId)}$`));
+  } finally {
+    await alice.close();
+  }
+});
+
+// A board card is itself a drag handle, so the agent link inside it has to navigate under a
+// finger rather than lifting the card. The keyboard walk above cannot see that; only a real tap
+// can, so it is a phone row of its own.
+test("a tap on a board card's agent link opens the agent rather than dragging the card @phone", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "a tap is a phone gesture");
+  const seeded = await seed();
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/projects/AGT");
+    await page.getByRole("button", { name: "Board" }).click();
+    const card = page.locator(`[data-board-card="${seeded.runIssue}"]`);
+    const cardLink = agentIn(card, runId).locator(`a[href="${livePath(runId)}"]`);
+    await expect(cardLink).toBeVisible();
+    await cardLink.tap();
     await expect(page).toHaveURL(new RegExp(`${livePath(runId)}$`));
   } finally {
     await alice.close();

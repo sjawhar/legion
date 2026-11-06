@@ -43,8 +43,9 @@ const FIXTURE =
   "## Heading\n\n**Bold** then `code` and a [link](https://example.com/docs) to dispatch://CORE-1.\n\n- first\n- second";
 
 /** What the fixture's text reads as once formatted on one line: no syntax, the words in order,
- *  the reference replaced by its resolved title (`Design decision`). */
-const RENDERED = /Heading\s+Bold then code and a link to Design decision\.?\s+first second/;
+ *  the reference replaced by its resolved title, which for an issue is its key then its title
+ *  (`CORE-1 Design decision`). */
+const RENDERED = /Heading\s+Bold then code and a link to CORE-1 Design decision\.?\s+first second/;
 
 /** The characters a raw-text surface leaks. The bare reference is listed by its scheme, so a
  *  surface that showed `dispatch://CORE-1` unresolved fails too. */
@@ -146,7 +147,7 @@ function expectFormatted(element: HTMLElement): void {
   }));
   expect(links).toEqual([
     { reference: null, text: "link" },
-    { reference: "dispatch://CORE-1", text: "Design decision" },
+    { reference: "dispatch://CORE-1", text: "CORE-1 Design decision" },
   ]);
 }
 
@@ -164,7 +165,7 @@ function expectFormattedWithLiveLinks(element: HTMLElement): void {
   }));
   expect(links).toEqual([
     { href: "https://example.com/docs", reference: null, text: "link" },
-    { href: "/issues/CORE-1", reference: "dispatch://CORE-1", text: "Design decision" },
+    { href: "/issues/CORE-1", reference: "dispatch://CORE-1", text: "CORE-1 Design decision" },
   ]);
 }
 
@@ -207,7 +208,7 @@ test("the agent transcript renders assistant and reasoning text as Markdown", as
     expectBody(reasoning);
     expect(turn.querySelectorAll("h2")).toHaveLength(2);
     expect(turn.querySelectorAll("ul")).toHaveLength(2);
-    expect(turn.textContent).toContain("Bold then code and a link to Design decision.");
+    expect(turn.textContent).toContain("Bold then code and a link to CORE-1 Design decision.");
     for (const syntax of LITERAL_SYNTAX) {
       expect(turn.textContent).not.toContain(syntax);
     }
@@ -568,13 +569,14 @@ function words(element: HTMLElement): string {
   return (element.textContent ?? "").replace(/\s+/g, " ").trim();
 }
 
-/** A full body's picture: an `<img>` named by its caption, at the column's width and capped in
- *  height (`DispatchPicture`'s `block`), never the preview's thumbnail. */
+/** A full body's picture: an `<img>` named by its caption, at its own size scaled down to the
+ *  column with no cap on its height (`DispatchPicture`'s `block`), never the preview's thumbnail. */
 async function expectBlockPicture(element: HTMLElement): Promise<void> {
   const picture = await within(element).findByRole("img", { name: "shot.png" });
   expect(picture.getAttribute("src")).toBe(PICTURE_SRC);
   const classes = picture.className.split(" ");
-  expect(classes).toEqual(expect.arrayContaining(["max-h-96", "max-w-full", "object-contain"]));
+  expect(classes).toEqual(expect.arrayContaining(["max-w-full", "object-contain"]));
+  expect(classes.some((name) => name.startsWith("max-h-"))).toBe(false);
   expect(classes).not.toContain("h-10");
   for (const syntax of PICTURE_SYNTAX) {
     expect(element.textContent).not.toContain(syntax);

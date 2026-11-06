@@ -12,14 +12,13 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/logging"
-	"github.com/sjawhar/envoy/internal/session"
 )
 
 // unplaceableRetryDelay is the delay an agent delivery this listener could not place asks for
 // before the stream redelivers it. It is short enough that a window's worth of them is a dozen
 // attempts rather than two - at the 30 s finalize(true) takes, a minute is one retry - and long
-// enough that a session whose record is still propagating, or whose server is still binding its
-// serve port, has time to finish between two of them.
+// enough that a session whose record is still propagating, or whose process is restarting and
+// registering again, has time to finish between two of them.
 const unplaceableRetryDelay = 5 * time.Second
 
 // unplaceableMaxDeliveries is the hard stop on those retries beside the window's own count of
@@ -161,30 +160,15 @@ func (d *unplaceableDeferrals) sweepLocked(now time.Time) {
 // unplaceableAgentDelivery answers an agent delivery that nothing placed and nothing failed hard
 // enough to NAK (agentSubjectDelivery's undelivered, error-free result). It either defers the
 // message for redelivery or gives it up with its record, and finalizes the message either way.
-func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope, sessionID string, metadata *nats.MsgMetadata, result session.HandleAgentResult) {
-	// Nothing placed this message and nothing failed hard enough to NAK: the session has no
-	// record this listener could find, or its record names nothing to push to. Each can be true
-	// of a session that is about to be placeable - a record still propagating from the bucket, a
-	// server still binding its serve port, a session process restarting - so the message is kept
-	// in the stream and redelivered for as long as cfg.unplaceableRetryWindow, and only then
-	// given up, with a record and a counter of its own rather than the ACKed skip that lost it.
+func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope, sessionID string, metadata *nats.MsgMetadata) {
+	// Nothing placed this message and nothing failed hard enough to NAK: this listener found no
+	// session record it could deliver through - no entry at all, or an entry that records no way
+	// the session receives a message (session.ErrNoSessionRecord). Either can be true of a
+	// session that is about to be placeable - a record still propagating from the bucket, a
+	// session process restarting and registering again - so the message is kept in the stream
+	// and redelivered for as long as cfg.unplaceableRetryWindow, and only then given up, with a
+	// record and a counter of its own rather than the ACKed skip that lost it.
 	//
-	// reason names which of the two causes this is, for the operator and for the counter label.
-	// session.ReasonNone and session.ReasonPushFailed keep no_push_target's label only because
-	// the switch needs a default: in a deployed listener nothing reaches here with either.
-	// HandleAgentMessage answers undelivered, error-free and ReasonNone only for a session
-	// another listener owns (session.ErrWrongMachine), which it reports as OwnedElsewhere, and
-	// agentSubjectDelivery acknowledges that result before it calls here; a push that fails is no
-	// longer this path's either, since the durable hands every push to a serving-port session to
-	// that session's worker, which pushes it until the port accepts it (servePortWorkers), and
-	// the live and core lanes' own failed push is answered delivery_failed by the interest path.
-	// Both arms are defensive, and no_push_target on a dashboard never means them.
-	reason := "no_push_target"
-	giveUpStatus := "unplaceable_no_push_target"
-	if result.Reason == session.ReasonNoSessionRecord {
-		reason = "no_session_record"
-		giveUpStatus = "unplaceable_no_record"
-	}
 	// The window is counted from this message's first delivery, not from the time the
 	// stream stored it: a backlog replayed into a listener whose caches are still cold -
 	// after a restart, during a rolling deploy - is minutes old when it is first delivered,
@@ -199,18 +183,8 @@ func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliver
 	if cfg.unplaceableRetryWindow > 0 {
 		windowDeferrals = uint64(cfg.unplaceableRetryWindow / unplaceableRetryDelay)
 	}
-	// What does not hold the retry open is session.ReasonNone, the defensive arm above: an
-	// undelivered result that carries it is another listener's session to place, however often
-	// this one sees the message. Every outcome a deployed listener reaches here with carries one
-	// of the two reasons - no entry is ReasonNoSessionRecord and a record with no port
-	// ReasonNoPushTarget (internal/session/handler.go, reasonFor) - and the interest path's
-	// failures return ShouldNAK with an Err set and are answered by agentSubjectDelivery. A read
-	// that did not answer is no evidence of absence and must not end the retries, and it does
-	// not: it leaves no entry, and an attempt with no entry reports ReasonNoSessionRecord here,
-	// so the reason alone already holds the window open for it.
-	placementMayChange := result.Reason != session.ReasonNone
 	deferred := false
-	if metadata != nil && placementMayChange && metadata.NumDelivered <= windowDeferrals &&
+	if metadata != nil && metadata.NumDelivered <= windowDeferrals &&
 		metadata.NumDelivered < unplaceableMaxDeliveries {
 		// The slot is this message's own, keyed on its stream sequence, so only this
 		// message's next delivery gives it back, or its expiry (unplaceableDeferralExpiry) when
@@ -232,7 +206,7 @@ func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliver
 			sessionID: sessionID,
 			log: func(logger *logging.Logger) {
 				logger.DeliveryLog(slog.LevelInfo, "listener agent delivery deferred", sessionID, item.Topic, item.EventID, "deferred",
-					slog.String("reason", reason),
+					slog.String("reason", "no_session_record"),
 					slog.Uint64("attempt", metadata.NumDelivered),
 					slog.Uint64("window_deferrals", windowDeferrals),
 				)
@@ -246,15 +220,15 @@ func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliver
 	// Given up: the deferrals this cause is allowed are spent, the delivery count is reached,
 	// this listener is already holding unplaceableDeferralCap messages, the metadata could
 	// not be read, or this is a core delivery nothing would redeliver. The give-up is
-	// terminal whatever becomes of its no_holder notice: once the push allowance is spent,
-	// nothing here may restore the state that permits another push, and the record of the
+	// terminal whatever becomes of its no_holder notice: once the delivery allowance is spent,
+	// nothing here may restore the state that permits another attempt, and the record of the
 	// give-up must not depend on the bus that just failed to place the message.
 	//
 	// So applyDeliveryOutcome writes the counter and the give-up line first, then publishes
 	// the notice, once per message rather than once per attempt. A notice that does not go
 	// out is logged exceptionPublishFailedLine and nothing else: it neither NAKs the message
 	// nor clears its attempt-cache entry. The entry is kept rather than cleared because it is
-	// what stops a further delivery of this message pushing again - the redelivery an ACK
+	// what stops a further delivery of this message being attempted again - the redelivery an ACK
 	// lost on the wire brings (finalize's ACK is fire-and-forget), which arrives after the
 	// durable's AckWait and well inside attemptCacheTTL - and this function ACKs the message once
 	// the give-up is applied.
@@ -265,7 +239,7 @@ func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliver
 	// exception subjects (infra/core, DaemonPermissions), while the give-up line, its counter
 	// and exceptionPublishFailedLine are what an operator does read. The retry NAKed the
 	// message and cleared its attempt entry, so every redelivery ran the whole handler again
-	// and pushed a message whose push allowance was already spent; and the failure it retried
+	// for a message whose delivery allowance was already spent; and the failure it retried
 	// is correlated with the fault (the bus that will not take the notice is the one whose
 	// trouble made the message unplaceable) and can be permanent - the notice embeds the
 	// original payload, so an envelope near the server's max payload yields a notice refused
@@ -273,12 +247,16 @@ func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliver
 	// with no give-up record at all.
 	applyDeliveryOutcome(cfg, item, deliveryOutcome{
 		sessionID:    sessionID,
-		metricStatus: giveUpStatus,
+		metricStatus: "unplaceable_no_record",
 		log: func(logger *logging.Logger) {
-			logger.DeliveryLog(slog.LevelWarn, "listener agent delivery given up", sessionID, item.Topic, item.EventID, giveUpStatus, slog.String("reason", reason))
+			logger.DeliveryLog(slog.LevelWarn, "listener agent delivery given up", sessionID, item.Topic, item.EventID, "unplaceable_no_record", slog.String("reason", "no_session_record"))
 		},
 		exceptionReason: "no_holder",
 		origin:          exceptionOrigin(message),
 	})
+	// Nothing could place the message, and a session of a released Legion issue pod is exactly
+	// that: gone from the bucket with its pod. The wake is reported once per message, beside the
+	// give-up, so the pod comes back and the sender's next attempt reaches it.
+	reportAgentWake(cfg.wakes, cfg.logger, sessionID)
 	message.finalize(false)
 }

@@ -22,6 +22,7 @@ on:
       - "bun.lock"
       - "patches/**"
       - "packages/envoy-client/package.json"
+      - "packages/broker-client/package.json"
       - "packages/pi-envoy/package.json"
       - "packages/pi-legion/package.json"
       - "packages/pi-shared/package.json"
@@ -92,6 +93,15 @@ jobs:
   # this job needs, but it's what every other job in this workflow (and the wider CI config) does
   # regardless of how much of the tree it touches; a sparse or shallow checkout here alone would
   # be the inconsistency.
+  #
+  # It also derives the image every job below pushes, tags, attests or reads back, from
+  # $GITHUB_REPOSITORY (.github/scripts/repo-paths.sh), so moving the repository to another owner
+  # or name moves the image with it instead of leaving a literal in five places. It is derived
+  # here and read everywhere else through this job's output because each of those jobs holds
+  # packages: write, contents: write, id-token or attestations: write, and a job holding a
+  # credential runs no script of this repository (.github/scripts/check-release-credentials.sh).
+  # This job holds contents: read alone, so it may run one - which makes it a build job, hence the
+  # tripwire last, as in build, docker and release_build.
   targets:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -99,12 +109,25 @@ jobs:
       contents: read
     outputs:
       envoy: ${{ steps.read.outputs.envoy }}
+      envoy_image: ${{ steps.read.outputs.envoy_image }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - id: read
-        run: echo "envoy=$(jq -c .envoy .github/go-release-targets.json)" >> "$GITHUB_OUTPUT"
+        run: |
+          # Each value is assigned first, never written as `echo "key=$(…)"`: a command
+          # substitution inside echo's arguments cannot fail the step, since echo exits 0
+          # whatever the substitution did, so a refusal would publish an empty job output that
+          # docker, image_index, attest and release_publish would all read.
+          envoy=$(jq -c .envoy .github/go-release-targets.json)
+          image=$(.github/scripts/repo-paths.sh envoy_image)
+          {
+            echo "envoy=$envoy"
+            echo "envoy_image=$image"
+          } >> "$GITHUB_OUTPUT"
+      - name: Check this job holds no credential (tripwire)
+        run: .github/scripts/release-push.sh no-credential
 
   build:
     needs: targets
@@ -153,7 +176,10 @@ jobs:
   # last leg's value, so the digests travel as artifacts instead.
   docker:
     name: docker (${{ matrix.arch }})
-    needs: build
+    # targets as well as build: `needs` carries direct dependencies only, so a job reading
+    # needs.targets.outputs.envoy_image must name targets itself, however far back it already
+    # reaches through build.
+    needs: [build, targets]
     strategy:
       fail-fast: true
       matrix:
@@ -185,11 +211,11 @@ jobs:
           # $GITHUB_EVENT_PATH's full JSON into any provenance predicate a build below computes,
           # attached to the pushed image or not. false here keeps every build this builder runs —
           # smoke and publish alike — free of that, regardless of each build's own provenance
-          # setting. image= is the driver's own default BuildKit image: ghcr.io/sjawhar/legion/ci,
+          # setting. image= is the driver's own default BuildKit image: ghcr.io/cybermonklabs/legion/ci,
           # the copy of moby/buildkit:buildx-stable-1 (.github/ci-images.yaml).
           driver-opts: |
             provenance-add-gha=false
-            image=ghcr.io/sjawhar/legion/ci@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+            image=ghcr.io/cybermonklabs/legion/ci@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
@@ -274,8 +300,9 @@ jobs:
           provenance: mode=min
           # Pushes this platform by digest, with no tag: only image_index tags `envoy:<sha>`, once
           # both legs have pushed. `outputs` replaces `push` and `tags`; `push` beside it would
-          # request a second exporter.
-          outputs: type=image,name=ghcr.io/sjawhar/legion/envoy,push-by-digest=true,name-canonical=true,push=true
+          # request a second exporter. The image comes from targets, which derived it from
+          # $GITHUB_REPOSITORY, so a rename moves every push, tag and attestation together.
+          outputs: type=image,name=${{ needs.targets.outputs.envoy_image }},push-by-digest=true,name-canonical=true,push=true
           # envoy-dispatch's /healthz reports this as the commit it was built from; the
           # Dockerfile refuses anything but a full sha.
           build-args: |
@@ -308,7 +335,10 @@ jobs:
   # docker buildx runs imagetools, so this job checks out nothing and sets up no builder, and with
   # no dependency code it ends in no tripwire.
   image_index:
-    needs: docker
+    # targets as well as docker: this job holds packages: write, so it runs no script of its own
+    # to derive the image, and `needs` is not transitive - reading needs.targets.outputs here
+    # means naming targets here.
+    needs: [docker, targets]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     # Pushes the index and its tag to ghcr.io; nothing here writes to the repository.
@@ -333,7 +363,9 @@ jobs:
       - name: Create the image index
         id: index
         env:
-          IMAGE: ghcr.io/sjawhar/legion/envoy
+          # Derived by targets from $GITHUB_REPOSITORY, not written here: the index this job tags
+          # must name the same repository the legs pushed their platforms to.
+          IMAGE: ${{ needs.targets.outputs.envoy_image }}
           SHA: ${{ github.sha }}
         run: |
           shopt -s nullglob
@@ -366,8 +398,8 @@ jobs:
   # branch pushes one too. The attestation's Sigstore certificate carries this workflow file's
   # identity, ref and commit from the run's OIDC token, which no workflow edit can change, so a
   # consumer accepts a digest only when a run of this file on main built it:
-  #   gh attestation verify oci://ghcr.io/sjawhar/legion/envoy@sha256:… --repo sjawhar/legion \
-  #     --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/main \
+  #   gh attestation verify oci://ghcr.io/cybermonklabs/legion/envoy@sha256:… --repo cybermonklabs/legion \
+  #     --cert-identity https://github.com/cybermonklabs/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/main \
   #     --source-ref refs/heads/main --deny-self-hosted-runners
   # and adds `--source-digest <the commit its tag names>` to pin the commit as well. The certificate
   # names the workflow whose job signed, so this job stays in this file: moved into a called
@@ -378,7 +410,10 @@ jobs:
   # (`provenance: mode=min`), which the index carries. A branch dispatch attests too, and its
   # certificate names `refs/heads/<branch>`, which the command above refuses.
   attest:
-    needs: image_index
+    # targets as well as image_index: this job holds id-token and attestations: write, so it runs
+    # no script to derive the image it names, and reads it from targets' output - which `needs`
+    # carries only to a job that names targets directly.
+    needs: [image_index, targets]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     # id-token: write is the OIDC token Sigstore issues the signing certificate for; attestations:
@@ -392,7 +427,7 @@ jobs:
     steps:
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-name: ghcr.io/sjawhar/legion/envoy
+          subject-name: ${{ needs.targets.outputs.envoy_image }}
           subject-digest: ${{ needs.image_index.outputs.digest }}
 
   # agent-secrets (packages/envoy/cmd/agent-secrets) and the host helper
@@ -424,6 +459,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       skip: ${{ steps.version.outputs.skip }}
+      notes: ${{ steps.notes.outputs.notes }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -439,6 +475,32 @@ jobs:
         run: |
           # shellcheck disable=SC2086 # $LEGION_ENVOY_VERSION_ARGS is the argument list, split on purpose
           .github/scripts/release-push.sh version legion-envoy-v $LEGION_ENVOY_VERSION_ARGS >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/install-changie
+        if: steps.version.outputs.skip != 'true'
+      # This release's own changelog entries, which release_publish writes into the GitHub
+      # release's body. A fragment stays under packages/envoy/.changes/unreleased/ after the
+      # release that ships it, so fold-notes renders the ones this release's own commits first
+      # added, which are the ones its tag will hold. A release no fragment belongs to renders no
+      # file, and the `notes` line fold-notes prints says which of the two it was, since
+      # release_publish cannot look into the artifact before it downloads it.
+      - name: Render this release's changelog entries
+        id: notes
+        if: steps.version.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          .github/scripts/release-push.sh fold-notes "$VERSION" \
+            "$RUNNER_TEMP/release-notes.md" packages/envoy legion-envoy-v >> "$GITHUB_OUTPUT"
+      # The entries, exactly as rendered, for release_publish; a release with none uploads
+      # nothing at all. The name must not start with `legion-envoy-`, as the image digests' must
+      # not (image_index above): release_publish downloads `pattern: legion-envoy-*` into the
+      # release's assets, and release-push.sh handed refuses anything there but the archives.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.version.outputs.skip != 'true' && steps.notes.outputs.notes == 'true'
+        with:
+          name: envoy-release-notes
+          path: ${{ runner.temp }}/release-notes.md
+          if-no-files-found: error
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         if: steps.version.outputs.skip != 'true'
         with:
@@ -525,10 +587,16 @@ jobs:
     # any other branch publishes its `envoy:<sha>` image above and stops there. `latest` moves
     # whatever release_build did; the release steps run only on its success and once "Confirm the
     # version" finds no other run took the version.
-    needs: [build, image_index, release_build]
+    # targets too: this job holds contents: write, the deploy key and the rest, so it runs no
+    # script to derive the image it tags and reads back, and takes it from targets' output, which
+    # `needs` carries only to a job naming targets directly.
+    needs: [build, image_index, release_build, targets]
+    # On `always()`, so a skipped release_build does not skip this job; every job whose outputs
+    # the steps below read has its result tested, targets' among them.
     if: >-
       always() && github.ref == 'refs/heads/main' &&
-      needs.build.result == 'success' && needs.image_index.result == 'success'
+      needs.build.result == 'success' && needs.image_index.result == 'success' &&
+      needs.targets.result == 'success'
     concurrency:
       # One run at a time, and every run's turn comes: `queue: max` keeps up to 100 jobs pending
       # in the group, first in, first out, where the default keeps one and cancels it for the
@@ -570,7 +638,10 @@ jobs:
       - name: Determine latest
         id: latest
         env:
-          IMAGE: ghcr.io/sjawhar/legion/envoy
+          # The image targets derived from $GITHUB_REPOSITORY. This job holds contents: write,
+          # the deploy key and the rest, so it runs no script to derive it for itself
+          # (.github/scripts/check-release-credentials.sh).
+          IMAGE: ${{ needs.targets.outputs.envoy_image }}
           OWN_DIGEST: ${{ needs.image_index.outputs.digest }}
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -608,9 +679,15 @@ jobs:
               latest_has_revision=$(printf '%s\n' "$latest_manifest" | jq -r '(.annotations // {}) | has("org.opencontainers.image.revision")')
               latest_sha=$(printf '%s\n' "$latest_manifest" | jq -r '(.annotations // {})["org.opencontainers.image.revision"] // empty')
 
-              # Resolve the one legacy unannotated latest tag through its GHCR package-version metadata.
+              # Resolve the one legacy unannotated latest tag through its GHCR package-version
+              # metadata. The package is the image without its registry and owner
+              # (ghcr.io/<owner>/ -> <name>/envoy), whose remaining slash is percent-encoded
+              # because the package name is one segment of the API's path; taken from $IMAGE so
+              # that this lookup moves with the repository as the tag above does.
               if [ "$latest_has_revision" = false ]; then
-                if ! legacy_source=$(gh api "users/$GITHUB_REPOSITORY_OWNER/packages/container/legion%2Fenvoy/versions?per_page=100" --paginate --jq '.[] | select(.metadata.container.tags | index("latest")) | [.name, (.metadata.container.tags[] | select(test("^[0-9a-f]{40}$")))] | @tsv'); then
+                package=${IMAGE#"ghcr.io/$GITHUB_REPOSITORY_OWNER/"}
+                package=${package//\//%2F}
+                if ! legacy_source=$(gh api "users/$GITHUB_REPOSITORY_OWNER/packages/container/$package/versions?per_page=100" --paginate --jq '.[] | select(.metadata.container.tags | index("latest")) | [.name, (.metadata.container.tags[] | select(test("^[0-9a-f]{40}$")))] | @tsv'); then
                   echo "::error title=Cannot establish latest provenance::Unable to resolve legacy latest through GHCR."
                   exit 1
                 fi
@@ -686,7 +763,9 @@ jobs:
       - name: Advance latest image
         if: steps.latest.outputs.should_tag_latest == 'true'
         env:
-          IMAGE: ghcr.io/sjawhar/legion/envoy
+          # targets' derivation again, for the same reason as "Determine latest" above: the
+          # `latest` tag must move on the image this run's index was pushed to.
+          IMAGE: ${{ needs.targets.outputs.envoy_image }}
           SHA: ${{ steps.latest.outputs.latest_sha }}
           DIGEST: ${{ steps.latest.outputs.latest_digest }}
         run: |
@@ -794,21 +873,18 @@ jobs:
       - name: Tag release
         if: steps.confirm.outputs.release == 'true'
         env:
+          VERSION: ${{ needs.release_build.outputs.version }}
           TAG: ${{ steps.assets.outputs.tag }}
           DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
         run: |
-          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-            test "$(git rev-list -n 1 "$TAG")" = "$GITHUB_SHA"
-            exit 0
-          fi
-          git tag "$TAG"
+          .github/scripts/release-push.sh tag "$VERSION" "$TAG"
           .github/scripts/release-push.sh push-tag "$TAG"
       # Build provenance for the host binaries a mise pin installs, linux or darwin, which the
       # release below uploads exactly. `--repo` alone accepts an archive any workflow of this
       # repository attested, so the check pins the signer as docs/kubernetes.md ("Pin by digest,
       # never by tag") does:
-      #   gh attestation verify agent-secrets-<asset>.tar.gz --repo sjawhar/legion \
-      #     --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/main \
+      #   gh attestation verify agent-secrets-<asset>.tar.gz --repo cybermonklabs/legion \
+      #     --cert-identity https://github.com/cybermonklabs/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/main \
       #     --source-ref refs/heads/main --deny-self-hosted-runners
       # and adds `--source-digest <the legion-envoy-v<version> tag's commit>` to pin the commit as well.
       # It runs after "Tag release", so a run whose tag step refuses (the tag already names another
@@ -818,6 +894,7 @@ jobs:
         with:
           subject-path: ${{ steps.assets.outputs.subjects }}
       - name: Create or update GitHub release
+        id: release
         if: steps.confirm.outputs.release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -833,3 +910,23 @@ jobs:
           .github/scripts/release-push.sh release --upload-to-published \
             --notes "Envoy listener release — Go binary + Docker image, plus agent-secrets and agent-secrets-helper host binaries." \
             "$TAG" "$TAG" "${assets[@]}"
+      # The entries release_build rendered from this release's fragments, under the runner's
+      # temporary directory, outside the checkout.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        id: notes
+        if: steps.release.outcome == 'success' && needs.release_build.outputs.notes == 'true'
+        with:
+          name: envoy-release-notes
+          path: ${{ runner.temp }}/release-notes
+      # release_build's entries become the release body's one "## Changelog" section, below the
+      # fixed sentence above. release-section replaces a section that heading already holds, and
+      # says there why the write is a replace and not an append. The artifact holds the one file
+      # fold-notes wrote, under the name the build job gave it.
+      - name: Write the changelog into the release body
+        if: steps.notes.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.assets.outputs.tag }}
+        run: |
+          .github/scripts/release-push.sh release-section "$TAG" '## Changelog' \
+            "$RUNNER_TEMP/release-notes/release-notes.md"

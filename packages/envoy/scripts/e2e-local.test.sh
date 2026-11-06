@@ -91,8 +91,6 @@ expect_occupied_refusal E2E_NATS_PORT 'the NATS server this script started ended
 printf 'PASS: refuses to run against a NATS server it did not start (E2E_NATS_PORT in use)\n'
 expect_occupied_refusal E2E_PORT 'the listener this script started ended before it was listening.'
 printf 'PASS: an E2E_PORT already in use fails with address already in use\n'
-expect_occupied_refusal E2E_SESSION_PORT 'the fake session did not report its port.'
-printf 'PASS: an E2E_SESSION_PORT already in use fails with address already in use\n'
 
 # A second run in the same checkout shares the first's out/e2e: its evidence, its logs and its
 # JetStream store. Only the claim on out/e2e refuses it: the second run is refused on that lock

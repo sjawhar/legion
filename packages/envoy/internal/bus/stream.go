@@ -42,6 +42,13 @@ const (
 	SessionBucket = "envoy_sessions"
 	// CIStateBucket holds the CI state of each commit of a pull request (internal/cistore).
 	CIStateBucket = "envoy_ci_state"
+	// DPoPProofBucket holds one record per RFC 9449 proof a listener has already spent, keyed by
+	// the proof's 'jti' and target URI, so a captured proof presented a second time inside its
+	// acceptance window is refused by whichever listener of a deployment receives it
+	// (cmd/listener/brokerauth.go). Its records are the only ones Envoy keeps on a bucket TTL
+	// alone: nothing reads a record back, and a key that has outlived the window its proof could
+	// be presented in says nothing, so each key expires rather than being deleted.
+	DPoPProofBucket = "envoy_dpop_proofs"
 	// WebhookRedeliveryBucket holds the cursor and records of Dispatch's sweep of the GitHub App
 	// webhook's failed deliveries (internal/dispatch/redeliver).
 	WebhookRedeliveryBucket = "envoy_webhook_redelivery"
@@ -49,13 +56,14 @@ const (
 
 // ListenerBuckets reports the KV buckets envoy-listener opens, in the order its NATS grant lists
 // them: the interest and role-claim buckets (internal/store), the session registry
-// (internal/session), and the CI state bucket, which only a listener with the GitHub webhook route
-// opens (internal/cistore). The listener's keeper raises each of them (WithKeptBuckets), and
-// envoy-infra grants the listener and the host each one's calls
+// (internal/session), the CI state bucket, which only a listener with the GitHub webhook route
+// opens (internal/cistore), and the spent-proof bucket, which only a listener that takes broker
+// access tokens opens (cmd/listener/brokerauth.go). The listener's keeper raises each of them
+// (WithKeptBuckets), and envoy-infra grants the listener and the host each one's calls
 // (packages/envoy/infra/core/permissions.go), so a bucket named here is both kept and granted.
 // Each call returns a fresh slice, so no caller changes another's list.
 func ListenerBuckets() []string {
-	return []string{InterestBucket, RoleClaimBucket, SessionBucket, CIStateBucket}
+	return []string{InterestBucket, RoleClaimBucket, SessionBucket, CIStateBucket, DPoPProofBucket}
 }
 
 // NotificationTopicPrefix begins every notification topic: the subjects the stream carries, the
@@ -65,6 +73,15 @@ const NotificationTopicPrefix = "notifications."
 // ExceptionTopicPrefix begins a delivery's exception lane: a failed or refused delivery is reported
 // on ExceptionTopicPrefix followed by its original topic.
 const ExceptionTopicPrefix = NotificationTopicPrefix + "envoy.exceptions."
+
+// LegionWakeTopic is the one topic the listener reports a wake of a released Legion issue pod
+// on: a message published to a role topic with no live holder, a message sent to the agent
+// subject of a session that is gone, and the listener's own `listener_ready`. It is a new leaf
+// under notifications.legion.>, which the stream already carries, so it is retained with no
+// stream change and no new grant. Only the listener sees these, and it does not know which
+// daemon owns a session: every Legion daemon consumes the topic on a durable of its own and acts
+// only on a released claim of its own project.
+const LegionWakeTopic = NotificationTopicPrefix + "legion.wake"
 
 // DispatchDeliveryDurable is the stream's durable consumer Dispatch's delivery intake binds, over
 // every GitHub notification (internal/dispatch/delivery).
@@ -107,14 +124,33 @@ func DeliverSubject(sessionID string) string {
 	return DeliverSubjectPrefix + sessionID
 }
 
-// ListenerLiveQueue is the queue group the listener of machine machineID subscribes its live lane in
-// (every notifications topic, over core NATS), so NATS hands each message to one of the machine's
-// listeners while a rolling deploy runs two. It must differ from ListenerQueue: NATS merges
-// matching queue subscriptions by queue name across subjects and hands each message to one member,
-// so a live lane in the role lanes' group could take a role message its role lane never sees. A
-// space in the machine id is a hyphen in the name.
-func ListenerLiveQueue(machineID string) string {
-	return "envoy-listener-live-" + strings.ReplaceAll(machineID, " ", "-")
+// KeptTopicPrefix begins the listener's kept lane: the role messages it kept because it could not
+// deliver them and the drain cursors over them (cmd/listener/role_keep.go). The listener alone
+// publishes under it and reads it, no session may register a topic under it
+// (ReachesPrivateStreamSubject), and no consumer of the notification stream delivers one: the
+// stream carries the prefix (streamCarriedSubjects) where no consumer filter does
+// (StreamSubjects).
+const KeptTopicPrefix = NotificationTopicPrefix + "envoy.kept."
+
+// KeptRoleSubjectPrefix begins the kept lane of every role (KeptRoleSubject): what a reader of all
+// of them filters the stream's subjects on and reads each role's own token back out of
+// (Client.KeptRoleLanes).
+const KeptRoleSubjectPrefix = KeptTopicPrefix + "role."
+
+// KeptRoleSubject is the kept lane of role: the role messages the listener could not deliver, each
+// held until the role is claimed and then forwarded to the new holder. The role name is written
+// into the segment as contracts.RoleTopicPrefix writes it, unsanitized, so a role's kept subject
+// follows from its role topic.
+func KeptRoleSubject(role string) string {
+	return KeptRoleSubjectPrefix + role
+}
+
+// KeptRoleCursorSubject is the drain cursor of role: how far the listener has read that role's
+// kept lane, so a kept message already forwarded is not forwarded again. The role name is written
+// into the segment as contracts.RoleTopicPrefix writes it, unsanitized, so a role's cursor subject
+// follows from its role topic.
+func KeptRoleCursorSubject(role string) string {
+	return KeptTopicPrefix + "cursor." + role
 }
 
 // streamDuplicateWindow covers the entire retained notification lifetime, so
@@ -131,6 +167,9 @@ func ListenerLiveQueue(machineID string) string {
 // is generated.
 const streamDuplicateWindow = contracts.DeliveryDuplicateWindow
 
+// streamSubjects are the notification subjects the stream carries, and the list every consumer
+// filter over them takes (StreamSubjects). The stream carries one subject more, the listener's own
+// kept lane (streamCarriedSubjects).
 var streamSubjects = []string{
 	"notifications.agent.>",
 	"notifications.dispatch.>",
@@ -145,7 +184,15 @@ var streamSubjects = []string{
 	ExceptionTopicPrefix + contracts.AgentTopicPrefix + ">",
 }
 
-// Every subject of streamSubjects is classified for POST /v1/replay (cmd/listener/replay.go) by
+// streamCarriedSubjects is every subject the stream itself carries: the notification subjects and
+// the listener's kept lane, the role messages it could not deliver and the per-role drain cursors
+// over them. That prefix is the stream's alone and no consumer filter takes it: a kept copy still
+// carries its role topic in the envelope, so a consumer handed one would deliver it as a role
+// message and re-trigger role delivery on every listener. The listener reads the lane itself
+// instead (cmd/listener/role_keep.go).
+var streamCarriedSubjects = slices.Concat(streamSubjects, []string{KeptTopicPrefix + ">"})
+
+// Every subject of streamCarriedSubjects is classified for POST /v1/replay (cmd/listener/replay.go) by
 // whether a topic under it ever carries one agent session's private payload, read from the code
 // that publishes it. A shared subject's topics are replayed to any session that registered them as
 // interests; a private subject's never are, since a registered interest is any topic a caller
@@ -180,6 +227,10 @@ var (
 		// A failed delivery's report, carrying the undelivered message's payload and the session it
 		// was for (cmd/listener publishDeliveryException); a session's own lane included.
 		ExceptionTopicPrefix + contracts.AgentTopicPrefix + ">",
+		// A role message the listener could not deliver, carrying that message's payload and the
+		// holder it was meant for, and the per-role drain cursor over them: no session may
+		// register a topic under it and no replay hands one out.
+		KeptTopicPrefix + ">",
 	}
 )
 
@@ -204,9 +255,18 @@ func ReachesPrivateStreamSubject(sessionID, topic string) bool {
 	return topic != contracts.AgentSubject(sessionID) || strings.ContainsAny(sessionID, "*>")
 }
 
-// StreamSubjects reports the durable notification subjects, excluding role lanes.
+// StreamSubjects reports the notification subjects the stream carries, excluding the role lanes
+// and the listener's kept lane: the list every consumer filter built over the notification
+// subjects uses. The stream's own list, which carries the kept lane too, is StreamCarriedSubjects.
 func StreamSubjects() []string {
 	return slices.Clone(streamSubjects)
+}
+
+// StreamCarriedSubjects reports every subject the stream itself carries (streamCarriedSubjects):
+// the notification subjects and the listener's kept lane. A caller that builds or checks the
+// stream takes it, where a consumer's filter takes StreamSubjects.
+func StreamCarriedSubjects() []string {
+	return slices.Clone(streamCarriedSubjects)
 }
 
 // StreamCaptures reports whether the stream retains a publish to topic: some subject this binary
@@ -216,7 +276,7 @@ func StreamSubjects() []string {
 // literally: a `*` or `>` in it is a character of the topic, not a wildcard, which is what nats.go
 // publishes it as.
 func StreamCaptures(topic string) bool {
-	for _, subject := range streamSubjects {
+	for _, subject := range streamCarriedSubjects {
 		prefix := strings.TrimSuffix(subject, ">")
 		if len(topic) > len(prefix) && strings.HasPrefix(topic, prefix) {
 			return true
@@ -237,7 +297,7 @@ func StreamCaptures(topic string) bool {
 // and the bus sends it once more without the id (ErrNotStored).
 var streamCfg = &nats.StreamConfig{
 	Name:       Stream,
-	Subjects:   streamSubjects,
+	Subjects:   streamCarriedSubjects,
 	Retention:  nats.LimitsPolicy,
 	MaxAge:     streamDuplicateWindow,
 	Duplicates: streamDuplicateWindow,
@@ -271,6 +331,16 @@ func purgeLegacyRoleMessages(js nats.JetStreamContext) error {
 	return nil
 }
 
+// consumerFilterSubjects is subjects without the listener's kept lane, the list a consumer's
+// filter may carry: the stream's own list holds the kept prefix (streamCarriedSubjects) and no
+// consumer filter ever does, since a kept copy still carries its role topic and a consumer handed
+// one would deliver it as a role message, and a drain cursor is no envelope at all.
+func consumerFilterSubjects(subjects []string) []string {
+	return slices.DeleteFunc(slices.Clone(subjects), func(subject string) bool {
+		return subjectsOverlap(subject, KeptTopicPrefix+">")
+	})
+}
+
 func migrateLegacyConsumerFilters(js nats.JetStreamContext, subjects []string) error {
 	for name := range js.ConsumerNames(Stream) {
 		info, err := js.ConsumerInfo(Stream, name)
@@ -282,7 +352,7 @@ func migrateLegacyConsumerFilters(js nats.JetStreamContext, subjects []string) e
 		}
 		config := info.Config
 		config.FilterSubject = ""
-		config.FilterSubjects = slices.Clone(subjects)
+		config.FilterSubjects = consumerFilterSubjects(subjects)
 		if _, err := js.UpdateConsumer(Stream, &config); err != nil {
 			return err
 		}

@@ -1,7 +1,222 @@
 # Changelog
 
+This file is history: every entry after the last release below is in the package's GitHub
+releases, one per `pi-legion-v*` tag.
+
 `@sjawhar/pi-legion` was split from `@sjawhar/pi-legion-envoy` 7.x (LEGION-247). Every release
 before the split, and the Envoy plugin's releases after it, are in `packages/pi-envoy/CHANGELOG.md`.
+
+## [18.14.1] - 2026-11-06
+
+### Changed
+
+- A retro learning cites a file and a symbol, or text quoted from the file at the head it commits, instead of a line number, and the claim rule in the shared role-prompt core asks for the same.
+
+## [18.14.0] - 2026-11-06
+
+### Changed
+
+- The Legion worker skill tells a role to read a shared database through the deployment's read-only login, the URL in the file `SESSION_READER_DSN_FILE` names, never through the session URL the file `OMP_SESSION_SQL_DSN_FILE` names, and to keep the read-only setting inside one transaction rather than on the connection, where a pooled server leaves it for the pool's next client. The claim that the session login can create and drop databases is gone with it, and the reference is now reached by a trigger a role about to read a transcript matches.
+
+## [18.13.1] - 2026-11-06
+
+### Changed
+
+- Every role that pushes an issue branch now reads the pull request head after its push and pushes a new commit when the head is not the commit it pushed, so the commit that is tested, reviewed and merged is the one that was pushed.
+
+## [18.9.0] - 2026-11-05
+
+### Changed
+
+- The plugin declares daemon API contract 49, which adds each issue's tree memory draw to the
+  state. A daemon below 49 is refused by the boot gate, as it is for every contract change.
+
+### Fixed
+
+- A pod whose plugin is one daemon contract behind no longer loses every `legion` tool call to one field the daemon added: the reader this plugin bundles ignores a key it does not name. Every worker and architect is also told, beside the update task it already reads, not to retry a `legion` call its plugin refused because the daemon's answer is not the shape it reads: it pushes what it wants kept and ends the turn, and a turn answering an update task still calls `ready_for_update` with the round the task named, when its tool has that operation, before it ends.
+
+## [18.8.0] - 2026-11-05
+
+### Changed
+
+- The worker guide tells a worker that an issue pod runs no heavy build and no whole test suite: in the pod it compiles and vets what its change touches, builds the program a check drives and runs Postgres-backed tests by name, while a whole module's or whole package's run goes to CI on the pull request or where the deployment's instructions say. The skill's own table sends a worker there before such a run rather than after one fails.
+
+## [18.7.0] - 2026-11-05
+
+### Fixed
+
+- The Legion plugin's Dispatch client, its listener publisher and the production-Dispatch reader
+  of `scripts/skill-scenarios/` present the one credential a resolved section carries rather than
+  a bearer string, so they work on a machine whose Dispatch token is the secrets broker's
+  DPoP-bound access token instead of being refused with a bare `401`. `handoff_complete` reports
+  through that credential too, under the session the pane is acting as: it used to read the
+  resolution's bearer field, which is empty on the broker's route, and failed on every such pane.
+
+## [18.6.0] - 2026-11-05
+
+### Changed
+
+- Eight guidance rules, each closing one measured way a defect or a silent failure reached
+  review. `ce-simplify-code` now covers every file of its scope — documentation, workflow and
+  configuration files as much as code — runs on a scope with no code at all, and reports a
+  defect it sees with its file and line rather than dropping it as out of scope; its three
+  reviewer personas say the same, and its verification step runs only when a fix was applied.
+  `legion-worker`'s `pr-body.md` says a check that cannot fail is not a result and that a
+  documented procedure counts only when it ran, carries the class search in the forward-merge
+  re-check line, and records what the simplify pass reported in the `Thermo` line; its
+  `SKILL.md` has two roles wait rather than proceed, a planner on a decision the plan itself
+  needs and a reviewer on a half of the round with no review; `conflicts-and-rewrites.md` says
+  the unchanged-diff fingerprint cannot show an instance the merge brought in from the base;
+  `merge-gate.md` makes a review result with no report a failed run, refuses an approval while
+  a half of the round has no review, and points at the merger's prompt part for the causes of
+  `READY_UNREVIEWED_CHANGE`, as `legion-retro` now does too; `legion-architect`'s
+  `acceptance.md` adds the class search to the architect's reading of a forward-merge re-check.
+  The two thermonuclear agents open their result with the verdict and the findings and name no
+  other place the report lives; `deep-worker`, `plan-gap-analyst`, `plan-reviewer` and both
+  thermonuclear agents say how to read a piped command's status and never to pipe a write into
+  a pager; the three agents that may write, and both thermonuclear skills, say to make scratch
+  with `mktemp -d` and never to delete by a glob in the `$TMPDIR` every role of an issue
+  shares.
+
+## [18.5.0] - 2026-11-05
+
+### Added
+
+- Every claimed Oh My Pi session tells the Legion daemon what it is doing — whether it runs
+  background work, and for a phase worker when its next phase reminder is due — at each turn's
+  end and whenever the reading changes. That is what lets the daemon release an issue pod no
+  role of which has a turn in progress or a turn due, and bring it back on the next wake.
+
+## [18.4.0] - 2026-11-05
+
+### Changed
+
+- The controller reads the whole Slack thread of a mention posted inside one, with Slack's
+  `conversations.replies` through the secrets broker's client, before it decides what the person
+  wants: the paging loop to five pages, de-duplication by `ts`, the success test, and whose words
+  make a request. A mention that adopts an earlier message's request files an issue whose
+  `Filed for` line names both messages. The worker, controller and architect skills point at the
+  new `agent-secrets` skill instead of restating the client's rules.
+  They name `skill://agent-secrets`, so they need a `@sjawhar/pi-envoy` that ships that skill.
+
+## [18.3.0] - 2026-11-04
+
+### Changed
+
+- The package `repository.url`, which is the repository link on its npm page, names `cybermonklabs/legion`.
+
+## [18.2.0] - 2026-11-04
+
+### Changed
+
+- A phase worker's stall reminder to an architect role nobody holds asks Envoy to keep nothing
+  (`keep: false`), so the listener answers it `404` and the next reminder of the worker's own
+  endless run tries again. The reminder is a notice whose latest copy is the one that matters, and
+  the worker already retries it, so a copy Envoy kept would be delivered stale, or dropped an hour
+  later with nobody told.
+
+## [18.1.0] - 2026-11-04
+
+### Changed
+
+- A Legion phase records what it saw as a result against a check of the issue's Verification document, with `dispatch result`, in place of the six-field proof a handoff carried and the two `E2E` lines of the pull-request body, which is now one line per check.
+  The reviewer approves only when every before-merge check has a passing result that is current at the head it reviews, and the architect's acceptance names each check with its result.
+  The planner writes its plan's tasks as `plan_task` blocks, runs the plan review without a round limit, sends a repeated finding to the architect, and records the plan's approval with `dispatch plan-approve`.
+  Retro commits nothing: its findings are a comment on the issue.
+
+## [18.0.0] - 2026-11-03
+
+### Added
+
+- The controller skill handles the Go daemon's `parked-decision` notice and walks the parked roots
+  and their children at its start and on each `tick`. It re-admits a root it parked for a hold of
+  its own, a park it marks with a comment that begins `Parked by Legion while it waits on:`, when a
+  person's decision after the park gives its work a next step. It leaves every other park, a
+  person's, another session's or an operator's `legion status`, for whoever made it to set to
+  `todo`, and answers a person's question on its ask
+  (`skill://legion-controller/references/parked-decisions.md`).
+
+### Changed
+
+- The skill-scenario rig starts its Envoy listener without `ENVOY_HOST_BRIDGE`, which the listener no longer reads.
+
+## [17.6.2] - 2026-11-03
+
+### Fixed
+
+- The `legion-controller` skill's escalation reference says what happens to unpushed work when the
+  daemon replaces an issue's pod. Before the replacement, the daemon checks every workspace on the
+  pod's disk, a failed claim's included, and pushes what the remote lacks to a rescue branch,
+  `legion/<KEY>-rescue-<pod>-<n>`, which the issue is told of. When that check fails, the pod is
+  not replaced, and the `update-stalled` wake's `reason` names the claim, the workspace and the
+  error. The controller opens a finding ask for it, as for a replacement the cluster refuses. A
+  worker the controller prompts is told to put any scratch evidence it still needs on Dispatch
+  before it answers.
+
+## [17.5.1] - 2026-11-03
+
+### Changed
+
+- The architect's design-gate reference names a second version that keeps the approval: one
+  whose text is exactly the text of the version a person approved, with no decision block in it
+  decided since, such as an accidental edit undone exactly. Dispatch records the approval at that
+  version and emits `artifact.approved`, so the daemon reopens the gate. The reference tells the
+  architect to undo an accidental edit of an approved root spec exactly, to request nothing when
+  the spec then reads Approved, and to request approval again when it does not.
+
+## [17.2.0] - 2026-11-03
+
+### Added
+
+- The `legion` tool's `ready_for_update` operation, for a phase worker and for an architect: it
+  answers the daemon's update task on the issue's pod. The plugin reads the head of
+  `legion/<issue>@origin` with the pane's own jj and sends it with the answer, and leaves it out
+  when the branch is not on the remote. The operation ends no phase, and the turn it answered in
+  is not continued by a phase reminder: after the answer the worker waits, and no reminder
+  follows, because the daemon is what wakes it. The daemon replaces the pod only once every
+  worker of that pod has answered, and holds the worker's next task until its process comes back
+  on the new pod in the same session, where its workspace is provisioned afresh from the issue's
+  pushed branch.
+  `legion.daemonApiVersion` is 46.
+
+## [17.0.0] - 2026-11-02
+
+### Added
+
+- **Breaking:** daemon API contract 45: a phase handoff is a record on the issue's Dispatch issue,
+  no longer a file committed under `.legion/<issue>/` on its branch. The `legion` tool's
+  `handoff_complete` for a planning, implementing, testing or reviewing phase reports the phase's
+  Dispatch handoff record, `handoffId` and `handoffVersion`: the newest record of the phase's word
+  (`plan`, `implement`, `test`, `review`), read from the Dispatch the pane's `dispatch` command
+  reaches, which the daemon reads back and holds to the issue, the phase, the version and the
+  claim's session. A phase with no record is refused naming `dispatch handoff-write`, and a
+  Dispatch that does not answer is refused with its answer. The implementer also reports its
+  pushed tip, the commit `legion/<issue>@origin` names, and is refused, naming the push, when `@-`
+  is not on that branch yet; retro and the merger's READY report `@-`. No committed `.legion/`
+  handoff file is looked up. Install this release with a `legion` built from the same commit, in
+  this order (docs/kubernetes.md, "Moving the handoffs onto their Dispatch issues"): deploy the
+  Dispatch server that carries the handoff routes first, then run `legion handoffs import` while
+  the old daemon still runs, then roll out the daemon and the plugins, then run the import again,
+  which catches a file an old worker pushed in between, until no line asks for another run and
+  none says `kept`.
+  A handoff record carries no `completed` time and no `previousHandoff`: Dispatch records when it
+  was written, and its version names the record before it. A reviewer's still carries
+  `headReviewed`.
+- The skills this plugin ships teach the handoff record: a worker writes its phase's handoff with
+  `dispatch handoff-write --issue <KEY> --phase <phase> --body-file <file>` and reads the previous
+  role's with `dispatch handoff-read`, at the version its task's `Handoff:` line names
+  (`--version <n>`), rather than committing and pushing `.legion/<issue>/<phase>.json`. The
+  `LEGION_WORKSPACE_RECREATED` notice tells a worker whose workspace was recreated to re-read the
+  last handoff recorded on its issue with `dispatch handoff-read --issue <KEY> --phase <phase>`,
+  since Dispatch keeps it whatever the workspace lost.
+
+### Removed
+
+- The handoff commit checks go with the committed handoff: `handoff_complete` no longer requires
+  that the commit carrying the handoff was authored by the identity the daemon put on the pane,
+  `JJ_USER`/`JJ_EMAIL` (the App-identity check). The skills drop the commit trailer that kept a
+  commit of handoffs alone from starting CI, and retro's removal of `.legion/<issue>/` from the
+  branch; the `legion-worker` reference on that trailer is deleted.
 
 ## [16.1.0] - 2026-11-01
 

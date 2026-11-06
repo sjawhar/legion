@@ -308,6 +308,82 @@ func TestEnsureRepositoryCacheCreatesSuspendedWritesTheSecretThenSetsRunning(t *
 	}
 }
 
+// The cache pod takes its tokens from files the kubelet keeps current (INFRA-1254).
+// refreshCacheTokens rewrites the cache's Secret every minute, and the kubelet rewrites the files
+// of a Secret volume in place when that Secret changes — but only for a volume mounted whole: a
+// mount with a non-empty subPath is copied once when the container starts and never written
+// again, and a value taken through an environment secretKeyRef or an envFrom is fixed for the
+// container's life. So the refresher's write reaches the running process only while three things
+// hold, which this test pins: the cache container's mount of the provisioning volume carries an
+// empty SubPath, that volume is the whole cache Secret with its two items (the provisioning token
+// and the bearer token its clients present), and no container is handed either token in its
+// environment — each is read from its projected file (LEGION_PROVISION_TOKEN_FILE,
+// LEGION_REPOSITORY_CACHE_TOKEN_FILE). Undo any one of them and the refresh becomes nothing: the
+// pod keeps serving the token it started with until it is replaced.
+func TestTheCachePodProjectsItsTokenSoTheKubeletKeepsItCurrent(t *testing.T) {
+	name := CacheSandboxName(testProject, cacheRepo)
+	spec := bareRuntime(t).cacheManifest(cacheRepo).Spec.PodTemplate.Spec
+	cache := containerNamed(t, spec, cacheContainer)
+
+	var mounts []corev1.VolumeMount
+	for _, m := range cache.VolumeMounts {
+		if m.Name == provisionVolume {
+			mounts = append(mounts, m)
+		}
+	}
+	if len(mounts) != 1 {
+		t.Fatalf("%s mounts the %s volume %d times (%+v), want once", cacheContainer, provisionVolume, len(mounts), mounts)
+	}
+	if m := mounts[0]; m.SubPath != "" || m.MountPath != ProvisionDir {
+		t.Errorf("%s mounts %s at %q with subPath %q, want the whole volume at %q with no subPath: the kubelet rewrites a whole-volume Secret projection in place when the Secret changes and never a subPath copy, so the refresher's write would not reach the file",
+			cacheContainer, provisionVolume, m.MountPath, m.SubPath, ProvisionDir)
+	}
+
+	volume := slices.IndexFunc(spec.Volumes, func(v corev1.Volume) bool { return v.Name == provisionVolume })
+	if volume < 0 {
+		t.Fatalf("the cache pod has no %s volume, only %+v", provisionVolume, spec.Volumes)
+	}
+	secret := spec.Volumes[volume].Secret
+	if secret == nil || secret.SecretName != cacheSecretName(name) {
+		t.Fatalf("the %s volume is %+v, want the cache Secret %s whole", provisionVolume, spec.Volumes[volume], cacheSecretName(name))
+	}
+	var items []string
+	for _, item := range secret.Items {
+		items = append(items, item.Key+" at "+item.Path)
+	}
+	want := []string{provisionTokenKey + " at " + provisionTokenKey, cacheTokenKey + " at " + cacheTokenKey}
+	if !slices.Equal(items, want) {
+		t.Errorf("the %s volume projects %q, want %q", provisionVolume, items, want)
+	}
+
+	for _, c := range slices.Concat(spec.InitContainers, spec.Containers) {
+		for _, v := range c.Env {
+			if v.ValueFrom == nil || v.ValueFrom.SecretKeyRef == nil {
+				continue
+			}
+			ref := v.ValueFrom.SecretKeyRef
+			if ref.Key == provisionTokenKey || ref.Key == cacheTokenKey || v.Name == provisionTokenKey || v.Name == cacheTokenKey {
+				t.Errorf("%s is handed %s from the Secret %s key %s; want the token's file alone, since an environment value is fixed for the container's life and no refresh reaches it",
+					c.Name, v.Name, ref.Name, ref.Key)
+			}
+		}
+		for _, from := range c.EnvFrom {
+			if from.SecretRef != nil {
+				t.Errorf("%s takes envFrom the Secret %s, which carries %s and %s; want the tokens' files alone, since an environment value is fixed for the container's life",
+					c.Name, from.SecretRef.Name, provisionTokenKey, cacheTokenKey)
+			}
+		}
+	}
+
+	env := envOf(cache)
+	if file := ProvisionDir + "/" + provisionTokenKey; env["LEGION_PROVISION_TOKEN_FILE"] != file {
+		t.Errorf("LEGION_PROVISION_TOKEN_FILE = %q, want the projected file %q", env["LEGION_PROVISION_TOKEN_FILE"], file)
+	}
+	if file := ProvisionDir + "/" + cacheTokenKey; env[repocache.CacheTokenFileEnv] != file {
+		t.Errorf("%s = %q, want the projected file %q", repocache.CacheTokenFileEnv, env[repocache.CacheTokenFileEnv], file)
+	}
+}
+
 // The name of one repository's cache held by another repository's cache is a refusal naming both,
 // and nothing is written.
 func TestEnsureRepositoryCacheRefusesAnotherRepositorysCacheAtTheName(t *testing.T) {
@@ -336,7 +412,7 @@ func TestEnsureRepositoryCacheReplacesADriftedPodKeepingTheSandbox(t *testing.T)
 		resized bool
 		suspend bool
 	}{
-		{"a pod on another image", modeRunning, cachePod(cacheRepo, "uid-pod-old", "uid-cache", "ghcr.io/sjawhar/legion-worker@sha256:0ld", corev1.PodRunning), false, true},
+		{"a pod on another image", modeRunning, cachePod(cacheRepo, "uid-pod-old", "uid-cache", "ghcr.io/cybermonklabs/legion-worker@sha256:0ld", corev1.PodRunning), false, true},
 		{"a failed pod", modeRunning, cachePod(cacheRepo, "uid-pod-old", "uid-cache", testImage, corev1.PodFailed), false, true},
 		{"a template reserving another cpu", modeRunning, cachePod(cacheRepo, "uid-pod-old", "uid-cache", testImage, corev1.PodRunning), true, true},
 		{"a template reserving another cpu, with no pod", modeRunning, nil, true, true},
@@ -787,7 +863,7 @@ func TestReconcileOrphansKeepsAMappedCacheAndRetiresAnUnmappedOne(t *testing.T) 
 		return s != nil && s.Annotations[annotationCacheUnmappedAt] == ""
 	})
 
-	g.update(g.pod(name), func(p *corev1.Pod) { p.Spec.Containers[0].Image = "ghcr.io/sjawhar/legion-worker@sha256:0ld" })
+	g.update(g.pod(name), func(p *corev1.Pod) { p.Spec.Containers[0].Image = "ghcr.io/cybermonklabs/legion-worker@sha256:0ld" })
 	g.eventually("the drifted pod in the store", func() bool {
 		_, drifted := imageDrift(g.r.storedPod(name), testImage)
 		return drifted

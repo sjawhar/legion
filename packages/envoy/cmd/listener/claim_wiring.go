@@ -9,30 +9,26 @@ import (
 // subscribeBody is the POST /v1/interests/subscribe payload sent by each
 // agent session's envoy extension, on subscribe and on every heartbeat.
 type subscribeBody struct {
-	SessionID    string   `json:"session_id"`
-	Dir          string   `json:"dir"`
-	Topics       []string `json:"topics"`
-	Port         int      `json:"port"`
-	Title        string   `json:"title"`
-	Capabilities []string `json:"capabilities"`
-	// Driving reports that this process is the one actually driving the session,
-	// rather than a process that merely has it loaded from shared on-disk state.
-	// Absent (older plugins) means "not driving", which is the safe default: a
-	// claim without the flag cannot displace a live driving claim.
-	Driving        bool `json:"driving"`
-	SelfSubscribed bool `json:"self_subscribed"`
+	SessionID string   `json:"session_id"`
+	Dir       string   `json:"dir"`
+	Topics    []string `json:"topics"`
+	// Port is the session's own HTTP serving port, parsed so that a registration carrying one
+	// above 0 can be refused by name (subscribeHandler): this listener delivers nothing to a
+	// port, and storing such a registration would leave its session waiting for messages
+	// nothing sends. A session receives from its own consumer, or on its own NATS subscription.
+	Port           int      `json:"port"`
+	Title          string   `json:"title"`
+	Capabilities   []string `json:"capabilities"`
+	SelfSubscribed bool     `json:"self_subscribed"`
 	// Host is envoy-client's machineID() (ENVOY_MACHINE_ID, falling back to the kernel
 	// hostname): where the session process actually runs, as opposed to machineID below,
-	// which is always the registering listener's own machine (unrelated to the caller). It is the
-	// address the session's owning listener reaches its serving port at, unless the session runs
-	// on that listener's machine (it registered through it, or Host is that listener's machine
-	// id) and the listener has a host bridge (ENVOY_HOST_BRIDGE), which then wins. The owner is
-	// the listener the session's stored subscription names (the one
-	// store.Registry.Match delivers on), else the one it registered through; only the owner
-	// delivers to the session, and any other listener leaves inbox messages to it silently
-	// (session.ErrWrongMachine). Empty for a session whose plugin predates
-	// this field; its owning listener then falls back to host.docker.internal when the session
-	// registered through it, else to the machine id of the listener it registered through.
+	// which is always the registering listener's own machine (unrelated to the caller). No
+	// delivery reads it: an inbox message is the owner's to deliver - the listener the session's
+	// stored subscription names (the one store.Registry.Match delivers on), which this
+	// registration moves to the listener answering it (store's mergeForUpsert), and any other
+	// listener leaves such a message to it silently - and it reaches the session from its own
+	// consumer, relayed by that listener, or on the session's own NATS subscription, wherever
+	// its process runs. Empty for a session whose plugin predates this field.
 	Host string `json:"host"`
 	// Plugin and PluginVersion name the plugin the session registers through (its npm package
 	// name) and that plugin's build, so the session list shows which build each session runs.
@@ -65,23 +61,25 @@ type subscribeDelivery struct {
 
 // subscribeResume is a session's resume point: the stream's identity (bus.StreamIDMetadataKey) and
 // a sequence below which the plugin holds nothing unwritten, so a consumer created from it starts at
-// Seq+1 when StreamID is still the stream's.
+// Seq+1 when StreamID is still the stream's. A Seq of 0 is a position too: the plugin holds nothing
+// of the stream, and its consumer starts at sequence 1. Seq is nil when the body carries no seq,
+// which names no position, so the consumer starts at the stream's end.
 type subscribeResume struct {
-	StreamID string `json:"stream_id"`
-	Seq      uint64 `json:"seq"`
+	StreamID string  `json:"stream_id"`
+	Seq      *uint64 `json:"seq"`
 }
 
 // sessionEntryFromSubscribe is the session entry a registration writes: the body's fields, the
 // registering listener's machine id, and, when delivery says the listener holds the session's
 // consumer for it, consumer delivery, the plugin's epoch and the sequence that consumer starts at.
+// The entry's Port is left 0: a registration naming one is refused before it reaches here
+// (subscribeHandler).
 func sessionEntryFromSubscribe(body subscribeBody, machineID string, delivery sessionDeliveryOutcome) session.SessionEntry {
 	entry := session.SessionEntry{
-		Port:             body.Port,
 		MachineID:        machineID,
 		Dir:              body.Dir,
 		Title:            body.Title,
 		Capabilities:     append([]string{}, body.Capabilities...),
-		Driving:          body.Driving,
 		SelfSubscribed:   body.SelfSubscribed,
 		Host:             body.Host,
 		Plugin:           strings.TrimSpace(body.Plugin),

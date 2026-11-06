@@ -1,72 +1,5 @@
 # Envoy diagnostic scripts
 
-## probe-webhook-e2e.sh
-
-On-demand end-to-end probe for the GitHub webhook → Envoy session delivery
-path. Run it any time you suspect webhooks aren't reaching subscribed
-sessions (e.g., agents subscribed to `notifications.github.<owner>.<repo>.pr.<n>.checks`
-not seeing settled CI events).
-
-### Usage
-
-```bash
-WEBHOOK_URL=https://your-ingress.example.com/webhook/github \
-  packages/envoy/scripts/probe-webhook-e2e.sh
-```
-
-Required env:
-
-- `WEBHOOK_URL` — the public ingress that fronts the webhook receiver Envoy
-  publishes from. **No default** — supply your deployment's URL.
-
-Run from a host with:
-
-- A local Envoy listener reachable at `http://127.0.0.1:9020` (override with
-  `LISTENER_URL=...`).
-- SOPS-decryptable access to `ENVOY_GITHUB_WEBHOOK_SECRET` (the same secret
-  the receiver verifies against). The probe reads it via
-  `packages/envoy/deploy/scripts/read-secret.sh`.
-
-### Exit codes
-
-| Code | Meaning |
-|------|---------|
-| 0 | The synthetic webhook was delivered to a live session via the full pipeline. |
-| 1 | Webhook ingress accepted the payload but the on-prem listener never delivered it (the bridge is broken). |
-| 2 | Webhook ingress rejected the request (signature mismatch, malformed, or 5xx). |
-| 3 | Local listener unreachable or subscribe call failed at startup. (Cleanup unsubscribe failures are tolerated by the cleanup trap and do not flip the exit code.) |
-| 4 | Required tool missing on the host (`curl`, `openssl`, `python3`, `jq`, or `read-secret.sh`). |
-
-### Diagnosing failures
-
-- **Exit 1 (most common):** the receiver published to its NATS but the
-  on-prem listener never saw it. Check `docker logs envoy-listener --since 1m`
-  on the on-prem host for any `received` line containing the probe's trigger
-  string. If absent, the event never made it from receiver-side NATS to the
-  listener — the bridge between them is broken.
-- **Exit 2:** the receiver itself rejects the request. Verify
-  `ENVOY_GITHUB_WEBHOOK_SECRET` matches what the receiver has in its secret
-  store. Confirm the URL with `curl -i $WEBHOOK_URL/../healthz` if there's a
-  health endpoint.
-- **Exit 3:** the local listener is down or on a different port. Check
-  `curl http://127.0.0.1:9020/healthz` and the running container
-  (`docker ps | grep envoy-listener`).
-- **Exit 4:** install the missing tool.
-
-### Why the topic is `notifications.github.legion-probe.canary.issue.1.comment`
-
-The `legion-probe/canary` repo does not exist on GitHub — that's intentional.
-The probe sends a fake `issue_comment` event with that owner/repo, the
-receiver normalizes the envelope topic from the payload (it does not call
-the GitHub API to validate the resource), and the topic flows through
-exactly the same code path real events do. Using a synthetic owner/repo
-guarantees no real subscriber will ever match the probe traffic.
-
-### Tuning
-
-- `TIMEOUT_SECONDS=60 ...` — wait longer (default 30s).
-- `LISTENER_URL=http://other-host:9020 ...` — point at a different on-prem listener.
-
 ## e2e-local.sh
 
 Runs the local listener against a throwaway NATS server it builds and runs
@@ -74,16 +7,23 @@ itself (`internal/testnats/cmd/natsd`), so it needs no container runtime. It
 posts signed public GitHub fixtures and a three-paragraph direct message,
 checks the one-warning response for a never-seen GitHub repository, reads the
 registered session back by id from `/v1/registry/<session_id>` and an id that
-never registered as `404 {"error":"no live session <id>"}`, rejects an unheld
-role publish before claiming it for the fake session, captures the raw
-notification envelopes, and proves both the Go prompt text and the shared
-TypeScript renderer print the full direct message once, with no separate
-summary line repeating its first line.
+never registered as `404 {"error":"no live session <id>; this listener does
+not know when it last registered","state":"gone"}` — dispatch://INFRA-392 puts
+the state the refusal was decided on beside the kept `no live session <id>`
+prefix, with a `last_seen` only when this listener still remembers a
+registration, and, when it remembers none, those words in its place rather
+than a missing field, so a sender can tell a session this listener watched
+reach the gone horizon from one it has never heard of — rejects an unheld
+role publish before claiming it for a stand-in session that takes every
+delivery from its own NATS consumer, refuses a registration naming a port,
+captures the raw notification envelopes, and proves that the shared TypeScript
+renderer prints the full direct message once, with no separate summary line
+repeating its first line.
 
 It also proves the three answers a sender gets when a send cannot be delivered:
 a send to a session the store does not hold is refused `404 {"error":"no live
-session <id>"}`; each send leaves exactly one `listener send` record in
-`listener.log`, INFO when accepted and WARN when refused, carrying
+session <id>","state":"gone"}`; each send leaves exactly one `listener send`
+record in `listener.log`, INFO when accepted and WARN when refused, carrying
 `target_session`, `event_id`, `source`, `source_session`, `payload_summary`,
 `outcome` and `status`; and a send whose bus is gone is refused `503` with
 `{"error":"envoy: the message bus did not answer: …"}` and `Retry-After: 1`
@@ -99,9 +39,8 @@ packages/envoy/scripts/e2e-local.sh
 The run writes its reusable evidence to `packages/envoy/out/e2e/`:
 
 - `envelopes.jsonl` — raw NATS envelope frames
-- `session-prompts.jsonl` — raw fake-session `prompt_async` requests
+- `session-frames.jsonl` — the envelopes the session took from its own consumer
 - `rendered-ts.txt` — `renderInbound` output for every envelope
-- `rendered-go.txt` — the corresponding Go `Deliverer.Text` output
 - `listener.log` — the listener's own log, including one record per send and publish
 - `absent-session-response.json` — the 404 body naming the session nothing registered
 - `bus-down-send-response.json`, `bus-down-send-headers.txt`,
@@ -109,15 +48,88 @@ The run writes its reusable evidence to `packages/envoy/out/e2e/`:
   status and `time_total`
 - `bus-down-client-error.json` — the `EnvoySendUnconfirmedError` the real client raised for it
 
-The OS chooses the NATS, listener and fake-session ports, and each URL is built
-from the port its own process reports. `E2E_NATS_PORT`, `E2E_PORT` or
-`E2E_SESSION_PORT` sets a port explicitly: it is used as given, and one already
-in use fails the run with `address already in use`. The NATS server is a
-process of this checkout's own build, stopped on exit with the listener and the
-two fake clients. Unlike
-`probe-webhook-e2e.sh`, it has no deployment URL or secret prerequisite: it
-validates local branch behavior only. CI runs it as the `envoy-e2e-local` job of
+The OS chooses the NATS and listener ports, and each URL is built from the port
+its own process reports. `E2E_NATS_PORT` or `E2E_PORT` sets a port explicitly:
+it is used as given, and one already in use fails the run with `address already
+in use`. The session opens no port: it registers with none, which a listener
+now refuses above 0, and takes its messages from its own NATS consumer. The
+NATS server is a process of this checkout's own build, stopped on exit with the
+listener and the two fake clients. CI runs it as the `envoy-e2e-local` job of
 `.github/workflows/ci.yaml` on every change its `envoy_e2e_local` filter matches.
+
+## e2e-refill.sh
+
+Proves on the real listener and a NATS server of its own (`internal/testnats/cmd/natsd`, its file
+store under the output directory) that the listener keeps its copy of a bucket while it reads the
+bucket again, and that its two list routes refuse, with no active-sessions sample, while it cannot
+stand behind that copy (INFRA-261). `internal/testnats/cmd/refillrig` does the work a shell cannot
+do quickly: it seeds the session and interest buckets, through the listener's
+`POST /v1/interests/subscribe` and straight into the buckets, deletes and recreates a bucket,
+polls `GET /v1/sessions`, `GET /v1/interests/` and `/metrics` as fast as they answer, and judges
+each scenario from those polls beside the listener's own log lines.
+
+```bash
+packages/envoy/scripts/e2e-refill.sh [--scenario reread|interrupt|refuse|recreate-live|all]
+```
+
+The listener's watcher reads its bucket's stream every 2 s, so it finds a recreated bucket itself
+and starts the read of the new bucket at once. The `reread` and `interrupt` scenarios observe that
+read of a whole bucket, so the rig stops the listener (`SIGSTOP`) while it deletes, creates and
+fills the bucket, and continues it once the bucket is full, just after a tick of the listener's
+30 s self-health monitor, so no tick falls while the listener is stopped.
+
+- `reread`: registers 3,000 `old` and 3,000 `both` sessions, then recreates the session bucket
+  holding `both` with changed titles and 3,000 `new`, the interest bucket the same way with changed
+  topics, and the session bucket again with the very records it holds (only its creation time
+  changes). Each new bucket carries 100,000 delete markers among its records, so the read outlasts
+  many list answers. Every `old` and `both` row must be listed until the read's completed
+  `cache warm-up` line, a delivered row never goes back, and the list is exactly the bucket after
+  it.
+- `interrupt`: on a 41,000-record session bucket, stops NATS the moment the read of the new bucket
+  begins (its `bucket was recreated; its cache is re-read` line), either with `SIGSTOP` until the
+  scan times out (or the watcher ends) and then `SIGCONT`, or with `SIGKILL` and a restart
+  (`--interrupt-by stop|restart`, both by default). Nothing may be removed until a later read,
+  which the listener starts itself, completes and sweeps; the verdict names which incomplete
+  outcome the log shows.
+- `recreate-live`: recreates the session bucket under a running listener, 26 to 28 s before a
+  self-health tick, so the tick cannot be what reads it, in two shapes: an old stream shorter than
+  the new one, and one longer (the old bucket's records written three times). The old bucket has a
+  60 s `MaxAge` (the listener adopts a bucket's), 1,000 `same` and 1,000 `chg` sessions, and `hb`,
+  whose old record expires 3.5 s after the recreate; the new one holds `same` unchanged, `chg` with
+  changed titles, 1,000 `new` and `hb` renewed. The recreate lands between two of the watcher's
+  stream probes, and NATS is stopped for 4 s from the watcher's `bucket was recreated under its
+  watcher` line, so `hb`'s old record expires after the copy stopped following and before the read
+  delivers its renewal. Each shape passes when the watcher logs that finding and completes the read
+  of the new bucket before the tick, with no self-health failure or rebuild; every `GET
+  /v1/sessions` answer lists every record of the old copy, `hb` included, until the read completes;
+  none answered before a line says the copy stopped following lists records only the new bucket has
+  while lacking others it held (a consumer nats.go moved onto the new stream resumes past the
+  sequences the old one covered); and once the read and the fill are done the list is exactly the
+  new bucket. A listener that finds a recreate only by the self-health tick's `Check` fails both
+  shapes: the longer one shows nothing of the new bucket before the tick, the shorter one part of
+  it. `refillrig recreate -fill-log` records when each record of the fill was acknowledged, so a
+  read that begins before the fill is done is judged against what the bucket held.
+- `refuse`: a start on 40,000-record buckets, where every list answer is the refilling `503` with
+  `Retry-After: 5` or the whole bucket and no gauge has a sample while its list refuses; NATS down
+  past the 2-minute stale bound, where both lists answer the refilling `503` and `/metrics` has
+  neither gauge's sample, then a complete `200` within 30 s of NATS's return with both gauges equal
+  to the lists; and empty buckets, which answer `200 []` and `0` samples. The outage waits out the
+  real bound, which the listener has no setting for, so the scenario takes about four minutes.
+  `--during-refuse <command>` runs while both lists refuse and `--after-refuse <command>` once they
+  are whole again, each with `bash -c`, `ENVOY_URL` and `REFILL_RIG_ROLE`, `REFILL_RIG_HOLDER` (a
+  registered session whose topics make it that role's holder), `REFILL_RIG_SESSIONS` and
+  `REFILL_RIG_DIR` exported, so another client (an MCP host, Dispatch) is checked in the same
+  window; their output is in `refuse/during-refuse.log` and `refuse/after-refuse.log`.
+
+Each scenario prints `verdict <scenario> PASS <what it saw>`, `FAIL <reason>`, or
+`INVALID <reason>` when the run missed the window it was there to observe (no poll inside the read,
+a scan that finished before the interruption, a read that began before the bucket was filled, a
+self-health tick inside the read of `recreate-live`), which is never a pass. It exits 0 when every
+verdict passes, 1 on a `FAIL`, and 4 on an `INVALID` with no `FAIL`. `--listener-bin` and
+`--natsd-bin` run other builds, such as the merge base's for a negative control. The evidence (each
+scenario's listener and NATS logs and every poll, one JSON line each) goes to `--out` (default
+`$TMPDIR/envoy-e2e-refill`). `E2E_REFILL_NATS_PORT` (14232) and `E2E_REFILL_PORT` (19030) move the
+ports. A full run takes about ten minutes, so it is a manual proof, not a CI job.
 
 ## listener-deploy-probe.sh
 
@@ -194,6 +206,17 @@ A listener from before LEGION-456 keeps `/v1` closed until its durable binds,
 so during a rolling deploy the replacement answers `/healthz` 200 `starting`
 and `/v1` 503 `service starting` for most of a minute and the run exits 1. A
 listener that opens `/v1` once its caches are warm passes.
+
+The refilling answer is another cause. A listener answers `GET /v1/sessions`
+`503` with `Retry-After: 5` and code `refilling` (`503:envoy: the agent list is
+refilling; try again in a moment` in the summary) while it cannot stand behind
+its copy of the session or interest bucket: before its first complete read of
+the bucket (its closed `/v1` start gate gives this route the same answer, and a
+cache warm-up that timed out opens `/v1` on a copy still being read), or once a
+re-read has not completed for longer than its bound (2 minutes, or half the
+bucket's `MaxAge` when that is shorter). Its `/healthz` answers 200 all the
+while, so the target fails: a client that reached it then was refused the list
+(INFRA-261).
 
 `listener-deploy-probe.test.sh` proves the verdict over two fake tasks, one
 Python process per case serving `127.0.0.1` and `127.0.0.2` on one port the
@@ -287,3 +310,121 @@ p95 and max over 20 runs for the text of the issue `DISPATCH_RECALL_LATENCY_ISSU
 cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<test database> DISPATCH_RECALL_CORPUS="$TMPDIR/recall.jsonl" \
   go test ./internal/dispatch/api -run 'TestRelatedRecallOnDuplicates|TestRelatedCheckLatencyOnRecallCorpus' -v -count=1 -timeout 60m
 ```
+
+## Measuring Dispatch's statements and its write routes on the seeded database
+
+These are INFRA-325's own measurements: every changed statement's plan and time (A8), and the
+median wall time of the six write routes the new triggers slow (A9). Both run against the seeded
+measurement database `cmd/dispatch-seed` fills, never against a test database and never against
+production. `DISPATCH_BENCH_DATABASE_URL` is the one gate: CI leaves it unset, so CI runs no
+measurement.
+
+### The statement timings
+
+`internal/dispatch/benchtime` is the runner, and each package that owns statement texts carries
+its own `statement_timing_test.go`, all named `TestStatementTimings`: `internal/dispatch/api`,
+`internal/dispatch/refs` and `internal/dispatch/docs`.
+`Pair` takes a named pair of statement texts with their arguments, runs `EXPLAIN (ANALYZE, BUFFERS)` of each alternately on one connection, reports planning plus execution as the median of runs 2 to 12, prints both plans and fails when the after text's median is not below the before text's.
+`Report` is that same two-sided reading with no bound, for a statement whose gain is real but smaller than the run-to-run spread of the parts it shares a statement with: the gate then sits on the piece whose text differs, as a pair of its own.
+The runner records the server settings it found and the subjects it bound (the largest project, its most heavily linked issue, the most anchored document, five sessions, an embedding and three words), each read from the database at run time, so a re-seed moves them with it.
+
+```bash
+cd packages/envoy && DISPATCH_BENCH_DATABASE_URL=<seeded database> \
+  go test -run TestStatementTimings -v -count=1 -timeout 90m \
+  ./internal/dispatch/api ./internal/dispatch/refs ./internal/dispatch/docs
+```
+
+A statement whose gain needs an index or a table a migration of this release adds has no such pair, because one schema cannot hold both sides of it.
+`Before` and `After` measure one side of such a statement alone, with its plan and no bound, each line naming the side it read: the after side on a database at this release's schema, the before side on one migrated from the release before it.
+Running this same test against each of the two databases is what puts the two sides together.
+Each test file says which statement is under which protocol and why.
+
+`TestRelatedTermsRefreshTiming`, in `internal/dispatch/api`, measures the related-terms refresh,
+which has no statement pair: it times one whole pass of the release before this one, one whole
+pass of this build with no change, and eleven rounds each preceded by a hundred item writes
+outside the timed part, and reports the median of the eleven. It writes 1,100 items to the
+database it measures and leaves them there, so run it after the statement timings.
+
+```bash
+cd packages/envoy && DISPATCH_BENCH_DATABASE_URL=<seeded database> \
+  go test -run TestRelatedTermsRefreshTiming -v -count=1 -timeout 90m ./internal/dispatch/api
+```
+
+### The write routes
+
+`route-timings.sh` times the six write routes against one running server: the median wall time of
+50 requests to each of `POST /api/v1/issues/{key}/comments`, `.../asks`, `.../messages`,
+`.../artifacts` under a name that already exists, that same upload over a 100-660 KB document,
+and `PATCH /api/v1/issues/{key}` with a title alone. It prints one tab-separated line per route -
+the label, the route, the median in milliseconds and every reading - so a reader sees the spread.
+
+The caller gives it the base URL and the issue key, so one command measures the base server and
+the head server, and the plan's three base-and-head pairs are a loop:
+
+```bash
+for round in 1 2 3; do
+  packages/envoy/scripts/route-timings.sh --url "$BASE_URL" --issue SEED1-1 --label "base-$round" >>runs.tsv
+  packages/envoy/scripts/route-timings.sh --url "$HEAD_URL" --issue SEED1-1 --label "head-$round" >>runs.tsv
+done
+packages/envoy/scripts/route-timings.sh --summarise runs.tsv
+```
+
+`--summarise` prints each route's runs, the highest base run - what a rise is judged against,
+since a rise inside the spread of the base runs is no rise - and each head run against it.
+`DISPATCH_USER` names the caller (default `bench`), and the server must take it as a human
+identity. The script writes 50 comments, 50 asks, 50 messages, 100 document versions and 50 title
+edits for every run, which is what A9 measures: run it after the statement timings, and re-seed
+before anything reads a row count again. `--requests`, `--body-bytes`, `--artifact` and
+`--large-artifact` are the knobs; `--help` lists them.
+
+## going-smoke.sh
+
+Proves, on a booted server, that the real `envoy-dispatch` binary answers a question over HTTP and
+streams it. It builds `./cmd/dispatch`, starts the fake chat-completions model it serves itself,
+boots the binary against `DATABASE_URL` with `DISPATCH_ANSWERER=endpoint` pointed at that model,
+reads `GET /api/v1/going/capability` and refuses anything but `{"model_configured":true}`, seeds a
+project and an issue whose own text is worth citing through the API as the identity header's
+person, asks a question of that issue over `POST /api/v1/going/requests` and prints the run's id
+and `ends_at`, then prints every frame of `GET /api/v1/going/requests/{id}/stream` as
+`<elapsed ms> <event> <data>` as it arrives, so two builds' runs diff, with the first `text`
+frame's arrival on a line of its own. It ends `going-smoke: OK` only when the stream carried at
+least one `text` frame, exactly one `item` frame naming the seeded issue and exactly one terminal
+frame, and the first `text` frame arrived before the stream ended; any refusal names what was
+missing and prints the server's and the model's logs. It needs `curl`, `jq`, `python3`, `openssl`
+and `psql`, and names the one it cannot find.
+
+No cloud model is called: the model is a fake the script starts. It serves TLS, because
+`DISPATCH_CHAT_ENDPOINT` is an absolute https URL with a host and no query or fragment
+(`cmd/dispatch/answerer.go`, `chatEndpoint`), so the run makes a self-signed certificate for
+`127.0.0.1` with the IP in a subject alternative name, serves it from a small `python3` server and
+hands the binary `SSL_CERT_FILE`, which Go's `crypto/x509` reads — no setting of Dispatch's own is
+bent to admit a plain-http endpoint. The fake answers a streamed completion that links the seeded
+issue by the href the server gave it, in several frames with a pause between them, and refuses any
+call that does not present the bearer `DISPATCH_CHAT_TOKEN_FILE` holds, so a run that reports OK is
+one whose token file reached the call. The server runs with a throwaway `HOME`, a made-up agent
+token and a trusted identity header, so it reads no operator configuration and holds no credential,
+and with NATS off. `DATABASE_URL` names the Postgres server rather than one database: the run makes
+a database of its own on it, which the binary migrates as every start does, and drops it at the end.
+
+```bash
+legion-testpg ensure
+cd packages/envoy && DATABASE_URL="$LEGION_TEST_PG_DSN" bash scripts/going-smoke.sh
+```
+
+Options:
+
+- `--binary <envoy-dispatch>` — run this binary instead of building `./cmd/dispatch` from this
+  checkout.
+- `--model-status <code>` — answer every call to the fake model with that status instead of a
+  completion. `--model-status 401` is one negative control: the stream carries
+  `error ANSWER_FAILED` and nothing else, and the run exits 1 naming the frames it did not get.
+- `--no-model` — boot the server with `DISPATCH_ANSWERER` unset and no `DISPATCH_CHAT_*` setting.
+  That is the other negative control: the capability route answers `{"model_configured":false}`
+  and the run exits 1 naming it.
+
+No CI job runs this one, and none should: it builds the binary, boots a server, serves TLS and
+reads an answer as it streams, which takes a machine with a Postgres server and the better part of
+a minute, and what it proves is that a reader gets an answer on a real deployment's own path — a
+thing a person reads rather than a status a job reports. Run it by hand, or as the role proving a
+change to `going/`, to the answerer settings in `cmd/dispatch`, or to the three `going` routes, and
+paste its output: the frame lines are the evidence.

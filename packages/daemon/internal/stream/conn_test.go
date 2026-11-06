@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -732,6 +733,60 @@ func TestAdoptWorkingCopyAsksTheShimAndReadsItsResult(t *testing.T) {
 
 	if err := conn.AdoptWorkingCopy(context.Background(), runtime.GitIdentity{}, time.Second); err == nil {
 		t.Fatal("AdoptWorkingCopy sent a frame with no identity")
+	}
+}
+
+// The push check is a request the shim answers itself, with one entry per workspace; a shim built
+// before it forwards the frame to its agent, whose refusal is runtime.ErrRescueUnsupported, and a
+// shim that answers and could not run the check is a refusal like any other.
+func TestRescueUnpushedAsksTheShimAndTellsAnOldShimApart(t *testing.T) {
+	h := startListener(t, harnessOptions{})
+	p := h.connect(testToken)
+	conn := h.conn()
+	request := runtime.RescueRequest{Branch: "legion/LEGION-484-rescue-9d3f0c7a", WorkspaceTimeout: 2 * time.Second, Timeout: 3 * time.Second}
+	var report []runtime.WorkspaceRescue
+	ask := func() <-chan error {
+		return async(func() (err error) {
+			report, err = conn.RescueUnpushed(context.Background(), request)
+			return err
+		})
+	}
+
+	result := ask()
+	frame := p.expect(shimwire.TypeRescueUnpushed).(shimwire.RescueUnpushed)
+	if frame.Branch != request.Branch || frame.WorkspaceTimeoutMs != 2000 || frame.TimeoutMs != 3000 || frame.ID == "" {
+		t.Fatalf("rescue-unpushed frame = %#v", frame)
+	}
+	p.send(shimwire.RescueUnpushedResult{ID: frame.ID, OK: true, Workspaces: []shimwire.RescueWorkspace{
+		{Dir: "/legion/workspaces/acme/widgets/legion-484", Status: "rescued", Branches: []shimwire.RescueBranch{{Name: request.Branch + "-1", Commit: "c0ffee"}}},
+	}})
+	if err := awaitResult(t, result); err != nil {
+		t.Fatalf("RescueUnpushed: %v", err)
+	}
+	want := []runtime.WorkspaceRescue{{Dir: "/legion/workspaces/acme/widgets/legion-484", Status: runtime.RescueRescued,
+		Branches: []runtime.RescuedBranch{{Name: request.Branch + "-1", Commit: "c0ffee"}}}}
+	if fmt.Sprint(report) != fmt.Sprint(want) {
+		t.Fatalf("report = %+v, want %+v", report, want)
+	}
+
+	result = ask()
+	frame = p.expect(shimwire.TypeRescueUnpushed).(shimwire.RescueUnpushed)
+	p.send(shimwire.Response{ID: frame.ID, Command: shimwire.TypeRescueUnpushed, Success: false, Error: "Unknown command: rescue-unpushed"})
+	if err := awaitResult(t, result); !errors.Is(err, runtime.ErrRescueUnsupported) {
+		t.Fatalf("RescueUnpushed answered by the agent's refusal = %v, want ErrRescueUnsupported", err)
+	}
+
+	result = ask()
+	frame = p.expect(shimwire.TypeRescueUnpushed).(shimwire.RescueUnpushed)
+	p.send(shimwire.RescueUnpushedResult{ID: frame.ID, OK: false, Error: "worker-shim: LEGION_WORKSPACE is not set; no disk to check"})
+	err := awaitResult(t, result)
+	var refused *RefusedError
+	if !errors.As(err, &refused) || errors.Is(err, runtime.ErrRescueUnsupported) || !strings.Contains(refused.Reason, "LEGION_WORKSPACE") {
+		t.Fatalf("RescueUnpushed refused by the shim = %v, want a RefusedError carrying its reason", err)
+	}
+
+	if _, err := conn.RescueUnpushed(context.Background(), runtime.RescueRequest{Branch: "main", WorkspaceTimeout: time.Second, Timeout: time.Second}); !errors.Is(err, shimwire.ErrMalformedFrame) {
+		t.Fatalf("RescueUnpushed for a branch outside legion/ = %v, want the frame's own refusal", err)
 	}
 }
 

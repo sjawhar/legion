@@ -294,11 +294,7 @@ func TestTheProvisioningCredentialAnswersOnlyGitHub(t *testing.T) {
 			fill := exec.Command("git", "credential", "fill")
 			fill.Dir = repository
 			fill.Stdin = strings.NewReader("url=" + tc.url + "\n\n")
-			for _, entry := range os.Environ() {
-				if !strings.HasPrefix(entry, "GIT_") {
-					fill.Env = append(fill.Env, entry)
-				}
-			}
+			fill.Env = setupEnvironment()
 			fill.Env = append(fill.Env, "GIT_CONFIG_GLOBAL="+global, "GIT_CONFIG_NOSYSTEM=1")
 			fill.Env = append(fill.Env, credential.env...)
 			out, err := fill.Output()

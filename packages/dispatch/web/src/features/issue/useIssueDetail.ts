@@ -2,7 +2,7 @@ import { itemFromSearch } from "@legion/contracts";
 import { useQuery } from "@tanstack/react-query";
 import { useLocation } from "react-router-dom";
 
-import { primarySpec } from "../../api/issue-cache";
+import { primarySpec, roleDocument } from "../../api/issue-cache";
 import { issueQuery, userStateQuery } from "../../api/queries";
 import { type IssueRoute, isPrimaryDocumentArtifactRoute, issueTabForRoute } from "../refs/routes";
 import { firstHighlightTerm } from "../search/search-model";
@@ -18,6 +18,8 @@ export function useIssueDetail(route: IssueRoute) {
   const highlightTerm = firstHighlightTerm(query.get("q") ?? "");
   const issue = useQuery(issueQuery(route.key));
   const state = useQuery(userStateQuery());
+  const planArtifact = roleDocument(issue.data, "plan");
+  const verificationArtifact = roleDocument(issue.data, "verification");
   const primaryArtifact = primarySpec(issue.data);
   const selectedArtifact =
     artifactRouteSlug === undefined
@@ -39,8 +41,10 @@ export function useIssueDetail(route: IssueRoute) {
     isPrimaryArtifactRoute,
     highlightTerm,
     issue,
+    planArtifact,
     primaryArtifact,
     selectedArtifact,
     state,
+    verificationArtifact,
   };
 }

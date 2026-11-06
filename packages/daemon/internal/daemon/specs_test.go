@@ -13,6 +13,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -258,7 +259,7 @@ func TestTheControllersLaunchIsItsHeadlessPromptAndNoCheckout(t *testing.T) {
 			t.Error("the controller's launch asked for a repository")
 			return ghrepo.MustParse("acme/widgets"), "main", nil
 		},
-		identity: func(context.Context, claim.Role, string) (runtime.GitIdentity, error) {
+		identity: func(context.Context, claim.Role, ghrepo.Repository) (runtime.GitIdentity, error) {
 			t.Error("the controller's launch asked for a git identity")
 			return runtime.GitIdentity{}, nil
 		},
@@ -499,14 +500,13 @@ func TestSpawnSpecCarriesTheStallLimitsTheDaemonHolds(t *testing.T) {
 	for name, value := range held {
 		t.Setenv(name, value)
 	}
-	// The fourth is one this daemon does not hold: t.Setenv first, so the shell's own value, if it
-	// had one, is restored after the test.
-	t.Setenv("LEGION_STALL_ARCHITECT_AFTER", "restored-by-cleanup")
-	os.Unsetenv("LEGION_STALL_ARCHITECT_AFTER")
+	// The fourth is one this daemon does not hold: fixtureenv.Unset takes it out of this process
+	// and puts the shell's own value, if it had one, back after the test.
+	fixtureenv.Unset(t, "LEGION_STALL_ARCHITECT_AFTER")
 
 	bot := runtime.GitIdentity{Name: "legion-implement[bot]", Email: "9+legion-implement[bot]@users.noreply.github.com"}
 	s := specs{stateDir: t.TempDir(), project: "s1", prompts: composer, repositories: noRepositoriesView,
-		identity: func(context.Context, claim.Role, string) (runtime.GitIdentity, error) { return bot, nil }}
+		identity: func(context.Context, claim.Role, ghrepo.Repository) (runtime.GitIdentity, error) { return bot, nil }}
 	token, err := claim.NewToken("s1", "S1-2", claim.RoleImplementer)
 	if err != nil {
 		t.Fatal(err)

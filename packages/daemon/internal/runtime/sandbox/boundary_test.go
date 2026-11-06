@@ -31,6 +31,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/testbin"
@@ -44,11 +45,12 @@ import (
 // readable, and nothing planted outlives the pod whose disk it is on.
 //
 // What the boundary protects is identity, not a repository-write token kept off the issue's disk:
-// an implement role now holds the implement App's token — the same lease as the
-// provisioning token — read-only in its own gh directory (GHConfigDir), and a review role the
-// review App's. What the fetch container's boundary still keeps is that no review role ever holds
-// the implement App's token, which is what lets the daemon's fix-attempt counting read a push's App
-// from the App that made it. A plant that
+// an implement role now holds the implement App's token — for the issue's owner the App's own
+// installation token, which writes, where the provisioning token is that same App narrowed to
+// reading, so the two are no longer one lease (INFRA-1254) — read-only in its own gh directory
+// (GHConfigDir), and a review role the review App's. What the fetch container's boundary still
+// keeps is that no review role ever holds the implement App's token, which is what lets the
+// daemon's fix-attempt counting read a push's App from the App that made it. A plant that
 // an agent's own git triggers after provisioning runs under that agent's role: its clone's
 // helper is `legion git-credential` (workspace.GitHubCredentialHelper), which answers from the gh
 // files of the process running it (its LEGION_GH_OWNERS_DIR and GH_CONFIG_DIR), and here, with
@@ -857,7 +859,7 @@ func newGitHubStandIn(t *testing.T, root string) *gitHubStandIn {
 	} {
 		command := exec.Command(git, argv...)
 		command.Dir = root
-		command.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+		command.Env = fixtureenv.Isolated(t.TempDir())
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("git %s: %v\n%s", strings.Join(argv, " "), err, output)
 		}
@@ -933,7 +935,7 @@ func feedTar(remote string) ([]byte, error) {
 	clone := filepath.Join(dir, "clone.git")
 	command := exec.Command("git", "clone", "--bare", "--quiet", "--no-local", remote, clone)
 	command.Dir = dir
-	command.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+	command.Env = fixtureenv.Isolated(dir)
 	if output, err := command.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("clone %s: %w\n%s", remote, err, output)
 	}

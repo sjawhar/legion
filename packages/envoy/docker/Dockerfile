@@ -6,8 +6,8 @@
 # bundler output differs across Bun releases, so a published SPA must not be built by whatever
 # 1.x is newest that day. The web stage runs the copy of that Bun, named by digest;
 # .github/scripts/check-bun-version.sh holds that row's upstream tag to .bun-version.
-# ghcr.io/sjawhar/legion/ci, the copy of oven/bun:1.4.4 (.github/ci-images.yaml)
-FROM ghcr.io/sjawhar/legion/ci@sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d1bc573bb4720b407548f1d AS web
+# ghcr.io/cybermonklabs/legion/ci, the copy of oven/bun:1.4.4 (.github/ci-images.yaml)
+FROM ghcr.io/cybermonklabs/legion/ci@sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d1bc573bb4720b407548f1d AS web
 
 WORKDIR /repo
 
@@ -32,6 +32,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 make g+
 COPY package.json bun.lock ./
 COPY patches patches
 COPY packages/contracts/package.json packages/contracts/package.json
+COPY packages/broker-client/package.json packages/broker-client/package.json
 COPY packages/envoy-client/package.json packages/envoy-client/package.json
 COPY packages/pi-envoy/package.json packages/pi-envoy/package.json
 COPY packages/pi-legion/package.json packages/pi-legion/package.json
@@ -52,8 +53,8 @@ RUN cd packages/contracts && bun run gen:go
 RUN cd packages/dispatch && bun run build:web
 
 # Go version must match go.mod.
-# ghcr.io/sjawhar/legion/ci, the copy of golang:1.27.1-alpine (.github/ci-images.yaml)
-FROM ghcr.io/sjawhar/legion/ci@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS build
+# ghcr.io/cybermonklabs/legion/ci, the copy of golang:1.27.3-alpine (.github/ci-images.yaml)
+FROM ghcr.io/cybermonklabs/legion/ci@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS build
 
 WORKDIR /src
 
@@ -76,6 +77,13 @@ COPY packages/envoy/internal ./internal
 # listenfd: the inherited listening socket envoy-dispatch and envoy-listener serve on
 # (DISPATCH_LISTEN_FD, ENVOY_LISTEN_FD).
 COPY packages/envoy/listenfd ./listenfd
+# going: the chat client, the answer filter and the run the going routes answer with, a package
+# outside internal/ so the daemon can speak the same stream (going/events.go). envoy-dispatch
+# compiles it in, so the build needs it here beside cmd and internal.
+COPY packages/envoy/going ./going
+# migrationid: the rule a store's migration identifiers follow, which internal/pgmigrate reads to
+# name the remedy a collision takes in the set that refused it.
+COPY packages/envoy/migrationid ./migrationid
 # The Go contracts file is generated from packages/contracts/schemas; never
 # trust the copy checked into the tree over a fresh regeneration.
 COPY --from=web /repo/packages/envoy/internal/contracts/generated.go ./internal/contracts/generated.go
@@ -113,10 +121,10 @@ RUN if [ -n "$LEGION_COMMIT" ] && ! printf '%s' "$LEGION_COMMIT" | grep -Eqx '[0
 
 # Minimal runtime — static binary, no shell needed.
 # curl is included for HEALTHCHECK and operational debugging.
-# ghcr.io/sjawhar/legion/ci, the copy of debian:bookworm-slim (.github/ci-images.yaml)
-FROM ghcr.io/sjawhar/legion/ci@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3
+# ghcr.io/cybermonklabs/legion/ci, the copy of debian:bookworm-slim (.github/ci-images.yaml)
+FROM ghcr.io/cybermonklabs/legion/ci@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3
 
-LABEL org.opencontainers.image.source=https://github.com/sjawhar/legion
+LABEL org.opencontainers.image.source=https://github.com/cybermonklabs/legion
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/* \
     && groupadd -r envoy && useradd -r -g envoy envoy \

@@ -3,8 +3,9 @@
 // The shape here is designed from the LEGION-208 spec's Issue record, not ported from the
 // TypeScript daemon's `packages/contracts/src/legion-daemon-api.ts` (which still carries the
 // tossed worker queue and the Dispatch/GitHub mirror). Go is the source of truth for the wire:
-// `packages/contracts/src/legion-api.ts` mirrors these types as strict zod objects and is
-// held to them by the golden fixture in `packages/contracts/fixtures/daemon-api/`.
+// `packages/contracts/src/legion-api.ts` mirrors these types as zod objects, which strip a key
+// they do not name on the answer side, and is held to them by the golden fixture in
+// `packages/contracts/fixtures/daemon-api/`.
 package api
 
 import (
@@ -247,7 +248,7 @@ type AgentSecretsLoginView struct {
 
 // MarshalJSON keeps `issues` an object and `pendingStatusWrites`, `heldOutboxRows`,
 // `strandedClaims`, `capabilities` and `consumers` arrays on the wire: a nil Go map or slice is
-// `null`, which the plugin's strict reader refuses.
+// `null`, which the plugin's reader refuses.
 func (s State) MarshalJSON() ([]byte, error) {
 	type wire State
 	out := wire(s)
@@ -285,15 +286,33 @@ type DaemonInfo struct {
 // Admission is the issue cap and the issues under it, in Dispatch rank order. Concurrency is
 // capped on issues, never on workers, so there is no worker queue here.
 type Admission struct {
-	Cap     int      `json:"cap"`
-	Active  []string `json:"active"`
+	Cap int `json:"cap"`
+	// Active is every issue holding an admission slot, a child as much as a root: the cap counts
+	// the issues at work rather than the trees (dispatch://INFRA-980), so one tree with three
+	// working children holds three of these and a tree whose every issue only waits holds none.
+	Active []string `json:"active"`
+	// Waiting is the admission line, in the line's own order: the issues whose work came back and
+	// wait for a slot before their worker is started again, oldest first, then the issues whose
+	// first phase can start, by their tree root's Dispatch rank. It carries children as well as
+	// roots, for the same reason `active` does.
 	Waiting []string `json:"waiting"`
+	// Trees is the root of every live tree the daemon judges (record.TreeLive), sorted by key: a
+	// tree whose lifecycle stands open under the workflow and does not linger, one whose root
+	// waits in the line, and one whose root waits on a person. A slot is no longer one per tree,
+	// so a running tree can hold no slot at all — its root accepting or awaiting its merge while
+	// its children work, or every issue of it waiting — and `active` alone no longer tells a
+	// reader such as the controller which trees run. Never null; empty when no tree is live.
+	Trees []string `json:"trees"`
 	// Blocked is every issue Legion is waiting to start that waits on a Dispatch issue nobody has
 	// finished (INFRA-225), by issue key: a waiting root admission skips and a child the workflow
-	// holds at `admitted`, together in one list, each with what it still waits on. Waiting is the
-	// waiting line and stays roots alone, so a blocked root is in both. Never null; empty when
-	// nothing waits on a link.
+	// holds at `admitted`, together in one list, each with what it still waits on. A blocked issue
+	// the line carries is in Waiting too. Never null; empty when nothing waits on a link.
 	Blocked []BlockedIssue `json:"blocked"`
+	// treesHidden is set on the copy the state route serves a caller whose plugin is older than
+	// the contract that added Trees (api's withoutTrees, below server.go's treeContract): that
+	// reader knows no `trees` and refuses the key as surely when it is empty as when it names a
+	// tree, so MarshalJSON leaves the key off that one body rather than writing it empty.
+	treesHidden bool
 }
 
 // BlockedIssue is one issue of Blocked and the issues it waits on that are not done. It is
@@ -301,8 +320,11 @@ type Admission struct {
 // read two ways, and the row is declared once, under both.
 type BlockedIssue = record.BlockedIssue
 
-// MarshalJSON keeps `active`, `waiting` and `blocked` arrays on the wire, empty rather than
-// `null`.
+// MarshalJSON keeps `active`, `waiting`, `trees` and `blocked` arrays on the wire, empty rather
+// than `null` — except on an admission whose trees are hidden, which carries no `trees` key at
+// all. That body is marshaled through a value whose own nil `trees` field, being `omitempty`,
+// shadows the embedded one and so is written by nothing; every other key of the block, including
+// one a later contract adds above, is still written from the one place that writes it.
 func (a Admission) MarshalJSON() ([]byte, error) {
 	type wire Admission
 	out := wire(a)
@@ -315,6 +337,16 @@ func (a Admission) MarshalJSON() ([]byte, error) {
 	if out.Blocked == nil {
 		out.Blocked = []BlockedIssue{}
 	}
+	if a.treesHidden {
+		out.Trees = nil
+		return json.Marshal(struct {
+			wire
+			Trees []string `json:"trees,omitempty"`
+		}{wire: out})
+	}
+	if out.Trees == nil {
+		out.Trees = []string{}
+	}
 	return json.Marshal(out)
 }
 
@@ -322,8 +354,18 @@ type Issue struct {
 	Key        string      `json:"key"`
 	Generation uint64      `json:"generation"`
 	Phase      phase.Phase `json:"phase"`
-	// Status is the last Dispatch status the daemon observed for the issue.
+	// Status is the status the daemon means the issue to have and writes to Dispatch
+	// (record.Issue.Status). It is not the status Dispatch shows: that is
+	// record.Issue.DispatchStatus, which this state does not carry. The two differ while a status
+	// write is queued, and go on differing where one was lost until the status repair puts it
+	// back, so a reader who wants the status Dispatch shows must read Dispatch.
 	Status string `json:"status"`
+	// Tree is the key of the root of the issue's tree, which equals Key on a root. Since a child
+	// holds a slot of its own, neither `admission.active` nor `admission.waiting` says any more
+	// which tree an issue belongs to, and a reader needs it to tell a child from a root and to
+	// find the members of a tree that lingers. Absent on an issue the workflow does not record
+	// (an operator's claim, Unrecorded), which stands in no tree.
+	Tree string `json:"tree,omitempty"`
 	// Repo is the repository (owner/name) the issue targets and DefaultBranch that repository's
 	// default branch, both taken when the daemon first recorded the issue and never changed after.
 	// Both are absent on an issue the workflow does not record (an operator's claim, Unrecorded).
@@ -347,6 +389,17 @@ type Issue struct {
 	// Check is the issue's open production check, the work after its close (record.ProductionCheck):
 	// present only while the check is open, and absent once it closed or while none was opened.
 	Check *CheckView `json:"check,omitempty"`
+	// MemoryGroup is the memory group of the issue's tree (memorygroup.Group): `memory` for a
+	// tree whose roles run with the project's memory overlays and instructions, `none` for one
+	// that runs without them, and absent while nothing has drawn for the tree — a tree first
+	// opened before the setting existed, or one the draw never reached. MemoryDrawMode is the
+	// project's memory mode in force when that group was drawn (config.MemoryMode's words) and
+	// MemoryDrawnAt when it was drawn, both absent with the group. The draw is made once, on the
+	// tree's root record, when the tree's lifecycle row is first created, and every issue of the
+	// tree shows its root's: an issue's memory group is its tree's (contract 49).
+	MemoryGroup    string     `json:"memoryGroup,omitempty"`
+	MemoryDrawMode string     `json:"memoryDrawMode,omitempty"`
+	MemoryDrawnAt  *time.Time `json:"memoryDrawnAt,omitempty"`
 }
 
 // WaitingOnView is what a root in awaiting_person waits on from a person (record.Awaiting). Kind
@@ -377,7 +430,8 @@ func (i Issue) MarshalJSON() ([]byte, error) {
 
 // ClaimView is one role claim as the record holds it: the session its agent registered as, where
 // it is in its life (`supervise.ClaimState`), its locator, and the capability report its session
-// sent with its ready (LEGION-663). The locator is the runtime's own nested shape —
+// sent on a `claims/ready` of its own while it ran (LEGION-663, INFRA-927). The locator is the
+// runtime's own nested shape —
 // `{"runtime":"tmux","claim":…,"incarnation":…,"tmux":{"window":…,"pane":…}}` or the `sandbox`
 // member for a pod — marshalled by the standard library from `runtime.Locator`; the process
 // incarnation lives there and in the capability report's `incarnation`, which is the reporting
@@ -393,6 +447,15 @@ type ClaimView struct {
 	// PluginContract is the contract the claim's current registration declared, 0 when none
 	// recorded, always emitted.
 	PluginContract int `json:"pluginContract"`
+	// UpdateRound is the update round the claim is in, and absent when none is open: the pod's
+	// drift round (`pod:<pod uid>`), which every claim of that pod shares, or the claim's own
+	// plugin round (`plugin:<daemon contract>`). Once its worker has answered, the process holding
+	// this claim is waiting to be replaced and the daemon holds the claim's next task. UpdateHead
+	// is the commit the worker reported as the head of its issue branch at origin when it answered
+	// the round, and is absent until it answers and for a worker that reported none (a planner
+	// before its first push). It is the worker's word, which nothing verifies.
+	UpdateRound string `json:"updateRound,omitempty"`
+	UpdateHead  string `json:"updateHead,omitempty"`
 }
 
 // CapabilityReportView is one session's capability report as the state shows it: when the session
@@ -542,12 +605,57 @@ type HeldOutboxRow struct {
 
 // StrandedClaim is one claim nothing will wake — a worker of its issue's phase, or its tree's
 // architect, in a tree that runs — named by its issue, its role and its state; the issue's own
-// entry under `issues` carries the rest. Its state and role say the move that brings it back
-// (Move).
+// entry under `issues` carries the rest. Its state, its role and who suspended it say the move
+// that brings it back (Move), and that suspender is no field of it: every plugin parses this
+// body with the schema of the contract it was built at, and a session whose plugin predates
+// INFRA-1048 refuses the whole state over a key it does not know — a daemon that relaunches no
+// stale session (spec R10) would break every such pod the moment a claim is stranded. A plugin
+// built after it strips the key instead, which loses the field rather than the state, and the
+// drift gate in packages/contracts names it at the next golden write. It is served on the
+// operator claim routes, which no plugin calls (OperatorClaim.SuspendedBy), so a reader hands
+// Move the suspender it holds: the daemon's own boot the claim's (SuspendersOf), `legion state`
+// the operator claim list's.
 type StrandedClaim struct {
 	Issue string     `json:"issue"`
 	Role  claim.Role `json:"role"`
 	State string     `json:"state"`
+}
+
+// Suspenders is who suspended each claim, by the key its issue and role make: the fact a
+// stranded claim's move turns on, which the state body does not carry.
+type Suspenders map[string]string
+
+// SuspendersOf is who suspended each suspended claim of stranded, as the daemon's own boot reads
+// it from the claims themselves. A failed claim carries no suspension.
+func SuspendersOf(stranded []supervise.Claim) Suspenders {
+	by := make(Suspenders, len(stranded))
+	for _, c := range stranded {
+		if c.State == supervise.StateSuspended {
+			by[strandedKey(c.Issue, c.Role)] = string(c.SuspendedBy)
+		}
+	}
+	return by
+}
+
+// SuspendersOfOperatorClaims is who suspended each claim of the operator claim list, the one
+// surface that serves it (OperatorClaim.SuspendedBy): how a reader off the daemon, `legion
+// state`, names the move of a stranded claim.
+func SuspendersOfOperatorClaims(claims []OperatorClaim) Suspenders {
+	by := make(Suspenders, len(claims))
+	for _, c := range claims {
+		by[strandedKey(c.Issue, c.Role)] = c.SuspendedBy
+	}
+	return by
+}
+
+// Of is who suspended c, "" when nobody did or when this lookup does not name it.
+func (s Suspenders) Of(c StrandedClaim) string {
+	return s[strandedKey(c.Issue, c.Role)]
+}
+
+// strandedKey names one claim of a tree in both lookups: an issue runs one claim of a role.
+func strandedKey(issue string, role claim.Role) string {
+	return issue + " " + string(role)
 }
 
 // StrandedMove is the move that brings a stranded claim back (StrandedClaim.Move). Its value is the
@@ -557,18 +665,25 @@ type StrandedMove string
 const (
 	StrandedResume           StrandedMove = "resume"
 	StrandedSuspendedWorkers StrandedMove = "suspendedWorkers"
+	StrandedReleasedNoResume StrandedMove = "releasedNoResume"
 	StrandedRetry            StrandedMove = "retry"
 	StrandedWorkflowStart    StrandedMove = "needsWorkflowStart"
 )
 
 // StrandedMoves is every move, in the order the boot's log line and `legion state` list them.
 func StrandedMoves() []StrandedMove {
-	return []StrandedMove{StrandedResume, StrandedSuspendedWorkers, StrandedRetry, StrandedWorkflowStart}
+	return []StrandedMove{StrandedResume, StrandedSuspendedWorkers, StrandedReleasedNoResume, StrandedRetry, StrandedWorkflowStart}
 }
 
-// Move is the move that brings c back, the one statement of it that the boot's log line and
-// `legion state` both group by:
+// Move is the move that brings c back, given who suspended it (Suspenders.Of, "" for a claim
+// nobody suspended or whose suspender the caller cannot read): the one statement of it that the
+// boot's log line and `legion state` both group by:
 //
+//   - StrandedReleasedNoResume, a claim whose idle pod the daemon released and whose wake never
+//     brought it back (workflow.Stranded's ten-minute rule): the pod and its disk are gone, so
+//     the move is the operator's reading of why the replacement pod never took a turn, not a
+//     resume of the claim — a released claim resumes on its next delivery, and the wake that
+//     should have resumed it has already been taken.
 //   - StrandedResume, a suspended architect: the operator's resume (`legion claims resume`), which
 //     a catch-up follows.
 //   - StrandedSuspendedWorkers, a suspended phase worker: the move its claim's suspendedBy calls
@@ -580,9 +695,11 @@ func StrandedMoves() []StrandedMove {
 //   - StrandedWorkflowStart, a failed phase worker: the retry of its held phase — its architect's
 //     retry_or_escalate, or the operator's retry (`legion claims retry`, which applies the same
 //     retry) — since a failed claim ignores resume and deliver.
-func (c StrandedClaim) Move() StrandedMove {
+func (c StrandedClaim) Move(suspendedBy string) StrandedMove {
 	failed := c.State == string(supervise.StateFailed)
 	switch {
+	case !failed && suspendedBy == string(supervise.SuspendedByReleased):
+		return StrandedReleasedNoResume
 	case failed && c.Role == claim.RoleArchitect:
 		return StrandedRetry
 	case failed:
@@ -603,15 +720,17 @@ func StrandedClaimsOf(stranded []supervise.Claim) []StrandedClaim {
 	return claims
 }
 
-// StrandedByMove is each stranded claim named `<issue> <role>`, grouped by its Move, each group in
-// stranded's order; every move has a group, empty when no claim takes it.
-func StrandedByMove(stranded []StrandedClaim) map[StrandedMove][]string {
+// StrandedByMove is each stranded claim named `<issue> <role>`, grouped by its Move under
+// suspended, each group in stranded's order; every move has a group, empty when no claim takes
+// it.
+func StrandedByMove(stranded []StrandedClaim, suspended Suspenders) map[StrandedMove][]string {
 	grouped := make(map[StrandedMove][]string, len(StrandedMoves()))
 	for _, move := range StrandedMoves() {
 		grouped[move] = []string{}
 	}
 	for _, c := range stranded {
-		grouped[c.Move()] = append(grouped[c.Move()], c.Issue+" "+string(c.Role))
+		move := c.Move(suspended.Of(c))
+		grouped[move] = append(grouped[move], strandedKey(c.Issue, c.Role))
 	}
 	return grouped
 }

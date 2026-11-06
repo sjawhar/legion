@@ -3,10 +3,10 @@ import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { ASK_QUESTION_MAX, overCapMessage } from "@legion/contracts";
-import { DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
+import { DISPATCH_BLOCK_UNITS, DISPATCH_EVENT_BODY_MAX } from "@legion/contracts/dispatch-tools";
+import { bearerCredential } from "../bearer";
 import { type DispatchToolResult, executeDispatchTool } from "../dispatch-execute";
-import { DispatchClient } from "../dispatch-http";
+import { DISPATCH_WRITE_RETRY, DispatchClient, forgetKeyedLayerMemory } from "../dispatch-http";
 import {
   forgetShownPictures,
   readPictures,
@@ -16,7 +16,12 @@ import {
 import { pictureAddresses } from "../dispatch-pictures";
 import { ToolInputError } from "../tool-input-errors";
 
-const config = { enabled: true, url: "http://dispatch.test", token: "secret", error: null };
+const config = {
+  enabled: true,
+  url: "http://dispatch.test",
+  credential: bearerCredential("secret"),
+  error: null,
+};
 const session = "01a1058e-f14f-7684-87eb-3dc885955551";
 const directory = mkdtempSync(path.join(os.tmpdir(), "dispatch-images-"));
 afterAll(() => rmSync(directory, { recursive: true, force: true }));
@@ -63,6 +68,13 @@ function dispatch(
     const method = init.method ?? "GET";
     requests.push(`${method} ${target.pathname}`);
     const answered = routes(target.pathname, init);
+    if (method === "POST" && !target.pathname.endsWith("/artifacts")) {
+      // The write's text is recorded whether `routes` answers it - with a refusal, say - or the
+      // Dispatch below does.
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      posted.push(body);
+      return answered ?? json({ id: "written-1", issue_key: "DSP-41", in_reply_to: null, ...body });
+    }
     if (answered !== undefined) return answered;
     if (method === "POST" && target.pathname.endsWith("/artifacts")) {
       // The client sends a form encoded once, so every attempt of the write carries its bytes, as
@@ -82,11 +94,6 @@ function dispatch(
       versions.set(slug, number);
       uploads.push({ path: target.pathname, name, type: partType?.[1] ?? "", size: upload.size });
       return json({ artifact: { slug, name }, version: { number } });
-    }
-    if (method === "POST") {
-      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
-      posted.push(body);
-      return json({ id: "written-1", issue_key: "DSP-41", in_reply_to: null, ...body });
     }
     throw new Error(`unexpected request: ${method} ${target.pathname}`);
   };
@@ -178,41 +185,50 @@ describe("sending pictures", () => {
     ]);
   });
 
-  test("a body the picture lines carry over the cap is refused with the count before anything is uploaded", async () => {
-    const server = dispatch();
+  // Nothing is judged here before the request: the picture is uploaded, its line is appended,
+  // and Dispatch refuses the whole text and names the block that passed its bound.
+  test("a body the picture lines carry over a block bound is posted whole and refused by Dispatch", async () => {
+    const over = `body block 1 (paragraph) is 1 characters over the ${DISPATCH_BLOCK_UNITS}-character block limit (${DISPATCH_BLOCK_UNITS + 1}/${DISPATCH_BLOCK_UNITS})`;
+    const server = dispatch((pathname, init) =>
+      pathname === "/api/v1/issues/DSP-41/messages" && init.method === "POST"
+        ? json({ code: "CAP_EXCEEDED", error: over }, 400)
+        : undefined
+    );
     const shot = file("shot.png", PNG);
     const line = "![shot.png](dispatch://DSP-41/artifact/shot-png@v1)";
-    const body = "x".repeat(DISPATCH_BODY_MAX - 2 - line.length + 1);
+    const body = "x".repeat(DISPATCH_BLOCK_UNITS - 2 - line.length + 1);
 
     const failure = await refusal(
       run("dispatch_message", { issue: "DSP-41", body, images: [shot] }, server.fetchImpl)
     );
 
-    expect(failure).toBeInstanceOf(ToolInputError);
-    expect((failure as ToolInputError).problems).toEqual([
-      `body plus 1 picture ${overCapMessage(DISPATCH_BODY_MAX + 1, DISPATCH_BODY_MAX)}; shorten the body or send fewer pictures`,
-    ]);
-    expect(server.uploads).toEqual([]);
-    expect(server.posted).toEqual([]);
+    expect(failure.message).toBe(over);
+    expect(server.uploads.map((upload) => upload.name)).toEqual(["shot.png"]);
+    expect(server.posted.map((posted) => posted.body)).toEqual([`${body}\n\n${line}`]);
   });
 
-  test("an ask's question counts its ref and its pictures toward the question cap", async () => {
-    const server = dispatch();
+  test("an ask's question goes to Dispatch with its ref and its picture lines, and Dispatch bounds it", async () => {
+    const over = `question and options is 1 characters over the ${DISPATCH_EVENT_BODY_MAX}-character limit (${DISPATCH_EVENT_BODY_MAX + 1}/${DISPATCH_EVENT_BODY_MAX})`;
+    const server = dispatch((pathname, init) =>
+      pathname === "/api/v1/issues/DSP-41/asks" && init.method === "POST"
+        ? json({ code: "CAP_EXCEEDED", error: over }, 400)
+        : undefined
+    );
     const shot = file("shot.png", PNG);
     const ref = "dispatch://DSP-41/message/0b6e0f4e-4e2c-4d55-9a7e-0e9b3a4c1d22";
     const line = "![shot.png](dispatch://DSP-41/artifact/shot-png@v1)";
-    const question = "q".repeat(ASK_QUESTION_MAX - `\n\nRef: ${ref}`.length - 2 - line.length + 1);
+    const question = "q".repeat(
+      DISPATCH_EVENT_BODY_MAX - `\n\nRef: ${ref}`.length - 2 - line.length + 1
+    );
 
     const failure = await refusal(
       run("dispatch_ask", { issue: "DSP-41", question, ref, images: [shot] }, server.fetchImpl)
     );
 
-    expect((failure as ToolInputError).problems).toEqual([
-      `question plus ref plus 1 picture is 1 characters over the ${ASK_QUESTION_MAX}-character ` +
-        `limit (${ASK_QUESTION_MAX + 1}/${ASK_QUESTION_MAX}); shorten the question, drop the ref ` +
-        "or send fewer pictures",
+    expect(failure.message).toBe(over);
+    expect(server.posted.map((posted) => posted.question)).toEqual([
+      `${question}\n\nRef: ${ref}\n\n${line}`,
     ]);
-    expect(server.uploads).toEqual([]);
   });
 
   test("a file that is no picture, a missing file and one over 25 MiB are each refused by path, with nothing sent", async () => {
@@ -263,12 +279,12 @@ describe("sending pictures", () => {
     ]);
   });
 
-  // The cap is judged before the upload on the slug Dispatch will give the name, so a name holding
-  // a letter outside a-z must be predicted as the server slugs it, or a body that fits is refused.
-  test("a body that fits the cap exactly with a non-ASCII file name's picture is posted", async () => {
+  // A name holding a letter outside a-z is slugged by the server, and the line the call appends
+  // carries the slug the server answered, never one guessed before the upload.
+  test("a picture whose name is not ASCII is posted under the slug Dispatch gave it", async () => {
     const server = dispatch();
     const line = "![café.png](dispatch://DSP-41/artifact/caf-png@v1)";
-    const body = "x".repeat(DISPATCH_BODY_MAX - 2 - line.length);
+    const body = "Here it is.";
 
     await run(
       "dispatch_message",
@@ -413,16 +429,87 @@ describe("sending pictures", () => {
     expect(server.posted).toEqual([]);
   });
 
-  test("a text the uploads' own addresses carry over the cap is refused with nothing posted", async () => {
-    // The owner already holds a file of this name at version 12, so its line is longer than the
-    // one judged before the upload.
+  // An upload that ends with no definitive answer may still land, so it is not said to have
+  // failed, and the write's own message, which ends its sentence, is not given a second period.
+  test("an upload that may have reached Dispatch is not said to have failed", async () => {
+    let uploads = 0;
+    const server = dispatch((pathname, init) => {
+      if (pathname === "/healthz") return json({ idempotency_keys: true });
+      if (pathname !== "/api/v1/issues/DSP-41/artifacts" || init.method !== "POST") return;
+      uploads += 1;
+      const status = uploads === 1 ? 502 : 429;
+      return new Response(`<html>${status}</html>`, {
+        status,
+        headers: { "Content-Type": "text/html" },
+      });
+    });
+    const shot = file("unsettled.png", PNG);
+
+    const failure = await refusal(
+      executeDispatchTool({
+        tool: "dispatch_message",
+        args: { issue: "DSP-41", body: "Look.", images: [shot] },
+        cwd: directory,
+        host: "omp",
+        sessionId: session,
+        config,
+        env: {},
+        exec: async () => {
+          throw new Error("no repository");
+        },
+        fetchImpl: server.fetchImpl,
+        writeRetry: { ...DISPATCH_WRITE_RETRY, pausesMs: [0], pause: async () => undefined },
+      })
+    );
+    // The /healthz answer above is remembered per process and origin; later files' tests drive
+    // the same origin as a Dispatch of their own.
+    forgetKeyedLayerMemory();
+
+    expect(uploads).toBe(2);
+    expect(failure.message).toStartWith(`images: ${shot} may or may not have been uploaded: `);
+    expect(failure.message).toEndWith(
+      "a new command sends it under a new key. Nothing was posted."
+    );
+    expect(server.posted).toEqual([]);
+  });
+
+  // A gateway's 502 can come after Dispatch stored the upload, so it is no refusal either, even
+  // where the write is not asked again (no keyed layer is known here).
+  test("an upload a gateway answered 502 is not said to have failed", async () => {
     const server = dispatch((pathname, init) =>
       pathname === "/api/v1/issues/DSP-41/artifacts" && init.method === "POST"
-        ? json({ artifact: { slug: "shot-png" }, version: { number: 12 } })
+        ? new Response("<html>502 Bad Gateway</html>", {
+            status: 502,
+            headers: { "Content-Type": "text/html" },
+          })
         : undefined
     );
-    const line = "![shot.png](dispatch://DSP-41/artifact/shot-png@v1)";
-    const body = "x".repeat(DISPATCH_BODY_MAX - 2 - line.length);
+    const shot = file("gateway.png", PNG);
+
+    const failure = await refusal(
+      run("dispatch_message", { issue: "DSP-41", body: "Look.", images: [shot] }, server.fetchImpl)
+    );
+
+    expect(failure.message).toStartWith(`images: ${shot} may or may not have been uploaded: `);
+    expect(failure.message).toEndWith(". Nothing was posted.");
+    expect(failure.message).not.toContain("..");
+    expect(server.posted).toEqual([]);
+  });
+
+  test("the line a picture gets names the version Dispatch gave it, and Dispatch bounds the text", async () => {
+    // The owner already holds a file of this name at version 12, so the posted line is longer
+    // than one for a first version.
+    const over = `body block 1 (paragraph) is 1 characters over the ${DISPATCH_BLOCK_UNITS}-character block limit (${DISPATCH_BLOCK_UNITS + 1}/${DISPATCH_BLOCK_UNITS})`;
+    const server = dispatch((pathname, init) => {
+      if (pathname === "/api/v1/issues/DSP-41/artifacts" && init.method === "POST") {
+        return json({ artifact: { slug: "shot-png" }, version: { number: 12 } });
+      }
+      return pathname === "/api/v1/issues/DSP-41/messages" && init.method === "POST"
+        ? json({ code: "CAP_EXCEEDED", error: over }, 400)
+        : undefined;
+    });
+    const posted = "![shot.png](dispatch://DSP-41/artifact/shot-png@v12)";
+    const body = "x".repeat(DISPATCH_BLOCK_UNITS - 2 - posted.length + 1);
 
     const failure = await refusal(
       run(
@@ -432,12 +519,8 @@ describe("sending pictures", () => {
       )
     );
 
-    expect(failure.message).toBe(
-      `body plus 1 picture ${overCapMessage(DISPATCH_BODY_MAX + 1, DISPATCH_BODY_MAX)} with the ` +
-        "addresses Dispatch gave the uploads (dispatch://DSP-41/artifact/shot-png@v12), so " +
-        "nothing was posted; shorten the body or send fewer pictures."
-    );
-    expect(server.posted).toEqual([]);
+    expect(failure.message).toBe(over);
+    expect(server.posted.map((sent) => sent.body)).toEqual([`${body}\n\n${posted}`]);
   });
 });
 
@@ -983,7 +1066,11 @@ describe("reading pictures", () => {
         artifacts,
         Object.fromEntries(artifacts.map((artifact) => [artifact.id, png(16)]))
       );
-      const client = new DispatchClient("http://dispatch.test", "secret", server.fetchImpl);
+      const client = new DispatchClient(
+        "http://dispatch.test",
+        bearerCredential("secret"),
+        server.fetchImpl
+      );
       const address = (n: number) => `dispatch://agent/${session}/artifact/p${n}-png@v1`;
       const shown = new Set([address(1)]);
 

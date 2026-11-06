@@ -40,6 +40,10 @@ func (publishOnly) Request(subject string, _ contracts.Envelope, _ bus.RequestOp
 	return answered(fmt.Errorf("test publisher serves no Request (to %q)", subject))
 }
 
+func (publishOnly) PublishStoredAsync(subject string, _ contracts.Envelope, _ string) <-chan error {
+	return answered(fmt.Errorf("test publisher serves no stored publish (to %q)", subject))
+}
+
 func (publishOnly) Probe(time.Duration) error { return nil }
 
 func (publishOnly) Connected() bool { return true }
@@ -70,6 +74,13 @@ func (w deadlineWindow) Request(subject string, item contracts.Envelope, opts bu
 		return answered(fmt.Errorf("test window: %w", bus.ErrWindowDeadline))
 	}
 	return w.Sender.Request(subject, item, opts)
+}
+
+func (w deadlineWindow) PublishStoredAsync(subject string, item contracts.Envelope, msgID string) <-chan error {
+	if w.passed() {
+		return answered(fmt.Errorf("test window: %w", bus.ErrWindowDeadline))
+	}
+	return w.Sender.PublishStoredAsync(subject, item, msgID)
 }
 
 // unfenced is a publisher hold whose deadline never comes, for a test that scans without one. The
@@ -122,7 +133,7 @@ func publish(ctx context.Context, deps Deps, event model.Event, slug string, rou
 		case dest.forward.err != nil:
 			answer = failedAnswer(dest.forward.err)
 		default:
-			answer = dest.forward.send(sender, routed)
+			answer = dest.forward.send(ctx, deps, sender, routed, newKeptHandovers())
 		}
 		if err := <-answer; err != nil && !errors.Is(err, bus.ErrRefused) {
 			failures = append(failures, fmt.Errorf("%s %q: %w", dest.label, dest.id, err))

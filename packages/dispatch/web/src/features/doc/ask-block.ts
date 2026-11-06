@@ -4,7 +4,7 @@ import type { EditorView, NodeView, ViewMutationRecord } from "@milkdown/kit/pro
 
 import type { BlockSchema, BlockTypeSchema } from "../../api/types";
 import type { ViewBlockSlot } from "../view/view-slots";
-import { pictureNodeView } from "./picture-view";
+import { pictureNodeView, type WatchPicture } from "./picture-view";
 import {
   type AskBlockHost,
   applyAskBlockShell,
@@ -174,12 +174,14 @@ export const NO_TYPED_BLOCKS: TypedBlockHosts = { asks: [], views: [] };
  * editable caption), reporting both live sets whenever either changes, the decision hosts in
  * document order; `renderTypedBlock`'s node view for every other type in the block schema,
  * `pictureNodeView` for every `image` node (a picture whose source is a Dispatch reference draws
- * from its version's bytes route), while keeping the library's other node views, and
+ * from its version's bytes route, a version-less one from its latest version's, which
+ * `watchPicture` reports), while keeping the library's other node views, and
  * `askBlockEditingPlugin`. Call once per editor, right after it is created. */
 export function installTypedBlocks(
   view: EditorView,
   blockSchema: BlockSchema,
-  onHostsChange: (hosts: TypedBlockHosts) => void
+  onHostsChange: (hosts: TypedBlockHosts) => void,
+  watchPicture: WatchPicture
 ): void {
   const asks = new Map<number, AskBlockHost>();
   const views = new Map<string, ViewBlockSlot>();
@@ -206,7 +208,7 @@ export function installTypedBlocks(
       ),
       ask: (node) => new AskBlockView(node, view.dom.ownerDocument, asks, publish),
       view: (node) => viewBlockView(node, view.dom.ownerDocument, views, publish),
-      image: pictureNodeView(view),
+      image: pictureNodeView(view, watchPicture),
     },
     plugins: [...(view.props.plugins ?? []), askBlockEditingPlugin],
   });

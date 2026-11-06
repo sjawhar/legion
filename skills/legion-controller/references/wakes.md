@@ -19,9 +19,11 @@ the same way and wakes nobody.
 
 ## `slot-free on <KEY>` (`{kind: "slot-free"}`)
 
-The daemon released `<KEY>`'s slot and no waiting root took it: its tree finished or left the
-workflow, or the root returned the slot to wait on a person (`awaiting_person`, which also sends
-its own `awaiting-person` wake). Name the free slots; take nothing.
+The daemon released the slot of `<KEY>` and no waiting issue took it: the work of that issue ended
+or left the workflow — its merge, `accepting`, a blocker, its own children, a person
+(`awaiting_person`, which also sends its own `awaiting-person` wake), or its tree finishing. A
+slot is one issue with work, a root or a child, so the issue it names may be either. Name the free
+slots; take nothing.
 
 ## `todo on <KEY>` (`{kind: "todo"}`)
 
@@ -33,7 +35,7 @@ Legion's.
 
 The daemon's periodic wake, a minute after it starts and then every
 `controller_wake_interval_seconds` (an hour by default), whatever the slots. Run the skill's every-turn
-steps.
+steps, then the parked-root walk (`skill://legion-controller/references/parked-decisions.md#the-walk`).
 
 `openCapabilities`, when present, names the open capability rows; `read_state`'s `capabilities`
 gives each one's `detail`. A deployment row (the secrets broker, model fallback, a role's CPU and
@@ -46,10 +48,12 @@ because the operator closes or decides a deployment row, and the operator or the
 fixes a live row's session.
 
 `blocked`, when present, is `[{issue, blockedBy}, …]`: every root and child Legion is waiting to
-start behind an unfinished Dispatch issue, each with the issues it waits on. `read_state` shows the
+start, each with what it waits on — the unfinished Dispatch issues of its `blocked_by` links, or,
+for a parent, the open children beneath it that children-first holds it for. `read_state` shows the
 same list under `admission.blocked`, and `legion state` prints it as `blocked on Dispatch links:`.
-The wait ends when each blocker reaches `done` (a person's close, or the blocker's own merge) or its
-link is taken off (by a person or the tree's architect): name the waits in the day's report and
+A link's wait ends when each blocker reaches `done` (a person's close, or the blocker's own merge) or its
+link is taken off (by a person or the tree's architect), and a children-first wait ends when the
+last open child leaves the workflow: name the waits in the day's report and
 take nothing for them.
 
 ## `unslotted on <KEY>` (`{kind: "unslotted", reason}`)
@@ -69,9 +73,19 @@ A root whose architect asked a person a question, or handed its spec to a person
 now waits only on them: the daemon returned its slot while the architect stays live to read the
 person's comments and replies. Read `issues.<KEY>.waitingOn`. Do not park it or start anything, and
 take nothing for the slot it returned: it is no reason to label or admit an issue ([Free
-slots](skill://legion-controller/SKILL.md#free-slots)). The person's answer puts it at the front of
-`admission.waiting` by itself, and the next free slot delivers its task. A lost label or a foreign
+slots](skill://legion-controller/SKILL.md#free-slots)). The person's answer puts it among the
+issues at the front of `admission.waiting` by itself, and its promotion gives its architect the
+answer task: at once, holding no slot, when its design gate has already opened, and at the next
+free slot while its architect is still writing the first spec. A lost label or a foreign
 Dispatch claim sends the separate `unslotted` wake.
+
+## `parked-decision on <KEY>` (`{kind: "parked-decision", decision, root, ref, actor, version?, reason?}`)
+
+A person's spec decision, or answer, resolution or reply on an ask, on a tree Legion is not
+running, which nobody inside the tree heard. The payload names the decision, the tree's `root`,
+the decision's Dispatch `ref`, the person (`actor`), and a spec decision's `version` and a changes
+request's `reason`. Decide it as `skill://legion-controller/references/parked-decisions.md#deciding`
+says.
 
 ## `held on <KEY>` (`{kind: "held", phase, role?, reason?}`)
 
@@ -82,10 +96,15 @@ handle it as an escalation (`skill://legion-controller/references/escalation.md`
 with no `holdReason` while its tree lingers (the time after its root closes when a reopen resumes
 it) or is closed waits for the tree's re-admission and needs nothing from you.
 
-When an escalated hold's cause is not gone, park the tree: `set_status` the root to `backlog`. Set
-the root back to `todo` only when you checked that the hold's cause is gone, or a person asks,
-because `todo` re-admits it as a new generation: a new run of the tree that starts again from its
-architect.
+When an escalated hold's cause is not gone, park the tree: `set_status` the root to `backlog`,
+then, in the same turn, post one comment on the root (`dispatch comment --issue <root>
+--body-file -`) whose first line is `Parked by Legion while it waits on: <the hold's cause>`, the
+cause being what you found the held phase waits on (the payload's `phase` and `role`, and the held
+issue's `dispatch read`). That mark is what makes the park Legion's own hold
+(`skill://legion-controller/references/parked-decisions.md#deciding`, step 2). Set the root back to
+`todo` only when you checked that the hold's cause is gone, a person asks, or a person's decision
+after the park gives its work a next step (that reference's step 4), because `todo` re-admits it
+as a new generation: a new run of the tree that starts again from its architect.
 
 ## `worker-died on <KEY>` (`role: "architect"`)
 
@@ -98,6 +117,12 @@ architect's last message on the root issue. When you find none, or it is gone, r
 (`set_status` the root to `backlog`, then to `todo`: a new generation whose architect starts with
 fresh budgets). When it stays, park the tree (`set_status` the root to `backlog`) and say why on
 the issue, because a relaunch would fail the same way.
+
+## `update-stalled on <KEY>` (`{kind: "update-stalled", reason, update}`)
+
+An update round over the issue's pod, or over one claim's own process, is not finishing. Handle
+it as `skill://legion-controller/references/escalation.md#an-update-round-that-is-not-finishing-update-stalled`
+says.
 
 ## GitHub mentions
 

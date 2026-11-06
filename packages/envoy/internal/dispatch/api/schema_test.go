@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
@@ -28,8 +29,12 @@ func TestBlockSchemaRouteServesEmbeddedSchema(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &schema); err != nil {
 		t.Fatalf("decode schema response: %v", err)
 	}
-	if schema.Version != 3 || len(schema.Types) != 3 ||
-		schema.Types[0].Name != "callout" || schema.Types[1].Name != "ask" || schema.Types[2].Name != "view" {
-		t.Fatalf("schema = %#v, want version 3 callout, ask and view types", schema)
+	names := make([]string, len(schema.Types))
+	for index, typ := range schema.Types {
+		names[index] = typ.Name
+	}
+	if schema.Version != 4 ||
+		!slices.Equal(names, []string{"callout", "ask", "requirement", "plan_task", "check", "view"}) {
+		t.Fatalf("schema = version %d, types %v; want version 4 and callout, ask, requirement, plan_task, check, view", schema.Version, names)
 	}
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -98,9 +97,11 @@ func (e *Engine) RefuseRecording(ctx context.Context, tx pgx.Tx, key, resolved s
 
 // NoteRepositoryKept says on a recorded issue that the repository Dispatch now resolves it to,
 // resolved, is not applied: the record keeps the one it was recorded with. It says it once per
-// resolution, and nothing when resolved is the recorded repository.
+// resolution, and nothing when resolved is the recorded repository — the same name, or the other
+// name of a configured rename (sameRepository), so re-pointing every open issue at the repository
+// a transfer moved to says nothing on any of them.
 func (e *Engine) NoteRepositoryKept(ctx context.Context, tx pgx.Tx, issue record.Issue, resolved string) error {
-	if strings.EqualFold(resolved, issue.Repo) {
+	if e.sameRepository(resolved, issue.Repo) {
 		return nil
 	}
 	changed := resolved

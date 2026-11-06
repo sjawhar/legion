@@ -10,7 +10,7 @@ import {
   test,
 } from "@playwright/test";
 
-import type { ArtifactUploadResponse, CredentialRecord } from "../web/src/api/types";
+import type { ArtifactUploadResponse } from "../web/src/api/types";
 import { type FakeSession, setLiveSessions } from "./agents";
 import {
   baseUrl,
@@ -25,13 +25,13 @@ import {
   dashboardOrigin,
   publishAgentStreamFrame,
   putArchitectureSource,
+  search,
   syncArchitectureSource,
   uploadIssueFile,
   userHeaders,
 } from "./api";
 import { seedDeliveryFixture } from "./delivery-seed";
 import { connectedDot, documentEditor } from "./editor";
-import { setCredentialRecords } from "./fake-broker-helpers";
 import { seedFakeGithub } from "./fake-github-helpers";
 import {
   type DispatchProcess,
@@ -128,7 +128,6 @@ const shown = {
   agentReply: "The release notes are read.",
   child: "Split the rollout",
   comment: "The rollout waits on the canary.",
-  credentialReason: "need it for the rollout",
   document: "The handbook explains the rollout.",
   issue: "Roll out two builds",
   issueArtifact: "These notes track the rollout.",
@@ -173,23 +172,6 @@ const messageAuthor = {
   as: "agent" as const,
 };
 
-const credentialRecord: CredentialRecord = {
-  approver: "alice",
-  decided: null,
-  enrollment: { kind: "session", operator: "alice", runtime_id: "host-alice:559:0", slot: null },
-  expires_at: new Date(Date.now() + 3_600_000).toISOString(),
-  identifiers: ["ROLLOUT_API_KEY"],
-  kind: "agent_secret",
-  lifetime_seconds: 3600,
-  record_id: "record-two-builds",
-  requested_at: new Date().toISOString(),
-  reason: shown.credentialReason,
-  rules_version: "rules-v1",
-  service: null,
-  session: { enrollment: session.session_id, request: session.session_id },
-  state: "pending",
-};
-
 /** The 1x1 PNG e2e/artifacts.e2e.ts uploads. */
 const tinyPng =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL0eAAAAABJRU5ErkJggg==";
@@ -226,8 +208,7 @@ interface Seeded {
  *  project with an architecture source, an issue with a spec, a child, a comment, a message
  *  holding a Mermaid diagram and a document artifact, a page file with a data file granted to
  *  it and a document whose `view` block names the pair, a project document, a live session
- *  with a broadcast, a replayed conversation and a picture, a credential record, and the
- *  delivery timeline's runs. */
+ *  with a broadcast, a replayed conversation and a picture, and the delivery timeline's runs. */
 async function seedEveryRoute(): Promise<Seeded> {
   await setLiveSessions([session]);
   await createProject({ key: "CORE", name: "Core" });
@@ -321,7 +302,6 @@ async function seedEveryRoute(): Promise<Seeded> {
     "replay"
   );
   const agentArtifact = await uploadAgentPicture(session.session_id);
-  await setCredentialRecords([credentialRecord]);
   await seedDeliveryFixture();
   return {
     agentArtifact,
@@ -533,12 +513,9 @@ function visits(seed: Seeded): readonly Visit[] {
       url: `/projects/CORE/documents/${seed.viewDocument}`,
     },
     {
-      route: "/credentials/:recordId",
-      shows: (page) => [
-        heading(page, "Credential request"),
-        page.getByText(shown.credentialReason, { exact: true }),
-      ],
-      url: `/credentials/${credentialRecord.record_id}`,
+      route: "/credentials/*",
+      shows: (page) => [heading(page, "Inbox")],
+      url: "/credentials/record-old-broker",
     },
     {
       route: "/credentials/machine",
@@ -825,4 +802,101 @@ test("a tab of build B focused once only build A is live shows the new-version n
     }
     await page?.context().close();
   }
+});
+
+/** Waits until `statement` answers `want`, reading it every second for at most `seconds`. */
+async function until(
+  statement: string,
+  want: string,
+  seconds: number,
+  what: string
+): Promise<void> {
+  await expect
+    .poll(async () => (await sql(statement)).trim(), {
+      intervals: [1_000],
+      message: what,
+      timeout: seconds * 1_000,
+    })
+    .toBe(want);
+}
+
+// While a release overlaps two builds, the older one's meaning search reads a whole-text
+// `embeddings` row per item (kind `comment`), and the newer one reads the windows of blocks it
+// writes instead (kind `comment_block`). So the newer build retires a whole-text row only once
+// its owner holds a window of the matching kind whose vector is current, and an item leaves the
+// older build's meaning search only once the newer build can find it. Both processes here run
+// one build, so what this proves is the rule the older build's reader depends on: the row it
+// reads stays, current and alive, while the window is not current, and goes once it is. The
+// block-index tick runs every 30 s, so each wait below spans more than one pass.
+test("a windowed item keeps the whole-text row the older build's meaning search reads until its window is current", async () => {
+  // Every wait below at its bound, and the two-tick sleep: 60 + 120 + 70 + 120 seconds, which a
+  // lane sharing the runner with the rest of the suite can need where an idle one returns in
+  // seconds.
+  test.setTimeout(420_000);
+  await createProject({ key: "ROLL", name: "Rollout" });
+  const issue = await createIssue({ project: "ROLL", title: "Two builds at once" });
+  const body = "The canary pours the astrolabe over the quiet wharf.\n\nA second paragraph.";
+  const comment = await createComment(issue.key, { body }, { as: "agent" });
+  const owner = `comment/${comment.id}`;
+  const whole = `select count(*) from embeddings where kind = 'comment' and id = '${comment.id}'`;
+  const windows = `select count(*) from embeddings where kind = 'comment_block' and split_part(id, '#', 1) = '${owner}'`;
+  const currentWindows = `${windows} and embedded_hash = content_hash and embedding is not null`;
+
+  // The window first, and stale before the whole-text row exists. The retirement arm deletes a
+  // whole-text row whenever its owner holds one current window (`wholeTextOwner.retire()`), and
+  // it does not ask whether that row is embedded, so a run that enqueued the row first would be
+  // racing its own queue against the block-index tick: on a machine where the queue embeds the
+  // row within the tick the row is there to be read, and on one where the tick comes first the
+  // row is deleted and no wait of any length can see it. That is what a lane sharing a runner
+  // with the rest of the browser suite made happen. With no window current, the arm cannot take
+  // the row, so what follows is decided by the queue's progress alone.
+  await until(currentWindows, "1", 60, "the comment's window is embedded");
+
+  // A window waiting for its vector: the state every item is in between this build's write and
+  // the queue's pass over it. `dead` keeps the queue from embedding it again while the
+  // retirement arm is given its chance.
+  await sql(
+    `update embeddings set embedded_hash = null, dead = true
+       where kind = 'comment_block' and split_part(id, '#', 1) = '${owner}'`
+  );
+  expect((await sql(currentWindows)).trim(), "no window is current").toBe("0");
+
+  // The row the previous build's trigger wrote for this comment, which this build no longer
+  // writes at a write: the same call that trigger made.
+  // psql reads the body as one SQL string literal, with any quote of its own doubled.
+  const quoted = `'${body.replaceAll("'", "''")}'`;
+  await sql(`select embeddings_enqueue('comment', '${comment.id}', ${quoted})`);
+  const embedded = `${whole} and embedded_hash = content_hash and embedding is not null`;
+  await until(embedded, "1", 120, "the whole-text row is embedded");
+
+  // Two ticks of the reconciliation pass over it, and the row the older build reads is still
+  // there: alive, with its vector and the comment's own text.
+  const { promise, resolve } = Promise.withResolvers<void>();
+  setTimeout(resolve, 70_000);
+  await promise;
+  expect((await sql(whole)).trim(), "the whole-text row after two ticks").toBe("1");
+  const readable = await sql(
+    `select count(*) from embeddings where kind = 'comment' and id = '${comment.id}'
+       and not dead and embedding is not null and embedded_hash = content_hash
+       and text_snapshot = (select body from comments where id = '${comment.id}')`
+  );
+  expect(
+    readable.trim(),
+    "the older build's meaning row is current and holds the comment's text"
+  ).toBe("1");
+
+  // The hit the newer build already serves for the same comment names the block that matched,
+  // so both builds find it while the row is there.
+  const hits = await search("astrolabe wharf canary", { as: "agent" });
+  expect(
+    hits.results.filter((hit) => hit.kind === "comment" && hit.id === comment.id),
+    "the newer build's hit for the comment"
+  ).not.toEqual([]);
+
+  // Once the window is current again, the arm takes the whole-text row.
+  await sql(
+    `update embeddings set dead = false, embedded_hash = content_hash
+       where kind = 'comment_block' and split_part(id, '#', 1) = '${owner}'`
+  );
+  await until(whole, "0", 120, "the whole-text row is retired behind its window");
 });

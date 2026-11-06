@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
@@ -146,7 +146,7 @@ func (v *issueVolume) withRemote(t *testing.T, defaultBranch string) *issueVolum
 	} {
 		setup := exec.Command(argv[0], argv[1:]...)
 		setup.Dir = dir
-		setup.Env = append(os.Environ(), "JJ_USER=Legion test", "JJ_EMAIL=legion-test@example.invalid")
+		setup.Env = fixtureenv.Isolated(t.TempDir())
 		if output, err := setup.CombinedOutput(); err != nil {
 			t.Fatalf("%s: %v\n%s", strings.Join(argv, " "), err, output)
 		}
@@ -180,9 +180,7 @@ var runtimeOptionalEnv = []string{"LEGION_PROVISION_TOKEN_FILE", "LEGION_REPOSIT
 // setenv is the volume's environment for an in-process run of `provision`.
 func (v *issueVolume) setenv(t *testing.T) {
 	t.Helper()
-	for _, name := range runtimeOptionalEnv {
-		unsetenv(t, name)
-	}
+	fixtureenv.Unset(t, runtimeOptionalEnv...)
 	for name, value := range v.env {
 		t.Setenv(name, value)
 	}
@@ -195,17 +193,9 @@ func (v *issueVolume) fetch(t *testing.T) {
 	v.setenv(t)
 	t.Setenv("LEGION_PROVISION_TOKEN_FILE", v.token)
 	code, _, stderr := runWorkspaceInitHere(v.fetchArgs())
-	unsetenv(t, "LEGION_PROVISION_TOKEN_FILE")
+	fixtureenv.Unset(t, "LEGION_PROVISION_TOKEN_FILE")
 	if code != 0 {
 		t.Fatalf("workspace-init fetch: exit %d, stderr %q", code, stderr)
-	}
-}
-
-func unsetenv(t *testing.T, name string) {
-	t.Helper()
-	t.Setenv(name, "")
-	if err := os.Unsetenv(name); err != nil {
-		t.Fatal(err)
 	}
 }
 
@@ -244,7 +234,7 @@ func (v *issueVolume) jj(t *testing.T, args ...string) string {
 	// so a command with no Dir would open the workspace the test process stands in, which in a
 	// Legion issue pod is a real one.
 	command.Dir = v.root
-	command.Env = append(os.Environ(), "JJ_USER=Legion test", "JJ_EMAIL=legion-test@example.invalid")
+	command.Env = fixtureenv.Isolated(t.TempDir())
 	output, err := command.Output()
 	if err != nil {
 		t.Fatalf("jj %s: %v", strings.Join(args, " "), err)
@@ -258,6 +248,7 @@ func (v *issueVolume) git(t *testing.T, args ...string) string {
 	// Every call names the repository it reads with --git-dir, which is not a working directory:
 	// the helper runs in the volume's root rather than wherever the test process stands.
 	command.Dir = v.root
+	command.Env = fixtureenv.Isolated(t.TempDir())
 	output, err := command.Output()
 	if err != nil {
 		t.Fatalf("git %s: %v", strings.Join(args, " "), err)
@@ -464,13 +455,11 @@ func TestWorkspaceInitProvisionsTheIssueWorkspace(t *testing.T) {
 	if origin := v.git(t, "--git-dir="+filepath.Join(v.clone(), ".git"), "remote", "get-url", "origin"); origin != "https://github.com/acme/widgets" {
 		t.Fatalf("the clone's origin is %q, want GitHub's", origin)
 	}
-	read := exec.Command("git", "--git-dir="+filepath.Join(v.clone(), ".git"), "config", "--get-all", "credential.helper")
-	// --git-dir is not a working directory: the read runs in the clone provisioning just made,
-	// never in the directory the test process happens to have.
-	read.Dir = v.clone()
-	helpers, err := read.Output()
-	if err != nil || !strings.HasSuffix(string(helpers), "\n"+winitHelper+"\n") {
-		t.Fatalf("the clone's credential helpers are %q (%v), want the named helper last", helpers, err)
+	// -z, because v.git trims its output and the first of the clone's two values is the empty
+	// reset: with newline separators that value is a leading newline, which the trim takes away.
+	// NUL separators keep it, so the pair reads whole, the reset first and the named helper last.
+	if helpers := v.git(t, "--git-dir="+filepath.Join(v.clone(), ".git"), "config", "-z", "--get-all", "credential.helper"); helpers != "\x00"+winitHelper+"\x00" {
+		t.Fatalf("the clone's credential helpers are %q, want the empty reset and then %q", helpers, winitHelper)
 	}
 
 	for _, dir := range []string{"worker-bin", "bin", "gh"} {
@@ -753,12 +742,9 @@ func (v *issueVolume) start(t *testing.T, tag, issue string, env ...string) *ini
 		name, value, _ := strings.Cut(entry, "=")
 		overrides[name] = value
 	}
-	for _, entry := range os.Environ() {
-		name, _, _ := strings.Cut(entry, "=")
-		if _, overridden := overrides[name]; !overridden && !slices.Contains(runtimeOptionalEnv, name) {
-			p.cmd.Env = append(p.cmd.Env, entry)
-		}
-	}
+	// The process under test runs the real git and jj, so it starts from fixtureenv.Isolated, as
+	// the test's own fixtures do, and the volume's overrides come after and win.
+	p.cmd.Env = fixtureenv.Isolated(t.TempDir())
 	for name, value := range overrides {
 		p.cmd.Env = append(p.cmd.Env, name+"="+value)
 	}

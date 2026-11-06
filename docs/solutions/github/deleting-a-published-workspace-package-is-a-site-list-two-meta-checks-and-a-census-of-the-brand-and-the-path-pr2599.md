@@ -33,9 +33,11 @@ and two of them no check covers.
   `.github/scripts/check-bun-workspace-manifests.sh` requires every root workspace manifest to be
   copied before each frozen install, so it flags a *missing* `COPY`, and a surviving `COPY` of a
   deleted file fails `docker build` instead.
-- **Five separate sites in `.github/workflows/ci.yaml`**: the filter's output in the `changes`
+- **Four separate sites in `.github/workflows/ci.yaml`**: the filter's output in the `changes`
   job, the package's manifest inside the shared `*bun_install` anchor, the filter block itself,
-  the job, and *two* entries in `ci-ok` — its `needs` list and its `SELECTED_BY` map.
+  the job (with its ci-ok report step), and its entry in the `CI_OK_SELECTED_BY` map of the
+  file's `env:`. (When this learning was written, ci-ok was a job, and the job also had an entry
+  in that job's `needs` list; sjawhar/legion#2698 made the last job to finish post ci-ok.)
 - **Two separate sites in `.github/scripts/ci_job_reads.py`**: the `WORKSPACES` entry and the
   `gate(...)` block.
 - **The release**: the build job, its `*_VERSION_ARGS` `env:` block, every publish step, the

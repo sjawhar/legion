@@ -12,7 +12,9 @@
  * server looks like.
  *
  * The rows run in `chromium`, `firefox`, `webkit` and `webkit-iphone`: a sandbox, an opaque
- * origin and a Content-Security-Policy are each engine's own.
+ * origin and a Content-Security-Policy are each engine's own. Every row here carries `@webkit`
+ * and `@firefox`, the tags those two projects select by, and the phrase `a view block`, which
+ * `webkit-iphone`'s title `grep` selects by.
  */
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
@@ -166,7 +168,7 @@ async function seedPage(
   };
 }
 
-test("a view block's page reads nothing of the reader and reaches no network", async ({
+test("a view block's page reads nothing of the reader and reaches no network @webkit @firefox", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -236,7 +238,9 @@ test("a view block's page reads nothing of the reader and reaches no network", a
   }
 });
 
-test("a view block takes a height from its own frame alone", async ({ browser }) => {
+test("a view block takes a height from its own frame alone @webkit @firefox", async ({
+  browser,
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   // A page that posts the height its data names, and nothing when the data names no number.
   const reporting = `<!doctype html>
@@ -298,7 +302,7 @@ parent.postMessage({ type: "dispatch-view:ready" }, "*");
   }
 });
 
-test("a view block whose page moves away from its address is sent nothing more", async ({
+test("a view block whose page moves away from its address is sent nothing more @webkit @firefox", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -357,7 +361,7 @@ setTimeout(() => { window.location.href = ${JSON.stringify(`${recorder.origin}/m
   }
 });
 
-test("a view block's page address opened in a tab is answered as an attachment", async ({
+test("a view block's page address opened in a tab is answered as an attachment @webkit @firefox", async ({
   browser,
   browserName,
 }) => {

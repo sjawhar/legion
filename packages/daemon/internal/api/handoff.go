@@ -8,6 +8,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/dispatchbody"
+
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
@@ -81,7 +83,7 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusBadRequest, "READY_ROLE_FORBIDDEN", "only a merger may report ready")
 		return
 	}
-	if s.pool == nil || s.records == nil {
+	if s.pool == nil {
 		writeFailure(w, http.StatusInternalServerError, "FACTS_UNAVAILABLE", "fact intake is unavailable")
 		return
 	}
@@ -176,21 +178,23 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	// READY is held to the pull request's head on GitHub before the fact is applied: a refusal the
 	// workflow committed would be recorded as processed under this completion's key, which leaves
 	// the summary out, while a refusal here records nothing, and the corrected retry at the same
-	// commit is applied. That holds for the packet's length too. The daemon posts the packet it tells
-	// (record.ReadyPacket: the merger's packet, with a by-hand READY's note above it) as one Dispatch
-	// message, the outbox's marker appended, and Dispatch refuses a longer body on every attempt, so
-	// a packet over record.MessagePostLimit would never reach the human; refused only by the
-	// workflow, the shortened packet at the same commit would be answered HANDOFF_ALREADY_RECORDED
-	// and the issue would stay in merging.
+	// commit is applied. That holds for the packet Dispatch takes too. The daemon posts the packet
+	// it tells (record.ReadyPacket: the merger's packet, with a by-hand READY's note above it) as
+	// one Dispatch message, and Dispatch refuses a body past the bounds it publishes on every
+	// attempt, so a packet it would refuse would never reach the human. Refused only by the post,
+	// the issue would already be in awaiting_merge, where no worker holds a phase and this
+	// merger's completion is over: nobody could send the shorter packet. Refused here, the issue
+	// stays in merging and the merger completes again with it. The text measured is the post the
+	// outbox makes, not the packet alone (record.LongestPost).
 	var answer readyAnswer
 	if req.Ready {
 		if answer, ok = s.readyNote(w, r, grant, issue, req.Commit); !ok {
 			return
 		}
-		if length := dispatch.MessageBodyLength(record.ReadyPacket(req.Summary, answer.mergeNote)); length > record.MessagePostLimit {
+		if over := dispatchbody.Check(record.LongestPost(record.ReadyPacket(req.Summary, answer.mergeNote))); over != nil {
 			writeFailure(w, http.StatusBadRequest, "READY_PACKET_TOO_LONG", fmt.Sprintf(
-				"the READY packet%s is %d characters over the %d the daemon can post as one Dispatch message (%d/%d): link the pull request body's ## Verification section instead of quoting it, then call handoff_complete again; this completion changed nothing",
-				byHandShare(answer.mergeNote), length-record.MessagePostLimit, record.MessagePostLimit, length, record.MessagePostLimit))
+				"the READY packet%s is one Dispatch refuses: %s: link the pull request body's ## Verification section instead of quoting it, then call handoff_complete again; this completion changed nothing",
+				byHandShare(answer.mergeNote), over))
 			return
 		}
 	}
@@ -265,10 +269,10 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 //     says nothing of the id (a 5xx, a credential answer; dispatch.PermanentRefusal); the worker
 //     completes again once Dispatch answers.
 //   - HANDOFF_RECORD_MISMATCH: the record is another issue's, another phase's, or another version.
-//   - HANDOFF_SESSION_MISMATCH: another session wrote it, or no session did. The import of the
-//     handoff files committed before handoffs moved to Dispatch writes under the daemon's own
-//     session (dispatch.DaemonSession), so its record is refused this way too, and the refusal says
-//     to read it and write it again from the worker's session.
+//   - HANDOFF_SESSION_MISMATCH: another session wrote it, or no session did. A record carried
+//     from before handoffs moved to the Dispatch issue is under the daemon's own session
+//     (dispatch.DaemonSession), so it is refused this way too, and the refusal says to read it
+//     and write it again from the worker's session.
 func (s *server) handoffRecord(w http.ResponseWriter, r *http.Request, session string, issue *record.Issue, word string, req HandoffCompleteRequest) bool {
 	write := fmt.Sprintf("`dispatch handoff-write --issue %s --phase %s --body-file <file>`", issue.Key, word)
 	read := fmt.Sprintf("`dispatch handoff-read --issue %s --phase %s`", issue.Key, word)
@@ -307,7 +311,7 @@ func (s *server) handoffRecord(w http.ResponseWriter, r *http.Request, session s
 	}
 	if handoff.Author.IsSession(dispatch.DaemonSession(issue.Key)) {
 		writeFailure(w, http.StatusForbidden, "HANDOFF_SESSION_MISMATCH", fmt.Sprintf(
-			"handoff record %s (%s version %d) was written by the daemon's own session %s, which imported the handoff file committed before handoffs moved to Dispatch, not by this claim's session %s: read it with %s, write it again with %s from this session, then complete naming the new record; this completion changed nothing",
+			"handoff record %s (%s version %d) was written by the daemon's own session %s, as a record carried from before handoffs moved to the Dispatch issue is, not by this claim's session %s: read it with %s, write it again with %s from this session, then complete naming the new record; this completion changed nothing",
 			req.HandoffID, word, handoff.Version, handoff.Author.ID, session, read, write))
 		return false
 	}
@@ -403,11 +407,17 @@ func (s *server) implementationPullRequest(w http.ResponseWriter, r *http.Reques
 		}
 		s.log.Warn("api: read the open pull request on a completing implementer's branch; the completion is applied unread, and the required-checks pass records the pull request it finds", attributes...)
 	}
-	repository, err := ghrepo.Parse("the GitHub repository of "+issue.Key, issue.GitHubRepo)
+	recordedRepo, err := ghrepo.Parse("the GitHub repository of "+issue.Key, issue.GitHubRepo)
 	if err != nil {
 		logUnread(err)
 		return true
 	}
+	// This read is GitHub's own, so it is minted for and addressed at the repository GitHub holds
+	// the recorded one under now (ghrepo.Renames.Serving, whose doc says why both halves are
+	// taken): the token is the half the old owner cannot supply, since after a transfer the
+	// installation covering the repository is the owner it moved to's. The log line above and the
+	// fact applied below go on naming issue.GitHubRepo, the name the record is held under.
+	repository := s.serving(recordedRepo)
 	lease, err := s.tokens.Token(ctx, appauth.Implement, repository.Owner())
 	if err != nil {
 		logUnread(fmt.Errorf("mint the implement App token for %s: %w", repository.Owner(), err))
@@ -486,8 +496,8 @@ func (s *server) checkReport(w http.ResponseWriter, r *http.Request, grant crede
 	writeJSON(w, http.StatusOK, HandoffCompleteResponse{})
 }
 
-// byHandShare is the clause READY_PACKET_TOO_LONG names a by-hand note's share of the packet with,
-// empty when READY carries none.
+// byHandShare is the clause READY_PACKET_TOO_LONG names a by-hand note's share of the packet
+// with, empty when READY carries none.
 func byHandShare(mergeNote string) string {
 	if mergeNote == "" {
 		return ""
@@ -496,9 +506,10 @@ func byHandShare(mergeNote string) string {
 }
 
 // readyNote runs READY's checks (readyChecks) against issue's recorded pull request on GitHub, in
-// the repository issue's record names, for a merger's ready: true, and is what they leave
-// (readyAnswer). Every refusal is written before the fact is applied, so nothing is recorded under
-// the completion's key and the corrected retry at the same commit is applied:
+// the repository GitHub holds the issue's recorded one under now (serving), for a merger's
+// ready: true, and is what they leave (readyAnswer). Every refusal is written before the fact is
+// applied, so nothing is recorded under the completion's key and the corrected retry at the same
+// commit is applied:
 //
 //   - READY's refusals (readyChecks): NO_PULL_REQUEST, READY_PULL_REQUEST_CLOSED,
 //     READY_HEAD_MOVED, READY_NOT_APPROVED and READY_UNREVIEWED_CHANGE
@@ -506,8 +517,9 @@ func byHandShare(mergeNote string) string {
 //     READY_HEAD_CONFLICTS, READY_FILES_TRUNCATED, READY_DISARM_PENDING.
 //   - GITHUB_READ_FAILED: GitHub failed to answer a read; its failure, not the head's.
 //
-// The reads are made as the implement App, minted for the repository's owner, whose token never
-// leaves the daemon; a runtime that boots without Apps publishes no READY (leaseForGrant).
+// The reads are made as the implement App, minted for the owner of the repository GitHub serves,
+// whose token never leaves the daemon; a runtime that boots without Apps publishes no READY
+// (leaseForGrant).
 func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credential.Grant, issue *record.Issue, readyHead string) (answer readyAnswer, ok bool) {
 	repository, err := issue.Repository()
 	if err != nil {
@@ -515,6 +527,12 @@ func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credent
 		writeFailure(w, http.StatusInternalServerError, "RECORD_READ_FAILED", fmt.Sprintf("the record of %s names no repository its pull request can be read in", issue.Key))
 		return readyAnswer{}, false
 	}
+	// READY's checks are GitHub's own reads, so they are minted for and addressed at the
+	// repository GitHub holds the recorded one under now (ghrepo.Renames.Serving, whose doc says
+	// why both halves are taken): the token is the half the old owner cannot supply, since after
+	// a transfer the installation covering the repository is the owner it moved to's, and without
+	// it a tree open at the transfer would never publish READY.
+	repository = s.serving(repository)
 	lease, ok := s.leaseForGrant(w, r, grant, appauth.Implement, repository.Owner())
 	if !ok {
 		return readyAnswer{}, false
@@ -545,7 +563,7 @@ func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credent
 // for it), and the head its review round approved, "" when it recorded none (record.ApprovedHead),
 // which READY holds the pull request's head to (unreviewedChange).
 func (s *server) readyRecord(ctx context.Context, issue string) (*record.PullRequest, bool, string, error) {
-	if s.pool == nil || s.records == nil {
+	if s.pool == nil {
 		return nil, false, "", errors.New("record dependencies are unavailable")
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly, IsoLevel: pgx.RepeatableRead})

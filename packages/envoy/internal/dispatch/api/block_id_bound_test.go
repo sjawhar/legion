@@ -238,7 +238,7 @@ func TestASuggestionWritingABlockIDPastTheBoundIsAccepted(t *testing.T) {
 	}
 
 	requireStoredWithoutLongIDNode(t, handler, database, issue.PrimaryArtifactID, long, "A note.", "Other paragraph.")
-	if line := logs.Lines("54000"); line != "" {
+	if line := logs.Lines("SQLSTATE 54000"); line != "" {
 		t.Fatalf("a write failed on an index key past its limit: %.400s", line)
 	}
 }
@@ -478,7 +478,7 @@ func TestAnAnchorInsideABlockWhoseIDIsPastTheBoundIsWritten(t *testing.T) {
 	if !counted {
 		t.Fatalf("blocks = %.400v, want the long-id callout counting one comment and one ask", blocks)
 	}
-	if line := logs.Lines("54000"); line != "" {
+	if line := logs.Lines("SQLSTATE 54000"); line != "" {
 		t.Fatalf("a write failed on an index key past its limit: %.400s", line)
 	}
 }

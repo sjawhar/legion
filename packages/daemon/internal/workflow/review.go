@@ -360,15 +360,15 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 			return intake.Result{}, err
 		}
 	}
-	// The decision belongs to the review round, not to the pull request's head: the round must still
-	// know, when the reviewer completes, what the review decided, on which head, and what it said for
-	// the next round's implementer. The
-	// round is open while the issue is in reviewing, and while it is held from reviewing, since the
-	// retry puts it back there with the reviewer's work kept. A review outside the round decides
-	// nothing and counts no round. An approval is judged against the head it names when the
-	// review ends (classify.ApprovalStands).
-	held := issue.Phase == phase.Held && issue.Hold != nil && issue.Hold.From == phase.Reviewing
-	if issue.Phase != phase.Reviewing && !held {
+	// The decision belongs to the review round, not to the pull request's head: the round must
+	// still know, when the reviewer completes, what the review decided, on which head, and what
+	// it said for the next round's implementer. The round is open while the issue stands in
+	// reviewing, a hold from reviewing counted as standing there (record.StandsIn, the one shape
+	// every question about where an issue stands is written over), since the retry puts it back
+	// there with the reviewer's work kept. A review outside the round decides nothing and counts
+	// no round. An approval is judged against the head it names when the review ends
+	// (classify.ApprovalStands).
+	if !record.StandsIn(*issue, phase.Reviewing) {
 		return intake.Result{}, nil
 	}
 	reviewer.Decision = &record.ReviewDecision{State: state, Body: fact.Body, Head: fact.CommitID}

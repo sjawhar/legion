@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -370,7 +371,7 @@ func TestReconcileHoldsAKeyTheBootListingShowsOutOfTheWorkflowStatusWindow(t *te
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories}, log)
 	admission := admit.New(record.NewStore(), engine, 1, "CAPTURE", log)
 	w := &workflowRuntime{
-		pool: pool, records: record.NewStore(), admission: admission, engine: engine, handlers: []intake.Handler{engine, admission}, repositories: newRepositories("CAPTURE"),
+		pool: pool, records: record.NewStore(), admission: admission, engine: engine, handlers: []intake.Handler{engine, admission}, repositories: newRepositories("CAPTURE", ghrepo.Renames{}),
 		dispatch: &filteringDispatch{summaries: []dispatch.IssueSummary{
 			{Key: "LEGION-EDGE", ResolvedRepo: "sjawhar/legion", Title: "edge", Status: "backlog", Rank: "A", HandedOver: true, LastSeq: 2},
 		}},
@@ -431,7 +432,7 @@ func TestReconcileOnThePilotsShapeAdmitsOnlyTheLabeledTodoRootQuickly(t *testing
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories}, log)
 	admission := admit.New(record.NewStore(), engine, 1, "CAPTURE", log)
 	w := &workflowRuntime{
-		pool: pool, records: record.NewStore(), admission: admission, engine: engine, handlers: []intake.Handler{engine, admission}, repositories: newRepositories("CAPTURE"),
+		pool: pool, records: record.NewStore(), admission: admission, engine: engine, handlers: []intake.Handler{engine, admission}, repositories: newRepositories("CAPTURE", ghrepo.Renames{}),
 		dispatch: &pilotDispatch{summaries: []dispatch.IssueSummary{
 			{Key: "CAPTURE-1", ResolvedRepo: "sjawhar/legion", Title: "todo root", Status: "todo", Rank: "A", HandedOver: true},
 			{Key: "CAPTURE-2", ResolvedRepo: "sjawhar/legion", Title: "backlog root", Status: "backlog", Rank: "B", HandedOver: true},
@@ -721,4 +722,123 @@ func reconcileAdmission(t *testing.T, pool *pgxpool.Pool, admission *admit.Admis
 		t.Fatalf("reconcile: %v", err)
 	}
 	committed()
+}
+
+// The three admission log lines this proof reads, each the one an operator reads in the daemon's
+// own output.
+const (
+	holdingMessage   = "admission reconcile: holding roots for the Dispatch consumer to reach a stream position"
+	releaseMessage   = "admission: the Dispatch consumer has caught up; releasing held roots"
+	slotTakenMessage = "admission: slot taken"
+)
+
+// A root held for the Dispatch consumer was once skipped rather than allowed to stop admission's
+// pass, so the lower-ranked root behind it in the waiting line took the one free slot while the
+// held root's own record still missed whatever Dispatch had recorded while the daemon was down.
+// The rule is locked in admission's own unit test; this proves it on the daemon's runtime, where a
+// real Postgres, a real JetStream consumer and the boot-owned pollHoldRelease ticker decide the
+// order, and it reads the proof from the operator-visible log lines rather than from admission's
+// internals. The boot pass holds LEGION-HELD and takes no slot for anything at all, and only the
+// release that follows the quiet consumer's catch-up admits it, with the lower-ranked LEGION-NEXT
+// still waiting behind it.
+func TestAHeldRootKeepsItsPlaceOnTheRuntimeUntilItsOwnReleaseAdmitsIt(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	js := workflowJetStream(t, workflowNATS(t))
+	logged := &syncBuffer{}
+	log := slog.New(slog.NewTextHandler(logged, nil))
+	consumers, err := intake.OpenConsumers(context.Background(), js, pool, intake.ConsumerSpec{
+		Project: "CAPTURE", Repositories: []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion")}, AckWait: time.Second, NakDelay: time.Millisecond, Logger: log,
+	})
+	if err != nil {
+		t.Fatalf("OpenConsumers: %v", err)
+	}
+
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories}, log)
+	admission := admit.New(record.NewStore(), engine, 1, "CAPTURE", log)
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		for _, seed := range []struct{ key, rank string }{{"LEGION-HELD", "A"}, {"LEGION-NEXT", "B"}} {
+			if err := record.NewStore().PutIssue(context.Background(), tx, record.Issue{
+				Key: seed.key, Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Project: "CAPTURE", Title: seed.key, Tree: seed.key, Phase: phase.Admitted,
+				Generation: 1, Status: "todo", Rank: seed.rank, HandedOver: true, LastDispatchSeq: 1,
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed roots: %v", err)
+	}
+	// LEGION-HELD's summary stands ahead of its own record, so the boot read holds it, while
+	// LEGION-NEXT's is level with its record and holds nothing. The target is far past anything an
+	// ack floor on this empty stream will ever reach, so only the quiet consumer's idle reading,
+	// taken by the runtime's own ticker, closes the hold.
+	reconcileAdmission(t, pool, admission, []dispatch.IssueSummary{
+		{Key: "LEGION-HELD", ResolvedRepo: "sjawhar/legion", Title: "LEGION-HELD", Status: "todo", Rank: "A", HandedOver: true, LastSeq: 2},
+		{Key: "LEGION-NEXT", ResolvedRepo: "sjawhar/legion", Title: "LEGION-NEXT", Status: "todo", Rank: "B", HandedOver: true, LastSeq: 1},
+	}, 1000, intake.DispatchConsumerPosition{AckFloorStream: 0, Idle: false})
+
+	if !admission.Held() {
+		t.Fatal("Held() = false after the boot read of a record behind Dispatch, want it held")
+	}
+	if slotted := tickSlotted(t, pool); len(slotted) > 0 {
+		t.Fatalf("slots after the boot pass = %v, want none: the held root keeps its place and nothing behind it takes the slot", slotted)
+	}
+	booted := logged.String()
+	if !strings.Contains(booted, holdingMessage) {
+		t.Fatalf("the boot pass logged no hold:\n%s", booted)
+	}
+	if strings.Contains(booted, slotTakenMessage) {
+		t.Fatalf("the boot pass took a slot while a root was held:\n%s", booted)
+	}
+
+	w := &workflowRuntime{
+		pool: pool, admission: admission, handlers: []intake.Handler{engine, admission},
+		dispatchProject: "CAPTURE", bootID: "test-boot", log: log,
+		holdPollInterval: 20 * time.Millisecond, consumers: consumers,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { w.pollHoldRelease(ctx); close(done) }()
+
+	testwait.Eventually(t, "the held root takes the free slot once the quiet stream's idle ticker releases it", func() bool {
+		return slices.Contains(tickSlotted(t, pool), "LEGION-HELD")
+	})
+	cancel()
+	<-done
+
+	text := logged.String()
+	var releaseLine string
+	var takenLines []string
+	takenBeforeRelease := false
+	for _, line := range strings.Split(text, "\n") {
+		switch {
+		case strings.Contains(line, releaseMessage):
+			releaseLine = line
+		case strings.Contains(line, slotTakenMessage):
+			takenLines = append(takenLines, line)
+			// The release is logged inline, within its own transaction, while a slot taken is
+			// logged by intake.OnCommit once that transaction has committed, so a slot reported
+			// before the release is one the pass took while the root was still held.
+			takenBeforeRelease = takenBeforeRelease || releaseLine == ""
+		}
+	}
+	if releaseLine == "" {
+		t.Fatalf("the log names no release of the hold:\n%s", text)
+	}
+	if takenBeforeRelease {
+		t.Fatalf("a slot was taken before the release: a root behind the held one took the slot:\n%s", text)
+	}
+	if !strings.Contains(releaseLine, "admitted=1") {
+		t.Fatalf("release line = %q, want admitted=1: the release itself admits the root it held", releaseLine)
+	}
+	if len(takenLines) != 1 {
+		t.Fatalf("slot taken lines = %v, want exactly one: only the held root may take the one slot", takenLines)
+	}
+	if !strings.Contains(takenLines[0], "issue=LEGION-HELD") {
+		t.Fatalf("slot taken line = %q, want issue=LEGION-HELD", takenLines[0])
+	}
+	if slotted := strings.Join(tickSlotted(t, pool), ","); slotted != "LEGION-HELD" {
+		t.Fatalf("slots after the release = %q, want LEGION-HELD alone: the lower-ranked root still waits", slotted)
+	}
 }

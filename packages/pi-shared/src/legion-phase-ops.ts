@@ -14,14 +14,26 @@ import {
 import type { HandoffReport } from "./handoff-record";
 
 /** The claim a session registered, as the phase ops need it, and as the claim boot
- * (`legion-claim-core`) records it: its own id, the daemon's answer for tree, issue and role, and
- * the secret every grant is minted with. */
+ * (`legion-claim-core`) records it: its own id, the claim token and the launch generation every
+ * claim route authenticates with, the daemon's answer for tree, issue and role, and the secret
+ * every grant is minted with. The token and the secret are the pair the claim routes
+ * authenticate a pod by, and they stay in this process: nothing writes either to disk. */
 export interface ClaimCapability {
   readonly sessionID: string;
+  readonly claimToken: string;
+  readonly generation: number;
   readonly tree: string;
   readonly issue: string;
   readonly role: LegionRole;
   readonly secret: string;
+  /** The task agents the registration answered with (`LegionRegistration.promptAgents`), which
+   * the session's own capability measurements check its discovered agents against long after the
+   * boot returned. `bootLegionClaim` is this field's only producer, and every claim in production
+   * carries the list: `packages/claude-envoy/src/legion-claim.ts`, the other host that records a
+   * claim, records what that boot hands it. It is optional because a reader that finds no value
+   * has a defined answer — it measures against no prompt agents — so a claim built without it,
+   * which only a test does, is read rather than refused. */
+  readonly promptAgents?: readonly string[];
 }
 
 /**
@@ -29,7 +41,13 @@ export interface ClaimCapability {
  * `legion` tool serves: pi-legion's (`packages/pi-legion/src/tools.ts`, beside the architect's and
  * the controller's operations) and claude-envoy's MCP tool (`packages/claude-envoy/src/legion-tool.ts`).
  */
-export const PHASE_OPS = ["read_record", "handoff_complete", "request_backward_move"] as const;
+export const PHASE_OPS = [
+  "read_record",
+  "read_release_records",
+  "handoff_complete",
+  "request_backward_move",
+  "ready_for_update",
+] as const;
 export type PhaseOp = (typeof PHASE_OPS)[number];
 
 export function isPhaseOp(op: string): op is PhaseOp {
@@ -41,6 +59,15 @@ const requiredString = (op: PhaseOp, field: string) => {
   const message = `${op} requires ${field}`;
   return z.string({ error: message }).refine((value) => value.trim() !== "", { error: message });
 };
+
+/** `read_release_records`' window: the instant it reads from, in the RFC 3339 form the route
+ * takes (`LegionReleaseRecordsRequest`'s `since`). A value the route could not read is refused
+ * here by the op's own name, rather than as the request schema's parse failure, and a blank one
+ * is refused as missing alone. */
+const windowStart = requiredString("read_release_records", "since").refine(
+  (value) => value.trim() === "" || z.iso.datetime({ offset: true }).safeParse(value).success,
+  { error: "read_release_records' since is an RFC 3339 time, as 2026-11-02T09:00:00Z is" }
+);
 
 /** One operation's arguments: `op` and `shape`, and nothing else. */
 const operation = <Op extends PhaseOp, Shape extends z.ZodRawShape>(op: Op, shape: Shape) =>
@@ -62,6 +89,9 @@ export const PhaseOpArguments = z.discriminatedUnion(
   "op",
   [
     operation("read_record", { issue: requiredString("read_record", "issue") }),
+    operation("read_release_records", {
+      since: windowStart,
+    }),
     operation("handoff_complete", {
       summary: requiredString("handoff_complete", "summary"),
       verdict: z
@@ -84,6 +114,10 @@ export const PhaseOpArguments = z.discriminatedUnion(
       }),
       reason: requiredString("request_backward_move", "reason"),
     }),
+    // The signal carries one field of the agent's: the round its update task named, which the
+    // daemon takes the answer for and no other. The claim says who answers, and the plugin
+    // resolves the branch head it reports.
+    operation("ready_for_update", { round: requiredString("ready_for_update", "round") }),
   ],
   {
     error: (issue) =>
@@ -125,10 +159,16 @@ export function phaseOpParameters(zod: unknown): Record<PhaseOpField, z.ZodType>
   return byField;
 }
 
-/** The `legion` tool's sentences on `read_record` and `request_backward_move`, which a host whose
- * tool states them passes as `before` and `after` (`legionToolDescription`). */
+/** The `legion` tool's sentences on `read_record`, `read_release_records` and
+ * `request_backward_move`, which a host whose tool states them passes as `before` and `after`
+ * (`legionToolDescription`). */
 export const PHASE_OP_SENTENCES = {
   readRecord: "read_record returns the record of `issue` from the daemon's state. ",
+  readReleaseRecords:
+    "read_release_records returns this deployment's idle-release records from `since` (an RFC 3339 time) on, read with this session's own claim: " +
+    "every release, resume and hold the daemon recorded, and over them the counts of releases, of resumes by wake kind and of holds by reason, " +
+    "the pod-hours released, the share of releases woken again within ten minutes, and the median, 90th percentile and maximum seconds from a " +
+    "wake to the woken role's first turn. ",
   requestBackwardMove:
     "request_backward_move returns an issue to an earlier phase (`to`, `reason`): a phase worker moves its own issue; " +
     "the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which counts a review round. ",
@@ -139,7 +179,8 @@ export const PHASE_OP_SENTENCES = {
  * then `handoff_complete`'s contract, then `after`, then where a question for another role goes,
  * `envoyPublish` being the host's name for Envoy's publish tool. `before` and `after` are whole
  * sentences, each ending in a space: the host's sentences on its other operations, and on
- * `read_record` and `request_backward_move` when it states them (`PHASE_OP_SENTENCES`).
+ * `read_record`, `read_release_records` and `request_backward_move` when it states them
+ * (`PHASE_OP_SENTENCES`).
  */
 export function legionToolDescription(host: {
   readonly envoyPublish: string;
@@ -170,6 +211,10 @@ export function legionToolDescription(host: {
     "merged (HANDOFF_NO_PULL_REQUEST: open it; one naming a closed pull request is the architect's to decide) and, for READY, each " +
     "refusal the merger's role names; a refused completion changed nothing, so fix what it names and complete again. An accepted READY whose `note` " +
     "begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " +
+    "ready_for_update answers the daemon's update task on this issue's pod: `round` is the round id that task names, and the " +
+    "daemon takes your answer for that round alone. Push every commit you want kept to the issue branch " +
+    "first, because the pod and its disk are replaced after every worker of the pod has answered. The call ends no phase. The " +
+    "daemon holds your next task until your process comes back on the new pod, in this same session. " +
     (host.after ?? "") +
     `What a later phase needs goes in your handoff; a question for another live role goes to its role topic with ${host.envoyPublish}.`
   );
@@ -182,9 +227,17 @@ export interface PhaseOpRuntime {
    * the pane's environment and Dispatch): throws naming the remedy when the phase has no handoff
    * record, Dispatch does not answer, or the implementer's work is not pushed. */
   readonly handoffReport: (phase: LegionPhase, role: LegionRole) => Promise<HandoffReport>;
+  /** The head of `legion/<issue>@origin` the `ready_for_update` signal reports
+   * (`findPushedBranchHead` with the pane's environment): `""` when the branch is not there. A
+   * throw leaves the head out of the signal, which is still sent, and the throw's message goes
+   * to the agent in the answer's `note`. */
+  readonly branchHead: () => Promise<string>;
   /** How `handoff_complete` waits out a daemon restart (`retryWhileDaemonRestarts`): the host's
    * sentence to the agent, and a test's clock. */
   readonly restart?: DaemonRestartRetry;
+  /** The clock `read_release_records` measures a release the daemon has not resumed yet against,
+   * `Date` itself unless a test hands it another. */
+  readonly now?: () => Date;
 }
 
 /** A grant for one write of the claim's session, minted on `/grants`' session form with the
@@ -212,10 +265,12 @@ const ROOT_COMPLETION_REFUSAL =
   "handoff_complete is not available to a root architect session, which runs no phase";
 
 /**
- * Runs one phase op and answers its JSON result: `{ record }` for `read_record`, the daemon's
- * answer for `handoff_complete`, `{}` for `request_backward_move`. A refusal throws before any
- * write, minting nothing and posting nothing: each problem `PhaseOpArguments` finds, joined by
- * `; `, a field the operation does not take named first, then a root architect's completion,
+ * Runs one phase op and answers its JSON result: `{ record }` for `read_record`, the window's
+ * records and their counts for `read_release_records`, the daemon's answer for
+ * `handoff_complete`, `{}` for `request_backward_move`, and `{}` for `ready_for_update`, or
+ * `{ note }` when its branch-head lookup failed. A refusal throws before any write, minting
+ * nothing and posting nothing: each problem `PhaseOpArguments` finds, joined by `; `, a field
+ * the operation does not take named first, then a root architect's completion,
  * then each problem with the operation's own fields in the order it takes them; then what the
  * record decides (a check report's verdict, `pending` on a phase completion, the issue a move
  * names), then a refused handoff report (`findHandoffReport`). A daemon refusal throws its code
@@ -256,6 +311,8 @@ export async function executePhaseOp(
   switch (args.op) {
     case "read_record":
       return { record: recordFrom(await daemon.state(), args.issue) };
+    case "read_release_records":
+      return releaseRecords(runtime, args.since);
     case "handoff_complete":
       // Retried whole while the daemon restarts: the record, the handoff report and a fresh grant
       // are read again on each attempt. A repeat never applies twice, but it cannot tell a landed
@@ -290,7 +347,142 @@ export async function executePhaseOp(
       });
       return {};
     }
+    case "ready_for_update": {
+      // The claim authenticates the signal, as it does `claims/ready`: no grant is minted. The
+      // round is the agent's own word, read from the update task it answers, and the daemon takes
+      // the answer for that round alone — an answer for a round its claim has left is refused
+      // naming both. The head is the plugin's to resolve, and a branch not yet on the remote is
+      // left out. A workspace whose jj cannot answer leaves it out too, and is told so: the round
+      // waits for every claim of the pod, so a worker whose lookup fails must still be able to
+      // answer. The daemon verifies no head, so the missing one costs the record a line and the
+      // round nothing.
+      let head = "";
+      let failure: string | undefined;
+      try {
+        head = await runtime.branchHead();
+      } catch (error) {
+        failure = error instanceof Error ? error.message : String(error);
+      }
+      await daemon.readyForUpdate({
+        claimToken: claim.claimToken,
+        sessionId: claim.sessionID,
+        secret: claim.secret,
+        generation: claim.generation,
+        round: args.round,
+        ...(head === "" ? {} : { head }),
+      });
+      // The answer names the signal the daemon has and the head it misses, and carries the
+      // lookup's own message, so the worker can repair what it names.
+      return failure === undefined
+        ? {}
+        : {
+            note:
+              "The daemon has your ready_for_update signal. The signal reports no branch head, " +
+              "because the branch-head lookup failed. The daemon checks no head, so your signal " +
+              "counts without one. Repair what the lookup's message names before your next jj " +
+              `command. The lookup said: ${failure}`,
+          };
+    }
   }
+}
+
+/** A release woken again within this of its release is churn: the pod was given up and paid for
+ * again at once (`docs/kubernetes.md`, "Idle release"). */
+const WOKEN_SOON_MS = 10 * 60 * 1000;
+
+/** How many rows of each `key`, the key's own order kept. */
+const countedBy = <Row>(
+  rows: readonly Row[],
+  key: (row: Row) => string
+): Readonly<Record<string, number>> => {
+  const counts: Record<string, number> = {};
+  for (const row of rows) counts[key(row)] = (counts[key(row)] ?? 0) + 1;
+  return counts;
+};
+
+/** The nearest-rank percentile of `sorted`, ascending: the smallest value `share` of the rows
+ * are at or below. Null for no rows, which is a window nothing was measured in rather than a
+ * zero. */
+const percentile = (sorted: readonly number[], share: number): number | null =>
+  sorted.length === 0 ? null : (sorted[Math.max(Math.ceil(share * sorted.length), 1) - 1] ?? null);
+
+/**
+ * `read_release_records`: the window's records from the daemon, with the numbers a report of the
+ * deployment's idle release is written from, so an agent counts nothing itself. The claim's own
+ * token and secret authenticate the read, as every other claim route is authenticated, and they
+ * never leave this process.
+ *
+ * `podHoursReleased` is how long the released pods were gone: from each release to the first
+ * resume of it, and to `asOf` for a release the daemon has not resumed yet, since that pod is
+ * gone now. A pod's roles wake one resume each, so the first of them ends the release.
+ * `wokenWithinTenMinutes` counts the releases a wake followed that soon, the churn of releasing
+ * a pod that was wanted again at once. `wakeToFirstTurnSeconds` measures each resume the daemon
+ * has seen a first turn for, `withoutFirstTurn` counting the rest, and reports the nearest-rank
+ * median and 90th percentile and the maximum.
+ */
+async function releaseRecords(
+  runtime: PhaseOpRuntime,
+  since: string
+): Promise<Readonly<Record<string, unknown>>> {
+  const { claim } = runtime;
+  const records = await runtime.daemon.releaseRecords({
+    claimToken: claim.claimToken,
+    secret: claim.secret,
+    since,
+  });
+  const asOf = runtime.now?.() ?? new Date();
+  const wokenAt = new Map<number, number>();
+  for (const resume of records.resumes) {
+    if (resume.release === 0) continue;
+    const at = Date.parse(resume.at);
+    const first = wokenAt.get(resume.release);
+    if (first === undefined || at < first) wokenAt.set(resume.release, at);
+  }
+  let releasedMs = 0;
+  let wokenSoon = 0;
+  for (const release of records.releases) {
+    const from = Date.parse(release.at);
+    const woken = wokenAt.get(release.id);
+    releasedMs += Math.max((woken ?? asOf.getTime()) - from, 0);
+    if (woken !== undefined && woken - from <= WOKEN_SOON_MS) wokenSoon += 1;
+  }
+  const waits = records.resumes
+    .flatMap((resume) =>
+      resume.firstTurnAt === undefined
+        ? []
+        : [(Date.parse(resume.firstTurnAt) - Date.parse(resume.at)) / 1000]
+    )
+    .sort((one, other) => one - other);
+  const whole = (value: number | null) => (value === null ? null : Math.round(value));
+  return {
+    since,
+    asOf: asOf.toISOString(),
+    releases: records.releases,
+    resumes: records.resumes,
+    holds: records.holds,
+    counts: {
+      releases: records.releases.length,
+      resumes: records.resumes.length,
+      resumesByKind: countedBy(records.resumes, (resume) => resume.kind),
+      holds: records.holds.length,
+      holdsByReason: countedBy(records.holds, (hold) => hold.reason),
+    },
+    podHoursReleased: Math.round((releasedMs / 3_600_000) * 100) / 100,
+    wokenWithinTenMinutes: {
+      releases: wokenSoon,
+      share:
+        records.releases.length === 0
+          ? 0
+          : Math.round((wokenSoon / records.releases.length) * 1000) / 1000,
+    },
+    wakeToFirstTurnSeconds: {
+      measured: waits.length,
+      withoutFirstTurn: records.resumes.length - waits.length,
+      median: whole(percentile(waits, 0.5)),
+      p90: whole(percentile(waits, 0.9)),
+      max: whole(waits.at(-1) ?? null),
+    },
+  };
 }
 
 /** One attempt of `handoff_complete` (`executePhaseOp`'s doc comment). */

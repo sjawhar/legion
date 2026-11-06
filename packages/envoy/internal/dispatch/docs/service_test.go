@@ -23,6 +23,7 @@ import (
 	"github.com/reearth/ygo/persistence"
 	ygws "github.com/reearth/ygo/provider/websocket"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
@@ -235,9 +236,10 @@ func TestAnAskWhoseTextHoldsWebAddressesSettlesAsWritten(t *testing.T) {
 // A spec's decisions are ask blocks, and the write that adds one already carries its words into
 // a version: indexing it afterwards is bookkeeping over the same document. Settlement recording
 // that bookkeeping as a version of its own wrote a byte-identical version credited to nobody,
-// which stales the approval pinned to the version the agent wrote - and Legion's design gate,
-// open exactly while the approved version is the latest, closes with nothing in the event log
-// to explain it (LEGION-273).
+// which staled the approval pinned to the version the agent wrote and closed Legion's design gate
+// with nothing in the event log to explain it (LEGION-273). The approval carry now carries that
+// approval to such a version instead, which is a version and an artifact.approved event nothing in
+// the log explains, so settlement still writes none.
 func TestSettlementIndexingAnAskBlockTheEditVersionedWritesNoVersion(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -462,10 +464,8 @@ func TestSettlementRepairsServerOwnedAskAttributesOncePerVersion(t *testing.T) {
 	`, askID, answerJSON); err != nil {
 		t.Fatalf("answer indexed ask: %v", err)
 	}
-	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
-		tree.Children[0].Attrs["state"] = "open"
-		return tree
-	})
+	// The block still reads state="open" while its row is answered: a browser's edit setting it to
+	// open again would change nothing, and a transaction that changes nothing commits nothing.
 	settleCurrentGeneration(t, service, artifactID)
 	waitForDocumentText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"answered\" answered_by=\"alice\" answered_at=\""+answer.At.Format(time.RFC3339Nano)+"\" selected=\"[]\"}\nShip it?\n:::\n")
 	var repaired int
@@ -3455,6 +3455,38 @@ func TestSettlementMarksAnAskWithAParagraphAfterItsOptionsInvalid(t *testing.T) 
 	})
 }
 
+// A browser edit reaches a document through the Yjs room and settlement, where no ask route's
+// check runs, so the bound an ask's question and options share (askWordingTooLong) is
+// settlement's too: a decision one unit over is marked invalid, with a block.invalid event
+// naming the bound, and its row is left open as it was. Were that wording stored, the ask
+// would take no PATCH at all - an urgency-only edit included - because every ask route holds
+// the merged ask to the same bound. Shortening the question by one unit repairs it.
+func TestSettlementMarksADecisionOverTheWordingBoundInvalid(t *testing.T) {
+	const blockID = "ask-wording"
+	options := []model.AskOption{{Label: "Ship", Description: "Release it"}, {Label: "Hold", Description: "Wait for review"}}
+	// The options the seed wrote spend their own units of the bound; the question fills the
+	// rest of it and one unit more.
+	question := strings.Repeat("a", contracts.DispatchEventBodyMax+1-AskWordingUnits("", options))
+	service, artifactID := seedIndexedShipAsk(t, blockID)
+	setQuestion := func(text string) {
+		t.Helper()
+		editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+			ask := firstAsk(tree)
+			ask.Children[0] = parsedBlock(t, text+"\n")
+			return tree
+		})
+		settleCurrentGeneration(t, service, artifactID)
+	}
+
+	setQuestion(question)
+	reason := fmt.Sprintf("ask block %q is 1 characters over the %d-character limit on its question and options (%d/%d)",
+		blockID, contracts.DispatchEventBodyMax, contracts.DispatchEventBodyMax+1, contracts.DispatchEventBodyMax)
+	assertAskMarkedInvalidAndKept(t, service, artifactID, blockID, reason)
+
+	setQuestion(question[:len(question)-1])
+	assertAskRepaired(t, service, artifactID, blockID, question[:len(question)-1], options)
+}
+
 // seedIndexedShipAsk is a document holding one ask, "Should we ship?" with the options Ship and
 // Hold, which settlement has indexed as an open ask row. Its settlements run only when the test
 // runs them.
@@ -3789,7 +3821,7 @@ func TestSettleRendersTreeAndWritesVersion(t *testing.T) {
 // (syncListOrderPlugin). The server parses headings with an empty id and every list item as a
 // bullet. A version records the rendered markdown alone, so such an update changes nothing a
 // version records: it credits no connected reader and settles without a version, which would
-// otherwise stale an approval.
+// otherwise be a version and, over an approved document, a carried approval no change explains.
 func TestAttributesTheEditorDerivesSettleWithoutAVersion(t *testing.T) {
 	for _, test := range []struct {
 		name     string
@@ -4331,7 +4363,7 @@ func TestBackfillStampsClosedIssueDocument(t *testing.T) {
 	if _, err := database.Pool.Exec(context.Background(), `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
 		t.Fatalf("close document issue: %v", err)
 	}
-	service.SetIssueClosed(context.Background(), "DOC-1", true)
+	service.issueOpenChanged(context.Background(), "DOC-1")
 
 	reports, err := service.BackfillBlockIDs(context.Background())
 	if err != nil {
@@ -4365,7 +4397,7 @@ func TestAClosedIssuesDocumentReadsItsBlocksWithoutFailingItsRoom(t *testing.T) 
 	if _, err := database.Pool.Exec(context.Background(), `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
 		t.Fatalf("close document issue: %v", err)
 	}
-	service.SetIssueClosed(context.Background(), "DOC-1", true)
+	service.issueOpenChanged(context.Background(), "DOC-1")
 
 	markdown, blocks, err := service.TextWithBlocks(context.Background(), artifactID)
 	if err != nil {
@@ -4392,7 +4424,7 @@ func TestBackfillDoesNotBypassClosedIssueForConcurrentApplyOps(t *testing.T) {
 	if _, err := database.Pool.Exec(context.Background(), `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
 		t.Fatalf("close document issue: %v", err)
 	}
-	service.SetIssueClosed(context.Background(), "DOC-1", true)
+	service.issueOpenChanged(context.Background(), "DOC-1")
 
 	entered := make(chan struct{})
 	release := make(chan struct{})
@@ -5103,7 +5135,7 @@ type shutdownCompactStore struct {
 	compactionAfterClose chan struct{}
 }
 
-func (s *shutdownCompactStore) Compact(ctx context.Context, room string, keep int) (int, error) {
+func (s *shutdownCompactStore) compactRoom(ctx context.Context, room string, rule compactRule, wait bool) (compactResult, error) {
 	if s.closed.Load() {
 		select {
 		case s.compactionAfterClose <- struct{}{}:
@@ -5111,9 +5143,12 @@ func (s *shutdownCompactStore) Compact(ctx context.Context, room string, keep in
 		}
 	}
 	s.compactions.Add(1)
-	return s.VersionedStore.Compact(ctx, room, keep)
+	return s.VersionedStore.compactRoom(ctx, room, rule, wait)
 }
 
+// Shutdown closes its resident rooms, and each close compacts the document under the tail rule
+// before the store closes: a document whose rows are all older than the tail is one row once
+// Shutdown returns, and no compaction runs after.
 func TestShutdownCompletesCompactionBeforeTestStoreCloses(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "# First")
@@ -5128,12 +5163,19 @@ func TestShutdownCompletesCompactionBeforeTestStoreCloses(t *testing.T) {
 	seedServiceText(t, service, artifactID, "before")
 	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
 	waitForDocumentVersion(t, database, artifactID, 2)
+	if rows := storedUpdateCount(t, database, artifactID); rows < 2 {
+		t.Fatalf("stored updates before shutdown = %d, want the seed and the edit", rows)
+	}
+	ageUpdatesThrough(t, database, artifactID, everyVersion, time.Hour)
 
 	if err := service.Shutdown(context.Background()); err != nil {
 		t.Fatalf("shutdown document service: %v", err)
 	}
 	if persistence.compactions.Load() == 0 {
 		t.Fatal("shutdown did not run document compaction")
+	}
+	if rows := storedUpdateCount(t, database, artifactID); rows != 1 {
+		t.Fatalf("stored updates after shutdown = %d, want the one row the close compacted them into", rows)
 	}
 
 	persistence.closed.Store(true)
@@ -5362,14 +5404,14 @@ func TestIssueReopenRestoresLiveWrites(t *testing.T) {
 	if _, err := service.store.Pool.Exec(context.Background(), `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
 		t.Fatalf("close document issue: %v", err)
 	}
-	service.SetIssueClosed(context.Background(), "DOC-1", true)
+	service.issueOpenChanged(context.Background(), "DOC-1")
 	if _, err := joinedReplaceText(service, artifactID, "closed", model.Actor{Kind: "user", ID: "alice"}); !errors.Is(err, ErrIssueClosed) {
 		t.Fatalf("write to closed issue = %v, want ErrIssueClosed", err)
 	}
 	if _, err := service.store.Pool.Exec(context.Background(), `update issues set closed_at = null where key = 'DOC-1'`); err != nil {
 		t.Fatalf("reopen document issue: %v", err)
 	}
-	service.SetIssueClosed(context.Background(), "DOC-1", false)
+	service.issueOpenChanged(context.Background(), "DOC-1")
 	service.events.Publish(model.Event{IssueKey: new("DOC-1"), Type: "issue.closed"})
 	if got := service.events.SubscriberCount(); got != 0 {
 		t.Fatalf("stale issue.closed event gained %d subscriptions, want none", got)
@@ -5542,11 +5584,11 @@ func (s failingVersionedStore) AppendUpdate(ctx context.Context, room string, up
 	return s.VersionedStore.AppendUpdate(ctx, room, update)
 }
 
-func (s failingVersionedStore) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
+func (s failingVersionedStore) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit, browser *BrowserAppend) (persistence.Version, error) {
 	if s.appendErr != nil {
 		return 0, s.appendErr
 	}
-	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit)
+	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit, browser)
 }
 
 func (s failingVersionedStore) AppendRoomFlush(ctx context.Context, room string, flush *RoomFlush, through uint64, credit *UpdateCredit) (persistence.Version, error) {
@@ -5591,12 +5633,12 @@ func (s *blockingFirstAppendStore) AppendUpdate(ctx context.Context, room string
 	return s.VersionedStore.AppendUpdate(ctx, room, update)
 }
 
-func (s *blockingFirstAppendStore) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
+func (s *blockingFirstAppendStore) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit, browser *BrowserAppend) (persistence.Version, error) {
 	if s.blocked.CompareAndSwap(false, true) {
 		close(s.entered)
 		<-s.release
 	}
-	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit)
+	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit, browser)
 }
 
 func (s *blockingFirstAppendStore) AppendRoomFlush(ctx context.Context, room string, flush *RoomFlush, through uint64, credit *UpdateCredit) (persistence.Version, error) {

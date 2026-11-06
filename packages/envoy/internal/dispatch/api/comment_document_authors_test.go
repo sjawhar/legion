@@ -48,7 +48,7 @@ func TestAPersonsCommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 		}
 	}))
 	defer listener.Close()
-	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.URL})
+	handler, database, _ := newTestServer(t, testServerOptions{envoyURL: listener.URL})
 	issue := createInteractionIssue(t, handler, "DOCS", "Document comments", "The issue's own spec.")
 
 	// upload writes a document as actor, a session's actor map or a person's login, and returns
@@ -96,7 +96,7 @@ func TestAPersonsCommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 	// sessions' own topics it reached, each as often as it was published there.
 	reached := func(t *testing.T, commentID string) (bool, []string) {
 		t.Helper()
-		deliveries := eventDeliveries(t, database, deps.Docs, "comment.created", commentID)
+		deliveries := eventDeliveries(t, database, "comment.created", commentID)
 		if len(deliveries) != 1 {
 			t.Fatalf("comment.created events for %s = %#v, want one", commentID, deliveries)
 		}

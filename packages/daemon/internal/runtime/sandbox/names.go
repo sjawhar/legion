@@ -98,6 +98,14 @@ const (
 	RoleProbeDir = launcher.FixedRoot + "/role-probe"
 )
 
+// SkillsDir is where an issue pod mounts its skills volume: the clone of the deployment's skills
+// marketplace (runtime.kubernetes.skills_repository) that skills-fetch filled, with the commit,
+// the marketplace's name and its plugins recorded beside it (workspace.SkillsClone and its
+// siblings). It is read-write in skills-fetch alone and read-only in the pod's launcher
+// container, and it is not under RolesDir or HomeMountsDir, the two directories a role's
+// namespaces cover, so every role of the pod reads it at this one path.
+const SkillsDir = launcher.FixedRoot + "/skills"
+
 // roleDir is role's own directory of an issue pod's one container, under RolesDir: its launcher
 // token and gh projections of its role Secret, read-only, and its memory-backed private, state and
 // agent-secrets key directories, the last only in a pod enrolled with the secrets broker, each one
@@ -264,8 +272,20 @@ const (
 // without changing the launcher's binding.
 const GitHubDefaultKey = "github-default"
 
+// githubHostsPrefix is the one spelling of the hosts.yml keys' prefix, which GitHubHostsKey
+// writes and GitHubHostsOwner reads back.
+const githubHostsPrefix = "github-hosts-"
+
 // GitHubHostsKey is the role Secret's key holding owner's hosts.yml.
-func GitHubHostsKey(owner string) string { return "github-hosts-" + owner }
+func GitHubHostsKey(owner string) string { return githubHostsPrefix + owner }
+
+// GitHubHostsOwner is the owner a role Secret's key names the hosts.yml of, and whether key is
+// such a key at all: GitHubHostsKey read backwards, so a pod's gh projection can be read as the
+// owners it holds (movedGhOwners). One key of the pair names each owner, the config one naming
+// the same, so the hosts keys alone answer the whole set.
+func GitHubHostsOwner(key string) (owner string, ok bool) {
+	return strings.CutPrefix(key, githubHostsPrefix)
+}
 
 // GitHubConfigKey is the role Secret's key holding owner's config.yml.
 func GitHubConfigKey(owner string) string { return "github-config-" + owner }

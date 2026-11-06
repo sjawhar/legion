@@ -54,9 +54,10 @@ import (
 // gap), and the mark sweep only for a mark a browser race left with no comment, ask or
 // suggestion row to match; neither fires on every settlement the way an answer's return can.
 // What the bound weighs is the document a write leaves, not the history its store keeps - that
-// is now compaction's (LEGION-496), which folds every update into the document's state as a
-// room closes, as the server shuts down, and daily; what grows between those is bounded by how
-// long a room stays open, not by how many versions or replies it has had.
+// is now compaction's (LEGION-496), which folds the document's rows older than compactTail into
+// its state once they are due (the compaction queue, checkCompaction) and at the hourly sweep
+// (RunCompactionSweep); what grows between those is bounded by the rows a document stores while a
+// row waits to fold, about 75 minutes at most, not by how many versions or replies it has had.
 
 // growth is what one write leaves a document, as refuseGrowth weighs it. The live state it leaves
 // is checked apart (refuseUndecodable), once the write has let go of the tree before it.

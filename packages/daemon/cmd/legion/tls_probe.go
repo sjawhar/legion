@@ -272,7 +272,10 @@ func tlsCertificateError(detail string) bool {
 		"certificate revoked",
 		"certificate verify failed",
 		"invalid peer certificate",
+		// curl before 8.18 says "SSL certificate problem: <reason>"; 8.18 says "SSL certificate
+		// OpenSSL verify result: <reason> (<code>)" for the same refusal (exit 60).
 		"ssl certificate problem",
+		"ssl certificate openssl verify result",
 		"x509:",
 		"failed to verify certificate",
 		"net::err_cert",

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
 // strandedStore is the issue record, the admission slots and the queued supervise rows Stranded
@@ -30,6 +32,29 @@ type strandedStore struct {
 func (s *strandedStore) Issues(context.Context, pgx.Tx) ([]record.Issue, error) { return s.issues, nil }
 
 func (s *strandedStore) Slots(context.Context, pgx.Tx) ([]record.Slot, error) { return s.slots, nil }
+
+// TreeLifecycles reports a lifecycle open under the workflow for each tree the fixture gave a
+// slot: a slot now counts one issue at work, and it is the lifecycle that says a tree runs
+// (record.TreeLive), so the fixture's slots stand for the trees this store has open.
+func (s *strandedStore) TreeLifecycles(_ context.Context, _ pgx.Tx, _ string, trees []string) (map[string]treelifecycle.Lifecycle, error) {
+	open := make(map[string]treelifecycle.Lifecycle, len(trees))
+	for _, slot := range s.slots {
+		if slices.Contains(trees, slot.Issue) {
+			open[slot.Issue] = treelifecycle.Lifecycle{Tree: slot.Issue, Authority: treelifecycle.AuthorityWorkflow}
+		}
+	}
+	return open, nil
+}
+
+// Gates and OwedStarts answer nothing: Stranded reads the live trees of the line facts and no
+// other part of them.
+func (s *strandedStore) Gates(context.Context, pgx.Tx, []string) (map[string]record.DesignGate, error) {
+	return map[string]record.DesignGate{}, nil
+}
+
+func (s *strandedStore) OwedStarts(context.Context, pgx.Tx, string) ([]record.OwedStart, error) {
+	return nil, nil
+}
 
 // slotsOf is one admission slot for each of keys.
 func slotsOf(keys ...string) []record.Slot {
@@ -77,6 +102,75 @@ func strandedIssue(key, tree string, p phase.Phase) record.Issue {
 		issue.Parent = &tree
 	}
 	return issue
+}
+
+// strandedNow is the moment every Stranded test judges a released claim's wake at. It is far
+// past the rule's bound, so a test that hands Stranded no resume records sees the same answer it
+// saw before R6.
+var strandedNow = time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+
+// INFRA-945 R6: a released claim is the one claim Stranded judges on its pod's wakes. Nothing
+// woke it, so it waits for a delivery as a released pod is meant to and is not stranded; a wake
+// that ran out of StrandedReleaseWake with no turn of the woken role is the pod that never came
+// back, and nothing else will take that wake again.
+func TestStrandedNamesAReleasedClaimOnlyWhenItsWakeNeverBroughtThePodBack(t *testing.T) {
+	issues := []record.Issue{
+		strandedIssue("LEGION-1", "LEGION-1", phase.Implementing),
+		strandedIssue("LEGION-2", "LEGION-2", phase.Testing),
+		strandedIssue("LEGION-3", "LEGION-3", phase.Reviewing),
+		strandedIssue("LEGION-4", "LEGION-4", phase.Planning),
+		strandedIssue("LEGION-5", "LEGION-5", phase.Merging),
+	}
+	released := func(tree, issue string, role claim.Role) supervise.Claim {
+		c := strandedClaim(t, tree, issue, role, supervise.StateSuspended)
+		c.SuspendedBy = supervise.SuspendedByReleased
+		return c
+	}
+	never := released("LEGION-1", "LEGION-1", claim.RoleImplementer)
+	fresh := released("LEGION-2", "LEGION-2", claim.RoleTester)
+	stuck := released("LEGION-3", "LEGION-3", claim.RoleReviewer)
+	marked := released("LEGION-4", "LEGION-4", claim.RolePlanner)
+	back := released("LEGION-5", "LEGION-5", claim.RoleMerger)
+	// A released architect is held to the same one fact: its tree's admission would start it, but
+	// the wake its pod was taken for is the thing that did not land.
+	architect := released("LEGION-3", "LEGION-3", claim.RoleArchitect)
+	claims := []supervise.Claim{never, fresh, stuck, marked, back, architect}
+	stored := map[claim.Token]supervise.Claim{}
+	for _, c := range claims {
+		stored[c.Token] = c
+	}
+	s := &strandedStore{issues: issues, claims: stored,
+		slots: slotsOf("LEGION-1", "LEGION-2", "LEGION-3", "LEGION-4", "LEGION-5")}
+
+	resumes := []ReleasedWake{
+		// Woken a minute ago: the replacement pod is still being built.
+		{Issue: "LEGION-2", Role: string(claim.RoleTester), At: strandedNow.Add(-time.Minute)},
+		// Woken well past the bound with no turn, for both roles of LEGION-3's pod.
+		{Issue: "LEGION-3", Role: string(claim.RoleReviewer), At: strandedNow.Add(-30 * time.Minute)},
+		{Issue: "LEGION-3", Role: string(claim.RoleArchitect), At: strandedNow.Add(-30 * time.Minute)},
+		// The same fact already recorded by the stuck pass, whatever the wake's age reads as now.
+		{Issue: "LEGION-4", Role: string(claim.RolePlanner), At: strandedNow, Stuck: true},
+	}
+
+	got, err := Stranded(context.Background(), nil, s, "LEGION", claims, resumes, strandedNow)
+	if err != nil {
+		t.Fatalf("Stranded: %v", err)
+	}
+	want := []supervise.Claim{architect, stuck, marked}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("stranded = %v, want %v", names(got), names(want))
+	}
+
+	// A wake exactly at the bound has not run out of it.
+	atTheBound := []ReleasedWake{{Issue: "LEGION-1", Role: string(claim.RoleImplementer),
+		At: strandedNow.Add(-StrandedReleaseWake)}}
+	got, err = Stranded(context.Background(), nil, s, "LEGION", []supervise.Claim{never}, atTheBound, strandedNow)
+	if err != nil {
+		t.Fatalf("Stranded at the bound: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("stranded at the bound = %v, want none", names(got))
+	}
 }
 
 // Each claim nothing will wake is named, and every claim something will still wake, or that
@@ -178,7 +272,7 @@ func TestStrandedNamesTheClaimsNothingWillWake(t *testing.T) {
 		},
 	}
 
-	got, err := Stranded(context.Background(), nil, s, claims)
+	got, err := Stranded(context.Background(), nil, s, "LEGION", claims, nil, strandedNow)
 	if err != nil {
 		t.Fatalf("Stranded: %v", err)
 	}
@@ -223,7 +317,7 @@ func TestStrandedLeavesOutTheWorkersTheRuleResumes(t *testing.T) {
 		queued: map[claim.Token][]record.QueuedSupervise{
 			unknownStarted.Token: {{ID: 21, Request: record.SuperviseRequest{Op: "start", Tree: "LEGION-5", Role: claim.RoleTester, Generation: 2, Phase: phase.Testing}}},
 		}}
-	got, err := Stranded(context.Background(), nil, store, claims)
+	got, err := Stranded(context.Background(), nil, store, "LEGION", claims, nil, strandedNow)
 	if err != nil {
 		t.Fatalf("Stranded: %v", err)
 	}
@@ -257,7 +351,7 @@ func TestStrandedReadsRoleRunsInBatches(t *testing.T) {
 		claims = append(claims, current)
 	}
 
-	got, err := Stranded(context.Background(), nil, store, claims)
+	got, err := Stranded(context.Background(), nil, store, "LEGION", claims, nil, strandedNow)
 	if err != nil {
 		t.Fatalf("Stranded: %v", err)
 	}

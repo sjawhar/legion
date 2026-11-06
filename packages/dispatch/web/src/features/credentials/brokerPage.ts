@@ -5,9 +5,9 @@ import { safeExternalHref } from "../../lib/external-href";
  *  and Dispatch relays that answer's body verbatim, so the value is the broker's word and not
  *  Dispatch's: `safeExternalHref` takes it only as an absolute `http:` or `https:` URL, and
  *  anything else, a `javascript:` URL or a relative path among them, reads as absent, since a
- *  link or a redirect would otherwise run or open whatever the relayed body named. A broker older
- *  than that page names none: the Inbox row then links to the record's own Dispatch page, and that
- *  page decides the request itself, which is what both did before the broker had a page at all.
+ *  link would otherwise run or open whatever the relayed body named. A broker older than that
+ *  page names none, and the Inbox row then renders its summary with no link, since Dispatch
+ *  decides no secret request of its own any more.
  */
 export function brokerPage(approveUrl: string | undefined): string | null {
   return approveUrl === undefined ? null : safeExternalHref(approveUrl);

@@ -59,6 +59,8 @@ const (
 	// ReasonGitHubOwnersMalformed: a github-app secret's github-owners tag holds a comma, its logins
 	// being separated by spaces, or an entry that is not a GitHub login (ParseGitHubOwners).
 	ReasonGitHubOwnersMalformed = "github-owners-malformed"
+	// ReasonDefaultGrantMalformed: default-grant is set to anything but "session".
+	ReasonDefaultGrantMalformed = "default-grant-malformed"
 )
 
 // slugPattern is a secret's name under the prefix: the lowercase form of an environment-variable
@@ -217,6 +219,12 @@ func (l Loader) secret(ctx context.Context, slug string, ls secrets.Listing) (Se
 		if s.MaxGrant, err = ParseMaxGrant(raw); err != nil {
 			return Secret{}, ReasonMaxGrantMalformed, nil
 		}
+	}
+	if raw, tagged := ls.Tags[TagDefaultGrant]; tagged {
+		if raw != DefaultGrantSession {
+			return Secret{}, ReasonDefaultGrantMalformed, nil
+		}
+		s.SessionDefault = true
 	}
 	if kind := ls.Tags[TagKind]; kind != "" {
 		if !ValidKind(kind) {

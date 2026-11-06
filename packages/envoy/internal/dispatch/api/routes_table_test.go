@@ -6,10 +6,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 type routeIndex struct {
@@ -105,7 +109,7 @@ func TestWriteRouteIndexCarriesEveryRouteTheTableHas(t *testing.T) {
 // The table is the registration: every row is mounted, every row is described, and the
 // count only moves when a route is deliberately added or removed.
 func TestRoutesTablePinsEveryRegisteredRoute(t *testing.T) {
-	const registeredRoutes = 155
+	const registeredRoutes = 171
 	routes := (&server{}).routes()
 	if len(routes) != registeredRoutes {
 		t.Fatalf("routes() has %d rows, want %d (update the pin when adding a route)", len(routes), registeredRoutes)
@@ -124,14 +128,123 @@ func TestRoutesTablePinsEveryRegisteredRoute(t *testing.T) {
 			t.Fatalf("route %q has no handler", key)
 		}
 		switch route.Auth {
-		case authPublic, authAny, authHuman, authBearer:
+		case authPublic, authAny, authBearer:
 		default:
 			t.Fatalf("route %q has auth %q", key, route.Auth)
 		}
 	}
-	if got := len((&server{deps: Deps{TestHooksEnabled: true}}).routes()); got != registeredRoutes+6 {
-		t.Fatalf("test hooks add six routes: got %d, want %d", got, registeredRoutes+6)
+	if got := len((&server{deps: Deps{TestHooksEnabled: true}}).routes()); got != registeredRoutes+12 {
+		t.Fatalf("test hooks add twelve routes: got %d, want %d", got, registeredRoutes+12)
 	}
+}
+
+// TestEveryIDRouteIsNamed: every route whose pattern carries {id} or {block_id} says what that
+// id names — a kind whose prefix is resolved into it and the 404 that route answers for an id
+// it does not hold, or a reason it resolves none — and every name in the table is a route the
+// server serves. The sub-tests are the negative control, as TestEveryMutatingRouteIsClassed's
+// are: the same walk over a fixture holding a route the table does not name, one that resolves
+// nothing and says why not at once, and one that resolves an id without naming that 404, fails
+// on each.
+func TestEveryIDRouteIsNamed(t *testing.T) {
+	routes := (&server{deps: Deps{TestHooksEnabled: true}}).routes()
+	if undecided := undecidedIDRoutes(routes); len(undecided) > 0 {
+		t.Fatalf("%d route(s) whose id the prefix layer cannot decide:\n%s", len(undecided), strings.Join(undecided, "\n"))
+	}
+	served := make(map[string]bool, len(routes))
+	for _, route := range routes {
+		served[route.Method+" "+route.Pattern] = true
+	}
+	for name := range idRoutes {
+		if !served[name] {
+			t.Errorf("idRoutes names %q, which the table does not serve", name)
+		}
+		if !hasIDWildcard(name) {
+			t.Errorf("idRoutes names %q, whose pattern carries no id", name)
+		}
+	}
+
+	t.Run("a route the table does not name fails this walk", func(t *testing.T) {
+		undecided := undecidedIDRoutes([]apiRoute{
+			{routeRow: routeRow{Method: http.MethodGet, Pattern: "/api/v1/widgets", Auth: authAny}},
+			{routeRow: routeRow{Method: http.MethodGet, Pattern: "/api/v1/widgets/{id}", Auth: authAny}},
+		})
+		if len(undecided) != 1 || !strings.HasPrefix(undecided[0], "GET /api/v1/widgets/{id}:") {
+			t.Fatalf("the walk answered %q, want the unnamed id route named and the other left alone", undecided)
+		}
+	})
+
+	t.Run("a row that resolves nothing and gives no reason fails it too", func(t *testing.T) {
+		withIDRoute(t, "GET /api/v1/widgets/{block_id}", idRoute{})
+		undecided := undecidedIDRoutes([]apiRoute{
+			{routeRow: routeRow{Method: http.MethodGet, Pattern: "/api/v1/widgets/{block_id}", Auth: authAny}},
+		})
+		if len(undecided) != 1 || !strings.Contains(undecided[0], "gives no reason") {
+			t.Fatalf("the walk answered %q, want the reasonless row named", undecided)
+		}
+	})
+
+	t.Run("a row that resolves a kind and gives a reason fails it too", func(t *testing.T) {
+		withIDRoute(t, "GET /api/v1/widgets/{id}", idRoute{Kind: "ask", NotFound: "NOT_FOUND", Reason: "and also not"})
+		undecided := undecidedIDRoutes([]apiRoute{
+			{routeRow: routeRow{Method: http.MethodGet, Pattern: "/api/v1/widgets/{id}", Auth: authAny}},
+		})
+		if len(undecided) != 1 || !strings.Contains(undecided[0], "a reason not to") {
+			t.Fatalf("the walk answered %q, want the contradictory row named", undecided)
+		}
+	})
+
+	t.Run("a row that resolves an id and names no 404 of its own fails it too", func(t *testing.T) {
+		withIDRoute(t, "GET /api/v1/widgets/{id}", idRoute{Kind: "ask"})
+		undecided := undecidedIDRoutes([]apiRoute{
+			{routeRow: routeRow{Method: http.MethodGet, Pattern: "/api/v1/widgets/{id}", Auth: authAny}},
+		})
+		if len(undecided) != 1 || !strings.Contains(undecided[0], "what 404 the route answers") {
+			t.Fatalf("the walk answered %q, want the row with no not-found answer named", undecided)
+		}
+	})
+
+	t.Run("a row that resolves a block and names no 404 for it fails it too", func(t *testing.T) {
+		withIDRoute(t, "GET /api/v1/widgets/{id}/blocks/{block_id}",
+			idRoute{Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND", Blocks: true})
+		undecided := undecidedIDRoutes([]apiRoute{
+			{routeRow: routeRow{Method: http.MethodGet, Pattern: "/api/v1/widgets/{id}/blocks/{block_id}", Auth: authAny}},
+		})
+		if len(undecided) != 1 || !strings.Contains(undecided[0], "the document does not hold") {
+			t.Fatalf("the walk answered %q, want the row with no block not-found answer named", undecided)
+		}
+	})
+
+	t.Run("every row names a kind the prefix resolver reads and a 404 that is one", func(t *testing.T) {
+		for name, entry := range idRoutes {
+			switch entry.Kind {
+			case "", "ask", "comment", "message", "artifact":
+			default:
+				t.Errorf("idRoutes gives %q the kind %q, which refs.ResolvePrefix does not read", name, entry.Kind)
+			}
+			if entry.WithinIssue && !strings.Contains(name, "{key}") {
+				t.Errorf("idRoutes looks within the issue of %q, whose pattern names none", name)
+			}
+			if entry.Blocks && !strings.Contains(name, "{block_id}") {
+				t.Errorf("idRoutes reads a block of %q, whose pattern carries no {block_id}", name)
+			}
+			if strings.Contains(name, "{block_id}") && !entry.Blocks {
+				t.Errorf("idRoutes leaves the {block_id} of %q unresolved", name)
+			}
+			for column, code := range map[string]string{"NotFound": entry.NotFound, "BlockNotFound": entry.BlockNotFound} {
+				if code != "" && code != notFoundNone && !strings.HasSuffix(code, "NOT_FOUND") {
+					t.Errorf("idRoutes gives %q the %s code %q, which is no not-found code", name, column, code)
+				}
+			}
+		}
+	})
+}
+
+// withIDRoute names one route in idRoutes for the length of a test, so a negative control can
+// walk a row the server does not serve without leaving it behind.
+func withIDRoute(t *testing.T, name string, entry idRoute) {
+	t.Helper()
+	idRoutes[name] = entry
+	t.Cleanup(func() { delete(idRoutes, name) })
 }
 
 // routeProbePath fills a mux pattern's wildcards with well-formed placeholders so the request
@@ -174,9 +287,10 @@ func routeProbeBody(route apiRoute) string {
 	return `{"actor":{"kind":"session","id":"s1"}}`
 }
 
-// authRefusal reports whether a response is the server turning the caller away for who they
-// are: 401, or a 403 whose code names the caller kind (HANDOFF_FORBIDDEN is a cookie caller on
-// the bearer-only handoff write). Other 4xx/5xx are the handler proceeding past the gate on
+// authRefusal reports whether a response is the server turning the caller away for what its
+// credential is: 401, or a 403 whose code names the credential (OAUTH_SCOPE_REQUIRED is a
+// credential that holds none of the row's scopes; HANDOFF_FORBIDDEN is a cookie caller on the
+// bearer-only handoff write). Other 4xx/5xx are the handler proceeding past the gate on
 // placeholder input.
 func authRefusal(response *httptest.ResponseRecorder) (bool, string) {
 	switch response.Code {
@@ -187,18 +301,59 @@ func authRefusal(response *httptest.ResponseRecorder) (bool, string) {
 			Code string `json:"code"`
 		}
 		_ = json.Unmarshal(response.Body.Bytes(), &body)
-		if body.Code == "HUMAN_ONLY" || body.Code == "REPLY_FORBIDDEN" || body.Code == "ACCEPT_FORBIDDEN" || body.Code == "HANDOFF_FORBIDDEN" {
+		switch body.Code {
+		case codeScopeRequired, "REPLY_FORBIDDEN", "ACCEPT_FORBIDDEN", "HANDOFF_FORBIDDEN":
 			return true, "403 " + body.Code
 		}
 	}
 	return false, ""
 }
 
+// personalTokenHolding mints a personal agent token of alice's on the test store holding exactly
+// the scopes named, and answers its plaintext: the credential a scoped row admits.
+func personalTokenHolding(t *testing.T, database *store.Store, scopes ...string) string {
+	t.Helper()
+	return personalTokenOwnedBy(t, database, "alice", scopes...)
+}
+
+// personalTokenOwnedBy mints one person's personal agent token holding exactly the scopes named.
+// The row is written straight to the table rather than minted through POST
+// /api/v1/me/agent-tokens, which is itself one of the rows under test and needs a credential of
+// this kind to call. The owner is a parameter because two owners' tokens are what tells a route
+// comparing whole identities from one comparing kind and id alone: every personal token resolves
+// with an empty id (agent_tokens.go), so only the owner tells them apart.
+func personalTokenOwnedBy(t *testing.T, database *store.Store, owner string, scopes ...string) string {
+	t.Helper()
+	plaintext, hash, err := newAgentToken()
+	if err != nil {
+		t.Fatalf("mint a personal token: %v", err)
+	}
+	if scopes == nil {
+		// A caller that names no scope wants a token holding none, and the column is not null:
+		// an empty set, as the shared token's credential holds, rather than a null one.
+		scopes = []string{}
+	}
+	if _, err := database.Pool.Exec(context.Background(), `
+		insert into agent_tokens (owner, name, token_hash, prefix, scopes)
+		values ($1, $2, $3, $4, $5)
+	`, owner, "probe", hash[:], plaintext[len("dsp_"):len("dsp_")+agentTokenPrefixLength], scopes); err != nil {
+		t.Fatalf("insert a personal token: %v", err)
+	}
+	return plaintext
+}
+
 // Every row's auth cell is checked against what its handler does to a cookie caller, a bearer,
 // and an anonymous request, so GET /api/v1 cannot describe a route the server refuses (or
-// admits) differently.
+// admits) differently. A row that names OAuth scopes is checked against three bearers: the
+// deployment's shared token, which holds no scope and is refused OAUTH_SCOPE_REQUIRED; a
+// person's own token holding exactly the scopes the row declares, which is admitted; and, on a
+// row that names `approve`, a token of that person holding `person` alone, which is refused.
+// That last probe is what holds the gate to the table: without it a row the table declares
+// `approve` whose gate asked only for `person` would pass every test here.
 func TestRoutesTableAuthCellsMatchHandlers(t *testing.T) {
-	handler, _ := newTestHandlerWithStore(t)
+	handler, database := newTestHandlerWithStore(t)
+	personal := personalTokenHolding(t, database, model.ScopePerson, model.ScopeApprove)
+	personOnly := personalTokenHolding(t, database, model.ScopePerson)
 	probe := func(route apiRoute, credential string) *httptest.ResponseRecorder {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -207,8 +362,12 @@ func TestRoutesTableAuthCellsMatchHandlers(t *testing.T) {
 		switch credential {
 		case "cookie":
 			request.Header.Set("X-Dispatch-User", "alice")
+		case "anonymous":
 		case "bearer":
 			request.Header.Set("Authorization", "Bearer agent-token")
+		default:
+			// A personal token's plaintext, presented as the person's own credential.
+			request.Header.Set("Authorization", "Bearer "+credential)
 		}
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, request)
@@ -228,6 +387,14 @@ func TestRoutesTableAuthCellsMatchHandlers(t *testing.T) {
 			t.Fatalf("%s %s is %q but admits a %s caller: %d %s", route.Method, route.Pattern, route.Auth, credential, response.Code, response.Body.String())
 		}
 	}
+	expectScopeRefusal := func(t *testing.T, route apiRoute, credential string) {
+		t.Helper()
+		response := probe(route, credential)
+		refused, why := authRefusal(response)
+		if !refused || why != "403 "+codeScopeRequired {
+			t.Fatalf("%s %s needs %v but answers a %s caller %d %s", route.Method, route.Pattern, route.OAuthScopes, credential, response.Code, response.Body.String())
+		}
+	}
 	for _, route := range (&server{}).routes() {
 		t.Run(route.Method+" "+route.Pattern, func(t *testing.T) {
 			switch route.Auth {
@@ -236,16 +403,93 @@ func TestRoutesTableAuthCellsMatchHandlers(t *testing.T) {
 			case authAny:
 				expectRefused(t, route, "anonymous")
 				expectAdmitted(t, route, "cookie")
+				if len(route.OAuthScopes) > 0 {
+					expectScopeRefusal(t, route, "bearer")
+					if slices.Contains(route.OAuthScopes, model.ScopeApprove) {
+						expectScopeRefusal(t, route, personOnly)
+					}
+					expectAdmitted(t, route, personal)
+					return
+				}
 				expectAdmitted(t, route, "bearer")
-			case authHuman:
-				expectRefused(t, route, "anonymous")
-				expectAdmitted(t, route, "cookie")
-				expectRefused(t, route, "bearer")
 			case authBearer:
 				expectRefused(t, route, "anonymous")
 				expectRefused(t, route, "cookie")
 				expectAdmitted(t, route, "bearer")
 			}
 		})
+	}
+}
+
+// Every route Dispatch refused a bearer token on before INFRA-1017 names the `person` scope now,
+// and the scope map names no route the table does not mount: the two halves register's panic
+// protects (scopedRoutesNotMounted), proved from the table alone with nothing mounted.
+func TestEveryRouteThatWasABrowsersAloneNamesThePersonScope(t *testing.T) {
+	browserOnly := []string{
+		"GET /api/v1/settings/project-default-assignees",
+		"PUT /api/v1/projects/{key}/default-assignee",
+		"GET /api/v1/me/agent-tokens",
+		"POST /api/v1/me/agent-tokens",
+		"DELETE /api/v1/me/agent-tokens/{id}",
+		"GET /api/v1/users",
+		"GET /api/v1/issues/{key}/subscribers",
+		"DELETE /api/v1/issues/{key}/subscribers/{session_id}",
+		"GET /api/v1/inbox",
+		"GET /api/v1/me/answers",
+		"GET /api/v1/me/replies",
+		"PUT /api/v1/me/threads/{id}/read",
+		"GET /api/v1/agents/{session_id}/messages",
+		"POST /api/v1/agents/{session_id}/messages",
+		"POST /api/v1/broadcasts",
+		"GET /api/v1/broadcasts",
+		"GET /api/v1/broadcasts/{id}",
+		"POST /api/v1/asks/{id}/answer",
+		"POST /api/v1/comments/{id}/reopen",
+		"POST /api/v1/comments/{id}/accept",
+		"PATCH /api/v1/comments/{id}",
+		"POST /api/v1/comments/{id}/reject",
+		"GET /api/v1/artifacts/{id}/subscribers",
+		"DELETE /api/v1/artifacts/{id}/subscribers/{session_id}",
+		"POST /api/v1/artifacts/{id}/rebuild",
+		"POST /api/v1/artifacts/{id}/reviews",
+		"GET /api/v1/me/state",
+		"PUT /api/v1/me/issues/{key}/state",
+		"GET /api/v1/me/agents/state",
+		"PUT /api/v1/me/agents/{session_id}/state",
+		"GET /api/v1/me/documents/{id}/read",
+		"PUT /api/v1/me/documents/{id}/read",
+		"POST /api/v1/artifacts/{id}/blocks/{block_id}/keep",
+		"PUT /api/v1/me/asks/{id}/snooze",
+		"DELETE /api/v1/me/asks/{id}/snooze",
+		"GET /api/v1/credential-requests",
+		"POST /api/v1/credential-requests/{id}/approve",
+		"POST /api/v1/credential-requests/{id}/deny",
+		"POST /api/v1/credential-requests/machine-lookup",
+		"GET /api/v1/credential-grants",
+		"POST /api/v1/credential-grants/{id}/revoke",
+		"GET /api/v1/machine-logins",
+		"POST /api/v1/machine-logins/{id}/revoke",
+		// The sign-in rows and the capabilities read are this change's own, and are the
+		// browser's alone for the reason the credential rows above them are: each names the
+		// calling person, whom Dispatch takes from the credential and never from the request.
+		"GET /api/v1/signins",
+		"POST /api/v1/signins/{id}/revoke",
+		"GET /api/v1/credentials/capabilities",
+		"POST /api/v1/agents/{session_id}/stream/_test/publish",
+		// The scope edit is the one route that was no row at all before INFRA-1017: it is the
+		// person's own, as the mint and the revoke beside it are.
+		"PATCH /api/v1/me/agent-tokens/{id}",
+	}
+	for _, name := range browserOnly {
+		scopes, named := routeScopes[name]
+		if !named || !slices.Contains(scopes, model.ScopePerson) {
+			t.Errorf("%s names %v, want the %s scope among them", name, scopes, model.ScopePerson)
+		}
+	}
+	if len(routeScopes) != len(browserOnly) {
+		t.Errorf("routeScopes names %d routes, want exactly the %d above", len(routeScopes), len(browserOnly))
+	}
+	if unmounted := scopedRoutesNotMounted(); len(unmounted) > 0 {
+		t.Errorf("routeScopes names %s, which the table does not mount", strings.Join(unmounted, ", "))
 	}
 }

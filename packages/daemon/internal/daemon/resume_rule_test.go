@@ -346,6 +346,13 @@ func readmissionRig(t *testing.T, suspend func(*supervisor, claim.Token)) (rt *f
 			Title: root.Title, Rank: root.Rank, HandedOver: true}, engine, admission); err != nil {
 			t.Fatalf("apply the todo: %v", err)
 		}
+		// The re-admission writes the mid-phase child's start owing a slot (admit's
+		// startMidPhaseMembers through workflow.StartOrOwe), and that row is written after this
+		// pass read its waiting line, so the slot it waits for is the next pass's to grant. Every
+		// fact and every tick makes such a pass; here the controller's tick is it.
+		if _, err := intake.ApplyFact(ctx, pool, "controller", "tick-after-the-readmission", intake.ControllerTick{}, engine, admission); err != nil {
+			t.Fatalf("apply the tick that gives the child its slot: %v", err)
+		}
 		// The first run creates the branches the starts wait for; the second runs the starts.
 		tick(0)
 		tick(0)
@@ -374,7 +381,10 @@ func TestReadmissionResumesTheClaimsTheTreesCloseSuspended(t *testing.T) {
 
 // A root parked after its architect exhausted the launch budget keeps that failed claim and its
 // session into re-admission. Forgetting that stopped claim's session before the root is admitted
-// again makes the workflow start a fresh architect rather than repeat the failed resume.
+// again makes the workflow start a fresh architect rather than repeat the failed resume. The
+// re-admission relaunches every role of each member it carries (admit's startMidPhaseMembers),
+// so the architect's own launch is read out of the calls by its claim rather than counted
+// against their number.
 func TestReadmissionSpawnsAFreshArchitectAfterForgettingItsSession(t *testing.T) {
 	rootArchitect := mustClaimToken(t, "LEGION-208", claim.RoleArchitect)
 	var rt *fake.Runtime
@@ -412,12 +422,21 @@ func TestReadmissionSpawnsAFreshArchitectAfterForgettingItsSession(t *testing.T)
 		t.Fatalf("architect after forget = %+v, want no recorded session", cleared)
 	}
 	before := len(rt.CallsOf("Spawn"))
+	resumed := len(resumesOf(rt, architect))
 
 	readmit()
 
-	spawns := rt.CallsOf("Spawn")
-	if len(spawns) != before+1 || spawns[len(spawns)-1].Spec.Claim != architect || spawns[len(spawns)-1].Spec.ResumeSessionFile != "" {
-		t.Fatalf("re-admission spawns = %+v, want one fresh architect spawn", spawns)
+	var fresh []fake.Call
+	for _, call := range rt.CallsOf("Spawn")[before:] {
+		if call.Spec.Claim == architect {
+			fresh = append(fresh, call)
+		}
+	}
+	if len(fresh) != 1 || fresh[0].Spec.ResumeSessionFile != "" {
+		t.Fatalf("re-admission spawned the architect %+v, want one fresh spawn carrying no session to resume", fresh)
+	}
+	if again := len(resumesOf(rt, architect)) - resumed; again != 0 {
+		t.Fatalf("re-admission resumed the architect %d times, want none: the session it would resume was forgotten", again)
 	}
 }
 
@@ -449,7 +468,8 @@ func TestReadmissionWaitsForTheOperatorToResumeTheClaimsItSuspended(t *testing.T
 // seedWorkflowTree records root as an admitted tree of project in the store at dsn — the issue, its
 // admission slot and its tree's lifecycle, as admission leaves a root it promoted — and each of
 // claims, bound to that lifecycle as the daemon binds a claim it admits, its pending delivery
-// written too when it carries one (AdmitClaim alone writes only the claim row).
+// written too when it carries one (AdmitClaim alone writes only the claim row). Each tree takes
+// the next free slot, so a test may seed more than one running tree.
 func seedWorkflowTree(t *testing.T, dsn, project string, root record.Issue, claims ...supervise.Claim) {
 	t.Helper()
 	ctx := context.Background()
@@ -463,7 +483,19 @@ func seedWorkflowTree(t *testing.T, dsn, project string, root record.Issue, clai
 		if err := records.PutIssue(ctx, tx, root); err != nil {
 			return err
 		}
-		return records.PutSlot(ctx, tx, record.Slot{Issue: root.Key, Index: 0, AdmittedAt: time.Now()})
+		taken, err := records.Slots(ctx, tx)
+		if err != nil {
+			return err
+		}
+		// Above every slot the store holds, so a second tree seeded here takes a free one whatever
+		// the first left.
+		index := 0
+		for _, slot := range taken {
+			if slot.Index >= index {
+				index = slot.Index + 1
+			}
+		}
+		return records.PutSlot(ctx, tx, record.Slot{Issue: root.Key, Index: index, AdmittedAt: time.Now()})
 	}); err != nil {
 		t.Fatalf("record the tree of %s: %v", root.Key, err)
 	}

@@ -1,5 +1,232 @@
 # Changelog
 
+This file is history: every entry after the last section below stays as a fragment file under
+`.changes/unreleased/`, since this package has no release of its own to carry it.
+
+## [main@0abb1e50da7d] - 2026-11-06
+
+### Changed
+
+- The client's call timing comes from `@legion/contracts` through one function.
+  `resolveCallTiming(config)` returns the per-attempt timeout, the attempt count and the retry
+  delay for a configuration, reading `LISTENER_CALL_TIMEOUT_MS`, `LISTENER_CALL_ATTEMPTS` and
+  `LISTENER_CALL_RETRY_DELAY_MS` for each value the configuration leaves unset, and the request
+  loop takes its defaults from it alone; `DEFAULT_TIMEOUT_MS` and `RETRY_DELAY_MS` are gone.
+  `DEFAULT_HEARTBEAT_MS` is `SESSION_HEARTBEAT_MS` and stays exported. A caller's own
+  `timeoutMs` and `retry`, and the replay path's 10000 ms deadline, are unchanged, and no value
+  changed.
+
+## [main@c5c94dbd542d] - 2026-11-05
+
+### Added
+
+- A session row and a role answer carry the session's state: `SessionWireSchema` gains `state`,
+  `RoleWireSchema` gains `state` and `holder_state`, a send answer gains `recipient_state` and
+  `last_seen`, and `listSessions` takes `include`. A refusal that names a session carries its
+  state too: `EnvoyApiError` reads the `state`, `holder`, `holder_state`, `last_seen` and
+  `claim_released` a refused send and a lapsed role's 404 answer, and its message says which
+  state the session is in and when it was last seen, so a role lookup or a publish refused by
+  an unresponsive holder no longer reads as that holder's death. A listener that names no
+  state is read as `live`, so an older listener still works. An `envoy_publish` answer names
+  every session its message was only stored for, under `unresponsive`, and for a role publish
+  the holder and the state the listener resolved that holder in (`holder_state`), so the agent
+  that published hears that a peer has not taken the message yet. The tool descriptions say
+  what the three states mean and what to do about them, in place of "List all live sessions"
+  and "stays registered for up to 5 minutes": an unresponsive session is not dead, so start no
+  replacement for it and take no claim from it until it is `gone`, or until
+  `ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS` has passed since its `last_seen`, the sum the Dispatch
+  server itself refuses a take by, counted into the sentence rather than written as a number
+  nothing enforces.
+
+### Fixed
+
+- A `dispatch_issues` list row says an unresponsive holder is unresponsive, and since when, as
+  `dispatch_read` and the dashboard do. The rows judged a claim by membership of the live agent
+  list alone, and that list now carries unresponsive sessions, because an unresponsive session
+  keeps its roles and its claims: such a holder read as plainly holding. Each row now reads the
+  holder's own state and last registration from its agent row, and a Dispatch server that names
+  no state is read by membership as before.
+- `dispatch issues` and `dispatch read` say a route's status is unknown because the Envoy
+  listener's agent list is refilling (`route_status_reason: "refilling"`), so to try again in a
+  moment, where they used to say the listener did not answer, which they now say only of a
+  listener that did not.
+
+## [main@87fb43e754ba] - 2026-11-05
+
+### Changed
+
+- The `dispatch` command carries no length bound of its own: a question, a body, an option, a
+  closing reason and a reply go to the server as written, and Dispatch's refusal, which names
+  the block or the field that passed the bound, is what the command prints. `dispatch limits`
+  is new and prints the bounds the server holds a write to, read from the server itself.
+
+## [main@c82087d74996] - 2026-11-05
+
+### Added
+
+- Document reads print the version's content SHA-256 and the approval's pinned hash. Approvals hashed after they were recorded are labeled as such; older servers keep the existing output when they do not report hashes.
+
+## [main@804d3695e12e] - 2026-11-05
+
+### Added
+
+- A session whose Dispatch or Envoy listener names no bearer at all now presents the access
+  token the secrets broker mints for this machine's own identity: a pod's projected
+  service-account token, or a Compute Engine machine's Google identity token, traded at
+  `AGENT_SECRETS_URL` through `@legion/broker-client` when `AGENT_SECRETS_MACHINE_IDENTITY`
+  names one. That token is bound to a key this process makes, so every request carries
+  `Authorization: DPoP <token>` and a proof of that key naming the request and hashing the
+  token (RFC 9449); `src/bearer.ts` holds a bearer and that credential as one
+  `RequestCredential`, and a resolved section carries exactly one of them in its `credential`
+  field. `DISPATCH_TOKEN`, `DISPATCH_TOKEN_FILE`, `ENVOY_TOKEN`, `ENVOY_TOKEN_FILE` and an
+  envoy.json's own token are resolved first and unchanged, so a session that has one behaves
+  exactly as it did.
+
+
+### Changed
+
+- A resolved Dispatch and a resolved Envoy carry one credential, not two: `ActiveDispatchConfig`
+  and `EnabledEnvoySettings` have a single `credential` field, and `DispatchClient` and the
+  listener client take only a `RequestCredential`. The `token` and `brokered` fields, the
+  `dispatchCredential` and `envoyCredential` helpers and the empty-string guard are gone, so a
+  caller can no longer present half of a credential and the compiler names every call site. Both
+  resolvers take the session a broker trade writes under, as a name or as a function read at every
+  trade, since one process holds more than one session over its life.
+
+
+### Fixed
+
+- Three ways the secrets broker could take a working session down are closed. The broker's `429`
+  no longer drops the access token in hand: it is the one refusal a later trade may answer
+  differently, so a client that holds a live token keeps writing with it until that token lapses,
+  as the Go client does, and the shared wire corpus both clients replay now carries a `429`
+  exchange. `AGENT_SECRETS_MACHINE_IDENTITY=pool` reads as a machine with no TypeScript route
+  rather than an error, so Envoy stays on where only the Go client can federate. And a credential
+  this machine could not mint no longer fails a listener that asks for none: the request goes
+  without it, and only a `401` or `403` reports the failed trade.
+
+## [main@43a994db0ea1] - 2026-11-04
+
+### Added
+
+- `dispatch inbox` lists what the person's Dispatch Inbox page shows, read with the caller's own credential: Needs you, Waiting on agents, Later and Credential requests, each with its count and then its rows, banded by the page's own rule. A credential-request read that fails prints a warning line and counts none; a credential without the `person` scope is refused, and the refusal prints its code and the scope it names. Every reader of an act - `dispatch read`, `dispatch answers`, `dispatch search` and the digest of what people wrote - now names the agent beside the person as `<person>, acting through session <id>` or `... through token <name>`.
+
+## [main@fd9666ee5cc3] - 2026-11-04
+
+### Added
+
+- `ReplayEngine.startCursors()` starts the cursor of every followed subject that has none at the
+  stream's end, reading no message and changing no cursor already set, so a session that registers
+  before it can open its subscriptions is shown, by its first sweep, what was stored meanwhile. It
+  waits at most 2 seconds for the position. A read that fails marks the session's own agent subject
+  `from_start`, with when the mark was set, persisted with the cursors: its first sweep reads it
+  from the oldest message the stream holds, and notices a retention gap only when the mark is older
+  than the stream's 72-hour age limit. `ReplayEngine.startPending()` says whether such a sweep is
+  still owed. `ReplayInput.timeoutMs` sets one replay call's deadline. `startCursors()` drops no
+  cursor of a subject not followed now, runs one at a time with sweeps, and never rejects.
+
+## [main@6f23228e01f0] - 2026-11-04
+
+### Added
+
+- `publish` takes `keep` and reports `kept` and `keptReason` from the listener's 202, so a role
+  message the listener kept for the role's next holder reads as the success it is. A delivery
+  carrying `kept_at` renders the time the listener kept it, and the `envoy_publish` tool's
+  description states the three answers a role publish has.
+
+## [main@7ae56d094176] - 2026-11-04
+
+### Added
+
+- A Dispatch dashboard URL of an issue's Decisions tab (`/issues/<key>/decisions`) resolves to the issue's `decisions.md`, `dispatch://<key>/artifact/decisions-md`.
+- `dispatch result` records what a check saw and prints the pull-request body line every writer writes; `dispatch results` prints each check of the issue's Verification document with its latest result and whether that result still stands.
+  `dispatch plan-approve` records a plan review's approval of a plan version.
+  `dispatch request-approval --include-verification` asks for one approval of the spec and the issue's Verification document together, and its answer names each requirement with no check, or says the spec marks no requirements.
+  `dispatch read --issue` prints those same coverage lines, `dispatch doc-read --blocks` prints each block's type with its `serves` and `needs`, and `dispatch read` of a block reference prints the block's type, every attribute it carries and what refers to it.
+- The `dispatch` command records and reads Legion phase handoffs on their Dispatch issue. `dispatch handoff-write --issue <KEY> --phase <phase> --body-file <path>` (`-` reads stdin) records the text of one JSON object, at most 262144 bytes, exactly as written, as this session's next version of the phase's handoff, and prints its version and id. `dispatch handoff-read --issue <KEY> --phase <phase>` prints one line naming the record's version, id, session and time, then the body exactly as stored; `--version <n>` reads that version. `DispatchClient` gains `writeHandoff`, `latestHandoff`, `handoff` and `listHandoffs`.
+- `dispatch read` of an ask names each option and its answer by that part's own reference (`dispatch://KEY/ask/<id>#b-<part>`) and lists what points at that part under it, leaving every other backlink under the ask; `dispatch read --ref` of a part says which part it read (`Option b2 of ask <id> (changed in revision 1):`); and `dispatch comment --reply-to-ask` takes a part reference, threading the reply under the ask and naming the part it answers.
+- `sessionAnswersWords(items)` in `@legion/envoy-client/session-answers` keys what the people
+  wrote in each item (kind, id, author, times, options chosen, words), and `readSessionAnswers`
+  returns it as `words` on a `fresh` or `cache` read for the items its list shows, so a host can
+  tell a new item shown or a changed answer from a list that only lost items or changed its
+  titles or header.
+
+### Changed
+
+- Under Claude Code (`DISPATCH_HOST=claude`) the `dispatch` command acts as `ENVOY_SESSION_ID`, else `CLAUDE_CODE_SESSION_ID`: the session claude-envoy registers and claims under, so a handoff it writes is written by the session the Legion daemon holds the phase's completion to. With neither set it refuses the call, naming both variables.
+- The `dispatch` CLI's refusal of a file that changed after AskGate read it says "read" rather
+  than "reviewed", and tells the agent to send the call again in a later message than the one
+  that changes the file.
+- The `envoy_publish` tool description no longer names `ENVOY_SUBSCRIBE_ALL_TOPICS`, which the listener has deleted. A registration's `port` is documented as always 0: the listener refuses a registration whose port is above 0, naming the field.
+- The line a document write prints when it superseded a person's approval no longer says that no
+  undo restores it. It now says that the approval is stale until someone approves the new version
+  or a later write stores the approved version's text again exactly, with no decision block in it
+  decided since, which Dispatch now carries the approval to.
+
+### Fixed
+
+- A send any attempt of which got no answer (a timeout, a failed connection or an unreadable 2xx)
+  or a 5xx throws `EnvoySendUnconfirmedError` instead of the raw error, even when a later attempt
+  was refused: it says the message is not confirmed delivered, names the `idempotencyKey`, and
+  says in `resendSafe` whether Envoy recognises a resend under it inside the 72-hour duplicate
+  window as a repeat. A send refused with a 4xx on every attempt stays an `EnvoyApiError`.
+  `SendResult.duplicate` says the listener already held a send under that key. Each attempt reads
+  the answer's body under its deadline, inside the retry, and a 4xx whose body does not arrive is
+  still a refusal. `envoy_send` takes `idempotency_key` (a lower-case UUID).
+- A `dispatch` command whose `--artifact` names nothing on an issue or a project holding more than eight documents and files says how many it holds (`documents and files` when a picture or file is among them, since `--artifact` names those too), lists the ones whose slug or filename is closest to the reference first (ASCII letter case ignored), then the newest, and names `dispatch read --issue <KEY>` or `dispatch read --project <KEY>` as the read that lists them all. `dispatch read --issue` now lists every document, picture and file of the issue under `Documents:`, and `dispatch read --project <KEY>` with no `--artifact` lists the project's documents on no issue rather than refusing.
+- A `dispatch` write that stalls (cut off after 20 s without progress, or failed in transport)
+  is sent again under its `Idempotency-Key` when an earlier call of the same session saw,
+  within the last five minutes, that the Dispatch runs the keyed layer. Each call is a new
+  process, so before this fix every such write probed `/healthz`, and under load the probe's
+  5 s bound ran out, so the write was reported as perhaps taken effect instead. The session's
+  `state.json` now carries that sighting (`keyedLayer`), and it still expires five minutes
+  after the answer that showed it.
+- `readDocumentBlocks` returns the document's `slug` beside its `name`, since Dispatch now finds the
+  document an upload replaces by its name or its slug.
+- `dispatch <command> --help` lists the keys a JSON flag's value takes, from the schema the
+  call is checked against: each key with whether it is required, its type or its values, and
+  its description, and the keys of a nested object or list of objects below it.
+  `dispatch doc-edit --help` said an operation in `--ops-json` takes "only the keys below"
+  and listed none, so a caller learned the field names only from a refusal.
+  `--precondition-json`, `--components-json`, `--anchor-json` and `--options-json` list
+  their keys too.
+- A bare document reference that is one document's slug and another's filename (a `plan-md-2` named
+  `plan-md` beside `plan.md`) resolves to the slug's document, as Dispatch's own document routes
+  resolve it, instead of being refused as naming two documents. Only a filename two documents share
+  is still refused.
+- A `dispatch` write that Dispatch may still be running (an attempt cut off after 20 s without
+  progress, or answered `409 KEY_IN_FLIGHT`) is asked again under its `Idempotency-Key` every
+  3 s at most (longer only when a `Retry-After` asks) until 55 s, inside the command's 60 s
+  deadline, so it ends in the answer Dispatch stores for it. Before, it stopped asking 30 s after
+  the first attempt, so a write Dispatch took 50 s to finish, or two silent attempts in a row,
+  was reported as perhaps taken effect although it landed. An upload of a megabyte or more keeps
+  the five-attempt schedule, since each repeat sends its whole file again. When a write still
+  ends with no answer after the command saw the keyed layer, the message says Dispatch finishes
+  it and to read it back before sending it again, since a new command sends it under a new key.
+  A picture upload that ends that way, or with any answer that may come after Dispatch stored it
+  (a gateway's page, Dispatch's own 5xx, a transport failure), says the picture may or may not
+  have been uploaded, rather than that it was not.
+- `dispatch artifact` refuses `--content` and `--content-file` under a `--name` whose extension
+  is not `.md` or `.markdown` (`rows.jsonl`, `sizes.tsv`), before it sends anything, and the
+  refusal names `--path`. Inline content is always stored as a Markdown document, so such an
+  upload was accepted and came back altered, a JSONL file's lines joined into one paragraph.
+  A name with no extension, such as a document title, is still taken.
+- A `dispatch comment --reply-to-ask` that hands the turn to the human but lands on an approval request a newer version moved, which stays waiting on the agent, now says why and what to run. The output names the version the request is for and the document's current version, and gives the `dispatch request-approval` call that hands the request back.
+- The `dispatch` command no longer takes an Oh My Pi process of another pid namespace for a gone
+  one. An agent box runs its process in a pid namespace of its own over the host's state
+  directory, and the command judged each AskGate owner by its pid and start time read in its own
+  namespace: the host's daily prune, and every other box's, removed a live box process's marker
+  store once no marker had changed it for two hours, and could remove its idle session directory.
+  The box's command then refused every gated write, saying the record names a marker store that
+  cannot be read. An owner file now carries its process's pid namespace (`ns`), and its store's
+  name ends with it (`<pid>-<start>-<ns>`). The command looks up by pid only an owner of its own
+  namespace, and counts one of another namespace live while its store changed within two hours.
+  `keepStore` makes a store when it is gone and marks it changed; `writeAskgateRecord` and
+  `setRecordMode` call it before they write the owner file. An owner file without `ns` is looked
+  up by pid, as before, and the prune keeps a store named without a namespace (`<pid>-<start>`)
+  for 14 days rather than two hours, since it may be a live process's of another namespace that
+  started on an earlier pi-envoy and touches its store only when it mints.
+
 ## [main@6b1524cdb8aa] - 2026-11-01
 
 ### Fixed

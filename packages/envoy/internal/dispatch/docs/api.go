@@ -27,7 +27,6 @@ type API interface {
 	TextWithBlocks(ctx context.Context, artifactID string) (string, []model.ArtifactBlock, error)
 	BlockPath(ctx context.Context, artifactID, blockID string) (model.BlockPath, error)
 	SnapshotVersion(ctx context.Context, artifactID string, actor model.Actor) (VersionResult, error)
-	SetIssueClosed(ctx context.Context, issueKey string, closed bool)
 	SettleIssueDocuments(ctx context.Context, issueKey string) error
 	WriteIssueAskStates(ctx context.Context, issueKey string, asks []model.Ask, actor model.Actor, markUnindexed bool) ([]BlockRef, error)
 	AcquireConditionalEdit(ctx context.Context, artifactID string) (func(), error)
@@ -45,7 +44,6 @@ type API interface {
 	ProjectMark(ctx context.Context, artifactID, markID string, record MarkRecord, actor model.Actor) error
 	Join(ctx context.Context, tx pgx.Tx) (context.Context, *Ledger)
 	NamedVersion(ctx context.Context, artifactID, summary string, actor model.Actor) (VersionResult, error)
-	CompactAll(ctx context.Context) error
 	Quiesce(ctx context.Context) error
 }
 

@@ -16,6 +16,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -277,7 +278,11 @@ func TestAColdSubscriptionThatStartsTheRelayIsSentAnEventCommittedWhileItStarts(
 	}); response.Code != http.StatusCreated {
 		t.Fatalf("create the mentioning message: status=%d body=%s", response.Code, response.Body.String())
 	}
-	awaitGraphEdges(t, rig.handler, url.Values{"to": {"dispatch://" + issue.Key}, "since": {"0"}, "kind": {"mentions"}}, 1)
+	awaitSinceRead(t, "since 0 ?to= dispatch://"+issue.Key+" for mentions, wanting the message's mention",
+		func() model.GraphReferences {
+			return graphEdges(t, rig.handler, url.Values{"to": {"dispatch://" + issue.Key}, "since": {"0"}, "kind": {"mentions"}})
+		},
+		func(read model.GraphReferences) bool { return len(read.Edges) == 1 })
 
 	release := holdClusterTransactionID(t, 30*time.Second)
 	// An event committed before the subscribe but above the proven horizon, which the hold keeps

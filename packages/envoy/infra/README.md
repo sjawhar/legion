@@ -47,12 +47,12 @@ from any workflow of this repository, so the command pins the signer:
 ```sh
 version=<version>
 archive=pulumi-resource-envoy-infra-v$version-<os>-<arch>.tar.gz
-gh release download "envoy-infra-v$version" --repo sjawhar/legion --pattern "$archive"
-gh attestation verify "$archive" --repo sjawhar/legion \
-  --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-infra.yaml@refs/heads/main \
+gh release download "envoy-infra-v$version" --repo cybermonklabs/legion --pattern "$archive"
+gh attestation verify "$archive" --repo cybermonklabs/legion \
+  --cert-identity https://github.com/cybermonklabs/legion/.github/workflows/release-envoy-infra.yaml@refs/heads/main \
   --source-ref refs/heads/main --deny-self-hosted-runners
 pulumi plugin install resource envoy-infra "$version" \
-  --server 'https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}' \
+  --server 'https://github.com/cybermonklabs/legion/releases/download/envoy-infra-v${VERSION}' \
   --checksum "$(sha256sum "$archive" | cut -d' ' -f1)"
 ```
 
@@ -61,19 +61,22 @@ well. `--checksum` makes `pulumi` refuse a download whose SHA-256 is not the arc
 verified. Then add the package to the project:
 
 ```sh
-pulumi package add envoy-infra@<version> --server 'https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}'
+pulumi package add envoy-infra@<version> --server 'https://github.com/cybermonklabs/legion/releases/download/envoy-infra-v${VERSION}'
 ```
 
 Keep the single quotes: Pulumi fills in `${VERSION}` itself and downloads
 `pulumi-resource-envoy-infra-v<version>-<os>-<arch>.tar.gz` from the GitHub release tagged
-`envoy-infra-v<version>`. `pulumi package add` records the package in `Pulumi.yaml`:
+`envoy-infra-v<version>`. The address after `--server` is the one the release built into the
+plugin from the repository it ran in,
+`https://github.com/cybermonklabs/legion/releases/download/envoy-infra-v${VERSION}` today.
+`pulumi package add` records the package in `Pulumi.yaml`:
 
 ```yaml
 packages:
   envoy-infra:
     source: envoy-infra
     version: <version>
-    pluginDownloadURL: https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}
+    pluginDownloadURL: https://github.com/cybermonklabs/legion/releases/download/envoy-infra-v${VERSION}
 ```
 
 It also generates an SDK for the project's language under `sdks/` and prints how to import it. A
@@ -90,9 +93,9 @@ with your cloud credentials, so check the archive's provenance before you instal
 amd64:
 
 ```sh
-gh release download envoy-infra-v<version> --repo sjawhar/legion --pattern envoy-infra-linux-amd64.tar.gz
-gh attestation verify envoy-infra-linux-amd64.tar.gz --repo sjawhar/legion \
-  --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-infra.yaml@refs/heads/main \
+gh release download envoy-infra-v<version> --repo cybermonklabs/legion --pattern envoy-infra-linux-amd64.tar.gz
+gh attestation verify envoy-infra-linux-amd64.tar.gz --repo cybermonklabs/legion \
+  --cert-identity https://github.com/cybermonklabs/legion/.github/workflows/release-envoy-infra.yaml@refs/heads/main \
   --source-ref refs/heads/main --deny-self-hosted-runners
 tar -xzf envoy-infra-linux-amd64.tar.gz
 envoy-infra-linux-amd64/envoy-infra --version
@@ -105,14 +108,14 @@ runner, so an archive attested by any other workflow, branch or runner in the re
 explains each flag). `--version` prints the release's version, `<version>`. Put the binary on your
 `PATH`; the commands below call it `envoy-infra`.
 
-To install it with mise, give it a tool alias: `github:sjawhar/legion` is also where the `legion`
+To install it with mise, give it a tool alias: `github:cybermonklabs/legion` is also where the `legion`
 command's releases come from, so a second pin of that repository needs a name of its own. Pin the
 tag, and name each platform's archive with its digest, since each release holds the plugin's
 archives beside the command's:
 
 ```toml
 [tool_alias]
-envoy-infra = "github:sjawhar/legion"
+envoy-infra = "github:cybermonklabs/legion"
 
 [tools.envoy-infra]
 version = "envoy-infra-v<version>"
@@ -124,7 +127,7 @@ platforms.macos-arm64 = { asset_pattern = "envoy-infra-darwin-arm64.tar.gz", che
 
 Each `<digest>` is the SHA-256 of that platform's archive: `sha256sum` of the one you verified
 above, or GitHub's digest for it, which
-`gh api repos/sjawhar/legion/releases/tags/envoy-infra-v<version> --jq '.assets[] | .name, .digest'`
+`gh api repos/cybermonklabs/legion/releases/tags/envoy-infra-v<version> --jq '.assets[] | .name, .digest'`
 lists. mise strips the archive's one directory, so `envoy-infra` lands at the top of the install
 and on `PATH`.
 
@@ -557,9 +560,9 @@ those is, the sandbox in the paragraph under it.
 | Private services access range and connection | Cloud SQL receives a private IP on the component's VPC. | Not built |
 | Autopilot cluster | Enables the Secret Manager add-on, Secret Sync with rotation (GKE 1.33 or later; a new Secret Manager version reaches a synced Kubernetes Secret whose SecretProviderClass reads `versions/latest` without an apply), and Workload Identity. | Built |
 | Cloud SQL instance, database, user and generated password | PostgreSQL 18 by default (`databaseVersion`), private IP only, automated backups and point-in-time recovery. | Not built |
-| Kubernetes namespace (not with `existingNamespace`), ServiceAccount `<hostname>`, Secrets, ConfigMap and SecretProviderClass | The app's and the listener's account, which Workload Identity lets mount the NATS seed; the generated application secrets (`<hostname>-dispatch`), the listener's generated bearer in a Secret of its own (`<hostname>-listener`, one key `ENVOY_API_TOKEN`), the front door's auth key (`<hostname>-tailnet-auth-key`, one key `TS_AUTHKEY`), the Serve configuration (ConfigMap `<hostname>-serve`, rendered from the component's own names and registered after the Tailscale Service), and the NATS seed mount (and, with `azureEmbedKeySecret`, a second SecretProviderClass, `<hostname>-azure-embed-key`, for the Azure embedder's key). | Not built |
-| Tailscale Service `svc:<hostname>` | The name every reader reaches Dispatch at, which the component declares itself through the `tailscale` provider it is given: one port, `tcp:443`, the component's own `tags`, and a comment naming `<hostname>.<tailnetDnsName>`, the tailnet name it serves. It is a tailnet resource and no child of the cluster, so it is parented on the component alone, its `protect` follows `deletionProtection` rather than being fixed (a child's explicit `Protect` overrides what it would inherit, so a fixed one could be changed only by a resource transform on the component or a state edit), and it is registered after the Cloud SQL instance. The provider's create is an upsert, so a Service that already exists under that name is adopted and its comment, ports and tags overwritten ([Moving a stack that declares the Service itself](#moving-a-stack-that-declares-the-service-itself)). | Not built |
-| ServiceAccount `<hostname>-tailnet`, Role and RoleBinding `<hostname>-tailnet-tls` | The front door's pods run as an account of their own, which the Role lets `get` and `patch` the one Secret `<hostname>-tailnet-tls` and nothing else (no `create`, since the component creates it, and no `update`, since the pods send merge patches), so neither the app nor the listener, nor the account `serviceAccountSubject` names, can write the certificate. The pod does not automount the account's token: only `cert-publish`, which calls the API server, mounts it, so the tailnet-facing `tailscale` and `advertiser` containers hold no credential for the Secret. | Not built |
+| Kubernetes namespace (not with `existingNamespace`), ServiceAccount `<hostname>`, Secrets, ConfigMap and SecretProviderClass | The app's and the listener's account, which Workload Identity lets mount the NATS seed; the generated application secrets (`<hostname>-dispatch`), the listener's generated bearer in a Secret of its own (`<hostname>-listener`, one key `ENVOY_API_TOKEN`), the front door's auth key (`<hostname>-tailnet-auth-key`, one key `TS_AUTHKEY`), the Serve configuration (ConfigMap `<hostname>-serve`, rendered from the component's own names and registered after the Tailscale Service), and the NATS seed mount (and, with `azureEmbedKeySecret`, a second SecretProviderClass, `<hostname>-azure-embed-key`, for the Azure embedder's key, and with `chatTokenSecret` a third, `<hostname>-chat-token`, for the answerer's bearer token). | Not built |
+| Tailscale Service `svc:<hostname>` | The name every reader reaches Dispatch at, which the component declares itself through the `tailscale` provider it is given: one port, `tcp:443`, no tags, and a comment naming `<hostname>.<tailnetDnsName>`, the tailnet name it serves. It requests no tags because the OAuth client that creates it may not be allowed to set any, and Tailscale refuses a Service whose requested tags that client may not set; the hosts' own `tags` are what auto-approve them as the Service's hosts, and a tailnet policy grants the Service by its name. It is a tailnet resource and no child of the cluster, so it is parented on the component alone, its `protect` follows `deletionProtection` rather than being fixed (a child's explicit `Protect` overrides what it would inherit, so a fixed one could be changed only by a resource transform on the component or a state edit), and it is registered after the Cloud SQL instance. The provider's create is an upsert, so one that already exists under that name is adopted, its comment and ports overwritten; the request carries no tags, and Tailscale's API reference does not say whether the live Service keeps its own ([Moving a stack that declares the Service itself](#moving-a-stack-that-declares-the-service-itself)). | Not built |
+| ServiceAccount `<hostname>-tailnet`, Role and RoleBinding `<hostname>-tailnet-tls` | The front door's pods run as an account of their own, which the Role lets `get` and `patch` the one Secret `<hostname>-tailnet-tls` and nothing else (no `create`, since the component creates it, and no `update`, since the pods send merge patches), so neither the app nor the listener, nor the account `serviceAccountSubject` names, can write the certificate. The pod does not automount the account's token: only `cert-publish`, which calls the API server, mounts it, so the tailnet-facing `tailscale` and `advertiser` containers hold no credential for the Secret. The RoleBinding names the Role by an output that waits on the Role's ID, so a preview that creates the Role leaves the name unknown and pulumi-kubernetes sends no server-side dry run of the binding, which an account without the `bind` verb would see refused as "not found" while the Role does not exist. | Not built |
 | Secret `<hostname>-tailnet-tls` | The Tailscale Service's certificate, its key and the ACME account key (keys `tls.crt`, `tls.key` and `acme-account.key.pem`), which the front door's pods publish and seed from ([The front door](#the-front-door)). The component declares it with no data and ignores its contents, so a later preview never plans to undo what the pods wrote, and no pod template carries its checksum, so a renewed certificate rolls no pod. | Not built |
 | Three ClusterIP Services and three NetworkPolicies (two Services with `natsInCluster`) | Dispatch's API on port 8766, to the `allowedNamespaces` and the front door; the front door's SOCKS5 proxy on port 1055, to the app and the listener, neither the Service nor that rule rendered with `natsInCluster`, which leaves the front door's policy admitting nothing; the listener's API on port 9020, to the app. Each policy admits those sources alone among pods (Kubernetes still admits each pod's own node). | Not built |
 | Three Deployments | The app at `replicas` pods, the front door at `frontDoorReplicas` (2 by default) and the listener at `listenerReplicas` (1 by default), each `Recreate` at one pod and `RollingUpdate` (`maxUnavailable: 0`, `maxSurge: 1`) above one, by its own count. Every pod carries required pod anti-affinity on `kubernetes.io/hostname` and a `topology.kubernetes.io/zone` spread with `minDomains: 2`, both over its own Deployment's pods, and every serving container a startup and a liveness probe ([The pods](#the-pods)). The app and the listener have a 35-second termination grace period, a five-second pre-stop wait and the stop each is built for; the front door 60 seconds, for its drain ([The front door](#the-front-door)). Every container has equal requests and limits. A pod template whose Deployment has no PodDisruptionBudget carries `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`; one whose Deployment has a budget does not. | Not built |
@@ -607,7 +610,7 @@ while sign-in was on included, since the deployment's own `DISPATCH_SIGNING_KEY`
 such a cookie for its thirty days and nobody is left to confirm the person is still a member. A
 personal agent token a person minted in Settings while sign-in was on keeps acting for that
 person, and with no sign-in nobody can sign in to revoke it, so revoke those tokens before a stack
-drops its sign-in inputs. Such a stack also pins an `envoyImage` built from a sjawhar/legion
+drops its sign-in inputs. Such a stack also pins an `envoyImage` built from a cybermonklabs/legion
 `main` commit at or after this change: `envoy-dispatch` in an older image exits 1 when it is given
 no `DISPATCH_SIGNIN_*` setting, so the app's pods never start. A
 group set in part is refused by the per-input refusal it always gave, trailing one clause that
@@ -661,7 +664,7 @@ takes. Its app gets no `DISPATCH_SIGNIN_*` setting, so nobody signs in through a
 request that needs a person answers `401 NO_IDENTITY`, one carrying a `dsession` cookie minted
 while a stack ran sign-in included: the deployment's own `DISPATCH_SIGNING_KEY` still verifies that
 cookie for its thirty days, and no membership check is left behind it. A sandbox stack pins an
-`envoyImage` built from a sjawhar/legion `main` commit at or after this change: `envoy-dispatch` in
+`envoyImage` built from a cybermonklabs/legion `main` commit at or after this change: `envoy-dispatch` in
 an older image exits 1 when it is given no `DISPATCH_SIGNIN_*` setting, so the app's pods never
 start.
 
@@ -679,7 +682,7 @@ PostgreSQL 16, set `databaseVersion: POSTGRES_16` before moving the pin.
 
 The component declares the Tailscale Service itself, so no input names it and a consumer has one
 thing to apply: `svc:<hostname>`, the name the certificate and the URL carry, with its one port
-`tcp:443`, the component's own `tags`, and a comment naming the tailnet name it serves,
+`tcp:443`, no tags, and a comment naming the tailnet name it serves,
 `<hostname>.<tailnetDnsName>`. What a consumer passes instead is a `tailscale` provider, which
 the component requires wherever it builds the front door — every deployment but the sandbox and
 `clusterOnly`, neither of which builds one — and the tailnet that provider is configured for is
@@ -694,15 +697,24 @@ it, so on a fresh stack no pod advertises the Service before it exists: a node t
 Service before it exists is not approved when the Service appears.
 
 **The component adopts a Service that already exists under that name.** The Tailscale provider's
-create is an upsert (`VIPServices().CreateOrUpdate`), so a first apply does not fail on a live
-`svc:<hostname>`: it takes the Service over and overwrites its comment, its ports and its tags
-with the component's. A stack that declared that Service itself must therefore hand it over
-before the apply that moves the pin, with `retainOnDelete: true` on its own declaration rather
-than a state edit
+create is an upsert (`VIPServices().CreateOrUpdate`, a `PUT` of the Service), so a first apply
+does not fail on a live `svc:<hostname>`: it takes the Service over and overwrites its comment
+and its ports with the component's. It sends no tags: the provider's `tags` defaults to the
+empty set, and its client leaves an empty list out of the request (`tags,omitempty` in
+tailscale-client-go-v2 v2.9.0). Tailscale's API reference does not say whether a `PUT` without
+`tags` keeps the tags a live Service already carries; the component's state records none either
+way. A stack that declared that Service itself must therefore hand it over before the apply that
+moves the pin, with `retainOnDelete: true` on its own declaration rather than a state edit
 ([Moving a stack that declares the Service itself](#moving-a-stack-that-declares-the-service-itself)
 below); removing the declaration without that, while the component's own Service is in the same
 apply, deletes the Service the component has just adopted, and readers lose
 `<hostname>.<tailnetDnsName>`.
+
+**The Service requests no tags.** Tailscale refuses a Service whose requested tags the OAuth
+client creating it may not set (`requested tags ... are invalid or not permitted`), so a
+consumer whose `services` client may set no tags could not create a Service that requested any.
+The component's `tags` input is unchanged and still reaches the front door's nodes, which is
+where it is needed: the nodes' own tag is what the tailnet policy's auto-approval names.
 
 The tailnet policy is still the operator's. The Service's hosts are approved there, so give
 `tags` an auto-approval for `svc:<hostname>` before an apply creates the front door's pods; that
@@ -710,8 +722,9 @@ auto-approval only lets those nodes host the Service, and gives no client access
 Service is a grant destination of its own
 ([Tailscale Services](https://tailscale.com/kb/1552/tailscale-services),
 "Configure Service access"), so the tailnet policy also needs a grant that reaches it for every
-client of Dispatch: one with `dst: ["svc:<hostname>"]` and `ip: ["443"]`, or one whose `dst`
-names `tags`, since the Service carries the same `tags` the front door's nodes do.
+client of Dispatch: one with `dst: ["svc:<hostname>"]` and `ip: ["443"]`. A grant whose `dst`
+names `tags` does not reach a Service the component creates, which carries none, so name the
+Service in the grant for an adopted Service too.
 
 `frontDoorToolsImage`, one of the tailnet group and pinned by digest like the other three
 images, is the image the front door's `cert-publish` container runs on. Its scripts call
@@ -993,17 +1006,48 @@ service-account token for the audience `azureFederationAudience` (plain; unset,
 `api://AzureADTokenExchange`), valid for an hour and rotated before it runs out, into the volume
 `azure-federation` at `/var/run/secrets/azure-federation/token`, which
 `DISPATCH_AZURE_FEDERATED_TOKEN_FILE` names, and Dispatch exchanges it with Microsoft Entra for an
-access token on every renewal. The endpoint, the deployment, the key secret's path and the two ids
+access token on every renewal. Those three variables are the Azure sign-in the embedder and the
+answerer share, read by whichever of them is on Azure, so either `azureEmbedEndpoint` or
+`azureChatEndpoint` (below) accepts `azureTenantId`, `azureClientId` and
+`azureFederationAudience`, and with neither endpoint each is refused. The endpoint, the
+deployment, the key secret's path and the two ids
 are Pulumi inputs and may be another resource's outputs (an Azure program's, for the endpoint and
 the identity). Every replica gets the same values, which Dispatch requires: one deployment runs
 one embedder configuration, and a model change on Azure takes a new `azureEmbedDeployment`, since
 the vectors' identity names the deployment, not the model (`packages/envoy/cmd/dispatch/README.md`,
-"Search"). Without `azureEmbedEndpoint`, Dispatch embeds on Bedrock as it always did, and nothing of
-this group renders.
+"Search"). Without `azureEmbedEndpoint`, Dispatch embeds on Bedrock as it always did, and nothing
+of the embedder's own inputs renders.
+
+The answerer's inputs are a fourth optional group, which names the model Dispatch generates text
+with and reaches the app's `envoy-dispatch` container alone. Either of its two endpoints turns it
+on, and the two are refused together, since one deployment names one answerer.
+`azureChatEndpoint` is a chat deployment of an Azure AI Foundry resource:
+`DISPATCH_ANSWERER=azure` and `DISPATCH_AZURE_CHAT_ENDPOINT`, the base URL `/chat/completions` is
+appended to. It comes with `azureChatTokensPerMinute` (plain, a positive integer, the deployment's
+quota, rendered as `DISPATCH_AZURE_CHAT_TOKENS_PER_MINUTE`) and `azureChatDeployment`
+(`DISPATCH_AZURE_CHAT_DEPLOYMENT`, the name each request sends as its model), and may come with
+`azureChatApiVersion` (`DISPATCH_AZURE_CHAT_API_VERSION`; unset, a request sends no `api-version`)
+and `azureChatScope` (`DISPATCH_AZURE_CHAT_SCOPE`; unset, the scope the embedder asks for), both
+plain, since one Foundry resource serves two inference families whose route, `api-version` and
+token scope differ and which of them a deployment serves is named by that deployment. Its one
+credential is the shared keyless sign-in, `azureTenantId` with `azureClientId`: the Azure chat
+form takes no API key, so the endpoint is refused without them, and a deployment that embeds on
+Bedrock and answers on Azure is what that sharing is for. `chatEndpoint` is the other form, any
+OpenAI-shaped chat completions service: `DISPATCH_ANSWERER=endpoint` and `DISPATCH_CHAT_ENDPOINT`,
+with `chatModel` (plain, `DISPATCH_CHAT_MODEL`, the model each request names) and
+`chatTokenSecret`, this group's one secret input: a Secret Manager secret's resource path whose
+value is the bearer token every call presents, read at run time as the Azure key is, through the
+SecretProviderClass `<hostname>-chat-token` and its own CSI volume, mounted read-only at
+`/var/run/secrets/chat-token`, whose file `token` `DISPATCH_CHAT_TOKEN_FILE` names, under a grant
+of its own (`<hostname>-chat-token-accessor`) the app Deployment waits for. Dispatch re-reads that
+file on every call, so a new token version needs no restart. The two endpoints, the Azure chat
+deployment and the token's secret path are Pulumi inputs and may be another resource's outputs.
+With neither endpoint nothing of this group renders: Dispatch then configures no model, and its
+server starts and says so.
 
 Every image must be pinned by SHA-256 digest. Verify an `envoyImage` digest from
-`ghcr.io/sjawhar/legion/envoy` before pinning it, with the `gh attestation verify` command
-[Running Dispatch](https://sjawhar.github.io/legion/dispatch/running-dispatch/) gives. The
+`ghcr.io/cybermonklabs/legion/envoy` before pinning it, with the `gh attestation verify` command
+[Running Dispatch](https://cybermonklabs.github.io/legion/dispatch/running-dispatch/) gives. The
 component refuses invalid hostnames, tailnet DNS names, tags, image references, sign-in domains,
 namespaces, allowed namespaces, an `appCpu`, `appMemory`, `proxyCpu`, `proxyMemory`,
 `appEphemeralStorage` or `proxyEphemeralStorage` outside
@@ -1021,12 +1065,19 @@ refuses an `agentSecretsUrl` or an `agentSecretsAudience` whose partner input is
 others (each missing input named), an `appId` that is not digits or is 0, an
 `appPrivateKeySecretName` that is not a DNS subdomain, an `appPrivateKeySecretKey` outside
 `[-._a-zA-Z0-9]+`, and an `agentSecretsUrl` that is not an absolute http(s) URL with no path; and,
-of the Azure group, any of its inputs without `azureEmbedEndpoint`, an endpoint without
-`azureEmbedTokensPerMinute` or with one below 1, both credential forms or neither, `azureTenantId`
-or `azureClientId` without the other, and an `azureFederationAudience` without them or empty.
+of the Azure embedder's group, any `azureEmbed` input without `azureEmbedEndpoint`, an endpoint
+without `azureEmbedTokensPerMinute` or with one below 1, both credential forms or neither,
+`azureTenantId` or `azureClientId` without the other, an `azureFederationAudience` without them or
+empty, and any of the three without `azureEmbedEndpoint` and `azureChatEndpoint` alike, since the
+sign-in is shared; and, of the answerer's group, any `azureChat` input without
+`azureChatEndpoint` and any `chat` input without `chatEndpoint`, the two endpoints together, an
+`azureChatEndpoint` without `azureChatTokensPerMinute` (or with one below 1), without
+`azureChatDeployment` or without the keyless sign-in, a `chatEndpoint` without `chatTokenSecret`
+or `chatModel`, and an empty `azureChatApiVersion`, `azureChatScope` or `chatModel`.
 Once each Pulumi input resolves, before any child takes it, it refuses a seed in
 `tailnetAuthKey`, `signInClientSecret`, `natsSeedSecret`, `databaseWaitsFor`, `azureEmbedEndpoint`,
-`azureEmbedDeployment`, `azureEmbedKeySecret`, `azureTenantId` and `azureClientId`; a blank or
+`azureEmbedDeployment`, `azureEmbedKeySecret`, `azureTenantId`, `azureClientId`,
+`azureChatEndpoint`, `azureChatDeployment`, `chatEndpoint` and `chatTokenSecret`; a blank or
 whitespace-only `tailnetAuthKey` or `signInClientSecret`, neither of which can work blank (the
 front door cannot join the tailnet, Dispatch refuses a blank sign-in secret at boot) — each a
 refusal naming the input and never echoing it; and a `natsUrl` that holds a seed, is local
@@ -1053,8 +1104,9 @@ unproven (`docs/plans/2026-10-14-dispatch-gcp-plan.md`, the hardening ledger); i
 the first apply stops at the app's readiness wait, and a grant made then lets the next apply
 finish. The component itself grants that
 principal `roles/secretmanager.secretAccessor` only on the NATS seed secret (and on the Azure key
-secret when `azureEmbedKeySecret` is set), and the app and the listener, which mount the seed,
-wait for that grant to be written, as the app waits for the Azure key's. IAM can take minutes to apply
+secret when `azureEmbedKeySecret` is set, and on the chat token's secret when `chatTokenSecret`
+is), and the app and the listener, which mount the seed,
+wait for that grant to be written, as the app waits for the Azure key's and the chat token's. IAM can take minutes to apply
 a new binding (Google cites typically two, sometimes seven or more), and a pod restarts until it
 can mount. The app and the listener share that one Kubernetes service account, which holds no
 Role: no pod creates a Secret, since each front-door node keeps its tailnet state on its own pod's
@@ -1065,12 +1117,14 @@ The `serviceAccountIssuer` and `serviceAccountSubject` outputs are the issuer an
 app's and the listener's Kubernetes service-account tokens (the front door's pods run as an
 account the subject never names): the cluster's own issuer,
 `https://container.googleapis.com/v1/projects/<project id>/locations/<location>/clusters/<cluster name>`,
-and `system:serviceaccount:<namespace>:<hostname>`. The keyless Azure form rests on them: the
+and `system:serviceaccount:<namespace>:<hostname>`. The keyless Azure form rests on them, for the
+embedder and the answerer alike: the
 managed identity `azureClientId` names holds a federated identity credential whose issuer is
 `serviceAccountIssuer`, whose subject is `serviceAccountSubject` and whose audience is
 `api://AzureADTokenExchange` (or the `azureFederationAudience` set), which admits these pods'
 projected tokens and no other, and the identity needs a role on the Azure AI Foundry resource that
-lets it call the deployment. The component writes nothing in Azure: the consumer's Azure program
+lets it call each deployment it is given, the embedding deployment's and the chat deployment's.
+The component writes nothing in Azure: the consumer's Azure program
 declares the credential and the role from these two outputs.
 
 ### The pods
@@ -1094,8 +1148,10 @@ sets `dispatchMachineId` to the component's `hostname`. Both Envoy containers mo
 at `/var/run/secrets/envoy/nats-seed`; the seed remains outside Pulumi state. With
 `agentSecretsUrl` set, the `envoy-dispatch` container alone also mounts its projected
 ServiceAccount token, read-only, at `/var/run/secrets/dispatch/agent-secrets-account-token`; with
-`azureEmbedKeySecret`, the Azure key at `/var/run/secrets/azure-embed/key`; and with the keyless
-Azure form, the projected token at `/var/run/secrets/azure-federation/token`.
+`azureEmbedKeySecret`, the Azure key at `/var/run/secrets/azure-embed/key`; with the keyless
+Azure form, which `azureChatEndpoint` takes too, the projected token at
+`/var/run/secrets/azure-federation/token`; and with `chatTokenSecret`, the answerer's bearer token
+at `/var/run/secrets/chat-token/token`.
 
 Each Deployment takes its update strategy from its own replica count. At one pod it is recreated,
 stopping the old pod before the new one starts: a roll would run the outgoing and the incoming
@@ -1210,7 +1266,10 @@ pods that have just come up.
 
 Every container reads its environment once, at start, and Dispatch reads the Azure key file and
 the NATS seed once, at boot, as the listener reads the seed, so a pod boots on a secret's new value
-only when it restarts. The component's own Secrets restart their readers by themselves: each pod
+only when it restarts. The answerer's bearer token is the exception among the mounted files:
+Dispatch reads `DISPATCH_CHAT_TOKEN_FILE` on every call, so a new version of `chatTokenSecret`
+reaches a running pod on its own, as the projected tokens do. The component's own Secrets restart
+their readers by themselves: each pod
 template carries a `checksum/<secret>` annotation holding the resourceVersion of every component
 Secret its environment reads, `<hostname>-dispatch` and `<hostname>-listener` on the app,
 `<hostname>-listener` on the listener and `<hostname>-tailnet-auth-key` on the front door. The
@@ -1243,7 +1302,7 @@ replacing the app's pods alone, and nobody is signed out at the add or the promo
 Each apply leaves the incoming pods' key set sharing its current key with the pods still serving,
 which is what lets the roll pass the check that refuses a server whose keys a running server does
 not share. These are the three steps of
-[Changing the session key](https://sjawhar.github.io/legion/dispatch/running-dispatch/#changing-the-session-key),
+[Changing the session key](https://cybermonklabs.github.io/legion/dispatch/running-dispatch/#changing-the-session-key),
 which states the server-side rule the applies implement.
 
 The component sees one state and never the one before it, so the rest is the operator's to keep:
@@ -1264,15 +1323,16 @@ these are preconditions of that procedure, not guarantees the component makes.
   negative generation or a repeated one.
 
 The projected tokens need no restart either: the kubelet rewrites them in place, and Dispatch
-reads the broker token on every call and the keyless Azure form's token on every exchange with
-Entra. The secrets the component does not own carry no checksum, so after rotating one, restart
+reads the broker token on every call, the keyless Azure form's token on every exchange with
+Entra — the answerer's sign-in as much as the embedder's — and the answerer's bearer token on
+every call. The secrets the component does not own carry no checksum, so after rotating one, restart
 the Deployments that read it, once the synced Kubernetes Secret or the mounted file holds the new
 value:
 
 - the NATS seed: the app's `envoy-dispatch` and the listener's `envoy-listener` each read it once,
   at start
   (`kubectl -n <namespace> rollout restart deployment/<hostname> deployment/<hostname>-listener`);
-- the GitHub App key and the Azure key: the app alone reads them
+- the GitHub App key and the Azure key: the app alone reads them, each once at boot
   (`kubectl -n <namespace> rollout restart deployment/<hostname>`). Rotate the App key by adding a
   new key to the App and writing it to the Secret Manager secret SecretSync copies, restarting the
   app, and only then deleting the old key from the App: GitHub accepts every key the App holds,
@@ -1406,13 +1466,13 @@ and selector are unchanged. Before it:
 
 1. Prepare the tailnet policy: an auto-approval for `svc:<hostname>` to the front door's `tags`,
    and access for every client of Dispatch. A Tailscale Service is a grant destination of its
-   own, so a grant reaches it either with `dst: ["svc:<hostname>"]` and `ip: ["443"]`, or with a
-   `dst` naming `tags`, since the component gives the Service the same `tags` its nodes carry.
-   Without a grant of one of those two shapes, no client reaches Dispatch after the move.
+   own, so a grant reaches it with `dst: ["svc:<hostname>"]` and `ip: ["443"]`; the Service
+   carries no tags, so a grant whose `dst` names `tags` does not reach it. Without a grant of
+   that shape, no client reaches Dispatch after the move.
 2. Delete the tailnet machine that holds the name `<hostname>`: Tailscale refuses a Service whose
    name a machine holds. Dispatch is off the tailnet from here on.
 3. Pass the stack a `tailscale` provider for the tailnet: the component declares `svc:<hostname>`
-   itself, with its port `tcp:443` and its `tags`, after the Cloud SQL instance, and the Serve
+   itself, with its port `tcp:443` and no tags, after the Cloud SQL instance, and the Serve
    ConfigMap and the front door's Deployment wait for it.
 4. Set `frontDoorToolsImage`, and give `tailnetAuthKey` a key minted as the front door needs it
    ([The front door](#the-front-door)).
@@ -1449,8 +1509,8 @@ in one apply:
 2. In the next apply, remove that resource and the `tailnetService` argument from the program and
    pass the component a `tailscale` provider. The component registers the Service without the
    consumer's dependency, its create is an upsert, so it adopts the live `svc:<hostname>` and
-   writes the component's comment, port `tcp:443` and `tags` over it; the consumer's retained
-   delete then removes its own state entry and leaves the Service where it is.
+   writes the component's comment and port `tcp:443` over it, sending no tags; the consumer's
+   retained delete then removes its own state entry and leaves the Service where it is.
 
 Do not reach for `pulumi state delete` on the consumer's Service instead. A stack that passed
 that Service's `Name` as `tailnetService` has the component depending on it — the SDK puts the
@@ -1463,7 +1523,7 @@ Removing the consumer's declaration without the retain deletes the Service in th
 after the component has adopted it: readers lose `<hostname>.<tailnetDnsName>`, and the
 component's state still records a Service that is gone, so the next `up` plans nothing until a
 `pulumi refresh`. Keeping both declarations is no better: two resources then own one Service and
-each apply overwrites the other's tags.
+each apply overwrites what the other declared.
 
 ### YAML
 
@@ -1576,13 +1636,11 @@ Its environment comes from the inputs:
 | `ENVOY_MACHINE_ID` | `machineId` |
 | `NATS_URLS` | `natsUrls`, joined with commas |
 | `ENVOY_ALLOW_REMOTE_NATS` | `1` when any URL in `natsUrls` names a host other than `localhost` or a loopback address. The URL is read, never resolved. |
-| `ENVOY_HOST_BRIDGE` | `hostBridge`, when set |
-| `ENVOY_SUBSCRIBE_ALL_TOPICS` | `1` when `subscribeAllTopics` is `true`; unset otherwise |
 | `NATS_NKEY_SEED` | `seed`, when set. The whole environment is then a secret in the stack's state. |
 
 The listener serves on the host's loopback, `127.0.0.1:<port>`. This version sets no listen host,
 no API token and no webhook routes. The listener's other settings are on the documentation site's
-[Envoy page](https://sjawhar.github.io/legion/dispatch/envoy/#running-the-listener).
+[Envoy page](https://cybermonklabs.github.io/legion/dispatch/envoy/#running-the-listener).
 
 The listener's outputs are `containerName` and `port`.
 
@@ -1592,11 +1650,9 @@ The listener's outputs are `containerName` and `port`.
 | --- | --- | --- |
 | `machineId` | required | The listener's name, `ENVOY_MACHINE_ID`. It names the durable consumer `listener-<machineId>` and queue group `envoy-listener-<machineId>`; an interior ordinary space becomes a hyphen in both names. |
 | `natsUrls` | required | The NATS servers to connect to. May come from another resource or stack. |
-| `image` | required | The listener image, such as `ghcr.io/sjawhar/legion/envoy:<tag>`. |
+| `image` | required | The listener image, such as `ghcr.io/cybermonklabs/legion/envoy:<tag>`. |
 | `containerName` | `envoy-listener` | The container's name. |
 | `port` | `9020` | The port the listener serves and the health check calls. |
-| `hostBridge` | unset | The address the listener delivers to this machine's sessions at: those registered through it, and those recording `machineId` as their host. Unset, the listener uses the host each session recorded, then `host.docker.internal`. Sessions that serve on the host's loopback are at `127.0.0.1`, since the container shares the host's network. |
-| `subscribeAllTopics` | `false` | `true` sets `ENVOY_SUBSCRIBE_ALL_TOPICS=1`: the listener also subscribes to every notification topic, so a session served on this machine receives a topic the stream does not store. Only for a NATS user holding `HostPermissions` or `ListenerHostPermissions`, such as a `gcp:NatsHub` user with `machineId` or `listenerMachineId`; under any other grant the server refuses the subscription and the listener's start ends. See [Permission sets](#permission-sets). |
 | `seed` | unset | A secret: the nkey seed of the NATS user the listener connects as. May come from another resource or stack. |
 | `waitForHealthy` | `true` | Whether `pulumi up` waits on the container's health check. See [Readiness](#readiness). |
 | `watchdog` | unset | `{host}`: deploys the watchdog on that SSH address. See [The watchdog](#the-watchdog). |
@@ -1618,7 +1674,7 @@ The listener refuses these before it registers anything, with an error naming wh
 
 - an nkey seed of any type, in any spelling listed under "What `check` and `verify` print",
   anywhere in its name or in any input but `seed`: `machineId`, `image`, `containerName`,
-  `hostBridge`, `watchdog.host`, `adopt.container`, `adopt.image` or `adopt.watchdog`. The error
+  `watchdog.host`, `adopt.container`, `adopt.image` or `adopt.watchdog`. The error
   names the input and never the value, as `envoy-infra:host:Listener example-host-a: image holds an
   nkey seed (not echoed)`, since each would reach a resource's inputs, an alias or another refusal.
   `seed` is the one input that is a seed;
@@ -1626,9 +1682,7 @@ The listener refuses these before it registers anything, with an error naming wh
   `\`, a control character, or whitespace other than an interior ordinary space, or one over 246 bytes: none can be used
   the durable consumer `listener-<machineId>` and queue group `envoy-listener-<machineId>` the
   listener uses;
-- a `hostBridge` holding a control character, such as a line break;
 - a `port` outside 1-65535;
-- a `hostBridge` with leading or trailing whitespace;
 - `watchdog` with a `containerName` other than `envoy-listener`;
 - `watchdog` with `seed`;
 - a `watchdog.host` containing `@` or `://`;
@@ -1679,7 +1733,7 @@ from `starting` on, before the listener has connected to NATS. A listener is con
 `/healthz` answers `"status":"healthy"` or `"status":"degraded"`: a degraded answer is a
 dependency that repairs itself, such as a role claim view whose first scan has not delivered every
 claim, and the listener behind it is connected and serving. The answers are listed under
-[Health and readiness](https://sjawhar.github.io/legion/dispatch/envoy/#health-and-readiness).
+[Health and readiness](https://cybermonklabs.github.io/legion/dispatch/envoy/#health-and-readiness).
 
 `waitForHealthy: false` creates the container without waiting on its health check. Use it for a
 listener that cannot reach its NATS server when the stack is applied: Docker restarts the listener
@@ -1771,7 +1825,7 @@ packages:
   envoy-infra:
     source: envoy-infra
     version: <version>
-    pluginDownloadURL: https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}
+    pluginDownloadURL: https://github.com/cybermonklabs/legion/releases/download/envoy-infra-v${VERSION}
 config:
   natsSeed:
     type: string
@@ -1789,8 +1843,7 @@ resources:
       machineId: example-host-a
       natsUrls:
         - nats://nats.internal.example:4222
-      image: ghcr.io/sjawhar/legion/envoy:<tag>
-      hostBridge: 127.0.0.1
+      image: ghcr.io/cybermonklabs/legion/envoy:<tag>
       seed: ${natsSeed}
     options:
       providers:
@@ -1836,8 +1889,7 @@ const listener = new envoyInfra.host.Listener(
   {
     machineId: "example-host-a",
     natsUrls: nats.requireOutput("natsUrls"),
-    image: "ghcr.io/sjawhar/legion/envoy:<tag>",
-    hostBridge: "127.0.0.1",
+    image: "ghcr.io/cybermonklabs/legion/envoy:<tag>",
     watchdog: { host: "example-host-a.internal.example" },
   },
   { providers: [dockerHost, commandHost] }
@@ -1963,8 +2015,6 @@ environment, in this order:
 | `ENVOY_MACHINE_ID` | `machineId` |
 | `NATS_URLS` | `natsUrls`, joined with commas |
 | `ENVOY_ALLOW_REMOTE_NATS` | `1` when any URL names a host other than `localhost` or a loopback address |
-| `ENVOY_HOST_BRIDGE` | `hostBridge`, when it is not `""` |
-| `ENVOY_SUBSCRIBE_ALL_TOPICS` | `1` when `subscribeAllTopics` is `true` |
 | `ENVOY_NATS_REPLICAS` | `natsReplicas` |
 | `ENVOY_WEBHOOKS` | `webhooks`, joined with commas, when it lists one |
 | `ENVOY_GITHUB_MENTION_TRIGGER`, `ENVOY_REVIEWER_APP_ID` | `mentionTrigger`, `reviewerAppId`, with `github` |
@@ -2000,7 +2050,7 @@ Its outputs are `serviceArn`, `serviceName`, `logGroupName`, `taskDefinitionArn`
 | --- | --- | --- |
 | `machineId` | required | `ENVOY_MACHINE_ID`, the listener's name. It names the durable consumer `listener-<machineId>` and queue group `envoy-listener-<machineId>`; an interior ordinary space becomes a hyphen in both names. |
 | `natsUrls` | required | The NATS servers. May come from another resource as an output of the whole list, such as `nats.internal_url.apply(lambda url: [url])`. |
-| `image` | required | The listener image, such as `ghcr.io/sjawhar/legion/envoy@sha256:<digest>`. |
+| `image` | required | The listener image, such as `ghcr.io/cybermonklabs/legion/envoy@sha256:<digest>`. |
 | `region` | required | The container's `awslogs-region`. |
 | `apiTokenSecretArn` | required | The secret holding the listener's API token. |
 | `apiTokenSecretVersionId` | required | The token's secret version. The component only orders the task definition after it, so pass your `SecretVersion`'s `versionId` output: a literal orders nothing. |
@@ -2017,9 +2067,7 @@ Its outputs are `serviceArn`, `serviceName`, `logGroupName`, `taskDefinitionArn`
 | `family`, `cpu`, `memory` | required | The task definition's family and size. |
 | `logGroupName`, `logRetentionDays` | required | The log group, which the filters read and the alarms' descriptions name. |
 | `listenHost` | required | `ENVOY_LISTEN_HOST`. The listener binds `127.0.0.1` when it is blank, where the target group cannot reach it. |
-| `hostBridge` | required | `ENVOY_HOST_BRIDGE`; `""` leaves it unset. |
 | `natsReplicas` | required | `ENVOY_NATS_REPLICAS`, from 1 to 5: the deployment's replica count, which the listener creates its stream and buckets at and raises them to, at start and every 30 seconds after. Every Envoy program of the deployment carries the same value. More than 1 needs a clustered NATS; `aws:NatsService` runs one server. |
-| `subscribeAllTopics` | `false` | `true` sets `ENVOY_SUBSCRIBE_ALL_TOPICS=1`, as for `host:Listener`: only for a NATS user holding `HostPermissions` or `ListenerHostPermissions`, since under any other grant the listener's start ends. |
 | `alarmTopicArn` | required | The SNS topic the alarms page and clear on. |
 | `baseTags`, `metricNamespace` | required | As for `aws:NatsService`. |
 | `natsServiceArn` | required | The NATS service's ARN. The component only orders its ECS service after it, so the listener rolls out after NATS, which by then holds the key the listener presents: pass the `NatsService`'s `serviceArn` output, not a literal. |
@@ -2048,9 +2096,9 @@ the input:
   counts as missing) or given while it does not, each input checked before the list; then a
   `webhooks` other than `[]` or exactly `["github", "slack"]`; an empty `machineId`, one with
   leading or trailing whitespace, or one holding `.`, `*`, `>`, `/`, `\`, a control character, or
-  whitespace other than an interior ordinary space, or one over 246 bytes; a `hostBridge` or `listenHost` holding a
-  control character; a `hostBridge` with leading or trailing whitespace; a blank `listenHost`; a
-  `natsReplicas` below 1 or above 5; an empty `subnetIds`; a `baseTags` holding `service`.
+  whitespace other than an interior ordinary space, or one over 246 bytes; a `listenHost` holding
+  a control character; a blank `listenHost`; a `natsReplicas` below 1 or above 5; an empty
+  `subnetIds`; a `baseTags` holding `service`.
 - Either, without an `aws` provider (see [Providers and transformations](#providers-and-transformations)).
 
 `natsUrls` may come from another resource, so the listener checks it when the container's
@@ -2269,7 +2317,6 @@ listener = envoy_infra.aws.WebhookListener(
     cpu="256",
     memory="512",
     listen_host="0.0.0.0",
-    host_bridge="127.0.0.1",
     nats_replicas=1,
     alarm_topic_arn=f"arn:aws:sns:{region}:000000000000:example-alarms",
     base_tags=base_tags,
@@ -2358,7 +2405,7 @@ authorization {
 ### webhook-listener-env
 
 ```text
-envoy-infra render webhook-listener-env --machine-id <id> --nats-url <url>... [--webhook <name>]... [--reviewer-app-id <id>] [--mention-trigger <t>] --listen-host <h> --host-bridge <h> --nats-replicas <n> [--subscribe-all-topics]
+envoy-infra render webhook-listener-env --machine-id <id> --nats-url <url>... [--webhook <name>]... [--reviewer-app-id <id>] [--mention-trigger <t>] --listen-host <h> --nats-replicas <n>
 ```
 
 Prints `aws:WebhookListener`'s container environment, one `KEY=value` line per variable in the
@@ -2366,13 +2413,12 @@ container's order. The secrets ECS injects are not printed. It refuses what the 
 these inputs, and a value holding a line break, which no line could carry:
 
 ```text
-$ envoy-infra render webhook-listener-env --machine-id example-fargate --nats-url nats://example-bus.example-namespace.internal.example:4222 --webhook github --webhook slack --reviewer-app-id 1234567 --mention-trigger @legion --listen-host 0.0.0.0 --host-bridge 127.0.0.1 --nats-replicas 1
+$ envoy-infra render webhook-listener-env --machine-id example-fargate --nats-url nats://example-bus.example-namespace.internal.example:4222 --webhook github --webhook slack --reviewer-app-id 1234567 --mention-trigger @legion --listen-host 0.0.0.0 --nats-replicas 1
 PORT=9020
 ENVOY_LISTEN_HOST=0.0.0.0
 ENVOY_MACHINE_ID=example-fargate
 NATS_URLS=nats://example-bus.example-namespace.internal.example:4222
 ENVOY_ALLOW_REMOTE_NATS=1
-ENVOY_HOST_BRIDGE=127.0.0.1
 ENVOY_NATS_REPLICAS=1
 ENVOY_WEBHOOKS=github,slack
 ENVOY_GITHUB_MENTION_TRIGGER=@legion
@@ -2381,9 +2427,6 @@ ENVOY_REVIEWER_APP_ID=1234567
 
 With no `--webhook`, it prints no `ENVOY_WEBHOOKS` line and no GitHub lines, as the component writes
 none for `webhooks: []`, and refuses `--reviewer-app-id` and `--mention-trigger`.
-
-With `--subscribe-all-topics`, the component's `subscribeAllTopics: true`, it prints
-`ENVOY_SUBSCRIBE_ALL_TOPICS=1` right after the `ENVOY_HOST_BRIDGE` line; without it, no such line.
 
 Without `--reviewer-app-id`, it prints
 `refused: --reviewer-app-id: reviewerAppId is required with webhook "github"` and exits 2.
@@ -2903,30 +2946,16 @@ lane queue groups, and the session user's refusal of a consumer create; `AGENTS.
 directory says how.
 
 `ListenerHostPermissions(machineID)` is the grant of a listener's own NATS user, one no session
-shares: `ListenerPermissions(machineID)`, the session consumers' calls included, then the plain
-`notifications.>` subscribe `ENVOY_SUBSCRIBE_ALL_TOPICS` needs. It is the one set under which a
-listener both keeps its sessions' consumers and subscribes to every notification topic. A
-`gcp:NatsHub` user with `listenerMachineId` holds it, for a listener whose process is the only
-thing holding that seed: a session connecting as it could create, pull and delete any session's
-consumer. A host whose sessions share the listener's user takes `machineId` and
-`HostPermissions` instead, and keeps its sessions on the core path. This repository's listener
-runs under this set, opted in, against the real servers below: it answers a registration
-`consumer`, relays a send on the session's relay subject, and pushes a topic the stream does not
-store to a session's serving port, with no refusal.
-
-`HostPermissions` and `ListenerHostPermissions` are the sets under which a listener may set
-`ENVOY_SUBSCRIBE_ALL_TOPICS=1` (`host:Listener`'s and `aws:WebhookListener`'s
-`subscribeAllTopics`). The listener then holds a core subscription on `notifications.>` in its
-machine's queue group `envoy-listener-live-<m>`, so a session served on its machine receives a
-topic the stream does not store, which the sets' plain `notifications.>` subscribe entry allows in
-any queue group. `ListenerPermissions` and `DispatchPermissions` subscribe only to the role lanes
-and `_INBOX.>`, so the server refuses that subscription, and the listener's start ends with exit 1
-and an ERROR naming `ENVOY_SUBSCRIBE_ALL_TOPICS`. A `gcp:NatsHub`'s own `listener` and
-`gcp:Dispatch`'s listener therefore never set it, and neither component takes the input. Both
-outcomes are checked against the real servers above: the listener opted in as a user holding
-`HostPermissions` delivers an ad-hoc topic to a session's serving port with no refusal, and opted
-in as a user holding `ListenerPermissions` ends its start, the server's one refusal its
-subscription to `notifications.>`.
+shares: `ListenerPermissions(machineID)`, the session consumers' calls included, then a plain
+`notifications.>` subscribe that no Envoy program uses any more. A `gcp:NatsHub` user with
+`listenerMachineId` holds it, for a listener whose process is the only thing holding that seed: a
+session connecting as it could create, pull and delete any session's consumer. A host whose
+sessions share the listener's user takes `machineId` and `HostPermissions` instead, and keeps its
+sessions on the core path. The two sets therefore allow the same calls a listener makes; the
+subscribe stays rather than being dropped because a change to a set rewrites every hub's rendered
+authorization, which replaces a VM hub's instance and reaches a clustered hub only as a live
+reload. This repository's listener runs under this set against the real servers below: it answers
+a registration `consumer` and relays a send on the session's relay subject, with no refusal.
 
 `DaemonPermissions()` is the grant of a Legion daemon's dedicated NATS user. It publishes the
 notification stream's info request, its stored-message get

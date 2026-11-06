@@ -1,18 +1,23 @@
 name: PR Title
 
 # Checks that a pull request's title, body, branch name, commits, comments and reviews name
-# nothing private (check-pr-text.sh) and that its title is a conventional commit subject. It lives
+# nothing private and that its title is a conventional commit subject (check-pr-text.sh). It lives
 # apart from the lint, typecheck and test jobs of ci.yaml (LEGION-90) so that an edit, which a
-# Legion round makes several times, does not re-run them at an unchanged head. A push, open,
-# reopen or edit (title or body) of the pull request runs it, draft or not, and so does a review
-# submitted or edited; each run reports `pr-title` on the pull request's head, which main's
-# ruleset requires. Comments and review comments start no run of their own: GitHub leaves those
-# events' checks out of a pull request's checks, an inline comment posted alone arrives with a
-# review event that does run, and every run reads every comment, as ci.yaml's lint job does. A
-# newer run that cancels an older one loses nothing, since it repeats every check on the title and
-# body as they now are. Anyone signed in can review a public pull request, so check-pr-text.sh,
-# not an `if:`, decides whose text counts: a skipped job posts a `pr-title` that GitHub and the
-# daemon (classify.RunResult) count as a pass, so a skipped run would turn a real failure green.
+# Legion round makes several times, does not re-run them at an unchanged head. An open, reopen or
+# edit (title or body) of the pull request runs it, draft or not, and so does a review submitted or
+# edited; each run reports `pr-title` on the pull request's head, which main's ruleset requires. A
+# push starts no run here: ci.yaml's lint job, which runs at every push to a pull request that is
+# not a draft and when a draft is marked ready, runs the same check and posts `pr-title` on the
+# new head itself, from a runner it already holds (a job of this workflow at every push waited for
+# a runner of its own; ci.yaml's header says why that matters). A draft's new head has no
+# `pr-title` until it is marked ready or edited, and a draft cannot merge. Comments and review
+# comments start no run of their own: GitHub leaves those events' checks out of a pull request's
+# checks, an inline comment posted alone arrives with a review event that does run, and every run
+# reads every comment, as ci.yaml's lint job does. A newer run that cancels an older one loses
+# nothing, since it repeats every check on the title and body as they now are. Anyone signed in
+# can review a public pull request, so check-pr-text.sh, not an `if:`, decides whose text counts:
+# a skipped job posts a `pr-title` that GitHub and the daemon (classify.RunResult) count as a
+# pass, so a skipped run would turn a real failure green.
 #
 # The merge queue's group runs it too, and it reports `pr-title` on the group's commit: a required
 # check that does not report on the merge group fails the group ("The merge will fail as the
@@ -22,7 +27,7 @@ name: PR Title
 # are when it is queued, read from the pull request the group's branch names.
 on:
   pull_request:
-    types: [opened, edited, reopened, synchronize]
+    types: [opened, edited, reopened]
   pull_request_review:
     types: [submitted, edited]
   merge_group:
@@ -30,12 +35,13 @@ on:
 
 # A run cancels the run before it of the same pull request and event, so a pull request holds at
 # most one running and one pending PR Title run per event however many edits and reviews arrive.
-# Nothing is lost: each run checks the title and body its event names and reads the commits,
-# comments and reviews live, so the newest repeats every check of the runs it cancels. The event is
-# in the group because GitHub lists a pull request's checks once per check name and event (as
-# `gh pr checks` does): a review run that cancelled a pull_request run would leave that event's
-# latest `pr-title` cancelled on the head until the next push or edit. A review run checks with
-# main's copy of check-pr-text.sh; the required lint job checks a pull request that changes it with
+# Nothing is lost: each run reads the title, body, comments and reviews as they are when it runs,
+# and the commits of the head its event names, so the newest repeats every check of the runs it
+# cancels. The event is in the group because GitHub lists a pull request's checks once per check
+# name and event (as `gh pr checks` does): a review run that cancelled a pull_request run would
+# leave that event's latest `pr-title` cancelled on the head until the next push or edit. A review
+# run checks with main's copy of check-pr-text.sh; the required lint job checks a pull request that
+# changes it with
 # its own copy (ci.yaml says when that job runs: at every push to a pull request that is not a
 # draft, and when a draft is marked ready). A merge group carries no pull request and is a group
 # of its own per commit (its head sha), so no run cancels a merge group's, which the queue waits
@@ -96,26 +102,15 @@ jobs:
           echo "path=$payload" >> "$GITHUB_OUTPUT"
 
       # The title, body, commit messages, comments and reviews are as public as the tree
-      # (check-pr-text.sh says where each lands). ci.yaml's lint job checks them too (that file
-      # says when it runs); this step checks them at every event above, an edit, a review or a
-      # queued group included. Both steps read the payload file rather than an `env:` block, which
-      # the runner prints in the job log; only its path is in `env:`. A workflow `env:` cannot
+      # (check-pr-text.sh says where each lands), and the title must be a conventional commit
+      # subject. ci.yaml's lint job checks them too (that file says when it runs); this step checks
+      # them at every event above, an edit, a review or a queued group included: a review run
+      # reports `pr-title` on the head too, and one that skipped the title would post a passing
+      # `pr-title` over a failed one. The step reads the payload file rather than an `env:` block,
+      # which the runner prints in the job log; only its path is in `env:`. A workflow `env:` cannot
       # override a GITHUB_* variable, so the shell sets GITHUB_EVENT_PATH for the script.
-      - name: Check the title, body, branch name, commits, comments and reviews name nothing private
+      - name: Check the title, body, branch name, commits, comments and reviews
         env:
           GH_TOKEN: ${{ github.token }}
           PAYLOAD: ${{ steps.payload.outputs.path }}
         run: GITHUB_EVENT_PATH="$PAYLOAD" .github/scripts/check-pr-text.sh
-
-      # Every run checks the title, since a review run reports `pr-title` on the head too and a
-      # run that skipped it would post a passing `pr-title` over a failed one.
-      - name: Require a conventional PR title
-        env:
-          PAYLOAD: ${{ steps.payload.outputs.path }}
-        run: |
-          if jq -r '.pull_request.title' "$PAYLOAD" | grep -qE '^[a-z]+(\([^)]+\))?!?: .+'; then
-            echo "PR title is conventional"
-          else
-            echo "::error::PR title must be a conventional commit subject (type(scope): summary). Squash merges use the PR title as the commit subject, and the release workflows version from conventional subjects — a merge the Legion daemon submits writes an empty squash body, so on it the title is the only text they read."
-            exit 1
-          fi

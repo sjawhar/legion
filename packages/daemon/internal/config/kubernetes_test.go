@@ -11,10 +11,11 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 )
 
-const workerImage = "ghcr.io/sjawhar/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+const workerImage = "ghcr.io/cybermonklabs/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 // kubernetesFile is the smallest file `runtime: kubernetes` loads: every key a pod needs to reach
 // the daemon, Envoy, NATS, and Dispatch, and the required members of the block. The App
@@ -71,6 +72,8 @@ func TestLoadForValidationSettlesEveryMemberOfTheKubernetesBlock(t *testing.T) {
     kubeconfig: kube/legion-daemon
     context: legion-daemon@example
     setup: [/bin/sh, -c, 'omp plugin marketplace add acme/agent-skills']
+    skills_repository: acme/agent-skills
+    idle_release: {idle_minutes: 20, backstop_minutes: 120}
     repository_cache:
       volume: 50Gi
       refresh_minutes: 5
@@ -128,8 +131,9 @@ provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 		Context:      "legion-daemon@example",
 		// A store that keeps sessions in a database is required under this runtime, so the one
 		// kubernetesFile names settles on every load of the block.
-		SessionStore: ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: "SESSION_DSN"},
-		Setup:        []string{"/bin/sh", "-c", "omp plugin marketplace add acme/agent-skills"},
+		SessionStore:     ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: "SESSION_DSN"},
+		Setup:            []string{"/bin/sh", "-c", "omp plugin marketplace add acme/agent-skills"},
+		SkillsRepository: ghrepo.MustParse("acme/agent-skills"),
 		Scheduling: Scheduling{
 			NodeSelector: map[string]string{"karpenter.k8s.aws/instance-family": "m7i", "zone": "4"},
 			Tolerations: []Toleration{
@@ -178,6 +182,7 @@ provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 			Volume: "50Gi", RefreshMinutes: 5, RetainHours: 24,
 			Resources: Reservation{CPU: "2", CPURequest: "2", Memory: "4Gi", MemoryRequest: "4Gi", EphemeralStorage: "2Gi", EphemeralStorageRequest: "1Gi"},
 		},
+		IdleRelease: IdleReleaseConfig{IdleMinutes: 20, BackstopMinutes: 120},
 	}}
 	if cfg.Runtime.Name != want.Name || cfg.Runtime.Kubernetes == nil {
 		t.Fatalf("Runtime = %+v, want %q with its block", cfg.Runtime, want.Name)
@@ -317,6 +322,7 @@ func TestLoadForValidationDefaultsTheKubernetesBlock(t *testing.T) {
 		{"pod", block.Pod, PodConfig{}},
 		{"session_store", block.SessionStore, ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: "SESSION_DSN"}},
 		{"setup", block.Setup, []string(nil)},
+		{"skills_repository", block.SkillsRepository, ghrepo.Repository{}},
 		{"test_postgres", block.TestPostgres, false},
 		{"repository_cache", block.RepositoryCache, RepositoryCacheConfig{
 			Volume: "20Gi", RefreshMinutes: 10, RetainHours: 168,
@@ -569,12 +575,12 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 		},
 		{
 			name: "image by tag",
-			body: kubernetesWith(workerImage, "ghcr.io/sjawhar/legion-worker:latest"),
+			body: kubernetesWith(workerImage, "ghcr.io/cybermonklabs/legion-worker:latest"),
 			want: "runtime.kubernetes.image must be pinned by digest (@sha256:…)",
 		},
 		{
 			name: "image with a short digest",
-			body: kubernetesWith(workerImage, "ghcr.io/sjawhar/legion-worker@sha256:0"),
+			body: kubernetesWith(workerImage, "ghcr.io/cybermonklabs/legion-worker@sha256:0"),
 			want: "runtime.kubernetes.image must be pinned by digest (@sha256:…)",
 		},
 		{
@@ -823,6 +829,11 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			name: "the TypeScript role_profiles",
 			body: kubernetesFile + "    role_profiles: {tester: large}\n",
 			want: "unknown key runtime.kubernetes.role_profiles: an issue pod's reservation is runtime.kubernetes.resources.issue, its cpu and memory limits with optional lower cpu_request and memory_request, and a field absent there takes the daemon's default",
+		},
+		{
+			name: "skills_repository that is no owner/name",
+			body: kubernetesFile + "    skills_repository: agent-skills\n",
+			want: `runtime.kubernetes.skills_repository must be "owner/name" (got "agent-skills")`,
 		},
 		{
 			name: "session_store omitted",

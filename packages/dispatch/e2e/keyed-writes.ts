@@ -69,6 +69,33 @@ export function replayed(page: Page, method: string, path: string): Promise<Resp
   );
 }
 
+/** Runs `page`'s own clock forward in `stepMs` pieces, a tenth of a second of real time apart,
+ *  until `landing` settles, and answers what it settled with. A write between two attempts is
+ *  waiting on a page `setTimeout` (`pause`, `web/src/features/writes/keyed-write.ts`) armed only
+ *  once the attempt before it ended, which is after the row saw that attempt, so the clock is
+ *  driven until the write moves rather than jumped once. `runFor` rather than `fastForward`:
+ *  it fires a repeating timer every period it covers, where `fastForward` fires each timer once.
+ *  The page's clock must be installed before it loaded (`page.clock.install()`, which leaves the
+ *  clock running at real speed), so the write loop's timers are the ones driven here. */
+export async function runClockUntil<T>(
+  page: Page,
+  landing: Promise<T>,
+  stepMs = 1_100
+): Promise<T> {
+  let waiting = true;
+  const landed = landing.finally(() => {
+    waiting = false;
+  });
+  const quiet = landed.catch(() => undefined);
+  while (waiting) {
+    await page.clock.runFor(stepMs);
+    const margin = Promise.withResolvers<void>();
+    setTimeout(margin.resolve, 100);
+    await Promise.race([quiet, margin.promise]);
+  }
+  return landed;
+}
+
 /** How many writes the tab keeps in its storage for a reload to resume (`dispatch.write:<key>`),
  *  leaving out read marks: a mark is a quiet write, kept as an entry of its own until Dispatch
  *  answers it, which a row about the writes the reader made does not count. */

@@ -165,7 +165,7 @@ func typedDirectiveRefusal(directive *typedDirective) error {
 			values[name] = raw
 			continue
 		}
-		value, err := parseTypedAttributeValue(typ.Attributes[name], raw)
+		value, err := parseTypedAttributeValue(typ.Attributes.Get(name), raw)
 		if err != nil {
 			return fmt.Errorf("%w: typed block %q attribute %q: %v", ErrSchema, directive.Name, name, err)
 		}

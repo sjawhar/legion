@@ -276,14 +276,14 @@ func (w *workflowRuntime) readListings(ctx context.Context) {
 		listed := map[string]bool{}
 		for _, pull := range pulls {
 			issue, ok := claim.BranchIssue(pull.Head.Ref)
-			if !ok || listed[issue] || !pull.HeadIn(repo) {
+			if !ok || listed[issue] || !pull.HeadIn(repo, w.repositories.renames) {
 				continue
 			}
 			listed[issue] = true
 			w.recordListed(ctx, repo, issue, pull)
 		}
 		for _, waiting := range handedOff {
-			if strings.EqualFold(waiting.Issue.GitHubRepo, repo) && !listed[waiting.Issue.Key] {
+			if w.repositories.renames.Same(waiting.Issue.GitHubRepo, repo) && !listed[waiting.Issue.Key] {
 				w.tellMissing(ctx, repo, waiting)
 			}
 		}
@@ -326,7 +326,7 @@ func (w *workflowRuntime) recordListed(ctx context.Context, repo, key string, pu
 		}
 		return
 	}
-	if issue == nil || issue.Project != w.dispatchProject || !strings.EqualFold(issue.GitHubRepo, repo) || (prior != nil && prior.State == record.PullRequestOpen) {
+	if issue == nil || issue.Project != w.dispatchProject || !w.repositories.renames.Same(issue.GitHubRepo, repo) || (prior != nil && prior.State == record.PullRequestOpen) {
 		return
 	}
 	fact, eventID := intake.OpenedRead(w.dispatchProject, repo, pull.Head.Ref, pull, issue.Generation, prior)

@@ -21,9 +21,8 @@ import (
 
 // Parse and Render finish in time linear in the text on the shapes that cost quadratic time
 // before LEGION-465. Each shape is timed at growthStep's fraction of its target size and then at
-// the full size (parseFullTarget/renderFullTarget: linear_sizes.go, and a smaller pair under
-// -race, linear_sizes_race.go, so a -count=N run stays well inside go test's own default
-// per-package timeout even there), through growsLinearly (below).
+// the full size (parseFullTarget/renderFullTarget: linear_sizes.go), through growsLinearly
+// (below).
 //
 // What each shape's closure measures is the CPU time this process spends on the call alone
 // (cpuTimeOf), not wall time. A loaded box's scheduler can inflate wall time on either side of a
@@ -53,9 +52,9 @@ import (
 // the parse here is a read-back's, which counts none and reads all of it. Render's target is
 // smaller than parse's (linear_sizes.go): this loop's own ratio check is `<a`'s live linearity
 // measurement, at whatever parseFullTarget/renderFullTarget currently are, not a one-time aside
-// recorded in a comment to go stale - but -race's own per-access instrumentation costs real CPU
-// time a reintroduced O(n²) bug would cost far more of; the margin this loop checks is that
-// difference, not a hang (which perCallDeadline catches on its own, independent of the ratio).
+// recorded in a comment to go stale. The margin it checks is between the CPU time healthy linear
+// work costs and the far greater time a reintroduced O(n²) bug would cost, not a hang (which
+// perCallDeadline catches on its own, independent of the ratio).
 func TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText(t *testing.T) {
 	for _, shape := range []string{"a_", "a_b*", "a~b_"} {
 		full := parseFullTarget / len(shape)
@@ -200,9 +199,7 @@ const linearSlack = 3
 //
 // Each shape runs at two sizes through growsLinearly, measuring process CPU time rather than a
 // fixed wall-clock budget. The sizes are eightfold apart, so a quadratic renderer grows 64x where
-// a linear renderer may grow 24x (linearSlack*growthStep). renderFullTarget and parseFullTarget
-// use smaller targets under -race, where the instrumentation makes healthy work slower but cannot
-// change its growth ratio.
+// a linear renderer may grow 24x (linearSlack*growthStep).
 func TestRenderIsLinearOnRunsFootnoteLabelsAndLineFeeds(t *testing.T) {
 	paragraph := func(text string) *Node {
 		return &Node{Type: "paragraph", Children: []*Node{{Type: "text", Text: text}}}
@@ -308,8 +305,8 @@ func TestParseIsLinearInATableOfEscapedPipes(t *testing.T) {
 // A paragraph that reads back in no spelling is written in every spelling runSpellings lists for
 // it, and unreadableRun calls for every family of them. The plain text after it is in each writing,
 // and each distinct writing is read back once (TestRenderReadsEachWritingBackUnderAReaderOnce). It
-// is timed up to renderFullTarget, which -race shrinks, as
-// TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText times a render.
+// is timed up to renderFullTarget, as TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText
+// times a render.
 func TestBareURLShapesParseAndRenderLinearly(t *testing.T) {
 	sizes := []int{16 << 10, 256 << 10, 1 << 20}
 	for _, shape := range []string{
@@ -400,7 +397,7 @@ func readsAndWritesLinearly(t *testing.T, head, shape, tail string, sizes []int)
 //
 // Replaced blocks that stand apart are not linear. ygo's Delete and Insert walk the fragment from
 // its start to the index each is given (crdt/yxml.go leftChildAt, deleteChildRange, in the pinned
-// sjawhar/ygo v1.51.3-sami.1), and a replaced block between two kept ones is a run of its own, so a
+// sjawhar/ygo v1.55.1-sami.2), and a replaced block between two kept ones is a run of its own, so a
 // document whose every other block changes type costs a walk per replaced block, as it did before
 // runs were batched. That shape is held to ygo's own walks instead: Update may take no more than
 // alternatingAllowance times what a Delete and an Insert at each replaced index take on the same
@@ -488,8 +485,8 @@ func TestUpdateIsLinearInTheBlockCount(t *testing.T) {
 			// its fastest of sampleCount.
 			var fastestUpdate, fastestWalks time.Duration
 			for sample := range sampleCount {
-				took := timedWithDeadline(t, fmt.Sprintf("replacing every other block at %d blocks", blocks), perCallDeadline, update)
-				walked := timedWithDeadline(t, fmt.Sprintf("ygo's walks to every other block at %d blocks", blocks), perCallDeadline, walks)
+				took := timedWithDeadline(t, fmt.Sprintf("replacing every other block at %d blocks", blocks), perCallDeadline(t), update)
+				walked := timedWithDeadline(t, fmt.Sprintf("ygo's walks to every other block at %d blocks", blocks), perCallDeadline(t), walks)
 				if sample == 0 || took < fastestUpdate {
 					fastestUpdate = took
 				}
@@ -944,16 +941,39 @@ func fastestOf(timed func() time.Duration) time.Duration {
 	return best
 }
 
-// perCallDeadline bounds every one of growthVerdict's measured calls: well under go test's own
-// ten-minute default per-package timeout, so a single call that itself blocks far longer than
-// this file's bound allows fails fast and names its own shape and size (the file-level comment
-// above has why that matters). It is a wall-clock bound guarding a CPU-time budget, so box-load
-// scheduling starvation, not only a regression, could in principle trip it on a healthy call -
-// measured margin against that: the slowest observed healthy call at this file's current sizes,
-// under real ambient box load, was "<a" rendering at parseFullTarget/renderFullTarget's race-mode
-// size in about 0.8s, and "a_b*" parsing at the non-race size in about 0.9s - both over 60x under
-// this deadline. A margin under 10x would call for raising it; this one does not.
-const perCallDeadline = 60 * time.Second
+// perCallReportMargin is what perCallDeadline leaves of the test binary's own deadline, so a
+// measured call that hangs fails this file's shape by name (timedWithDeadline) while go test's
+// own timeout is still some way off. Without that margin the package's default timeout fires
+// first, with no shape attached, which is the property the file-level comment above records.
+const perCallReportMargin = 60 * time.Second
+
+// perCallHangCap bounds a measured call when the run has no deadline to read (-timeout 0): a
+// hang still has to be reported, and half an hour is far past any healthy call at these sizes.
+const perCallHangCap = 30 * time.Minute
+
+// perCallDeadline bounds every one of growthVerdict's measured calls: what the test binary's own
+// deadline leaves after perCallReportMargin, capped at perCallHangCap. It is read from the
+// deadline rather than fixed because each measured call is a CPU-time measurement (cpuTimeOf,
+// cputest.Measure) that repeats its operation until a window reaches the measurement's
+// resolution, so the wall time it takes is the CPU it needs multiplied by whatever contention the
+// runner is under; a fixed wall-clock bound over a CPU-time budget fails healthy calls on a
+// loaded shared runner, which is what this file's own history records. For scale: a healthy
+// '<a b="x;a@b.cc ">' call at the 1 MiB tag shape, measured under -race in a two-CPU gVisor pod on
+// 2026-11-03, took 50.26s - 84% of the 60s bound this replaced, which is why the bound had to go
+// rather than be raised. A run whose deadline leaves no more than the
+// margin fails once, by name: that reads like a misconfigured run, not a hang.
+func perCallDeadline(t *testing.T) time.Duration {
+	t.Helper()
+	deadline, bounded := t.Deadline()
+	if !bounded {
+		return perCallHangCap
+	}
+	left := time.Until(deadline)
+	if left <= perCallReportMargin {
+		t.Fatalf("the test binary's deadline leaves %s, not more than perCallReportMargin (%s): this looks like a misconfigured run; raise -timeout", left.Round(time.Millisecond), perCallReportMargin)
+	}
+	return min(perCallHangCap, left-perCallReportMargin)
+}
 
 // growsLinearly times what at each of sizes in turn and fails t at the first size whose time grew
 // more than allowance times faster than the size did (growthVerdict, which this wraps). Every
@@ -962,7 +982,7 @@ const perCallDeadline = 60 * time.Second
 func growsLinearly(t *testing.T, what string, sizes []int, allowance int, timed func(size int) (time.Duration, error)) {
 	t.Helper()
 	bounded := func(size int) time.Duration {
-		return timedWithDeadline(t, fmt.Sprintf("%s at %s", what, sizeText(size)), perCallDeadline, func() (time.Duration, error) {
+		return timedWithDeadline(t, fmt.Sprintf("%s at %s", what, sizeText(size)), perCallDeadline(t), func() (time.Duration, error) {
 			return timed(size)
 		})
 	}

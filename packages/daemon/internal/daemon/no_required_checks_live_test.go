@@ -51,6 +51,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
@@ -101,6 +102,7 @@ func (i noRequiredChecksIssue) branch() string { return "legion/" + i.key }
 // push onto the counted head once its base requires nothing leaves the counted attempt, so the new
 // head's red, once the base requires the check again, sends the work back.
 func TestABaseThatRequiresNothingGivesNoVerdictLive(t *testing.T) {
+	fixtureenv.Live(t)
 	r := newNoRequiredChecksLive(t)
 	r.step("nothing-required-failed-check", r.nothingRequiredFailedCheck)
 	r.step("the-same-failure-once-required-is-red", r.theSameFailureOnceRequiredIsRed)
@@ -476,7 +478,6 @@ func (r *noRequiredChecksLive) publishPush(issue noRequiredChecksIssue, from, to
 	r.t.Helper()
 	payload, err := json.Marshal(map[string]string{
 		"kind": "push", "repo": liveRepo, "ref": "refs/heads/" + issue.branch(), "before": from, "after": to,
-		"changed_paths": "src/widget.go", "changed_paths_truncated": "false", "forced": "false",
 		"pusher": "legion-implement[bot]", "commit_count": "1", "head_subject": "fix the widget",
 	})
 	if err != nil {

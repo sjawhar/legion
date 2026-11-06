@@ -111,6 +111,12 @@ const (
 	azureTenantID       = "example-azure-tenant-id"
 	azureClientID       = "example-azure-client-id"
 	azureIssuer         = "https://container.googleapis.com/v1/projects/example-project/locations/us-central1/clusters/example-dispatch"
+	// azureChatEndpoint, chatEndpointURL and chatTokenSecret are the answerer's two forms: the
+	// chat deployment of the same Azure AI Foundry resource the embedder's endpoint names, and an
+	// OpenAI-shaped service with the Secret Manager secret holding the bearer token it presents.
+	azureChatEndpoint = "https://example-resource.services.ai.azure.com/models"
+	chatEndpointURL   = "https://example-chat.internal.example/v1"
+	chatTokenSecret   = "projects/example-project/secrets/example-chat-token"
 )
 
 // setAzureEndpoint sets the Azure embedder's endpoint and quota, which come together, and no
@@ -127,13 +133,40 @@ func setAzureKey(a *gcp.DispatchArgs) {
 	a.AzureEmbedKeySecret = pulumi.String(azureEmbedKeySecret)
 }
 
+// setAzureSignIn sets the shared keyless Azure sign-in, which whichever of the embedder and the
+// answerer is on Azure reads.
+func setAzureSignIn(a *gcp.DispatchArgs) {
+	a.AzureTenantId = pulumi.String(azureTenantID)
+	a.AzureClientId = pulumi.String(azureClientID)
+}
+
 // setAzureFederation sets the Azure embedder with the keyless form of credential, a deployment
 // named, and the default audience.
 func setAzureFederation(a *gcp.DispatchArgs) {
 	setAzureEndpoint(a)
 	a.AzureEmbedDeployment = pulumi.String("example-embed-deployment")
-	a.AzureTenantId = pulumi.String(azureTenantID)
-	a.AzureClientId = pulumi.String(azureClientID)
+	setAzureSignIn(a)
+}
+
+// setAzureChat sets the Azure answerer: the chat endpoint, the quota and the deployment that come
+// with it, the api-version and the scope that endpoint's inference family takes, and the shared
+// sign-in it takes no API key beside. It sets no embedder input, so meaning search stays on
+// Bedrock: that mixed deployment is what the shared sign-in exists for.
+func setAzureChat(a *gcp.DispatchArgs) {
+	a.AzureChatEndpoint = pulumi.String(azureChatEndpoint)
+	a.AzureChatDeployment = pulumi.String("example-chat-deployment")
+	a.AzureChatTokensPerMinute = pulumi.IntRef(120000)
+	a.AzureChatApiVersion = pulumi.StringRef("2024-05-01-preview")
+	a.AzureChatScope = pulumi.StringRef("https://cognitiveservices.azure.com/.default")
+	setAzureSignIn(a)
+}
+
+// setChatEndpoint sets the answerer's other form: the base URL, the model each request names, and
+// the Secret Manager secret whose value the pod mounts as the bearer token file.
+func setChatEndpoint(a *gcp.DispatchArgs) {
+	a.ChatEndpoint = pulumi.String(chatEndpointURL)
+	a.ChatModel = pulumi.StringRef("example-chat-model")
+	a.ChatTokenSecret = pulumi.String(chatTokenSecret)
 }
 
 func runDispatch(t *testing.T, args *gcp.DispatchArgs, providers bool) (*pulumitest.Mocks, error) {
@@ -169,7 +202,14 @@ func newTailscaleProvider(ctx *pulumi.Context) (pulumi.ProviderResource, error) 
 func runDispatchWithProviders(t *testing.T, name string, args *gcp.DispatchArgs, providers ...func(*pulumi.Context) (pulumi.ProviderResource, error)) (*pulumitest.Mocks, error) {
 	t.Helper()
 	m := newMocks()
-	err := m.Run(func(ctx *pulumi.Context) error {
+	return m, runDispatchOnMocks(t, m, name, args, providers...)
+}
+
+// runDispatchOnMocks is runDispatchWithProviders on mocks the caller owns, so a test can set
+// Mocks.Preview before the program runs.
+func runDispatchOnMocks(t *testing.T, m *pulumitest.Mocks, name string, args *gcp.DispatchArgs, providers ...func(*pulumi.Context) (pulumi.ProviderResource, error)) error {
+	t.Helper()
+	return m.Run(func(ctx *pulumi.Context) error {
 		var declared []pulumi.ProviderResource
 		for _, newProvider := range providers {
 			provider, err := newProvider(ctx)
@@ -185,7 +225,6 @@ func runDispatchWithProviders(t *testing.T, name string, args *gcp.DispatchArgs,
 		_, err := gcp.NewDispatch(ctx, name, args, opts...)
 		return err
 	})
-	return m, err
 }
 
 func TestDispatchSettingsApplyDefaults(t *testing.T) {
@@ -564,9 +603,10 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 		{name: "an Azure deployment without the endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureEmbedDeployment = pulumi.String("example-embed-deployment") }, err: []string{"azureEmbedEndpoint is required when azureEmbedDeployment is set"}},
 		{name: "an Azure quota without the endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureEmbedTokensPerMinute = pulumi.IntRef(300000) }, err: []string{"azureEmbedEndpoint is required when azureEmbedTokensPerMinute is set"}},
 		{name: "an Azure key without the endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureEmbedKeySecret = pulumi.String(azureEmbedKeySecret) }, err: []string{"azureEmbedEndpoint is required when azureEmbedKeySecret is set"}},
-		{name: "an Azure tenant without the endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureTenantId = pulumi.String(azureTenantID) }, err: []string{"azureEmbedEndpoint is required when azureTenantId is set"}},
-		{name: "an Azure client without the endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureClientId = pulumi.String(azureClientID) }, err: []string{"azureEmbedEndpoint is required when azureClientId is set"}},
-		{name: "an Azure audience without the endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureFederationAudience = pulumi.StringRef("api://example-audience") }, err: []string{"azureEmbedEndpoint is required when azureFederationAudience is set"}},
+		// The sign-in is shared, so it takes either endpoint and is refused with neither.
+		{name: "an Azure tenant without either endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureTenantId = pulumi.String(azureTenantID) }, err: []string{"azureEmbedEndpoint or azureChatEndpoint is required when azureTenantId is set", "whichever of the embedder and the answerer is on Azure"}},
+		{name: "an Azure client without either endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureClientId = pulumi.String(azureClientID) }, err: []string{"azureEmbedEndpoint or azureChatEndpoint is required when azureClientId is set"}},
+		{name: "an Azure audience without either endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureFederationAudience = pulumi.StringRef("api://example-audience") }, err: []string{"azureEmbedEndpoint or azureChatEndpoint is required when azureFederationAudience is set"}},
 		{name: "both Azure credential forms", edit: func(a *gcp.DispatchArgs) {
 			setAzureFederation(a)
 			a.AzureEmbedKeySecret = pulumi.String(azureEmbedKeySecret)
@@ -588,6 +628,50 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 			setAzureFederation(a)
 			a.AzureFederationAudience = pulumi.StringRef("")
 		}, err: []string{"azureFederationAudience is empty", "api://AzureADTokenExchange"}},
+		{name: "an Azure chat deployment without the chat endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureChatDeployment = pulumi.String("example-chat-deployment") }, err: []string{"azureChatEndpoint is required when azureChatDeployment is set"}},
+		{name: "an Azure chat api-version without the chat endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureChatApiVersion = pulumi.StringRef("2024-05-01-preview") }, err: []string{"azureChatEndpoint is required when azureChatApiVersion is set"}},
+		{name: "an Azure chat scope without the chat endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureChatScope = pulumi.StringRef("https://ai.azure.com/.default") }, err: []string{"azureChatEndpoint is required when azureChatScope is set"}},
+		{name: "an Azure chat quota without the chat endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureChatTokensPerMinute = pulumi.IntRef(120000) }, err: []string{"azureChatEndpoint is required when azureChatTokensPerMinute is set"}},
+		{name: "a chat model without the chat endpoint", edit: func(a *gcp.DispatchArgs) { a.ChatModel = pulumi.StringRef("example-chat-model") }, err: []string{"chatEndpoint is required when chatModel is set"}},
+		{name: "a chat token without the chat endpoint", edit: func(a *gcp.DispatchArgs) { a.ChatTokenSecret = pulumi.String(chatTokenSecret) }, err: []string{"chatEndpoint is required when chatTokenSecret is set"}},
+		{name: "both answerer forms", edit: func(a *gcp.DispatchArgs) {
+			setAzureChat(a)
+			setChatEndpoint(a)
+		}, err: []string{"chatEndpoint is set with azureChatEndpoint", "one deployment names one answerer"}},
+		{name: "an Azure chat endpoint without its quota", edit: func(a *gcp.DispatchArgs) {
+			setAzureChat(a)
+			a.AzureChatTokensPerMinute = nil
+		}, err: []string{"azureChatTokensPerMinute is required when azureChatEndpoint is set"}},
+		{name: "a zero Azure chat quota", edit: func(a *gcp.DispatchArgs) { setAzureChat(a); a.AzureChatTokensPerMinute = pulumi.IntRef(0) }, err: []string{"azureChatTokensPerMinute 0", "positive integer"}},
+		{name: "a negative Azure chat quota", edit: func(a *gcp.DispatchArgs) { setAzureChat(a); a.AzureChatTokensPerMinute = pulumi.IntRef(-1) }, err: []string{"azureChatTokensPerMinute -1", "positive integer"}},
+		{name: "an Azure chat endpoint without its deployment", edit: func(a *gcp.DispatchArgs) {
+			setAzureChat(a)
+			a.AzureChatDeployment = nil
+		}, err: []string{"azureChatDeployment is required when azureChatEndpoint is set"}},
+		{name: "an Azure chat endpoint without the sign-in", edit: func(a *gcp.DispatchArgs) {
+			setAzureChat(a)
+			a.AzureTenantId, a.AzureClientId = nil, nil
+		}, err: []string{"azureChatEndpoint needs the keyless Azure sign-in", "takes no API key"}},
+		{name: "an empty Azure chat api-version", edit: func(a *gcp.DispatchArgs) {
+			setAzureChat(a)
+			a.AzureChatApiVersion = pulumi.StringRef("")
+		}, err: []string{"azureChatApiVersion is empty", "sends no api-version"}},
+		{name: "an empty Azure chat scope", edit: func(a *gcp.DispatchArgs) {
+			setAzureChat(a)
+			a.AzureChatScope = pulumi.StringRef("")
+		}, err: []string{"azureChatScope is empty", "leave it unset"}},
+		{name: "a chat endpoint without its token", edit: func(a *gcp.DispatchArgs) {
+			setChatEndpoint(a)
+			a.ChatTokenSecret = nil
+		}, err: []string{"chatTokenSecret is required when chatEndpoint is set"}},
+		{name: "a chat endpoint without its model", edit: func(a *gcp.DispatchArgs) {
+			setChatEndpoint(a)
+			a.ChatModel = nil
+		}, err: []string{"chatModel is required when chatEndpoint is set"}},
+		{name: "an empty chat model", edit: func(a *gcp.DispatchArgs) {
+			setChatEndpoint(a)
+			a.ChatModel = pulumi.StringRef("")
+		}, err: []string{"chatModel is empty"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -692,6 +776,18 @@ func TestDispatchRefusesAnNKeySeedInAPlainInput(t *testing.T) {
 		{"a seed in the Azure federation audience", "azureFederationAudience", func(a *gcp.DispatchArgs) {
 			setAzureFederation(a)
 			a.AzureFederationAudience = pulumi.StringRef("api://" + lower)
+		}},
+		{"a seed as the Azure chat api-version", "azureChatApiVersion", func(a *gcp.DispatchArgs) {
+			setAzureChat(a)
+			a.AzureChatApiVersion = pulumi.StringRef(seed)
+		}},
+		{"a seed inside the Azure chat scope", "azureChatScope", func(a *gcp.DispatchArgs) {
+			setAzureChat(a)
+			a.AzureChatScope = pulumi.StringRef("https://" + lower + ".azure.com/.default")
+		}},
+		{"a seed as the chat model", "chatModel", func(a *gcp.DispatchArgs) {
+			setChatEndpoint(a)
+			a.ChatModel = pulumi.StringRef(seed)
 		}},
 	} {
 		t.Run(row.name, func(t *testing.T) {
@@ -1392,18 +1488,17 @@ func TestDispatchFrontDoorAloneWritesItsTLSSecret(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
 
-	const roleType, bindingType = "kubernetes:rbac.authorization.k8s.io/v1:Role", "kubernetes:rbac.authorization.k8s.io/v1:RoleBinding"
 	require.Len(t, registrationsOf(m, roleType), 1, "the component registers one Role")
-	require.Len(t, registrationsOf(m, bindingType), 1, "the component registers one RoleBinding")
+	require.Len(t, registrationsOf(m, roleBindingType), 1, "the component registers one RoleBinding")
 	role := m.Named(t, roleType, "example-dispatch-tailnet-tls").Inputs.Mappable()
 	require.Equal(t, []any{map[string]any{
 		"apiGroups": []any{""}, "resources": []any{"secrets"}, "resourceNames": []any{"example-dispatch-tailnet-tls"},
 		"verbs": []any{"get", "patch"},
 	}}, role["rules"])
-	binding := m.Named(t, bindingType, "example-dispatch-tailnet-tls").Inputs.Mappable()
+	binding := m.Named(t, roleBindingType, "example-dispatch-tailnet-tls").Inputs.Mappable()
 	require.Equal(t, map[string]any{"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "example-dispatch-tailnet-tls"}, binding["roleRef"])
 	require.Equal(t, []any{map[string]any{"kind": "ServiceAccount", "name": "example-dispatch-tailnet", "namespace": "dispatch"}}, binding["subjects"])
-	for _, r := range append(registrationsOf(m, roleType), registrationsOf(m, bindingType)...) {
+	for _, r := range append(registrationsOf(m, roleType), registrationsOf(m, roleBindingType)...) {
 		for _, s := range allStrings(resource.NewProperty(r.Inputs)) {
 			require.NotContains(t, s, "tailscale-state", "%s %s", r.Type, r.Name)
 		}
@@ -1428,6 +1523,46 @@ func TestDispatchFrontDoorAloneWritesItsTLSSecret(t *testing.T) {
 					require.Equal(t, "", entry["value"], "%s names no Kubernetes Secret for tailnet state", workload.deployment)
 				}
 			}
+		}
+	}
+}
+
+// On a preview that creates the front door's TLS Role, its binding's roleRef name is unknown until
+// the Role has an ID, so pulumi-kubernetes sends the API server no dry run of the binding, which an
+// account without the bind verb (a consumer's CI account may be one) would see refused as "not found"
+// while the Role does not exist. On an apply the binding names the Role.
+//
+// Both surfaces are read: the component under the mock engine, and the component as the plugin
+// serves it through Construct, which is the artifact a consumer installs and the path its
+// pulumi preview takes.
+func TestDispatchFrontDoorBindingWaitsForItsRoleOnPreview(t *testing.T) {
+	for _, surface := range []struct {
+		name string
+		run  func(t *testing.T, m *pulumitest.Mocks) error
+	}{
+		{"component", func(t *testing.T, m *pulumitest.Mocks) error {
+			return runDispatchOnMocks(t, m, "example-dispatch", dispatchArgs(), newGCPProvider, newRandomProvider, newTailscaleProvider)
+		}},
+		{"plugin", func(t *testing.T, m *pulumitest.Mocks) error {
+			_, err := constructDispatchOnMocks(t, m, dispatchConstructBaseInputs())
+			return err
+		}},
+	} {
+		for _, preview := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/preview=%v", surface.name, preview), func(t *testing.T) {
+				m := newMocks()
+				m.Preview = preview
+				require.NoError(t, surface.run(t, m))
+				ref := m.Named(t, roleBindingType, "example-dispatch-tailnet-tls").Inputs["roleRef"].ObjectValue()
+				require.Equal(t, "Role", ref["kind"].StringValue())
+				name := ref["name"]
+				if preview {
+					// The mock monitor unmarshals inputs without keeping unknowns, so an unknown arrives as null.
+					require.True(t, name.IsNull() || name.IsComputed(), "roleRef name on a preview = %v, want unknown until the Role exists", name)
+				} else {
+					require.Equal(t, "example-dispatch-tailnet-tls", name.StringValue())
+				}
+			})
 		}
 	}
 }
@@ -1527,8 +1662,10 @@ func TestDispatchTheFrontDoorWaitsForItsTailscaleService(t *testing.T) {
 
 // The Service the component declares is the name every reader reaches Dispatch at: svc: and the
 // hostname, so the Service and the nodes that advertise it can never be named differently; tcp:443
-// alone, the one port the front door terminates TLS on; and the component's own tags, the same
-// grant its front-door nodes join the tailnet under, so a node may host the Service it advertises.
+// alone, the one port the front door terminates TLS on; and no tags. The OAuth client that creates
+// the Service may request no tags — Tailscale refuses the ones it may not set — the hosts' own tag
+// is what auto-approves them as the Service's hosts, and a tailnet policy grants the Service by
+// its name.
 func TestDispatchDeclaresItsTailscaleService(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
@@ -1537,14 +1674,8 @@ func TestDispatchDeclaresItsTailscaleService(t *testing.T) {
 	require.Equal(t, "svc:example-dispatch", normalizedProperty(service.Inputs["name"]))
 	require.Equal(t, []any{"tcp:443"}, normalizedProperty(service.Inputs["ports"]),
 		"the front door terminates TLS on 443 and publishes no other port")
-	// The tags input itself, as the engine reads a property list, so the row is the fixture's own
-	// value rather than a second spelling of it and an absent tags fails as an absent list.
-	wantTags := make([]any, 0, len(dispatchArgs().Tags))
-	for _, tag := range dispatchArgs().Tags {
-		wantTags = append(wantTags, tag)
-	}
-	require.Equal(t, wantTags, normalizedProperty(service.Inputs["tags"]),
-		"the Service carries the component's own tags input, the grant its nodes join under")
+	require.NotContains(t, service.Inputs, resource.PropertyKey("tags"),
+		"the Service requests no tags: the client that creates it may not set the component's own")
 }
 
 // The Service's Protect follows deletionProtection, the input that already guards the cluster and
@@ -2480,6 +2611,71 @@ func TestDispatchPodWithAzureFederationMatchesGolden(t *testing.T) {
 	requirePodGolden(t, m, "example-dispatch", "dispatch-pod-with-azure-federation.golden")
 }
 
+// The mixed deployment this group exists for: meaning search stays on Bedrock, so the pod carries
+// no DISPATCH_EMBEDDER, and the server answers on an Azure chat deployment, so it carries
+// DISPATCH_ANSWERER=azure, the endpoint, the deployment, the quota, the api-version and the scope,
+// and the shared sign-in, whose projected token the answerer alone now reads.
+func TestDispatchPodWithAzureAnswererMatchesGolden(t *testing.T) {
+	args := dispatchArgs()
+	setAzureChat(args)
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+	requirePodGolden(t, m, "example-dispatch", "dispatch-pod-with-azure-answerer.golden")
+}
+
+// The answerer's other form: the pod carries DISPATCH_ANSWERER=endpoint, the endpoint, the model
+// and DISPATCH_CHAT_TOKEN_FILE naming the bearer token mounted from its own SecretProviderClass,
+// and no Azure variable at all.
+func TestDispatchPodWithChatEndpointMatchesGolden(t *testing.T) {
+	args := dispatchArgs()
+	setChatEndpoint(args)
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+	requirePodGolden(t, m, "example-dispatch", "dispatch-pod-with-chat-endpoint.golden")
+}
+
+// The endpoint answerer's token is read at run time from Secret Manager: its own
+// SecretProviderClass, written to the file token the pod mounts at /var/run/secrets/chat-token,
+// and one per-secret accessor for the pods' principal, on that secret alone, which the app's
+// Deployment waits for. The Azure answerer registers neither: it signs in with the projected
+// token and stores no secret.
+func TestDispatchRegistersTheChatTokenSecretOnlyWithTheEndpointForm(t *testing.T) {
+	args := dispatchArgs()
+	setChatEndpoint(args)
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+	class := m.Named(t, "kubernetes:secrets-store.csi.x-k8s.io/v1:SecretProviderClass", "example-dispatch-chat-token").Inputs.Mappable()
+	require.Equal(t, "example-dispatch-chat-token", class["metadata"].(map[string]any)["name"])
+	spec := class["spec"].(map[string]any)
+	require.Equal(t, "gke", spec["provider"])
+	require.Equal(t, "- resourceName: "+chatTokenSecret+"/versions/latest\n  path: token\n", spec["parameters"].(map[string]any)["secrets"])
+	var members []string
+	for _, r := range registrationsOf(m, "gcp:secretmanager/secretIamMember:SecretIamMember") {
+		members = append(members, r.Name)
+	}
+	require.ElementsMatch(t, []string{"example-dispatch-nats-seed-accessor", "example-dispatch-chat-token-accessor"}, members)
+	inputs := m.Named(t, "gcp:secretmanager/secretIamMember:SecretIamMember", "example-dispatch-chat-token-accessor").Inputs.Mappable()
+	require.Equal(t, chatTokenSecret, inputs["secretId"])
+	require.Equal(t, "roles/secretmanager.secretAccessor", inputs["role"])
+	require.Contains(t, m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch").RPC.GetDependencies(), chatTokenAccessorURN)
+	for _, other := range []string{"example-dispatch-listener", "example-dispatch-tailnet"} {
+		require.NotContains(t, m.Named(t, "kubernetes:apps/v1:Deployment", other).RPC.GetDependencies(), chatTokenAccessorURN,
+			"%s mounts no chat token", other)
+	}
+
+	args = dispatchArgs()
+	setAzureChat(args)
+	m, err = runDispatch(t, args, true)
+	require.NoError(t, err)
+	require.Len(t, registrationsOf(m, "gcp:secretmanager/secretIamMember:SecretIamMember"), 1, "only the NATS seed's accessor exists")
+	for _, r := range m.Registrations() {
+		require.NotEqual(t, "example-dispatch-chat-token", r.Name)
+	}
+}
+
+// chatTokenAccessorURN is the endpoint answerer's accessor, which the app's Deployment waits for.
+const chatTokenAccessorURN = "urn:pulumi:s::p::" + dispatchType + "$gcp:secretmanager/secretIamMember:SecretIamMember::example-dispatch-chat-token-accessor"
+
 // azureFederationVolume is the keyless form's projected volume in the app's pod template.
 func azureFederationVolume(t *testing.T, template map[string]any) map[string]any {
 	t.Helper()
@@ -2506,10 +2702,12 @@ func TestDispatchProjectsTheTokenForTheGivenAudience(t *testing.T) {
 	}}}}, volume["projected"])
 }
 
-// Either form reaches the app's envoy-dispatch container alone: the listener's and the front
+// Every form reaches the app's envoy-dispatch container alone: the listener's and the front
 // door's pods are exactly as without it.
 func TestDispatchAzureLeavesTheOtherWorkloadsUnchanged(t *testing.T) {
-	for name, set := range map[string]func(*gcp.DispatchArgs){"key": setAzureKey, "federation": setAzureFederation} {
+	for name, set := range map[string]func(*gcp.DispatchArgs){
+		"key": setAzureKey, "federation": setAzureFederation, "azure answerer": setAzureChat, "chat endpoint": setChatEndpoint,
+	} {
 		t.Run(name, func(t *testing.T) {
 			args := dispatchArgs()
 			set(args)
@@ -2714,6 +2912,8 @@ func TestDispatchRefusesEphemeralStorageBeforeRegistering(t *testing.T) {
 const (
 	podDisruptionBudgetType = "kubernetes:policy/v1:PodDisruptionBudget"
 	priorityClassType       = "kubernetes:scheduling.k8s.io/v1:PriorityClass"
+	roleType                = "kubernetes:rbac.authorization.k8s.io/v1:Role"
+	roleBindingType         = "kubernetes:rbac.authorization.k8s.io/v1:RoleBinding"
 )
 
 // safeToEvict reports whether deployment's pod template carries the cluster autoscaler's

@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
@@ -20,13 +21,44 @@ import (
 // A view block names a page file and the data files it draws, but a block is markdown any
 // author writes, an agent included, so the block never decides what the page is given. The
 // grants do, they hang from the page file rather than from the block, and only a person writes
-// one: both writes here are authHuman and call requireHuman before they read a body, so every
-// token — shared, personal, service account and broker — gets 403 HUMAN_ONLY and changes
-// nothing.
+// one: both writes here hold the caller to the person themselves before they read a body
+// (grantingPerson), so no token writes a grant and none changes anything.
 //
 // A grant is access and not content, so a person may change the grants of a page file on a
 // closed issue: blocks elsewhere still show that page. A grant covers every version of the page
 // file, so a new upload of the page's code keeps its grants.
+
+// codeHumanOnly refuses a credential that is no person at a browser. It is these two routes'
+// own code and no shared mechanism: every other route a person alone may call is decided by
+// the scopes its row names (routeScopes), and these two need more than any scope can say,
+// since a personal token holding every scope its person holds is still not that person. The
+// rows name no scope for that reason — a scope the gate refused would answer a token
+// OAUTH_SCOPE_REQUIRED, which reads as "hold this scope and you may", and none may.
+const codeHumanOnly = "HUMAN_ONLY"
+
+// grantingPerson is the person at their own browser, the one caller that may write a grant
+// (dispatch://INFRA-682, R9). Their cookie resolves to the credential that holds the `person`
+// scope and names no agent at all (optionalActor's personCredential); every token that gets
+// this far names one — a personal token its id and name, a broker-issued token the session it
+// proved (model.Credential) — and is refused 403 HUMAN_ONLY, whatever scopes it holds. The two
+// credentials that name no agent and hold no scope either, the deployment's shared token and a
+// pod's service-account token, are refused by the scope test here.
+//
+// Past Holds the credential is not nil, which is what makes the two names below safe to read.
+func (s *server) grantingPerson(w http.ResponseWriter, r *http.Request) (model.Actor, bool) {
+	actor, _, err := s.optionalActor(r)
+	if err != nil {
+		s.writeAuthenticationError(w, err)
+		return model.Actor{}, false
+	}
+	if !actor.Credential.Holds(model.ScopePerson) ||
+		actor.Credential.TokenID != "" || actor.Credential.Session != "" {
+		writeError(w, codeHumanOnly, http.StatusForbidden,
+			"only a person at their own browser may change a page file's data grants; no token may, whatever scopes it holds")
+		return model.Actor{}, false
+	}
+	return actor.Recorded(), true
+}
 
 // grantReferencePin is the `@v<N>` a grant's reference may end in. text.ParseRef reads a
 // document reference's version and does not carry it (parseArtifactSlug drops it), so the pin is
@@ -283,7 +315,7 @@ func (s *server) resolveGrantedFile(ctx context.Context, q queryer, reference st
 // nothing counts as a change twice.
 func (s *server) createArtifactGrant(w http.ResponseWriter, r *http.Request) {
 	// Before the body, so no token's request is read any further than its credential.
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.grantingPerson(w, r)
 	if !ok {
 		return
 	}
@@ -368,7 +400,7 @@ func (s *server) grantOfPair(ctx context.Context, q queryer, pageID, dataID stri
 // cover, with nothing for this one.
 func (s *server) deleteArtifactGrant(w http.ResponseWriter, r *http.Request) {
 	// Before the body, as the add does: a token changes nothing here either.
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.grantingPerson(w, r)
 	if !ok {
 		return
 	}

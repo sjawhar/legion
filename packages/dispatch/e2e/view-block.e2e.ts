@@ -16,7 +16,9 @@
  *   page working rather than a fixture written to pass.
  *
  * The rows run in `chromium`, `firefox`, `webkit`, `webkit-iphone` and `iphone`: what a frame
- * does with its page, its messages and its height is each engine's own.
+ * does with its page, its messages and its height is each engine's own. Every row here carries
+ * `@phone`, `@webkit` and `@firefox`, the tags those projects select by, and the phrase
+ * `a view block`, which `webkit-iphone`'s title `grep` selects by.
  */
 import { readFile } from "node:fs/promises";
 
@@ -222,7 +224,7 @@ test.beforeEach(async () => {
 // A1 (R1, R2), with A7: the block shows the skill's page, in every place a block shows.
 // ---------------------------------------------------------------------------
 
-test("a view block in a document shows the skill's page drawing its data file @phone", async ({
+test("a view block in a document shows the skill's page drawing its data file @phone @webkit @firefox", async ({
   browser,
 }) => {
   const fixture = await seedView();
@@ -255,7 +257,7 @@ test("a view block in a document shows the skill's page drawing its data file @p
   }
 });
 
-test("a view block shows the same in a comment, a reply, an ask in the Inbox and a message @phone", async ({
+test("a view block shows the same in a comment, a reply, an ask in the Inbox and a message @phone @webkit @firefox", async ({
   browser,
 }) => {
   const fixture = await seedView();
@@ -311,7 +313,9 @@ test("a view block shows the same in a comment, a reply, an ask in the Inbox and
   }
 });
 
-test("a view block shows its page in a document's version view @phone", async ({ browser }) => {
+test("a view block shows its page in a document's version view @phone @webkit @firefox", async ({
+  browser,
+}) => {
   const fixture = await seedView();
   const alice = await asUser(browser, "alice");
   try {
@@ -351,7 +355,7 @@ test("a view block shows its page in a document's version view @phone", async ({
 // A version view sits on the page beside the live editor, which `ProofDocument` only hides. Both
 // hold their own `view` node views, and a block of either must be drawn once: one frame and one
 // copy of each line. Drawn from one registry shared by both editors, every block got two.
-test("a view block is drawn once in a version view open over the live editor @phone", async ({
+test("a view block is drawn once in a version view open over the live editor @phone @webkit @firefox", async ({
   browser,
 }) => {
   const fixture = await seedView();
@@ -405,7 +409,7 @@ test("a view block is drawn once in a version view open over the live editor @ph
   }
 });
 
-test("a view block in a clipped preview of a comment shows its caption and no frame @phone", async ({
+test("a view block in a clipped preview of a comment shows its caption and no frame @phone @webkit @firefox", async ({
   browser,
 }) => {
   const fixture = await seedView();
@@ -441,7 +445,7 @@ test("a view block in a clipped preview of a comment shows its caption and no fr
   }
 });
 
-test("a view block's frame is 400 pixels until its page reports, then held to 100 and 2,000 @phone", async ({
+test("a view block's frame is 400 pixels until its page reports, then held to 100 and 2,000 @phone @webkit @firefox", async ({
   browser,
 }) => {
   const fixture = await seedView();
@@ -526,7 +530,7 @@ test("a view block's frame is 400 pixels until its page reports, then held to 10
 // A2 (R3), with A7: a new version of a data file reaches the running page.
 // ---------------------------------------------------------------------------
 
-test("a view block shows a new data version within 5 seconds and keeps its page running @phone", async ({
+test("a view block shows a new data version within 5 seconds and keeps its page running @phone @webkit @firefox", async ({
   browser,
 }) => {
   const fixture = await seedView();
@@ -577,7 +581,7 @@ test("a view block shows a new data version within 5 seconds and keeps its page 
   }
 });
 
-test("a view block keeps its page running through another session's edit of the caption @phone", async ({
+test("a view block keeps its page running through another session's edit of the caption @phone @webkit @firefox", async ({
   browser,
 }) => {
   const fixture = await seedView();
@@ -618,7 +622,7 @@ test("a view block keeps its page running through another session's edit of the 
 // is the reader's own login acting through the API, beside the tab that is watching. The
 // reader's tab never touches the comment: the edit reaches it over the live socket, which is
 // what this row is about.
-test("a view block keeps its page running through another session's edit of its comment @phone", async ({
+test("a view block keeps its page running through another session's edit of its comment @phone @webkit @firefox", async ({
   browser,
 }) => {
   const fixture = await seedView();
@@ -667,7 +671,7 @@ test("a view block keeps its page running through another session's edit of its 
   }
 });
 
-test("a view block sends ten uploads inside a second as at most two messages and two reads @phone", async ({
+test("a view block sends ten uploads inside a second as at most two messages and two reads @phone @webkit @firefox", async ({
   browser,
 }) => {
   const fixture = await seedView();
@@ -726,7 +730,7 @@ test("a view block sends ten uploads inside a second as at most two messages and
   }
 });
 
-test("a view block shows a new version of a project's data file within 5 seconds @phone", async ({
+test("a view block shows a new version of a project's data file within 5 seconds @phone @webkit @firefox", async ({
   browser,
 }) => {
   const fixture = await seedView();
@@ -777,7 +781,7 @@ test("a view block shows a new version of a project's data file within 5 seconds
 // A3 (R4): a new version of the page file.
 // ---------------------------------------------------------------------------
 
-test("a view block shows a new version of its page file within 5 seconds @phone", async ({
+test("a view block shows a new version of its page file within 5 seconds @phone @webkit @firefox", async ({
   browser,
 }) => {
   const fixture = await seedView();
@@ -820,7 +824,7 @@ test("a view block shows a new version of its page file within 5 seconds @phone"
 // A6 (R7): every case of "When the block cannot show".
 // ---------------------------------------------------------------------------
 
-test("a view block whose attributes name no file shows its caption and one line each @phone", async ({
+test("a view block whose attributes name no file shows its caption and one line each @phone @webkit @firefox", async ({
   browser,
 }) => {
   const fixture = await seedView();
@@ -883,7 +887,7 @@ test("a view block whose attributes name no file shows its caption and one line 
   }
 });
 
-test("a view block whose page or data file is not found says so, and draws once it is uploaded @phone", async ({
+test("a view block whose page or data file is not found says so, and draws once it is uploaded @phone @webkit @firefox", async ({
   browser,
 }) => {
   const fixture = await seedView();
@@ -950,7 +954,7 @@ test("a view block whose page or data file is not found says so, and draws once 
   }
 });
 
-test("a view block whose page file is no page, or is over 5 MiB, says which @phone", async ({
+test("a view block whose page file is no page, or is over 5 MiB, says which @phone @webkit @firefox", async ({
   browser,
 }) => {
   const fixture = await seedView();
@@ -1030,7 +1034,7 @@ async function openNotTextBlock(
   return { block, jsonRef: fixture.dataRef, pngRef };
 }
 
-test("a view block still sends every other file when one is not UTF-8 text @phone", async ({
+test("a view block still sends every other file when one is not UTF-8 text @phone @webkit @firefox", async ({
   browser,
 }) => {
   const alice = await asUser(browser, "alice");
@@ -1051,7 +1055,7 @@ test("a view block still sends every other file when one is not UTF-8 text @phon
   }
 });
 
-test("a view block names the file that is not UTF-8 text and says why @phone", async ({
+test("a view block names the file that is not UTF-8 text and says why @phone @webkit @firefox", async ({
   browser,
 }) => {
   const alice = await asUser(browser, "alice");
@@ -1067,7 +1071,7 @@ test("a view block names the file that is not UTF-8 text and says why @phone", a
   }
 });
 
-test("a view block whose data passes 16 MiB sends no data and says so @phone", async ({
+test("a view block whose data passes 16 MiB sends no data and says so @phone @webkit @firefox", async ({
   browser,
 }) => {
   const fixture = await seedView();
@@ -1106,7 +1110,7 @@ test("a view block whose data passes 16 MiB sends no data and says so @phone", a
   }
 });
 
-test("a view block counts the version it sends against 16 MiB, not the newest @phone", async ({
+test("a view block counts the version it sends against 16 MiB, not the newest @phone @webkit @firefox", async ({
   browser,
 }) => {
   const fixture = await seedView();
@@ -1152,7 +1156,7 @@ test("a view block counts the version it sends against 16 MiB, not the newest @p
   }
 });
 
-test("a view block whose read of a data file fails names its status @phone", async ({
+test("a view block whose read of a data file fails names its status @phone @webkit @firefox", async ({
   browser,
 }) => {
   const fixture = await seedView();
@@ -1183,7 +1187,7 @@ test("a view block whose read of a data file fails names its status @phone", asy
   }
 });
 
-test("a view block whose page sends no ready message in 10 seconds says so @phone", async ({
+test("a view block whose page sends no ready message in 10 seconds says so @phone @webkit @firefox", async ({
   browser,
 }) => {
   const fixture = await seedView();
@@ -1213,7 +1217,7 @@ test("a view block whose page sends no ready message in 10 seconds says so @phon
   }
 });
 
-test("a view block with an empty caption shows its page and says it has none @phone", async ({
+test("a view block with an empty caption shows its page and says it has none @phone @webkit @firefox", async ({
   browser,
 }) => {
   const fixture = await seedView();

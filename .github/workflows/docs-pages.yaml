@@ -1,15 +1,15 @@
 name: Docs (main)
 
 # Builds the documentation site (docs/site) on every push to main whose change could change it, and
-# publishes it to GitHub Pages (https://sjawhar.github.io/legion/). The build is docs-site.yaml's,
+# publishes it to GitHub Pages, at the address .github/scripts/repo-paths.sh derives from the
+# repository this runs in (https://cybermonklabs.github.io/legion/ today). The build is docs-site.yaml's,
 # which holds those steps once. Pull requests and merge groups call the same workflow from
 # ci.yaml's docs job; this workflow is main's half.
 #
 # A `workflow_dispatch` run starts this workflow on any branch. The build job runs as it does on
 # main, with the `upload-pages-artifact` step that no other caller of docs-site.yaml asks for, so
 # a dispatch of a branch proves that step before the merge. The deploy job runs on main alone
-# (`github.ref`), so a dispatch of a branch deploys nothing to
-# https://sjawhar.github.io/legion/.
+# (`github.ref`), so a dispatch of a branch deploys nothing to the live site.
 #
 # A workflow of its own, so deployments happen in push order and the site ends at the newest
 # docs-selecting commit's build. A workflow-level concurrency group takes runs in the order they
@@ -34,6 +34,7 @@ on:
       - 'package.json'
       - 'bun.lock'
       - 'patches/**'
+      - 'packages/broker-client/package.json'
       - 'packages/contracts/package.json'
       - 'packages/envoy-client/package.json'
       - 'packages/pi-envoy/package.json'
@@ -58,7 +59,7 @@ on:
       - 'packages/envoy/go.sum'
       # The docs filter's own:
       - 'docs/site/**'
-      # ci.yaml's *legion_command, 57 patterns:
+      # ci.yaml's *legion_command, 72 patterns:
       - 'packages/daemon/cmd/legion/*'
       - 'packages/daemon/internal/admit/*'
       - 'packages/daemon/internal/agentsecrets/*'
@@ -82,10 +83,10 @@ on:
       - 'packages/daemon/internal/ghconfig/*'
       - 'packages/daemon/internal/ghrepo/*'
       - 'packages/daemon/internal/githubrest/*'
-      - 'packages/daemon/internal/handoffimport/*'
       - 'packages/daemon/internal/intake/*'
       - 'packages/daemon/internal/launcher/*'
       - 'packages/daemon/internal/lookpath/*'
+      - 'packages/daemon/internal/memorygroup/*'
       - 'packages/daemon/internal/modeltoken/*'
       - 'packages/daemon/internal/natsauth/*'
       - 'packages/daemon/internal/notify/*'
@@ -93,6 +94,7 @@ on:
       - 'packages/daemon/internal/omplaunch/*'
       - 'packages/daemon/internal/ompsessions/*'
       - 'packages/daemon/internal/phase/*'
+      - 'packages/daemon/internal/pods/**'
       - 'packages/daemon/internal/podsafety/**'
       - 'packages/daemon/internal/procgroup/*'
       - 'packages/daemon/internal/projection/*'
@@ -102,6 +104,7 @@ on:
       - 'packages/daemon/internal/registry/*'
       - 'packages/daemon/internal/repocache/*'
       - 'packages/daemon/internal/requiredchecks/*'
+      - 'packages/daemon/internal/rescue/*'
       - 'packages/daemon/internal/runtime/*'
       - 'packages/daemon/internal/runtime/sandbox/*'
       - 'packages/daemon/internal/runtime/shellprefix/*'
@@ -117,11 +120,24 @@ on:
       - 'packages/daemon/internal/wait/*'
       - 'packages/daemon/internal/workflow/*'
       - 'packages/daemon/internal/workspace/*'
+      - 'packages/envoy/brokerclient/*'
+      - 'packages/envoy/dispatchbody/*'
+      - 'packages/envoy/internal/brokerclient/*'
+      - 'packages/envoy/internal/contracts/*'
+      - 'packages/envoy/internal/dispatch/itemblocks/*'
+      - 'packages/envoy/internal/dispatch/model/*'
+      - 'packages/envoy/internal/dispatch/pmdoc/**'
+      - 'packages/envoy/internal/dispatch/text/*'
+      - 'packages/envoy/internal/googleidentity/*'
       - 'packages/envoy/listenfd/*'
       - 'packages/envoy/migrationid/*'
-      # ci.yaml's *dispatch_server, 42 patterns:
+      - 'packages/envoy/sessiontiming/*'
+      # ci.yaml's *dispatch_server, 61 patterns:
       - 'packages/envoy/cmd/dispatch/*'
+      - 'packages/envoy/going/*'
+      - 'packages/envoy/going/goingtest/*'
       - 'packages/envoy/internal/bus/*'
+      - 'packages/envoy/internal/cistore/*'
       - 'packages/envoy/internal/contracts/*'
       - 'packages/envoy/internal/dispatch/accesslog/*'
       - 'packages/envoy/internal/dispatch/agentsecrets/*'
@@ -130,6 +146,7 @@ on:
       - 'packages/envoy/internal/dispatch/architecture/*'
       - 'packages/envoy/internal/dispatch/asks/*'
       - 'packages/envoy/internal/dispatch/auth/*'
+      - 'packages/envoy/internal/dispatch/cireconcile/*'
       - 'packages/envoy/internal/dispatch/config/*'
       - 'packages/envoy/internal/dispatch/dashboard/*'
       - 'packages/envoy/internal/dispatch/delivery/**'
@@ -160,14 +177,18 @@ on:
       - 'packages/envoy/internal/dispatch/store/*'
       - 'packages/envoy/internal/dispatch/store/migrations/**'
       - 'packages/envoy/internal/dispatch/text/*'
+      - 'packages/envoy/internal/envconf/*'
       - 'packages/envoy/internal/githubappjwt/*'
+      - 'packages/envoy/internal/googleidentity/*'
       - 'packages/envoy/internal/id/*'
       - 'packages/envoy/internal/kvwatch/*'
+      - 'packages/envoy/internal/logging/*'
       - 'packages/envoy/internal/metrics/*'
       - 'packages/envoy/internal/oidc/*'
       - 'packages/envoy/internal/pglisten/*'
       - 'packages/envoy/internal/pgmigrate/*'
       - 'packages/envoy/internal/redact/*'
+      - 'packages/envoy/internal/redirects/*'
       - 'packages/envoy/internal/roles/*'
       - 'packages/envoy/internal/routing/*'
       - 'packages/envoy/internal/session/*'
@@ -185,6 +206,7 @@ on:
       - 'packages/envoy/internal/broker/enroll/*'
       - 'packages/envoy/internal/broker/exchange/*'
       - 'packages/envoy/internal/broker/helper/*'
+      - 'packages/envoy/internal/broker/leasetime/*'
       - 'packages/envoy/internal/broker/machine/*'
       - 'packages/envoy/internal/broker/oauth/*'
       - 'packages/envoy/internal/broker/oauthstore/*'
@@ -210,6 +232,7 @@ on:
       - 'deploy/kubernetes/**'
       - 'scripts/third-party-notices.ts'
       - '.github/scripts/check-private-names.sh'
+      - '.github/scripts/repo-paths.sh'
   workflow_dispatch:
 
 # One run at a time, in push order: `queue: max` keeps up to 100 runs waiting in the group, first

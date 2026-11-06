@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, waitFor, within } from "@testing-library/react";
 import type { Window as HappyDOMWindow } from "happy-dom";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
+import { installIntersectionObserver } from "../../__tests__/intersection-observer";
+import { renderWithQueries as render } from "../../__tests__/query-provider";
 import { api } from "../../api/client";
 import type {
   AskRead,
@@ -85,10 +87,12 @@ describe("Dispatch pictures", () => {
       const shot = await within(view.container).findByRole("img", { name: "shot.png" });
       expect(shot.getAttribute("src")).toBe("/api/v1/issues/CORE-1/artifacts/shot-png/versions/1");
       expect(shot.getAttribute("loading")).toBe("lazy");
-      // Scaled to the column, never taller than 24rem.
-      expect(shot.className.split(" ")).toEqual(
-        expect.arrayContaining(["max-h-96", "max-w-full", "w-auto", "object-contain"])
+      // At its own size scaled down to the column, with no cap on its height.
+      const classes = shot.className.split(" ");
+      expect(classes).toEqual(
+        expect.arrayContaining(["max-w-full", "w-auto", "h-auto", "object-contain"])
       );
+      expect(classes.some((name) => name.startsWith("max-h-"))).toBe(false);
       expect(shot.closest("a")?.getAttribute("href")).toBe("/issues/CORE-1/artifacts/shot-png?v=1");
       // A picture with no caption is named by its slug.
       const plan = within(view.container).getByRole("img", { name: "plan-png" });
@@ -152,7 +156,7 @@ describe("Dispatch pictures", () => {
     }
   });
 
-  test("a Dispatch picture that pins no version reads as its reference, with the image's thumbnail", async () => {
+  test("a Dispatch picture that pins no version shows its latest version inline", async () => {
     const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
       issueSummary([picture])
     );
@@ -161,18 +165,100 @@ describe("Dispatch pictures", () => {
     );
 
     try {
-      const link = await within(view.container).findByRole("link", { name: "shot.png" });
-      expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/shot-png");
-      expect(link.getAttribute("data-dispatch-ref")).toBe("dispatch://CORE-1/artifact/shot-png");
-      // The plain reference's thumbnail is the latest version, in the 40 px shape.
-      await waitFor(() =>
-        expect(link.querySelector("img")?.getAttribute("src")).toBe(
-          "/api/v1/issues/CORE-1/artifacts/shot-png/versions/2"
-        )
-      );
-      expect(link.querySelector("img")?.className.split(" ")).toContain("h-10");
+      const shot = await within(view.container).findByRole("img", { name: "shot.png" });
+      expect(shot.getAttribute("src")).toBe("/api/v1/issues/CORE-1/artifacts/shot-png/versions/2");
+      expect(shot.className.split(" ")).toContain("max-w-full");
+      expect(shot.className.split(" ")).not.toContain("h-10");
+      expect(shot.closest("a")?.getAttribute("href")).toBe("/issues/CORE-1/artifacts/shot-png");
     } finally {
       getIssueSummary.mockRestore();
+      view.unmount();
+    }
+  });
+
+  test("a version-less picture whose latest version fails to load draws the next version", async () => {
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([picture])
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <MarkdownBody markdown="![shot.png](dispatch://CORE-1/artifact/shot-png)" />
+      </QueryClientProvider>
+    );
+
+    try {
+      const v2 = await within(view.container).findByRole("img", { name: "shot.png" });
+      fireEvent.error(v2);
+      await waitFor(() =>
+        expect(within(view.container).queryByRole("img", { name: "shot.png" })).toBeNull()
+      );
+      // An upload of version 3 refreshes the summary, as its event does.
+      act(() => {
+        queryClient.setQueryData(
+          ["issue-summary", "CORE-1"],
+          issueSummary([{ ...picture, latest_version: 3 }])
+        );
+      });
+      const v3 = await within(view.container).findByRole("img", { name: "shot.png" });
+      expect(v3.getAttribute("src")).toBe("/api/v1/issues/CORE-1/artifacts/shot-png/versions/3");
+    } finally {
+      getIssueSummary.mockRestore();
+      view.unmount();
+    }
+  });
+
+  test("a picture line that pins no version and names a document reads as its reference", async () => {
+    const notes: IssueReferenceSummaryDocument = {
+      id: "artifact-notes",
+      kind: "doc",
+      latest_version: 4,
+      name: "notes.md",
+      primary: false,
+      size: 512,
+      slug: "notes-md",
+    };
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(issueSummary([notes]));
+    const view = render(
+      withQueries(<MarkdownBody markdown="![notes](dispatch://CORE-1/artifact/notes-md)" />)
+    );
+
+    try {
+      const link = await within(view.container).findByRole("link", { name: "notes.md" });
+      expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/notes-md");
+      expect(view.container.querySelector("img")).toBeNull();
+    } finally {
+      getIssueSummary.mockRestore();
+      view.unmount();
+    }
+  });
+
+  test("a plain click on a picture opens it at full size instead of following its link", async () => {
+    const view = render(
+      withQueries(<MarkdownBody markdown="![shot.png](dispatch://CORE-1/artifact/shot-png@v1)" />)
+    );
+
+    try {
+      const shot = await within(view.container).findByRole("img", { name: "shot.png" });
+      const click = new MouseEvent("click", { bubbles: true, button: 0, cancelable: true });
+      shot.dispatchEvent(click);
+      expect(click.defaultPrevented).toBe(true);
+      const lightbox = document.querySelector<HTMLDialogElement>(
+        '[data-testid="picture-lightbox"]'
+      );
+      expect(lightbox?.open).toBe(true);
+      expect(lightbox?.querySelector("img")?.getAttribute("src")).toBe(
+        "/api/v1/issues/CORE-1/artifacts/shot-png/versions/1"
+      );
+      lightbox?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      expect(document.querySelector('[data-testid="picture-lightbox"]')).toBeNull();
+
+      // Opened again, the layer goes with the body that opened it.
+      shot.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, cancelable: true }));
+      expect(document.querySelector('[data-testid="picture-lightbox"]')).not.toBeNull();
+      view.unmount();
+      expect(document.querySelector('[data-testid="picture-lightbox"]')).toBeNull();
+    } finally {
       view.unmount();
     }
   });
@@ -430,6 +516,41 @@ test("a typed callout in a body draws its name, kind and title above its content
     expect(view.container.textContent).not.toContain(":::callout");
   } finally {
     view.unmount();
+  }
+});
+
+// The `view` arm of `markdown-engine.ts`'s `renderBlock` is what gives a `view` block in a
+// comment, reply, ask or message the frame slot its page runs in. Drop that arm and the block
+// still draws - as a generic typed block with no slot - so nothing but the browser suite
+// noticed. This row is the cheap guard: it paints one body and reads the slot.
+test("a view block in a body draws the frame slot its page runs in", async () => {
+  const intersection = installIntersectionObserver();
+  const view = render(
+    <MarkdownBody
+      markdown={
+        ':::view{page="dispatch://CORE-1/artifact/chart-html" data="dispatch://CORE-1/artifact/data-json"}\nAttempts, by try.\n:::\n'
+      }
+    />
+  );
+
+  try {
+    const slot = await waitFor(() => {
+      const found = view.container.querySelector<HTMLElement>("[data-dispatch-view-frame]");
+      expect(found).not.toBeNull();
+      return found as HTMLElement;
+    });
+    expect(slot.getAttribute("data-dispatch-view-page")).toBe(
+      "dispatch://CORE-1/artifact/chart-html"
+    );
+    expect(slot.getAttribute("data-dispatch-view-data")).toBe(
+      "dispatch://CORE-1/artifact/data-json"
+    );
+    expect(view.container.querySelector('section[data-proof-block-type="view"]')).not.toBeNull();
+    expect(view.container.textContent).toContain("Attempts, by try.");
+    expect(view.container.textContent).not.toContain(":::view");
+  } finally {
+    view.unmount();
+    intersection.restore();
   }
 });
 
@@ -741,6 +862,7 @@ test("a bare dispatch ask reference renders an inline link to the ask route with
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);
@@ -752,7 +874,11 @@ test("a bare dispatch ask reference renders an inline link to the ask route with
   );
 
   try {
-    const link = await within(view.container).findByRole("link", { name: "CORE-1 ask" });
+    // Until the ask is read the link shows the reference as its author wrote it, never a short
+    // form of it: a target that never resolves then reads as the words on the page.
+    const link = await within(view.container).findByRole("link", {
+      name: "dispatch://CORE-1/ask/ask-1",
+    });
     expect(link.getAttribute("href")).toBe("/issues/CORE-1/asks/ask-1");
     await waitFor(() => expect(link.textContent).toBe("Ship it?"));
     expect(within(view.container).getAllByRole("link")).toHaveLength(1);
@@ -872,6 +998,7 @@ test("two references in one body each resolve their own inline link and title, r
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);
@@ -957,6 +1084,7 @@ test("a hand-authored Markdown link to a dispatch:// target resolves through dat
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);

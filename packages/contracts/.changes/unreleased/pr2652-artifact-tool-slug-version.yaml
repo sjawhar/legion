@@ -1,7 +1,0 @@
-kind: Fixed
-body: |-
-    The `dispatch_artifact` tool description says that an upload of a document's slug makes its next
-    version, as an upload of its name does.
-time: 2026-11-02T01:10:00.000000000Z
-custom:
-    Issue: pr2652

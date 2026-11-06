@@ -14,6 +14,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/pods"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
@@ -94,7 +95,14 @@ type Issue struct {
 	DefaultBranch string
 	// GitHubRepo is GitHub's own spelling of Repo, taken with it and never changed: what Envoy's
 	// event subjects carry, which NATS matches case-sensitively, so GitHub intake hears the issue's
-	// repository by it, read from the record at boot.
+	// repository by it, read from the record at boot. Under a configured repository rename
+	// (`repository_renames`) whose two names are Repo and the name GitHub holds the repository
+	// under, it is the pair's spelling of Repo's own side instead, which GitHub publishes nothing
+	// under after the transfer: the record's two repository columns must name one repository, and
+	// a record keeps the name it was recorded under for its whole life. Intake still hears the
+	// issue, because the daemon subscribes to both names of a pair (heardRepositories), and every
+	// GitHub call the daemon makes for the record addresses the repository GitHub serves it under
+	// now (ghrepo.Renames.Serving) rather than this field.
 	GitHubRepo string
 	// Ancestry is the keys of a root's Dispatch parent chain, from its parent upward to the top,
 	// stopping only at a repeated key or back at the root, as the newest Dispatch observation
@@ -108,13 +116,16 @@ type Issue struct {
 	// root that ran as a tree of its own (workflow's RanAsRoot), which no release adopts, and
 	// cleared when adoption takes the record into a tree.
 	Ancestry []string
-	// HandedOverFrom is the key of the tree the issue left when it became a root of its own:
-	// re-admission (admit.Admission.readmit) writes it whenever it moves a member of another tree
-	// into a tree of its own, a child its finished tree handed over (carrying its run or not) or an
-	// orphan a person admitted, and never clears it, a root's re-admission of itself included. Such
-	// a root stays its own tree (workflow's RanAsRoot): no admission sweep or release of children
-	// adopts it, into the tree it left or any other, and no ancestry hold holds it. Empty for every
-	// other record.
+	// HandedOverFrom is the key of the tree the issue left when it became a root of its own, while
+	// the tree of its own has still to be opened: re-admission (admit.Admission.readmit) writes it
+	// whenever it moves a member of another tree into a tree of its own, a child its finished tree
+	// handed over (carrying its run or not) or an orphan a person admitted, and the promotion that
+	// opens that tree clears it (admit's promoteHolds), because the run the record carries is this
+	// tree's own from then on and the waiting line reads the mark as a tree still to be opened
+	// (QueuedRoot, ran). Such a root stays its own tree whether or not the mark is still set
+	// (workflow's RanAsRoot, which reads the opened lifecycle too): no admission sweep or release
+	// of children adopts it, into the tree it left or any other, and no ancestry hold holds it.
+	// Empty for every other record.
 	HandedOverFrom string
 	// Awaiting is what a root in phase awaiting_person waits on, nil in every other phase: the two
 	// change together, as Hold and held do.
@@ -130,6 +141,17 @@ type Issue struct {
 	// write them: PutIssue keeps the stored values.
 	DeclaredSeq int64
 	DeclaredAt  time.Time
+	// MemoryGroup is the memory group of the issue's tree, `memory` or `none`, and "" exactly while
+	// nothing has drawn for it;
+	// MemoryDrawMode the project's memory mode in force when that group was drawn
+	// (config.MemoryMode's words); and MemoryDrawnAt when it was drawn, nil for a record with no
+	// draw: a tree first opened before the setting existed, or a root the draw never reached, which
+	// has no group and runs without memory. The draw is made once, when the tree's lifecycle row is
+	// first created, and only Store.DrawMemory and Store.CarryMemory write the three: PutIssue keeps
+	// the stored values, so a re-admission, a new generation and ClearTreeGeneration keep the draw.
+	MemoryGroup    string
+	MemoryDrawMode string
+	MemoryDrawnAt  *time.Time
 }
 
 // Repository is the repository the record names (Repo) in the spelling the record keeps: what
@@ -206,7 +228,10 @@ const (
 	// looks again.
 	AnsweredByTurn Answer = "turn"
 	// AnsweredByApproval is the root's design gate standing open: a person's approval of the
-	// root's spec, or a registration under gates.design: off, where nobody approved it.
+	// root's spec, or a registration under gates.design: off, where nobody approved it. A wait on
+	// a closed gate that gates.design: off answered (workflow's leaveGateOff) is recorded as this
+	// too, since the API's answeredBy has no value of its own for it; its AnsweredDetail marks it,
+	// so the resume never says a person approved the spec.
 	AnsweredByApproval Answer = "approved"
 	// AnsweredByChanges is a person's changes request on the root's spec, which the gate records
 	// as told with its reason.
@@ -215,6 +240,44 @@ const (
 	// request back to the architect.
 	AnsweredByVersion Answer = "version"
 )
+
+// ParkedDecision is a person's decision on a tree nobody in it could hear, which the daemon
+// relayed to the controller (a parked-decision notice) or kept for a root that waits for its slot
+// (RelayParkedDecision). It is kept under the issue it was decided on, never under a root, so the
+// tree it is owed to is read from the record whenever a start or a catch-up names it: an issue
+// that changes trees takes its decisions with it with nothing to move. It stands until the one
+// start task or catch-up that claimed it (ClaimedBy, the outbox row whose payload names it:
+// workflow.Engine.ParkedDecisionTask names only rows nothing counting claims or holds) has told
+// an architect of its issue's tree, and is deleted then — by that catch-up's publish
+// (Store.ForgetKeptDecisions) or by the confirmation of the delivery that holds it (HeldBy). A
+// claiming row that reached no architect hands it over instead (workflow.HandOverKept): it goes
+// back to KEPT, and a fresh catch-up names it at once while its tree has an architect to tell, so
+// a release never leaves it kept with nobody to name it again.
+type ParkedDecision struct {
+	// Issue is where in Dispatch the decision was made: the issue of the ask, comment or spec it
+	// was made on. It is the row's key with Ref, and what says whose debt the row is: the
+	// architect of the tree this issue stands in now owes the person the answer, whatever tree it
+	// stood in when the decision was made. It is empty for no row the daemon writes, since every
+	// path that keeps one knows where it was made (RelayParkedDecision).
+	Issue    string
+	Ref      string
+	Decision DecisionKind
+	Actor    string
+	At       time.Time
+	// ClaimedBy is the outbox row claiming it, 0 when no row does; HeldBy is the claim and the
+	// delivery id of the queued start task holding it, the zero value when none does.
+	ClaimedBy int64
+	HeldBy    DeliveryHold
+}
+
+// DeliveryHold is the claim token and delivery id of a start's task queued on an architect's
+// claim, which holds what that task names until that delivery is confirmed (the rows are told),
+// retired (the hold is cleared and the rows are KEPT again) or taken back under a new id (the
+// hold moves to it). The zero value is no hold.
+type DeliveryHold struct {
+	Claim    string
+	Delivery string
+}
 
 // AwaitingPerson says whether the issue is a root waiting on a person (phase awaiting_person).
 func (i Issue) AwaitingPerson() bool { return i.Phase == phase.AwaitingPerson && i.Awaiting != nil }
@@ -759,6 +822,17 @@ type DesignGate struct {
 	ToldChangesVersion *int
 	ToldChangesReason  string
 	ToldChangesMark    EventMark
+	// EverOpened records that a human approved the gate's document version at some point in this
+	// generation of the issue, whether or not the gate stands open now. Nothing else remembers it:
+	// classify.DesignGateOpen is point-in-time, reading the approval against LatestVersion as both
+	// stand, and a changes request clears ApprovedVersion, so a gate that opened and was sent back
+	// reads exactly like one that never opened. Under the children-first rule a root stays at
+	// admitted while its children run, which is the state the later rule must tell from a root
+	// still waiting for its first approval. It lives on the gate row rather than on the issue
+	// because ClearTreeGeneration deletes the gate when a root is re-admitted, and a re-admitted
+	// root's architect writes its spec again: the mark belongs to the generation whose approval it
+	// records.
+	EverOpened bool
 }
 
 // RootAsk is the daemon's mirror of Dispatch's state of one ask of a root, written from the ask's
@@ -898,7 +972,12 @@ type HandedOverRoot struct {
 // observation that showed it, 0 when none has. The claim is kept apart from the row, with a fence
 // of its own, since a claim event says nothing of the status or the blockers and may arrive before
 // the issue's first mirrored observation (PutDispatchClaim). A row written with ClaimSeq 0 leaves
-// the stored claim as it stands.
+// the stored claim as it stands. Parent is the key of the issue's Dispatch parent, "" for none; it
+// is the parent the observation saw, and "" is its observation that the issue has none, which
+// clears a stored one. It is written outside the sequence fence as well as inside it, since a
+// listing at the sequence the row already holds is the only thing that carries the parent of an
+// issue the daemon has never recorded; an observation older than the row writes no parent at all,
+// because the row's own saw it later (PutDispatchIssue).
 type DispatchIssueRow struct {
 	Key       string
 	Project   string
@@ -907,12 +986,17 @@ type DispatchIssueRow struct {
 	Seq       int64
 	ClaimedBy string
 	ClaimSeq  int64
+	Parent    string
 }
 
 // Store contains only transactional operations. The caller owns each transaction so intake can
 // atomically deduplicate an event, update the record, and enqueue all of its effects.
 type Store interface {
 	MarkProcessed(ctx context.Context, tx pgx.Tx, source, eventID string) (fresh bool, err error)
+	// Processed reports whether source's event eventID is already marked (MarkProcessed), for a
+	// caller that must read the mark rather than take it: a catch-up that finds itself superseded
+	// reads whether it published what it named before deciding to forget it or hand it over.
+	Processed(ctx context.Context, tx pgx.Tx, source, eventID string) (bool, error)
 	Issue(ctx context.Context, tx pgx.Tx, key string) (*Issue, error)
 	Issues(ctx context.Context, tx pgx.Tx) ([]Issue, error)
 	// LiveIssues is every record of project that is not finished, by key: each not in phase done,
@@ -923,6 +1007,12 @@ type Store interface {
 	// IssuesOf is the record of each of keys that is an issue of project, by key, leaving out a key
 	// with no record; no keys read nothing.
 	IssuesOf(ctx context.Context, tx pgx.Tx, project string, keys []string) ([]Issue, error)
+	// AncestorsOf is the record of each of keys and of every issue above it on the chain of
+	// recorded parents, by key, for the issues of project; it walks the chain in one query
+	// whatever its depth. It is what the waiting line's pass reads of the issues its live read
+	// leaves out, so the one chain walk (Ancestors) crosses a parent already done. No keys read
+	// nothing.
+	AncestorsOf(ctx context.Context, tx pgx.Tx, project string, keys []string) ([]Issue, error)
 	// QueuedRootsUnder is every labelled todo root whose Ancestry holds key, by key: the roots the
 	// waiting line may hold under a live root on a chain key is on (Waiting), whose Ancestry an
 	// event of key reads again.
@@ -960,8 +1050,14 @@ type Store interface {
 	// sequence: a row already holding an observation at least as fresh keeps what it has, so a
 	// slower observation never overwrites a faster one. The claim is fenced apart, on ClaimSeq: a
 	// row carrying a claim (ClaimSeq above zero) writes it only over an older claim, and one
-	// carrying none leaves the stored claim as it stands. A row whose Seq is zero — a fact the
-	// daemon minted from its own record, which Dispatch never said — writes nothing at all.
+	// carrying none leaves the stored claim as it stands. The parent is written outside the fence
+	// as well as inside it, and the parent the observation saw is what is written, "" included: an
+	// observation at or below the stored sequence writes the parent alone, leaving the status, the
+	// blockers and the sequence as they stand, so an issue whose live events are older than the
+	// listing that carried its parent still gets it, and a person who takes a parent off clears
+	// the stored one. An observation strictly older than the row writes no parent at all, since
+	// the row's own saw it later. A row whose Seq is zero — a fact the daemon minted from its own
+	// record, which Dispatch never said — writes nothing at all.
 	PutDispatchIssue(ctx context.Context, tx pgx.Tx, row DispatchIssueRow) error
 	// PutDispatchClaim writes holder (`<kind>:<id>`, "" for nobody) as key's claim at seq, over an
 	// older claim only, and touches nothing of the status or the blockers. It is kept whether or not
@@ -978,6 +1074,11 @@ type Store interface {
 	// (blockers.Load), whatever the number of rows the project's mirror holds. No keys read
 	// nothing.
 	DispatchIssuesOf(ctx context.Context, tx pgx.Tx, project string, keys []string) ([]DispatchIssueRow, error)
+	// DispatchChildren is every mirrored issue of the Dispatch project key project whose parent is
+	// one of parents, grouped by parent and in key order within each group; a parent with no
+	// children has no entry, and no parents reads nothing. A later step reads it to decide whether
+	// a parent's own first phase waits for a child of its own that is still open.
+	DispatchChildren(ctx context.Context, tx pgx.Tx, project string, parents []string) (map[string][]DispatchIssueRow, error)
 	// DispatchClaim is who the claims mirror shows holding key's claim (`<kind>:<id>`, "" for
 	// nobody), "" when it holds no claim of key. It reads the claim alone (PutDispatchClaim), with
 	// or without a mirrored row of the issue: a claim event applied before the issue's first row is
@@ -1001,6 +1102,77 @@ type Store interface {
 	OpenProductionChecksOfTree(ctx context.Context, tx pgx.Tx, tree string) ([]ProductionCheck, error)
 	// SessionClaimsTree says whether the agent session holds a claim in the tree.
 	SessionClaimsTree(ctx context.Context, tx pgx.Tx, tree, session string) (bool, error)
+	// AddParkedDecision keeps a relayed decision under the issue it was decided on, for the next
+	// start or catch-up of the tree that issue stands in. A ref that issue already keeps keeps its
+	// newest decision: a later one, by At, replaces it, KEPT again, so a changes request the
+	// person has since followed with an approval of the same spec is not what the start names.
+	AddParkedDecision(ctx context.Context, tx pgx.Tx, decision ParkedDecision) error
+	// ParkedDecisions is every decision owed to tree — every row whose issue stands in tree now,
+	// in any state — newest first, ties by ref. It is what the close of a tree reads: the tree
+	// ends owing each of them (workflow's warnKeptDecisionsOfAClosedTree).
+	ParkedDecisions(ctx context.Context, tx pgx.Tx, tree string) ([]ParkedDecision, error)
+	// UnclaimedKept is what a start or catch-up of tree may name: every row whose issue stands in
+	// tree now and that no counting claim or hold holds — a claim counts only while the claiming
+	// outbox row's issue stands in the same tree, and a hold only while the holding claim's tree
+	// is that tree — newest first, ties by ref, and tree's own readmitted approval pair on the
+	// same rule, zeros when there is none to name (workflow.Engine.ParkedDecisionTask).
+	UnclaimedKept(ctx context.Context, tx pgx.Tx, tree string) ([]ParkedDecision, int, int, error)
+	// ClaimKeptDecisions claims for outbox row what kept names of what tree is owed and nothing
+	// counting claims or holds yet, in the transaction that enqueues row: from then on no other
+	// start or catch-up of that tree names it until that row settles what it named. A published
+	// catch-up tells it (ForgetKeptDecisions); a start whose task the claim queued leaves it to
+	// that delivery, which holds it until its confirmation tells it; a start or catch-up that
+	// reached no architect hands it over (ReleaseKeptClaims, workflow.HandOverKept), and a row's
+	// deletion releases it as a last resort (claimed_by is set null with the row), for the next
+	// start or catch-up to name.
+	ClaimKeptDecisions(ctx context.Context, tx pgx.Tx, tree string, kept KeptDecisions, row int64) error
+	// MoveKeptClaims moves every claim of outbox row from to row to: the re-hold's copy of a catch-up
+	// carries the claims of the row it copies, which then finishes.
+	MoveKeptClaims(ctx context.Context, tx pgx.Tx, from, to int64) error
+	// ReleaseKeptClaims unclaims every parked decision and readmitted approval outbox row holds,
+	// and reports the tree each released row is owed to now, by key: the hand-over's first step,
+	// since the row told no architect what it named, and what says which trees' architects the
+	// hand-over must write a fresh catch-up to (workflow.HandOverKept).
+	ReleaseKeptClaims(ctx context.Context, tx pgx.Tx, row int64) ([]string, error)
+	// ReleaseHeldDecisions clears the hold the delivery of claim token holds on the rows marks
+	// names, and reports the tree each released row is owed to now, by key: the send-time drop of
+	// what a held task names of another tree leaves those rows KEPT for that tree to name
+	// (workflow's RootTask). A retired delivery's holds go the same way, in the write that retires
+	// it (the claim store's RetireDelivery).
+	ReleaseHeldDecisions(ctx context.Context, tx pgx.Tx, token claim.Token, delivery string, marks []DecisionMark) ([]string, error)
+	// HeldKeptRefs is the reference of every decision the delivery of claim token still holds: what
+	// a held task may still name when it is about to be sent (workflow's RootTask). A reference it
+	// named that is gone from here was told by something else, or replaced by a newer decision on
+	// the same reference, and this task names it no longer.
+	HeldKeptRefs(ctx context.Context, tx pgx.Tx, token claim.Token, delivery string) ([]string, error)
+	// ArchitectLaunches is the launch each tree's root architect claim stands at now, by tree, for
+	// the trees that have one: what a catch-up queued to another tree's architect is written for
+	// (record.CatchUp.Launch), so a failed forward of an older one is not queued again behind it.
+	ArchitectLaunches(ctx context.Context, tx pgx.Tx, trees []string) (map[string]uint64, error)
+	// KeepReadmittedApproval keeps, for root's next architect start, the spec version a person
+	// approved and the spec's latest version, which its re-admission found above the approved one
+	// before it cleared the old generation's gate; a later keep replaces it, KEPT again.
+	KeepReadmittedApproval(ctx context.Context, tx pgx.Tx, root string, approved, latest int) error
+	// DropReadmittedApproval deletes the pair root keeps, if any: a re-admission whose gate holds no
+	// stale approval, or under gates.design off, leaves nothing an earlier one kept.
+	DropReadmittedApproval(ctx context.Context, tx pgx.Tx, root string) error
+	// ReadmittedApproval is the pair root keeps, in any state, zeros when it keeps none.
+	ReadmittedApproval(ctx context.Context, tx pgx.Tx, root string) (approved, latest int, err error)
+	// TellChildrenFirst marks that issue's architect has been told, for the run generation of
+	// tree, that the issue's own first phase waits for the Dispatch children under it, and
+	// reports whether this call is the telling. The wait itself is never stored, so that a stale
+	// mirror row costs one pass; the telling is, so that the pass every fact, tick, hold release
+	// and boot runs does not tell it again. A re-admission opens a new generation of the tree and
+	// so tells it anew, and so does a hand-over, which gives the issue a tree of its own.
+	TellChildrenFirst(ctx context.Context, tx pgx.Tx, issue, tree string, generation uint64, at time.Time) (bool, error)
+	// ForgetKeptDecisions tells what outbox row's published catch-up named of what tree is owed
+	// (KeptDecisions), of the rows row claims or nothing claims: every parked decision still
+	// standing at the reference and time it named — a newer decision on the same reference, kept
+	// since and unclaimed, survives — and the readmitted approval still standing at the pair of
+	// versions it named. One whose issue has left tree since the row was composed is told nothing:
+	// its claim and hold are cleared instead, so the tree it stands in now names it. A row whose
+	// task reached no architect tells nothing and hands over instead (ReleaseKeptClaims).
+	ForgetKeptDecisions(ctx context.Context, tx pgx.Tx, tree string, kept KeptDecisions, row int64) error
 	// ClaimSession is the session claims records for token, "" and no error when the token holds
 	// no row. The workflow reads it for the reviewer's claim (PhaseRow.Claim) to tell the
 	// reviewer's own review from another review-App session's by the Legion footer each carries
@@ -1014,9 +1186,9 @@ type Store interface {
 	ClearGeneration(ctx context.Context, tx pgx.Tx, issue string) error
 	ClearTreeGeneration(ctx context.Context, tx pgx.Tx, tree string) error
 	Gate(ctx context.Context, tx pgx.Tx, issue string) (*DesignGate, error)
-	// Gates is the design gate of each of issues, by issue, in one read: the gates of the trees
-	// whose held children one look judges (workflow's StartUnblockedChildren), rather than a read
-	// per tree under the fact lock. An issue with no gate has no entry.
+	// Gates is the design gate of each of issues, by issue, in one read: the gates one look over
+	// many trees judges from (ReadLineFacts), rather than a read per tree under the fact lock. An
+	// issue with no gate has no entry.
 	Gates(ctx context.Context, tx pgx.Tx, issues []string) (map[string]DesignGate, error)
 	// GatesForArtifact is every gate registered on artifactID, in issue order: the document owner's
 	// gate and each copy a hand-over carried to a child of its tree.
@@ -1055,6 +1227,31 @@ type Store interface {
 	// RestartCaughtUp sets issue's catch-up cursor back to 0, so its next catch-up reads from its
 	// last handout: a re-admission's new generation, whose old generation's events are not its own.
 	RestartCaughtUp(ctx context.Context, tx pgx.Tx, issue string) error
+	// DrawMemory records the memory group drawn for root's tree: the group (`memory` or `none`),
+	// the mode it was drawn under (a config.MemoryMode word, taken as a
+	// string because internal/config reads internal/store, whose own tests read this package, so
+	// an import of config here would close a cycle) and the time of the draw, written once and
+	// never again. It reports whether it wrote the row. Writing nothing is no error: a root that
+	// already carries a draw keeps it, whatever the project's mode says now, and a tree whose root
+	// has no issue record — an operator's spawn — records no draw at all.
+	//
+	// Nor is a root whose memory its hand-over settled: a child handed over out of a tree the
+	// daemon had opened takes that tree's answer, which CarryMemory wrote at the hand-over — the
+	// tree's draw where it had one, and no draw at all where it had none, a tree first opened
+	// before this release, which nothing draws for. The draw reads that written answer, not the
+	// old tree's state, so the order the two roots are promoted in changes nothing. A root out of
+	// a tree nothing ever opened takes no answer with it, so its own first open draws it like any
+	// other new tree.
+	DrawMemory(ctx context.Context, tx pgx.Tx, root, group, mode string, at time.Time) (bool, error)
+	// CarryMemory settles the memory of key, a child handed over as a tree of its own, from the
+	// tree it left: from's draw verbatim, the original draw time included, where that tree had one,
+	// and no draw at all where it had none, and either way DrawMemory writes nothing for key
+	// afterwards. project is the normalized runtime token tree_lifecycles is keyed by, whose row
+	// for from is the fact that the tree was opened at all: a tree with no row hands nothing over,
+	// and key's own first open draws it. It reports whether the hand-over settled key's memory,
+	// which is wider than whether a draw was copied, and writes nothing when key already carries a
+	// draw of its own or a hand-over settled it before.
+	CarryMemory(ctx context.Context, tx pgx.Tx, project, key, from string) (bool, error)
 	Slots(ctx context.Context, tx pgx.Tx) ([]Slot, error)
 	PutSlot(ctx context.Context, tx pgx.Tx, slot Slot) error
 	ReleaseSlot(ctx context.Context, tx pgx.Tx, issue string) error
@@ -1065,6 +1262,12 @@ type Store interface {
 	// TreeLifecycle is the tree's lifecycle under the project token, and whether it has one, read
 	// without opening anything (treelifecycle.Read).
 	TreeLifecycle(ctx context.Context, tx pgx.Tx, project, tree string) (treelifecycle.Lifecycle, bool, error)
+	// TreeLifecycles is the lifecycle of each of trees, by tree, in one read, opening nothing: the
+	// lifecycles a single look over many trees needs, rather than a read per tree under the fact
+	// lock. A tree with no row has no entry, and no trees reads nothing. project is the claim
+	// project token the tree_lifecycles table is keyed by, the value OpenTreeLifecycle takes, not
+	// the Dispatch project key.
+	TreeLifecycles(ctx context.Context, tx pgx.Tx, project string, trees []string) (map[string]treelifecycle.Lifecycle, error)
 	// ControllerRegistered says whether a session holds the current controller registration of the
 	// Dispatch project key project (controller.Record.Registered's rule), reading the controllers
 	// table under the project token (claim.ProjectToken) `legion controller start` mints under.
@@ -1084,6 +1287,22 @@ type Store interface {
 	// row among them, are not counted.
 	PersonHandoverPending(ctx context.Context, tx pgx.Tx, issue string) (bool, error)
 	Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error
+	// EnqueueID enqueues row as Enqueue does and returns its id, for a row that claims what it names
+	// (ClaimKeptDecisions). It refuses a ready_merge row, whose insert may update another.
+	EnqueueID(ctx context.Context, tx pgx.Tx, row OutboxRow) (int64, error)
+	// ReplaceOwedStart writes row's payload over the issue's oldest supervise start that waits
+	// for the issue's admission slot (SuperviseRequest.NeedsSlot) and that no live lease holds,
+	// and says whether it found one, so two transitions before that slot leave exactly one
+	// start, the later one, in the place in the waiting line the first one took. A row a lane
+	// holds now is not touched, including one it takes while the call waits on its row lock; the
+	// caller then enqueues its own. A lapsed lease holds nothing and is replaced like any other.
+	ReplaceOwedStart(ctx context.Context, tx pgx.Tx, row OutboxRow) (bool, error)
+	// OwedStarts is every pending worker start of the Dispatch project key project that waits for
+	// its issue's admission slot and that no live lease holds, a row whose lease has lapsed among
+	// them, oldest first by creation time and then id — the waiting line's own ordering key for
+	// the issues whose work came back (Waiting). An issue holding two of them appears twice,
+	// oldest first.
+	OwedStarts(ctx context.Context, tx pgx.Tx, project string) ([]OwedStart, error)
 	// DueRows is every row of project a lane may run at now — due, under no live lease, in order
 	// behind none of its issue's older rows, and, for a lifecycle row, with no other lifecycle row
 	// of its issue under a live lease — oldest first, with no lease taken. Issue "" is every issue
@@ -1142,11 +1361,32 @@ type Store interface {
 	// caller that then wakes the row's lane has its issue and kind.
 	ExpediteOutbox(ctx context.Context, tx pgx.Tx, row OutboxRow, now time.Time) error
 	// DropCatchUps deletes every catch-up notice row of issue the outbox still holds, a re-held copy
-	// and a row the runner has leased included. A leased row may be mid-publish: the runner executes
-	// it from memory, and the notice executor publishes it only while OutboxLeased still finds it,
-	// so a dropped row is delivered only when the drop lands during its publish, a duplicate the
-	// fresh catch-up follows.
-	DropCatchUps(ctx context.Context, tx pgx.Tx, issue string) error
+	// and a row the runner has leased included, but for two a drop would lose a person's decision
+	// from. The first is a row whose publish told the decisions it named (KeptToldSource) and whose
+	// forget has not committed yet: that row still owes them that forget, which its next run makes,
+	// and dropping it would release them for the fresh catch-up to tell a second time. The second is
+	// a row that carries kept decisions under a live lease (lease_until after now, which is the
+	// caller's clock, the one a claim's lease is written from: ClaimRow): its lane may be publishing
+	// it this moment, outside every transaction, and the drop would release what it named for the
+	// fresh catch-up, written in the same transaction, to name again — telling the architect that
+	// already has the publish in its hands a person's decision twice. Such a row is left for its own
+	// ending to settle what it claims: its publish forgets exactly what it named
+	// (ForgetKeptDecisions), a newer catch-up that supersedes it hands those rows over
+	// (workflow.HandOverKept), and every other ending leaves them to the row's deletion, for the
+	// architect's next ready to name. A claim of one of the issue's catch-ups and this drop are
+	// serialized by an advisory lock keyed by the issue, which ClaimRow takes too: a claim either
+	// commits before the drop reads the leases, and is seen, or it waits for the drop and claims
+	// nothing when the drop deleted its row (TestDroppingCatchUpsLeavesTheRowALaneIsLeasing,
+	// TestDroppingCatchUpsWaitsForTheClaimOfACopyAReholdQueued). The drop locks no outbox row before
+	// its delete, since a lane finishing a catch-up waits on the decisions its caller holds
+	// (TestDroppingCatchUpsWaitsOnNoRowAFinishIsDeleting). A leased row with no decisions is
+	// dropped as before: the
+	// runner executes it from memory, and the notice executor publishes it only while OutboxLeased
+	// still finds it, so a dropped row is delivered only when the drop lands during its publish, a
+	// duplicate the fresh catch-up follows. A dropped catch-up's decisions are released with its row
+	// and named again by the fresh catch-up, written in the same transaction as the drop: only a
+	// published catch-up forgets them.
+	DropCatchUps(ctx context.Context, tx pgx.Tx, issue string, now time.Time) error
 	// DropStatusWrites deletes every Dispatch status write of issue the outbox still holds, a row
 	// the runner has leased included; one mid-attempt can still reach Dispatch, and its finish then
 	// finds nothing to delete.
@@ -1236,6 +1476,12 @@ func (i Issue) Lingers() bool { return i.LingerUntil != nil }
 // linger only, not in the tree's next run nor in a later linger of it.
 func (i Issue) LingersAt(generation uint64) bool {
 	return i.Lingers() && i.Generation == generation
+}
+
+// Standing is where the issue stands for the gate every path that acts on an idle or released
+// pod reads (pods.InWorkflowNotLingering).
+func (i Issue) Standing() pods.Standing {
+	return pods.Standing{Phase: i.Phase, Status: i.Status, Lingers: i.Lingers()}
 }
 
 // CarriesRun says whether the issue carries a run: it started a phase, and its tree neither left

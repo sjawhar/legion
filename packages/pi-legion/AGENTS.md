@@ -59,7 +59,7 @@ worker image from the daemon's commit.
 ## Daemon contract
 
 The plugin speaks to the Legion daemon (`packages/daemon`) through the daemon client
-(`@legion/pi-shared/daemon-client`), which reads every response through the strict schemas of
+(`@legion/pi-shared/daemon-client`), which reads every response through the schemas of
 `@legion/contracts/legion-api`, and boots every Legion session through the claim session
 (`src/claim-session.ts`) or, for the controller, the controller session
 (`src/controller-session.ts`). `package.json` declares the contract it was built against as
@@ -90,7 +90,21 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is the one `DaemonAPIVersion` declares, last bumped by contract 45's handoff records
+number is the one `DaemonAPIVersion` declares, last bumped by contract 51's admission cap over the
+issues at work (`admission.active` and `admission.waiting` on `GET /legion/v1/state` name issues
+rather than trees, `admission.trees` is the root of every live tree, and each issue record carries
+its `tree`; a strict reader before 51 refuses a state carrying either new key, so a caller from a
+pod below 51 is served the state without them, and a controller below 51 reads `active` as the
+trees at work), after contract 49's memory group (each
+issue of `GET /legion/v1/state` carries its tree's `memoryGroup`, `memoryDrawMode` and
+`memoryDrawnAt`, which a strict reader before 49 refuses, and a caller from a pod below 49 is
+served the state without them), after contract 48's idle release (the plugin reports each
+session's activity on `POST /legion/v1/claims/activity`, and the `legion` tool's
+`read_release_records` op posts `POST /legion/v1/claims/release-records`), after contract 46's
+update round (the
+`legion` tool's `ready_for_update` op, which posts `POST /legion/v1/claims/ready-for-update` with
+the round its update task named and the head of `legion/<issue>@origin`, and the `updateRound` and
+`updateHead` fields every claim view gains), after contract 45's handoff records
 (sjawhar/legion#2354: `handoff_complete` names the phase's Dispatch handoff record, `handoffId` and
 `handoffVersion`, and `GET /legion/v1/state` gives each phase its `handoffRecord`; a 44 plugin
 posts a commit and no record, and rejects `handoffRecord`), after contract 44's removal of
@@ -248,19 +262,22 @@ whose issue is its tree: the persisted transcript, recorded as the bootstrapped 
 and daemon sentence and a 5xx or transport failure propagates without exiting — a 409 naming a
 stale `pluginContract` is one such 4xx, so a pane that registers on an old contract exits and its
 daemon-side claim is already being relaunched onto the current plugin, under Kubernetes through a
-kept-pod install (docs/kubernetes.md "Contract discipline"), never a new pod; the capability
-measurement, started once the registration has answered and run beside the next two steps
-(`measureCapabilities` in `src/capability-report.ts`: the six live rows of the daemon's capability
-table — `subagents`, `web-search`, `mcp`, `repository-extensions`, `dispatch-envoy-tools`,
-`github` — each check within 8 s and the report within 10 s, measured against the registration's
-`promptAgents`, the session's active tools and the host's `pi.agents`; a failing or timed-out
-check is a failing row, and a measurer that throws costs the report, never the boot); jj session
+kept-pod install (docs/kubernetes.md "Contract discipline"), never a new pod; jj session
 attribution, before the capability is set; the Envoy role, which is the claim token and the topic
 the daemon sends an architect every notice on (no claim subscribes to an issue's notice topic, so
-no phase worker is woken by an architect's notice); and `claims/ready`,
-awaited on the measurement and carrying its report as `capabilities`, retried three times a second
-apart on a 5xx or transport failure only, and run again with the same report whenever the Envoy
-heartbeat regains the role. The controller measures nothing: its ready carries no report. The
+no phase worker is woken by an architect's notice); and `claims/ready`, retried three times a
+second apart on a 5xx or transport failure only, and run again whenever the Envoy heartbeat
+regains the role. The boot measures no capability rows, and neither that `claims/ready` nor the
+regain's carries a report. The session measures its rows afterwards instead, on the 5 s interval
+it already runs and only while it is idle (INFRA-927, `src/capability-schedule.ts` driven from
+`extensions/legion.ts`), and a report leaves as a `claims/ready` of its own carrying
+`capabilities`. One measurement is `measureCapabilities` in `src/capability-report.ts`: the six
+live rows of the daemon's capability table — `subagents`, `web-search`, `mcp`,
+`repository-extensions`, `dispatch-envoy-tools`, `github` — each check within 8 s and the report
+within 10 s, measured against the registration's `promptAgents` (which the recorded claim
+carries), the session's active tools and the host's `pi.agents`; a failing or timed-out check is a
+failing row, and a measurer that throws costs that attempt, never the session. The controller
+measures nothing: it runs no such schedule and its ready carries no report. The
 production measurer (`ompCapabilityHost`) reaches Oh My Pi's own modules through string-literal
 `import()` of `@oh-my-pi/pi-coding-agent` and its subpaths `config/settings`,
 `extensibility/settings`, `extensibility/extensions/loader`, `mcp/config` and `task/settings`,
@@ -490,8 +507,9 @@ the daemon refuses it with `CHECK_NOT_OPEN`, `CHECK_LOOK_NOT_OPEN` or `CHECK_VER
 and refuses, recording nothing, a completion that names no record (`HANDOFF_RECORD_REQUIRED`), a
 record Dispatch does not have (`HANDOFF_RECORD_NOT_FOUND`), a read Dispatch did not answer
 (`DISPATCH_READ_FAILED`), a record of another issue, phase or version (`HANDOFF_RECORD_MISMATCH`),
-one written by another session than the claim's (`HANDOFF_SESSION_MISMATCH`, the import's records
-included), and the one the role named for its previous phase (`HANDOFF_NOT_NEW`); for the
+one written by another session than the claim's (`HANDOFF_SESSION_MISMATCH`, a record carried from
+before handoffs moved to the Dispatch issue, under the daemon's session, included), and the one the
+role named for its previous phase (`HANDOFF_NOT_NEW`); for the
 implementer's completion of implementing it reads the open pull request on `legion/<issue>` as the
 implement App, records one the webhook has not, and refuses `HANDOFF_NO_PULL_REQUEST` when there
 is none and the record holds none merged (naming a recorded pull request closed without merging,
@@ -522,7 +540,11 @@ a tool.
 In a phase-worker session (planner, implementer, tester, reviewer, merger: never an architect, the
 controller, a session with no Legion environment, or a `task` subagent), the phase-stall machine
 `@legion/pi-shared/phase-stall` tracks the phase: the daemon's assignment (a user message) opens it, the tool's successful
-`handoff_complete` closes it. A person's direct message the Envoy extension sent in as the user's
+`handoff_complete` closes it, and its successful `ready_for_update` (`onUpdateAnswered`), which
+closes no phase, moves it to the `waiting` state a WAITING reply buys, so the turn the worker
+answered the daemon's update task in ends with no reminder continuing it: work a continuation did
+would go with the replaced pod, and the daemon would see no turn end.
+A person's direct message the Envoy extension sent in as the user's
 own turn is a user message too (for a `/skill:`, the host's `skill-prompt` custom message), and
 counts as an Envoy delivery rather than an assignment: the Envoy extension records each turn it
 sends in, process-wide, on the shared interface (`injectedUserTurns`,
@@ -601,7 +623,8 @@ closed.
 | Both entries in one process | `extensions/legion-role-claim.test.ts`, `extensions/legion-phase-stall-omp.test.ts`, `extensions/legion-role-tools-omp.test.ts`, `extensions/controller-start-omp.test.ts` | Test-only; the shipped sources never import the sibling. `legion-role-claim.test.ts` loads `../pi-envoy/extensions/envoy.ts` by relative path: the role claim through the interface with Legion initialised first. The phase-stall and role-tools omp tests run through the harness's `runLegionPane` (`@legion/pi-shared/test/omp-harness`), which names both entries by path for the Oh My Pi child: the endless phase reminder, and no role refused a tool, on the pinned Oh My Pi (`LEGION_TEST_OMP`). `controller-start-omp.test.ts` runs the operator's controller as `legion controller start` does, interactive Oh My Pi under a pseudo-terminal (the harness's `spawnInteractive`) with both entries by path and `/legion-controller-start` on its command line, against a stand-in gateway, daemon and Envoy listener and the real NATS server the role claim needs (`LEGION_TEST_NATS_URL`), over which it also sends the controller a role-lane card and a controller-topic notice: the start turn runs after startup and shows on screen, the operator can type during it, Esc interrupts it, the start message starts the first turn once, a card published the moment the role is claimed and a notice published the moment the controller topic is registered both reach the model after the start message, and a refused claim shows its warning and sends nothing |
 | Shipped agents | `agents/`, `src/shipped-agents.test.ts` | The task agents Legion's prompts dispatch: `oracle`, the reviewer's pair `thermonuclear-deep-review` and `thermonuclear-code-quality`, `deep-worker`, and the planner's `plan-gap-analyst` and `plan-reviewer`. The root architect also runs the planner's two on its spec before every approval request. Each agent declares the name of its file, and its model only as role aliases. The planner's two carry `bash` and no edit or write tool. Oh My Pi has no per-agent command limit, so their prompts hold them to read-only commands |
 | Daemon contract pin | `src/daemon-api-version.test.ts` | Pins `legion.daemonApiVersion` to `packages/contracts/fixtures/daemon-api/version.json`, which the daemon's golden test writes |
-| Capability report | `src/capability-report.ts`, `src/capability-report.test.ts` | The six live capability checks a claim session runs at boot and sends with `claims/ready` (see Daemon contract): `measureCapabilities` over a `CapabilityHost` that wraps every Oh My Pi import and the two child commands (`dispatch read --issue <issue>`, `gh api graphql {viewer{login}}`), with the budgets (8 s a check, 10 s the report) and each row's detail strings; `ompCapabilityHost` is the production host, string-literal `import()` only. The test fakes the host; `extensions/legion.test.ts` substitutes one through `setLegionCapabilityHostForTests` |
+| Capability report | `src/capability-report.ts`, `src/capability-report.test.ts` | The six live capability checks a claimed session runs on its own interval, while it is idle, and sends with `claims/ready` (see Daemon contract): `measureCapabilities` over a `CapabilityHost` that wraps every Oh My Pi import and the two child commands (`dispatch read --issue <issue>`, `gh api graphql {viewer{login}}`), with the budgets (8 s a check, 10 s the report) and each row's detail strings; `ompCapabilityHost` is the production host, string-literal `import()` only. The test fakes the host; `extensions/legion.test.ts` substitutes one through `setLegionCapabilityHostForTests` and shortens the budgets through `setLegionCapabilityBudgetsForTests` |
+| Capability schedule | `src/capability-schedule.ts` | The tick machine behind those checks (INFRA-927): `createCapabilitySchedule` holds the ticks counted, the tick the next attempt is due at, the attempts spent, whether a measurement or a send is in flight, a held report and whether the session has settled. A role's first due tick is `CAPABILITY_FIRST_DUE_TICK` plus its index in `LEGION_ROLES`, so the architect is due at the sixth tick and the merger at the eleventh and one pod's roles start their attempts on different ticks — each role counts from its own interval, which starts at its own boot, and a role busy at its due tick measures at its first idle tick instead, so the offset spreads the first attempts rather than keeping two roles' measurements from ever overlapping; `CAPABILITY_RETRY_TICKS` is the gap after an attempt ends and `CAPABILITY_ATTEMPTS` the three measurements one process makes. A report measured while a turn starts is held for the next idle tick rather than sent from under a working session, and the machine stops once the daemon has taken a report whose every row was present. It is driven by `extensions/legion.ts`'s managed interval (`SESSION_ACTIVITY_PERIOD_MS`, beside the activity report) and proven in `extensions/legion.test.ts` |
 | Skills partition and its guard | `src/skills-guard.test.ts`, `scripts/pi-plugin-prepack.sh` (repository root) | The partition this package ships, staged as its prepack stages it, held to the size, name and link rules in `@legion/pi-shared/test/skills-guard`, with the daemon's prompts as linking roots and every `legion-worker` reference linked from somewhere |
 | No import of the sibling | `src/no-cross-import.test.ts` | Fails on a shipped source under `extensions/` or `src/` whose relative import resolves into `packages/pi-envoy` |
 | Rigs | `scripts/skill-scenarios/` | The skill-scenario rig replays skill scenarios on real agents (`../pi-envoy/scripts/README.md`, its last section); its tester-proof scenario boots a real phase worker through this extension against a stand-in daemon (`daemon-standin.ts`), with the pane built by the daemon's own functions (`daemon-pane.go`, `daemon-pane.test.ts`: no inherited key, no grant file reaches the pane). The grant rig that proved the per-command grant mint went with the mint (LEGION-631) |

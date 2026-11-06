@@ -22,11 +22,11 @@ related_issues:
 
 A worker pod has no `docker`, cannot create pods and cannot `exec` into one (`kubectl auth can-i create
 pods -n legion` and `create pods/exec` both answer no). It can still prove what a published
-`ghcr.io/sjawhar/legion-worker` image carries and what that image's own `legion probe-image` decides:
+`ghcr.io/cybermonklabs/legion-worker` image carries and what that image's own `legion probe-image` decides:
 
 - Pull the image anonymously — the package is public — with a token from
-  `https://ghcr.io/token?scope=repository:sjawhar/legion-worker:pull`, kept in a shell variable and never
-  printed. Fetch `/v2/sjawhar/legion-worker/manifests/sha-<12-char head sha>` with an `Accept` naming the OCI
+  `https://ghcr.io/token?scope=repository:cybermonklabs/legion-worker:pull`, kept in a shell variable and never
+  printed. Fetch `/v2/cybermonklabs/legion-worker/manifests/sha-<12-char head sha>` with an `Accept` naming the OCI
   manifest type, and check `sha256sum` of the manifest file equals the `Worker Image` run's
   `containerimage.digest`: that is what ties the rootfs to the run you cite.
 - Unpack the layers in manifest order into one directory with `tar -xp -z --no-same-owner --exclude='.wh.*'
@@ -71,7 +71,7 @@ expects a non-root uid fails there (the tester's `install-model-gateway.test.ts`
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
-tag="$1"; rootfs="$2"; repo=sjawhar/legion-worker
+tag="$1"; rootfs="$2"; repo=cybermonklabs/legion-worker
 tok="$(curl -fsS "https://ghcr.io/token?scope=repository:${repo}:pull" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
 mkdir -p "$rootfs" /tmp/layers
 curl -fsS -H "Authorization: Bearer $tok" \
@@ -116,7 +116,8 @@ exec unshare -r -m -p -f sh -c '
 ## Evidence
 
 LEGION-764 (sjawhar/legion#1967) added `jq` and `openssh-client` to the image and both names to the probe's toolchain
-row. In pod `legion-legion-legion-764`, on `ghcr.io/sjawhar/legion-worker:sha-40b71edb8b43` (manifest sha256
+row. In pod `legion-legion-legion-764`, on the worker image at `legion-worker:sha-40b71edb8b43` under this
+repository's ghcr.io account before its transfer to cybermonklabs on 2026-11-03 (manifest sha256
 `8044216f…`, the `Worker Image` run 38766268187 digest): `type -P` printed `/usr/bin/jq` and `/usr/bin/ssh-keygen`,
 `legion version` printed `commit 40b71edb…`, `legion probe-image` printed 20 rows with 7 `present`, the toolchain row ending
 `/usr/bin/jq, /usr/bin/ssh-keygen; go version go1.26.8 linux/amd64`, and the OK line, rc 0. With `/usr/bin/jq` removed:

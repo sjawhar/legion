@@ -732,8 +732,8 @@ async function agentTokenRefused({ A, B, main, page, S, services }: Context): Pr
     (answer.body as { code?: string; error?: { code?: string } } | null)?.code ??
     (answer.body as { error?: { code?: string } } | null)?.error?.code;
   expect(
-    answer.status === 403 && JSON.stringify(answer.body).includes("HUMAN_ONLY"),
-    `the agent bearer's switch answered ${answer.status} ${JSON.stringify(answer.body)}`
+    answer.status === 403 && JSON.stringify(answer.body).includes("OAUTH_SCOPE_REQUIRED"),
+    `the agent bearer's switch answered ${answer.status} ${JSON.stringify(answer.body)}, want 403 OAUTH_SCOPE_REQUIRED`
   );
   await sleep(3_000);
   const after = await oracle(main);

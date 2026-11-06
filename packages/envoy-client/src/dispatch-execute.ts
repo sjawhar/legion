@@ -2,6 +2,7 @@ import { resolve as resolvePath } from "node:path";
 import type {
   Actor,
   Advised,
+  Agent,
   ArchitectureSource,
   Artifact,
   ArtifactBlock,
@@ -11,6 +12,7 @@ import type {
   AskUrgency,
   BlockPath,
   ClaimedIssue,
+  ClaimHolderLiveness,
   Comment,
   CommentRead,
   CreateArtifactInput,
@@ -26,11 +28,14 @@ import type {
   GraphReferences,
   Handoff,
   HandoffSummary,
+  InboxRow,
   Issue,
+  IssueCheckResults,
   IssueClaim,
   IssueComponents,
   IssueComponentsInput,
   IssueComponentsMode,
+  IssueCoverage,
   IssueDetails,
   IssuePriority,
   IssueProgress,
@@ -42,21 +47,22 @@ import type {
   OpenAsksResponse,
   Project,
   SessionAnswersResponse,
+  WhoamiResponse,
   WriteAdvice,
 } from "@legion/contracts";
 import {
-  ASK_QUESTION_MAX,
   ASK_URGENCIES,
+  actorActText,
   actorLabel,
   claimHolds,
+  claimTakeableAt,
   DEFAULT_ISSUE_PAGE_LIMIT,
-  DISPATCH_BODY_MAX,
   decodeBlockId,
   dispatchToolSchema,
   dispatchToolSpecs,
   encodeBlockId,
+  isIdPrefix,
   itemFromSearch,
-  overCapMessage,
   PROJECT_KEY_PATTERN,
   PROJECT_KEY_RULE,
   serviceSubjectLabel,
@@ -78,6 +84,7 @@ import {
   resolveOrigin,
 } from "./dispatch-cwd";
 import {
+  type CredentialPendingRow,
   DispatchClient,
   DispatchGatewayError,
   DispatchServiceError,
@@ -105,11 +112,10 @@ import {
   type AgentArtifactRef,
   askTexts,
   datedBodies,
-  eventTexts,
+  eventTextsWhole,
   type LocalPicture,
   localPictures,
   type PicturesRead,
-  type PictureTextLimit,
   parseAgentArtifactRef,
   readPictures,
   shownPictureLine,
@@ -172,9 +178,9 @@ export interface ExecuteDispatchToolInput {
   readonly host: DispatchHost;
   readonly sessionId?: string;
   readonly sessionTitle?: string;
-  /** The resolved Dispatch (`activeDispatchSettings`): the server, the bearer it takes, and the
-   *  public dashboard its printed links point at when there is one. */
-  readonly config: Pick<ActiveDispatchConfig, "url" | "token" | "publicUrl">;
+  /** The resolved Dispatch (`activeDispatchSettings`): the server, the credential every request
+   *  presents, and the public dashboard its printed links point at when there is one. */
+  readonly config: Pick<ActiveDispatchConfig, "url" | "credential" | "publicUrl">;
   /** Host cancellation for the currently executing tool call. */
   readonly signal?: AbortSignal;
   readonly env?: ExecutorEnvironment;
@@ -329,12 +335,13 @@ function renderAdvice(
   // The gate line is last for the document tools, for the reason the cadence line is last for
   // the others: behind `| tail -1` it is the only line the agent sees, and it is the one line of
   // a document write that someone else has to act on. It describes this one write - the version
-  // it stored and the approval that version replaced - rather than a rule about editing a spec,
-  // because the server sends it only on the write that superseded the approval.
+  // it stored, the approval that version replaced and how that approval comes back - rather than a
+  // rule about editing a spec, because the server sends it only on the write that superseded the
+  // approval.
   const superseded = advice.superseded_approval;
   if (superseded !== undefined && (tool === "dispatch_doc_edit" || tool === "dispatch_artifact")) {
     lines.push(
-      `Stored version ${superseded.version}, superseding version ${superseded.approved_version}, which ${superseded.approved_by} approved. That approval is stale until someone approves version ${superseded.version}, and no undo restores it: a Legion design gate on this document is closed meanwhile, so every READY in its tree is refused. Meant to change the approved design? Request approval with \`dispatch request-approval\`. Meant a correction beside it? Tell the tree's architect, and keep the next one in a comment or in the plan.`
+      `Stored version ${superseded.version}, superseding version ${superseded.approved_version}, which ${superseded.approved_by} approved. That approval is stale until someone approves version ${superseded.version} or a later write stores the text of version ${superseded.approved_version} again exactly, with no decision block in it decided since: a Legion design gate on this document is closed meanwhile, so every READY in its tree is refused. Meant to change the approved design? Request approval with \`dispatch request-approval\`. Meant a correction beside it? Tell the tree's architect, and keep the next one in a comment or in the plan.`
     );
   }
 
@@ -456,6 +463,8 @@ const issueFreeTools: Readonly<Record<string, true>> = {
   dispatch_open_asks: true,
   dispatch_answers: true,
   dispatch_whoami: true,
+  dispatch_limits: true,
+  dispatch_inbox: true,
   dispatch_architecture_sync: true,
 };
 
@@ -466,6 +475,12 @@ function canonicalExternalIssueRef(value: string): string {
 function stringArg(args: Record<string, unknown>, name: string): string {
   const value = args[name];
   if (typeof value !== "string") throw new Error(`${name} is required`);
+  return value;
+}
+
+function numberArg(args: Record<string, unknown>, name: string): number {
+  const value = args[name];
+  if (typeof value !== "number") throw new Error(`${name} is required`);
   return value;
 }
 
@@ -482,6 +497,19 @@ function optionalBoolean(args: Record<string, unknown>, name: string): boolean |
 function optionalNumber(args: Record<string, unknown>, name: string): number | undefined {
   const value = args[name];
   return typeof value === "number" ? value : undefined;
+}
+
+/** One field of a call's input, or no field at all when the argument was absent. An input whose
+ *  optional properties are exact (`exactOptionalPropertyTypes`, which claude-envoy compiles this
+ *  file under) takes an omitted key, never one whose value is `undefined`. */
+function defined<K extends string, V>(name: K, value: V | undefined): { [P in K]?: V } {
+  return (value === undefined ? {} : { [name]: value }) as { [P in K]?: V };
+}
+
+/** A list of strings an argument carries, or nothing when it carries none. */
+function optionalStringArray(args: Record<string, unknown>, name: string): string[] | undefined {
+  const value = args[name];
+  return Array.isArray(value) ? (value as string[]) : undefined;
 }
 
 /** `priority` as the server's tri-state: absent leaves it, null clears it, 0–3 set it. */
@@ -615,20 +643,12 @@ function askUrgency(args: ToolArguments): AskUrgency | undefined {
   return ASK_URGENCIES.find((urgency) => urgency === value);
 }
 
-/** The question text sent to Dispatch: the ref is appended unless the question already cites it. */
-function questionWithRef(question: string, ref: string | undefined): string {
-  return ref === undefined || question.includes(ref) ? question : `${question}\n\nRef: ${ref}`;
-}
-
-/** The validated question plus ref; `argumentProblems` has already refused an over-cap pair. */
+/** The question text sent to Dispatch: the ref appended unless the question already cites it.
+ *  Dispatch holds the pair to its own bound and refuses a longer one. */
 function askQuestionWithRef(args: ToolArguments): string {
-  return questionWithRef(stringArg(args, "question"), optionalString(args, "ref"));
-}
-
-function askQuestionProblem(withRef: string): string | undefined {
-  return withRef.length > ASK_QUESTION_MAX
-    ? `question plus ref ${overCapMessage(withRef.length, ASK_QUESTION_MAX)}; shorten the question or drop the ref`
-    : undefined;
+  const question = stringArg(args, "question");
+  const ref = optionalString(args, "ref");
+  return ref === undefined || question.includes(ref) ? question : `${question}\n\nRef: ${ref}`;
 }
 
 /** The tools whose `images` argument sends pictures. */
@@ -752,9 +772,6 @@ function replyBlockProblem(
   return undefined;
 }
 
-/** A short id: 8+ hex characters (hyphens allowed) that is not a full uuid. */
-const idPrefixPattern = /^[0-9a-f][0-9a-f-]{7,}$/i;
-
 /** How a refusal names the owner whose asks or comments a prefix was matched against. */
 function refOwnerName(ref: ParsedDispatchRef): string {
   return ref.owner.kind === "issue"
@@ -822,7 +839,7 @@ async function resolveIdPrefix(
 ): Promise<string> {
   const fullID = normalizeUUID(id);
   if (fullID !== undefined) return fullID;
-  if (!idPrefixPattern.test(id)) {
+  if (!isIdPrefix(id)) {
     throw new ToolInputError(tool, [
       `${kind} id ${id} must be a full uuid or a prefix of at least 8 hex characters`,
     ]);
@@ -866,7 +883,7 @@ async function readAskRef(
   const asks = await list();
   let matches = asks.filter((ask) => ask.block_id === id);
   if (matches.length === 0) {
-    if (!idPrefixPattern.test(id)) {
+    if (!isIdPrefix(id)) {
       throw new ToolInputError(tool, [
         `ask id ${id} must be a full uuid, a prefix of at least 8 hex characters, or the id of an :::ask block on ${ownerName}`,
       ]);
@@ -919,7 +936,7 @@ async function resolveAskArgument(
   sessionId: string | undefined
 ): Promise<{ readonly id: string; readonly read?: AskRead }> {
   const id = askId(args);
-  if (normalizeUUID(id) === undefined && !idPrefixPattern.test(id)) {
+  if (normalizeUUID(id) === undefined && !isIdPrefix(id)) {
     const asks = await sessionOpenAsks(client, sessionId).catch(() => undefined);
     throw new ToolInputError(tool, [
       asks === undefined ? askIdShapeProblem : `${askIdShapeProblem}; ${openAskHints(asks)}`,
@@ -982,16 +999,6 @@ function itemReplyTo(
 function argumentProblems(tool: string, args: ToolArguments): string[] {
   const problems: string[] = [];
   switch (tool) {
-    case "dispatch_ask": {
-      // The schema already caps the bare question; this covers the ref the tool appends.
-      const question = optionalString(args, "question");
-      const ref = optionalString(args, "ref");
-      if (question !== undefined && ref !== undefined && question.length <= ASK_QUESTION_MAX) {
-        const problem = askQuestionProblem(questionWithRef(question, ref));
-        if (problem !== undefined) problems.push(problem);
-      }
-      break;
-    }
     case "dispatch_edit_ask":
     case "dispatch_resolve_ask":
     case "dispatch_follow": {
@@ -1123,10 +1130,11 @@ function readWithoutEvents(args: ToolArguments): string | undefined {
 /**
  * The dispatch:// form of a dashboard URL on the configured server, or undefined when the
  * value is not such a URL. Accepts the issue, spec, artifact, ask, comment, log and activity
- * pages, project document pages (with their ?ask= / ?comment= deep links, which name the item
- * whatever the fragment), the `#b-<block id>` of a live document page or of an issue ask's,
- * comment's or message's page, which names that block, and the page of an upload an agent's
- * conversation owns (`/agents/<session id>/artifacts/<slug>`).
+ * pages, the Decisions page (which names the issue's decisions.md), project document pages (with
+ * their ?ask= / ?comment= deep links, which name the item whatever the fragment), the
+ * `#b-<block id>` of a live document page or of an issue ask's, comment's or message's page,
+ * which names that block, and the page of an upload an agent's conversation owns
+ * (`/agents/<session id>/artifacts/<slug>`).
  */
 export function dispatchRefFromUrl(value: string, serverUrl: string): string | undefined {
   let url: URL;
@@ -1154,7 +1162,7 @@ export function dispatchRefFromUrl(value: string, serverUrl: string): string | u
       : `#b-${encodeBlockId(id)}`;
   };
   const issuePage = url.pathname.match(
-    /^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|activity|children)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/
+    /^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|activity|children|decisions)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/
   );
   if (issuePage) {
     const [, key = "", page, artifact, ask, comment, message] = issuePage;
@@ -1169,6 +1177,9 @@ export function dispatchRefFromUrl(value: string, serverUrl: string): string | u
     }
     if (page === "spec" && version !== "") return `dispatch://${key}/artifact/spec${version}`;
     if (page === "spec") return `dispatch://${key}/spec${blockOf("v")}`;
+    // The Decisions tab is a view of the issue's decisions.md, so its page names that document,
+    // whatever its fragment.
+    if (page === "decisions") return `dispatch://${key}/artifact/decisions-md`;
     // `/conversation` keeps resolving to the reference it always had, `KEY/log`; `/activity`,
     // the tab that now holds the event list, is spelled as its own path is.
     if (page !== undefined) return `dispatch://${key}/${page === "conversation" ? "log" : page}`;
@@ -1657,7 +1668,7 @@ class DocumentNotFoundError extends Error {}
 function artifactByReference(
   artifacts: readonly Artifact[],
   artifactReference: string,
-  owner: "issue" | "project",
+  owner: Owner,
   canonical: boolean
 ): Artifact {
   const bySlug = artifacts.find((candidate) => candidate.slug === artifactReference);
@@ -1710,7 +1721,7 @@ async function resolveArtifact(
         : [routed, ...unlinked.filter((candidate) => candidate.id !== routed.id)];
     return {
       owner,
-      artifact: artifactByReference(artifacts, artifactReference, "project", canonical),
+      artifact: artifactByReference(artifacts, artifactReference, owner, canonical),
     };
   }
   const issue = await client.getIssue(owner.issue);
@@ -1720,11 +1731,19 @@ async function resolveArtifact(
       (candidate) => candidate.primary || candidate.id === issue.primary_artifact_id
     );
   } else {
-    artifact = artifactByReference(issue.artifacts, artifactReference, "issue", canonical);
+    artifact = artifactByReference(
+      issue.artifacts,
+      artifactReference,
+      { kind: "issue", issue: issue.key },
+      canonical
+    );
   }
   if (!artifact) {
     throw new DocumentNotFoundError(
-      documentReferenceProblem(artifactReference ?? "spec", issue.artifacts, "issue")
+      documentReferenceProblem(artifactReference ?? "spec", issue.artifacts, {
+        kind: "issue",
+        issue: issue.key,
+      })
     );
   }
   return { owner, issue, artifact };
@@ -1784,20 +1803,125 @@ export async function resolveIssueDocumentId(
 const documentHintLimit = 8;
 
 /** The refusal of a document reference: none matched, or, `ambiguous`, several share it as their
- * filename, which their slugs tell apart. */
+ * filename, which their slugs tell apart. An owner with more documents than the hint lists is
+ * named with its count, the documents nearest the reference first (`documentsNearest`), and the
+ * read that lists them all. */
 function documentReferenceProblem(
   reference: string,
-  documents: readonly Pick<Artifact, "slug" | "name">[],
-  owner: "issue" | "project",
+  documents: readonly (Pick<Artifact, "slug" | "name"> & { readonly kind?: Artifact["kind"] })[],
+  owner: Owner,
   ambiguous = false
 ): string {
-  const hints = documents
+  const scope = owner.kind;
+  const busy = !ambiguous && documents.length > documentHintLimit;
+  const hints = (busy ? documentsNearest(reference, documents) : documents)
     .slice(0, documentHintLimit)
     .map((document) => `${document.slug} (${document.name})`);
   const list = hints.length === 0 ? "none" : hints.join(", ");
+  if (busy) {
+    const read =
+      owner.kind === "issue"
+        ? `dispatch read --issue ${owner.issue}`
+        : `dispatch read --project ${owner.project}`;
+    // `--artifact` names an uploaded picture or file as well as a document, so the hint counts
+    // and ranks them too, and says so: Dispatch's own refusal counts documents alone.
+    const counted = documents.every((document) => (document.kind ?? "doc") === "doc")
+      ? "documents"
+      : "documents and files";
+    return `document "${reference}" not found by slug; this ${scope}'s ${documents.length} ${counted} include: ${list}; ${read} lists them all`;
+  }
   return ambiguous
-    ? `"${reference}" names ${documents.length} documents on this ${owner}; use a slug: ${list}`
-    : `document "${reference}" not found by slug; this ${owner}'s documents: ${list}`;
+    ? `"${reference}" names ${documents.length} documents on this ${scope}; use a slug: ${list}`
+    : `document "${reference}" not found by slug; this ${scope}'s documents: ${list}`;
+}
+
+/** `documents`, given oldest first as Dispatch lists them, ordered for a hint about `reference`:
+ * those whose slug or filename is close to it (`documentCloseness`) first, nearest first, then
+ * every other one, each group newest first. Dispatch's `documentsNearest`
+ * (packages/envoy/internal/dispatch/api/artifacts.go) orders its own hint by the same rule. */
+function documentsNearest<T extends Pick<Artifact, "slug" | "name">>(
+  reference: string,
+  documents: readonly T[]
+): T[] {
+  return documents
+    .map((document, index) => ({
+      document,
+      index,
+      ...documentCloseness(reference, document.slug, document.name),
+    }))
+    .sort((a, b) => {
+      if (a.near !== b.near) return a.near ? -1 : 1;
+      if (a.near && a.distance !== b.distance) return a.distance - b.distance;
+      return b.index - a.index;
+    })
+    .map(({ document }) => document);
+}
+
+/** An owner's documents as a read lists them, one line each in the order Dispatch gives: slug,
+ *  then filename and kind, the address `artifact` takes and the name a person sees. */
+function documentListLines(
+  documents: readonly Pick<Artifact, "slug" | "name" | "kind">[]
+): string[] {
+  return documents.length === 0
+    ? ["- none"]
+    : documents.map((document) => `- ${document.slug} (${document.name}, ${document.kind})`);
+}
+
+/** A reference compared with a document's slug and filename, ASCII letter case ignored: the smaller
+ * edit distance of the two, and whether the document is close to it - within a third of the
+ * reference's length (at least 2 edits), or one holding the other where the one held is at least 4
+ * characters long, whose distance is then exactly their difference in length. A spelling more than
+ * `limit` edits away gives no distance (`boundedEditDistance` knows only that it is past `limit`),
+ * so it never ties a document close through its other spelling. Characters are code points, as
+ * Go's runes are, and only ASCII letters are folded, since JavaScript and Go lowercase other
+ * letters differently (`İ`) and Dispatch's `documentCloseness` must rank alike. */
+function documentCloseness(
+  reference: string,
+  slug: string,
+  name: string
+): { distance: number; near: boolean } {
+  const wanted = [...reference.replace(/[A-Z]/g, (letter) => letter.toLowerCase())];
+  const limit = Math.max(2, Math.floor(wanted.length / 3));
+  let distance = Number.POSITIVE_INFINITY;
+  for (const candidate of [slug, name]) {
+    const label = [...candidate.replace(/[A-Z]/g, (letter) => letter.toLowerCase())];
+    let edits = boundedEditDistance(wanted, label, limit);
+    if (
+      (wanted.length >= 4 && label.join("").includes(wanted.join(""))) ||
+      (label.length >= 4 && wanted.join("").includes(label.join("")))
+    ) {
+      edits = Math.abs(label.length - wanted.length);
+    } else if (edits > limit) {
+      continue;
+    }
+    distance = Math.min(distance, edits);
+  }
+  return distance === Number.POSITIVE_INFINITY
+    ? { distance: limit + 1, near: false }
+    : { distance, near: true };
+}
+
+/** The Levenshtein distance between `a` and `b`, or `limit + 1` once it is known to be more. */
+function boundedEditDistance(a: readonly string[], b: readonly string[], limit: number): number {
+  if (Math.abs(a.length - b.length) > limit) return limit + 1;
+  let previous = Array.from({ length: b.length + 1 }, (_, j) => j);
+  let current = new Array<number>(b.length + 1).fill(0);
+  for (let i = 1; i <= a.length; i++) {
+    current[0] = i;
+    let smallest = i;
+    for (let j = 1; j <= b.length; j++) {
+      const substitution = (previous[j - 1] as number) + (a[i - 1] === b[j - 1] ? 0 : 1);
+      current[j] = Math.min(
+        (previous[j] as number) + 1,
+        (current[j - 1] as number) + 1,
+        substitution
+      );
+      smallest = Math.min(smallest, current[j] as number);
+    }
+    if (smallest > limit) return limit + 1;
+    [previous, current] = [current, previous];
+  }
+  return Math.min(previous[b.length] as number, limit + 1);
 }
 
 const askHintLimit = 8;
@@ -1807,6 +1931,32 @@ function askIDInputProblem(asks: readonly Pick<Ask, "id" | "question">[], scope:
     .slice(0, askHintLimit)
     .map((ask) => `${ask.id.slice(0, 8)}… ${textHead(ask.question)}`);
   return `ask IDs are UUIDs; use the full ask ID; ${scope} open asks: ${hints.length === 0 ? "none" : hints.join(", ")}`;
+}
+
+/** The line a reply on an approval request a newer version moved prints: no reply hands such a
+ *  request back (the server's approvalMoved), only `request-approval` at the current version does.
+ *  Undefined when the ask is anything else or its read fails, so the reply reports as before. */
+async function movedApprovalLine(
+  client: DispatchClient,
+  askID: string
+): Promise<string | undefined> {
+  const ask = (await client.getAsk(askID).catch(() => undefined))?.ask;
+  const approval = ask?.approval;
+  if (ask?.kind !== "approval" || approval === undefined) return undefined;
+  if (approval.requested_version >= approval.version) return undefined;
+  const owner =
+    ask.issue_key === null
+      ? `--project ${ask.approval_artifact?.project ?? "<project>"} --artifact ${approval.artifact_id}`
+      : ask.approval_artifact?.primary === true
+        ? `--issue ${ask.issue_key}`
+        : `--issue ${ask.issue_key} --artifact ${approval.artifact_id}`;
+  return (
+    `The reply did not hand the ask to the human: it is the approval request for ${approval.name} ` +
+    `at version ${approval.requested_version}, and ${approval.name} is now version ${approval.version}. ` +
+    "No reply hands a moved approval request back. Once the human has agreed to every point in " +
+    `version ${approval.version}, run: dispatch request-approval ${owner} --summary ` +
+    `'<what changed since version ${approval.requested_version}>'`
+  );
 }
 
 async function invalidReplyToAskProblem(
@@ -1853,17 +2003,21 @@ function toolActor(origin: DispatchOrigin, input: ExecuteDispatchToolInput): Act
 function approvalLine(artifact: Pick<Artifact, "approval">): string | undefined {
   const approval = artifact.approval;
   if (approval === undefined || approval.state === "draft") return undefined;
+  const content =
+    approval.content_sha256 === undefined
+      ? ""
+      : `, content sha256:${approval.content_sha256}${approval.content_sha256_source === "backfill" ? " (hashed after approval)" : ""}`;
   switch (approval.state) {
     case "awaiting": {
       const turn = approval.waiting_on === undefined ? "" : `, waiting on ${approval.waiting_on}`;
       return `Approval: awaiting${turn} (requested by ${approval.requested_by?.id ?? "unknown"}, ask ${approval.ask_id ?? "?"})`;
     }
     case "approved":
-      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}`;
+      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}${content}`;
     case "stale":
-      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}, changed since (now v${approval.latest_version}) - the human's own answer to a decision block carries the approval when that answer is the whole change since v${approval.version}; for any other change, request approval again once the human has agreed to every point in this version, with a --summary naming what changed since v${approval.version}`;
+      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}, changed since (now v${approval.latest_version}) - the human's own answer to a decision block carries the approval when that answer is the whole change since v${approval.version}; for any other change, request approval again once the human has agreed to every point in this version, with a --summary naming what changed since v${approval.version}${content}`;
     case "changes_requested":
-      return `Approval: changes requested on v${approval.version} by ${approval.by?.id ?? "unknown"}: ${approval.reason ?? ""}`;
+      return `Approval: changes requested on v${approval.version} by ${approval.by?.id ?? "unknown"}: ${approval.reason ?? ""}${content}`;
   }
 }
 
@@ -1890,40 +2044,120 @@ function componentsLine(components: IssueComponents): string {
  * page see one name for one holder; without a registry it falls back to the title the session
  * stamped on the claim, as the dashboard's does. Whether it holds is `claimHolds`, the judgement
  * the dashboard's claim chip makes too: a session the loaded registry does not list reads
- * "· not running", as the chip does, and its issue is free to claim; with no registry (`titles`
+ * "· not running", as the chip does, and its issue is free to claim; with no registry (`agents`
  * undefined) a session's claim reads "· liveness unknown", since nothing can say whether that
- * session runs. A person's claim, and a session the registry lists, carry no marker.
+ * session runs. A person's claim, and a session the registry lists as live, carry no marker.
+ *
+ * `read` is the issue read's own answer about the holder, which only `dispatch_read` has; a list
+ * row has none and is judged by the holder's own registry row instead (`holderLiveness`). Either
+ * way a holder that has missed its heartbeats without ending reads
+ * "· unresponsive since <last seen>, takeable at <time>". An agent deciding whether to take the
+ * issue reads exactly that - wait until the second time, or pick it up now - so both times are
+ * named, and the second is `claimTakeableAt`, the moment the server's own refusal names.
  */
-function claimText(claim: IssueClaim, titles: ReadonlyMap<string, string> | undefined): string {
-  const holding = claimHolds(claim, titles);
+function claimText(
+  claim: IssueClaim,
+  agents: LiveAgents | undefined,
+  read: ClaimHolderLiveness = {}
+): string {
+  const titles = agents?.titles;
+  const liveness = holderLiveness(claim, agents, read);
+  const holding = claimHolds(claim, titles, liveness);
+  const takeableAt = claimTakeableAt(liveness);
+  const unresponsive =
+    liveness.holder_state === "unresponsive" && liveness.last_seen != null
+      ? ` · unresponsive since ${liveness.last_seen}${takeableAt === null ? "" : `, takeable at ${takeableAt}`}`
+      : " · unresponsive";
   const marker =
-    holding === "unknown" ? " · liveness unknown" : holding === "lapsed" ? " · not running" : "";
+    holding === "unknown"
+      ? " · liveness unknown"
+      : holding === "lapsed"
+        ? " · not running"
+        : holding === "unresponsive"
+          ? unresponsive
+          : "";
   return `${actorLabel(claim.actor, titles)} since ${claim.at}${marker}`;
 }
 
 /**
- * The live agent registry behind one piece of output, as session titles by id: at most one
- * `GET /api/v1/agents` per tool call, never per row, and none at all unless a session holds
- * something being rendered — the same gate the dashboard applies with `useAgents(holdsSession)`.
+ * What a reader knows about a session claim's holder: the issue read's own answer wherever it
+ * gave one, filled in from the holder's row in the live agent registry, which says the same
+ * thing for a reader that has no such read. The registry lists an unresponsive session, because
+ * an unresponsive session keeps its roles and its claims, so reading the list as membership
+ * alone showed such a holder as plainly holding while `dispatch read` and the dashboard said
+ * unresponsive (dispatch://INFRA-392, R5).
+ */
+function holderLiveness(
+  claim: IssueClaim,
+  agents: LiveAgents | undefined,
+  read: ClaimHolderLiveness
+): ClaimHolderLiveness {
+  if (claim.actor.kind !== "session") return read;
+  const row = agents?.liveness.get(claim.actor.id);
+  if (row === undefined) return read;
+  // Each field is omitted rather than set to undefined: a reader compiled with
+  // exactOptionalPropertyTypes (claude-envoy) takes "absent" and "undefined" for different
+  // things, and `null` is what either side says when it looked and could not tell.
+  const holderState = read.holder_state ?? row.holder_state;
+  const lastSeen = read.last_seen ?? row.last_seen;
+  const takeableAt = read.takeable_at ?? row.takeable_at;
+  return {
+    ...(holderState === undefined ? {} : { holder_state: holderState }),
+    ...(lastSeen === undefined ? {} : { last_seen: lastSeen }),
+    ...(takeableAt === undefined ? {} : { takeable_at: takeableAt }),
+  };
+}
+
+/**
+ * The live agent registry behind one piece of output: each listed session's title, for naming a
+ * holder, and what that session's own row says about it, for judging one.
+ */
+interface LiveAgents {
+  /** Session titles by session id, as `actorLabel` and `claimHolds` read them. */
+  readonly titles: ReadonlyMap<string, string>;
+  /** Each listed session's state and last registration, by session id (`agentLiveness`). */
+  readonly liveness: ReadonlyMap<string, ClaimHolderLiveness>;
+}
+
+/**
+ * The registry behind one piece of output: at most one `GET /api/v1/agents` per tool call, never
+ * per row, and none at all unless a session holds something being rendered — the same gate the
+ * dashboard applies with `useAgents(holdsSession)`.
  *
  * `undefined` is no registry: none was needed, or the agents request failed. Names then fall back
  * to the title each session stamped on its write, and a session's claim reads "liveness unknown"
  * (`claimText`) rather than running or not running. A holder the registry does not list is the
  * ordinary case, a session that has ended, whose claim the next agent may take.
  */
-async function liveSessionTitles(
+async function liveAgents(
   client: DispatchClient,
   needed: boolean
-): Promise<ReadonlyMap<string, string> | undefined> {
+): Promise<LiveAgents | undefined> {
   if (!needed) {
     return undefined;
   }
   try {
     const agents = await client.listAgents();
-    return new Map(agents.map((agent) => [agent.session_id, agent.title]));
+    return {
+      titles: new Map(agents.map((agent) => [agent.session_id, agent.title])),
+      liveness: new Map(agents.map((agent) => [agent.session_id, agentLiveness(agent)])),
+    };
   } catch {
     return undefined;
   }
+}
+
+/**
+ * One agent row as a claim's reader judges it. A Dispatch server predating `state` names none,
+ * and a claim is then judged by list membership alone, as it always was. The row's `last_seen`
+ * is epoch milliseconds, where a claim's liveness carries RFC3339, and a row with no
+ * registration behind it (0) names no time rather than 1970.
+ */
+function agentLiveness(agent: Agent): ClaimHolderLiveness {
+  return {
+    ...(agent.state === undefined ? {} : { holder_state: agent.state }),
+    ...(agent.last_seen > 0 ? { last_seen: new Date(agent.last_seen).toISOString() } : {}),
+  };
 }
 
 /** Whether a claim needs the live registry to be named: only a session has a title that moves. */
@@ -1943,7 +2177,12 @@ function routeHeldBySession(issue: RoutedIssue): boolean {
  * reaches anyone, from the `route_status` the server resolved on this read. A route to a role
  * nobody holds, or to a session that is not running, reaches nobody as of the listener's session
  * list Dispatch last stored, at most 5 s old and the same on every server process, so it says
- * so - and says "right now", because a restarting session is absent for minutes.
+ * so - and says "right now", because a restarting session is absent for minutes. A route whose
+ * holder is unresponsive still reaches it - the listener stores what is sent while it is silent
+ * - so it names the state rather than reading as unreachable. An `unknown` route says why from
+ * `route_status_reason`: a listener whose agent list is refilling did answer and will judge it
+ * in a moment, while one that is unreachable (or a server too old to give a reason) did not
+ * answer at all.
  */
 function routeText(issue: RoutedIssue, titles?: ReadonlyMap<string, string>): string {
   if (issue.route === null) return "none";
@@ -1953,10 +2192,16 @@ function routeText(issue: RoutedIssue, titles?: ReadonlyMap<string, string>): st
       routeHeldBySession(issue) && holder !== null
         ? ` (held by ${titles?.get(holder) ?? holder})`
         : "",
+    holder_unresponsive: issue.route.startsWith("role:")
+      ? ` (its holder${holder === null ? "" : ` ${titles?.get(holder) ?? holder}`} is unresponsive: messages wait for it)`
+      : " (that session is unresponsive: messages wait for it)",
     no_holder: issue.route.startsWith("role:")
       ? " (nobody holds it right now)"
       : " (that session is not running right now)",
-    unknown: " (the Envoy listener did not answer, so whether it reaches anyone is unknown)",
+    unknown:
+      issue.route_status_reason === "refilling"
+        ? " (the Envoy listener's agent list is refilling, so whether it reaches anyone is unknown; try again in a moment)"
+        : " (the Envoy listener did not answer, so whether it reaches anyone is unknown)",
   };
   return issue.route + (issue.route_status == null ? "" : reach[issue.route_status]);
 }
@@ -1974,6 +2219,29 @@ function progressText(progress: IssueProgress | undefined, sep: string): string 
     parts.push(`children ${progress.children.done}/${progress.children.total}`);
   }
   return parts.join(sep);
+}
+
+/** What `dispatch results` prints: each check of the issue's Verification document with its
+ *  latest result and whether that result is current. A check with no result says so, and an
+ *  issue with no Verification document says that instead of printing an empty list: Dispatch
+ *  answers `verification_artifact_id` "" for such an issue, never null, so that is what is
+ *  compared. */
+function formatCheckResults(results: IssueCheckResults): string {
+  if (results.verification_artifact_id === "") {
+    return `${results.issue} has no Verification document, so it has no checks. Write one (verification.md) with a check block per thing that must be proved.`;
+  }
+  if (results.checks.length === 0) {
+    return `${results.issue}'s Verification document holds no check blocks.`;
+  }
+  const lines = results.checks.map((check) => {
+    const head = `- ${check.block_id} (${check.when}): `;
+    const latest = check.results[0];
+    if (latest === undefined) {
+      return `${head}no result yet. ${check.text}`;
+    }
+    return `${head}${latest.verdict} at ${latest.commit_sha.slice(0, 12)} by ${latest.role}, ${latest.currency ?? "unknown"}. ${check.text}`;
+  });
+  return [`Checks of ${results.issue}:`, ...lines].join("\n");
 }
 
 /** Which repository the issue targets and where it came from: its own, or resolved through its
@@ -2027,7 +2295,8 @@ function issueSummary(
   references: IssueReferences | string,
   graph: readonly string[],
   linkBase: string,
-  titles?: ReadonlyMap<string, string>
+  coverage: IssueCoverage | string,
+  agents?: LiveAgents
 ): string {
   const asks = issue.open_asks;
   const spec = issue.artifacts?.find((artifact) => artifact.primary);
@@ -2047,16 +2316,22 @@ function issueSummary(
     `Link: ${new URL(`/issues/${encodeURIComponent(issue.key)}`, linkBase).toString()}`,
     `Status: ${issue.status}`,
     `Assignee: ${issue.assignee ?? "unassigned"}`,
-    `Claimed by: ${issue.claim === null ? "nobody" : claimText(issue.claim, titles)}`,
+    `Claimed by: ${issue.claim === null ? "nobody" : claimText(issue.claim, agents, issue)}`,
     ...(issue.priority === null ? [] : [`Priority: P${issue.priority}`]),
     `Labels: ${issue.labels.length === 0 ? "none" : issue.labels.join(", ")}`,
     componentsLine(issue.components),
-    `Route: ${routeText(issue, titles)}`,
+    `Route: ${routeText(issue, agents?.titles)}`,
     repositoryLine(issue),
     `Progress: ${progressText(issue.progress, ", ") || "none"}`,
     ...(specApproval === undefined
       ? []
       : [`Spec ${specApproval.replace(/^Approval/, "approval")}`]),
+    // What the spec's requirements lack: one line per gap, or the one line that says the spec
+    // marks none. A gap refuses nothing; it is what the reader fixes before the work starts. A
+    // read the server could not answer says so rather than reading as a spec with no gaps.
+    ...(typeof coverage === "string"
+      ? [`Coverage: ${coverage}`]
+      : coverage.gaps.map((gap) => `Coverage: ${gap}`)),
     // The links a person or an agent put on the issue — the pull request that delivers it among
     // them — which the issue page renders with their state; the reference graph below carries
     // only links between Dispatch nodes.
@@ -2066,6 +2341,10 @@ function issueSummary(
       : issue.external_links.map(
           (link) => `- ${link.url}${link.kind === undefined ? "" : ` (${link.kind})`}`
         )),
+    // Every document, picture and file the issue holds, oldest first, which a document
+    // reference's not-found hint points to once the issue holds more than the hint lists.
+    "Documents:",
+    ...documentListLines(issue.artifacts ?? []),
     "Open asks:",
     ...(asks.length === 0 ? ["- none"] : asks.map((ask) => `- ${ask.id}: ${ask.question}`)),
     "References:",
@@ -2155,6 +2434,23 @@ async function issueReferencesOrUnavailable(
 }
 
 /**
+ * What the issue's requirements lack, or why the server could not say: a Dispatch that does not
+ * serve the coverage read yet answers `unavailable`, and any other failure is named, as the
+ * closure and graph sections do (unavailableReason). A swallowed failure would make a spec with
+ * uncovered requirements read exactly like a fully covered one.
+ */
+async function issueCoverageOrReason(
+  client: DispatchClient,
+  key: string
+): Promise<IssueCoverage | string> {
+  try {
+    return await client.issueCoverage(key);
+  } catch (error) {
+    return unavailableReason(error);
+  }
+}
+
+/**
  * The sections every read ends with: the `Node:` line (the read node's maker, last change and
  * parent), `Referenced by:` (edges pointing at the node, mentions and structure alike) and
  * `Links:` (edges it writes), read from the reference graph in both directions. A graph the
@@ -2206,24 +2502,37 @@ function nodeLine(node: GraphNode): string[] {
 }
 
 /**
- * A block read's head, from the node its reference names. A document's block: the block, the
- * document it is in (`ref.document`, the reference before the `#b-`), the version its text last
- * changed in and that text. A comment's or message's block: one line naming the block, its item
- * and the comment revision its text last changed in (`Block b2 of comment <id> (changed in
- * revision 1):`), then its text. A part of an ask reads the same way, under the name `noun`
- * gives it (`Option b2 of ask <id> (changed in revision 1):`), the revision being the ask's
- * parts'. A block no current version or revision holds has neither a changed version nor text.
- * Then for a pinned ref how the block stands against the version or revision it pins and its
- * text there.
+ * A block read's head, from the node its reference names and, for a block of a document, the
+ * live block `GET /api/v1/artifacts/{id}/blocks` lists under its id (`typedBlockOf`). A
+ * document's block: the block, its type, the document it is in (`ref.document`, the reference
+ * before the `#b-`), every attribute it carries — a `check`'s `serves`, `surface`, `run`, `when`
+ * and `negative_control`, a `plan_task`'s `serves` and `needs` — the version its text last
+ * changed in and that text, the claim a `check` makes among it. A comment's or message's block:
+ * one line naming the block, its item and the comment revision its text last changed in (`Block
+ * b2 of comment <id> (changed in revision 1):`), then its text; neither has a type or attributes.
+ * A part of an ask reads the same way, under the name `noun` gives it (`Option b2 of ask <id>
+ * (changed in revision 1):`), the revision being the ask's parts'. A block no current version or
+ * revision holds has no changed version, text, type or attribute. Then for a pinned ref how the
+ * block stands against the version or revision it pins and its text there.
  */
-function blockLines(node: GraphNode, ref: ParsedDispatchRef, noun = "Block"): string[] {
+function blockLines(
+  node: GraphNode,
+  ref: ParsedDispatchRef,
+  typed?: ArtifactBlock | undefined,
+  noun = "Block"
+): string[] {
   const unit = ref.item === undefined ? "version" : "revision";
   const blockID = node.block_id ?? ref.block;
   const head =
     ref.item === undefined
       ? [
           `Block: ${blockID}`,
+          ...(typed === undefined ? [] : [`Type: ${typed.type}`]),
           `Document: ${node.document ?? ref.document}`,
+          ...(typed?.attributes ?? []).map(
+            (attribute) =>
+              `${attribute.name}: ${attribute.value === "" ? "(empty)" : attribute.value}`
+          ),
           ...(node.changed_version === undefined
             ? []
             : [`Changed in version: ${node.changed_version}`]),
@@ -2248,6 +2557,31 @@ function blockLines(node: GraphNode, ref: ParsedDispatchRef, noun = "Block"): st
     `Text at ${unit} ${pin.version}:`,
     pin.text,
   ];
+}
+
+/**
+ * The live block of the document a block reference names, under the id the reference carries:
+ * its type and the attributes a typed block holds. The reference names its document's owner and
+ * slug (`spec` for an issue's spec), so one read serves it and the document is never resolved.
+ * A block of a comment or a message has neither type nor attributes, and so has a block the
+ * live document no longer holds — a pinned reference's, say — so both answer nothing. A listing
+ * the caller cannot read leaves the block's head as it read before the listing, rather than
+ * failing the read.
+ */
+async function typedBlockOf(
+  client: DispatchClient,
+  ref: ParsedDispatchRef
+): Promise<ArtifactBlock | undefined> {
+  if (ref.item !== undefined || ref.block === undefined) return undefined;
+  try {
+    const blocks =
+      ref.owner.kind === "project"
+        ? await client.projectArtifactBlocks(ref.owner.project, ref.id)
+        : await client.issueArtifactBlocks(ref.owner.issue, ref.id);
+    return blocks.find((block) => block.id === ref.block);
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -2389,7 +2723,7 @@ function askSummary(
     ...(answer === null
       ? ["- none"]
       : [
-          `- By: ${answer.user}`,
+          `- By: ${actorActText(answer.user, answer.act)}`,
           `- Selected: ${answer.selected.length === 0 ? "none" : answer.selected.join(", ")}`,
           ...(answer.text === null ? [] : [`- Text: ${answer.text}`]),
           ...(answer.id === undefined ? [] : [`- Reference: ${partRef(answer.id)}`]),
@@ -2400,7 +2734,8 @@ function askSummary(
       : [
           "Earlier answers:",
           ...earlierAnswers.map(
-            (earlier) => `- ${earlier.at} · ${earlier.user} · ${askAnswerText(earlier)}`
+            (earlier) =>
+              `- ${earlier.at} · ${actorActText(earlier.user, earlier.act)} · ${askAnswerText(earlier)}`
           ),
         ]),
     ...(ask.resolution === undefined
@@ -2491,6 +2826,123 @@ export function formatOpenAsksSummary(response: OpenAsksResponse, baseUrl: strin
   ].join("\n");
 }
 
+/** The person a credential acts for, as `GET /api/v1/whoami` names them: the owner of a personal
+ *  or broker-issued token, and a signed-in person's own login in the canonical lowercase every
+ *  stored login and assignee carries. `null` for a credential that acts for nobody, which the
+ *  shared token and a service-account token are. */
+function whoamiPerson(identity: WhoamiResponse): string | null {
+  return identity.kind === "agent" ? identity.owner : identity.login.toLowerCase();
+}
+
+/** How much of an ask's question the Inbox summary's line carries. The event summaries' head
+ *  (`textHead`) is longer: a question is one line among four counted bands here, and the whole of
+ *  it is one `dispatch read` away. */
+const INBOX_QUESTION_HEAD = 80;
+
+/**
+ * Whether the person has deferred this row and its moment is still ahead: the Inbox page's own
+ * `isSnoozed` (`packages/dispatch/web/src/features/inbox/snooze.ts`), re-read here and held to
+ * the page by Dispatch's browser test (`packages/dispatch/e2e/inbox-cli.e2e.ts`), which compares
+ * this command's bands with the page's. The window is absolute, so nothing an agent does to the
+ * ask shortens it; a row Dispatch lists with no snooze at all is not deferred, and neither is one
+ * whose moment has passed.
+ */
+function inboxSnoozed(row: InboxRow, now: number): boolean {
+  if (row.snoozed_until === null) return false;
+  const at = Date.parse(row.snoozed_until);
+  return !Number.isNaN(at) && at > now;
+}
+
+/**
+ * Which band a row sits in: the page's `sectionOf` (`.../features/inbox/sections.ts`). A snooze
+ * the person set wins over everything, because deferring an ask is them saying it does not need
+ * them now; every other row sits under whose turn it is. A row the Inbox lists without a turn
+ * belongs to no band, as on the page, and so is listed under no heading.
+ */
+function inboxSection(row: InboxRow, now: number): "agent" | "human" | "later" | undefined {
+  if (inboxSnoozed(row, now)) return "later";
+  return row.waiting_on;
+}
+
+/** Where an inbox row's ask lives: the issue key or the document slug its line is named by, and
+ *  the ask's own `dispatch://` address under that owner. Every row the Inbox lists has one owner
+ *  or the other; a row with neither, which no read makes, is named by the ask's id alone. */
+function inboxAskOwner(row: InboxRow): { readonly label: string; readonly ref: string } {
+  const key = row.issue?.key ?? row.issue_key;
+  if (key !== null) {
+    return { label: key, ref: dispatchChildRef(dispatchIssueRef(key), "ask", row.id) };
+  }
+  const document = row.document;
+  if (document !== undefined) {
+    return {
+      label: document.slug,
+      ref: dispatchChildRef(dispatchDocumentRef(document.project, document.slug), "ask", row.id),
+    };
+  }
+  return { label: row.id, ref: row.id };
+}
+
+function inboxAskLine(row: InboxRow): string {
+  const { label, ref } = inboxAskOwner(row);
+  const priority = row.priority === null ? "P-" : `P${row.priority}`;
+  return `- ${label} · ${priority} · ${row.kind} · ${textHead(row.question, INBOX_QUESTION_HEAD)} · ${ref}`;
+}
+
+/** One pending credential request: what it asks for, when, the sessions it names and the page
+ *  where it is decided. A row that names no session leaves that field out rather than printing
+ *  two dashes, and a machine login, which is decided with `dispatch` rather than on a broker
+ *  page, carries no url to print. */
+function credentialRequestLine(request: CredentialPendingRow): string {
+  const session = request.session ?? null;
+  return [
+    `- ${request.kind}`,
+    request.identifiers.join(", "),
+    request.requested_at,
+    ...(session === null
+      ? []
+      : [`session request=${session.request ?? "-"}, enrollment=${session.enrollment ?? "-"}`]),
+    ...(request.approve_url === undefined ? [] : [request.approve_url]),
+  ].join(" · ");
+}
+
+/**
+ * What the person's Inbox page shows, as the `dispatch inbox` command prints it: each heading
+ * with its count, then the rows under it, in the order the page bands them. The rows within a
+ * band are the server's order and nothing re-sorts them.
+ *
+ * `Needs you` is the page's `needsYou` (`.../features/inbox/BlockedOnYou.tsx`): the asks waiting
+ * on a person that the viewer has not deferred and that sit on their own issues (`waitingOnYou`),
+ * plus every credential request, which is the viewer's by construction because the list is read
+ * as `?approver=me`. Here that is the band's own rows and nothing narrower, since `?assignee=me`
+ * keeps only the asks on issues assigned to the caller, as the page's default view does; counting
+ * the rows it prints is therefore the page's rule, and it is the one count that cannot disagree
+ * with the lines under it.
+ */
+function formatInboxSummary(
+  rows: readonly InboxRow[],
+  requests: readonly CredentialPendingRow[],
+  now: number
+): string {
+  const sections = { agent: [] as InboxRow[], human: [] as InboxRow[], later: [] as InboxRow[] };
+  for (const row of rows) {
+    const section = inboxSection(row, now);
+    if (section !== undefined) sections[section].push(row);
+  }
+  return [
+    `Needs you ${sections.human.length + requests.length}`,
+    ...sections.human.map(inboxAskLine),
+    "",
+    `Waiting on agents ${sections.agent.length}`,
+    ...sections.agent.map(inboxAskLine),
+    "",
+    `Later ${sections.later.length}`,
+    ...sections.later.map(inboxAskLine),
+    "",
+    `Credential requests ${requests.length}`,
+    ...requests.map(credentialRequestLine),
+  ].join("\n");
+}
+
 function commentSummary({ comment, replies }: CommentRead, graph: readonly string[]): string {
   const root = [
     `${comment.id} · ${actorText(comment.author)}`,
@@ -2502,6 +2954,7 @@ function commentSummary({ comment, replies }: CommentRead, graph: readonly strin
     `${reply.id} · ${actorText(reply.author)}`,
     ...anchorLines(reply),
     ...replyBlockLines(reply),
+    ...(reply.answers != null && reply.answers !== comment.id ? [`Answers: ${reply.answers}`] : []),
     `Body: ${reply.body}`,
   ]);
   return [
@@ -2793,7 +3246,7 @@ async function listDocumentBlocks(
   const { bytes, blocks } = live;
   const decoder = new TextDecoder();
   const lines = [
-    `Blocks of ${artifact.name}, in document order, each indented under the block holding it: id, type, (token; anchored comments and asks), opening words. A table lists its rows by the index delete_row takes and its cells by the row and the column delete_column takes.`,
+    `Blocks of ${artifact.name}, in document order, each indented under the block holding it: id, type, (token; anchored comments and asks), opening words, then a typed block's serves and needs. A table lists its rows by the index delete_row takes and its cells by the row and the column delete_column takes.`,
   ];
   const holders: ArtifactBlock[] = [];
   for (const block of blocks) {
@@ -2810,6 +3263,16 @@ async function listDocumentBlocks(
     lines.push(
       `${indent}${block.id} ${block.type} (${block.token ?? "no token"}; ${comments} comment${comments === 1 ? "" : "s"}, ${asks} ask${asks === 1 ? "" : "s"}): ${opening}`
     );
+    // Every pointer a typed block holds, in the order its type declares them: a reader follows
+    // these between documents, and a `block[]` attribute a type declares later must not go
+    // silently unprinted. A pointer is what the schema declares `block[]`, never what reads like
+    // one: a check's `run` may quote a `dispatch://` URL, and it is a command, not a pointer.
+    // Every attribute of a block is in `dispatch read` of its reference.
+    for (const attribute of block.attributes ?? []) {
+      if (attribute.kind === "block[]" && attribute.value !== "") {
+        lines.push(`${indent}  ${attribute.name}: ${attribute.value}`);
+      }
+    }
     if (block.type === "table") {
       if (block.table === undefined) {
         lines.push(
@@ -3271,7 +3734,7 @@ export async function checkDispatchCall(input: DispatchCallCheckInput): Promise<
 export async function executeDispatchTool(
   input: ExecuteDispatchToolInput
 ): Promise<DispatchToolResult> {
-  const { url: configUrl, token: configToken } = input.config;
+  const { url: configUrl, credential } = input.config;
   // Every link the command prints is to Dispatch's dashboard as people open it: the public URL when
   // the session has one (a pod reaches Dispatch at an in-cluster address nobody else can open), and
   // the API's URL otherwise.
@@ -3308,7 +3771,7 @@ export async function executeDispatchTool(
   // A factory, not one instance: the constructor starts the request deadline, and the main
   // path resolves the origin (a subprocess) before it needs a client.
   const dispatchClient = (): DispatchClient =>
-    new DispatchClient(configUrl, configToken, fetchImpl, input.signal, input.writeRetry);
+    new DispatchClient(configUrl, credential, fetchImpl, input.signal, input.writeRetry);
   if (input.tool === "dispatch_open_asks") {
     const client = dispatchClient();
     const project = optionalString(ownerArguments.args, "project");
@@ -3345,7 +3808,7 @@ export async function executeDispatchTool(
     if (!sessionId) throw new Error("host session id is required for dispatch whoami");
     const client = dispatchClient();
     const identity = await client.whoami();
-    const owner = identity.kind === "agent" ? identity.owner : identity.login.toLowerCase();
+    const owner = whoamiPerson(identity);
     // A Dispatch that predates verified service tokens omits the field entirely.
     const service = identity.kind === "agent" ? (identity.service ?? null) : null;
     // So does one that predates broker-issued tokens, which are the only credential that proves
@@ -3356,13 +3819,22 @@ export async function executeDispatchTool(
     const session = proved ?? sessionId;
     const unowned =
       "no owner, so an issue you create without an assignee takes its parent's assignee, else the project's default assignee, else nobody.";
+    // A broker token is the one credential that proves a session of its own, so a caller that
+    // names a service and proves a session is the kind Dispatch refuses every write with
+    // SIGN_IN_REQUIRED. whoami is where a person asks what their credential may do, so it says
+    // that here rather than describing the issue creation the server would refuse, and it names
+    // the command that gets them a write. A verified service-account token names a service and
+    // proves no session; it writes as before, and keeps the sentence it had.
+    const signInNeeded = owner === null && service !== null && proved !== null;
     const acting =
       owner !== null
         ? `Session ${session} acts for ${owner}: issues you create without an assignee are assigned to ${owner}.`
         : service !== null
           ? // The text names the identity the way every other surface does; details
             // keeps the subject whole, because that is the persisted value.
-            `Session ${session} runs as service ${serviceSubjectLabel(service)}: ${unowned}`
+            signInNeeded
+            ? `Session ${session} runs as service ${serviceSubjectLabel(service)} and no person, so it may read but Dispatch refuses every write it makes: run \`agent-secrets login\` on this machine to write as yourself.`
+            : `Session ${session} runs as service ${serviceSubjectLabel(service)}: ${unowned}`
           : `Session ${session} runs under the shared token: ${unowned}`;
     const elsewhere =
       proved !== null && proved !== sessionId
@@ -3372,6 +3844,75 @@ export async function executeDispatchTool(
     return {
       text: acting + elsewhere + writable,
       details: { session, owner, service, project },
+    };
+  }
+  if (input.tool === "dispatch_limits") {
+    const limits = await dispatchClient().limits();
+    const count = (value: number) => value.toLocaleString("en-US");
+    return {
+      text: [
+        `One block of a body - a paragraph, list, quote, table or code block: ${count(limits.block_units)} characters (UTF-16 units).`,
+        `Blocks in one body: ${count(limits.item_blocks)}.`,
+        `An ask's question and its options together: ${count(limits.ask_units)} characters (UTF-16 units).`,
+        `Options on one ask: ${count(limits.ask_options)}.`,
+        `The body an event carries whole: ${count(limits.event_body_units)} characters (UTF-16 units); a longer body reaches a reader cut, and the item itself holds the rest.`,
+        `One request: ${count(limits.request_bytes)} bytes.`,
+        `One markdown document: ${count(limits.document_bytes)} bytes.`,
+        `One handoff body: ${count(limits.handoff_bytes)} bytes.`,
+        "Dispatch holds every write to these bounds and refuses a longer text, naming the block or the field that passed one.",
+      ].join("\n"),
+      details: { ...limits },
+    };
+  }
+  if (input.tool === "dispatch_inbox") {
+    const client = dispatchClient();
+    // All three reads at once: they depend on nothing of each other, and the credential list is
+    // the slow one, since Dispatch relays it to the secrets broker. Its rejection is caught at
+    // the start so that a refusal of the other two, which throws first, leaves no unhandled one.
+    const pending = client.credentialPending().then(
+      (answer) => ({ answer }),
+      (error: unknown) => ({ error })
+    );
+    let identity: WhoamiResponse;
+    let rows: InboxRow[];
+    try {
+      [identity, rows] = await Promise.all([client.whoami(), client.inbox("me")]);
+    } catch (error) {
+      // The inbox route needs `person`, and a credential without it is refused 403
+      // OAUTH_SCOPE_REQUIRED, whose message names the scope: the code is what the caller acts
+      // on, so it reaches the text. `whoami` needs no scope.
+      throw refusalWithCode(error);
+    }
+    const viewer = whoamiPerson(identity);
+    const settled = await pending;
+    let requests: readonly CredentialPendingRow[] = [];
+    const warnings: string[] = [];
+    if ("error" in settled) {
+      const error = settled.error;
+      // The asks are the greater part of the Inbox, so one failed read of the broker's list does
+      // not cost the caller the rest of it. A refusal for want of a scope is the exception: the
+      // credential itself is wrong, and reporting that as a missing section would hide it.
+      if (dispatchAnswered(error, 403) && error.code === "OAUTH_SCOPE_REQUIRED") {
+        throw refusalWithCode(error);
+      }
+      const refusal =
+        error instanceof DispatchServiceError
+          ? `${error.code} ${error.message}`
+          : messageFor(error);
+      warnings.push(`dispatch: warning: credential requests could not be read: ${refusal}`);
+    } else {
+      // A Dispatch with no secrets broker answers null, which is an ordinary deployment: it has
+      // no credential requests, so it lists and counts none.
+      requests = settled.answer?.pending ?? [];
+    }
+    return {
+      text: formatInboxSummary(rows, requests, Date.now()),
+      details: {
+        viewer,
+        asks: rows.length,
+        credential_requests: requests.length,
+      },
+      ...(warnings.length === 0 ? {} : { warnings }),
     };
   }
   const args = checked.args;
@@ -3403,15 +3944,12 @@ export async function executeDispatchTool(
   // the call undone: it fails, rather than reading as the call's landing.
   const postWithPictures = (
     text: string,
-    limit: PictureTextLimit,
     owner: string,
     upload: (upload: CreateArtifactInput) => Promise<ArtifactUploadResponse>
   ): Promise<string> =>
     textWithPictures(
-      input.tool,
       text,
       pictures,
-      limit,
       owner,
       (picture) =>
         upload(picture).catch((error: unknown) => {
@@ -3424,19 +3962,13 @@ export async function executeDispatchTool(
       actor
     );
   // An ask or comment uploads to the project of the project document it is on, else to its issue.
-  const writePictures = (
-    resolved: ResolvedArtifact | undefined,
-    text: string,
-    limit: PictureTextLimit
-  ): Promise<string> => {
+  const writePictures = (resolved: ResolvedArtifact | undefined, text: string): Promise<string> => {
     if (resolved?.owner.kind === "project") {
       const { project } = resolved.owner;
-      return postWithPictures(text, limit, project, (upload) =>
-        client.projectArtifact(project, upload)
-      );
+      return postWithPictures(text, project, (upload) => client.projectArtifact(project, upload));
     }
     const issueKey = issue();
-    return postWithPictures(text, limit, issueKey, (upload) => client.artifact(issueKey, upload));
+    return postWithPictures(text, issueKey, (upload) => client.artifact(issueKey, upload));
   };
   // The pictures this host session was already shown: dispatch_read names them instead of sending
   // them again, and it and dispatch_doc_read add the ones their result shows.
@@ -3849,10 +4381,11 @@ export async function executeDispatchTool(
         route: row.route ?? null,
         route_status: row.route_status ?? null,
         route_holder: row.route_holder ?? null,
+        route_status_reason: row.route_status_reason ?? null,
         updated_at: row.updated_at,
         progress: row.progress,
       }));
-      const titles = await liveSessionTitles(
+      const agents = await liveAgents(
         client,
         rows.some((row) => holdsSession(row.claim))
       );
@@ -3876,7 +4409,7 @@ export async function executeDispatchTool(
                     (row.open_asks === 0
                       ? ""
                       : ` · ${row.open_asks} open ${row.open_asks === 1 ? "ask" : "asks"}`) +
-                    (row.claim === null ? "" : ` · claimed by ${claimText(row.claim, titles)}`) +
+                    (row.claim === null ? "" : ` · claimed by ${claimText(row.claim, agents)}`) +
                     (progress === "" ? "" : ` · ${progress}`) +
                     // A route that reaches a live session changes nothing about the row; one
                     // that reaches nobody, or cannot be judged, is what the owner audit reads.
@@ -4000,13 +4533,7 @@ export async function executeDispatchTool(
       const multiple = optionalBoolean(args, "multiple");
       const urgency = askUrgency(args);
       const anchored = anchorArgs && resolved ? anchor(resolved.artifact, anchorArgs) : undefined;
-      const withRef = askQuestionWithRef(args);
-      const refAppended = withRef !== stringArg(args, "question");
-      const question = await writePictures(resolved, withRef, {
-        cap: ASK_QUESTION_MAX,
-        text: refAppended ? "question plus ref" : "question",
-        shorten: refAppended ? "shorten the question, drop the ref" : "shorten the question",
-      });
+      const question = await writePictures(resolved, askQuestionWithRef(args));
       const askInput = {
         question,
         ...(Array.isArray(options)
@@ -4095,11 +4622,7 @@ export async function executeDispatchTool(
       // The schema already refused reply_to alongside reply_to_ask, turn without reply_to_ask,
       // and a turn outside agent|human, so the value is the contract's shape.
       const requestedTurn = optionalString(args, "turn") as CreateCommentInput["turn"];
-      const body = await writePictures(resolved, stringArg(args, "body"), {
-        cap: DISPATCH_BODY_MAX,
-        text: "body",
-        shorten: "shorten the body",
-      });
+      const body = await writePictures(resolved, stringArg(args, "body"));
       const commentInput: CreateCommentInput = {
         body,
         ...(anchored === undefined ? {} : { anchor: anchored }),
@@ -4131,9 +4654,16 @@ export async function executeDispatchTool(
           comment.ask_waiting_on === undefined
             ? ""
             : `; ask now waiting on ${comment.ask_waiting_on}`;
+        // A reply meant for the human that leaves the ask with the agent landed on an approval
+        // request a newer version moved: say why, and name the call that hands it back.
+        const moved =
+          requestedTurn !== "agent" && comment.ask_waiting_on === "agent"
+            ? await movedApprovalLine(client, replyToAsk)
+            : undefined;
         return {
           text: [
             `Replied on ask ${replyToAsk} (comment ${comment.id}${askState}). ${await followsAsk(commentOwner, input.subscriptions)}`,
+            ...(moved === undefined ? [] : [moved]),
             ...adviceLines,
           ].join("\n"),
           details: {
@@ -4182,11 +4712,6 @@ export async function executeDispatchTool(
       const target = messageInReplyTo(args);
       const inReplyTo = target?.id;
       const written = stringArg(args, "body");
-      const bodyLimit: PictureTextLimit = {
-        cap: DISPATCH_BODY_MAX,
-        text: "body",
-        shorten: "shorten the body",
-      };
       if (owner === null && inReplyTo !== undefined) {
         // A direct message's conversation belongs to no issue, so its pictures belong to this
         // session's own conversation, where the person reads the reply.
@@ -4198,7 +4723,7 @@ export async function executeDispatchTool(
               "host session id is required to send pictures in a direct-message reply"
             );
           }
-          body = await postWithPictures(written, bodyLimit, `agent/${sessionId}`, (upload) =>
+          body = await postWithPictures(written, `agent/${sessionId}`, (upload) =>
             client.agentArtifact(sessionId, upload)
           );
         }
@@ -4261,7 +4786,7 @@ export async function executeDispatchTool(
         };
       }
       const issueKey = issue();
-      const body = await postWithPictures(written, bodyLimit, issueKey, (upload) =>
+      const body = await postWithPictures(written, issueKey, (upload) =>
         client.artifact(issueKey, upload)
       );
       const message = await client.message(issueKey, {
@@ -4449,6 +4974,9 @@ export async function executeDispatchTool(
         ...("token" in document && document.token !== undefined
           ? [`Document token: ${document.token}`]
           : []),
+        ...("sha256" in document && document.sha256 !== undefined
+          ? [`Content: sha256:${document.sha256}`]
+          : []),
         ...(approval === undefined ? [] : [approval]),
       ];
       return {
@@ -4474,13 +5002,33 @@ export async function executeDispatchTool(
           : undefined);
       const resolved = await resolveDocument(documentOwner(), artifactReference);
       await refuseOpenDecisionBlocks(client, input.tool, resolved);
+      const includeVerification = optionalBoolean(args, "include_verification") === true;
       const result = await client.requestApproval(resolved.artifact.id, {
         actor,
         summary: stringArg(args, "summary"),
+        ...(includeVerification ? { include_verification: true } : {}),
       });
+      // One line per requirement of the spec with no check, or the one line saying the spec
+      // marks none, as Dispatch names them; never a missing plan task, since the plan comes
+      // after the approval. A gap refuses nothing: the request is recorded, and a spec every
+      // requirement of which has a check carries no line at all. A coverage the server could
+      // not read says so, because silence here reads exactly like a spec with no gaps.
+      const gaps = result.coverage ?? [];
+      const coverageLines = result.coverage_unread
+        ? [
+            `Coverage of ${resolved.artifact.name}: unread. Dispatch could not read what the spec's requirements lack, so no line here says there is no gap; the request is recorded either way. Read the coverage again with dispatch read --issue, and mark each requirement the spec states with a requirement block and write a check that serves it, in the issue's Verification document, before the work starts.`,
+          ]
+        : gaps.length === 0
+          ? []
+          : [
+              `Coverage of ${resolved.artifact.name}: ${gaps.map((gap) => `${gap}.`).join(" ")} Mark each requirement the spec states with a requirement block and write a check that serves it, in the issue's Verification document, before the work starts.`,
+            ];
       if (result.ask === null) {
         return {
-          text: `${resolved.artifact.name} (document id ${resolved.artifact.id}) is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. A change outside the decision blocks after approval makes it stale, so request again only for such a version, once the human has agreed to every point in it, with a --summary naming what changed since version ${result.version}; the human's own answer to a decision block carries the approval when that answer is the whole change.`,
+          text: [
+            `${resolved.artifact.name} (document id ${resolved.artifact.id}) is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. A change outside the decision blocks after approval makes it stale, so request again only for such a version, once the human has agreed to every point in it, with a --summary naming what changed since version ${result.version}; the human's own answer to a decision block carries the approval when that answer is the whole change.`,
+            ...coverageLines,
+          ].join("\n"),
           details: {
             ...(resolved.owner.kind === "project"
               ? documentResultDetails(resolved.artifact)
@@ -4497,8 +5045,75 @@ export async function executeDispatchTool(
         ? `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}).`
         : `The approval request for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}) already waits on the human, so this call changed nothing: nothing since it last reached the human (a newer version, a human's reply in its thread, or your progress note) left it waiting on you.`;
       return {
-        text: `${outcome} The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested. An edit before the answer moves this request to the new version and leaves it waiting on you, and a change outside the decision blocks after approval makes the approval stale: either way, request again for the new version once the human has agreed to every point in it, which hands this request back or opens a new one, with a --summary naming what changed since the earlier approval. The human's own answer to a decision block carries the approval when that answer is the whole change since the approved version, and answers an open request Approve in their name: request nothing then.`,
+        text: [
+          `${outcome} The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested. An edit before the answer moves this request to the new version and leaves it waiting on you, and a change outside the decision blocks after approval makes the approval stale: either way, request again for the new version once the human has agreed to every point in it, which hands this request back or opens a new one, with a --summary naming what changed since the earlier approval. The human's own answer to a decision block carries the approval when that answer is the whole change since the approved version, and answers an open request Approve in their name: request nothing then.`,
+          ...coverageLines,
+        ].join("\n"),
         details: { ...details, artifact: resolved.artifact.id, version: result.version },
+      };
+    }
+    case "dispatch_plan_approve": {
+      const planOwner = documentOwner();
+      const named = optionalString(args, "artifact");
+      // The server resolves a plan by its role and the dashboard by the issue's
+      // plan_artifact_id, precisely because a hand-renamed document must not displace the Plan
+      // tab; the filename is only what an issue whose detail names no plan falls back on.
+      const byRole =
+        named === undefined && planOwner.kind === "issue"
+          ? ((await client.getIssue(planOwner.issue)).plan_artifact_id ?? "")
+          : "";
+      const resolved = await resolveDocument(planOwner, named ?? (byRole || "plan.md"));
+      const version = numberArg(args, "version");
+      const review = await client.planApprove(resolved.artifact.id, { actor, version });
+      return {
+        text: `The plan review approved ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${review.version}; no human is asked to approve a plan. A later plan version makes this approval stale: run the review again and record it the same way.`,
+        details: {
+          issue: resolved.issue?.key,
+          artifact: resolved.artifact.id,
+          version: review.version,
+        },
+      };
+    }
+    case "dispatch_result": {
+      const issue = stringArg(args, "issue");
+      // Each optional field is omitted rather than passed as `undefined`: the input's optional
+      // properties are exact (`exactOptionalPropertyTypes`, which claude-envoy compiles this
+      // file under), so `{ surface: undefined }` is not the same shape as `{}`.
+      const optional = {
+        ...defined("surface", optionalString(args, "surface")),
+        ...defined("run", optionalString(args, "run")),
+        ...defined("observed", optionalString(args, "observed")),
+        ...defined("negative_control", optionalString(args, "negative_control")),
+        ...defined("failed", optionalNumber(args, "failed")),
+        ...defined("skipped", optionalNumber(args, "skipped")),
+        ...defined("excluded", optionalNumber(args, "excluded")),
+        ...defined("screenshots", optionalStringArray(args, "screenshots")),
+      };
+      const recorded = await client.recordResult(issue, {
+        actor,
+        check: stringArg(args, "check"),
+        role: stringArg(args, "role"),
+        verdict: stringArg(args, "verdict") as "pass" | "fail",
+        commit: stringArg(args, "commit"),
+        ...optional,
+      });
+      return {
+        text: `Recorded ${recorded.result.verdict} for check ${recorded.result.check_block_id} of ${recorded.result.check_issue_key} at ${recorded.result.commit_sha.slice(0, 12)}, as ${recorded.result.role}.\n\nPull request body line:\n${recorded.line}`,
+        details: {
+          issue,
+          result: recorded.result.id,
+          check: recorded.result.check_block_id,
+          verdict: recorded.result.verdict,
+          line: recorded.line,
+        },
+      };
+    }
+    case "dispatch_results": {
+      const issue = stringArg(args, "issue");
+      const results = await client.issueResults(issue);
+      return {
+        text: formatCheckResults(results),
+        details: { issue, checks: results.checks.length },
       };
     }
     case "dispatch_artifact": {
@@ -4793,7 +5408,7 @@ export async function executeDispatchTool(
         // The read names the block's node, so a 404 is the block's own answer: an unpinned ref
         // names a block no current version holds, and a pinned one's answer says which of its
         // version, that version's record or the block the server could not find.
-        const [incoming, outgoing, partOf] = await Promise.all([
+        const [incoming, outgoing, partOf, typed] = await Promise.all([
           client.getReferences({ to: blockRef }).catch((error: unknown) => {
             if (ref.pin === undefined && dispatchAnswered(error, 404)) {
               throw new Error(`No block ${ref.block} in ${holder}.`);
@@ -4802,6 +5417,9 @@ export async function executeDispatchTool(
           }),
           graphReferences(client, { from: blockRef }),
           askOfPart,
+          // The live block of its document, for its type and the attributes it carries: a block
+          // of a comment or a message has neither, and so has one no live version holds.
+          typedBlockOf(client, ref),
         ]);
         const blockID = incoming.node.block_id ?? ref.block ?? "";
         // A part whose ask the read could not name reads as a `Part`, as a part the ask does not
@@ -4814,7 +5432,7 @@ export async function executeDispatchTool(
               : askPartNoun(partOf.ask, incoming.node, blockID);
         return {
           text: [
-            ...blockLines(incoming.node, ref, noun),
+            ...blockLines(incoming.node, ref, typed, noun),
             ...graphSectionLines(incoming, outgoing),
           ].join("\n"),
           details: {
@@ -4823,6 +5441,21 @@ export async function executeDispatchTool(
               : { issue: ref.owner.issue }),
             block: incoming.node.block_id ?? ref.block,
           },
+        };
+      }
+      // A project named with no document reads as the list of its documents (those on no issue,
+      // the ones a project document reference names), which a project document reference's
+      // not-found hint points to.
+      const projectOwner = documentOwner();
+      if (projectOwner.kind === "project" && optionalString(args, "artifact") === undefined) {
+        const documents = await client.listProjectArtifacts(projectOwner.project, true);
+        return {
+          text: [
+            `Project: ${projectOwner.project}`,
+            "Documents:",
+            ...documentListLines(documents),
+          ].join("\n"),
+          details: { project: projectOwner.project },
         };
       }
       // A document's summary. An issue's document reads as a project's does, with the issue it
@@ -4865,7 +5498,7 @@ export async function executeDispatchTool(
       };
       if (ownerArguments.ref?.kind === "log") {
         const read = await client.read(issueKey, readEvents);
-        const pictures = await picturesOf(read.events.flatMap(eventTexts));
+        const pictures = await picturesOf(await eventTextsWhole(client, read.events));
         return {
           text: [logSummary(read.issue, read.events), ...pictures.lines].join("\n"),
           details: { issue: read.issue.key },
@@ -4887,14 +5520,15 @@ export async function executeDispatchTool(
       const read = await readPromise;
       // The claim's holder must read the same here as on the issue page, so the label comes
       // from the live registry — asked for only when a session holds this issue.
-      const [references, graph, titles, pictures] = await Promise.all([
+      const [references, graph, agents, pictures, coverage] = await Promise.all([
         referencesPromise,
         graphSections(client, dispatchIssueRef(read.issue.key)),
-        liveSessionTitles(client, holdsSession(read.issue.claim) || routeHeldBySession(read.issue)),
+        liveAgents(client, holdsSession(read.issue.claim) || routeHeldBySession(read.issue)),
         picturesOf([
           ...read.issue.open_asks.map((ask) => ({ text: ask.question, at: ask.created_at })),
-          ...read.events.flatMap(eventTexts),
+          ...(await eventTextsWhole(client, read.events)),
         ]),
+        issueCoverageOrReason(client, read.issue.key),
       ]);
       return {
         text: issueSummary(
@@ -4903,7 +5537,8 @@ export async function executeDispatchTool(
           references,
           [...pictures.lines, ...graph],
           linkBase,
-          titles
+          coverage,
+          agents
         ),
         details: { issue: read.issue.key },
         ...showImages(pictures),

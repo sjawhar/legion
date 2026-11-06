@@ -232,3 +232,21 @@ func TestSummarizeLive(t *testing.T) {
 		t.Errorf("from write response %+v, want %+v: only event 10, the 2xx in-window write's primary event", got.FrameMsFromWriteResponse, want)
 	}
 }
+
+// TestNewSummaryNamesNoLiveTransport: live.transport is read, never written (liveTransport reads
+// the field of a run from before config.dashboard). A summary.json this build writes must hold
+// no transport key at all: an empty one would read as a step whose streams named their transport
+// and named nothing.
+func TestNewSummaryNamesNoLiveTransport(t *testing.T) {
+	doc, err := json.Marshal(summarizeLive(nil, nil, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var live map[string]json.RawMessage
+	if err := json.Unmarshal(doc, &live); err != nil {
+		t.Fatal(err)
+	}
+	if _, named := live["transport"]; named {
+		t.Errorf("a new summary.json's live block names transport: %s", doc)
+	}
+}

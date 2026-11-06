@@ -145,11 +145,12 @@ func CheckTestPostgres(dir string) error {
 		return nil
 	}
 	// The database is named for the probe alone, and dropped again, so the cluster the probe
-	// leaves behind holds nothing of it; the server is stopped whatever the steps answered.
+	// leaves behind holds nothing of it; the server is stopped whatever the steps answered. It is a
+	// file copy of template1, as every database the module's tests make is (docs/testing.md).
 	steps := [][]string{
 		{testPGProgram, "check"},
 		{testPGProgram, "ensure"},
-		{"psql", "-X", "-q", TestPGDSN, "-c", "create database legion_probe_testpg"},
+		{"psql", "-X", "-q", TestPGDSN, "-c", "create database legion_probe_testpg strategy file_copy"},
 		{"psql", "-X", "-q", TestPGDSN, "-c", "drop database legion_probe_testpg with (force)"},
 	}
 	for _, step := range steps {

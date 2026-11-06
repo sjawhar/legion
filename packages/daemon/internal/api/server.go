@@ -7,7 +7,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,7 +23,9 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/memorygroup"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/store"
@@ -44,6 +49,11 @@ type Options struct {
 	ConsumerLag func(ctx context.Context) []intake.ConsumerLag
 	// Supervisor is the claims the claim and operator routes post their requests to.
 	Supervisor Supervisor
+	// PodUpdateRounds answers what the daemon's last pod-update sweep decided, which the claim
+	// listing carries beside the claims (the daemon's podUpdateRoundsView). Nil answers the zero
+	// record, which says the daemon has not swept yet: a deployment that serves the route with no
+	// sweep behind it says so rather than read as a sweep that held no issue back.
+	PodUpdateRounds func() PodUpdateRounds
 	// BootTokens resolves a registration's boot token.
 	BootTokens *BootTokens
 	// Project and DispatchProject are the two names this one project answers to, and the daemon
@@ -75,6 +85,20 @@ type Options struct {
 	// refuses it either, since refusing calls with no relaunch under way would stall agents that
 	// work today.
 	PluginRelaunchable bool
+	// NoPluginInstall is supervise.Deps.NoPluginInstall as the API sees it: whether this claim's
+	// launch installs no plugin at all, which only the daemon knows, since a role's backend and
+	// the runtime it launches into are its configuration (internal/daemon's noPluginInstall — a
+	// Claude Code role's plugin in a pod is its image's own claude-envoy). Nothing of this
+	// daemon relaunches such a claim for its contract and its registration stands, so the routes
+	// serve it on the contract it speaks (staleClaim). Nil is a daemon whose every claim a
+	// relaunch can carry.
+	NoPluginInstall func(c supervise.Claim) bool
+	// CallerPod is the runtime's pod at a request's address: the uid of the project's pod that
+	// holds addr, and false for an address no pod of the project holds (the Sandbox runtime's
+	// PodAt). GET /legion/v1/state authenticates nobody, so this is how it knows which claims'
+	// plugin asked (stateFor). Nil is a runtime that runs no pods, whose every caller is served
+	// the state as this contract writes it.
+	CallerPod func(addr netip.Addr) (string, bool)
 	// Stopping is done once the daemon's stop begins, before the stop closes the worker stream
 	// connections no route holds (RouteDecisions): an operator's request that would change a claim
 	// is refused from then on (stopped), and a route whose decision fails logs it at Info
@@ -95,12 +119,25 @@ type Options struct {
 	// GitHubOwners are the GitHub owners of the project's repositories, every one of which the
 	// controller's gh bundle holds a read-only token for (appauth.GitHubCredential).
 	GitHubOwners func() []string
+	// RepositoryRenames is the deployment's repository equivalence
+	// (config.Config.RepositoryRenames): the controller's gh bundle holds one entry for a
+	// configured rename's two owners (appauth.GitHubCredential). The zero value configures none.
+	RepositoryRenames ghrepo.Renames
 	// Releaser releases what the runtime holds for a tree whose operator close reserved and
 	// finished its cleanup: the daemon's runtime.
 	Releaser store.TreeReleaser
 	// Trees is the store's durable tree barrier, which the operator routes open a root's tree
 	// through and reserve and finish a closed tree's cleanup through.
 	Trees TreeLifecycles
+	// Memory is the project's `memory` block (config.Project.Memory), under whose mode the
+	// operator's spawn draws the memory group of a tree it opens for the first time
+	// (memorygroup.DrawAndRecord). The zero block is a project that names none, which draws
+	// every tree `none`. MemoryCoin is the coin the `random` mode is drawn with; nil is
+	// memorygroup.CryptoCoin, and a test pins it. Now is the clock that draw's instant is read
+	// from; nil is time.Now, and a test pins it.
+	Memory     config.Memory
+	MemoryCoin func() (bool, error)
+	Now        func() time.Time
 	// GitHubAPI is GitHub's REST root, which the handoff route reads an issue branch's head, its
 	// handoff file and READY's checks under; empty, in production, is https://api.github.com, and a
 	// test points it at a stand-in.
@@ -129,7 +166,10 @@ type Options struct {
 	// workflow's tests import this package). The operator's retry of a failed phase worker applies
 	// its issue's held phase only when that phase's role is the claim's (retryClaim); nil retries no
 	// held phase, leaving every one to its architect.
-	RoleFor  func(phase.Phase) claim.Role
+	RoleFor func(phase.Phase) claim.Role
+	// Record is the issue record the routes read and write (record.NewStore()). Nil is defaulted
+	// to one: the Postgres implementation is stateless, so a server given none still draws an
+	// operator tree's memory group. A route that needs a database as well tests Pool.
 	Record   record.Store
 	Dispatch dispatch.Client
 	// ClaimReady is told of each claim whose agent's ready the claim took, on the session it
@@ -148,23 +188,52 @@ type Options struct {
 	// store — on a context that outlives the agent's connection, and the route answers the agent
 	// once it has returned.
 	CapabilityReported func(ctx context.Context, c supervise.Claim, report capabilities.Report)
+	// ReleaseRecords is the store's record of what the idle release has done (store.Store), which
+	// the claim route `POST /legion/v1/claims/release-records` serves a pod. Nil answers that route
+	// 500 and changes nothing else.
+	ReleaseRecords ReleaseRecordStore
+	// ClaimActivity records what a claim's session reports it is doing (store.Store), which the
+	// claim route `POST /legion/v1/claims/activity` writes. Nil answers that route 500 and
+	// changes nothing else.
+	ClaimActivity ClaimActivityStore
 }
 
 // TreeLifecycles is the store's durable tree barrier (store.Store) as the operator routes use it:
 // an operator root opens its tree's lifecycle before its claim is stored, and the tree's close
-// reserves the tree's cleanup, then finishes it once every claim of the tree has retired.
+// reserves the tree's cleanup, then finishes it once every claim of the tree has retired. The
+// open's created runs in the open's own transaction where it created the tree's row, and is where
+// the tree's memory group is drawn (store.Store.OpenOperatorTreeLifecycle).
 type TreeLifecycles interface {
-	OpenTreeLifecycle(ctx context.Context, project, tree string, authority treelifecycle.Authority) (treelifecycle.Lifecycle, error)
+	OpenOperatorTreeLifecycle(ctx context.Context, project, tree string,
+		created func(ctx context.Context, tx pgx.Tx) error) (treelifecycle.Lifecycle, error)
 	ReserveOperatorTreeCleanup(ctx context.Context, project, tree string) (treelifecycle.Lifecycle, bool, error)
 	CleanupReservedTree(ctx context.Context, project, tree string, epoch uint64, releaser store.TreeReleaser) error
+}
+
+// ReleaseRecordStore is the store's idle-release records (store.Store) as the claim route reads
+// them: every release, resume and hold of the project recorded at or after a time.
+type ReleaseRecordStore interface {
+	PodReleaseRecords(ctx context.Context, project string, since time.Time) (store.PodReleaseRecords, error)
+}
+
+// ClaimActivityStore is the store's write of a session's activity report (store.Store) as the
+// claim route makes it: the report lives on the claim's row and nowhere in the claim's machine,
+// so the route reaches it here rather than through the daemon's pool. It answers whether the
+// store holds the claim at all; a report older than the one recorded is dropped and still
+// answers true.
+type ClaimActivityStore interface {
+	PutClaimActivity(ctx context.Context, token claim.Token, activity claim.SessionActivity) (bool, error)
 }
 
 type server struct {
 	state             StateSource
 	stateTransactions StateTransactions
 	consumerLag       func(ctx context.Context) []intake.ConsumerLag
+	callerPod         func(addr netip.Addr) (string, bool)
 	supervisor        Supervisor
-	bootTokens        *BootTokens
+	// podUpdateRounds is Options.PodUpdateRounds.
+	podUpdateRounds func() PodUpdateRounds
+	bootTokens      *BootTokens
 	// project and dispatchProject are Options.Project and Options.DispatchProject.
 	project         string
 	dispatchProject string
@@ -174,30 +243,44 @@ type server struct {
 	designGate      config.DesignGate
 	// controllerLaunched is Options.ControllerLaunched.
 	controllerLaunched bool
-	// pluginRelaunchable is Options.PluginRelaunchable.
+	// pluginRelaunchable is Options.PluginRelaunchable, noPluginInstall Options.NoPluginInstall.
 	pluginRelaunchable bool
+	noPluginInstall    func(c supervise.Claim) bool
 	// controllerMu orders a capability mint against a registration and a controller grant, so a
 	// grant the replaced registration authorised is never recorded after the mint revoked them.
 	controllerMu sync.Mutex
 	tokens       appauth.Tokens
 	githubOwners func() []string
-	githubAPI    string
-	mergeRules   func(project string) config.MergeRules
-	grants       *credential.Grants
-	releaser     store.TreeReleaser
-	trees        TreeLifecycles
-	pool         *pgxpool.Pool
-	handlers     []intake.Handler
-	prepare      func(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error)
-	unread       func(resolved string) bool
-	await        func(repo, tree, child, parent string)
-	roleFor      func(phase.Phase) claim.Role
-	records      record.Store
-	dispatch     dispatch.Client
-	claimReady   func(c supervise.Claim)
-	// promptAgents and capabilityReported are Options.PromptAgents and Options.CapabilityReported.
+	// renames is the deployment's repository equivalence (Options.RepositoryRenames): the rule
+	// that says which owner's installation holds a repository recorded under the name a transfer
+	// moved it away from, which the controller's gh bundle reads (appauth.GitHubCredential) and
+	// serving reads for this server's own GitHub calls. The zero value configures none.
+	renames    ghrepo.Renames
+	githubAPI  string
+	mergeRules func(project string) config.MergeRules
+	grants     *credential.Grants
+	releaser   store.TreeReleaser
+	trees      TreeLifecycles
+	// memory, coin and now are Options.Memory, Options.MemoryCoin and Options.Now: what the
+	// spawn's own draw of a tree it opens for the first time reads (drawMemory).
+	memory     config.Memory
+	coin       func() (bool, error)
+	now        func() time.Time
+	pool       *pgxpool.Pool
+	handlers   []intake.Handler
+	prepare    func(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error)
+	unread     func(resolved string) bool
+	await      func(repo, tree, child, parent string)
+	roleFor    func(phase.Phase) claim.Role
+	records    record.Store
+	dispatch   dispatch.Client
+	claimReady func(c supervise.Claim)
+	// promptAgents and capabilityReported are Options.PromptAgents and Options.CapabilityReported,
+	// releaseRecordStore Options.ReleaseRecords and claimActivity Options.ClaimActivity.
 	promptAgents       []string
 	capabilityReported func(ctx context.Context, c supervise.Claim, report capabilities.Report)
+	releaseRecordStore ReleaseRecordStore
+	claimActivity      ClaimActivityStore
 	// stopping and drained are Options.Stopping and Options.Drained, decisions Options.Decisions.
 	stopping  context.Context
 	drained   context.Context
@@ -220,7 +303,9 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		state:              opts.State,
 		stateTransactions:  opts.StateTransactions,
 		consumerLag:        opts.ConsumerLag,
+		callerPod:          opts.CallerPod,
 		supervisor:         opts.Supervisor,
+		podUpdateRounds:    opts.PodUpdateRounds,
 		bootTokens:         opts.BootTokens,
 		project:            opts.Project,
 		dispatchProject:    opts.DispatchProject,
@@ -228,12 +313,17 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		designGate:         opts.DesignGate,
 		controllerLaunched: opts.ControllerLaunched,
 		pluginRelaunchable: opts.PluginRelaunchable,
+		noPluginInstall:    opts.NoPluginInstall,
 		tokens:             opts.Tokens,
 		githubOwners:       opts.GitHubOwners,
+		renames:            opts.RepositoryRenames,
 		githubAPI:          opts.GitHubAPI,
 		mergeRules:         opts.MergeRules,
 		releaser:           opts.Releaser,
 		trees:              opts.Trees,
+		memory:             opts.Memory,
+		coin:               opts.MemoryCoin,
+		now:                opts.Now,
 		grants:             opts.Grants,
 		pool:               opts.Pool,
 		handlers:           opts.Handlers,
@@ -246,6 +336,8 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		claimReady:         opts.ClaimReady,
 		promptAgents:       opts.PromptAgents,
 		capabilityReported: opts.CapabilityReported,
+		releaseRecordStore: opts.ReleaseRecords,
+		claimActivity:      opts.ClaimActivity,
 		log:                opts.Log,
 		stopping:           opts.Stopping,
 		drained:            opts.Drained,
@@ -253,6 +345,15 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	}
 	if opts.OperatorToken != "" {
 		s.operatorSet, s.operatorHash = true, sha256.Sum256([]byte(opts.OperatorToken))
+	}
+	if s.coin == nil {
+		s.coin = memorygroup.CryptoCoin
+	}
+	if s.now == nil {
+		s.now = time.Now
+	}
+	if s.records == nil {
+		s.records = record.NewStore()
 	}
 	if s.grants == nil {
 		s.grants = credential.New(nil)
@@ -278,7 +379,10 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 
 	mux.HandleFunc("POST /legion/v1/claims/register", s.register)
 	mux.HandleFunc("POST /legion/v1/claims/ready", s.ready)
+	mux.HandleFunc("POST /legion/v1/claims/ready-for-update", s.readyForUpdate)
 	mux.HandleFunc("POST /legion/v1/claims/exit", s.exit)
+	mux.HandleFunc("POST /legion/v1/claims/activity", s.activity)
+	mux.HandleFunc("POST /legion/v1/claims/release-records", s.releaseRecords)
 	mux.HandleFunc("POST /legion/v1/grants", s.grant)
 	mux.HandleFunc("POST /legion/v1/controller/secret", s.controllerSecret)
 	mux.HandleFunc("POST /legion/v1/controller/github-credential", s.controllerGitHubCredential)
@@ -315,6 +419,25 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		Handler:           mux,
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
+}
+
+// serving is the repository GitHub holds a recorded one under now (ghrepo.Renames.Serving): the
+// other name of its configured pair when the project's owners make that name's owner the one
+// whose installation holds it, and the recorded repository itself otherwise. It is the daemon's
+// one rule, read here over the owners this server already holds (Options.GitHubOwners) rather
+// than written a second time.
+func (s *server) serving(recorded ghrepo.Repository) ghrepo.Repository {
+	return s.renames.Serving(recorded, s.ownsOwner)
+}
+
+// ownsOwner is whether owner is an owner of the project's repositories, compared without case as
+// GitHub compares owners. A server built with no owners — a test's, a daemon with no GitHub Apps
+// — owns none.
+func (s *server) ownsOwner(owner string) bool {
+	if s.githubOwners == nil {
+		return false
+	}
+	return slices.ContainsFunc(s.githubOwners(), func(o string) bool { return strings.EqualFold(o, owner) })
 }
 
 // decision is the context a route runs a decision of token's claim on. It outlives the request,
@@ -432,7 +555,188 @@ func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {
 	if s.consumerLag != nil {
 		state.Consumers = ConsumerLagViewsOf(s.consumerLag(r.Context()))
 	}
-	writeJSON(w, http.StatusOK, state)
+	writeJSON(w, http.StatusOK, s.stateFor(r, state))
+}
+
+// stateFor is state as the plugin that asked for it reads it. The route authenticates nobody, so
+// the caller is known by its address alone: a pod of the project (Options.CallerPod), whose claims
+// record the plugin contract each registration declared. A plugin older than INFRA-1048 — which is
+// who this function is kept for — reads the state with a strict schema and refuses the whole body
+// for one key it does not know, where today's plugin strips one; and an update round serves a
+// claim of the contract before it until its pod is replaced (version.go's 46). So a caller in a pod
+// whose claims record a contract below supervise.PodUpdateContract, the contract that added
+// `updateRound` and `updateHead` to the claim views, is served the state without them
+// (withoutUpdateRounds), which is the body that contract's schema describes; a caller below
+// memoryContract, the contract that added the issues' memory group, is served it without those
+// three fields (withoutMemory); and a caller below treeContract, the contract that named the live
+// trees beside the issues holding a slot, is served it without `admission.trees` and without the
+// issues' `tree` (withoutTrees). The three compose: each is applied when the state carries
+// something of its own, so a caller below all of them — a pod below supervise.PodUpdateContract —
+// is served a body with none of the seven keys. Every later reader takes all seven as optional, so
+// the body this serves when the claims cannot be read is the one every reader from 45 on takes.
+// Any other caller — a pod at this contract, the operator's `legion state`, a tmux pane — is
+// served the state as this contract writes it.
+func (s *server) stateFor(r *http.Request, state State) State {
+	// A daemon that does not know its callers' pods serves every caller the state as it is, and
+	// scans nothing for it: under runtime tmux that is every request of every pane and of
+	// `legion state`.
+	if s.callerPod == nil || s.supervisor == nil {
+		return state
+	}
+	caller, err := netip.ParseAddrPort(r.RemoteAddr)
+	if err != nil {
+		return state
+	}
+	pod, inPod := s.callerPod(caller.Addr().Unmap())
+	if !inPod {
+		return state
+	}
+	// Before treeContract, a state with no update round on any claim view and no memory group on
+	// any issue was the body every contract reads, and was served with no read of the claims at
+	// all. There is no such body since: the admission block writes `trees` on every one of them
+	// (carriesTrees), so a caller in a pod has its claims read for every state request. What a
+	// downgrade would strip is looked for only once the contract that needs it is known, so a
+	// caller at this contract — every caller, outside the window in which a pod of the contract
+	// before it is still being replaced — costs no scan of the issues.
+	claims, err := s.supervisor.Claims(r.Context())
+	if err != nil {
+		s.log.Warn("api: the claims of the pod that asked for the state could not be read; it is served the state without the update round, memory and tree fields, which every plugin contract since 45 reads",
+			"pod", pod, "error", err)
+		return withoutTrees(withoutMemory(withoutUpdateRounds(state)))
+	}
+	contract := podContract(claims, pod)
+	if contract == 0 {
+		return state
+	}
+	if contract < supervise.PodUpdateContract && carriesUpdateRounds(state) {
+		state = withoutUpdateRounds(state)
+	}
+	if contract < memoryContract && carriesMemory(state) {
+		state = withoutMemory(state)
+	}
+	if contract < treeContract && carriesTrees(state) {
+		state = withoutTrees(state)
+	}
+	return state
+}
+
+// memoryContract is the daemon contract that added the issues' memory group to the state
+// (version.go's 49): a plugin before it reads the state with a strict schema that knows none of
+// `memoryGroup`, `memoryDrawMode` and `memoryDrawnAt` and refuses the whole body for one of them.
+const memoryContract = 49
+
+// treeContract is the daemon contract that made the admission cap count the issues at work rather
+// than the trees (version.go's 51), which added `admission.trees`, the root of every live tree,
+// and each issue's `tree`, its own tree's root: a plugin before it reads the state with a strict
+// schema that knows neither key and refuses the whole body for one of them.
+const treeContract = 51
+
+// carriesUpdateRounds is whether any claim view of state carries `updateRound` or `updateHead`.
+func carriesUpdateRounds(state State) bool {
+	carries := func(v ClaimView) bool { return v.UpdateRound != "" || v.UpdateHead != "" }
+	for _, issue := range state.Issues {
+		if issue.Architect != nil && carries(*issue.Architect) {
+			return true
+		}
+		for _, worker := range issue.Workers {
+			if carries(worker.Claim) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// carriesMemory is whether any issue of state carries its tree's memory draw.
+func carriesMemory(state State) bool {
+	for _, issue := range state.Issues {
+		if issue.MemoryGroup != "" || issue.MemoryDrawMode != "" || issue.MemoryDrawnAt != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// carriesTrees is whether state carries either key treeContract added: `admission.trees` or an
+// issue's `tree`. It carries `admission.trees` whatever the daemon holds, since the admission
+// block writes that key on every body, empty rather than null (Admission.MarshalJSON), and the
+// strict reader before the contract refuses the empty key as surely as one naming a tree. So this
+// is true of every state the route writes; it is asked beside carriesUpdateRounds and
+// carriesMemory all the same, because stateFor puts the same question to the three and because a
+// later contract that stops writing `trees` on every body answers it here.
+func carriesTrees(State) bool { return true }
+
+// podContract is the lowest plugin contract a claim whose process runs in pod records, and 0 when
+// none records one: every role of a pod is served by the plugin that pod runs, and the body the
+// lowest of them reads is one every higher contract reads too.
+func podContract(claims []supervise.Claim, pod string) int {
+	lowest := 0
+	for _, c := range claims {
+		if c.Locator == nil || c.Locator.Sandbox == nil || c.Locator.Sandbox.PodUID != pod || c.PluginContract == 0 {
+			continue
+		}
+		if lowest == 0 || c.PluginContract < lowest {
+			lowest = c.PluginContract
+		}
+	}
+	return lowest
+}
+
+// withoutUpdateRounds is state with no claim view carrying `updateRound` or `updateHead`, the two
+// fields supervise.PodUpdateContract added to the state; nothing else of that contract is on the
+// route but `settings` keys, which every plugin reads loosely. The issue maps are copied, so the
+// state the source answered is left as it was.
+func withoutUpdateRounds(state State) State {
+	issues := make(map[string]Issue, len(state.Issues))
+	for key, issue := range state.Issues {
+		if issue.Architect != nil {
+			architect := *issue.Architect
+			architect.UpdateRound, architect.UpdateHead = "", ""
+			issue.Architect = &architect
+		}
+		if issue.Workers != nil {
+			workers := make(map[claim.Role]PhaseView, len(issue.Workers))
+			for role, worker := range issue.Workers {
+				worker.Claim.UpdateRound, worker.Claim.UpdateHead = "", ""
+				workers[role] = worker
+			}
+			issue.Workers = workers
+		}
+		issues[key] = issue
+	}
+	state.Issues = issues
+	return state
+}
+
+// withoutMemory is state with no issue carrying `memoryGroup`, `memoryDrawMode` or
+// `memoryDrawnAt`, the three fields memoryContract added to the state; nothing else of that
+// contract is on the route but `settings` keys, which every plugin reads loosely. The issue map is
+// copied, so the state the source answered is left as it was.
+func withoutMemory(state State) State {
+	issues := make(map[string]Issue, len(state.Issues))
+	for key, issue := range state.Issues {
+		issue.MemoryGroup, issue.MemoryDrawMode, issue.MemoryDrawnAt = "", "", nil
+		issues[key] = issue
+	}
+	state.Issues = issues
+	return state
+}
+
+// withoutTrees is state with no `admission.trees` and no issue carrying `tree`, the two keys
+// treeContract added to the state. Nothing else of that contract is a key of its own: `active`
+// and `waiting` keep their names and count issues rather than trees, which no downgrade can
+// carry, and which the boot gate and `legion probe-image` keep a plugin of the contract before
+// this one from reading (version.go's 51). The admission block is a value of the state's own and
+// the issue map is copied, so the state the source answered is left as it was.
+func withoutTrees(state State) State {
+	state.Admission.Trees, state.Admission.treesHidden = nil, true
+	issues := make(map[string]Issue, len(state.Issues))
+	for key, issue := range state.Issues {
+		issue.Tree = ""
+		issues[key] = issue
+	}
+	state.Issues = issues
+	return state
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

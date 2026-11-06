@@ -9,7 +9,9 @@
  * another reader's open block is given.
  *
  * The rows run in `chromium`, `firefox`, `webkit` and `webkit-iphone`: a grant reaching an open
- * block is the live socket, the refresh and a new frame, each engine's own.
+ * block is the live socket, the refresh and a new frame, each engine's own. Every row here
+ * carries `@webkit` and `@firefox`, the tags those two projects select by, and the phrase
+ * `a view block`, which `webkit-iphone`'s title `grep` selects by.
  */
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
@@ -110,7 +112,7 @@ async function seedIssuePage(title: string): Promise<{
   };
 }
 
-test("a view block whose page has no grant runs its page and names the file it may not read", async ({
+test("a view block whose page has no grant runs its page and names the file it may not read @webkit @firefox", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -148,7 +150,7 @@ test("a view block whose page has no grant runs its page and names the file it m
   }
 });
 
-test("a view block follows a grant a person adds and removes in an issue page file's panel", async ({
+test("a view block follows a grant a person adds and removes in an issue page file's panel @webkit @firefox", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -215,7 +217,7 @@ test("a view block follows a grant a person adds and removes in an issue page fi
   }
 });
 
-test("a view block follows a grant a person adds in a project page file's panel", async ({
+test("a view block follows a grant a person adds in a project page file's panel @webkit @firefox", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -272,7 +274,7 @@ test("a view block follows a grant a person adds in a project page file's panel"
   }
 });
 
-test("a view block naming two files under one grant gets the one text and one not-granted", async ({
+test("a view block naming two files under one grant gets the one text and one not-granted @webkit @firefox", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -315,7 +317,7 @@ test("a view block naming two files under one grant gets the one text and one no
   }
 });
 
-test("a view block under a grant pinned to version 1 gets version 1, and @v3 is not granted", async ({
+test("a view block under a grant pinned to version 1 gets version 1, and @v3 is not granted @webkit @firefox", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -364,7 +366,7 @@ test("a view block under a grant pinned to version 1 gets version 1, and @v3 is 
   }
 });
 
-test("a view block whose grant pins a version over 16 MiB sends no data and says so", async ({
+test("a view block whose grant pins a version over 16 MiB sends no data and says so @webkit @firefox", async ({
   browser,
 }) => {
   // The upload of 17 MiB, and the block's own read of the version's size, take longer than the
@@ -415,7 +417,7 @@ test("a view block whose grant pins a version over 16 MiB sends no data and says
   }
 });
 
-test("a view block under a grant without a version takes a new data version in the same frame", async ({
+test("a view block under a grant without a version takes a new data version in the same frame @webkit @firefox", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -459,7 +461,7 @@ test("a view block under a grant without a version takes a new data version in t
   }
 });
 
-test("a view block keeps its grants through a new version of its page file", async ({
+test("a view block keeps its grants through a new version of its page file @webkit @firefox", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -502,7 +504,7 @@ test("a view block keeps its grants through a new version of its page file", asy
   }
 });
 
-test("a view block whose data attribute an agent edits to an ungranted file says so", async ({
+test("a view block whose data attribute an agent edits to an ungranted file says so @webkit @firefox", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });

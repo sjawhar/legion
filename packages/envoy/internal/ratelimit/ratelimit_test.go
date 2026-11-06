@@ -127,3 +127,56 @@ func TestARefusedTakeSpendsNothing(t *testing.T) {
 		t.Fatal("a's bucket did not refill once Every passed: the refused takes spent it")
 	}
 }
+
+// TestSetRatesAtKeepsEachKeysTokensAndSlowsItsRefill pins what a rate change does to a bucket a
+// caller already spent from: the tokens it holds stay, and only the rate it gains them back at
+// moves. The broker rewrites these rates when its replica count changes
+// (api.RereadRate.SetReplicas), and a rewrite that refilled every bucket would hand every
+// caller a fresh burst at each change of the fleet's size.
+func TestSetRatesAtKeepsEachKeysTokensAndSlowsItsRefill(t *testing.T) {
+	k := NewKeyed(Limit{Every: time.Second, Burst: 2})
+	// A depth no row here can reach, so the only refusal below is the per-key one.
+	free := Limit{Every: time.Millisecond, Burst: 1000}
+	shared := NewBucket(free)
+	if _, ok := k.AllowBothAt("a", shared, t0); !ok {
+		t.Fatal("a's first request was refused")
+	}
+	slower := Limit{Every: 10 * time.Second, Burst: 2}
+	k.SetRatesAt(t0, slower, shared, free)
+	if got := k.Every(); got != slower.Every {
+		t.Fatalf("Every() = %s after the change, want %s", got, slower.Every)
+	}
+	if _, ok := k.AllowBothAt("a", shared, t0); !ok {
+		t.Fatal("the request a's bucket still held was refused: the rate change emptied it")
+	}
+	if refused, ok := k.AllowBothAt("a", shared, t0.Add(time.Second)); ok || refused != slower {
+		t.Fatalf("a's request one second on = %+v, %v; want refused by the new rate, which gives one back every %s", refused, ok, slower.Every)
+	}
+	if _, ok := k.AllowBothAt("a", shared, t0.Add(slower.Every)); !ok {
+		t.Fatal("a's bucket did not refill once the new Every passed")
+	}
+	if _, ok := k.AllowBothAt("b", shared, t0.Add(slower.Every)); !ok {
+		t.Fatal("a key first seen after the change was refused its burst")
+	}
+}
+
+// TestSetRatesAtMovesTheSharedBucketAndItsRefusal pins the same for the bucket every key shares,
+// and that a refusal names the rate that bucket now refills at: Retry-After is read off the
+// limit AllowBothAt answers (api.refuseReread), so a stale limit there would tell a caller to
+// come back while the bucket is still empty.
+func TestSetRatesAtMovesTheSharedBucketAndItsRefusal(t *testing.T) {
+	// A per-key depth no row here can reach, so the only refusal below is the shared one.
+	free := Limit{Every: time.Millisecond, Burst: 1000}
+	k, shared := NewKeyed(free), NewBucket(Limit{Every: time.Second, Burst: 1})
+	if _, ok := k.AllowBothAt("a", shared, t0); !ok {
+		t.Fatal("the shared bucket refused the first request of its burst")
+	}
+	slower := Limit{Every: 5 * time.Second, Burst: 1}
+	k.SetRatesAt(t0, free, shared, slower)
+	if refused, ok := k.AllowBothAt("a", shared, t0.Add(time.Second)); ok || refused != slower {
+		t.Fatalf("a request one second on = %+v, %v; want refused by the new shared rate of one every %s", refused, ok, slower.Every)
+	}
+	if _, ok := k.AllowBothAt("a", shared, t0.Add(slower.Every)); !ok {
+		t.Fatal("the shared bucket did not refill once its new Every passed")
+	}
+}

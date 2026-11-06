@@ -18,6 +18,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	dispatchenvoy "github.com/sjawhar/envoy/internal/dispatch/envoy"
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -37,7 +38,7 @@ import (
 // the same capability list, and the response covers the race where a session's capabilities
 // or liveness changed in between. What persists is who was actually sent to.
 //
-// Broadcasting is human-only, like the one-session route it is built from.
+// Broadcasting needs the person scope (routeScopes), like the one-session route it is built from.
 
 // broadcastDeliveryWorkers is how many recipients are delivered to at once, once the create
 // request has already answered. Each worker takes a tracking context of its own
@@ -127,7 +128,7 @@ type broadcastTarget struct {
 // a retry of a send that landed owes nothing to the registry and must not fail because the
 // listener is down.
 func (s *server) createBroadcast(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}
@@ -231,8 +232,8 @@ func validateBroadcastInput(body, delivery string, sessionIDs []string) ([]strin
 	if strings.TrimSpace(body) == "" {
 		return nil, errorf(http.StatusBadRequest, "INVALID_MESSAGE", "message body is required")
 	}
-	if length := len16(body); length > contracts.DispatchBodyMax {
-		return nil, capExceededError("body", length, contracts.DispatchBodyMax)
+	if err := blockBoundError(itemblocks.Check("body", body)); err != nil {
+		return nil, err
 	}
 	if !validDelivery(delivery) {
 		return nil, errorf(http.StatusBadRequest, "BROADCAST_INPUT", "delivery must be one of btw, aside, steer")
@@ -361,8 +362,13 @@ func (s *server) resolveBroadcastSessions(
 }
 
 // resolveBroadcastTargets judges each selected session against the record the session store
-// holds for it: it is a recipient when the store holds its session and that session advertises
-// the chosen mode, and otherwise carries the reason it was left out.
+// holds for it: it is a recipient when the store holds its session, that session has not gone,
+// and it advertises the chosen mode, and otherwise carries the reason it was left out.
+//
+// An unresponsive session is a recipient like any other: the listener stores what is sent to
+// it and hands it over when it answers again, which is exactly what a broadcast to a session
+// that missed its heartbeats should do. Only a record the registry itself calls gone is no
+// session to send to, as a missing record is.
 func resolveBroadcastTargets(
 	requested []string, delivery string, live map[string]dispatchenvoy.Session,
 ) []broadcastTarget {
@@ -370,7 +376,7 @@ func resolveBroadcastTargets(
 	for _, sessionID := range requested {
 		session, ok := live[sessionID]
 		switch {
-		case !ok:
+		case !ok, session.State == dispatchenvoy.StateGone:
 			targets = append(targets, broadcastTarget{sessionID: sessionID, reason: "no live session"})
 		case !hasCapability(session.Capabilities, delivery):
 			targets = append(targets, broadcastTarget{
@@ -494,6 +500,19 @@ func (s *server) writeBroadcast(
 // resumeOwedDeliveries), or a repeat under the send's key (sendOwedBroadcastRecipients), resumes
 // once the claim lease has passed.
 func (s *server) deliverBroadcast(ctx context.Context, sends []broadcastSend, delivery string, actor model.Actor) {
+	// A hold mark of this delivery's own (store.ForConcurrentWorker), as hardening: nothing sets
+	// the request's mark during a delivery today. ctx is the request's, detached from its
+	// cancellation but not from its mark, and the request goroutine lives on past the hand-off -
+	// it writes its JSON, records the answer and releases the key (settleRequestKey,
+	// releaseRequestKey) - but those run through store.Pool.Exec, which only checks the mark and
+	// never sets it; only Pool.Query, whose cursor holds its connection, and Pool.Begin do. Were
+	// that bookkeeping to move into a transaction, or a handler to read through Pool.Query after
+	// the hand-off, the shared mark would refuse a worker's ForConcurrentRead below
+	// (store.ErrNestedAcquire) and leave that recipient's send to the delivery sweep. Both callers
+	// hand the delivery over with no connection of their own held - the create's transaction
+	// committed before it detached, and a repeat's reads are closed before it resumes anyone -
+	// which is what a mark of its own needs.
+	ctx = store.ForConcurrentWorker(ctx)
 	workers := min(broadcastDeliveryWorkers, len(sends))
 	pending := make(chan broadcastSend)
 	var wait sync.WaitGroup
@@ -503,9 +522,8 @@ func (s *server) deliverBroadcast(ctx context.Context, sends []broadcastSend, de
 			defer wait.Done()
 			for send := range pending {
 				// A mark of this worker's own: workers sharing one would refuse each other a
-				// connection (store.ErrNestedAcquire), and the caller holds none by now - the
-				// create's transaction committed before it detached this delivery, and a
-				// repeat's reads are closed before it resumes anyone.
+				// connection (store.ErrNestedAcquire), and nothing but this delivery's own
+				// workers holds the mark it runs on.
 				sending, err := store.ForConcurrentRead(ctx)
 				if err != nil {
 					slog.Error("dispatch: broadcast delivery",
@@ -566,7 +584,7 @@ func (s *server) sendOwedBroadcastRecipients(ctx context.Context, read broadcast
 
 // GET /api/v1/broadcasts
 func (s *server) listBroadcasts(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHuman(w, r); !ok {
+	if _, ok := s.actingPerson(w, r); !ok {
 		return
 	}
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `
@@ -612,8 +630,13 @@ func (s *server) listBroadcasts(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /api/v1/broadcasts/{id}
+//
+// A broadcast's route resolves no id prefix, but the prefix layer canonicalizes its {id} all the
+// same (canonicalizeUUIDPath), so this handler parses the one spelling of it: Postgres refuses
+// `urn:uuid:<uuid>` on the uuid column, and the raw value would answer 500 where the canonical
+// one answers this route's own 404.
 func (s *server) getBroadcast(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHuman(w, r); !ok {
+	if _, ok := s.actingPerson(w, r); !ok {
 		return
 	}
 	id := r.PathValue("id")

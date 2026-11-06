@@ -4,9 +4,9 @@ Shared HTTP transport, tool contract, inbound delivery renderer, and missed-mess
 hosts. pi-envoy and claude-envoy consume these modules rather than maintaining host-specific
 envelope parsers.
 
-This package has no release of its own: `.github/workflows/changelog-fold.yaml` folds its
-changelog fragments (`.changes/unreleased/`) into `CHANGELOG.md` under `main@<commit>` at the
-first fold run after they merge.
+This package has no release of its own, so nothing renders its changelog entries: each stays
+readable as the fragment file that holds it, under `.changes/unreleased/`. `CHANGELOG.md` is the
+history before that and stops where the fragments begin.
 
 ## Inbound delivery
 
@@ -101,9 +101,14 @@ frame was delivered in while the host shuts down: it writes while the host's opt
 ledger holds the frame from the call on (Oh My Pi records every BTW's event id so, before its side
 turn and before any reply is posted).
 
-The state holds each followed subject's `since` and `after`, the stream's `id` (`stream_id`, the
-`envoy_stream_id` the listener answers as `stream.id`) and `created` time, and the one-time
-notices raised but not told yet (`notices`);
+The state holds each followed subject's `since` and `after`, or `from_start` on the session's own
+agent subject while its first sweep still owes it from the oldest message the stream holds, the
+stream's `id` (`stream_id`, the `envoy_stream_id` the listener answers as `stream.id`) and
+`created` time, and the one-time notices raised but not told yet (`notices`). A host that
+registers before it can open its subscriptions (NATS down) calls `startCursors()` first: each
+followed subject with no cursor starts at the stream's end, and a read that fails marks the own
+agent subject `from_start` instead; `startPending()` says whether such a mark stands, and while
+one does the host asks for no consumer delivery.
 `restore(snapshot)` loads what a host persisted, dropping expired ledger entries and keeping the
 state at any age. A write carries the state only when it changed; a sweep that handled no message
 and only moved its cursors to the stream's end goes with the next write, or once the state last
@@ -202,8 +207,13 @@ uses the stack runs only with `LEGION_E2E_ENVOY_STACK=1`.
 `createEnvoyClient` sends and receives the listener's `/v1` JSON contracts. Send and publish
 accept optional `inReplyTo`, `supersedes`, `urgency`, `expectsReply`, and `expiresAt` metadata.
 Successful direct sends return both the envelope and listener-selected recipient, and
-`duplicate` when the listener already held a send under that target and idempotency key;
-publishes return the envelope and an optional role holder. Network failures, timeouts (5 s an
+`duplicate` when the listener already held a send under that target and idempotency key.
+A publish returns the envelope and an optional role holder. A role publish has three answers,
+told apart by status. 200 is a live holder that took the message, named by `holder`. 202 is a
+message the listener kept for the session that claims the role next, with `kept`, `keptReason`
+(`unclaimed` or `holder_lapsed`) and `holder` when a lapsed claim named one. 404 is nothing kept,
+thrown as an `EnvoyApiError`, and the sender's own fallback must run. A sender that keeps a queue
+of its own passes `keep: false` to get the 404. Network failures, timeouts (5 s an
 attempt, the answer's body included) and 5xx responses retry once after 250 ms, under the same
 idempotency key; a 4xx whose body does not arrive is still a refusal. A send any attempt of which
 got no answer, an unreadable 2xx or a 5xx throws `EnvoySendUnconfirmedError`, even when a later
@@ -216,6 +226,16 @@ still sees it twice). A send
 refused with a 4xx on every attempt stays an `EnvoyApiError`. Listener error responses preserve their
 `error` and optional `expected` fields. The listener's bearer is the `token` the client is given
 (`envoySettings`); without one it sends no `Authorization` header.
+
+Every call whose body names the session it acts for — `subscribe`, `unsubscribe`,
+`unregisterSession`, `setRole`, `replay`, and a `send` or `publish` with a `sourceSessionID` —
+presents that session's own credential, since the listener holds such a write to the session its
+broker token names and answers 403 to any other. That is what lets a process that has switched
+sessions hand back a role the session it left still holds: the old session's credential is a
+client of its own and answers out of the token it already has. A read of another session's
+record (`getInterest`, `getRole`, `listSessions`) names no session and is answered the
+credential the client was built with. A bearer is the same header whichever session a call acts
+for.
 
 `subscribe` sends the host's `plugin` (`{name, version}`, required) as `plugin` and
 `plugin_version` on every registration, and exposes listener warnings, including a topic that has
@@ -478,8 +498,20 @@ slow to finish is answered `409 KEY_IN_FLIGHT` and then replayed rather than wai
 whole deadline. Progress is the connection taking the body: a body of a megabyte or more goes out
 as a stream read 64 KiB at a time, with its `Content-Length`, and each read restarts the bound, so
 an upload on a slow line is never cut off while it is still going out; a smaller body leaves in
-one write. All of it sits inside the call's own 60 s deadline, so a Dispatch that is down holds a
-`dispatch` command, and the session waiting on it, no longer than that. The call's deadline and
+one write. Once an attempt was cut off for silence or answered `409 KEY_IN_FLIGHT`, Dispatch may
+still be running the write, and its keyed layer finishes that run whatever the client does, so the
+write keeps asking every 3 s at most (`inFlightPauseMs`; a longer `Retry-After` is still waited),
+with no attempt started more than 55 s after the first (`inFlightWithinMs`), until the run's stored
+answer comes back: a write that takes Dispatch 50 s, or two silent attempts in a row, still ends in
+its answer. An upload (a body of a megabyte or more) keeps the five-attempt schedule, since each
+repeat sends its whole body again. No attempt of any write starts more than 55 s after the client
+was made, since its 60 s deadline counts from there. The numbers come from the 3,612 `dispatch`
+write commands that succeeded between 2026-10-31 21:00Z and 2026-11-02 07:30Z, each timed whole
+(p50 1.8 s, p95 19.6 s, p99 45.5 s). All of it sits inside the call's own 60 s deadline, so a
+Dispatch that is down holds a `dispatch` command, and the session waiting on it, no longer than
+that. When the write ends with no definitive answer after this call saw the keyed layer judge
+it, the error says Dispatch finishes an attempt it received, and to read the write back before
+sending it again, since a new command sends it under a new key. The call's deadline and
 its cancellation end the write at once and are never retried. Any other answer - a 2xx, a replay,
 `422 KEY_REUSED`, another 4xx - is the answer, at once.
 
@@ -598,6 +630,20 @@ against it rather than the API's URL, which every call still goes to; a dashboar
 `ref` resolves on either address; and a value that is not an http or https URL disables Dispatch,
 naming it in `error`.
 
+With no bearer configured at all, a machine that proves an identity of its own trades it at the
+secrets broker instead (`AGENT_SECRETS_URL` with `AGENT_SECRETS_MACHINE_IDENTITY`,
+`brokerCredential`): the credential is then a DPoP-bound access token presented under the `DPoP`
+scheme rather than a bearer. Every bearer source above is resolved first and unchanged, so a
+session that has one behaves exactly as it did. `DISPATCH_TOKEN_BROKER=1` makes that route the
+only one: no bearer is read at all — not the variables, not the chosen file's `dispatch.token`,
+not a checkout's pair — and a machine that can trade none leaves Dispatch disabled with an
+`error` naming the broker variable that is missing, rather than falling back to whatever bearer
+the box holds. A deployment sets it on a session whose Dispatch credential must be that machine's
+own identity and nothing else, such as the controller `legion controller start` launches under
+`dispatch_token_broker`, which runs in the operator's own HOME where that person's envoy.json
+holds their `dispatch.token`. Any other value of the variable is refused, naming it:
+`DISPATCH_TOKEN_BROKER is "<value>" and takes 1 …`.
+
 ### The `dispatch` command
 
 Agents reach Dispatch through one command, `dispatch <command> [flags]`, which each host plugin
@@ -650,7 +696,7 @@ prints its URL, for proving what a command shows when a gateway, not Dispatch, a
 
 ## Command specs
 
-`@legion/contracts` `src/dispatch-tools.ts` is the single source for the twenty-five
+`@legion/contracts` `src/dispatch-tools.ts` is the single source for the twenty-eight
 Dispatch specs behind the `dispatch` command: each one's name, description, field schemas
 and example. `dispatch-command.ts` derives the command and its flags from them, and no host
 adds aliases or descriptions of its own.

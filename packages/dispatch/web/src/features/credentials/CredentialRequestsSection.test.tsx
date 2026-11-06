@@ -32,46 +32,53 @@ function renderSection(credentials: CredentialRequests) {
   );
 }
 
-test("renders every pending credential request, linking a secret row to its broker page and a machine row to /credentials/machine", () => {
+// The machine row links to `/credentials/machine` only where this deployment serves that page,
+// which the credential capabilities say (`useMachineCodePage`, GET
+// /api/v1/credentials/capabilities), so the row's link is there once that answer is in.
+test("renders every pending credential request, linking a secret row to its broker page and a machine row to /credentials/machine", async () => {
   const machineRow: CredentialPendingRow = {
     identifiers: ["worker-7.example.com"],
     kind: "launcher_credential",
     record_id: "req-2",
     requested_at: "2026-09-27T01:00:00Z",
   };
-  renderSection({
-    requests: [
-      pendingSecretRow({ approve_url: "https://secrets.example.com/approve/req-1" }),
-      machineRow,
-    ],
-    status: "listed",
+  const capabilities = spyOn(api, "getCredentialCapabilities").mockResolvedValue({
+    machine_code_page: true,
   });
+  try {
+    renderSection({
+      requests: [
+        pendingSecretRow({ approve_url: "https://secrets.example.com/approve/req-1" }),
+        machineRow,
+      ],
+      status: "listed",
+    });
 
-  expect(screen.getByText("Secret request")).toBeDefined();
-  expect(screen.getByText("Machine login")).toBeDefined();
-  expect(screen.getByText("ANTHROPIC_API_KEY")).toBeDefined();
-  expect(screen.getByText("worker-7.example.com")).toBeDefined();
-  const secret = screen.getByRole("link", { name: /Secret request.*ANTHROPIC_API_KEY/s });
-  expect(secret.getAttribute("href")).toBe("https://secrets.example.com/approve/req-1");
-  expect(secret.getAttribute("target")).toBeNull();
-  expect(
-    screen
-      .getByRole("link", { name: /Machine login.*worker-7\.example\.com/s })
-      .getAttribute("href")
-  ).toBe("/credentials/machine");
-  expect(screen.getAllByText("No session named.")).toHaveLength(2);
+    expect(screen.getByText("Secret request")).toBeDefined();
+    expect(screen.getByText("Machine login")).toBeDefined();
+    expect(screen.getByText("ANTHROPIC_API_KEY")).toBeDefined();
+    expect(screen.getByText("worker-7.example.com")).toBeDefined();
+    const secret = screen.getByRole("link", { name: /Secret request.*ANTHROPIC_API_KEY/s });
+    expect(secret.getAttribute("href")).toBe("https://secrets.example.com/approve/req-1");
+    expect(secret.getAttribute("target")).toBeNull();
+    const machine = await screen.findByRole("link", {
+      name: /Machine login.*worker-7\.example\.com/s,
+    });
+    expect(machine.getAttribute("href")).toBe("/credentials/machine");
+    expect(screen.getAllByText("No session named.")).toHaveLength(2);
+  } finally {
+    capabilities.mockRestore();
+  }
 });
 
 // A broker older than its own approval page names none, and an approve_url that is not an
-// absolute http(s) URL is no page to send anyone to: either row keeps the link it had before
-// that page existed, to the record's own Dispatch page, the only place such a request is
-// decided.
-test("a secret row with no usable approve_url links to the record's own Dispatch page", () => {
+// absolute http(s) URL is no page to send anyone to: either row reads as the same summary with
+// no link, since Dispatch decides no secret request of its own any more.
+test("a secret row with no usable approve_url renders its summary with no link", () => {
   for (const approve_url of [undefined, "javascript:alert(1)", "/approve/req-1"]) {
     const view = renderSection({ requests: [pendingSecretRow({ approve_url })], status: "listed" });
     expect(screen.getByText("ANTHROPIC_API_KEY")).toBeDefined();
-    const row = screen.getByRole("link", { name: /Secret request.*ANTHROPIC_API_KEY/s });
-    expect(row.getAttribute("href")).toBe("/credentials/req-1");
+    expect(screen.queryByRole("link", { name: /Secret request.*ANTHROPIC_API_KEY/s })).toBeNull();
     view.unmount();
   }
 });

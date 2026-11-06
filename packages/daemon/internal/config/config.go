@@ -33,6 +33,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shim"
 )
@@ -152,11 +153,29 @@ type Config struct {
 	// ProductionCheckBound is how long a closed issue's production check waits for its deploy
 	// after the close before its last look (`production_check_hours`, 14 days by default).
 	ProductionCheckBound time.Duration
-	ReviewRoundCap       int
-	MaxFixAttempts       int
+	// PodUpdateRetask is how long an open update round waits after it sent a worker the task
+	// before it asks that worker again (`pod_update_retask_hours`, an hour by default), and
+	// PodUpdateNotice how long after the round opened the controller is told the round is stalled
+	// (`pod_update_notice_hours`, four hours by default). Both are decimal numbers of hours, as
+	// `production_check_hours` is, so a live proof and the production check can drive each bound
+	// inside one run rather than wait out a day of real time.
+	PodUpdateRetask time.Duration
+	PodUpdateNotice time.Duration
+	// PodUpdateMaxOpenRounds is how many issues may hold an open pod-update round at once
+	// (`pod_update_max_open_rounds`), and PodUpdateRoundsPerMinute how many rounds one sweep may
+	// open in a minute (`pod_update_rounds_per_minute`). Both are pointers because a file that
+	// leaves the key out asks for no limit at all, which no number says: there is no default to
+	// fall back on, and nil is how a sweep reads "open as many as the fleet needs".
+	PodUpdateMaxOpenRounds   *int
+	PodUpdateRoundsPerMinute *int
+	ReviewRoundCap           int
+	MaxFixAttempts           int
 	// ControllerWakeInterval is the period of the daemon's `tick` controller wake
 	// (`controller_wake_interval_seconds`, an hour by default); when a tick wakes the controller is
-	// admission's rule (admit.Admission.wakeController and its callers).
+	// admission's rule (admit.Admission.wakeController and its callers). The same tick runs the
+	// workflow's status repair (workflow.Engine.correctStatuses), so this period is also how long
+	// an issue's Dispatch status can stand wrong before the daemon puts it back: an operator who
+	// raises it to quiet the controller slows that repair by as much.
 	ControllerWakeInterval time.Duration
 	// ControllerLaunch is who launches the project's controller (`controller`): the operator unless
 	// the file says the daemon does.
@@ -171,6 +190,11 @@ type Config struct {
 	// (runtime.tmux.pi_config_files, or runtime.kubernetes.pod.env's PI_CONFIG_FILES); a role it
 	// leaves out names those alone. Nil while the file names none.
 	RoleConfigFiles map[claim.Role][]string
+	// RepositoryRenames is `repository_renames`: the repository pairs this deployment treats as
+	// one repository wherever a name is compared, because a repository moved while Legion's
+	// records keep the name each was written under. The zero value, which answers as
+	// strings.EqualFold does, while the file configures none.
+	RepositoryRenames ghrepo.Renames
 }
 
 const (
@@ -222,7 +246,7 @@ var countKeys = []struct {
 // would.
 var tossedKeys = map[string]string{
 	"worker_cap":                 "the running-worker cap no longer exists (LEGION-208 Requirement 8)",
-	"worker_idle_retire_seconds": `a worker stays live from its role's first assignment until its issue closes, and nothing retires it after an idle window (LEGION-462)`,
+	"worker_idle_retire_seconds": `an idle window retires no worker: it releases the worker's issue pod, and the key for it is runtime.kubernetes.idle_release (idle_minutes, backstop_minutes), which suspends every claim of the released pod with the source released and brings them back on the next wake (INFRA-945)`,
 	"resync_interval_seconds":    `the mirror of Dispatch and GitHub as truth, and resync's drift healing, no longer exist (LEGION-208 Design, "Ported, and tossed")`,
 	"max_recursion_depth":        "an architect spawns no worker and no sub-architect (the daemon starts every phase, and only the operator starts any other claim), so there is no spawn recursion to bound",
 }
@@ -275,14 +299,22 @@ type fileConfig struct {
 	GitHubApps             *GitHubApps
 	Linger                 *time.Duration
 	ProductionCheckBound   *time.Duration
-	ReviewRoundCap         *int
-	MaxFixAttempts         *int
-	Controller             *string
-	Capabilities           *Capabilities
-	Durations              map[string]int
-	Counts                 map[string]int
-	WorkerBackends         map[claim.Role]runtime.Backend
-	RoleConfigFiles        map[claim.Role][]string
+	PodUpdateRetask        *time.Duration
+	PodUpdateNotice        *time.Duration
+	// PodUpdateMaxOpenRounds is `pod_update_max_open_rounds` and PodUpdateRoundsPerMinute
+	// `pod_update_rounds_per_minute`; each stays nil when the file leaves its key out, which is
+	// how resolve tells an absent key from a number and leaves Config's own pointer nil.
+	PodUpdateMaxOpenRounds   *int
+	PodUpdateRoundsPerMinute *int
+	ReviewRoundCap           *int
+	MaxFixAttempts           *int
+	Controller               *string
+	Capabilities             *Capabilities
+	Durations                map[string]int
+	Counts                   map[string]int
+	WorkerBackends           map[claim.Role]runtime.Backend
+	RoleConfigFiles          map[claim.Role][]string
+	RepositoryRenames        []ghrepo.Rename
 }
 
 // Load reads the daemon's complete runtime configuration. App private-key commands and secrets
@@ -408,6 +440,16 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.Linger, err = readHours(value, key)
 		case "production_check_hours":
 			file.ProductionCheckBound, err = readHours(value, key)
+		case "pod_update_retask_hours":
+			file.PodUpdateRetask, err = readHours(value, key)
+		case "pod_update_notice_hours":
+			file.PodUpdateNotice, err = readHours(value, key)
+		// Both round caps are read here rather than through countKeys, which carries a default
+		// for every key it holds and so could never report that the operator named neither.
+		case "pod_update_max_open_rounds":
+			file.PodUpdateMaxOpenRounds, err = readPositiveInteger(value, key, 0)
+		case "pod_update_rounds_per_minute":
+			file.PodUpdateRoundsPerMinute, err = readPositiveInteger(value, key, 0)
 		case "review_round_cap":
 			file.ReviewRoundCap, err = readPositiveInteger(value, key, 0)
 		case "max_fix_attempts":
@@ -420,6 +462,8 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.WorkerBackends, err = readWorkerBackends(value, key)
 		case "role_config_files":
 			file.RoleConfigFiles, err = readRoleConfigFiles(value, key)
+		case repositoryRenamesKey:
+			file.RepositoryRenames, err = readRepositoryRenames(value, key)
 		default:
 			if isDurationKey(key) || isCountKey(key) {
 				err = readPositive(value, key, file)
@@ -770,11 +814,13 @@ func readInt(value *yaml.Node, key string) (*int, error) {
 	return &read, nil
 }
 
-// readHours is a key in hours (`linger_hours`, `production_check_hours`): a positive number of
-// hours, a decimal among them (0.3 is 18 minutes), bounded as the shipped key is, by the timer
-// bound in whole hours (config.ts MAX_TIMER_HOURS). A value too small to be a nanosecond is
-// refused, never read as zero: the engine arms the deadline it is given, so a zero would close a
-// finished tree at once and take its workspace with it, or bound a check before its first look.
+// readHours is a key in hours (`linger_hours`, `production_check_hours`,
+// `pod_update_retask_hours`, `pod_update_notice_hours`): a positive number of hours, a decimal
+// among them (0.3 is 18 minutes), bounded as the shipped key is, by the timer bound in whole
+// hours (config.ts MAX_TIMER_HOURS). A value too small to be a nanosecond is refused, never read
+// as zero: the engine arms the deadline it is given, so a zero would close a finished tree at
+// once and take its workspace with it, bound a check before its first look, or ask an update
+// round's worker again at every tick.
 func readHours(value *yaml.Node, key string) (*time.Duration, error) {
 	if value.Tag == "!!null" {
 		return nil, nil
@@ -869,6 +915,8 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 		Gates:                Gates{Design: DesignGateRootIssues},
 		Linger:               72 * time.Hour,
 		ProductionCheckBound: 336 * time.Hour,
+		PodUpdateRetask:      time.Hour,
+		PodUpdateNotice:      4 * time.Hour,
 		ReviewRoundCap:       3,
 		MaxFixAttempts:       3,
 	}
@@ -952,6 +1000,15 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 	cfg.WorkerBackends = file.WorkerBackends
 	cfg.RoleConfigFiles = file.RoleConfigFiles
 	if err := checkRoleConfigFiles(cfg); err != nil {
+		return Config{}, err
+	}
+	if err := checkMemory(cfg); err != nil {
+		return Config{}, err
+	}
+	if err := checkRepositoryRenames(file, &cfg); err != nil {
+		return Config{}, err
+	}
+	if err := checkDeployRenames(&cfg); err != nil {
 		return Config{}, err
 	}
 	if cfg.Runtime.Name == "kubernetes" {

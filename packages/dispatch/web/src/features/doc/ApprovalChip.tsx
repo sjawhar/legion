@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useId, useRef, useState } from "react";
 
-import { api, type CreateArtifactReviewInput } from "../../api/client";
+import { api, type CreateArtifactReviewInput, isCapExceeded } from "../../api/client";
 import { inboxQuery } from "../../api/queries";
 import type { Artifact, ArtifactApproval } from "../../api/types";
 import { approvalPillClassName } from "../../components/Pill";
@@ -25,22 +25,36 @@ import {
 import { AgentName } from "../refs/AgentName";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
+import { textSourceOf } from "../refs/text-references";
 import { useDialog } from "../shell/useDialog";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 
 function approvalLabel(approval: ArtifactApproval): string {
+  // A plan is approved by its plan review, never by a person, and its chip says so.
+  const approved = approval.kind === "plan_review" ? "Approved by plan review" : "Approved";
+  const version = approval.version ?? approval.latest_version;
   switch (approval.state) {
     case "draft":
       return "Draft";
     case "awaiting":
-      return "Awaiting approval";
+      return `Awaiting approval${approvalScope(approval)}`;
     case "approved":
-      return `Approved v${approval.version ?? approval.latest_version}`;
+      return `${approved} v${version}`;
     case "stale":
-      return `Approved v${approval.version ?? approval.latest_version} · changed since`;
+      return `${approved} v${version} · changed since`;
     case "changes_requested":
       return "Changes requested";
   }
+}
+
+/** The documents an open request covers, when it covers more than the one being read. */
+function approvalScope(approval: ArtifactApproval): string {
+  const documents = approval.documents ?? [];
+  if (documents.length < 2) {
+    return "";
+  }
+  const named = documents.map((document) => `${document.name} v${document.version}`);
+  return ` of ${named.slice(0, -1).join(", ")} and ${named[named.length - 1]}`;
 }
 
 function ReviewsDialog({
@@ -94,7 +108,10 @@ function ReviewsDialog({
                   </p>
                   {review.reason === null ? null : (
                     <div className={`mt-1 text-sm ${textSecondaryOnSurface}`}>
-                      <MarkdownBody markdown={review.reason} />
+                      <MarkdownBody
+                        markdown={review.reason}
+                        source={textSourceOf("artifact", artifactId)}
+                      />
                     </div>
                   )}
                 </li>
@@ -113,7 +130,8 @@ function RequestChangesDialog({
   onSubmit,
   saving,
 }: {
-  error: boolean;
+  /** What the server answered the last request with, or null while none was refused. */
+  error: Error | null;
   onClose: () => void;
   onSubmit: (reason: string) => void;
   saving: boolean;
@@ -159,11 +177,13 @@ function RequestChangesDialog({
               value={reason}
             />
           </label>
-          {error ? (
+          {error === null ? null : (
             <p className={`text-sm ${dangerText}`} role="alert">
-              Could not request changes. Try again.
+              {/* A reason Dispatch refused for its length says so in its own words, which name
+                  the block and the bound; any other failure is worth another try. */}
+              {isCapExceeded(error) ? error.message : "Could not request changes. Try again."}
             </p>
-          ) : null}
+          )}
           <div className="flex items-center justify-end gap-2">
             <button
               className={`rounded-lg border px-3 py-1.5 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
@@ -299,7 +319,7 @@ export function ApprovalChip({
       ) : null}
       {requestChangesOpen ? (
         <RequestChangesDialog
-          error={review.isError}
+          error={review.isError ? review.error : null}
           onClose={() => {
             review.reset();
             setRequestChangesOpen(false);

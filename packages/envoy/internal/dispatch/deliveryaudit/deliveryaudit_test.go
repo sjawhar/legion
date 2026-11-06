@@ -29,6 +29,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/outbox"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/roles"
 	"github.com/sjawhar/envoy/internal/session"
 	envoystore "github.com/sjawhar/envoy/internal/store"
 )
@@ -72,6 +73,12 @@ func (r *recorder) Request(_ string, item contracts.Envelope, _ bus.RequestOptio
 	return r.PublishAsync(item)
 }
 
+// PublishStoredAsync takes a role route kept on the role's kept lane, recording the envelope,
+// whose topic is still the role's.
+func (r *recorder) PublishStoredAsync(_ string, item contracts.Envelope, _ string) <-chan error {
+	return r.PublishAsync(item)
+}
+
 func (r *recorder) Probe(time.Duration) error { return nil }
 
 func (r *recorder) sent(eventID string) []string {
@@ -82,26 +89,19 @@ func (r *recorder) sent(eventID string) []string {
 
 // heldRoles is the role and session buckets the outbox resolves a role route's holder from
 // (outbox.Deps.RoleClaims and Sessions): every role is held by s-heard, a live self-subscribed
-// session, so a role route is forwarded to it with a Request the recorder takes.
-type heldRoles struct{}
+// session, so a role route is forwarded to it with a Request the recorder takes. It judges that
+// session on the package's own windows, as roles.Buckets does (roles.Windows).
+type heldRoles struct{ roles.Windows }
 
 func (heldRoles) RoleClaim(context.Context, string) (envoystore.RoleClaim, error) {
 	return envoystore.RoleClaim{HolderSessionID: "s-heard"}, nil
 }
 
-func (heldRoles) ReleaseExpiredRoleClaim(context.Context, string, string, time.Duration) (envoystore.ExpiredRoleClaimRelease, error) {
-	return envoystore.ExpiredRoleClaimSuperseded, nil
+func (heldRoles) Holder(context.Context, string) (session.SessionEntry, error) {
+	return session.SessionEntry{SelfSubscribed: true, UpdatedAt: time.Now().UnixMilli()}, nil
 }
 
-func (heldRoles) Holder(_ context.Context, _ string, live func(session.SessionEntry) bool) (session.SessionEntry, error) {
-	entry := session.SessionEntry{SelfSubscribed: true, UpdatedAt: time.Now().UnixMilli()}
-	if !live(entry) {
-		return session.SessionEntry{}, fmt.Errorf("s-heard is not live")
-	}
-	return entry, nil
-}
-
-func (heldRoles) TTL() time.Duration { return 5 * time.Minute }
+func (heldRoles) LastSeen(string) int64 { return 0 }
 
 // heardEnvelope is the envelope id the stand-in listener mints for every send to s-heard.
 const heardEnvelope = "envelope-heard-1"
@@ -110,11 +110,10 @@ const heardEnvelope = "envelope-heard-1"
 // live sessions: s-mention, every send to which it refuses, and s-heard, every send to which it
 // accepts under heardEnvelope. s-heard holds the role lead.
 type rig struct {
-	handler   http.Handler
-	database  *store.Store
-	broker    *events.Broker
-	documents docs.API
-	sent      *recorder
+	handler  http.Handler
+	database *store.Store
+	broker   *events.Broker
+	sent     *recorder
 }
 
 func newRig(t *testing.T) *rig {
@@ -181,7 +180,7 @@ func newRig(t *testing.T) *rig {
 	// keyed handlers, detached deliveries, sockets and relay it started have ended, before the
 	// database closes under them.
 	t.Cleanup(api.Register(mux, t.Context(), deps).Wait)
-	return &rig{handler: mux, database: database, broker: broker, documents: documents, sent: &recorder{topics: map[string][]string{}}}
+	return &rig{handler: mux, database: database, broker: broker, sent: &recorder{topics: map[string][]string{}}}
 }
 
 // call sends one request: as the person login names when it is not empty, else as the session actor
@@ -240,7 +239,7 @@ func (r *rig) publishAll(t *testing.T) {
 	go func() {
 		defer close(stopped)
 		outbox.New(outbox.Deps{
-			Store: r.database, Publisher: r.sent, Broker: r.broker, Listen: r.database.Pool.Listener, Docs: r.documents,
+			Store: r.database, Publisher: r.sent, Broker: r.broker, Listen: r.database.Pool.Listener,
 			RoleClaims: heldRoles{}, Sessions: heldRoles{},
 		}).Run(ctx)
 	}()

@@ -288,6 +288,7 @@ func TestValuesRefusesAChainTheBrokerDidNotWrite(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			m, enr, key, approver := newFixture(t)
+			sessionDefaultFixture(t, m)
 			ctx := context.Background()
 			req, err := m.Create(ctx, enr, signRequest(t, m, key, "why", "DEEL_API_KEY"), "")
 			if err != nil || req.RecordID == nil {
@@ -973,6 +974,9 @@ func TestRevokeByApproverIsLimitedToTheApproverOrOperator(t *testing.T) {
 
 // TestApprovalAfterTheEnrollmentLapsedDenies pins that an approval landing after the requesting
 // session's lease lapsed denies the request as withdrawn instead of granting to a dead session.
+// The fixture's enrollment names no session, so no end of its box could leave it dormant and
+// there is nothing to carry the approval to; a lapsed row that would go dormant takes the grant
+// instead (TestAnApprovalOnALapsedRowTheSweepHasNotEndedGrantsAndTheSweepThenCarriesIt).
 func TestApprovalAfterTheEnrollmentLapsedDenies(t *testing.T) {
 	m, enr, key, approver := newFixture(t)
 	ctx := context.Background()

@@ -7,12 +7,15 @@ import { buildIssuePath, type IssueTab } from "../refs/routes";
 function tabs(artifactCount: number): readonly TabDefinition<IssueTab>[] {
   return [
     { id: "spec", label: "Spec" },
+    { id: "verification", label: "Verification" },
+    { id: "plan", label: "Plan" },
     { id: "conversation", label: "Conversation" },
     { id: "children", label: "Children" },
     artifactCount === 0
       ? { id: "artifacts", label: "Artifacts" }
       : { id: "artifacts", label: "Artifacts", count: artifactCount },
     { id: "activity", label: "Activity" },
+    { id: "decisions", label: "Decisions" },
   ];
 }
 

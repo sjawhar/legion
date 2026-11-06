@@ -20,7 +20,7 @@ import (
 )
 
 // OMPHome puts in home, a fresh HOME a test runs omp under, the native module omp would otherwise
-// write there on its first run: one .node file of about 111 MiB at the pin, the variant the CPU
+// write there on its first run: one .node file of about 116 MiB at the pin, the variant the CPU
 // runs, which omp extracts from its own binary into .omp/natives/<version> under any HOME that
 // lacks it. Oh My Pi has no setting for that directory short of XDG_DATA_HOME, which moves its
 // whole profile. The file is instead a hardlink to one copy per omp binary under the user's cache
