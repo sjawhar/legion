@@ -1,0 +1,12 @@
+kind: Added
+body: |-
+    `github.com/sjawhar/envoy/sessiontiming` is the one public door onto the generated Envoy
+    session-registration timings — `Heartbeat`, `LiveWindow`, `ClaimStale`, `CallTimeout`,
+    `CallRetryDelay` and `CallAttempts` — for a caller in another Go module, which Go's internal
+    rule bars from `internal/contracts`. The listener's own uses read `internal/contracts`
+    directly: `session.LiveWindow`, the window every reader of the session registry judges a
+    record's age against, and `session.ClaimStaleAfter` each read the declaration rather than a
+    literal of their own. No value changed.
+time: 2026-11-05T23:29:12.000000000Z
+custom:
+    Issue: pr2838

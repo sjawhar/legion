@@ -275,6 +275,33 @@ export function unresolvedAgentDispatches(
 /** The worker skill, the one file the release rule below is written over. */
 export const WORKER_SKILL = path.join(REPO_ROOT, "skills/legion-worker/SKILL.md");
 
+/** The worker skill's tool reference, the one file the shared-database rules are written over. */
+export const WORKER_TOOLS = path.join(REPO_ROOT, "skills/legion-worker/references/tools.md");
+
+/**
+ * What one skill file gets wrong about a rule pinned over the repository's own `skills/`: it
+ * still carries a claim the rule retired (`retired.claim`, a pattern rather than its one wording,
+ * so a reword of the same shape is caught too), or it has lost the sentence the rule turns on
+ * (`required.sentence`, pinned whole and literally). Each fault is one sentence naming `file` and
+ * saying what a reader of the wrong text would believe. The text is whitespace-normalized first,
+ * because these files are wrapped and a sentence of one crosses lines.
+ */
+function prosePinFaults(
+  file: string,
+  markdown: string,
+  retired: { claim: RegExp; because: string },
+  required: { sentence: string; because: string }
+): string[] {
+  const text = markdown.replace(/\s+/g, " ");
+  const faults: string[] = [];
+  const found = text.match(retired.claim);
+  if (found !== null) faults.push(`${file} says "${found[0]}": ${retired.because}`);
+  if (!text.includes(required.sentence)) {
+    faults.push(`${file} does not say "${required.sentence}": ${required.because}`);
+  }
+  return faults;
+}
+
 /**
  * The claim the idle release retired (INFRA-945): that a role, or the pane it runs in, stays live
  * for as long as its issue is in the workflow. Under `runtime: kubernetes` the daemon now releases
@@ -296,24 +323,60 @@ const ROLE_STAYS_LIVE =
  */
 const RELEASE_IS_NO_STOP = "A released pod is not a stop.";
 
-/**
- * What `markdown` — skills/legion-worker/SKILL.md — gets wrong about a released pod, each as one
- * sentence naming the file. Both halves are read over whitespace-normalized text, because the
- * skill is written with semantic line breaks and a sentence of it can cross lines.
- */
+/** What `markdown` — skills/legion-worker/SKILL.md — gets wrong about a released pod. */
 export function retiredWorkerLifecycleClaims(markdown: string): string[] {
-  const text = markdown.replace(/\s+/g, " ");
-  const faults: string[] = [];
-  const live = text.match(ROLE_STAYS_LIVE);
-  if (live !== null) {
-    faults.push(
-      `skills/legion-worker/SKILL.md says "${live[0]}": a released pod ends every role process of it, so no role stays live for as long as its issue is in the workflow`
-    );
-  }
-  if (!text.includes(RELEASE_IS_NO_STOP)) {
-    faults.push(
-      `skills/legion-worker/SKILL.md does not say "${RELEASE_IS_NO_STOP}": a worker told nothing about release reads its pod's deletion as a crash`
-    );
-  }
-  return faults;
+  return prosePinFaults(
+    "skills/legion-worker/SKILL.md",
+    markdown,
+    {
+      claim: ROLE_STAYS_LIVE,
+      because:
+        "a released pod ends every role process of it, so no role stays live for as long as its issue is in the workflow",
+    },
+    {
+      sentence: RELEASE_IS_NO_STOP,
+      because: "a worker told nothing about release reads its pod's deletion as a crash",
+    }
+  );
+}
+
+/**
+ * The claim INFRA-1315 retired: that a login, or the URL that carries one, can create and drop
+ * databases on the shared server. The skill ships to every deployment and cannot know what a
+ * deployment's session login may do, so it claims no power for it: a deployment that splits that
+ * login gives its roles one that owns nothing, and a role that read the old claim there would
+ * believe a power it does not have. The claim is a pattern rather than its one wording, and the
+ * subject is named rather than left open, so the file's own "Each makes and drops a database of
+ * its own per test", said of the pod's server, stays outside it; the rule the file does carry,
+ * that nothing which creates or drops a database gets the session URL, names no login that can
+ * and so passes too.
+ */
+const LOGIN_OWNS_DATABASES =
+  /\b(?:login|account|credentials?|URL|DSN)\b[^.]{0,40}?\b(?:can|could|may|is able to|is allowed to|has (?:the )?(?:rights?|permissions?|privileges?) to)\s+(?:create|make|drop|delete)\b[^.]{0,40}?\bdatabases?\b/i;
+
+/**
+ * The sentence of `## Reading a shared database` a role must not lose, pinned whole and literally:
+ * a role that reads nothing about it reads the shared store through the write-capable session URL,
+ * which on 2026-11-05 left a session-level read-only setting on a pooled backend and failed 1,432
+ * session writes.
+ */
+const NO_READ_THROUGH_SESSION_URL =
+  "Never read it through the session URL the file `OMP_SESSION_SQL_DSN_FILE` names.";
+
+/** What `markdown` — skills/legion-worker/references/tools.md — gets wrong about a shared database. */
+export function brokenSharedDatabaseRules(markdown: string): string[] {
+  return prosePinFaults(
+    "skills/legion-worker/references/tools.md",
+    markdown,
+    {
+      claim: LOGIN_OWNS_DATABASES,
+      because:
+        "the skill cannot know what a deployment's session login may do, so it claims no power for that login",
+    },
+    {
+      sentence: NO_READ_THROUGH_SESSION_URL,
+      because:
+        "a role told nothing about reads reaches the shared store through the write-capable session URL",
+    }
+  );
 }

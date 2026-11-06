@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"testing"
 	"time"
@@ -59,10 +58,9 @@ func TestAKeyedWriteAProcessDiedRunningIsTakenOverOnceItsLeaseLapses(t *testing.
 
 	first := make(chan error, 1)
 	go func() {
-		response, err := pair.a.sendKeyed(http.MethodPost, path, body, "killed-press")
+		answer, err := pair.a.trySend(http.MethodPost, path, body, asKeyed(dispatchTestLogin, "killed-press"))
 		if err == nil {
-			_ = response.Body.Close()
-			err = errors.New("process A answered the held write: " + response.Status)
+			err = errors.New("process A answered the held write: " + answer.String())
 		}
 		first <- err
 	}()
@@ -87,43 +85,35 @@ func TestAKeyedWriteAProcessDiedRunningIsTakenOverOnceItsLeaseLapses(t *testing.
 		t.Fatal("the held write's client saw no failure when its process died")
 	}
 
-	repeat := func() (int, string, http.Header) {
+	repeat := func() httpAnswer {
 		t.Helper()
-		response, err := pair.b.sendKeyed(http.MethodPost, path, body, "killed-press")
-		if err != nil {
-			t.Fatalf("repeat on process B: %v", err)
-		}
-		defer response.Body.Close()
-		answer, _ := io.ReadAll(response.Body)
-		return response.StatusCode, string(answer), response.Header
+		return pair.b.send(t, http.MethodPost, path, body, asKeyed(dispatchTestLogin, "killed-press"))
 	}
-	status, answer, header := repeat()
-	if status != http.StatusConflict || !json.Valid([]byte(answer)) || header.Get("Retry-After") != "1" {
-		t.Fatalf("a repeat inside the dead run's lease: %d %s, want 409 %s with Retry-After: 1", status, answer, contracts.IdempotencyKeyInFlight)
+	answer := repeat()
+	if answer.status != http.StatusConflict || !json.Valid(answer.body) || answer.header.Get("Retry-After") != "1" {
+		t.Fatalf("a repeat inside the dead run's lease: %v, want 409 %s with Retry-After: 1", answer, contracts.IdempotencyKeyInFlight)
 	}
-	var refusal struct{ Code string }
-	_ = json.Unmarshal([]byte(answer), &refusal)
-	if refusal.Code != contracts.IdempotencyKeyInFlight {
-		t.Fatalf("a repeat inside the dead run's lease: code %s, want %s", refusal.Code, contracts.IdempotencyKeyInFlight)
+	if answer.code() != contracts.IdempotencyKeyInFlight {
+		t.Fatalf("a repeat inside the dead run's lease: code %s, want %s", answer.code(), contracts.IdempotencyKeyInFlight)
 	}
 	// The refusal under the live lease is read; what is left is the take-over, so the lease is
 	// moved past its end rather than waited out. Nothing renews it - process A is gone - so its
 	// remaining minute is wall clock alone.
 	lapsed := backDateKeyLease(t, pair.database, "killed-press", contracts.IdempotencyLease+time.Second)
-	for status == http.StatusConflict {
+	for answer.status == http.StatusConflict {
 		if time.Since(lapsed) > 30*time.Second {
-			t.Fatalf("process B never took the key over: still %d %s %v after the dead run's lease lapsed",
-				status, answer, time.Since(lapsed))
+			t.Fatalf("process B never took the key over: still %v %v after the dead run's lease lapsed",
+				answer, time.Since(lapsed))
 		}
 		time.Sleep(200 * time.Millisecond)
-		status, answer, header = repeat()
+		answer = repeat()
 	}
-	if status != http.StatusCreated || header.Get(contracts.IdempotencyReplayedHeader) != "" {
-		t.Fatalf("the repeat once the lease lapsed: %d %s replayed=%q, want the write made by process B", status, answer,
-			header.Get(contracts.IdempotencyReplayedHeader))
+	if answer.status != http.StatusCreated || answer.header.Get(contracts.IdempotencyReplayedHeader) != "" {
+		t.Fatalf("the repeat once the lease lapsed: %v replayed=%q, want the write made by process B", answer,
+			answer.header.Get(contracts.IdempotencyReplayedHeader))
 	}
-	if status, answer, header = repeat(); status != http.StatusCreated || header.Get(contracts.IdempotencyReplayedHeader) != "?1" {
-		t.Fatalf("a repeat after the takeover: %d %s, want the takeover's answer replayed", status, answer)
+	if answer = repeat(); answer.status != http.StatusCreated || answer.header.Get(contracts.IdempotencyReplayedHeader) != "?1" {
+		t.Fatalf("a repeat after the takeover: %v, want the takeover's answer replayed", answer)
 	}
 	var comments int
 	if err := pair.database.Pool.QueryRow(context.Background(),
