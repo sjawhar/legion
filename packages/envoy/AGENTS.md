@@ -2421,52 +2421,18 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
 - `GET /api/v1/issues/{key}/summary` and `GET /api/v1/projects/{key}/artifacts/{slug}/summary` (`api/issue_summary.go`, any authenticated caller) answer what a rendered `dispatch://` reference shows, at a cost a page linking a hundred items can pay on every event that touches them:
   the issue's `{key, project, title, status, documents}`, each document `{id, slug, name, kind, latest_version, primary}` in the order the issue read lists its artifacts (`primary` marks the spec, which a reference to a block of the spec names, so a pinned spec block's link opens that version under the spec's own slug without the full read), from one query for the issue and one for its artifacts (`latest_version` a `max(number)` probe of `artifact_versions` per artifact), and a project document's `{id, project, slug, name, kind, latest_version}`, its slug or unambiguous filename resolved as the project document read resolves it (`resolveDocumentReference`).
   Neither reads a version body, an approval, a child, an open ask or a route roster, as the full reads do.
-- `GET /api/v1/issues/{key}` (`getIssue`, `api/issue_queries.go`) reads the database in two batches,
-  one round trip each on one pooled connection (`store.Pool.SendBatch`) once that connection has
-  prepared their statements (pgx prepares a statement it has not cached in a round trip of its own
-  before the batch, as it does before a single query), where it once spent a statement per part of
-  the answer: six, two more when the issue has documents, two more when it has open asks, and one
-  per artifact. Batch 1 is everything keyed on the issue key alone: the issue row with its progress
-  (`issueRowStatement`), its external links, its artifacts (`issueArtifactsStatement`), its open
-  asks (`listIssueAsksQueryOpen`), its children (`issueChildrenStatement`) and its own
-  `referenced_by_count` (`refs.QueueBacklinkCounts`). A key no issue carries is recorded by the
-  issue row's callback, which returns no error, and answered as that row's `pgx.ErrNoRows` — `404
-  NOT_FOUND` — once the batch has closed: pgx invalidates every statement of a batch whose `Close`
-  answers an error in that connection's statement and description caches
-  (`invalidateCachesOnBatchResultsError`), so a callback that returned the error would cost the
-  connection the read's whole prepared statements on every 404, and the other callbacks, which run
-  against an issue with no row, answer empty lists the read drops. Batch 2 is what only batch 1's
-  answers name: every artifact's versions in one `artifact_id = any($1::uuid[])` statement
-  (`artifactVersionsStatement`, each artifact's own versions still in `order by v.number`), the
-  documents' latest reviews and open approval requests (`latestReviewsStatement`,
-  `openApprovalAsksStatement`), and the open asks' identity events (`events.QueueOpenedEventIDs`),
-  backlink counts and the part ids of their options and answers (`refs.QueueAskPartIDs`); an issue with no artifact and no open ask makes no second round trip. Each
-  batch's results are closed before anything else reads, because a batch holds its connection until
-  then, and a second connection taken while it is held is the nesting `store.ErrNestedAcquire`
-  exists to stop. The pool would not refuse it here: `store.Pool.SendBatch` checks the request's
-  mark when the batch is sent but sets none while the batch is open, so no callback of either batch
-  reads the database. A routed issue's reach is read after both (`routeRosterOrUnknown`): one
-  statement more for the listener's stored answer (`storedRouteRoster`), and a shared listener
-  fetch only when that answer is stale. One
-  queue-and-apply serves every read of the same thing — `queueArtifactDetails` (`api/artifacts.go`)
-  for a list of artifacts' versions, which it queues itself, and their documents' latest reviews and
-  open approval requests, which it nests `queueApprovals` (`api/reviews.go`) for, and
-  `queueAskDetails` (`api/ask_rows.go`) for a list of asks' identity events, backlink counts and part ids —
-  queued beside this read's other statements here and sent as a batch of their own by the loaders
-  every other route calls (`loadArtifactDetails`, `loadAskDetails`), so the two paths cannot drift.
-  One artifact's read is that list of one: `loadArtifactRow` (the lookup by id and the one by
-  `ref_key`) sends `loadArtifactDetails` for the row it scanned, so its versions and its approval
-  cost one round trip after that lookup, and `attachApprovals`, which the approval-request route
-  (`requestArtifactApproval`, through `attachApproval`) calls on its transaction before and after it
-  opens or renews the ask, and which loads no versions, sends `queueApprovals`'s pair as a batch of
-  its own, one round trip too. `api/issue_read_batch_test.go` holds the batched body byte for byte
-  to one built from the loaders the other routes call (`loadIssueWithProgress`, `loadArtifacts`,
-  `queryOwnerAsks` with `issueOpenAsksOf`, `issueChildrenStatement` with `scanIssueChildren`,
-  `refs.BacklinkCounts`); since `loadArtifacts` and `queryOwnerAsks` send the same two
-  queue-and-applies, that comparison checks how `readIssue` puts its batches and its answer
-  together, not the detail statements themselves. The same file counts the read's round trips with a
-  pgx tracer on the server's pool (`storetest.Traced`), counting only the statements of the one
-  request its context marks.
+
+- `GET /api/v1/issues/{key}` (`getIssue`, `api/issue_queries.go`) reads the database in two batches, one round trip each on one pooled connection (`store.Pool.SendBatch`) once that connection has prepared their statements (pgx prepares a statement it has not cached in a round trip of its own before the batch, as it does before a single query), where it once spent a statement per part of the answer: six, two more when the issue has documents, two more when it has open asks, and one per artifact.
+  Batch 1 is everything keyed on the issue key alone: the issue row with its progress (`issueRowStatement`), its external links, its artifacts (`issueArtifactsStatement`), its open asks (`listIssueAsksQueryOpen`), its children (`issueChildrenStatement`) and its own `referenced_by_count` (`refs.QueueBacklinkCounts`).
+  A key no issue carries is recorded by the issue row's callback, which returns no error, and answered as that row's `pgx.ErrNoRows` — `404 NOT_FOUND` — once the batch has closed: pgx invalidates every statement of a batch whose `Close` answers an error in that connection's statement and description caches (`invalidateCachesOnBatchResultsError`), so a callback that returned the error would cost the connection the read's whole prepared statements on every 404, and the other callbacks, which run against an issue with no row, answer empty lists the read drops.
+  Batch 2 is what only batch 1's answers name: every artifact's versions in one `artifact_id = any($1::uuid[])` statement (`artifactVersionsStatement`, each artifact's own versions still in `order by v.number`), the documents' latest reviews and open approval requests (`latestReviewsStatement`, `openApprovalAsksStatement`), and the open asks' identity events (`events.QueueOpenedEventIDs`), backlink counts and the part ids of their options and answers (`refs.QueueAskPartIDs`); an issue with no artifact and no open ask makes no second round trip.
+  Each batch's results are closed before anything else reads, because a batch holds its connection until then, and a second connection taken while it is held is the nesting `store.ErrNestedAcquire` exists to stop.
+  The pool would not refuse it here: `store.Pool.SendBatch` checks the request's mark when the batch is sent but sets none while the batch is open, so no callback of either batch reads the database.
+  A routed issue's reach is read after both (`routeRosterOrUnknown`): one statement more for the listener's stored answer (`storedRouteRoster`), and a shared listener fetch only when that answer is stale.
+  One queue-and-apply serves every read of the same thing — `queueArtifactDetails` (`api/artifacts.go`) for a list of artifacts' versions, which it queues itself, and their documents' latest reviews and open approval requests, which it nests `queueApprovals` (`api/reviews.go`) for, and `queueAskDetails` (`api/ask_rows.go`) for a list of asks' identity events, backlink counts and part ids — queued beside this read's other statements here and sent as a batch of their own by the loaders every other route calls (`loadArtifactDetails`, `loadAskDetails`), so the two paths cannot drift.
+  One artifact's read is that list of one: `loadArtifactRow` (the lookup by id and the one by `ref_key`) sends `loadArtifactDetails` for the row it scanned, so its versions and its approval cost one round trip after that lookup, and `attachApprovals`, which the approval-request route (`requestArtifactApproval`, through `attachApproval`) calls on its transaction before and after it opens or renews the ask, and which loads no versions, sends `queueApprovals`'s pair as a batch of its own, one round trip too.
+  `api/issue_read_batch_test.go` holds the batched body byte for byte to one built from the loaders the other routes call (`loadIssueWithProgress`, `loadArtifacts`, `queryOwnerAsks` with `issueOpenAsksOf`, `issueChildrenStatement` with `scanIssueChildren`, `refs.BacklinkCounts`); since `loadArtifacts` and `queryOwnerAsks` send the same two queue-and-applies, that comparison checks how `readIssue` puts its batches and its answer together, not the detail statements themselves.
+  The same file counts the read's round trips with a pgx tracer on the server's pool (`storetest.Traced`), counting only the statements of the one request its context marks.
 
 - The reference grammar accepts any segment as an id, so `dispatch://CORE-1/ask/hello` parses and is stored like any other target.
   Every lookup that resolves a stored target skips what resolves to nothing rather than failing the write:
