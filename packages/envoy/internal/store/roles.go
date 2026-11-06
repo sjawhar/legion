@@ -526,9 +526,10 @@ func (r *Registry) releaseAllRoleClaims(ctx context.Context, sessionID string) e
 // bucket until something rewrites it and which the role reaper does no more than count skipped. A
 // line each also means neither is written for a deregistration that met none of its class, where
 // one shared line would be written for either and read as both. The refused key is named by its
-// size (key_bytes) and not its text, as the per-claim line it replaces named it: a key is refused
-// for being longer than the bucket allows or for being outside its alphabet, and its size tells
-// those apart without putting the key itself in the log. releaseRoleClaim writes that same
+// size (key_bytes), as the per-claim line it replaces named it: a key is refused for being longer
+// than the bucket allows or for being outside its alphabet, and its size tells those apart. The
+// error carries the key's text when the key was refused for its characters rather than its
+// length, as the per-claim line's did. releaseRoleClaim writes that same
 // refusal over the release of one named role, and an operator must tell the two lines apart: this
 // one names no role, and carries the session whose deregistration met these claims and how many
 // of them there were.

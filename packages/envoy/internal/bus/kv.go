@@ -454,7 +454,9 @@ func (kv KeyValue) write(key string) error {
 // invalidKey names nats.go's refusal of a key outside its key alphabet (nats.ErrInvalidKey, or
 // jetstream.ErrInvalidKey on a watch through the jetstream handle) as the ErrInvalidKey it is,
 // naming key. nats.go checks the alphabet before it sends anything (an exact key on a read, write
-// or delete, a search key on a watch), so the handle reads its answer rather than repeat its check.
+// or delete, a search key on a watch), so every call through the handle reads its answer rather
+// than repeat its check. RefusesRead is the one exception: it answers without calling nats.go, so
+// it repeats the check as natsKeyValid, which must follow nats.go's validKeyRe on every upgrade.
 func invalidKey(key any, err error) error {
 	if errors.Is(err, nats.ErrInvalidKey) || errors.Is(err, jetstream.ErrInvalidKey) {
 		return fmt.Errorf("%w: key %q: %w", ErrInvalidKey, key, err)

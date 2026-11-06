@@ -3419,7 +3419,7 @@ that is the rule and not a transitional measure, and it is what lets Dispatch de
   What it went past it counts rather than warns about per claim, and writes after the loop as one summary line per class, logged only when that class's count is not zero:
   the fallback runs only while the view cannot be served — the outage itself — and once per deregistration, so a line per claim over a bucket of thousands, under a fleet deregistering, would amplify what it reports.
   Each line carries the session, how many claims it left and the first one it met with that claim's error, and the two classes keep a line each because their remedies differ:
-  a key no call of any build can read (`bus.ErrRefused`, named by its `key_bytes` and not its text, which the role reaper deletes), and a record no build can decode (`ErrMalformedRoleClaim`, named by its `role`, which the role reaper only counts `skipped`).
+  a key no call of any build can read (`bus.ErrRefused`, named by its `key_bytes`, which the role reaper deletes), and a record no build can decode (`ErrMalformedRoleClaim`, named by its `role`, which the role reaper only counts `skipped`).
   That scan carries every record's value and revision, so the sweep makes no read per key at all and sends past it only the deletes it owes, each conditional on the revision the scan read.
   It fails on two things: a listing that did not answer or failed, and a delete of a claim the session holds.
   The per-key read that once failed it after the request's context had ended went with the per-key reads themselves, so a spent budget now reaches the route as the listing's wording or the delete's rather than as `read role <role>'s claim: context deadline exceeded`.

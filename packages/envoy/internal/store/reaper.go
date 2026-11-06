@@ -149,12 +149,14 @@ type RoleClaimSweep struct {
 // too; one it cannot delete either (a key outside the alphabet) is passed
 // over, uncounted, and the sweep goes on.
 //
-// The scan (roleClaimsUntil) and every bucket call the pass makes after it - each release, and
-// the delete of a key this build cannot read - wait no longer than ctx (bus.Bounded), which is
-// the reaper loop's own context (StartRoleClaimReaper): the listener's shutdown ends that context
-// and then waits for this loop to return, up to its shared 10 s shutdown bound, before it drains
-// the bus, so a pass that returns inside that bound fails each call it has left on the ended
-// context alone, against a bus that is still answering.
+// Every bucket call the pass makes after its scan - each release, and the delete of a key this
+// build cannot read - waits no longer than ctx (bus.Bounded), which is the reaper loop's own
+// context (StartRoleClaimReaper): the listener's shutdown ends that context and then waits for
+// this loop to return, up to its shared 10 s shutdown bound, before it drains the bus, so a pass
+// that returns inside that bound fails each call it has left on the ended context alone, against
+// a bus that is still answering. The scan itself (roleClaimsUntil) is not under bus.Bounded: it
+// reads ctx at each record delivered to it and ends at the first one after ctx has ended, so a
+// scan the bucket delivers nothing to ends at its own idle bound (kvwatch.ScanIdleTimeout) instead.
 //
 // The delete of a key this build cannot read is the tree's one unconditional abandoned delete,
 // and it argues from the key what every other caller argues from the revision it deletes at.
