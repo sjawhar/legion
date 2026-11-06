@@ -103,8 +103,8 @@ mapping in Dispatch.
 
 Legion uses three GitHub Apps, each installed on the owner of every repository Legion works: an
 implement App, a review App and an Envoy App. The daemon mints each agent's token from its role's
-App, with the App's whole installation permissions, so the implement and review Apps' permissions
-are exactly what Legion's agents can do on GitHub:
+App, narrowed to the repositories that agent works and to the permissions its work needs, so the
+implement and review Apps' permissions bound what Legion's agents can do on GitHub:
 
 | App | Write | Read |
 | --- | --- | --- |
@@ -112,7 +112,12 @@ are exactly what Legion's agents can do on GitHub:
 | **implement** (implementer, merger) | contents, pull requests, issues, actions, statuses, workflows | checks, metadata, packages |
 
 The implement App cannot create a check run, and a review never comes from the App that wrote the
-change. `gh api /apps/<app slug> --jq .permissions` shows what an App holds. The daemon itself reads
+change. `gh api /apps/<app slug> --jq .permissions` shows what an App asks accounts for, and
+`gh api /app/installations/<id> --jq .permissions`, under the App's own JWT, shows what one
+account granted it. The mint reads that second set before each token and asks for the role's
+permissions cut down to it: a permission the account has not approved is left out of the
+request, and the daemon says so once on its stderr, naming the App, the owner and the
+permission. The daemon itself reads
 GitHub with the implement App too, in a pass as it starts and every two minutes after: it reads
 each open pull request's base branch and the checks that branch requires (its rulesets and its
 branch protection), since only those decide whether CI is red at a head, and so where Legion sends

@@ -270,7 +270,11 @@ func appLoginsAtBoot(ctx context.Context, apps appauth.Logins, log *slog.Logger)
 // mintAtBoot mints the implement and then the review App token for repo, as one attempt run again
 // after a failure GitHub reports as its own trouble (appauth.TransientError); any other failure is
 // refused at once. The token manager keeps a lease it minted, so an attempt after the implement
-// token passed asks GitHub only for the review token.
+// token passed asks GitHub only for the review token. A mint asks for what each App's
+// installation is granted of the role's set and says on stderr what it left out (appauth's
+// exchangeGranted), so a permission an account has not approved no longer stops the boot: what
+// does is a repository the installation cannot reach, an installation granted none of the set
+// at all, or GitHub's own trouble lasting past the retries.
 func mintAtBoot(ctx context.Context, tokens appauth.Tokens, repo ghrepo.Repository, log *slog.Logger) error {
 	return bootprobe.Run(ctx, "GitHub App tokens mint", appMintRetry, log, appAttempt(func(ctx context.Context) error {
 		for _, role := range appauth.Roles {
@@ -334,9 +338,11 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	}
 	// A token names the repository it acts on, so the boot proves each App's key on every
 	// repository the mapping serves rather than once per owner: an installation that does not
-	// reach one of them, or that holds none of the permissions a role's write token asks for,
-	// stops the boot naming the repository and the set, where it would otherwise leave a role
-	// with no gh files at its launch.
+	// reach one of them, or that is granted none of the permissions a role's write token asks
+	// for, stops the boot naming the repository and the set, where it would otherwise leave a
+	// role with no gh files at its launch. An installation granted some of the set mints with
+	// what it is granted, and the mint says the rest on stderr (appauth's exchangeGranted), so
+	// one permission awaiting an account's approval costs the role no gh files at all.
 	for _, repo := range w.repositories.Accepted() {
 		if err := mintAtBoot(ctx, tokens, repo, log); err != nil {
 			return nil, err

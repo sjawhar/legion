@@ -121,6 +121,23 @@ func mintedFor(token string, expires time.Time, repos ...string) string {
 		token, expires.Format(time.RFC3339), strings.Join(named, ","))
 }
 
+// grantedEverythingAsked is every permission readPermissions and the two writePermissions name,
+// at the highest access any of them names: what an installation whose account has approved all
+// of Legion's grants is granted.
+var grantedEverythingAsked = map[string]string{
+	"actions": "write", "checks": "write", "contents": "write", "metadata": "read",
+	"pull_requests": "write", "statuses": "write", "workflows": "write",
+}
+
+// installationGranting is GitHub's GET /app/installations/{id}: the installation and the
+// permissions its account granted the App, which a mint reads before each exchange and cuts its
+// request down to (exchangeGranted).
+func installationGranting(id string, permissions map[string]string) string {
+	// A map of strings always marshals, and json.Marshal sorts its keys.
+	encoded, _ := json.Marshal(permissions)
+	return fmt.Sprintf(`{"id":%s,"permissions":%s}`, id, encoded)
+}
+
 func TestGenerateJWTSignsShippedClaims(t *testing.T) {
 	key, privatePEM := testAppKey(t)
 	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
@@ -191,6 +208,9 @@ func TestTokensMintsRefreshesAndCachesIdentity(t *testing.T) {
 			discoveries++
 			mu.Unlock()
 			fmt.Fprint(w, `[{"id":77,"account":{"login":"Sjawhar"}}]`)
+		case "/app/installations/77":
+			verifyAppJWT(t, jwt[len("Bearer "):], &key.PublicKey, now, "12345")
+			fmt.Fprint(w, installationGranting("77", grantedEverythingAsked))
 		case "/app/installations/77/access_tokens":
 			if r.Method != http.MethodPost {
 				t.Fatalf("method = %s, want POST", r.Method)
@@ -273,6 +293,15 @@ func TestAnInstallationRemovedAfterItWasFoundIsAnsweredNotInstalled(t *testing.T
 				return
 			}
 			fmt.Fprintf(w, `[{"id":%s,"account":{"login":"acme"}}]`, current)
+		case "/app/installations/77", "/app/installations/88":
+			// The mint reads what the installation is granted before it asks for a token, so a
+			// removed installation answers this read 404 before the exchange is ever made.
+			if !strings.HasSuffix(r.URL.Path, "/"+current) || current == "" {
+				w.WriteHeader(http.StatusNotFound)
+				fmt.Fprint(w, `{"message":"Not Found"}`)
+				return
+			}
+			fmt.Fprint(w, installationGranting(current, grantedEverythingAsked))
 		case "/app/installations/77/access_tokens", "/app/installations/88/access_tokens":
 			if !strings.Contains(r.URL.Path, "/"+current+"/") || current == "" {
 				w.WriteHeader(http.StatusNotFound)
@@ -332,6 +361,8 @@ func TestForgetMakesTheNextTokenAndReadTokenMintAgain(t *testing.T) {
 		switch r.URL.Path {
 		case "/app/installations":
 			fmt.Fprint(w, `[{"id":77,"account":{"login":"acme"}}]`)
+		case "/app/installations/77":
+			fmt.Fprint(w, installationGranting("77", grantedEverythingAsked))
 		case "/app/installations/77/access_tokens":
 			mu.Lock()
 			exchanges++
@@ -397,6 +428,9 @@ func TestReadTokenMintsANarrowedTokenCachedApartFromToken(t *testing.T) {
 		switch r.URL.Path {
 		case "/app/installations":
 			fmt.Fprint(w, `[{"id":77,"account":{"login":"acme"}}]`)
+		case "/app/installations/77":
+			verifyAppJWT(t, jwt[len("Bearer "):], &key.PublicKey, now, "12345")
+			fmt.Fprint(w, installationGranting("77", grantedEverythingAsked))
 		case "/app/installations/77/access_tokens":
 			verifyAppJWT(t, jwt[len("Bearer "):], &key.PublicKey, now, "12345")
 			body, err := io.ReadAll(r.Body)
@@ -455,107 +489,240 @@ func TestReadTokenMintsANarrowedTokenCachedApartFromToken(t *testing.T) {
 	}
 }
 
-// An App holds Actions only once each installation's account approves that grant, and GitHub
-// answers 422 to a token request naming a permission the installation does not hold, minting
-// nothing. The read token is then asked for again without actions: the lease is served with
-// contents, pull requests and metadata, every owner's read token is served rather than the first
-// such owner failing, and the daemon writes what that lease cannot read once per owner.
-func TestReadTokenDropsActionsWhereTheInstallationDoesNotHoldThem(t *testing.T) {
-	_, privatePEM := testAppKey(t)
-	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
-	var mu sync.Mutex
-	bodies := map[string][]string{}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/app/installations":
-			fmt.Fprint(w, `[{"id":77,"account":{"login":"acme"}},{"id":88,"account":{"login":"sjawhar"}}]`)
-		case strings.HasSuffix(r.URL.Path, "/access_tokens"):
-			installation := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/app/installations/"), "/access_tokens")
-			body, err := io.ReadAll(r.Body)
-			if err != nil {
-				t.Errorf("read the exchange body: %v", err)
-				return
-			}
-			mu.Lock()
-			bodies[installation] = append(bodies[installation], string(body))
-			exchanges := len(bodies[installation])
-			mu.Unlock()
-			// GitHub's own answer to a request naming a permission the installation does not
-			// hold: no token at all, rather than a token without that permission.
-			if strings.Contains(string(body), `"actions"`) {
-				w.WriteHeader(http.StatusUnprocessableEntity)
-				fmt.Fprint(w, `{"message":"The permissions requested are not granted to this installation."}`)
-				return
-			}
-			fmt.Fprint(w, mintedFor(fmt.Sprintf("installation-%s-%d", installation, exchanges), now.Add(time.Hour), "legion"))
-		case r.URL.Path == "/app":
-			fmt.Fprint(w, `{"slug":"legion-reviewer"}`)
-		case r.URL.Path == "/users/legion-reviewer[bot]":
-			fmt.Fprint(w, `{"id":271566631}`)
-		default:
-			t.Errorf("unexpected GitHub path %s", r.URL.Path)
-		}
-	}))
-	defer server.Close()
-
+// A write mint asks for what the installation is granted of the role's set and leaves the rest
+// out: an account that has approved three of the implement App's seven permissions gets a token
+// holding those three, in one exchange, where asking for all seven would make GitHub refuse the
+// mint whole and cost the role its gh bundle.
+func TestGrantedWriteSetAsksForTheThreeTheInstallationGrants(t *testing.T) {
+	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
 	var stderr bytes.Buffer
-	tokens := New(config.GitHubApps{
-		Review: config.GitHubApp{AppID: "67890", PrivateKey: privatePEM},
-	}, Options{BaseURL: server.URL, HTTPClient: server.Client(), Now: func() time.Time { return now }, Stderr: &stderr})
-	defer tokens.Close()
+	github := &keyModeGitHub{
+		owners: []string{"cybermonklabs"},
+		slug:   "legion-implementer",
+		grants: map[string]string{"contents": "write", "metadata": "read", "checks": "read"},
+	}
+	github.answer = func(exchange int, body accessTokensBody) (int, string) {
+		// GitHub's own answer to a request naming a permission the installation is not granted:
+		// no token at all, rather than a token without that permission.
+		for permission := range body.Permissions {
+			if github.grants[permission] == "" {
+				return http.StatusUnprocessableEntity, `{"message":"The permissions requested are not granted to this installation."}`
+			}
+		}
+		return http.StatusOK, mintedFor(fmt.Sprintf("ghs_%d", exchange), now.Add(time.Hour), body.Repositories...)
+	}
+	tokens := keyModeManager(t, github, &now, &stderr)
 
-	read, err := tokens.ReadToken(context.Background(), Review, "acme", []string{"legion"})
-	if err != nil {
-		t.Fatalf("read token for an installation that holds no actions: %v", err)
+	lease, err := tokens.Token(context.Background(), Implement, ghrepo.MustParse("cybermonklabs/legion"))
+	if err != nil || lease.Token != "ghs_1" {
+		t.Fatalf("Token = %q, %v; want the lease the three granted permissions mint", lease.Token, err)
 	}
-	if read.Token != "installation-77-2" {
-		t.Fatalf("read token = %q, want installation-77-2, the exchange that named no actions", read.Token)
-	}
-	// The second owner's read token is asked for directly, which is what a controller's bundle
-	// does for it (ControllerCredential): one mint per owner, over the repositories that owner
-	// serves, each refused its actions and served without them.
-	second, err := tokens.ReadToken(context.Background(), Review, "sjawhar", []string{"legion"})
-	if err != nil {
-		t.Fatalf("read token for the second installation that holds no actions: %v", err)
-	}
-	if second.Token != "installation-88-2" {
-		t.Fatalf("the second read token = %q, want installation-88-2, the exchange that named no actions", second.Token)
-	}
-	asked := []string{
-		`{"repositories":["legion"],"permissions":{"actions":"read","contents":"read","metadata":"read","pull_requests":"read"}}`,
-		`{"repositories":["legion"],"permissions":{"contents":"read","metadata":"read","pull_requests":"read"}}`,
-	}
-	mu.Lock()
-	if !maps.EqualFunc(bodies, map[string][]string{"77": asked, "88": asked}, slices.Equal) {
-		mu.Unlock()
-		t.Fatalf("exchange bodies = %v, want each installation asked for %v", bodies, asked)
-	}
-	mu.Unlock()
 
-	// Each owner's lease is cached, so the line is not written again for a lease served from the
-	// cache, nor for the fresh mint a Forget makes the next read token do.
-	tokens.Forget(Review, "acme")
-	if _, err := tokens.ReadToken(context.Background(), Review, "acme", []string{"legion"}); err != nil {
-		t.Fatalf("read token after Forget: %v", err)
+	asked := github.exchanges()
+	if len(asked) != 1 {
+		t.Fatalf("%d exchanges, want the one mint: the request is cut before it is sent, never asked again", len(asked))
 	}
-	for _, line := range []string{
-		"appauth: the review App's installation on acme does not hold actions",
-		"appauth: the review App's installation on sjawhar does not hold actions",
-	} {
+	want := map[string]string{"checks": "read", "contents": "write", "metadata": "read"}
+	if !maps.Equal(asked[0].Permissions, want) {
+		t.Errorf("the write request named permissions %v, want exactly %v", asked[0].Permissions, want)
+	}
+	if !slices.Equal(github.permissionReads(), []string{"101"}) {
+		t.Errorf("the installation was read %v, want the one read before the exchange", github.permissionReads())
+	}
+	for _, left := range []string{"actions", "pull_requests", "statuses", "workflows"} {
+		if _, named := asked[0].Permissions[left]; named {
+			t.Errorf("the request named %s, which the installation is granted none of", left)
+		}
+		line := fmt.Sprintf("appauth: the implement App's installation on cybermonklabs is granted no %s, where its token asks for %s: write, so the token is minted without it; grant the App %s: write and approve it on that account", left, left, left)
 		if count := strings.Count(stderr.String(), line); count != 1 {
 			t.Errorf("stderr holds %d of %q, want exactly one:\n%s", count, line, stderr.String())
 		}
 	}
-	if !strings.Contains(stderr.String(), "grant the App Actions: Read") {
-		t.Errorf("stderr does not say what fixes it:\n%s", stderr.String())
+}
+
+// A permission granted below the access the role's set asks for is asked for at the access
+// granted: the token does what the account approved, and the mint says what it cannot do.
+// Asking at the access the set names would make GitHub refuse the mint whole.
+func TestGrantedAccessBelowTheSetIsAskedForAtWhatIsGranted(t *testing.T) {
+	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	var stderr bytes.Buffer
+	github := &keyModeGitHub{
+		owners: []string{"acme"},
+		slug:   "legion-reviewer",
+		grants: map[string]string{"actions": "read", "checks": "write", "contents": "read", "metadata": "write", "pull_requests": "write"},
+	}
+	github.answer = func(exchange int, body accessTokensBody) (int, string) {
+		return http.StatusOK, mintedFor(fmt.Sprintf("ghs_%d", exchange), now.Add(time.Hour), body.Repositories...)
+	}
+	tokens := keyModeManager(t, github, &now, &stderr)
+
+	if _, err := tokens.Token(context.Background(), Review, ghrepo.MustParse("acme/legion")); err != nil {
+		t.Fatalf("Token: %v", err)
+	}
+
+	asked := github.exchanges()
+	if len(asked) != 1 {
+		t.Fatalf("%d exchanges, want the one mint", len(asked))
+	}
+	// contents and actions are granted read where the review set asks for write, so each is
+	// asked for at read; metadata is granted write where the set asks for read, and is asked for
+	// at the read the set names.
+	want := map[string]string{"actions": "read", "checks": "write", "contents": "read", "metadata": "read", "pull_requests": "write"}
+	if !maps.Equal(asked[0].Permissions, want) {
+		t.Errorf("the write request named permissions %v, want exactly %v", asked[0].Permissions, want)
+	}
+	for _, permission := range []string{"actions", "contents"} {
+		line := fmt.Sprintf("appauth: the review App's installation on acme is granted %s: read, where its token asks for %s: write, so the token is minted with %s: read; grant the App %s: write and approve it on that account", permission, permission, permission, permission)
+		if count := strings.Count(stderr.String(), line); count != 1 {
+			t.Errorf("stderr holds %d of %q, want exactly one:\n%s", count, line, stderr.String())
+		}
+	}
+	if strings.Contains(stderr.String(), "metadata") {
+		t.Errorf("stderr says something of metadata, which is granted more than the set asks for:\n%s", stderr.String())
 	}
 }
 
-// A 422 carrying GitHub's rate limit says nothing about what the installation holds: it is
-// GitHub's trouble (TransientError), so the request is not asked again without actions, no lease
-// is served and nothing is said about a missing grant. GitHub documents its limits on a 429 and a
-// 403, so the three ways a 422 can still carry one are each checked.
-func TestARateLimited422DoesNotDropActions(t *testing.T) {
+// An account approves each of an App's grants, so an installation may be granted no actions at
+// all. The read mint leaves actions out of the request and asks for the other three in one
+// exchange, so every owner's read token is served rather than the first such owner's mint
+// failing. What the token cannot read is said once per App role and owner: a second mint of the
+// same scope says nothing again, since the grant is the installation's.
+func TestGrantedReadSetLeavesOutActionsAndSaysSoOncePerOwner(t *testing.T) {
+	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	var stderr bytes.Buffer
+	github := &keyModeGitHub{
+		owners: []string{"acme", "sjawhar"},
+		slug:   "legion-reviewer",
+		grants: map[string]string{"contents": "read", "metadata": "read", "pull_requests": "read"},
+	}
+	github.answer = func(exchange int, body accessTokensBody) (int, string) {
+		if body.Permissions["actions"] != "" {
+			return http.StatusUnprocessableEntity, `{"message":"The permissions requested are not granted to this installation."}`
+		}
+		return http.StatusOK, mintedFor(fmt.Sprintf("ghs_%d", exchange), now.Add(time.Hour), body.Repositories...)
+	}
+	tokens := keyModeManager(t, github, &now, &stderr)
+
+	// Each owner's read token is asked for on its own, which is what a controller's bundle does
+	// for it (ControllerCredential): one mint per owner, over the repositories that owner serves.
+	for _, owner := range []string{"acme", "sjawhar"} {
+		lease, err := tokens.ReadToken(context.Background(), Review, owner, []string{"legion"})
+		if err != nil || lease.Token == "" {
+			t.Fatalf("read token for %s = %q, %v; want the lease the three granted reads mint", owner, lease.Token, err)
+		}
+	}
+	// Forget drops acme's lease, so the next read token of that scope mints again.
+	tokens.Forget(Review, "ACME")
+	if _, err := tokens.ReadToken(context.Background(), Review, "acme", []string{"legion"}); err != nil {
+		t.Fatalf("read token after Forget: %v", err)
+	}
+
+	asked := github.exchanges()
+	if len(asked) != 3 {
+		t.Fatalf("%d exchanges, want one for each of the three mints: a cut request is never asked twice", len(asked))
+	}
+	want := map[string]string{"contents": "read", "metadata": "read", "pull_requests": "read"}
+	for i, body := range asked {
+		if !maps.Equal(body.Permissions, want) {
+			t.Errorf("exchange %d named permissions %v, want exactly %v", i+1, body.Permissions, want)
+		}
+	}
+	for _, owner := range []string{"acme", "sjawhar"} {
+		line := fmt.Sprintf("appauth: the review App's installation on %s is granted no actions, where its token asks for actions: read, so the token is minted without it; grant the App actions: read and approve it on that account", owner)
+		if count := strings.Count(stderr.String(), line); count != 1 {
+			t.Errorf("stderr holds %d of %q, want exactly one:\n%s", count, line, stderr.String())
+		}
+	}
+	if lines := strings.Count(stderr.String(), "\n"); lines != 2 {
+		t.Errorf("stderr holds %d lines, want one for each of the two owners:\n%s", lines, stderr.String())
+	}
+}
+
+// GitHub reads a token request with no permissions as every permission the installation holds,
+// so a cut that leaves nothing refuses the mint where it is made: nothing reaches the token
+// endpoint, and the refusal names the role, the owner, the repositories and the set it asked
+// for.
+func TestGrantedNoneOfTheSetRefusesTheMintBeforeTheTokenEndpoint(t *testing.T) {
+	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	var stderr bytes.Buffer
+	github := &keyModeGitHub{
+		owners: []string{"acme"},
+		slug:   "legion-implementer",
+		grants: map[string]string{"issues": "write", "members": "read"},
+	}
+	github.answer = func(int, accessTokensBody) (int, string) {
+		t.Error("GitHub was asked for a token whose every permission the installation is granted none of")
+		return http.StatusOK, ""
+	}
+	tokens := keyModeManager(t, github, &now, &stderr)
+
+	lease, err := tokens.Token(context.Background(), Implement, ghrepo.MustParse("acme/legion"))
+	if lease.Token != "" || err == nil {
+		t.Fatalf("a mint on an installation granted none of the set = %q, %v; want no lease and a refusal", lease.Token, err)
+	}
+	for _, named := range []string{"implement", "acme", "legion", "contents: write", "workflows: write"} {
+		if !strings.Contains(err.Error(), named) {
+			t.Errorf("the refusal does not name %q: %v", named, err)
+		}
+	}
+	if asked := github.exchanges(); len(asked) != 0 {
+		t.Errorf("%d exchanges, want none: a body with no permissions mints every permission the installation holds", len(asked))
+	}
+}
+
+// The permissions read is classified as every other read of GitHub here is: its 5xx is GitHub's
+// trouble, which a boot waits out, and its 404 is the installation gone, which sends the mint
+// down the re-discovery path — the installation is forgotten, looked for once more, and a mint
+// that meets the 404 again answers ErrNotInstalled.
+func TestGrantedPermissionsReadIsTransientOn5xxAndGoneOn404(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		status    int
+		transient bool
+		gone      bool
+		reads     int
+	}{
+		{name: "a 500 is GitHub's trouble", status: http.StatusInternalServerError, transient: true, reads: 1},
+		{name: "a 404 is the installation gone", status: http.StatusNotFound, gone: true, reads: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+			var stderr bytes.Buffer
+			github := &keyModeGitHub{owners: []string{"acme"}, slug: "legion-implementer"}
+			github.granted = func(string, int) (int, string) { return tc.status, `{"message":"no"}` }
+			github.answer = func(int, accessTokensBody) (int, string) {
+				t.Error("GitHub was asked for a token after the permissions read failed")
+				return http.StatusOK, ""
+			}
+			tokens := keyModeManager(t, github, &now, &stderr)
+
+			lease, err := tokens.Token(context.Background(), Implement, ghrepo.MustParse("acme/legion"))
+			var trouble *TransientError
+			if lease.Token != "" {
+				t.Fatalf("a mint whose permissions read failed = %q, want no lease", lease.Token)
+			}
+			if got := errors.As(err, &trouble); got != tc.transient {
+				t.Errorf("the failure = %v, transient %v, want transient %v", err, got, tc.transient)
+			}
+			if got := errors.Is(err, ErrNotInstalled); got != tc.gone {
+				t.Errorf("the failure = %v, not installed %v, want %v", err, got, tc.gone)
+			}
+			if reads := github.permissionReads(); len(reads) != tc.reads {
+				t.Errorf("the installation was read %v, want %d: a 404 is looked for once more and a 500 is not", reads, tc.reads)
+			}
+			if asked := github.exchanges(); len(asked) != 0 {
+				t.Errorf("%d exchanges, want none: no token is asked for before the grants are read", len(asked))
+			}
+		})
+	}
+}
+
+// A 422 carrying GitHub's rate limit says nothing about what the installation is granted: it is
+// GitHub's trouble (TransientError), no lease is served, and nothing is said of a grant. GitHub
+// documents its limits on a 429 and a 403, so the three ways a 422 can still carry one are each
+// checked. The mint asked for the four reads whole, which this installation is granted, so the
+// answer is about the limit alone.
+func TestARateLimited422IsGitHubsTroubleAndNotAGrant(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		headers map[string]string
@@ -574,6 +741,8 @@ func TestARateLimited422DoesNotDropActions(t *testing.T) {
 				switch {
 				case r.URL.Path == "/app/installations":
 					fmt.Fprint(w, `[{"id":77,"account":{"login":"acme"}}]`)
+				case r.URL.Path == "/app/installations/77":
+					fmt.Fprint(w, installationGranting("77", grantedEverythingAsked))
 				case strings.HasSuffix(r.URL.Path, "/access_tokens"):
 					mu.Lock()
 					exchanges++
@@ -605,7 +774,7 @@ func TestARateLimited422DoesNotDropActions(t *testing.T) {
 			mu.Lock()
 			defer mu.Unlock()
 			if exchanges != 1 {
-				t.Errorf("%d exchanges, want the one request: a rate limit is not asked again without actions", exchanges)
+				t.Errorf("%d exchanges, want the one request a rate limit is answered to", exchanges)
 			}
 			if stderr.Len() != 0 {
 				t.Errorf("stderr = %q, want nothing said of a grant the answer says nothing about", stderr.String())
@@ -637,6 +806,9 @@ func TestTokensDeduplicatesConcurrentRequests(t *testing.T) {
 		case "/app":
 			verifyAppJWT(t, jwt[len("Bearer "):], &key.PublicKey, now, "12345")
 			fmt.Fprint(w, `{"slug":"legion-implementer"}`)
+		case "/app/installations/77":
+			verifyAppJWT(t, jwt[len("Bearer "):], &key.PublicKey, now, "12345")
+			fmt.Fprint(w, installationGranting("77", grantedEverythingAsked))
 		case "/users/legion-implementer[bot]":
 			fmt.Fprint(w, `{"id":271566630}`)
 		default:
@@ -739,6 +911,8 @@ func TestGitHubsTroubleIsTransientAndItsAnswersAreNot(t *testing.T) {
 				switch r.URL.Path {
 				case "/app/installations":
 					tc.discovery(w, r)
+				case "/app/installations/77":
+					fmt.Fprint(w, installationGranting("77", grantedEverythingAsked))
 				case "/app/installations/77/access_tokens":
 					if tc.exchange != nil {
 						tc.exchange(w, r)
@@ -768,15 +942,20 @@ func TestGitHubsTroubleIsTransientAndItsAnswersAreNot(t *testing.T) {
 }
 
 // keyModeGitHub is a stand-in GitHub for a mint the daemon signs its own JWT for: one
-// installation for each owner it names, the App's slug and bot user, and every access_tokens body
-// as GitHub parsed it, which is what a narrowing is read from rather than the text it was sent
-// as. answer decides each exchange from the body it carried and how many came before it.
+// installation for each owner it names, what each installation is granted (grants, nil for
+// grantedEverythingAsked), the App's slug and bot user, and every access_tokens body as GitHub
+// parsed it, which is what a narrowing is read from rather than the text it was sent as. answer
+// decides each exchange from the body it carried and how many came before it, and granted, when
+// it is set, answers the permissions read of an installation instead of its grants.
 type keyModeGitHub struct {
-	mu     sync.Mutex
-	owners []string
-	slug   string
-	bodies []accessTokensBody
-	answer func(exchange int, body accessTokensBody) (int, string)
+	mu      sync.Mutex
+	owners  []string
+	slug    string
+	grants  map[string]string
+	bodies  []accessTokensBody
+	reads   []string
+	answer  func(exchange int, body accessTokensBody) (int, string)
+	granted func(installation string, read int) (int, string)
 }
 
 func (g *keyModeGitHub) serve(t *testing.T) *httptest.Server {
@@ -807,6 +986,22 @@ func (g *keyModeGitHub) serve(t *testing.T) *httptest.Server {
 			status, answer := g.answer(exchange, body)
 			w.WriteHeader(status)
 			fmt.Fprint(w, answer)
+		case strings.HasPrefix(r.URL.Path, "/app/installations/"):
+			installation := strings.TrimPrefix(r.URL.Path, "/app/installations/")
+			g.mu.Lock()
+			g.reads = append(g.reads, installation)
+			read, grants, granted := len(g.reads), g.grants, g.granted
+			g.mu.Unlock()
+			if granted != nil {
+				status, answer := granted(installation, read)
+				w.WriteHeader(status)
+				fmt.Fprint(w, answer)
+				return
+			}
+			if grants == nil {
+				grants = grantedEverythingAsked
+			}
+			fmt.Fprint(w, installationGranting(installation, grants))
 		case r.URL.Path == "/app":
 			fmt.Fprintf(w, `{"slug":%q}`, g.slug)
 		case r.URL.Path == "/users/"+g.slug+"[bot]":
@@ -824,6 +1019,14 @@ func (g *keyModeGitHub) exchanges() []accessTokensBody {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return slices.Clone(g.bodies)
+}
+
+// permissionReads is the installation each read of what an installation is granted named, in the
+// order GitHub got them.
+func (g *keyModeGitHub) permissionReads() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return slices.Clone(g.reads)
 }
 
 // keyModeManager is a Manager holding a key for each App, minting against github, with its

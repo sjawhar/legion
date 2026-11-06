@@ -565,7 +565,7 @@ func TestAReviewPublishedBeforeATransferIsReadOnTheRepositoryGitHubHoldsItUnderN
 			}{
 				{name: "the pair configured", renames: transferredLegion, asked: []string{caller.asked}},
 				{name: "no pair configured", renames: ghrepo.Renames{},
-					refused: "mint the review App token for sjawhar: no installation of the review App on sjawhar covers the repository"},
+					refused: "mint the review App token for sjawhar/legion: no installation of the review App on sjawhar covers the repository"},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					var asked []string

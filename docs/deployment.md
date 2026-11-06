@@ -69,8 +69,10 @@ tokens, refuses a token whose `GET /apps/<slug>` names an id other than `app_id`
 the App is installed on a repository from that owner's installation's repository list.
 A read-only token holds what the command's read-only release gives: the broker's holds
 `contents: read`, `metadata: read`, `pull_requests: read` and `actions: read`, the same set a
-configured key mints, and the first three alone where the App's installation has not been granted
-Actions.
+configured key asks for, and the first three alone where the App's installation has not been
+granted Actions.
+A configured key reads what the installation is granted before each mint and asks for the set
+cut down to it, so the two end at the same place by different routes.
 The daemon passes the command's stderr through as it runs, with every GitHub token in it redacted,
 so `agent-secrets`' line naming the pending request appears in the daemon's log while the review
 App waits for its grant.
@@ -97,8 +99,9 @@ own `hosts.yml` (an App installation token, user `x-access-token`) and `config.y
 `<state_dir>/secrets/<claim>-gh/<dir>` (0700, files 0600) when it opens the pane — in the issue
 owner's own directory the role's App token for the issue's repository and no other, and in every
 other directory that App's token narrowed to reading contents, pull requests, Actions and metadata
-over the repositories that directory names (an owner whose installation has not been
-granted Actions gets the other three) — names the issue owner's directory as `GH_CONFIG_DIR`
+over the repositories that directory names (each token asks for what the App's installation on
+that owner is granted of the set, and a permission it is granted none of is left out, named on
+the daemon's stderr) — names the issue owner's directory as `GH_CONFIG_DIR`
 and the bundle's root as `LEGION_GH_OWNERS_DIR`, with `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` set
 empty so nothing outranks the files, and rewrites each directory's `hosts.yml` in place every
 minute from its cached leases (the log lines `tmux runtime: github credential written` and `github

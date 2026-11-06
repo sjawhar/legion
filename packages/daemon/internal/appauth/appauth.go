@@ -128,17 +128,19 @@ type Tokens interface {
 	// the one its issue's repository is under (a configured rename's two owners count as that
 	// one, GitHubCredential), and a controller holds one for every owner it has. An App on
 	// token_command gets what its command's read-only release holds instead, which the command
-	// decides: the secrets broker's is the same four (its readOnlyPermissions). Either way an
-	// installation whose account has not granted the App Actions gets the other three rather
-	// than nothing (optionalReadPermission). A call naming no repository is refused before
-	// anything is minted, as Token's is.
+	// decides: the secrets broker's is the same four (its readOnlyPermissions). With a key of
+	// its own the mint asks for what the installation is granted of those four and leaves the
+	// rest out (exchangeGranted), so an installation whose account has not granted the App
+	// Actions gets the other three rather than nothing. A call naming no repository is refused
+	// before anything is minted, as Token's is.
 	ReadToken(ctx context.Context, role AppRole, owner string, repos []string) (Lease, error)
 }
 
 // readPermissions narrows an installation token to reading a repository's contents, its pull
 // requests, its Actions runs and its metadata: what a role needs of every repository of the
-// project but its own issue's, and what a controller needs of every one of them. GitHub mints a
-// token with the permissions a request names, each at most what the installation holds.
+// project but its own issue's, and what a controller needs of every one of them. A mint asks for
+// what the installation is granted of this set, at the access it is granted (exchangeGranted),
+// and GitHub mints a token with the permissions the request names.
 //
 // actions:read is here because reading a repository includes reading what its merges did: a
 // deployment check of a merge reads the push run that carries it, that run's jobs and a job's
@@ -152,16 +154,17 @@ type Tokens interface {
 // dispatch a workflow, and reaches no Actions secret or variable, which are permissions of their
 // own.
 //
-// The set is what the token holds over the repositories the request names (ReadToken's repos) and
-// not its installation's whole breadth: exchange sends those names beside these permissions, so a
-// read lease reaches no repository its caller did not ask for.
+// The set is the most a read lease holds, over the repositories the request names (ReadToken's
+// repos) and not its installation's whole breadth: exchange sends those names beside these
+// permissions, so a read lease reaches no repository its caller did not ask for, and a
+// permission the installation is granted none of is left out of the request rather than minted.
 var readPermissions = map[string]string{"contents": "read", "pull_requests": "read", "actions": "read", "metadata": "read"}
 
-// writePermissions is the permission set a role's write token is minted with, one per App role:
-// what that App's roles do to the one repository the token names, and nothing else. GitHub mints
-// a token with the permissions a request names, each at most what the installation holds, so a
-// set naming one the installation does not hold is refused outright (a 422, errNarrowingRefused)
-// rather than minted without it.
+// writePermissions is the permission set a role's write token is asked for, one per App role:
+// what that App's roles do to the one repository the token names, and nothing else. It is what
+// the mint asks for of an installation granted all of it; an installation granted less is asked
+// for what it is granted (exchangeGranted), since GitHub answers a request naming a permission
+// the installation is not granted HTTP 422, minting nothing rather than leaving that one out.
 //
 // Every entry has its user. workflows:write is a push that touches `.github/workflows`, which
 // GitHub refuses from a token without it; contents:write is that push and every other, each role
@@ -182,41 +185,69 @@ var writePermissions = map[AppRole]map[string]string{
 	Review:    {"actions": "write", "checks": "write", "contents": "write", "metadata": "read", "pull_requests": "write"},
 }
 
-// optionalReadPermission is the one permission of readPermissions an installation may not hold.
-// An App gets Actions by a grant each installation's account approves, and GitHub answers a token
-// request naming a permission its installation does not hold HTTP 422, minting nothing rather
-// than leaving that one out. One owner's failed mint drops a role's whole gh bundle
-// (GitHubCredential), so asking for actions outright would take contents and pull requests away
-// from every deployment whose App is not granted Actions. A read token is therefore asked for
-// again without it (exchangeRead).
-//
-// Asking again is the whole mechanism: it costs one request only where the grant is missing, it
-// keeps no record of what each installation holds for a later mint to go stale against, and the
-// day an account approves the grant the first request simply succeeds. Reading the installation's
-// own permissions instead (GET /app/installations/{id}) would cost a request for every
-// configured installation, which the exchange reaches without any discovery today, and a cache
-// that an approval does not invalidate. The other three permissions are what the daemon has
-// always asked for: an installation without one of them is a misconfigured App rather than a
-// grant awaiting approval, so they stay required.
-const optionalReadPermission = "actions"
+// accessOrder ranks GitHub's three accesses, each holding every one below it: a permission
+// granted at write is granted its read, and one granted at read is not granted its write. A
+// value outside these three is no access this daemon knows how to ask for, and ranks below all
+// of them, so narrowToGranted leaves that permission out rather than ask for a word of GitHub's
+// it cannot order.
+var accessOrder = map[string]int{"read": 1, "write": 2, "admin": 3}
 
-// withoutOptionalRead is permissions without optionalReadPermission. It copies, since
-// readPermissions is shared by every mint.
-func withoutOptionalRead(permissions map[string]string) map[string]string {
-	reduced := make(map[string]string, len(permissions))
-	for name, access := range permissions {
-		if name != optionalReadPermission {
-			reduced[name] = access
-		}
-	}
-	return reduced
+// grantShortfall is one permission a role's set asks for that the installation is not granted at
+// the access asked: the permission, the access the set asks for, and the access the installation
+// is granted, empty where it is granted none. It carries no token, and neither does the line it
+// is said on (shortfallMessage).
+type grantShortfall struct {
+	permission string
+	asked      string
+	granted    string
 }
 
-// missingActionsMessage is written to the daemon's stderr, once per App role and owner, when
-// GitHub refuses a read token's permissions and the token is minted without actions: the lease is
-// served, and what it cannot read is said once rather than at every mint. It takes the role, the
-// owner and the repositories the mint asked for, and carries no token.
-const missingActionsMessage = "appauth: the %s App's installation on %s does not hold actions, so its read-only token for %s reads no Actions runs, jobs or job logs; grant the App Actions: Read and approve it on that account\n"
+// granting is what the installation is granted of the permission, as a line says it.
+func (s grantShortfall) granting() string {
+	if s.granted == "" {
+		return "no " + s.permission
+	}
+	return s.permission + ": " + s.granted
+}
+
+// minting is what the mint's request carries of the permission: the access granted where that is
+// one GitHub mints at, and nothing where the installation is granted none of it.
+func (s grantShortfall) minting() string {
+	if accessOrder[s.granted] == 0 {
+		return "without it"
+	}
+	return "with " + s.permission + ": " + s.granted
+}
+
+// narrowToGranted is asked cut down to granted, and every shortfall between the two in one order
+// whatever order a map ranges in: a permission granted at the access asked or above is asked for
+// as asked names it, one granted below is asked for at the access granted, and one granted none
+// is left out. It copies, since the sets it cuts are shared by every mint.
+func narrowToGranted(asked, granted map[string]string) (map[string]string, []grantShortfall) {
+	narrowed := make(map[string]string, len(asked))
+	var short []grantShortfall
+	for _, permission := range slices.Sorted(maps.Keys(asked)) {
+		access, held := asked[permission], granted[permission]
+		switch {
+		case accessOrder[held] == 0:
+			short = append(short, grantShortfall{permission: permission, asked: access, granted: held})
+		case accessOrder[held] < accessOrder[access]:
+			narrowed[permission] = held
+			short = append(short, grantShortfall{permission: permission, asked: access, granted: held})
+		default:
+			narrowed[permission] = access
+		}
+	}
+	return narrowed, short
+}
+
+// shortfallMessage is written to the daemon's stderr, once per App role, owner and shortfall,
+// when a mint asks for less than the role's set names because the installation is granted less:
+// the lease is served, and what the token cannot do is said once rather than at every mint. It
+// takes the role, the owner, what the installation is granted (granting), the permission and the
+// access asked for, what the request carries of it (minting), and the permission and access to
+// grant. It carries no token.
+const shortfallMessage = "appauth: the %s App's installation on %s is granted %s, where its token asks for %s: %s, so the token is minted %s; grant the App %s: %s and approve it on that account\n"
 
 // Options makes a token manager testable. The zero value uses api.github.com, http.DefaultClient,
 // the wall clock, and the daemon's own stderr for what a token_command writes there.
@@ -247,9 +278,10 @@ type Manager struct {
 	// keys holds each App private key parsed, by its PEM text (generateJWT).
 	keys map[string]*rsa.PrivateKey
 
-	// warnedMissingActions holds the read scopes, each naming an App role and an owner and no
-	// repository, whose owner has already had missingActionsMessage written for it.
-	warnedMissingActions map[scope]bool
+	// saidShortfalls holds every shortfall already said on stderr, each by the App role, the
+	// owner whose installation is granted less than the role's set asks for, and the shortfall
+	// itself (shortfallMessage).
+	saidShortfalls map[saidShortfall]bool
 
 	// root ends every token_command run on Close (stop), runs counts the runs still going, and
 	// closed, set under mu, refuses a run after Close.
@@ -257,6 +289,16 @@ type Manager struct {
 	stop   context.CancelFunc
 	runs   sync.WaitGroup
 	closed bool
+}
+
+// saidShortfall is the key one line of shortfallMessage is said under: the App role, the owner
+// lowercased as a scope's is, and what the installation is granted of the permission. A second
+// mint of any scope of that role and owner says nothing again, since the grant is the
+// installation's and the line is about the installation.
+type saidShortfall struct {
+	role  AppRole
+	owner string
+	grantShortfall
 }
 
 type pendingLease struct {
@@ -294,21 +336,21 @@ func New(apps config.GitHubApps, options Options) *Manager {
 	}
 	root, stop := context.WithCancel(context.Background())
 	return &Manager{
-		root:                 root,
-		stop:                 stop,
-		apps:                 apps,
-		baseURL:              baseURL,
-		client:               client,
-		now:                  now,
-		stderr:               stderr,
-		leases:               map[scope]Lease{},
-		pending:              map[scope]*pendingLease{},
-		installations:        map[AppRole]map[string]string{},
-		identities:           map[string]GitIdentity{},
-		pendingIdentities:    map[string]*pendingIdentity{},
-		commands:             map[string]*commandRun{},
-		keys:                 map[string]*rsa.PrivateKey{},
-		warnedMissingActions: map[scope]bool{},
+		root:              root,
+		stop:              stop,
+		apps:              apps,
+		baseURL:           baseURL,
+		client:            client,
+		now:               now,
+		stderr:            stderr,
+		leases:            map[scope]Lease{},
+		pending:           map[scope]*pendingLease{},
+		installations:     map[AppRole]map[string]string{},
+		identities:        map[string]GitIdentity{},
+		pendingIdentities: map[string]*pendingIdentity{},
+		commands:          map[string]*commandRun{},
+		keys:              map[string]*rsa.PrivateKey{},
+		saidShortfalls:    map[saidShortfall]bool{},
 	}
 }
 
@@ -325,12 +367,13 @@ func (m *Manager) Token(ctx context.Context, role AppRole, repo ghrepo.Repositor
 }
 
 // ReadToken is Token for a token narrowed to repos on owner and to readPermissions, cached under
-// a scope of its own, so an owner's write and read tokens never stand in for each other, and
-// minted without optionalReadPermission where the installation does not hold it (exchangeRead).
-// In token mode it is the command's read-only release (TokenCommandReadOnly) instead, which the
-// command decides; the secrets broker's is readPermissions' own set, narrowed the same way. The
-// role's own owner's lease is unaffected either way, since Token asks the command for no
-// narrowing at all. A call that names no repository is refused, and nothing is minted.
+// a scope of its own, so an owner's write and read tokens never stand in for each other. Each of
+// those four permissions is asked for at what the installation is granted of it, and one it is
+// granted none of is left out (exchangeGranted). In token mode it is the command's read-only
+// release (TokenCommandReadOnly) instead, which the command decides; the secrets broker's is
+// readPermissions' own set, narrowed the same way. The role's own owner's lease is unaffected
+// either way, since Token asks the command for no narrowing at all. A call that names no
+// repository is refused, and nothing is minted.
 func (m *Manager) ReadToken(ctx context.Context, role AppRole, owner string, repos []string) (Lease, error) {
 	if len(repos) == 0 {
 		return Lease{}, fmt.Errorf("the %s App's read-only token for %s names no repository to read", role, owner)
@@ -483,10 +526,11 @@ func callerEnded(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrCommandPending)
 }
 
-// mint mints the request's installation token. An installation the daemon found that
-// answers the exchange 404 was removed since (errInstallationGone): it is forgotten and looked for
-// once more, so a removed App answers ErrNotInstalled and an App installed there again mints on
-// its new installation. A configured installation answering 404 is not installed either.
+// mint mints the request's installation token. An installation the daemon found that answers the
+// permissions read or the exchange 404 was removed since (errInstallationGone): it is forgotten
+// and looked for once more, so a removed App answers ErrNotInstalled and an App installed there
+// again mints on its new installation. A configured installation answering 404 is not installed
+// either.
 func (m *Manager) mint(ctx context.Context, request mintRequest) (Lease, error) {
 	app, err := m.app(request.role)
 	if err != nil {
@@ -503,13 +547,13 @@ func (m *Manager) mint(ctx context.Context, request mintRequest) (Lease, error) 
 	if err != nil {
 		return Lease{}, err
 	}
-	lease, err := m.exchangeRead(ctx, jwt, installation, request)
+	lease, err := m.exchangeGranted(ctx, jwt, installation, request)
 	if errors.Is(err, errInstallationGone) && configuredInstallation(app, request.owner) == "" {
 		m.forgetInstallation(request.role, request.owner)
 		if installation, err = m.installation(ctx, request.role, app, request.owner); err != nil {
 			return Lease{}, err
 		}
-		lease, err = m.exchangeRead(ctx, jwt, installation, request)
+		lease, err = m.exchangeGranted(ctx, jwt, installation, request)
 	}
 	if errors.Is(err, errInstallationGone) {
 		m.forgetInstallation(request.role, request.owner)
@@ -528,39 +572,92 @@ func (m *Manager) mint(ctx context.Context, request mintRequest) (Lease, error) 
 	return lease, nil
 }
 
-// exchangeRead is exchange, asked again without readPermissions' one optional permission when
-// GitHub refuses what the read request named (errNarrowingRefused, a 422): three reads serve a
-// role better than the bundle a failed mint would cost it (optionalReadPermission). A read
-// request that names no actions passes straight through, as the write token's does, so a 422 to
-// either stays the failure it is. A second refusal is the caller's error and names a set actions
-// is not in, so no cause is blamed on the missing grant.
+// exchangeGranted is exchange over what the installation is granted: the request's permissions
+// cut down to the access owner's account approved for the App (grantedPermissions,
+// narrowToGranted), with a line on stderr for each one left out or lowered (sayShortfalls). A
+// permission the installation is not granted is left out, where asking for it would make GitHub
+// refuse the mint whole (a 422) and cost the role every other permission of its set, and the gh
+// bundle that mint belongs to (GitHubCredential).
 //
-// The write set names actions too (writePermissions, for `gh run rerun`), and the request's read
-// is what keeps this to the read token: a write token minted without actions would take a re-run
-// away from every role silently, where the refusal says what the installation does not hold.
-func (m *Manager) exchangeRead(ctx context.Context, jwt, installation string, request mintRequest) (Lease, error) {
-	lease, err := m.exchange(ctx, jwt, installation, request.repos, request.permissions)
-	if !errors.Is(err, errNarrowingRefused) || !request.read || request.permissions[optionalReadPermission] == "" {
-		return lease, err
+// A cut that leaves no permission at all refuses the mint instead: GitHub reads a request with
+// no permissions as every permission the installation holds, so a body without them would mint
+// wider than the role's set asks for rather than narrower. The refusal names the role, the
+// owner, the repositories and the set asked for (askedFor), and carries no token.
+//
+// A 422 from the exchange after this cut is a repository the installation does not reach, or a
+// grant that changed between the two calls (errNarrowingRefused): it stays the hard refusal it
+// is.
+func (m *Manager) exchangeGranted(ctx context.Context, jwt, installation string, request mintRequest) (Lease, error) {
+	granted, err := m.grantedPermissions(ctx, jwt, installation)
+	if err != nil {
+		return Lease{}, err
 	}
-	lease, err = m.exchange(ctx, jwt, installation, request.repos, withoutOptionalRead(request.permissions))
-	if err == nil {
-		m.warnMissingActions(request.role, request.owner, request.repos)
+	permissions, short := narrowToGranted(request.permissions, granted)
+	m.sayShortfalls(request.role, request.owner, short)
+	if len(permissions) == 0 {
+		return Lease{}, fmt.Errorf("the %s App's installation on %s is granted none of the permissions its token asks for (%s), and a token request naming no permission holds every permission the installation has",
+			request.role, request.owner, askedFor(request.repos, request.permissions))
 	}
-	return lease, err
+	return m.exchange(ctx, jwt, installation, request.repos, permissions)
 }
 
-// warnMissingActions writes missingActionsMessage the first time a read token of role for owner is
-// minted without actions, and nothing on every mint after it, whatever repositories that mint or
-// the ones after it named: the grant is the installation's and the line is about the installation.
-func (m *Manager) warnMissingActions(role AppRole, owner string, repos []string) {
-	key := leaseScope(true, role, owner, nil)
-	m.mu.Lock()
-	warned := m.warnedMissingActions[key]
-	m.warnedMissingActions[key] = true
-	m.mu.Unlock()
-	if !warned {
-		fmt.Fprintf(m.stderr, missingActionsMessage, role, owner, strings.Join(repos, ", "))
+// grantedPermissions is what owner's account approved for the App's installation: GET
+// /app/installations/{id} under the App's JWT answers the installation, whose permissions object
+// maps each permission it is granted to the access it is granted at ("read", "write", "admin"),
+// and names none of the ones it is granted nothing of. GitHub's trouble is transient, as every
+// other read here is, and a 404 is the installation gone (errInstallationGone), which mint
+// answers by looking for the installation once more.
+//
+// It is read before every exchange and never cached. A mint happens about three times an hour
+// per scope, so the read costs little, and an account that approves a grant has it asked for at
+// the next mint rather than at the next daemon restart, which a cache no approval invalidates
+// would make it wait for.
+func (m *Manager) grantedPermissions(ctx context.Context, jwt, installation string) (map[string]string, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, m.baseURL+"/app/installations/"+url.PathEscape(installation), nil)
+	if err != nil {
+		return nil, err
+	}
+	m.appHeaders(request, jwt)
+	response, err := m.client.Do(request)
+	if err != nil {
+		return nil, &TransientError{Err: fmt.Errorf("GitHub App installation permissions read: %w", err)}
+	}
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		body := refusalBody(response)
+		failed := fmt.Errorf("GitHub App installation permissions read failed (%d): %s", response.StatusCode, strings.TrimSpace(string(body)))
+		if response.StatusCode == http.StatusNotFound {
+			return nil, fmt.Errorf("%w: %w", errInstallationGone, failed)
+		}
+		return nil, transient(response, body, failed)
+	}
+	body, err := readBody(response, "GitHub App installation permissions read", responseBound)
+	if err != nil {
+		return nil, err
+	}
+	var payload struct {
+		Permissions map[string]string `json:"permissions"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("GitHub App installation permissions read returned an invalid response")
+	}
+	return payload.Permissions, nil
+}
+
+// sayShortfalls writes shortfallMessage for each of short the first time a mint of role for
+// owner meets it, and nothing on every mint after it, whatever repositories that mint or the
+// ones after it named: the grant is the installation's and the line is about the installation.
+func (m *Manager) sayShortfalls(role AppRole, owner string, short []grantShortfall) {
+	for _, shortfall := range short {
+		key := saidShortfall{role: role, owner: strings.ToLower(strings.TrimSpace(owner)), grantShortfall: shortfall}
+		m.mu.Lock()
+		said := m.saidShortfalls[key]
+		m.saidShortfalls[key] = true
+		m.mu.Unlock()
+		if said {
+			continue
+		}
+		fmt.Fprintf(m.stderr, shortfallMessage, role, owner, shortfall.granting(),
+			shortfall.permission, shortfall.asked, shortfall.minting(), shortfall.permission, shortfall.asked)
 	}
 }
 
@@ -626,12 +723,15 @@ func (m *Manager) forgetInstallation(role AppRole, owner string) {
 	delete(m.installations[role], strings.ToLower(owner))
 }
 
-// errInstallationGone is a token exchange GitHub answers 404: the installation is no longer there.
+// errInstallationGone is a permissions read or a token exchange GitHub answers 404: the
+// installation is no longer there.
 var errInstallationGone = errors.New("the installation is gone")
 
-// errNarrowingRefused is a token exchange GitHub answers 422 to a request that named repositories
-// or permissions: a repository the installation does not reach, or a permission it does not hold
-// — GitHub answers both the same way, and mints nothing rather than leaving one out.
+// errNarrowingRefused is a token exchange GitHub answers 422 to a request that named
+// repositories or permissions: a repository the installation does not reach, or a permission it
+// is not granted — GitHub answers both the same way, and mints nothing rather than leaving one
+// out. A mint asks only for what the installation was granted a moment before (exchangeGranted),
+// so the permissions half of it is a grant that changed between the two calls.
 var errNarrowingRefused = errors.New("the installation does not reach the repositories or hold the permissions asked for")
 
 // ErrNotInstalled is a mint refused because the App has no installation on the owner: an answer
@@ -806,11 +906,13 @@ func (m *Manager) exchange(ctx context.Context, jwt, installation string, repos 
 				return Lease{}, &TransientError{Err: failed}
 			}
 			// Otherwise a 422 to a request that narrowed the token is the installation reaching
-			// fewer repositories, or holding fewer permissions, than the request asked for.
-			// GitHub answers the two the same way and its text is never quoted as a cause, so the
-			// refusal names both halves of what was asked and an operator reads which it was. One
-			// to a request that narrowed nothing says nothing about either and stays the refusal
-			// it is.
+			// fewer repositories than the request asked for, or being granted less than it asked
+			// for of a permission — which a mint asks for as the installation was granted it a
+			// moment before (exchangeGranted), so that half is a grant changed between the two
+			// calls. GitHub answers the two the same way and its text is never quoted as a
+			// cause, so the refusal names both halves of what was asked and an operator reads
+			// which it was. One to a request that narrowed nothing says nothing about either and
+			// stays the refusal it is.
 			if requestBody != nil {
 				return Lease{}, fmt.Errorf("%w (%s): %w", errNarrowingRefused, askedFor(repos, permissions), refused)
 			}

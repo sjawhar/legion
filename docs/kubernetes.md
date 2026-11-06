@@ -2706,7 +2706,8 @@ for every directory of the bundle, `github-hosts-<dir>`, gh's `hosts.yml` carryi
 A directory names a GitHub owner of the project, or one repository of that owner as `<owner>/<repo>`, whose `/` the key writes as a `.`, since a Secret key holds no slash.
 The bundle holds one directory per owner, and, under the issue's own owner, one more for each other repository the project serves there.
 The token in the issue owner's directory is the role's App's (the implement App's for the implementer and the merger, the review App's for every other role), and it reaches the issue's repository and no other;
-every other directory's is the same App's narrowed to reading contents, pull requests, Actions and metadata over the repositories that directory names, Actions left out for an owner whose installation has not been granted it.
+every other directory's is the same App's narrowed to reading contents, pull requests, Actions and metadata over the repositories that directory names.
+Each mint asks for what the App's installation on that owner is granted of the set it names, so a permission the account has not approved — Actions most often — is left out of the request and said once on the daemon's stderr, rather than costing the role the whole bundle.
 
 The `roles` container mounts each role `<r>`'s own volumes under its directory of `/var/run/legion/roles`:
 `/var/run/legion/roles/<r>/launcher` (volume `launcher-<r>`, read-only:
