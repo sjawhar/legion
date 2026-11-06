@@ -83,11 +83,10 @@ type liveOperation struct {
 // transaction's write to the document (joinLiveWrite) and brings that write's fork up to date with
 // the room (forkLive). The caller defers the operation's abandon once it is open.
 //
-// It answers the context the rest of the operation runs under: ctx carrying the write's grant of
-// the copy-heap bound (liveWrite.carriedBy), so every decode and copy the operation makes - the
-// decode-cap copy of the room its fork was read from, above all (elementMeasurer.structsAfter) -
-// covers that one grant rather than acquire a second inside it. The fork's build covered it
-// already, for the fork's whole life.
+// It answers the context the rest of the operation runs under: ctx carrying the write's load
+// slot (liveWrite.carriedBy), so every decode and copy the operation makes - the decode-cap copy
+// of the room its fork was read from, above all (structsAfter) - covers that one slot rather
+// than take a second inside it. The fork's build took it already, for the fork's whole life.
 func (s *Service) openLiveOperation(ctx context.Context, artifactID string) (liveOperation, context.Context, error) {
 	if s.shuttingDown(artifactID) {
 		return liveOperation{}, ctx, ErrServiceUnavailable
@@ -166,12 +165,12 @@ func (op *liveOperation) change(mutate func() error) (*marginWatch, error) {
 // tags the update against, and the zero pointer for every other write.
 func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, actor model.Actor, rendered renderedTree, contentChanged bool, rendering publishedRendering, marginRoom weak.Pointer[crdt.Doc]) error {
 	// Every write is refused when the live state its transaction would leave the room is past the
-	// decode cap, the one check that encodes a whole document once the room's ceiling and what the
-	// transaction adds pass the cap: the room's, in the measurer's turn, or the fork's where no
+	// decode cap, the one check that copies a whole document once the room's own struct total and
+	// what the transaction added to its fork pass the cap: the room's, or the fork's where no
 	// room is behind it (refuseUndecodable). The caller has let go of whatever tree it held from
-	// before the change, so the encode runs beside the fork and the tree the change left, not a
-	// third tree (LEGION-504). Only a room the count leaves within what the transaction adds of
-	// the cap is copied as well, for the one count, as the three server writes copy it
+	// before the change, so the copy runs beside the fork and the tree the change left, not a
+	// third tree (LEGION-504). Only a room the total leaves within what the transaction adds of
+	// the cap is copied at all, for the one count, as the three server writes copy it
 	// (structsAfter).
 	if err := s.refuseUndecodable(ctx, op.write, op.fork, op.updates); err != nil {
 		return err
@@ -955,17 +954,16 @@ func (s *Service) heldTree(ctx context.Context, artifactID string) (tree *pmdoc.
 // nil when this server holds the document. A durable history that does not decode is
 // ErrDocumentUnloadable and fails the room, as ygo's own load of it would.
 //
-// The read's fold, when the history holds several updates, and the decode run under one grant of
-// the copy-heap bound (heapGrant), whose wait ends with ctx, the socket's request: one that ends
-// first answers ctx's error and holds nothing of the bound. The grant is given back once the copy
-// is the preload's, which the admission reserved in the room budget (reserveRoom), and before the
-// room fails, whose eviction can wait.
+// The read's fold, when the history holds several updates, and the decode run under one slot of
+// the pod's load concurrency (loadSlots), whose wait ends with ctx, the socket's request: one
+// that ends first answers ctx's error and holds no slot. The slot is given back once the copy
+// is the preload's, and before the room fails, whose eviction can wait.
 func (s *Service) loadTree(ctx context.Context, artifactID string) (*pmdoc.Node, *preloadedDocument, error) {
 	tree, held, err := s.heldTree(ctx, artifactID)
 	if err != nil || held {
 		return tree, nil, err
 	}
-	history, err := loadDecodedHistory(ctx, s.persistence, artifactID, 1, s.maxPendingItems, nil)
+	history, err := loadDecodedHistory(ctx, s.persistence, artifactID, s.maxPendingItems, nil)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, nil, err
@@ -1820,7 +1818,7 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 	// the caller's write transaction and holds one of the shared pool's connections.
 	fromStore := false
 	if !s.roomHoldsDocument(room) {
-		if s.budget.openServerRoom() {
+		if s.budget.openServerRoom(room) {
 			defer s.budget.closeServerRoom()
 		} else {
 			fromStore = true

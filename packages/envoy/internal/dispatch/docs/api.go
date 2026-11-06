@@ -24,6 +24,7 @@ type API interface {
 	InjectSchemaInvalidForTest(ctx context.Context, artifactID string) error
 	SetRoomBudgetForTest(bytes int64) int64
 	RoomLiveForTest(artifactID string) bool
+	RoomChargesForTest() (charges map[string]int64, used, limit int64)
 	HoldNextAdmissionForTest(artifactID string, wait time.Duration)
 	RefuseNextPeerUpdateForTest(artifactID string)
 	UseUpScanTotalForTest(ctx context.Context, artifactID string) error

@@ -21,46 +21,19 @@ import (
 // cmd/dispatch/main.go). A process holding another limit charges them the same share of it
 // (MemoryBounds.RoomBudget), which is what its budget's limit is (New); the figures below are
 // this calibration's. Open documents are the largest thing the pod holds; the rest is the request
-// path's, the cold reads' cache's (documentReadBudget, 256 MiB,
-// which this does not count) and the collector's slack. At the measured cost of a room
-// (bytesOfHeapAnElement) it holds thirty-seven documents of a mebibyte of prose (57,600 elements,
-// 58 MB each at both copies, roomCopies) as they load, and since an admission reserves its stored
-// version's count at that same price (storedRoomReservation), an empty budget admits thirty-seven
-// of them and refuses the thirty-eighth; what browsers add to a room after its load is charged
-// beside that count (roomCharge), so rooms typed into hold fewer. A document whose history
-// outgrows its rendering is priced at its structs instead (bytesOfHeapAStructHeld): six documents
-// at the decode cap, 356,515,840 bytes each at both copies, whatever they render. A document of
-// long runs of text, which makes few elements from few structs, is priced at its rendered bytes
-// (bytesOfHeapARenderedByte): a paragraph of a mebibyte about 25 MB at both copies, where its 9
-// elements would price it at 9,000 bytes. No room has a ceiling: a mebibyte of the densest
-// markdown measured is priced at more than the whole budget (bytesOfHeapAByteAtTheDensest), and
-// what answers a room that heavy is the hook's refusal of every insert while nothing can be closed
-// (refusedUnderPressure), not a cap on its charge (TestTheRoomBudgetsArithmetic).
-const roomBudgetBytes = 2 << 30
-
-// pressureReserveBytes is how far past the budget's limit the charges of the delete-only updates
-// admitted while the budget is full may take it at the calibration (refusedUnderPressure):
-// 256 MiB, and the same share of another Go memory limit, since what fills it is a share of the
-// rooms the budget holds (MemoryBounds.PressureReserve). A delete that cuts
-// the middle of an item splits it and adds structs, so unbounded deletes would grow the heap while
-// nothing can be closed. A delete range is charged a split at both copies, 800 bytes, for each of
-// its ends its apply can leave split (deletedRuns.splitEnds), two at most, where a split keeps
-// about 154 bytes in each copy (TestTheRoomBudgetsSplitMarginHoldsWhatSplitsAdd), so deletes that
-// fill the reserve hold about three quarters of it, 206 MB, in the heap.
+// path's, the cold reads' cache's (documentReadBudget, 256 MiB, which this does not count) and
+// the collector's slack. At the measured cost of a room (bytesOfHeapAStateByte, both copies) it
+// holds twenty-five documents of a mebibyte of prose, whose 3,035,240-byte state is charged
+// 84,986,720, and a document at the state cap (maxRoomStateBytes) is charged 378,000,000, so five
+// of those fill it. No room has a ceiling: a room is charged what its state comes to, however
+// heavy, and what answers a room that heavy is the hook's refusal of every apply that integrates
+// anything while nothing can be closed (roomBudget.full), not a cap on its charge.
 //
-// It is set from what A4 (cmd/dispatch, TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks) asks a
-// full server to take, measured on its shapes
-// (TestTheRoomBudgetsPressureReserveHoldsWhatAFullServerIsAskedToTake), and not left at the 64 MiB
-// the plan proposed. What raises full is a sweep that finds the charges past the limit with
-// nothing to close, and the update that took them past was admitted whole: one of A4's rounds of
-// 2,048 headings is a structure part of 47,423,488 bytes and a count of 7,700,480 more, 55,123,968
-// past the limit at most once its early count lands, close to the whole of 64 MiB by itself, and a
-// second grower's round can be admitted before the sweep raises full. Its hundred shrinking
-// updates - four cuts of fifty bytes from one browser's copy, each sent to twenty-five rooms, each
-// carrying the cuts before it, of which only its own range is new to the room (deletedRuns) -
-// charge 80,000 bytes. Three crossing rounds and the shrinks come to 165,451,904 bytes, inside the
-// reserve with 103 MB to spare.
-const pressureReserveBytes = 256 << 20
+// Nothing is reserved before a room loads. What keeps fifty admissions at once from each reading
+// the same headroom is the pod's load concurrency, one slot at the calibration
+// (MemoryBounds.LoadSlots): each cold load holds a slot while it decodes, so the budget sees
+// each room's charge before the next load begins.
+const roomBudgetBytes = 2 << 30
 
 // admissionFlushAllowance is what an admission that finds the budget short waits for its sweep
 // beyond the settle delay (Service.admissionWait): a room whose browser has just gone is not
@@ -71,7 +44,7 @@ const pressureReserveBytes = 256 << 20
 // loaded pod (TestShutdownThatCutsASettlementShortLeavesItToTheNextLoad), with the flush beside it.
 const admissionFlushAllowance = 8 * time.Second
 
-// errRoomBudgetFull is the refusal of a browser the open rooms leave no room for (reserveRoom). It
+// errRoomBudgetFull is the refusal of a browser the open rooms leave no room for (ServeHTTP). It
 // is answered with DocumentBusyCloseCode, the transient close, and only once the admission has
 // waited for the sweeps it started to close what they could (roomBudget.await): the next attempt
 // finds the rooms open retiring by themselves, or the rooms whose browsers leave meanwhile.
@@ -79,13 +52,12 @@ var errRoomBudgetFull = errors.New("the open documents fill their memory budget"
 
 // roomBudget charges every open room the heap it holds, and refuses a browser one more room past
 // limit. It is written as the cold reads' cache is (documentReads): one mutex, a count against a
-// budget, and a measured weight per entry, here a room's (roomCharge) and each admission's
-// reservation before its room loads (roomReservation). It charges every room whoever opened it,
-// and refuses only a browser's socket at its admission (reserveRoom): never Server.Apply, so the
-// server's own work - an API write's publish, which opens its room from the store
-// (publishLiveWrite), settlement's warm-up and repair, the unrecorded-mark sweep - opens its
-// room over the budget, and a room so opened is closed once nothing holds it (closeOnceUnused,
-// Service.closeIfOpenedOverBudget).
+// budget, and a measured weight per entry, here a room's (roomCharge). It charges every room
+// whoever opened it, and refuses only a browser's socket at its admission (ServeHTTP): never
+// Server.Apply, so the server's own work - an API write's publish, which opens its room from the
+// store (publishLiveWrite), settlement's warm-up and repair, the unrecorded-mark sweep - opens
+// its room over the budget, and a room so opened is closed once nothing holds it
+// (closeOnceUnused, Service.closeIfOpenedOverBudget).
 //
 // What bounds that work is not a refusal but an opening (openServerRoom): it loads a room the
 // budget does not charge only while the charges stand under the limit and no other such load is
@@ -97,44 +69,49 @@ var errRoomBudgetFull = errors.New("the open documents fill their memory budget"
 // opening refuses leaves its room closed, which loses nothing (publishedWithoutARoom); a
 // settlement waits for one, and is armed again where none came (settleNoRoom).
 //
-// Over the budget, or short of what the admissions waiting on it need (wanted), the rooms that
-// hold nothing outlasting them are closed (sweepRooms), and an admission that finds the budget
-// short waits for those closes before it is refused (await). When the budget is still over its
-// limit with none left to close, full is raised: the one signal the peer update hook reads
-// (Service.weighPeerUpdate), with one atomic load, since the hook runs on the peer's read loop and
-// takes neither this mutex nor a room's state lock. It is lowered once the rooms' charges are back
-// within the budget, and a sweep started once a room may have become closable lowers it too.
+// Over its limit, the rooms that hold nothing outlasting them are closed (sweepRooms), and an
+// admission that finds the budget over it waits for those closes before it is refused (await).
+// When the budget is still over its limit with none left to close, full is raised: the one signal
+// the peer update hook reads (Service.weighPeerUpdate), with one atomic load, since the hook runs
+// on the peer's read loop and takes neither this mutex nor a room's state lock. It is lowered
+// once the rooms' charges are back within the budget, and a sweep started once a room may have
+// become closable lowers it too.
 type roomBudget struct {
 	mu sync.Mutex
 	// limit is what the service's Go memory limit gives it (MemoryBounds.RoomBudget), but for a
-	// browser test's own (SetRoomBudgetForTest), and used
+	// browser test's own (SetRoomBudgetForTest), and used what the loaded rooms come to.
 	limit, used int64
-	// rooms holds, per document, the charges of its loaded instances and the reservations of the
-	// sockets being admitted to it; a document with neither has no entry.
+	// rooms holds, per document, the charges of its loaded instances; a document with none has
+	// no entry.
 	rooms map[string]*budgetedRoom
 	// sweeping is set while a sweep runs, so one runs at a time, and again is set by anything that
 	// would have started one meanwhile - a room that may have become closable, an admission that
-	// began to wait - so that the sweep runs once more if the budget is still short when it ends
-	// (swept): the running sweep may have looked at that room, or weighed the budget, before.
+	// began to wait - so that the sweep runs once more if the budget is still over its limit when
+	// it ends (swept): the running sweep may have looked at that room, or weighed the budget,
+	// before.
 	sweeping, again bool
 	// sweep closes the rooms nothing holds until the budget is met (Service.sweepRooms), started
 	// on a goroutine of its own. Nil in a budget no service built, which never sweeps.
 	sweep func()
-	// wanted is what the admissions waiting on the budget need together (await): what each would
-	// reserve, beside the limit itself, which the sweeps close rooms to make room for (short), and
-	// waiting how many there are. Without it a sweep would stop as soon as the budget is back
-	// within its limit, and a reservation never takes it past: the sweep a short admission starts
-	// would close nothing, and the admission would be refused while unused rooms stayed charged
-	// until each retired on its own a minute later. Each admission takes its own weight back when
-	// it stops waiting, admitted or refused; no sweep's end clears it while one still waits.
-	wanted  int64
+	// waiting is how many admissions wait on the budget, and waiters the same for the readers
+	// that take no lock (sweepsForCloses): while an admission waits, a room that becomes closable
+	// starts a sweep, as it does while full is up.
 	waiting int
-	// waiters is waiting, for the readers that take no lock (sweepsForCloses): while an
-	// admission waits, a room that becomes closable starts a sweep, as it does while full is up.
 	waiters atomic.Int32
+	// wanted is what the admissions waiting on the budget need together: each one's room, which
+	// the budget does not charge yet, at roomWeight of the stored state that admission read
+	// (refusal). A sweep closes rooms for it as well as for the limit (short), so an admission
+	// whose room would cross the limit waits for a close rather than being refused while a room
+	// nothing holds is still open.
+	wanted int64
+	// reserved is what the admissions already weighed hold for rooms whose loads have not run
+	// yet (roomReservation), which the budget weighs beside the charges: a room's reservation
+	// is released when its load charges the room, or when the socket that holds it goes.
+	reserved int64
 	// pending is whether the last sweep to end left a charged room that something other than a
 	// connected browser holds - a settlement, a writer, an append - and that will be closable once
-	// that ends; an admission still short when no sweep runs and none is pending is refused at once.
+	// that ends; an admission still refused when no sweep runs and none is pending is refused at
+	// once.
 	pending bool
 	// changed is closed, and replaced, by every change to the budget while an admission waits, so
 	// each waiting admission weighs the budget again (await).
@@ -143,38 +120,29 @@ type roomBudget struct {
 	// (watchesForCloses).
 	marked atomic.Int32
 	// full is raised by a sweep that leaves the budget over its limit, having closed every room it
-	// could; never by one that leaves it within its limit but short of wanted (swept).
+	// could (swept).
 	full atomic.Bool
-	// stored holds the counts admissions made of the stored versions (storedRoomReservation).
-	stored storedCounts
 	// opening is the one room the server's own work is loading that the budget does not yet
-	// charge (openServerRoom). Another such load waits for it, or gives up and leaves its room
-	// closed.
-	opening bool
+	// charge, named so that the charge its load makes is the one marked closeOnceUnused
+	// (openServerRoom, load), and empty while none is. Another such load waits for it, or gives
+	// up and leaves its room closed.
+	opening string
 }
 
-// budgetedRoom is what the budget holds for one document: charges, the instances of its room ygo
-// has loaded and not yet retired, oldest first - more than one only while a retired instance's
-// unload has not fired yet when its successor loads - and reservations, the sockets admitted to
-// it whose room has not loaded.
+// budgetedRoom is what the budget holds for one document: the charges of the instances of its
+// room ygo has loaded and not yet retired, oldest first - more than one only while a retired
+// instance's unload has not fired yet when its successor loads.
 type budgetedRoom struct {
-	charges      []*roomCharge
+	charges []*roomCharge
+	// reservations is what the sockets admitted to this room hold for the load that has not
+	// run yet (roomReservation): the first admission's weight, and nothing for each later one,
+	// since one load serves them all. The room's load settles every one of them.
 	reservations []*roomReservation
 }
 
-// roomReservation is a socket's admission to a room that has not loaded: the count of the stored
-// version at both copies (storedRoomReservation), held from the admission until the room loads,
-// when the room's own charge replaces it, or until the socket's handler returns, whichever comes
-// first.
-type roomReservation struct {
-	room    string
-	weight  int64
-	settled bool
-}
-
-// join reports whether room has a loaded instance the budget charges, which a socket joins with
-// nothing reserved (joinedLocked); over the limit it starts a sweep, since the socket's room may be
-// one of many that something has stopped using.
+// join reports whether room has a loaded instance the budget charges, which a socket joins
+// (joinedLocked); over the limit it starts a sweep, since the socket's room may be one of many
+// that something has stopped using.
 func (b *roomBudget) join(room string) bool {
 	b.mu.Lock()
 	defer b.unlock()
@@ -202,54 +170,100 @@ func (b *roomBudget) joinedLocked(room string) bool {
 	return true
 }
 
-// refusal is a budget past its limit refusing an admission before it weighs anything, once the
-// sweeps the admission starts have closed what they could before deadline or ctx ends (await);
-// nil within the limit, at once or by then.
-func (b *roomBudget) refusal(ctx context.Context, deadline time.Time) error {
-	b.mu.Lock()
-	defer b.unlock()
-	if b.await(ctx, deadline, 0, func() bool { return b.used <= b.limit }) {
-		return nil
-	}
-	return fmt.Errorf("%w: %d of %d bytes are charged", errRoomBudgetFull, b.used, b.limit)
+// roomReservation is the weight a socket's admission holds for the room it is about to load,
+// from the weighing until that room's load charges it (roomBudget.load) or the socket goes
+// (release). It is what keeps two admissions weighed at the same moment from each reading the
+// same headroom.
+type roomReservation struct {
+	room    string
+	weight  int64
+	settled bool
 }
 
-// reserve holds weight for a socket admitted to room, or reserves nothing for a room already
-// charged, which the socket joins (joinedLocked). Where weight would take the budget past its
-// limit, the admission waits on the budget (await): weight is what the sweeps it starts are to make
-// room for (wanted), and the admission is refused only once they have closed what they could, the
-// rooms whose browsers have just gone among them, or once deadline or ctx ends, reserving nothing.
-// A weight past the limit itself is refused at once, since no sweep can make room for it, and
-// closing every unused room to try would only cost their next readers a load.
-func (b *roomBudget) reserve(ctx context.Context, deadline time.Time, room string, weight int64) (*roomReservation, error) {
+// refusal weighs an admission and holds what it needs until its room has loaded: it answers a
+// reservation, or a budget with no room for the admission refuses it, once the sweeps the
+// admission starts have closed what they could before deadline or ctx ends (await).
+//
+// weight is the room the admission is about to load, which the budget does not charge yet: the
+// bytes of the stored state the admission has already read and decoded for it (ServeHTTP's
+// preload), at roomWeight. So the admission is weighed as the budget will stand once its room
+// has loaded, which is what keeps it from taking the budget past its limit at all. That matters
+// beyond the arithmetic: the budget standing over its limit raises full, and full refuses every
+// insert in EVERY room of the pod with 4503 until a sweep can close something, which it cannot
+// while browsers hold those rooms - so an admission that crossed the limit made the whole pod
+// read-only. Measured before this: fifty browsers at once, twenty-seven admitted, and every one
+// of the twenty-seven refused on its first edit (INFRA-179).
+//
+// The reservation is what makes it hold for a burst rather than for one: every admission in
+// flight is weighed against the others' rooms as well as against the rooms already open. Two
+// admissions to the SAME document reserve its weight once - the second shares the first's, at a
+// weight of nothing - since one load serves both. It is not the reservation the cut deleted:
+// nothing is cached, no count is read for it and no flight is held, only a length the admission
+// already holds. While an admission waits, what it needs is wanted, so the sweeps close rooms
+// for it as well as for the limit (short).
+func (b *roomBudget) refusal(ctx context.Context, deadline time.Time, room string, weight int64) (*roomReservation, error) {
 	b.mu.Lock()
 	defer b.unlock()
-	charged := func() bool {
-		entry := b.rooms[room]
-		return entry != nil && len(entry.charges) > 0
+	if entry := b.rooms[room]; entry != nil && len(entry.reservations) > 0 {
+		weight = 0
 	}
-	if weight <= b.limit {
-		b.await(ctx, deadline, weight, func() bool { return charged() || b.used+weight <= b.limit })
+	b.wanted += weight
+	defer func() { b.wanted -= weight }()
+	if !b.await(ctx, deadline, func() bool { return b.used+b.reserved+weight <= b.limit }) {
+		return nil, fmt.Errorf("%w: %d charged and %d reserved of %d bytes, and the room asks %d",
+			errRoomBudgetFull, b.used, b.reserved, b.limit, weight)
 	}
-	if b.joinedLocked(room) {
-		return nil, nil
-	}
-	if b.used+weight > b.limit {
-		return nil, fmt.Errorf("%w: %d of %d bytes are charged, and this document needs %d", errRoomBudgetFull, b.used, b.limit, weight)
-	}
-	entry := b.entry(room)
 	reservation := &roomReservation{room: room, weight: weight}
+	entry := b.entry(room)
 	entry.reservations = append(entry.reservations, reservation)
-	b.used += weight
+	b.reserved += weight
 	return reservation, nil
 }
 
-// await waits until fits reports room for an admission needing weight, and reports whether it
-// does. Its caller holds mu, which it gives up while it waits and holds again whenever it looks
-// and when it returns. While it waits, weight is wanted, so the sweeps close rooms for it as well
-// as for the limit (short), and a room that becomes closable meanwhile starts a sweep of its own
-// (waiters, Service.unlockState). It starts a sweep, or has the running one run again once it
-// ends, since that one may have weighed the budget before this weight was wanted (sweepAgainLocked).
+// release gives a reservation back, unless its room's load has already settled it. A nil
+// reservation releases nothing, which is what a socket that joined a charged room holds.
+func (b *roomBudget) release(reservation *roomReservation) {
+	if reservation == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.unlock()
+	b.settleLocked(reservation)
+}
+
+// settleLocked drops reservation from its room and from the reserved total, once. Its caller
+// holds mu.
+func (b *roomBudget) settleLocked(reservation *roomReservation) {
+	if reservation.settled {
+		return
+	}
+	reservation.settled = true
+	b.reserved -= reservation.weight
+	entry := b.rooms[reservation.room]
+	if entry == nil {
+		return
+	}
+	entry.reservations = slices.DeleteFunc(entry.reservations, func(held *roomReservation) bool {
+		return held == reservation
+	})
+	b.dropIfEmptyLocked(reservation.room, entry)
+}
+
+// awaitRoom waits for the budget's sweep to bring the charges back within the limit, and reports
+// whether they are: what an admission waits for, with a weight of nothing. A browser's update
+// about to be refused for the pressure waits for it too, so the rooms nothing is still using are
+// closed before anything is refused (Service.underPressure, the spec's R3 and A3).
+func (b *roomBudget) awaitRoom(ctx context.Context, deadline time.Time) bool {
+	b.mu.Lock()
+	defer b.unlock()
+	return b.await(ctx, deadline, func() bool { return b.used+b.reserved <= b.limit })
+}
+
+// await waits until fits reports room for an admission, and reports whether it does. Its caller
+// holds mu, which it gives up while it waits and holds again whenever it looks and when it
+// returns. While it waits, a room that becomes closable starts a sweep of its own (waiters,
+// Service.unlockState). It starts a sweep, or has the running one run again once it ends, since
+// that one may have weighed the budget before this admission arrived (sweepAgainLocked).
 //
 // It stops waiting, answering what fits says then, once deadline passes or ctx ends; and at once
 // when no sweep runs and the last one to end left nothing pending (pending): the rooms still
@@ -268,16 +282,14 @@ func (b *roomBudget) reserve(ctx context.Context, deadline time.Time, room strin
 // closes that window - ygo offers no peer count and no per-peer leave - so the drive that opens a
 // browser just after another left holds its socket until the report has landed
 // (cmd/dispatch, TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays).
-func (b *roomBudget) await(ctx context.Context, deadline time.Time, weight int64, fits func() bool) bool {
+func (b *roomBudget) await(ctx context.Context, deadline time.Time, fits func() bool) bool {
 	if fits() {
 		return true
 	}
 	b.waiting++
-	b.wanted += weight
 	b.waiters.Store(int32(b.waiting))
 	defer func() {
 		b.waiting--
-		b.wanted -= weight
 		b.waiters.Store(int32(b.waiting))
 	}()
 	b.sweepAgainLocked()
@@ -318,8 +330,8 @@ func (b *roomBudget) await(ctx context.Context, deadline time.Time, weight int64
 //
 // Those two conditions together are what bounds the server's own work, and neither does it
 // alone. The limit alone would not: a room the budget has not weighed cannot be refused by
-// arithmetic - the work that opens it holds no count of the stored document, and a publish may
-// take no pooled connection to make one (storedRoomReservation, publishLiveUpdate) - so three
+// arithmetic - the work that opens it holds no measure of the stored document, and reading one
+// would cost it a pooled connection (publishLiveUpdate) - so three
 // hundred of them would read the same headroom at the same moment and all pass. One at a time
 // alone would not either, for a caller that gives the opening back while its room stands: a room
 // outlives the load that opened it, by the settlement the write armed in it and then by the
@@ -333,13 +345,13 @@ func (b *roomBudget) await(ctx context.Context, deadline time.Time, weight int64
 // (publishLiveWrite). A caller that cannot do without one waits instead (awaitServerRoom). A
 // budget with no limit is a budget no service built, a test's, which bounds nothing and opens
 // whatever it is asked for, as its admissions are never refused (await).
-func (b *roomBudget) openServerRoom() bool {
+func (b *roomBudget) openServerRoom(room string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.opening || !(b.limit <= 0 || b.used < b.limit) {
+	if b.opening != "" || !(b.limit <= 0 || b.used < b.limit) {
 		return false
 	}
-	b.opening = true
+	b.opening = room
 	return true
 }
 
@@ -362,12 +374,12 @@ func (b *roomBudget) openServerRoom() bool {
 // closes the rooms a burst of this work has left behind. A caller it refuses loses nothing and
 // gives nothing up for good: the settlement is armed again (settleNoRoom), and the document's
 // pending-settlement row outlives every process.
-func (b *roomBudget) awaitServerRoom(ctx context.Context, deadline time.Time) bool {
+func (b *roomBudget) awaitServerRoom(ctx context.Context, deadline time.Time, room string) bool {
 	b.mu.Lock()
 	defer b.unlock()
 	for {
-		if !b.opening {
-			b.opening = true
+		if b.opening == "" {
+			b.opening = room
 			return true
 		}
 		wait := time.Until(deadline)
@@ -400,77 +412,41 @@ func (b *roomBudget) awaitServerRoom(ctx context.Context, deadline time.Time) bo
 func (b *roomBudget) closeServerRoom() {
 	b.mu.Lock()
 	defer b.unlock()
-	b.opening = false
+	b.opening = ""
 }
 
-// release returns reservation, unless its room's charge already replaced it. Nil releases nothing.
-func (b *roomBudget) release(reservation *roomReservation) {
-	if reservation == nil {
-		return
-	}
-	b.mu.Lock()
-	defer b.unlock()
-	if reservation.settled {
-		return
-	}
-	entry := b.rooms[reservation.room]
-	entry.reservations = slices.DeleteFunc(entry.reservations, func(held *roomReservation) bool { return held == reservation })
-	b.settleLocked(reservation)
-	b.dropIfEmptyLocked(reservation.room, entry)
-}
-
-// load charges room's newly loaded instance, whose one copy is priced at heap (copyHeap) from the
-// count of the rendering it loaded with and the struct total of its state, at roomCopies, in place
-// of every reservation its admissions hold: the room's own document replaces its stored version at
-// the same two copies, and the two documents differ only by the updates stored since that version
-// was cut. A room loaded with no socket's reservation is the server's own work's - an API write's
-// publish (publishLiveWrite), settlement's repair and warm-up, the mark sweep, a mark's
-// verification, a snapshot read, a warm-up, a live tree's read, settlement resumed at boot: every
-// opener of Server.Apply - and where its charge leaves the budget over its limit it is marked
-// closeOnceUnused, to be closed once that work no longer holds it (Service.closeIfOpenedOverBudget)
-// rather than staying charged until it retires a minute later.
-func (b *roomBudget) load(room string, heap int64) *roomCharge {
+// load charges room's newly loaded instance at stateBytes, the bytes of the stored state the
+// load decoded, at both copies (roomWeight): the room's two documents hold that state, and what
+// the room commits after it the room's update observer adds as it drains
+// (renderedReplica.chargeAdded). A room the budget's opening named is the server's own work's -
+// an API write's publish (publishLiveWrite), settlement's repair and warm-up, the mark sweep, a
+// mark's verification, a snapshot read, a live tree's read, settlement resumed at boot: every
+// opener of Server.Apply (openServerRoom) - and where its charge leaves the budget over its
+// limit it is marked closeOnceUnused, to be closed once that work no longer holds it
+// (Service.closeIfOpenedOverBudget) rather than staying charged until it retires a minute later.
+func (b *roomBudget) load(room string, stateBytes int64) *roomCharge {
 	b.mu.Lock()
 	defer b.unlock()
 	entry := b.entry(room)
-	reserved := len(entry.reservations) > 0
-	for _, reservation := range entry.reservations {
+	charge := &roomCharge{budget: b, room: room}
+	entry.charges = append(entry.charges, charge)
+	// The room is charged now, so every admission waiting for this load stops holding its
+	// weight: the charge is the real figure and the reservation was its estimate.
+	for _, reservation := range slices.Clone(entry.reservations) {
 		b.settleLocked(reservation)
 	}
-	entry.reservations = nil
-	charge := &roomCharge{budget: b, room: room, heap: heap}
-	entry.charges = append(entry.charges, charge)
-	b.reweighLocked(charge)
-	if !reserved && b.used > b.limit {
+	b.reweighLocked(charge, roomWeight(stateBytes))
+	if b.opening == room && b.used > b.limit {
 		charge.closeOnceUnused = true
 		b.marked.Add(1)
 	}
 	return charge
 }
 
-// growWithin charges charge structure more, as grew does, where the charges and reservations then
-// stay within the limit and reserve beyond it, and reports whether it did: the pressure reserve's
-// look at the budget (refusedUnderPressure), which books the charge in the same look so that two
-// browsers' deletes weighed at once cannot each pass the check and together pass the reserve. A
-// nil charge, a room no load charged, is weighed and charges nothing.
-func (b *roomBudget) growWithin(charge *roomCharge, structure, reserve int64) bool {
-	b.mu.Lock()
-	defer b.unlock()
-	if b.used+structure > b.limit+reserve {
-		return false
-	}
-	if charge != nil {
-		charge.structure += structure
-		b.reweighLocked(charge)
-	}
-	return true
-}
-
 // retire returns the charge of room's oldest loaded instance, which ygo has retired
-// (releaseUnloadedRoom), all three of its parts. ygo fires one unload for each instance it loaded,
-// and loads the next only once the last is out of its map, so the oldest charge is the retired
-// instance's - or, where two retire before either unload fires, the other's, which is the same
-// total.
+// (releaseUnloadedRoom). ygo fires one unload for each instance it loaded, and loads the next
+// only once the last is out of its map, so the oldest charge is the retired instance's - or,
+// where two retire before either unload fires, the other's, which is the same weight.
 func (b *roomBudget) retire(room string) {
 	b.mu.Lock()
 	defer b.unlock()
@@ -537,21 +513,20 @@ func (b *roomBudget) unmarkLocked(charge *roomCharge) {
 	}
 }
 
-// short is whether the charges and reservations leave no room for wanted, what the admissions
-// waiting on the budget need together: past the limit, or within it but without room for them. A
-// sweep closes rooms while it holds.
+// short is whether the charges leave no room for the limit or for what the admissions waiting on
+// the budget need together (wanted). A sweep closes rooms while it holds.
 func (b *roomBudget) short() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.used+b.wanted > b.limit
+	return b.used+b.reserved+b.wanted > b.limit
 }
 
-// figures is what the rooms' charges and the reservations come to, the limit, and wanted, for a
-// sweep to log what each room it closes left.
-func (b *roomBudget) figures() (used, limit, wanted int64) {
+// figures is what the rooms' charges come to and the limit, for a sweep to log what each room it
+// closes left.
+func (b *roomBudget) figures() (used, limit int64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.used, b.limit, b.wanted
+	return b.used, b.limit
 }
 
 // heaviest lists the charged rooms, the heaviest first, for a sweep to close in that order.
@@ -601,7 +576,7 @@ func (b *roomBudget) watchesForCloses() bool {
 func (b *roomBudget) kick(room string) {
 	b.mu.Lock()
 	defer b.unlock()
-	if entry := b.rooms[room]; entry == nil || len(entry.charges) == 0 || b.used+b.wanted <= b.limit {
+	if entry := b.rooms[room]; entry == nil || len(entry.charges) == 0 || b.used <= b.limit {
 		return
 	}
 	b.sweepAgainLocked()
@@ -662,22 +637,18 @@ func (b *roomBudget) sweepAgainLocked() {
 }
 
 // swept ends a sweep, which leaves pending what pending says (sweepRooms). Where something asked
-// for the sweep again while it ran and the budget is still short, it runs again at once, on a
-// goroutine of its own. Otherwise it raises full when it left the budget over its limit: it closed
-// every room it could. A sweep that leaves the budget within its limit but short of wanted lowers
-// full rather than raising it. Full refuses every insert in every room (Service.weighPeerUpdate),
-// and a single oversized document refused on an almost empty pod must not freeze every room's
-// growth; an admission still short is answered by its own refusal once it stops waiting.
-//
-// wanted is left as it is: each admission waiting takes its own weight back when it stops waiting
-// (await), so a sweep's end never drops what another admission still waits for. Every waiting
-// admission is woken to weigh the budget again.
+// for the sweep again while it ran and the budget is still over its limit, it runs again at
+// once, on a goroutine of its own. Otherwise it raises full when it left the budget over its
+// limit: it closed every room it could. Full refuses every apply that integrates anything in
+// every room (Service.weighPeerUpdate), and a single oversized document refused on an almost
+// empty pod must not freeze every room's growth; an admission still refused is answered by its
+// own refusal once it stops waiting. Every waiting admission is woken to weigh the budget again.
 func (b *roomBudget) swept(pending bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.pending = pending
 	b.wakeLocked()
-	if b.again && b.used+b.wanted > b.limit {
+	if b.again && b.used > b.limit {
 		b.again = false
 		go b.sweep()
 		return
@@ -705,17 +676,12 @@ func (b *roomBudget) dropIfEmptyLocked(room string, entry *budgetedRoom) {
 	}
 }
 
-func (b *roomBudget) settleLocked(reservation *roomReservation) {
-	reservation.settled = true
-	b.used -= reservation.weight
-}
-
-// reweighLocked charges charge its weight now, unless its room has retired. Its caller holds mu.
-func (b *roomBudget) reweighLocked(charge *roomCharge) {
+// reweighLocked charges charge weight in place of what it carried, unless its room has retired.
+// Its caller holds mu.
+func (b *roomBudget) reweighLocked(charge *roomCharge, weight int64) {
 	if charge.retired {
 		return
 	}
-	weight := roomWeight(charge.heap, charge.content-charge.measuredAt, charge.structure)
 	b.used += weight - charge.weight
 	charge.weight = weight
 }

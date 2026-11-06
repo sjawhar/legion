@@ -53,10 +53,28 @@ func (s *Service) RoomLiveForTest(artifactID string) bool {
 	return s.srv.GetDoc(artifactID) != nil
 }
 
+// RoomChargesForTest is what the room budget charges each room it holds a charge for, beside the
+// budget's own used and limit (roomBudget.figures). It is the budget's own reading of which rooms
+// it still carries: a room whose charges were given back is absent from it, not zero, which is how
+// a real-process drive tells a room the budget closed from one it still holds open. It takes the
+// budget's lock for the length of the read and nothing else: it charges nothing, closes nothing
+// and loads nothing. It is mounted only through Dispatch's test-hook route.
+func (s *Service) RoomChargesForTest() (charges map[string]int64, used, limit int64) {
+	s.budget.mu.Lock()
+	defer s.budget.mu.Unlock()
+	charges = make(map[string]int64, len(s.budget.rooms))
+	for room, entry := range s.budget.rooms {
+		for _, charge := range entry.charges {
+			charges[room] += charge.weight
+		}
+	}
+	return charges, s.budget.used, s.budget.limit
+}
+
 // HoldNextAdmissionForTest makes the next socket to artifactID wait for wait before its admission
 // (ServeHTTP), so a browser test can keep a document's first sync waiting as long as a browser in a
-// burst waits for its room - for its stored version's count and the grant that count takes of the
-// copy bound (storedCountWeight), all before the server answers the socket's upgrade - and see
+// burst waits for its room - for the load slot its load takes (loadSlots), all before the server
+// answers the socket's upgrade - and see
 // what the editor does meanwhile. The wait ends early, and the socket is answered nothing, if its
 // request ends. A wait of zero or less takes back a hold no socket has used yet. It is mounted
 // only through Dispatch's test-hook route.
@@ -268,11 +286,20 @@ func tangleProbe(origin crdt.ID) []byte {
 	return frame.Bytes()
 }
 
+// The bytes the hand-written frames below are built from (sjawhar/ygo v1.55.1-sami.1,
+// crdt/update.go:17-37): structStringRef is the content reference of a string item, and the two
+// info bits say that the item names a left and a right origin on the wire.
+const (
+	structStringRef    byte = 4
+	infoHasOrigin      byte = 0x80
+	infoHasRightOrigin byte = 0x40
+)
+
 // writeOriginString writes one string item of content naming origin as its left origin and no
 // right origin, so its parent is its origin's and the wire does not name it (sjawhar/ygo
 // v1.55.1-sami.1, crdt/update.go:1195-1215).
 func writeOriginString(frame *encoding.Encoder, origin crdt.ID, content string) {
-	frame.WriteUint8(byte(structString) | infoHasOrigin)
+	frame.WriteUint8(structStringRef | infoHasOrigin)
 	frame.WriteVarUint(uint64(origin.Client))
 	frame.WriteVarUint(origin.Clock)
 	frame.WriteVarString(content)
@@ -282,7 +309,7 @@ func writeOriginString(frame *encoding.Encoder, origin crdt.ID, content string) 
 // rightOrigin as its right origin, the shape of an insert made between two items a document
 // holds: its integrate scans from the one to the other (Item.integrate).
 func writeLadderString(frame *encoding.Encoder, origin, rightOrigin crdt.ID, content string) {
-	frame.WriteUint8(byte(structString) | infoHasOrigin | infoHasRightOrigin)
+	frame.WriteUint8(structStringRef | infoHasOrigin | infoHasRightOrigin)
 	frame.WriteVarUint(uint64(origin.Client))
 	frame.WriteVarUint(origin.Clock)
 	frame.WriteVarUint(uint64(rightOrigin.Client))
@@ -539,13 +566,17 @@ func DocumentReadWeightForTest(markdown string) (int64, error) {
 	return read.weight, nil
 }
 
-// StateStructsForTest is the structs of state, a document's encoded Yjs state, as a walk of a
-// room's own state counts them (walkUpdate, fromRoom; countRoomStructs, but for parked structs'
-// splits). A real-process drive counts a document's stored state with it to know how many structs
-// the writes it made added, without duplicating the walk.
+// StateStructsForTest is the structs state, a document's encoded Yjs state, decodes into
+// (crdt.Doc.StructCount): the count a room's own state holds once a load has read it, parked
+// structs left out, since a state a room stored holds none. A real-process drive counts a
+// document's stored state with it to know how many structs the writes it made added, without
+// loading the document itself.
 func StateStructsForTest(state []byte) (int64, error) {
-	tally, err := walkUpdate(state, fromRoom, nil)
-	return int64(tally.structs), err
+	doc := newCappedDocumentCopy(maxUpdateItems)
+	if err := decodeStoredState(doc, state); err != nil {
+		return 0, err
+	}
+	return int64(doc.StructCount()), nil
 }
 
 // RescanForTest is what a re-scan of state, a document's stored Yjs state, scans (rescan): the

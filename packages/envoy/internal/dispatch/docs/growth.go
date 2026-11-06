@@ -362,7 +362,7 @@ func elements(size pmdoc.DocumentSize) string {
 }
 
 // refuseUndecodable is the refusal of an operation of write's transaction that would leave the
-// room's live document past the decode cap, or nil: a struct total (countRoomStructs) past the
+// room's live document past the decode cap, or nil: a struct total (structCeiling) past the
 // maxUpdateItems structs ygo decodes in one update. The operation ran on fork, its transaction's
 // copy of the room, and recorded updates there; write.updates are the transaction's earlier
 // operations, which are in the fork and in no room until the transaction publishes, and the
@@ -375,29 +375,25 @@ func elements(size pmdoc.DocumentSize) string {
 // merge and what the difference measures), so a fork can count far below the room it was forked
 // from, and a write the fork's count clears could carry the room past the cap once published.
 // The room is asked instead, by leavesPastDecodeCap itself, as the three server writes outside
-// applyLive ask it: the ceiling of its struct total with what the transaction's updates add at
-// most (updatesAdd), then its exact struct total in the measurer's turn, then the transaction's
-// updates applied to a copy of it, each step answering only where the one before cannot.
+// applyLive ask it: its own struct total with what the transaction's updates added to the fork
+// (updatesAdd), then the transaction's updates applied to a copy of the room, the second step
+// answering only where the first cannot.
 //
-// What the turn costs, and why it runs one at a time, is leavesPastDecodeCap's. Nothing the
-// operation holds here is a transaction on the room: it wrote the fork, and the fork's read of the
-// room ended before the operation began (warmFork), so the encode can take the room document's
-// lock. A browser's edit landing between the count and the publish is the peer update hook's to
-// bound (roomTotals).
+// What the copy costs, and when it is taken, is leavesPastDecodeCap's. Nothing the operation
+// holds here is a transaction on the room: it wrote the fork, and the fork's read of the room
+// ended before the operation began (warmFork), so the copy can take the room document's lock. A
+// browser's edit landing between the count and the publish is the peer update hook's to bound.
 //
 // A write with no room behind it - a cold fork, built from the store while no room held the
 // document (coldFork), or a room evicted since the fork read it - reaches a room that loads from
 // the store once it publishes, and a load decodes the store's state in one update (Load,
 // stateThrough), the way the fork was decoded, with the transaction's updates folded into it,
 // where the fork took each as a transaction of its own and so merged no run a decode would not.
-// So the fork's own total answers for that room: its ceiling first, then its count, an encode of
-// its state and a walk of it, where a decode of that state into a fresh document would hold a
-// second copy of it.
+// So the fork's own total answers for that room: its structs as the next load's decode meets
+// them (structCeiling), which costs neither an encode nor a walk.
 //
-// Each count is never below what a decode of the state reads, since it adds the splits parked
-// structs can still cause, so it refuses every state a decode would. A state past the cap is
-// refused whether or not the write grew the document: storing it would leave every read unable
-// to load it.
+// A state past the cap is refused whether or not the write grew the document: storing it would
+// leave every read unable to load it.
 func (s *Service) refuseUndecodable(ctx context.Context, write *liveWrite, fork *crdt.Doc, updates [][]byte) error {
 	if s.leavesRoomPastDecodeCap(ctx, write, fork, updates) {
 		return fmt.Errorf("%w: this change would leave the document's live state past the %d items ygo decodes in one update; shorten the change, or split the document",
@@ -407,18 +403,17 @@ func (s *Service) refuseUndecodable(ctx context.Context, write *liveWrite, fork 
 }
 
 // leavesRoomPastDecodeCap is refuseUndecodable's question: whether updates, with write's earlier
-// updates, leave the room write's fork was read from past the decode cap. ctx carries the write's
-// grant of the copy-heap bound, which the copy the count may take covers rather than acquiring a
-// second grant inside it (liveWrite.carriedBy, elementMeasurer.structsAfter).
+// updates, leave the room write's fork was read from past the decode cap. ctx carries the
+// write's load slot, which the copy the count may take covers rather than taking a second slot
+// inside it (liveWrite.carriedBy, structsAfter).
 func (s *Service) leavesRoomPastDecodeCap(ctx context.Context, write *liveWrite, fork *crdt.Doc, updates [][]byte) bool {
 	live := write.forkedFrom.Value()
 	if live == nil {
-		return structCeiling(fork) > maxUpdateItems && countRoomStructs(fork) > maxUpdateItems
+		return structCeiling(fork) > maxUpdateItems
 	}
 	transaction := append(append(make([][]byte, 0, len(write.updates)+len(updates)), write.updates...), updates...)
-	adds, bounded := updatesAdd(transaction)
 	unapplied := false
-	past := s.leavesPastDecodeCap(ctx, live, serverWrite{adds: adds, bounded: bounded, apply: func(copied *crdt.Doc) {
+	past := s.leavesPastDecodeCap(ctx, live, serverWrite{adds: write.updatesAdd(fork), bounded: true, apply: func(copied *crdt.Doc) {
 		if err := applyTransactionWrites(copied, transaction); err != nil {
 			// Each update applied to the fork, a decode of the same room; one that does not
 			// apply to the copy leaves a count that cannot be trusted to hold all of it.
@@ -429,27 +424,25 @@ func (s *Service) leavesRoomPastDecodeCap(ctx context.Context, write *liveWrite,
 	return unapplied || past
 }
 
-// updatesAdd is the most structs applying updates, a transaction's own writes, can add to a
-// document, and whether a walk of each bounds it: each struct an update carries, but a skip, with
-// the splits its integration can cause, and the two splits each delete range can cause. It counts
-// every range, the ones the room holds deleted already too, which the peer update hook charges
-// nothing (peerWeighing.added, deletedRuns.splitEnds): a transaction's update carries what that
-// transaction deleted (collectAndEncodeLocked, sjawhar/ygo v1.55.1-sami.1, crdt/doc.go:844-873,
-// written by encodeV1Locked, crdt/update.go:403), and a room that holds those clocks deleted
-// already takes them as deleting nothing, so near the cap a write that deletes nothing new still
-// goes on to the room's exact count and then to a copy (leavesRoomPastDecodeCap), which answer for
-// what it adds. Every struct of a transaction's update is its own new item, which no room holds
-// yet. An update the walk refuses is bounded by nothing, and its document is counted.
-func updatesAdd(updates [][]byte) (uint64, bool) {
-	var adds uint64
-	for _, update := range updates {
-		tally, err := walkUpdate(update, fromRoom, nil)
-		if err != nil {
-			return 0, false
-		}
-		adds += (tally.structs-tally.skips)*(1+splitsAStructCanCause) + tally.deleteRanges*splitsAStructCanCause
+// updatesAdd is how many structs the transaction's own writes have added to fork, its copy of
+// the room: what fork holds now (structCeiling) less what it held when it was built
+// (liveWrite.forkStructs), never below nothing. Every struct the transaction wrote is in the
+// fork, since the fork is where its operations ran, so the two counts either side of them are
+// what they added, splits of items the fork already held included, and the same items
+// integrate into the room when the transaction publishes.
+//
+// It is read from the two counts rather than from the updates themselves because a count costs
+// a walk of the store's client slices and the updates would cost a decode of every struct they
+// carry. Splits are not counted twice over: ygo's own apply budget leaves the splits an apply
+// makes out of what it charges a browser (crdt.ApplyBudget), and the cap is enforced on what
+// the document holds at each apply after them, so a split the room makes that the fork did not
+// is seen by the next write's count rather than guessed at by this one.
+func (w *liveWrite) updatesAdd(fork *crdt.Doc) uint64 {
+	held := structCeiling(fork)
+	if held <= w.forkStructs {
+		return 0
 	}
-	return adds, true
+	return held - w.forkStructs
 }
 
 // clockSum is the sum of doc's state vector, capped at the largest uint64 rather than wrapped
@@ -484,22 +477,18 @@ func plusCapped(a, b uint64) uint64 {
 	return math.MaxUint64
 }
 
-// structCeiling bounds doc's struct total (countRoomStructs) from above without an encode: the
-// one measure of a document against the decode cap that costs nothing. The struct total is the
-// structs doc's encoded state carries plus the splits its parked structs and parked delete ranges
-// can still cause. Of those structs, every one doc has integrated takes at least one clock of the
-// state vector (clockSum), but a parked one takes none: the state vector stops at the gap a parked
-// struct waits behind, and the encoded state carries each parked struct, with at most a skip over
-// the gap before it (withParked, crdt/update.go:229-257 in sjawhar/ygo v1.55.1-sami.1). So the
-// encoded state holds at most the clock sum and two structs for each parked one, and the splits
-// are splitsAStructCanCause for each parked struct and each parked delete range
-// (crdt.Doc.PendingStats, crdt/doc.go:1183-1200). A room may park up to maxUpdateItems structs
-// (Server.MaxPendingItems, which New sets), none of which the clock sum sees. Every sum here is
-// capped rather than wrapped, for the reason clockSum gives.
+// structCeiling is how many structs doc's whole state holds as the next load's decode meets
+// them, the one measure of a document against the decode cap that costs neither an encode nor a
+// decode: the structs its store holds (crdt.Doc.StructCount, a walk of the handful of client
+// slices) and what it has parked. Each parked struct is counted twice over, since the encoded
+// state carries it with at most a skip over the gap it waits behind (withParked,
+// crdt/update.go:229-257 in sjawhar/ygo v1.55.1-sami.1), and each parked delete range once, for
+// the struct its apply can leave split. A room may park up to maxUpdateItems structs
+// (Server.MaxPendingItems, which New sets), none of which the store holds yet. Every sum here
+// is capped rather than wrapped, for the reason clockSum gives.
 func structCeiling(doc *crdt.Doc) uint64 {
 	parked := doc.PendingStats()
-	items, ranges := uint64(parked.Items), uint64(parked.DeleteRanges)
-	return plusCapped(clockSum(doc), 2*items+splitsAStructCanCause*(items+ranges))
+	return plusCapped(uint64(doc.StructCount()), 2*uint64(parked.Items)+uint64(parked.DeleteRanges))
 }
 
 // serverWrite is one of the server's writes into a room's live document outside applyLive - the
@@ -519,21 +508,18 @@ type serverWrite struct {
 }
 
 // leavesPastDecodeCap reports whether write would leave doc, a room's live document, with a
-// struct total (countRoomStructs) past the decode cap: the question each server write outside
-// applyLive asks before it writes (errPastDecodeCap), and the one an API write's transaction asks
-// of its updates and the room its fork was read from (leavesRoomPastDecodeCap). The server writes
-// write into the live document itself, where the sweep's single transaction (unmarkExpired) cannot
-// be rolled back once it has begun, so the question is answered before the write rather than of
-// what it left. Each step answers only where the one before cannot:
+// struct total (structCeiling) past the decode cap: the question each server write outside
+// applyLive asks before it writes (errPastDecodeCap), and the one an API write's transaction
+// asks of its updates and the room its fork was read from (leavesRoomPastDecodeCap). The server
+// writes write into the live document itself, where the sweep's single transaction
+// (unmarkExpired) cannot be rolled back once it has begun, so the question is answered before
+// the write rather than of what it left. Each step answers only where the one before cannot:
 //
-//   - the ceiling of doc's struct total (structCeiling) and what the write adds at most: within
-//     the cap, the write fits. It costs no encode and clears every document well short of the cap.
-//   - in the measurer's turn (elementMeasurer.structsAfter), doc's exact struct total, an encode
-//     of its state and a walk of it: past the cap, the write is refused, and a copy could not even
-//     be made, since its decode would refuse the state; with what the write adds at most and still
-//     within the cap, the write fits.
-//   - in the same turn, the write made on a copy of doc, whose struct total it raises by as much
-//     as it would raise doc's at least: within the cap with that added, the write fits.
+//   - doc's own struct total (structCeiling) and what the write adds at most: within the cap,
+//     the write fits. It costs a walk of the document's client slices and nothing else, and
+//     clears every document well short of the cap.
+//   - the write made on a copy of doc (structsAfter), whose struct total it raises by as much as
+//     it would raise doc's at least: within the cap with that added, the write fits.
 //
 // The copy cannot be counted for doc's own total: it is a decode of doc's state, and ygo merges
 // into one struct each run of typing a decode delivers at once (squashRuns, crdt/transaction.go:
@@ -545,50 +531,60 @@ type serverWrite struct {
 // point no boundary of doc's holds, it makes in the copy too.
 //
 // No answer is kept between writes. The question turns on the write, so one write's answer does
-// not answer another's, and a document's struct total can grow without its clocks: a deletion
-// inside a struct splits it and adds no clock, so a count kept until the clocks had grown some
-// way could be passed unseen. The count of doc is paid by each such write on a document whose
-// ceiling has passed the cap, and the copy only by one within what it adds of the cap; either is
-// paid only by a write that has something to write - an id to mint, an expired mark, an answer to
-// return. Measured alone on a two-processor pod on 2026-10-26 (BenchmarkDecodeCapConfirmation),
-// the count of doc took 31 to 48 ms and allocated 7 to 18 MB on a mebibyte of typed-over markdown
-// (a 3,035,240-byte state of 77,600 structs), and 397 to 412 ms and 68 to 102 MB on a document of
-// exactly maxUpdateItems structs (19,527,448 bytes); the count with the copy took 302 to 387 ms and
-// 72 to 95 MB, and 2.65 to 3.58 s and 573 to 755 MB. The encode and decode into a fresh document
-// it replaced, measured beside it, took 162 to 278 ms and 46 to 63 MB, and 1.45 to 1.59 s and 300
-// to 448 MB: the count with the copy costs up to about twice that, since it is that decode with
-// three encodes and walks beside it, and the count alone a fifth to a quarter of it.
+// not answer another's. The copy is paid for only by a write on a document already within what
+// it adds of the cap, and only by a write that has something to write - an id to mint, an
+// expired mark, an answer to return.
 //
-// A count holds an encode of doc's whole state, and one near the cap a whole copy of the document,
-// which is the heap the room budget exists to bound, so the service runs one at a time, in the
-// measurer's turn, which waits for an element count or another room's count to finish: two rooms
-// never hold a copy each for it at once. Each of the three writes can wait for it, on its own
-// goroutine and never a peer's read loop: they are the server's own background work, and the
-// sweep and the backfill already leave a document and run again on the next pass. What the wait
-// and the count hold meanwhile is the writer's own: the stamp's repair holds its suppression slot,
-// so the room's persistence worker waits at the room's next update, and its close gate
-// (applySuppressed); settlement's answer check holds the settlement's database transaction. The
-// copy lives for the one count and is dropped, so it is charged to no room's budget entry
-// (roomCharge), and the budget's arithmetic does not count it.
+// The copy is a whole second document, which is the heap the pod's load concurrency bounds, so
+// it takes a slot of it before it is decoded (structsAfter). Each of the three server writes can
+// wait for that slot, on its own goroutine and never a peer's read loop: they are the server's
+// own background work, and the sweep and the backfill already leave a document and run again on
+// the next pass. The copy lives for the one count and is dropped, so it is charged to no room's
+// budget entry (roomCharge).
 //
-// The caller holds no transaction on doc, since the encode takes doc's lock, and a count in the
-// turn waiting on that lock while the transaction waited on the turn would hold both for good.
-// The answer is of doc as it is when the turn counts it: a browser's edit landing between it and
-// the write is the peer update hook's to bound (roomTotals). The stamp and the sweep keep what
-// they write within the bound they were answered on whatever such an edit leaves (stampBlockIDs,
-// unmarkExpired), and each of settlement's repairs lands on the one block its id names
-// (repairLive).
+// The caller holds no transaction on doc, since the copy encodes doc under its lock. The answer
+// is of doc as it is when it is counted: a browser's edit landing between that and the write is
+// the peer update hook's to bound. The stamp and the sweep keep what they write within the
+// bound they were answered on whatever such an edit leaves (stampBlockIDs, unmarkExpired), and
+// each of settlement's repairs lands on the one block its id names (repairLive).
 //
-// ctx carries the grant of the copy-heap bound a live write's transaction already holds
-// (liveWrite.carriedBy), which the copy covers rather than acquire a second inside it; a write
-// of the server's own carries none and takes one before the turn (structsAfter says why before).
-// The room's own state is weighed by its running totals here, where the Service that keeps them
-// is at hand (roomStateBytes).
+// ctx carries the load slot a live write's transaction already holds (liveWrite.carriedBy),
+// which the copy covers rather than take a second inside it; a write of the server's own
+// carries none and takes one of its own, waiting without a deadline (holdServerLoad).
 func (s *Service) leavesPastDecodeCap(ctx context.Context, doc *crdt.Doc, write serverWrite) bool {
-	if write.bounded && plusCapped(structCeiling(doc), write.adds) <= maxUpdateItems {
+	held := structCeiling(doc)
+	if held > maxUpdateItems {
+		return true
+	}
+	if write.bounded && plusCapped(held, write.adds) <= maxUpdateItems {
 		return false
 	}
-	return s.measurer.structsAfter(ctx, doc, write, s.roomStateBytes(doc)) > maxUpdateItems
+	return structsAfter(ctx, doc, write) > maxUpdateItems
+}
+
+// structsAfter is the struct total doc, a room's live document, would hold after write: doc's
+// own total with what the write added to a copy of doc, the copy's total after the write less
+// its total before. A write the copy shows taking structs away is credited none of them. The
+// copy is a decode of doc's state into a fresh document with doc's client id, so the write's own
+// items take the clocks they would take in doc; it holds a whole second document while it is
+// counted, and is dropped when this returns.
+//
+// It takes a slot of the pod's load concurrency for that copy (holdServerLoad), the slot ctx
+// carries where it carries one - a live write's, which the write holds for its fork's whole life
+// and which this decode therefore waits for nothing to get (liveWrite.carriedBy).
+func structsAfter(ctx context.Context, doc *crdt.Doc, write serverWrite) uint64 {
+	defer holdServerLoad(ctx)()
+	live := structCeiling(doc)
+	copied := newDocumentCopy(crdt.WithClientID(doc.ClientID()))
+	if err := crdt.ApplyUpdateV1(copied, crdt.EncodeStateAsUpdateV1(doc, nil), nil); err != nil {
+		// A state whose total is within the cap is within what a decode reads; one that still
+		// does not decode cannot be written to and loaded again.
+		slog.Error("dispatch: copy a room's document to count a server write on it", "error", err)
+		return maxUpdateItems + 1
+	}
+	before := structCeiling(copied)
+	write.apply(copied)
+	return live + max(structCeiling(copied), before) - before
 }
 
 // errPastDecodeCap is the refusal of a server write outside applyLive - the block-id stamp

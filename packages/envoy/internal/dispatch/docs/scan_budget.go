@@ -22,7 +22,7 @@ import (
 // whichever is less; the server's own remote applies scan at most the ceiling.
 
 // perFrameScanCeiling is the most items the scans of one remote apply may pass in a room, for a
-// browser's update the peer update hook weighs against the apply-heap bound (MemoryBounds.ApplyHeap)
+// browser's update the peer update hook weighs against the pod's load concurrency (loadSlots)
 // and for every remote apply of the server's own. Measured on this pod
 // (BenchmarkAnApplyJustUnderTheScanCeiling, GOMAXPROCS=1,
 // 2026-10-28, three runs of three to five applies each): a frame scanning 399,999 items, each a
@@ -62,7 +62,7 @@ const usedUpScanBudget = 64
 // keystrokes whose state re-scans 1,000,000 items: its decode took 2.22 s and allocated 457,822,248
 // bytes, against 1.46 s and 383,011,168 for the same run unscanned, 0.76 s and 74,811,080 bytes
 // more (an earlier run of the same decode took 2.47 s, against 1.25 to 1.36 s unscanned). Copies
-// take turns under the copy-heap bound (MemoryBounds.CopyHeap). A rebuild is the way out of a room
+// take turns under the pod's load concurrency (MemoryBounds.LoadSlots). A rebuild is the way out of a room
 // that reaches it (RebuildDocument).
 const roomScanTotal = 1_000_000
 
@@ -73,21 +73,19 @@ const roomScanTotal = 1_000_000
 // maxUpdateItems is near the decode cap.
 const honestHandoffScans = 35_800
 
-// scanCeiling is the most items the scans of a browser's update may pass whose own share of its
-// apply-heap estimate is own (peerWeighing.ownApplyHeap): perFrameScanCeiling for an update the
-// hook weighs (own past unweighedApplyHeapBytes), whose estimate prices the marks its scans can
-// make (peerWeighing.applyHeap) and which applies only once it holds that estimate out of
-// the apply-heap bound (MemoryBounds.ApplyHeap), or the whole bound for an estimate past it, and
-// for any other what its marks can hold in what is left of unweighedApplyHeapBytes past its own
-// share, (2 MiB - own) / 76: 27,594
-// for an update of no share, so typing never waits on the heap bound for its scans either. It is
-// at least 1, since an allowance of 0 would leave the apply unbounded (applyScanLimit,
-// sjawhar/ygo v1.55.1-sami.1, crdt/doc.go:429-437).
-func scanCeiling(own uint64) int {
-	if own > unweighedApplyHeapBytes {
+// scanCeiling is the most items the scans of a browser's update of updateBytes bytes may pass:
+// perFrameScanCeiling for an update over unslottedApplyBytes, which applies holding a slot of
+// the pod's load concurrency, so the marks its scans make are inside the memory that slot
+// covers (loadSlots); and for any other what its marks can hold in what is left of
+// unslottedApplyBytes past the update's own bytes, (2 MiB - updateBytes) / 76: 27,594 for a
+// keystroke, so typing never waits on a slot for its scans either. It is at least 1, since an
+// allowance of 0 would leave the apply unbounded (applyScanLimit, sjawhar/ygo v1.55.1-sami.1,
+// crdt/doc.go:429-437).
+func scanCeiling(updateBytes int) int {
+	if updateBytes > unslottedApplyBytes {
 		return perFrameScanCeiling
 	}
-	return max(int((unweighedApplyHeapBytes-own)/bytesOfAScanMark), 1)
+	return max((unslottedApplyBytes-updateBytes)/bytesOfAScanMark, 1)
 }
 
 // roomScans is a room's scan total and the allowances of the browsers' applies it has handed out.
@@ -149,7 +147,7 @@ type scanAllowance struct {
 // as every room the peer update hook guards does. The room's load records what the stored state's
 // re-scan came to (rescanned) before ygo hands the room to any peer. What decodes a document the
 // server already holds stays unbounded: a write's fork, the fold, growth's and a cold load's
-// copies, the measurer's copies (structsAfter), validateUpdate, snapshotDocument and the room's
+// copies, growth's decode-cap copies (structsAfter), validateUpdate, snapshotDocument and the room's
 // replica integrate state no browser chose, and a bounded document's apply keeps a journal to take
 // itself back out (beginRemoteApply, crdt/apply_rollback.go:150-176) where theirs need not.
 func newRoomScans(live *crdt.Doc) *roomScans {

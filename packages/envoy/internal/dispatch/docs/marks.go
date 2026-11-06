@@ -164,7 +164,7 @@ func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKi
 	var unsubscribe func()
 	watch, booked := true, false
 	if !s.roomHoldsDocument(artifactID) {
-		booked = s.budget.openServerRoom()
+		booked = s.budget.openServerRoom(artifactID)
 		watch = booked
 	}
 	if watch {
@@ -1034,7 +1034,22 @@ func forgetMarkAuthorDeparture(state *roomState, actor model.Actor) {
 // unmarkRunStructs a run; a browser's edit landing after that read that leaves the marks on more
 // runs leaves the sweep writing nothing, so it never adds more than it was answered on, and the
 // next settlement's pass sweeps them.
+//
+// It loads a room for a document none holds only while the room budget has an opening for it
+// (roomBudget.openServerRoom), as every other opener of Server.Apply does, since the budget
+// charges a room this sweep opened and marks it to be closed once nothing holds it only for the
+// room its opening names (roomBudget.load). Without an opening it sweeps nothing this round and
+// says so: the marks stay expired, and the next settlement's pass finds them again, which is
+// what a refusal of the decode cap already leaves it doing.
 func (s *Service) unmarkExpired(room string, expired []pmdoc.MarkRef) error {
+	if !s.roomHoldsDocument(room) {
+		if !s.budget.openServerRoom(room) {
+			slog.Debug("dispatch: the unrecorded-mark sweep found no opening for a room no browser holds",
+				"room", room, "marks", len(expired))
+			return nil
+		}
+		defer s.budget.closeServerRoom()
+	}
 	var sweepErr error
 	err := s.srv.Apply(context.Background(), room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
 		read, readErr := s.liveTree(room, doc)

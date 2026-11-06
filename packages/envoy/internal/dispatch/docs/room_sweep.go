@@ -2,32 +2,50 @@ package docs
 
 import (
 	"log/slog"
-
-	"github.com/reearth/ygo/crdt"
 )
 
 // This file holds the service's side of the room budget: the charge a room's load takes on
-// (chargeLoadedRoom), and the sweep that closes the rooms the budget cannot hold
-// (sweepRooms, closeIfOpenedOverBudget, roomApplied).
+// (chargeLoadedRoom), the re-base a compaction gives it (rebaseRoomState), and the sweep that
+// closes the rooms the budget cannot hold (sweepRooms, closeIfOpenedOverBudget, roomApplied).
 
-// chargeLoadedRoom charges room's newly loaded instance, live, whose replica has just published
-// its load's count (keepReplica), in place of the reservations of the sockets admitted to it, and
-// hands the replica the charge its counts re-base from then on (renderedReplica.storeCounted). The
-// load is priced from that count, the rendering's bytes and the struct total the replica counted
-// at the load (newRoomTotals), whichever is the most (copyHeap). The charge lists live's delete
-// set as the ranges the room holds deleted (deletedRuns) before the replica hands it to the peer
-// hook: a walk of the document's whole store, beside the load's rendering of it, which is not a
-// keystroke.
-func (s *Service) chargeLoadedRoom(room string, live *crdt.Doc, replica *renderedReplica) *roomCharge {
-	bytes, elements, _ := replica.size()
-	charge := s.budget.load(room, copyHeap(bytes, elements, replica.structs.countedStructs()))
-	charge.deleted.seed(crdt.DeleteSetFromDoc(live))
+// chargeLoadedRoom charges room's newly loaded instance, whose replica has just published its
+// load's rendering (keepReplica), at stateBytes, the bytes of the stored state that load
+// decoded, and hands the replica the charge its drains raise from then on
+// (renderedReplica.chargeAdded). The state is the bytes already in hand: the load read them,
+// decoded them into the room and decoded them again into the replica, so the budget charges the
+// room what its two copies were built from without encoding either (roomWeight).
+func (s *Service) chargeLoadedRoom(room string, replica *renderedReplica, stateBytes int64) *roomCharge {
+	charge := s.budget.load(room, stateBytes)
+	replica.state.Store(stateBytes)
 	replica.charge.Store(charge)
 	return charge
 }
 
-// sweepRooms is the budget's sweep (roomBudget.sweep): while the budget is short (roomBudget.short)
-// - over its limit, or without room for what the admissions waiting on it need (wanted) - it
+// rebaseRoomState re-bases room's tracked state on stateBytes, what a compaction that folded the
+// room's whole stored history into one row wrote (compactResult), and charges the room again
+// from it. It is the one thing that lowers a room's tracked state while the room stands: each
+// drain adds its update's bytes, which carry what that transaction deleted beside what it added,
+// so a room typed into for hours is tracked above the state it holds until a compaction reads
+// the state itself. A room this server does not hold, or one no load listed, is left alone.
+//
+// A drain landing between the compaction's fold and this one is lost to the re-base, which
+// under-states the room by that one update until its next drain adds more. That is accounting
+// and not a refusal, the window is one update long, and the room's next load re-bases it exactly.
+func (s *Service) rebaseRoomState(room string, stateBytes int64) {
+	live := s.srv.GetDoc(room)
+	if live == nil {
+		return
+	}
+	weighing := s.roomWeighingOf(live)
+	if weighing == nil {
+		return
+	}
+	weighing.state.Store(stateBytes)
+	weighing.roomCharge().weigh(stateBytes)
+}
+
+// sweepRooms is the budget's sweep (roomBudget.sweep): while the budget is over its limit
+// (roomBudget.short) it
 // closes the charged rooms that hold nothing outlasting them, the heaviest first, so as few as it
 // can, through the eviction a failed room takes (evictRoom), whose close flushes the room before
 // it goes. Unused is the service's own test (unusedLocked), not the weaker "no browser
@@ -42,7 +60,7 @@ func (s *Service) chargeLoadedRoom(room string, live *crdt.Doc, replica *rendere
 //
 // A room it leaves because something other than a connected browser holds it - a settlement, a
 // writer, an append, a load - is pending: it will be closable once that ends, which starts a sweep
-// of its own (Service.unlockState), so the admissions waiting on the budget wait for it (await).
+// of its own (Service.unlockState), so an admission waiting on the budget waits for it (await).
 // So is a room whose browsers have all gone though their handlers have not yet forgotten them
 // (roomState.departedPeers): its last browser's leaving runs the settlement it owes before they do.
 // Once nothing more can be closed it raises full if the budget is still over its limit
@@ -64,11 +82,19 @@ func (s *Service) sweepRooms() {
 		state := s.lockExistingState(room)
 		if state == nil {
 			pending = true
+			slog.Info("dispatch: the room budget's sweep found no state for a charged room",
+				"room", room)
 			continue
 		}
 		if s.srv.GetDoc(room) == nil || !s.unusedLocked(state) {
 			// Left as it is: unlockState's look at the budget would only ask for this sweep again.
+			// The line names what holds it, which is the one reading that says why a sweep over a
+			// budget past its limit closed nothing: a browser still connected, a browser gone
+			// whose handler has not forgotten it, the room's own work (a settlement, a writer, an
+			// append), or no room at all (INFRA-179).
 			pending = pending || state.onlyDepartedLocked()
+			slog.Info("dispatch: the room budget's sweep left a charged room open",
+				"room", room, "held_by", s.holdingLocked(state), "pending", pending)
 			state.mu.Unlock()
 			continue
 		}
@@ -77,7 +103,7 @@ func (s *Service) sweepRooms() {
 		// would take this room, unused, for one to sweep or close again.
 		state.roomGeneration++
 		state.mu.Unlock()
-		before, _, _ := s.budget.figures()
+		before, _ := s.budget.figures()
 		closed, _ := s.evictUnusedRoom(room, state)
 		if !closed {
 			// An Apply is inside its callback on the room (closeUnused): the room will be
@@ -86,9 +112,9 @@ func (s *Service) sweepRooms() {
 			pending = true
 			continue
 		}
-		after, limit, wanted := s.budget.figures()
+		after, limit := s.budget.figures()
 		slog.Info("dispatch: the room budget closed an unused document",
-			"room", room, "charged_before", before, "charged", after, "limit", limit, "making_room_for", wanted)
+			"room", room, "charged_before", before, "charged", after, "limit", limit)
 	}
 }
 
@@ -123,13 +149,13 @@ func (s *Service) closeIfOpenedOverBudget(room string) {
 	}
 	go func() {
 		defer s.evictWG.Done()
-		before, _, _ := s.budget.figures()
+		before, _ := s.budget.figures()
 		closed, _ := s.evictUnusedRoom(room, state)
 		if !closed {
 			s.budget.markAgain(room)
 			return
 		}
-		after, limit, _ := s.budget.figures()
+		after, limit := s.budget.figures()
 		slog.Info("dispatch: the room budget closed a document the server opened over it",
 			"room", room, "charged_before", before, "charged", after, "limit", limit)
 	}()

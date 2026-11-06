@@ -6,7 +6,6 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
-	"time"
 	"weak"
 
 	"github.com/reearth/ygo/crdt"
@@ -122,37 +121,17 @@ type renderedReplica struct {
 	// and again once that update is classified, so no block reference outlives the update's
 	// classification - on the recover path too, which resets it as it drops the document.
 	touched touchedBlocks
-	// measurer is the service's, which counts this room's renderings.
-	measurer *elementMeasurer
 	// roomWeighing is what the peer update hook reads of the room: its charge in the room budget,
-	// which each count re-bases (storeCounted) and the hook adds the room's structure to
-	// (Service.weighPeerUpdate), its struct and scan totals, and the size of the rendering this
-	// replica last published (publishSize). The replica writes it, through the fields it promotes
-	// here; the hook reads the same record without the replica, which is why it is a record of
-	// its own and not these fields.
+	// which each drain re-weighs (chargeAdded), the room's tracked state bytes, which each drain
+	// raises, its scan total and the allowance of each apply in flight, and the size of the
+	// rendering this replica last published (publishSize). The replica writes it, through the
+	// fields it promotes here; the hook reads the same record without the replica, which is why
+	// it is a record of its own and not these fields.
 	*roomWeighing
-	// sizeMu orders the measurer's count of a rendering against the publications that follow it
-	// (storeCounted). It is held for a few field writes alone, never across a render or a parse,
-	// so neither the update observer nor the measurer waits on the other's work.
+	// sizeMu orders the publications of the replica's renderings against each other. It is held
+	// for a field write or two alone, never across a render, so no publication waits on another
+	// room's work.
 	sizeMu sync.Mutex
-	// published counts the replica's publications, and settled is the last of them that stored
-	// its own element count: the room's load, or a rendering the room could not read.
-	published, settled uint64
-	// uncounted is the latest rendering the measurer has not taken yet, made by publication
-	// uncountedAt when the room had added uncountedContent bytes of content (roomCharge); a later
-	// one replaces it, and a later publication that settles withdraws it. It points into the
-	// rendering the replica published (replicaRendering), which no one writes in place, so the
-	// count reads the markdown that publication made. queued is whether the measurer lists the
-	// replica, in its queue or waiting out the interval, so it is listed once however many
-	// renderings replace each other meanwhile, and delay the timer it waits out the interval on,
-	// while it does. countedAt is when the room's last count started: its load's, or the
-	// measurer's latest.
-	uncounted        *string
-	uncountedAt      uint64
-	uncountedContent int64
-	queued           bool
-	delay            *time.Timer
-	countedAt        time.Time
 	// seq is the room instance's commit position: how many of the room's commits since its load
 	// the log has handed over, through every drain and every recover. Each update's class carries
 	// the position it was handed over at (documentUpdateClass.seq), the order the room's durable
@@ -201,7 +180,7 @@ type replicaRendering struct {
 
 // markdownAt is the markdown of rendering, the pointer the room's measurement is published from
 // (renderedReplica.publishSize), or nil for no rendering at all - a document outside the schema.
-// It points into the rendering, which no one writes in place, so a measurer holding it counts the
+// It points into the rendering, which no one writes in place, so a reader holding it reads the
 // markdown that publication made.
 func markdownAt(rendering *replicaRendering) *string {
 	if rendering == nil {
@@ -211,97 +190,19 @@ func markdownAt(rendering *replicaRendering) *string {
 }
 
 // publishSize publishes markdown's size, the rendering the update observer is keeping as the
-// replica's own (renderedReplica.keep). A rendering the room could not read publishes no size at
-// once. Any other publishes its bytes at once and hands its elements to the service's measurer
-// (elementMeasurer), replacing the rendering the room already had waiting there, if any; the
-// measurer counts it once the room's last count is roomCountInterval old, or at once when the
-// room's uncounted part has passed earlyCountCharge (roomCharge.contentTaken), also when the room
-// is already waiting out the interval (elementMeasurer.hurry). The bytes alone re-base nothing in
-// the room budget: the content the room has added by now is cleared from its uncounted part only
-// once the count of this rendering lands (storeCounted), since until then the charge still prices
-// an older rendering that does not hold it.
+// replica's own (renderedReplica.keep), for the peer update hook's byte bound to weigh the next
+// update against (roomWeighing.size). A rendering the room could not read publishes
+// sizeUnmeasured, which that bound reads as a room it cannot measure. It re-bases nothing in the
+// room budget: what the budget charges the room is its tracked state bytes, which each drain of
+// the room's update log raises (chargeAdded), and no rendering says anything about those.
 func (r *renderedReplica) publishSize(markdown *string) {
-	if markdown == nil {
-		r.publishCounted(nil, 0)
-		return
-	}
-	// The measurer is handed the replica under sizeMu, which orders a delay it starts before the
-	// count it leads to takes the rendering (takeUncounted); the measurer's own lock is taken
-	// after sizeMu here as everywhere, and its worker takes sizeMu holding nothing of it.
 	r.sizeMu.Lock()
 	defer r.sizeMu.Unlock()
-	r.published++
-	r.bytes.Store(int64(len(*markdown)))
-	r.uncounted, r.uncountedAt = markdown, r.published
-	content, early := r.roomCharge().contentTaken()
-	r.uncountedContent = content
-	switch {
-	case !r.queued:
-		r.queued = true
-		wait := time.Until(r.countedAt.Add(r.measurer.minInterval()))
-		if early {
-			wait = 0
-		}
-		r.delay = r.measurer.enqueueAfter(weak.Make(r), wait)
-	case early && r.delay != nil:
-		r.measurer.hurry(weak.Make(r), r.delay)
-		r.delay = nil
-	}
-}
-
-// publishLoadedSize publishes the size of markdown, the rendering the room loaded with
-// (keepReplica), counting its elements on the caller's goroutine, so a room never starts with no
-// element count to charge it by. The load is not a keystroke, and a cold load already costs far
-// more than this one parse.
-func (r *renderedReplica) publishLoadedSize(markdown *string) {
-	elements := int64(0)
-	if markdown != nil {
-		elements = countElements(*markdown)
-	}
-	r.sizeMu.Lock()
-	r.countedAt = time.Now()
-	r.sizeMu.Unlock()
-	r.publishCounted(markdown, elements)
-}
-
-// roomCountInterval is the least time between two counts of one room's rendering after its load's:
-// a rendering published sooner waits out the rest of it in the measurer (enqueueAfter). A count is
-// a whole goldmark parse, 89 ms of one processor at a mebibyte of the shape a room holds and 58 ms
-// at 524 KiB of the keystroke benchmark's document (BenchmarkElementCountAgainstRender), and a
-// count of each changed rendering took the keystroke benchmark's p50 up by 29 to 36 per cent on
-// this pod's two processors (BenchmarkKeystrokeBesideReads).
-//
-// This interval is the knob that moves what the count costs a keystroke: what the benchmark sees is
-// how many keystrokes a count falls across. At five seconds a 58 ms count fell across about one
-// keystroke in twelve on the 524 KiB document, which took one row of BenchmarkKeystrokeBesideReads
-// to 10.89 per cent against its gate of ten. Fifteen seconds puts it at about one keystroke in
-// thirty-five, and a room typed into at the bound at under 1 per cent of one processor.
-//
-// What it costs is how old a room's charge can be: up to this interval and one count, fifteen
-// seconds rather than five. The content every transaction adds in between is charged beside the
-// last count either way, at the densest price at both copies (roomCharge's uncounted part), so the
-// age that could hide heap is bytes uncounted, not seconds: a few hundred bytes of typing in
-// fifteen seconds, a few hundred kilobytes of charge, against the tens of megabytes the count
-// prices; and a paste that takes the uncounted part past earlyCountCharge is counted at once,
-// whatever this interval says. It is memory accounting, which refuses nothing in the room itself.
-const roomCountInterval = 15 * time.Second
-
-// publishCounted publishes markdown's size with elements, its count, already known, and withdraws
-// any rendering the room had waiting for the measurer: this one is newer, and a count of the older
-// one landing after it would be older still (storeCounted).
-func (r *renderedReplica) publishCounted(markdown *string, elements int64) {
-	r.sizeMu.Lock()
-	defer r.sizeMu.Unlock()
-	r.published++
-	r.settled = r.published
-	r.uncounted = nil
 	if markdown == nil {
 		r.bytes.Store(sizeUnmeasured)
-		r.elements.Store(sizeUnmeasured)
 		return
 	}
 	r.bytes.Store(int64(len(*markdown)))
-	r.elements.Store(elements)
 }
 
 // replicaEpochs is where every renderedReplica.epoch is drawn from, so no two replicas in the
@@ -612,11 +513,11 @@ func (r *renderedReplica) standsAt(mark forkReadMark) bool {
 // update's. A base that does not apply leaves no replica (recover). A rendering other than the
 // one the room last published is published as the room's measurement (publishSize).
 //
-// The decode runs under a grant of the copy-heap bound where one is free at once, and beside the
-// bound's holders where none is (holdFreeCopy), given back once the copy is the replica's. It
-// may not wait: it runs under mu, which a live write holding a grant of that bound waits for to
-// clone the replica (warmFork, liveWriteWeight), so a wait here would hold that write and this
-// replica against each other. No observer holds a grant as it runs (podCopyHeaps).
+// The decode runs under a slot of the pod's load concurrency where one is free at once, and
+// beside the slots' holders where none is (holdFreeLoad), given back once the copy is the
+// replica's. It may not wait: it runs under mu, which a live write holding a slot waits for to
+// clone the replica (warmFork), so a wait here would hold that write and this replica against
+// each other. No observer holds a slot as it runs (podLoadSlots).
 //
 // The first run of a replica its load handed no copy takes the load's rendering (loaded) as
 // base's rather than render base, when the rendering is still there: a weak pointer that no
@@ -645,7 +546,7 @@ func (r *renderedReplica) start(room string, base []byte) {
 	published := r.rendering
 	loaded := r.loaded.Value()
 	r.loaded = weak.Pointer[replicaRendering]{}
-	release := holdFreeCopy(len(base))
+	release := holdFreeLoad()
 	doc := newDocumentCopy()
 	err := crdt.ApplyUpdateV1(doc, base, nil)
 	release()
@@ -778,35 +679,36 @@ func (r *renderedReplica) drainedSeq(room string) (seq uint64, settles bool) {
 	return r.seq, settles
 }
 
-// chargeAdded charges the room's charge in the room budget what each of updates added: the content
-// a transaction added (contentAdded), whoever wrote it - a browser's update the peer hook
-// admitted, or the server's own write, a repair's included - never the update's bytes, which carry
-// that transaction's delete set beside its structs, that delete set and every GC struct of the
-// update listed as the clocks the room holds deleted from the same walk (roomCharge.applied,
-// deletedRuns); and, for a transaction the hook did not apply (roomTotals.hookApplies) - an API
-// write's publish, an injected update, settlement's repair, any other write of the server's own
-// - its structure too, as the hook charges a browser's (roomCharge.wrote), which refuses none of
-// them. Each committed update is charged exactly once, by the observer whose drain of the room's
-// update log hands it over, whichever observer that is: charged by the observer it was handed
-// to, as it once was, an update another observer had already drained and rendered would be
-// charged after the rendering that holds it was published, so the count of that rendering would
-// not re-base the charge past it. Charged here, before the replica renders any of them, each is
-// held by the rendering the replica publishes next (keep, publishSize), and that rendering's
-// count re-bases the charge past it. The replica's own copy of the room, which the room's load
-// hands it (keepReplica), is the room's second copy, which the charge has held since the room
-// loaded (roomCopies). A replica no room's load charged (a test's) charges nothing.
+// chargeAdded adds the bytes of each of updates to the room's tracked state and charges the room
+// again from the sum (roomWeight), whoever wrote the update: a browser's the peer hook admitted,
+// an API write's publish, an injected update, settlement's repair, any other write of the
+// server's own. It is the budget's one writer while a room stands, and it reads nothing of the
+// document: an update's own length is in hand, where an encode of the room's state costs 18.7 ms
+// and 5,495,143 bytes allocated on a mebibyte of prose and so can sit on no keystroke's path
+// (bytesOfHeapAStateByte).
+//
+// Only the update is counted, never what the commit parked (crdt.LoggedUpdate.Parked): a parked
+// struct integrates in a later transaction, whose own update carries it, and counting it here
+// would charge it twice. The bytes counted are the update's whole frame, its transaction's
+// delete set beside its structs, so the tracked state runs above the state the room holds
+// between re-bases, which is the safe side for a budget (roomWeight says what re-bases it).
+//
+// Each committed update is counted exactly once, by the observer whose drain of the room's
+// update log hands it over, whichever observer that is (observe, atPoint). A replica no room's
+// load charged (a test's) counts nothing.
 func (r *renderedReplica) chargeAdded(updates []crdt.LoggedUpdate) {
 	charge := r.roomCharge()
 	if charge == nil {
 		return
 	}
+	var added int64
 	for _, update := range updates {
-		if r.structs.hookApplies(update.Origin) {
-			charge.applied(update.Update)
-			continue
-		}
-		charge.wrote(update.Update)
+		added += int64(len(update.Update))
 	}
+	if added == 0 {
+		return
+	}
+	charge.weigh(r.state.Add(added))
 }
 
 // keepReplica makes the replica live's update observer keeps, moving through log, live's update
@@ -833,24 +735,28 @@ func (r *renderedReplica) chargeAdded(updates []crdt.LoggedUpdate) {
 // only weakly, for its first run to take in place of rendering its base (start): once the caller
 // drops it, nothing holds it, so it adds no resident memory and the next collection takes it.
 //
-// The rendering is the room's first measurement either way (publishLoadedSize), which the hook
-// weighs the room's first peer update against and the room budget charges the load by
-// (chargeLoadedRoom). The load also counts live's struct total (newRoomTotals), which the room
-// budget charges the load by beside it (copyHeap), an encode of live's state and a walk of it,
-// here beside the load's rendering, which has already walked the whole document; the load is not
-// a keystroke. And it sets live's scan budget (newRoomScans), so from here every remote apply on
-// live is bounded, with nothing of the room's scan total used until the load records its re-scan
+// The rendering is the room's first measurement either way (publishSize), which the hook weighs
+// the room's first peer update against. The load also reads the clients live's history retires
+// (retiredClientsOf), which the hook refuses a browser's replaced history against; it sets
+// live's apply budget and allowed roots (newRoomApplies), so from here every browser's update
+// applies under the allowance the hook builds for it and may name no other root; and it sets
+// live's scan budget (newRoomScans), so from here every remote apply on live is bounded, with
+// nothing of the room's scan total used until the load records its re-scan
 // (roomScans.rescanned).
 func (s *Service) keepReplica(live *crdt.Doc, log *crdt.UpdateLog, loaded *replicaRendering, decoded *crdt.Doc) *renderedReplica {
-	weighing := &roomWeighing{structs: newRoomTotals(live), scans: newRoomScans(live)}
-	replica := &renderedReplica{log: log, measurer: &s.measurer, roomWeighing: weighing, paths: &s.renderPaths}
+	weighing := &roomWeighing{
+		retired: retiredClientsOf(live),
+		budgets: newRoomApplies(live),
+		scans:   newRoomScans(live),
+	}
+	replica := &renderedReplica{log: log, roomWeighing: weighing, paths: &s.renderPaths}
 	replica.epoch.Store(replicaEpochs.Add(1))
 	if decoded != nil {
 		replica.startFromLoad(decoded, loaded)
 	} else {
 		replica.loaded = weak.Make(loaded)
 	}
-	replica.publishLoadedSize(markdownAt(loaded))
+	replica.publishSize(markdownAt(loaded))
 	listResident(&s.replicas, live, &roomListing{weighing: weighing, replica: weak.Make(replica)})
 	return replica
 }
@@ -1063,13 +969,10 @@ func (r *renderedReplica) spliceTouched(room string) (changed bool, asks func() 
 // keep makes markdown, rendered with layout, the replica's rendering (replicaRendering) and
 // reports whether it changed the replica's markdown: the replica takes layout either way, and
 // keeps the markdown string it holds where markdown equals it. A changed markdown is published as
-// the room's measurement (publishSize), which is what the peer update hook weighs and the room
-// budget charges the room by; an update that left the rendering as it was leaves the measurement
-// as it was too, so no unchanged keystroke makes a count of its elements. A changed one hands the
-// parse to the service's measurer rather than running it here, where every browser in the room
-// waits for the observer to return, and the measurer runs it at most once each roomCountInterval,
-// or sooner for a room whose uncounted content passes earlyCountCharge (elementMeasurer). The
-// caller holds mu.
+// the room's measurement (publishSize), which is what the peer update hook's byte bound weighs;
+// an update that left the rendering as it was leaves the measurement as it was too. What the
+// room budget charges the room by is not the rendering at all but the bytes of each update this
+// drain hands over (chargeAdded). The caller holds mu.
 func (r *renderedReplica) keep(markdown string, layout *pmdoc.Layout) bool {
 	if held := r.rendering; held != nil && held.markdown == markdown {
 		// The replica's own string, not the equal one just rendered, with the layout the new

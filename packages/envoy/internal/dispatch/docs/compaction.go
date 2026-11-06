@@ -71,10 +71,16 @@ const (
 	compactUnfoldable
 )
 
-// compactResult is a compaction's outcome and how many rows it deleted.
+// compactResult is a compaction's outcome, how many rows it deleted, and, for one that folded
+// the room's whole stored history into one row, the bytes that row now holds (wholeState): what
+// a resident room's tracked state is re-based on (Service.rebaseRoomState).
 type compactResult struct {
 	outcome compactOutcome
 	deleted int
+	// wholeState is the bytes of the state the fold wrote where no row stood above the fold
+	// point, so that row is the room's whole stored history; zero where one did, since the
+	// state then holds only part of the document.
+	wholeState int64
 }
 
 // rowVersion names a row: its version and the transaction that wrote it, Postgres's xmin, which
@@ -300,16 +306,22 @@ func (p *PgVersioned) writeCompaction(ctx context.Context, pool *pgxpool.Pool, r
 		// A document left with no row above the fold point has nothing more to fold, so it leaves
 		// the sweep's list (compactionCandidates); one with younger rows above it stays there.
 		// Every append that names it takes the lock this transaction holds.
-		if _, err := tx.Exec(ctx, `
+		whole, err := tx.Exec(ctx, `
 			delete from doc_compaction_owed where artifact_id = $1
 				and not exists (select 1 from doc_updates where artifact_id = $1 and version > $2)
-		`, room, point.version); err != nil {
+		`, room, point.version)
+		if err != nil {
 			return fmt.Errorf("delete compacted document's compaction entry: %w", err)
 		}
 		if err := tx.Commit(ctx); err != nil {
 			return fmt.Errorf("commit compact document: %w", err)
 		}
 		result = compactResult{outcome: compactCompacted, deleted: len(folded.rows) - 1}
+		if whole.RowsAffected() > 0 {
+			// The delete above found no row above the fold point, so the row this fold wrote is
+			// the document's whole stored history: its length is what the room holds.
+			result.wholeState = int64(len(folded.state))
+		}
 		return nil
 	})
 	if errors.Is(err, errRoomLockBusy) {

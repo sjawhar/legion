@@ -543,8 +543,8 @@ func (p *PgVersioned) GetUpdate(ctx context.Context, room string, version persis
 
 // MaterializeAt rebuilds the V1 state at version (stateThrough), or the latest state before it
 // when a requested version is newer than the room head. Its fold streams the rows inside the
-// transaction it opens, under a grant of the copy-heap bound it covers in that transaction and
-// gives back as the state goes to its caller (foldWeight, podCopyHeaps).
+// transaction it opens, under one slot of the pod's load concurrency its decode takes and gives
+// back as the state goes to its caller (loadSlots, fold).
 func (p *PgVersioned) MaterializeAt(ctx context.Context, room string, version persistence.Version) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -571,15 +571,8 @@ func (p *PgVersioned) MaterializeAt(ctx context.Context, room string, version pe
 	if version > head {
 		version = head
 	}
-	weight, err := foldWeight(ctx, tx, room, version)
-	if err != nil {
-		return nil, err
-	}
-	ctx, grant, done := withCopyGrant(ctx)
+	ctx, _, done := withLoadSlot(ctx)
 	defer done()
-	if err := grant.cover(ctx, int(weight)); err != nil {
-		return nil, err
-	}
 	update, err := stateThrough(ctx, room, version, storedUpdates(ctx, tx, room, version), p.maxPendingItems)
 	if err != nil {
 		return nil, err
@@ -694,10 +687,10 @@ func (p *PgVersioned) PruneAfter(ctx context.Context, room string, target persis
 // RebuildTx replaces a room's durable history with one fresh update at the next version, inside
 // tx, which holds the room's lock until it ends. Its caller has already proved that ygo cannot load
 // the old merged history; this method never makes that destructive decision itself. The seed is a
-// whole state, and its validation decodes it under a grant of the copy-heap bound, covered before
-// the room's lock is taken and given back once the decode is done.
+// whole state, and its validation decodes it under a slot of the pod's load concurrency, taken
+// before the room's lock is taken and given back once the decode is done.
 func (p *PgVersioned) RebuildTx(ctx context.Context, tx pgx.Tx, room string, seed []byte) (RebuildReport, error) {
-	release, err := holdCopy(ctx, len(seed))
+	release, err := holdLoad(ctx)
 	if err != nil {
 		return RebuildReport{}, err
 	}
@@ -982,7 +975,7 @@ var _ persistence.VersionedPersistence = (*PgVersioned)(nil)
 // crdt/update.go:761-763): one update can name more of them than this, up to this many for each
 // of its clients, and a decode that would park more than this is refused, so a history holding
 // more parked delete ranges than this does not load. A room's struct total counts each parked
-// range splitsAStructCanCause times within this cap (countRoomStructs), so no room the peer
+// range within this cap (structCeiling), so no room the peer
 // update hook guards stores one. ygo's own check of each update the service broadcasts
 // (Server.BroadcastUpdate) takes no pending queue at all: it is the check ygo's bundled stores
 // run, since the room has already applied the update (reearth/ygo#268, in the pinned fork).

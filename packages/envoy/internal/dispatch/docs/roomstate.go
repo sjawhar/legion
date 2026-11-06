@@ -364,6 +364,39 @@ func (s *Service) unusedLocked(state *roomState) bool {
 		len(state.parked) == 0
 }
 
+// holdingLocked names what holds state's room open, for the sweep's line over a budget past its
+// limit: the first of the things unusedLocked reads that is not clear, in that order, and "the
+// room is gone" where ygo no longer holds one. It is the one reading that says why a sweep over
+// a full budget closed nothing, which is the difference between a room a browser is editing and
+// one whose own work has not landed yet (INFRA-179). Its caller holds state.mu.
+func (s *Service) holdingLocked(state *roomState) string {
+	switch {
+	case state.liveWriter != nil:
+		return "a writer"
+	case state.settling != 0:
+		return "a settlement running"
+	case s.isSettleTimerArmed(state.settle):
+		return "a settlement armed"
+	case state.unsettled:
+		return "unsettled work"
+	case state.failed != nil:
+		return "a failed room"
+	case len(state.connected) != 0 && !state.onlyDepartedLocked():
+		return "a browser connected"
+	case len(state.connected) != 0:
+		return "a browser gone whose handler has not forgotten it"
+	case state.pendingUpdates != 0:
+		return "updates not yet appended"
+	case state.durableAppends.Load() != 0:
+		return "a durable append"
+	case len(state.inflight) != 0:
+		return "an apply in flight"
+	case len(state.parked) != 0:
+		return "parked bytes"
+	}
+	return "the room is gone"
+}
+
 // parkedBytes is one commit's parked bytes and the cursor of the room instance that took them.
 type parkedBytes struct {
 	update []byte

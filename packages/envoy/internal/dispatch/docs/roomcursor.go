@@ -37,15 +37,15 @@ type loadedState struct {
 	// bytes runs as this decode did, with the format cleanup off and under the same pending cap
 	// (bootstrapLoadedState), so the room holds item for item what the copy holds.
 	decoded decodedState
-	// grant is the load's part of the copy-heap bound (heapGrant), which covers LoadDoc's read -
-	// its fold of a history of several updates, covered where the rows are read (foldRead) - and
-	// its decode, and the room's own decode of the state after it; after a socket's admission,
-	// whose own grant covered its read and decode (loadTree), it covers that decode alone.
-	// LoadDoc's covers wait without deadline, ygo handing it no context, and hold no part of the
-	// bound while they wait. Whoever takes the record gives the grant back: onLoadDocument, once
-	// its decode has returned, and the room's next load, which replaces a record ygo never handed
-	// to that hook (beginRoomLoad).
-	grant *heapGrant
+	// slot is the load's slot of the pod's load concurrency (loadSlots), which covers LoadDoc's
+	// read - its fold of a history of several updates, taken where the rows are read (foldRead) -
+	// and its decode, and the room's own decode of the state after it; after a socket's
+	// admission, whose own slot covered its read and decode (loadTree), it covers that decode
+	// alone. LoadDoc's wait has no deadline, ygo handing it no context, and holds no slot while
+	// it waits. Whoever takes the record gives the slot back: onLoadDocument, once its decode has
+	// returned, and the room's next load, which replaces a record ygo never handed to that hook
+	// (beginRoomLoad).
+	slot *loadSlot
 }
 
 // roomLoad is one room load's record of the durable history behind the room it loads, kept from
@@ -80,28 +80,28 @@ type roomLoad struct {
 // record goes when the document of the load that left it is collected (keepInstance), or, for a
 // load that left none, where the failure that ended it was met (LoadDoc, onLoadDocument). A
 // record that is replaced, or dropped by such a failure, while it still holds what its load read
-// gives up its state, its copy and its grant with it (take, failRoomLoad).
+// gives up its state, its copy and its slot with it (take, failRoomLoad).
 func (s *Service) beginRoomLoad(room string) *roomLoad {
 	load := &roomLoad{}
 	if previous, replaced := s.roomLoads.Swap(room, load); replaced {
-		previous.(*roomLoad).take().grant.release()
+		previous.(*roomLoad).take().slot.release()
 	}
 	return load
 }
 
 // read records what the load's read of the store saw: the head, the version the room it loads
 // holds every update through, the state through that head, which the room's load hook decodes
-// itself (bootstrapLoadedState), the decode of that state it made of its own, and the grant that
+// itself (bootstrapLoadedState), the decode of that state it made of its own, and the slot that
 // covers that decode and the room's own after it.
-func (load *roomLoad) read(head persistence.Version, state []byte, decoded decodedState, grant *heapGrant) {
+func (load *roomLoad) read(head persistence.Version, state []byte, decoded decodedState, slot *loadSlot) {
 	load.mu.Lock()
 	defer load.mu.Unlock()
-	load.head, load.loaded = int64(head), loadedState{state: state, decoded: decoded, grant: grant}
+	load.head, load.loaded = int64(head), loadedState{state: state, decoded: decoded, slot: slot}
 }
 
 // take hands over what the load read, once, so the record holds neither the state nor the copy
-// for as long as the document it loaded lives. Whoever takes it gives the grant back, once the
-// room's own apply of the state - the last thing the grant covers - has returned.
+// for as long as the document it loaded lives. Whoever takes it gives the slot back, once the
+// room's own apply of the state - the last thing the slot covers - has returned.
 func (load *roomLoad) take() loadedState {
 	load.mu.Lock()
 	defer load.mu.Unlock()

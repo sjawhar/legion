@@ -328,11 +328,6 @@ type Service struct {
 	// forkTrees counts the trees read off write transactions' forks and the reads that taking the
 	// write's rendering in their place avoided (forkTreeCounts).
 	forkTrees forkTreeCounts
-	// measurer counts, one at a time for the whole service, the elements of the renderings rooms
-	// publish, off their update observers, for the room budget, and runs the decode-cap
-	// confirmations of the server's writes outside applyLive in the same turn (elementMeasurer).
-	// Its zero value is ready, and Shutdown stops it.
-	measurer elementMeasurer
 	// memory is what the process's Go memory limit gives this service (BoundsForLimit), which
 	// New derives from Deps.GoMemoryLimit. Zero in a service New did not build (a test's), whose
 	// bounds are the calibration's (bounds).
@@ -342,15 +337,9 @@ type Service struct {
 	// closes of the rooms it opened over the budget (closeIfOpenedOverBudget).
 	budget roomBudget
 	// admissionWait is the longest a browser's admission waits on the budget's sweeps before it is
-	// refused (reserveRoom): the settle delay and admissionFlushAllowance, which New sets. Zero in a
+	// refused (ServeHTTP): the settle delay and admissionFlushAllowance, which New sets. Zero in a
 	// service New did not build (a test's), whose admission is refused at once.
 	admissionWait time.Duration
-	// applyHeaps is the service's bound on the estimated heap of browsers' applies,
-	// memory.ApplyHeap of it, out of which an admitted update whose own share of its estimate
-	// passes unweighedApplyHeapBytes holds its estimate, or all of it for an estimate past it,
-	// while it applies (weighPeerUpdate, weighedHeaps). Whoever builds the service sizes it: New
-	// from the process's bounds, a test from the calibration's (calibratedService).
-	applyHeaps *weighedHeaps
 	// instances lists, for each resident room document, what that instance records about the
 	// durable history behind it (*roomInstance): the updates whose writes can have recorded a
 	// pending author, and the durable version the instance stands at, keyed by a weak pointer to
@@ -698,16 +687,15 @@ func New(deps Deps) *Service {
 		memory:            bounds,
 		reads:             newDocumentReads(bounds.DocumentReadCache),
 		budget:            roomBudget{limit: bounds.RoomBudget},
-		applyHeaps:        newWeighedHeaps(applyHeapName, bounds.ApplyHeap),
 		admissionWait:     settle + admissionFlushAllowance,
 		maxPendingItems:   maxUpdateItems,
 	}
-	// The copy-heap bound is the process's, not one service's, because the memory it bounds is
-	// the process's: every service and store in it shares one (weighedHeaps, podCopyHeaps). A
+	// The load concurrency is the process's, not one service's, because the memory it bounds is
+	// the process's: every service and store in it shares one (loadSlots, podLoadSlots). A
 	// service at the calibration leaves it as it stands, so a test that swapped its own keeps it;
 	// a boot that read another limit sizes it from that limit, before anything decodes.
-	if bounds.CopyHeap != calibratedBounds.CopyHeap {
-		podCopyHeaps.Store(newWeighedHeaps(copyHeapName, bounds.CopyHeap))
+	if bounds.LoadSlots != calibratedBounds.LoadSlots {
+		podLoadSlots.Store(newLoadSlots(bounds.LoadSlots))
 	}
 	service.budget.sweep = service.sweepRooms
 	service.compactions = startCompactionQueue(service.compactionStep)
@@ -754,11 +742,17 @@ func New(deps Deps) *Service {
 	// opens a document socket. It is a floor against a client that is not the editor, not the
 	// bound on what a document may hold, which is the peer update hook's (maxMessageBytes).
 	srv.MaxMessageBytes = maxMessageBytes
-	// ygo bounds a browser's write queue in frames alone without this, 512 of them whatever their
-	// size, so a socket that sends SyncStep1 frames it never reads the answers to can make the
-	// server hold 512 whole states of its room. The budget bounds those queued bytes instead, and
-	// closes a socket a frame reaches while the budget or more waits (MemoryBounds.PeerWriteQueue,
-	// peerWriteQueueBytes).
+	// ygo bounds a browser's write queue in frames as well as in bytes, and since sami.3 it
+	// answers a SyncStep1 in Update frames of at most syncFrameTargetBytes each, so its default
+	// of 512 frames tops a queue out at about 33.5 MB and the byte budget below could never be
+	// reached: measured, a browser handing a room's whole state back 56 times offered a silent
+	// socket 168,315,448 bytes, 2.3 times the budget, and no close was made (INFRA-179). The
+	// frame queue is therefore raised to what the byte budget allows at that frame size
+	// (peerWriteQueueFrames), so the bytes are what close a socket and a frame of any size is
+	// weighed by what it holds rather than by being one of 512.
+	srv.PeerWriteQueueSize = peerWriteQueueFrames
+	// The budget bounds those queued bytes, and closes a socket a frame reaches while the budget
+	// or more waits (MemoryBounds.PeerWriteQueue, peerWriteQueueBytes).
 	srv.PeerWriteQueueBytes = bounds.PeerWriteQueue
 
 	service.srv = newRoomServer(srv)
@@ -818,9 +812,6 @@ const ShutdownDrainBudget = 9 * time.Second
 // ctx, and is cancelled once ctx ends; either way Shutdown returns only after the queue's worker
 // has, so nothing of it outlives the store's pools, which its caller closes next.
 func (s *Service) Shutdown(ctx context.Context) error {
-	// The measurer runs until the rooms are gone, so a room still taking updates while it drains
-	// keeps its element count current; whichever way Shutdown returns, nothing is counted after.
-	defer s.measurer.stop(ctx)
 	s.compactions.shutDown()
 	defer s.compactions.awaitStopped(ctx)
 	// loadedRoom is a room as Shutdown found it: the generation its settlement runs at, and
@@ -1561,9 +1552,9 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		// came free within the wait (settleNoRoom): the pending-settlement row stands until a
 		// settlement commits, so nothing is lost by waiting or by giving up.
 		//
-		// It waits as a browser's admission does (admissionWait, reserveRoom), and holds no
+		// It waits as a browser's admission does (admissionWait, ServeHTTP), and holds no
 		// pooled connection while it waits: its transaction opens below.
-		opened = s.budget.awaitServerRoom(parent, time.Now().Add(s.admissionWait))
+		opened = s.budget.awaitServerRoom(parent, time.Now().Add(s.admissionWait), room)
 		if !opened {
 			return settleOutcome{
 				next:       settleNoRoom,

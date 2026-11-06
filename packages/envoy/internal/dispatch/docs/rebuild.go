@@ -28,42 +28,37 @@ type RebuildReport struct {
 }
 
 // smallestReplacementAdds is what the smallest replacement a write can make adds to a document's
-// struct total, as refuseUndecodable bounds a write's updates (updatesAdd): one character replaced
-// by another, a new struct with the splits its integration can cause and a delete range with the
-// splits it can cause.
-const smallestReplacementAdds = 1 + splitsAStructCanCause + splitsAStructCanCause
+// struct total, as refuseUndecodable bounds a write's updates (updatesAdd): one character
+// replaced by another, the new item and the two items the delete and the insert can split off
+// between them.
+const smallestReplacementAdds = 3
 
 // nearACap reports whether doc, a document's decoded history or its live room, stands so near a
 // cap that it must be rebuilt, and why. Near the decode cap means a write's smallest replacement
-// would carry it past the cap: its struct total as a load decodes it (countRoomStructs) and
-// smallestReplacementAdds pass maxUpdateItems, so refuseUndecodable refuses every write that adds
-// a struct, as it refuses the write of a document no room holds by the count of its fork, a
+// would carry it past the cap: its struct total as a load decodes it (structCeiling) and
+// smallestReplacementAdds pass maxUpdateItems, so refuseUndecodable refuses every write that
+// adds a struct, as it refuses the write of a document no room holds by the count of its fork, a
 // decode of the same history (leavesRoomPastDecodeCap). Near the scan total means a re-scan of
 // its state (rescan) scans at least roomScanTotal less honestHandoffScans items, a state the
-// decode refuses counting as no answer. Both tests
-// read the one encode of doc's state below, taken after its parked structs as countRoomStructs
-// takes them, so neither pays an encode of its own and both answer for the same state.
+// decode refuses counting as no answer.
 //
-// The scan test decodes that state afresh, a full-state decode like any other, so the check holds
-// a grant of the copy-heap bound weighed by the state it decodes (holdCopy), taken once the state
-// is encoded and given back when the check answers: its own where ctx carries none, as the check
-// of a live room makes it, whose own copies the room budget charges (RebuildDocument), and the
-// caller's where ctx carries one sized for this decode beside the caller's own (rebuildSource). A
-// wait ctx ends is its error, and no answer.
+// The struct total costs neither an encode nor a decode (crdt.Doc.StructCount). The scan test
+// encodes doc's state and decodes it afresh, a whole-document decode like any other, so the
+// check holds a slot of the pod's load concurrency (holdLoad) from before that encode until it
+// answers: its own where ctx carries none, as the check of a live room makes it
+// (RebuildDocument), and the caller's where ctx carries one (rebuildSource). A wait ctx ends is
+// its error, and no answer.
 func nearACap(ctx context.Context, doc *crdt.Doc) (why string, near bool, err error) {
-	pending := doc.PendingStats()
-	state := crdt.EncodeStateAsUpdateV1(doc, nil)
-	release, err := holdCopy(ctx, len(state))
+	release, err := holdLoad(ctx)
 	if err != nil {
 		return "", false, err
 	}
 	defer release()
-	tally, refused := walkUpdate(state, fromRoom, nil)
-	if structs := structTotalOf(tally, refused, pending); structs+smallestReplacementAdds > maxUpdateItems {
+	if structs := structCeiling(doc); structs+smallestReplacementAdds > maxUpdateItems {
 		return fmt.Sprintf("the document's live state holds %d structs, and a write's smallest replacement, %d more, would carry it past the %d ygo decodes in one update",
 			structs, smallestReplacementAdds, maxUpdateItems), true, nil
 	}
-	if scans, err := rescan(state); err == nil && scans+honestHandoffScans >= roomScanTotal {
+	if scans, err := rescan(crdt.EncodeStateAsUpdateV1(doc, nil)); err == nil && scans+honestHandoffScans >= roomScanTotal {
 		return fmt.Sprintf("a re-scan of the document's live state scans %d items, within %d of the %d a room's history may scan",
 			scans, honestHandoffScans, roomScanTotal), true, nil
 	}
@@ -321,15 +316,14 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 // rebuildSource is what a rebuild of artifactID starts from: the stored history decoded (nil for
 // one that does not decode), why it must be rebuilt - how near a cap it stands (nearACap), or the
 // decode's refusal - and the clients it retires. A history that loads and stands near no cap is
-// ErrDocumentLoads. The read's fold, its decode (loadDecodedHistory) and the check's re-scan of it
-// run under one grant of the copy-heap bound, whose wait ends with ctx, held here rather than by
-// the read, since the check runs inside it, and given back once the history is the rebuild's.
-// The grant is weighed for two decodes of the history's bytes, since the check decodes the state
-// again while this decode's document is kept, and the two are alive at once.
+// ErrDocumentLoads. The read's fold, its decode (loadDecodedHistory) and the check's re-scan of
+// it run under one slot of the pod's load concurrency, whose wait ends with ctx, held here
+// rather than by the read, since the check runs inside it, and given back once the history is
+// the rebuild's.
 func (s *Service) rebuildSource(ctx context.Context, artifactID string) (*crdt.Doc, string, map[crdt.ClientID]uint64, error) {
-	ctx, _, done := withCopyGrant(ctx)
+	ctx, _, done := withLoadSlot(ctx)
 	defer done()
-	read, err := loadDecodedHistory(ctx, s.persistence, artifactID, 2, s.maxPendingItems, nil)
+	read, err := loadDecodedHistory(ctx, s.persistence, artifactID, s.maxPendingItems, nil)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("%w: load document before rebuild: %v", ErrServiceUnavailable, err)
 	}
@@ -386,30 +380,20 @@ func historyClients(history *crdt.Doc) map[crdt.ClientID]uint64 {
 }
 
 // undecodableHistoryClients is what a rebuild of a history ygo cannot load retires: the clients
-// a walk of its update reads before it refuses, each at the end of the last struct read, skips
-// left out, since the holder of the history lacks those clocks too. A browser holding such a
-// history holds every client a walk reaches first - each client's structs are encoded from its
-// first clock - so one retired client is enough to refuse it; a client whose structs all follow
-// the walk's refusal, and the clients an earlier rebuild listed, whose values the walk does not
-// decode, are not retired.
+// the header of its update names, each at the clock past its last struct, read without decoding
+// any content (crdt.ParseUpdateMeta). A browser holding such a history holds those clients, so
+// one retired client is enough to refuse it. A header that does not read at all retires none:
+// no clock of it can be trusted, and the rebuild replaces the history either way.
+//
+// Where the walk this replaced left a client's withheld clocks out, the header counts them: a
+// Skip is read as the client's own structs, so a client is retired at the end of its last
+// struct whether or not the history held every clock before it. That retires a browser at a
+// clock it may not have reached, which refuses it exactly as a clock it did reach would - the
+// rebuild replaced its history either way.
 func undecodableHistoryClients(update []byte) map[crdt.ClientID]uint64 {
-	var read historyClientReader
-	_, _ = walkUpdate(update, fromRoom, &read)
-	return read.clients
-}
-
-// historyClientReader is undecodableHistoryClients's visitor.
-type historyClientReader struct{ clients map[crdt.ClientID]uint64 }
-
-func (r *historyClientReader) walkedStruct(walked updateStruct) {
-	if walked.kind == structSkip {
-		return
+	_, to, err := crdt.ParseUpdateMeta(update)
+	if err != nil {
+		return nil
 	}
-	if r.clients == nil {
-		r.clients = make(map[crdt.ClientID]uint64)
-	}
-	client := crdt.ClientID(walked.client)
-	r.clients[client] = max(r.clients[client], walked.clock+walked.length)
+	return to
 }
-
-func (*historyClientReader) walkedDelete(_, _, _ uint64) {}
