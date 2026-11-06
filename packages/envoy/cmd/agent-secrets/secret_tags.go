@@ -104,16 +104,17 @@ func checkGitHubOwnersFor(kind, owners string, named bool) error {
 	}
 }
 
-// checkRequesters is --requesters' rule, the broker's own (policy.ParseRequesters): people by
-// their lowercase sign-in email and services by their registered name, separated by spaces, which
-// the shell quotes as one argument; a comma is refused. This CLI passes no service list, since it
-// holds none: an entry naming a service is checked for a service name's shape alone here, and a
-// name the deployment does not register is caught by the broker's answer to the reread that
-// follows the write. none is a sentinel, not a requester: alone, and only where orNone allows it
-// (retag), it removes the tag; given on create, or beside a requester, it is refused, since it
-// would otherwise be written as a service named none or dropped as the removal (optionalTags),
-// leaving a secret nobody but none may ask for. It answers the list as the broker reads it,
-// sorted, each entry once and single-spaced, so the tag is written as it will be served.
+// checkRequesters is --requesters' rule, the broker's own (policy.ParseRequesterShapes): people
+// by their lowercase sign-in email and services by their registered name, separated by spaces,
+// which the shell quotes as one argument; a comma is refused. This CLI checks shapes rather than
+// the registered list, since it holds none: an entry naming a service is checked for a service
+// name's shape alone here, and a name the deployment does not register is caught by the broker's
+// answer to the reread that follows the write. none is a sentinel, not a requester: alone, and
+// only where orNone allows it (retag), it removes the tag; given on create, or beside a
+// requester, it is refused, since it would otherwise be written as a service named none or
+// dropped as the removal (optionalTags), leaving a secret nobody but none may ask for. It
+// answers the list as the broker reads it, sorted, each entry once and single-spaced, so the tag
+// is written as it will be served.
 func checkRequesters(list string, orNone bool) (string, error) {
 	if list == "" || (orNone && list == tagNone) {
 		return list, nil
@@ -127,7 +128,7 @@ func checkRequesters(list string, orNone bool) (string, error) {
 		}
 		return "", usageErr{fmt.Errorf("--requesters %q: none names no person or service, and removes the tag only on retag; leave --requesters off to let every session the owner and tier allow ask", list)}
 	}
-	parsed, err := policy.ParseRequesters(list, nil)
+	parsed, err := policy.ParseRequesterShapes(list)
 	if err != nil {
 		return "", usageErr{fmt.Errorf("--requesters: %w", err)}
 	}

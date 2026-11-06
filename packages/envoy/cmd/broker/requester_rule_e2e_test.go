@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -669,11 +670,17 @@ func newRequesterStore(t *testing.T) *requesterStore {
 	return s
 }
 
-// requesterStoreName is where the secret a session asks for as name sits in the store: lowered
-// and hyphenated under the prefix every broker these tests start serves (testSecretsPrefix), the
-// slug the policy loader reads that name back out of.
+// requesterStoreName is where the secret a session asks for as name sits in the store: its slug
+// under the prefix every broker these tests start serves (testSecretsPrefix), the name the
+// policy loader reads that secret back out of. The slug is the loader's own (policy.NameToSlug),
+// so a fixture naming a secret no session could ask for is a test bug and panics here rather
+// than being written and never served, as policytest's own mustSlug does.
 func requesterStoreName(name string) string {
-	return testSecretsPrefix + strings.ToLower(strings.ReplaceAll(name, "_", "-"))
+	slug, err := policy.NameToSlug(name)
+	if err != nil {
+		panic(fmt.Sprintf("requester_rule_e2e_test: %q: %v", name, err))
+	}
+	return testSecretsPrefix + slug
 }
 
 // requesterRow is one secret of the fake store: its place in the store (requesterStoreName), the

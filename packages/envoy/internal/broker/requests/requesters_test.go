@@ -25,13 +25,11 @@ const listedValue = "listed-v1"
 // it at all (overMaxGrant), which is this file's last case rather than its premise.
 const anHour = 3600
 
-// listedSecret is a namespace secret whose requesters tag names requesters, carrying the
-// max-grant every listed secret must set for the loader to serve it.
+// listedSecret is policytest.ListedSecret holding the one value this file releases: a namespace
+// secret whose requesters tag names requesters, carrying the max-grant every listed secret must
+// set for the loader to serve it.
 func listedSecret(name, owner, tier, requesters string) secrets.LocalSecret {
-	secret := policytest.Secret(name, owner, tier, listedValue)
-	secret.Tags[policy.TagRequesters] = requesters
-	secret.Tags[policy.TagMaxGrant] = policytest.FixtureMaxGrant
-	return secret
+	return policytest.ListedSecret(name, owner, tier, requesters, listedValue)
 }
 
 // createdAudit reads request requestID's one request.created audit row: the state it recorded and

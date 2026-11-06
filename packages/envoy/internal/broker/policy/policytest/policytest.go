@@ -64,6 +64,17 @@ func KindSecret(name, owner, tier, kind, value string) secrets.LocalSecret {
 	return secret
 }
 
+// ListedSecret is Secret with a requesters tag naming requesters, beside the max-grant every
+// listed secret must set for the loader to serve it (FixtureMaxGrant): the shape
+// policy.RequesterRules demands of a secret whose list says who may ask for it. A test of a
+// refusal those rules answer edits the tags of what this returns.
+func ListedSecret(name, owner, tier, requesters, value string) secrets.LocalSecret {
+	secret := Secret(name, owner, tier, value)
+	secret.Tags[policy.TagRequesters] = requesters
+	secret.Tags[policy.TagMaxGrant] = FixtureMaxGrant
+	return secret
+}
+
 // ID is the Secrets Manager name of the secret a session asks for as name.
 func ID(name string) string {
 	return Prefix + mustSlug(name)

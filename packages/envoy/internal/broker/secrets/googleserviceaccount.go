@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -50,10 +51,44 @@ type GoogleServiceAccount struct {
 	HTTP    *http.Client
 	// Source is the broker's OWN Google credential, the identity that must hold
 	// roles/iam.serviceAccountTokenCreator on the account it mints for. Nil means Google's
-	// application default credentials, which in production are the pod's Workload Identity, found
-	// on the first mint with the mint's own context: nothing is resolved when the broker is built,
-	// so a test that sets a fixed source runs on a machine with no Google credential at all.
+	// application default credentials, which in production are the pod's Workload Identity,
+	// found on the first mint that needs them and kept for every mint after it (ownSource):
+	// nothing is resolved when the broker is built, so a test that sets a fixed source runs on a
+	// machine with no Google credential at all.
 	Source oauth2.TokenSource
+
+	// mu guards resolved: two releases can mint at once, and only one of them resolves.
+	mu sync.Mutex
+	// resolved is the application default credentials as the first mint that needed them found
+	// them. It is kept so no later mint re-reads the credentials and takes a token round trip of
+	// its own, and it is written only once a resolution has succeeded, so a transient failure to
+	// find them never becomes permanent.
+	resolved oauth2.TokenSource
+}
+
+// ownSource is the broker's own credential for one mint: Source whenever a caller set one, and
+// otherwise the application default credentials, resolved by the first mint that needs them and
+// kept for the rest. Its refusal is ErrMintUpstream, word for word what resolving inline
+// answered.
+func (m *GoogleServiceAccount) ownSource(ctx context.Context) (oauth2.TokenSource, error) {
+	if m.Source != nil {
+		return m.Source, nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.resolved != nil {
+		return m.resolved, nil
+	}
+	// The default credentials are found with a context detached from the request's cancellation
+	// (its values are kept): x/oauth2's refresher holds on to the context its source was built
+	// with, so a source built from one request's context would fail every refresh once that
+	// request ended. Their error is dropped: it names the file or metadata server it tried.
+	source, err := google.DefaultTokenSource(context.WithoutCancel(ctx), googleCloudPlatformScope)
+	if err != nil {
+		return nil, fmt.Errorf("%w: the broker found no Google credentials of its own", ErrMintUpstream)
+	}
+	m.resolved = source
+	return source, nil
 }
 
 type googleServiceAccountSecret struct {
@@ -70,7 +105,10 @@ type googleServiceAccountToken struct {
 // and before any call is made. It never puts the stored value, the broker's own token, the minted
 // token or Google's answer in an error, and every error wraps one of ErrMintStoredValue,
 // ErrMintRefused or ErrMintUpstream.
-func (m GoogleServiceAccount) Mint(ctx context.Context, req MintRequest) (string, error) {
+//
+// The receiver is a pointer because a mint that resolves the broker's own credentials keeps
+// them on it (ownSource), which a copy would throw away.
+func (m *GoogleServiceAccount) Mint(ctx context.Context, req MintRequest) (string, error) {
 	const what = "mint Google service account token"
 	var secret googleServiceAccountSecret
 	// encoding/json's syntax errors quote the offending byte, so the decode's own error is
@@ -81,15 +119,9 @@ func (m GoogleServiceAccount) Mint(ctx context.Context, req MintRequest) (string
 	if !googleServiceAccountEmail.MatchString(secret.ServiceAccount) {
 		return "", fmt.Errorf("%w: Google service account secret must name one <id>@<project>.iam.gserviceaccount.com account in service_account", ErrMintStoredValue)
 	}
-	source := m.Source
-	if source == nil {
-		var err error
-		// The default credentials are found with the mint's context, not the broker's startup,
-		// and their error is dropped: it names the file or metadata server it tried.
-		source, err = google.DefaultTokenSource(ctx, googleCloudPlatformScope)
-		if err != nil {
-			return "", fmt.Errorf("%w: the broker found no Google credentials of its own", ErrMintUpstream)
-		}
+	source, err := m.ownSource(ctx)
+	if err != nil {
+		return "", err
 	}
 	// A token source's error can quote the credential it read, so only its class is reported.
 	own, err := source.Token()

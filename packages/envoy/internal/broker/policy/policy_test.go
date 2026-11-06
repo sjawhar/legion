@@ -154,10 +154,7 @@ func TestRequesters(t *testing.T) {
 		daemon = "legion-daemon"
 	)
 	listed := func(name, owner, tier, requesters string) secrets.LocalSecret {
-		s := policytest.Secret(name, owner, tier, "v")
-		s.Tags[policy.TagRequesters] = requesters
-		s.Tags[policy.TagMaxGrant] = "1h"
-		return s
+		return policytest.ListedSecret(name, owner, tier, requesters, "v")
 	}
 	store := secrets.NewLocal(
 		listed("GCLOUD_SAMI", sami, policy.TierHuman, daemon+" "+sami),

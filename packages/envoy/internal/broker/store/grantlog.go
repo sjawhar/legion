@@ -169,7 +169,12 @@ func ReadGrantLog(ctx context.Context, pool *pgxpool.Pool, q GrantLogQuery) ([]G
 		return nil, err
 	}
 	defer rows.Close()
+	// The page is as big as the limit allows, so a full page is read into one allocation. A
+	// limit of zero or less reads the whole period and bounds nothing, so it starts from nil.
 	var events []GrantLogEvent
+	if q.Limit > 0 {
+		events = make([]GrantLogEvent, 0, q.Limit)
+	}
 	for rows.Next() {
 		var ev GrantLogEvent
 		var secrets, raw []byte

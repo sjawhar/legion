@@ -206,18 +206,40 @@ var ErrRequestersComma = errors.New(`requesters separates its entries with space
 // or one naming a service the deployment does not register.
 var ErrRequestersEntry = errors.New("requesters names people by their lowercase sign-in email and services by their registered name")
 
-// ParseRequesters reads a requesters tag: people by lowercase email and services by name,
-// separated by white space. It refuses a comma anywhere (ErrRequestersComma), a list that names
-// nobody (ErrRequestersMissing), and an entry that is neither (ErrRequestersEntry). An entry
-// holding an @ is a person, and must be the lowercase email their sign-in names them by
-// (emailPattern), since Evaluate compares it against record.CanonicalLogin of the session's
-// operator; any other entry is a service, which must be one of services when the caller holds the
-// registered list and is otherwise checked for a service name's shape alone (record.ValidService),
-// the case of `agent-secrets`, which never sees BROKER_SERVICES. It answers the entries sorted,
-// each once and joined by single spaces, so a Secret holding them stays comparable, two spellings
-// of one list are one policy, and the value is one an AWS tag and a Secret Manager annotation
-// both hold.
+// ParseRequesters reads a requesters tag for a caller that holds the deployment's registered
+// service list — the loader (Loader.Services), the one reader whose answer decides whether the
+// secret is served. People are named by lowercase email and services by name, separated by white
+// space. It refuses a comma anywhere (ErrRequestersComma), a list that names nobody
+// (ErrRequestersMissing), and an entry that is neither (ErrRequestersEntry). An entry holding an
+// @ is a person, and must be the lowercase email their sign-in names them by (emailPattern),
+// since Evaluate compares it against record.CanonicalLogin of the session's operator; any other
+// entry is a service, and must be one of services, ALWAYS, so a nil or empty list refuses every
+// service entry, exactly as the owner tag already refuses a name the deployment does not
+// register (Loader.secret). That is a behaviour change: this function once read a nil list as
+// "check the shape alone", which left the loader accepting an unregistered name in a requesters
+// tag while refusing the same name in an owner tag whenever BROKER_SERVICES was unset.
+// ParseRequesterShapes is that shape-only check, under a name of its own, for the one caller
+// that holds no registered list. It answers the entries sorted, each once and joined by single
+// spaces, so a Secret holding them stays comparable, two spellings of one list are one policy,
+// and the value is one an AWS tag and a Secret Manager annotation both hold.
 func ParseRequesters(raw string, services []string) (string, error) {
+	return parseRequesters(raw, services, true)
+}
+
+// ParseRequesterShapes reads a requesters tag for a caller that holds no registered service list:
+// `agent-secrets`, which never sees BROKER_SERVICES. It is ParseRequesters in every respect but
+// one — an entry naming a service is checked for a service name's shape alone
+// (record.ValidService) rather than against the registered list — so the CLI refuses a malformed
+// tag before it writes, and the broker's answer to the write's reread (ReasonRequestersMalformed)
+// is what catches a name no deployment registers. ParseRequesters exists for the loader, which
+// holds that list and must apply it.
+func ParseRequesterShapes(raw string) (string, error) {
+	return parseRequesters(raw, nil, false)
+}
+
+// parseRequesters is the one reading behind both exported functions. registered says which check
+// a service entry gets: membership of services, or a service name's shape alone.
+func parseRequesters(raw string, services []string, registered bool) (string, error) {
 	if strings.Contains(raw, ",") {
 		return "", ErrRequestersComma
 	}
@@ -228,7 +250,7 @@ func ParseRequesters(raw string, services []string) (string, error) {
 			if !emailPattern.MatchString(entry) {
 				return "", fmt.Errorf("%w, not %q", ErrRequestersEntry, entry)
 			}
-		case services != nil:
+		case registered:
 			if !slices.Contains(services, entry) {
 				return "", fmt.Errorf("%w, not %q: no registered service has that name", ErrRequestersEntry, entry)
 			}
@@ -423,9 +445,10 @@ func (secret Secret) GitHubOwnerLogins() []string {
 	return strings.Fields(secret.GitHubOwners)
 }
 
-// RequesterList is Requesters as a list of the emails and service names it holds, nil when it is
-// "".
-func (secret Secret) RequesterList() []string {
+// requesterNames is Requesters as a list of the emails and service names it holds, nil when it
+// is "". It is unexported because lists, just below, is its one caller: nothing outside this
+// package reads a secret's requesters as a list.
+func (secret Secret) requesterNames() []string {
 	if secret.Requesters == "" {
 		return nil
 	}
@@ -436,7 +459,7 @@ func (secret Secret) RequesterList() []string {
 // service of the pod it is. An empty Operator (a pod has no person) and an empty Service (a
 // session has no service) match nothing, never an entry.
 func (secret Secret) lists(r Requester) bool {
-	listed := secret.RequesterList()
+	listed := secret.requesterNames()
 	if operator := record.CanonicalLogin(r.Operator); operator != "" && slices.Contains(listed, operator) {
 		return true
 	}

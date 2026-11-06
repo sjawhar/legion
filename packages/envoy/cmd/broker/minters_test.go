@@ -51,7 +51,7 @@ func TestEachKindReachesItsOwnMinter(t *testing.T) {
 		secrets.GitHubApp{Base: github.URL, HTTP: github.Client()},
 		secrets.GoogleLogin{TokenURL: google.URL, HTTP: google.Client()},
 		secrets.AzureLogin{},
-		secrets.GoogleServiceAccount{BaseURL: iam.URL, HTTP: iam.Client(), Source: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "broker-own-token"})},
+		&secrets.GoogleServiceAccount{BaseURL: iam.URL, HTTP: iam.Client(), Source: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "broker-own-token"})},
 	)
 
 	app, err := json.Marshal(map[string]string{"app_id": "123456", "private_key": pemText})
@@ -78,7 +78,7 @@ func TestEachKindReachesItsOwnMinter(t *testing.T) {
 // and nothing else, so a kind added to policy.Kinds with no minter behind it, or a minter left
 // under a key no kind names, fails here rather than when a session asks for that secret.
 func TestKindMinters(t *testing.T) {
-	minters := kindMinters(secrets.GitHubApp{}, secrets.GoogleLogin{}, secrets.AzureLogin{}, secrets.GoogleServiceAccount{})
+	minters := kindMinters(secrets.GitHubApp{}, secrets.GoogleLogin{}, secrets.AzureLogin{}, &secrets.GoogleServiceAccount{})
 	for _, kind := range policy.Kinds {
 		if minters[kind] == nil {
 			t.Errorf("kindMinters has no minter for kind %q, which the policy serves", kind)

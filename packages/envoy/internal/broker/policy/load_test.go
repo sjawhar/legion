@@ -570,10 +570,11 @@ func TestLoadOneMakesNoCallForAnIDPastSecretsManagersNameLimit(t *testing.T) {
 
 // TestRequestersLoad pins what the loader makes of a requesters tag, each refusal logged as the
 // one line the deployment's alarm filters on, with its own reason: a list it cannot read at all
-// is requesters-malformed; a listed secret whose grants are unbounded, or bounded past an hour,
-// is requesters-max-grant; and a google-service-account secret whose requesters are not exactly
-// its owner is requesters-not-owner, a missing list included. The well-tagged secret beside them
-// is served, so the rules refuse these secrets and not every secret.
+// is requesters-malformed, an entry naming a service this deployment does not register included;
+// a listed secret whose grants are unbounded, or bounded past an hour, is requesters-max-grant;
+// and a google-service-account secret whose requesters are not exactly its owner is
+// requesters-not-owner, a missing list included. The well-tagged secret beside them is served,
+// so the rules refuse these secrets and not every secret.
 func TestRequestersLoad(t *testing.T) {
 	const (
 		sami   = "sami@theorem.dev"
@@ -586,9 +587,7 @@ func TestRequestersLoad(t *testing.T) {
 	}
 	refusals := map[string]refusal{}
 	refuse := func(name, reason string, edit func(*secrets.LocalSecret)) {
-		s := policytest.Secret(name, sami, policy.TierAgent, "v")
-		s.Tags[policy.TagRequesters] = sami
-		s.Tags[policy.TagMaxGrant] = "1h"
+		s := policytest.ListedSecret(name, sami, policy.TierAgent, sami, "v")
 		edit(&s)
 		refusals[name] = refusal{s, reason}
 	}
@@ -626,9 +625,7 @@ func TestRequestersLoad(t *testing.T) {
 		s.Tags[policy.TagRequesters] = jason
 	})
 
-	served := policytest.Secret("SERVED_KEY", sami, policy.TierAgent, "v")
-	served.Tags[policy.TagRequesters] = sami
-	served.Tags[policy.TagMaxGrant] = "1h"
+	served := policytest.ListedSecret("SERVED_KEY", sami, policy.TierAgent, sami, "v")
 	store := secrets.NewLocal(served)
 	for _, r := range refusals {
 		store.Put(r.secret)
@@ -651,6 +648,24 @@ func TestRequestersLoad(t *testing.T) {
 	if got := strings.Count(lines, "\n"); got != len(refusals) {
 		t.Errorf("logged %d lines, want one per refused secret (%d):\n%s", got, len(refusals), lines)
 	}
+
+	// The same tag read by a loader that registers no service at all, which is what the broker
+	// has when BROKER_SERVICES is unset: an entry naming a service is refused
+	// requesters-malformed, exactly as an owner tag naming an unregistered service is refused,
+	// since no pod can prove a name the deployment does not register.
+	unregistered := policytest.ListedSecret("SERVICE_LIST_KEY", sami, policy.TierAgent, daemon, "v")
+	bareLog := policytest.CaptureLog(t)
+	bare, err := policytest.Loader(secrets.NewLocal(unregistered)).Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load with no registered services: %v", err)
+	}
+	if len(bare.Secrets) != 0 {
+		t.Errorf("a loader registering no service served %+v, want the list naming %s refused", bare.Secrets, daemon)
+	}
+	bareLines := bareLog.String()
+	if want := refusedLine("SERVICE_LIST_KEY", policy.ReasonRequestersMalformed); strings.Count(bareLines, want) != 1 {
+		t.Errorf("log has %d of %q, want exactly one:\n%s", strings.Count(bareLines, want), want, bareLines)
+	}
 }
 
 // TestNewSetDigest pins what a requesters tag does to the digest: two spellings of one list — the
@@ -668,9 +683,7 @@ func TestNewSetDigest(t *testing.T) {
 	)
 	version := func(requesters string) string {
 		t.Helper()
-		s := policytest.Secret("LISTED_KEY", sami, policy.TierAgent, "v1")
-		s.Tags[policy.TagRequesters] = requesters
-		s.Tags[policy.TagMaxGrant] = "1h"
+		s := policytest.ListedSecret("LISTED_KEY", sami, policy.TierAgent, requesters, "v1")
 		set, err := policytest.Loader(secrets.NewLocal(s), daemon).Load(context.Background())
 		if err != nil {
 			t.Fatalf("Load: %v", err)

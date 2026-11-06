@@ -927,9 +927,7 @@ func cmdRequest(args []string, stdout, stderr io.Writer) int {
 		writeVerbatim(stdout, raw)
 	} else {
 		fmt.Fprintf(stdout, "request_id: %s\nstate: %s\nsource: %s\n", result.RequestID, result.State, c.source(ctx))
-		if result.Detail != nil {
-			fmt.Fprintf(stdout, "detail: %s\n", *result.Detail)
-		}
+		printDetail(stdout, result.Detail)
 		if result.State == "pending" {
 			fmt.Fprintln(stdout, waitingOn(result.Approver, result.ApproveURL))
 		}
@@ -985,9 +983,7 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 	if result.Decision != nil {
 		fmt.Fprintf(stdout, "decided_by: %s\n", result.Decision.By)
 	}
-	if result.Detail != nil {
-		fmt.Fprintf(stdout, "detail: %s\n", *result.Detail)
-	}
+	printDetail(stdout, result.Detail)
 	return 0
 }
 
@@ -1298,6 +1294,17 @@ func deniedBecause(detail *string) string {
 		return ""
 	}
 	return ": " + *detail
+}
+
+// printDetail writes the broker's own sentence about a request, the one the request row keeps as
+// its decision_detail, as the "detail: <text>" line the request and status forms both end with.
+// A broker that recorded none, and one from before the field, writes no line at all, so such an
+// answer reads exactly as it always has.
+func printDetail(stdout io.Writer, detail *string) {
+	if detail == nil {
+		return
+	}
+	fmt.Fprintf(stdout, "detail: %s\n", *detail)
 }
 
 // sessionIdentityVars are the AGENT_SECRETS_* variables the exec form's child keeps: the broker's

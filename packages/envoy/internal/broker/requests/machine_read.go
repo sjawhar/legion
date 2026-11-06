@@ -19,7 +19,6 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
-	"github.com/sjawhar/envoy/internal/broker/store"
 )
 
 // MintFailedMessage is logged, at ERROR, each time a kind secret's minter fails a release,
@@ -250,9 +249,7 @@ func (m *Machine) endGrant(ctx context.Context, grantID string, reason error) er
 	// The grant's own release path reads no enrollment row here, so the line names the
 	// enrollment and nothing else of the session; the route's read fills the rest in
 	// (grantLogEvent).
-	ev := grantLogEvent("grant.revoked", GrantEndedActor, enrollmentRow{ID: enrollmentID})
-	ev.RequestID, ev.GrantID, ev.Raw = requestID, grantID, rawJSON(rowDetail)
-	store.LogGrantEvent(ev)
+	logGrantRow("grant.revoked", GrantEndedActor, enrollmentRow{ID: enrollmentID}, requestID, grantID, rawJSON(rowDetail))
 	return reason
 }
 

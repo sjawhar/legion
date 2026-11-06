@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -58,7 +60,7 @@ func TestGoogleServiceAccountMintImpersonatesTheStoredAccount(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"accessToken": "impersonated-access-token", "expireTime": "2026-11-06T13:00:00Z"})
 	})
 
-	got, err := (secrets.GoogleServiceAccount{BaseURL: server.URL, HTTP: server.Client(), Source: brokerSource()}).
+	got, err := (&secrets.GoogleServiceAccount{BaseURL: server.URL, HTTP: server.Client(), Source: brokerSource()}).
 		Mint(t.Context(), secrets.MintRequest{Name: "GCP_FLEET", Value: serviceAccountValue})
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
@@ -109,7 +111,7 @@ func TestGoogleServiceAccountMintNamesGooglesVerdict(t *testing.T) {
 				_, _ = io.WriteString(w, tc.body)
 			})
 
-			_, err := (secrets.GoogleServiceAccount{BaseURL: server.URL, HTTP: server.Client(), Source: brokerSource()}).
+			_, err := (&secrets.GoogleServiceAccount{BaseURL: server.URL, HTTP: server.Client(), Source: brokerSource()}).
 				Mint(t.Context(), secrets.MintRequest{Value: serviceAccountValue})
 			if err == nil || secrets.MintErrorClass(err) != tc.class {
 				t.Fatalf("Mint error = %v (class %s), want class %s", err, secrets.MintErrorClass(err), tc.class)
@@ -143,7 +145,7 @@ func TestGoogleServiceAccountMintErrorsQuoteNoToken(t *testing.T) {
 				_, _ = io.WriteString(w, tc.body)
 			})
 
-			_, err := (secrets.GoogleServiceAccount{BaseURL: server.URL, HTTP: server.Client(), Source: brokerSource()}).
+			_, err := (&secrets.GoogleServiceAccount{BaseURL: server.URL, HTTP: server.Client(), Source: brokerSource()}).
 				Mint(t.Context(), secrets.MintRequest{Value: serviceAccountValue})
 			if err == nil {
 				t.Fatal("Mint: want an error")
@@ -184,7 +186,7 @@ func TestGoogleServiceAccountMintRefusesAValueThatIsNoServiceAccount(t *testing.
 
 			// No Source: a value this minter refuses is refused before it looks for the broker's
 			// own credentials, which this machine does not have.
-			_, err := (secrets.GoogleServiceAccount{BaseURL: server.URL, HTTP: server.Client()}).
+			_, err := (&secrets.GoogleServiceAccount{BaseURL: server.URL, HTTP: server.Client()}).
 				Mint(t.Context(), secrets.MintRequest{Value: tc.value})
 			if err == nil || secrets.MintErrorClass(err) != "stored-value" {
 				t.Fatalf("Mint error = %v (class %s), want class stored-value", err, secrets.MintErrorClass(err))
@@ -193,5 +195,66 @@ func TestGoogleServiceAccountMintRefusesAValueThatIsNoServiceAccount(t *testing.
 				t.Fatalf("the IAM endpoint saw %d calls for a value that is no service account, want none", calls.Load())
 			}
 		})
+	}
+}
+
+// TestGoogleServiceAccountResolvesItsOwnCredentialsOnce: the broker's own credentials are found
+// by the first mint that needs them and kept, so a second release neither re-reads them nor
+// takes a token round trip of its own. The resolutions are counted at the token endpoint the
+// credentials file names: each resolution builds a token source of its own, with a token cache
+// of its own, so one call there is one resolution. The credentials are gcloud's authorized_user
+// shape, whose token_uri the file names, as the broker's own end-to-end fixture writes them.
+func TestGoogleServiceAccountResolvesItsOwnCredentialsOnce(t *testing.T) {
+	var resolutions atomic.Int64
+	own := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/token" {
+			t.Errorf("the broker's own-credential endpoint was asked %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		resolutions.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": brokerOwnToken, "token_type": "Bearer", "expires_in": 3600,
+		})
+	}))
+	t.Cleanup(own.Close)
+	credentials, err := json.Marshal(map[string]string{
+		"type":          "authorized_user",
+		"client_id":     "example-broker.apps.googleusercontent.example",
+		"client_secret": "example-broker-secret",
+		"refresh_token": "example-broker-refresh-token",
+		"token_uri":     own.URL + "/token",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "application_default_credentials.json")
+	if err := os.WriteFile(path, credentials, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", path)
+
+	server, calls := iamServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer "+brokerOwnToken {
+			t.Errorf("the IAM endpoint was called with Authorization %q, want the broker's own bearer token", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"accessToken": "impersonated-access-token"})
+	})
+
+	// No Source: the minter finds the broker's own credentials for itself, as it does in
+	// production, where they are the pod's Workload Identity.
+	minter := &secrets.GoogleServiceAccount{BaseURL: server.URL, HTTP: server.Client()}
+	for mint := 1; mint <= 2; mint++ {
+		got, err := minter.Mint(t.Context(), secrets.MintRequest{Name: "GCP_FLEET", Value: serviceAccountValue})
+		if err != nil || got != "impersonated-access-token" {
+			t.Fatalf("mint %d = %q, %v; want the bare access token", mint, got, err)
+		}
+	}
+	if resolutions.Load() != 1 {
+		t.Errorf("two mints resolved the broker's own credentials %d times, want once", resolutions.Load())
+	}
+	if calls.Load() != 2 {
+		t.Errorf("the IAM endpoint saw %d calls, want one per mint", calls.Load())
 	}
 }

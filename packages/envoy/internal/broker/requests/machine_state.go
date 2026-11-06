@@ -387,8 +387,11 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 		approver: e.approver, rulesVersion: set.Version, sessionID: sessionID, lifetime: lifetime, decisions: e.decisions,
 		requester: requester, denials: e.denials,
 	}
+	// Both branches end the same way — commit, then the one grant-log line for the request.created
+	// audit row insertRequest wrote — so only how req is produced differs between them.
+	var req Request
 	if e.state != "pending" {
-		req := Request{ID: r.id, State: r.state, Secrets: r.decisions, LifetimeSeconds: r.lifetime, Detail: nullable(r.decisionDetail())}
+		req = Request{ID: r.id, State: r.state, Secrets: r.decisions, LifetimeSeconds: r.lifetime, Detail: nullable(r.decisionDetail())}
 		if err := m.insertRequest(ctx, tx, r); err != nil {
 			return Request{}, err
 		}
@@ -399,21 +402,18 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 			}
 			req.GrantID = &grantID
 		}
-		if err := tx.Commit(ctx); err != nil {
+	} else {
+		r.pendingExpiresAt = time.Now().Add(m.PendingTTL)
+		pending, err := m.createPending(ctx, tx, enr, r, obj)
+		if err != nil {
 			return Request{}, err
 		}
-		store.LogGrantEvent(r.grantLogEvent(enr))
-		return req, nil
-	}
-	r.pendingExpiresAt = time.Now().Add(m.PendingTTL)
-	req, err := m.createPending(ctx, tx, enr, r, obj)
-	if err != nil {
-		return Request{}, err
+		req = pending
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Request{}, err
 	}
-	store.LogGrantEvent(r.grantLogEvent(enr))
+	store.LogGrantEvent(r.createdRequestLogEvent(enr))
 	return req, nil
 }
 
@@ -612,12 +612,14 @@ func (r newRequest) auditDetail() auditDetail {
 	return detail
 }
 
-// grantLogEvent is the request.created audit row insertRequest wrote for this request, as the
-// grant-log line Create logs once its transaction has committed (grantLogEvent). Every field it
+// createdRequestLogEvent is the request.created audit row insertRequest wrote for this request,
+// as the grant-log line Create logs once its transaction has committed. Every field it
 // carries is one the decision itself was made with: the requester the policy saw, the request's
 // names and their decisions in name order — the order store.ReadGrantLog answers them in, so the
-// line and the route's event read the same way round — and the audit row's own detail.
-func (r newRequest) grantLogEvent(enr enrollmentRow) store.GrantLogEvent {
+// line and the route's event read the same way round — and the audit row's own detail. It is
+// named for the row it carries, as endedRequestLogEvent is, so a reader at the call site tells
+// it from the package-level grantLogEvent it builds on.
+func (r newRequest) createdRequestLogEvent(enr enrollmentRow) store.GrantLogEvent {
 	ev := grantLogEvent("request.created", "session:"+r.enrollmentID, enr)
 	ev.RequestID = r.id
 	ev.Service = r.requester.Service
@@ -721,16 +723,16 @@ func (m *Machine) Cancel(ctx context.Context, id, enrollmentID string) error {
 		return ErrTerminal
 	}
 	actor := "session:" + enrollmentID
-	const detail = "cancelled by the requesting session"
-	if _, err := store.EndPendingRequests(ctx, tx, store.RequestByID, id, store.RequestEnd{
-		State: "cancelled", Actor: actor, DecidedBy: &actor, Detail: detail,
-	}); err != nil {
+	end := store.RequestEnd{
+		State: "cancelled", Actor: actor, DecidedBy: &actor, Detail: "cancelled by the requesting session",
+	}
+	if _, err := store.EndPendingRequests(ctx, tx, store.RequestByID, id, end); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
-	store.LogGrantEvent(endedRequestLogEvent("cancelled", actor, actor, detail, enrollmentID, id))
+	store.LogGrantEvent(endedRequestLogEvent(end, enrollmentID, id))
 	return nil
 }
 
@@ -750,10 +752,10 @@ func (m *Machine) expirePending(ctx context.Context, now time.Time) ([]store.End
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	const detail = "no answer before the request expired"
-	expired, err := store.EndPendingRequests(ctx, tx, store.RequestsPastDeadline, now, store.RequestEnd{
-		State: "expired", Actor: "broker", DecidedAt: &now, Detail: detail,
-	})
+	end := store.RequestEnd{
+		State: "expired", Actor: "broker", DecidedAt: &now, Detail: "no answer before the request expired",
+	}
+	expired, err := store.EndPendingRequests(ctx, tx, store.RequestsPastDeadline, now, end)
 	if err != nil {
 		return nil, err
 	}
@@ -762,7 +764,7 @@ func (m *Machine) expirePending(ctx context.Context, now time.Time) ([]store.End
 	}
 	// One audit row was written per request this expired, so one line goes out per request.
 	for _, r := range expired {
-		store.LogGrantEvent(endedRequestLogEvent("expired", "broker", "", detail, r.EnrollmentID, r.ID))
+		store.LogGrantEvent(endedRequestLogEvent(end, r.EnrollmentID, r.ID))
 	}
 	return expired, nil
 }
@@ -1171,9 +1173,7 @@ func (m *Machine) RevokeGrant(ctx context.Context, grantID, enrollmentID string)
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
-	ev := grantLogEvent("grant.revoked", actor, enrollmentRow{ID: owner})
-	ev.RequestID, ev.GrantID, ev.Raw = requestID, grantID, rawJSON(auditDetail{})
-	store.LogGrantEvent(ev)
+	logGrantRow("grant.revoked", actor, enrollmentRow{ID: owner}, requestID, grantID, rawJSON(auditDetail{}))
 	return nil
 }
 
@@ -1244,18 +1244,17 @@ func (m *Machine) RevokeByApprover(ctx context.Context, grantID, login, actor st
 		return err
 	}
 	// One line per audit row this transaction wrote, not one per transaction: withhold can end
-	// several other grants of the session, each with a grant.revoked row of its own, and those
-	// were written before the revoke's own row, so they are logged in the order the table holds
-	// them. Each names the request whose grant it ended, which is not the revoked grant's.
+	// several other grants of the session, each with a grant.revoked row of its own. Those rows
+	// were written before the revoke's own, so every withheld line goes out before it, the order
+	// the review reads them in as well (store.ReadGrantLog orders by audit id). Among themselves
+	// they are in no order the table holds: withhold's aggregate answers them by grant_id, a
+	// UUID order, and the statement's audited CTE inserts them with no ordering at all. Each
+	// names the request whose grant it ended, which is not the revoked grant's.
 	enr := enrollmentRow{ID: session, Operator: operator}
 	for _, g := range endedByWithhold {
-		ev := grantLogEvent("grant.revoked", actor, enr)
-		ev.RequestID, ev.GrantID, ev.Raw = g.RequestID, g.GrantID, g.Detail
-		store.LogGrantEvent(ev)
+		logGrantRow("grant.revoked", actor, enr, g.RequestID, g.GrantID, g.Detail)
 	}
-	ev := grantLogEvent(kind, actor, enr)
-	ev.RequestID, ev.GrantID, ev.Raw = requestID, grantID, rawJSON(detail)
-	store.LogGrantEvent(ev)
+	logGrantRow(kind, actor, enr, requestID, grantID, rawJSON(detail))
 	return nil
 }
 
@@ -1379,14 +1378,28 @@ func grantLogEvent(kind, actor string, enr enrollmentRow) store.GrantLogEvent {
 	}
 }
 
+// logGrantRow logs the grant-log line of one grant row this package has just committed: a
+// grant.revoked or grant.withheld audit row, whose line names the grant, the request it was
+// granted for and the row's own detail beside what grantLogEvent reads off enr, and nothing
+// else. Every writer of such a row goes through it — a session's own revoke (RevokeGrant), a
+// person's and each grant the withhold beside it ended (RevokeByApprover), and the end a
+// release writes when what was granted cannot come back (endGrant) — so the four build the
+// same line. A request's own line sets fields past these three and builds its event itself.
+func logGrantRow(kind, actor string, enr enrollmentRow, requestID, grantID string, raw json.RawMessage) {
+	ev := grantLogEvent(kind, actor, enr)
+	ev.RequestID, ev.GrantID, ev.Raw = requestID, grantID, raw
+	store.LogGrantEvent(ev)
+}
+
 // endedRequestLogEvent is one request store.EndPendingRequests has just ended, as its grant-log
 // line: the transition that statement wrote, who it recorded as deciding it (nobody, for an
 // expiry the broker made) and the detail it gave the request, which is also what the route reads
-// back off the request row. The audit row it wrote carries the column's default detail, {}.
-// Cancel and expirePending both end requests through that one statement.
-func endedRequestLogEvent(state, actor, decidedBy, detail, enrollmentID, requestID string) store.GrantLogEvent {
-	ev := grantLogEvent("request."+state, actor, enrollmentRow{ID: enrollmentID})
-	ev.RequestID, ev.State, ev.DecidedBy, ev.Detail = requestID, state, decidedBy, detail
+// back off the request row. It takes the very store.RequestEnd its caller handed that statement,
+// so the line and the row it stands for cannot drift. The audit row the statement wrote carries
+// the column's default detail, {}. Cancel and expirePending both end requests through it.
+func endedRequestLogEvent(end store.RequestEnd, enrollmentID, requestID string) store.GrantLogEvent {
+	ev := grantLogEvent("request."+end.State, end.Actor, enrollmentRow{ID: enrollmentID})
+	ev.RequestID, ev.State, ev.DecidedBy, ev.Detail = requestID, end.State, deref(end.DecidedBy), end.Detail
 	ev.Raw = rawJSON(auditDetail{})
 	return ev
 }

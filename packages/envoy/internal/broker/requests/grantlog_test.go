@@ -9,7 +9,6 @@ import (
 	"reflect"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -19,26 +18,6 @@ import (
 	"github.com/sjawhar/envoy/internal/logtest"
 )
 
-// grantLogCapture keeps the broker's own log records, so a test reads the attributes the request
-// machine logged rather than a rendering of them. The records are one test's own: logtest puts
-// the previous default logger back when it ends.
-type grantLogCapture struct {
-	mu      sync.Mutex
-	records []slog.Record
-}
-
-func (c *grantLogCapture) Enabled(context.Context, slog.Level) bool { return true }
-
-func (c *grantLogCapture) Handle(_ context.Context, r slog.Record) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.records = append(c.records, r.Clone())
-	return nil
-}
-
-func (c *grantLogCapture) WithAttrs([]slog.Attr) slog.Handler { return c }
-func (c *grantLogCapture) WithGroup(string) slog.Handler      { return c }
-
 // grantLogLine is one captured store.GrantLogMessage line: its attributes by key, and the level
 // it was written at.
 type grantLogLine struct {
@@ -46,14 +25,14 @@ type grantLogLine struct {
 	level slog.Level
 }
 
-// lines are the grant-log lines captured so far, in the order they were written. Every other
+// grantLogLines are the grant-log lines capture holds, in the order they were written, so a test
+// reads the attributes the request machine logged rather than a rendering of them. Every other
 // line the broker logs is skipped: this is the one line the access review's log pipeline keeps.
-func (c *grantLogCapture) lines(t *testing.T) []grantLogLine {
+// The records are one test's own: logtest puts the previous default logger back when it ends.
+func grantLogLines(t *testing.T, capture *logtest.Recorder) []grantLogLine {
 	t.Helper()
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	var lines []grantLogLine
-	for _, r := range c.records {
+	for _, r := range capture.Records() {
 		if r.Message != store.GrantLogMessage {
 			continue
 		}
@@ -72,9 +51,9 @@ func (c *grantLogCapture) lines(t *testing.T) []grantLogLine {
 
 // newGrantLogFixture is newFixture with every log line captured and its enrollment named as a
 // session, which is where the route reads the session fields from.
-func newGrantLogFixture(t *testing.T, sessionID string) (*grantLogCapture, *Machine, string, *ecdsa.PrivateKey, string) {
+func newGrantLogFixture(t *testing.T, sessionID string) (*logtest.Recorder, *Machine, string, *ecdsa.PrivateKey, string) {
 	t.Helper()
-	capture := &grantLogCapture{}
+	capture := &logtest.Recorder{}
 	logtest.SetDefault(t, capture)
 	m, enr, key, approver := newFixture(t)
 	nameSession(t, m, enr, sessionID)
@@ -124,11 +103,11 @@ func sameAttr(got, want any) bool {
 // routeLine is ev as store.LogGrantEvent writes it, captured. The drift test compares the
 // machine's line with the route's event through that one writer rather than rendering the event
 // a second way of its own, so what it pins is the two constructions and nothing else.
-func routeLine(t *testing.T, capture *grantLogCapture, ev store.GrantLogEvent) grantLogLine {
+func routeLine(t *testing.T, capture *logtest.Recorder, ev store.GrantLogEvent) grantLogLine {
 	t.Helper()
-	before := len(capture.lines(t))
+	before := len(grantLogLines(t, capture))
 	store.LogGrantEvent(ev)
-	lines := capture.lines(t)
+	lines := grantLogLines(t, capture)
 	if len(lines) != before+1 {
 		t.Fatalf("LogGrantEvent wrote %d lines, want one", len(lines)-before)
 	}
@@ -197,7 +176,7 @@ func TestGrantLogLineAndTheRoutesEventSayTheSameThing(t *testing.T) {
 		t.Fatalf("ApplyDecision = %+v, %v; want granted", decision, err)
 	}
 
-	machineLines := capture.lines(t)
+	machineLines := grantLogLines(t, capture)
 	events := readGrantLog(t, m, since)
 	for _, tc := range []struct {
 		name, kind, request string
@@ -370,7 +349,7 @@ func TestGrantLogLogsEveryDecisionAndEveryGrantEndAndNothingElse(t *testing.T) {
 	if uses != 3 {
 		t.Fatalf("the audit table holds %d grant.used rows, want one per release: the exclusion has to be tested against real rows", uses)
 	}
-	lines := capture.lines(t)
+	lines := grantLogLines(t, capture)
 	for _, line := range lines {
 		kind, _ := line.attrs["kind"].(string)
 		if !loggedKind(kind) {
@@ -413,12 +392,12 @@ func TestGrantLogLogsOneLinePerAuditRowAndNotOnePerTransaction(t *testing.T) {
 	if err != nil || decision.GrantID == "" {
 		t.Fatalf("ApplyDecision = %+v, %v; want a grant", decision, err)
 	}
-	before := len(capture.lines(t))
+	before := len(grantLogLines(t, capture))
 	if err := m.RevokeByApprover(ctx, *automatic.GrantID, fixtureOperator, "human:"+fixtureOperator); err != nil {
 		t.Fatalf("RevokeByApprover: %v", err)
 	}
 
-	lines := capture.lines(t)[before:]
+	lines := grantLogLines(t, capture)[before:]
 	if len(lines) != 2 {
 		t.Fatalf("the revoke logged %d lines, want one per grant it ended: its own and the one the withhold ended", len(lines))
 	}

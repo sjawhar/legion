@@ -14,7 +14,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -50,35 +49,15 @@ const (
 	listedOwner = "mallory@example.com"
 )
 
-// grantLogCapture keeps the broker's own log records, so the test reads the attributes the broker
-// logged rather than a rendering of them. The records are this test's own: logtest puts the
+// grantLogLines are the store.GrantLogMessage lines capture holds, in the order they were
+// written, each as its attributes by key, so the test reads the attributes the broker logged
+// rather than a rendering of them. Every other line the broker logs is skipped: this is the one
+// line the access review's log pipeline keeps. The records are this test's own: logtest puts the
 // previous default logger back when it ends.
-type grantLogCapture struct {
-	mu      sync.Mutex
-	records []slog.Record
-}
-
-func (c *grantLogCapture) Enabled(context.Context, slog.Level) bool { return true }
-
-func (c *grantLogCapture) Handle(_ context.Context, r slog.Record) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.records = append(c.records, r.Clone())
-	return nil
-}
-
-func (c *grantLogCapture) WithAttrs([]slog.Attr) slog.Handler { return c }
-func (c *grantLogCapture) WithGroup(string) slog.Handler      { return c }
-
-// lines are the store.GrantLogMessage lines captured so far, in the order they were written, each
-// as its attributes by key. Every other line the broker logs is skipped: this is the one line the
-// access review's log pipeline keeps.
-func (c *grantLogCapture) lines(t *testing.T) []map[string]any {
+func grantLogLines(t *testing.T, capture *logtest.Recorder) []map[string]any {
 	t.Helper()
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	var lines []map[string]any
-	for _, r := range c.records {
+	for _, r := range capture.Records() {
 		if r.Message != store.GrantLogMessage {
 			continue
 		}
@@ -148,9 +127,7 @@ func driveGrantLogFlow(t *testing.T, ts *testServer) grantLogFlow {
 
 	// A listed secret nobody in this flow may ask for, so one request is refused by the
 	// requesters rule rather than by an owner's denial.
-	listed := policytest.Secret("LISTED_KEY", testApprover, policy.TierAgent, "listed-v1")
-	listed.Tags[policy.TagRequesters] = listedOwner
-	listed.Tags[policy.TagMaxGrant] = policytest.FixtureMaxGrant
+	listed := policytest.ListedSecret("LISTED_KEY", testApprover, policy.TierAgent, listedOwner, "listed-v1")
 	ts.Secrets.Put(listed)
 	if status, body := ts.req(t, http.MethodPost, "/v1/secrets/LISTED_KEY/reread", nil, nil); status != http.StatusOK {
 		t.Fatalf("reread LISTED_KEY = %d %s, want 200", status, body)
@@ -296,7 +273,7 @@ func eventFor(t *testing.T, events []store.GrantLogEvent, kind, requestID string
 // callers that reach every other named-caller route — Dispatch's server and the Envoy listener —
 // read nothing here at all.
 func TestGrantLog(t *testing.T) {
-	capture := &grantLogCapture{}
+	capture := &logtest.Recorder{}
 	logtest.SetDefault(t, capture)
 	ts, reviewToken, listenerToken := newGrantLogServer(t)
 	flow := driveGrantLogFlow(t, ts)
@@ -507,7 +484,7 @@ func TestGrantLog(t *testing.T) {
 		if uses == 0 {
 			t.Fatal("the flow wrote no grant.used row, so the exclusion of a release from the log is not being tested against a real row")
 		}
-		lines := capture.lines(t)
+		lines := grantLogLines(t, capture)
 		if len(lines) != len(logged) {
 			t.Fatalf("the broker logged %d grant-log lines for %d audit rows of a logged kind: one line per decision and grant end, and no line for a release, an enrollment or a row this route read",
 				len(lines), len(logged))
