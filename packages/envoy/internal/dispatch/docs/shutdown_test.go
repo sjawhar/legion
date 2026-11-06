@@ -87,7 +87,10 @@ func TestShutdownSettlesTheDocumentAColdWriteLeftOwing(t *testing.T) {
 	}
 	waitForSettlementOwed(t, service, artifactID)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// The check is the version the settlement wrote, not a wall-clock bound: ten seconds leaves
+	// one over ShutdownDrainBudget, so a loaded machine ended the shutdown before its own drain
+	// did. Its siblings here use roomWait.
+	ctx, cancel := context.WithTimeout(context.Background(), roomWait(t))
 	defer cancel()
 	if err := service.Shutdown(ctx); err != nil {
 		t.Fatalf("shutdown with a cold write's settlement owed: %v", err)

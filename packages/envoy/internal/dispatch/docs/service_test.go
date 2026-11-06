@@ -5237,7 +5237,9 @@ func TestShutdownSkipsColdDocumentSettlement(t *testing.T) {
 	t.Parallel()
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "before")
-	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	// What this checks is the settlement the shutdown did not arm, not how long the shutdown
+	// took, and it runs beside the rest of the package, so the deadline is roomWait.
+	ctx, cancel := context.WithTimeout(context.Background(), roomWait(t))
 	defer cancel()
 	if err := service.Shutdown(ctx); err != nil {
 		t.Fatalf("shutdown cold document: %v", err)
@@ -5259,7 +5261,9 @@ func TestShutdownStopsTimerForEvictedRoom(t *testing.T) {
 	if err := service.Evict(context.Background(), artifactID); err != nil {
 		t.Fatalf("evict scheduled room: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	// As above: the check is that the shutdown returns, not that it returns inside a fixed
+	// wall-clock bound a loaded machine would blow.
+	ctx, cancel := context.WithTimeout(context.Background(), roomWait(t))
 	defer cancel()
 	if err := service.Shutdown(ctx); err != nil {
 		t.Fatalf("shutdown after eviction: %v", err)

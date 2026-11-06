@@ -45,7 +45,9 @@ func TestConditionalDocumentEditDoesNotOverwriteWriterDuringTableAnchorCheck(t *
 			artifactID := createDocument(t, database, "")
 			service := New(Deps{Store: database, Settle: time.Hour})
 			t.Cleanup(func() {
-				shutdown, cancel := context.WithTimeout(context.Background(), time.Second)
+				// Teardown, not a bound this test checks: the drain takes as long as the
+				// loaded machine takes, so it gets roomWait like this file's other waits.
+				shutdown, cancel := context.WithTimeout(context.Background(), roomWait(t))
 				defer cancel()
 				if err := service.Shutdown(shutdown); err != nil {
 					t.Errorf("shutdown service: %v", err)
