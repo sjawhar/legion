@@ -2737,9 +2737,12 @@ jobs:
     runs-on: ubuntu-24.04
     # Each go test step's -timeout must fire before the runner cancels the job, so a hung test
     # prints the dump that names it. A timed-out step fails the job, so the bound is the steps
-    # before it at their measured times plus its own limit: about 1 minute of setup, then the unit
-    # step's two 20-minute runs, which is 41; after the unit step's measured 35 minutes, natslive's
-    # default 10 is 46, and the shell tests' 7 plus the integration step's 5 is 48.
+    # before it at their measured times plus its own limit: about 1 minute of setup, then the
+    # plain race-impossible step's three 10-minute runs, which is 31; after that step's measured
+    # 2 minutes the unit step's own 20 is 23; after the unit step, which runs strictly fewer
+    # packages than the 35 minutes it measured before the race lane's left it and so cannot
+    # exceed that, natslive's default 10 is 48, and the shell tests' 7 and the integration step's
+    # 5 are less.
     timeout-minutes: 60
     services:
       postgres:
@@ -3026,6 +3029,10 @@ jobs:
   # shows: envoy-go's unit-test step runs without -race (LEGION-499). The lane sits beside
   # envoy-go because -race runs these packages several times slower, and each job carries a
   # package deadline of its own, since go test's ten-minute default is a whole package's.
+  # envoy-go runs none of these packages plain any more (INFRA-1408): its unit step leaves out
+  # exactly what the lane runs, and the one plain run it keeps of them is the step named "Test
+  # what the race build cannot run at all or at full size", which runs the handful of
+  # assertions the detector makes impossible or shrinks and nothing else.
   #
   # The lane is three jobs: envoy-go-race (delivery, the Dispatch store, the bus, the listener,
   # the registry store, the session cache and kvwatch), envoy-go-race-api and envoy-go-race-docs,
