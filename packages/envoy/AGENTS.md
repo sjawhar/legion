@@ -1154,7 +1154,7 @@ Each pool below is sized in `store/pools.go`, and every connection carries `disp
 | `rooms` (`Rooms`) | 4 | 3 s | cold document loads |
 | `health` (`Healthy`) | 1 | the probe's own 2 s | `/healthz` |
 | `listen` (`Listener`) | the 5 it hands over (its one dial is one of them redialling) | 10 s | the LISTEN connections of the delivery hub, the event stream relay, the stale-room evictor, the background loops' shared wake hub (`pglisten.Hub`, one connection for every channel they wait on) and the events outbox (`dispatch_events` and `dispatch_duty_holds`) |
-| `leases` (`Leases`) | 15 | 2 s | `duty.Exclusive`: one per lease name (13) and 2 spare |
+| `leases` (`Leases`) | 15 | 2 s | `duty.Exclusive`: one per lease name (14, the CI reconcile pass's among them) and 1 spare |
 | `outbox` (`Outbox`) | 2 | none: one connection for each of its two callers | the events outbox: its batches' statements, one at a time, and its publisher hold's renewal beside them |
 | `compaction` (`Compaction`) | 2 | 30 s | a document's compaction: its repeatable-read read of the rows to fold, and its write back under the document's advisory lock (the compaction queue's and the hourly sweep's alike) |
 | `horizon` (`Horizon`) | 2 | 3 s | the event log's safe horizon (`events.Horizon`): its observations, its marks and the reads beside them, its stall diagnosis and its persist write, and the reads `GET /auth/whoami`, `GET /api/v1/references?since=` and the relay's first start make through it |
@@ -1229,7 +1229,7 @@ Only a read is wrapped, and the websockets are mounted outside the routes, so no
 **The lease pool counts its leases.**
 `duty.LeaseNames` is every lease `duty.Exclusive` takes, each a constant in `duty/exclusive.go` (a delivery durable's consumer lease spelled out, though `consumerLease` builds it at run time);
 Exclusive refuses any other name (ERROR `dispatch duty: lease refused`), and `store.leaseNameCount` is held to the list's length by `TestTheLeasePoolCountsEveryLeaseName`.
-Every listed name can be inside Exclusive at once, each on a connection of its own, and the two spare cover pgxpool's own health check and lifetime expiry and a pass whose unlock failed holding its connection until it closes, so a wait for a lease connection is a fault:
+Every listed name can be inside Exclusive at once, each on a connection of its own, and the spare covers pgxpool's own health check and lifetime expiry or a pass whose unlock failed holding its connection until it closes (the second spare the pool once held went to the CI reconcile pass's lease, keeping the process at its budget), so a wait for a lease connection is a fault:
 a pass that waits the lease pool's bound is skipped (WARN `dispatch duty: leased pass skipped`) and its next tick tries again.
 A loop that leases a new name, or holds a lease-pool connection for any other reason, adds its constant to the list and one connection to the pool, rather than taking one another loop counted on.
 

@@ -268,10 +268,10 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 
 // leaseNameCount is how many lease names duty.Exclusive accepts: the names of duty's lease list,
 // counted here because store cannot import duty, and held to that list by a test.
-const leaseNameCount = 13
+const leaseNameCount = 14
 
 // leasePoolSize bounds the pool a periodic maintenance loop takes its once-overall lease on
-// (duty.Exclusive): a connection for every lease name on duty's list, and two spare. A caller and
+// (duty.Exclusive): a connection for every lease name on duty's list, and one spare. A caller and
 // not a lease needs the connection - Exclusive takes it before it learns whether the lease is
 // held, so a pass that skips because another process holds the lease holds one for that round
 // trip too - and every listed name has one caller, since each delivery intake takes its own
@@ -279,16 +279,19 @@ const leaseNameCount = 13
 // once. Exclusive refuses a name that is not on the list, so a loop added to the list adds its
 // connection here rather than taking one another loop counted on.
 //
-// The two spare connections are for what holds one without being a listed lease's pass: pgxpool's
-// own health check and lifetime expiry take an idle connection while they ping or replace it, and
-// a pass whose unlock failed holds its connection until the close that ends its session
-// (duty.FreeSessionLock, leaseCallTimeout). Without them the next pass waits on those (review BG-5);
-// with them a wait at all is a fault, and an acquire that waits leaseAcquireBound makes Exclusive
-// skip the pass rather than queue. They cannot come from the request pool: a lease is held for the
-// whole pass, which is minutes for the compaction sweep, and the request pool's connections are
-// what every request reads through. The compaction sweep holds only its lease here: each document
-// it compacts reads and writes on the compaction pool (Pool.Compaction).
-const leasePoolSize = leaseNameCount + 2
+// The spare connection is for what holds one without being a listed lease's pass: pgxpool's own
+// health check and lifetime expiry take an idle connection while they ping or replace it, and a
+// pass whose unlock failed holds its connection until the close that ends its session
+// (duty.FreeSessionLock, leaseCallTimeout). Without it the next pass waits on those (review BG-5).
+// There were two until the CI reconcile pass (duty.CIReconcileLease) joined the list: its
+// connection is the second spare's, which keeps the process at one budget (ConnectionsPerProcess)
+// rather than growing it. Two such holders at once leave the next lease waiting, and an acquire
+// that waits leaseAcquireBound makes Exclusive skip the pass rather than queue, so the cost is one
+// skipped pass that its next tick runs. The connections cannot come from the request pool: a
+// lease is held for the whole pass, which is minutes for the compaction sweep, and the request
+// pool's connections are what every request reads through. The compaction sweep holds only its
+// lease here: each document it compacts reads and writes on the compaction pool (Pool.Compaction).
+const leasePoolSize = leaseNameCount + 1
 
 // Leases is where a periodic maintenance loop takes the connection it holds its lease on, so that
 // only one process runs each pass (duty.Exclusive). The lease is a session-level advisory lock, so

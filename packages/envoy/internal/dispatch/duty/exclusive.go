@@ -50,10 +50,14 @@ const (
 	// ServerProcessesLease is processes.RunPrune's: the prune of the server process registry, so
 	// one process prunes per PruneInterval however many serve the database.
 	ServerProcessesLease = "server-processes"
+	// CIReconcileLease is cireconcile's pass: one process reads GitHub per period, since each pass
+	// reads every open pull request of every mapped repository and the App's budget pays for every
+	// process that passes.
+	CIReconcileLease = "ci-reconcile"
 )
 
 // leaseNames is every lease Exclusive takes, and Exclusive refuses any other: the lease pool has a
-// connection for each of these and two spare (store.leasePoolSize, held to this list's length by a
+// connection for each of these and one spare (store.leasePoolSize, held to this list's length by a
 // test), so a lease taken under a name not counted here would take a connection a listed lease
 // counted on. A loop that leases a new name - or holds a connection of the lease pool for any other
 // reason - adds its constant above and here, and store's count with it.
@@ -71,6 +75,7 @@ var leaseNames = [...]string{
 	DeliveryJobsConsumerLease,
 	IssueAskRepairLease,
 	ServerProcessesLease,
+	CIReconcileLease,
 }
 
 // LeaseNames is every lease name Exclusive accepts.

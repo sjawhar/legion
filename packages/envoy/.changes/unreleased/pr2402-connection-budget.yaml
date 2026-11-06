@@ -3,8 +3,8 @@ body: |-
   Dispatch's database connections are one budget of 94 a process, as many as before, partitioned so that neither
   requests nor background work can starve the other: the request pool holds 48, from 64, and the
   background loops (6), the live event stream relay and delivery hub (4) and document settlements
-  (4) each draw from a pool of their own. The lease pool holds a connection for each of its 13
-  lease names and 2 spare, 15 where it held 13 with none spare; `duty.Exclusive` refuses a name
+  (4) each draw from a pool of their own. The lease pool holds a connection for each of its 14
+  lease names (the CI reconcile pass's among them) and 1 spare, 15 where it held 13 with none spare; `duty.Exclusive` refuses a name
   that is not on its list, and skips
   a pass that finds no lease connection free within 2 seconds until its next tick. Every
   connection names its pool in `application_name` (`dispatch-requests`, `dispatch-background`,

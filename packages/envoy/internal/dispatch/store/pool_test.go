@@ -1055,11 +1055,11 @@ func holdOne(t *testing.T, acquire func(context.Context) (*pgxpool.Conn, error))
 	return conn
 }
 
-// The lease pool has a connection for every lease name duty.Exclusive accepts, and two spare.
+// The lease pool has a connection for every lease name duty.Exclusive accepts, and one spare.
 func TestTheLeasePoolCountsEveryLeaseName(t *testing.T) {
 	names := len(duty.LeaseNames())
-	if leaseNameCount != names || leasePoolSize != names+2 {
+	if leaseNameCount != names || leasePoolSize != names+1 {
 		t.Errorf("leaseNameCount %d and leasePoolSize %d, want %d lease names and %d connections",
-			leaseNameCount, leasePoolSize, names, names+2)
+			leaseNameCount, leasePoolSize, names, names+1)
 	}
 }
