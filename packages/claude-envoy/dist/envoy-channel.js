@@ -36253,6 +36253,7 @@ function serviceSubjectLabel(subject) {
   }
   return subject;
 }
+var ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS = 20 * 60 * 1000;
 var MAX_ISSUE_BLOCKERS = 20;
 var ISSUE_TITLE_MAX = 1000;
 var PROJECT_NAME_MAX = 80;
@@ -36582,14 +36583,37 @@ var AGENT_STREAM_LIMITS = {
   commandDescriptionChars: 200
 };
 // ../contracts/src/claim-holds.ts
-function claimHolds(claim, titles) {
+var HOLDING_OF = {
+  gone: "lapsed",
+  live: "holds",
+  unknown: "unknown",
+  unresponsive: "unresponsive"
+};
+function claimHolds(claim, titles, liveness = {}) {
   if (claim.actor.kind !== "session") {
     return "holds";
+  }
+  const state = liveness.holder_state;
+  if (state != null) {
+    return HOLDING_OF[state];
   }
   if (titles === undefined) {
     return "unknown";
   }
   return titles.has(claim.actor.id) ? "holds" : "lapsed";
+}
+function claimTakeableAt(liveness, lastSeen = undefined) {
+  if (liveness.takeable_at != null) {
+    return liveness.takeable_at;
+  }
+  if (liveness.holder_state !== "unresponsive") {
+    return null;
+  }
+  const seen = liveness.last_seen == null ? lastSeen : Date.parse(liveness.last_seen);
+  if (seen === undefined || !Number.isFinite(seen) || seen <= 0) {
+    return null;
+  }
+  return new Date(seen + ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS).toISOString();
 }
 // ../contracts/src/dispatch-href.ts
 function hasControlCharacter(value) {
@@ -36832,7 +36856,12 @@ var ISSUE_STATUSES = [
   "retro",
   "done"
 ];
-var ISSUE_ROUTE_STATUSES = ["live", "no_holder", "unknown"];
+var ISSUE_ROUTE_STATUSES = [
+  "live",
+  "holder_unresponsive",
+  "no_holder",
+  "unknown"
+];
 var DOC_EDIT_OPS = [
   "replace",
   "delete",
@@ -37257,7 +37286,7 @@ var dispatchToolSpecs = [
       label: z.string().describe("Optional label filter.").optional(),
       priority: z.array(z.number({ int: true, min: 0, max: 3 }).nullable(), { min: 1, max: 5 }).describe("Optional priority filter: one or more of 0 (P0, highest) through 3 (P3, lowest), and null " + "for an issue with no priority; an issue matching any listed value is returned.").optional(),
       updated_since: z.string().describe("Optional RFC3339 timestamp; only issues updated at or after it.").optional(),
-      route_status: z.enum(ISSUE_ROUTE_STATUSES).describe("Optional: only open issues whose route is in this state. live: a running session holds " + "the role or is the routed session. no_holder: nobody running holds the role, or the " + "session is not running, right now. unknown: the Envoy listener did not answer.").optional(),
+      route_status: z.enum(ISSUE_ROUTE_STATUSES).describe("Optional: only open issues whose route is in this state. live: a running session holds " + "the role or is the routed session. holder_unresponsive: that session has missed its " + "heartbeats without ending, so the route still reaches it and its messages wait. " + "no_holder: nobody running holds the role, or the session is gone, right now. " + "unknown: the Envoy listener did not answer.").optional(),
       limit: z.number({ int: true, min: 1, max: MAX_ISSUE_PAGE_LIMIT }).describe(`Maximum rows, 1-${MAX_ISSUE_PAGE_LIMIT}; default ${DEFAULT_ISSUE_PAGE_LIMIT}.`).optional(),
       offset: z.number({ int: true, min: 0 }).describe("Rows to skip before the page; nonnegative integer; default 0.").optional(),
       all: z.boolean().describe("Take every matching issue in one unpaged read, so no row is missed or repeated while " + "the list changes. Refused with limit or offset.").optional()
@@ -37690,6 +37719,11 @@ function dedupeKeyNamesItsEvent(envelope) {
       return false;
   }
 }
+// ../contracts/src/envoy-session.ts
+var SESSION_HEARTBEAT_MS = 90000;
+var LISTENER_CALL_TIMEOUT_MS = 5000;
+var LISTENER_CALL_RETRY_DELAY_MS = 250;
+var LISTENER_CALL_ATTEMPTS = 2;
 // ../contracts/src/subject.ts
 var AGENT_TOPIC_PREFIX = "notifications.agent.";
 var ROLE_TOPIC_PREFIX = "notifications.role.";
@@ -43839,10 +43873,17 @@ function fileBearer(bearer, url, section, env, commands = "run") {
 
 // ../envoy-client/src/envoy-settings.ts
 var DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
-var DEFAULT_HEARTBEAT_MS = 90000;
+var DEFAULT_HEARTBEAT_MS = SESSION_HEARTBEAT_MS;
 var MIN_PASS_DEADLINE_MS = 30000;
 var MIN_INTERVAL_MS = 25;
 var MAX_INTERVAL_MS = 2147483647;
+var REGISTRATION_SETTLE_MS = 5000;
+var SHUTDOWN_SETTLE_MS = 250;
+var HEARTBEAT_RETRY_MIN_MS = 20000;
+var HEARTBEAT_RETRY_MAX_MS = 40000;
+function heartbeatRetryDelayMs(draw = Math.random) {
+  return Math.round(HEARTBEAT_RETRY_MIN_MS + draw() * (HEARTBEAT_RETRY_MAX_MS - HEARTBEAT_RETRY_MIN_MS));
+}
 function namedInterval(raw) {
   const parsed = Number(raw);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
@@ -43961,10 +44002,11 @@ function machineID() {
 }
 
 // ../envoy-client/src/transport.ts
-var DEFAULT_TIMEOUT_MS = 5000;
-var RETRY_DELAY_MS = 250;
 var REPLAY_TIMEOUT_MS = 1e4;
 var REPLAY_UNAVAILABLE_CODE = "REPLAY_UNAVAILABLE";
+var SessionStateSchema = _enum2(["live", "unresponsive", "gone"]);
+var UNRESPONSIVE_RULE = "An unresponsive session is not dead: it keeps its role claims and its issue claims, and a " + "message sent to it is stored until it answers. Start no replacement for it and take no claim " + `from it until it is gone, or until ${ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS / 60000} minutes ` + "have passed since its last_seen, the time of its last registration.";
+var WireStateSchema = SessionStateSchema.default("live");
 var InterestWireSchema = object({
   session_id: string2(),
   machine_id: string2(),
@@ -43994,6 +44036,7 @@ var SessionWireSchema = object({
   capabilities: array(string2()).optional(),
   self_subscribed: boolean2(),
   last_seen: number2().int().optional(),
+  state: WireStateSchema,
   plugin: string2().optional(),
   plugin_version: string2().optional()
 });
@@ -44001,7 +44044,9 @@ var RoleWireSchema = object({
   role: string2(),
   holder: string2(),
   host: string2().optional(),
-  last_seen: number2().int()
+  last_seen: number2().int(),
+  state: WireStateSchema,
+  holder_state: SessionStateSchema.optional()
 });
 var RoleHeldWireSchema = object({
   error: string2(),
@@ -44011,11 +44056,21 @@ var RoleHeldWireSchema = object({
 var ErrorWireSchema = object({
   error: string2(),
   code: string2().optional(),
-  expected: array(string2()).optional()
+  expected: array(string2()).optional(),
+  state: SessionStateSchema.optional(),
+  holder: string2().optional(),
+  holder_state: SessionStateSchema.optional(),
+  last_seen: number2().int().optional(),
+  claim_released: boolean2().optional(),
+  unresponsive: array(string2()).optional()
 });
 var EnvelopeResponseSchema = EnvelopeSchema.extend({
   recipient: string2().optional(),
   holder: string2().optional(),
+  holder_state: SessionStateSchema.optional(),
+  recipient_state: SessionStateSchema.optional(),
+  last_seen: number2().int().optional(),
+  unresponsive: array(string2()).optional(),
   duplicate: boolean2().optional()
 });
 var PublishResponseSchema = EnvelopeResponseSchema.extend({
@@ -44067,6 +44122,9 @@ function mergeInterestSources(registryTopics, liveTopics) {
   }
   return interests;
 }
+function holderStateOf(role) {
+  return role.holder_state ?? role.state;
+}
 function newClientInstanceID() {
   return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
@@ -44087,12 +44145,36 @@ function expandSubscriptionTopics(topics) {
   }
   return [...expanded];
 }
+function refusalStateText(parsed) {
+  const sentences = [];
+  const state = parsed.holder_state ?? parsed.state;
+  if (state !== undefined) {
+    const who = parsed.holder === undefined ? "That session" : `Holder ${parsed.holder}`;
+    const seen = parsed.last_seen === undefined || parsed.last_seen <= 0 ? "" : `, last seen ${new Date(parsed.last_seen).toISOString()}`;
+    sentences.push(`${who} is ${state}${seen}.`);
+  }
+  const stored = parsed.unresponsive ?? [];
+  if (stored.length > 0) {
+    const one = stored.length === 1;
+    sentences.push(`Envoy stored the message for ${stored.join(", ")}.`, `${one ? "That session" : "Those sessions"} stopped answering, so ${one ? "it" : "they"} did not fail this send.`);
+  }
+  if (sentences.length === 0)
+    return "";
+  if (state === "unresponsive" || stored.length > 0)
+    sentences.push(UNRESPONSIVE_RULE);
+  return ` ${sentences.join(" ")}`;
+}
 
 class EnvoyApiError extends Error {
   details;
   name = "EnvoyApiError";
   expected;
   code;
+  holder;
+  sessionState;
+  lastSeen;
+  claimReleased;
+  unresponsive;
   constructor(details) {
     let parsed;
     try {
@@ -44100,10 +44182,15 @@ class EnvoyApiError extends Error {
       if (result.success)
         parsed = result.data;
     } catch {}
-    super(parsed === undefined ? `${details.method} ${details.url} failed with ${details.status}: ${details.responseBody}` : `${parsed.error}${parsed.expected === undefined ? "" : ` (expected: ${parsed.expected.join(", ")})`}`);
+    super(parsed === undefined ? `${details.method} ${details.url} failed with ${details.status}: ${details.responseBody}` : `${parsed.error}${parsed.expected === undefined ? "" : ` (expected: ${parsed.expected.join(", ")})`}${refusalStateText(parsed)}`);
     this.details = details;
     this.expected = parsed?.expected;
     this.code = parsed?.code;
+    this.holder = parsed?.holder;
+    this.sessionState = parsed?.holder_state ?? parsed?.state;
+    this.lastSeen = parsed?.last_seen;
+    this.claimReleased = parsed?.claim_released;
+    this.unresponsive = parsed?.unresponsive;
   }
 }
 var mintedDedupeKey2 = new RegExp(MINTED_DEDUPE_KEY_PATTERN);
@@ -44128,10 +44215,16 @@ class EnvoySendUnconfirmedError extends Error {
     this.resendSafe = resendSafe;
   }
 }
+function resolveCallTiming(config) {
+  return {
+    timeoutMs: config.timeoutMs ?? LISTENER_CALL_TIMEOUT_MS,
+    attempts: config.retry === false ? 1 : LISTENER_CALL_ATTEMPTS,
+    retryDelayMs: LISTENER_CALL_RETRY_DELAY_MS
+  };
+}
 function createEnvoyClient(config) {
   const baseUrl = normalizeEnvoyUrl(config.baseUrl);
-  const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const attempts = config.retry === false ? 1 : 2;
+  const { timeoutMs, attempts, retryDelayMs } = resolveCallTiming(config);
   const credential = config.credential;
   const attemptOnce = async (url, init, deadlineMs, actingSession) => {
     let response;
@@ -44177,7 +44270,7 @@ function createEnvoyClient(config) {
       if ("unanswered" in outcome) {
         options.onUnanswered?.();
         if (attempt + 1 < tries) {
-          await waitForRetry();
+          await waitForRetry(retryDelayMs);
           continue;
         }
         throw outcome.unanswered;
@@ -44194,7 +44287,7 @@ function createEnvoyClient(config) {
       if (response.status >= 500) {
         options.onUnanswered?.();
         if (attempt + 1 < tries) {
-          await waitForRetry();
+          await waitForRetry(retryDelayMs);
           continue;
         }
       }
@@ -44259,6 +44352,8 @@ function createEnvoyClient(config) {
         envelope: response,
         recipient: response.recipient ?? input.targetSessionID,
         confirmed: response.recipient !== undefined,
+        recipientState: response.recipient_state ?? "live",
+        ...response.last_seen === undefined || response.last_seen <= 0 ? {} : { lastSeen: response.last_seen },
         duplicate: response.duplicate === true
       };
     },
@@ -44277,6 +44372,8 @@ function createEnvoyClient(config) {
       return {
         envelope: response,
         ...response.holder === undefined ? {} : { holder: response.holder },
+        ...response.holder_state === undefined ? {} : { holderState: response.holder_state },
+        unresponsive: response.unresponsive ?? [],
         ...response.kept === undefined ? {} : { kept: response.kept },
         ...response.kept_reason === undefined ? {} : { keptReason: response.kept_reason }
       };
@@ -44320,6 +44417,8 @@ function createEnvoyClient(config) {
         search.set("dir", input.directory);
       if (input.title !== undefined)
         search.set("title", input.title);
+      if (input.include !== undefined)
+        search.set("include", input.include);
       const query = search.size === 0 ? "" : `?${search.toString()}`;
       return SessionWireSchema.array().parse(JSON.parse(await request(`/v1/sessions${query}`, {})));
     },
@@ -44334,9 +44433,9 @@ function createEnvoyClient(config) {
     })))
   };
 }
-function waitForRetry() {
+function waitForRetry(delayMs) {
   const { promise, resolve } = Promise.withResolvers();
-  setTimeout(resolve, RETRY_DELAY_MS);
+  setTimeout(resolve, delayMs);
   return promise;
 }
 function messageMetadata(input) {
@@ -48010,21 +48109,49 @@ function componentsLine(components) {
       return "Components: unassigned";
   }
 }
-function claimText(claim, titles) {
-  const holding = claimHolds(claim, titles);
-  const marker = holding === "unknown" ? " \xB7 liveness unknown" : holding === "lapsed" ? " \xB7 not running" : "";
+function claimText(claim, agents, read = {}) {
+  const titles = agents?.titles;
+  const liveness = holderLiveness(claim, agents, read);
+  const holding = claimHolds(claim, titles, liveness);
+  const takeableAt = claimTakeableAt(liveness);
+  const unresponsive = liveness.holder_state === "unresponsive" && liveness.last_seen != null ? ` \xB7 unresponsive since ${liveness.last_seen}${takeableAt === null ? "" : `, takeable at ${takeableAt}`}` : " \xB7 unresponsive";
+  const marker = holding === "unknown" ? " \xB7 liveness unknown" : holding === "lapsed" ? " \xB7 not running" : holding === "unresponsive" ? unresponsive : "";
   return `${actorLabel(claim.actor, titles)} since ${claim.at}${marker}`;
 }
-async function liveSessionTitles(client, needed) {
+function holderLiveness(claim, agents, read) {
+  if (claim.actor.kind !== "session")
+    return read;
+  const row = agents?.liveness.get(claim.actor.id);
+  if (row === undefined)
+    return read;
+  const holderState = read.holder_state ?? row.holder_state;
+  const lastSeen = read.last_seen ?? row.last_seen;
+  const takeableAt = read.takeable_at ?? row.takeable_at;
+  return {
+    ...holderState === undefined ? {} : { holder_state: holderState },
+    ...lastSeen === undefined ? {} : { last_seen: lastSeen },
+    ...takeableAt === undefined ? {} : { takeable_at: takeableAt }
+  };
+}
+async function liveAgents(client, needed) {
   if (!needed) {
     return;
   }
   try {
     const agents = await client.listAgents();
-    return new Map(agents.map((agent) => [agent.session_id, agent.title]));
+    return {
+      titles: new Map(agents.map((agent) => [agent.session_id, agent.title])),
+      liveness: new Map(agents.map((agent) => [agent.session_id, agentLiveness(agent)]))
+    };
   } catch {
     return;
   }
+}
+function agentLiveness(agent) {
+  return {
+    ...agent.state === undefined ? {} : { holder_state: agent.state },
+    ...agent.last_seen > 0 ? { last_seen: new Date(agent.last_seen).toISOString() } : {}
+  };
 }
 function holdsSession(claim) {
   return claim?.actor.kind === "session";
@@ -48038,8 +48165,9 @@ function routeText(issue, titles) {
   const holder = issue.route_holder ?? null;
   const reach = {
     live: routeHeldBySession(issue) && holder !== null ? ` (held by ${titles?.get(holder) ?? holder})` : "",
+    holder_unresponsive: issue.route.startsWith("role:") ? ` (its holder${holder === null ? "" : ` ${titles?.get(holder) ?? holder}`} is unresponsive: messages wait for it)` : " (that session is unresponsive: messages wait for it)",
     no_holder: issue.route.startsWith("role:") ? " (nobody holds it right now)" : " (that session is not running right now)",
-    unknown: " (the Envoy listener did not answer, so whether it reaches anyone is unknown)"
+    unknown: issue.route_status_reason === "refilling" ? " (the Envoy listener's agent list is refilling, so whether it reaches anyone is unknown; try again in a moment)" : " (the Envoy listener did not answer, so whether it reaches anyone is unknown)"
   };
   return issue.route + (issue.route_status == null ? "" : reach[issue.route_status]);
 }
@@ -48097,7 +48225,7 @@ function refuseUnsavedRepository(verb, issue, repo) {
   const lost = repo === "" ? "the repository was not cleared" : `${repo} was not saved`;
   throw new Error(`Dispatch ${verb} ${issue.key} without its repository: this Dispatch server predates repository fields, so ${lost}; upgrade the server`);
 }
-function issueSummary(issue, events, references, graph, linkBase, coverage, titles) {
+function issueSummary(issue, events, references, graph, linkBase, coverage, agents) {
   const asks = issue.open_asks;
   const spec = issue.artifacts?.find((artifact) => artifact.primary);
   const specApproval = spec === undefined ? undefined : approvalLine(spec);
@@ -48118,11 +48246,11 @@ function issueSummary(issue, events, references, graph, linkBase, coverage, titl
     `Link: ${new URL(`/issues/${encodeURIComponent(issue.key)}`, linkBase).toString()}`,
     `Status: ${issue.status}`,
     `Assignee: ${issue.assignee ?? "unassigned"}`,
-    `Claimed by: ${issue.claim === null ? "nobody" : claimText(issue.claim, titles)}`,
+    `Claimed by: ${issue.claim === null ? "nobody" : claimText(issue.claim, agents, issue)}`,
     ...issue.priority === null ? [] : [`Priority: P${issue.priority}`],
     `Labels: ${issue.labels.length === 0 ? "none" : issue.labels.join(", ")}`,
     componentsLine(issue.components),
-    `Route: ${routeText(issue, titles)}`,
+    `Route: ${routeText(issue, agents?.titles)}`,
     repositoryLine(issue),
     `Progress: ${progressText(issue.progress, ", ") || "none"}`,
     ...specApproval === undefined ? [] : [`Spec ${specApproval.replace(/^Approval/, "approval")}`],
@@ -49325,10 +49453,11 @@ async function executeDispatchTool(input) {
         route: row.route ?? null,
         route_status: row.route_status ?? null,
         route_holder: row.route_holder ?? null,
+        route_status_reason: row.route_status_reason ?? null,
         updated_at: row.updated_at,
         progress: row.progress
       }));
-      const titles = await liveSessionTitles(client, rows.some((row) => holdsSession(row.claim)));
+      const agents = await liveAgents(client, rows.some((row) => holdsSession(row.claim)));
       const isPartial = offset !== 0 || rows.length !== total;
       const showing = !isPartial ? "" : rows.length === 0 ? `showing 0-0 of ${total}` : pageSummaryText(offset, rows.length, total);
       return {
@@ -49336,7 +49465,7 @@ async function executeDispatchTool(input) {
           `${rows.length} ${rows.length === 1 ? "issue" : "issues"} in ${project}` + (isPartial ? ` (${showing})` : ""),
           ...rows.map((row) => {
             const progress = progressText(row.progress, " \xB7 ");
-            return `${row.key} [${row.status}]${row.priority === null ? "" : ` P${row.priority}`} ${row.title}` + (row.open_asks === 0 ? "" : ` \xB7 ${row.open_asks} open ${row.open_asks === 1 ? "ask" : "asks"}`) + (row.claim === null ? "" : ` \xB7 claimed by ${claimText(row.claim, titles)}`) + (progress === "" ? "" : ` \xB7 ${progress}`) + (row.route === null || row.route_status === "live" || row.route_status === null ? "" : ` \xB7 route ${routeText(row)}`);
+            return `${row.key} [${row.status}]${row.priority === null ? "" : ` P${row.priority}`} ${row.title}` + (row.open_asks === 0 ? "" : ` \xB7 ${row.open_asks} open ${row.open_asks === 1 ? "ask" : "asks"}`) + (row.claim === null ? "" : ` \xB7 claimed by ${claimText(row.claim, agents)}`) + (progress === "" ? "" : ` \xB7 ${progress}`) + (row.route === null || row.route_status === "live" || row.route_status === null ? "" : ` \xB7 route ${routeText(row)}`);
           })
         ].join(`
 `),
@@ -50122,10 +50251,10 @@ ${handoff.body}`,
       const readPromise = client.read(issueKey, readEvents);
       const referencesPromise = issueReferencesOrUnavailable(client, issueKey);
       const read = await readPromise;
-      const [references, graph, titles, pictures, coverage] = await Promise.all([
+      const [references, graph, agents, pictures, coverage] = await Promise.all([
         referencesPromise,
         graphSections(client, dispatchIssueRef(read.issue.key)),
-        liveSessionTitles(client, holdsSession(read.issue.claim) || routeHeldBySession(read.issue)),
+        liveAgents(client, holdsSession(read.issue.claim) || routeHeldBySession(read.issue)),
         picturesOf([
           ...read.issue.open_asks.map((ask) => ({ text: ask.question, at: ask.created_at })),
           ...await eventTextsWhole(client, read.events)
@@ -50133,7 +50262,7 @@ ${handoff.body}`,
         issueCoverageOrReason(client, read.issue.key)
       ]);
       return {
-        text: issueSummary(read.issue, read.events, references, [...pictures.lines, ...graph], linkBase, coverage, titles),
+        text: issueSummary(read.issue, read.events, references, [...pictures.lines, ...graph], linkBase, coverage, agents),
         details: { issue: read.issue.key },
         ...showImages(pictures),
         ...repositoryFieldsWarnings(read.issue)
@@ -50859,6 +50988,7 @@ function allowedAPIURL(value) {
 }
 
 // ../envoy-client/src/tool-contract.ts
+var SESSION_STATE_GUIDE = "A session is live, unresponsive or gone, by how long ago it last registered: live within 5 " + "minutes, unresponsive after that and within an hour, gone past the hour or with no record at " + `all. ${UNRESPONSIVE_RULE} A session named with no state is live.`;
 var DELIVERY_CONTRACT = "Delivery is at-least-once, possibly out of order across topics; use id for dedupe and at for freshness.";
 var STORED_DELIVERY = "Stored topics (agent, dispatch, github, slack, legion, ghostwispr, whatsapp; a role message " + "reaches its holder as a stored copy on the holder's agent topic) reach each subscribed session " + "once from the durable consumer its listener relays to it, also one that was away or restarted. " + "Team and other ad-hoc topics are live only.";
 var TOPIC_GUIDE = "Topic guide (all are under notifications.): agent.<session_id> (subscribe: own inbox); role.<role> " + "(publish-to; holders claim via envoy_role_set). > matches one or more trailing tokens and does not " + "match the base subject. Envoy registers the concrete base when you subscribe to <subject>.>, so " + "the recommended default remains github.<owner>.<repo>.pr.<n>.>. <owner> and <repo> are one token " + "each, with every dot in the name written _ (sjawhar/.github is github.sjawhar._github; " + "acme/site.io is github.acme.site_io), and a topic spelled with the dot receives nothing. " + "Default PR subscription: " + "github.<owner>.<repo>.pr.<n>.> (it receives the quiet PR family): pr.<n> (lifecycle: " + "opened/synchronize/closed; closed carries merged, merge_commit_sha, merged_by, head_sha), " + "pr.<n>.comment, pr.<n>.review, pr.<n>.mention, pr.<n>.checks (one settlement event per commit whose checks settle, the head or not, naming its sha: " + 'passed/failed/cancelled/skipped with failing names and URLs; re-fires with superseded_settlement: "true" ' + "when new runs appear for the same commit). Other GitHub: issue.<n>, issue.<n>.comment, " + "issue.<n>.mention, mention, push.branch.<name>, push.tag.<name>, workflow.<file>.<action> (only " + "runs without an associated PR); slack.<team>.<channel>.message|mention and " + "slack.<team>.<channel>.thread.<ts>.message|mention; ghostwispr.<session>.<kind>; " + "whatsapp.<phone>.<jid>.<kind>; envoy.exceptions.<original-topic>.";
@@ -50928,7 +51058,7 @@ var envoyToolSpecs = [
   },
   {
     name: "envoy_send",
-    description: `Send an Envoy agent-to-agent message directly to another session by session ID. ${DELIVERY_CONTRACT} A send that is not confirmed delivered errs naming its idempotency_key; send the same message again with that idempotency_key within 72 hours, and Envoy drops it as a repeat if the first copy arrived.`,
+    description: `Send an Envoy agent-to-agent message directly to another session by session ID. The confirmation names the recipient's state. A message to an unresponsive session is stored and reaches it when it answers again, so an unresponsive recipient is not a failed send and no reason to send to someone else instead. ${SESSION_STATE_GUIDE} ${DELIVERY_CONTRACT} A send that is not confirmed delivered errs naming its idempotency_key; send the same message again with that idempotency_key within 72 hours, and Envoy drops it as a repeat if the first copy arrived.`,
     arguments: (schema) => ({
       session_id: schema.string().describe("Target session ID; find it with envoy_sessions or envoy_whoami."),
       ...messageArguments(schema),
@@ -50938,7 +51068,7 @@ var envoyToolSpecs = [
   },
   {
     name: "envoy_publish",
-    description: `Publish an Envoy message to a notifications. topic. ${STORED_DELIVERY} A role or built-in topic is delivered as its guide says. A role message has three possible answers. First, the session that holds the role takes the message. That session must confirm the message inside the listener's window, or this tool errs. Second, no session holds the role, or its holder's claim has lapsed. The listener then keeps the message, and gives it to the next session that claims that role in the hour that follows. This is a success, and the result says that the listener kept the message. Third, the listener keeps nothing and errs, which tells you to reach the agent some other way. A team or ad-hoc topic (such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not kept for a session that subscribes later. The listener confirms it with each other session that holds its own NATS connection and registered the topic, and errs naming each session that did not confirm; a session that stopped without unregistering stays registered for up to 5 minutes and is named in that time, and a named session is not a failed delivery to the other sessions. A session that holds its own NATS connection receives such a live topic directly, yours included. ${DELIVERY_CONTRACT}`,
+    description: `Publish an Envoy message to a notifications. topic. ${STORED_DELIVERY} A role or built-in topic is delivered as its guide says. A role message has three possible answers. First, the session that holds the role takes the message. That session must confirm the message inside the listener's window, or this tool errs. Second, no session holds the role. The listener then keeps the message, and gives it to the next session that claims that role in the hour that follows. This is a success, and the result says that the listener kept the message. Third, the listener keeps nothing and errs. A holder that stopped answering keeps its role but was not sent the message, and nothing waits for it, so publish the message again once that holder's holder_state reads live, and start no replacement for that session. A team or ad-hoc topic (such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not kept for a session that subscribes later. The listener confirms it with each other session that holds its own NATS connection and registered the topic, and errs naming each session that did not confirm; a session that stopped without unregistering stays registered until Envoy finds it gone and is named until then. A named session is not a failed delivery to the other sessions. A session that is only unresponsive is named as no failure at all. The listener stores that session's copy, asks it for no receipt, and names the session under unresponsive. The accepted publish and the error both name it there. That session takes the message when it answers again. A session that holds its own NATS connection receives such a live topic directly, yours included. ${SESSION_STATE_GUIDE} ${DELIVERY_CONTRACT}`,
     arguments: (schema) => ({ topic: schema.string(), ...messageArguments(schema) }),
     operation: EnvoyToolOperation.publish
   },
@@ -50950,7 +51080,7 @@ var envoyToolSpecs = [
   },
   {
     name: "envoy_role_get",
-    description: "Get the live holder of a named Envoy role.",
+    description: `Get the holder of a named Envoy role, with its holder_state and the holder's last_seen. A holder that is only unresponsive still holds the role: nothing a lookup does releases its claim, and only a gone holder leaves the role unheld. ${SESSION_STATE_GUIDE}`,
     arguments: (schema) => ({ role: schema.string() }),
     operation: EnvoyToolOperation.getRole
   },
@@ -50962,7 +51092,7 @@ var envoyToolSpecs = [
   },
   {
     name: "envoy_sessions",
-    description: "List all live sessions registered with Envoy. Filter by optional machine, directory, or title.",
+    description: "List the Envoy sessions that are live or unresponsive; a gone session is listed by neither. " + "Filter by optional machine, directory, or title. Each row carries its state and its " + `last_seen, the epoch milliseconds of its last registration. ${SESSION_STATE_GUIDE}`,
     arguments: (schema) => ({
       machine: schema.string().optional(),
       dir: schema.string().optional(),
@@ -50985,14 +51115,23 @@ function sendConfirmationText(result) {
   if (result.duplicate) {
     return `sent to ${result.recipient} once: an earlier attempt under the same idempotency_key was already stored, so this one stored no second copy`;
   }
-  return `sent ${result.envelope.event_id} to ${result.recipient}${result.confirmed ? "" : " (recipient unconfirmed by listener)"}`;
+  const since = result.lastSeen === undefined ? "" : ` since ${new Date(result.lastSeen).toISOString()}`;
+  const state = result.recipientState === "unresponsive" ? `unresponsive${since}, so it is stored until that session answers; ${UNRESPONSIVE_RULE}` : result.recipientState;
+  return `sent ${result.envelope.event_id} to ${result.recipient} (${state})${result.confirmed ? "" : " (recipient unconfirmed by listener)"}`;
 }
 function publishConfirmationText(result) {
-  const published = `published ${result.envelope.event_id}`;
+  const sentences = [`published ${result.envelope.event_id}.`];
   if (result.kept === true) {
-    return `${published}; kept for the role: no session holds it yet, and the message waits for the session that claims it next`;
+    sentences.push("Envoy kept it for the role: no session holds it yet, and the message waits for the session that claims it next.");
+  } else if (result.holder !== undefined) {
+    const state = result.holderState === undefined ? "" : ` (${result.holderState})`;
+    sentences.push(`Its role holder is ${result.holder}${state}.`);
   }
-  return result.holder === undefined ? published : `${published}; holder ${result.holder}`;
+  if (result.unresponsive.length > 0) {
+    const one = result.unresponsive.length === 1;
+    sentences.push(`Envoy stored it for ${result.unresponsive.join(", ")}.`, `${one ? "That session" : "Those sessions"} stopped answering, so ${one ? "it has" : "they have"} not taken it yet.`, UNRESPONSIVE_RULE);
+  }
+  return sentences.join(" ");
 }
 function sessionsOnMachine(sessions, machine) {
   if (machine === undefined || machine === "")
@@ -56581,6 +56720,28 @@ async function startChannelSession(options) {
     });
     return result;
   };
+  let registrationInFlight;
+  const settleMs = options.registrationSettleMs ?? REGISTRATION_SETTLE_MS;
+  const shutdownSettleMs = Math.min(settleMs, SHUTDOWN_SETTLE_MS);
+  const settledOrGivenUp = async (settling, ms = settleMs) => {
+    const { promise, resolve } = Promise.withResolvers();
+    const timer = setTimeout(resolve, ms);
+    try {
+      await Promise.race([settling.catch(() => {
+        return;
+      }), promise]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  const deregister = async (sessionID, settleFor = settleMs) => {
+    if (registrationInFlight !== undefined)
+      await settledOrGivenUp(registrationInFlight, settleFor);
+    await options.client.unregisterSession({
+      sessionID,
+      clientInstanceID: options.clientInstanceID
+    });
+  };
   const dedupe = createDeliveryDedupe();
   let replayBound;
   const showReplayed = async (frame) => {
@@ -56833,7 +56994,7 @@ async function startChannelSession(options) {
     const topics = registeredTopics();
     const asking = relay?.sessionID === identity.id ? relay : undefined;
     asking?.delivery.setFollowed(topics);
-    const result = await options.client.subscribe({
+    const registering = options.client.subscribe({
       sessionID,
       directory: identity.directory,
       topics,
@@ -56846,6 +57007,17 @@ async function startChannelSession(options) {
       plugin: { name, version: options.pluginVersion },
       ...asking === undefined ? {} : { delivery: asking.delivery.registration() }
     });
+    const settled = registering.then(() => {
+      return;
+    }, () => {
+      return;
+    });
+    registrationInFlight = settled;
+    settled.then(() => {
+      if (registrationInFlight === settled)
+        registrationInFlight = undefined;
+    });
+    const result = await registering;
     takeDeliveryAnswer(sessionID, topics, asking, result);
   };
   const restoreRole = async (previousSessionID = identity.id) => {
@@ -56947,10 +57119,7 @@ async function startChannelSession(options) {
     forwarder.follow(nextSubject);
     try {
       await withTimeout(options.connection.flush(), options.handoffFlushTimeoutMs ?? HANDOFF_FLUSH_TIMEOUT_MS, "flushing NATS");
-      await options.client.unregisterSession({
-        sessionID: previous,
-        clientInstanceID: options.clientInstanceID
-      });
+      await deregister(previous);
     } catch (error) {
       forwarder.unfollow([nextSubject]);
       throw error;
@@ -56999,7 +57168,20 @@ async function startChannelSession(options) {
   let heartbeatRequested = false;
   let outageReported = false;
   let registrationFailed = false;
-  const heartbeat = async () => {
+  let retryArmed = false;
+  let dropRetry;
+  const scheduleRetry = options.scheduleRetry ?? ((run, delayMs) => {
+    const timer = setTimeout(run, delayMs);
+    return () => {
+      clearTimeout(timer);
+    };
+  });
+  const clearRetry = () => {
+    retryArmed = false;
+    dropRetry?.();
+    dropRetry = undefined;
+  };
+  const heartbeat = async (fromRetry = false) => {
     if (shuttingDown || heartbeatInFlight)
       return;
     heartbeatInFlight = true;
@@ -57018,13 +57200,15 @@ async function startChannelSession(options) {
       });
       registrationFailed = false;
       outageReported = false;
+      clearRetry();
     } catch (error) {
+      const retryIn = fromRetry ? undefined : armRetry();
       if (outageReported)
         return;
       outageReported = true;
-      process.stderr.write(`envoy-channel: registry heartbeat failed (${messageFor(error)}); retrying every heartbeat
+      const retrying = retryIn === undefined ? "retrying at the next heartbeat" : `retrying once in ${Math.round(retryIn / 1000)} s, then every heartbeat`;
+      process.stderr.write(`envoy-channel: registry heartbeat failed (${messageFor(error)}); ${retrying}
 `);
-      requestHeartbeat();
     } finally {
       heartbeatInFlight = false;
       triggerReplay();
@@ -57033,6 +57217,20 @@ async function startChannelSession(options) {
         heartbeat();
       }
     }
+  };
+  const armRetry = () => {
+    if (retryArmed || shuttingDown)
+      return;
+    retryArmed = true;
+    const delayMs = heartbeatRetryDelayMs();
+    dropRetry = scheduleRetry(() => {
+      if (!retryArmed)
+        return;
+      retryArmed = false;
+      dropRetry = undefined;
+      heartbeat(true);
+    }, delayMs);
+    return delayMs;
   };
   const requestHeartbeat = () => {
     if (heartbeatInFlight)
@@ -57148,14 +57346,14 @@ async function startChannelSession(options) {
         return;
       shuttingDown = true;
       clearInterval(heartbeatTimer);
+      clearRetry();
       if (handoffFile !== undefined)
         unwatchFile(handoffFile, handoffFileChanged);
       closeRelay();
       await forwarder.close();
-      await serialized(() => options.client.unregisterSession({
-        sessionID: identity.id,
-        clientInstanceID: options.clientInstanceID
-      })).catch((error) => {
+      const settleBy = Date.now() + shutdownSettleMs;
+      await settledOrGivenUp(registryWrites, shutdownSettleMs);
+      await deregister(identity.id, Math.max(0, settleBy - Date.now())).catch((error) => {
         process.stderr.write(`envoy-channel: session deregistration failed \u2014 ${messageFor(error)}
 `);
       });
@@ -57183,6 +57381,7 @@ async function executeEnvoyTool(runtime, name, input) {
         message: sendConfirmationText(result),
         event_id: result.envelope.event_id,
         recipient: result.recipient,
+        recipient_state: result.recipientState,
         confirmed: result.confirmed
       };
     }
@@ -57195,7 +57394,16 @@ async function executeEnvoyTool(runtime, name, input) {
         message: args.message,
         ...toMessageMetadata(args)
       });
-      return { message: publishConfirmationText(result), ...result };
+      return {
+        message: publishConfirmationText(result),
+        event_id: result.envelope.event_id,
+        topic: result.envelope.topic,
+        ...result.holder === undefined ? {} : { holder: result.holder },
+        ...result.holderState === undefined ? {} : { holder_state: result.holderState },
+        unresponsive: result.unresponsive,
+        ...result.kept === undefined ? {} : { kept: result.kept },
+        ...result.keptReason === undefined ? {} : { kept_reason: result.keptReason }
+      };
     }
     case EnvoyToolOperation.subscribe: {
       const args = parseArguments(spec, input);
@@ -57223,7 +57431,8 @@ async function executeEnvoyTool(runtime, name, input) {
       const args = parseArguments(spec, input);
       const sessions = await runtime.client.listSessions({
         ...args.dir === undefined ? {} : { directory: args.dir },
-        ...args.title === undefined ? {} : { title: args.title }
+        ...args.title === undefined ? {} : { title: args.title },
+        include: "unresponsive"
       });
       return sessionsOnMachine(sessions, args.machine);
     }
@@ -57237,7 +57446,8 @@ async function executeEnvoyTool(runtime, name, input) {
     }
     case EnvoyToolOperation.getRole: {
       const args = parseArguments(spec, input);
-      return runtime.client.getRole(args.role);
+      const role = await runtime.client.getRole(args.role);
+      return { ...role, holder_state: holderStateOf(role) };
     }
     case EnvoyToolOperation.inbox:
       parseArguments(spec, input);

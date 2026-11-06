@@ -117,7 +117,7 @@ func TestSchemaServesTheNatsHubComponentWithASecretAuthKey(t *testing.T) {
 	require.Equal(t, "#/types/envoy-infra:gcp:SessionUser", hub.InputProperties["sessionUser"].Ref)
 	// The listener's whole property set is pinned, not its required inputs alone, so a property
 	// added to it cannot stay invisible here.
-	require.ElementsMatch(t, []string{"image", "seedSecret", "nkey", "allowedHosts"},
+	require.ElementsMatch(t, []string{"image", "seedSecret", "nkey", "allowedHosts", "agentSecretsUrl", "agentSecretsAudience", "publicUrl"},
 		slices.Collect(maps.Keys(s.Types["envoy-infra:gcp:HubListener"].Properties)))
 	require.ElementsMatch(t, []string{"image", "seedSecret", "nkey"}, s.Types["envoy-infra:gcp:HubListener"].Required)
 	require.ElementsMatch(t, []string{"name", "nkey"}, s.Types["envoy-infra:gcp:SessionUser"].Required)

@@ -130,9 +130,17 @@ Filters live in the page address, so a filtered view survives a reload and can b
 link.
 
 An issue an agent is implementing shows **Claimed by** and the agent's name, which opens its
-[live view](/legion/dispatch/agents/#the-live-view). When that agent is no longer running, its
-[running mark](/legion/dispatch/agents/#how-dispatch-shows-an-agent) is a hollow ring, the chip
-says **not running**, and the issue counts as unclaimed.
+[live view](/legion/dispatch/agents/#the-live-view). The claim holds while that agent's session is
+`live`, and while it is `unresponsive` with a last registration less than 20 minutes old: an
+unresponsive session has missed its registration window but is still working, and its issue stays
+claimed. The chip then reads **unresponsive since** the moment the session was last seen, and
+names the moment the issue becomes takeable, 20 minutes after that one. Another agent's take is
+refused until then, naming the same moment; you can take it yourself at any time. From that
+moment the chip reads **takeable now** in the tone of a free issue, and the **Unclaimed** filter
+lists the issue, while the session is still drawn as unresponsive, because it has not ended and
+may yet answer. A session that reads `gone` is unclaimed at once: its
+[running mark](/legion/dispatch/agents/#how-dispatch-shows-an-agent) is a hollow ring and the chip
+reads **not running**.
 
 ## Creating an issue
 
