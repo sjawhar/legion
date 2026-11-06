@@ -4,8 +4,9 @@
 # ubuntu24.04-x64 list, so the two lists hold the same names, and this script holds them against
 # each other both ways: every name Playwright asks for is one the pinned list holds, and every
 # pinned name is one Playwright asks for. It runs after the step's install, so it also expects
-# Playwright to report nothing missing. Any of the three failing is a list that has fallen
-# behind, and this fails on it.
+# Playwright to report nothing missing. Either of the first two failing is a list that has
+# fallen behind, and the third failing is an install that did not deliver the names it was
+# given; this fails on any of them.
 #
 # The pinned list is the arguments. Playwright's own list is printed nowhere, so it is read from
 # the `apt-get install -s --no-install-recommends` call its dry run makes, which the recording
@@ -132,14 +133,13 @@ if [ "$recorded_call" = false ]; then
   exit 1
 fi
 
+# One pass over the names Playwright asks for. It records each in `asks`, which the second
+# direction below reads whole, and on the way it collects the first direction: a name
+# Playwright asks for that the pinned list does not hold.
 declare -A asks=()
-for name in ${asked[@]+"${asked[@]}"}; do
-  asks[$name]=1
-done
-
-# The first direction: a name Playwright asks for that the pinned list does not hold.
 unpinned=()
 for name in ${asked[@]+"${asked[@]}"}; do
+  asks[$name]=1
   if [ -z "${pinned[$name]:-}" ]; then
     unpinned+=("$name")
   fi
@@ -154,28 +154,28 @@ for name in "$@"; do
   fi
 done
 
-# All three comparisons are reported, so one run names everything a re-derivation has to account
-# for.
-behind=false
+# All three comparisons are reported, so one run names every name a re-derivation of the list
+# has to account for and every name the install did not deliver.
+failed=false
 if [ "${#unpinned[@]}" -gt 0 ]; then
   echo "::error::Playwright asks for system packages the install step's list does not pin:" \
     "${unpinned[*]} - re-derive packages= in .github/workflows/ci.yaml from playwright-core's" \
     "lib/coreBundle.js, as the comment above that step says."
-  behind=true
+  failed=true
 fi
 if [ "${#unasked[@]}" -gt 0 ]; then
   echo "::error::the install step's list pins system packages Playwright does not ask for:" \
     "${unasked[*]} - re-derive packages= in .github/workflows/ci.yaml from playwright-core's" \
     "lib/coreBundle.js, as the comment above that step says."
-  behind=true
+  failed=true
 fi
 if [ "${#missing[@]}" -gt 0 ]; then
   echo "::error::Playwright reports system packages missing after the install step installed the" \
     "whole pinned list: ${missing[*]} - the step did not deliver them, so read its apt output" \
     "above this check in the job log."
-  behind=true
+  failed=true
 fi
-if [ "$behind" = true ]; then
+if [ "$failed" = true ]; then
   exit 1
 fi
 

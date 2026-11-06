@@ -103,7 +103,7 @@ run_check() { # run_check [NAME=VALUE ...] [-- PACKAGE ...]
 }
 
 echo "case: the pinned list is current"
-# What CI takes now: the step installs Playwright's list whole, so the two lists hold the same
+# The run CI makes: the step installs Playwright's list whole, so the two lists hold the same
 # names and the dry run after the install finds nothing missing.
 run_check PLAYWRIGHT_STATUS=0 PLAYWRIGHT_STDOUT='All system dependencies are installed.'
 check "exits 0" "$(is "$status" 0)"
@@ -185,13 +185,13 @@ check "never says the list is current" \
   "$(is "$(contains "$out" 'The pinned list is current')" false)"
 
 echo "case: the count disagrees with the heading"
-run_check PLAYWRIGHT_STATUS=1 PLAYWRIGHT_STDOUT='Missing system dependencies (5):
-  libnss3
-  libgtk-3-0t64
-  xvfb'
+missing_lines=$(printf '  %s\n' "${PINNED[@]}")
+run_check PLAYWRIGHT_STATUS=1 PLAYWRIGHT_STDOUT="Missing system dependencies (5):
+$missing_lines"
 check "exits 1" "$(is "$status" 1)"
 check "names both numbers" \
-  "$(contains "$out" 'says 5 system dependencies are missing and this script read 3 package names')"
+  "$(contains "$out" \
+    "says 5 system dependencies are missing and this script read ${#PINNED[@]} package names")"
 
 echo "case: the dry run broke before it could simulate"
 run_check PLAYWRIGHT_LIST= PLAYWRIGHT_STATUS=1 \

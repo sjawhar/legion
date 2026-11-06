@@ -2556,23 +2556,25 @@ jobs:
       # plays nothing: the plugins that demux Matroska and decode VP8 and h.264 are in them.
       # Playwright's own source says of gstreamer1.0-libav that its one library libgstlibav.so is
       # the library required for playing h.264. The decoder guard after the install asks the
-      # GStreamer registry for one element out of each, so a package dropped from the list fails
-      # this step by its own name rather than a browser row three steps later. That the browsers
-      # launch at all is what the suite's six WebKit and Firefox projects prove - webkit,
-      # webkit-iphone, webkit-alone, firefox, firefox-download-navigation and firefox-alone
-      # (e2e/playwright.config.ts) - which the "Browser-test dispatch dashboard" step below runs.
+      # GStreamer registry for one element out of each. It runs before the browsers are
+      # downloaded, and it is the one check that catches a package that installs without its
+      # element reaching the GStreamer registry. That the browsers launch at all is what the
+      # suite's six WebKit and Firefox projects prove - webkit, webkit-iphone, webkit-alone,
+      # firefox, firefox-download-navigation and firefox-alone (e2e/playwright.config.ts) -
+      # which the "Browser-test dispatch dashboard" step below runs.
       #
       # On a Playwright upgrade, re-derive the list as that union again, with nothing taken out
       # of it. Deriving it at run time by subtracting one apt closure from another does not work
       # and must not be written: the closure of the four that carry playback and the closure of
       # the rest share 35 packages Playwright's own list names or needs, and the subtraction
-      # leaves WebKit unable to launch.
+      # leaves WebKit unable to launch. This paragraph is a standing refusal, not a record of a
+      # design that was taken out: nobody is to re-derive a reduced list.
       #
       # The 22-minute budget is the step's own retry arithmetic, not its measured maximum, which
       # the bounds make unreachable: two bounded attempts of `apt-get update` at 90 s, two of the
       # download at 300 s, then, where both of those time out, one 90 s read of the fallback
       # origin's indexes and a third 300 s download attempt, then the unpack, the browser
-      # download and the two apt simulations of the list check, none of which touch the Ubuntu
+      # download and the one apt simulation of the list check, none of which touch the Ubuntu
       # mirror. So the arithmetic is 2 x 90 + 2 x 300 + 90 + 300 s of bounded apt, about 20 s of
       # unpack, about 90 s for the browsers and about 30 s for the list check: 1310 s, rounded up
       # to 22 min. The budget has to carry the fallback's own update, because the path that
@@ -2666,6 +2668,8 @@ jobs:
           # name of Playwright's list. It is out of `packages` because `packages` is the list the
           # check at the end of the step holds against Playwright's own.
           step_tools="gstreamer1.0-tools"
+          # What apt is given in every phase: the pinned list and the step's own tool.
+          apt_list="$packages $step_tools"
           # A bounded attempt, retried: the attempt count, then what the log calls the phase,
           # then the command. Each failed attempt prints the phase, that attempt's exit status
           # and how many attempts are left; `timeout` exits 124 when it killed the command, so
@@ -2693,10 +2697,10 @@ jobs:
           # Download only (`-d`): a killed apt releases its fcntl locks either way, but with
           # nothing unpacked in this phase no dpkg run is ever stopped part way, so the attempts
           # after it and the unbounded install below start from a clean package state. It prints
-          # what it fetched, which is this step's own byte record. $packages and $step_tools are
-          # left unquoted on purpose, to split into words.
+          # what it fetched, which is this step's own byte record. $apt_list is left unquoted on
+          # purpose, to split into words.
           if ! attempts 2 "the package download" sudo timeout 300 \
-            apt-get install -y --no-install-recommends -d $packages $step_tools; then
+            apt-get install -y --no-install-recommends -d $apt_list; then
             # The last attempt fetches from another origin, which is the one thing more attempts
             # on the configured pool cannot do. That pool is a mirrorlist, which `apt-get update`
             # reads as `Get:1 file:/etc/apt/apt-mirrors.txt Mirrorlist`, so the switch is an edit
@@ -2720,19 +2724,20 @@ jobs:
             attempts 1 "apt-get update for the fallback origin" sudo timeout 90 apt-get update ||
               echo "::warning::the fallback origin's lists were not read; the attempt below uses what is on disk"
             attempts 1 "the package download from the fallback origin" sudo timeout 300 \
-              apt-get install -y --no-install-recommends -d $packages $step_tools || {
+              apt-get install -y --no-install-recommends -d $apt_list || {
               echo "::error::the package download failed three times, the last of them on another origin;" \
                 "the step ends here rather than leaving the job's budget to cancel the browser step after it"
               exit 1
             }
           fi
           # Unbounded and unretried: the archive is on disk now, so this takes no network.
-          sudo apt-get install -y --no-install-recommends $packages $step_tools
+          sudo apt-get install -y --no-install-recommends $apt_list
           # Is each decoder WebKit plays through in the GStreamer registry? One call per element:
           # `gst-inspect-1.0 --exists` reads one element argument and discards the rest, so a
           # single call with five names would report on the first alone. Each element is written
           # with the package that carries it, and this is what fails the step by its own name
           # where one of those packages has gone missing from the list above.
+          probed=()
           for probe in matroskademux:gstreamer1.0-plugins-good vp8dec:gstreamer1.0-plugins-good \
             h264parse:gstreamer1.0-plugins-bad avdec_h264:gstreamer1.0-libav \
             vorbisdec:gstreamer1.0-plugins-base; do
@@ -2742,9 +2747,9 @@ jobs:
                 "${probe#*:} carries it and packages= above must hold it"
               exit 1
             }
+            probed+=("$element")
           done
-          echo "the decoders WebKit plays through are in the registry:" \
-            "matroskademux vp8dec h264parse avdec_h264 vorbisdec"
+          echo "the decoders WebKit plays through are in the registry: ${probed[*]}"
           # The browsers alone. Named, because with no argument Playwright resolves its own
           # default set rather than this job's three.
           bunx playwright install chromium webkit firefox
