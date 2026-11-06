@@ -1485,11 +1485,12 @@ jobs:
         with:
           persist-credentials: false
 
-      # A pull request's title, body and commit messages reach main's squash commit, the
-      # generated release notes and GitHub's pages, and its comments and reviews are public on its
-      # page, so this job checks them, and that the title is a conventional commit subject, at
-      # every push to a pull request that is not a draft and when a draft is marked ready, and
-      # posts the verdict on the head as pr-title, the check main's ruleset requires.
+      # A pull request's title becomes main's squash subject and shows in the generated release
+      # notes; its body, its branch name and each commit's message, author and committer stay
+      # public on its page, where its comments and reviews are public once posted. So this job
+      # checks them, and that the title is a conventional commit subject, at every push to a pull
+      # request that is not a draft and when a draft is marked ready, and posts the verdict on the
+      # head as pr-title, the check main's ruleset requires.
       # pr-title.yaml checks them and posts pr-title when the pull request is opened, reopened or
       # edited, a review is submitted or edited, or the merge queue runs its group. A push to main
       # or a merge-queue run of this workflow carries no pull request. These run first, so a failed
