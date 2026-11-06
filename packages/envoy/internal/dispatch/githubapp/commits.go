@@ -136,16 +136,21 @@ func (c *Client) CommitOnBranch(ctx context.Context, token, owner, repo, branch,
 // for an unreadable repository and, as CommitOnBranch's comment records, for a commit a
 // readable repository does not have.
 //
-// The body is read for nothing, so the read asks GitHub for as little as it will send: a commit
-// object carries its whole diff, and `per_page=1` is the one page of it the commit's own
-// pagination allows.
+// The body is read for nothing, so the read asks GitHub for the smallest answer that path
+// sends: `Accept: application/vnd.github.sha`, whose answer is the commit's SHA on one line,
+// in place of the commit object with its message, its parents and every file's patch. Ref
+// reads the same path that way, for the same reason; this read cannot call Ref, which folds
+// 404 and 422 into one ErrNoBranch and so loses the split the classification above turns on.
 func (c *Client) HasCommit(ctx context.Context, token, owner, repo, sha string) (bool, error) {
 	if c == nil {
 		return false, ErrNoAppKey
 	}
-	path := repoPath(owner, repo) + "/commits/" + url.PathEscape(sha) + "?per_page=1"
-	_, status, err := c.readRepositoryJSON(ctx, token, path, owner+"/"+repo, http.StatusUnprocessableEntity)
+	target := c.base + repoPath(owner, repo) + "/commits/" + url.PathEscape(sha)
+	body, status, header, err := c.request(ctx, c.TokenScope(token), http.MethodGet, target, "Bearer "+token, mediaTypeSHA, "", nil, responseLimit)
 	if err != nil {
+		return false, err
+	}
+	if err := CheckRepositoryResponse(status, header, body, owner+"/"+repo, target, http.StatusUnprocessableEntity); err != nil {
 		return false, err
 	}
 	return status != http.StatusUnprocessableEntity, nil

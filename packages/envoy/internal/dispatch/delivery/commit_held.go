@@ -2,7 +2,6 @@ package delivery
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 )
@@ -13,21 +12,17 @@ import (
 // (api/results.go).
 
 // RepositoryHoldsCommit answers whether repoFull holds sha, through the App: it mints the
-// repository's installation token and makes githubapp.Client.HasCommit's read, exactly as
-// commitOnBranch mints and reads for its own question.
+// repository's installation token, through the repositoryRead prologue commitOnBranch and
+// repositoryDefaultBranch share, and makes githubapp.Client.HasCommit's read.
 //
 // A false with no error is GitHub's 422, the one answer that proves the repository does not hold
 // the commit. Every other failure is the error, which says only that Dispatch cannot tell: a
 // malformed repository name, a deployment with no App key, a repository the App cannot read, a
 // rate limit, a 5xx, a transport failure.
 func RepositoryHoldsCommit(ctx context.Context, client *githubapp.Client, repoFull, sha string) (bool, error) {
-	owner, repo, err := splitRepo(repoFull)
+	owner, repo, token, err := repositoryRead(ctx, client, repoFull)
 	if err != nil {
 		return false, err
-	}
-	token, err := client.RepositoryToken(ctx, owner, repo)
-	if err != nil {
-		return false, fmt.Errorf("mint installation token for %s: %w", repoFull, err)
 	}
 	return client.HasCommit(ctx, token, owner, repo, sha)
 }

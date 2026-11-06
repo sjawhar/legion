@@ -347,8 +347,10 @@ optional ones:
 
 One rule governs every result the script records, beside the refusals above.
 A result at a 40-character commit the repository of the check's issue does not hold is refused `400 RESULT_COMMIT_UNKNOWN`, naming the commit and that `owner/repo`.
-Only GitHub's `422 No commit found for SHA` refuses, and only the currency section maps a repository at all: every result recorded outside it is stored because the check's issue resolves to no repository, which is never asked about.
-Inside it, each stored result names a commit the section seeded its fake GitHub with, and the one commit it seeds nothing with is the refusal it drives.
+Only GitHub's `422 No commit found for SHA` refuses, and the script reads `PROJECT`'s repository mappings once, in its setup, to know which of two runs it is.
+Where `PROJECT` maps no default repository, every result recorded outside the currency section is stored because the check's issue resolves to no repository, which is never asked about; inside the section, each stored result names a commit it seeded its fake GitHub with, and the one commit it seeds nothing with is the refusal it drives.
+Where `PROJECT` already maps one, every issue the script writes resolves to that repository and the commits it records at are its own, which that repository does not hold, so each check that reaches that read prints one `SKIP: <section> <what>` line instead — the `result` section's record and the two reads of what it recorded, the `closed` section's record and its `ISSUE_CLOSED` refusal, which the commit's own refusal would answer first, and the currency section whole.
+Every other check runs, the `result` section's two refusals among them: a malformed field and an unknown check are refused before any commit is read.
 
 It writes four issues in `PROJECT` — a root with a spec, a Verification document and a plan, a
 child of it, a sibling in another tree and one more whose spec and Verification document are

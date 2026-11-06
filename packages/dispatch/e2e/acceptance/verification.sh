@@ -32,6 +32,17 @@
 # DEV_SIGNIN_LOGIN unset each prints one `SKIP: … POST /api/v1/artifacts/{id}/reviews needs a
 # person's credential holding the approve scope …` line and every other section runs.
 #
+# The run reads PROJECT's repository mappings once, in its setup. Where PROJECT already maps a
+# default repository, every issue this script writes resolves to that repository, so Dispatch
+# asks GitHub whether the repository holds each result's commit and refuses the one it does not
+# hold — and the commits below are this script's own, which no repository outside the fake
+# GitHub holds. Each check that reaches that read then prints one `SKIP: <section> <what>` line
+# instead: the result section's record and the two reads of what it recorded, the closed
+# section's record and its ISSUE_CLOSED refusal, which the commit's own refusal would answer
+# first, and the currency section whole. Every other check runs, the result section's two
+# refusals among them: a malformed field and an unknown check are refused before any commit is
+# read.
+#
 # It writes four issues in PROJECT — a root, a child of it, a sibling in another tree and one more
 # whose spec and Verification document are approved together — with a spec, a Verification document
 # and, on the root, a plan; it closes every one of them, also when a check fails, and an approval
@@ -344,6 +355,18 @@ readonly commit_unknown=4444444444444444444444444444444444444444
 
 # --- setup ---------------------------------------------------------------------------------------
 
+# Whether PROJECT already maps a default repository, read once and read by three sections. With
+# one mapped, every issue of the project resolves to that repository, so Dispatch asks GitHub
+# whether it holds the commit each result names and refuses the ones it does not; the commits
+# below are this script's own, which no real repository holds. Every check that records a result
+# therefore stands down with a SKIP line, and every other check runs.
+get "/api/v1/settings/repo-projects"
+want_status 200 setup "the repository mappings answer"
+default_repo_mapped="$(jq -r --arg p "$project" \
+  '[.[] | select(.project == $p and .default)] | length' "$work/body")" ||
+  fail setup "read the repository mappings" "$(body)"
+readonly default_repo_mapped
+
 # The root's spec marks three requirements: r1 is served by a check and a plan task, r2 by a check
 # alone, and r3 by nothing until a child's check serves it.
 cat >"$work/root-spec.md" <<'SPEC'
@@ -575,17 +598,26 @@ expect move "r1 keeps both edges that serve it through the move" 2 \
 
 # --- result: recording one, and the two refusals a result's own fields earn ----------------------
 
-record result "record a pass for c1" "$root" --check c1 --role tester --verdict pass \
-  --commit "$commit_one" --surface cli --run "bash e2e/acceptance/verification.sh" \
-  --observed "every check passed" --negative-control "Deleted the check and the flag came back."
-grep -qF "Pull request body line:" "$work/out" ||
-  fail result "the record prints the pull-request body line" "$(<"$work/out")"
-pass result "the record prints the pull-request body line"
+if [[ "$default_repo_mapped" != 0 ]]; then
+  skip result "record a pass for c1: $project already maps a default repository, and a result at a commit that repository does not hold is refused, so this run cannot record one"
+  skip result "the record prints the pull-request body line: no result was recorded to print it"
+else
+  record result "record a pass for c1" "$root" --check c1 --role tester --verdict pass \
+    --commit "$commit_one" --surface cli --run "bash e2e/acceptance/verification.sh" \
+    --observed "every check passed" --negative-control "Deleted the check and the flag came back."
+  grep -qF "Pull request body line:" "$work/out" ||
+    fail result "the record prints the pull-request body line" "$(<"$work/out")"
+  pass result "the record prints the pull-request body line"
+fi
 
 run result "read the results of $root" results --issue "$root"
-grep -qE "^- c1 \(before_merge\): pass at ${commit_one} by tester, " "$work/out" ||
-  fail result "the results read shows the result under c1" "$(<"$work/out")"
-pass result "the results read shows the pass under c1"
+if [[ "$default_repo_mapped" != 0 ]]; then
+  skip result "the results read shows the pass under c1: no result was recorded to read"
+else
+  grep -qE "^- c1 \(before_merge\): pass at ${commit_one} by tester, " "$work/out" ||
+    fail result "the results read shows the result under c1" "$(<"$work/out")"
+  pass result "the results read shows the pass under c1"
+fi
 grep -qF -- "- cnone (before_merge): no result yet." "$work/out" ||
   fail result "a check with no result says so" "$(<"$work/out")"
 pass result "a check nobody has run reads no result yet"
@@ -602,13 +634,20 @@ refused_result result "a pass counting a skipped case" "$root" \
 # --- closed: the one write a closed issue takes --------------------------------------------------
 
 close_issue closed "$child"
-record closed "record a pass for the after-merge check on the closed $child" "$child" \
-  --check cafter --role tester --verdict pass --commit "$commit_two" --surface api \
-  --run "curl the production route" --observed "the production route answered"
-refused_result closed "a result for a before-merge check on a closed issue" "$child" \
-  "$(jq -cn --arg s "$session" --arg c "$commit_two" \
-    '{actor: {kind: "session", id: $s}, check: "cbefore", role: "tester", verdict: "pass", commit: $c}')" \
-  ISSUE_CLOSED 409
+if [[ "$default_repo_mapped" != 0 ]]; then
+  skip closed "record a pass for the after-merge check on the closed $child: $project already maps a default repository, and a result at a commit that repository does not hold is refused, so this run cannot record one"
+  # The closed-issue refusal is read after the commit's own, so this POST would be refused
+  # RESULT_COMMIT_UNKNOWN rather than ISSUE_CLOSED here, which says nothing about a closed issue.
+  skip closed "a result for a before-merge check on a closed issue: the commit would be refused first"
+else
+  record closed "record a pass for the after-merge check on the closed $child" "$child" \
+    --check cafter --role tester --verdict pass --commit "$commit_two" --surface api \
+    --run "curl the production route" --observed "the production route answered"
+  refused_result closed "a result for a before-merge check on a closed issue" "$child" \
+    "$(jq -cn --arg s "$session" --arg c "$commit_two" \
+      '{actor: {kind: "session", id: $s}, check: "cbefore", role: "tester", verdict: "pass", commit: $c}')" \
+    ISSUE_CLOSED 409
+fi
 
 printf 'A note the closed issue must refuse.\n' >"$work/note.md"
 send POST "/api/v1/issues/$child/artifacts" "$(document_body "$child" note.md "$work/note.md")"
@@ -754,12 +793,7 @@ currency_repo="acme/verification-$$"
 if [[ -z "$fake_github_port" ]]; then
   skip currency "a result at the pull request's head reads current: FAKE_GITHUB_PORT is unset; only a server reading the harness's fake GitHub can be told a pull request's head"
 else
-  get "/api/v1/settings/repo-projects"
-  want_status 200 currency "the repository mappings answer"
-  mapped_already="$(jq -r --arg p "$project" \
-    '[.[] | select(.project == $p and .default)] | length' "$work/body")" ||
-    fail currency "read the repository mappings" "$(body)"
-  if [[ "$mapped_already" != 0 ]]; then
+  if [[ "$default_repo_mapped" != 0 ]]; then
     skip currency "a result at the pull request's head reads current: $project already names a default repository, which this section would replace"
   else
     curl -sS -o /dev/null -X PUT -H 'Content-Type: application/json' --data-binary "$(
@@ -793,13 +827,7 @@ else
     run currency "read the results of $root" results --issue "$root"
     grep -qE "^- c1 \(before_merge\): pass at ${commit_two} by tester, current\." "$work/out" ||
       fail currency "the newest result reads current" "$(<"$work/out")"
-    pass currency "the last result recorded, at the pull request's head, reads current"
-    grep -qE "^- c1 \(before_merge\): pass at [0-9a-f]{40} by tester, " "$work/out" ||
-      fail currency "the result line prints the commit's forty characters" "$(<"$work/out")"
-    pass currency "the result line prints the whole commit, not its first twelve characters"
-    grep -qE "at [0-9a-f]{12}${commit_lookalike:12} by " "$work/out" &&
-      fail currency "the look-alike's characters stand where the head's should" "$(<"$work/out")"
-    pass currency "the line carries the head's own last twenty-eight characters"
+    pass currency "the newest result reads current and prints all forty characters of the pull request's head, so the look-alike's own characters cannot stand in for it"
 
     refused_result currency "a result at a commit $currency_repo does not hold" "$root" \
       "$(jq -cn --arg s "$session" --arg c "$commit_unknown" \
