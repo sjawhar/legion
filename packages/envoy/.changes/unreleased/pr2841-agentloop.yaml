@@ -1,0 +1,11 @@
+kind: Added
+body: |-
+  A new `agentloop` package: the one model loop the Legion daemon and Dispatch's server both
+  import, and this module's only import of Grafana's AI SDK for Go. It is the engine and nothing
+  more. The caller hands it an endpoint, a model and what that model charges, the messages, the
+  tools the model may call, the bounds of the run and the JSON schema the last reply must be one
+  object of, and reads back that reply, every step and what the run cost; no base URL and no
+  credential is read from the environment. `Run` makes one bounded run of a model and the tools
+  it calls, on `anthropic-messages`, `openai-responses`, `openai-chat` or `azure-anthropic`, and
+  `Decide` makes one System One call and answers each question it put with a typed decision. No
+  binary of this package calls it yet.
