@@ -506,8 +506,8 @@ func TestARefusedRaiseNamesTheReplicaSetting(t *testing.T) {
 }
 
 // With one server of three stopped and the stream and a bucket already at three copies, a start
-// succeeds and writes nothing to either; a create at three copies with one server stopped fails,
-// naming the setting.
+// succeeds and writes nothing to either; a bucket created at three copies with one server stopped
+// lands, with the stopped member among its peers.
 func TestOneServerStoppedAStartOfAThreeCopyDeploymentWritesNothing(t *testing.T) {
 	cluster, js := startClusterJetStream(t)
 	startOnCluster(t, cluster, WithReplicas(3), WithStreamMaxBytes(testStreamMaxBytes))
@@ -538,30 +538,58 @@ func TestOneServerStoppedAStartOfAThreeCopyDeploymentWritesNothing(t *testing.T)
 		t.Fatalf("a start with one server stopped wrote %v, want nothing", writes)
 	}
 
-	_, err := EnsureKeyValue(clusterConn(t, cluster), js, &nats.KeyValueConfig{Bucket: "envoy_new_test", Storage: nats.FileStorage, Replicas: 3})
-	if err == nil || !strings.HasPrefix(err.Error(), ReplicasEnvVar+"=3: ") {
-		t.Fatalf("create a three-copy bucket with one server stopped = %v, want a refusal naming %s=3", err, ReplicasEnvVar)
+	// nats-server v2.15.1 places a three-copy bucket with one of three servers stopped, one
+	// offline peer assigned, and the create lands rather than being refused. Our own refusal of a
+	// count the cluster cannot hold at all is TestARefusedRaiseNamesTheReplicaSetting's.
+	const made = "envoy_new_test"
+	if _, err := EnsureKeyValue(clusterConn(t, cluster), js, &nats.KeyValueConfig{Bucket: made, Storage: nats.FileStorage, Replicas: 3}); err != nil {
+		t.Fatalf("create a three-copy bucket with one server stopped: %v", err)
+	}
+	info, err := js.StreamInfo("KV_" + made)
+	if err != nil {
+		t.Fatalf("read the new bucket's stream: %v", err)
+	}
+	if info.Config.Replicas != 3 || testnats.Copies(info.Cluster) != 3 {
+		t.Fatalf("the new bucket's stream has %d copies configured and %d assigned, want 3 and 3", info.Config.Replicas, testnats.Copies(info.Cluster))
 	}
 }
 
-// A create of the stream at three copies with one server of three stopped fails the start, and the
-// error names the replica setting.
-func TestOneServerStoppedACreateAtThreeCopiesFailsNamingTheSetting(t *testing.T) {
+// A create of the stream at three copies with one server of three stopped lands on nats-server
+// v2.15.1, with the stopped member among the stream's peers, and the start serves: it publishes
+// and reads back. Once the stopped member starts again it catches up, and the stream holds three
+// settled copies with the message the start published.
+func TestOneServerStoppedACreateAtThreeCopiesLandsAndTheStoppedMemberCatchesUp(t *testing.T) {
 	cluster := testnats.StartCluster(t, 3)
 	cluster.Servers[2].Stop(t)
 	cluster.AwaitReady(t)
 	client, err := ConnectOwningStream(cluster.URLs(), WithReplicas(3))
-	if err == nil {
-		client.Close()
-		t.Fatal("a start created the stream at three copies with one server of three stopped")
+	if err != nil {
+		t.Fatalf("start at three copies with one server of three stopped: %v", err)
 	}
-	if !strings.HasPrefix(err.Error(), ReplicasEnvVar+"=3: ") {
-		t.Fatalf("start error = %q, want it to name %s=3", err, ReplicasEnvVar)
+	t.Cleanup(client.Close)
+	js := cluster.JetStream(t)
+	info := testnats.AwaitStreamLeader(t, js, Stream, cluster.Name(2))
+	if info.Config.Replicas != 3 || testnats.Copies(info.Cluster) != 3 {
+		t.Fatalf("stream replicas = %d with %d copies assigned, want 3 and 3", info.Config.Replicas, testnats.Copies(info.Cluster))
+	}
+	if err := client.Publish(contracts.Envelope{
+		EventID: "event-stopped", Source: "dispatch",
+		Topic: "notifications.agent.ses_stopped", DedupeKey: "dispatch.event.stopped",
+	}); err != nil {
+		t.Fatalf("publish with one server stopped: %v", err)
+	}
+
+	cluster.Servers[2].Start(t)
+	cluster.AwaitReady(t)
+	js = cluster.JetStream(t)
+	after := testnats.AwaitStreamCopies(t, js, Stream, 3)
+	if after.State.Msgs != 1 {
+		t.Fatalf("stream state = %+v once the stopped member caught up, want the one message", after.State)
 	}
 }
 
 // A server's refusal of the stream names each setting the refused create or update carried, with
-// its value, and wraps the server's error (single server). A single nats-server v2.10.29 refuses a
+// its value, and wraps the server's error (single server). A single nats-server v2.15.1 refuses a
 // create at more than one copy but takes an update to more, recording the count while it holds one
 // copy, so a refused raise is TestARefusedRaiseNamesTheReplicaSetting's, on a cluster.
 func TestARefusedStreamNamesTheSettingsItCarried(t *testing.T) {

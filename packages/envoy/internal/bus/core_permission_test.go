@@ -286,9 +286,12 @@ func TestCoreSubOKIsFalseOnceAReloadRevokesTheSubscription(t *testing.T) {
 	if !held.IsValid() {
 		t.Fatal("nats.go dropped the revoked subscription; the test proves nothing about a refusal it keeps valid")
 	}
+	// The server's own wording for the refusal has changed between versions (v2.15.1 names the
+	// queue group between the subject and the sid), so what this asserts is the refusal and the
+	// subject it names, not the sentence.
 	if err := client.Conn.LastError(); !errors.Is(err, natsgo.ErrPermissionViolation) ||
-		!strings.Contains(err.Error(), `Permissions Violation for Subscription to "`+subject+`" (sid "`) {
-		t.Fatalf("the server's last error is %v, want its revocation of %s naming the sid", err, subject)
+		!strings.Contains(err.Error(), `Permissions Violation for Subscription to "`+subject+`"`) {
+		t.Fatalf("the server's last error is %v, want its revocation of %s", err, subject)
 	}
 
 	server.Restart(t, granted)

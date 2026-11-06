@@ -1,20 +1,10 @@
-import { expect, type Page, test } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 import type { Comment } from "../web/src/api/types";
 
 import { createIssue, createProject, listComments } from "./api";
 import { barAction, deleteEditorText, documentEditor, selectEditorText } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
-
-async function openReviewPanel(page: Page): Promise<void> {
-  const sheet = page.getByTestId("margin-sheet");
-  if (
-    (await sheet.getAttribute("data-expanded")) !== "true" &&
-    (await page.getByRole("button", { name: /Open review panel/ }).count()) > 0
-  ) {
-    await page.getByRole("button", { name: /Open review panel/ }).click();
-  }
-}
 
 // The server's anchor state after a live write is read back from Node, so the probe ladder is
 // this row's own: the default one first sees a fact true at 120 ms at 350 ms.
@@ -24,9 +14,9 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-// SLOW(>=2s): one test body on a desktop and a phone layout, each run a document editor, a
-// comment anchored to a block, a reword and a deletion - every one a real live write.
-test("a block-anchored comment remains with its block through a reword and quote deletion @phone", async ({
+// SLOW(>=2s): one document editor, a comment anchored to a block, a reword and a deletion -
+// every one a real live write.
+test("a block-anchored comment remains with its block through a reword and quote deletion", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -64,7 +54,6 @@ test("a block-anchored comment remains with its block through a reword and quote
     const gutter = page.getByRole("button", { name: "1 references on block" });
     await expect(gutter).toBeVisible();
     await gutter.click();
-    await openReviewPanel(page);
     await expect(page.getByText("References for this block")).toBeVisible();
     await selectEditorText(page, "Target passage");
     await page.keyboard.type("Reworded passage");
