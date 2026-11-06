@@ -5,12 +5,6 @@ import (
 	"encoding/json"
 	"net/url"
 	"time"
-
-	// The SDK modules the loop calls into for protocols no file of this package serves yet.
-	// Until one does, these imports are what names each module a direct requirement of
-	// github.com/sjawhar/envoy, and they go as the real imports arrive.
-	_ "github.com/grafana/ai-sdk/providers/azure"
-	_ "github.com/grafana/ai-sdk/providers/openai-compatible"
 )
 
 // Kind is the wire protocol an endpoint speaks. It picks the provider a call is made through

@@ -41,6 +41,14 @@ func (r *run) toolSet() (aisdk.ToolSet, error) {
 			Execute: func(ctx context.Context, raw json.RawMessage, opts aisdk.ToolExecutionOptions) (json.RawMessage, error) {
 				return json.Marshal(r.call(ctx, t, opts.ToolCallID, raw))
 			},
+			// OnInputAvailable takes the call's index. The SDK calls it in the
+			// stream's own goroutine, once per tool call of a step, in the order
+			// the model asked for them and before any of that step's tools run, so
+			// the indexes follow the model's order and not the order the calls are
+			// executed in.
+			OnInputAvailable: func(_ json.RawMessage, opts aisdk.ToolExecutionOptions) {
+				r.index(opts.ToolCallID)
+			},
 			ToModelOutput: func(out aisdk.ToolOutputContext) (*provider.ToolResultOutput, error) {
 				return modelOutput(out.Output), nil
 			},
@@ -50,15 +58,28 @@ func (r *run) toolSet() (aisdk.ToolSet, error) {
 }
 
 // call runs one call of t under the run's tool lock, held for the whole of the caller's Run, so
-// a step's tool calls run one at a time and take their indexes in the order they run. The index
-// counts on from Request.FirstToolIndex, so the run's first call is that number and one.
+// a step's tool calls run one at a time. The call's index is the one it took in the order the
+// model asked for it, counting on from Request.FirstToolIndex, so the first call of the run is
+// that number and one.
 func (r *run) call(ctx context.Context, t Tool, id string, input json.RawMessage) toolOutcome {
 	r.tool.Lock()
 	defer r.tool.Unlock()
-	index := r.next
-	r.next++
-	output, isError := t.Run(ctx, ToolCall{Index: index, ID: id, Input: input})
+	output, isError := t.Run(ctx, ToolCall{Index: r.index(id), ID: id, Input: input})
 	return toolOutcome{Output: output, IsError: isError}
+}
+
+// index is one tool call's index, by the call's id: the index the call took when the model
+// asked for it, or the next index where it has none, so a call the SDK ran without announcing
+// its input is still numbered.
+func (r *run) index(id string) int {
+	r.numbering.Lock()
+	defer r.numbering.Unlock()
+	if i, taken := r.indexes[id]; taken {
+		return i
+	}
+	r.indexes[id] = r.next
+	r.next++
+	return r.indexes[id]
 }
 
 // modelOutput is what the model is told of one tool call: the tool's own output, as a result or,

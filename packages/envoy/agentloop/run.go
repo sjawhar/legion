@@ -15,7 +15,10 @@ import (
 	"github.com/grafana/ai-sdk/output"
 	"github.com/grafana/ai-sdk/provider"
 	"github.com/grafana/ai-sdk/providers/anthropic"
+	"github.com/grafana/ai-sdk/providers/azure"
+	"github.com/grafana/ai-sdk/providers/azure/foundry"
 	"github.com/grafana/ai-sdk/providers/openai"
+	openaicompatible "github.com/grafana/ai-sdk/providers/openai-compatible"
 	"github.com/grafana/ai-sdk/schema"
 	openaiopt "github.com/openai/openai-go/v3/option"
 )
@@ -54,14 +57,17 @@ func Run(ctx context.Context, req Request) (Result, error) {
 	}
 	if req.CacheHistory {
 		switch kind {
-		case AnthropicMessages:
+		case AnthropicMessages, AzureAnthropic:
 			markAnthropicHistory(messages, len(history))
 		case OpenAIResponses:
 			markOpenAIHistory(messages, len(history))
 		}
 	}
 
-	r := &run{req: req, kind: kind, transport: transport, next: req.FirstToolIndex + 1}
+	r := &run{
+		req: req, kind: kind, transport: transport,
+		indexes: make(map[string]int, len(req.Tools)), next: req.FirstToolIndex + 1,
+	}
 	opts := []aisdk.StreamOption{
 		aisdk.WithModelMessages(messages...),
 		aisdk.WithMaxOutputTokens(req.Bounds.OutputTokens),
@@ -155,6 +161,35 @@ func languageModel(req Request, client *http.Client) (provider.LanguageModel, pr
 		model := openai.NewResponses(placeholderKey, req.Model.ID, openai.WithRequestOptions(
 			openaiopt.WithHTTPClient(client), openaiopt.WithMaxRetries(0), openaiopt.WithBaseURL(endpoint.BaseURL)))
 		return model, openaiOptions(req.Model.Effort), nil
+	case OpenAIChat:
+		// The run's own transport puts the token on every request and adds the
+		// endpoint's query parameters, so the client is given neither headers nor query
+		// parameters of its own: one mechanism, in the transport, for every kind.
+		// WithIncludeUsage asks the stream for its token counts.
+		model := openaicompatible.New(req.Model.ID,
+			openaicompatible.WithBaseURL(endpoint.BaseURL), openaicompatible.WithAPIKey(placeholderKey),
+			openaicompatible.WithHTTPClient(client), openaicompatible.WithIncludeUsage(true))
+		return model, openaicompatible.OpenAIOptions{ReasoningEffort: req.Model.Effort}, nil
+	case AzureAnthropic:
+		// The deployment name is given only where it differs from the model id, and the
+		// foundry config owns the base URL, which NewAnthropic applies itself.
+		deployment := endpoint.Deployment
+		if deployment == "" {
+			deployment = req.Model.ID
+		}
+		config := foundry.Config{BaseURL: endpoint.BaseURL, Credential: func(ctx context.Context) (foundry.Credential, error) {
+			token, err := endpoint.Token(ctx)
+			if err != nil {
+				return foundry.Credential{}, err
+			}
+			return foundry.Credential{AuthToken: token}, nil
+		}}
+		model, err := azure.NewAnthropic(config, req.Model.ID, deployment, anthropic.WithRequestOptions(
+			anthropicopt.WithHTTPClient(client), anthropicopt.WithMaxRetries(0)))
+		if err != nil {
+			return nil, nil, fmt.Errorf("agentloop: the %s endpoint: %w", endpoint.Kind, err)
+		}
+		return model, anthropicOptions(req.Model.Effort), nil
 	default:
 		return nil, nil, fmt.Errorf("agentloop: the loop makes no run on the %s protocol", endpoint.Kind)
 	}
@@ -194,9 +229,14 @@ type run struct {
 	reason provider.FinishReason
 	failed error
 
-	// tool holds one tool call at a time; next is the index the next one takes.
+	// tool holds one tool call at a time, so a step's calls run one after another.
 	tool sync.Mutex
-	next int
+
+	// numbering guards the tool call indexes: indexes is the index each call's id took
+	// when the model asked for it, and next is the index the next call takes.
+	numbering sync.Mutex
+	indexes   map[string]int
+	next      int
 }
 
 // drain reads both of the run's streams to their end, which the SDK needs for the run to finish
@@ -243,17 +283,17 @@ func (r *run) failure() error {
 	return r.failed
 }
 
-// prepareStep offers no tool on the last allowed call, so that call must answer, and on
-// Anthropic, where the run asks for cache marks, moves the newest message's mark: the history's
-// end keeps the one Run put there, the newest message gets one, and the one an earlier step put
-// on its newest message is taken off (the SDK carries a step's message overrides into later
-// steps; Anthropic allows four marks).
+// prepareStep offers no tool on the last allowed call, so that call must answer, and on the
+// kinds Anthropic serves, where the run asks for cache marks, moves the newest message's mark:
+// the history's end keeps the one Run put there, the newest message gets one, and the one an
+// earlier step put on its newest message is taken off (the SDK carries a step's message
+// overrides into later steps; Anthropic allows four marks).
 func (r *run) prepareStep(state aisdk.PrepareStepState) (*aisdk.PrepareStepResult, error) {
 	result := &aisdk.PrepareStepResult{}
 	if state.StepNumber == r.req.Bounds.Calls-1 {
 		result.ToolChoice = &provider.ToolChoice{Type: provider.ToolChoiceNone}
 	}
-	if r.kind != AnthropicMessages || !r.req.CacheHistory || len(state.Messages) == 0 {
+	if (r.kind != AnthropicMessages && r.kind != AzureAnthropic) || !r.req.CacheHistory || len(state.Messages) == 0 {
 		return result, nil
 	}
 	if state.StepNumber == 0 {
