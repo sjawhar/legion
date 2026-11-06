@@ -39,6 +39,7 @@ type testSuggestions struct {
 	Decision     *testSuggestionItem        `json:"decision"`
 	Missing      string                     `json:"missing"`
 	TitleMatches []model.DuplicateCandidate `json:"title_matches"`
+	Proxy        *model.AskProxy            `json:"proxy"`
 }
 
 type testAdvisedSuggestions struct {

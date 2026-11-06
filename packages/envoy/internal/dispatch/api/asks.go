@@ -312,6 +312,13 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		source.artifactID = *owner.ArtifactID
 	}
 	suggestions := s.relatedCheck(r.Context(), relatedInput{text: ask.Question, title: ask.Question, source: source, record: true})
+	// The proxy advisory, beside the check and for the same reason it runs here: an ask reaches
+	// the issue's assignee, and where that person has a skill holding their recorded advice, the
+	// agent is pointed at it and at what they already answered on this issue and its parent. A
+	// document ask reaches nobody through an assignee, so it has none.
+	if owner.IssueKey != nil {
+		suggestions.Proxy = s.askProxyAdvice(r.Context(), *owner.IssueKey)
+	}
 	WriteJSON(w, http.StatusCreated, withSuggestions(ask, advice, suggestions))
 }
 

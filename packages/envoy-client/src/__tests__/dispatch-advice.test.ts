@@ -1021,6 +1021,58 @@ describe("the related-item check", () => {
     );
   });
 
+  test("dispatch_ask prints the proxy advisory and the target's earlier answers under the form", async () => {
+    const result = await executeWrite(
+      "dispatch_ask",
+      { issue: "DSP-42", question: "Should the billing service retry?" },
+      advice({
+        suggestions: {
+          outcome: "none",
+          search: "meaning_and_keywords",
+          related: [],
+          proxy: {
+            skill: "skill://sami-proxy",
+            target: "sami@theorem.dev",
+            answers: [
+              { ref: "dispatch://DSP-42/ask/ask-1", line: "Keep the budget where it is." },
+              { ref: "dispatch://DSP-7/ask/ask-2", line: "" },
+            ],
+          },
+        },
+      })
+    );
+
+    expect(result.text).toBe(
+      [
+        askedLine,
+        "Related-item check searched (meaning and keywords) and found nothing.",
+        "This ask reaches sami@theorem.dev. Read skill://sami-proxy first: it holds their recorded advice, so a question it answers costs them no time.",
+        "sami@theorem.dev has already answered on this issue or its parent:",
+        "- dispatch://DSP-42/ask/ask-1 — Keep the budget where it is.",
+        "- dispatch://DSP-7/ask/ask-2",
+        followsLine,
+      ].join("\n")
+    );
+  });
+
+  test("an ask whose target has no proxy skill prints no advisory", async () => {
+    const result = await executeWrite(
+      "dispatch_ask",
+      { issue: "DSP-42", question: "Should the billing service retry?" },
+      advice({
+        suggestions: { outcome: "none", search: "meaning_and_keywords", related: [] },
+      })
+    );
+
+    expect(result.text).toBe(
+      [
+        askedLine,
+        "Related-item check searched (meaning and keywords) and found nothing.",
+        followsLine,
+      ].join("\n")
+    );
+  });
+
   test("dispatch_ask still ends with the cadence line", async () => {
     const result = await executeWrite(
       "dispatch_ask",

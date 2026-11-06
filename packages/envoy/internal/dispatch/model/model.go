@@ -657,7 +657,8 @@ type WriteSuggestion struct {
 // client built before Outcome still says the check was skipped. SearchQuery is two or three of
 // the words the keyword search used, spelled as the text spells them, for a reader to search with
 // by hand. TitleMatches is the issues whose titles near-duplicate a new issue's when the create
-// was forced past that refusal. Related is always an array, never null.
+// was forced past that refusal. Related is always an array, never null. Proxy is set on an ask
+// whose target has a proxy skill, and nil everywhere else.
 type Suggestions struct {
 	Outcome      string               `json:"outcome"`
 	Search       string               `json:"search,omitempty"`
@@ -667,6 +668,26 @@ type Suggestions struct {
 	Decision     *WriteSuggestion     `json:"decision,omitempty"`
 	Missing      string               `json:"missing,omitempty"`
 	TitleMatches []DuplicateCandidate `json:"title_matches,omitempty"`
+	Proxy        *AskProxy            `json:"proxy,omitempty"`
+}
+
+// AskProxy is what a new ask carries when the person it targets has a proxy skill: a skill that
+// holds that person's recorded advice, which an agent reads instead of spending their time. Skill
+// is the skill's address, Target the person, and Answers what Target has already answered on the
+// ask's issue and on that issue's parent, newest first. The advisory refuses nothing and names no
+// further ask to open.
+type AskProxy struct {
+	Skill   string           `json:"skill"`
+	Target  string           `json:"target"`
+	Answers []AskProxyAnswer `json:"answers"`
+}
+
+// AskProxyAnswer is one answer the proxy's person already wrote, as the advisory lists it: Ref is
+// the answered ask's dispatch:// address and Line the answer's first line, empty for an answer
+// that chose options and wrote no words.
+type AskProxyAnswer struct {
+	Ref  string `json:"ref"`
+	Line string `json:"line"`
 }
 
 // RelatedChecksReport is GET /api/v1/related-checks: how the related-item checks recorded in

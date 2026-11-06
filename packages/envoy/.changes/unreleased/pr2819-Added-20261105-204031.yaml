@@ -1,0 +1,5 @@
+kind: Added
+body: A new ask on an issue whose assignee has a proxy skill carries that skill in `advice.suggestions.proxy`, with what the assignee has already answered on the issue and on its parent.
+time: 2026-11-05T20:40:31.206103142Z
+custom:
+    Issue: pr2819

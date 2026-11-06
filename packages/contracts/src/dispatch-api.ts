@@ -2293,7 +2293,8 @@ export type RelatedCheckSearch = "meaning_and_keywords" | "keywords_only";
  * check was not made, and `missing` is set, to the reason, exactly when `outcome` is `not_made`.
  * `search_query` is two or three of the words the keyword search used, spelled as the text spells
  * them, for a reader to run `dispatch search` with. `title_matches` is the issues whose titles
- * near-duplicate a new issue's when the create was forced past that refusal. Mirrors
+ * near-duplicate a new issue's when the create was forced past that refusal. `proxy` is set on a
+ * new ask whose target has a proxy skill, and absent everywhere else. Mirrors
  * `model.Suggestions`.
  */
 export interface Suggestions {
@@ -2305,6 +2306,28 @@ export interface Suggestions {
   readonly decision?: WriteSuggestion;
   readonly missing?: string;
   readonly title_matches?: DuplicateCandidate[];
+  readonly proxy?: AskProxy;
+}
+
+/**
+ * What a new ask carries when the person it reaches has a proxy skill: a skill holding that
+ * person's recorded advice, which an agent reads instead of spending their time. `skill` is the
+ * skill's address, `target` the person, and `answers` what that person has already answered on
+ * the ask's issue and on that issue's parent, newest first. It refuses nothing and names no
+ * further ask to open. Mirrors `model.AskProxy`.
+ */
+export interface AskProxy {
+  readonly skill: string;
+  readonly target: string;
+  readonly answers: AskProxyAnswer[];
+}
+
+/** One answer `AskProxy.answers` lists: `ref` the answered ask's `dispatch://` address and `line`
+ *  the answer's first line, empty for an answer that chose options and wrote no words. Mirrors
+ *  `model.AskProxyAnswer`. */
+export interface AskProxyAnswer {
+  readonly ref: string;
+  readonly line: string;
 }
 
 /** One new decision block's related-item check in a document edit's advice
