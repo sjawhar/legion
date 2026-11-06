@@ -29,7 +29,14 @@ interface KeptFileRow {
 
 /** A row the release before this one wrote, holding the `File` itself. Rows of this shape are
  *  still in the stores of readers who loaded that release, so they are read - a reader whose page
- *  reloads across the deploy resumes their upload - but none is ever written again. */
+ *  reloads across the deploy resumes their upload - but none is ever written again.
+ *
+ *  This shape has an end, and `keepOnly` is what ends it: every load of the page sweeps each row
+ *  of the signed-in person older than `IDEMPOTENCY_KEY_TTL_MS`, and every row of anyone else
+ *  whatever its age. So the last row of this shape is gone one key lifetime after the release
+ *  reaches a reader, at that reader's next load - and a store nobody opens again is read by
+ *  nobody either. Once every reader has loaded the page once a day after the deploy, this
+ *  interface, `fileFrom`'s `file` branch and `EitherKeptFileRow` can go together. */
 interface KeptFileRowBefore {
   readonly key: string;
   readonly login: string;
