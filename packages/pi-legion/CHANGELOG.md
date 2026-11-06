@@ -6,6 +6,12 @@ releases, one per `pi-legion-v*` tag.
 `@sjawhar/pi-legion` was split from `@sjawhar/pi-legion-envoy` 7.x (LEGION-247). Every release
 before the split, and the Envoy plugin's releases after it, are in `packages/pi-envoy/CHANGELOG.md`.
 
+## [18.13.1] - 2026-11-06
+
+### Changed
+
+- Every role that pushes an issue branch now reads the pull request head after its push and pushes a new commit when the head is not the commit it pushed, so the commit that is tested, reviewed and merged is the one that was pushed.
+
 ## [18.9.0] - 2026-11-05
 
 ### Changed
