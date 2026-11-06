@@ -83,6 +83,8 @@ var settingsEmitted = map[string]string{
 	"Config.ProductionCheckBound":                    "production_check_hours",
 	"Config.PodUpdateRetask":                         "pod_update_retask_hours",
 	"Config.PodUpdateNotice":                         "pod_update_notice_hours",
+	"Config.PodUpdateMaxOpenRounds":                  "pod_update_max_open_rounds",
+	"Config.PodUpdateRoundsPerMinute":                "pod_update_rounds_per_minute",
 	"Config.ReviewRoundCap":                          "review_round_cap",
 	"Config.MaxFixAttempts":                          "max_fix_attempts",
 	"Config.ControllerLaunch":                        "controller",
@@ -282,7 +284,8 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 		"controller_wake_interval_seconds", "worker_boot_registration_deadline_intervals",
 		"launch_failure_limit", "prompt_failure_limit", "prompt_retire_limit", "envoy_url", "nats_urls",
 		"dispatch_url", "projects", "gates", "github_apps", "linger_hours", "production_check_hours",
-		"pod_update_retask_hours", "pod_update_notice_hours", "review_round_cap",
+		"pod_update_retask_hours", "pod_update_notice_hours", "pod_update_max_open_rounds",
+		"pod_update_rounds_per_minute", "review_round_cap",
 		"max_fix_attempts", "controller", "capabilities", "worker_backends", "role_config_files", "repository_renames",
 	}
 	top := keysOf(t, encoded)
@@ -437,6 +440,8 @@ func TestPluginSourceOfMasksOnlyTheURLForm(t *testing.T) {
 
 // A tmux file of the three required keys resolves to the defaults, with every optional block
 // absent and every collection empty rather than null; and a key the file sets is the file's.
+// The two pod-update round caps are the one exception: a file that names no limit carries them
+// as null, since an absent key is the one thing no number could say.
 func TestSettingsOfAMinimalConfigurationResolvesTheDefaults(t *testing.T) {
 	settings := SettingsOf(minimalSettingsConfig(t))
 	encoded, err := json.Marshal(settings)
@@ -463,8 +468,13 @@ func TestSettingsOfAMinimalConfigurationResolvesTheDefaults(t *testing.T) {
 			t.Errorf("%s = %s, want absent", absent, raw)
 		}
 	}
-	if bytes.Contains(encoded, []byte("null")) {
-		t.Errorf("settings carry null: %s", encoded)
+	var document any
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	wantNull := []string{"settings.pod_update_max_open_rounds", "settings.pod_update_rounds_per_minute"}
+	if got := slices.Sorted(slices.Values(nullKeys(document, "settings"))); !slices.Equal(got, wantNull) {
+		t.Errorf("settings carry the null keys %q, want %q and no other: %s", got, wantNull, encoded)
 	}
 	if bytes.Contains(encoded, []byte("postgres://")) || bytes.Contains(encoded, []byte("fixture-dsn-password")) {
 		t.Errorf("settings carry the DSN: %s", encoded)
@@ -508,6 +518,48 @@ func TestSettingsOfLeavesOutTheCommitIssueTrailerRepositories(t *testing.T) {
 	}
 }
 
+// The two pod-update round caps ride the settings as the numbers the maximal file names, and as
+// null under the minimal one, which names neither: the key is always on the wire, and its null is
+// how a reader learns the deployment caps nothing. An omitted key would say only that the daemon
+// is too old to know the setting.
+func TestSettingsPodUpdateRounds(t *testing.T) {
+	maximal := SettingsOf(settingsFixtureConfig(t))
+	if maximal.PodUpdateMaxOpenRounds == nil || maximal.PodUpdateRoundsPerMinute == nil {
+		t.Fatalf("pod_update_max_open_rounds = %v, pod_update_rounds_per_minute = %v; want the file's two numbers",
+			maximal.PodUpdateMaxOpenRounds, maximal.PodUpdateRoundsPerMinute)
+	}
+	if *maximal.PodUpdateMaxOpenRounds != 6 || *maximal.PodUpdateRoundsPerMinute != 2 {
+		t.Errorf("pod_update_max_open_rounds = %d, pod_update_rounds_per_minute = %d; want the file's 6 and 2",
+			*maximal.PodUpdateMaxOpenRounds, *maximal.PodUpdateRoundsPerMinute)
+	}
+	encoded, err := json.Marshal(maximal)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for key, want := range map[string]string{"pod_update_max_open_rounds": "6", "pod_update_rounds_per_minute": "2"} {
+		if got := string(keysOf(t, encoded)[key]); got != want {
+			t.Errorf("%s = %s, want %s", key, got, want)
+		}
+	}
+
+	minimal := SettingsOf(minimalSettingsConfig(t))
+	if minimal.PodUpdateMaxOpenRounds != nil || minimal.PodUpdateRoundsPerMinute != nil {
+		t.Errorf("pod_update_max_open_rounds = %v, pod_update_rounds_per_minute = %v; want nil for both, since the file names no limit",
+			minimal.PodUpdateMaxOpenRounds, minimal.PodUpdateRoundsPerMinute)
+	}
+	encoded, err = json.Marshal(minimal)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	top := keysOf(t, encoded)
+	for _, key := range []string{"pod_update_max_open_rounds", "pod_update_rounds_per_minute"} {
+		raw, present := top[key]
+		if !present || string(raw) != "null" {
+			t.Errorf("%s = %s (present: %v), want null, the limit no file named", key, raw, present)
+		}
+	}
+}
+
 // keysOf is the members of one JSON object.
 func keysOf(t *testing.T, encoded []byte) map[string]json.RawMessage {
 	t.Helper()
@@ -540,6 +592,27 @@ func everyKey(document any, prefix string) []string {
 	case []any:
 		for _, member := range value {
 			keys = append(keys, everyKey(member, prefix+"[]")...)
+		}
+	}
+	return keys
+}
+
+// nullKeys is every object key under document whose value is null, as a dotted path from prefix:
+// the keys a test holds to the short list the plugin's reader tolerates.
+func nullKeys(document any, prefix string) []string {
+	var keys []string
+	switch value := document.(type) {
+	case map[string]any:
+		for key, member := range value {
+			path := prefix + "." + key
+			if member == nil {
+				keys = append(keys, path)
+			}
+			keys = append(keys, nullKeys(member, path)...)
+		}
+	case []any:
+		for _, member := range value {
+			keys = append(keys, nullKeys(member, prefix+"[]")...)
 		}
 	}
 	return keys

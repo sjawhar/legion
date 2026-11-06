@@ -38,6 +38,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/memorygroup"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
+	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/projection"
@@ -105,6 +106,26 @@ const (
 	// busyBackoffFirst is the Sandbox runtime's first wait before a launch's request the API server
 	// answered overloaded is sent again (sandbox.Options.BusyBackoff), doubled up to 8 s.
 	busyBackoffFirst = 250 * time.Millisecond
+	// cleanSessionStopBudget bounds one clean stop of an Envoy session registration
+	// (cleanSessionStop). It is longer than the listener's own budget for that route
+	// (sendRequestBudget, packages/envoy/cmd/listener/api.go: 3.5 s), so a listener that answers
+	// at all answers inside it, and short enough that one that never answers is abandoned while
+	// the claim's relaunch is still a launch backoff and a process boot away
+	// (launchBackoffFirst), rather than left in flight for as long as the listener likes. What
+	// keeps a stop that does land late off the relaunch's registration is the condition the stop
+	// carries (cleanSessionStop), not this bound.
+	cleanSessionStopBudget = 5 * time.Second
+	// cleanSessionStopSkewAllowance is how far before the moment its probe judged a dead role's
+	// process gone the clean stop dates itself (cleanSessionStop). The listener compares that
+	// moment with the registration's UpdatedAt, which the registering process stamped on its own
+	// clock, so a daemon clock ahead of the listener's by δ would otherwise delete a relaunch's
+	// registration written up to δ after the stop. Dating the stop earlier moves every skew
+	// toward the safe answer, which is the refusal: a stop that is kept costs the session only
+	// the wait it already had, where one that deletes the live registration of the process that
+	// replaced the dead one is the loss this whole path exists to stop. Half the first launch
+	// backoff is the size of it, because the relaunch's registration cannot land sooner than
+	// that backoff plus a process boot, so no stop that is owed is refused by it.
+	cleanSessionStopSkewAllowance = launchBackoffFirst / 2
 )
 
 // overrides are the parts of a daemon a test replaces, and the listener `legion start` inherited;
@@ -1062,6 +1083,25 @@ type supervision struct {
 	reportMu     sync.Mutex
 	reportedGaps []string
 	reports      map[claim.Token]capabilities.Report
+	// podUpdateMu guards podUpdateOpenedAt and podUpdateOpened, the whole of what the update-round
+	// sweep keeps between ticks (reconcilePodUpdates): when this daemon last opened a pod round,
+	// and the rounds it has opened whose claims have not recorded one yet, by issue. The two pace
+	// the sweep's openings under `pod_update_rounds_per_minute` and `pod_update_max_open_rounds`;
+	// nothing of either is in the store, because neither decides a round, and a daemon that has
+	// just booted opens its first round at its first sweep. The sweep is one goroutine, and the
+	// mutex is what makes that a fact of this code rather than of its caller.
+	podUpdateMu       sync.Mutex
+	podUpdateOpenedAt time.Time
+	podUpdateOpened   map[string]string
+	// podUpdateRoundsMu guards podUpdateRounds, what the last sweep decided under those two limits
+	// as the operator's claim listing serves it (api.PodUpdateRounds, podUpdateRoundsView): the
+	// issues that held an open round and the issues each limit held back. It is the sweep's own
+	// word and no claim carries it — an issue a limit held back is posted nothing at all — and it
+	// is kept in the shape the route answers, so nothing between the sweep and the wire translates
+	// it. A mutex of its own, because the API's reader is another goroutine than the sweep and
+	// neither waits on what the other is doing.
+	podUpdateRoundsMu sync.Mutex
+	podUpdateRounds   api.PodUpdateRounds
 	// reportStore persists each report as it arrives (store.Store), so a restart renders the
 	// sessions it re-adopts without waiting for them to report again.
 	reportStore capabilityReportStore
@@ -1180,6 +1220,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		RootTask:      p.rootTask,
 		TreeClosable:  p.treeClosable,
 		TaskConfirmed: p.taskConfirmed,
+		SessionGone:   cleanSessionStop(supervising, cfg.EnvoyURL, p.secrets["ENVOY_TOKEN"], log),
 		Clock:         p.clock,
 		Log:           log,
 		Limits: supervise.Limits{
@@ -1207,6 +1248,81 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		cancel: cancel, draining: draining, endDrain: endDrain, decided: api.NewRouteDecisions(),
 		stopping: stopping, beginStop: beginStop,
 	}, nil
+}
+
+// cleanSessionStop is what a machine calls once a probe has judged a claim's agent process gone
+// (supervise.Deps.SessionGone): it deletes that session's registration from the Envoy listener,
+// so the listener reads the session `gone` at once instead of holding its role claim and its
+// issue claims for the whole live window (dispatch://INFRA-392). It runs on the same client the
+// daemon's notices go through (notify.New), beside controller.NewProber, on the same base URL
+// and bearer.
+//
+// The machine calls it inside its own decision, under its lock, so the call is made on a
+// goroutine of its own, on supervising — supervision's lifetime, not the decision's context,
+// which the machine's caller can end the moment the decision returns.
+//
+// That delete must never remove a registration newer than the stop it belongs to: the very
+// decision that asks for the stop goes on to relaunch the claim under the same session id
+// (Machine.died), and a delete still in flight by then would otherwise take the live
+// registration of the process that replaced the dead one — the loss this change exists to stop.
+// So the stop carries the moment it belongs to, read here, inside the decision and before any
+// relaunch (Machine.died calls sessionGone first), and the listener deletes only while the
+// stored registration has not been written since
+// (if_not_registered_after, notify.HTTPPublisher.DeleteSession). The judgement is the listener's,
+// at the revision it deletes, as the session registry's own compare-and-swap is: a stop that
+// lands after the relaunch registered is refused there, whatever this daemon knew when it sent
+// it. So every stop is sent, and the one that would have done the damage is the one the listener
+// keeps.
+//
+// The two clocks are not one. goneAt is read on this daemon's clock and compared with an
+// UpdatedAt the registering process stamped on its own, so a daemon ahead of the listener by δ
+// would call a registration written up to δ after the stop older than it, and delete exactly the
+// relaunch registration the condition is for. The stop therefore carries goneAt less
+// cleanSessionStopSkewAllowance, which moves every skew toward the refusal: the direction that
+// costs a session only the wait it already had.
+//
+// The request is bounded by cleanSessionStopBudget, so a listener that never answers does not
+// leave it in flight for as long as it likes.
+//
+// A listener that refuses the delete or cannot be reached costs the session nothing beyond the
+// wait it already had: the registration lapses on its own at the gone horizon. With no listener
+// configured nothing is told.
+func cleanSessionStop(supervising context.Context, envoyURL, token string, log *slog.Logger) func(string) {
+	if envoyURL == "" {
+		return nil
+	}
+	stop := sessionStop{sessions: notify.New(envoyURL, token), log: log}
+	return func(session string) {
+		goneAt := time.Now().Add(-cleanSessionStopSkewAllowance)
+		go stop.send(supervising, session, goneAt)
+	}
+}
+
+// sessionStop is one role's clean stop in flight: the listener client it goes to, and the log
+// that says what became of it.
+type sessionStop struct {
+	sessions *notify.HTTPPublisher
+	log      *slog.Logger
+}
+
+// send is the goroutine cleanSessionStop starts, with goneAt the moment the stop belongs to -
+// the moment the probe judged the process gone, less cleanSessionStopSkewAllowance - which the
+// listener judges the stored registration against. It reports the stop refused, kept or done,
+// one line either way, since nothing waits on its answer.
+func (s sessionStop) send(supervising context.Context, session string, goneAt time.Time) {
+	ctx, cancel := context.WithTimeout(supervising, cleanSessionStopBudget)
+	defer cancel()
+	stopped, err := s.sessions.DeleteSession(ctx, session, goneAt)
+	if err != nil {
+		s.log.Warn("the Envoy listener did not take the clean stop of a dead role's session", "session", session, "error", err)
+		return
+	}
+	if !stopped.Deleted {
+		s.log.Info("the Envoy listener kept the registration of a dead role's session: it was written after the stop",
+			"session", session, "goneAt", goneAt.UnixMilli(), "reason", stopped.Reason)
+		return
+	}
+	s.log.Info("the Envoy session of a role whose process is gone was stopped", "session", session)
 }
 
 // start supervises every claim the store holds. A claim with a live locator is re-adopted — its
@@ -1656,6 +1772,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		ConsumerLag:        consumerLag,
 		CallerPod:          callerPodOf(s.runtime),
 		Supervisor:         s.supervisor,
+		PodUpdateRounds:    s.podUpdateRoundsView,
 		BootTokens:         s.tokens,
 		Project:            p.project,
 		DispatchProject:    cfg.Project,
