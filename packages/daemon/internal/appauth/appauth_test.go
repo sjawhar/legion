@@ -1235,6 +1235,42 @@ func TestTokenRefusesATokenWiderThanThePermissionsAsked(t *testing.T) {
 	}
 }
 
+// An answer naming no permissions is the other half of the answer naming no repository, and is
+// refused for the same reason: a token GitHub describes as holding nothing holds whatever the
+// installation is granted, and nothing in the answer says otherwise. The mint refuses what it
+// cannot hold to the request rather than serving it, and the refusal carries no token.
+func TestTokenRefusesATokenWhoseAnswerNamesNoPermissions(t *testing.T) {
+	expires := time.Date(2026, 11, 6, 13, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	for _, tc := range []struct {
+		name   string
+		answer string
+	}{
+		{"no permissions object at all", `{"token":"ghs_wide","expires_at":"` + expires +
+			`","repository_selection":"selected","repositories":[{"name":"legion"}]}`},
+		{"an empty permissions object", `{"token":"ghs_wide","expires_at":"` + expires +
+			`","repository_selection":"selected","repositories":[{"name":"legion"}],"permissions":{}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+			var stderr bytes.Buffer
+			github := &keyModeGitHub{owners: []string{"acme"}, slug: "legion-reviewer"}
+			github.answer = func(int, accessTokensBody) (int, string) { return http.StatusOK, tc.answer }
+			tokens := keyModeManager(t, github, &now, &stderr)
+
+			lease, err := tokens.ReadToken(context.Background(), Review, "acme", []string{"legion"})
+			if err == nil || lease.Token != "" {
+				t.Fatalf("a token whose answer names no permission = %q, %v; want no lease and a refusal", lease.Token, err)
+			}
+			if strings.Contains(err.Error(), "ghs_wide") {
+				t.Errorf("the refusal carries the token it refused: %v", err)
+			}
+			if !strings.Contains(err.Error(), "contents: read") {
+				t.Errorf("the refusal does not name the permissions asked for: %v", err)
+			}
+		})
+	}
+}
+
 // A request body with no `repositories` is the owner-wide token this change exists to stop:
 // GitHub mints the whole installation for it, whatever the answer it sends back is held to. So
 // every door into a mint refuses a call that names none, and refuses it before any exchange is
