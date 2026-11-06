@@ -1620,8 +1620,8 @@ type MyReplyRow struct {
 // its read mark. NextCursor is where the next state=dismissed page resumes, empty when the page
 // that answered it was the last.
 type MyRepliesResponse struct {
-	Rows  []MyReplyRow `json:"rows"`
-	Total int          `json:"total"`
+	Rows       []MyReplyRow `json:"rows"`
+	Total      int          `json:"total"`
 	Limit      int          `json:"limit"`
 	Offset     int          `json:"offset"`
 	AsOf       time.Time    `json:"as_of"`
