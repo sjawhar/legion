@@ -47,7 +47,7 @@
 import { realpathSync } from "node:fs";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { SESSION_ID_PATTERN } from "@legion/envoy-client/dispatch-session-directory";
+import { SESSION_ID_PATH_SEGMENT } from "@legion/envoy-client/dispatch-session-directory";
 
 const UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
 /** The bound on `jj config path --user`, which reads no repository and answers in milliseconds:
@@ -157,10 +157,10 @@ export async function userConfigChain(
 
 /** Writes the overlay for `sessionId` under `stateDir` and returns the chain it exported into
  * `env.JJ_CONFIG`, or undefined when it exported none: a session id that is not one
- * (`SESSION_ID_PATTERN`: the id reaches both the TOML literal and the overlay's file name, so an
- * id that is not one passes nothing on), no base chain to layer over, or a failed write — which
- * still degrades `env.JJ_CONFIG` to the base, since no overlay is active. `options.issueKey` and
- * `options.workspace` add the `Dispatch:` line, scoped to that one
+ * (`SESSION_ID_PATH_SEGMENT`: the id reaches both the TOML literal and the overlay's file name,
+ * so an id that is not one passes nothing on), no base chain to layer over, or a failed write —
+ * which still degrades `env.JJ_CONFIG` to the base, since no overlay is active.
+ * `options.issueKey` and `options.workspace` add the `Dispatch:` line, scoped to that one
  * workspace, only when the key's whole value is a key and the path is one a TOML basic string can
  * carry; `options.workspace` is the resolved path (`resolvedWorkspace`), which is what jj matches
  * a scope against. */
@@ -179,7 +179,7 @@ export async function exportJjSessionAttribution(
   // and break every `jj` command in the pane, and a `/` would move the overlay out of the state
   // directory. Oh My Pi's id is the transcript's UUID; Claude Code's is whatever its hook input
   // carries, which its schema caps at nothing.
-  if (!SESSION_ID_PATTERN.test(sessionId)) return undefined;
+  if (!SESSION_ID_PATH_SEGMENT.test(sessionId)) return undefined;
   const overlay = path.join(stateDir, `omp-attribution-${sessionId}.toml`);
   // Bracket access, not a dot: claude-envoy type-checks this source under
   // noPropertyAccessFromIndexSignature, which refuses a dot on an index signature.

@@ -12,8 +12,8 @@
 //    reads the file ENVOY_CONFIG_FILE names whenever DISPATCH_HOST is set. A subagent's Bash can
 //    lack what that file holds (anthropics/claude-code#46696); the `dispatch` command it runs then
 //    takes host `claude` from `CLAUDE_CODE_CHILD_SESSION=1` and reads `CLAUDE_CONFIG_DIR` itself.
-//    The path is single-quoted, the one form Claude Code's PowerShell
-//    bridge also reads. The command reads the session id from `CLAUDE_CODE_SESSION_ID`, which
+//    The path is single-quoted (`singleQuoted`, whose doc gives what Claude Code's
+//    PowerShell bridge reads of that form). The command reads the session id from `CLAUDE_CODE_SESSION_ID`, which
 //    Claude Code sets fresh in each Bash command, so a `/clear` needs nothing more here.
 // 2. For a Legion pane (`LEGION_STATE_DIR` set), write the pane's jj attribution overlay under
 //    that directory and hand on the jj config chain it layers over: `export JJ_CONFIG='<chain>'`
@@ -23,13 +23,18 @@
 //    so, and how, is `paneAttributionOptions`
 //    (`exportJjSessionAttribution`, `@legion/pi-shared/jj-attribution`). The
 //    hook writes it, not the claim boot: that boot is the MCP server Claude Code spawns as a
-//    child, and a child cannot change its parent's environment. A `/clear` gives the session a
-//    new id and so a new overlay path, so this line replaces an earlier one rather than joining
-//    it: exactly one `export JJ_CONFIG=` stands however many times the hook runs. A session that
-//    is no Legion pane gets nothing, and an overlay that could not be written (no jj, or a jj
-//    that never answers inside its 3 s) costs the session that one export and nothing else: the
-//    line an earlier SessionStart wrote is removed, since a chain naming the pre-`/clear`
-//    session's overlay would stamp a wrong session id where no chain stamps none.
+//    child, and a child cannot change its parent's environment. This line replaces an earlier one
+//    rather than joining it: exactly one `export JJ_CONFIG=` stands however many times the hook
+//    runs, since a resume or a compaction of the same session id runs it again over the file it
+//    already wrote and the chain it resolves can differ, and two such lines in one sourced file
+//    would leave which overlay wins to the order they were written in. A session that is no
+//    Legion pane gets nothing, and an overlay that could not be written (no jj, or a jj that
+//    never answers inside its 3 s) costs the session that one export and nothing else: a line an
+//    earlier run of this same id wrote is left as it stands, since `CLAUDE_ENV_FILE` is
+//    `<config>/session-env/<session id>/sessionstart-hook-<n>.sh` on the pinned Claude Code
+//    2.1.311 — one file per session id, so a `/clear`, which gives the session a new id, gets a
+//    new and empty one — and a line already there names this same session's own overlay, still on
+//    disk and still correct.
 // 3. Record the CURRENT session id for this Claude process so the channel
 //    server, which keeps the id it was spawned with, can follow a `/clear`.
 // 4. Put the session's open Dispatch asks into the model's context, after one `envoy: <warning>`
@@ -181,9 +186,12 @@ const JJ_BASE_CHAIN_TIMEOUT_MS = 3_000
 
 /** `value` as a single-quoted shell word: Claude Code sources this file before every bash command
  *  of the session, so a path or a config chain holding a space, a quote or a `$` must reach the
- *  shell as one word, and single quotes are the one form Claude Code's PowerShell bridge also
- *  reads. A single quote inside the value ends the quoting, is passed as an escaped quote of its
- *  own, and opens it again. */
+ *  shell as one word. A single quote inside the value ends the quoting, is passed as an escaped
+ *  quote of its own, and opens it again. Claude Code's PowerShell bridge reads the single-quoted
+ *  form of a value holding no quote; the `'\''` escape is POSIX `sh`'s, and that bridge's value
+ *  grammar, read on the pinned 2.1.311, does not take it, so a line carrying one is no line the
+ *  bridge can read — which costs the whole file there, and costs a Legion pane nothing, since
+ *  Legion panes are not on Windows. */
 function singleQuoted(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`
 }
@@ -214,9 +222,10 @@ function appendOnce(envFile: string, line: string): void {
 }
 
 /** Writes `line` to the env file as the only line starting with `prefix`, replacing an earlier
- *  one in its place and appending when there is none: a `/clear` gives the session a new id and so
- *  a new overlay path, and two `export JJ_CONFIG=` lines in one sourced file would leave which
- *  overlay wins to the order they were written in. Every other line keeps its text and its place.
+ *  one in its place and appending when there is none: a resume or a compaction of the same
+ *  session id runs the hook again over the file it already wrote, and the chain it resolves can
+ *  differ, where two `export JJ_CONFIG=` lines in one sourced file would leave which overlay wins
+ *  to the order they were written in. Every other line keeps its text and its place.
  *  A replacement is written through a temporary file and a rename, so a process that dies
  *  mid-write leaves the shell the whole old file, never a truncated one; with no earlier line it
  *  appends, as `appendOnce` does (`appendLine`), rather than rewriting what another hook may be
@@ -231,21 +240,6 @@ function replaceOnce(envFile: string, prefix: string, line: string): void {
   }
   if (lines[at] === line) return
   lines[at] = line
-  writeAtomically(envFile, lines.join("\n"))
-}
-
-/** Deletes the one line starting with `prefix` from the env file, and does nothing when there is
- *  none: a SessionStart that wrote no overlay must leave none of an earlier one behind. After a
- *  `/clear` the earlier line names the pre-clear session's overlay, so every commit the session
- *  makes would carry that session's id — a *wrong* trailer, where the write this hook could not
- *  do costs only the *absence* of one, which is what this module degrades to. Removal is written
- *  the same atomic way `replaceOnce` writes a replacement, and every other line keeps its text
- *  and its place. */
-function removeOnce(envFile: string, prefix: string): void {
-  const lines = envFileText(envFile).split("\n")
-  const at = lines.findIndex((existing) => existing.startsWith(prefix))
-  if (at === -1) return
-  lines.splice(at, 1)
   writeAtomically(envFile, lines.join("\n"))
 }
 
@@ -269,14 +263,20 @@ async function openAsks(raw: unknown): Promise<void> {
           ...paneAttributionOptions(process.env),
           resolveBase: () => userConfigChain(JJ_BASE_CHAIN_TIMEOUT_MS),
         })
-        if (chain === undefined) {
-          removeOnce(envFile, JJ_CONFIG_EXPORT)
-        } else {
+        // An overlay that could not be written leaves the file as it is: no line written, and
+        // none removed. `CLAUDE_ENV_FILE` is
+        // `<config>/session-env/<session id>/sessionstart-hook-<n>.sh` on the pinned Claude Code
+        // 2.1.311, so the file belongs to this session id alone: an `export JJ_CONFIG=` line
+        // already in it was written by an earlier run of this same id — a resume or a compaction
+        // — and names this same session's own overlay, still on disk and still correct. Removing
+        // it after a jj that did not answer would leave the session with neither trailer, where
+        // keeping it leaves the session the trailer it already had.
+        if (chain !== undefined) {
           replaceOnce(envFile, JJ_CONFIG_EXPORT, `${JJ_CONFIG_EXPORT}${singleQuoted(chain)}`)
         }
       } catch (error) {
-        // The overlay writer swallows its own failures, but replacing or removing a line writes a
-        // temporary file beside the env file, which needs its directory writable where appending
+        // The overlay writer swallows its own failures, but replacing a line writes a temporary
+        // file beside the env file, which needs its directory writable where appending
         // above did not: attribution must cost the session neither its exports nor its summary.
         process.stderr.write(`envoy: could not export the jj attribution — ${messageFor(error)}\n`)
       }

@@ -688,14 +688,21 @@ test("writes no overlay and no JJ_CONFIG for a session that is no Legion pane", 
   }
 })
 
-// A `/clear` gives the session a new id and so a new overlay path. Two export lines in one sourced
-// file would leave which overlay wins to the order they were written in.
-test("keeps one JJ_CONFIG export, naming the newest overlay, however many session ids ran the hook", async () => {
+// Claude Code gives each session id its own env file, so the runs that find a line already there
+// are a resume and a compaction of the same id, which this hook runs again over the file that id
+// wrote; the chain it resolves can differ between them. Two export lines in one sourced file
+// would leave which chain wins to the order they were written in.
+test("keeps one JJ_CONFIG export, naming the chain this run resolved, when the same id runs again", async () => {
   const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-jj-twice-"))
   const stateDir = join(scratch, "state")
   await mkdir(stateDir)
   const userConfig = join(scratch, "jj-user.toml")
+  const laterConfig = join(scratch, "jj-user-later.toml")
   const bin = await jjDirectory(scratch, `printf '%s\\n' ${JSON.stringify(userConfig)}`)
+  const laterBin = await jjDirectory(
+    join(scratch, "later"),
+    `printf '%s\\n' ${JSON.stringify(laterConfig)}`,
+  )
   const envFile = join(scratch, "session-env.sh")
   await writeFile(envFile, "export FROM_ANOTHER_HOOK=1\n")
   try {
@@ -707,14 +714,17 @@ test("keeps one JJ_CONFIG export, naming the newest overlay, however many sessio
       LEGION_STATE_DIR: stateDir,
     }
     expect((await runHook(hookInput, env)).exitCode).toBe(0)
-    expect((await runHook({ ...hookInput, session_id: "s-2" }, env)).exitCode).toBe(0)
+    expect(
+      (await runHook(hookInput, { ...env, PATH: `${laterBin}:${process.env["PATH"] ?? ""}` }))
+        .exitCode,
+    ).toBe(0)
 
     expect(await readFile(envFile, "utf8")).toBe(
       [
         "export FROM_ANOTHER_HOOK=1",
         "export DISPATCH_HOST=claude",
         `export ENVOY_CONFIG_FILE='${scratch}/.config/legion/envoy.json'`,
-        `export JJ_CONFIG='${userConfig}:${join(stateDir, "omp-attribution-s-2.toml")}'`,
+        `export JJ_CONFIG='${laterConfig}:${join(stateDir, `omp-attribution-${hookInput.session_id}.toml`)}'`,
         "",
       ].join("\n"),
     )
@@ -791,13 +801,16 @@ test("gives up on a jj that never answers, keeping the other exports and the sum
   }
 })
 
-// A `/clear` after an overlay the hook could not write would otherwise leave the chain of the
-// session before it, and so stamp every commit of this session with the pre-clear session's id: a
-// wrong trailer, where no chain is the absence of one. The writer takes its base from an
-// inherited JJ_CONFIG and spawns no jj at all when it finds one, so the hanging run is given an
-// environment carrying none, as Claude Code's hook process is.
-test("removes the export of an earlier session when this one's overlay could not be written", async () => {
-  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-jj-stale-"))
+// `CLAUDE_ENV_FILE` is one file per session id
+// (`<config>/session-env/<session id>/sessionstart-hook-<n>.sh` on the pinned Claude Code
+// 2.1.311), so the only runs that find an `export JJ_CONFIG=` line already written are a resume
+// or a compaction of that same id — which the Legion daemon does on every relaunch. The line
+// there names this same session's own overlay, still on disk: a jj that never answers must leave
+// it, since removing it would leave the session with neither trailer. The writer takes its base
+// from an inherited JJ_CONFIG and spawns no jj at all when it finds one, so both runs are given
+// an environment carrying none, as Claude Code's hook process is.
+test("keeps the session's own export when a later run of the same id has no jj to answer", async () => {
+  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-jj-resume-"))
   const stateDir = join(scratch, "state")
   await mkdir(stateDir)
   const userConfig = join(scratch, "jj-user.toml")
@@ -811,22 +824,25 @@ test("removes the export of an earlier session when this one's overlay could not
       LEGION_STATE_DIR: stateDir,
       LEGION_ISSUE_TRAILER: "ACME-7",
     })
+    const overlay = join(stateDir, "omp-attribution-s-1.toml")
     const working = await jjDirectory(
       join(scratch, "working"),
       `printf '%s\\n' ${JSON.stringify(userConfig)}`,
     )
     expect((await runHook(hookInput, env(working))).exitCode).toBe(0)
     expect(await readFile(envFile, "utf8")).toContain(
-      `export JJ_CONFIG='${userConfig}:${join(stateDir, "omp-attribution-s-1.toml")}'\n`,
+      `export JJ_CONFIG='${userConfig}:${overlay}'\n`,
     )
 
+    // The resume: same session id, same file, and a jj that never answers.
     const hanging = await jjDirectory(join(scratch, "hanging"), "exec sleep 30")
-    expect((await runHook({ ...hookInput, session_id: "s-2" }, env(hanging))).exitCode).toBe(0)
+    expect((await runHook(hookInput, env(hanging))).exitCode).toBe(0)
 
     expect(await readFile(envFile, "utf8")).toBe(
       [
         "export DISPATCH_HOST=claude",
         `export ENVOY_CONFIG_FILE='${scratch}/.config/legion/envoy.json'`,
+        `export JJ_CONFIG='${userConfig}:${overlay}'`,
         "",
       ].join("\n"),
     )
