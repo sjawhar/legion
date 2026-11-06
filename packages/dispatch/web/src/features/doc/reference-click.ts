@@ -1,5 +1,8 @@
 import type { QueryClient } from "@tanstack/react-query";
+import { useCallback, useRef } from "react";
+import { useNavigate } from "react-router-dom";
 
+import { isPlainClick } from "../refs/picture-viewer";
 import { fetchReferencePath, needsSpecSlug } from "../refs/reference-target";
 import {
   buildReferencePath,
@@ -11,6 +14,18 @@ import {
  * `useNavigate`; the picture node view, which is plain DOM and holds no hook, is handed one at
  * its editor's mount (`picture-view.ts`). */
 export type NavigateToReference = (path: string) => void;
+
+/** The one a document page hands its editor, which never changes: React Router gives out a new
+ * `navigate` on every location change, and the editor is built in an effect that must rebuild
+ * for no navigation, so the page keeps the latest in a ref and the editor calls it through
+ * this. Both articles read it (`ProofDocument`, `VersionView`) and pass what it answers into
+ * `createDoc`, which hands it to the picture node view. */
+export function useStableNavigate(): NavigateToReference {
+  const navigate = useNavigate();
+  const navigateRef = useRef(navigate);
+  navigateRef.current = navigate;
+  return useCallback((path: string) => navigateRef.current(path), []);
+}
 
 /** What the tests below read of a click. React's synthetic mouse event and the DOM's both
  * satisfy it, so the articles hand in the one their JSX handler is given and a plain-DOM
@@ -41,10 +56,11 @@ function dispatchHrefOf(anchor: Element): string | null {
  * to end on the link should reach the browser's and the editor's own handling, not be stolen;
  * and so should a click something nearer the target has already answered — the picture's
  * fallback link answers its own click (`picture-view.ts`), and the article sees that same click
- * again as it bubbles. */
+ * again as it bubbles. The button and the modifier keys are the one test a picture's own click
+ * is held to (`isPlainClick`).
+ */
 export function opensReference(event: ReferenceClick): boolean {
-  const modified = event.ctrlKey || event.metaKey || event.shiftKey || event.altKey;
-  if (event.defaultPrevented || event.button !== 0 || modified) {
+  if (event.defaultPrevented || !isPlainClick(event)) {
     return false;
   }
   const selection = window.getSelection();

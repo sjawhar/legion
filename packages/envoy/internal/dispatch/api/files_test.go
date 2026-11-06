@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -302,8 +303,16 @@ func TestAFileVersionInItsRowAnswersRangeRequests(t *testing.T) {
 // A version whose bytes are in the store answers the same ranges, read back through the store.
 func TestAFileVersionInTheStoreAnswersRangeRequests(t *testing.T) {
 	handler, database, _ := newTestServer(t, testServerOptions{files: filestest.NewMemory()})
-	issue := fileIssue(t, handler)
 	clip := []byte("a video's bytes, start to end")
+	route, sha := storedClip(t, handler, database, clip)
+	assertFileVersionRanges(t, handler, route, clip, sha)
+}
+
+// storedClip uploads a video to a server whose bytes live in the store and answers the route
+// that downloads it, for the rows below, which read that one path.
+func storedClip(t *testing.T, handler http.Handler, database *store.Store, clip []byte) (route, sha string) {
+	t.Helper()
+	issue := fileIssue(t, handler)
 	upload := multipartRequest(t, handler, "/api/v1/issues/"+issue+"/artifacts", map[string]string{"name": "clip.mp4"}, "clip.mp4", "video/mp4", clip, "alice")
 	if upload.Code != http.StatusCreated {
 		t.Fatalf("upload: status=%d body=%s", upload.Code, upload.Body.String())
@@ -312,7 +321,93 @@ func TestAFileVersionInTheStoreAnswersRangeRequests(t *testing.T) {
 	if row := versionRow(t, database, version.Artifact.ID, 1); row != nil {
 		t.Fatalf("the row holds %d bytes; with a store it should hold none", len(row))
 	}
-	assertFileVersionRanges(t, handler, "/api/v1/artifacts/"+version.Artifact.ID+"/versions/1", clip, version.Version.SHA256)
+	return "/api/v1/artifacts/" + version.Artifact.ID + "/versions/1", version.Version.SHA256
+}
+
+// A range that asks for the whole of a stored file - what a player's opening probe asks for -
+// is answered 206 with all of the bytes, their Content-Range and their length, streamed from
+// the store rather than read into memory first.
+func TestAFileVersionInTheStoreStreamsAWholeFileRange(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{files: filestest.NewMemory()})
+	clip := []byte("a video's bytes, start to end")
+	route, _ := storedClip(t, handler, database, clip)
+	for _, header := range []string{"bytes=0-", fmt.Sprintf("bytes=0-%d", len(clip)-1)} {
+		answer := fileVersionRequest(t, handler, route, map[string]string{"Range": header})
+		if answer.Code != http.StatusPartialContent || !bytes.Equal(answer.Body.Bytes(), clip) {
+			t.Fatalf("GET %s %s: status=%d body=%q, want 206 with the whole file", route, header, answer.Code, answer.Body.String())
+		}
+		if got, want := answer.Header().Get("Content-Range"), fmt.Sprintf("bytes 0-%d/%d", len(clip)-1, len(clip)); got != want {
+			t.Errorf("GET %s %s: Content-Range %q, want %q", route, header, got, want)
+		}
+		if got, want := answer.Header().Get("Content-Length"), strconv.Itoa(len(clip)); got != want {
+			t.Errorf("GET %s %s: Content-Length %q, want %q", route, header, got, want)
+		}
+		if got := answer.Header().Get("Accept-Ranges"); got != "bytes" {
+			t.Errorf("GET %s %s: Accept-Ranges %q, want bytes", route, header, got)
+		}
+	}
+}
+
+// The streamed answer to a whole-file range is held to the row's hash as the unranged one is: a
+// version whose object no longer holds the row's bytes is cut short of its Content-Length
+// rather than delivered whole. Over a real connection, since the cut is the connection's.
+func TestATamperedObjectIsNotDeliveredWholeForARange(t *testing.T) {
+	original := bytes.Repeat([]byte("o"), 300_000)
+	replaced := append(bytes.Repeat([]byte("o"), 299_999), 'x')
+	store := tampered{Store: filestest.NewMemory(), sha: files.SHA256(original), bytes: replaced}
+	handler, _, _ := newTestServer(t, testServerOptions{files: store})
+	issue := fileIssue(t, handler)
+	response := multipartRequest(t, handler, "/api/v1/issues/"+issue+"/artifacts", map[string]string{"name": "shot.bin"}, "shot.bin", "application/octet-stream", original, "alice")
+	if response.Code != http.StatusCreated {
+		t.Fatalf("upload: status=%d body=%s", response.Code, response.Body.String())
+	}
+	version := decodeBody[uploaded](t, response)
+
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	request, err := http.NewRequest(http.MethodGet, server.URL+"/api/v1/artifacts/"+version.Artifact.ID+"/versions/1", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	request.Header.Set("X-Dispatch-User", "alice")
+	request.Header.Set("Range", "bytes=0-")
+	served, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer served.Body.Close()
+	if served.StatusCode != http.StatusPartialContent || served.ContentLength != int64(len(original)) {
+		t.Fatalf("status %d, Content-Length %d, want 206 and %d: the object opened, so the headers went out", served.StatusCode, served.ContentLength, len(original))
+	}
+	got, err := io.ReadAll(served.Body)
+	if err == nil || int64(len(got)) >= int64(len(original)) {
+		t.Fatalf("the client read %d of %d bytes with error %v; want fewer bytes and a read error", len(got), len(original), err)
+	}
+}
+
+// A browser that kept a stored version's bytes sends their entity tag back and is told they
+// have not changed, with no body and nothing read from the store; a tag that is not this
+// version's is answered the whole file. The tag is read as net/http reads it, so it is found in
+// a list and matched weakly, and a bare one matches nothing.
+func TestAFileVersionInTheStoreAnswersIfNoneMatch(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{files: filestest.NewMemory()})
+	clip := []byte("a video's bytes, start to end")
+	route, sha := storedClip(t, handler, database, clip)
+	for _, header := range []string{`"` + sha + `"`, `W/"` + sha + `"`, `"other", "` + sha + `"`, "*"} {
+		answer := fileVersionRequest(t, handler, route, map[string]string{"If-None-Match": header})
+		if answer.Code != http.StatusNotModified || answer.Body.Len() != 0 {
+			t.Errorf("GET %s If-None-Match %s: status=%d, %d body bytes, want 304 with no body", route, header, answer.Code, answer.Body.Len())
+		}
+		if got, want := answer.Header().Get("ETag"), `"`+sha+`"`; got != want {
+			t.Errorf("GET %s If-None-Match %s: ETag %q, want %q", route, header, got, want)
+		}
+	}
+	for _, header := range []string{`"not-this-file"`, sha} {
+		answer := fileVersionRequest(t, handler, route, map[string]string{"If-None-Match": header})
+		if answer.Code != http.StatusOK || !bytes.Equal(answer.Body.Bytes(), clip) {
+			t.Errorf("GET %s If-None-Match %s: status=%d, %d body bytes, want 200 with the whole file", route, header, answer.Code, answer.Body.Len())
+		}
+	}
 }
 
 func TestAnUploadTheStoreRefusesLeavesNoVersionBehind(t *testing.T) {

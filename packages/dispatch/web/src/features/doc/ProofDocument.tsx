@@ -68,7 +68,7 @@ import {
 import { NameVersionDialog } from "./NameVersionDialog";
 import type { PendingState } from "./pending-sync";
 import { createPendingWaiter } from "./pending-waiter";
-import { handleReferenceClick } from "./reference-click";
+import { handleReferenceClick, useStableNavigate } from "./reference-click";
 import { refocusAfterDiagrams } from "./refocus-after-diagrams";
 import { FRAGMENT_NAME } from "./roots";
 import { DocumentRuntime } from "./runtime";
@@ -238,11 +238,9 @@ export function ProofDocument({
   // rather than listing them as dependencies, so a margin re-render never rebuilds the editor.
   const marginRef = useRef(margin);
   marginRef.current = margin;
-  // The editor's picture links reach the page's latest `navigate` through this ref, for the same
-  // reason: React Router hands out a new one on every location change, and a navigation must
-  // never rebuild the editor.
-  const navigateRef = useRef(navigate);
-  navigateRef.current = navigate;
+  // What the editor's picture links navigate with, which never changes as the page's own
+  // `navigate` does (`useStableNavigate`).
+  const navigateFromEditor = useStableNavigate();
   highlightTermRef.current = highlightTerm;
   const queryClient = useQueryClient();
   const documentRef = buildDispatchReference(documentRoute(artifact));
@@ -767,7 +765,7 @@ export function ProofDocument({
                 blockSchema,
                 // What a picture's fallback link opens its artifact with, since the node view is
                 // plain DOM: the page's own navigation and its query client.
-                navigate: (path) => navigateRef.current(path),
+                navigate: navigateFromEditor,
                 queryClient,
                 watchPicture: (route, onPicture) => watchPicturePath(queryClient, route, onPicture),
                 // The open document's own reference, never a version's: a pointer names a block
@@ -809,6 +807,7 @@ export function ProofDocument({
     documentRef,
     focusInEditor,
     loadTransport,
+    navigateFromEditor,
     page,
     pendingWaiter,
     queryClient,

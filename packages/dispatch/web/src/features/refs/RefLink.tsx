@@ -2,7 +2,7 @@ import { type ReactNode, useLayoutEffect } from "react";
 
 import { ArtifactMedia } from "./ArtifactMedia";
 import { referenceSpans } from "./reference-spans";
-import { usePinnedMedia, useReferencePath, useReferenceTarget } from "./reference-target";
+import { useReferencePath, useReferenceTarget } from "./reference-target";
 import {
   buildDispatchReference,
   buildReferencePath,
@@ -50,12 +50,11 @@ export function RefLink({
 }): ReactNode {
   const { picture, title } = useReferenceTarget(route, { text: false });
   const path = useReferencePath(route);
-  // What the reference draws: the summary's answer, which for a pinned reference carries the
-  // address the reference itself names, and until it is read the pinned read's own answer,
-  // which asks the cache and waits for nothing.
-  const pinned = usePinnedMedia(route);
-  const media = picture ?? pinned;
-  const player = alone === true && media?.kind === "video" ? media.src : undefined;
+  // A video standing alone in its block is a player. The summary says which references are
+  // videos, and this component reads it through the hook, which subscribes to the very query a
+  // pinned reference's media would be read out of the cache from (`usePinnedMedia`), so
+  // whenever that summary is there `picture` already answers `video`.
+  const player = alone === true && picture?.kind === "video" ? picture.src : undefined;
   useLayoutEffect(() => {
     if (anchor instanceof HTMLAnchorElement && player === undefined) {
       anchor.setAttribute("href", path);

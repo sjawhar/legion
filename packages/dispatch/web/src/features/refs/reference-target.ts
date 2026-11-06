@@ -1,4 +1,4 @@
-import { isVideoContentType } from "@legion/contracts";
+import { isVideoContentType, storedMediaType } from "@legion/contracts";
 import {
   type QueryClient,
   type QueryKey,
@@ -533,15 +533,12 @@ export function useReferenceTarget(
 
 /** Whether a stored content type is a video's: the one such test in the web app. A reference
  *  asks it of the type its summary carries, and the artifact page and the Artifacts tab, which
- *  read a `Version` record rather than a reference, ask it of the version's own stored type. A
- *  stored type may carry parameters (`video/mp4; codecs=…`), which name no other type, so the
- *  type before the first `;` decides. */
+ *  read a `Version` record rather than a reference, ask it of the version's own stored type. The
+ *  stored type is read without its parameters (`storedMediaType`), since `video/mp4; codecs=…`
+ *  names no other type. */
 export function isStoredVideo(mime: string | null | undefined): boolean {
-  if (mime === null || mime === undefined) {
-    return false;
-  }
-  const [type = ""] = mime.split(";");
-  return isVideoContentType(type.trim());
+  const type = storedMediaType(mime);
+  return type !== undefined && isVideoContentType(type);
 }
 
 /** The size a summary lets a reference reserve a box with: the pair it recorded for `artifact`'s
@@ -652,12 +649,13 @@ export function watchPicturePath(
 
 /** What a reference pinned to a version draws: the bytes route it names, at once, with no read
  *  and no subscription of its own - a picture pinned by a document's source draws as it always
- *  has, never a link while something is in flight. Its type and its size are the ones the
- *  summary already in the query cache carries, where a link, a card or another picture on the
- *  page has read it, so a pinned video answers `video` and a picture pinned at the artifact's
- *  latest version carries that version's shape (`recordedSize`); where the cache holds none it
- *  answers `picture` with no size, which is what a pinned reference drew before either was
- *  known. Undefined for a reference that pins no version, whose media is the hook's `picture`. */
+ *  has, never a link while something is in flight. The summary already in the query cache, where
+ *  a link, a card or another picture on the page has read it, answers as it answers the hook
+ *  (`referenceMedia`), so a pinned video answers `video` and a picture pinned at the artifact's
+ *  latest version carries that version's shape; where it answers nothing - the cache holds no
+ *  summary, or the one it holds names a document or another file - the pinned address is drawn
+ *  as a picture with no size, which is what a pinned reference drew before either was known.
+ *  Undefined for a reference that pins no version, whose media is the hook's `picture`. */
 export function usePinnedMedia(
   route: DispatchReferenceRoute | undefined
 ): ReferenceMedia | undefined {
@@ -666,16 +664,9 @@ export function usePinnedMedia(
   if (route === undefined || named?.version === undefined) {
     return undefined;
   }
-  const artifact = cachedReferenceArtifact(queryClient, route);
+  const cached = referenceMedia(named, cachedReferenceArtifact(queryClient, route));
   const src = artifactVersionPath(named.owner, named.slug, named.version);
-  if (isStoredVideo(artifact?.mime)) {
-    return { kind: "video", src };
-  }
-  return {
-    kind: "picture",
-    src,
-    ...(artifact === undefined ? {} : recordedSize(named.version, artifact)),
-  };
+  return cached ?? { kind: "picture", src };
 }
 
 /** The summary of the document a reference names, as the query cache already holds it: undefined

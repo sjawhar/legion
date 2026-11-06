@@ -15,7 +15,7 @@ import { colorForLogin } from "./connection";
 import { createDoc, type EditorHandle } from "./editor";
 import type { Highlight } from "./highlight";
 import { embedHighlight } from "./highlight";
-import { handleReferenceClick } from "./reference-click";
+import { handleReferenceClick, useStableNavigate } from "./reference-click";
 import { refocusAfterDiagrams } from "./refocus-after-diagrams";
 import { DocumentRuntime } from "./runtime";
 import type { AskBlockHost } from "./typed-block-drawing";
@@ -58,11 +58,9 @@ export function VersionView({
   const userQuery = useQuery(whoAmIQuery());
   const queryClient = useQueryClient();
   const navigate = useNavigate();
-  // The editor effect reaches the latest `navigate` through this ref rather than listing it as
-  // a dependency: React Router hands out a new one on every location change, and a navigation
-  // must never rebuild the editor.
-  const navigateRef = useRef(navigate);
-  navigateRef.current = navigate;
+  // What the editor's picture links navigate with, which never changes as this page's own
+  // `navigate` does (`useStableNavigate`).
+  const navigateFromEditor = useStableNavigate();
   const markdown =
     versionQuery.data !== undefined && "markdown" in versionQuery.data
       ? versionQuery.data.markdown
@@ -116,7 +114,7 @@ export function VersionView({
         onAskBlockHosts: setAskBlockHosts,
         // What a picture's fallback link opens its artifact with, since the node view is plain
         // DOM: this page's own navigation and its query client.
-        navigate: (path) => navigateRef.current(path),
+        navigate: navigateFromEditor,
         queryClient,
         readOnly: true,
         user: { color: colorForLogin(user.login), name: user.login },
@@ -168,6 +166,7 @@ export function VersionView({
     createEditor,
     highlighted,
     markdown,
+    navigateFromEditor,
     queryClient,
     userQuery.data,
   ]);

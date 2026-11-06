@@ -1,12 +1,20 @@
 import type { default as PhotoSwipe, SlideData } from "photoswipe";
 
 import { importWhenOnline } from "../shell/DeploymentResilience";
-import { pictureThumbnailClassName } from "./picture-classes";
 
-/** Whether a click on a picture is the plain primary click that opens it at full size. A click
- *  with a modifier key, or with another button, keeps the browser's own meaning (a new tab for
- *  the link a rendered body puts around the picture). */
-export function isPlainClick(event: MouseEvent): boolean {
+/** Whether a click is the plain primary click that opens a picture at full size. A click with a
+ *  modifier key, or with another button, keeps the browser's own meaning (a new tab for the link
+ *  a rendered body puts around the picture). It reads the five answers every click carries, so
+ *  the DOM's `MouseEvent`, React's synthetic one and a document's own `ReferenceClick`
+ *  (`features/doc/reference-click.ts`, which asks the same of a click on a link) all satisfy
+ *  it. */
+export function isPlainClick(event: {
+  readonly altKey: boolean;
+  readonly button: number;
+  readonly ctrlKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
+}): boolean {
   return event.button === 0 && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey;
 }
 
@@ -30,6 +38,12 @@ const READING_SURFACE = "article.dispatch-doc, .dispatch-markdown";
  *  body (`markdown-serializer.ts`), `[data-dispatch-doc-picture]` in an editor
  *  (`features/doc/picture-view.ts`). */
 const PLACEHOLDER_PICTURE = "[data-dispatch-picture] img, [data-dispatch-doc-picture] img";
+
+/** The thumbnails among them: the 40 px square a line holds beside its title, which opens the
+ *  artifact's page rather than this view. Each drawing place stamps the size it drew at on the
+ *  element itself (`ArtifactMedia.tsx`, `features/doc/picture-view.ts`), never on the class
+ *  alone, which a caller adds its own to. */
+const THUMBNAIL_PICTURE = '[data-dispatch-picture-size="thumbnail"]';
 
 /** The viewer that is open, whose library is still being imported, or that is still animating
  *  itself off the page: one at a time. The slot frees on PhotoSwipe's `destroy` (`release`), so
@@ -86,9 +100,8 @@ export function openPictureViewer(clicked: HTMLImageElement): PictureViewer | un
  *  them. A placeholder can hold the 40 px thumbnail instead of a picture drawn at reading size -
  *  a reference link's, an ask option's, `MarkdownPreview`'s inline variant - and a thumbnail
  *  opens the artifact's page rather than this view, so it is no part of the set: the two wear
- *  the same placeholder attribute, and what tells them apart is the class each is drawn with
- *  (`pictureThumbnailClassName`, 40 px square and cropped; `pictureClassName`, the reading size
- *  the column leaves it). */
+ *  the same placeholder attribute, and what tells them apart is the size each drawing place
+ *  stamped on the element it drew (`THUMBNAIL_PICTURE`). */
 function surfacePictures(clicked: HTMLImageElement): HTMLImageElement[] {
   const surface = clicked.closest(READING_SURFACE);
   if (surface === null) {
@@ -96,7 +109,7 @@ function surfacePictures(clicked: HTMLImageElement): HTMLImageElement[] {
   }
   const pictures = Array.from(
     surface.querySelectorAll<HTMLImageElement>(PLACEHOLDER_PICTURE)
-  ).filter((picture) => picture.className !== pictureThumbnailClassName);
+  ).filter((picture) => !picture.matches(THUMBNAIL_PICTURE));
   return pictures.includes(clicked) ? pictures : [clicked];
 }
 

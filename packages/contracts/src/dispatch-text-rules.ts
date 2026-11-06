@@ -73,6 +73,18 @@ export function pictureCaption(name: string): string {
   return name.replace(/[\\[\]`]/g, "\\$&").replace(/\s+/g, " ");
 }
 
+/**
+ * The media type a version is stored under, as the predicates below read one: the type alone,
+ * without the parameters a stored type may carry, since `image/png; charset=binary` is the same
+ * picture as `image/png` and no parameter names another type. Undefined where the record
+ * carries no type at all, which is no type any of them answers for. Every reader of a stored
+ * type asks this one question of it: the dashboard's reference media, the CLI's upload line and
+ * the pictures a delivery shows a model.
+ */
+export function storedMediaType(mime: string | null | undefined): string | undefined {
+  return mime === null || mime === undefined ? undefined : mime.split(";")[0]?.trim();
+}
+
 /** The picture types a model is shown and the server stores as `kind: image`: what their bytes
  *  say, never a name or a header. Everything else, an SVG included, is a file. */
 export type PictureType = "image/png" | "image/jpeg" | "image/gif" | "image/webp";

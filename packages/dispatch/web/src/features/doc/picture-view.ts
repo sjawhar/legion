@@ -207,6 +207,9 @@ export function pictureView(
       drawn = img;
     }
     element.className = pictureClassName;
+    // The size it is drawn at, beside the class: an editor draws a picture at reading size and
+    // never as a thumbnail, and `refs/picture-viewer.ts` reads this to tell the two apart.
+    element.dataset.dispatchPictureSize = "block";
     // The listener and the element's place in the wrapper come before `src`, so an error the
     // browser raises at once is caught and replaces it rather than preceding it. An element a
     // newer version already replaced falls back to nothing.

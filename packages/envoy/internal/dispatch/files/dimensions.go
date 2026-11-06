@@ -6,39 +6,32 @@ import (
 	"errors"
 	"fmt"
 	"image"
-	// The three picture formats the standard library decodes, registered with image.DecodeConfig
-	// so PictureDimensions can read a header without naming a decoder for each; WebP has none in
-	// the standard library and is read by golang.org/x/image/webp below.
+	// The four picture formats an upload stores, each registering itself with image.DecodeConfig
+	// so PictureDimensions names no decoder of its own. The standard library decodes three of
+	// them; WebP it does not decode at all, and golang.org/x/image/webp registers that one.
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
 
-	"golang.org/x/image/webp"
+	_ "golang.org/x/image/webp"
 )
 
 // PictureDimensions is a picture's own width and height in pixels, read from the header of the
-// bytes the caller already holds, so the read costs no second copy of the file. storedType is
-// what the picture is stored under, which is what its bytes are; an upload asks this of an image
-// alone, so a video, a document and every other file record neither.
+// bytes the caller already holds, so the read costs no second copy of the file. An upload asks
+// this of an image alone, so a video, a document and every other file record neither.
 //
 // The pair is recorded together or not at all: a header that does not decode, or that claims no
 // area, answers nil for both and the upload is stored and served exactly as it was before
-// Dispatch read a size (INFRA-760 R12). WebP is read by its own decoder, since the standard
-// library has none; the other three are image.DecodeConfig's, through the blank imports at the
-// head of this file. Each reads the header alone and decodes no pixel.
+// Dispatch read a size (INFRA-760 R12). Which of the four decoders reads the header is the
+// registry's own answer, from the bytes' magic, through the blank imports at the head of this
+// file; each reads the header alone and decodes no pixel.
 //
 // This is the one declaration of the decode: the upload path (api.uploadArtifact) and the pass
 // that fills the versions stored before it (BackfillDimensions) read a size the same way, so no
 // version is ever recorded under two answers.
-func PictureDimensions(storedType string, content []byte) (width, height *int) {
-	var config image.Config
-	var err error
-	if storedType == "image/webp" {
-		config, err = webp.DecodeConfig(bytes.NewReader(content))
-	} else {
-		config, _, err = image.DecodeConfig(bytes.NewReader(content))
-	}
+func PictureDimensions(content []byte) (width, height *int) {
+	config, _, err := image.DecodeConfig(bytes.NewReader(content))
 	if err != nil || config.Width <= 0 || config.Height <= 0 {
 		return nil, nil
 	}
@@ -111,7 +104,7 @@ func BackfillDimensions(ctx context.Context, pool Querier, store Store, out io.W
 				continue
 			}
 		}
-		width, height := PictureDimensions(version.mime, body)
+		width, height := PictureDimensions(body)
 		if width == nil {
 			report.fail(out, version.id, fmt.Errorf("the %s header did not decode", version.mime))
 			continue

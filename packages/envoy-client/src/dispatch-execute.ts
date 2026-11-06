@@ -66,6 +66,7 @@ import {
   PROJECT_KEY_PATTERN,
   PROJECT_KEY_RULE,
   serviceSubjectLabel,
+  storedMediaType,
   typedBlockIdAttribute,
   zodSchemaApi,
 } from "@legion/contracts";
@@ -5088,7 +5089,7 @@ export async function executeDispatchTool(
       // upload into a body instead of building the address by hand. The type is the stored one,
       // parameters stripped, never the file's name. The first line keeps its shape: the skill
       // scenarios' scorer reads `Uploaded <name> as version <n>` off it.
-      const storedType = result.version.mime?.split(";")[0]?.trim();
+      const storedType = storedMediaType(result.version.mime);
       const shownLine =
         storedType !== undefined && isInlineContentType(storedType)
           ? pictureLine(result.artifact.name, `${artifactRef}@v${result.version.number}`)

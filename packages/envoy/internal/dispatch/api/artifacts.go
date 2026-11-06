@@ -244,7 +244,7 @@ func (s *server) uploadArtifactFor(w http.ResponseWriter, r *http.Request, targe
 	}
 	input.contentType = storedType
 	if kind == "image" {
-		input.width, input.height = files.PictureDimensions(storedType, input.content)
+		input.width, input.height = files.PictureDimensions(input.content)
 	}
 	s.storeArtifact(w, r, input, actor, kind, target)
 }

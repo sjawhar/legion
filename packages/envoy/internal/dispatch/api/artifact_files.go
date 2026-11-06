@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"net/textproto"
 	"strconv"
 	"strings"
 	"time"
@@ -95,11 +96,19 @@ func (s *server) refuseUploadBeforeItsObject(ctx context.Context, target artifac
 // quoted entity tag, the only form net/http reads back from If-Range and If-None-Match.
 //
 // A reader may ask for part of a file: every answer says so (`Accept-Ranges: bytes`), since a
-// player decides from the first answer it gets whether it may seek. Row bytes and, for a request
-// that carries a Range, store bytes are answered by http.ServeContent, which writes the length
-// and the status itself and answers Range, 206, Content-Range, 416 and the conditional reads. A
-// store request with no Range is streamed as it always was, so a file is never held in memory
-// for a reader who asked for the whole of it.
+// player decides from the first answer it gets whether it may seek. Row bytes are answered by
+// http.ServeContent, which writes the length and the status itself and answers Range, 206,
+// Content-Range, 416 and the conditional reads. Store bytes are streamed for the whole of a
+// file, so one is never held in memory for a reader who asked for all of it: with no Range, as
+// they always were, and for an unconditional range that names the whole of the object
+// (`wholeObjectRange`, what a player's opening probe asks for), answered 206 with the same
+// bytes, the same Content-Range and the same length http.ServeContent would write. Only a
+// genuinely partial range reads the object into memory first, since the store hands out one
+// stream from the object's start.
+//
+// A conditional read of store bytes with no Range is answered here as http.ServeContent answers
+// one of row bytes: an If-None-Match holding this version's entity tag is 304 with no body
+// (`etagMatches`), so a browser that kept the bytes fetches none of them again.
 //
 // The headers wait for the object to open, so a store that fails answers 502 and never a 200 cut
 // short; a body that fails after that, or does not hash to the row's hash, aborts the streamed
@@ -159,7 +168,8 @@ func (s *server) serveFileVersion(w http.ResponseWriter, r *http.Request, artifa
 		writeError(w, "FILE_MISSING", http.StatusInternalServerError, "this file's bytes cannot be found")
 		return
 	}
-	if r.Header.Get("Range") != "" {
+	ranged := r.Header.Get("Range")
+	if ranged != "" && !wholeObjectRange(r, ranged, object.Size) {
 		// A part of the file is answered from the whole of it: the store hands out one stream
 		// from the object's start, and the reader that checks the hash must see all of it
 		// (files.ReadAll reads an object this way too). The object is at most
@@ -179,9 +189,21 @@ func (s *server) serveFileVersion(w http.ResponseWriter, r *http.Request, artifa
 		http.ServeContent(w, r, name, time.Time{}, bytes.NewReader(whole))
 		return
 	}
+	if ranged == "" && etagMatches(r.Header.Get("If-None-Match"), `"`+*sha+`"`) {
+		// The reader holds these bytes already, and a version's never change: the object opened,
+		// but no byte of it is read and no body goes out.
+		headers()
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
 	headers()
 	w.Header().Set("Content-Length", strconv.FormatInt(object.Size, 10))
-	w.WriteHeader(http.StatusOK)
+	status := http.StatusOK
+	if ranged != "" {
+		w.Header().Set("Content-Range", "bytes 0-"+strconv.FormatInt(object.Size-1, 10)+"/"+strconv.FormatInt(object.Size, 10))
+		status = http.StatusPartialContent
+	}
+	w.WriteHeader(status)
 	if _, err := io.Copy(w, object.Body); err != nil {
 		if r.Context().Err() != nil {
 			return // The client went away; nothing to tell it.
@@ -189,6 +211,85 @@ func (s *server) serveFileVersion(w http.ResponseWriter, r *http.Request, artifa
 		slog.Error("dispatch: stream a file version from the file store", "artifact", artifactID, "version", number, "sha256", *sha, "error", err)
 		panic(http.ErrAbortHandler)
 	}
+}
+
+// wholeObjectRange reports whether r asks for the whole of a size-byte object in one range and
+// on no condition: `bytes=0-` or `bytes=0-<size-1>`, which is how a player opens a file it may
+// seek in (`<video preload="metadata">` asks for `bytes=0-` in Chrome and `bytes=0-1` in
+// Safari, and a seek asks for the rest of the file from somewhere). Those are streamed, so the
+// opening of a 25 MiB video costs no 25 MiB buffer; every other range, and any range carrying a
+// condition, is http.ServeContent's, which reads the conditions and answers 416 for a range
+// past the end. An empty object is its too, since a range over no bytes overlaps nothing.
+func wholeObjectRange(r *http.Request, header string, size int64) bool {
+	if size <= 0 {
+		return false
+	}
+	for _, condition := range []string{"If-Match", "If-Modified-Since", "If-None-Match", "If-Range", "If-Unmodified-Since"} {
+		if r.Header.Get(condition) != "" {
+			return false
+		}
+	}
+	spec, found := strings.CutPrefix(header, "bytes=")
+	if !found {
+		return false
+	}
+	first, last, found := strings.Cut(spec, "-")
+	if !found || textproto.TrimString(first) != "0" {
+		return false
+	}
+	last = textproto.TrimString(last)
+	return last == "" || last == strconv.FormatInt(size-1, 10)
+}
+
+// etagMatches reports whether an If-None-Match header holds tag, this version's own quoted
+// entity tag, read as net/http's checkIfNoneMatch reads that header: a comma-separated list, `*`
+// standing for any tag, and the weak comparison a conditional GET uses, under which `W/"x"`
+// matches `"x"`. net/http keeps that reading to itself (scanETag, etagWeakMatch) and
+// http.ServeContent, the one exported door to it, cannot be handed a store object's stream, so
+// the walk is written out here rather than compared as a string, which would answer the whole
+// file to a list and to a weak tag.
+func etagMatches(header, tag string) bool {
+	for rest := textproto.TrimString(header); rest != ""; rest = textproto.TrimString(rest) {
+		if rest[0] == ',' {
+			rest = rest[1:]
+			continue
+		}
+		if rest[0] == '*' {
+			return true
+		}
+		candidate, remain := scanETag(rest)
+		if candidate == "" {
+			return false
+		}
+		if strings.TrimPrefix(candidate, "W/") == strings.TrimPrefix(tag, "W/") {
+			return true
+		}
+		rest = remain
+	}
+	return false
+}
+
+// scanETag reads the entity tag an If-None-Match list opens with and what follows it, as
+// net/http's own scanETag does: `"text"` or `W/"text"`, holding only the characters an entity
+// tag may hold. It answers an empty tag for anything else, which ends the walk.
+func scanETag(header string) (etag, remain string) {
+	start := 0
+	if strings.HasPrefix(header, "W/") {
+		start = 2
+	}
+	if len(header[start:]) < 2 || header[start] != '"' {
+		return "", ""
+	}
+	for i := start + 1; i < len(header); i++ {
+		switch c := header[i]; {
+		case c == '"':
+			return header[:i+1], header[i+1:]
+		case c == 0x21 || (c >= 0x23 && c <= 0x7e) || c >= 0x80:
+		default:
+			return "", ""
+		}
+	}
+	return "", ""
 }
 
 // fileDisposition is a version download's Content-Disposition: inline for a content type a

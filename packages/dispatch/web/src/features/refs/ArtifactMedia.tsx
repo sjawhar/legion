@@ -42,8 +42,10 @@ export function ArtifactMedia({
    *  does; one that stands alone in a row of its own (the Artifacts tab) is named here. */
   caption: string;
   /** What the place adds to its size's own class: the artifact page's own width and border.
-   *  Left out everywhere else, so a thumbnail wears `pictureThumbnailClassName` and nothing
-   *  else, which is what `picture-viewer.ts` reads it by. */
+   *  Left out everywhere else. It is the class alone that it adds to: the size the element was
+   *  drawn at is stamped on the element itself (`data-dispatch-picture-size`, written beside
+   *  the class here and by the editors' node view), which is what `picture-viewer.ts` reads to
+   *  keep a thumbnail out of the set a reader steps through. */
   className?: string;
   /** What is drawn once the browser refuses the address: a link to the artifact, never a broken
    *  element. */
@@ -104,8 +106,6 @@ export function ArtifactMedia({
   }
   const sizeClassName = variant === "block" ? pictureClassName : pictureThumbnailClassName;
   const classes = className === undefined ? sizeClassName : `${sizeClassName} ${className}`;
-  // What failed is the element's own address and what it drew, so a load of a newer version,
-  // or of the same address as the other kind, is its own.
   if (kind === "video") {
     return (
       // Dispatch stores an uploaded video's bytes and nothing else, so there is no caption
@@ -115,6 +115,7 @@ export function ArtifactMedia({
         aria-label={caption === "" ? undefined : caption}
         className={classes}
         controls
+        data-dispatch-picture-size={variant}
         onError={() => setFailed({ kind, src })}
         preload="metadata"
         src={src}
@@ -128,6 +129,7 @@ export function ArtifactMedia({
     <img
       alt={caption}
       className={classes}
+      data-dispatch-picture-size={variant}
       height={height}
       loading="lazy"
       onError={() => setFailed({ kind, src })}

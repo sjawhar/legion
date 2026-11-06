@@ -13,7 +13,12 @@ import type {
   CreateArtifactInput,
   Event,
 } from "@legion/contracts";
-import { isVideoContentType, overCapMessage, SESSION_ID_PATTERN } from "@legion/contracts";
+import {
+  isVideoContentType,
+  overCapMessage,
+  SESSION_ID_PATTERN,
+  storedMediaType,
+} from "@legion/contracts";
 import { type DispatchClient, DispatchGatewayError, DispatchServiceError } from "./dispatch-http";
 import { parseDispatchRef } from "./dispatch-owner";
 import {
@@ -446,7 +451,7 @@ export async function readPictures(
         skip(`${artifact.name} has no version ${target.version}`);
         continue;
       }
-      const mime = version.mime?.split(";")[0]?.trim();
+      const mime = storedMediaType(version.mime);
       // A video is passed over before either refusal: Dispatch stores it as a file rather than
       // an image, so both the kind and the type would turn it down, and the line either wrote
       // would stand in every agent's read of that body though no reading of it could change.
