@@ -40,7 +40,8 @@ var isolatedGitConfig = []string{"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSY
 type FetchRequest struct {
 	Repo ghrepo.Repository
 	// Token answers the provisioning token as it stands when called, never a copy kept from an
-	// earlier call: the file a pod mounts it at, which the daemon keeps fresh while the fetch runs.
+	// earlier call: the file a pod mounts it at, which the daemon keeps fresh for the pod's whole
+	// life, whatever its fetch has done.
 	Token         func() (string, error)
 	CredentialDir string
 	Feed          string
