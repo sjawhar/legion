@@ -166,6 +166,10 @@ func (r *outbox) noticeAnswered(ctx context.Context, row record.OutboxRow, paylo
 	var denied notify.ErrPublishDenied
 	switch {
 	case published == nil:
+		// The listener accepted the publish, which starts the architect's healing clock if it is in
+		// a reclaim incident; accepted is not taken, so the incident ends only once no failed forward
+		// follows for reclaimHealedAfter (reclaim_unheld.go, noteReclaimDelivered).
+		r.noteReclaimDelivered(architect, row.ID)
 		// The architect has the catch-up, so the decisions it named and this row claims are told:
 		// the telling is recorded under the key it went out on, before anything forgets them, and
 		// the settle after this run forgets them (toldKept, settleTold).
@@ -204,6 +208,12 @@ func (r *outbox) noticeAnswered(ctx context.Context, row record.OutboxRow, paylo
 			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "because", ended)
 		return nil
 	}
+	// The architect can hold its role again, yet the listener has no holder for it: the role was
+	// unheld at a moment after this row was noted, which stops any healing clock it has. If the pane
+	// is a running one that went deaf, relaunch it so its claim boot re-claims; the notice is held
+	// either way and lands on the next copy once the role is re-held.
+	r.noteReclaimFailed(architect, row.ID)
+	r.reclaimUnheldRunning(ctx, architect, "publish")
 	return fmt.Errorf("%w: %s holds no role for %s: %w", errNoticeWaits, architect, row.Issue, published)
 }
 
@@ -246,6 +256,16 @@ func (r *outbox) reholdNotice(ctx context.Context, reported reportedNotice, reas
 	key := record.OutboxKey(reported.row)
 	issue, notice := reported.issue, reported.notice
 	topic := notify.RoleTopicPrefix + string(reported.architect)
+	// A failed forward to the architect means a copy the listener accepted for it did not reach a
+	// pane that takes its messages, whether an earlier listener reported it on the exception lane or
+	// the confirmed route answered the publish 504. The failure names the copy as its original's row
+	// and its copy count (record.Notice.Published), which the reclaim record maps to the row it went
+	// out as: a copy the claim's current process got stops the healing clock, or reopens an incident
+	// that healed while the report was on its way; a copy that went to a process a relaunch has since
+	// replaced changes nothing (reclaim_unheld.go, noteReclaimReport). Recorded for every failed
+	// forward, before the reclaim gate below, so an accepted copy that a failed forward follows never
+	// ends an incident.
+	current := r.noteReclaimReport(reported.architect, reclaimCopy{keyRow: reported.row, resends: notice.Resends})
 	held := r.supervisedClaim(reported.architect)
 	if !holdsRole(held) {
 		root, lingers, err := r.issueTree(ctx, issue)
@@ -260,6 +280,19 @@ func (r *outbox) reholdNotice(ctx context.Context, reported reportedNotice, reas
 				"issue", issue, "kind", notice.Kind, "topic", topic, "key", key, "reason", reason, "state", held.State, "stopping", held.Stopping)
 			return nil
 		}
+	}
+	// A running architect whose own live session (recipient == held.Session) failed to take
+	// this notice again (notice.Resends > 0, so a re-held copy already tried and failed) has gone
+	// deaf while still registered: the listener resolved its stale registration and forwarded, and
+	// the forward kept failing, so the publish path's ErrNoHolder never fires for it. Relaunch it
+	// to re-claim, in addition to re-holding the notice below — the two do not fight: the relaunch
+	// re-claims the role, and the re-held copy lands once it does. A first receipt timeout, one whose
+	// recipient is a stale predecessor session the claim already moved off, and one about a copy a
+	// relaunch has since replaced the process of (current) are left for the re-held copy, so a healthy
+	// architect is not relaunched. The relaunch runs off this callback, which every architect's report
+	// shares (reclaimUnheldDetached).
+	if current && notice.Resends > 0 && recipient != "" && recipient == held.Session {
+		r.reclaimUnheldDetached(ctx, reported.architect, reason)
 	}
 	if notice.Resends >= len(noticeReholdDelays) {
 		r.log.Warn("outbox notice not re-held again: it was queued again the most times a notice is",

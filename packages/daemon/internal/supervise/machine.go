@@ -1726,6 +1726,8 @@ func claimOf(ev Event) claim.Token {
 		return ev.Claim
 	case StalePlugin:
 		return ev.Claim
+	case RoleUnheld:
+		return ev.Claim
 	case PodUpdateOpen:
 		return ev.Claim
 	case PodUpdateEnded:

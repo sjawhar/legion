@@ -135,6 +135,26 @@ type outbox struct {
 	// limitsMu guards it (deferral, noteLimit).
 	limitsMu sync.Mutex
 	limits   map[githubrest.Budget]rateLimit
+	// The running-but-unheld reclaim limiter (reclaim_unheld.go), guarded by reclaimMu:
+	// reclaimInFlight is each claim admitted for a relaunch to re-claim a lost Envoy role that has
+	// not finished booting (reclaimReservation); reclaimTries is each claim's record, of the incident
+	// in progress or, once it healed, its tombstone (reclaimTry); and reclaimNextAt is the earliest the
+	// next relaunch of any claim may start (the fleet-wide stagger). reclaimCap bounds how many
+	// relaunch at once, reclaimTryCap how many times one claim is relaunched per incident, and
+	// reclaimInterval the stagger; each zero takes its maxReclaimsInFlight/maxReclaimAttempts/
+	// reclaimMinInterval default, so a test can set small ones. reclaimGoMu guards reclaimDetach, which
+	// is on while Run runs and hands the exception lane's relaunches to goroutines reclaimWG counts
+	// (reclaimUnheldDetached), so Run's stop joins them.
+	reclaimMu       sync.Mutex
+	reclaimInFlight map[claim.Token]reclaimReservation
+	reclaimTries    map[claim.Token]reclaimTry
+	reclaimNextAt   time.Time
+	reclaimCap      int
+	reclaimTryCap   int
+	reclaimInterval time.Duration
+	reclaimGoMu     sync.Mutex
+	reclaimDetach   bool
+	reclaimWG       sync.WaitGroup
 	// The lane registry (outbox_lanes.go). mu guards running, laneCtx and lanes; running is true
 	// between Run's start and its stop, laneCtx is Run's context, which every lane runs under, and
 	// lanes is each live lane by its key. wg counts the lane goroutines, so Run returns only once
@@ -922,6 +942,13 @@ func (r *outbox) deliverNotice(ctx context.Context, row record.OutboxRow, payloa
 	if earlier := earlierNoticeFor(tree, architect, r.holdsItsRole); earlier != 0 {
 		return fmt.Errorf("%w: %s's notice row %d waits behind its row %d", errNoticeWaits, architect, row.ID, earlier)
 	}
+	// The reclaim record learns of the publish before it goes out, since a failed forward's report
+	// can come back before Publish returns; a re-held copy is reported under its original's key.
+	keyRow := row.ID
+	if payload.ResendOf != 0 {
+		keyRow = payload.ResendOf
+	}
+	r.noteReclaimPublishing(architect, reclaimCopy{keyRow: keyRow, resends: payload.Resends}, row.ID)
 	published := r.notices.Publish(ctx, notify.RoleTopicPrefix+string(architect), noticeSummary(payload.Kind, row.Issue), notice, key)
 	return r.noticeAnswered(ctx, row, payload, tree, architect, published)
 }

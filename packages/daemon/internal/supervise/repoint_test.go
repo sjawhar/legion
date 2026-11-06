@@ -151,3 +151,21 @@ func TestAStaleAddressWithAHeldSuspensionSuspendsTheClaimChargingNothing(t *test
 		t.Fatalf("claim %+v after the stale observation, want the held suspension ended", claim)
 	}
 }
+
+// (M7) The reclaim row charges nothing: a RoleUnheld on a ready claim whose Resume succeeds leaves
+// Budgets{} unchanged and calls Resume once on the recorded session. A mutation that adds
+// LaunchFailures++ to the replaceProcess path fails here. A Resume the runtime refuses is still
+// charged, as any launch's is; the fake runtime's Resume does not refuse a live previous process.
+func TestAReclaimRelaunchIsUnchargedAndResumesOnce(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
+
+	h.must(RoleUnheld{Claim: h.token, Trigger: "publish"})
+
+	h.wantState(StateLaunching)
+	h.wantBudgets(Budgets{})
+	resumes := h.wantCalls("Resume", 1)
+	if resumes[0].Spec.ResumeSessionFile != sessionFile {
+		t.Fatalf("resumed %q, want the recorded session %q", resumes[0].Spec.ResumeSessionFile, sessionFile)
+	}
+}
