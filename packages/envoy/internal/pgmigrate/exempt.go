@@ -9,10 +9,10 @@ import (
 )
 
 // catalogOnlyStatements are the statement kinds a migration may be made of and still be exempt
-// from CensusTableLimit, keyed by the parse node Postgres's own grammar gives each, with the words
-// the report names them by and the check a statement of that kind must pass. The command itself
-// does its work in the system catalog and reads no row of a table, so the time it holds its lock
-// does not grow with the table:
+// from CensusTableLimit, keyed by the parse node Postgres's own grammar gives each, each node's
+// function answering the word the report names the statement by, or "" where a statement of that
+// node is not one of these kinds. The command itself does its work in the system catalog and
+// reads no row of a table, so the time it holds its lock does not grow with the table:
 //
 //   - create function (or procedure, with or without or replace), in plpgsql or sql only
 //     (functionIsCatalogOnly): creating one writes pg_proc and has the language's validator check
@@ -21,6 +21,16 @@ import (
 //     language is not exempt: creating a C function loads its library, which can run any code;
 //   - create trigger, of any form: it takes SHARE ROW EXCLUSIVE on its table and writes
 //     pg_trigger, and the trigger runs only on later writes, never on the rows already there;
+//   - drop trigger and drop function, with RESTRICT, which is the default (catalogOnlyDrop):
+//     dropping a trigger writes pg_trigger and dropping a function writes pg_proc, and neither
+//     reads a row of the table or removes one, so the time the statement holds its lock does not
+//     grow with the table. The lock is not the argument for it: drop trigger takes ACCESS
+//     EXCLUSIVE on its table where create trigger takes SHARE ROW EXCLUSIVE, and what the limit
+//     is about is how long a lock is held, not which lock it is. A drop with cascade is not
+//     exempt: what it drops besides the object it names is not in the statement, so the census
+//     cannot read which objects a cascade reaches, and the exemption is an argument about the
+//     statement the census can read. drop procedure is left out for the one reason that no
+//     migration of this repository drops a procedure;
 //   - set and reset (VariableSetStmt), local or session, set role included: a run-time parameter,
 //     which takes no lock, reads no row and names no table, so it cannot make a migration's lock
 //     window grow with any table, and the other statements are still held to the kinds above.
@@ -32,13 +42,16 @@ import (
 // the exemption where one is enabled (ddlEventTriggers). Adding a kind is a reviewed edit with the
 // same argument for it; a kind that can scan or rewrite (create index, alter table, a DO block,
 // any DML) never belongs here.
-var catalogOnlyStatements = map[string]struct {
-	kind  string
-	check func(node json.RawMessage) bool
-}{
-	"CreateFunctionStmt": {"create function", functionIsCatalogOnly},
-	"CreateTrigStmt":     {"create trigger", func(json.RawMessage) bool { return true }},
-	"VariableSetStmt":    {"set", func(json.RawMessage) bool { return true }},
+var catalogOnlyStatements = map[string]func(node json.RawMessage) string{
+	"CreateFunctionStmt": func(node json.RawMessage) string {
+		if functionIsCatalogOnly(node) {
+			return "create function"
+		}
+		return ""
+	},
+	"CreateTrigStmt":  func(json.RawMessage) string { return "create trigger" },
+	"DropStmt":        catalogOnlyDrop,
+	"VariableSetStmt": func(json.RawMessage) string { return "set" },
 }
 
 // functionIsCatalogOnly reports whether a create function's parse node names plpgsql or sql as its
@@ -78,10 +91,33 @@ func functionIsCatalogOnly(node json.RawMessage) bool {
 	return false
 }
 
+// catalogOnlyDrop names a drop's kind as the report names it, "drop trigger" or "drop function",
+// and answers "" for a drop of anything else (a table, an index, a view, a schema, a procedure),
+// for a drop with cascade, and for a node it cannot read. What a cascade drops besides the object
+// the statement names is not in the statement, so the census cannot read which objects it
+// reaches, and the exemption is an argument about the statement the census can read.
+func catalogOnlyDrop(node json.RawMessage) string {
+	var drop struct {
+		RemoveType string `json:"removeType"`
+		Behavior   string `json:"behavior"`
+	}
+	if err := json.Unmarshal(node, &drop); err != nil || drop.Behavior != "DROP_RESTRICT" {
+		return ""
+	}
+	switch drop.RemoveType {
+	case "OBJECT_TRIGGER":
+		return "drop trigger"
+	case "OBJECT_FUNCTION":
+		return "drop function"
+	}
+	return ""
+}
+
 // tableSizeExemption says why migration sql is exempt from CensusTableLimit: the kinds of its
-// statements, as the report names them ("create function and create trigger"), when every one of
-// its statements is a catalogOnlyStatements kind and passes that kind's check; "" when any is not
-// or does not, when it holds no statement, or when it does not parse.
+// statements, as the report names them ("create function and create trigger"), when
+// catalogOnlyStatements holds the parse node of every one of its statements and its function
+// names a kind for each; "" when the map holds no function for a node or one names no kind for
+// the statement, when the migration holds no statement, or when it does not parse.
 //
 // The statements are read by Postgres's own parser, libpg_query (Postgres 17's scan.l and
 // gram.y), run as WebAssembly in pure Go by github.com/wasilibs/go-pgquery, so the reading is the
@@ -114,12 +150,16 @@ func tableSizeExemption(sql string) (exemption string) {
 			return ""
 		}
 		for node, body := range statement.Stmt {
-			allowed, ok := catalogOnlyStatements[node]
-			if !ok || !allowed.check(body) {
+			catalogOnly, ok := catalogOnlyStatements[node]
+			if !ok {
 				return ""
 			}
-			if !slices.Contains(kinds, allowed.kind) {
-				kinds = append(kinds, allowed.kind)
+			kind := catalogOnly(body)
+			if kind == "" {
+				return ""
+			}
+			if !slices.Contains(kinds, kind) {
+				kinds = append(kinds, kind)
 			}
 		}
 	}
@@ -127,9 +167,11 @@ func tableSizeExemption(sql string) (exemption string) {
 }
 
 // ddlEventTriggersQuery names, sorted and comma-separated, the enabled event triggers that run when
-// a create function, create procedure or create trigger runs; "" when there are none.
+// a create function, create procedure, create trigger, drop function or drop trigger runs; "" when
+// there are none. A drop fires sql_drop as well as ddl_command_start and ddl_command_end, so an
+// event trigger on that event would run code of its own on a drop the exemption covers.
 const ddlEventTriggersQuery = `
 	select coalesce(string_agg(evtname, ', ' order by evtname), '')
 	from pg_event_trigger
-	where evtenabled <> 'D' and evtevent in ('ddl_command_start', 'ddl_command_end')
-		and (evttags is null or evttags && array['CREATE FUNCTION', 'CREATE PROCEDURE', 'CREATE TRIGGER'])`
+	where evtenabled <> 'D' and evtevent in ('ddl_command_start', 'ddl_command_end', 'sql_drop')
+		and (evttags is null or evttags && array['CREATE FUNCTION', 'CREATE PROCEDURE', 'CREATE TRIGGER', 'DROP FUNCTION', 'DROP TRIGGER'])`
