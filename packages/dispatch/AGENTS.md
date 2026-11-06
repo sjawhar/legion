@@ -1481,8 +1481,8 @@ comment covers, and on a comment whose every row came in well under that. Run it
 over a one-worker report of the files you changed, since four workers inflate a
 row by the contention of its neighbours rather than by its own work. A marker is
 earned by a row that reached three quarters of the threshold, not only by one
-that crossed it: four of the eight rows of `coverage.e2e.ts`, `plan-tab.e2e.ts`
-and `verification.e2e.ts` sit between 1.5 and 2.7 seconds, where the machine
+that crossed it: rows of `coverage.e2e.ts`, `plan-tab.e2e.ts` and
+`verification.e2e.ts` sit between 1.5 and 2.7 seconds, where the machine
 decides which side of the bar they land, and without that band such a row fails
 the check bare on a slow run and marked on a fast one. A row's own cost is what
 it proves: most of a short row is the floor every row pays, measured in an issue
@@ -1499,7 +1499,10 @@ clear-on-send check). Second, when something other than the assertion decides wh
 a login's casing - make that selector an assertion too, then lapse the property once and confirm the assertion
 fires, since a selector check that cannot fire only looks like a guard. The one exception is a Playwright
 project's `grep`: `webkit-iphone`'s title `grep` falls back on the one-time manual check beside that project
-below, and `iphone`'s `@phone` tag `grep` on the `--list` check under "Phone acceptance".
+below, and the `@phone`, `@webkit` and `@firefox` tag `grep`s of `iphone`, `webkit` and `firefox` on the
+`--list` check under "Phone acceptance", on the comment beside each tagged row naming the behaviour it
+exercises, and on `e2e/__tests__/row-configurations.test.ts`, which refuses a row that runs twice in one
+engine, viewport, origin and server-process count.
 
 `run-server.sh` builds the server with the caller's `go`, in the caller's
 environment, and execs the binary with every server
