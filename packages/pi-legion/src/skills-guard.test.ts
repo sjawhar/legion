@@ -503,13 +503,16 @@ test("a retro learning cites a symbol or quoted text at the committed head, neve
     "Drop a point that cites no file, symbol, quoted text or commit of this pull request",
     ["skills/legion-retro/references/learnings.md", "skills/legion-retro/SKILL.md"]
   );
-  // The two files this change touches, named rather than swept: six other staged skills carry
-  // these strings in finding formats the specification scopes out (dispatch://INFRA-924).
+  // The two files this change touches, named rather than swept: four other staged skills carry
+  // these strings, in seven files, in finding formats the specification scopes out
+  // (dispatch://INFRA-924).
   const retired = ["file, line or commit", "file:line", "file and line"];
-  const carried = ["references/learnings.md", "SKILL.md"].flatMap((file) =>
-    retired
-      .filter((text) => collapsed(path.join(staged, "legion-retro", file)).includes(text))
-      .map((text) => `${file}: ${text}`)
+  const retroFiles: [string, string][] = [
+    ["references/learnings.md", learnings],
+    ["SKILL.md", collapsed(path.join(staged, "legion-retro", "SKILL.md"))],
+  ];
+  const carried = retroFiles.flatMap(([file, text]) =>
+    retired.filter((phrase) => text.includes(phrase)).map((phrase) => `${file}: ${phrase}`)
   );
   expect(carried).toEqual([]);
 });

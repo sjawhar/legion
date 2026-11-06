@@ -105,8 +105,9 @@ func TestSharedRulesSitInCommonOnceAndRoleRulesInTheirCores(t *testing.T) {
 	}
 	contains("core/common.md", readSource, true)
 	contains("core/common.md", noDefer, true)
-	// The four roles that compose common.md do not repeat it; the oracle composes alone and keeps
-	// the read-first rule itself, never the hardening ledger (it changes nothing).
+	// The four roles that compose common.md do not repeat it; core/oracle.md is joined to no
+	// common part and composed for no role, so it keeps the read-first rule itself, never the
+	// hardening ledger (it changes nothing).
 	for _, role := range composedWithCommon {
 		contains("core/"+role+".md", readSource, false)
 		contains("core/"+role+".md", noDefer, false)
@@ -386,11 +387,12 @@ func TestEveryRolePartCarriesItsGuidanceRule(t *testing.T) {
 	if strings.Contains(rolePart(t, "core/planner.md"), "and saying so is its answer") {
 		t.Error("core/planner.md still answers a decision its owner must make by naming it")
 	}
-	// The forms R1 retires. A part carrying one again would give a retro two orders that disagree
+	// The forms R5 retires. A part carrying one again would give a retro two orders that disagree
 	// (dispatch://INFRA-924).
 	for _, file := range []string{"core/common.md", "core/oracle.md"} {
+		text := rolePart(t, file)
 		for _, retired := range []string{"file and line", "file:line"} {
-			if strings.Contains(rolePart(t, file), retired) {
+			if strings.Contains(text, retired) {
 				t.Errorf("%s still contains %q", file, retired)
 			}
 		}
