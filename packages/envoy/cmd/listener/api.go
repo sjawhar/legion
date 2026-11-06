@@ -1375,13 +1375,27 @@ func adminInterestsHandler(registry *store.Registry, sessions *session.SessionRe
 			}
 			writeJSON(w, http.StatusOK, interestRowFor(sessions, item))
 		case http.MethodDelete:
+			// The administrator's removal: it frees every role claim the session holds,
+			// whoever holds it (store.RoleReleaseAuthority.Force), and it is the only
+			// caller that forces one. An operator clearing a session's interests states no
+			// process, and a release naming none frees nothing, so without the force this
+			// route could no longer free the roles of a client that has gone away, which
+			// is what it is for.
+			//
+			// The limit this leaves open, decided and left as it stands: a second process
+			// that resumed the session's id reaches this route and frees the live holder's
+			// claim, because sessionNotBound refuses only a token acting as another
+			// session, and such a process acts as this very one. POST
+			// /v1/interests/unsubscribe, the route every client hands a role back through,
+			// is scoped to the process that asks and cannot; closing this one needs a
+			// credential naming the process rather than the session.
 			if refusal := sessionNotBound(r, logger, sessionID); refusal != "" {
 				writeJSONError(w, http.StatusForbidden, refusal, "session_id")
 				return
 			}
 			ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 			defer cancel()
-			if err := registry.Remove(ctx, sessionID, nil); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
+			if err := registry.Remove(ctx, sessionID, nil, store.RoleReleaseAuthority{Force: true}); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
 				writeStoreError(ctx, w, err, http.StatusInternalServerError)
 				return
 			}
@@ -2029,12 +2043,19 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 		var body struct {
 			SessionID string   `json:"session_id"`
 			Topics    []string `json:"topics"`
+			// ClientInstanceID is the process handing these interests back, which is
+			// what decides the role claims this release frees: the claims naming that
+			// same process and no others (store.RoleReleaseAuthority). It is trimmed
+			// like session_id, and a request that leaves it out states no process and
+			// frees no claim - the session's topics are still removed.
+			ClientInstanceID string `json:"client_instance_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid json")
 			return
 		}
 		body.SessionID = strings.TrimSpace(body.SessionID)
+		body.ClientInstanceID = strings.TrimSpace(body.ClientInstanceID)
 		if body.SessionID == "" {
 			writeJSONError(w, http.StatusBadRequest, "session_id is required", "session_id")
 			return
@@ -2048,7 +2069,11 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 		// write does, and store work that did not answer is the bus-unavailable 503.
 		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 		defer cancel()
-		if err := d.registry.Remove(ctx, body.SessionID, body.Topics); err != nil {
+		// The role claims released are the ones this process holds, never the whole session's:
+		// a session id names no process, and a second process that resumed this one's id hands
+		// back a role it does not hold. This route never forces a release; DELETE
+		// /v1/interests/<session_id> is the one that does.
+		if err := d.registry.Remove(ctx, body.SessionID, body.Topics, store.RoleReleaseAuthority{ClientInstanceID: body.ClientInstanceID}); err != nil {
 			writeStoreError(ctx, w, err, http.StatusInternalServerError)
 			return
 		}

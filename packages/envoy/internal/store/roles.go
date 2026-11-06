@@ -346,7 +346,47 @@ func (r *Registry) roleClaim(ctx context.Context, role string) (RoleClaim, nats.
 	return claim, entry, nil
 }
 
-func (r *Registry) releaseRoleClaims(ctx context.Context, sessionID string, topics []string) error {
+// RoleReleaseAuthority is how a release of a session's role claims is authorised: the process
+// that asked for it, or an administrator's force. Registry.Remove takes one, stated by its
+// caller rather than inferred from the rest of the request, because the two routes that reach
+// Remove are authorised differently and nothing in the shape of a request says which: POST
+// /v1/interests/unsubscribe is a client handing back the roles its own process holds, and DELETE
+// /v1/interests/<session_id> is an operator removing a session's interests whoever holds them.
+//
+// The zero value frees no claim at all, and that is the point of the type: a session id names no
+// process, so a release that cannot say which process it is looks exactly like the release a
+// second process that resumed a live session's id would send, and the live holder's claim is
+// what that release would take.
+type RoleReleaseAuthority struct {
+	// ClientInstanceID is the client instance of the process asking for the release: it frees
+	// the claims naming that same process (RoleClaim.ClientInstanceID) and no others. Empty
+	// names no process and frees nothing, and neither does any instance against a claim that
+	// names none - an absent instance is no match on either side, where
+	// session.InstanceMatches, written for a soft claim's predecessor, admits one. A claim an
+	// earlier build wrote names no process until its holder's next registration adopts it
+	// (Registry.RenewRoleClaims), and until then only a forced release frees it.
+	ClientInstanceID string
+	// Force frees every claim the session holds, whoever holds it. It is the administrator's
+	// release, and DELETE /v1/interests/<session_id> is its one caller: an operator clearing a
+	// session's interests states no process and must still be able to free the roles that
+	// session took.
+	Force bool
+}
+
+// frees reports whether this release may delete claim, the stored claim of a role the release
+// names, from the session sessionID: the claim must be that session's, and the release must
+// either force it or name the very process the claim names.
+func (a RoleReleaseAuthority) frees(claim RoleClaim, sessionID string) bool {
+	if claim.HolderSessionID != sessionID {
+		return false
+	}
+	return a.Force || (a.ClientInstanceID != "" && a.ClientInstanceID == claim.ClientInstanceID)
+}
+
+// releaseRoleClaims releases the claim of each role topic in topics that release authorises
+// (RoleReleaseAuthority.frees), and leaves every other topic alone: a topic that is not a role
+// lane's, and a role name a subscription wildcard reaches, which names no one role to free.
+func (r *Registry) releaseRoleClaims(ctx context.Context, sessionID string, topics []string, release RoleReleaseAuthority) error {
 	for _, topic := range topics {
 		if !strings.HasPrefix(topic, contracts.RoleTopicPrefix) {
 			continue
@@ -355,20 +395,26 @@ func (r *Registry) releaseRoleClaims(ctx context.Context, sessionID string, topi
 		if role == "" || strings.ContainsAny(role, "*>") {
 			continue
 		}
-		if err := r.releaseRoleClaim(ctx, sessionID, role); err != nil {
+		if err := r.releaseRoleClaim(ctx, sessionID, role, release); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// releaseRoleClaim deletes role's claim when sessionID holds it, its read and its conditional delete
-// each waiting no longer than ctx (bus.Bounded). A delete ctx abandoned may still land after this
-// answer, and that is safe: it deletes only the revision it read, sessionID's claim, which the
-// caller asked to release, and a claim written since is kept. A claim stored under a key NATS
-// refuses (bus.ErrRefused: too long, or outside its key alphabet) has a holder nothing can tell, so
-// it is left to the role reaper, which deletes it, or skips one no KV call can delete.
-func (r *Registry) releaseRoleClaim(ctx context.Context, sessionID, role string) error {
+// releaseRoleClaim deletes role's claim when release authorises freeing it from sessionID
+// (RoleReleaseAuthority.frees), its read and its conditional delete each waiting no longer than
+// ctx (bus.Bounded). A claim the release does not authorise is left exactly as it stands and is
+// not an error: the session is removing its interests either way, and a release from another
+// process of that session id, or one that names no process at all, says nothing about the claim
+// the holder's own process still holds.
+//
+// A delete ctx abandoned may still land after this answer, and that is safe: it deletes only the
+// revision it read, the claim this release authorised, and a claim written since is kept. A
+// claim stored under a key NATS refuses (bus.ErrRefused: too long, or outside its key alphabet)
+// has a holder nothing can tell, so it is left to the role reaper, which deletes it, or skips
+// one no KV call can delete.
+func (r *Registry) releaseRoleClaim(ctx context.Context, sessionID, role string, release RoleReleaseAuthority) error {
 	claim, entry, err := r.roleClaim(ctx, role)
 	if errors.Is(err, bus.ErrRefused) {
 		r.logger().Warn("role registry left a stored claim it cannot read to the role reaper", slog.Int("key_bytes", len(role)), slog.String("error", err.Error()))
@@ -377,7 +423,7 @@ func (r *Registry) releaseRoleClaim(ctx context.Context, sessionID, role string)
 	if err != nil {
 		return err
 	}
-	if entry == nil || claim.HolderSessionID != sessionID {
+	if entry == nil || !release.frees(claim, sessionID) {
 		return nil
 	}
 	epoch := r.roleViewEpoch()
@@ -581,13 +627,18 @@ func (r *Registry) ReleaseExpiredRoleClaim(ctx context.Context, role, sessionID 
 	}
 }
 
-func (r *Registry) releaseAllRoleClaims(ctx context.Context, sessionID string) error {
+// releaseAllRoleClaims releases every claim of the role bucket that release authorises freeing
+// from sessionID (RoleReleaseAuthority.frees), read from every key the bucket holds (roleKeys)
+// rather than from the session's interest topics: a role the session holds whose topic its
+// record has lost is released here too. A release that authorises nothing still reads them, and
+// frees none.
+func (r *Registry) releaseAllRoleClaims(ctx context.Context, sessionID string, release RoleReleaseAuthority) error {
 	roles, err := r.roleKeys()
 	if err != nil {
 		return err
 	}
 	for _, role := range roles {
-		if err := r.releaseRoleClaim(ctx, sessionID, role); err != nil {
+		if err := r.releaseRoleClaim(ctx, sessionID, role, release); err != nil {
 			return err
 		}
 	}

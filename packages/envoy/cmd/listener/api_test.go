@@ -2168,15 +2168,21 @@ func TestUnsubscribeRequiresSessionIDAndReturnsRemovedTopics(t *testing.T) {
 		}
 	})
 }
-func TestUnsubscribeAllReleasesRoleClaims(t *testing.T) {
+
+// The empty-topics unsubscribe is the shape a client leaving sends, and it frees the role claims
+// of the process it names (client_instance_id): the claim here names that very process, so the
+// role is free for its next holder.
+func TestUnsubscribeAllReleasesTheRoleClaimsOfTheProcessThatAsked(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, nil)
 	const (
 		sessionID = "ses_unsubscribe_role"
 		role      = "legion-controller"
 	)
-	if _, err := registry.SetRole(sessionID, "test-machine", role, false); err != nil {
-		t.Fatalf("SetRole: %v", err)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := registry.SetRoleWithPrevious(ctx, sessionID, "test-machine", holdingProcess, role, "", false, nil); err != nil {
+		t.Fatalf("claim %s for %s: %v", role, sessionID, err)
 	}
 
 	mux := http.NewServeMux()
@@ -2186,7 +2192,7 @@ func TestUnsubscribeAllReleasesRoleClaims(t *testing.T) {
 	mux.ServeHTTP(recorder, httptest.NewRequest(
 		http.MethodPost,
 		"/v1/interests/unsubscribe",
-		strings.NewReader(`{"session_id":"ses_unsubscribe_role","topics":[]}`),
+		strings.NewReader(`{"session_id":"ses_unsubscribe_role","topics":[],"client_instance_id":"`+holdingProcess+`"}`),
 	))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
