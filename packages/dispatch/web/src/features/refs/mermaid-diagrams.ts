@@ -77,8 +77,9 @@ import { dangerText } from "../../theme/classes";
 import type { DrawnSource, MermaidRequest } from "./mermaid-render.worker";
 import { rememberUpTo, type WorkerJob, WorkerQueue } from "./worker-queue";
 
-/** Draws one body block, or one editor block, once its source's answer arrives. */
-type LateDraw = (drawn: MermaidDrawing) => void;
+/** Draws one body block, or one editor block, once its source's answer arrives, under the key
+ *  the source is drawn, cached and remembered by; the editor's drawer reads the drawing alone. */
+type LateDraw = (drawn: MermaidDrawing, key: string) => void;
 /** Parses a source with the engine and soft-break policy that parsed the body; `undefined` for a
  *  source the engine refuses. */
 type Reparse = (source: string) => ProseMirrorNode | undefined;
@@ -324,10 +325,14 @@ export function requestMermaidDrawing(source: string, draw: LateDraw): () => voi
   const normalised = sourceKey(source);
   const drawn = drawings.get(normalised);
   if (drawn !== undefined) {
-    draw(drawn);
+    draw(drawn, normalised);
     return noop;
   }
-  return mermaidQueue.wait(normalised, () => ({ key: normalised }), draw);
+  return mermaidQueue.wait(
+    normalised,
+    () => ({ key: normalised }),
+    (drawn) => draw(drawn, normalised)
+  );
 }
 
 /**
@@ -353,11 +358,9 @@ export function drawMermaidDiagrams(
   if (blocks.length > 0 && (openFence ?? endsInOpenMermaidFence(parsed, markdown, reparse))) {
     blocks.pop();
   }
-  const cancels = blocks.map((pre) => {
-    const source = pre.textContent ?? "";
-    const key = sourceKey(source);
-    return requestMermaidDrawing(source, (drawn) => drawBlock(pre, drawn, key));
-  });
+  const cancels = blocks.map((pre) =>
+    requestMermaidDrawing(pre.textContent ?? "", (drawn, key) => drawBlock(pre, drawn, key))
+  );
   return () => {
     for (const cancel of cancels) cancel();
   };

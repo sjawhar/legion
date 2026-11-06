@@ -486,8 +486,8 @@ test("a mermaid source a reader opened is open again when the comment is edited,
 
     // On a phone the open thread is a dialog over the Conversation, so the reader goes back to
     // it before opening the refused comment's thread.
-    const phoneThread = page.getByRole("dialog", { name: "Thread" });
-    if ((await phoneThread.count()) > 0) {
+    if (testInfo.project.name === "iphone") {
+      const phoneThread = page.getByRole("dialog", { name: "Thread" });
       await phoneThread.getByRole("button", { exact: true, name: "Back" }).click();
       await expect(phoneThread).toHaveCount(0);
     }
