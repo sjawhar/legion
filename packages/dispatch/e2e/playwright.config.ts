@@ -208,11 +208,15 @@ const parallelProjects = [
   // WebKit is the one iOS Safari uses for every subscription its row opens. The keyed write
   // path (`keyed-writes`, `keyed-send`) runs here and in Firefox too: each engine has its own
   // way of failing a request, aborting one, keeping a tab's storage across a reload and
-  // asking before it unloads, and a write must land once through all of them.
+  // asking before it unloads, and a write must land once through all of them. Two more specs
+  // run here because an engine decides them: a browser sent to a version's own address decides
+  // on the answer's headers whether to draw the file or hand it over as a download
+  // (`picture-address`), and the containers and codecs a `<video>` plays are the engine's own
+  // (`video`).
   {
     name: "webkit",
     testMatch:
-      /(collab-cursor|deep-links|heavy-streamed-turn|keyboard-agents-picker|keyboard-session-pickers|keyed-send|keyed-writes|live-socket|mermaid|offline-edits)\.e2e\.ts/,
+      /(collab-cursor|deep-links|heavy-streamed-turn|keyboard-agents-picker|keyboard-session-pickers|keyed-send|keyed-writes|live-socket|mermaid|offline-edits|picture-address|video)\.e2e\.ts/,
     use: { ...devices["Desktop Safari"] },
   },
   // The live view's phone layout (its keyboard cap, gutter and scroll locks), its model
