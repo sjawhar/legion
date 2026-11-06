@@ -2342,9 +2342,9 @@ jobs:
     # The rule: a step budget is that step's measured maximum plus 15 per cent, rounded up to the
     # next whole minute, with a floor of two minutes; an install step's budget comes from its own
     # retry arithmetic instead. So 1671 s x 1.15 = 1922 s -> 33 min for the browser step, and
-    # 16 min for the install step, for the reason its own comment gives. The job budget is the
+    # 22 min for the install step, for the reason its own comment gives. The job budget is the
     # sum of its step budgets plus the measured maximum of every step without one, rounded up:
-    # 960 + 1980 + 232 s = 3172 s -> 53 min. The spread is the fleet's rather than the suite's,
+    # 1320 + 1980 + 232 s = 3532 s -> 59 min. The spread is the fleet's rather than the suite's,
     # which is why each budget is that measured maximum plus a margin rather than a figure near
     # the median.
     #
@@ -2354,7 +2354,7 @@ jobs:
     # upload steps below still run and the Playwright report, the memory samples and the CPU
     # samples still reach the run, which a cancelled job loses. The job budget is the backstop
     # above the sum of the step budgets, so it never fires first.
-    timeout-minutes: 53
+    timeout-minutes: 59
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2484,13 +2484,16 @@ jobs:
       # packages Playwright's own list names or needs, and the subtraction leaves WebKit unable
       # to launch.
       #
-      # The 16-minute budget is the step's own retry arithmetic, not its measured maximum, which
+      # The 22-minute budget is the step's own retry arithmetic, not its measured maximum, which
       # the bounds make unreachable: two bounded attempts of `apt-get update` at 90 s, two of the
-      # download at 300 s, then the unpack, the browser download and the two apt simulations of
-      # the list check, none of which touch the Ubuntu mirror. So the arithmetic is
-      # 2 x 90 + 2 x 300 s of bounded apt, about 20 s of unpack, about 90 s for the browsers and
-      # about 30 s for the list check: 920 s, rounded up to 16 min. Healthy today is a 38 s
-      # median and a 102 s 95th percentile for the whole step.
+      # download at 300 s, then, where both of those time out, one 90 s read of the fallback
+      # origin's indexes and a third 300 s download attempt, then the unpack, the browser
+      # download and the two apt simulations of the list check, none of which touch the Ubuntu
+      # mirror. So the arithmetic is 2 x 90 + 2 x 300 + 90 + 300 s of bounded apt, about 20 s of
+      # unpack, about 90 s for the browsers and about 30 s for the list check: 1310 s, rounded up
+      # to 22 min. The budget has to carry the fallback's own update, because the path that
+      # needs every one of those bounds is the path on which the step still succeeds. Healthy
+      # today is a 38 s median and a 102 s 95th percentile for the whole step.
       #
       # Each bound is derived from its own phase: each job's two apt rates, as apt logged them,
       # scaled onto the head's smaller fetch of 12.9 MB of indexes and 51.4 MB of packages. The
@@ -2514,21 +2517,51 @@ jobs:
       # understates the download. The model assumes a retry meets the same mirror rate, and
       # azure.archive.ubuntu.com is a pool, so a retry may meet a faster mirror or a slower one.
       # Both bounds come from the slowest mirror a green job of that window met, and are read
-      # again when a green job meets a slower one. A slower mirror on both attempts - under
-      # about 143 kB/s for the indexes or 171 kB/s for the packages - fails the step by its own
-      # name: job 127274913129 met 62.5 kB/s for its packages, and its job budget cancelled it.
+      # again when a green job meets a slower one. Under about 143 kB/s the indexes do not
+      # arrive inside one bound, and under about 171 kB/s the packages do not: job 127274913129
+      # met 62.5 kB/s for its packages, and its job budget cancelled it.
       #
-      # The worst case the step now carries: if both `apt-get update` attempts fail, `twice`
-      # returns 1 and the step stops after about 180 s, so the longest the bounded apt phases
-      # can run is one update attempt stopped at 90 s, a second ending just inside 90 s, then
-      # both download attempts stopped at 300 s. The step fails by its own name in at most
-      # 780 s, against the 40-minute job cancel it replaces.
+      # What the three attempts complete, which is the threshold the step carries: three bounds
+      # of 300 s are 900 s of download, so the step completes above about 57 kB/s, and under
+      # that it fails by its own name - in about 1080 s where the update was fast, and in at
+      # most 1170 s where the update phase was retried to its bound. Two attempts would have
+      # completed only above about 86 kB/s, which is why there are three: at 62.5 kB/s the
+      # head's 51.4 MB need 822 s, which 600 s of download does not reach and 900 s does, and
+      # job 127274913129 above met exactly that rate.
+      #
+      # The attempts accumulate, which is measured and not assumed: `apt-get ... -d` resumes. An
+      # attempt the bound kills leaves its bytes in apt's partial directory, and the attempt
+      # after it asks only for the rest, which that attempt logs as
+      # `Need to get 42.1 MB/51.4 MB of archives` after a first attempt that had asked for
+      # 51.4 MB. Measured separately, the partial is resumed across the origin switch too, since
+      # the two mirrors serve the same file and the server answers a byte-range request. Where
+      # the fallback's snapshot holds a different version the filename differs, the partial is
+      # not reused and that attempt carries the full 51.4 MB, which at any healthy rate is
+      # seconds.
+      #
+      # Why the third attempt changes origin rather than the bound being raised: a longer bound
+      # buys a longer hang and hides the mirror. One step's log holds both of the rates the one
+      # host it met served, 9977 kB/s for the indexes and 31 kB/s for the pool files, so the
+      # slowness was in the pool path rather than in the host, and another origin is the lever
+      # that answers that. A single bad pool member is the case no attempt count on one origin
+      # reaches.
+      #
+      # The slowest reading this repository holds is that 31 kB/s: 9.3 MB fetched in a 300 s
+      # attempt. No attempt count worth having completes 51.4 MB at that rate - it needs
+      # 1658 s - so the step fails by its own name there, which is the intended outcome.
+      #
+      # The worst case the step now carries: if both `apt-get update` attempts fail, the step
+      # stops after about 180 s, so the longest the bounded apt phases can run is one update
+      # attempt stopped at 90 s, a second ending just inside 90 s, two download attempts stopped
+      # at 300 s, the fallback origin's update stopped at 90 s and a third download attempt
+      # stopped at 300 s. The step fails by its own name in at most 1170 s, against the
+      # 40-minute job cancel it replaces.
       - name: Install Playwright Chromium, WebKit and Firefox
         # The runner image preconfigures Google's chrome-stable apt source, whose index
         # intermittently fails `apt-get update` with a hash-sum mismatch and takes the install
         # down with it. Chrome is already installed there; the source only serves upgrades, so
         # drop it before installing our deps.
-        timeout-minutes: 16
+        timeout-minutes: 22
         run: |
           grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
           packages="fonts-freefont-ttf fonts-ipafont-gothic fonts-liberation fonts-noto-color-emoji
@@ -2543,30 +2576,57 @@ jobs:
           libwayland-server0 libwebp7 libwebpdemux2 libwoff1 libx11-6 libx11-xcb1 libx264-164
           libxcb-shm0 libxcb1 libxcomposite1 libxcursor1 libxdamage1 libxext6 libxfixes3 libxi6
           libxkbcommon0 libxml2 libxrandr2 libxrender1 libxslt1.1 xfonts-cyrillic xfonts-scalable xvfb"
-          # One retry, then the step fails by its own name rather than leaving the job's budget
-          # to cancel the browser step after it. The first argument is what the log calls the
-          # phase: a mirror that answers the second time costs one more bound, and one that
-          # never answers ends the step here. `timeout` exits 124 when it killed the command, so
-          # the status separates a mirror that stalled from one that refused.
-          twice() {
-            local what=$1
-            shift
-            "$@" && return 0
-            echo "::warning::$what failed with exit $? (124 is the timeout); one more attempt"
-            "$@" && return 0
-            echo "::error::$what failed twice, the second time with exit $? (124 is the timeout);" \
-              "the apt mirror is the suspect"
-            return 1
+          # A bounded attempt, retried: the attempt count, then what the log calls the phase,
+          # then the command. Each failed attempt prints the phase, that attempt's exit status
+          # and how many attempts are left; `timeout` exits 124 when it killed the command, so
+          # the status separates a mirror that stalled from one that refused. What an exhausted
+          # phase means is the caller's: the update below ends the step, and the download moves
+          # to another origin and takes its last attempt there.
+          attempts() {
+            local left=$1 what=$2 status
+            shift 2
+            while :; do
+              "$@" && return 0
+              status=$?
+              left=$((left - 1))
+              echo "::warning::$what failed with exit $status (124 is the timeout); attempts left: $left"
+              [ "$left" -gt 0 ] || return 1
+            done
           }
           # `sudo timeout`, not `timeout sudo`: the signal has to reach apt-get itself, not a
           # sudo holding it.
-          twice "apt-get update" sudo timeout 90 apt-get update
+          attempts 2 "apt-get update" sudo timeout 90 apt-get update || {
+            echo "::error::apt-get update failed twice, so no package list was read;" \
+              "the apt mirror is the suspect"
+            exit 1
+          }
           # Download only (`-d`): a killed apt releases its fcntl locks either way, but with
-          # nothing unpacked in this phase no dpkg run is ever stopped part way, so the retry and
-          # the unbounded install after it start from a clean package state. It prints what it
-          # fetched, which is this step's own byte record. $packages is left unquoted on purpose,
-          # to split into words.
-          twice "the package download" sudo timeout 300 apt-get install -y --no-install-recommends -d $packages
+          # nothing unpacked in this phase no dpkg run is ever stopped part way, so the attempts
+          # after it and the unbounded install below start from a clean package state. It prints
+          # what it fetched, which is this step's own byte record. $packages is left unquoted on
+          # purpose, to split into words.
+          if ! attempts 2 "the package download" sudo timeout 300 apt-get install -y --no-install-recommends -d $packages; then
+            # The last attempt fetches from another origin, which is the one thing more attempts
+            # on the configured pool cannot do. That pool is a mirrorlist, which `apt-get update`
+            # reads as `Get:1 file:/etc/apt/apt-mirrors.txt Mirrorlist`, so the switch is an edit
+            # of that file. The copy beside it is what was there; nothing puts it back, and
+            # nothing has to, the runner being ephemeral and going with the job.
+            mirrorlist=/etc/apt/apt-mirrors.txt
+            sudo cp "$mirrorlist" "$mirrorlist.orig"
+            sudo sed -i 's,^\(https\?://\)[^/]*,\1archive.ubuntu.com,' "$mirrorlist"
+            cat "$mirrorlist"
+            # The new origin's indexes are not the old one's, so they are read before the
+            # attempt that uses them. Where that read fails the attempt still runs: the lists on
+            # disk may still name files this origin serves, and an attempt is worth more here
+            # than a tidy exit.
+            attempts 1 "apt-get update for the fallback origin" sudo timeout 90 apt-get update ||
+              echo "::warning::the fallback origin's lists were not read; the attempt below uses what is on disk"
+            attempts 1 "the package download from the fallback origin" sudo timeout 300 apt-get install -y --no-install-recommends -d $packages || {
+              echo "::error::the package download failed three times, the last of them on another origin;" \
+                "the step ends here rather than leaving the job's budget to cancel the browser step after it"
+              exit 1
+            }
+          fi
           # Unbounded and unretried: the archive is on disk now, so this takes no network.
           sudo apt-get install -y --no-install-recommends $packages
           # The browsers alone. Named, because with no argument Playwright resolves its own
