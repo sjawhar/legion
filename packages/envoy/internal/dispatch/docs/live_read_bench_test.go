@@ -156,7 +156,7 @@ func BenchmarkKeystrokeBesideReads(b *testing.B) {
 				service := calibratedService()
 				service.budget.limit = roomBudgetBytes
 				replica := observedReplica(b, service, live, liveRendering(b, live))
-				service.chargeLoadedRoom("bench", live, replica)
+				service.chargeLoadedRoom("bench", replica, int64(len(crdt.EncodeStateAsUpdateV1(live, nil))))
 				for b.Loop() {
 					stop := make(chan struct{})
 					var reading sync.WaitGroup
@@ -205,13 +205,14 @@ func BenchmarkKeystrokeBesideReads(b *testing.B) {
 
 // BenchmarkPeerUpdateWeighing measures what the peer update hook costs the browser whose keystroke
 // it weighs (Service.weighPeerUpdate), with an update of the size a keystroke sends against a 524
-// KiB room, the size BenchmarkKeystrokeBesideReads types into. Every update is walked
-// (walkUpdate), netted against the room's state vector and its apply's heap estimated from the same
-// walk (peerWeighing.applyHeap), and its addition weighed against the room's struct total
-// (roomTotals) under the room's admission lock; it is weighed twice: against a room whose
-// published measurement is under the bound, where the walk's bytes admit it, and against a room
-// whose measurement is at pmdoc.MaxDocumentBytes, where what the walk found it inserts beyond the
-// room's state is weighed too. The apply the hook is handed does nothing: what
+// KiB room, the size BenchmarkKeystrokeBesideReads types into. The hook reads no byte of the
+// update: it builds the allowance the apply runs under from the update's own length, the room's
+// last published measurement, its tracked state bytes and what it already holds
+// (crdt.Doc.StructCount), reserves that allowance and its scan allowance for the apply's origin,
+// and runs the apply. It is weighed twice: against a room whose published measurement is under
+// the bound, where the allowance leaves the bytes unbounded, and against a room whose measurement
+// is at pmdoc.MaxDocumentBytes, where the bound caps what the apply may integrate. The apply the
+// hook is handed does nothing: what
 // is timed is the weighing this change adds to the peer's read loop, where the room's own apply
 // runs with the hook or without it. The percentiles are reported in milliseconds, as
 // BenchmarkKeystrokeBesideReads reports a keystroke's, so the hook's cost can be read against the
@@ -229,7 +230,7 @@ func BenchmarkPeerUpdateWeighing(b *testing.B) {
 	service := calibratedService()
 	replica := service.keepReplica(live, nil, liveRendering(b, live), nil)
 	update := benchmarkKeystrokeUpdate(b, live)
-	published, _, measured := replica.size()
+	published, measured := replica.size()
 	if !measured || published+int64(len(update)) >= pmdoc.MaxDocumentBytes {
 		b.Fatalf("the room published %d bytes, want a measurement under the bound", published)
 	}

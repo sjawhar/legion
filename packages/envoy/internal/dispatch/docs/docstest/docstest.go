@@ -31,8 +31,11 @@ import (
 type Peer struct {
 	// Doc is the peer's copy of the document. The peer's reader applies the room's updates to it.
 	Doc *crdt.Doc
-	// Answers carries the content of each sync step 2 the room sends, once Doc holds it. One that
-	// arrives while sixteen are waiting to be read is dropped.
+	// Answers carries the whole of each answer the room makes to a sync step 1, once Doc holds
+	// it: the room answers with Update frames of about 64 KiB each and then one sync step 2
+	// carrying only what no Update could (sjawhar/ygo v1.55.1-sami.3), and what arrives here is
+	// those frames merged, which is byte for byte what the one sync step 2 of before carried.
+	// An answer that arrives while sixteen are waiting to be read is dropped.
 	Answers <-chan []byte
 	// Ended is closed once the connection has ended and the reader has stopped.
 	Ended <-chan struct{}
@@ -138,6 +141,11 @@ func (p *Peer) Closed() *gws.CloseError {
 // read applies every sync frame the room sends and answers its sync step 1 until the connection
 // closes, handing answers the content of each sync step 2 once it is applied.
 func (p *Peer) read(answers chan<- []byte) {
+	// The frames of the answer being read: every Update since the last answer ended, and then
+	// the sync step 2 that ends this one. A room's answer is a series since
+	// sjawhar/ygo v1.55.1-sami.3, so a reader that took the last message alone would read the
+	// remainder rather than the state.
+	var answering [][]byte
 	for {
 		_, message, err := p.connection.ReadMessage()
 		if err != nil {
@@ -168,9 +176,22 @@ func (p *Peer) read(answers chan<- []byte) {
 				return
 			}
 		}
+		if kind == ygsync.MsgUpdate {
+			answering = append(answering, append([]byte(nil), content...))
+			continue
+		}
 		if kind == ygsync.MsgSyncStep2 {
+			answer := content
+			if len(answering) > 0 {
+				merged, err := crdt.MergeUpdatesV1(append(answering, content)...)
+				if err != nil {
+					return
+				}
+				answer = merged
+			}
+			answering = nil
 			select {
-			case answers <- content:
+			case answers <- answer:
 			default:
 			}
 		}

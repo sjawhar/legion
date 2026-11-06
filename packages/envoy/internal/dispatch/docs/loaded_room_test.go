@@ -3,6 +3,7 @@ package docs
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -20,13 +21,13 @@ import (
 
 // A room a browser opens over a real socket is measured and charged at its load, and its replica
 // follows the room's update log. The load's rendering is the room's first measurement: the bytes
-// the peer update hook weighs (roomWeighing.size, which the hook reads through roomWeighingOf) and
-// the elements the room budget charges the load by (chargeLoadedRoom) beside the struct total the
-// load counted, at both copies, in place of the socket's reservation. The replica then moves only
-// through the room's commits as the update log hands them over (keepReplica, doc.OpenUpdateLog):
-// once the browser's edit is in, the replica holds the room as of that commit with nothing left in
-// the log, its rendering is the measurement, and the content every logged update added is charged
-// once.
+// the peer update hook weighs (roomWeighing.size, which the hook reads through roomWeighingOf).
+// What the budget charges it is its tracked state - the bytes of the stored state its load
+// decoded - at both copies (chargeLoadedRoom, roomWeight). The replica then moves only through
+// the room's commits as the update log hands them over (keepReplica, doc.OpenUpdateLog): once
+// the browser's edit is in, the replica holds the room as of that commit with nothing left in
+// the log, its rendering is the measurement, and every logged update's own bytes have been added
+// to the room's tracked state once (renderedReplica.chargeAdded).
 func TestAFreshlyLoadedRoomIsMeasuredAndChargedWithItsUpdateLog(t *testing.T) {
 	database := storetest.Open(t)
 	service := newRoomBudgetService(t, database, NewPgVersioned(database))
@@ -45,23 +46,25 @@ func TestAFreshlyLoadedRoomIsMeasuredAndChargedWithItsUpdateLog(t *testing.T) {
 		t.Fatal("the loaded room listed no replica for the peer update hook to read")
 	}
 	loaded := renderedLive(t, service, room)
-	bytes, elements, measured := replica.size()
-	if !measured || bytes != int64(len(loaded)) || elements != countElements(loaded) {
-		t.Fatalf("the loaded room measures %d bytes and %d elements (measured %t), want its rendering's %d bytes and %d elements",
-			bytes, elements, measured, len(loaded), countElements(loaded))
+	bytes, measured := replica.size()
+	if !measured || bytes != int64(len(loaded)) {
+		t.Fatalf("the loaded room measures %d bytes (measured %t), want its rendering's %d", bytes, measured, len(loaded))
 	}
 	charge := replica.roomCharge()
 	if charge == nil {
 		t.Fatal("the loaded room's replica holds no charge in the room budget")
 	}
-	if want, used := roomWeight(copyHeap(bytes, elements, replica.structs.countedStructs()), 0, 0), budgetUsed(service); used != want {
-		t.Fatalf("the budget holds %d bytes for the loaded room, want its load's count at both copies, %d", used, want)
+	tracked := replica.roomStateBytes()
+	if tracked == 0 {
+		t.Fatal("the loaded room is tracked at no state, want the bytes of the stored state its load decoded")
+	}
+	if want, used := roomWeight(tracked), budgetUsed(service); used != want {
+		t.Fatalf("the budget holds %d bytes for the loaded room, want its %d tracked bytes of state at both copies, %d", used, tracked, want)
 	}
 
 	// Every update the room commits from here on, as the room's own log records it.
 	log := live.OpenUpdateLog()
 	t.Cleanup(log.Close)
-	_, before, _, _ := chargeParts(charge)
 	const edited = "Room cap probe.\n\nAlice's paragraph.\n"
 	editAsBrowser(t, service, room, browser, edited)
 	want := renderedLive(t, service, room)
@@ -74,19 +77,22 @@ func TestAFreshlyLoadedRoomIsMeasuredAndChargedWithItsUpdateLog(t *testing.T) {
 		rendered, err := renderDocument(doc)
 		return err == nil && rendered == want
 	})
-	if bytes, _, measured := replica.size(); !measured || bytes != int64(len(want)) {
+	if bytes, measured := replica.size(); !measured || bytes != int64(len(want)) {
 		t.Fatalf("after the browser's edit the room measures %d bytes (measured %t), want its rendering's %d", bytes, measured, len(want))
 	}
 	_, logged := log.Drain()
 	var added int64
 	for _, update := range logged {
-		added += contentAdded(update.Update)
+		added += int64(len(update.Update))
 	}
 	if added == 0 {
-		t.Fatal("the browser's edit added no content, so nothing here is charged")
+		t.Fatal("the browser's edit committed no update, so nothing here is charged")
 	}
-	if _, content, _, _ := chargeParts(charge); content-before != added {
-		t.Fatalf("the room's charge took %d bytes of content for the updates it committed, want the %d they added", content-before, added)
+	if after := replica.roomStateBytes(); after-tracked != added {
+		t.Fatalf("the room's tracked state took %d bytes for the updates it committed, want the %d those updates hold", after-tracked, added)
+	}
+	if want, used := roomWeight(tracked+added), budgetUsed(service); used != want {
+		t.Fatalf("the budget holds %d bytes once the edit is in, want the %d its tracked state comes to", used, want)
 	}
 }
 
@@ -106,13 +112,13 @@ func TestATransactionsUpdateIsChargedOnceWhenAnotherObserverRendersItFirst(t *te
 	if live == nil {
 		t.Fatal("document room is not resident")
 	}
-	charge := service.replicaOf(live).roomCharge()
-	if charge == nil {
+	replica := service.replicaOf(live)
+	if replica == nil || replica.roomCharge() == nil {
 		t.Fatal("the room's replica holds no charge in the room budget")
 	}
 	log := live.OpenUpdateLog()
 	t.Cleanup(log.Close)
-	_, before, _, _ := chargeParts(charge)
+	before := replica.roomStateBytes()
 
 	release := holdPeerEdit(t, service, artifactID, &service.beforeObserveUpdate, appendBlocks(t, "Bob's paragraph.\n"))
 	editAsPeer(t, service, artifactID, appendBlocks(t, "Carol's paragraph.\n"))
@@ -122,21 +128,21 @@ func TestATransactionsUpdateIsChargedOnceWhenAnotherObserverRendersItFirst(t *te
 	}
 	var added int64
 	for _, update := range logged {
-		if contentAdded(update.Update) == 0 {
-			t.Fatal("an edit added no content, so nothing here is charged")
+		if len(update.Update) == 0 {
+			t.Fatal("an edit committed no update, so nothing here is charged")
 		}
-		added += contentAdded(update.Update)
+		added += int64(len(update.Update))
 	}
-	if _, content, _, _ := chargeParts(charge); content-before != added {
-		t.Fatalf("with Bob's observer held, the room's charge took %d bytes of content, want the %d both edits added, charged by Carol's observer's drain", content-before, added)
+	if after := replica.roomStateBytes(); after-before != added {
+		t.Fatalf("with Bob's observer held, the room's tracked state took %d bytes, want the %d both edits hold, charged by Carol's observer's drain", after-before, added)
 	}
 
 	release()
 	if pending := log.Pending(); pending != 0 {
 		t.Fatalf("releasing Bob's observer committed %d more updates, want none", pending)
 	}
-	if _, content, _, _ := chargeParts(charge); content-before != added {
-		t.Fatalf("once Bob's observer ran, the room's charge holds %d bytes of content, want the %d both edits added, each charged once", content-before, added)
+	if after := replica.roomStateBytes(); after-before != added {
+		t.Fatalf("once Bob's observer ran, the room's tracked state holds %d bytes more, want the %d both edits hold, each charged once", after-before, added)
 	}
 }
 
@@ -358,4 +364,198 @@ func TestAPeerUpdateThatParksBehindAGapLeavesTheReplicaHoldingWhatTheRoomHolds(t
 		t.Fatalf("the replica renders %q, want it to hold %q", replica.rendering.markdown, want)
 	}
 	runtime.KeepAlive(replica)
+}
+
+// loadRendering is markdown as a room's load hands it to its replica (keepReplica,
+// replicaRendering), for a test whose replica renders nothing of its own: it carries no layout,
+// which only a replica splicing an update into the rendering reads (spliceTouched). So it is for
+// a replica that never drains the room's log - one keepReplica is given no log - and a test whose
+// replica follows the room's commits takes liveRendering instead: production makes no rendering
+// without a layout (documentRenderingWithLayout, renderDocumentForUpdate, pmdoc.Layout.Splice),
+// and a splice of one would read a layout that is not there.
+func loadRendering(markdown string) *replicaRendering {
+	return &replicaRendering{markdown: markdown}
+}
+
+// liveRendering is live's rendering as a room's load makes it, the markdown and the layout of one
+// render (documentRenderingWithLayout), for a test whose replica follows the room's commits and
+// splices an update into that rendering.
+func liveRendering(tb testing.TB, live *crdt.Doc) *replicaRendering {
+	tb.Helper()
+	tree, err := treeOf(live)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	markdown, _, layout, err := documentRenderingWithLayout(tree)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return &replicaRendering{markdown: markdown, layout: layout}
+}
+
+// headings is a rendering of a few thousand headings, a different one for each n.
+func headings(n int) string {
+	return strings.Repeat("# a\n", 4_096+n)
+}
+
+// forgedGCRunDocument is the document the forged GC run's rooms load with: one paragraph long
+// enough that a delete over every other character of it is a few hundred ranges, and short enough
+// that each room loads in a few milliseconds.
+const forgedGCRunDocument = "word word word word word word word word word word\n"
+
+// A GC run born deleted over every clock the room holds, which the peer update hook admits
+// (gcRunOverHeldClocks: it integrates one struct, of a client the room holds nothing of, and
+// nothing else), leaves the room taking edits: the delete a browser sends next is admitted, the
+// replica's rendering after it is what a fresh render of the room answers, and the room's text
+// carries the delete. The forged run touches no block of the replica's document - it integrates
+// one struct born deleted, under no block - so the rendering the room loaded with is what the
+// delete's own blocks are spliced into (renderedReplica.spliceTouched), which is why the room is
+// loaded here as production loads one (drainedPeerUpdateRoom, keepReplica): with the markdown and
+// the layout of one render of the state its replica starts from.
+func TestARoomTakesAnHonestDeleteAfterAForgedGCRun(t *testing.T) {
+	service, room, replica, _ := drainedPeerUpdateRoom(t, forgedGCRunDocument)
+	before := firstText(room.GetXmlFragment(fragmentName)).ToString()
+	forged := gcRunOverHeldClocks(room)
+	if err, called := weighInto(service, room, forged); err != nil || !called {
+		t.Fatalf("the %d-byte GC run was answered %v (applied %t), want it admitted", len(forged), err, called)
+	}
+	requireRoomRendered(t, room, replica, "the forged GC run")
+	honest := peerDeletingEveryOtherCharacter(t, room)
+	if err, called := weighInto(service, room, honest); err != nil || !called {
+		t.Fatalf("the %d-byte honest delete was answered %v (applied %t), want it admitted", len(honest), err, called)
+	}
+	requireRoomRendered(t, room, replica, "the honest delete")
+	if got, want := firstText(room.GetXmlFragment(fragmentName)).ToString(), everyOtherCharacterDeleted(before); got != want {
+		t.Fatalf("the room's text after the delete reads %q, want %q", got, want)
+	}
+	runtime.KeepAlive(replica)
+}
+
+// The same forged GC run, and then the smallest edit there is: one character typed on a browser's
+// own copy of the room (snapshotDocument), three of them, each from a copy taken after the one
+// before it. Each is admitted, each leaves the replica's rendering equal to a fresh render of the
+// room, and the room's text carries all three.
+func TestARoomTakesTypedCharactersAfterAForgedGCRun(t *testing.T) {
+	service, room, replica, _ := drainedPeerUpdateRoom(t, forgedGCRunDocument)
+	before := firstText(room.GetXmlFragment(fragmentName)).ToString()
+	forged := gcRunOverHeldClocks(room)
+	if err, called := weighInto(service, room, forged); err != nil || !called {
+		t.Fatalf("the %d-byte GC run was answered %v (applied %t), want it admitted", len(forged), err, called)
+	}
+	requireRoomRendered(t, room, replica, "the forged GC run")
+	const typed = "y"
+	for keystroke := 1; keystroke <= 3; keystroke++ {
+		update := browserTypingACharacter(t, room, typed)
+		if err, called := weighInto(service, room, update); err != nil || !called {
+			t.Fatalf("keystroke %d, %d bytes, was answered %v (applied %t), want it admitted", keystroke, len(update), err, called)
+		}
+		requireRoomRendered(t, room, replica, fmt.Sprintf("keystroke %d", keystroke))
+	}
+	if got, want := firstText(room.GetXmlFragment(fragmentName)).ToString(), strings.Repeat(typed, 3)+before; got != want {
+		t.Fatalf("the room's text after the three keystrokes reads %q, want %q", got, want)
+	}
+	runtime.KeepAlive(replica)
+}
+
+// A replica that could not place an update holds no document, no fragment and no rendering, and
+// waits for the base the room's next commit records (renderedReplica.recover): the edit after that
+// commit starts the replica from that base, rendering it whole, and splices its own block into that
+// rendering. So a restart leaves the room taking edits too, and nothing on the path reads the
+// document, the fragment or the layout the replica dropped.
+func TestARestartedReplicaRendersItsBaseAndSplicesTheEditAfterIt(t *testing.T) {
+	service, room, replica, _ := drainedPeerUpdateRoom(t, "# Title\n\nParagraph one of the room.\n\nParagraph two of the room.\n")
+	// The room's first commit, which hands the replica the log's first base and leaves it
+	// following the room (renderedReplica.start): what a restart after it starts again from is
+	// the fresh base the log records, which no load rendered.
+	if err, called := weighInto(service, room, browserTypingACharacter(t, room, "a")); err != nil || !called {
+		t.Fatalf("the room's first edit was answered %v (applied %t), want it admitted", err, called)
+	}
+	requireRoomRendered(t, room, replica, "the room's first edit")
+	// The replica cannot place the next update, as one whose apply failed cannot (takeLocked).
+	forceRecover(replica)
+	before := readRenderPaths(service)
+	unplaced := browserTypingACharacter(t, room, "b")
+	if err, called := weighInto(service, room, unplaced); err != nil || !called {
+		t.Fatalf("the update the replica could not place was answered %v (applied %t), want it admitted", err, called)
+	}
+	doc, fragment, rendering, layout := replicaHolds(replica)
+	if doc || fragment || rendering || layout {
+		t.Fatalf("between the drop and the room's next commit the replica holds a document %t, a fragment %t, a rendering %t and a layout %t, want none of them",
+			doc, fragment, rendering, layout)
+	}
+	if took := readRenderPaths(service).minus(before); took != (renderPaths{}) {
+		t.Fatalf("the update it could not place took the paths %+v, want none", took)
+	}
+	before = readRenderPaths(service)
+	edit := browserTypingACharacter(t, room, "c")
+	if err, called := weighInto(service, room, edit); err != nil || !called {
+		t.Fatalf("the edit after the restart was answered %v (applied %t), want it admitted", err, called)
+	}
+	if took, want := readRenderPaths(service).minus(before), (renderPaths{catchUpRendered: 1, observerIncremental: 1}); took != want {
+		t.Fatalf("the edit after the restart took the paths %+v, want %+v", took, want)
+	}
+	requireRoomRendered(t, room, replica, "the edit after the restart")
+	if got := paragraphTexts(room)[0].ToString(); !strings.HasPrefix(got, "cba") {
+		t.Fatalf("the room's first paragraph reads %q, want it to carry the three characters typed", got)
+	}
+	runtime.KeepAlive(replica)
+}
+
+// requireRoomRendered holds the rendering the replica keeps after an update to a fresh render of
+// the room: whichever path the update took - spliced, rendered whole, or taken from a published
+// write - the replica's markdown is the room's own.
+func requireRoomRendered(t *testing.T, room *crdt.Doc, replica *renderedReplica, after string) {
+	t.Helper()
+	want, err := renderDocument(room)
+	if err != nil {
+		t.Fatalf("after %s, render the room: %v", after, err)
+	}
+	held := markdownAt(heldRendering(replica))
+	if held == nil {
+		t.Fatalf("after %s the replica holds no rendering, want the room's", after)
+	}
+	if *held != want {
+		t.Fatalf("after %s the replica's rendering is %q and a fresh render of the room %q", after, *held, want)
+	}
+}
+
+// replicaHolds is whether the replica holds a document, a fragment, a rendering and a layout with
+// that rendering, read under its lock.
+func replicaHolds(replica *renderedReplica) (doc, fragment, rendering, layout bool) {
+	replica.mu.Lock()
+	defer replica.mu.Unlock()
+	return replica.doc != nil, replica.fragment != nil, replica.rendering != nil,
+		replica.rendering != nil && replica.rendering.layout != nil
+}
+
+// browserTypingACharacter is the update a browser sends that types character at the start of the
+// first paragraph of its own copy of the room (snapshotDocument): the smallest edit the editor
+// makes, from a copy of the room as it stands now.
+func browserTypingACharacter(t *testing.T, room *crdt.Doc, character string) []byte {
+	t.Helper()
+	browser, err := snapshotDocument(room)
+	if err != nil {
+		t.Fatal(err)
+	}
+	texts := paragraphTexts(browser)
+	if len(texts) == 0 {
+		t.Fatal("the browser's copy of the room holds no paragraph")
+	}
+	var sent []byte
+	browser.OnUpdate(func(update []byte, _ any) { sent = update })
+	browser.Transact(func(txn *crdt.Transaction) { texts[0].Insert(txn, 0, character, nil) })
+	if sent == nil {
+		t.Fatal("the browser's keystroke made no update")
+	}
+	return sent
+}
+
+// everyOtherCharacterDeleted is text with the characters peerDeletingEveryOtherCharacter deletes
+// taken out of it: every other one from its last, none of them the first.
+func everyOtherCharacterDeleted(text string) string {
+	runes := []rune(text)
+	for at := len(runes) - 1; at > 0; at -= 2 {
+		runes = append(runes[:at], runes[at+1:]...)
+	}
+	return string(runes)
 }

@@ -16,7 +16,19 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
-func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
+// The package's tests run in one process, and many of them drive a room's load from inside a
+// write's fork read, through a hook of the service's (afterForkRead) or a store that loads the
+// room inside the read it answers (roomDuringColdReadStore): a nesting no pod makes, where a
+// browser's load is a goroutine of its own that simply waits for the write's fork to be dropped.
+// A write holds a slot of the pod's load concurrency for its fork's whole life (loadSlots), and
+// at the calibration the pod has one (MemoryBounds.LoadSlots), which such a nesting would
+// deadlock. So the binary runs with the production pod's sixteen; what the slots themselves
+// bound is weighed by MemoryBounds' own arithmetic and by the tests that swap in a concurrency
+// of their own (useLoadSlots).
+func TestMain(m *testing.M) {
+	podLoadSlots.Store(newLoadSlots(BoundsForLimit(productionGoMemoryLimitBytes).LoadSlots))
+	os.Exit(storetest.Main(m))
+}
 
 func createDocument(t *testing.T, database *store.Store, markdown string) string {
 	t.Helper()

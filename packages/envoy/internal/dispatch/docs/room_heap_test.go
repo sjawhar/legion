@@ -1,11 +1,11 @@
 package docs
 
 import (
-	"encoding/binary"
 	"fmt"
 	"math"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -16,260 +16,185 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
-// What one open document costs the pod is the figure the room budget charges a room by
-// (bytesOfHeapAnElement), and it was first read off a benchmark of a read's second replica rather
-// than measured of a room: about 120 bytes of heap for every byte of markdown for one copy, and
-// two copies for a room under edit, the figure packages/envoy/AGENTS.md carried until this
-// measurement replaced it. This measures the room itself: the live
-// document beside the rendered replica its update observer keeps while the room is resident
-// (keepReplica, renderedReplica.observe), which every room holds from its load on - the replica is
-// the copy the load decoded of the stored state (decodeStoredCopy) - whether it is only read or
-// has taken an update since. Each measures about two copies, the budget's roomCopies.
+// What one open document costs the pod is the figure the room budget charges a room by, and the
+// budget charges one price: the heap one copy of a document holds for each byte of its encoded
+// state (bytesOfHeapAStateByte), at both copies a room keeps (roomCopies). This measures the room
+// itself - the live document beside the rendered replica its update observer keeps while the room
+// is resident (keepReplica, renderedReplica.observe), which every room holds from its load on -
+// against the bytes of state the budget charges it by.
 //
-// Both are weighed against the room's rendering, the markdown its stored version holds. A byte of
-// markdown is not what the heap follows, though: what it follows is the elements that markdown
-// makes, about 500 bytes of heap for each one for each copy at 524 KiB and at 1 MiB (501 and 510
-// read and edited, 493 and 502), and 605 and 616 at 51 KiB, where what a document holds whatever
-// its size is a larger share of the whole. So the same bytes in a denser shape cost more, and the
-// 120 bytes a byte the figure above states were measured on a shape four times denser than this
-// one: the live benchmarks' own document (benchmarkLiveDocument), 0.28 elements a byte, which
-// weighed 130 bytes of heap a byte at 51 KiB under sjawhar/ygo v1.51.3-sami.7
-// - the figure reproduced - and which no room could hold at 524 KiB or at 1 MiB, since a
-// document may hold pmdoc.MaxDocumentElements and that shape passes them at about 490 KiB. The
-// shape here (residentRoomMarkdown) is that one with longer paragraphs, 0.055 elements a byte,
-// which a room holds at every size weighed. The per-byte bounds are wide enough for that spread and
-// are not a number to the byte; the per-element bound is the budget's own, and fails once a copy's
-// heap an element leaves leastPerElement to mostPerElement of bytesOfHeapAnElement.
+// The price replaced six of them, each of a different measure of a document: its elements, its
+// structs held, its rendered bytes, its bytes at the densest, a struct added and a split. The
+// encoded state is the one measure every shape's heap follows within one spread, and the one the
+// room can keep without reading the document, since a whole-state encode costs 18.7 ms on a
+// mebibyte of prose and nothing on the keystroke path may take one. So the shapes below are what
+// that spread is measured over: prose at three sizes, read and edited; a small document whose
+// paragraph took 100,000 characters before its last one and then lost them all, the densest
+// measured; the long-edited fixture; a run of 300,000 keystrokes, the lightest; and one and eight
+// long paragraphs each typed in one transaction, which ygo merges into a few items.
+//
+// Each shape must hold no more than the price for each byte of its state in each copy, which is
+// what keeps the budget's arithmetic honest; and the heaviest of them must hold at least
+// leastOfThePrice of it, which is what keeps the price from being set so far above every shape
+// that the budget charges rooms many times what they cost.
 //
 // Each row is measured in a process of its own (measuredAlone): every row collects twelve times,
 // and inside the package's whole run each collection walks the gigabyte or more that run holds by
-// then, which took this test 318 s on this pod on 2026-11-03 against 11 s alone, with the same
-// readings. The row's state is built in that process alone, so the run itself builds none.
-func TestAResidentRoomsHeapPerByteOfItsMarkdown(t *testing.T) {
-	skipUnderRace(t)
-	const leastPerElement, mostPerElement = 0.85, 1.3
-	for _, size := range []int{51 << 10, 524 << 10, 1 << 20} {
-		for _, room := range []struct {
-			name                      string
-			edited                    bool
-			copies                    int
-			leastPerByte, mostPerByte float64
-		}{
-			{"read", false, 2, 30, 120},
-			{"edited", true, 2, 30, 120},
-		} {
-			t.Run(fmt.Sprintf("%dKiB/%s", size>>10, room.name), func(t *testing.T) {
-				if !measuredAlone(t) {
-					return
-				}
-				state, rendering := residentRoomState(t, size)
-				held := heldByResidentRoom(t, state, room.edited)
-				perByte := float64(held) / float64(rendering.Bytes)
-				perElement := float64(held) / float64(rendering.Elements*room.copies)
-				t.Logf("%d B of markdown making %d elements, heap held %d B (%.1f B of heap a byte, %.0f B an element for each of %d copies)",
-					rendering.Bytes, rendering.Elements, held, perByte, perElement, room.copies)
-				if perByte < room.leastPerByte || perByte > room.mostPerByte {
-					t.Errorf("the room holds %d B of heap for %d B of markdown, %.1f B a byte, want %.0f to %.0f a byte",
-						held, rendering.Bytes, perByte, room.leastPerByte, room.mostPerByte)
-				}
-				if ratio := perElement / bytesOfHeapAnElement; ratio < leastPerElement || ratio > mostPerElement {
-					t.Errorf("the room holds %.0f B of heap an element for each copy, %.2fx the %d B the room budget charges, want %.2fx to %.2fx",
-						perElement, ratio, bytesOfHeapAnElement, leastPerElement, mostPerElement)
-				}
-			})
-		}
-	}
-}
-
-// structHeapMeasurement is the environment variable that runs the heavy rows of
-// TestAResidentRoomsHeapPerStructOfItsState, each a document at or near the decode cap.
-const structHeapMeasurement = "DISPATCH_MEASURE_STRUCT_HEAP"
-
-// copyPrice is the term of copyHeap that prices a shape's copy: its elements, its structs or its
-// rendered bytes.
-type copyPrice int
-
-const (
-	pricedByElements copyPrice = iota
-	pricedByStructs
-	pricedByBytes
-)
-
-// A room's copy is priced at whichever of its three terms is the most (copyHeap), and each term's
-// price neither under-charges the shapes it prices nor drifts far past what they hold: a copy holds
-// bytesOfHeapAStructHeld or less for each struct of its state, and a struct-dense document at least
-// 0.85 of it; and bytesOfHeapARenderedByte or less for each byte of its rendering, and a run of
-// keystrokes at least 0.75 of it. It is measured as TestAResidentRoomsHeapPerByteOfItsMarkdown
-// measures a room (heldByResidentRoom): a room as its load leaves it, the live document and the
-// replica its load decoded, read and not edited, against the struct total its load counts
-// (countRoomStructs) and its rendering, each shape in a process of its own (measuredAlone). Each
-// shape is priced by the term it is listed under, which passes the other two: the struct-dense
-// shapes at their structs; the long runs at their rendered bytes - runs of 300,000 and of a million
-// keystrokes, which the decode of their state merges into a few structs (squashRuns), so they are
-// struct-dense only in the room that typed them, and one paragraph of a mebibyte and eight of 128
-// KiB, each typed in one transaction, which hold about a byte a byte and are checked only against
-// the price's top; and a mebibyte of prose, whose structs carry its text, at its elements, which
-// both other prices leave as they were. A run of keystrokes holds 9.2 to 11.1 bytes a rendered
-// byte for each copy as its length moves (bytesOfHeapARenderedByte says why), so its least is
-// 0.75 of the price.
+// then, which took the prose rows 318 s on this pod on 2026-11-03 against 11 s alone, with the
+// same readings. The row's state is built in that process alone, so the run itself builds none.
 //
-// The fast rows are a mebibyte of prose, a small document typed into 100,000 times before its last
-// character and then deleted (typedBeforeState), the long-edited fixture (longEditedState), a run
-// of 300,000 keystrokes (typedRunState) and the two long paragraphs' shapes (longRunState), which
-// took 4.0, 1.6, 8.8, 6.1 and 0.2 s each here on 2026-10-28, each in its own process. Set
-// DISPATCH_MEASURE_STRUCT_HEAP=1 for the heavy rows, each at the decode cap or a million keystrokes
-// long: the document an agent rewrote whole until the cap refused a write (agentRewrittenState,
-// about 200 s to build, kept between runs in the file DISPATCH_AGENT_REWRITTEN_CACHE names), the
-// long-edited document typed on until the cap (longEditedAtCapState) and a run of a million
-// keystrokes (keystrokeRunStates), 26.9 to 29.4, 26.6 to 38.5 and 20.5 to 27.0 s with the agent's
-// state cached, about 100 s together.
-func TestAResidentRoomsHeapPerStructOfItsState(t *testing.T) {
+// Set DISPATCH_MEASURE_STRUCT_HEAP=1 for the heavy rows, each at the decode cap or a million
+// keystrokes long: the document an agent rewrote whole until the cap refused a write
+// (agentRewrittenState, about 200 s to build, kept between runs in the file
+// DISPATCH_AGENT_REWRITTEN_CACHE names), the long-edited document typed on until the cap
+// (longEditedAtCapState) and a run of a million keystrokes (keystrokeRunStates).
+func TestAResidentRoomsHeapPerByteOfItsState(t *testing.T) {
 	skipUnderRace(t)
-	const dense, run, most = 0.85, 0.75, 1.0
+	const leastOfThePrice = 0.75
 	heavy := os.Getenv(structHeapMeasurement) != ""
-	for _, shape := range []struct {
+	type shape struct {
 		name   string
 		heavy  bool
-		priced copyPrice
-		// least is the least of its price the shape may hold for each copy.
-		least float64
-		state func(t *testing.T) []byte
-	}{
-		{"a mebibyte of prose", false, pricedByElements, 0, func(t *testing.T) []byte {
-			state, _ := residentRoomState(t, 1<<20)
-			return state
-		}},
-		{"a paragraph typed before its last character 100,000 times and deleted", false, pricedByStructs, dense, func(t *testing.T) []byte {
+		edited bool
+		state  func(t *testing.T) []byte
+	}
+	shapes := []shape{
+		{"a paragraph typed before its last character 100,000 times and deleted", false, false, func(t *testing.T) []byte {
 			return typedBeforeState(t, 100_000)
 		}},
-		{"the long-edited document", false, pricedByStructs, dense, func(t *testing.T) []byte { return longEditedState(t) }},
-		{"a run of 300,000 keystrokes", false, pricedByBytes, run, func(t *testing.T) []byte { return typedRunState(t, 300_000) }},
-		{"one paragraph of a mebibyte typed in one transaction", false, pricedByBytes, 0, func(t *testing.T) []byte { return longRunState(t, 1) }},
-		{"eight paragraphs of 128 KiB, each typed in one transaction", false, pricedByBytes, 0, func(t *testing.T) []byte { return longRunState(t, 8) }},
-		{"an agent's whole rewrites until the cap refused one", true, pricedByStructs, dense, cachedAgentRewrittenState},
-		{"a long-edited document typed on until the cap", true, pricedByStructs, dense, longEditedAtCapState},
-		{"a run of a million keystrokes", true, pricedByBytes, run, func(t *testing.T) []byte {
+		{"the long-edited document", false, false, func(t *testing.T) []byte { return longEditedState(t) }},
+		{"a run of 300,000 keystrokes", false, false, func(t *testing.T) []byte { return typedRunState(t, 300_000) }},
+		{"one paragraph of a mebibyte typed in one transaction", false, false, func(t *testing.T) []byte { return longRunState(t, 1) }},
+		{"eight paragraphs of 128 KiB, each typed in one transaction", false, false, func(t *testing.T) []byte { return longRunState(t, 8) }},
+		{"an agent's whole rewrites until the cap refused one", true, false, cachedAgentRewrittenState},
+		{"a long-edited document typed on until the cap", true, false, longEditedAtCapState},
+		{"a run of a million keystrokes", true, false, func(t *testing.T) []byte {
 			keystrokes, _ := keystrokeRunStates(t)
 			return keystrokes
 		}},
-	} {
-		t.Run(shape.name, func(t *testing.T) {
-			if shape.heavy && !heavy {
-				t.Skip("set " + structHeapMeasurement + "=1 to run the heavy rows")
+	}
+	for _, size := range []int{51 << 10, 524 << 10, 1 << 20} {
+		for _, edited := range []bool{false, true} {
+			name := fmt.Sprintf("%d KiB of prose, read", size>>10)
+			if edited {
+				name = fmt.Sprintf("%d KiB of prose, edited", size>>10)
 			}
-			if !measuredAlone(t) {
+			shapes = append(shapes, shape{name, false, edited, func(t *testing.T) []byte {
+				state, _ := residentRoomState(t, size)
+				return state
+			}})
+		}
+	}
+	// heaviest is what the shapes held at their most, a share of the price, and heaviestShape
+	// which one that is. Each shape is measured in a process of its own, so each reading is read
+	// back out of what that process printed (heapReadingLine): the heaviest of them is known only
+	// here, where the readings meet. A run that measured every shape it did not skip is the only
+	// one that can weigh the price against the heaviest of them, so a run of one of them - the
+	// process a shape is measured in, which runs this test with that shape alone - weighs none.
+	heaviest, heaviestShape, read := 0.0, "", 0
+	measured := 0
+	for _, shape := range shapes {
+		if shape.heavy && !heavy {
+			t.Run(shape.name, func(t *testing.T) { t.Skip("set " + structHeapMeasurement + "=1 to run the heavy rows") })
+			continue
+		}
+		measured++
+		t.Run(shape.name, func(t *testing.T) {
+			output, here := measuredAloneOutput(t)
+			if !here {
+				perStateByte, ok := heapReading(output)
+				if !ok {
+					t.Fatalf("the measurement in a process of its own printed no reading (%q)", heapReadingLine)
+				}
+				read++
+				if perStateByte > heaviest {
+					heaviest, heaviestShape = perStateByte, shape.name
+				}
 				return
 			}
 			state := shape.state(t)
-			held := heldByResidentRoom(t, state, false)
-			live := newDocumentCopy()
-			if err := crdt.ApplyUpdateV1(live, state, nil); err != nil {
-				t.Fatal(err)
-			}
-			structs := int64(countRoomStructs(live))
-			markdown, err := renderDocument(live)
-			if err != nil {
-				t.Fatal(err)
-			}
-			bytes, elements := int64(len(markdown)), countElements(markdown)
-			perStruct := float64(held) / float64(structs*roomCopies)
-			perByte := float64(held) / float64(bytes*roomCopies)
-			terms := [...]int64{
-				pricedByElements: elements * bytesOfHeapAnElement,
-				pricedByStructs:  structs * bytesOfHeapAStructHeld,
-				pricedByBytes:    bytes * bytesOfHeapARenderedByte,
-			}
-			t.Logf("%d B of state, %d structs, %d B of markdown making %d elements; heap held %d B, for each of %d copies %.1f B a struct (%.2fx the %d B price) and %.1f B a rendered byte (%.2fx the %d B price); a copy is priced %d B at its elements, %d at its structs, %d at its bytes",
-				len(state), structs, bytes, elements, held, roomCopies, perStruct, perStruct/bytesOfHeapAStructHeld, bytesOfHeapAStructHeld,
-				perByte, perByte/bytesOfHeapARenderedByte, bytesOfHeapARenderedByte, terms[pricedByElements], terms[pricedByStructs], terms[pricedByBytes])
-			if copyHeap(bytes, elements, structs) != terms[shape.priced] {
-				t.Fatalf("the copy is priced %d B, want its %d B term, %v", copyHeap(bytes, elements, structs), terms[shape.priced], terms)
-			}
-			for priced, term := range terms {
-				if copyPrice(priced) != shape.priced && term >= terms[shape.priced] {
-					t.Errorf("term %d prices the copy at %d B, no less than the %d B of the term that should price it, %v", priced, term, terms[shape.priced], terms)
-				}
-			}
-			var ratio float64
-			switch shape.priced {
-			case pricedByStructs:
-				ratio = perStruct / bytesOfHeapAStructHeld
-			case pricedByBytes:
-				ratio = perByte / bytesOfHeapARenderedByte
-			default:
-				return
-			}
-			if ratio < shape.least || ratio > most {
-				t.Errorf("the room holds %.2fx the price that prices it for each copy, want %.2fx to %.2fx", ratio, shape.least, most)
+			held := heldByResidentRoom(t, state, shape.edited)
+			perStateByte := float64(held) / float64(int64(len(state))*roomCopies)
+			t.Logf("%d B of state; heap held %d B, %.2f B a state byte for each of %d copies, %.3f of the %d-byte price",
+				len(state), held, perStateByte, roomCopies, perStateByte/bytesOfHeapAStateByte, bytesOfHeapAStateByte)
+			fmt.Printf("%s%.6f\n", heapReadingLine, perStateByte)
+			if perStateByte > bytesOfHeapAStateByte {
+				t.Errorf("the room holds %.2f B of heap a state byte for each copy, past the %d the room budget charges: measure the price again",
+					perStateByte, bytesOfHeapAStateByte)
 			}
 		})
 	}
+	if read != measured {
+		return
+	}
+	t.Logf("the heaviest of the %d shapes measured is %s at %.2f B a state byte, %.3f of the %d-byte price",
+		read, heaviestShape, heaviest, heaviest/bytesOfHeapAStateByte, bytesOfHeapAStateByte)
+	if heaviest < leastOfThePrice*bytesOfHeapAStateByte {
+		t.Errorf("the heaviest shape, %s, holds %.2f B of heap a state byte, under %.2f of the %d the room budget charges: the price is set far past every shape",
+			heaviestShape, heaviest, leastOfThePrice, bytesOfHeapAStateByte)
+	}
 }
+
+// heapReadingLine is how a process measuring one shape's heap reports its reading to the process
+// that started it (measuredAloneOutput), which is where the shapes' readings meet.
+const heapReadingLine = "heap-bytes-a-state-byte: "
+
+// heapReading is the reading a measuring process printed, and whether it printed one.
+func heapReading(output string) (float64, bool) {
+	for line := range strings.SplitSeq(output, "\n") {
+		printed, found := strings.CutPrefix(strings.TrimSpace(line), heapReadingLine)
+		if !found {
+			continue
+		}
+		reading, err := strconv.ParseFloat(printed, 64)
+		if err != nil {
+			continue
+		}
+		return reading, true
+	}
+	return 0, false
+}
+
+// structHeapMeasurement is the environment variable that runs the heavy rows of
+// TestAResidentRoomsHeapPerByteOfItsState, each a document at or near the decode cap.
+const structHeapMeasurement = "DISPATCH_MEASURE_STRUCT_HEAP"
 
 // typedRoomHeapMeasurement is the environment variable that runs
 // TestATypedAndPastedRoomIsChargedAtLeastItsHeapAndWithinTheFactor, about thirteen minutes.
 const typedRoomHeapMeasurement = "DISPATCH_MEASURE_TYPED_ROOM_HEAP"
 
 // A room typed into is charged no less than the heap it holds, and no more than the factor the
-// other shapes' prices may run past theirs. The structure part charges every struct a browser's
-// update adds as one of its own at the heaviest kind's price (bytesOfHeapAStruct) with both the
-// splits its integration can cause (bytesOfHeapASplit), where ygo merges a run of typed characters
-// back into one item and a keystroke splits one item at most (roomCharge), so it charges typing
-// past what typing adds; this weighs whether that leaves the room's whole charge within what the
-// heap tests let a priced shape be charged. Those tests hold a copy of a shape to no less than 0.85
-// of the price that prices it: the element price
-// (TestAResidentRoomsHeapPerByteOfItsMarkdown, leastPerElement) and the struct price of the
-// struct-dense shapes (TestAResidentRoomsHeapPerStructOfItsState, dense). So a priced shape may be
-// charged up to 1/0.85, 1.18 times its heap, and that is the factor here: the room's charge is at
-// least its heap and its heap at least leastHeldOfCharge of its charge. The 0.75 a run of
-// keystrokes may hold of the rendered-byte price is that price's own spread over run lengths
-// (bytesOfHeapARenderedByte), which prices no part of this room's charge.
+// shapes' own measurement allows. The budget charges a room its tracked state, which its drain
+// raises by the bytes of every update the room commits (renderedReplica.chargeAdded), and an
+// update's bytes carry what its transaction deleted beside what it added, where the state itself
+// merges a run of typed characters into one item: so a room typed into is tracked above the state
+// it holds, which is the safe side for a budget and is what this weighs. The shapes' measurement
+// holds the heaviest of them to leastOfThePrice of the price (TestAResidentRoomsHeapPerByteOfItsState),
+// so a priced shape may be charged up to 1/0.75 times its heap, and that is the factor here: the
+// room's charge is at least its heap and its heap at least leastHeldOfCharge of its charge.
 //
-// The room is a mebibyte of prose (residentRoomState), loaded as a room's load leaves it - the live
-// document, and the load's own decode of the stored state as the replica, its update log open and
-// its update observer registered (onLoadDocument) - and typed into as a person types:
+// The room is a mebibyte of prose (residentRoomState), loaded as a room's load leaves it - the
+// live document, and the load's own decode of the stored state as the replica, its update log
+// open and its update observer registered (onLoadDocument) - and typed into as a person types:
 // 2,000 one-character keystrokes in a hundred runs of twenty, each run in the middle of a
 // paragraph of its own across the document, and a paste of 4 KiB after every tenth run, each in a
-// paragraph of its own, every one a browser's update the peer hook weighs and charges
-// (Service.weighPeerUpdate) and the observer renders (renderedReplica.observe). Once the
-// measurer's count of the last rendering has landed, the room is weighed as
-// TestAResidentRoomsHeapPerByteOfItsMarkdown weighs a room (heldByResidentRoom): what stays
+// paragraph of its own, every one a browser's update the peer hook weighs
+// (Service.weighPeerUpdate) and the observer renders and charges (renderedReplica.observe).
+//
+// The room is then weighed as the shapes' measurement weighs one (heldByResidentRoom): what stays
 // allocated after two collections, a first build of the same state discarded beforehand, both
 // copies and everything the room holds besides. It takes one reading rather than the least of
 // three, since each build is the 2,010 updates' run; the readings of a room's heap agree to the
-// byte from one build to the next in a process of its own (heldByUpdates), and this one is
-// measured in one (measuredAlone). One difference of HeapAlloc can still carry garbage the build
-// left behind, so the reading is cross-checked against what a collection frees once every
-// reference to the room is dropped (runtime.KeepAlive, placed so the room lives through the
-// reading of its charge and no longer), which what else the process allocates or frees meanwhile
-// does not move: the two must agree within a hundredth, and the heap the factor is weighed
-// against is not trusted otherwise. The state and the updates, allocated before the first
-// reading, are kept past the last; freed between the readings they would be taken off the room's
-// heap, as they were in the reading of 2026-10-29 below, which read the room 3,244,400 bytes short.
-// The room's update log is left open, so nothing outside the room holds it and a room dropped is
-// collected whole (loadAndType). The structure part is checked against the prices too: each
-// update's struct at bytesOfHeapAStruct with its splits at bytesOfHeapASplit and its text at
-// bytesOfHeapAByteOfText, as the walk reads the text, its length prefix included
-// (updateStruct.content) - two bytes for a keystroke, 4,098 for a paste - at both copies, and
-// nothing for the delete set each update carries, which the room holds.
-//
-// Measured on 2026-11-03 under sjawhar/ygo v1.54.1-sami.3, in a process of its own that peaked at
-// 233 MiB resident: a mebibyte of prose, 1,048,359 bytes of markdown making 57,600 elements,
-// loaded and given its 2,010 updates in 8 m 46 s. The typed room renders 1,091,319 bytes, still
-// 57,600 elements, from 79,720 structs, and holds 58,740,176 bytes of heap at both copies,
-// 1,936,368 more than the same room loaded and not typed into (56,803,808); dropping it frees
-// 58,730,712, 9,464 bytes from that reading. It is charged 62,000,920 bytes: its count's
-// 57,600,000 beside a structure part of 4,400,920, which is what its updates are priced at, 1.056
-// times the heap it holds. The reading of 2026-10-31 read the same charge against 58,735,880
-// bytes of heap, 1.056 times it too. The same run under sjawhar/ygo v1.51.3-sami.7 read the
-// typed room at 55,591,872 bytes and charged it 58,424,320, 1.051 times that, and the reading
-// of 2026-10-29, taken before this test cross-checked its heap, when the state and updates could
-// be freed between the readings, read 52,347,472 bytes and a charge of 1.116 times it. At the
-// price the structure part charged a split before bytesOfHeapASplit, the heaviest kind's, that
-// run was charged 61,801,120 bytes, 1.179 times that reading's heap, which is what that price
-// was measured again for.
+// byte from one build to the next in a process of its own, and this one is measured in one
+// (measuredAlone). One difference of HeapAlloc can still carry garbage the build left behind, so
+// the reading is cross-checked against what a collection frees once every reference to the room
+// is dropped (runtime.KeepAlive, placed so the room lives through the reading of its charge and
+// no longer), which what else the process allocates or frees meanwhile does not move: the two
+// must agree within a hundredth, and the heap the factor is weighed against is not trusted
+// otherwise. The state and the updates, allocated before the first reading, are kept past the
+// last; freed between the readings they would be taken off the room's heap.
 func TestATypedAndPastedRoomIsChargedAtLeastItsHeapAndWithinTheFactor(t *testing.T) {
-	const keystrokes, runs, pastes, pasteBytes, leastHeldOfCharge = 2_000, 100, 10, 4 << 10, 0.85
+	const keystrokes, runs, pastes, pasteBytes, leastHeldOfCharge = 2_000, 100, 10, 4 << 10, 0.75
 	if os.Getenv(typedRoomHeapMeasurement) == "" {
 		t.Skip("set " + typedRoomHeapMeasurement + "=1 to run it, about thirteen minutes")
 	}
@@ -278,14 +203,13 @@ func TestATypedAndPastedRoomIsChargedAtLeastItsHeapAndWithinTheFactor(t *testing
 	}
 	state, rendering := residentRoomState(t, 1<<20)
 	updates := typedAndPastedUpdates(t, state, keystrokes, runs, pastes, pasteBytes)
-	// The walk prices a string's content as encoded: its bytes after a varuint of their length.
-	encoded := func(bytes int) int64 { return int64(bytes + len(binary.AppendUvarint(nil, uint64(bytes)))) }
-	keystroke := (bytesOfHeapAStruct + splitsAStructCanCause*bytesOfHeapASplit + encoded(1)*bytesOfHeapAByteOfText) * roomCopies
-	paste := (bytesOfHeapAStruct + splitsAStructCanCause*bytesOfHeapASplit + encoded(pasteBytes)*bytesOfHeapAByteOfText) * roomCopies
-	priced := keystrokes*keystroke + pastes*paste
+	tracked := int64(len(state))
+	for _, update := range updates {
+		tracked += int64(len(update))
+	}
 
-	// The loaded room, untyped, weighed as the heap test weighs it; its first build is the
-	// discarded one that keeps the decoder's one-time setup out of the typed room's reading.
+	// The loaded room, untyped, weighed as the shapes' measurement weighs it; its first build is
+	// the discarded one that keeps the decoder's one-time setup out of the typed room's reading.
 	loaded := heldByResidentRoom(t, state, false)
 	collected := func() int64 {
 		var stats runtime.MemStats
@@ -299,9 +223,8 @@ func TestATypedAndPastedRoomIsChargedAtLeastItsHeapAndWithinTheFactor(t *testing
 	room := loadAndType(t, state, updates)
 	took := time.Since(started)
 	after := collected()
-	structure, content, measuredAt, weight := chargeParts(room.charge)
-	bytes, elements, _ := room.replica.size()
-	structs := room.replica.structs.countedStructs()
+	weight := chargedWeight(room.charge)
+	bytes, _ := room.replica.size()
 	// The room lives through the readings of its charge and no longer, so what the collection
 	// below frees is the room's own heap; the state and the updates outlive that collection, so
 	// neither is freed into the figure the reading is cross-checked against.
@@ -311,33 +234,33 @@ func TestATypedAndPastedRoomIsChargedAtLeastItsHeapAndWithinTheFactor(t *testing
 	runtime.KeepAlive(updates)
 	held, freed := after-before, after-dropped
 
-	counted := copyHeap(bytes, elements, structs) * roomCopies
 	t.Logf("%d B of markdown making %d elements; the loaded room holds %d B of heap", rendering.Bytes, rendering.Elements, loaded)
-	t.Logf("%d updates (%d keystrokes in %d runs, %d pastes of %d B) in %s; the room renders %d B making %d elements from %d structs",
-		len(updates), keystrokes, runs, pastes, pasteBytes, took.Round(time.Second), bytes, elements, structs)
-	t.Logf("the typed room holds %d B of heap, %d more than loaded, and its drop frees %d, %d from that reading; it is charged %d B: its count %d and a structure part of %d, against %d its updates are priced at",
-		held, held-loaded, freed, held-freed, weight, counted, structure, priced)
+	t.Logf("%d updates (%d keystrokes in %d runs, %d pastes of %d B) in %s; the room renders %d B",
+		len(updates), keystrokes, runs, pastes, pasteBytes, took.Round(time.Second), bytes)
+	t.Logf("the typed room holds %d B of heap, %d more than loaded, and its drop frees %d, %d from that reading; it is tracked at %d B of state and charged %d B",
+		held, held-loaded, freed, held-freed, tracked, weight)
 	t.Logf("the charge is %.3fx the heap, want 1.000x to %.3fx (1/%.2f)", float64(weight)/float64(held), 1/leastHeldOfCharge, leastHeldOfCharge)
 	if diff := held - freed; diff > held/100 || -diff > held/100 {
 		t.Fatalf("the room reads %d B of heap and its drop frees %d, more than a hundredth apart: the two readings disagree, so the heap the factor is weighed against is not trustworthy",
 			held, freed)
 	}
-	if content != measuredAt {
-		t.Fatalf("the room's charge holds %d B of content its last count did not measure, want every update counted before it is weighed", content-measuredAt)
-	}
-	if weight != counted+structure {
-		t.Fatalf("the room is charged %d B, want its count's %d beside its %d-byte structure part", weight, counted, structure)
-	}
-	if structure != priced {
-		t.Errorf("the room's structure part is %d B, want the %d its updates' structs, splits and text are priced at", structure, priced)
+	if weight != roomWeight(tracked) {
+		t.Fatalf("the room is charged %d B, want the %d its %d tracked bytes of state come to", weight, roomWeight(tracked), tracked)
 	}
 	if weight < held {
 		t.Errorf("the room is charged %d B for the %d B of heap it holds, under it", weight, held)
 	}
 	if float64(held) < leastHeldOfCharge*float64(weight) {
-		t.Errorf("the room holds %d B of heap for the %d B it is charged, %.3f of it, want at least %.2f: the structure part over-charges typing",
+		t.Errorf("the room holds %d B of heap for the %d B it is charged, %.3f of it, want at least %.2f: the tracked state over-charges typing",
 			held, weight, float64(held)/float64(weight), leastHeldOfCharge)
 	}
+}
+
+// chargedWeight is what the budget charges charge now, read under the budget's lock.
+func chargedWeight(charge *roomCharge) int64 {
+	charge.budget.mu.Lock()
+	defer charge.budget.mu.Unlock()
+	return charge.weight
 }
 
 // typedResidentRoom is a room typed into (loadAndType): the room as heldByResidentRoom holds one,
@@ -349,10 +272,11 @@ type typedResidentRoom struct {
 
 // loadAndType loads state as a room's load does (onLoadDocument): the
 // live document decoded from state, the load's own decode of it as the replica, the room's update
-// log opened, the replica kept and its scan total set from that decode, the room charged in a
-// budget of roomBudgetBytes, and an update observer on live that moves the replica through each
-// commit. It then hands each of updates to the peer hook as one browser's, applied as the room
-// applies a peer's update, and returns once the measurer has counted the room's last rendering.
+// log opened, the replica kept and its scan total set from that decode, the room charged at the
+// bytes of the state it loaded in a budget of roomBudgetBytes, and an update observer on live
+// that moves the replica through each commit, adding each committed update's bytes to the room's
+// tracked state (renderedReplica.chargeAdded). It then hands each of updates to the peer hook as
+// one browser's, applied as the room applies a peer's update.
 // The room's update log is left open, as a room's load leaves it (onLoadDocument): it goes with
 // the replica that drains it, which the room holds, so nothing outside the room holds the log and
 // a room dropped is collected whole, which the heap reading's cross-check rests on.
@@ -370,7 +294,7 @@ func loadAndType(t *testing.T, state []byte, updates [][]byte) *typedResidentRoo
 	service.budget.limit = roomBudgetBytes
 	replica := service.keepReplica(live, live.OpenUpdateLog(), liveRendering(t, live), decoded.doc)
 	replica.scans.rescanned(decoded.scans)
-	charge := service.chargeLoadedRoom("room", live, replica)
+	charge := service.chargeLoadedRoom("room", replica, int64(len(state)))
 	live.OnUpdate(func([]byte, any) { replica.observe("room") })
 	browser := new(int)
 	for index, update := range updates {
@@ -379,7 +303,7 @@ func loadAndType(t *testing.T, state []byte, updates [][]byte) *typedResidentRoo
 			t.Fatalf("update %d of %d: the hook answered %v, want it admitted", index+1, len(updates), err)
 		}
 	}
-	service.measurer.waitIdle()
+
 	return &typedResidentRoom{residentRoom: residentRoom{service: service, live: live, replica: replica}, charge: charge}
 }
 
@@ -571,7 +495,7 @@ func buildResidentRoom(t *testing.T, state []byte, edited bool) *residentRoom {
 		return room
 	}
 	room.replica = observedReplica(t, room.service, live, nil)
-	if _, _, measured := room.replica.size(); !measured {
+	if _, measured := room.replica.size(); !measured {
 		t.Fatal("the room's observer published no measurement, so it rendered no markdown and the replica this weighs is not a room's")
 	}
 	return room

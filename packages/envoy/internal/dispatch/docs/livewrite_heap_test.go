@@ -17,7 +17,7 @@ import (
 // would make.
 var errLiveWriteMeasured = errors.New("the live write was measured")
 
-// liveWriteMeasurer is one shape measured by TestALiveWritesPeakHeapIsWithinItsGrant: the service
+// liveWriteMeasurer is one shape measured by TestALiveWritesPeakHeapIsWithinItsSlot: the service
 // and document a write is made on, with the state its store holds.
 type liveWriteMeasurer struct {
 	service    *Service
@@ -84,7 +84,7 @@ func (m *liveWriteMeasurer) measureLiveWrite(t *testing.T, warm bool, find, with
 // time this runs, and what they hold and free while the sampler reads the heap every
 // millisecond is counted into the peak - 154,327,768 bytes for the cloned mebibyte inside the
 // package's run on 2026-11-05 against 67,103,336 in a process of its own.
-func TestALiveWritesPeakHeapIsWithinItsGrant(t *testing.T) {
+func TestALiveWritesPeakHeapIsWithinItsSlot(t *testing.T) {
 	skipUnderRace(t)
 	if !measuredAlone(t) {
 		return
@@ -94,29 +94,19 @@ func TestALiveWritesPeakHeapIsWithinItsGrant(t *testing.T) {
 			state, _ := residentRoomState(t, size)
 			service, artifactID := newTestService(t)
 			service.settle = time.Hour
-			service.measurer.interval = time.Hour
 			measurer := &liveWriteMeasurer{service: service, artifactID: artifactID, state: state}
 			for _, path := range []struct {
 				name string
 				warm bool
 			}{{"the replica cloned", true}, {"the stored state decoded", false}} {
 				cost := measurer.measureLiveWrite(t, path.warm, "Section 0", "Section Zero")
-				grant := min(liveWriteWeight(len(state)), calibratedBounds.CopyHeap)
 				kept := max(cost.held, 0)
-				t.Logf("%d-byte state, a live write whose fork is %s: %s, %d bytes allocated, %d peak (%.1f a byte of state), %d kept (%.1f a byte), against a %d-byte grant",
+				t.Logf("%d-byte state, a live write whose fork is %s: %s, %d bytes allocated, %d peak (%.1f a byte of state), %d kept (%.1f a byte), against a %d-byte slot",
 					len(state), path.name, cost.took.Round(time.Millisecond), cost.allocated,
-					cost.peak, float64(cost.peak)/float64(len(state)), kept, float64(kept)/float64(len(state)), grant)
-				if int64(cost.peak) > grant {
-					t.Errorf("a live write whose fork is %s holds %d bytes at its peak, %.1f a byte of its %d-byte state, past its %d-byte grant",
-						path.name, cost.peak, float64(cost.peak)/float64(len(state)), len(state), grant)
-				}
-				// What the write keeps once collected - its fork, the tree it left, the
-				// rendering of it and the update and version it appended - is what
-				// liveWriteKeepPerByte is set from, and what the grant adds to a decode's own
-				// (liveWriteHeapPerByte).
-				if keep := int64(len(state)) * liveWriteKeepPerByte; kept > keep {
-					t.Errorf("a live write whose fork is %s keeps %d bytes once collected, %.1f a byte of its %d-byte state, past the %d liveWriteKeepPerByte grants it",
-						path.name, kept, float64(kept)/float64(len(state)), len(state), keep)
+					cost.peak, float64(cost.peak)/float64(len(state)), kept, float64(kept)/float64(len(state)), loadSlotBytes)
+				if int64(cost.peak) > loadSlotBytes {
+					t.Errorf("a live write whose fork is %s holds %d bytes at its peak, %.1f a byte of its %d-byte state, past the %d bytes one load slot allows",
+						path.name, cost.peak, float64(cost.peak)/float64(len(state)), len(state), loadSlotBytes)
 				}
 			}
 		})

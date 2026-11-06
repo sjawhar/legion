@@ -61,12 +61,12 @@ func TestAnApplysScansAreCountedThroughTheFormatCleanupAfterIt(t *testing.T) {
 			// The row is only a guard while its document carries what makes ygo run the cleanup:
 			// the ContentFormat items a mark is stored as (sjawhar/ygo v1.55.1-sami.1,
 			// crdt/item.go:379-383).
-			formats := formatStructs(t, crdt.EncodeStateAsUpdateV1(doc, nil))
+			formats := formatStructs(t, doc)
 			if formats != row.formats {
 				t.Fatalf("the %s document carries %d format structs, want %d", row.name, formats, row.formats)
 			}
 			frame := newV1Frame(1).group(1, uint64(scanner), 0).
-				raw(byte(structString) | infoHasOrigin).uint(uint64(runner)).uint(0).str("z").noDeletes()
+				raw(structStringRef | infoHasOrigin).uint(uint64(runner)).uint(0).str("z").noDeletes()
 			scans, err := decodeCountingScans(doc, frame)
 			if err != nil {
 				t.Fatal(err)
@@ -79,25 +79,25 @@ func TestAnApplysScansAreCountedThroughTheFormatCleanupAfterIt(t *testing.T) {
 	}
 }
 
-// formatStructs is how many of state's structs are the ContentFormat items a mark is stored as.
-func formatStructs(t *testing.T, state []byte) int {
+// formatStructs is how many of doc's structs are the ContentFormat items a mark is stored as,
+// counted off the document rather than off its encoded state: a format item renders as a mark on
+// the text it opens, so the count walks the tree's marks (pmdoc.Walk) and holds the row to the
+// shape it was written for.
+func formatStructs(t *testing.T, doc *crdt.Doc) int {
 	t.Helper()
-	count := formatCounter(0)
-	if _, err := walkUpdate(state, fromRoom, &count); err != nil {
+	tree, err := treeOf(doc)
+	if err != nil {
 		t.Fatal(err)
 	}
-	return int(count)
+	// A mark over one run of text is stored as two format items, the one that opens it and the
+	// one that closes it (sjawhar/ygo v1.55.1-sami.1, crdt/item.go:379-383).
+	marks := 0
+	pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
+		marks += len(node.Marks)
+		return true
+	})
+	return 2 * marks
 }
-
-type formatCounter int
-
-func (c *formatCounter) walkedStruct(walked updateStruct) {
-	if walked.kind == structFormat {
-		*c++
-	}
-}
-
-func (c *formatCounter) walkedDelete(client, clock, length uint64) {}
 
 // scanMeasurement is the environment variable that runs this file's slow measurements.
 const scanMeasurement = "DISPATCH_MEASURE_SCAN_TOTAL"
@@ -346,7 +346,7 @@ func chainedRun(tb testing.TB, doc *crdt.Doc, after crdt.ID, client crdt.ClientI
 			origin = crdt.ID{Client: client, Clock: uint64(clock - 1)}
 		}
 		frame := newV1Frame(1).group(1, uint64(client), uint64(clock)).
-			raw(byte(structString) | infoHasOrigin).uint(uint64(origin.Client)).uint(origin.Clock).str("a").noDeletes()
+			raw(structStringRef | infoHasOrigin).uint(uint64(origin.Client)).uint(origin.Clock).str("a").noDeletes()
 		if err := crdt.ApplyUpdateV1(doc, frame, nil); err != nil {
 			tb.Fatal(err)
 		}
@@ -414,7 +414,7 @@ func BenchmarkAnApplyJustUnderTheScanCeiling(b *testing.B) {
 				// the room's lock costs any apply, its observers' encode of the room's whole store
 				// included, which the scans' share is told from.
 				quiet := newV1Frame(1).group(1, uint64(scanner+1), 0).
-					raw(byte(structString) | infoHasOrigin).uint(uint64(runner)).uint(uint64(shape.run - 1)).str("q").noDeletes()
+					raw(structStringRef | infoHasOrigin).uint(uint64(runner)).uint(uint64(shape.run - 1)).str("q").noDeletes()
 				runtime.GC()
 				runtime.ReadMemStats(&before)
 				*unlocked = time.Time{}
@@ -488,7 +488,7 @@ func TestAnApplyNeverScansMoreThanItsAllowanceDrainIncluded(t *testing.T) {
 	// missing, so the room parks them.
 	parked := newV1Frame(1).group(waiting, 9, 1)
 	for range waiting {
-		parked.raw(byte(structString) | infoHasOrigin).uint(uint64(tangledTypist)).uint(0).str("z")
+		parked.raw(structStringRef | infoHasOrigin).uint(uint64(tangledTypist)).uint(0).str("z")
 	}
 	if err, called := weighInto(service, room, parked.noDeletes()); err != nil || !called {
 		t.Fatalf("the hook answered the parked items %v (applied %t), want them admitted", err, called)
@@ -498,8 +498,8 @@ func TestAnApplyNeverScansMoreThanItsAllowanceDrainIncluded(t *testing.T) {
 	}
 	// Client 9's clock 0, after the typist's last character, where nothing follows it to scan.
 	filler := newV1Frame(1).group(1, 9, 0).
-		raw(byte(structString) | infoHasOrigin).uint(uint64(tangledTypist)).uint(typed - 1).str("f").noDeletes()
-	allowance := int64(browserScanCeiling(t, room, filler))
+		raw(structStringRef | infoHasOrigin).uint(uint64(tangledTypist)).uint(typed - 1).str("f").noDeletes()
+	allowance := int64(browserScanCeiling(filler))
 	if waiting*(typed-1) <= int(allowance) {
 		t.Fatalf("the parked items would scan %d items, want past the filler's %d allowance", waiting*(typed-1), allowance)
 	}

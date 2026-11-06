@@ -3,9 +3,7 @@ package docs
 import (
 	"bytes"
 	"errors"
-	"maps"
 	"runtime"
-	"slices"
 	"testing"
 
 	"github.com/reearth/ygo/crdt"
@@ -153,10 +151,22 @@ const (
 	scanSecondClient crdt.ClientID = 1_002
 )
 
+// chargedPeerRoom is peerUpdateRoom's room charged in a budget of roomBudgetBytes as a loaded
+// room is (chargeLoadedRoom), at the bytes of the state it holds, so the budget charges it what
+// its drains add.
+func chargedPeerRoom(t *testing.T) (*Service, *crdt.Doc, *renderedReplica, *roomCharge) {
+	t.Helper()
+	service, room, replica := peerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n", 0)
+	service.budget.limit = roomBudgetBytes
+	charge := service.chargeLoadedRoom("room", replica, int64(len(crdt.EncodeStateAsUpdateV1(room, nil))))
+	return service, room, replica, charge
+}
+
 // tangledTypist is the client of the browser whose keystrokes tangledRoom's paragraph holds.
 const tangledTypist crdt.ClientID = 5
 
-// tangledRoom is chargedPeerRoom's room, its document bounded by its scan budget (newRoomScans),
+// tangledRoom is chargedPeerRoom's room, its document bounded by its allowance and its scan
+// budget (newRoomApplies, newRoomScans),
 // after a browser of client tangledTypist typed typed characters onto the end of its paragraph, one
 // keystroke an update through the hook. Each keystroke stays an item of its own in the room, since
 // ygo merges a run of typed characters only within one transaction (sjawhar/ygo v1.55.1-sami.1,
@@ -188,14 +198,9 @@ func typeOnto(t *testing.T, service *Service, room *crdt.Doc, client crdt.Client
 }
 
 // browserScanCeiling is the per-frame ceiling of frame, a browser's update to room, as the hook
-// sets it from the update's own share of its apply-heap estimate (scanCeiling).
-func browserScanCeiling(t *testing.T, room *crdt.Doc, frame []byte) int {
-	t.Helper()
-	weighed := peerWeighing{held: room.StateVector()}
-	if _, err := walkUpdate(frame, fromPeer, &weighed); err != nil {
-		t.Fatalf("the walk refused the frame: %v", err)
-	}
-	return scanCeiling(weighed.ownApplyHeap(len(frame)))
+// sets it from the update's own bytes (scanCeiling).
+func browserScanCeiling(frame []byte) int {
+	return scanCeiling(len(frame))
 }
 
 // tangledFrame is client 9's scanningFrame in tangledRoom of the fewest items whose scans together
@@ -205,9 +210,10 @@ func browserScanCeiling(t *testing.T, room *crdt.Doc, frame []byte) int {
 // bytes of 1-character strings into a paragraph, which the hook does not weigh.
 func tangledFrame(t *testing.T, room *crdt.Doc, typed int) []byte {
 	t.Helper()
+	_ = room
 	for items := 1; ; items++ {
 		frame := scanningFrame(9, crdt.ID{Client: tangledTypist}, items)
-		if items*typed-1 > browserScanCeiling(t, room, frame) {
+		if items*typed-1 > browserScanCeiling(frame) {
 			return frame
 		}
 	}
@@ -219,35 +225,27 @@ func tangledFrame(t *testing.T, room *crdt.Doc, typed int) []byte {
 func scanningFrame(client crdt.ClientID, origin crdt.ID, items int) []byte {
 	f := newV1Frame(1).group(items, uint64(client), 0)
 	for range items {
-		f.raw(byte(structString) | infoHasOrigin).uint(uint64(origin.Client)).uint(origin.Clock).str("z")
+		f.raw(structStringRef | infoHasOrigin).uint(uint64(origin.Client)).uint(origin.Clock).str("z")
 	}
 	return f.noDeletes()
 }
 
-// roomPicture is what a refused update must leave a room's bookkeeping as: its document's encoded
-// state, the budget's used bytes, the room's structure part, its struct total, and the delete
-// ranges the room is known to hold deleted.
+// roomPicture is what a refused update must leave a room's bookkeeping as: its document's
+// encoded state, the budget's used bytes, the room's charge and the state bytes it is tracked at.
 type roomPicture struct {
-	state     []byte
-	used      int64
-	structure int64
-	total     uint64
-	stale     bool
-	deletes   map[uint64][]clockRun
+	state   []byte
+	used    int64
+	weight  int64
+	tracked int64
 }
 
 func pictureRoom(service *Service, room *crdt.Doc, replica *renderedReplica, charge *roomCharge) roomPicture {
-	picture := roomPicture{state: crdt.EncodeStateAsUpdateV1(room, nil), used: budgetUsed(service)}
-	picture.structure, _, _, _ = chargeParts(charge)
-	running, stale := replica.structs.runningTotals()
-	picture.total, picture.stale = running.structs, stale
-	charge.deleted.mu.RLock()
-	picture.deletes = make(map[uint64][]clockRun, len(charge.deleted.clients))
-	for client, runs := range charge.deleted.clients {
-		picture.deletes[client] = slices.Clone(runs)
+	return roomPicture{
+		state:   crdt.EncodeStateAsUpdateV1(room, nil),
+		used:    budgetUsed(service),
+		weight:  chargedWeight(charge),
+		tracked: replica.roomStateBytes(),
 	}
-	charge.deleted.mu.RUnlock()
-	return picture
 }
 
 func requireRoomAsItWas(t *testing.T, before, after roomPicture) {
@@ -255,15 +253,12 @@ func requireRoomAsItWas(t *testing.T, before, after roomPicture) {
 	if !bytes.Equal(after.state, before.state) {
 		t.Error("the room's document changed")
 	}
-	if after.used != before.used || after.structure != before.structure {
-		t.Errorf("the budget holds %d bytes and the room's structure part %d, want %d and %d as they were",
-			after.used, after.structure, before.used, before.structure)
+	if after.used != before.used || after.weight != before.weight {
+		t.Errorf("the budget holds %d bytes and the room is charged %d, want %d and %d as they were",
+			after.used, after.weight, before.used, before.weight)
 	}
-	if after.total != before.total || after.stale != before.stale {
-		t.Errorf("the room's struct total is %d (stale %t), want %d (stale %t) as it was", after.total, after.stale, before.total, before.stale)
-	}
-	if !maps.EqualFunc(after.deletes, before.deletes, slices.Equal) {
-		t.Errorf("the room's recorded delete ranges are %v, want %v as they were", after.deletes, before.deletes)
+	if after.tracked != before.tracked {
+		t.Errorf("the room is tracked at %d bytes of state, want the %d it was", after.tracked, before.tracked)
 	}
 }
 
@@ -271,21 +266,17 @@ func requireRoomAsItWas(t *testing.T, before, after roomPicture) {
 // its scans cost, as it leaves none in the document (sjawhar/ygo v1.55.1-sami.1,
 // crdt/apply_rollback.go:10-23): a frame whose scans pass its allowance, which every other rule of
 // the hook admits and an unbounded copy of the room applies, is refused with 4413 DOC_TOO_TANGLED,
-// and the room's document, the budget's used bytes, the room's structure part, its struct total and
-// its recorded delete ranges are as they were, while its scan total holds the items the refused
-// apply's scans passed, exactly its allowance. A delete admitted under pressure is charged before
-// its apply (refusedUnderPressure), and one whose apply fails takes that charge back
-// (roomCharge.gaveBack) and is answered with the apply's own error, its scan total as it was.
+// and the room's document, the budget's used bytes and the room's charge are as they were, while
+// its scan total holds the items the refused apply's scans passed, exactly its allowance. An
+// update the room's own apply refuses for anything else - here a delete its apply answers an
+// error of its own for - is answered with that error, and charges nothing: the room's observer
+// charges what a commit drains, and a refused apply commits nothing (renderedReplica.chargeAdded).
 func TestAnIntegrateScanRefusalLeavesTheRoomsChargeAndTotalAsTheyWere(t *testing.T) {
 	const typed = 2_000
 	service, room, replica, charge := tangledRoom(t, typed)
 	frame := tangledFrame(t, room, typed)
-	weighed := peerWeighing{held: room.StateVector(), known: charge.deletes()}
-	if _, err := walkUpdate(frame, fromPeer, &weighed); err != nil {
-		t.Fatalf("the walk refused the frame: %v", err)
-	}
-	if weighed.inserted >= maxPeerInsertAtTheBound || weighed.ownApplyHeap(len(frame)) > unweighedApplyHeapBytes {
-		t.Fatalf("the frame inserts %d and its apply's own share is %d bytes, want a small frame no other rule weighs", weighed.inserted, weighed.ownApplyHeap(len(frame)))
+	if len(frame) > unslottedApplyBytes {
+		t.Fatalf("the frame is %d bytes, want a small frame that takes no slot of the pod's load concurrency", len(frame))
 	}
 	copied, err := snapshotDocument(room)
 	if err != nil {
@@ -305,29 +296,25 @@ func TestAnIntegrateScanRefusalLeavesTheRoomsChargeAndTotalAsTheyWere(t *testing
 	}
 	requireRoomAsItWas(t, before, pictureRoom(service, room, replica, charge))
 	scannedAfter, _ := replica.scans.figures()
-	if allowance := int64(browserScanCeiling(t, room, frame)); scannedAfter-scannedBefore != allowance {
+	if allowance := int64(browserScanCeiling(frame)); scannedAfter-scannedBefore != allowance {
 		t.Errorf("the refusal added %d items to the room's scan total, want the %d of its allowance", scannedAfter-scannedBefore, allowance)
 	}
 
-	used := budgetUsed(service)
-	service.budget.mu.Lock()
-	service.budget.limit = used - 1
-	service.budget.mu.Unlock()
 	service.budget.full.Store(true)
 	deletion := peerDeleting(t, room, 3)
 	before = pictureRoom(service, room, replica, charge)
 	scannedBefore, _ = replica.scans.figures()
 	refused := errors.New("the room's document refused the update")
-	var chargedBeforeApply int64
+	var chargedDuringApply int64
 	err = service.weighPeerUpdate(websocket.PeerUpdateInfo{Room: "room", Doc: room, Update: deletion}, func() error {
-		chargedBeforeApply, _, _, _ = chargeParts(charge)
+		chargedDuringApply = chargedWeight(charge)
 		return refused
 	})
 	if !errors.Is(err, refused) {
 		t.Fatalf("the hook answered %v, want the apply's own error", err)
 	}
-	if chargedBeforeApply <= before.structure {
-		t.Fatalf("the room's structure part was %d bytes during the apply, want the deletion charged past %d before it", chargedBeforeApply, before.structure)
+	if chargedDuringApply != before.weight {
+		t.Fatalf("the room was charged %d bytes during the apply, want the %d it was charged before it: the hook charges nothing of its own", chargedDuringApply, before.weight)
 	}
 	requireRoomAsItWas(t, before, pictureRoom(service, room, replica, charge))
 	if scannedAfter, _ = replica.scans.figures(); scannedAfter != scannedBefore {
@@ -345,10 +332,9 @@ func TestAnIntegrateScanRefusalLeavesTheRoomsChargeAndTotalAsTheyWere(t *testing
 // recorded delete ranges are as they were: nothing of the update was booked, so nothing is
 // refunded either.
 //
-// Only ygo's apply can make this refusal: the struct total counts each parked delete range
-// splitsAStructCanCause times within maxUpdateItems and refuses a frame that would pass the room's
-// own cap of maxUpdateItems first (TestAPeerApplyIsHeldToTheRoomsPendingCapAfterTheLoad), so the
-// room here is given a cap as small as the frames this test sends.
+// Only ygo's apply can make this refusal: a room's pending cap is maxUpdateItems
+// (TestAPeerApplyIsHeldToTheRoomsPendingCapAfterTheLoad), far past the frames this test sends, so
+// the room here is given a cap as small as they are.
 func TestAPendingCapRefusalCostsTheRoomNeitherChargeNorScans(t *testing.T) {
 	const parked = 4
 	// What ygo answers, which the hook's accounting rests on.

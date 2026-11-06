@@ -151,7 +151,7 @@ func (fixture *roomLoadFixture) run(b *testing.B) {
 		if err := service.bootstrapLoadedState(fixture.artifactID, newDocumentCopy(), taken.state); err != nil {
 			b.Fatal(err)
 		}
-		taken.grant.release()
+		taken.slot.release()
 		stateBytes = len(taken.state)
 	}
 	b.StopTimer()

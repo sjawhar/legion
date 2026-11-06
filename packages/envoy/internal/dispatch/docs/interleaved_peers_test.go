@@ -182,8 +182,8 @@ func parkedOnlyCommitSurvivesReload(t *testing.T, truncated bool) {
 	}
 
 	// The editor's own shape: a paragraph under the document's fragment, which the peer update
-	// hook's walk admits (update_walk.go), and a successor to it whose predecessor the room has
-	// not seen, so the room parks every byte of that successor.
+	// hook's allowance admits (peer_update.go), and a successor to it whose predecessor the room
+	// has not seen, so the room parks every byte of that successor.
 	writer := newDocumentCopy(crdt.WithClientID(7))
 	writer.Transact(typeParagraph(writer, "base"))
 	base := crdt.EncodeStateAsUpdateV1(writer, nil)
@@ -191,11 +191,12 @@ func parkedOnlyCommitSurvivesReload(t *testing.T, truncated bool) {
 	writerText := firstText(writer.GetXmlFragment(fragmentName))
 	writer.Transact(func(txn *crdt.Transaction) { writerText.Insert(txn, 4, " later", nil) })
 	parked := crdt.EncodeStateAsUpdateV1(writer, atBase)
-	// The truncated row sends another client's frame first, its delete set cut: the walk admits
-	// it, ygo's apply refuses it, and the room's bounded document (keepReplica, newRoomScans)
-	// takes back everything that apply integrated or parked (reearth/ygo#340), so it leaves
-	// nothing parked and nothing to store. The valid frame behind it, which the rest of the test
-	// reads, is also what says the room had taken the cut one first: one socket, one order.
+	// The truncated row sends another client's frame first, its delete set cut: the hook reads
+	// nothing of the frame itself, so the apply runs, ygo refuses it, and the room's bounded
+	// document (keepReplica, newRoomScans) takes back everything that apply integrated or parked
+	// (reearth/ygo#340), so it leaves nothing parked and nothing to store. The valid frame behind
+	// it, which the rest of the test reads, is also what says the room had taken the cut one
+	// first: one socket, one order.
 	var cut []byte
 	if truncated {
 		cutWriter := newDocumentCopy(crdt.WithClientID(cutFrameClient))
@@ -213,7 +214,7 @@ func parkedOnlyCommitSurvivesReload(t *testing.T, truncated bool) {
 	server := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 	t.Cleanup(server.Close)
 	if truncated {
-		// The walk refuses the cut frame and ygo closes that browser 4413 (documentUpdateRefused),
+		// ygo refuses the cut frame and the hook closes that browser 4413 (documentUpdateRefused),
 		// so it is sent on a socket of its own: its close is what says the room has taken it,
 		// before the valid frame the rest of the test reads is sent.
 		cutPeer := connectPeer(t, server.URL, artifactID, "mallory")
@@ -223,7 +224,7 @@ func parkedOnlyCommitSurvivesReload(t *testing.T, truncated bool) {
 		select {
 		case <-cutPeer.Ended:
 		case <-time.After(10 * time.Second):
-			t.Fatal("the room left the browser whose frame the walk refuses connected")
+			t.Fatal("the room left the browser whose cut frame it refuses connected")
 		}
 		if closed := cutPeer.Closed(); closed == nil || closed.Code != contracts.DocumentTooLargeCloseCode {
 			t.Fatalf("the room ended the refused browser with %v, want %d", closed, contracts.DocumentTooLargeCloseCode)

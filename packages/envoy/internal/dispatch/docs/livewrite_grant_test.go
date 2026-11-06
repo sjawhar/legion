@@ -53,16 +53,9 @@ func grantWrite(request context.Context, service *Service, artifactID, find, rep
 	return ledger.Commit(request)
 }
 
-// grantRoomWeight is what a live write's fork of room's resident document is granted of the
-// copy-heap bound (liveWriteWeight, Service.roomStateBytes).
-func grantRoomWeight(t *testing.T, service *Service, room string) int64 {
-	t.Helper()
-	return liveWriteWeight(service.roomStateBytes(roomDocument(t, service, room)))
-}
-
 // requireHeading fails unless artifactID's text still holds the heading the writes replace, or no
-// longer holds it, as held says: a write refused for its grant must leave the document exactly as
-// it was, and one that waited for its grant must land.
+// longer holds it, as held says: a write refused for its slot must leave the document exactly as
+// it was, and one that waited for its slot must land.
 func requireHeading(t *testing.T, service *Service, artifactID string, held bool) {
 	t.Helper()
 	text, err := service.Text(context.Background(), artifactID)
@@ -74,17 +67,17 @@ func requireHeading(t *testing.T, service *Service, artifactID string, held bool
 	}
 }
 
-// Writes to four rooms at once, against a bound with room for two of their forks, never hold
-// more of it together than it has, and every one of them lands: the third waits for one of the
-// two to drop its fork. Each grant is held a tenth of a second past its cover, so the writes
-// overlap. The rooms are resident, so every fork is the replica cloned (Service.forkPoint),
-// which is the usual fork and which took no grant at all before this change; and each is on an
-// issue of its own, since a write takes its document's owner row and writes to one issue queue
-// on it (lockArtifactOwner) rather than on the bound.
-func TestConcurrentLiveWritesNeverHoldMoreOfTheCopyBoundThanItHas(t *testing.T) {
+// Writes to four rooms at once, against a load concurrency of two slots, never hold more slots
+// together than it has, and every one of them lands: the third waits for one of the two to drop
+// its fork. Each slot is held a tenth of a second past its take, so the writes overlap. The
+// rooms are resident, so every fork is the replica cloned (Service.forkPoint), which is the
+// usual fork and which took no slot at all before this change; and each is on an issue of its
+// own, since a write takes its document's owner row and writes to one issue queue on it
+// (lockArtifactOwner) rather than on the concurrency.
+func TestConcurrentLiveWritesNeverHoldMoreSlotsThanThePodHas(t *testing.T) {
+	const together = 2
 	service, _ := newTestService(t)
 	service.settle = time.Hour
-	service.measurer.interval = time.Hour
 	state := grantTestState(t, 16<<10)
 	var rooms []string
 	for issue := range 4 {
@@ -95,12 +88,11 @@ func TestConcurrentLiveWritesNeverHoldMoreOfTheCopyBoundThanItHas(t *testing.T) 
 			t.Fatalf("load room %s: %v", room, err)
 		}
 	}
-	weight := grantRoomWeight(t, service, rooms[0])
-	heaps := useCopyHeaps(t, newWeighedHeaps(copyHeapName, 2*weight+weight/2))
+	slots := useLoadSlots(t, newLoadSlots(together))
 	var most atomic.Int64
-	var grants heldGrants
-	heaps.granted = func(held int64) {
-		grants.record(held)
+	var taken slotsHeld
+	slots.taken = func(held int64) {
+		taken.record(held)
 		for seen := most.Load(); held > seen && !most.CompareAndSwap(seen, held); seen = most.Load() {
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -119,45 +111,43 @@ func TestConcurrentLiveWritesNeverHoldMoreOfTheCopyBoundThanItHas(t *testing.T) 
 			t.Fatal("the writes did not all finish in 60 s")
 		}
 	}
-	if got := most.Load(); got > heaps.size || got < 2*weight {
-		t.Fatalf("the writes held %d bytes of the bound at most, want two %d-byte forks at once and never past the %d-byte bound",
-			got, weight, heaps.size)
+	if got := most.Load(); got > slots.size || got < together {
+		t.Fatalf("the writes held %d slots at most, want the %d the concurrency has and never more", got, together)
 	}
-	if got := grants.all(); len(got) != len(rooms) {
-		t.Fatalf("the %d writes were granted %v, want one grant each: a fork that takes none is a whole document the bound does not hold",
+	if got := taken.all(); len(got) != len(rooms) {
+		t.Fatalf("the %d writes took %v slots, want one each: a fork that takes none is a whole document the concurrency does not hold",
 			len(rooms), got)
 	}
 	for _, room := range rooms {
 		requireHeading(t, service, room, false)
 	}
-	if held := heaps.held.Load(); held != 0 {
-		t.Fatalf("the writes still hold %d bytes of the bound once they have landed", held)
+	if held := slots.held.Load(); held != 0 {
+		t.Fatalf("the writes still hold %d slots once they have landed", held)
 	}
 }
 
-// A write's own decode of its fork runs inside the grant the write already holds, so a write that
-// filled the bound finishes rather than wait for a second grant nothing could serve. The bound
-// here has room for exactly one write's fork and a byte of it is held, so the write waits for all
-// of it, and its decode of the stored history then runs with nothing left to acquire. One wait is
-// the write's own cover; a second would be a nested acquire, and would never return.
-func TestAColdWriteWhoseForkDecodesWhileTheCopyBoundIsFullTakesOneGrant(t *testing.T) {
+// A write's own decode of its fork runs inside the slot the write already holds, so a write that
+// took the pod's only slot finishes rather than wait for a second nothing could serve. The
+// concurrency here holds one slot and the test holds it, so the write waits for it, and its
+// decode of the stored history then runs with nothing left to take. One wait is the write's own
+// cover; a second would be a nested take, and would never return.
+func TestAColdWriteWhoseForkDecodesWhileTheSlotsAreFullTakesOneSlot(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
-	service.measurer.interval = time.Hour
 	state := grantTestState(t, 16<<10)
 	storeHistory(t, service, artifactID, state)
 	if service.srv.GetDoc(artifactID) != nil {
 		t.Fatal("the room is resident, so the write would fork warm and decode nothing")
 	}
-	weight := liveWriteWeight(len(state))
-	heaps := useCopyHeaps(t, newWeighedHeaps(copyHeapName, weight))
-	if !heaps.semaphore().TryAcquire(1) {
-		t.Fatal("the empty bound refused a byte")
+	slots := useLoadSlots(t, newLoadSlots(1))
+	holder := newLoadSlot()
+	if !holder.tryTake() {
+		t.Fatal("the empty concurrency refused its only slot")
 	}
 	var waits atomic.Int64
 	waiting := make(chan struct{})
 	var waitOnce sync.Once
-	heaps.waiting = func(int64) {
+	slots.waiting = func() {
 		waits.Add(1)
 		waitOnce.Do(func() { close(waiting) })
 	}
@@ -168,58 +158,57 @@ func TestAColdWriteWhoseForkDecodesWhileTheCopyBoundIsFullTakesOneGrant(t *testi
 	select {
 	case <-waiting:
 	case err := <-written:
-		t.Fatalf("the write finished (%v) while a byte of the bound was held", err)
+		t.Fatalf("the write finished (%v) while the only slot was held", err)
 	case <-time.After(30 * time.Second):
-		t.Fatal("the write neither waited for the bound nor finished in 30 s")
+		t.Fatal("the write neither waited for a slot nor finished in 30 s")
 	}
-	heaps.semaphore().Release(1)
+	holder.release()
 	select {
 	case err := <-written:
 		if err != nil {
 			t.Fatalf("the write failed: %v", err)
 		}
 	case <-time.After(60 * time.Second):
-		t.Fatal("the write did not finish in 60 s once the bound was free: its decode waits for a second grant inside its own")
+		t.Fatal("the write did not finish in 60 s once the slot was free: its decode waits for a second slot inside its own")
 	}
 	if got := waits.Load(); got != 1 {
-		t.Fatalf("%d holds waited for the bound, want only the write's own cover: a decode inside the write must cover the grant the write carries", got)
+		t.Fatalf("%d holds waited for a slot, want only the write's own cover: a decode inside the write must cover the slot the write carries", got)
 	}
 	requireHeading(t, service, artifactID, false)
-	if held := heaps.held.Load(); held != 0 {
-		t.Fatalf("the write still holds %d bytes of the bound once it has landed", held)
+	if held := slots.held.Load(); held != 0 {
+		t.Fatalf("the write still holds %d slots once it has landed", held)
 	}
 }
 
-// An API write waits for its fork's grant within its request and no longer: one whose request
+// An API write waits for its fork's slot within its request and no longer: one whose request
 // ends while it waits is refused ErrServiceUnavailable, which the API answers 503
 // DOC_SERVICE_UNAVAILABLE for the caller to retry (api's documentErrorCode), leaves the document
-// exactly as it was, and holds nothing of the bound, so the next write lands once the bound has
-// room.
-func TestAnAPIWriteWhoseRequestEndsWhileItWaitsForTheCopyBoundIsRefusedAndChangesNothing(t *testing.T) {
+// exactly as it was, and holds no slot, so the next write lands once a slot is free.
+func TestAnAPIWriteWhoseRequestEndsWhileItWaitsForASlotIsRefusedAndChangesNothing(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
-	service.measurer.interval = time.Hour
 	state := grantTestState(t, 16<<10)
 	storeHistory(t, service, artifactID, state)
 	if err := loadRoomOf(service, artifactID); err != nil {
 		t.Fatalf("load the room: %v", err)
 	}
-	heaps := useCopyHeaps(t, newWeighedHeaps(copyHeapName, 2*grantRoomWeight(t, service, artifactID)))
-	if !heaps.semaphore().TryAcquire(heaps.size) {
-		t.Fatal("the empty bound refused all of itself")
+	slots := useLoadSlots(t, newLoadSlots(1))
+	holder := newLoadSlot()
+	if !holder.tryTake() {
+		t.Fatal("the empty concurrency refused its only slot")
 	}
 	waiting := make(chan struct{})
 	var waitOnce sync.Once
-	heaps.waiting = func(int64) { waitOnce.Do(func() { close(waiting) }) }
+	slots.waiting = func() { waitOnce.Do(func() { close(waiting) }) }
 	request, cancel := context.WithCancel(context.Background())
 	refused := make(chan error, 1)
 	go func() { refused <- grantWrite(request, service, artifactID, grantWriteHeading, "Written") }()
 	select {
 	case <-waiting:
 	case err := <-refused:
-		t.Fatalf("the write finished (%v) while the whole bound was held", err)
+		t.Fatalf("the write finished (%v) while the only slot was held", err)
 	case <-time.After(30 * time.Second):
-		t.Fatal("the write did not wait for the bound in 30 s")
+		t.Fatal("the write did not wait for a slot in 30 s")
 	}
 	cancel()
 	var err error
@@ -231,11 +220,11 @@ func TestAnAPIWriteWhoseRequestEndsWhileItWaitsForTheCopyBoundIsRefusedAndChange
 	if !errors.Is(err, ErrServiceUnavailable) {
 		t.Fatalf("the write answered %v, want ErrServiceUnavailable, which the API answers 503", err)
 	}
-	if held := heaps.held.Load(); held != 0 {
-		t.Fatalf("the refused write holds %d bytes of the bound", held)
+	if held := slots.held.Load(); held != 1 {
+		t.Fatalf("%d slots are held, want the one the test holds and none of the refused write's", held)
 	}
 	requireHeading(t, service, artifactID, true)
-	heaps.semaphore().Release(heaps.size)
+	holder.release()
 	if err := grantWrite(context.Background(), service, artifactID, grantWriteHeading, "Written"); err != nil {
 		t.Fatalf("the write after it failed: %v", err)
 	}
@@ -243,24 +232,24 @@ func TestAnAPIWriteWhoseRequestEndsWhileItWaitsForTheCopyBoundIsRefusedAndChange
 }
 
 // A write of the server's own, whose context carries no deadline and no cancel, is never refused
-// for the bound: it waits while the whole bound is held, however long that is, and lands once the
-// bound has room for its fork.
-func TestAServerWriteWaitsForTheCopyBoundWithoutADeadlineAndThenLands(t *testing.T) {
+// for a slot: it waits while every slot is held, however long that is, and lands once one is
+// free for its fork.
+func TestAServerWriteWaitsForASlotWithoutADeadlineAndThenLands(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
-	service.measurer.interval = time.Hour
 	state := grantTestState(t, 16<<10)
 	storeHistory(t, service, artifactID, state)
 	if err := loadRoomOf(service, artifactID); err != nil {
 		t.Fatalf("load the room: %v", err)
 	}
-	heaps := useCopyHeaps(t, newWeighedHeaps(copyHeapName, 2*grantRoomWeight(t, service, artifactID)))
-	if !heaps.semaphore().TryAcquire(heaps.size) {
-		t.Fatal("the empty bound refused all of itself")
+	slots := useLoadSlots(t, newLoadSlots(1))
+	holder := newLoadSlot()
+	if !holder.tryTake() {
+		t.Fatal("the empty concurrency refused its only slot")
 	}
 	waiting := make(chan struct{})
 	var waitOnce sync.Once
-	heaps.waiting = func(int64) { waitOnce.Do(func() { close(waiting) }) }
+	slots.waiting = func() { waitOnce.Do(func() { close(waiting) }) }
 	written := make(chan error, 1)
 	go func() {
 		written <- grantWrite(context.Background(), service, artifactID, grantWriteHeading, "Written")
@@ -268,28 +257,28 @@ func TestAServerWriteWaitsForTheCopyBoundWithoutADeadlineAndThenLands(t *testing
 	select {
 	case <-waiting:
 	case err := <-written:
-		t.Fatalf("the write finished (%v) while the whole bound was held", err)
+		t.Fatalf("the write finished (%v) while the only slot was held", err)
 	case <-time.After(30 * time.Second):
-		t.Fatal("the write did not wait for the bound in 30 s")
+		t.Fatal("the write did not wait for a slot in 30 s")
 	}
 	select {
 	case err := <-written:
-		t.Fatalf("the write answered %v while the whole bound was held, want it to wait", err)
+		t.Fatalf("the write answered %v while the only slot was held, want it to wait", err)
 	case <-time.After(500 * time.Millisecond):
 	}
 	requireHeading(t, service, artifactID, true)
-	heaps.semaphore().Release(heaps.size)
+	holder.release()
 	select {
 	case err := <-written:
 		if err != nil {
-			t.Fatalf("the write failed once the bound had room: %v", err)
+			t.Fatalf("the write failed once a slot was free: %v", err)
 		}
 	case <-time.After(60 * time.Second):
-		t.Fatal("the write did not land in 60 s once the bound had room")
+		t.Fatal("the write did not land in 60 s once a slot was free")
 	}
 	requireHeading(t, service, artifactID, false)
-	if held := heaps.held.Load(); held != 0 {
-		t.Fatalf("the write still holds %d bytes of the bound once it has landed", held)
+	if held := slots.held.Load(); held != 0 {
+		t.Fatalf("the write still holds %d slots once it has landed", held)
 	}
 }
 
@@ -298,16 +287,16 @@ func TestAServerWriteWaitsForTheCopyBoundWithoutADeadlineAndThenLands(t *testing
 // (TestAStreamOfAPILiveWritesStarvesNeitherARoomLoadNorAServerWrite).
 const streamHeading = "Heading Grant"
 
-// A stream of API live writes that keeps the copy-heap bound busy starves neither a browser's
-// room load nor a write of the server's own: both wait their turn and both run. Three goroutines
-// write to resident rooms of their own, each starting its next write as soon as its last one
-// returned, against a bound with room for two of their forks, so one of them is always waiting;
+// A stream of API live writes that keeps the pod's load concurrency busy starves neither a
+// browser's room load nor a write of the server's own: both wait their turn and both run. Three
+// goroutines write to resident rooms of their own, each starting its next write as soon as its
+// last one returned, against a concurrency of two slots, so one of them is always waiting;
 // while that runs, a room no process holds is loaded (the path a browser's join takes, which
 // covers a grant of its own with no deadline, loadDecodedHistory) and one write of the server's
 // own, whose context carries no deadline and no cancel, is made on a fourth room.
 //
-// Neither can starve, because the bound's waiters are served in the order they came. A caller
-// that finds the bound free takes it at once only while nothing is queued - golang.org/x/sync
+// Neither can starve, because the concurrency's waiters are served in the order they came. A
+// caller that finds a slot free takes it at once only while nothing is queued - golang.org/x/sync
 // v0.24.0, semaphore/semaphore.go:57-65, whose fast path is guarded by `s.waiters.Len() == 0` -
 // and a release notifies the waiters from the front of the list, stopping at the first whose
 // weight does not fit rather than passing over it (notifyWaiters, semaphore.go:145-165, whose
@@ -316,14 +305,14 @@ const streamHeading = "Heading Grant"
 // queue behind them.
 //
 // This test cannot be made to fail by taking that ordering away, which is why it asserts the
-// waits rather than the ordering: the ordering is semaphore.Weighted's own, inside the bound
-// (weighedHeaps.semaphore), and the service has no seam for a barging bound to be swapped in.
+// waits rather than the ordering: the ordering is semaphore.Weighted's own, inside the
+// concurrency (loadSlots.semaphore), and the service has no seam for a barging one to be swapped
+// in.
 // What a failure would look like is a probe that never returns, which is what the deadlines here
 // catch.
 func TestAStreamOfAPILiveWritesStarvesNeitherARoomLoadNorAServerWrite(t *testing.T) {
 	service, _ := newTestService(t)
 	service.settle = time.Hour
-	service.measurer.interval = time.Hour
 	state := grantTestState(t, 16<<10)
 	// Each room is on an issue of its own: writes to one issue queue on its owner row
 	// (lockArtifactOwner), not on the bound, and this test is about the bound.
@@ -346,10 +335,9 @@ func TestAStreamOfAPILiveWritesStarvesNeitherARoomLoadNorAServerWrite(t *testing
 	if err := loadRoomOf(service, serverRoom); err != nil {
 		t.Fatalf("load the server write's room: %v", err)
 	}
-	weight := grantRoomWeight(t, service, rooms[0])
-	heaps := useCopyHeaps(t, newWeighedHeaps(copyHeapName, 2*weight))
+	slots := useLoadSlots(t, newLoadSlots(2))
 	var waits atomic.Int64
-	heaps.waiting = func(int64) { waits.Add(1) }
+	slots.waiting = func() { waits.Add(1) }
 
 	// One write with the bound to itself, which the probes' deadline is a multiple of.
 	started := time.Now()
@@ -396,11 +384,11 @@ func TestAStreamOfAPILiveWritesStarvesNeitherARoomLoadNorAServerWrite(t *testing
 	// and the pool for the rest of the package's run.
 	stopped := sync.OnceFunc(func() { close(stop); streaming.Wait() })
 	defer stopped()
-	// Start the probes only once the stream has the bound crowded, so each of them queues behind
-	// a write rather than finding the bound free.
+	// Start the probes only once the stream has the slots crowded, so each of them queues behind
+	// a write rather than finding a slot free.
 	for crowded := time.Now(); waits.Load() == 0; {
 		if time.Since(crowded) > within {
-			t.Fatalf("the stream did not crowd the bound in %s: %d writes, no waiter", within, written.Load())
+			t.Fatalf("the stream did not crowd the slots in %s: %d writes, no waiter", within, written.Load())
 		}
 		select {
 		case err := <-failed:
@@ -444,8 +432,8 @@ func TestAStreamOfAPILiveWritesStarvesNeitherARoomLoadNorAServerWrite(t *testing
 		t.Fatalf("a write of the stream failed: %v", err)
 	default:
 	}
-	t.Logf("one uncontended write took %s; behind %d API writes over %d goroutines against a %d-byte bound holding two %d-byte forks, the room load took %s and the server write %s, and %d holds waited for the bound",
-		one, written.Load(), writers, heaps.size, weight, loadTook, serverTook, waits.Load())
+	t.Logf("one uncontended write took %s; behind %d API writes over %d goroutines against a concurrency of %d slots, the room load took %s and the server write %s, and %d holds waited for a slot",
+		one, written.Load(), writers, slots.size, loadTook, serverTook, waits.Load())
 	if loadTook > within || serverTook > within {
 		t.Fatalf("the room load took %s and the server write %s, past the %s a write of %s allows", loadTook, serverTook, within, one)
 	}
@@ -453,7 +441,7 @@ func TestAStreamOfAPILiveWritesStarvesNeitherARoomLoadNorAServerWrite(t *testing
 		t.Fatal("the room the load was asked for is not resident")
 	}
 	requireHeading(t, service, serverRoom, false)
-	if held := heaps.held.Load(); held != 0 {
-		t.Fatalf("%d bytes of the bound are still held once the stream has stopped", held)
+	if held := slots.held.Load(); held != 0 {
+		t.Fatalf("%d slots are still held once the stream has stopped", held)
 	}
 }

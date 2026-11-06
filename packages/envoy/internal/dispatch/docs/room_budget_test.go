@@ -4,12 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,114 +13,66 @@ import (
 	"time"
 
 	gws "github.com/gorilla/websocket"
+	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
+	"github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
-	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
-// A room is charged three parts: its latest count at both copies; the content its transactions
-// have added since that count, at the densest price at both copies; and its structure part. Both
-// copies are charged from its load, which keeps both (roomCopies). Each count replaces the last
-// rather than adding to it, so the charge falls when the document does, and clears the content
-// added up to the rendering it measured; no count touches the structure part. A count prices a
-// copy at its elements, its rendered bytes or its structs, whichever is the most. A rendering
-// goldmark could not finish counting is priced from its bytes at the densest price, past the
-// element bound and never at nothing. A socket's reservation is replaced by its room's charge when
-// the room loads, and the whole charge goes when ygo retires the room.
-func TestTheRoomBudgetChargesARoomItsCountItsUncountedContentAndItsStructure(t *testing.T) {
-	const densest = bytesOfHeapAByteAtTheDensest * roomCopies
+// A room is charged one weight: its tracked state at bytesOfHeapAStateByte in each of the two
+// copies a room keeps (roomWeight). Its load sets that state from the stored state it decoded
+// (chargeLoadedRoom); each update the room's observer drains adds the update's own bytes to it
+// (renderedReplica.chargeAdded, here driven through roomCharge.weigh, which is all that drain
+// does); a compaction that folds the room's whole stored history into one row re-bases it
+// (Service.rebaseRoomState); and the room's retirement drops the whole charge. The budget's
+// arithmetic after that is one sum: what the charges come to, against the limit.
+func TestTheRoomBudgetChargesARoomItsTrackedStateAtBothCopies(t *testing.T) {
 	budget := &roomBudget{limit: roomBudgetBytes}
-	charge := budget.load("room", copyHeap(10_000, 1_000, 0))
-	counted := int64(2 * 1_000 * bytesOfHeapAnElement)
-	requireCharged(t, budget, charge, counted, "a room that has taken no update is charged both copies")
+	const loaded, typed = 10_000, 100
+	charge := budget.load("room", loaded)
+	requireCharged(t, budget, charge, roomWeight(loaded), "a room that has taken no update is charged its stored state at both copies")
 
-	charge.adds(100)
-	requireCharged(t, budget, charge, counted+100*densest, "the content the first update adds is charged at the densest price at both copies")
-	charge.grew(5_000)
-	requireCharged(t, budget, charge, counted+100*densest+5_000, "the structure an update adds is charged as it is")
-	charge.adds(50)
-	requireCharged(t, budget, charge, counted+150*densest+5_000, "a later update's content adds to the uncounted part")
-
-	// The count of the rendering published once the room had added 100 bytes re-bases the charge
-	// there: the 50 bytes added since stay beside it, and so does the structure.
-	charge.measured(copyHeap(8_000, 800, 0), 100)
-	requireCharged(t, budget, charge, 2*800*bytesOfHeapAnElement+50*densest+5_000, "a count of a smaller document lowers the charge")
-	charge.measured(copyHeap(8_000, 800, 0), 150)
-	requireCharged(t, budget, charge, 2*800*bytesOfHeapAnElement+5_000, "a count of the latest rendering leaves no uncounted content, and the structure part as it was")
-	// The same rendering over a history of 100,000 structs: its structs outweigh its elements,
-	// and price it; structs that weigh less than the elements leave it at its elements.
-	charge.measured(copyHeap(8_000, 800, 100_000), 150)
-	requireCharged(t, budget, charge, 2*100_000*bytesOfHeapAStructHeld+5_000, "a count whose structs outweigh its elements is priced at its structs")
-	charge.measured(copyHeap(8_000, 800, 2_000), 150)
-	requireCharged(t, budget, charge, 2*800*bytesOfHeapAnElement+5_000, "a count whose elements outweigh its structs is priced at its elements")
-	// A long run of text renders many bytes making few elements from few structs: its bytes
-	// outweigh both, and price it.
-	charge.measured(copyHeap(800_000, 9, 11), 150)
-	requireCharged(t, budget, charge, 2*800_000*bytesOfHeapARenderedByte+5_000, "a count whose rendered bytes outweigh its elements and structs is priced at its bytes")
-
-	// A rendering MeasureDocument leaves uncounted answers no elements at all; priced as that, the
-	// heaviest room in the pod would be free. It is priced from its bytes at the densest price,
-	// with no ceiling at the element bound.
-	const uncounted = 64 << 10
-	charge.measured(copyHeap(uncounted, elementsPastCounting, 0), 150)
-	requireCharged(t, budget, charge, 2*uncounted*bytesOfHeapAByteAtTheDensest+5_000, "a rendering goldmark stopped counting is priced from its bytes at the densest price")
-	if atTheBound := roomWeight(copyHeap(pmdoc.MaxDocumentBytes, pmdoc.MaxDocumentElements, 0), 0, 0); charge.weight <= atTheBound {
-		t.Fatalf("an uncounted 64 KiB rendering is charged %d bytes, want more than the %d of a document at the element bound", charge.weight, atTheBound)
-	}
-	charge.measured(copyHeap(sizeUnmeasured, sizeUnmeasured, 0), 150)
-	requireCharged(t, budget, charge, 5_000, "a room that renders no markdown and holds no struct is charged its uncounted content and structure alone")
-	charge.measured(copyHeap(sizeUnmeasured, sizeUnmeasured, 1_000), 150)
-	requireCharged(t, budget, charge, 2*1_000*bytesOfHeapAStructHeld+5_000, "a room that renders no markdown is priced at its structs")
+	charge.weigh(loaded + typed)
+	requireCharged(t, budget, charge, roomWeight(loaded+typed), "an update's own bytes are added to the room's tracked state")
+	charge.weigh(loaded + 2*typed)
+	requireCharged(t, budget, charge, roomWeight(loaded+2*typed), "a later update adds its own bytes too")
+	// A compaction's re-base is the one thing that lowers a room's tracked state while it stands:
+	// the state a fold wrote, which merges a run of typed characters into one item and drops what
+	// the updates carried of what they deleted.
+	charge.weigh(loaded)
+	requireCharged(t, budget, charge, roomWeight(loaded), "a compaction's re-base lowers the room to the state its fold wrote")
 
 	budget.retire("room")
-	charge.adds(1_000)
-	charge.grew(1_000)
+	charge.weigh(loaded + typed)
 	if budget.used != 0 || len(budget.rooms) != 0 {
 		t.Fatalf("the budget holds %d bytes over %d rooms once the room retired, want nothing", budget.used, len(budget.rooms))
 	}
 
-	// The reservation an admission makes, its stored version's count at both copies, is replaced
-	// at the room's load by the charge of the room's own document at both copies, here one an
-	// update stored since that version has made smaller.
-	ctx := context.Background()
-	reserved := roomWeight(copyHeap(3_000, 300, 0), 0, 0)
-	reservation, err := budget.reserve(ctx, time.Time{}, "other", reserved)
-	if err != nil || reservation == nil || budget.used != reserved {
-		t.Fatalf("a reservation held %d bytes (%v), want %d", budget.used, err, reserved)
-	}
-	other := budget.load("other", copyHeap(3_000, 100, 0))
-	if budget.used != 2*100*bytesOfHeapAnElement || len(budget.rooms["other"].reservations) != 0 {
-		t.Fatalf("the loaded room is charged %d bytes beside %d reservations, want its own %d alone",
-			budget.used, len(budget.rooms["other"].reservations), 2*100*bytesOfHeapAnElement)
-	}
-	if other.closeOnceUnused || budget.marked.Load() != 0 {
-		t.Fatal("a room loaded for an admitted socket was marked to close once unused")
-	}
-	budget.release(reservation)
-	if joined, err := budget.reserve(ctx, time.Time{}, "other", reserved); joined != nil || err != nil || budget.used != other.weight {
-		t.Fatalf("a socket joining a charged room reserved %v (%v), and the budget holds %d bytes, want nothing reserved", joined, err, budget.used)
-	}
-
 	// A budget no service built never sweeps, so an admission it has no room for is refused at
-	// once, and wants nothing once it has been.
-	budget.limit = other.weight + 100
-	if refused, err := budget.reserve(ctx, time.Now().Add(time.Hour), "third", 101); refused != nil || !errors.Is(err, errRoomBudgetFull) || budget.used != other.weight {
-		t.Fatalf("a reservation past the limit was %v (%v), and the budget holds %d bytes, want a refusal holding nothing", refused, err, budget.used)
+	// once, and leaves nothing waiting once it has been.
+	other := budget.load("other", loaded)
+	budget.limit = other.weight - 1
+	ctx := context.Background()
+	if _, err := budget.refusal(ctx, time.Now().Add(time.Hour), "room", 0); !errors.Is(err, errRoomBudgetFull) {
+		t.Fatalf("an admission past the limit was answered %v, want it refused", err)
 	}
-	if budget.wanted != 0 || budget.waiting != 0 {
-		t.Fatalf("a refused admission left %d bytes wanted by %d waiting, want none", budget.wanted, budget.waiting)
+	if count := waiting(budget); count != 0 {
+		t.Fatalf("a refused admission left %d admissions waiting, want none", count)
 	}
 	// A sweep that leaves the budget within its limit raises nothing; one that leaves it over
-	// raises full, which refuses growth in every room, and the room's retirement lowers it.
+	// raises full, which refuses every apply that integrates anything in every room, and the
+	// room's retirement lowers it.
+	budget.limit = roomBudgetBytes
 	budget.swept(false)
 	if budget.full.Load() {
 		t.Fatal("a sweep that left the budget within its limit raised full")
 	}
-	other.grew(1_000)
+	budget.limit = other.weight - 1
 	budget.swept(false)
 	if !budget.full.Load() {
 		t.Fatal("a sweep that left the budget over did not raise full")
@@ -135,148 +83,110 @@ func TestTheRoomBudgetChargesARoomItsCountItsUncountedContentAndItsStructure(t *
 	}
 }
 
-// A room's charge follows its renderings through the measurer: a count that lands replaces the
-// counted part and clears the content the room had added when the counted rendering was
-// published, never the content added since, and a rendering whose bytes are published without a
-// count of its own clears nothing. No count touches the structure part. A room whose rendering the
-// counter cannot finish is charged from that rendering's bytes at the densest price, at its load
-// and at a later count alike.
-func TestTheMeasurersCountClearsOnlyTheContentAddedUpToTheRenderingItMeasured(t *testing.T) {
-	const densest = bytesOfHeapAByteAtTheDensest * roomCopies
-	service := calibratedService()
-	service.budget.limit = roomBudgetBytes
-	service.measurer.interval = noInterval
-	// Each count the measurer starts is handed over here and held until the test releases it.
-	counting, release := make(chan string, 2), make(chan struct{}, 2)
-	service.measurer.beforeCount = func(markdown string) {
-		counting <- markdown
-		<-release
+// An admission is weighed as the budget will stand once its room has loaded, not as it stands
+// before: the weight it carries is the room it is about to load, at roomWeight of the stored
+// state the admission read for it. So a budget with room to spare still refuses an admission
+// whose own room would not fit, and the budget is never taken past its limit by admitting one.
+// That is what keeps the pod out of the state a full budget puts it in, where full refuses every
+// insert in every room until a sweep can close something (refusal, Service.weighPeerUpdate).
+//
+// A budget no service built never sweeps, so each refusal below is immediate and leaves nothing
+// waiting.
+func TestAnAdmissionIsWeighedWithTheRoomItIsAboutToLoad(t *testing.T) {
+	const stored = 1_000_000
+	budget := &roomBudget{limit: roomWeight(stored) + roomWeight(stored)/2}
+	ctx := context.Background()
+	first, err := budget.refusal(ctx, time.Now(), "first", roomWeight(stored))
+	if err != nil {
+		t.Fatalf("the first admission was answered %v on an empty budget with room for it", err)
 	}
-	// Empty items of alternating bullet lists, each a list of its own, are the densest rendering
-	// measured (bytesOfHeapAByteAtTheDensest), and a mebibyte of them makes more nodes than
-	// goldmark builds before MeasureDocument stops counting.
-	dense := func(kibibytes int) string { return strings.Repeat("- \n\n* \n\n", kibibytes<<7) }
-	loaded, counted, later := dense(1024), headings(1), dense(1152)
-	for _, rendering := range []string{loaded, later} {
-		if elements := countElements(rendering); elements != elementsPastCounting {
-			t.Fatalf("a dense rendering of %d bytes counts %d elements, want it past counting", len(rendering), elements)
-		}
+	// A second socket to the same document shares that reservation rather than holding a second:
+	// one load serves both.
+	shared, err := budget.refusal(ctx, time.Now(), "first", roomWeight(stored))
+	if err != nil || shared.weight != 0 || budget.reserved != roomWeight(stored) {
+		t.Fatalf("a second admission to the same document was answered %v holding %d, with %d reserved; want it to share the first's %d",
+			err, shared.weight, budget.reserved, roomWeight(stored))
 	}
-	countedHeap := copyHeap(int64(len(counted)), countElements(counted), 0)
-	if countedHeap <= 0 || countedHeap == int64(len(later))*bytesOfHeapAByteAtTheDensest {
-		t.Fatalf("the counted rendering prices %d bytes, want a price no other rendering here has", countedHeap)
+	charge := budget.load("first", stored)
+	if budget.reserved != 0 || !first.settled || !shared.settled {
+		t.Fatalf("the room's load left %d bytes reserved, want every reservation of it settled", budget.reserved)
 	}
-
-	live := newDocumentCopy()
-	replica := service.keepReplica(live, nil, loadRendering(loaded), nil)
-	charge := service.chargeLoadedRoom("room", live, replica)
-	requireCharged(t, &service.budget, charge, 2*int64(len(loaded))*bytesOfHeapAByteAtTheDensest,
-		"a room loaded with a rendering the counter cannot finish is priced from its bytes at the densest price")
-
-	charge.adds(100)
-	charge.grew(7_000)
-	replica.publishSize(&counted)
-	if markdown := <-counting; markdown != counted {
-		t.Fatal("the measurer started on a rendering the room did not publish")
+	if charge == nil || budget.used != roomWeight(stored) {
+		t.Fatalf("the budget holds %d bytes once the first room loaded, want %d", budget.used, roomWeight(stored))
 	}
-	// The count of counted is in flight. What the room adds now, and a rendering published while
-	// that count runs, which publishes its bytes at once and waits for a count of its own, leave
-	// the charge as it was: the bytes alone clear nothing.
-	charge.adds(50)
-	replica.publishSize(&later)
-	if bytes, _, _ := replica.size(); bytes != int64(len(later)) {
-		t.Fatalf("the room published %d bytes, want the later rendering's %d at once", bytes, len(later))
+	// Half a room is left, so an admission for a room of this size is refused although the
+	// charges themselves are still well inside the limit. Weighed the other way round - the
+	// charges alone - it would be admitted and its load would take the budget over.
+	if budget.used > budget.limit {
+		t.Fatalf("the charges are %d of %d bytes, so an admission weighed on the charges alone would pass", budget.used, budget.limit)
 	}
-	requireCharged(t, &service.budget, charge, 2*int64(len(loaded))*bytesOfHeapAByteAtTheDensest+150*densest+7_000,
-		"a rendering published without a count clears no content")
-
-	// The count of counted lands: it holds the 100 bytes added before it was published, and not
-	// the 50 added since, which stay beside it until the count of later holds them.
-	release <- struct{}{}
-	if markdown := <-counting; markdown != later {
-		t.Fatal("the measurer's second count is not of the later rendering")
+	refused, err := budget.refusal(ctx, time.Now(), "second", roomWeight(stored))
+	if refused != nil || !errors.Is(err, errRoomBudgetFull) {
+		t.Fatalf("an admission whose room would cross the limit was answered %v, want it refused", err)
 	}
-	requireCharged(t, &service.budget, charge, 2*countedHeap+50*densest+7_000,
-		"a count clears the content added up to the rendering it measured, and no more, and leaves the structure")
-	release <- struct{}{}
-	service.measurer.waitIdle()
-	requireCharged(t, &service.budget, charge, 2*int64(len(later))*bytesOfHeapAByteAtTheDensest+7_000,
-		"the latest rendering's count, past counting, prices its bytes at the densest price and clears all the content it holds")
-	// A live room's update observer holds its replica, which the measurer holds weakly
-	// (elementMeasurer); nothing else here does, so a count could otherwise land on nothing.
-	runtime.KeepAlive(replica)
+	if count := waiting(budget); count != 0 {
+		t.Fatalf("a refused admission left %d admissions waiting, want none", count)
+	}
+	// A room small enough to fit what is left is admitted, and a room already charged is joined
+	// rather than weighed at all.
+	small, err := budget.refusal(ctx, time.Now(), "small", roomWeight(stored/4))
+	if err != nil {
+		t.Fatalf("an admission for a room that fits what is left was answered %v", err)
+	}
+	// Its reservation is weighed beside the charges: with it standing, a room of half the first
+	// one no longer fits, though the charges alone would leave room for it.
+	if _, err := budget.refusal(ctx, time.Now(), "another", roomWeight(stored/2)); !errors.Is(err, errRoomBudgetFull) {
+		t.Fatalf("an admission weighed beside a standing reservation was answered %v, want it refused", err)
+	}
+	// A reservation released by a socket that goes before its room loads leaves nothing behind.
+	budget.release(small)
+	if budget.reserved != 0 {
+		t.Fatalf("a released reservation left %d bytes reserved, want none", budget.reserved)
+	}
+	if !budget.join("first") {
+		t.Fatal("a socket joining the room the budget already charges was not joined")
+	}
 }
 
-// The budget's arithmetic at the shapes its design is stated in, each room admitted against an
-// empty budget, loaded and then given what browsers add to it before the next arrives. A room of a
-// mebibyte of prose (57,600 elements from 77,600 structs,
-// TestAResidentRoomsHeapPerByteOfItsMarkdown's shape) is charged 58 MB once counted, at its
-// elements, at both copies whether it is read or edited (roomCopies), and since an admission
-// reserves the same count at the same two copies (storedRoomReservation), the budget admits
-// thirty-seven such documents and refuses the thirty-eighth: a load charged at one copy would
-// admit seventy-four, whose replicas their first keystrokes would then take with nothing able to
-// refuse them.
+// The budget's arithmetic at the shapes its design is stated in, each room loaded into an empty
+// budget at the bytes of state its stored document holds. A room is charged
+// bytesOfHeapAStateByte in each of roomCopies copies for each byte of its state, 28 bytes a
+// state byte, whatever its shape renders: a mebibyte of prose, whose state is 3,035,240 bytes,
+// is charged 84,986,720, so twenty-five of them fit the budget; a document at the state cap
+// (maxRoomStateBytes) is charged 469,762,048, so four of those do; and the long-edited document,
+// 5 KiB of prose carrying a million keystrokes in a 7,814,707-byte state, is charged
+// 218,811,796, so nine of those do.
 //
-// What browsers add is charged beside the count. A 4 KiB paste not yet counted is its content at
-// the densest price at both copies, 4,096 x 1,126 x 2 = 9,224,192 bytes, so rooms each holding one
-// admit thirty-two. 2,000 keystrokes, each one struct at bytesOfHeapAStruct with its two splits at
-// bytesOfHeapASplit and its content, a character and its length, as text at bytesOfHeapAByteOfText
-// (typed text reads as unrendered to the walk, unrenderedContentHeap), at both copies,
-// (650 + 2 x 200 + 2 x 2) x 2 = 2,108 bytes, are a structure part of 4,216,000 bytes, which no
-// count clears, so rooms each typed into that much admit thirty-four; a delete range the room did
-// not hold deleted is two splits, 2 x 200 x 2 = 800 bytes, and one it held deleted already nothing
-// (deletedRuns). One frame of 500,000 GC structs (plan.md, departure 4: 64,645,200 bytes kept in
-// one copy, the rendering unchanged) is a structure part of 500,000 x (650 + 2 x 200) x 2 =
-// 1,050,000,000 bytes, so two such rooms take the whole budget. A document at the decode cap is
-// priced at its 1,048,576 structs whatever it renders (bytesOfHeapAStructHeld), 1,048,576 x 170 x
-// 2 = 356,515,840 bytes: the long-edited document's 53 elements and the agent-rewritten document's
-// 65,536 alike, so the budget admits six of either, where their elements would have admitted over
-// forty thousand of the first. A paragraph of a mebibyte typed in one transaction loads as 11
-// structs making 9 elements, 4,500 bytes a copy at the element price, and is priced at its rendered
-// bytes instead (bytesOfHeapARenderedByte), 1,048,576 x 12 x 2 = 25,165,824 bytes, so the budget
-// admits eighty-five; the same price leaves the other shapes where their elements or structs put
-// them, a mebibyte of prose at 12,582,912 bytes a copy against its elements' 28,800,000, and the
-// agent-rewritten document at 12,582,900 against its structs' 178,257,920. There is no ceiling on
-// one room: a mebibyte of the densest rendering, which goldmark stops counting and which is priced
-// from its bytes (bytesOfHeapAByteAtTheDensest), is more than the whole budget at both copies, so
-// the budget admits none, and the pressure rule is what answers a room grown that heavy
-// (refusedUnderPressure).
+// Exactly what fits is admitted and the next is refused: an admission carries the weight of the
+// room it is about to load (roomBudget.refusal), so the budget is never taken past its limit by
+// admitting one. No room has a ceiling of its own, though: a document twice the whole budget is
+// admitted into an empty one and charged what its state comes to, and what answers a room that
+// heavy once it is open is the sweep and the hook's refusal of every apply that integrates
+// anything while nothing can be closed (roomBudget.full).
 func TestTheRoomBudgetsArithmetic(t *testing.T) {
-	prose := copyHeap(pmdoc.MaxDocumentBytes, 57_600, 77_600)
 	for _, shape := range []struct {
-		name               string
-		heap               int64
-		content, structure int64
-		weight, admits     int64
+		name           string
+		stateBytes     int64
+		weight, admits int64
 	}{
-		{"a room of a mebibyte of prose", prose, 0, 0, 57_600_000, 37},
-		{"a mebibyte of prose with a 4 KiB paste not yet counted", prose, 4 << 10, 0, 66_824_192, 32},
-		{"a mebibyte of prose typed into with 2,000 keystrokes", prose, 0, 2_000 * (bytesOfHeapAStruct + splitsAStructCanCause*bytesOfHeapASplit + 2*bytesOfHeapAByteOfText) * roomCopies, 61_816_000, 34},
-		{"a mebibyte of prose given a frame of 500,000 GC structs", prose, 0, 500_000 * (bytesOfHeapAStruct + splitsAStructCanCause*bytesOfHeapASplit) * roomCopies, 1_107_600_000, 2},
-		{"the long-edited document typed on until the decode cap", copyHeap(5_314, 53, maxUpdateItems), 0, 0, 356_515_840, 6},
-		{"an agent's whole rewrites until the decode cap refused one", copyHeap(1_048_575, 65_536, maxUpdateItems), 0, 0, 356_515_840, 6},
-		{"a paragraph of a mebibyte typed in one transaction", copyHeap(pmdoc.MaxDocumentBytes, 9, 11), 0, 0, 25_165_824, 85},
-		{"a mebibyte of the densest rendering", copyHeap(pmdoc.MaxDocumentBytes, elementsPastCounting, 0), 0, 0, 2_361_393_152, 0},
+		{"a room of a mebibyte of prose", 3_035_240, 84_986_720, 25},
+		{"a document at the state cap", maxRoomStateBytes, 469_762_048, 4},
+		{"the long-edited document", 7_814_707, 218_811_796, 9},
+		{"a document twice the whole budget", roomBudgetBytes, 60_129_542_144, 0},
 	} {
 		t.Run(shape.name, func(t *testing.T) {
-			if weight := roomWeight(shape.heap, shape.content, shape.structure); weight != shape.weight {
-				t.Fatalf("a room of %d bytes of heap a copy, %d bytes of uncounted content and a %d-byte structure part is charged %d bytes, want %d",
-					shape.heap, shape.content, shape.structure, weight, shape.weight)
+			if weight := roomWeight(shape.stateBytes); weight != shape.weight {
+				t.Fatalf("a room tracked at %d bytes of state is charged %d bytes, want %d", shape.stateBytes, weight, shape.weight)
 			}
 			budget := &roomBudget{limit: roomBudgetBytes}
 			admitted := int64(0)
 			for {
-				room := fmt.Sprintf("room-%d", admitted)
-				reservation, err := budget.reserve(context.Background(), time.Time{}, room, roomWeight(shape.heap, 0, 0))
-				if errors.Is(err, errRoomBudgetFull) {
+				if _, err := budget.refusal(context.Background(), time.Now(), "room", shape.weight); errors.Is(err, errRoomBudgetFull) {
 					break
+				} else if err != nil {
+					t.Fatalf("admit room %d: %v", admitted+1, err)
 				}
-				if err != nil || reservation == nil {
-					t.Fatalf("reserve room %d: %v", admitted+1, err)
-				}
-				charge := budget.load(room, shape.heap)
-				charge.adds(shape.content)
-				charge.grew(shape.structure)
+				charge := budget.load(fmt.Sprintf("room-%d", admitted), shape.stateBytes)
 				if charge.weight != shape.weight {
 					t.Fatalf("room %d is charged %d bytes, want %d", admitted+1, charge.weight, shape.weight)
 				}
@@ -285,239 +195,21 @@ func TestTheRoomBudgetsArithmetic(t *testing.T) {
 			if admitted != shape.admits {
 				t.Fatalf("the budget admitted %d rooms charged %d bytes each, want %d", admitted, shape.weight, shape.admits)
 			}
+			if budget.used > budget.limit {
+				t.Fatalf("the rooms admitted come to %d bytes against the %d-byte limit: an admission took the budget past it",
+					budget.used, budget.limit)
+			}
+			// No ceiling on one room: the heaviest shape is refused at admission by the budget,
+			// and loaded anyway where nothing weighed it, as the server's own work does.
+			if shape.admits == 0 {
+				charge := budget.load("server-opened", shape.stateBytes)
+				if charge.weight != shape.weight || budget.used != shape.weight {
+					t.Fatalf("a room the server opened over the budget is charged %d of %d bytes, want %d",
+						charge.weight, budget.used, shape.weight)
+				}
+			}
 		})
 	}
-}
-
-// The densest price (bytesOfHeapAByteAtTheDensest) is the most elements a byte of rendered
-// markdown makes, measured here over the dense shapes pmdoc's own tests build
-// (pmdoc/elements_test.go: the shapes its refusal of a mebibyte and its spelling of every node
-// type use) and over this repository's markdown files, and this fails once any shape
-// prices higher at a mebibyte than the constant does. What is measured is each one's rendering,
-// since that is what the budget prices: a version is stored as its rendering
-// (writeVersionTx), and a room's replica publishes its own.
-//
-// MeasureDocument stops counting at twice the element bound, so a mebibyte of a dense shape is
-// counted in pieces, each a document of its own of up to 8 KiB of the shape, rendered and measured
-// whole, until their renderings reach the size: the sum counts the head and the containers each
-// piece opens once for each piece, which errs on the dense side. A unit that needs an id of its
-// own takes its index within its piece. The densest at a mebibyte, at 64 KiB and overall - every
-// shape at those sizes and as a lone unit, and every file at its own size - is logged.
-func TestNoMarkdownPricesPastTheDensestPrice(t *testing.T) {
-	type shape struct {
-		name, head, tail string
-		unit             func(index int) string
-	}
-	repeated := func(name, unit string) shape {
-		return shape{name: name, unit: func(int) string { return unit }}
-	}
-	numbered := func(name, format string) shape {
-		return shape{name: name, unit: func(index int) string { return fmt.Sprintf(format, index) }}
-	}
-	shapes := []shape{
-		repeated(")_", ")_"),
-		repeated("a_", "a_"),
-		repeated("a_b*", "a_b*"),
-		repeated("a*b*", "a*b*"),
-		repeated("[a", "[a"),
-		repeated("a line feed per character", "a\n"),
-		repeated("paragraphs", "a\n\n"),
-		repeated("list items", "- a\n"),
-		repeated("empty list items", "-\n"),
-		repeated("empty items of alternating bullet lists", "-\n*\n"),
-		repeated("empty items of alternating ordered lists", "1.\n1)\n"),
-		repeated("list items opening with a heading", "- # a\n"),
-		repeated("hard breaks", "a  \n"),
-		repeated("backslash hard breaks", "a\\\n"),
-		repeated("headings", "# a\n"),
-		repeated("empty headings", "#\n"),
-		repeated("empty quotes", ">\n\n"),
-		repeated("quotes", "> a\n\n"),
-		repeated("empty fences", "```\n```\n"),
-		repeated("fences", "```\na\n```\n"),
-		repeated("rules", "***\n"),
-		repeated("images", "![](u)"),
-		repeated("images with alt text", "![a](u)"),
-		repeated("linked images", "[![](u)](v)"),
-		repeated("inline HTML tags", "<b>"),
-		repeated("inline HTML spans", "<b>a</b>"),
-		repeated("inline HTML around emphasis", "<b>*a*</b>"),
-		{name: "HTML comments", head: "a", unit: func(int) string { return "<!---->" }},
-		{name: "a two-column table", head: "| a | b |\n| - | - |\n", unit: func(int) string { return "| x | y |\n" }},
-		{name: "empty table rows", head: "| a |\n| - |\n", unit: func(int) string { return "| |\n" }},
-		{name: "empty four-column rows", head: "| a | b | c | d |\n| - | - | - | - |\n", unit: func(int) string { return "| | | | |\n" }},
-		repeated("header-only tables", "| a |\n| - |\n\n"),
-		repeated("empty three-column header-only tables", "| | | |\n| - | - | - |\n\n"),
-		repeated(`\~a`, `\~a`),
-		repeated(`)\_`, `)\_`),
-		repeated(`\)\_`, `\)\_`),
-		repeated(`\[a`, `\[a`),
-		repeated("&#95;a", "&#95;a"),
-		numbered("empty footnote definitions", "[^%d]:\n"),
-		numbered("footnote definitions", "[^%d]: a\n"),
-		{name: "footnote references", tail: "\n\n[^a]: b\n", unit: func(int) string { return "[^a]" }},
-		repeated("empty callouts", ":::callout{}\n:::\n\n"),
-		repeated("callouts", ":::callout{}\na\n:::\n\n"),
-		numbered("empty asks", ":::ask{#ask-%d}\n:::\n\n"),
-		numbered("asks", ":::ask{#ask-%d}\nq\n:::\n\n"),
-	}
-	type density struct {
-		elements, bytes int64
-		name            string
-	}
-	denser := func(worst *density, name string, elements, bytes int64) {
-		if bytes > 0 && (worst.bytes == 0 || elements*worst.bytes > worst.elements*bytes) {
-			*worst = density{elements: elements, bytes: bytes, name: name}
-		}
-	}
-	perByte := func(d density) float64 { return float64(d.elements) / float64(d.bytes) }
-	// renderingOf is markdown read and rendered as a room would hold it, or the error that says it
-	// is no document's rendering at all: markdown outside the Proof schema.
-	renderingOf := func(markdown string) (string, error) {
-		tree, err := pmdoc.ParseRendering(markdown)
-		if err != nil {
-			return "", err
-		}
-		return documentMarkdown(tree)
-	}
-	const pieceBytes = 8 << 10
-	// at is what shape's renderings make, in pieces, once they reach size bytes; a piece measured
-	// once is not measured again, which every piece of a repeated unit is but the last. Every piece
-	// of a shape is a document in the schema, and counted whole.
-	at := func(s shape, size int64) (int64, int64) {
-		t.Helper()
-		measured := map[string][2]int64{}
-		var elements, bytes int64
-		for bytes < size {
-			var piece strings.Builder
-			piece.WriteString(s.head)
-			for index := 0; piece.Len()+len(s.tail) < pieceBytes; index++ {
-				piece.WriteString(s.unit(index))
-			}
-			piece.WriteString(s.tail)
-			got, ok := measured[piece.String()]
-			if !ok {
-				rendering, err := renderingOf(piece.String())
-				if err != nil {
-					t.Fatalf("%s: a piece of %d bytes is no document's rendering: %v", s.name, piece.Len(), err)
-				}
-				counted := pmdoc.MeasureDocument(rendering)
-				if !counted.Counted {
-					t.Fatalf("%s: a piece's rendering of %d bytes makes more nodes than MeasureDocument builds; measure it in smaller pieces", s.name, len(rendering))
-				}
-				got = [2]int64{int64(counted.Elements), int64(counted.Bytes)}
-				measured[piece.String()] = got
-			}
-			elements += got[0]
-			bytes += got[1]
-		}
-		return elements, bytes
-	}
-	var atAMebibyte, at64KiB, overall, densestFile density
-	for _, s := range shapes {
-		elements, bytes := at(s, pmdoc.MaxDocumentBytes)
-		denser(&atAMebibyte, s.name, elements, bytes)
-		denser(&overall, s.name+" at a mebibyte", elements, bytes)
-		if price, densest := elements*bytesOfHeapAnElement, bytes*bytesOfHeapAByteAtTheDensest; price > densest {
-			t.Errorf("a mebibyte of %s renders to %d bytes making %d elements, %d bytes of heap a copy, past the %d the densest price gives it",
-				s.name, bytes, elements, price, densest)
-		}
-		elements, bytes = at(s, 64<<10)
-		denser(&at64KiB, s.name, elements, bytes)
-		denser(&overall, s.name+" at 64 KiB", elements, bytes)
-		// A lone unit of some shapes reads as something else - a lone `<b>` is an HTML block,
-		// which the schema refuses - and is no document's rendering to weigh.
-		if rendering, err := renderingOf(s.head + s.unit(0) + s.tail); err == nil {
-			if size := pmdoc.MeasureDocument(rendering); size.Counted {
-				denser(&overall, "a lone unit of "+s.name, int64(size.Elements), int64(size.Bytes))
-			}
-		}
-	}
-	root := repositoryRoot(t)
-	files, unread := 0, 0
-	for _, file := range repositoryMarkdown(t, root) {
-		markdown, err := os.ReadFile(file)
-		if err != nil {
-			t.Fatal(err)
-		}
-		name, err := filepath.Rel(root, file)
-		if err != nil {
-			t.Fatal(err)
-		}
-		rendering, err := renderingOf(string(markdown))
-		if err != nil {
-			unread++ // markdown outside the Proof schema is no document's rendering
-			continue
-		}
-		size := pmdoc.MeasureDocument(rendering)
-		if !size.Counted {
-			t.Errorf("%s: its rendering of %d bytes makes more nodes than MeasureDocument builds", name, len(rendering))
-			continue
-		}
-		files++
-		denser(&overall, name, int64(size.Elements), int64(size.Bytes))
-		denser(&densestFile, name, int64(size.Elements), int64(size.Bytes))
-		if size.Bytes >= 64<<10 {
-			denser(&at64KiB, name, int64(size.Elements), int64(size.Bytes))
-		}
-	}
-	if files < 100 {
-		t.Fatalf("the walk read %d markdown files in this repository (%d outside the schema), want the hundreds it holds", files, unread)
-	}
-	t.Logf("the densest rendering at a mebibyte is %s at %.4f elements a byte, %.1f bytes of heap a byte; the densest price is %d",
-		atAMebibyte.name, perByte(atAMebibyte), perByte(atAMebibyte)*bytesOfHeapAnElement, bytesOfHeapAByteAtTheDensest)
-	t.Logf("the densest rendering at 64 KiB is %s at %.4f elements a byte", at64KiB.name, perByte(at64KiB))
-	t.Logf("the densest rendering overall is %s at %.4f elements a byte (%d elements in %d bytes), over %d shapes and %d of this repository's markdown files (%d outside the schema)",
-		overall.name, perByte(overall), overall.elements, overall.bytes, len(shapes), files, unread)
-	t.Logf("the densest rendering of this repository's markdown files is %s at %.4f elements a byte (%d elements in %d bytes)",
-		densestFile.name, perByte(densestFile), densestFile.elements, densestFile.bytes)
-}
-
-// repositoryRoot is the directory this repository's Go workspace sits in, found by walking up from
-// the package the test runs in.
-func repositoryRoot(t *testing.T) string {
-	t.Helper()
-	root, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for {
-		if _, err := os.Stat(filepath.Join(root, "go.work")); err == nil {
-			return root
-		}
-		parent := filepath.Dir(root)
-		if parent == root {
-			t.Fatal("no go.work above this package: the repository root is what the walk starts from")
-		}
-		root = parent
-	}
-}
-
-// repositoryMarkdown is every markdown file under root, skipping the trees nothing in this
-// repository wrote - its dependencies, its version control, the caches each leaves. It is this
-// test's own walk: no other package walks the repository's markdown.
-func repositoryMarkdown(t *testing.T, root string) []string {
-	t.Helper()
-	var files []string
-	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			if name := entry.Name(); path != root && (strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor") {
-				return fs.SkipDir
-			}
-			return nil
-		}
-		if strings.HasSuffix(entry.Name(), ".md") {
-			files = append(files, path)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return files
 }
 
 func requireCharged(t *testing.T, budget *roomBudget, charge *roomCharge, want int64, what string) {
@@ -527,34 +219,153 @@ func requireCharged(t *testing.T, budget *roomBudget, charge *roomCharge, want i
 	}
 }
 
-// Every way out of the document socket's handler returns the reservation its admission made, and
-// the one way that keeps the socket hands it to the room's own charge when the room loads: a socket
-// refused outside the schema, one whose admission load fails, one the budget refuses, and one that
-// joins its room. The reservation is the stored version's count at both copies, held while the
-// handler loads the document, and the room's load replaces it with the count of the rendering it
-// loaded with, at both copies too (roomCopies): the same document here, so the reservation itself.
-func TestTheDocumentSocketReturnsItsReservationOnEveryWayOut(t *testing.T) {
+// fakeSwept is a budget whose sweeps are the test's: each start is reported on the channel it
+// returns, and lasts until the test ends it (roomBudget.swept).
+func fakeSwept(limit int64) (*roomBudget, <-chan struct{}) {
+	sweeps := make(chan struct{}, 8)
+	budget := &roomBudget{limit: limit}
+	budget.sweep = func() { sweeps <- struct{}{} }
+	return budget, sweeps
+}
+
+// waiting reads how many admissions wait on budget.
+func waiting(budget *roomBudget) int {
+	budget.mu.Lock()
+	defer budget.mu.Unlock()
+	return budget.waiting
+}
+
+// An admission the budget has no room for waits for the sweeps it starts, and is refused only
+// once the last of them has ended with nothing left that something other than a browser holds.
+// There are two of them here: the charge that takes the budget past its limit starts one of its
+// own (unlock), and the admission that arrives while that one runs asks for it to run again
+// (sweepAgainLocked), since the first may have weighed the budget before the admission arrived.
+// A second look at a budget past its limit waits the same way, and passes once a room's
+// retirement brings the budget back within it.
+func TestTheRoomBudgetRefusesAnAdmissionOnlyOnceItsSweepHasEnded(t *testing.T) {
+	ctx := context.Background()
+	// A limit one byte under what the one charged room comes to, so the budget is over it.
+	budget, sweeps := fakeSwept(roomWeight(20) - 1)
+	budget.load("held", 20)
+	<-sweeps
+	answered := make(chan error, 1)
+	go func() { answered <- second(budget.refusal(ctx, time.Now().Add(time.Minute), "room", 0)) }()
+	waitFor(t, 5*time.Second, "the admission to wait", func() bool { return waiting(budget) == 1 })
+	select {
+	case err := <-answered:
+		t.Fatalf("the admission was answered %v while the charge's own sweep ran", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	budget.swept(false)
+	select {
+	case <-sweeps:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the sweep the admission asked for while the first ran never started")
+	}
+	select {
+	case err := <-answered:
+		t.Fatalf("the admission was answered %v while the sweep it asked for ran", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	budget.swept(false)
+	select {
+	case err := <-answered:
+		if !errors.Is(err, errRoomBudgetFull) {
+			t.Fatalf("the admission was answered %v once its sweep ended with nothing pending, want it refused", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the admission still waits after its sweep ended with nothing pending")
+	}
+	if count := waiting(budget); count != 0 {
+		t.Fatalf("a refused admission left %d admissions waiting", count)
+	}
+
+	passed := make(chan error, 1)
+	go func() { passed <- second(budget.refusal(ctx, time.Now().Add(time.Minute), "room", 0)) }()
+	<-sweeps
+	waitFor(t, 5*time.Second, "the look past the limit to wait", func() bool { return waiting(budget) == 1 })
+	budget.swept(true)
+	select {
+	case err := <-passed:
+		t.Fatalf("the look past the limit was answered %v while a room was pending", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	budget.retire("held")
+	select {
+	case err := <-passed:
+		if err != nil {
+			t.Fatalf("the look past the limit was answered %v once a retirement brought the budget within it", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the look past the limit still waits with the budget within it")
+	}
+}
+
+// Every admission waiting on the budget is kept waiting until the budget has room for it: a
+// sweep that ends with two still waiting leaves both of them waiting, and the second, which
+// began to wait while that sweep ran, has it run once more. Once a room retires both pass.
+func TestTheRoomBudgetKeepsEveryWaitingAdmissionAcrossASweep(t *testing.T) {
+	ctx := context.Background()
+	deadline := time.Now().Add(time.Minute)
+	budget, sweeps := fakeSwept(roomWeight(20) - 1)
+	budget.load("held", 20)
+	admitted := make(chan error, 2)
+	admit := func() { admitted <- second(budget.refusal(ctx, deadline, "room", 0)) }
+	go admit()
+	<-sweeps
+	waitFor(t, 5*time.Second, "the first admission to wait", func() bool { return waiting(budget) == 1 })
+	go admit()
+	waitFor(t, 5*time.Second, "the second admission to wait", func() bool { return waiting(budget) == 2 })
+	budget.swept(true)
+	select {
+	case <-sweeps:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the sweep an admission began to wait during did not run again")
+	}
+	if count := waiting(budget); count != 2 {
+		t.Fatalf("after a sweep ended %d admissions wait, want both", count)
+	}
+	budget.retire("held")
+	for range 2 {
+		select {
+		case err := <-admitted:
+			if err != nil {
+				t.Fatalf("a waiting admission was answered %v once a room retired, want it admitted", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("a waiting admission was not admitted once a room retired")
+		}
+	}
+	budget.swept(false)
+	if count := waiting(budget); count != 0 || budget.used != 0 {
+		t.Fatalf("after both were admitted %d wait and the budget holds %d bytes, want none and nothing", count, budget.used)
+	}
+}
+
+// Every way out of the document socket's handler leaves the budget charging nothing for a
+// document no room holds, and the one way that keeps the socket charges the room its load makes:
+// a socket refused outside the schema, one whose admission load fails, one the budget refuses,
+// and one that joins its room. Nothing is reserved before a load: the budget charges a room only
+// once its load has decoded the state it is charged for (chargeLoadedRoom), and what keeps a
+// burst of admissions from each reading the same headroom is the load slot each of their loads
+// takes (MemoryBounds.LoadSlots).
+func TestTheDocumentSocketChargesNothingUntilItsRoomLoads(t *testing.T) {
 	database := storetest.Open(t)
-	watch := &admissionWatchStore{VersionedStore: NewPgVersioned(database), held: make(map[string][]int64)}
+	watch := &admissionWatchStore{VersionedStore: NewPgVersioned(database), charged: make(map[string][]int64)}
 	service := newRoomBudgetService(t, database, watch)
 	watch.service.Store(service)
 	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 	t.Cleanup(httpServer.Close)
 	ids := createDocuments(t, database, 4)
 	outside, failing, refused, joined := ids[0], ids[1], ids[2], ids[3]
-	stored := latestVersionMarkdown(t, service, joined)
-	reserved := roomWeight(copyHeap(int64(len(stored)), countElements(stored), storedHistoryStructs(t, database, joined)), 0, 0)
-	if reserved <= 0 {
-		t.Fatalf("the stored document reserves %d bytes, want some", reserved)
-	}
 
 	t.Run("refused outside the schema", func(t *testing.T) {
 		if err := AppendRenderOnlySchemaViolationForTest(context.Background(), database, outside); err != nil {
 			t.Fatal(err)
 		}
 		requireClosedAtUpgrade(t, httpServer.URL, outside, documentSchemaCloseCode, contracts.DocumentSchemaCloseReason)
-		watch.requireHeldAtLoad(t, outside, reserved)
-		requireNothingReserved(t, service)
+		watch.requireChargedAtLoad(t, outside, 0)
+		requireNothingCharged(t, service)
 	})
 	t.Run("its admission load fails", func(t *testing.T) {
 		watch.failing.Store(failing)
@@ -564,17 +375,27 @@ func TestTheDocumentSocketReturnsItsReservationOnEveryWayOut(t *testing.T) {
 		} else if !strings.Contains(err.Error(), "503") {
 			t.Fatalf("the socket was refused with %v, want 503", err)
 		}
-		watch.requireHeldAtLoad(t, failing, reserved)
-		requireNothingReserved(t, service)
+		watch.requireChargedAtLoad(t, failing, 0)
+		requireNothingCharged(t, service)
 	})
 	t.Run("the budget has no room for it", func(t *testing.T) {
-		service.SetRoomBudgetForTest(reserved - 1)
+		// One room a browser holds, which no sweep may close, and a limit under its charge.
+		holder, err := dialDocument(httpServer.URL, joined)
+		if err != nil {
+			t.Fatalf("open the room that fills the budget: %v", err)
+		}
+		waitFor(t, 10*time.Second, "the room that fills the budget to go live", func() bool { return service.srv.GetDoc(joined) != nil })
+		service.SetRoomBudgetForTest(1)
 		t.Cleanup(func() { service.SetRoomBudgetForTest(0) })
 		requireClosedAtUpgrade(t, httpServer.URL, refused, contracts.DocumentBusyCloseCode, contracts.DocumentBusyCloseReason)
 		if service.srv.GetDoc(refused) != nil || len(watch.loads(refused)) != 0 {
 			t.Fatal("the refused socket's document was loaded, want it refused before any load")
 		}
-		requireNothingReserved(t, service)
+		leaveDocument(holder)
+		if err := service.Evict(context.Background(), joined); err != nil {
+			t.Fatal(err)
+		}
+		requireNothingCharged(t, service)
 	})
 	t.Run("it joins its room", func(t *testing.T) {
 		connection, err := dialDocument(httpServer.URL, joined)
@@ -582,15 +403,14 @@ func TestTheDocumentSocketReturnsItsReservationOnEveryWayOut(t *testing.T) {
 			t.Fatalf("open the document: %v", err)
 		}
 		waitFor(t, 10*time.Second, "the room to go live", func() bool { return service.srv.GetDoc(joined) != nil })
-		watch.requireHeldAtLoad(t, joined, reserved)
-		rendering := renderedLive(t, service, joined)
-		loaded := roomWeight(copyHeap(int64(len(rendering)), countElements(rendering), liveStructs(t, service, joined)), 0, 0)
-		requireNothingReserved(t, service)
-		if used := budgetUsed(service); used != loaded {
-			t.Fatalf("the budget holds %d bytes for the open room, want its own charge at both copies, %d", used, loaded)
+		watch.requireChargedAtLoad(t, joined, 0)
+		replica := service.replicaOf(service.srv.GetDoc(joined))
+		if replica == nil {
+			t.Fatal("the loaded room lists no replica")
 		}
-		if loaded != reserved {
-			t.Fatalf("the room's count charges %d bytes at both copies, want the %d its admission reserved from the same document at both", loaded, reserved)
+		tracked := replica.roomStateBytes()
+		if used, want := budgetUsed(service), roomWeight(tracked); tracked == 0 || used != want {
+			t.Fatalf("the budget holds %d bytes for the open room, want its %d tracked bytes of state at both copies, %d", used, tracked, want)
 		}
 		leaveDocument(connection)
 		if err := service.Evict(context.Background(), joined); err != nil {
@@ -600,543 +420,6 @@ func TestTheDocumentSocketReturnsItsReservationOnEveryWayOut(t *testing.T) {
 			t.Fatalf("the budget holds %d bytes once the room retired, want none", used)
 		}
 	})
-}
-
-// An admission reserves its stored version counted, at both copies, as the room it opens is priced
-// once loaded (storedRoomReservation). A mebibyte of prose, the shape
-// TestAResidentRoomsHeapPerByteOfItsMarkdown weighs, is admitted to an empty budget, and what it
-// reserves is within 1.05x of what its room is charged once loaded, at both copies. The
-// two are not one figure by construction: the admission counts the markdown the version stored,
-// and the room counts the rendering of the document it decoded from the stored updates, so they
-// agree only as far as that rendering spells the document as the stored one does - here, with no
-// update stored since the version, exactly; past that, by the updates stored since.
-//
-// The count is kept for the version: a second admission and the socket's own parse nothing, and
-// a new version is counted again. A version MeasureDocument cannot finish counting is priced from
-// its bytes at the densest price, and a mebibyte of it is refused at admission.
-func TestAnAdmissionReservesTheCountOfItsStoredVersion(t *testing.T) {
-	const factor = 1.05
-	ctx := context.Background()
-	database := storetest.Open(t)
-	service := newRoomBudgetService(t, database, NewPgVersioned(database))
-	var parses atomic.Int64
-	service.budget.stored.beforeCount = func(string, int64) { parses.Add(1) }
-	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
-	t.Cleanup(httpServer.Close)
-	room := createDocumentsHolding(t, database, 1, residentRoomMarkdown(t, pmdoc.MaxDocumentBytes))[0]
-	stored := latestVersionMarkdown(t, service, room)
-	started := time.Now()
-	elements := countElements(stored)
-	t.Logf("the stored version is %d bytes of prose making %d elements, counted in %s", len(stored), elements, time.Since(started))
-	if elements == elementsPastCounting {
-		t.Fatal("a mebibyte of prose is past counting, want it counted")
-	}
-
-	reservation, err := service.reserveRoom(ctx, room)
-	if err != nil || reservation == nil {
-		t.Fatalf("a mebibyte of prose was refused at admission to an empty budget: %v", err)
-	}
-	if want := roomWeight(copyHeap(int64(len(stored)), elements, storedHistoryStructs(t, database, room)), 0, 0); reservation.weight != want || parses.Load() != 1 {
-		t.Fatalf("the admission reserved %d bytes after %d parses, want its count at both copies, %d, after one", reservation.weight, parses.Load(), want)
-	}
-	service.budget.release(reservation)
-	again, err := service.reserveRoom(ctx, room)
-	if err != nil || again == nil || again.weight != reservation.weight || parses.Load() != 1 {
-		t.Fatalf("a second admission reserved %v (%v) after %d parses, want the same %d bytes and no second parse", again, err, parses.Load(), reservation.weight)
-	}
-	service.budget.release(again)
-
-	connection, err := dialDocument(httpServer.URL, room)
-	if err != nil {
-		t.Fatalf("open the document: %v", err)
-	}
-	waitFor(t, 30*time.Second, "the room to go live", func() bool { return service.srv.GetDoc(room) != nil })
-	requireNothingReserved(t, service)
-	loaded := budgetUsed(service)
-	ratio := float64(reservation.weight) / float64(loaded)
-	t.Logf("a mebibyte of prose reserves %d bytes at admission; its room is charged %d bytes loaded, at both copies (%.4fx); its bytes at the densest price would reserve %d",
-		reservation.weight, loaded, ratio, roomWeight(int64(len(stored))*bytesOfHeapAByteAtTheDensest, 0, 0))
-	if ratio < 1/factor || ratio > factor {
-		t.Fatalf("the admission reserved %d bytes, %.4fx the %d its room costs once counted, want within %.2fx", reservation.weight, ratio, loaded, factor)
-	}
-	if parses.Load() != 1 {
-		t.Fatalf("the socket's admission parsed the stored version again (%d parses), want the kept count", parses.Load())
-	}
-	leaveDocument(connection)
-	if err := service.Evict(ctx, room); err != nil {
-		t.Fatal(err)
-	}
-
-	appendVersion := func(markdown string) {
-		t.Helper()
-		if _, err := database.Pool.Exec(ctx, `
-			insert into artifact_versions (artifact_id, number, markdown, authors)
-			select $1, coalesce(max(number), 0) + 1, $2, '[]' from artifact_versions where artifact_id = $1
-		`, room, markdown); err != nil {
-			t.Fatalf("store a new version: %v", err)
-		}
-	}
-	const second = "A second version.\n"
-	appendVersion(second)
-	next, err := service.reserveRoom(ctx, room)
-	if want := roomWeight(copyHeap(int64(len(second)), countElements(second), storedHistoryStructs(t, database, room)), 0, 0); err != nil || next == nil || next.weight != want || parses.Load() != 2 {
-		t.Fatalf("an admission to a new version reserved %v (%v) after %d parses, want its own count, %d, after a second parse", next, err, parses.Load(), want)
-	}
-	service.budget.release(next)
-
-	// Empty items of alternating bullet lists, each a list of its own, are the densest rendering
-	// measured, and a mebibyte of them makes more nodes than goldmark builds before
-	// MeasureDocument stops counting.
-	uncountable := strings.Repeat("- \n\n* \n\n", 1024<<7)
-	if countElements(uncountable) != elementsPastCounting {
-		t.Fatal("a mebibyte of the densest rendering was counted, want it past counting")
-	}
-	appendVersion(uncountable)
-	densest := roomWeight(int64(len(uncountable))*bytesOfHeapAByteAtTheDensest, 0, 0)
-	if weight, err := service.storedRoomReservation(ctx, room); err != nil || weight != densest || parses.Load() != 3 {
-		t.Fatalf("a version past counting reserves %d bytes (%v) after %d parses, want its bytes at the densest price at both copies, %d, after a third", weight, err, parses.Load(), densest)
-	}
-	if refused, err := service.reserveRoom(ctx, room); refused != nil || !errors.Is(err, errRoomBudgetFull) || parses.Load() != 3 {
-		t.Fatalf("an admission to a mebibyte past counting reserved %v (%v) after %d parses, want a refusal from the kept count", refused, err, parses.Load())
-	}
-	requireNothingReserved(t, service)
-}
-
-// Two admissions to one document no room holds, at the same moment, parse its stored version once:
-// the second waits for the count the first started rather than starting its own
-// (storedRoomReservation), and both reserve that count.
-func TestTwoAdmissionsAtOnceCountTheStoredVersionOnce(t *testing.T) {
-	ctx := context.Background()
-	database := storetest.Open(t)
-	service := newRoomBudgetService(t, database, NewPgVersioned(database))
-	room := createDocuments(t, database, 1)[0]
-	stored := latestVersionMarkdown(t, service, room)
-	var parses atomic.Int64
-	counting, release := make(chan struct{}, 2), make(chan struct{})
-	service.budget.stored.beforeCount = func(string, int64) {
-		parses.Add(1)
-		counting <- struct{}{}
-		<-release
-	}
-	type admission struct {
-		reservation *roomReservation
-		err         error
-	}
-	admissions := make(chan admission, 2)
-	admit := func() {
-		reservation, err := service.reserveRoom(ctx, room)
-		admissions <- admission{reservation, err}
-	}
-	go admit()
-	select {
-	case <-counting:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the first admission never started its count")
-	}
-	go admit()
-	// Give the second admission a chance to reach the count the first holds, as the cold reads'
-	// test gives its followers (TestCancelledColdReaderLeavesTheFoldForOtherReaders).
-	time.Sleep(20 * time.Millisecond)
-	select {
-	case early := <-admissions:
-		t.Fatalf("an admission returned %v (%v) while the count was held, want it waiting for that count", early.reservation, early.err)
-	default:
-	}
-	close(release)
-	want := roomWeight(copyHeap(int64(len(stored)), countElements(stored), storedHistoryStructs(t, database, room)), 0, 0)
-	for range 2 {
-		select {
-		case got := <-admissions:
-			if got.err != nil || got.reservation == nil || got.reservation.weight != want {
-				t.Fatalf("an admission reserved %v (%v), want the stored version's count at both copies, %d", got.reservation, got.err, want)
-			}
-			defer service.budget.release(got.reservation)
-		case <-time.After(10 * time.Second):
-			t.Fatal("an admission never returned once the count was released")
-		}
-	}
-	if parses.Load() != 1 {
-		t.Fatalf("two admissions at once parsed the stored version %d times, want once", parses.Load())
-	}
-	if used := budgetUsed(service); used != 2*want {
-		t.Fatalf("the budget holds %d bytes, want both admissions' %d", used, 2*want)
-	}
-}
-
-// The counts of distinct documents each wait for a grant of the copy-heap bound, in the order they
-// asked for it (podCopyHeaps), so in a burst that fills the bound the last of them waits for every
-// count before it. Each count's read bound (coldReadTimeout) starts once it holds that grant, not
-// when its admission asks: against a bound one count fills, n admissions of n documents whose
-// counts each take twice the bound over n, the burst together twice the bound, all complete, none
-// with a count that timed out, each document counted once and no two counts at the same time.
-func TestABurstOfAdmissionsToDistinctDocumentsCountsEachWithinItsOwnReadBound(t *testing.T) {
-	const n = 6
-	const bound = 600 * time.Millisecond
-	const slow = 2 * bound / n
-	ctx := context.Background()
-	database := storetest.Open(t)
-	service := newRoomBudgetService(t, database, NewPgVersioned(database))
-	rooms := createDocuments(t, database, n)
-	useCopyHeaps(t, newWeighedHeaps(copyHeapName, storedCountGrant(t, database, rooms[0], 1)))
-	oldTimeout := coldReadTimeout
-	coldReadTimeout = bound
-	t.Cleanup(func() { coldReadTimeout = oldTimeout })
-	var parses, running atomic.Int64
-	var overlapped atomic.Bool
-	service.budget.stored.beforeCount = func(string, int64) {
-		if running.Add(1) > 1 {
-			overlapped.Store(true)
-		}
-		parses.Add(1)
-		time.Sleep(slow)
-		running.Add(-1)
-	}
-	type admission struct {
-		room        string
-		reservation *roomReservation
-		err         error
-	}
-	admissions := make(chan admission, n)
-	started := time.Now()
-	for _, room := range rooms {
-		go func() {
-			reservation, err := service.reserveRoom(ctx, room)
-			admissions <- admission{room, reservation, err}
-		}()
-	}
-	admitted := 0
-	for range n {
-		select {
-		case got := <-admissions:
-			switch {
-			case got.err == nil && got.reservation != nil:
-				admitted++
-				defer service.budget.release(got.reservation)
-			case errors.Is(got.err, errRoomBudgetFull):
-			default:
-				t.Errorf("the admission to %s answered %v (%v) %s into the burst, want it admitted or refused by the budget", got.room, got.reservation, got.err, time.Since(started).Round(time.Millisecond))
-			}
-		case <-time.After(30 * time.Second):
-			t.Fatal("an admission of the burst never returned")
-		}
-	}
-	elapsed := time.Since(started)
-	t.Logf("%d admissions of %d documents, each count %s against a read bound of %s: %d admitted in %s", n, n, slow, bound, admitted, elapsed.Round(time.Millisecond))
-	if elapsed <= bound {
-		t.Fatalf("the burst took %s, want it past one read bound, %s, so its last counts waited past it", elapsed, bound)
-	}
-	if parses.Load() != n || overlapped.Load() {
-		t.Fatalf("the burst parsed %d times, overlapping %v, want each of the %d documents counted once and one count at a time", parses.Load(), overlapped.Load(), n)
-	}
-}
-
-// An admission whose request ends while the count it waits for still waits for its grant of the
-// copy-heap bound returns at once with its request's error, and leaves the count to the admissions
-// still waiting for it, which are admitted at that count, the document parsed once. A count every
-// admission has left behind ends its wait for that grant and never parses: nobody is waiting for
-// it. The bound here holds one count, so the count holding it keeps the others waiting.
-func TestAnAdmissionWhoseRequestEndsWhileItsCountWaitsForItsGrantLeavesTheCountToTheOthers(t *testing.T) {
-	ctx := context.Background()
-	database := storetest.Open(t)
-	service := newRoomBudgetService(t, database, NewPgVersioned(database))
-	ids := createDocuments(t, database, 3)
-	held, shared, abandoned := ids[0], ids[1], ids[2]
-	useCopyHeaps(t, newWeighedHeaps(copyHeapName, storedCountGrant(t, database, held, 1)))
-	var mu sync.Mutex
-	parsed := map[string]int{}
-	counting, release := make(chan struct{}, 1), make(chan struct{})
-	var released sync.Once
-	t.Cleanup(func() { released.Do(func() { close(release) }) })
-	service.budget.stored.beforeCount = func(room string, _ int64) {
-		mu.Lock()
-		parsed[room]++
-		mu.Unlock()
-		if room == held {
-			counting <- struct{}{}
-			<-release
-		}
-	}
-	type admission struct {
-		reservation *roomReservation
-		err         error
-	}
-	admit := func(ctx context.Context, room string) chan admission {
-		answered := make(chan admission, 1)
-		go func() {
-			reservation, err := service.reserveRoom(ctx, room)
-			answered <- admission{reservation, err}
-		}()
-		return answered
-	}
-	answer := func(answered chan admission, what string) admission {
-		t.Helper()
-		select {
-		case got := <-answered:
-			return got
-		case <-time.After(10 * time.Second):
-			t.Fatalf("%s never returned", what)
-			return admission{}
-		}
-	}
-	waitingFor := func(room string) (flights, waiting int) {
-		service.budget.stored.mu.Lock()
-		defer service.budget.stored.mu.Unlock()
-		for key, flight := range service.budget.stored.flights {
-			if strings.HasPrefix(key, room+"@") {
-				flights++
-				waiting += flight.waiting
-			}
-		}
-		return flights, waiting
-	}
-
-	holding := admit(ctx, held)
-	select {
-	case <-counting:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the first admission's count never took its turn")
-	}
-	leaving, leave := context.WithCancel(ctx)
-	defer leave()
-	left := admit(leaving, shared)
-	staying := admit(ctx, shared)
-	gone, goAway := context.WithCancel(ctx)
-	defer goAway()
-	alone := admit(gone, abandoned)
-	waitFor(t, 5*time.Second, "two admissions waiting for one count of the shared document, one for the abandoned", func() bool {
-		sharedFlights, sharedWaiting := waitingFor(shared)
-		abandonedFlights, abandonedWaiting := waitingFor(abandoned)
-		return sharedFlights == 1 && sharedWaiting == 2 && abandonedFlights == 1 && abandonedWaiting == 1
-	})
-
-	leave()
-	if got := answer(left, "the admission whose request ended"); got.reservation != nil || !errors.Is(got.err, context.Canceled) {
-		t.Fatalf("the admission whose request ended answered %v (%v), want its request's end", got.reservation, got.err)
-	}
-	if flights, waiting := waitingFor(shared); flights != 1 || waiting != 1 {
-		t.Fatalf("once one of its admissions left, the shared document has %d counts with %d admissions waiting, want its one count with the other still waiting", flights, waiting)
-	}
-	goAway()
-	if got := answer(alone, "the abandoned document's only admission"); got.reservation != nil || !errors.Is(got.err, context.Canceled) {
-		t.Fatalf("the abandoned document's only admission answered %v (%v), want its request's end", got.reservation, got.err)
-	}
-	if flights, _ := waitingFor(abandoned); flights != 0 {
-		t.Fatalf("the abandoned document still has %d counts in flight once its only admission left, want none", flights)
-	}
-
-	released.Do(func() { close(release) })
-	for what, answered := range map[string]chan admission{"the first admission": holding, "the admission that stayed": staying} {
-		got := answer(answered, what)
-		if got.err != nil || got.reservation == nil {
-			t.Fatalf("%s answered %v (%v), want it admitted", what, got.reservation, got.err)
-		}
-		defer service.budget.release(got.reservation)
-	}
-	stored := latestVersionMarkdown(t, service, shared)
-	if want := roomWeight(copyHeap(int64(len(stored)), countElements(stored), storedHistoryStructs(t, database, shared)), 0, 0); budgetUsed(service) != 2*want {
-		t.Fatalf("the budget holds %d bytes, want the two admissions' %d each", budgetUsed(service), want)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if parsed[held] != 1 || parsed[shared] != 1 || parsed[abandoned] != 0 {
-		t.Fatalf("the documents were parsed %v times, want the held and the shared once each and the abandoned never", parsed)
-	}
-}
-
-// Counts of distinct documents run beside each other, as many at once as the copy-heap bound has
-// room for and no more (storedCountWeight, countStoredVersion): against a bound of three counts,
-// six admissions to six documents, each count held where it would parse, run three at once; the
-// fourth waits, and the bound never holds more than its size. Once they are released every
-// document is counted once and every admission reserves that count.
-func TestCountsOfStoredVersionsRunBesideEachOtherWithinTheCopyHeapBound(t *testing.T) {
-	const n, together = 6, 3
-	ctx := context.Background()
-	database := storetest.Open(t)
-	service := newRoomBudgetService(t, database, NewPgVersioned(database))
-	rooms := createDocuments(t, database, n)
-	weight := storedCountGrant(t, database, rooms[0], 1)
-	heaps := useCopyHeaps(t, newWeighedHeaps(copyHeapName, together*weight))
-	var most atomic.Int64
-	heaps.granted = func(held int64) {
-		for seen := most.Load(); held > seen && !most.CompareAndSwap(seen, held); seen = most.Load() {
-		}
-	}
-	var parses atomic.Int64
-	counting, release := make(chan string, n), make(chan struct{})
-	var released sync.Once
-	t.Cleanup(func() { released.Do(func() { close(release) }) })
-	service.budget.stored.beforeCount = func(room string, _ int64) {
-		parses.Add(1)
-		counting <- room
-		<-release
-	}
-	type admission struct {
-		reservation *roomReservation
-		err         error
-	}
-	admissions := make(chan admission, n)
-	for _, room := range rooms {
-		go func() {
-			reservation, err := service.reserveRoom(ctx, room)
-			admissions <- admission{reservation, err}
-		}()
-	}
-	started := map[string]bool{}
-	for range together {
-		select {
-		case room := <-counting:
-			started[room] = true
-		case <-time.After(10 * time.Second):
-			t.Fatalf("only %d of the %d counts the bound has room for started", len(started), together)
-		}
-	}
-	// The fourth count waits for its grant: nothing else gives one back while these three are held.
-	select {
-	case room := <-counting:
-		t.Fatalf("a fourth count of %s started with the %d-byte bound held by %d counts of %d bytes each", room, heaps.size, together, weight)
-	case <-time.After(250 * time.Millisecond):
-	}
-	if parses.Load() != together {
-		t.Fatalf("%d counts parsed with the bound held by %d, want only those", parses.Load(), together)
-	}
-	released.Do(func() { close(release) })
-	for range n - together {
-		select {
-		case <-counting:
-		case <-time.After(10 * time.Second):
-			t.Fatal("a count left waiting for its grant never ran once the first counts gave theirs back")
-		}
-	}
-	for range n {
-		select {
-		case got := <-admissions:
-			if got.err != nil || got.reservation == nil {
-				t.Fatalf("an admission of the burst answered %v (%v), want it admitted", got.reservation, got.err)
-			}
-			defer service.budget.release(got.reservation)
-		case <-time.After(30 * time.Second):
-			t.Fatal("an admission of the burst never returned")
-		}
-	}
-	t.Logf("%d counts of %d bytes each against a %d-byte bound: %d ran at once, the bound holding %d at its most",
-		n, weight, heaps.size, together, most.Load())
-	if parses.Load() != n {
-		t.Fatalf("the burst parsed %d times, want each of the %d documents counted once", parses.Load(), n)
-	}
-	if most.Load() != heaps.size {
-		t.Fatalf("the bound held %d bytes at its most, want all %d of it: %d counts of %d bytes ran at once", most.Load(), heaps.size, together, weight)
-	}
-}
-
-// A document whose history outgrows its rendering reserves its structs and is charged them once
-// loaded: a small document whose first paragraph took 100,000 characters, each typed before the
-// last and then deleted (typedBeforeState), renders the paragraph it began as, a few elements, from
-// over 100,000 structs. Its admission reads the struct count from a walk of its stored history,
-// which decodes nothing (storedStructs), and reserves it at bytesOfHeapAStructHeld at both copies;
-// its room's load prices the struct total it counts the same way (chargeLoadedRoom), within 1.05x
-// of the reservation.
-func TestAStructDenseDocumentReservesAndIsChargedItsStructs(t *testing.T) {
-	const factor = 1.05
-	ctx := context.Background()
-	database := storetest.Open(t)
-	service := newRoomBudgetService(t, database, NewPgVersioned(database))
-	service.settle = time.Hour // no settlement writes into the room while it is weighed
-	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
-	t.Cleanup(httpServer.Close)
-	room := createDocumentsHolding(t, database, 1, "# Title\n\nOne paragraph of ordinary prose.\n")[0]
-	storeHistory(t, service, room, typedBeforeState(t, 100_000))
-	stored := latestVersionMarkdown(t, service, room)
-	structs := storedHistoryStructs(t, database, room)
-	elements := countElements(stored)
-	if structs < 100_000 || structs*bytesOfHeapAStructHeld <= elements*bytesOfHeapAnElement {
-		t.Fatalf("the stored history holds %d structs beside a rendering of %d elements, want over 100,000 structs that outweigh the elements", structs, elements)
-	}
-
-	reservation, err := service.reserveRoom(ctx, room)
-	if err != nil || reservation == nil {
-		t.Fatalf("the admission was refused: %v", err)
-	}
-	if want := int64(structs * bytesOfHeapAStructHeld * roomCopies); reservation.weight != want {
-		t.Fatalf("the admission reserved %d bytes, want its %d structs at both copies, %d, where its %d elements would reserve %d",
-			reservation.weight, structs, want, elements, elements*bytesOfHeapAnElement*roomCopies)
-	}
-	service.budget.release(reservation)
-
-	connection, err := dialDocument(httpServer.URL, room)
-	if err != nil {
-		t.Fatalf("open the document: %v", err)
-	}
-	waitFor(t, 30*time.Second, "the room to go live", func() bool { return service.srv.GetDoc(room) != nil })
-	requireNothingReserved(t, service)
-	counted := liveStructs(t, service, room)
-	rendering := renderedLive(t, service, room)
-	loaded := budgetUsed(service)
-	if want := counted * bytesOfHeapAStructHeld * roomCopies; loaded != want || counted*bytesOfHeapAStructHeld <= countElements(rendering)*bytesOfHeapAnElement {
-		t.Fatalf("the loaded room is charged %d bytes for %d structs and %d elements, want its structs at both copies, %d",
-			loaded, counted, countElements(rendering), want)
-	}
-	ratio := float64(reservation.weight) / float64(loaded)
-	t.Logf("%d stored structs reserve %d bytes; the loaded room counts %d and is charged %d (%.4fx)", structs, reservation.weight, counted, loaded, ratio)
-	if ratio < 1/factor || ratio > factor {
-		t.Fatalf("the admission reserved %d bytes, %.4fx the %d its room is charged once loaded, want within %.2fx", reservation.weight, ratio, loaded, factor)
-	}
-	leaveDocument(connection)
-}
-
-// A document of one long run of text reserves its rendered bytes and is charged them once loaded:
-// a paragraph of a mebibyte, its text one item, renders about a mebibyte making a few elements
-// from a few structs, which would price it at a few kilobytes while each copy holds its text. Its
-// admission reserves the stored version's bytes at bytesOfHeapARenderedByte at both copies, past
-// what its elements and the structs of its stored history would reserve (copyHeap); its room's
-// load prices its rendering the same way (chargeLoadedRoom), within 1.05x of the reservation.
-func TestAParagraphOfAMebibyteReservesAndIsChargedItsRenderedBytes(t *testing.T) {
-	const factor = 1.05
-	ctx := context.Background()
-	database := storetest.Open(t)
-	service := newRoomBudgetService(t, database, NewPgVersioned(database))
-	service.settle = time.Hour // no settlement writes into the room while it is weighed
-	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
-	t.Cleanup(httpServer.Close)
-	const words = "words of one long paragraph "
-	paragraph := strings.Repeat(words, (pmdoc.MaxDocumentBytes-4<<10)/len(words)) + "end"
-	room := createDocumentsHolding(t, database, 1, "# Title\n\n"+paragraph+"\n")[0]
-	stored := latestVersionMarkdown(t, service, room)
-	structs := storedHistoryStructs(t, database, room)
-	bytes, elements := int64(len(stored)), countElements(stored)
-	byElements, byStructs := elements*bytesOfHeapAnElement, structs*bytesOfHeapAStructHeld
-	if bytes < pmdoc.MaxDocumentBytes-8<<10 || bytes*bytesOfHeapARenderedByte <= max(byElements, byStructs) {
-		t.Fatalf("the stored version is %d bytes making %d elements beside %d stored structs, want about a mebibyte whose bytes outweigh both", bytes, elements, structs)
-	}
-
-	reservation, err := service.reserveRoom(ctx, room)
-	if err != nil || reservation == nil {
-		t.Fatalf("the admission was refused: %v", err)
-	}
-	if want := bytes * bytesOfHeapARenderedByte * roomCopies; reservation.weight != want {
-		t.Fatalf("the admission reserved %d bytes, want its %d rendered bytes at both copies, %d, where its %d elements would reserve %d and its %d structs %d",
-			reservation.weight, bytes, want, elements, byElements*roomCopies, structs, byStructs*roomCopies)
-	}
-	service.budget.release(reservation)
-
-	connection, err := dialDocument(httpServer.URL, room)
-	if err != nil {
-		t.Fatalf("open the document: %v", err)
-	}
-	waitFor(t, 30*time.Second, "the room to go live", func() bool { return service.srv.GetDoc(room) != nil })
-	requireNothingReserved(t, service)
-	rendering := renderedLive(t, service, room)
-	loaded := budgetUsed(service)
-	if want := int64(len(rendering)) * bytesOfHeapARenderedByte * roomCopies; loaded != want {
-		t.Fatalf("the loaded room is charged %d bytes for a %d-byte rendering making %d elements from %d structs, want its rendered bytes at both copies, %d",
-			loaded, len(rendering), countElements(rendering), liveStructs(t, service, room), want)
-	}
-	ratio := float64(reservation.weight) / float64(loaded)
-	t.Logf("a %d-byte version of %d elements and %d stored structs reserves %d bytes; the loaded room renders %d bytes and is charged %d (%.4fx)",
-		bytes, elements, structs, reservation.weight, len(rendering), loaded, ratio)
-	if ratio < 1/factor || ratio > factor {
-		t.Fatalf("the admission reserved %d bytes, %.4fx the %d its room is charged once loaded, want within %.2fx", reservation.weight, ratio, loaded, factor)
-	}
-	leaveDocument(connection)
 }
 
 // Over the budget, the sweep closes the rooms nothing is still using and leaves the ones something
@@ -1171,7 +454,6 @@ func TestTheRoomBudgetClosesUnusedRoomsAndRefusesWhenNoneIsLeft(t *testing.T) {
 	if service.srv.GetDoc(refused) != nil {
 		t.Fatal("the refused browser's room was made, want none")
 	}
-	requireNothingReserved(t, service)
 
 	// The server's own write is never refused: it opens its room over the budget, lands, and the
 	// room goes once nothing holds it, the signal staying up for the room still in use.
@@ -1193,31 +475,23 @@ func TestTheRoomBudgetClosesUnusedRoomsAndRefusesWhenNoneIsLeft(t *testing.T) {
 }
 
 // An admission the budget has no room for while it is within its limit starts a sweep that makes
-// room for that admission, and waits for it: a reservation never takes the budget past its limit,
-// so a sweep that stopped once the budget was within it would close nothing, and the admission
-// would be refused while unused rooms stayed charged. The sweep closes unused rooms, the heaviest
-// first, until the admission's weight fits and no further, and the admission is admitted into the
-// room it made, its first attempt. Nothing in this raises full, which refuses growth in every room.
+// room for it, and waits for it: the sweep closes unused rooms, the heaviest first, until the
+// budget is within its limit, and the admission is admitted into the room it made, its first
+// attempt. Nothing in this raises full, which refuses growth in every room.
 func TestTheRoomBudgetAdmissionWaitsForItsSweepAndIsAdmittedIntoTheRoomItMakes(t *testing.T) {
-	ctx := context.Background()
 	database := storetest.Open(t)
 	service := newRoomBudgetService(t, database, NewPgVersioned(database))
-	// Each write's rendering is counted as it is published, so the rooms' charges are settled
-	// before the limit is set against them.
-	service.measurer.interval = noInterval
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
 	ids := createDocuments(t, database, 4)
-	unused, waiting := ids[:3], ids[3]
+	unused, joining := ids[:3], ids[3]
 	for _, room := range unused {
 		appendThroughAPI(t, service, room)
 		waitFor(t, 10*time.Second, "the written room to settle and hold nothing", func() bool { return roomUnused(service, room) })
 	}
-	service.measurer.waitIdle()
-	needs, err := service.storedRoomReservation(ctx, waiting)
-	if err != nil {
-		t.Fatal(err)
-	}
+	charged := budgetUsed(service)
 	service.budget.mu.Lock()
-	charged, lightest := service.budget.used, int64(0)
+	lightest := int64(0)
 	for _, room := range unused {
 		weight := service.budget.rooms[room].charges[0].weight
 		if lightest == 0 || weight < lightest {
@@ -1225,34 +499,599 @@ func TestTheRoomBudgetAdmissionWaitsForItsSweepAndIsAdmittedIntoTheRoomItMakes(t
 		}
 	}
 	service.budget.mu.Unlock()
-	if needs <= 0 || needs > lightest {
-		t.Fatalf("the waiting document reserves %d bytes and the lightest unused room is charged %d, want a reservation one room's close makes room for", needs, lightest)
+	if lightest <= 0 {
+		t.Fatalf("the lightest unused room is charged %d bytes, want a room whose close makes room", lightest)
 	}
 
-	service.SetRoomBudgetForTest(charged)
+	// A limit one byte under what the unused rooms fill: the sweep must close one of them before
+	// the admission passes.
+	service.SetRoomBudgetForTest(charged - 1)
 	t.Cleanup(func() { service.SetRoomBudgetForTest(0) })
-	reservation, err := service.reserveRoom(ctx, waiting)
-	if err != nil || reservation == nil {
-		t.Fatalf("an admission to a budget its unused rooms fill exactly reserved %v (%v), want it admitted once its sweep made room", reservation, err)
+	connection, err := dialDocument(httpServer.URL, joining)
+	if err != nil {
+		t.Fatalf("an admission to a budget its unused rooms fill was refused: %v", err)
 	}
-	defer service.budget.release(reservation)
+	t.Cleanup(func() { _ = connection.Close() })
+	waitFor(t, 10*time.Second, "the admitted room to go live", func() bool { return service.srv.GetDoc(joining) != nil })
 	closed := 0
 	for _, room := range unused {
 		if service.srv.GetDoc(room) == nil {
 			closed++
 		}
 	}
-	if closed != 1 {
-		t.Fatalf("the sweep closed %d of the %d unused rooms, want the one that makes room for the admission", closed, len(unused))
+	if closed == 0 || closed == len(unused) {
+		t.Fatalf("the sweep closed %d of the %d unused rooms, want the ones that make room for the admission and no more", closed, len(unused))
 	}
-	if used := budgetUsed(service); used > charged || service.budget.full.Load() {
-		t.Fatalf("after the admission the budget holds %d of %d bytes with full %t, want it within and full down", used, charged, service.budget.full.Load())
+	if count := waiting(&service.budget); count != 0 {
+		t.Fatalf("the admitted admission left %d admissions waiting, want none", count)
 	}
-	service.budget.mu.Lock()
-	defer service.budget.mu.Unlock()
-	if service.budget.wanted != 0 || service.budget.waiting != 0 {
-		t.Fatalf("the admitted admission left %d bytes wanted by %d waiting, want none", service.budget.wanted, service.budget.waiting)
+}
+
+// Every transaction the peer hook did not apply is charged to its room as a browser's admitted
+// update is - by the room's own update observer, from the bytes of the update that observer
+// drains (renderedReplica.chargeAdded) - and none is refused for it: here the server's own
+// writes, into a room one browser holds, with the budget far past its limit and full raised. A
+// browser's update the hook admits is charged the same way, once, by that same drain.
+func TestTheRoomBudgetChargesEveryServerWriteAndRefusesNone(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	service := newRoomBudgetService(t, database, NewPgVersioned(database))
+	service.settle = time.Hour // no settlement writes into the room while it is weighed
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
+	room := createDocumentsHolding(t, database, 1, "First paragraph of ordinary prose.")[0]
+	browser := connectBrowser(t, httpServer.URL, room, "alice")
+	t.Cleanup(browser.Close)
+	live := service.srv.GetDoc(room)
+	replica := service.replicaOf(live)
+	if replica == nil || replica.roomCharge() == nil {
+		t.Fatal("the browser's room holds no charge in the room budget")
 	}
+	tracked := func() int64 { return replica.roomStateBytes() }
+
+	// A browser's keystroke, through the hook into the room the observer drains.
+	origin := &struct{ browser string }{"alice"}
+	keystroke := peerTyping(t, live, "y")
+	before := tracked()
+	if err := service.weighPeerUpdate(websocket.PeerUpdateInfo{Room: room, Doc: live, Update: keystroke, Origin: origin}, func() error {
+		return crdt.ApplyUpdateV1(live, keystroke, origin)
+	}); err != nil {
+		t.Fatalf("the hook refused a keystroke: %v", err)
+	}
+	waitFor(t, 10*time.Second, "the room's observer to drain the keystroke", func() bool { return tracked() > before })
+	if grew := tracked() - before; grew > int64(len(keystroke)) {
+		t.Fatalf("a browser's keystroke grew the room's tracked state by %d bytes, want no more than its update's %d", grew, len(keystroke))
+	}
+
+	service.SetRoomBudgetForTest(1)
+	t.Cleanup(func() { service.SetRoomBudgetForTest(0) })
+	waitFor(t, 10*time.Second, "the budget to report itself full", service.budget.full.Load)
+	write := func(what string, change func(doc *crdt.Doc, transact func(func(*crdt.Transaction)))) int64 {
+		t.Helper()
+		before := tracked()
+		if err := service.srv.Apply(ctx, room, change); err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+			t.Fatalf("%s on a full budget: %v", what, err)
+		}
+		waitFor(t, 10*time.Second, "the room's observer to drain "+what, func() bool { return tracked() > before })
+		return tracked() - before
+	}
+	inText := func(edit func(text *crdt.YXmlText, txn *crdt.Transaction)) func(*crdt.Doc, func(func(*crdt.Transaction))) {
+		return func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+			// Read before the transaction, which holds the document's lock the read takes.
+			text := firstText(doc.GetXmlFragment(fragmentName))
+			transact(func(txn *crdt.Transaction) { edit(text, txn) })
+		}
+	}
+	if grew := write("type three characters", inText(func(text *crdt.YXmlText, txn *crdt.Transaction) { text.Insert(txn, 0, "abc", nil) })); grew == 0 {
+		t.Fatal("three characters the server typed grew the room's tracked state by nothing")
+	}
+	if grew := write("delete one character", inText(func(text *crdt.YXmlText, txn *crdt.Transaction) { text.Delete(txn, 8, 1) })); grew == 0 {
+		t.Fatal("a character the server deleted grew the room's tracked state by nothing: a delete's own update is still bytes the room holds")
+	}
+	before = tracked()
+	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+	if _, err := joinedApplyOps(service, room, []model.EditOp{{Op: "replace", Find: "ordinary", With: "plain"}}, agent, nil); err != nil {
+		t.Fatalf("an API write on a full budget: %v", err)
+	}
+	waitFor(t, 10*time.Second, "the room's observer to drain the API write", func() bool { return tracked() > before })
+	if text := renderedLive(t, service, room); !strings.Contains(text, "plain prose") {
+		t.Fatalf("the room reads %q after the API write, want it to hold the write", text)
+	}
+	if used, want := budgetUsed(service), roomWeight(tracked()); used != want {
+		t.Fatalf("the budget holds %d bytes for the room, want the %d its %d tracked bytes of state come to", used, want, tracked())
+	}
+}
+
+// An admission whose budget is short waits for a room whose browser has just gone: such a room
+// is not closable until what the browser left - here a latest edit source no settlement has read,
+// which a browser's edit leaves until its settlement runs - is gone. Once it is, the room's state
+// starts a sweep that closes it, and the waiting admission passes. With what the browser left
+// never ending, the admission is refused only once admissionWait has passed.
+func TestTheRoomBudgetAdmissionWaitsForARoomWhoseBrowserJustLeft(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	service := newRoomBudgetService(t, database, NewPgVersioned(database))
+	// The admissions below are the budget's own look, which names no document; the ids are
+	// the rooms the budget must make room out of.
+	left := createDocuments(t, database, 3)[0]
+	appendThroughAPI(t, service, left)
+	waitFor(t, 10*time.Second, "the written room to settle and hold nothing", func() bool { return roomUnused(service, left) })
+	hold := func(unsettled bool) {
+		state := service.lockExistingState(left)
+		if state == nil {
+			t.Fatal("the room whose browser left has no state")
+		}
+		state.unsettled = unsettled
+		service.unlockState(left, state)
+	}
+	hold(true)
+	// One byte under what the rooms are charged, so the budget stands over its limit: nothing is
+	// reserved for an admission any more (roomBudget.refusal), so the room that crosses the limit
+	// is the last one admitted and a limit at exactly what the rooms come to still fits one more.
+	service.SetRoomBudgetForTest(budgetUsed(service) - 1)
+	t.Cleanup(func() { service.SetRoomBudgetForTest(0) })
+
+	answered := make(chan error, 1)
+	go func() {
+		answered <- second(service.budget.refusal(ctx, time.Now().Add(service.admissionWait), "room", 0))
+	}()
+	waitFor(t, 5*time.Second, "the admission to wait", func() bool { return waiting(&service.budget) == 1 })
+	select {
+	case err := <-answered:
+		t.Fatalf("the admission was answered %v while the room whose browser left still settled", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if service.srv.GetDoc(left) == nil {
+		t.Fatal("the budget closed the room whose browser left before it was done with")
+	}
+	hold(false)
+	select {
+	case err := <-answered:
+		if err != nil {
+			t.Fatalf("the admission was answered %v once the room whose browser left was closable, want it admitted", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the admission still waits after the room whose browser left became closable")
+	}
+	if service.srv.GetDoc(left) != nil {
+		t.Fatal("the room whose browser left is still open after the admission it made room for")
+	}
+
+	// The same wait with what the browser left never ending: the admission is refused once
+	// admissionWait has passed, and not before. The room is written into again under the whole
+	// budget, so it is not opened over it.
+	service.SetRoomBudgetForTest(0)
+	appendThroughAPI(t, service, left)
+	waitFor(t, 10*time.Second, "the written room to settle and hold nothing", func() bool { return roomUnused(service, left) })
+	hold(true)
+	t.Cleanup(func() {
+		if state := service.lockExistingState(left); state != nil {
+			state.unsettled = false
+			service.unlockState(left, state)
+		}
+	})
+	service.SetRoomBudgetForTest(budgetUsed(service) - 1)
+	service.admissionWait = 500 * time.Millisecond
+	started := time.Now()
+	_, err := service.budget.refusal(ctx, time.Now().Add(service.admissionWait), "room", 0)
+	if !errors.Is(err, errRoomBudgetFull) {
+		t.Fatalf("an admission nothing could make room for was answered %v, want it refused", err)
+	}
+	if waited := time.Since(started); waited < service.admissionWait {
+		t.Fatalf("the admission was refused after %v, before the %v it waits for a pending room", waited, service.admissionWait)
+	}
+	if service.srv.GetDoc(left) == nil {
+		t.Fatal("the budget closed a room something still held")
+	}
+}
+
+// The same wait with a real browser: one edits its document over the socket and leaves, which
+// settles the room at once (settleLastPeer), and the next admission, to a budget that room fills,
+// arrives while the settlement still runs - here held at its document lock, as a mebibyte's
+// settlement takes seconds on a loaded pod. The admission waits for the settlement to commit and
+// the sweep to close the room, and is admitted into the room the close made: the room is gone by
+// the time the admission is answered, never refused first and closed after.
+func TestTheRoomBudgetAdmitsABrowserOnceTheRoomAnEditingBrowserLeftIsClosed(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	service := newRoomBudgetService(t, database, NewPgVersioned(database))
+	// The edit's own settle timer never fires: the browser's leaving takes it and settles at once.
+	service.settle = time.Minute
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
+	left := createDocuments(t, database, 2)[0]
+	settling, release := make(chan struct{}, 1), make(chan struct{})
+	var released sync.Once
+	t.Cleanup(func() { released.Do(func() { close(release) }) })
+	service.afterSettleLock = func(room string) {
+		if room == left {
+			select {
+			case settling <- struct{}{}:
+			default:
+			}
+			<-release
+		}
+	}
+
+	peer := connectPeer(t, httpServer.URL, left, "alice")
+	select {
+	case <-peer.Answers:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the browser was never handed its document")
+	}
+	text := firstText(peer.Doc.GetXmlFragment(fragmentName))
+	if text == nil {
+		t.Fatal("the browser's document holds no text")
+	}
+	if _, err := peer.Send(func(txn *crdt.Transaction) { text.Insert(txn, 0, "Edited. ", nil) }); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 10*time.Second, "the room to take the browser's edit", func() bool {
+		return strings.Contains(renderedLive(t, service, left), "Edited. ")
+	})
+	peer.Close()
+	select {
+	case <-settling:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the browser left and no settlement ran")
+	}
+	// The browser's handler forgets it only once the settlement its leaving runs has returned, so
+	// the room's state still names it, as departed; a sweep that took it for a browser holding the
+	// room would leave the admission nothing to wait for.
+	state := service.lockExistingState(left)
+	departed := state != nil && len(state.connected) == 1 && state.onlyDepartedLocked() && !service.unusedLocked(state)
+	if state != nil {
+		service.unlockState(left, state)
+	}
+	if !departed {
+		t.Fatal("while its settlement runs, the room whose browser left does not name that browser as departed")
+	}
+	service.SetRoomBudgetForTest(budgetUsed(service) - 1)
+	t.Cleanup(func() { service.SetRoomBudgetForTest(0) })
+
+	answered := make(chan error, 1)
+	go func() {
+		answered <- second(service.budget.refusal(ctx, time.Now().Add(service.admissionWait), "room", 0))
+	}()
+	waitFor(t, 5*time.Second, "the admission to wait", func() bool { return waiting(&service.budget) == 1 })
+	select {
+	case err := <-answered:
+		t.Fatalf("the admission was answered %v while the room whose browser left still settled", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	released.Do(func() { close(release) })
+	select {
+	case err := <-answered:
+		if err != nil {
+			t.Fatalf("the admission was answered %v once the room whose browser left had settled, want it admitted", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the admission still waits after the room whose browser left settled")
+	}
+	if service.srv.GetDoc(left) != nil {
+		t.Fatal("the admission was answered while the room whose browser left was still open")
+	}
+}
+
+// An admission whose budget is short waits for the one room the sweep could close while a
+// Server.Apply is inside its callback on it: that close declines (closeUnused), since the apply
+// holds the room and holds nothing in the room's state that the sweep could see, and the room is
+// left pending rather than the admission refused. The apply's return is what reports its end
+// (roomApplied), and the sweep that follows closes the room and admits the admission.
+func TestTheRoomBudgetAdmissionWaitsForARoomAnApplyIsInside(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	service := newRoomBudgetService(t, database, NewPgVersioned(database))
+	closable := createDocuments(t, database, 2)[0]
+	appendThroughAPI(t, service, closable)
+	waitFor(t, 10*time.Second, "the written room to settle and hold nothing", func() bool { return roomUnused(service, closable) })
+
+	inside, release := make(chan struct{}), make(chan struct{})
+	var released sync.Once
+	t.Cleanup(func() { released.Do(func() { close(release) }) })
+	applied := make(chan error, 1)
+	go func() {
+		applied <- service.srv.Apply(ctx, closable, func(*crdt.Doc, func(func(*crdt.Transaction))) {
+			close(inside)
+			<-release
+		})
+	}()
+	select {
+	case <-inside:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the apply never reached its callback")
+	}
+	if !roomUnused(service, closable) {
+		t.Fatal("the room an apply is inside holds something in its state, so the sweep would leave it pending without the apply")
+	}
+	service.SetRoomBudgetForTest(budgetUsed(service) - 1)
+	t.Cleanup(func() { service.SetRoomBudgetForTest(0) })
+
+	answered := make(chan error, 1)
+	go func() {
+		answered <- second(service.budget.refusal(ctx, time.Now().Add(service.admissionWait), "room", 0))
+	}()
+	waitFor(t, 5*time.Second, "the admission to wait", func() bool { return waiting(&service.budget) == 1 })
+	select {
+	case err := <-answered:
+		t.Fatalf("the admission was answered %v while the apply held the only room the budget could close", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if service.srv.GetDoc(closable) == nil {
+		t.Fatal("the budget closed the room an apply was inside")
+	}
+
+	released.Do(func() { close(release) })
+	if err := <-applied; err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+		t.Fatalf("the apply holding the room answered %v", err)
+	}
+	select {
+	case err := <-answered:
+		if err != nil {
+			t.Fatalf("the admission was answered %v once the apply holding the room returned, want it admitted", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the admission still waits after the apply that held the only closable room returned")
+	}
+	if service.srv.GetDoc(closable) != nil {
+		t.Fatal("the room the apply held is still open after the admission its close made room for")
+	}
+}
+
+// roomHasBrowser is whether room's state has a browser connected.
+func roomHasBrowser(service *Service, room string) bool {
+	state := service.lockExistingState(room)
+	if state == nil {
+		return false
+	}
+	defer service.unlockState(room, state)
+	return len(state.connected) > 0
+}
+
+// A room the server's own work loads through the budget's one opening while the charges are
+// about to pass its limit is closed once that work no longer holds it, though the budget is back
+// within its limit and not full by then, so nothing else would close it before it retires a
+// minute later. One a browser joins before the work ends is the browser's: it is not closed
+// while the browser holds it, nor once the browser has left.
+//
+// The opening is what tells the server's own room from a browser's, now that nothing is reserved
+// for an admission: the budget marks the room its opening named, and only where that room's
+// charge takes the charges past the limit (roomBudget.load). So each room here is opened as
+// every opener of Server.Apply opens one - the opening booked first, under a limit the room's
+// own charge then crosses, and given back once the Apply has returned (publishLiveWrite,
+// settleRoomWithin, VerifyMark, docTree, captureLiveTextAndAuthors) - and one stands at a time.
+func TestTheRoomBudgetClosesARoomTheServerOpenedOverItOnceUnusedAndNeverABrowsersRoom(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	service := newRoomBudgetService(t, database, NewPgVersioned(database))
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
+	ids := createDocuments(t, database, 2)
+	opened, joined := ids[0], ids[1]
+	// The server's work in each room outlasts the Apply that opens it, as a settlement or a write's
+	// append does: a latest edit source no settlement has read yet, recorded inside the Apply, once
+	// the room's load has taken the edit source its store row names (onLoadDocument, which clears
+	// one a row does not name).
+	hold := func(room string, unsettled bool) {
+		state := service.lockState(room)
+		state.unsettled = unsettled
+		service.unlockState(room, state)
+	}
+
+	for _, room := range []string{opened, joined} {
+		service.SetRoomBudgetForTest(budgetUsed(service) + 1)
+		if !service.budget.openServerRoom(room) {
+			t.Fatal("the budget refused the server's work an opening while the charges stood under its limit")
+		}
+		err := service.srv.Apply(ctx, room, func(*crdt.Doc, func(func(*crdt.Transaction))) { hold(room, true) })
+		service.budget.closeServerRoom()
+		if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+			t.Fatal(err)
+		}
+		if !service.budget.isMarked(room) {
+			t.Fatalf("the room the server opened as its charge passed the budget's limit was not marked to close once unused")
+		}
+	}
+	service.SetRoomBudgetForTest(0)
+	waitFor(t, 10*time.Second, "the budget's sweeps to end", func() bool {
+		service.budget.mu.Lock()
+		defer service.budget.mu.Unlock()
+		return !service.budget.sweeping
+	})
+	if service.budget.full.Load() || service.srv.GetDoc(opened) == nil || service.srv.GetDoc(joined) == nil {
+		t.Fatalf("with the budget back within its limit, full is %t and the rooms are open: %t, %t; want full down and both open while the work holds them",
+			service.budget.full.Load(), service.srv.GetDoc(opened) != nil, service.srv.GetDoc(joined) != nil)
+	}
+
+	connection, err := dialDocument(httpServer.URL, joined)
+	if err != nil {
+		t.Fatalf("open the room the server opened: %v", err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+	waitFor(t, 10*time.Second, "the browser to join", func() bool { return roomHasBrowser(service, joined) })
+	if service.budget.isMarked(joined) {
+		t.Fatal("a room a browser joined is still marked to close once the server's work ends")
+	}
+
+	hold(opened, false)
+	waitFor(t, 10*time.Second, "the room the server opened over the budget to close once unused", func() bool { return service.srv.GetDoc(opened) == nil })
+	hold(joined, false)
+	leaveDocument(connection)
+	waitFor(t, 10*time.Second, "the browser to leave", func() bool { return !roomHasBrowser(service, joined) })
+	time.Sleep(300 * time.Millisecond)
+	if service.srv.GetDoc(joined) == nil {
+		t.Fatal("the budget closed the room a browser had joined once the server's work in it ended")
+	}
+}
+
+// settlementOwed is whether the document still owes a settlement, which the settlement that has
+// read every one of its updates deletes as it commits (clearSettlementPending).
+func settlementOwed(t *testing.T, service *Service, room string) bool {
+	t.Helper()
+	var owed bool
+	if err := service.store.Pool.QueryRow(context.Background(),
+		`select exists(select 1 from doc_settlements_pending where artifact_id = $1)`, room).Scan(&owed); err != nil {
+		t.Fatalf("read the document's pending settlement: %v", err)
+	}
+	return owed
+}
+
+// A committed write to a document no room holds publishes into no room while the rooms already
+// open leave the budget no opening for one (roomBudget.openServerRoom): the budget's charges
+// stand where they stood, and the write is applied all the same, its update and its version
+// having been durable before the publish began. The settlement it leaves owed is what cannot do
+// without a room, so it waits for the budget's one opening whatever the charges read
+// (awaitServerRoom), warms its room over the full budget and settles the document, and the
+// budget closes that room as soon as the settlement has ended (closeIfOpenedOverBudget). With an
+// opening to be had, a publish opens its room as such a publish always has.
+//
+// Before the opening every such publish loaded its room whatever the budget held, charged it to a
+// budget already full, and left it charged until the settlement the write armed had run: a burst
+// of three hundred of them over a full budget took the pod 713,885,218 bytes past its Go memory
+// limit (cmd/dispatch, TestABurstOfConcurrentLiveWritesStaysUnderThePodsMemory).
+func TestAWritePublishesIntoNoRoomWhileTheBudgetHasNoOpeningForOne(t *testing.T) {
+	database := storetest.Open(t)
+	service := newRoomBudgetService(t, database, NewPgVersioned(database))
+	// Long enough that the settlement the write owes does not run while the publish is weighed;
+	// the test runs it itself below (SettleNow).
+	service.settle = time.Minute
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
+	ids := createDocuments(t, database, 3)
+	held, cold, opened := ids[0], ids[1], ids[2]
+
+	// One room a browser holds, which no sweep may close, and a budget its charge fills exactly.
+	browser := connectBrowser(t, httpServer.URL, held, "alice")
+	t.Cleanup(browser.Close)
+	waitFor(t, 10*time.Second, "the browser's room to be charged", func() bool { return budgetUsed(service) > 0 })
+	limit := service.SetRoomBudgetForTest(budgetUsed(service))
+	t.Cleanup(func() { service.SetRoomBudgetForTest(0) })
+
+	appendThroughAPI(t, service, cold)
+	if service.srv.GetDoc(cold) != nil {
+		t.Fatal("the publish of a write to a document no room holds opened its room while the budget had no opening for one")
+	}
+	if used := budgetUsed(service); used != limit {
+		t.Fatalf("the open rooms are charged %d bytes of the %d-byte budget after the write, want the charges left where they stood", used, limit)
+	}
+	// The paragraph the write appended beside the one the document was created holding, in the
+	// store, which held both before the publish began.
+	if stored, want := storedMarkdown(t, database, cold), 2; strings.Count(stored, "Room cap probe.") != want {
+		t.Fatalf("the written document reads %q, want the %d paragraphs of a write that was applied though it opened no room", stored, want)
+	}
+	if !settlementOwed(t, service, cold) {
+		t.Fatal("the written document owes no settlement, want the write to have armed the one its publish could not")
+	}
+
+	// The settlement takes the budget's opening though the budget is full, settles the document,
+	// and the room it warmed is closed once it has: it was opened over the limit, so the budget
+	// owes it that close.
+	service.SettleNow(cold)
+	waitFor(t, 30*time.Second, "the document to settle in the room its settlement warms", func() bool {
+		return !settlementOwed(t, service, cold)
+	})
+	waitFor(t, 30*time.Second, "the budget to close the room its settlement opened over it", func() bool {
+		return service.srv.GetDoc(cold) == nil
+	})
+	waitFor(t, 30*time.Second, "the budget's charges to fall back to what the browser's room holds", func() bool {
+		return budgetUsed(service) == limit
+	})
+
+	// A write with an opening to be had publishes into the room it opens, as every such write did
+	// before the budget booked openings at all.
+	service.SetRoomBudgetForTest(0)
+	appendThroughAPI(t, service, opened)
+	if service.srv.GetDoc(opened) == nil {
+		t.Fatal("the publish of a write to a document no room holds opened no room, want the room such a publish opens while the budget has an opening for one")
+	}
+}
+
+// A burst of API reads of documents no room holds opens no room while the budget has no opening
+// for one: each read is answered from the stored document instead (docTree, storedTree), and the
+// budget's charges stand where they stood. Without the opening each of those reads loaded a room
+// of its own, all of them at once, charged to a budget that refuses the server's own work
+// nothing.
+func TestABurstOfReadsOfColdDocumentsOpensNoRoomWhileTheBudgetHasNoOpeningForOne(t *testing.T) {
+	const reads = 12
+	ctx := context.Background()
+	database := storetest.Open(t)
+	service := newRoomBudgetService(t, database, NewPgVersioned(database))
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
+	ids := createDocuments(t, database, reads+1)
+	held, cold := ids[0], ids[1:]
+
+	browser := connectBrowser(t, httpServer.URL, held, "alice")
+	t.Cleanup(browser.Close)
+	waitFor(t, 10*time.Second, "the browser's room to be charged", func() bool { return budgetUsed(service) > 0 })
+	limit := service.SetRoomBudgetForTest(budgetUsed(service))
+	t.Cleanup(func() { service.SetRoomBudgetForTest(0) })
+
+	blocks := make([]string, reads)
+	errs := make([]error, reads)
+	var group sync.WaitGroup
+	start := make(chan struct{})
+	for index, room := range cold {
+		group.Go(func() {
+			<-start
+			blocks[index], errs[index] = service.BlockForQuote(ctx, room, "Room cap probe.")
+		})
+	}
+	close(start)
+	group.Wait()
+	for index, err := range errs {
+		if err != nil || blocks[index] == "" {
+			t.Fatalf("read %d of a document no room holds answered %q (%v), want the block holding its quote", index, blocks[index], err)
+		}
+	}
+	for index, room := range cold {
+		if service.srv.GetDoc(room) != nil {
+			t.Fatalf("read %d opened a room for document %s while the budget had no opening for one", index, room)
+		}
+	}
+	if used := budgetUsed(service); used != limit {
+		t.Fatalf("the open rooms are charged %d bytes of the %d-byte budget after %d reads, want the charges left where they stood", used, limit, reads)
+	}
+
+	// With an opening to be had, a read loads the room as such a read always has.
+	service.SetRoomBudgetForTest(0)
+	if _, err := service.BlockForQuote(ctx, cold[0], "Room cap probe."); err != nil {
+		t.Fatalf("a read with an opening to be had: %v", err)
+	}
+	if service.srv.GetDoc(cold[0]) == nil {
+		t.Fatal("a read of a document no room holds opened no room, want the room such a read opens while the budget has an opening for one")
+	}
+}
+
+// The opening the server's own work books is weighed against the charge of the room the opening
+// before it made, not against the budget as it stood before that room loaded: the load charges
+// the room inside the Apply that opens it (chargeLoadedRoom, roomBudget.load), which returns
+// before its opener gives the opening back (closeServerRoom), so the next openServerRoom reads a
+// used that already holds it. One room past the limit is therefore all the charges can stand
+// past it.
+func TestAnOpeningIsWeighedAgainstTheRoomTheOpeningBeforeItMade(t *testing.T) {
+	budget := &roomBudget{limit: 1_000}
+	if !budget.openServerRoom("opened") {
+		t.Fatal("the first opening of an empty budget was refused")
+	}
+	if budget.openServerRoom("another") {
+		t.Fatal("a second opening was booked while the first stood")
+	}
+	// What the load does inside the Apply the opening covers, before the opening is given back:
+	// a room of 40 bytes of state, charged roomWeight(40) = 1,120, past this budget's limit.
+	budget.load("opened", 40)
+	budget.closeServerRoom()
+	if used := budget.used; used <= budget.limit {
+		t.Fatalf("the room the opening made is charged %d of %d bytes, want this test's room to fill the limit", used, budget.limit)
+	}
+	if budget.openServerRoom("another") {
+		t.Fatalf("an opening was booked with %d of %d bytes charged, want it refused against the room the opening before it made", budget.used, budget.limit)
+	}
+	budget.retire("opened")
+	if !budget.openServerRoom("another") {
+		t.Fatal("an opening was refused once the room before it retired")
+	}
+	budget.closeServerRoom()
 }
 
 // newRoomBudgetService is a document service over persist whose rooms stay resident a minute after
@@ -1276,28 +1115,28 @@ func newRoomBudgetService(t *testing.T, database *store.Store, persist Versioned
 }
 
 // admissionWatchStore records, at each load of a document's stored state (the socket's admission
-// check, loadTree, and the room's own), the reservations the room budget holds for that document,
-// and fails the loads of the document failing names.
+// check, loadTree, and the room's own), what the room budget charges that document, and fails the
+// loads of the document failing names.
 type admissionWatchStore struct {
 	VersionedStore
 	service atomic.Pointer[Service]
 	failing atomic.Value
 	mu      sync.Mutex
-	held    map[string][]int64
+	charged map[string][]int64
 }
 
 func (s *admissionWatchStore) Load(ctx context.Context, room string) (persistence.LoadResult, error) {
 	budget := &s.service.Load().budget
 	budget.mu.Lock()
-	reserved := int64(0)
+	held := int64(0)
 	if entry := budget.rooms[room]; entry != nil {
-		for _, reservation := range entry.reservations {
-			reserved += reservation.weight
+		for _, charge := range entry.charges {
+			held += charge.weight
 		}
 	}
 	budget.mu.Unlock()
 	s.mu.Lock()
-	s.held[room] = append(s.held[room], reserved)
+	s.charged[room] = append(s.charged[room], held)
 	s.mu.Unlock()
 	if failing, _ := s.failing.Load().(string); failing == room {
 		return persistence.LoadResult{}, errors.New("injected load failure")
@@ -1308,16 +1147,17 @@ func (s *admissionWatchStore) Load(ctx context.Context, room string) (persistenc
 func (s *admissionWatchStore) loads(room string) []int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]int64(nil), s.held[room]...)
+	return append([]int64(nil), s.charged[room]...)
 }
 
-// requireHeldAtLoad requires the admission check's load of room, its first, to have found the
-// socket's reservation of want bytes held.
-func (s *admissionWatchStore) requireHeldAtLoad(t *testing.T, room string, want int64) {
+// requireChargedAtLoad requires the admission check's load of room, its first, to have found want
+// bytes charged for that document: nothing, until its room's own load has decoded the state the
+// budget charges it for.
+func (s *admissionWatchStore) requireChargedAtLoad(t *testing.T, room string, want int64) {
 	t.Helper()
 	loads := s.loads(room)
 	if len(loads) == 0 || loads[0] != want {
-		t.Fatalf("the admission's load found %v bytes reserved, want %d first", loads, want)
+		t.Fatalf("the admission's load found %v bytes charged, want %d first", loads, want)
 	}
 }
 
@@ -1338,21 +1178,12 @@ func requireClosedAtUpgrade(t *testing.T, serverURL, room string, code int, reas
 	}
 }
 
-// requireNothingReserved requires the budget to hold no reservation once the handlers the test
-// drove have returned: a refusing handler returns once the client answers its close, a moment
-// after the client has read it.
-func requireNothingReserved(t *testing.T, service *Service) {
+// requireNothingCharged requires the budget to charge nothing once the handlers the test drove
+// have returned: a refusing handler returns once the client answers its close, a moment after the
+// client has read it.
+func requireNothingCharged(t *testing.T, service *Service) {
 	t.Helper()
-	waitFor(t, 5*time.Second, "the budget to hold no reservation", func() bool {
-		service.budget.mu.Lock()
-		defer service.budget.mu.Unlock()
-		for _, entry := range service.budget.rooms {
-			if len(entry.reservations) > 0 {
-				return false
-			}
-		}
-		return true
-	})
+	waitFor(t, 5*time.Second, "the budget to charge nothing", func() bool { return budgetUsed(service) == 0 })
 }
 
 func budgetUsed(service *Service) int64 {
@@ -1381,41 +1212,6 @@ func renderedLive(t *testing.T, service *Service, room string) string {
 	return markdown
 }
 
-// storedHistoryStructs is the structs of every update room's history stores, each walked as a
-// room's own state is (walkUpdate, fromRoom), summed: what an admission prices the stored history
-// at (storedStructs), read here row by row.
-func storedHistoryStructs(t *testing.T, database *store.Store, room string) int64 {
-	t.Helper()
-	rows, err := database.Pool.Query(context.Background(), `select update from doc_updates where artifact_id = $1`, room)
-	if err != nil {
-		t.Fatalf("read the stored history: %v", err)
-	}
-	defer rows.Close()
-	var structs uint64
-	for rows.Next() {
-		var update []byte
-		if err := rows.Scan(&update); err != nil {
-			t.Fatalf("read a stored update: %v", err)
-		}
-		tally, err := walkUpdate(update, fromRoom, nil)
-		if err != nil {
-			t.Fatalf("walk a stored update: %v", err)
-		}
-		structs += tally.structs
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("read the stored history: %v", err)
-	}
-	return int64(structs)
-}
-
-// liveStructs is the struct total room's resident document counted last (roomTotals), which its
-// load charged it by.
-func liveStructs(t *testing.T, service *Service, room string) int64 {
-	t.Helper()
-	replica := service.replicaOf(service.srv.GetDoc(room))
-	if replica == nil {
-		t.Fatal("the room lists no replica")
-	}
-	return replica.structs.countedStructs()
-}
+// second is the error of a two-value answer, for a goroutine that sends only the error on a
+// channel (roomBudget.refusal, whose reservation such a test does not hold).
+func second(_ *roomReservation, err error) error { return err }

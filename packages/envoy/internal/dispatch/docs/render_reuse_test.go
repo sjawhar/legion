@@ -842,7 +842,7 @@ func TestRenderReuseAWritesReusedRenderingIsTheRoomsMeasurement(t *testing.T) {
 	if weighing == nil {
 		t.Fatal("the warm room's document is not listed, so the hook reads no weighing of it")
 	}
-	before, _, measured := weighing.size()
+	before, measured := weighing.size()
 	if !measured {
 		t.Fatal("the warm room published no measurement before the write")
 	}
@@ -859,7 +859,7 @@ func TestRenderReuseAWritesReusedRenderingIsTheRoomsMeasurement(t *testing.T) {
 	if int64(len(rendering)) == before {
 		t.Fatalf("the write left the room rendering %d bytes, the measurement it already had: this case cannot tell the write's measurement from the one before it", before)
 	}
-	published, _, measured := weighing.size()
+	published, measured := weighing.size()
 	if !measured || published != int64(len(rendering)) {
 		t.Fatalf("the room measures %d bytes (measured %t) after the write, want its rendering's %d; it measured %d before the write",
 			published, measured, len(rendering), before)

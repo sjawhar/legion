@@ -379,7 +379,7 @@ func TestARoomLoadDecodesItsStoredStateOnceInTheRoom(t *testing.T) {
 				t.Fatalf("LoadDoc handed ygo %d bytes (%v), want none", len(handed), err)
 			}
 			taken, _ := service.takeLoadedState(artifactID)
-			taken.grant.release()
+			taken.slot.release()
 			if !bytes.Equal(taken.state, stored.Update) {
 				t.Fatalf("LoadDoc kept %d bytes for the room's load hook, want the %d-byte stored state", len(taken.state), len(stored.Update))
 			}
