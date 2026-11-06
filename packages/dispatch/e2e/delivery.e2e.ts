@@ -362,6 +362,50 @@ test("on a phone a finger dragged along the chart sets a brush window and moves 
   await context.close();
 });
 
+// Guards `min-w-0` on the freshness row (`SourceFreshness.tsx`): the row's text is one
+// `truncate` line, so a flex item's automatic minimum size is the whole sentence, and without
+// that class a row naming a reconcile error stands past the column and a phone, which lays its
+// page out to its widest content, widens and scrolls the whole page under the reader. The row
+// above reads the same width, but only over the scene the fixture seeds, which holds no
+// reconcile error: it catches this only on the rare run where a real failure happens to arrive
+// while the finger is down, so removing `min-w-0` leaves it green nearly every run. Here the
+// failure is written while the finger is down, so the longest text the row can carry is always
+// on the page when the width is read.
+test("on a phone a reconcile error arriving under the finger widens nothing @phone", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "a finger on the chart is the phone project's");
+  await seedDeliveryFixture();
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  await openTimeline(page);
+
+  const dot = await shapePosition(page, { series: "PR merges" });
+  if (dot === null) throw new Error("no merge dot painted");
+  // The width alone, not the row above's whole layout: a row that turns red carries a longer
+  // sentence and the freshness rows rewrap, which moves what is under them down and takes the
+  // page's scroll offset with it. Standing past the viewport's right edge is the defect.
+  const width = () => page.evaluate(() => document.documentElement.scrollWidth);
+  const before = await width();
+  const finger = await pressFinger(page, dot);
+  await expect(page.getByText("acme/widgets#1: feat: a shipped widget")).toBeVisible();
+  // The failed pass the desktop freshness row below seeds, written here over the page's live
+  // socket instead: reconcile.go's RecordReconcileError leaves last_reconcile_at set and
+  // last_error naming the failure, and the PRs row carries that name.
+  await sql(
+    `UPDATE delivery_settings
+       SET last_reconcile_at = '2024-06-01T01:00:00Z',
+           last_error = 'the installation lacks Actions: read on acme/widgets'
+     WHERE singleton`
+  );
+  await expect(page.locator('[data-source="prs"]')).toHaveText(
+    /the installation lacks Actions: read on acme\/widgets/
+  );
+  expect(await width()).toBe(before);
+  await finger.lift();
+  await context.close();
+});
+
 test("the list sorts by its headers and a row opens the PR's details", async ({
   browser,
 }, testInfo) => {
