@@ -430,7 +430,9 @@ func (r *idleWakeRig) boot() {
 		base: "http://127.0.0.1:" + strconv.Itoa(r.cfg.Port), stopped: true}
 }
 
-// logFile keeps a copy of the daemon's log beside the test, which a failure names.
+// logFile keeps a copy of the daemon's log beside the test, which a failure names. The cleanup
+// closes it and, when the test did not fail, removes it: nothing is left to read it for. A test
+// that failed keeps its log, and the line below still names where it is.
 func (r *idleWakeRig) logFile() io.Writer {
 	r.t.Helper()
 	if r.daemonLog == nil {
@@ -438,7 +440,12 @@ func (r *idleWakeRig) logFile() io.Writer {
 		if err != nil {
 			r.t.Fatal(err)
 		}
-		r.t.Cleanup(func() { _ = file.Close() })
+		r.t.Cleanup(func() {
+			_ = file.Close()
+			if !r.t.Failed() {
+				_ = os.Remove(file.Name())
+			}
+		})
 		r.t.Logf("the daemon's log: %s", file.Name())
 		r.daemonLog = file
 	}

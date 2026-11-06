@@ -37,11 +37,24 @@ type idleRigListener struct {
 	stop   func()
 }
 
-// idleRigListenerBuild builds cmd/listener once per test binary, under the test's temporary root.
+// idleRigListenerBuild builds cmd/listener once per test binary, in a directory of its own that
+// the package's TestMain removes. The directory holds a binary of some 17 MB and binds no
+// socket, and no *testing.T outlives it, so it keeps os.MkdirTemp rather than testtmp.Dir,
+// whose budget is for paths a unix socket has to fit and whose removal is a test's.
 var idleRigListenerBuild struct {
 	once sync.Once
+	dir  string
 	path string
 	err  error
+}
+
+// removeIdleRigListenerBuild removes the build's directory, if a build made one. TestMain calls
+// it once every test has run: the directory outlives every test that uses it, so no t.Cleanup
+// can remove it.
+func removeIdleRigListenerBuild() {
+	if idleRigListenerBuild.dir != "" {
+		_ = os.RemoveAll(idleRigListenerBuild.dir)
+	}
 }
 
 // idleRigListenerBinary is the built listener, built on first use.
@@ -53,6 +66,7 @@ func idleRigListenerBinary(t *testing.T) string {
 			idleRigListenerBuild.err = err
 			return
 		}
+		idleRigListenerBuild.dir = dir
 		source, err := filepath.Abs(filepath.Join("..", "..", "..", "envoy"))
 		if err != nil {
 			idleRigListenerBuild.err = err

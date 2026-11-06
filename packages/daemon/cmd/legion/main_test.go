@@ -43,6 +43,14 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "TestMain:", err)
 		os.Exit(1)
 	}
+	os.Exit(runWithoutTheOperatorsJJConfig(m))
+}
+
+// runWithoutTheOperatorsJJConfig runs the package's tests with a jj configuration directory of
+// their own and removes it afterwards. The removal is deferred rather than written after m.Run:
+// it already ran whatever m.Run returned, and now it also runs when the setup below panics. A
+// run killed by a signal still keeps the directory, which nothing here can help.
+func runWithoutTheOperatorsJJConfig(m *testing.M) int {
 	// Every test below starts isolated from the operator's own jj configuration — in particular
 	// fsmonitor.backend = "watchman" on this devbox: JJ_CONFIG names a file that does not exist,
 	// so jj falls back to its built-in defaults instead of reading ~/.jjconfig.toml, and no
@@ -54,15 +62,14 @@ func TestMain(m *testing.M) {
 	configDir, err := os.MkdirTemp("", "legion-test-jj-config")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "TestMain:", err)
-		os.Exit(1)
+		return 1
 	}
+	defer os.RemoveAll(configDir)
 	if err := os.Setenv("JJ_CONFIG", filepath.Join(configDir, "no-user-config.toml")); err != nil {
 		fmt.Fprintln(os.Stderr, "TestMain:", err)
-		os.Exit(1)
+		return 1
 	}
-	code := m.Run()
-	os.RemoveAll(configDir)
-	os.Exit(code)
+	return m.Run()
 }
 
 // TestMain ran fixtureenv.Guard: no test here inherits a workspace, remote or credential of the
