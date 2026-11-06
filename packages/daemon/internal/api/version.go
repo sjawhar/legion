@@ -582,8 +582,16 @@ package api
 // stale-plugin round queues to a session already running, both held in the claim's machine, and
 // `catch-up`, the notice a start writes to an architect already running, which waits on its own
 // outbox row — in claim order, and empty at every moment outside a restart, a re-admission wave or
-// a plugin wave. A strict reader before 52 refuses a state carrying it, so the bump is why the two
-// never meet; with `daemon.startedAt` and each claim's `updateRound` it is what says whether a
+// a plugin wave. A strict reader before 52 refuses a state carrying the key, empty as surely as
+// naming a wake, so the bump is why the two never meet; for the one window the pairing leaves
+// open — a pod of the contract before this one still being replaced — the route serves a caller
+// whose pod records a contract below 52 a body with no `wakesWaiting` key at all (api's stateFor,
+// withoutWakesWaiting), as it serves the live trees only from 51 on and the memory group only
+// from 49 on. The key is left off that body rather than emptied, so it is left off the body a pod
+// whose claims cannot be read is served as well, which may be a pod at this contract: both are
+// why `packages/contracts/src/legion-api.ts` declares `wakesWaiting` optional, as it declares
+// `admission.trees`. A caller the daemon cannot place in a pod — the operator's `legion state` —
+// is served it. With `daemon.startedAt` and each claim's `updateRound` it is what says whether a
 // wave is still running. `legion state` prints a `wakes waiting:` line only when something waits.
 // This change adds no store migration. (This branch took 49, then 50, while main's memory-group
 // and admission-cap changes were unmerged; main landed those as 49 and 51, so this branch takes

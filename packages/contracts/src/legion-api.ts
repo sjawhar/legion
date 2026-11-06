@@ -543,7 +543,14 @@ const legionConsumerLag = z.object({
  * the keys it does not name, where the shapes around it drop theirs; `consumers` is the lag
  * of the daemon's durable consumers, never null, empty for a daemon with no workflow (contract 43);
  * `wakesWaiting` is every wake the daemon's pacing is holding until its turn, in claim order, never
- * null, empty at every moment outside a restart or a plugin wave (contract 52). */
+ * null, empty at every moment outside a restart or a plugin wave (contract 52). It is optional
+ * here only because a daemon at this contract leaves it off one body: a reader before 52 refuses
+ * the key outright, empty as surely as naming a wake, so the route strips it for a caller in a pod
+ * whose claims record a contract below 52, and for a caller in a pod whose claims it cannot read
+ * at all, which may be a pod at this contract (`api.stateFor`, `withoutWakesWaiting`). A reader
+ * that finds it absent has been served that stripped body and learns nothing about which wakes
+ * wait; it is never a daemon older than this plugin, whom the boot gate and `legion probe-image`
+ * refuse. */
 export const LegionStateResponse = z.object({
   daemon: daemonInfo,
   admission: legionAdmission,
@@ -551,7 +558,7 @@ export const LegionStateResponse = z.object({
   pendingStatusWrites: z.array(legionPendingStatusWrite),
   heldOutboxRows: z.array(legionHeldOutboxRow),
   strandedClaims: z.array(legionStrandedClaim),
-  wakesWaiting: z.array(legionWakeWaiting),
+  wakesWaiting: z.array(legionWakeWaiting).optional(),
   controllerLocator: legionControllerLocator.optional(),
   agentSecretsLogin: legionAgentSecretsLoginView.optional(),
   capabilities: z.array(legionCapabilityState),

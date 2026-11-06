@@ -571,13 +571,16 @@ func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {
 // three fields (withoutMemory); a caller below treeContract, the contract that named the live
 // trees beside the issues holding a slot, is served it without `admission.trees` and without the
 // issues' `tree` (withoutTrees); and a caller below wakesWaitingContract, the contract that added
-// the wakes the pacing holds, is served it with that array empty (withoutWakesWaiting). The four
+// the wakes the pacing holds, is served it without `wakesWaiting` (withoutWakesWaiting). The four
 // compose: each is applied when the state carries something of its own, so a caller below all of
 // them — a pod below supervise.PodUpdateContract — is served a body carrying none of the eight
-// keys, the last of them empty rather than absent, since `wakesWaiting` is always on the wire.
-// Every later reader takes all eight as optional, so the body this serves when the claims cannot
-// be read is the one every reader from 45 on takes. Any other caller — a pod at this contract,
-// the operator's `legion state`, a tmux pane — is served the state as this contract writes it.
+// keys, each of them absent rather than empty, since a strict reader before the contract that
+// added a key refuses it whether or not it names anything. Every later reader takes all eight as
+// optional — `packages/contracts/src/legion-api.ts` marks `admission.trees` and `wakesWaiting`
+// optional for exactly these bodies — so the body this serves a pod whose claims cannot be read,
+// which may be a pod at this contract, is the one every reader from 45 on takes. Any other caller
+// — a pod at this contract whose claims were read, the operator's `legion state`, a tmux pane —
+// is served the state as this contract writes it.
 func (s *server) stateFor(r *http.Request, state State) State {
 	// A daemon that does not know its callers' pods serves every caller the state as it is, and
 	// scans nothing for it: under runtime tmux that is every request of every pane and of
@@ -671,16 +674,19 @@ func carriesMemory(state State) bool {
 // issue's `tree`. It carries `admission.trees` whatever the daemon holds, since the admission
 // block writes that key on every body, empty rather than null (Admission.MarshalJSON), and the
 // strict reader before the contract refuses the empty key as surely as one naming a tree. So this
-// is true of every state the route writes; it is asked beside carriesUpdateRounds and
-// carriesMemory all the same, because stateFor puts the same question to the three and because a
-// later contract that stops writing `trees` on every body answers it here.
+// is true of every state the route writes; it is asked beside carriesUpdateRounds, carriesMemory
+// and carriesWakesWaiting all the same, because stateFor puts the same question to the four and
+// because a later contract that stops writing `trees` on every body answers it here.
 func carriesTrees(State) bool { return true }
 
-// carriesWakesWaiting is whether state carries a wake the pacing holds, the array
-// wakesWaitingContract added. Unlike carriesTrees it is false on most bodies: the key is always on
-// the wire, but an empty array is what a reader of every contract makes of a daemon holding no
-// wake, so there is nothing for withoutWakesWaiting to take away until a wave fills it.
-func carriesWakesWaiting(state State) bool { return len(state.WakesWaiting) > 0 }
+// carriesWakesWaiting is whether state carries the key wakesWaitingContract added: `wakesWaiting`,
+// the wakes the pacing holds. It carries that key whatever the daemon holds, since the state
+// writes it on every body, empty rather than null (State.MarshalJSON), and the strict reader
+// before the contract refuses the empty key as surely as one naming a wake. So this is true of
+// every state the route writes; it is asked beside carriesUpdateRounds, carriesMemory and
+// carriesTrees all the same, because stateFor puts the same question to the four and because a
+// later contract that stops writing `wakesWaiting` on every body answers it here.
+func carriesWakesWaiting(State) bool { return true }
 
 // podContract is the lowest plugin contract a claim whose process runs in pod records, and 0 when
 // none records one: every role of a pod is served by the plugin that pod runs, and the body the
@@ -755,13 +761,15 @@ func withoutTrees(state State) State {
 	return state
 }
 
-// withoutWakesWaiting is state with an empty `wakesWaiting`, the top-level array
-// wakesWaitingContract added; nothing else of that contract is on the route but `settings` keys,
-// which every plugin reads loosely. It is emptied rather than dropped, because the key is always
-// on the wire (State.MarshalJSON) and an empty array is what a reader of any contract makes of a
-// daemon holding no wake — which, outside a wave, is the true answer as well.
+// withoutWakesWaiting is state with no `wakesWaiting`, the top-level array wakesWaitingContract
+// added; nothing else of that contract is on the route but `settings` keys, which every plugin
+// reads loosely. The key is left off rather than emptied, because the strict reader before the
+// contract refuses it as surely when it is empty as when it names a wake, which is why
+// State.MarshalJSON writes the key on every body but this one (State.wakesWaitingHidden), as
+// Admission.MarshalJSON leaves off `trees` for withoutTrees. The flag is set on a value of the
+// state's own, so the state the source answered is left as it was.
 func withoutWakesWaiting(state State) State {
-	state.WakesWaiting = nil
+	state.WakesWaiting, state.wakesWaitingHidden = nil, true
 	return state
 }
 

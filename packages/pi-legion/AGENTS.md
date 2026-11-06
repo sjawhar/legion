@@ -93,8 +93,10 @@ refused naming that number. The split of the one plugin into this package and `@
 number is the one `DaemonAPIVersion` declares, last bumped by contract 52's wake pacing
 (`GET /legion/v1/state` carries `wakesWaiting`, the wakes the daemon's pacing holds until their
 turn, an array that is never null and is empty at every moment outside a restart, a re-admission
-wave or a plugin wave; a strict reader before 52 refuses a state carrying one, so a caller from a
-pod below 52 is served that array empty), after contract 51's admission cap over the
+wave or a plugin wave; a strict reader before 52 refuses a state carrying the key, empty as surely
+as naming a wake, so a caller from a pod below 52 is served the state without the key, as is a
+caller from a pod whose claims the daemon cannot read, which may be a pod at 52 — which is why the
+schema declares it optional), after contract 51's admission cap over the
 issues at work (`admission.active` and `admission.waiting` on `GET /legion/v1/state` name issues
 rather than trees, `admission.trees` is the root of every live tree, and each issue record carries
 its `tree`; a strict reader before 51 refuses a state carrying either new key, so a caller from a

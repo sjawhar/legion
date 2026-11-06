@@ -83,6 +83,12 @@ type State struct {
 	// NATS at the request after the state's transaction commits, so no NATS read holds the
 	// snapshot open. Never null: a daemon with no workflow has none (contract 43).
 	Consumers []ConsumerLagView `json:"consumers"`
+	// wakesWaitingHidden is set on the copy the state route serves a caller whose plugin is older
+	// than the contract that added WakesWaiting (api's withoutWakesWaiting, below server.go's
+	// wakesWaitingContract): that reader knows no `wakesWaiting` and refuses the key as surely
+	// when it is empty as when it names a wake, so MarshalJSON leaves the key off that one body
+	// rather than writing it empty, as Admission.treesHidden does for `trees`.
+	wakesWaitingHidden bool
 }
 
 // ConsumerLagView is one durable consumer's lag as the state shows it (intake.ConsumerLag): its
@@ -258,7 +264,10 @@ type AgentSecretsLoginView struct {
 
 // MarshalJSON keeps `issues` an object and `pendingStatusWrites`, `heldOutboxRows`,
 // `strandedClaims`, `wakesWaiting`, `capabilities` and `consumers` arrays on the wire: a nil Go map
-// or slice is `null`, which the plugin's reader refuses.
+// or slice is `null`, which the plugin's reader refuses. The one exception is a state whose
+// waiting wakes are hidden, which carries no `wakesWaiting` key at all; that body is marshaled
+// through a value whose own nil `wakesWaiting` field, being `omitempty`, shadows the embedded one
+// and so is written by nothing, which is how Admission.MarshalJSON leaves off `trees`.
 func (s State) MarshalJSON() ([]byte, error) {
 	type wire State
 	out := wire(s)
@@ -274,14 +283,21 @@ func (s State) MarshalJSON() ([]byte, error) {
 	if out.StrandedClaims == nil {
 		out.StrandedClaims = []StrandedClaim{}
 	}
-	if out.WakesWaiting == nil {
-		out.WakesWaiting = []WakeWaiting{}
-	}
 	if out.Capabilities == nil {
 		out.Capabilities = []CapabilityState{}
 	}
 	if out.Consumers == nil {
 		out.Consumers = []ConsumerLagView{}
+	}
+	if s.wakesWaitingHidden {
+		out.WakesWaiting = nil
+		return json.Marshal(struct {
+			wire
+			WakesWaiting []WakeWaiting `json:"wakesWaiting,omitempty"`
+		}{wire: out})
+	}
+	if out.WakesWaiting == nil {
+		out.WakesWaiting = []WakeWaiting{}
 	}
 	return json.Marshal(out)
 }

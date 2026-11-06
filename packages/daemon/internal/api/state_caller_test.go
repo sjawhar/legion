@@ -92,18 +92,25 @@ func podClaims(contract int) claimsOnly {
 	}}
 }
 
-// wakesServed is whether a state body carries the wakes the pacing holds. The key is on the wire
-// whoever asks (State.MarshalJSON), so a caller below wakesWaitingContract is served it as an
-// empty array rather than a body without it (withoutWakesWaiting), and emptiness is the question.
-func wakesServed(t *testing.T, body []byte) bool {
+// wakesServed is the `wakesWaiting` of a state body — the wakes it names, and whether the key is
+// on the wire at all, which an empty array is not. The two are read apart because the reader
+// before wakesWaitingContract refuses the key whether it names a wake or nothing, so an emptied
+// key is as bad as a filled one and withoutWakesWaiting leaves it off.
+func wakesServed(t *testing.T, body []byte) (wakes []map[string]any, carried bool) {
 	t.Helper()
 	var state struct {
-		WakesWaiting []map[string]any `json:"wakesWaiting"`
+		WakesWaiting json.RawMessage `json:"wakesWaiting"`
 	}
 	if err := json.Unmarshal(body, &state); err != nil {
 		t.Fatalf("decode state %s: %v", body, err)
 	}
-	return len(state.WakesWaiting) > 0
+	if state.WakesWaiting == nil {
+		return nil, false
+	}
+	if err := json.Unmarshal(state.WakesWaiting, &wakes); err != nil {
+		t.Fatalf("decode wakesWaiting %s: %v", state.WakesWaiting, err)
+	}
+	return wakes, true
 }
 
 // claimViews is every claim view of a state body, decoded as the plugin's reader sees it.
@@ -145,7 +152,8 @@ func claimViews(t *testing.T, body []byte) []map[string]any {
 // reader since 45 takes.
 func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 	full := stateFrom(t, populatedState(t), "192.0.2.1:41000", podClaims(supervise.PodUpdateContract-1))
-	if !strings.Contains(string(full), `"updateRound"`) || !strings.Contains(string(full), `"updateHead"`) || !wakesServed(t, full) {
+	fullWakes, fullCarried := wakesServed(t, full)
+	if !strings.Contains(string(full), `"updateRound"`) || !strings.Contains(string(full), `"updateHead"`) || !fullCarried || len(fullWakes) == 0 {
 		t.Fatalf("the fixture's state %s carries no update round or no waiting wake; this test proves nothing", full)
 	}
 
@@ -166,8 +174,12 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			body := stateFrom(t, populatedState(t), tc.remote, tc.sup)
 
-			if wakes := wakesServed(t, body); wakes != tc.wakes {
-				t.Errorf("the state %s carries the wakes the pacing holds = %v, want %v", body, wakes, tc.wakes)
+			wakes, carried := wakesServed(t, body)
+			if carried != tc.wakes {
+				t.Errorf("the state %s carries the `wakesWaiting` key = %v, want %v; the reader before wakesWaitingContract refuses it, empty as much as filled", body, carried, tc.wakes)
+			}
+			if tc.wakes && len(wakes) != len(fullWakes) {
+				t.Errorf("the state %s names %d of the wakes the pacing holds, want the fixture's %d", body, len(wakes), len(fullWakes))
 			}
 			if tc.rounds {
 				if string(body) != string(full) {
@@ -186,14 +198,14 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 			// with the three memory keys gone too, since a pod below this contract's own reader
 			// refuses those as well (memory_test.go holds that half), with contract 51's two tree
 			// keys — `admission.trees` and each issue's `tree` — gone (tree_test.go holds that
-			// half), and with `wakesWaiting` emptied, the key being on the wire whoever asks
-			// (withoutWakesWaiting).
+			// half), and with `wakesWaiting` gone, the key a reader before contract 52 refuses
+			// empty as surely as filled (withoutWakesWaiting).
 			var want, got map[string]any
 			if err := json.Unmarshal(full, &want); err != nil {
 				t.Fatal(err)
 			}
 			if !tc.wakes {
-				want["wakesWaiting"] = []any{}
+				delete(want, "wakesWaiting")
 			}
 			delete(want["admission"].(map[string]any), "trees")
 			for _, issue := range want["issues"].(map[string]any) {
