@@ -326,12 +326,15 @@ test("a video reference in a comment draws a player for the picture line and for
     await expectPlays(card.locator(`[data-dispatch-picture="${clipRef}"] video`));
 
     // Two plain references, in the body's order: the one standing alone in its block, whose
-    // anchor gives up its address for as long as the player is inside it, then the one inside a
-    // sentence, which is the link it has always been.
+    // anchor is the link to the artifact's page that it was before the player was drawn inside
+    // it, then the one inside a sentence, which is the link it has always been.
     const references = card.locator(`a[data-dispatch-ref="${clipRef}"]`);
     await expect(references).toHaveCount(2);
     await expectPlayer(references.nth(0).locator("video"), clipSrc);
-    await expect(references.nth(0)).not.toHaveAttribute("href", /./);
+    await expect(references.nth(0)).toHaveAttribute(
+      "href",
+      `/issues/${issue.key}/artifacts/clip-webm?v=1`
+    );
     await expect(references.nth(1)).toHaveAttribute(
       "href",
       `/issues/${issue.key}/artifacts/clip-webm?v=1`
@@ -345,6 +348,76 @@ test("a video reference in a comment draws a player for the picture line and for
       `${artifacts}/panel-png/versions/1`
     );
     await expect(card.locator("video")).toHaveCount(2);
+  } finally {
+    await alice.close();
+  }
+});
+
+// A player is drawn inside the link to the artifact's page, and a pointer press on it is the
+// player's own. That press is all the link gives up: it keeps its address, so it takes the
+// focus, is named by what it holds and opens the artifact's page on Enter, which is the way a
+// keyboard reader reaches that page from a body - the way a picture's link has always left
+// open.
+test("a keyboard reader opens a video's artifact page from the body it plays in, where a press on the player opens nothing @phone", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "A video a reader steps to" });
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const artifacts = `/api/v1/issues/${issue.key}/artifacts`;
+    await uploadVersion(page, artifacts, "clip.webm", "video/webm", TINY_WEBM);
+    const clipRef = `dispatch://${issue.key}/artifact/clip-webm@v1`;
+    const artifactPage = `/issues/${issue.key}/artifacts/clip-webm?v=1`;
+    const comment = await createComment(issue.key, { body: `![clip.webm](${clipRef})` });
+
+    /** Every address the tab's main frame committed since the body was opened, each once: the
+     *  app commits an address it lands on more than once as the route settles, and what is read
+     *  here is which pages were opened, not how many commits each took. */
+    const opened = new Set<string>();
+    page.on("framenavigated", (frame) => {
+      if (frame !== page.mainFrame()) return;
+      const url = new URL(frame.url());
+      opened.add(`${url.pathname}${url.search}`);
+    });
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const card = page.locator(`[data-turn="comment:${comment.id}"]`);
+    // The card the reader opened holds the body at reading size, where the picture line is the
+    // player and its placeholder the link around it. A preview of the same comment elsewhere on
+    // the page draws that reference as a link with no player inside it, so the player is what
+    // tells the body's own placeholder from a preview's.
+    await card.getByRole("button", { name: "Expand thread" }).click();
+    const line = card.locator(`a[data-dispatch-picture="${clipRef}"]:has(video)`);
+    const player = line.locator("video");
+    await expectPlayer(player, `${artifacts}/clip-webm/versions/1`);
+    await expectPlays(player);
+    opened.clear();
+
+    // A press on the player is the player's: it opens no page, whatever the engine's own
+    // controls do with it. Every step below runs on the body this press left in place, and the
+    // list of addresses opened says so for itself before the Enter that does open one.
+    await player.click();
+
+    // The link the player is drawn in is the artifact's, and it is named by the player it
+    // holds. It takes the focus and stands in the page's own tab order, which is how a reader
+    // arrives at it: the step back from it lands somewhere else, and the step forward lands on
+    // it again.
+    await expect(line).toHaveAttribute("href", artifactPage);
+    await expect(line).toHaveAccessibleName("clip.webm");
+    await line.focus();
+    await expect(line).toBeFocused();
+    await page.keyboard.press("Shift+Tab");
+    await expect(line).not.toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(line).toBeFocused();
+    expect([...opened], "the press on the player opened no page").toEqual([]);
+
+    await page.keyboard.press("Enter");
+    await page.waitForURL(`**${artifactPage}`);
+    const shown = page.getByRole("region", { name: "clip.webm version 1" });
+    await expectPlayer(shown.locator("video"), `${artifacts}/clip-webm/versions/1`);
+    expect([...opened]).toEqual([artifactPage]);
   } finally {
     await alice.close();
   }
@@ -391,9 +464,12 @@ test("a video sent in a direct message draws a player in the conversation on the
     const reference = conversation.locator(`a[data-dispatch-ref="${clipRef}"]`);
     await expectPlayer(reference.locator("video"), `${artifacts}/clip-webm/versions/1`);
     await expectPlays(reference.locator("video"));
-    // The anchor gives up its address for as long as the player is inside it, so a press on the
-    // player's controls plays instead of opening the artifact's page.
-    await expect(reference).not.toHaveAttribute("href", /./);
+    // The anchor keeps the address a keyboard reader opens the artifact's page by; a pointer
+    // press on the player is the player's own (the keyboard row above).
+    await expect(reference).toHaveAttribute(
+      "href",
+      `/agents/${planner.session_id}/artifacts/clip-webm?v=1`
+    );
     // The negative control: the picture beside it is a picture.
     await expectDrawn(
       conversation.locator(`[data-dispatch-picture="${panelRef}"] img`),

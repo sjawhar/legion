@@ -34,9 +34,10 @@ export interface ReferenceAnchor {
  * none. A thumbnail the browser cannot draw (a pinned version the server does not serve) is
  * dropped, leaving the title alone, so a stale or hand-written reference never shows a
  * broken-image glyph. A reference to a video standing alone in its block is its player instead,
- * drawn at reading size as a picture line's is, and the anchor stops being a link for as long
- * as the player is there, so a press on its controls plays rather than opening the artifact's
- * page (`ArtifactMedia`); inside a sentence it stays the link it has always been. When the
+ * drawn at reading size as a picture line's is, and the anchor stays the link it was: a pointer
+ * press on the player is the player's and plays rather than opening the artifact's page, while
+ * the keyboard reaches that page through the link as it does around a picture
+ * (`ArtifactMedia`); inside a sentence the reference is the link it has always been. When the
  * element it renders into is a link, its href follows `useReferencePath`, which a pinned block
  * of a spec resolves only once its issue's summary is read. */
 export function RefLink({
@@ -56,10 +57,10 @@ export function RefLink({
   // whenever that summary is there `picture` already answers `video`.
   const player = alone === true && picture?.kind === "video" ? picture.src : undefined;
   useLayoutEffect(() => {
-    if (anchor instanceof HTMLAnchorElement && player === undefined) {
+    if (anchor instanceof HTMLAnchorElement) {
       anchor.setAttribute("href", path);
     }
-  }, [anchor, path, player]);
+  }, [anchor, path]);
   const label = title ?? shortForm(route);
   if (player !== undefined) {
     return (

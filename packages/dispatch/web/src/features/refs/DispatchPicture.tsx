@@ -59,8 +59,10 @@ export function DispatchPicture({
   variant,
 }: {
   /** The placeholder this is portalled into: the link the serializer wrote, or the element a
-   *  surface put in its place. A player takes its address off it for as long as it is drawn,
-   *  so a press on the player's controls plays instead of opening the artifact's page. */
+   *  surface put in its place. A player leaves that link where it is, so the keyboard reaches
+   *  the artifact's page through it; the address comes off only for the length of a pointer
+   *  press, so a press on the player's controls plays instead of opening that page
+   *  (`ArtifactMedia`). */
   anchor?: HTMLElement;
   caption: string;
   route: DispatchReferenceRoute;
@@ -78,7 +80,7 @@ export function DispatchPicture({
   const pinned = usePinnedMedia(route);
   const media = target ?? pinned;
   // The placeholder is the link the serializer wrote, so the fallback hands the reader back
-  // exactly that link, with its address restored where a player had taken it off the anchor.
+  // exactly that link, its address the one `RefLink` keeps on it.
   const link = <RefLink anchor={anchor} route={route} />;
   if (media === undefined || (variant === "inline" && media.kind === "video")) {
     return link;

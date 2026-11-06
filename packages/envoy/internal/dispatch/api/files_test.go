@@ -266,9 +266,21 @@ func assertFileVersionRanges(t *testing.T, handler http.Handler, route string, c
 	}
 
 	// A Range header naming no range at all is no range to answer, and the whole file goes.
-	malformed := fileVersionRequest(t, handler, route, map[string]string{"Range": "bytes="})
-	if malformed.Code != http.StatusOK || !bytes.Equal(malformed.Body.Bytes(), content) {
-		t.Errorf("GET %s with a malformed Range: status=%d, %d body bytes, want 200 with the whole file", route, malformed.Code, malformed.Body.Len())
+	empty := fileVersionRequest(t, handler, route, map[string]string{"Range": "bytes="})
+	if empty.Code != http.StatusOK || !bytes.Equal(empty.Body.Bytes(), content) {
+		t.Errorf("GET %s with an empty Range: status=%d, %d body bytes, want 200 with the whole file", route, empty.Code, empty.Body.Len())
+	}
+
+	// A header that names a range and means none is refused instead: bytes that are no number,
+	// and bytes that run backwards. net/http's parseRange reads neither, and http.ServeContent
+	// answers 416 for both rather than handing the reader the whole file as the empty header
+	// above gets. It writes no Content-Range for a header it could not read, which it does
+	// write for the range past the end higher up, so only the status is read here.
+	for _, header := range []string{"bytes=abc", "bytes=5-2"} {
+		malformed := fileVersionRequest(t, handler, route, map[string]string{"Range": header})
+		if malformed.Code != http.StatusRequestedRangeNotSatisfiable {
+			t.Errorf("GET %s with Range %q: status=%d, %d body bytes, want 416", route, header, malformed.Code, malformed.Body.Len())
+		}
 	}
 
 	// A resume takes the rest of the file only while the bytes are the ones it already holds,

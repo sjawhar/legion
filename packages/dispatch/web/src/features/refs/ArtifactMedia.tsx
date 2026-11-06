@@ -147,19 +147,48 @@ export function ArtifactMedia({
   );
 }
 
-/** Keeps the link a player is drawn inside from navigating while the player is there: a rendered
- *  body portals both reference forms into an `<a>` to the artifact's page, and a press on a
- *  player's controls inside a link opens that page instead of playing. The anchor gets its
- *  address back the moment the player goes - a load the browser refused, a reference that is a
- *  picture again - so the link the reader is left with is the link it was. A host that is no
+/** Keeps a pointer press on a player from opening the page the link it is drawn inside goes to,
+ *  and leaves that link where a keyboard reader finds it: a rendered body portals both reference
+ *  forms into an `<a>` to the artifact's page, and a press on a player's controls inside a link
+ *  that holds its address opens that page instead of playing. The anchor keeps its `href`, so it
+ *  takes the focus, is named by the player it holds and opens the artifact's page on Enter,
+ *  exactly as the link around a picture does; the address comes off for the length of a pointer
+ *  press that reached the anchor and goes back on the press's own `pointerup`, since what decides
+ *  whether a click activates a link is the address the anchor holds when that click is
+ *  dispatched. The press is read in the capture phase, ahead of the controls' own handling, and
+ *  the release on the window, which no handler of theirs can keep it from; neither is cancelled,
+ *  so the control the press landed on does what it always did. Chromium and Firefox dispatch
+ *  neither event into the page's own tree for a press on the controls, so there the address
+ *  never moves and the controls are simply the controls; an engine that does dispatch them
+ *  dispatches both, and the press is the player's rather than the link's. A host that is no
  *  anchor (a preview puts a `<span>` where it keeps no link inside its own) is left alone. */
 function usePlayerHost(host: HTMLElement | undefined, playing: boolean): void {
   useLayoutEffect(() => {
     if (!playing || !(host instanceof HTMLAnchorElement)) return;
-    const href = host.getAttribute("href");
-    host.removeAttribute("href");
+    /** The address while a press holds it off the anchor, and what says a press is running. */
+    let held: string | null = null;
+    const disarm = () => {
+      const href = host.getAttribute("href");
+      if (held !== null || href === null) return;
+      held = href;
+      host.removeAttribute("href");
+    };
+    const rearm = () => {
+      if (held === null) return;
+      host.setAttribute("href", held);
+      held = null;
+    };
+    // A press's click is dispatched in the same task as its release, so the address goes back
+    // in the next one: the click finds no link, and the next key press finds one.
+    const rearmAfterTheClick = () => setTimeout(rearm, 0);
+    host.addEventListener("pointerdown", disarm, true);
+    window.addEventListener("pointerup", rearmAfterTheClick, true);
+    window.addEventListener("pointercancel", rearmAfterTheClick, true);
     return () => {
-      if (href !== null) host.setAttribute("href", href);
+      host.removeEventListener("pointerdown", disarm, true);
+      window.removeEventListener("pointerup", rearmAfterTheClick, true);
+      window.removeEventListener("pointercancel", rearmAfterTheClick, true);
+      rearm();
     };
   }, [host, playing]);
 }

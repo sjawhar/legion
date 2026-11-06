@@ -54,6 +54,9 @@ export const lazyPieces = {
   mermaid:
     "the Mermaid renderer's Web Worker (features/refs/mermaid-render.worker.ts), which a body " +
     "holding a fenced `mermaid` block starts (features/refs/mermaid-diagrams.ts)",
+  "picture-viewer":
+    "the full-size picture viewer, photoswipe and its stylesheet " +
+    "(features/refs/picture-viewer.ts), which a click on a picture drawn at reading size opens",
 } as const;
 
 export type LazyPiece = keyof typeof lazyPieces;
