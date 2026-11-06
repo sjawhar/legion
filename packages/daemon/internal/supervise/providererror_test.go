@@ -16,23 +16,39 @@ import (
 // told from the task behind it.
 const providerErrorTaskText = "implement the plan"
 
-// workingClaim is a ready claim in the turn of its implementing task: where a turn that ends in a
-// provider error ends. set, when it is given, changes the dependencies before the machine is
-// built, which is the only way a case gives the machine the controller's notice path.
+// workingClaim is a ready implementer in the turn of its implementing task: where a turn that
+// ends in a provider error ends. set, when it is given, changes the dependencies before the
+// machine is built, which is the only way a case gives the machine the controller's notice
+// path.
 func workingClaim(t *testing.T, set ...func(*Deps)) *harness {
 	t.Helper()
+	return workingClaimOf(t, queuedClaim(), set...)
+}
+
+// workingClaimOf is workingClaim over the claim c, for a case the claim's role decides: what a
+// retirement and a failure do with a task an update round's question went before turns on
+// whether the retry of this claim restarts a phase (Claim.phaseWorker).
+//
+// The task is the claim's own kind. A phase worker's names the phase and the run it was queued
+// for; an architect's names neither, as the workflow queues it (Delivery.Phase).
+func workingClaimOf(t *testing.T, c Claim, set ...func(*Deps)) *harness {
+	t.Helper()
 	h := newBareHarness(t)
+	h.token = c.Token
 	for _, change := range set {
 		change(&h.deps)
 	}
-	c := queuedClaim()
 	if err := h.store.PutClaim(h.ctx, c); err != nil {
 		t.Fatal(err)
 	}
 	h.start(c)
 	h.reach(StateReady)
-	h.must(RequestDeliver{Claim: testToken, Task: providerErrorTaskText, Phase: phase.Implementing, Generation: 7, Assignment: "A1"})
-	h.must(StreamTurnStart{Claim: testToken})
+	task := RequestDeliver{Claim: c.Token, Task: providerErrorTaskText}
+	if c.Role != claim.RoleArchitect {
+		task.Phase, task.Generation, task.Assignment = phase.Implementing, 7, "A1"
+	}
+	h.must(task)
+	h.must(StreamTurnStart{Claim: c.Token})
 	return h
 }
 
@@ -100,11 +116,13 @@ func TestThePromptRetryLadderStopsGrowingAtTenMinutes(t *testing.T) {
 	}
 }
 
-// A rate limit, a timeout and an overload all send the task again, and none costs the claim a
-// prompt failure: chargePrompt retires and then fails a claim past Limits.PromptFailures, which
-// would fail every claim of a project at once in a provider outage.
+// A credential error, a rate limit, a timeout and an overload all send the task again, and none
+// costs the claim a prompt failure: chargePrompt retires and then fails a claim past
+// Limits.PromptFailures, which would fail every claim of a project at once in a provider outage
+// — and a credential is the fleet's, so a 401 or a 403 reaches every claim of the project at
+// once (holdsTheIssue).
 func TestAStatusThatClearsChargesNoPromptBudgetHoweverOftenItHappens(t *testing.T) {
-	for _, status := range []int{408, 429, 529} {
+	for _, status := range []int{401, 403, 408, 429, 529} {
 		t.Run(fmt.Sprintf("HTTP %d", status), func(t *testing.T) {
 			h := workingClaim(t)
 			sent := 1
@@ -146,7 +164,8 @@ func TestAStatuslessRefusalIsSentAgainOnTheLadder(t *testing.T) {
 }
 
 // The one error that holds the issue for its architect: a client error the provider answered
-// that is neither a timeout nor a rate limit. A malformed request is the case this exists for.
+// that is none of a credential (401, 403), a timeout (408) and a rate limit (429). A malformed
+// request is the case this exists for.
 func TestAMalformedRequestFailsTheClaim(t *testing.T) {
 	h := workingClaim(t)
 
@@ -166,15 +185,18 @@ func TestAMalformedRequestFailsTheClaim(t *testing.T) {
 	h.wantPrompts(1)
 }
 
-// The whole rule, status by status. A 400 to 499 other than 408 and 429 holds the issue; every
-// other error — 5xx, 408, 429, and the statusless turn every content-filter refusal ends in —
-// keeps the task and sends it again.
-func TestOnlyAClientErrorThatIsNoTimeoutAndNoRateLimitHoldsTheIssue(t *testing.T) {
+// The whole rule, status by status. A 400 to 499 other than 401, 403, 408 and 429 holds the
+// issue; every other error — 5xx, the four exceptions, and the statusless turn every
+// content-filter refusal ends in — keeps the task and sends it again. 401 and 403 are a
+// credential, which is the fleet's and not this claim's work: failing every claim whose turn
+// hits one is worse than sending the task again, and the controller is told at six such turns
+// in a row (dispatch://INFRA-956/comment/838bf35d-69dd-4fb2-a1b3-4b474b4525b3).
+func TestOnlyAClientErrorThatIsNoCredentialNoTimeoutAndNoRateLimitHoldsTheIssue(t *testing.T) {
 	for _, tc := range []struct {
 		status int
 		holds  bool
 	}{
-		{0, false}, {400, true}, {401, true}, {403, true}, {404, true}, {408, false},
+		{0, false}, {400, true}, {401, false}, {403, false}, {404, true}, {408, false},
 		{422, true}, {429, false}, {499, true}, {500, false}, {503, false}, {529, false},
 	} {
 		t.Run(fmt.Sprintf("HTTP %d", tc.status), func(t *testing.T) {
@@ -344,25 +366,40 @@ func TestTheTaskAQuestionWentBeforeOutlivesADaemonRestart(t *testing.T) {
 	}
 }
 
-// The hold lives as long as the claim it is written on and no longer. An operator's stop retires
-// the claim, and the task an update round's question went before goes with it: the phase's own
-// restart is what gives a retried claim its task, and a hold left standing would queue the work
-// of a life that is over at the next retirement the claim makes.
-func TestAStopDropsTheTaskTheQuestionWentBefore(t *testing.T) {
-	h := workingClaim(t)
-	h.errorTurn(StreamPromptResult{Error: "overloaded_error", HTTPStatus: 529})
-	owed := h.pending()
-	h.openUpdate(testRound, testReasons)
-	h.must(StreamTurnStart{Claim: testToken})
+// A phase worker's hold lives as long as the claim it is written on and no longer. An
+// operator's stop retires the claim, and the task an update round's question went before goes
+// with it: the operator's retry of a phase worker restarts its issue's phase (api/operator.go's
+// retryClaim), that restart queues the phase's own task, and a hold left standing would queue
+// the work of a life that is over behind it. The question goes too, whether or not its turn
+// ran: nothing of this claim will answer a round that is over, and a question left pending is
+// the first thing the retry's fresh session would read.
+func TestAPhaseWorkersStopDropsTheTaskTheQuestionWentBefore(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		read bool
+	}{{"the worker read the question", true}, {"the stop came first", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := workingClaim(t)
+			h.errorTurn(StreamPromptResult{Error: "overloaded_error", HTTPStatus: 529})
+			owed := h.pending()
+			h.openUpdate(testRound, testReasons)
+			if tc.read {
+				h.must(StreamTurnStart{Claim: testToken})
+			}
 
-	h.must(RequestStop{Claim: testToken})
+			h.must(RequestStop{Claim: testToken})
 
-	h.wantState(StateRetired)
-	if p := h.claim().Pending; p != nil {
-		t.Errorf("the stopped claim holds %+v, want nothing: the task %s went with the claim", *p, owed.ID)
-	}
-	if d, ok := h.store.delivery(testToken); ok {
-		t.Errorf("the store holds %+v for the stopped claim, want no delivery", d)
+			h.wantState(StateRetired)
+			if p := h.claim().Pending; p != nil {
+				t.Errorf("the stopped claim holds %+v, want nothing: the task %s and the round's question both went with the claim", *p, owed.ID)
+			}
+			if held := h.claim().OwedTask; held != nil {
+				t.Errorf("the stopped claim still owes %+v, want nothing", *held)
+			}
+			if d, ok := h.store.delivery(testToken); ok {
+				t.Errorf("the store holds %+v for the stopped claim, want no delivery", d)
+			}
+		})
 	}
 }
 
@@ -558,5 +595,142 @@ func TestTheSixthProviderErrorTurnInARowTellsTheControllerOnce(t *testing.T) {
 	}
 	if got := h.claim().ProviderErrorRun; got != 7 {
 		t.Errorf("the run of provider errors is %d, want 7: the notice bounds nothing", got)
+	}
+}
+
+// A claim whose retry restarts no phase keeps the task an update round's question went before:
+// that retry relaunches this same claim and sends what the claim kept (table.go's retry), and
+// nothing else ever gives the task again, because the outbox row that gave it is recorded on
+// the claim (Claim.DeliveredRows). An architect is such a claim. The question is retired all
+// the same: the round is over, and a question left pending would be the first thing the
+// relaunched session reads.
+func TestAnArchitectsStopKeepsTheTaskTheQuestionWentBeforeAndTheRetrySendsIt(t *testing.T) {
+	h := workingClaimOf(t, subArchitectClaim())
+	h.errorTurn(StreamPromptResult{Error: "overloaded_error", HTTPStatus: 529})
+	owed := h.pending()
+	h.openUpdate(testRound, testReasons)
+	if p := h.pending(); !asksRound(p.ID, testRound) {
+		t.Fatalf("pending %+v, want the round's question before the owed task %s", p, owed.ID)
+	}
+
+	h.must(RequestStop{Claim: h.token})
+
+	h.wantState(StateRetired)
+	p := h.pending()
+	if p.ID != owed.ID || p.Task != owed.Task {
+		t.Fatalf("the stopped architect holds %+v, want the task %s it owes: no retry of its outbox row gives it again", p, owed.ID)
+	}
+	if p.ProviderErrorRetries != owed.ProviderErrorRetries || !p.DeliveredAt.Equal(owed.DeliveredAt) {
+		t.Errorf("the task came back %+v, want the step of the ladder and the read mark it was held with: %+v", p, owed)
+	}
+	if held := h.claim().OwedTask; held != nil {
+		t.Errorf("the claim still owes %+v, want the task pending instead", *held)
+	}
+	if d, ok := h.store.delivery(h.token); !ok || d.ID != owed.ID {
+		t.Fatalf("the store holds %+v (%t) for the stopped claim, want the owed task %s", d, ok, owed.ID)
+	}
+	h.wantPrompts(2)
+
+	h.must(RequestOperatorRetry{Claim: h.token})
+	h.relaunched()
+
+	again := h.wantPrompts(3)[2]
+	if again.DeliveryID != owed.ID || !strings.HasSuffix(again.Message, providerErrorTaskText) {
+		t.Errorf("the prompt after the retry = %+v, want the owed task %s", again, owed.ID)
+	}
+}
+
+// The same rule at the other end of a claim's life. A failure keeps the pending delivery for
+// whoever decides what happens next, so a claim whose retry restarts no phase keeps the held
+// task there too, and the question it waited behind is retired to free the slot for it. The
+// failure here is the one every provider error can end in: the turn that read the round's
+// question ended in a malformed request, which holds the issue (holdsTheIssue).
+func TestAFailureKeepsTheTaskTheQuestionWentBeforeForAClaimThatRestartsNoPhase(t *testing.T) {
+	h := workingClaimOf(t, subArchitectClaim())
+	h.errorTurn(StreamPromptResult{Error: "overloaded_error", HTTPStatus: 529})
+	owed := h.pending()
+	h.openUpdate(testRound, testReasons)
+	h.must(StreamTurnStart{Claim: h.token})
+
+	h.errorTurn(StreamPromptResult{Error: "invalid_request_error", HTTPStatus: 400})
+
+	h.wantState(StateFailed)
+	if failure := h.claim().Failure; !strings.Contains(failure, "HTTP 400") {
+		t.Errorf("the failure is %q, want the status the provider answered", failure)
+	}
+	p := h.pending()
+	if p.ID != owed.ID || p.Task != owed.Task {
+		t.Fatalf("the failed architect holds %+v, want the task %s it owes", p, owed.ID)
+	}
+	if held := h.claim().OwedTask; held != nil {
+		t.Errorf("the claim still owes %+v, want the task pending instead", *held)
+	}
+	if d, ok := h.store.delivery(h.token); !ok || d.ID != owed.ID {
+		t.Errorf("the store holds %+v (%t) for the failed claim, want the owed task %s", d, ok, owed.ID)
+	}
+}
+
+// A phase worker's failure is the other half: its retry restarts its issue's phase, which
+// queues the phase's own task, so the held task is dropped — and the question it waited behind
+// is retired with it, so the fresh session that phase starts is not first handed a question
+// about a pod replacement that already happened.
+func TestAPhaseWorkersFailureDropsTheTaskAndTheQuestionWithIt(t *testing.T) {
+	h := workingClaim(t)
+	h.errorTurn(StreamPromptResult{Error: "overloaded_error", HTTPStatus: 529})
+	owed := h.pending()
+	h.openUpdate(testRound, testReasons)
+	h.must(StreamTurnStart{Claim: testToken})
+
+	h.errorTurn(StreamPromptResult{Error: "invalid_request_error", HTTPStatus: 400})
+
+	h.wantState(StateFailed)
+	if p := h.claim().Pending; p != nil {
+		t.Errorf("the failed worker holds %+v, want nothing: the task %s and the round's question both went with the claim", *p, owed.ID)
+	}
+	if held := h.claim().OwedTask; held != nil {
+		t.Errorf("the failed worker still owes %+v, want nothing", *held)
+	}
+	if d, ok := h.store.delivery(testToken); ok {
+		t.Errorf("the store holds %+v for the failed claim, want no delivery", d)
+	}
+}
+
+// The window a given-back task is in once its prompt is acknowledged and before the turn it
+// starts: no send of the machine's own is out, the task is not confirmed, and the wait for its
+// turn is armed. The task is in the agent's hands there, so a newer task waits behind it
+// (ErrDeliveryPending). A task replaced in that window would be lost twice over: the turn the
+// given-back task started would confirm the task that replaced it, and that turn's end would
+// retire the given-back task unsent, with its outbox row already recorded as delivered.
+func TestANewerTaskDoesNotReplaceAGivenBackTaskWhosePromptIsInFlight(t *testing.T) {
+	h := workingClaim(t)
+	h.errorTurn(StreamPromptResult{Error: "overloaded_error", HTTPStatus: 529})
+	owed := h.pending()
+	h.openUpdate(testRound, testReasons)
+	h.must(StreamTurnStart{Claim: testToken})
+	h.signalUpdate("c0ffee")
+	h.must(StreamTurnEnd{Claim: testToken})
+	h.must(PodUpdateEnded{Claim: testToken, Round: testRound})
+	sent := h.wantPrompts(3)[2]
+	if sent.DeliveryID != owed.ID {
+		t.Fatalf("the prompt after the round = %+v, want the owed task %s", sent, owed.ID)
+	}
+	if p := h.pending(); !p.ConfirmedAt.IsZero() {
+		t.Fatalf("the owed task is %+v, want it acknowledged and not yet confirmed", p)
+	}
+
+	err := h.handle(RequestDeliver{Claim: testToken, Task: "test the change", Phase: phase.Testing, Generation: 8, Assignment: "A2"})
+
+	if !errors.Is(err, ErrDeliveryPending) {
+		t.Fatalf("the newer task was answered %v, want it refused: the task it would replace is in the agent's hands", err)
+	}
+	if p := h.pending(); p.ID != owed.ID {
+		t.Fatalf("pending %+v, want the owed task %s, whose prompt the agent has", p, owed.ID)
+	}
+	h.wantPrompts(3)
+
+	h.must(StreamTurnStart{Claim: testToken})
+
+	if p := h.pending(); p.ID != owed.ID || p.ConfirmedAt.IsZero() {
+		t.Errorf("the turn confirmed %+v, want the owed task %s it was started for", p, owed.ID)
 	}
 }

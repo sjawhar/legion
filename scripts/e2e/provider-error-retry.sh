@@ -8,7 +8,7 @@
 # it to the same session again after 30 s, 60 s and 120 s; the sixth turn in a row tells the
 # project's controller, once, and holds nothing; an OpenAI `finish_reason: content_filter` with no
 # fallback model left carries no HTTP status at all, so the task goes again after 30 s, holding the
-# issue for nobody; an HTTP 400, a client error that is neither 408 nor 429, fails the claim and
+# issue for nobody; an HTTP 400, a client error that is none of 401, 403, 408 and 429, fails the claim and
 # holds its issue for its architect; and `legion claims stop`,
 # `legion claims retry --fresh-session` and `legion claims list` — the built binary against that
 # daemon — drive and read the claims the first and the fourth leave

@@ -118,7 +118,9 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 	}
 	// The task an update round's question went before, as JSON, and null for a claim that owes
 	// none: the delivery is written whole, so it comes back the task it was taken (the claims
-	// migration 20261106120000, supervise's holdOwedTask).
+	// migration 20261106120000, supervise's holdOwedTask). The column's keys are the json tags
+	// supervise.Delivery carries, not its Go field names, so a field renamed there goes on
+	// reading back the holds this wrote.
 	var owed []byte
 	if c.OwedTask != nil {
 		encoded, err := json.Marshal(c.OwedTask)

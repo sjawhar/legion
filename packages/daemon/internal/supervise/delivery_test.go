@@ -2,13 +2,51 @@ package supervise
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"maps"
+	"reflect"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
+
+// A delivery is stored as JSON in one place: claims.owed_task, the task an update round's
+// question went before (store/claims.go's putClaim). The column's keys are this struct's json
+// tags, and they are pinned here, field by field. Without the tags they would be the Go field
+// names, so renaming a field would rename a key and read every hold already written back with
+// that field zeroed — a hold the daemon then queues as a task with no id, no text and no read
+// mark. A test that writes a delivery and reads it back in the same build cannot see that: both
+// halves move together.
+func TestADeliveryIsStoredUnderItsTagsAndNotItsGoFieldNames(t *testing.T) {
+	encoded, err := json.Marshal(Delivery{
+		ID: "d1", Task: "implement the plan", Generation: 7, Assignment: "A1", Phase: phase.Implementing,
+		QueuedAt: epoch, DeliveredAt: epoch, MarkedBy: "d1", ConfirmedAt: epoch, Interrupted: true,
+		OutOfMemory: true, Kept: []byte(`[{"id":"k1"}]`), ProviderErrorRetries: 2,
+		ProviderErrorNote: "Your previous turn stopped.",
+	})
+	if err != nil {
+		t.Fatalf("encode a delivery: %v", err)
+	}
+	var stored map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &stored); err != nil {
+		t.Fatalf("decode what was encoded: %v", err)
+	}
+	want := []string{"assignment", "confirmedAt", "deliveredAt", "generation", "id", "interrupted",
+		"kept", "markedBy", "outOfMemory", "phase", "providerErrorNote", "providerErrorRetries",
+		"queuedAt", "task"}
+	if got := slices.Sorted(maps.Keys(stored)); !slices.Equal(got, want) {
+		t.Errorf("a stored delivery's keys are %q, want %q: the column's shape is the tags", got, want)
+	}
+	// Every field is one of those keys, so a field added without a tag fails this rather than
+	// reaching the column under its Go name.
+	if fields := reflect.TypeFor[Delivery]().NumField(); fields != len(want) {
+		t.Errorf("Delivery has %d fields and the stored shape has %d keys; give the new field a json tag", fields, len(want))
+	}
+}
 
 func TestATaskQueuedBeforeReadyIsDeliveredOnceAtReady(t *testing.T) {
 	h := newHarness(t)

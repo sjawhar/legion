@@ -72,19 +72,27 @@ func (m *Machine) providerErrored(ctx context.Context, r StreamPromptResult) err
 }
 
 // holdsTheIssue is whether an error of this HTTP status fails the claim, so that the workflow
-// holds the issue for its architect: a client error, 400 to 499, that is neither a timeout (408)
-// nor a rate limit (429). A malformed request is the case this exists for. Every other error
-// sends the task again:
+// holds the issue for its architect: a client error, 400 to 499, that is none of 401, 403, 408
+// and 429. A malformed request is the case this exists for. Every other error sends the task
+// again:
 //
 //   - 5xx, 408 and 429 are the provider saying "not now", which the ladder waits out;
+//   - 401 and 403 are a credential, which is the fleet's and not this claim's work
+//     (dispatch://INFRA-956/comment/838bf35d-69dd-4fb2-a1b3-4b474b4525b3). Failing every claim
+//     whose turn hits one is worse than sending the task again, and the notice the project's
+//     controller is given at six such turns in a row is what tells a person
+//     (tellControllerOfProviderErrors);
 //   - no status at all is every content-filter refusal, which ends a turn with nothing but a
 //     message. It clears because the plugin has already moved the session down its model chain,
 //     so the next prompt goes to another model. A Claude Code worker's bridge names a status
 //     only for a result Claude Code marked api_error (internal/claudebridge's result), so its
 //     statusless turns go again here too.
 func holdsTheIssue(status int) bool {
-	return status >= 400 && status <= 499 &&
-		status != http.StatusRequestTimeout && status != http.StatusTooManyRequests
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusRequestTimeout, http.StatusTooManyRequests:
+		return false
+	}
+	return status >= 400 && status <= 499
 }
 
 // providerErrorClears keeps the task on the claim and arms the next step of the ladder for it:
@@ -176,6 +184,15 @@ func (m *Machine) waitsForProviderError(delivery string) bool {
 // the retry's fresh session takes on it retires it (R3, scripts/e2e/provider-error-retry.sh
 // step 5). A task whose turn is running, or whose prompt is in flight, is work in flight and is
 // never replaced either.
+//
+// Both marks end at the send they allow, so neither outlives it: the timer that fires the
+// ladder's wait is deleted before its action runs (machine.go's Handle), and the give-back's
+// mark is dropped by the send itself (startSend). Without that, the window between the prompt's
+// acknowledgement and its turn would answer true — the send is over (machine.go's fenceOutcome
+// clears it), the task is not confirmed yet, and the wait for its turn is armed — so a newer
+// task would take the place of a task already in the agent's hands: the given-back task's
+// agent_start would confirm the task that replaced it, and the turn's end would retire that one
+// unsent, with the outbox row that gave it already recorded as delivered.
 func (m *Machine) replaceable(p *Delivery) bool {
 	if !p.ConfirmedAt.IsZero() || m.send != nil {
 		return false

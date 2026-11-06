@@ -381,6 +381,21 @@ type ClaimView struct {
 // when its tree closes.
 func (c Claim) treeRoot() bool { return claim.IsTreeArchitect(c.Role, c.Issue, c.Tree) }
 
+// phaseWorker is whether the claim is one of the five workflow roles an issue's phase starts —
+// every role but the architect (claim.Roles) and the project controller. It is what says that a
+// retry of this claim restarts a phase, which queues the phase's own task again: the operator's
+// retry of such a claim is applied to its issue's phase rather than to the claim
+// (api/operator.go's retryClaim), and a task the claim still owes is superseded there
+// (endRoundHold).
+func (c Claim) phaseWorker() bool {
+	switch c.Role {
+	case claim.RolePlanner, claim.RoleImplementer, claim.RoleTester, claim.RoleReviewer, claim.RoleMerger:
+		return true
+	default:
+		return false
+	}
+}
+
 // Event is everything that reaches a machine: RuntimeObservation, StreamHello, StreamTurnStart,
 // StreamTurnEnd, StreamPromptResult, StreamClosed, StreamLateRefusal, PromptAcked, PromptRefused,
 // Timer, StalePlugin, PodUpdateOpen, PodUpdateEnded, PodUpdateSignalled, and the requests. The
@@ -559,9 +574,10 @@ type Deps struct {
 	PodUpdateRetask time.Duration
 	// ProviderErrorRunReached is told of a claim whose turns have ended in a provider error
 	// providerErrorRunTold times in a row, once per run, with the reason the project's controller
-	// is given: the model and the error's category or status, in words built from structured
-	// fields alone. The claim carries the issue and the role. nil tells nobody, as it does for
-	// TaskConfirmed above. It is called inside the machine's decision, so it returns at once.
+	// is given: the model, and the HTTP status the provider answered where it answered one, in
+	// words built from structured fields alone. The claim carries the issue and the role. nil
+	// tells nobody, as it does for TaskConfirmed above. It is called inside the machine's
+	// decision, so it returns at once.
 	ProviderErrorRunReached func(c Claim, reason string)
 }
 
@@ -753,8 +769,9 @@ type Machine struct {
 	// gaveBack is the id of the delivery giveBackOwedTask just queued, and "" when the claim
 	// holds no such task: the one pending task a provider error counted against that no wait of
 	// the claim's own names, which a newer task replaces all the same (replaceable). It is
-	// cleared when that delivery ends (dropPending), and a delivery taken back under a new id
-	// leaves it naming an id the claim no longer holds, which answers for no task.
+	// cleared when that task is sent (startSend) and when that delivery ends (dropPending), and
+	// a delivery taken back under a new id leaves it naming an id the claim no longer holds,
+	// which answers for no task.
 	//
 	// It is memory only, as the ladder's wait is: the given-back task goes at the first send the
 	// claim's state allows, so the window a mark covers is one send, and a daemon restarted
@@ -1494,11 +1511,11 @@ func (m *Machine) forgetSession() {
 
 // fail puts the claim where nothing relaunches it: its timers stop, its locator goes, and the
 // pending delivery stays for whoever decides what happens next. A task held owed behind an
-// update round's question does not stay (dropOwedTask): the claim's retry restarts its phase,
-// which queues the phase's task again, and a hold left standing would queue the task of a life
-// that is over behind it. A process the claim still records — found dead, or never stopped — is
-// suspended first, so nothing of it keeps holding what it ran on until the tree closes; a
-// suspension that fails is logged, and the claim fails all the same.
+// update round's question is decided by whether the claim's retry restarts a phase, and the
+// question it waits behind is retired either way (endRoundHold). A process the claim still
+// records — found dead, or never stopped — is suspended first, so nothing of it keeps holding
+// what it ran on until the tree closes; a suspension that fails is logged, and the claim fails
+// all the same.
 func (m *Machine) fail(ctx context.Context, why string) error {
 	if loc := m.claim.Locator; loc != nil {
 		if err := m.endProcess(ctx); err != nil {
@@ -1506,11 +1523,13 @@ func (m *Machine) fail(ctx context.Context, why string) error {
 		}
 	}
 	m.letGo()
-	m.dropOwedTask()
 	m.claim.State, m.claim.Failure = StateFailed, why
 	m.log.Error("supervise: claim failed", "why", why, "launchFailures", m.claim.Budgets.LaunchFailures,
 		"deaths", m.claim.Budgets.Deaths, "promptFailures", m.claim.Budgets.PromptFailures,
 		"promptRetires", m.claim.Budgets.PromptRetires)
+	if err := m.endRoundHold(ctx); err != nil {
+		return err
+	}
 	if err := m.persist(ctx); err != nil {
 		return err
 	}
@@ -1554,14 +1573,16 @@ func (m *Machine) endProcess(ctx context.Context) error {
 // in goes with it (clearUpdate): a retired claim runs nothing on the pod a round is opened over,
 // so a round left recorded on it would be read against whatever pod the replacement makes — the
 // daemon's sweep would find a round nothing can answer, and tell the issue its work was lost at
-// every tick for the rest of the tree's life. A task that round's question went before goes with
-// it too (dropOwedTask): the claim that owed it is over, and the task the operator's retry of
-// this claim is given is its phase's own.
+// every tick for the rest of the tree's life. The question that round asked is retired with it,
+// and the task that question went before is given back to the claim or dropped, by what the
+// claim's retry would restart (endRoundHold).
 func (m *Machine) retire(ctx context.Context) error {
 	m.letGo()
 	m.clearUpdate()
-	m.dropOwedTask()
 	m.claim.State = StateRetired
+	if err := m.endRoundHold(ctx); err != nil {
+		return err
+	}
 	return m.persist(ctx)
 }
 

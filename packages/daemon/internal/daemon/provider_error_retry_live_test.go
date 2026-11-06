@@ -30,7 +30,7 @@
 //     fallback is left, and an error that carries no status is one the daemon sends the task
 //     again for.
 //   - malformed: every request 400 with an `invalid_request_error` body, which Oh My Pi reports
-//     with status 400 — a client error that is neither 408 nor 429 — so the claim fails and the
+//     with status 400 — a client error that is none of 401, 403, 408 and 429 — so the claim fails and the
 //     workflow holds the issue for its architect.
 //
 // Each pane's Oh My Pi overlay sets `retry.enabled: false` (PI_CONFIG_FILES, the key an operator's
@@ -522,8 +522,8 @@ func (r *providerErrorLive) refusalGoesAgain() {
 		gap.Round(time.Second), token, r.refused, issue.Phase)
 }
 
-// cannotClearFails drives the last of R2: an HTTP 400, a client error that is neither 408 nor
-// 429, fails the claim, and the workflow holds the issue for its architect.
+// cannotClearFails drives the last of R2: an HTTP 400, a client error that is none of 401, 403,
+// 408 and 429, fails the claim, and the workflow holds the issue for its architect.
 func (r *providerErrorLive) cannotClearFails() {
 	t := r.t
 	token := r.token(r.failing, claim.RoleTester)

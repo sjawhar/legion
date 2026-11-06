@@ -409,12 +409,14 @@ provider answered when it answered one, and carries none of the provider's own w
 filter is sent again because the session has already stepped down to the next model of its
 fallback chain, so the next prompt goes to another model
 ([Starting fresh when a session is lost or wedged](https://github.com/sjawhar/legion/blob/main/docs/kubernetes.md#starting-fresh-when-a-session-is-lost-or-wedged));
-a 429, a 408, a 5xx and an error the provider answered no status for are sent again too. A newer
+a 429, a 408, a 401, a 403, a 5xx and an error the provider answered no status for are sent again
+too: a credential error is the fleet's rather than this claim's work, so it climbs the ladder like
+any other and the controller's notice at six is what tells a person. A newer
 task for that claim replaces the one the error took back and is sent at once, and an update
 round's question goes before it, so neither waits out a ladder that reaches ten minutes a step.
 
 **One provider error does hold the issue**, for its architect: one whose HTTP status is a client
-error, 400 to 499, that is neither a timeout (408) nor a rate limit (429). A malformed request is
+error, 400 to 499, that is none of 401, 403, 408 and 429. A malformed request is
 the case it exists for. The claim fails with `why` reading `a provider error that cannot clear
 ended this claim's turn: <cause>`, where the cause names that status, and the hold is the
 architect's to retry or escalate as any held phase is.

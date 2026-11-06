@@ -401,11 +401,11 @@ func (ControllerNotice) OutboxKind() OutboxKind { return OutboxKindControllerNot
 // `pod_update_notice_hours`, a turn that will not end holds the replacement, or the replacement
 // itself keeps failing (the daemon's reconcilePodUpdates). A provider-errors notice names an
 // issue whose role has ended six turns in a row in a provider error: its Role is that role, and
-// its Reason the model and the error's category or status, in words built from structured
-// fields alone (supervise's tellControllerOfProviderErrors). It is told once, and not again
-// until a turn with no error puts that run back to zero; nothing is held and nothing is
-// bounded, because a chain's bottom refusing deterministically costs one request every ten
-// minutes. When admission sends each is its rule (admit.Admission.wakeController and its
+// its Reason the model and the HTTP status the provider answered, where it answered one, in
+// words built from structured fields alone (supervise's tellControllerOfProviderErrors). It is
+// told once, and not again until a turn with no error puts that run back to zero; nothing is
+// held and nothing is bounded, because a chain's bottom refusing deterministically costs one
+// request every ten minutes. When admission sends each is its rule (admit.Admission.wakeController and its
 // callers, admit's releaseUnslotted, admit.Admission.TellController).
 //
 // A parked-decision notice names a person's decision on a tree Legion is not running, which
