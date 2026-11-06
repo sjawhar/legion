@@ -1,7 +1,6 @@
 package enroll
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -166,22 +165,7 @@ func within(t *testing.T, what string, got, low, high time.Time) {
 }
 
 // logBuffer is a log destination safe to write from several goroutines and read from the test.
-type logBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *logBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *logBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
+type logBuffer = logtest.Buffer
 
 // captureSlog sends slog's default logger to a buffer until t ends, and answers the buffer.
 func captureSlog(t *testing.T) *logBuffer {

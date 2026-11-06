@@ -1,7 +1,6 @@
 package session
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -834,22 +833,7 @@ func captureSessionRegistryLogs(t *testing.T) *lockedBuffer {
 	return &logs
 }
 
-type lockedBuffer struct {
-	mu     sync.Mutex
-	buffer bytes.Buffer
-}
-
-func (b *lockedBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buffer.Write(p)
-}
-
-func (b *lockedBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buffer.String()
-}
+type lockedBuffer = logtest.Buffer
 
 // TestMain removes the NATS server the package's tests share (testnats.Main).
 func TestMain(m *testing.M) { os.Exit(testnats.Main(m)) }

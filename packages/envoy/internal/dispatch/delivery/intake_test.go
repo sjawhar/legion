@@ -4,7 +4,6 @@ package delivery
 // intake's tests (intake_route_test.go, intake_consumer_test.go) and the reconcile's share.
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,7 +11,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -218,23 +216,8 @@ func captureLogs(t *testing.T) func() []map[string]any {
 	}
 }
 
-// lockedBuffer is a bytes.Buffer safe to write from one goroutine while another reads it.
-type lockedBuffer struct {
-	mu     sync.Mutex
-	buffer bytes.Buffer
-}
-
-func (b *lockedBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buffer.Write(p)
-}
-
-func (b *lockedBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buffer.String()
-}
+// lockedBuffer is a buffer safe to write from one goroutine while another reads it.
+type lockedBuffer = logtest.Buffer
 
 // pathBaseForTest is the workflow file name a workflow subject carries, as intake derives it from
 // the configured workflow path.

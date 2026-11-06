@@ -1,12 +1,10 @@
 package routes
 
 import (
-	"bytes"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
@@ -14,23 +12,12 @@ import (
 )
 
 // logBuffer is a log sink the router's goroutines may write while the test reads it.
-type logBuffer struct {
-	mu sync.Mutex
-	b  bytes.Buffer
-}
-
-func (l *logBuffer) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.b.Write(p)
-}
+type logBuffer = logtest.Buffer
 
 // routeLines are the access-log lines logged holds for route, in order.
 func routeLines(logged *logBuffer, route string) []string {
-	logged.mu.Lock()
-	defer logged.mu.Unlock()
 	var lines []string
-	for _, line := range strings.Split(logged.b.String(), "\n") {
+	for _, line := range strings.Split(logged.String(), "\n") {
 		if strings.Contains(line, `msg="`+accesslog.Message+`"`) && strings.Contains(line, " route="+route+" ") {
 			lines = append(lines, line)
 		}

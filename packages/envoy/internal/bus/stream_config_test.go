@@ -1,7 +1,6 @@
 package bus
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,7 +10,6 @@ import (
 	"reflect"
 	"slices"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -567,21 +565,7 @@ func TestEnsureStreamWithConfigStartsWhenADeployedSubjectOverlapsItsOwn(t *testi
 // without waiting for them (nats.go v1.50.0, nats.go:5892-5910), the bus's closed callback logs
 // through the default logger, and every test of the package shares one binary.
 type capturedLogs struct {
-	mu     sync.Mutex
-	buffer bytes.Buffer
-}
-
-func (l *capturedLogs) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.buffer.Write(p)
-}
-
-// String is a snapshot of the records logged so far; nothing reads the buffer another way.
-func (l *capturedLogs) String() string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.buffer.String()
+	logtest.Buffer
 }
 
 // records decodes every JSON record logged so far.

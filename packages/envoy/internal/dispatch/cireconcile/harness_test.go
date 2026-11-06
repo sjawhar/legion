@@ -1,7 +1,6 @@
 package cireconcile
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -13,7 +12,6 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -26,6 +24,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/logging"
+	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/metrics"
 	"github.com/sjawhar/envoy/internal/testnats"
 	"github.com/sjawhar/envoy/internal/webhook"
@@ -367,22 +366,7 @@ func number(t *testing.T, line map[string]any, field string) int {
 
 // syncBuffer is a log buffer two goroutines may write, since a pass and the test read and write
 // it from their own.
-type syncBuffer struct {
-	mu   sync.Mutex
-	text bytes.Buffer
-}
-
-func (b *syncBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.text.Write(p)
-}
-
-func (b *syncBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.text.String()
-}
+type syncBuffer = logtest.Buffer
 
 // checkRun is one check run object as GitHub's listing answers it, and as its webhook carries it.
 func checkRun(id int64, name, status, conclusion string, appID int, observedAt string) object {

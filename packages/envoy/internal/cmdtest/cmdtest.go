@@ -4,17 +4,17 @@
 package cmdtest
 
 import (
-	"bytes"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // Build builds the main package in the test's working directory, its own command's, into a binary
@@ -186,20 +186,5 @@ func (h *HeldPort) Pass(cmd *exec.Cmd, envName string) {
 }
 
 // LockedBuffer is a buffer a process's output, or a logger, writes from more than one goroutine
-// while a test reads it.
-type LockedBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *LockedBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *LockedBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
+// while a test reads it. Its body is logtest.Buffer's.
+type LockedBuffer = logtest.Buffer

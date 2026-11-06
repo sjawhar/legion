@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -17,22 +16,7 @@ import (
 )
 
 // logBuffer is a log sink the server's goroutines may write while the test reads it.
-type logBuffer struct {
-	mu sync.Mutex
-	b  bytes.Buffer
-}
-
-func (l *logBuffer) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.b.Write(p)
-}
-
-func (l *logBuffer) String() string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.b.String()
-}
+type logBuffer = logtest.Buffer
 
 // captureLog sends the default logger's lines to a buffer for the test's lifetime, as the
 // deployment's own logger writes them: a text handler, the one cmd/dispatch installs.

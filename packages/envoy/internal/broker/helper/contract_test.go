@@ -4,7 +4,6 @@
 package helper
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/hex"
@@ -17,34 +16,19 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/brokertest"
 	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
-// syncBuffer is bytes.Buffer plus a mutex: slog's own handler serializes its Write calls, but a
+// syncBuffer is a buffer plus a mutex: slog's own handler serializes its Write calls, but a
 // test reading the buffer's text back out (String) is a second, unsynchronized accessor racing
 // those writes from the Server's own background goroutines (enrollLoop, renewLoop) — a real race
 // -race catches, not a flaky artifact to suppress.
-type syncBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *syncBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *syncBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
+type syncBuffer = logtest.Buffer
 
 // contractRig is a real Server + Broker (this package's own production types) pointed at a real
 // broker (brokertest.Rig) over a real unix socket — the lesson test's own rig, distinct from

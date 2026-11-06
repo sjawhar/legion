@@ -276,6 +276,7 @@ jobs:
               - 'packages/envoy/internal/githubappjwt/*'
               - 'packages/envoy/internal/googleidentity/*'
               - 'packages/envoy/internal/id/*'
+              - 'packages/envoy/internal/logtest/*'
               - 'packages/envoy/internal/oidc/**'
               - 'packages/envoy/internal/pgmigrate/*'
               - 'packages/envoy/internal/ratelimit/*'
@@ -932,6 +933,7 @@ jobs:
               - 'packages/envoy/internal/broker/secrets/*'
               - 'packages/envoy/internal/broker/store/**'
               - 'packages/envoy/internal/broker/wake/*'
+              - 'packages/envoy/internal/logtest/*'
               - 'packages/envoy/internal/oidc/oidctest/*'
               - 'packages/envoy/internal/ratelimit/*'
             # The browser suite's two-process mode (dispatch-browser-multiprocess): what the
@@ -993,6 +995,7 @@ jobs:
               # counts its testdata among what this job reads.
               - 'packages/envoy/internal/dispatch/text/testdata/**'
               - 'packages/envoy/internal/fixtureenv/*'
+              - 'packages/envoy/internal/logtest/*'
               - 'packages/envoy/internal/testnats/*'
               - 'packages/envoy/internal/testpg/*'
               # The image pull before its tests, of the consts in testnats/nats.go and
@@ -1147,6 +1150,7 @@ jobs:
               - 'packages/envoy/internal/dispatch/text/**'
               - 'packages/envoy/internal/fixtureenv/*'
               - 'packages/envoy/internal/githubappjwt/*'
+              - 'packages/envoy/internal/logtest/*'
               - 'packages/envoy/internal/oidc/oidctest/*'
               - 'packages/envoy/internal/pglisten/*'
               - 'packages/envoy/internal/pgmigrate/*'
@@ -1197,6 +1201,7 @@ jobs:
               - 'packages/envoy/internal/dispatch/githubapp/githubapptest/*'
               - 'packages/envoy/internal/githubappjwt/*'
               - 'packages/envoy/internal/googleidentity/*'
+              - 'packages/envoy/internal/logtest/*'
               - 'packages/envoy/internal/oidc/**'
               - 'packages/envoy/internal/pglisten/*'
               - 'packages/envoy/internal/pgmigrate/*'
