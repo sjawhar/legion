@@ -5,13 +5,16 @@ import (
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
+	"github.com/sjawhar/legion/daemon/internal/testbuild"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
+	"github.com/sjawhar/legion/daemon/internal/testpg"
 )
 
 // TestMain takes out of the process every variable that could lead the tests' real git and jj to a
 // workspace, remote or credential not their own (fixtureenv.MustGuard; LEGION_KEPT_PROPERTY_SEED, which
-// replays a property run, is kept), and removes the NATS container the package's tests share
-// (testnats.Main).
+// replays a property run, is kept), drops the migrated template isolatedOutboxPool clones its
+// databases from (testpg.Main), removes the directory the tests' Envoy binaries were built into
+// (testbuild.Main), and removes the NATS container the package's tests share (testnats.Main).
 //
 // The guard runs for the test process alone. This binary is also the rig's role process, which its
 // launcher re-enters as TestIdleRigRoleProcess (idle_rig_pod_test.go) with the environment a role
@@ -23,10 +26,14 @@ import (
 // skips the guard, keeping what its launcher handed it, which is what Guard's own doc asks for a
 // helper child ("that child keeps the variables its test hands it"); it runs no git or jj of its
 // own, and goes on into m.Run as any other run of this binary does, where the one test it names
-// serves the rig.
+// serves the rig. That child serves one rig and clones no database and builds nothing, so it
+// takes neither template nor build directory.
 func TestMain(m *testing.M) {
-	if os.Getenv(idleRigURLVariable) == "" {
-		fixtureenv.MustGuard("LEGION_KEPT_PROPERTY_SEED")
+	if os.Getenv(idleRigURLVariable) != "" {
+		os.Exit(testnats.Main(m))
 	}
-	os.Exit(testnats.Main(m))
+	fixtureenv.MustGuard("LEGION_KEPT_PROPERTY_SEED")
+	os.Exit(testpg.Main("legion_daemon_test", func() int {
+		return testbuild.Main(func() int { return testnats.Main(m) })
+	}))
 }

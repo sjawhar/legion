@@ -21,6 +21,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/store/migrations"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testpg"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
@@ -73,13 +74,12 @@ func emptyStore(t *testing.T) *store.Store {
 	return st
 }
 
+// migratedStore is a store on a database carrying every migration, cloned from the package's
+// template rather than migrated here. emptyStore stays an empty, unmigrated database: the tests
+// that apply part of the migration set by hand and count what Migrate then applies need one.
 func migratedStore(t *testing.T) *store.Store {
 	t.Helper()
-	st := emptyStore(t)
-	if _, err := st.Migrate(context.Background()); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	return st
+	return testpg.CloneStore(t, "legion_record_test")
 }
 
 func randomSuffix(t *testing.T) string {

@@ -1041,11 +1041,19 @@ func TestWorkflowBootWhoseEveryInstallationReadFailsAnswersItsState(t *testing.T
 	if len(state.Repositories.Mapped) != 0 || !reflect.DeepEqual(state.Repositories.Refused, want) {
 		t.Fatalf("state's repositories = %+v, want none served and acme/widgets left out for its failed read", state.Repositories)
 	}
+	// The boot's own ERROR lines. pollClient bounds each readiness poll at a second (:275), and a
+	// poll the daemon answers more slowly than that - on a busy machine, or under the race
+	// detector - is abandoned by this test, whose cancelled request the API then logs
+	// (server.go:536). That line is the test's own doing and says nothing about the boot.
 	var errorLines []string
 	for line := range strings.SplitSeq(logged.String(), "\n") {
-		if strings.Contains(line, `"level":"ERROR"`) {
-			errorLines = append(errorLines, line)
+		if !strings.Contains(line, `"level":"ERROR"`) {
+			continue
 		}
+		if strings.Contains(line, "api: begin state transaction failed") && strings.Contains(line, "context canceled") {
+			continue
+		}
+		errorLines = append(errorLines, line)
 	}
 	if len(errorLines) != 1 || !strings.Contains(errorLines[0], "every mapped repository's GitHub App installation read failed") || !strings.Contains(errorLines[0], failure.Error()) {
 		t.Fatalf("ERROR lines = %q, want one naming the failed read", errorLines)
