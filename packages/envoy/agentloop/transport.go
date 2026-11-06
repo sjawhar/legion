@@ -17,9 +17,9 @@ import (
 
 // modelTransport carries every model call of a run. It puts the endpoint's token, read again for
 // the attempt, on each request; adds the endpoint's own query parameters to it; makes the run's
-// one retry, on a 429, a 5xx or a transport error, within the run's time; and keeps each response
-// it returns, so an OpenAI Responses turn's output items can be appended byte for byte as the API
-// sent them.
+// one retry, on a 429, a 5xx or a transport error, within the run's time; and, on the one
+// protocol that reads them back, keeps each response it returns, so an OpenAI Responses turn's
+// output items can be appended byte for byte as the API sent them.
 type modelTransport struct {
 	base  http.RoundTripper
 	kind  Kind
@@ -27,7 +27,9 @@ type modelTransport struct {
 	query url.Values
 
 	mu sync.Mutex
-	// responses are the bodies of the responses returned, one per model call, in order.
+	// responses are the bodies of the responses returned, one per model call, in order. They
+	// are kept for the openai-responses protocol alone, which is the only one that reads them
+	// back, through outputItems; every other kind keeps none, and reads none.
 	responses []*bytes.Buffer
 }
 
@@ -93,7 +95,7 @@ func (t *modelTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		if err != nil {
 			return nil, err
 		}
-		if resp.StatusCode/100 == 2 {
+		if t.kind == OpenAIResponses && resp.StatusCode/100 == 2 {
 			kept := &bytes.Buffer{}
 			t.mu.Lock()
 			t.responses = append(t.responses, kept)

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -33,7 +34,10 @@ type reply struct {
 
 // recorded is a request a stand-in got.
 type recorded struct {
-	path   string
+	path string
+	// query is the request URL's raw query string, exactly as it arrived, so a test can tell
+	// no query string from an empty parameter.
+	query  string
 	header http.Header
 	body   []byte
 }
@@ -49,7 +53,7 @@ func newStandIn(t *testing.T, replies ...reply) *standIn {
 func (s *standIn) serve(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	s.mu.Lock()
-	s.got = append(s.got, recorded{path: r.URL.Path, header: r.Header.Clone(), body: body})
+	s.got = append(s.got, recorded{path: r.URL.Path, query: r.URL.RawQuery, header: r.Header.Clone(), body: body})
 	if len(s.replies) == 0 {
 		s.mu.Unlock()
 		http.Error(w, `{"type":"error","error":{"type":"invalid_request_error","message":"the stand-in has no more replies"}}`, http.StatusBadRequest)
@@ -129,7 +133,9 @@ func anthropicStream(stopReason string, usage anthropicUsage, blocks ...map[stri
 		switch b["type"] {
 		case "text":
 			w.event("content_block_start", map[string]any{"type": "content_block_start", "index": i, "content_block": map[string]any{"type": "text", "text": ""}})
-			w.event("content_block_delta", map[string]any{"type": "content_block_delta", "index": i, "delta": map[string]any{"type": "text_delta", "text": b["text"]}})
+			for _, delta := range textDeltas(b) {
+				w.event("content_block_delta", map[string]any{"type": "content_block_delta", "index": i, "delta": map[string]any{"type": "text_delta", "text": delta}})
+			}
 		case "thinking":
 			w.event("content_block_start", map[string]any{"type": "content_block_start", "index": i, "content_block": map[string]any{"type": "thinking", "thinking": "", "signature": ""}})
 			w.event("content_block_delta", map[string]any{"type": "content_block_delta", "index": i, "delta": map[string]any{"type": "thinking_delta", "thinking": b["thinking"]}})
@@ -150,6 +156,21 @@ func anthropicStream(stopReason string, usage anthropicUsage, blocks ...map[stri
 
 func anthropicText(text string) map[string]any {
 	return map[string]any{"type": "text", "text": text}
+}
+
+// anthropicTexts is a Messages API text block whose text arrives in several deltas, as a reply
+// the model writes a piece at a time does.
+func anthropicTexts(deltas ...string) map[string]any {
+	return map[string]any{"type": "text", "text": strings.Join(deltas, ""), "deltas": deltas}
+}
+
+// textDeltas are the deltas one text block's text arrives in: the deltas anthropicTexts set, or
+// the whole of the text as one.
+func textDeltas(b map[string]any) []string {
+	if deltas, ok := b["deltas"].([]string); ok {
+		return deltas
+	}
+	return []string{b["text"].(string)}
 }
 
 func anthropicThinking(thinking, signature string) map[string]any {
@@ -271,4 +292,47 @@ func openaiMessage(id, text string) string {
 func quote(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
+}
+
+// chatUsage is a Chat Completions usage object: the prompt and completion counts, the prompt
+// tokens the provider served from its cache, and the reasoning tokens.
+type chatUsage struct {
+	Prompt, Cached, Completion, Reasoning int
+}
+
+func (u chatUsage) object() map[string]any {
+	return map[string]any{
+		"prompt_tokens": u.Prompt, "completion_tokens": u.Completion,
+		"total_tokens":              u.Prompt + u.Completion,
+		"prompt_tokens_details":     map[string]any{"cached_tokens": u.Cached},
+		"completion_tokens_details": map[string]any{"reasoning_tokens": u.Reasoning},
+	}
+}
+
+// chatStream is the event stream the Chat Completions API sends for a reply whose content
+// arrives in deltas and that stops for finishReason, with the usage chunk the stream is asked
+// for and the [DONE] line that ends it.
+func chatStream(finishReason string, usage chatUsage, deltas ...string) reply {
+	var w sseWriter
+	chunk := func(choices []any, usage any) map[string]any {
+		c := map[string]any{
+			"id": "chatcmpl-standin", "object": "chat.completion.chunk", "created": 1,
+			"model": "gpt-standin", "choices": choices,
+		}
+		if usage != nil {
+			c["usage"] = usage
+		}
+		return c
+	}
+	choice := func(delta map[string]any, finish any) []any {
+		return []any{map[string]any{"index": 0, "delta": delta, "finish_reason": finish}}
+	}
+	w.event("chunk", chunk(choice(map[string]any{"role": "assistant", "content": ""}, nil), nil))
+	for _, delta := range deltas {
+		w.event("chunk", chunk(choice(map[string]any{"content": delta}, nil), nil))
+	}
+	w.event("chunk", chunk(choice(map[string]any{}, finishReason), nil))
+	w.event("chunk", chunk([]any{}, usage.object()))
+	fmt.Fprint(&w, "data: [DONE]\n\n")
+	return reply{body: w.Bytes()}
 }
