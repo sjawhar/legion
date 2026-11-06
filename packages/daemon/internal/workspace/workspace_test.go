@@ -867,7 +867,8 @@ func TestProvisionFromAFeedLeavesTheSharedCloneWithNoWorkingTree(t *testing.T) {
 // The clone from a pod's feed runs each step whose duration follows the repository's size under
 // what remains of one shared CloneTimeout — the local `git clone`, then jj's import of every
 // commit, then the two steps that leave the clone with no working tree, each with what the ones
-// before it left — and every other provisioning command keeps the runner's slow-command budget.
+// before it left — the issue's checkout runs under CheckoutTimeout, and every other provisioning
+// command keeps the runner's slow-command budget.
 func TestTheSharedClonesCloneIsBoundedByCloneTimeout(t *testing.T) {
 	run := newLocalRunner(t)
 	req := feedRequest(t, run, provisionRequest(t))
@@ -884,6 +885,15 @@ func TestTheSharedClonesCloneIsBoundedByCloneTimeout(t *testing.T) {
 			given = append(given, call.Timeout)
 			if call.Timeout > CloneTimeout || call.Timeout < CloneTimeout-time.Minute {
 				t.Errorf("%q ran under %s, want what remained of one %s CloneTimeout", call.Argv, call.Timeout, CloneTimeout)
+			}
+			continue
+		}
+		// The checkout is the one provisioning command outside the clone's steps whose time
+		// follows the repository's size, so it holds CheckoutTimeout, its own
+		// (TestProvisionBoundsEachCommandByItsOwnBudget reads every command's).
+		if commandWith(call.Argv, "jj", "sparse", "reset") {
+			if call.Timeout != CheckoutTimeout {
+				t.Errorf("%q ran under %s, want CheckoutTimeout %s", call.Argv, call.Timeout, CheckoutTimeout)
 			}
 			continue
 		}
