@@ -546,8 +546,9 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fmt.Fprintf(stdout, "legion %s on %s — schema %d, boot %d started %s (first boot %s)\n",
 		state.Daemon.Project, address, state.Daemon.SchemaVersion, state.Daemon.Boots,
 		state.Daemon.StartedAt.Format(time.RFC3339), state.Daemon.FirstBootAt.Format(time.RFC3339))
-	fmt.Fprintf(stdout, "admission: %d active, %d waiting, cap %d; %d issues\n",
-		len(state.Admission.Active), len(state.Admission.Waiting), state.Admission.Cap, len(state.Issues))
+	fmt.Fprintf(stdout, "admission: %d issues hold a slot, cap %d, %d waiting; %d live trees; %d issues\n",
+		len(state.Admission.Active), state.Admission.Cap, len(state.Admission.Waiting),
+		len(state.Admission.Trees), len(state.Issues))
 	fmt.Fprintln(stdout, blockedSummary(state.Admission.Blocked))
 	fmt.Fprintln(stdout, memorySummary(state.Issues))
 	fmt.Fprintln(stdout, awaitingSummary(state.Issues))
@@ -633,10 +634,11 @@ func memorySummary(issues map[string]api.Issue) string {
 }
 
 // awaitingSummary is the one line an operator reads for the roots that gave their admission slot
-// up to wait on a person (api.WaitingOnView): an unanswered one is in neither admission list and
-// holds no slot, so without this line the capacity it freed looks idle. It says how many, how many
-// a person answered (each at the front of the waiting line for the next free slot), and each by
-// key with what it waits on and whether, when and by what act it was answered.
+// up to wait on a person (api.WaitingOnView): an unanswered one holds no slot and is in neither
+// `active` nor `waiting`, only among the live trees, so without this line the capacity it freed
+// looks idle. It says how many, how many a person answered (each at the front of the waiting line
+// for the next free slot), and each by key with what it waits on and whether, when and by what act
+// it was answered.
 func awaitingSummary(issues map[string]api.Issue) string {
 	var keys []string
 	answered := 0

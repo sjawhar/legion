@@ -1645,6 +1645,67 @@ From a release that also carries the one `roles` container (daemon API contract 
 — since the release before this one refuses a `roles` locator and an `issue` resources entry as this one does;
 its step 4 is not needed, since every issue Sandbox is deleted here.
 
+#### Rolling back the release whose cap counts issues
+
+This release's migration `20261103183833_issue_slots` gives a slot to every issue already at work, adds `design_gates.ever_opened` and `dispatch_issues.parent`, and writes the tree lifecycle row of every running tree that had none.
+Re-pinning the earlier image on that schema is not safe by itself, and the reason is the slots rather than the columns:
+the earlier release reads one slot per root and reads a root in `in_progress`, `testing`, `needs_review` or `retro` that holds none as stranded, so its first admission pass calls `LeaveUnslotted` on it and lingers its tree.
+Under this release a running root holds no slot in `accepting`, in `awaiting_merge`, at `admitted` while its children work, or while it waits in the line, so most live trees are in exactly that shape and the earlier image suspends them on its first pass.
+Its cap also counts the child slots this migration wrote, so it admits nothing until they drain.
+
+**Take a dump of the daemon's database before the upgrade** ([Rolling back the upgrade](#rolling-back-the-upgrade) says how, and says which tables a shared login cannot read), and restore that dump to roll back.
+No column has to be undone by hand: the earlier release ignores the two new columns and reads the `slots` and `tree_lifecycles` rows it knows.
+The outbox is the one thing that does, and it is undone the same way whether or not a dump is restored, since a dump taken before the upgrade carries no row of this release's shape while one taken after it carries them all ("The outbox rows the earlier release refuses" below).
+
+With no dump, put the slots back in the shape the earlier release reads, with the daemon stopped and before the earlier image is pinned:
+
+```sql
+-- Every slot a child holds, which the earlier release never writes and counts against its cap.
+delete from slots where issue <> (select tree from issues where issues.key = slots.issue);
+-- One slot for every root the earlier release expects to hold one: in the workflow, not
+-- lingering, and not waiting in the line, which under this release is a root in todo.
+insert into slots (issue, index, admitted_at)
+select i.key, row_number() over (order by i.key) + coalesce((select max(index) from slots), -1), now()
+  from issues i
+ where i.key = i.tree and i.linger_until is null and i.phase <> 'done' and i.status <> 'todo'
+   and i.status not in ('triage', 'icebox', 'backlog', 'done')
+   and not exists (select 1 from slots held where held.issue = i.key);
+```
+
+Read the count the second statement wrote against the deployment's `admissionCap` before starting the earlier image: it writes a row per running root whatever the cap, as this release's own migration does, and the earlier release's cap loop drains the surplus as trees finish rather than refusing to boot.
+Set `admissionCap` back to the value it had before the upgrade in the same change that pins the earlier image, since this release's value counts issues and the earlier one's counts trees.
+
+A root in `todo` is left out because it holds a slot under neither release: it goes back into the earlier release's waiting line, whose own admission pass gives it a slot and opens its tree when the line reaches it.
+Giving it one here would be the opposite of a rollback.
+The earlier release's `line` passes over a root that already holds a slot, and its `releasesSlot` and `releaseInactiveSlots` free only a root that is done, waiting on a person, or out of the workflow (`internal/admit/admit.go` on that release), so a queued root would hold its slot for ever, be promoted by nothing and fill the cap.
+With the cap full, which is the normal state, that strands every root waiting in the line.
+
+**The outbox rows the earlier release refuses must go, with or without a dump.**
+This release writes two marks into every phase worker's start — `needsSlot` on the row that carries the task, `relaunch` on the row that brings the worker's session back (`record.SuperviseRequest`, written by `workflow.StartOrOwe`) — and a `children-first` notice kind.
+The earlier release decodes an outbox payload strictly (`DisallowUnknownFields` in `record/outbox.go`), its `validNoticeKind` does not know that kind, and its `execute` returns the decode error, which is a permanent refusal for neither kind of row: every such row still queued fails and is retried on its backoff for ever, so the worker it was written for is never started again and the notice reaches nobody.
+Run this with the daemon stopped, before the earlier image is pinned:
+
+```sql
+-- The marks this release writes into the pair of rows a phase worker's start is.
+update outbox set payload = payload - 'needsSlot' - 'relaunch'
+ where kind = 'supervise' and (payload ? 'needsSlot' or payload ? 'relaunch');
+-- The notice kind the earlier release does not know.
+delete from outbox where kind = 'notice' and payload->>'kind' = 'children-first';
+```
+
+A start that was waiting for its issue's slot loses the mark that held it unclaimable, so the earlier release claims it as soon as it is due and delivers its task: that worker starts under the earlier release's own cap, which counts the trees holding a slot and not the issues at work, and the slot statements above are what keep that cap honest.
+The relaunch row beside it becomes an ordinary start of the same role carrying no task, which brings the claim back and delivers nothing, so for a claim that holds no task of its own the pair starts one worker and hands it one task between them.
+One case hands that worker the same task twice: the architect's or the operator's retry of a held phase, whose pair carries `ResumeTask` on neither row (`restart` → `started`, `internal/workflow/effects.go`), where the claim failed still holding the task of the phase being retried.
+Stripped of its mark, the relaunch row no longer leaves that failed claim to the task row behind it: the earlier release retries the claim as a plain start does, and the retry sends it the task it kept.
+The task row then fails the earlier release's guard against a second copy, which holds only for a row marked `ResumeTask` or a claim still failed (`internal/daemon/outbox.go` on that release), so the row's own copy waits while the kept task is pending and is delivered after it, a second prompt for the phase the worker is already on.
+It is one worker still, told the same work twice, and no other part of the rollback turns on it.
+A deleted `children-first` notice is told to nobody, and nothing of the earlier release keeps the wait it named: that release starts a parent's own first phase whatever the Dispatch children under it are doing.
+
+**Every daemon sharing the database moves together.**
+Several projects' daemons can share one database ([Daemon-launched controller](#daemon-launched-controller), step 3), and `issues`, `slots` and `tree_lifecycles` are one table each for all of them: this migration's inserts act on every project's rows, not only on the project of the daemon that ran it.
+So a daemon left on the earlier release counts the new child slots of its own project against its cap and admits nothing until they drain.
+Upgrade, and roll back, every daemon of one database in the same change.
+
 ### Pinning a release that drops what a running pod still uses
 
 A pod is built whole from the image pinned when it was launched, and no launch replaces a live pod for an image change alone:
@@ -3943,14 +4004,14 @@ The reservation is the pod's working set, and its request is what the scheduler 
 Concurrently running issue pods are bounded by what the pool's `limits.cpu` and `limits.memory` leave for pods of the per-pod sum of requests:
 at the defaults, two pods fit a floor node and `limits.cpu: 256` places about 80 three-CPU pods (less what the nodes' daemonsets hold), and `limits.memory` divided by 19 GiB bounds them too when that is the smaller (a `Burstable` issue pod's lower request places more)
 — where the tree-volume layout ran one tree per node, each pinned to a node of its own.
-`admission_cap` bounds roots alone: a tree of N children runs N+1 pods at once, and nothing caps concurrent child pods.
+`admission_cap` bounds the issues at work, not the pods: an issue that only waits — for its merge, in `accepting`, on a blocker, on its children or on a person — keeps its pod and holds no slot, so a deployment runs at least one pod per open issue of every live tree and nothing caps that number.
 A pod the pool cannot place stays `Pending`, unscheduled;
 once it has been for longer than `worker_boot_timeout_seconds` the boot watchdog reads it dead ([Liveness rules](#liveness-rules)), one launch failure, its relaunch meets the same pool, and the claim fails once its launch failures run out
 — no later than its registration deadline.
 Two pods beside the issue pods count against the same limits:
 the image probe pod, its own 250m / 1Gi, present at every boot and daemon restart for as long as the probe runs;
 and, under `controller: daemon`, the controller's pod, 1 CPU / 4Gi at the default, for as long as the daemon runs.
-Size the pool's limits for `admission_cap × (1 + the children a tree runs at once)` pods of the per-pod sum plus those two, or keep `admission_cap` within what the limits place.
+Size the pool's limits for the pods of every open tree a deployment runs at once, per-pod sum, plus those two, since `admission_cap` bounds the issues at work rather than the pods a waiting issue keeps.
 
 A pool with no room for the probe pod itself does not refuse the boot.
 The probe pod stays `Pending` with `PodScheduled=False Unschedulable`;
