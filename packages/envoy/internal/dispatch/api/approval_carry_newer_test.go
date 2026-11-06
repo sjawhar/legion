@@ -11,6 +11,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 // newerAskAttribute is an attribute of the decision block that this build's manifest does not
@@ -124,11 +125,12 @@ func TestAVersionWhoseApprovedVersionHoldsNewerContentIsWrittenByABuildThatReads
 	}
 	useNewerAskManifest(t)
 	newer, service := newerBuildDocuments(t, database, 20*time.Millisecond)
+	leases := storetest.Leases(t, database.Pool)
 	resumption, stop := context.WithCancel(ctx)
 	resumed := make(chan struct{})
 	go func() {
 		defer close(resumed)
-		service.RunSettlementResumption(resumption)
+		service.RunSettlementResumption(resumption, leases)
 	}()
 	t.Cleanup(func() {
 		stop()

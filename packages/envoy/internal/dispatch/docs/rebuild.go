@@ -29,26 +29,27 @@ type RebuildReport struct {
 // deliberately never a load fallback: a history that loads can contain unsettled edits newer than
 // its latest version and is refused unchanged.
 //
-// Every refusal comes before the first write: a room resident in this server, a history that
-// loads, a closed issue (for supplied markdown, which changes the document), a latest version
-// holding an element this build does not know (ErrDocNewerContent, as every read of it answers),
-// and markdown that is not a Proof document, drops an open ask block, or introduces a block
-// pointer at a block the attribute may not name (refuseBlockPointers, against the latest
-// version). Supplied markdown is caller text: it is parsed as an upload is, and its
-// rendering is weighed as a new document's is (SeedText). The latest version is the server's own
-// rendering of the document, read back as every stored rendering is (pmdoc.ParseRendering), so a
-// document whose version is past what one write may make - stored before that bound, or grown
-// past it by browser edits - still rebuilds, and so does one holding an element this build reads
-// but may not create yet, which the seed puts back rather than creates
-// (encodeDocumentTreeHolding). Supplied markdown that differs from the latest version is a
-// document change, so the same transaction writes its
-// version, which moves the open approval request to it (writeVersionTx, MoveApprovalAsk); the
-// VersionResult is what the caller's artifact.version event names. A rebuild of a closed issue's
-// document from its latest version writes the close's ask states into the tree it seeds, as the
-// close's final sweep writes them into the issue's other documents (closedIssueAskState), and
-// marks the document owing the settlement those writes leave owed, so no ask block the close
-// withdrew reads open again once the rebuild commits. A failure anywhere rolls the whole rebuild
-// back with the transaction. The room refuses loads until that transaction ends
+// Every refusal comes before the first write: a room resident in this server or in another
+// envoy-dispatch process (a holds query, roomQueries.ask), a history that loads, a history another
+// rebuild or an append moved past the one this rebuild loaded (RebuildTx), a closed issue (for
+// supplied markdown, which changes the document), a latest version holding an element this build
+// does not know (ErrDocNewerContent, as every read of it answers), and markdown that is not a
+// Proof document, drops an open ask block, or introduces a block pointer at a block the attribute
+// may not name (refuseBlockPointers, against the latest version). Supplied markdown is caller
+// text: it is parsed as an upload is, and its rendering is weighed as a new document's is
+// (SeedText). The latest version is the server's own rendering of the document, read back as
+// every stored rendering is (pmdoc.ParseRendering), so a document whose version is past what one
+// write may make - stored before that bound, or grown past it by browser edits - still rebuilds,
+// and so does one holding an element this build reads but may not create yet, which the seed puts
+// back rather than creates (encodeDocumentTreeHolding). Supplied markdown that differs from the
+// latest version is a document change, so the same transaction writes its version, which moves
+// the open approval request to it (writeVersionTx, MoveApprovalAsk); the VersionResult is what
+// the caller's artifact.version event names. A rebuild of a closed issue's document from its
+// latest version writes the close's ask states into the tree it seeds, as the close's final sweep
+// writes them into the issue's other documents (closedIssueAskState), and marks the document
+// owing the settlement those writes leave owed, so no ask block the close withdrew reads open
+// again once the rebuild commits. A failure anywhere rolls the whole rebuild back with the
+// transaction. The room refuses loads until that transaction ends
 // (Ledger.holdRebuild): a load before the commit would read the old history, and a second rebuild
 // would preflight against it. That is also why the close's states go into the seed rather than
 // through a live write after it (WriteIssueAskStates): such a write's fork is refused while the
@@ -70,18 +71,39 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	// fails on it, since it cannot load, or, once the rebuild commits, reads the rebuilt head:
 	// versions only increase, so its room holds the rebuilt update and none it would mistake for it.
 	//
-	// This refusal is this server's rooms alone, and that is all it can be: the other
-	// envoy-dispatch process's rooms are not in this server's. What covers them is the stale-room
-	// gate. RebuildTx replaces the whole history with one update at head+1, so an instance over
-	// there no longer stands at the head, and its next durable write is refused
-	// (ErrRoomBehindHead): its settlement closes the room (reloadRoomBehindHead), and its
-	// browser's append fails it outright, and either way the reload reads the rebuilt document.
+	// The other envoy-dispatch processes' rooms are asked the same through a holds query: a member
+	// that answers it holds a room of the document refuses the rebuild as this server's room does.
+	// A member that does not answer within the query's wait, or a room that loads there after it
+	// answered, is covered by room sync instead. RebuildTx replaces the whole history with one
+	// update at head+1 and announces it, so an instance over there finds its stored history
+	// replaced (historyReplaced): its catch-up closes and reloads the room
+	// (roomCatchUps.closeReplaced), and until then its settlement and its browser's append are
+	// refused (ErrRoomBehindHead) and lead to the same close, and the reload reads the rebuilt
+	// document.
 	if s.srv.GetDoc(artifactID) != nil {
 		latest, err := savedVersionNumber(ctx, tx, artifactID)
 		if err != nil {
 			return RebuildReport{}, VersionResult{}, err
 		}
 		return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: document %s is open in this Dispatch process, or its last editor left it less than two minutes ago, so Dispatch refused the rebuild. A rebuild discards every edit made after saved version %d. Stop. Ask a person whether to rebuild the document after two minutes", ErrDocumentLive, artifactID, latest)
+	}
+	answers, _, err := s.roomQueries.ask(ctx, tx, artifactID, roomQueryHolds)
+	if err != nil {
+		return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: ask the other processes whether they hold the document: %v", ErrServiceUnavailable, err)
+	}
+	for _, answer := range answers {
+		if answer.holds {
+			return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: document %s is live in another server process; close its editors and retry two minutes later, or replace it from markdown instead", ErrDocumentLive, artifactID)
+		}
+	}
+	// The head of the history the refusal below judges. RebuildTx replaces that history only
+	// while the head is still this one, and Load answers no head when it fails, which is the
+	// case this route exists for, so it is read here instead - as Load reads it, and before the
+	// load, so an append that lands between the two leaves the head behind the history judged
+	// and the rebuild refused rather than let through over a history nothing judged.
+	loadedHead, err := s.persistence.Head(ctx, artifactID)
+	if err != nil {
+		return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: read the document's head before rebuild: %v", ErrServiceUnavailable, err)
 	}
 	// The pre-load is only how a history that loads, which this refuses, is told from one that
 	// does not: the rebuild's source is the latest saved version or the supplied markdown, never
@@ -101,6 +123,7 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 		return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: load document before rebuild: %v", ErrServiceUnavailable, err)
 	default:
 		validationErr = validateUpdate(loaded.Update, s.maxPendingItems)
+		loadedHead = loaded.Version
 	}
 	if validationErr == nil {
 		latest, err := savedVersionNumber(ctx, tx, artifactID)
@@ -198,7 +221,11 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 		return RebuildReport{}, VersionResult{}, fmt.Errorf("seed rebuilt document tree: %w", err)
 	}
 
-	report, err := s.persistence.RebuildTx(ctx, tx, artifactID, seed)
+	// RebuildTx replaces the history only if its head is still the one loaded above, which is the
+	// history validated as one that cannot load: a second rebuild of the document on another
+	// process that loaded the same history waits on the owner row above until this one commits,
+	// then finds the head moved and is refused.
+	report, err := s.persistence.RebuildTx(ctx, tx, artifactID, loadedHead, seed)
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, err
 	}

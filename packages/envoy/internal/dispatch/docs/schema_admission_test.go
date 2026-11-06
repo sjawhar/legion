@@ -681,7 +681,9 @@ func TestARevokedSlowPageEndsOnACodeItReconnectsOnAndSyncsWhole(t *testing.T) {
 	// revoked it admits it no other way. What it syncs must be the whole document.
 	address := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/doc/" + artifactID + "?" + page(3, 3).Encode()
 	reconnected := docstest.Dial(t, address, http.Header{"X-Dispatch-User": []string{"alice"}}, artifactID, crdt.New())
-	waitForPeerDocument(t, reconnected, want)
+	if err := reconnected.WaitForText(peerMarkdown, want, 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // waitForTheDocumentOnTheWire waits until ygo's handshake to a slow page is out: the document is

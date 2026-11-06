@@ -1,6 +1,7 @@
 # Getting the tool your work needs
 
-Part of `skill://legion-worker`. Read it before you run a build or a test suite in your pod; the
+Part of `skill://legion-worker`. Read it before you read a shared database, a session store or
+another role's transcript among them; before you run a build or a test suite in your pod; the
 moment your phase needs a tool the worker image may not carry — a database client, a linter, a
 one-off CLI — before you install, download, or vendor anything; before you measure Oh My Pi's
 binary; and when a test fails in your pod. Every path it cites is in cybermonklabs/legion.
@@ -24,8 +25,8 @@ heavy run goes where your deployment's instructions say.
 ## The database your tests use
 
 - Never give a test, a migration or anything that creates or drops a database the URL in the
-  file `OMP_SESSION_SQL_DSN_FILE`: that is the live sessions database every pod shares, and its
-  login can create and drop databases there.
+  file `OMP_SESSION_SQL_DSN_FILE`: that is the live sessions database every pod shares, and it
+  holds every role's transcript.
 - Give every Postgres variable a test reads `$LEGION_TEST_PG_DSN`, your pod's own server:
   `LEGION_TEST_PG_DSN`, `DISPATCH_TEST_DATABASE_URL` and `BROKER_TEST_DATABASE_URL`. Each makes
   and drops a database of its own per test, so your pod's roles can share the server.
@@ -53,6 +54,53 @@ heavy run goes where your deployment's instructions say.
   role's connections and databases with it mid-test, and the next `ensure` of either role finds
   the same cluster on disk and serves it again. With no
   `legion-testpg` either, stand up one with the harness below (**The worked case**) and set the DSN.
+
+## Reading a shared database
+
+A shared database is one outside your pod: the deployment's sessions database, another team's
+database, any server whose other clients your role cannot stop. Your pod's own test server
+(`$LEGION_TEST_PG_DSN`, above) is not one of them, because it dies with your pod.
+
+- Read it through the deployment's read-only login. Where the deployment gives one, its URL is in
+  the file `SESSION_READER_DSN_FILE` names.
+- Never read it through the session URL the file `OMP_SESSION_SQL_DSN_FILE` names. That URL is the
+  one the role's own agent writes its transcript with, so a read through it puts a write-capable
+  connection on a shared server for a read.
+- Keep the read-only setting inside one transaction, never on the connection for its whole life. A
+  read-only setting made for the whole session stays on the backend after the connection goes back
+  to the pool. The next client of that pool gets it, and that client's writes fail. On 2026-11-05
+  one such read left the setting on a pooled backend, and 1,432 session writes failed over 16
+  minutes.
+
+These three forms do it. Each one holds the transaction read-only, so a write inside it is
+refused, and each one drops that state when the transaction ends.
+
+```sql
+BEGIN READ ONLY;
+SELECT path FROM omp_session_files ORDER BY path LIMIT 1;
+COMMIT;
+```
+
+```sql
+BEGIN;
+SET LOCAL transaction_read_only = on;
+SELECT path FROM omp_session_files ORDER BY path LIMIT 1;
+COMMIT;
+```
+
+```sh
+psql "$URL" --single-transaction -q -X -v ON_ERROR_STOP=1 -c 'SET TRANSACTION READ ONLY' -f <file>
+```
+
+`-q` keeps psql's `SET` status line off stdout. Without it psql prints that line, and it becomes
+the first line of a file you redirect the output into. `-X` keeps your `~/.psqlrc` out of the
+run, and `ON_ERROR_STOP` ends the run at the first error. The file holds no `COMMIT` or
+`ROLLBACK` of its own: one would end the read-only transaction early, and every statement after
+it would run outside it.
+
+Your deployment may give no `SESSION_READER_DSN_FILE`. Then read nothing of a shared database
+through the session URL. Read your deployment's instructions for the route they give, and when
+they name none, report it as a fault of the deployment rather than reaching for the writer URL.
 
 ## The five clients the image already carries
 

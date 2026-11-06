@@ -107,6 +107,24 @@ func ForConcurrentRead(ctx context.Context) (context.Context, error) {
 	return context.WithValue(ctx, holdingKey{}, &holding{}), nil
 }
 
+// ForConcurrentWorker returns a context for one of a caller's goroutines that run side by side
+// for as long as the caller lives: ctx's deadline, cancellation and values, with a hold mark of
+// its own, always a fresh one. A worker that takes a connection - a transaction, a cursor - marks
+// only itself, so its siblings are still free to take theirs, and the pool still refuses each
+// worker a second connection of its own.
+//
+// It differs from the other two marks by never reusing ctx's: WithTransactionTracking hands back
+// the mark ctx already carries, which siblings sharing it would set and clear under each other,
+// and ForConcurrentRead refuses a caller that holds a connection. A worker's mark is its own
+// whatever the parent carries, so the caller must start these goroutines outside any transaction
+// or connection of this pool's: a process-lifetime context, as room sync's lanes run off
+// (docs.Service.RegisterRoomSync), or a request's once its write has committed, as a broadcast's
+// detached delivery runs on (api.server.deliverBroadcast). A fresh mark cannot see a connection
+// the parent holds.
+func ForConcurrentWorker(ctx context.Context) context.Context {
+	return context.WithValue(ctx, holdingKey{}, &holding{})
+}
+
 // loggedSites remembers the call sites that have already logged a refusal, so a caller that
 // trips the guard in a loop reports its stack once instead of flooding the log. The error
 // itself is returned to every caller, every time.
@@ -247,26 +265,26 @@ func (p *Pool) Healthy(ctx context.Context) (int, error) {
 	return version, nil
 }
 
-// listenerPoolSize bounds the pool Listener takes its connections from. Five permanent
-// listeners dial through it - the delivery hub, the event stream relay, the stale-room evictor,
-// the shared hub cmd/dispatch's woken background loops wait on (pglisten.Hub, one connection for
-// all of their channels) and the events outbox - and a sixth, the test hooks'
-// (api/test_hooks_fanout.go), under DISPATCH_TEST_HOOKS alone, which production never sets. Each
-// connection is hijacked as soon as it is opened, so it leaves with its caller and the pool holds
-// none between dials: what one bounds is dials in flight, not connections held. A listener
-// redialling while another dials waits that dial out, which is what a loop that dials and then
-// waits for notifications for the life of the process can afford.
+// listenerPoolSize bounds the pool Listener and Dedicated take their connections from. Five
+// permanent connections dial through it - the delivery hub's, the event stream relay's and the
+// events outbox's listeners, the process's shared listener hub (pglisten.Hub, on which the
+// document rooms' room sync and cmd/dispatch's woken background loops are registered, one
+// connection for all of their channels) and the document rooms' NOTIFY sender - and a sixth, the
+// test hooks' (api/test_hooks_fanout.go), under DISPATCH_TEST_HOOKS alone, which production never
+// sets. Each connection is hijacked as soon as it is opened, so it leaves with its caller and the
+// pool holds none between dials: what one bounds is dials in flight, not connections held. A
+// caller redialling while another dials waits that dial out, which is what a loop that dials and
+// then waits for notifications for the life of the process can afford, and what the sender's
+// first send after a failure can afford too.
 const listenerPoolSize = 1
 
 // Listener returns one connection of its own for LISTEN, from a one-connection pool opened from the
 // shared pool's configuration and hijacked, so it holds no shared connection. The caller closes it.
 // The delivery hub (api/delivery_live_hub.go), the event stream relay (api/event_stream_relay.go),
-// the document rooms' stale-room evictor (docs/stale_room.go), the background loops' shared wake
-// hub (cmd/dispatch), the events outbox (outbox/lease.go) and, under the test hooks, their
-// fan-out (api/test_hooks_fanout.go) each hold one for as long as they wait for notifications,
-// which is the life of the process: a connection of the shared pool held that long would be one
-// fewer for every request, and a LISTEN on a pooled connection would end when the pool recycled
-// it.
+// the events outbox (outbox/lease.go) and, under the test hooks, their fan-out
+// (api/test_hooks_fanout.go) each hold one for as long as they wait for notifications, which is
+// the life of the process: a connection of the shared pool held that long would be one fewer for
+// every request, and a LISTEN on a pooled connection would end when the pool recycled it.
 func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 	listen, err := p.separate(&p.listen, listenerPoolSize, "listener")
 	if err != nil {
@@ -279,33 +297,58 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 	return conn.Hijack(), nil
 }
 
+// Dedicated returns one connection of its own, as Listener does, that pg_stat_activity names
+// applicationName. The caller closes it. It is outside the nested-acquire guard
+// (ErrNestedAcquire) for the reason the other separate pools are: a connection that belongs to no
+// shared-pool caller cannot close the cycle the guard prevents, so a request holding one of the
+// shared pool's transactions may use one. Two such connections are held per process: the shared
+// listener hub that cmd/dispatch dials, whose name is how every Dispatch process reads which
+// processes are listening (docs.ListenerApplicationPrefix), and the document rooms' NOTIFY sender
+// (docs/room_sync.go), which a request inside a transaction sends through.
+func (p *Pool) Dedicated(ctx context.Context, applicationName string) (*pgx.Conn, error) {
+	conn, err := p.Listener(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := conn.Exec(ctx, `select set_config('application_name', $1, false)`, applicationName); err != nil {
+		// Bounded, so a connection that went half-open between its dial and this statement
+		// cannot hold the caller in its Terminate.
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = conn.Close(closeCtx)
+		return nil, fmt.Errorf("name the connection %s: %w", applicationName, err)
+	}
+	return conn, nil
+}
+
 // leasePoolSize bounds the pool the once-overall leases (duty.Exclusive) and the delivery intakes'
 // holds (duty.Hold) are taken on. The requirement is one connection per caller that can be using
 // one at the same moment, and it is a caller and not a lease or a hold that needs one.
 //
 // Exclusive takes its connection before it learns whether the lease is held, so a pass that skips
-// because the other process holds the lease holds a connection for that round trip too. Fourteen
+// because the other process holds the lease holds a connection for that round trip too. Fifteen
 // names are leased - the document compaction, the keyed writes' maintenance sweep
 // (api.RunMaintenanceSweep, which keeps the lease name suggestion-outcomes the suggestion sweep
 // carried that work under), the reference-excerpt reconciliation, the block-index reconciliation,
 // the term-statistics refresh, the GitHub webhook redelivery sweep, the CI reconcile pass
 // (cireconcile.Lease), the architecture import, the delivery reconcile, the edit-notice sweep, the
-// repair of closed and reopened issues' asks (api.RunIssueAskRepair), one per delivery durable for
-// the intake's take-over (delivery.consumerLease, a name each for delivery-events and
-// delivery-jobs) and the server process registry's prune (processes.RunPrune) - by fourteen
-// callers, since each intake takes its own durable's name from its own goroutine, so fourteen
-// callers can be inside Exclusive at once. The suggestion outcome sweep is not among them: it
-// takes no lease, since the cursor row each of its pages holds for update serialises two
-// processes by itself (api/suggestion_outcomes.go).
+// document settlement resumption (docs.Service.RunSettlementResumption), the repair of closed and
+// reopened issues' asks (api.RunIssueAskRepair), one per delivery durable for the intake's
+// take-over (delivery.consumerLease, a name each for delivery-events and delivery-jobs) and the
+// server process registry's prune (processes.RunPrune) - by fifteen callers, since each intake
+// takes its own durable's name from its own goroutine, so fifteen callers can be inside Exclusive
+// at once. The suggestion outcome sweep is not among them: it takes no lease, since the cursor row
+// each of its pages holds for update serialises two processes by itself
+// (api/suggestion_outcomes.go).
 //
 // Each of the two intakes also holds its durable's hold, whose every statement is one statement
 // on a connection of this pool for that statement alone. Two can be in flight per intake at once:
 // the hold's renewal goroutine (duty.Hold's renew, every 5 s, each bounded by the renew interval),
 // and the intake's own goroutine (duty.HoldToken, duty.TryHold, SetToken, Release, one at a time),
 // whose SetToken runs inside the take-over and so needs a connection beside the one its lease is
-// held on. That is four more callers, eighteen in all.
+// held on. That is four more callers, nineteen in all.
 //
-// Eighteen connections are exactly those eighteen: the headroom is zero. A renewal that waited
+// Nineteen connections are exactly those nineteen: the headroom is zero. A renewal that waited
 // for a connection behind a compaction pass, which holds its lease for minutes, would see its hold
 // reported lost at the loss deadline and the durable's delivery stop, so the next caller added
 // here - a leased loop, or another hold - takes a connection of its own in this count. They
@@ -320,7 +363,7 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 // leasePoolSize (LeaseCallers.Complete). So a leased loop or a hold added without a connection
 // here, and a connection added here without a caller, stops the process at its start rather than
 // leaving a renewal to wait behind a pass that runs for minutes.
-const leasePoolSize = 18
+const leasePoolSize = 19
 
 // Leases is the registry of the lease pool's callers. A periodic maintenance loop takes the
 // connection it holds its lease on here, so that only one process runs each pass
@@ -415,10 +458,13 @@ const outboxPoolSize = 2
 const registryPoolSize = 1
 
 // permanentListeners is how many connections the listener pool dials and hands off for the life
-// of the process (Listener): the delivery hub, the event stream relay, the stale-room evictor,
-// the shared wake hub cmd/dispatch's woken background loops wait on, which main.go dials through
-// database.Pool.Listener, and the events outbox's LISTEN on dispatch_events and
-// dispatch_duty_holds.
+// of the process: the delivery hub's, the event stream relay's and the events outbox's listeners
+// (Listener), and the document rooms' two (Dedicated): the shared listener hub that room sync and
+// cmd/dispatch's woken background loops are registered on, and the NOTIFY sender, which opens at
+// the first send and then stays open. The outbox's LISTEN on dispatch_events and
+// dispatch_duty_holds is its own rather than a registration on the hub, as the delivery hub's and
+// the relay's are: cmd/dispatch builds the outbox only with NATS, and the LISTEN starts and stops
+// inside outbox.Outbox.Run, while the hub takes no registration once it runs.
 const permanentListeners = 5
 
 // ConnectionsPerProcess is the most connections one Dispatch server process opens to Postgres:
@@ -736,6 +782,15 @@ type beforeCommitKey struct{}
 // with its own rollback error, as it would without one.
 func WithBeforeCommit(ctx context.Context, step BeforeCommit) context.Context {
 	return context.WithValue(ctx, beforeCommitKey{}, step)
+}
+
+// WithoutBeforeCommit returns ctx with the step taken off, for a transaction of a request's that
+// writes none of the request's own work: the document rooms' conditional-edit queue takes its
+// bookkeeping transaction this way (docs.Service.admitConditionalEdit), since it commits before
+// the request's write and a crash between the two must leave the key for the repeat to run rather
+// than answer it KEY_COMMITTED for a write nobody made.
+func WithoutBeforeCommit(ctx context.Context) context.Context {
+	return context.WithValue(ctx, beforeCommitKey{}, BeforeCommit(nil))
 }
 
 // trackedTx clears the caller's mark however the transaction ends, and takes the caller's

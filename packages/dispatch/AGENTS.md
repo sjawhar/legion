@@ -1212,9 +1212,10 @@ A closed issue's document is admitted read-only
 too, and names no reload, which cannot make it editable: `ProofDocument` shows the line only for a
 read-only admission that came while the issue was open (`closedAdmission` records whether it was
 closed then), while the issue is open and the socket is connected. The admission and the
-connection decide the line, not the close or the reopen: each drops the socket only on the server
-process that served it (`SetIssueClosed`), and where it does, the reconnect's admission decides
-again. y-prosemirror deletes, from the page's copy of
+connection decide the line, not the close or the reopen. A close drops the socket on every server
+process that holds a room of the document. Migration `20261101181500`'s trigger announces the
+change, and each process closes its rooms of the issue (`issueOpenChanged`). The reconnect's
+admission decides again. y-prosemirror deletes, from the page's copy of
 the document, an element or text the editor's schema cannot build (`createNodeFromYElement`), such
 as an element a newer build wrote; `pending-sync.ts` never keeps that repair as a pending edit, so
 no later writable admission replays it. Typed blocks use `:::name{#block-id key="value"}`
