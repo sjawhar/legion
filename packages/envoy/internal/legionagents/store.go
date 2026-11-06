@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -345,7 +344,7 @@ func (s *Store) write(ctx context.Context, next prepared) (Entry, error) {
 			}
 			return next.entry, nil
 		}
-		if !isClaimConflict(err) {
+		if !bus.IsCASConflict(err) {
 			return Entry{}, err
 		}
 		if attempt == claimAttempts {
@@ -386,11 +385,4 @@ func putIndexKeys(ctx context.Context, kv bus.KeyValue, entry Entry, value []byt
 		}
 	}
 	return nil
-}
-
-// isClaimConflict reports whether err is a claim another write's moved the session key under: a
-// create of a key that exists (nats.ErrKeyExists) or an update at a revision the key is no longer
-// at (JetStream's "wrong last sequence"), as cistore's isCASConflict reads them.
-func isClaimConflict(err error) bool {
-	return errors.Is(err, nats.ErrKeyExists) || strings.Contains(err.Error(), "wrong last sequence")
 }

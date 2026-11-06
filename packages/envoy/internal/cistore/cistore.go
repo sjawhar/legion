@@ -832,14 +832,6 @@ func casBackoff(attempt int) time.Duration {
 	return time.Duration(rand.Int64N(int64(base) + 1))
 }
 
-// isCASConflict reports whether err is a compare-and-swap revision conflict
-// (as opposed to a real transport/storage error). Create returns ErrKeyExists
-// when the key already exists; Update returns a "wrong last sequence" API error
-// when the revision moved.
-func isCASConflict(err error) bool {
-	return errors.Is(err, nats.ErrKeyExists) || strings.Contains(err.Error(), "wrong last sequence")
-}
-
 // casState reads key's record, has apply change it, and writes it back at the revision it read,
 // retrying a lost compare-and-swap within recordBudget. A written record reaches the cache only
 // while the bucket the write went to is the one the watcher reads (kvwatch.Watcher.Handle): a
@@ -879,7 +871,7 @@ func (s *Store) casState(key string, apply func(st *State) (ok bool, err error))
 			s.mu.Unlock()
 			return state, true, nil
 		}
-		if !isCASConflict(err) {
+		if !bus.IsCASConflict(err) {
 			return State{}, false, err
 		}
 		if time.Now().After(deadline) {

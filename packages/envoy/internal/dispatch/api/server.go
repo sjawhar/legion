@@ -1540,8 +1540,32 @@ func issueStatus(ctx context.Context, q queryer, key, lock string) (string, bool
 	return status, open, nil
 }
 
+// closedWrite says of one write of an owner's collaboration whether a closed issue takes it. A
+// closed issue still takes a comment that is not a suggestion, a message, their deliveries and an
+// agent's reply to one (takenWhenClosed); every other write of it -- an ask, a suggestion, a
+// document edit, an upload, a claim, a review, an action on an existing comment -- is
+// refusedWhenClosed.
+type closedWrite bool
+
+const (
+	takenWhenClosed   closedWrite = false
+	refusedWhenClosed closedWrite = true
+)
+
 // errIssueClosed is the refusal of a write that a closed issue does not take.
 var errIssueClosed error = errorf(http.StatusConflict, "ISSUE_CLOSED", "issue is closed")
+
+// refuseClosed is the one place a closed owner refuses a write: every check of it decides here,
+// the locked ones each write makes for itself (requireOpenOwnerStatus, lockCommentOwner,
+// lockedComment) and the pooled one a comment makes before its transaction opens
+// (refuseOwnerBeforeResolving). open is what the owner's row read (ownerStatus, issueStatus): an
+// issue is open until it closed, and a project document always is.
+func refuseClosed(open bool, write closedWrite) error {
+	if write == refusedWhenClosed && !open {
+		return errIssueClosed
+	}
+	return nil
+}
 
 // A version event is built by docs.ArtifactVersionEventPayload wherever it is appended; a
 // document's creation is the one other artifact payload, and it states what the write moved

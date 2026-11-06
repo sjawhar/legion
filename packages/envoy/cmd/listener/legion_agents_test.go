@@ -367,10 +367,14 @@ authorization {
 }
 
 // A listener whose NATS user lacks the grant on the legion_agents bucket, as one deployed before
-// that grant is applied, starts and serves every other route, logs one ERROR naming the bucket
-// however often it retries the open, and answers each registry route 503 naming the failed open.
-// Once the server applies the grant and the listener reconnects, its reconnect hook wakes the
-// retry, which opens the bucket, and the routes serve.
+// that grant is applied, starts and serves every other route, logs one registry ERROR naming the
+// bucket however often it retries the open, and answers each registry route 503 naming the failed
+// open. The one registry ERROR is not the only ERROR a missing grant leaves: the server refuses
+// each open's publish to $JS.API.STREAM.INFO.KV_legion_agents, which the connection logs as one
+// `envoy nats async error` at ERROR per open, about one every 70 s once the backoff is capped
+// (1 min of backoff and the open's own 10 s JetStream timeout). Once the server applies the grant
+// and the listener reconnects, its reconnect hook wakes the retry, which opens the bucket, and the
+// routes serve.
 func TestAListenerWithoutTheRegistryGrantServesAndAnswersItsRoutes503(t *testing.T) {
 	bucket := "KV_" + bus.LegionAgentBucket
 	server, uri := testnats.StartConfig(t, listenerGrant(
@@ -424,9 +428,11 @@ func TestAListenerWithoutTheRegistryGrantServesAndAnswersItsRoutes503(t *testing
 }
 
 // A registry whose first open fails on a listener that holds the grant, a JetStream timeout or a
-// slow first create, answers its routes 503 naming the failed open and logs one ERROR however often
-// its retry fails; once an open succeeds, with no NATS connection event in between, the routes
-// serve and one INFO says the registry opened.
+// slow first create, answers its routes 503 naming the failed open and logs one registry ERROR
+// however often its retry fails (an open the server refuses for a missing grant also logs one
+// `envoy nats async error` at ERROR per open, which this open, failed by its stub, does not);
+// once an open succeeds, with no NATS connection event in between, the routes serve and one INFO
+// says the registry opened.
 func TestALegionAgentRegistryWhoseFirstOpenFailsServesOnceItsRetryOpensIt(t *testing.T) {
 	l := newLegionListener(t, setupPublishTestClient(t))
 	var failing atomic.Bool

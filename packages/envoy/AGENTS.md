@@ -2299,10 +2299,12 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
 
 - A closed issue (`closed_at` set) still takes its conversation: a new comment - issue-level, a thread reply, a reply on an ask, one anchored to a quote of one of its documents, and that thread's replies - and a new message, from a person or an agent, with their deliveries, retries and the mentioned or targeted agent's reply.
   A reply still reopens a resolved root there, as it does on an open issue.
-  Those writes lock the issue row as any write does and skip the open check: `lockIssue` for a message, its deliveries and its reply; `lockCommentOwner` for a comment that is not a suggestion; `lockedCommentForDelivery` for a comment's mention delivery and the agent's reply to it.
+  Those writes lock the issue row as any write does and skip the open check: `lockIssue` for a message, its deliveries and its reply; `lockedCommentForDelivery` for a comment's mention delivery and the agent's reply to it; and, for a comment that is not a suggestion, `lockCommentOwner`, which asks the one refusal below and is told the write is taken.
   An anchored comment's document writes - its mark, the version its anchor is pinned to, its margin record, and the thread root's projection a reply adds itself to - run under `docs.WithCommentMarks`, owner-verified because the comment's transaction holds the owner row and decided there that the comment is written;
   a content edit, a suggestion's mark, a named version or a rebuild under the same context still waits for a reopen.
   Everything else is `409 ISSUE_CLOSED` until a reopen: a new ask, an ask's edit, answer or resolve, a suggestion (a proposed document edit, whose acceptance is its only outcome), a document edit, a named version, an upload, a review, an approval request, a claim, a PATCH field outside the closed allow-list above, and the comment actions resolve, reopen, edit, accept and reject on an existing comment (`lockedComment`).
+  One function makes that refusal, wherever it is asked for: `refuseClosed(open, write)` (`api/server.go`), where `write` is `takenWhenClosed` for a comment that is not a suggestion and `refusedWhenClosed` for every other write of an owner's collaboration.
+  It is asked under the write's own lock (`requireOpenOwnerStatus`, `lockCommentOwner`, `lockedComment`) and, for the same answer before the work is spent, from the pool before a comment resolves its mentions and before an upload spools its body (`refuseOwnerBeforeResolving`).
   A reopen (a PATCH to any status but `done`) lifts every refusal.
 
 - An issue's `updated_at` never moves backwards.
@@ -4117,11 +4119,18 @@ routes above with the listener's `/v1` credential; Dispatch reads it through
   bucket (a missing grant is the usual cause): <err>"}`, since the registry is one Dispatch only
   displays and Dispatch answers `legion_registry: "unavailable"` without it. While it has no store
   the listener retries the open in the background, after a backoff doubling from 1 s to 1 min and
-  at once after every NATS reconnect, logging no further failure and one INFO once it opens, so a
-  grant applied by a configuration reload or on a new connection serves the routes without a
-  restart; the retry is the only open after the first, so no two run at once, and the shutdown's
-  drain ends it. Once open, the reconnect hook moves the store's handle onto a connection the bus
-  replaced (`Store.Reopen`). Both live in `legionAgentRegistry` (`cmd/listener/legion_agents.go`).
+  at once after every NATS reconnect, logging no further registry failure of its own and one INFO
+  once it opens, so a grant applied by a configuration reload or on a new connection serves the
+  routes without a restart; the retry is the only open after the first, so no two run at once, and
+  the shutdown's drain ends it. That one ERROR is the registry's own line, not the whole log a
+  missing grant leaves: the server refuses each open's publish to
+  `$JS.API.STREAM.INFO.KV_legion_agents`, which the connection reports as one `envoy nats async error`
+  at ERROR per open (`options`' async error callback, `internal/bus/connect.go`), and the refused
+  request then waits out its 10 s JetStream timeout (`legionagents`' `openTimeout`), so an outage
+  carries six of those lines in its first two minutes and about one every 70 s after that, 1 min of
+  backoff and the open's own 10 s. Once open, the reconnect hook moves the store's handle onto a
+  connection the bus replaced (`Store.Reopen`). Both live in `legionAgentRegistry`
+  (`cmd/listener/legion_agents.go`).
 
 ## Session consumers
 

@@ -28,4 +28,9 @@ body: |-
   a listener that cannot open the bucket (a missing grant is the usual cause) serves everything
   else and answers 503 on the registry routes, logging one ERROR naming the `legion_agents` bucket,
   and retries the open in the background (1 s doubling to 1 min, and at once after each NATS
-  reconnect) until it opens, so a grant applied later serves the routes without a restart.
+  reconnect) until it opens, so a grant applied later serves the routes without a restart. The
+  registry logs that one ERROR however often it retries, but the missing grant has the server
+  refuse each retried open's publish to `$JS.API.STREAM.INFO.KV_legion_agents`, which the
+  connection logs as one `envoy nats async error` at ERROR per open, and the refused open then
+  waits out its 10 s JetStream timeout: six such lines in the first two minutes, then about one
+  every 70 s (1 min of backoff and the open's own 10 s) until the grant reaches the listener.

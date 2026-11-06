@@ -24,8 +24,8 @@ func (s *server) lockedComment(ctx context.Context, tx pgx.Tx, id string) (model
 	if err != nil {
 		return model.Comment{}, err
 	}
-	if !open {
-		return model.Comment{}, errIssueClosed
+	if err := refuseClosed(open, refusedWhenClosed); err != nil {
+		return model.Comment{}, err
 	}
 	return s.loadCommentForUpdate(ctx, tx, id)
 }
