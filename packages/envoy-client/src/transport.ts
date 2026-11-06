@@ -724,8 +724,8 @@ type AttemptOutcome =
 /**
  * The one place the client's call timing resolves: a configuration names a per-attempt timeout
  * and whether a failed call is retried, and whatever it leaves unset comes from the declarations
- * in `@legion/contracts`, which weigh a whole call's cost against the lifetime of the session
- * record a refresh must renew. A per-request override (`RequestOptions.timeoutMs` and
+ * in `@legion/contracts`, which weigh a whole call's cost against the live window a refresh must
+ * renew a session's registration inside. A per-request override (`RequestOptions.timeoutMs` and
  * `RequestOptions.retry`) still overrides what this returns, for the one call it is given on.
  */
 export function resolveCallTiming(config: Pick<EnvoyClientConfig, "timeoutMs" | "retry">): {

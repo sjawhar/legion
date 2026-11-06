@@ -30,9 +30,9 @@ export const DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
  * The interval at which a pane's heartbeat refreshes its session registration:
  * `SESSION_HEARTBEAT_MS`, declared with the arrangement it belongs to in
  * `packages/contracts/src/envoy-session.ts`. Three refreshes plus one whole listener call must
- * fall strictly short of the lifetime the listener keeps a session record for, so two whole
- * refreshes may fail and the third still completes before the record is dropped. The sum, the
- * lifetime and the call's budget are stated there; change the interval there, not here.
+ * fall strictly short of the listener's live window (`SESSION_LIVE_WINDOW_MS`), so two whole
+ * refreshes may fail and the third still completes before the session reads unresponsive. The
+ * sum, the window and the call's budget are stated there; change the interval there, not here.
  */
 export const DEFAULT_HEARTBEAT_MS = SESSION_HEARTBEAT_MS;
 /** The floor under a pass deadline when nothing names one and the heartbeat is shorter than it. */

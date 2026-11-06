@@ -24,9 +24,9 @@ import "github.com/sjawhar/envoy/internal/contracts"
 // call attempt waits, CallRetryDelay the pause before the next attempt, and CallAttempts how many
 // attempts one call makes. Each is the generated contracts constant itself, so a caller outside
 // this module weighs the same numbers the listener does. The daemon's own code reads the first
-// three; the three call numbers are here because the rule that holds them all together - three
-// refreshes and one whole call strictly inside the live window - is weighed in the daemon's own
-// test, where all three of the copies it checks are unexported.
+// three. The three call numbers are exported only for the daemon test that holds the rule -
+// three refreshes and one whole call strictly inside the live window - which sits in another
+// module (packages/daemon/internal/daemon/session_timing_test.go); no production code reads them.
 const (
 	Heartbeat      = contracts.SessionHeartbeat
 	LiveWindow     = contracts.SessionLiveWindow

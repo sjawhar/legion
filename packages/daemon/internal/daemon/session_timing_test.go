@@ -11,9 +11,9 @@ import (
 )
 
 // refreshesBeforeExpiry is how many refreshes the renewal window leaves room for: a registration
-// that keeps its session live only until the live window closes is renewed at a third of that
-// window, so two whole refreshes may fail — a listener restart, a dropped connection, a pass that
-// held the plugin — and the third still renews the registration before the window closes.
+// that keeps its session live only until the live window closes is renewed at under a third of
+// that window, so two whole refreshes may fail — a listener restart, a dropped connection, a pass
+// that held the plugin — and the third still renews the registration before the window closes.
 const refreshesBeforeExpiry = 3
 
 // sessionTiming is one set of the numbers the session-timing rule weighs: how often a pane

@@ -30,7 +30,7 @@ function listenerConfig() {
 
 /** The declarations the renewal window is weighed over, as the client resolves them with nothing
  * of its own: the interval a pane refreshes its listener registration at, and what one whole
- * listener call costs. Three intervals plus one call fall strictly inside the record lifetime,
+ * listener call costs. Three intervals plus one call fall strictly inside the live window,
  * which holds only while the client reads these numbers rather than numbers of its own. */
 test("CLIENTTEST the client resolves the declared refresh interval and call budget", () => {
   const settings = envoySettings({}, listenerConfig());

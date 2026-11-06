@@ -1060,9 +1060,10 @@ func main() {
 	// store.InterestRefreshAge) of every row that reaper still lists.
 	//
 	// The windows every reader of the registry judges a record's age against. Each defaults to
-	// the compiled constant, which the Go test
+	// the compiled constant (session.LiveWindow, session.GoneHorizon). The live window's is the
+	// declaration contracts.SessionLiveWindow, which the Go test
 	// TestDAEMONTESTTheSessionTimingRuleHoldsAtTheValuesTheBuildUses (packages/daemon/internal/daemon)
-	// reads to prove that three registration refreshes fit inside the live window; a deployment
+	// weighs to prove that three registration refreshes fit inside it; a deployment
 	// that moves one moves what this listener runs with and nothing else. A value that is not a
 	// positive duration is refused by name here rather than taken. Dispatch reads the same two
 	// windows through the same helper and judges a role route's holder by them, so a deployment
