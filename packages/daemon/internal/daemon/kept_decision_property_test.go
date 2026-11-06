@@ -1089,7 +1089,7 @@ func (r *keptRun) restart() {
 	r.runner = &outbox{
 		log: quietLogger(), pool: r.pool, dispatchProject: "LEGION", records: r.records, notices: r.publisher,
 		supervisor: sup, trees: r.trees, tokens: outboxTokens{}, handlers: []intake.Handler{r.engine},
-		project: "legion", stateDir: r.stateDir, now: time.Now,
+		project: "legion", stateDir: r.stateDir, live: config.Settled(config.Config{}), now: time.Now,
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			return workspace.Workspace{Dir: r.t.TempDir(), Bookmark: "legion/" + keptRoot}, nil
 		},

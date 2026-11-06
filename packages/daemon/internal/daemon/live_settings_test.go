@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -358,16 +359,12 @@ func TestAChangedNatsSeedRebuildsTheNatsClient(t *testing.T) {
 	}
 	rebuild := newRebuilder(w.log, config.Settled(*live.Snapshot()))
 	live.OnChange(rebuild.observe)
-	// The daemon's own reopen reads what the consumers hear and swaps under the lock every fact
-	// applies under (workflowRuntime.connect); this one, whose consumers hear the boot's set and
-	// whose rebuild is what the test is about, opens and swaps.
-	w.nats = newNATSHolder(conn, consumers, w.log, func(c config.Config, swap func(*nats.Conn, *intake.Consumers)) error {
-		conn, consumers, err := open(c)
-		if err != nil {
-			return err
-		}
-		swap(conn, consumers)
-		return nil
+	// The daemon's own open reads what the consumers hear as the rebuild starts
+	// (workflowRuntime.connect); this one, whose consumers hear the boot's set and whose
+	// rebuild is what the test is about, opens with it. The handover runs under the lock every
+	// fact applies under, the daemon's own hold of it.
+	w.nats = newNATSHolder(conn, consumers, w.log, open, func(held func(context.Context) error) error {
+		return w.serializeFacts(t.Context(), held)
 	})
 	rebuild.register(w.nats)
 	t.Cleanup(w.stop)

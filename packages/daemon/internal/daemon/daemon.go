@@ -1218,12 +1218,10 @@ type supervision struct {
 // notice bound and the deployment's recorded capability decisions — so an operator's change
 // reaches the next sweep and the next read of the state with nothing rebuilt.
 //
-// A supervision built with no settings holder reads cfg, which never changes under it: a test's
-// own, as supervise.Deps reads its Limits and Timeouts copies when the caller set no holder.
+// Every supervision is built with that holder, a test's own as much as the daemon's: cfg is
+// what boot settled and nothing moves it, so reading a live value from it would answer the
+// boot's value for ever.
 func (s *supervision) live() *config.Config {
-	if s.plan.live == nil {
-		return &s.cfg
-	}
 	return s.plan.live.Snapshot()
 }
 

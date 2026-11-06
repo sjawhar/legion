@@ -22,14 +22,19 @@ import (
 // position is lost — the consumers are durable, and the new ones resume where the old ones
 // stopped.
 type natsHolder struct {
-	// reopen builds a connection and its consumers from a configuration and hands them to swap,
-	// which takes the holder onto them. The two run under one hold of the lock every fact applies
-	// under (workflowRuntime.connect, intake.SerializeFacts), because what the new consumers hear
-	// is read from the consumers this swap replaces: a mapping read landing between that read and
-	// the swap would set the repositories on the consumers being replaced and lose them with them
-	// (refreshMapping's SetRepositories).
-	reopen func(cfg config.Config, swap func(*nats.Conn, *intake.Consumers)) error
-	log    *slog.Logger
+	// open builds a connection and this project's durable consumers from a configuration. It
+	// runs under no lock of the daemon's: the dial, the reconnect and the four consumer opens
+	// are network work, and a fact applying while a rebuild ran would otherwise wait on it
+	// (workflowRuntime.connect).
+	open func(cfg config.Config) (*nats.Conn, *intake.Consumers, error)
+	// serialize runs what it is handed under one hold of the lock every fact applies under
+	// (intake.SerializeFacts), which a mapping read takes across its own SetRepositories
+	// (refreshMapping): the rebuild reads there what the consumers it replaces hear, hands it to
+	// the new ones and swaps, all inside that hold, so a mapping read landing between the read
+	// and the swap cannot set its repositories on the consumers being replaced and lose them
+	// with them.
+	serialize func(func(ctx context.Context) error) error
+	log       *slog.Logger
 
 	mu         sync.Mutex
 	conn       *nats.Conn
@@ -43,11 +48,14 @@ type natsHolder struct {
 	settled   chan struct{}
 }
 
-func newNATSHolder(conn *nats.Conn, consumers *intake.Consumers, log *slog.Logger, reopen func(cfg config.Config, swap func(*nats.Conn, *intake.Consumers)) error) *natsHolder {
+func newNATSHolder(conn *nats.Conn, consumers *intake.Consumers, log *slog.Logger,
+	open func(cfg config.Config) (*nats.Conn, *intake.Consumers, error),
+	serialize func(func(ctx context.Context) error) error,
+) *natsHolder {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &natsHolder{reopen: reopen, log: log, conn: conn, consumers: consumers}
+	return &natsHolder{open: open, serialize: serialize, log: log, conn: conn, consumers: consumers}
 }
 
 func (h *natsHolder) holder() string { return config.HolderNATS }
@@ -98,29 +106,41 @@ func (h *natsHolder) rebuilt(generation uint64) bool {
 // to a closed one, and a fact the handler had not finished is redelivered by the durable
 // consumer the new connection holds. No consumer is deleted and no position is lost.
 //
-// The build and the swap run under one hold of the lock every fact applies under (reopen), so
-// the repositories the new consumers hear are the ones the consumers they replace heard at the
-// swap: a mapping read that lands while a rebuild is opening its connection waits, and sets its
-// repositories on the consumers this rebuild has swapped in.
+// The connection and its consumers are opened under no lock (open), because that is the network
+// work: a dial, a reconnect and four consumer opens, which every fact would wait behind were
+// they held under the fact lock. What is held under it (serialize) is the handover alone: the
+// repositories the new consumers hear are read from the consumers they replace and set on them
+// there, and the swap happens before the hold is let go, so a mapping read that lands between
+// the read and the swap waits and then sets its repositories on the consumers this rebuild
+// swapped in (refreshMapping's SetRepositories). Nothing after the swap can fail, so a rebuild
+// that swapped never reports a failure the rebuilder would log as "the daemon keeps the one it
+// has" — which would leave the holder's digest unrecorded and rebuild NATS again at the next
+// reread.
 func (h *natsHolder) rebuild(cfg *config.Config) error {
+	conn, consumers, err := h.open(*cfg)
+	if err != nil {
+		return err
+	}
 	var old *nats.Conn
 	var cancel context.CancelFunc
 	var settled chan struct{}
-	swapped := false
-	err := h.reopen(*cfg, func(conn *nats.Conn, consumers *intake.Consumers) {
+	if err := h.serialize(func(ctx context.Context) error {
+		if err := consumers.SetRepositories(ctx, h.intake().Repositories()); err != nil {
+			return fmt.Errorf("hand the rebuilt consumers the repositories this daemon hears: %w", err)
+		}
 		h.mu.Lock()
 		defer h.mu.Unlock()
-		swapped = true
 		old, cancel, settled = h.conn, h.cancelRun, h.settled
 		h.conn, h.consumers, h.generation = conn, consumers, h.generation+1
 		h.cancelRun, h.settled = nil, nil
-	})
-	if !swapped {
+		return nil
+	}); err != nil {
+		// Nothing was swapped, so the connection this rebuild opened is the daemon's to close:
+		// left open it would hold a second set of consumers delivering onto a connection no
+		// reader of the holder can reach.
+		conn.Close()
 		return err
 	}
-	// The holder is on the new connection, so what it replaced is let go of whatever reopen
-	// answered: a transaction that could not commit once the swap had happened would otherwise
-	// leave the daemon holding two connections, the old one's intake still delivering.
 	if cancel != nil {
 		cancel()
 	}
@@ -135,7 +155,7 @@ func (h *natsHolder) rebuild(cfg *config.Config) error {
 	if old != nil {
 		old.Close()
 	}
-	return err
+	return nil
 }
 
 // close ends the connection the holder holds, which the daemon's stop calls.

@@ -13,12 +13,14 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/wait"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
@@ -119,14 +121,26 @@ func carriedChildStops(t *testing.T, rootKey, childKey string, carry func(apply 
 	trees := outboxTreeStore(t, pool, rootKey)
 	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 	machineClock := &heldClock{at: start}
-	sup.deps.Clock, sup.deps.Timeouts.Stop, sup.deps.Store = machineClock, stopTimeout, trees
+	// The machines read every budget and every wait from the daemon's settings holder, as
+	// production builds them (openSupervision's Settings: liveBudgets): the Limits and Timeouts
+	// copies of that Deps are the zero value and nothing reads them, so the stop bound this
+	// test is about is named where the daemon names it, `worker_stop_timeout_seconds`. The
+	// outbox reads the same holder for it (workerStopTimeout), so a deadline the rig proves is
+	// the deadline the daemon arms.
+	live := config.Settled(config.Config{
+		Project: "LEGION", LaunchFailureLimit: 2, PromptFailureLimit: 2, PromptRetireLimit: 2,
+		WorkerBootTimeout: time.Second, WorkerBootRegistrationDeadlineIntervals: 2, WorkerRPCTimeout: time.Second,
+		ProbeInterval: time.Second, WorkerStopTimeout: stopTimeout,
+	})
+	sup.deps.Limits, sup.deps.Timeouts, sup.deps.Settings = supervise.Limits{}, supervise.Timeouts{}, liveBudgets{live: live}
+	sup.deps.Clock, sup.deps.Store = machineClock, trees
 	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Linger: time.Hour}, quietLogger())
 	admission := admit.New(records, engine, 2, "legion", quietLogger())
 	var logs bytes.Buffer
 	clock := start
 	runner := &outbox{
 		dispatchProject: "LEGION", pool: pool, records: records, supervisor: sup, trees: trees,
-		tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(),
+		tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), live: live,
 		githubAPI: newBranchGitHub(t, nil, branchExists).url, notices: &outboxPublisher{},
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: childKey, Status: "todo", HandedOver: true, Labels: []string{"legion"}}},
 		handlers: []intake.Handler{engine, admission}, now: func() time.Time { return clock },
@@ -327,5 +341,67 @@ func TestACarriedRolesStopDeadlineIsItsOldRootsLingerExpiry(t *testing.T) {
 		if got := carriedStopDeadline(tc.root, now, stop); !got.Equal(tc.want) {
 			t.Errorf("%s: carriedStopDeadline = %s, want %s", tc.name, got, tc.want)
 		}
+	}
+}
+
+// The stop timeout that bounds a carried child's suspension, where its old root leaves no close
+// to wait for, is the one the daemon is running on (`worker_stop_timeout_seconds`), read from
+// its settings holder as the machines read it (liveBudgets, supervise.Deps.Settings).
+//
+// Production builds those machines with that holder alone, so the Limits and Timeouts copies
+// beside it are the zero value and nothing reads them. A stop bound read from the copy is
+// therefore no bound at all: the held suspension is armed for no wait, and the first decision
+// after it ends the turn mid tool call (supervise's suspendAtTimeout), where the role's work
+// should have had the whole of the stop timeout to finish.
+func TestACarriedRolesStopDeadlineIsTheStopTimeoutTheDaemonRunsOn(t *testing.T) {
+	const oldRoot, childKey = "LEGION-207", "LEGION-208"
+	// A wait no other timer of this rig is armed for, so a timer found at it is the suspension's.
+	const stopTimeout = 11 * time.Second
+	ctx := context.Background()
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	start := time.Now().UTC().Truncate(time.Second)
+	// The old root's tree closed: its linger expired and was cleared, so no close of that tree
+	// is left to end the turn the child's role still runs in it.
+	putOutboxIssue(t, pool, records, record.Issue{Key: oldRoot, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
+		Tree: oldRoot, Project: "LEGION", Title: "root", Phase: phase.Done, Generation: 1, Status: "done", Rank: "A", LastDispatchSeq: 1})
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	machineClock := &heldClock{at: start}
+	live := config.Settled(config.Config{
+		Project: "LEGION", LaunchFailureLimit: 2, PromptFailureLimit: 2, PromptRetireLimit: 2,
+		WorkerBootTimeout: time.Second, WorkerBootRegistrationDeadlineIntervals: 2, WorkerRPCTimeout: time.Second,
+		ProbeInterval: time.Second, WorkerStopTimeout: stopTimeout,
+	})
+	sup.deps.Limits, sup.deps.Timeouts, sup.deps.Settings = supervise.Limits{}, supervise.Timeouts{}, liveBudgets{live: live}
+	sup.deps.Clock = machineClock
+	implementer := launchedClaim(t, sup, oldRoot, childKey, claim.RoleImplementer)
+	machine, _ := sup.Machine(implementer)
+	if err := machine.Handle(ctx, supervise.StreamTurnStart{Claim: implementer}); err != nil {
+		t.Fatalf("the implementer's turn: %v", err)
+	}
+	runner := &outbox{pool: pool, records: records, supervisor: sup, project: "legion", live: live,
+		now: func() time.Time { return start }, log: quietLogger()}
+
+	// The start of the child in its own tree: the implementer still runs in the old one.
+	err := runner.stopElsewhere(ctx, record.Issue{Key: childKey, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: childKey})
+	if !errors.Is(err, wait.ErrWaiting) {
+		t.Fatalf("the start's check = %v, want it waiting for the implementer's turn in tree %s", err, oldRoot)
+	}
+	if got := machine.Claim(); got.State != supervise.StateWorking || !got.SuspensionHeld {
+		t.Fatalf("the implementer after the start's suspend = %s, held %t; want working with the suspension held", got.State, got.SuspensionHeld)
+	}
+
+	if fired := machineClock.fire(0); fired != 0 {
+		t.Fatalf("the held suspension was armed for no wait at all and stopped the turn at once (%d timers); want the %s the daemon runs on",
+			fired, stopTimeout)
+	}
+	if armed, total := machineClock.armed(stopTimeout); armed != 1 || total != 1 {
+		t.Fatalf("timers armed for the stop timeout: %d of %d; want the held suspension's one", armed, total)
+	}
+	if fired := machineClock.fire(stopTimeout); fired != 1 {
+		t.Fatalf("fired %d deadlines at the stop timeout, want the held suspension's one", fired)
+	}
+	if got := machine.Claim(); got.State != supervise.StateSuspended || got.SuspendedBy != supervise.SuspendedByDaemon {
+		t.Fatalf("the implementer at the stop timeout = %+v; want suspended by the daemon", got)
 	}
 }

@@ -461,29 +461,41 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, rebuil
 	if err != nil {
 		return err
 	}
-	// The boot's set is what the boot heard; from here on it is read from the consumers the
-	// rebuild is replacing, and that read and the swap onto the new consumers run under one hold
-	// of the lock every fact applies under (intake.SerializeFacts), which a mapping read takes
-	// across its own SetRepositories (refreshMapping). One that landed between them would set
-	// its repositories on the consumers being replaced, and they would go with them: the
+	// The boot's set is what the boot heard; a rebuild's connection is opened with the set the
+	// consumers hear as it starts, and the consumers it opened are handed the set those
+	// consumers hear at the swap, read under one hold of the lock every fact applies under
+	// (serialize, intake.SerializeFacts), which a mapping read takes across its own
+	// SetRepositories (refreshMapping). One that landed between that read and the swap would
+	// set its repositories on the consumers being replaced, and they would go with them: the
 	// repository it mapped would be unheard until something else moved the mapping again.
-	reopen := func(c config.Config, swap func(*nats.Conn, *intake.Consumers)) error {
-		return pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
-			if err := intake.SerializeFacts(ctx, tx); err != nil {
-				return fmt.Errorf("serialize the NATS rebuild with every fact: %w", err)
-			}
-			conn, consumers, err := open(c, w.nats.intake().Repositories())
-			if err != nil {
-				return err
-			}
-			swap(conn, consumers)
-			return nil
-		})
+	rebuildOpen := func(c config.Config) (*nats.Conn, *intake.Consumers, error) {
+		return open(c, w.nats.intake().Repositories())
 	}
-	w.nats = newNATSHolder(conn, consumers, w.log, reopen)
+	w.nats = newNATSHolder(conn, consumers, w.log, rebuildOpen, func(held func(ctx context.Context) error) error {
+		return w.serializeFacts(ctx, held)
+	})
 	rebuild.register(w.nats)
 	w.bootID = fmt.Sprintf("%d", time.Now().UnixNano())
 	return nil
+}
+
+// serializeFacts runs held under one hold of the lock every fact applies under
+// (intake.SerializeFacts), in a transaction of its own that writes nothing and is rolled back:
+// pg_advisory_xact_lock is held for the transaction's life and let go by a rollback as by a
+// commit, so what held did has no commit behind it that could fail once it has happened. The
+// NATS holder's rebuild hands its consumers the repositories this daemon hears and swaps there
+// (natsHolder.rebuild), and a swap reported as a failure would leave the rebuilder logging a
+// rebuild that happened as one that did not.
+func (w *workflowRuntime) serializeFacts(ctx context.Context, held func(ctx context.Context) error) error {
+	tx, err := w.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("serialize with every fact: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := intake.SerializeFacts(ctx, tx); err != nil {
+		return fmt.Errorf("serialize with every fact: %w", err)
+	}
+	return held(ctx)
 }
 
 // phaseHolds answers supervise's Deps.PhaseHolds from the issue record: a task carries the phase

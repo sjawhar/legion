@@ -88,9 +88,10 @@ type outbox struct {
 	// is shared, and another project's rows are another daemon's.
 	dispatchProject string
 	stateDir        string
-	// live is the daemon's settings holder, where every row that states the project's design
-	// gate policy reads it (designGate). A test that builds the runner by hand leaves it nil
-	// and reads the zero policy, which reads as the shipped one.
+	// live is the daemon's settings holder, where every row that states a value the daemon
+	// decides by now reads it: the project's design gate policy (designGate) and the stop
+	// bound a carried child's suspension is given (workerStopTimeout). Every runner is built
+	// with one, a test's own as much as the daemon's.
 	live *config.Live
 	log  *slog.Logger
 	// backstop is how long after a release its one open phase's worker is woken whatever else
@@ -202,10 +203,17 @@ func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client,
 // boot, so a change of the gate reaches the next catch-up with nothing rebuilt — a tree whose
 // architect is told the policy after an operator moved it is told the one the daemon decides by.
 func (r *outbox) designGate() config.DesignGate {
-	if r.live == nil {
-		return ""
-	}
 	return r.live.Snapshot().Gates.Design
+}
+
+// workerStopTimeout is how long a stop this runner asks for leaves the process to end
+// (`worker_stop_timeout_seconds`), as the daemon is running on it now: the very bound the
+// machines hold themselves to, read from the same holder they read it through (liveBudgets,
+// supervise.Deps.Settings). The machines' own Timeouts copy is not it: production builds that
+// Deps with Settings alone, so the copy is the zero value and a deadline named from it would
+// interrupt a running turn at once.
+func (r *outbox) workerStopTimeout() time.Duration {
+	return liveBudgets{live: r.live}.Timeouts().Stop
 }
 
 // RunOnce drains every row of the project due now, in the order the lanes would run them within
@@ -1409,7 +1417,7 @@ func (r *outbox) stopElsewhere(ctx context.Context, issue record.Issue) error {
 			return fmt.Errorf("read the root of tree %s, which claim %s still runs in: %w", held.Tree, token, err)
 		}
 		err = machine.Handle(ctx, supervise.RequestSuspend{Claim: token, By: supervise.SuspendedByDaemon,
-			Deadline: carriedStopDeadline(oldRoot, r.now(), r.supervisor.deps.Timeouts.Stop),
+			Deadline: carriedStopDeadline(oldRoot, r.now(), r.workerStopTimeout()),
 			Reason:   fmt.Sprintf("%s moved from tree %s to tree %s", issue.Key, held.Tree, issue.Tree)})
 		var refused *supervise.RefusedError
 		if err != nil && !errors.Is(err, supervise.ErrSuspendHeld) && !errors.As(err, &refused) {

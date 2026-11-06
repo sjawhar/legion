@@ -74,9 +74,11 @@ func TestDeploymentReadsTheConfigurationAlone(t *testing.T) {
 // deployment row starts open; the model-fallback read closing one changes the set.
 func TestReportCapabilitiesLogsAtBootAndOnChangeAlone(t *testing.T) {
 	var logged bytes.Buffer
+	cfg := config.Config{Runtime: config.Runtime{Name: "tmux"}}
 	s := &supervision{
-		cfg: config.Config{Runtime: config.Runtime{Name: "tmux"}},
-		log: slog.New(slog.NewTextHandler(&logged, nil)),
+		cfg:  cfg,
+		plan: plan{live: config.Settled(cfg)},
+		log:  slog.New(slog.NewTextHandler(&logged, nil)),
 	}
 	warnings := func() int { return strings.Count(logged.String(), "level=WARN") }
 
@@ -123,7 +125,7 @@ func TestReportCapabilitiesCarriesTheProbesCapacityWaits(t *testing.T) {
 		Capabilities: config.Capabilities{Decided: decided},
 	}
 	var logged bytes.Buffer
-	s := &supervision{cfg: cfg, log: slog.New(slog.NewTextHandler(&logged, nil)), probed: true,
+	s := &supervision{cfg: cfg, plan: plan{live: config.Settled(cfg)}, log: slog.New(slog.NewTextHandler(&logged, nil)), probed: true,
 		imageReport: bootprobe.ImageReport{ModelFallback: "on", CapacityWaits: 2, CapacityReason: reason}}
 
 	if got, want := s.reportCapabilities(), []string{"pool-capacity"}; !slices.Equal(got, want) {

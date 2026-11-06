@@ -217,7 +217,7 @@ func TestAReadyLeavesTheCatchUpThatIsPublishingWhatItNamed(t *testing.T) {
 		})
 	}}
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher,
-		supervisor: sup, project: "legion", now: func() time.Time { return now }}
+		supervisor: sup, project: "legion", live: config.Settled(config.Config{}), now: func() time.Time { return now }}
 
 	if err := runner.notice(ctx, leased, payload); err != nil {
 		t.Fatalf("run the publishing catch-up: %v", err)
@@ -279,7 +279,7 @@ func TestAReceiptTimeoutOnASupersededCatchUpHandsOverWhatItNamed(t *testing.T) {
 		},
 	}
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher,
-		supervisor: sup, project: "legion", now: func() time.Time { return now }}
+		supervisor: sup, project: "legion", live: config.Settled(config.Config{}), now: func() time.Time { return now }}
 
 	if err := runner.notice(ctx, leased, payload); err != nil {
 		t.Fatalf("run the catch-up whose receipt timed out: %v", err)
@@ -336,7 +336,7 @@ func TestACatchUpWhoseReholdsAreSpentHandsOverWhatItNamed(t *testing.T) {
 	publisher := &hookPublisher{answer: fmt.Errorf("publish notice: listener returned 504 Gateway Timeout: %w",
 		notify.ErrNotDelivered{Reason: notify.ReasonReceiptTimeout, Holder: "ses-architect"})}
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher,
-		supervisor: sup, project: "legion", now: func() time.Time { return now }}
+		supervisor: sup, project: "legion", live: config.Settled(config.Config{}), now: func() time.Time { return now }}
 	if err := runner.notice(ctx, leased, payload); err != nil {
 		t.Fatalf("run the catch-up whose last receipt timed out: %v", err)
 	}
@@ -392,7 +392,8 @@ func TestALateReportOfASpentCatchUpNamesWhatItsRowReleased(t *testing.T) {
 			}
 			payload.Resends = len(noticeReholdDelays)
 			runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records,
-				notices: &hookPublisher{}, supervisor: sup, project: "legion", now: func() time.Time { return now }}
+				notices: &hookPublisher{}, supervisor: sup, project: "legion", live: config.Settled(config.Config{}),
+				now: func() time.Time { return now }}
 			reported := reportedNotice{issue: "LEGION-1", notice: payload, row: leased.ID, architect: token}
 			if err := runner.reholdNotice(ctx, reported, notify.ReasonReceiptTimeout, "ses-architect"); err != nil {
 				t.Fatalf("answer the late report of the spent copy: %v", err)

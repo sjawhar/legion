@@ -9,25 +9,43 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
-	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
+	"github.com/sjawhar/legion/daemon/internal/testnats"
 )
 
 // A NATS rebuild ends the old connection's intake and waits for it to settle before it closes
 // that connection: an ack or a nak of a fact in flight goes to the connection it was delivered
 // on, never to a closed one. Without the wait the rebuild cancelled the run and closed the
 // connection in the same breath, and whatever the handlers were holding was acked into nothing.
+//
+// The holder is the daemon's own (workflowRuntime.connect), so the wait is the one production
+// runs: the connection and its consumers are opened outside every lock, the handover runs under
+// the fact lock, and only then is the intake this rebuild replaced ended and drained.
 func TestANatsRebuildWaitsForTheIntakeItEndedToSettle(t *testing.T) {
-	holder := newNATSHolder(nil, nil, quietLogger(), func(_ config.Config, swap func(*nats.Conn, *intake.Consumers)) error {
-		swap(nil, nil)
-		return nil
-	})
-	_, running, _, settled := holder.begin(t.Context())
+	url := testnats.URL(t)
+	probe, err := nats.Connect(url, nats.Timeout(5*time.Second))
+	if err != nil {
+		t.Fatalf("connect to the test NATS server: %v", err)
+	}
+	t.Cleanup(probe.Close)
+	js, err := jetstream.New(probe)
+	if err != nil {
+		t.Fatalf("open JetStream: %v", err)
+	}
+	testnats.CreateStream(t, js, jetstream.StreamConfig{Name: "ENVOY_NOTIFICATIONS", Subjects: []string{"notifications.>"}})
+	w := grantWorkflow(t, &syncBuffer{})
+	cfg := daemonGrantConfig(url)
+	if err := w.connect(t.Context(), cfg, newRebuilder(w.log, config.Settled(cfg)), func(string) (string, bool) { return "", false }); err != nil {
+		t.Fatalf("connect the workflow's NATS: %v", err)
+	}
+	t.Cleanup(w.stop)
+	_, running, _, settled := w.nats.begin(t.Context())
 	// The intake loop: its Run returns once the messages it holds are settled, which this test
 	// holds until it has seen the rebuild wait for it.
 	release := make(chan struct{})
@@ -38,12 +56,12 @@ func TestANatsRebuildWaitsForTheIntakeItEndedToSettle(t *testing.T) {
 	}()
 
 	rebuilt := make(chan error, 1)
-	go func() { rebuilt <- holder.rebuild(&config.Config{}) }()
+	go func() { rebuilt <- w.nats.rebuild(&cfg) }()
 
 	select {
 	case err := <-rebuilt:
 		t.Fatalf("the rebuild returned before the intake it ended had settled: %v", err)
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(time.Second):
 	}
 	close(release)
 	select {

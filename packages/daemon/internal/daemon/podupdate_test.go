@@ -183,20 +183,27 @@ func newPodUpdateRigOn(t *testing.T, live *config.Live, roles ...podUpdateRole) 
 	// configuration knows (supervise.Deps.NoPluginInstall). A test that moves a role onto another
 	// backend writes rig.s.cfg, and the closure reads it when a registration asks.
 	logs := &syncBuffer{}
+	// The rig's claims run in an issue pod, so its configuration is a Kubernetes deployment's:
+	// that is what the Claude Code role's exemption from the stale-plugin lane is read from,
+	// beside the role's backend (noPluginInstall).
+	cfg := config.Config{Project: "LEGION", Runtime: config.Runtime{Name: "kubernetes"},
+		PodUpdateRetask: podUpdateRetask, PodUpdateNotice: podUpdateNotice}
+	// The machines read their budgets from the holder the caller named, as production builds
+	// them; a rig no test moves a setting under keeps the fixed budgets below and settles its
+	// own configuration into a holder, because every supervision reads the bounds a change must
+	// reach at once from one (supervision.live).
+	var settings supervise.Settings
+	if live != nil {
+		settings = liveBudgets{live: live}
+	} else {
+		live = config.Settled(cfg)
+	}
 	s := &supervision{
-		// The rig's claims run in an issue pod, so its configuration is a Kubernetes
-		// deployment's: that is what the Claude Code role's exemption from the stale-plugin
-		// lane is read from, beside the role's backend (noPluginInstall).
-		cfg: config.Config{Project: "LEGION", Runtime: config.Runtime{Name: "kubernetes"},
-			PodUpdateRetask: podUpdateRetask, PodUpdateNotice: podUpdateNotice},
+		cfg:     cfg,
 		log:     slog.New(slog.NewJSONHandler(logs, nil)),
 		plan:    plan{clock: clock, project: podUpdateProject, pluginRelaunchable: true, orphanSweep: orphanSweepInterval, live: live},
 		runtime: rt, supervisor: sup,
 		enqueue: (&workflowRuntime{pool: pool, records: records, log: quietLogger()}).enqueueOutbox,
-	}
-	var settings supervise.Settings
-	if live != nil {
-		settings = liveBudgets{live: live}
 	}
 	sup.deps = supervise.Deps{
 		Runtime: rt, Conns: conns, Store: st, Specs: outboxSpecs{}, Clock: clock, Log: quietLogger(),
