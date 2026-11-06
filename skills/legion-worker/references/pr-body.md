@@ -41,6 +41,10 @@ order, each the line `dispatch result` printed when the result was recorded:
 **Fast-follow:** "none", or one named cleanup item in a file this pull request does not touch, and where it will land.
 
 **Chain:** stacked on <base bookmark> frozen at <sha> / not stacked.
+
+## Contract change census
+
+<written only when the change adds a refusal, makes a field required, removes or renames a field, or changes a signature at a process or package boundary; see below>
 ```
 
 ## Never waiting on CI
@@ -93,6 +97,22 @@ commit made (`skill://legion-retro`). `Fast-follow:` stays `none` for such a thr
 a file this pull request touches and is committed before the merge, which is not what that line is
 for. An open text thread is not an unproven claim, so `Not proven / risk` gains nothing from it
 and the merger quotes nothing new.
+
+**A contract change carries its census.** A pull request that adds a refusal, makes a field
+required, removes or renames a field, or changes a signature at a process or package boundary
+writes a `## Contract change census` section, and the implementer writes it when it opens the
+body: the search commands that find every caller of the contract, each hit with its disposition,
+and, where the change refuses something a caller does today, the rollout line — warn first, or an
+immediate refusal naming the vulnerability it closes. The reviewer re-runs those commands at the
+head and compares the hits with the list, so a hit the body does not list, a hit without a
+disposition, and a rollout line of neither kind are each a finding, and the section's absence from
+such a pull request is a finding of its own
+(`packages/daemon/internal/prompts/roles/core/reviewer.md`, which the tester reads with it). Under
+a warn-first rollout the negative control of each check's result is the warning itself: the
+refused input or call produces a message naming the change to make, exits 0, and records the
+would-be refusal. A pull request that changes no contract writes no such section. From the retro
+of dispatch://INFRA-1167, where the reviewer asked for a census no file under `skills/` had told
+the implementer to write, and the round it cost is the cost this rule removes.
 
 ## What a result is
 
