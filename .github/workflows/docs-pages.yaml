@@ -28,7 +28,7 @@ on:
       - '.github/workflows/ci.yaml'
       - '.github/workflows/docs-pages.yaml'
       - '.github/workflows/docs-site.yaml'
-      # ci.yaml's *bun_install, 16 patterns:
+      # ci.yaml's *bun_install:
       - 'package.json'
       - 'bun.lock'
       - 'patches/**'
@@ -45,10 +45,10 @@ on:
       - 'docs/site/package.json'
       - '.bun-version'
       - '.github/actions/setup-bun/**'
-      # ci.yaml's *biome, 2 patterns:
+      # ci.yaml's *biome:
       - 'biome.json'
       - '.gitignore'
-      # ci.yaml's *go_workspace, 6 patterns:
+      # ci.yaml's *go_workspace:
       - 'go.work'
       - 'go.work.sum'
       - 'packages/daemon/go.mod'
@@ -57,7 +57,7 @@ on:
       - 'packages/envoy/go.sum'
       # The docs filter's own:
       - 'docs/site/**'
-      # ci.yaml's *legion_command, 72 patterns:
+      # ci.yaml's *legion_command:
       - 'packages/daemon/cmd/legion/*'
       - 'packages/daemon/internal/admit/*'
       - 'packages/daemon/internal/agentsecrets/*'
@@ -130,7 +130,7 @@ on:
       - 'packages/envoy/internal/googleidentity/*'
       - 'packages/envoy/listenfd/*'
       - 'packages/envoy/migrationid/*'
-      # ci.yaml's *dispatch_server, 57 patterns:
+      # ci.yaml's *dispatch_server:
       - 'packages/envoy/cmd/dispatch/*'
       - 'packages/envoy/internal/bus/*'
       - 'packages/envoy/internal/cistore/*'
