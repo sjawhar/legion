@@ -7,7 +7,9 @@
 // reader makes in a built block is in the Yjs document before the last batch, another person's
 // change to a built block is in the editor in the task it arrives in, and the end of the build is
 // three tasks - the last batch, the binding's adoption, and the host's swap - rather than the one
-// task of 1,370 ms the three were on a phone at 4x CPU throttling.
+// task of 1,370 ms the three were on a phone at 4x CPU throttling. The last rows read how the
+// thread goes back between batches, which decides whether anything else on the page runs while
+// the build lasts.
 import { describe, expect, test } from "bun:test";
 import type { Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
 import { TextSelection } from "@milkdown/kit/prose/state";
@@ -17,6 +19,7 @@ import * as Y from "yjs";
 
 import { createProofEditor } from "../src/lib";
 import { createHeadlessProof } from "../src/lib-headless.js";
+import { endOfTask } from "../src/progressive-build";
 import { withDomWindow } from "./dom-window";
 import { pastePlainText, withHTMLElementGlobal } from "./paste";
 
@@ -32,6 +35,18 @@ function paragraph(index: number): string {
 /** A document of `blocks` paragraphs, each with words of its own so a test can name one. */
 function paragraphs(blocks: number): string {
   return `${Array.from({ length: blocks }, (_, index) => paragraph(index)).join("\n\n")}\n`;
+}
+
+/** A document of `count` sections, each a heading of its own and a paragraph under it, which is
+ *  `count * 2` top-level blocks. A heading in every batch is what brings Milkdown's
+ *  `syncHeadingIdPlugin` into the build: it is a plugin view, so ProseMirror runs its `update`
+ *  inside the `view.dispatch` each batch is placed with, and it dispatches an `id` for every
+ *  heading the batch brought (`@milkdown/preset-commonmark`). */
+function sections(count: number): string {
+  return `${Array.from(
+    { length: count },
+    (_, index) => `## Section ${index}\n\n${paragraph(index)}`
+  ).join("\n\n")}\n`;
 }
 
 /** The blocks the editor's root holds, at whatever depth. */
@@ -136,12 +151,27 @@ function everyBlockText(fragment: Y.XmlFragment): string[] {
   return fragment.toArray().map((_, index) => blockText(fragment, index));
 }
 
+/** Every top-level block of the Yjs document, by the id it carries and the text it holds: what
+ *  a build of a document nobody is editing has to leave exactly as it found it. */
+function everyBlock(fragment: Y.XmlFragment): string[] {
+  return fragment
+    .toArray()
+    .map(
+      (block, index) =>
+        `${block instanceof Y.XmlElement ? (block.getAttribute("blockId") ?? "-") : "-"}:` +
+        blockText(fragment, index)
+    );
+}
+
 /** What the build left behind, for a row to read. */
 interface Built {
   readonly batches: Batch[];
   readonly blocks: number;
   readonly displayWhenHandled: string;
   readonly displayWhenRevealed: string;
+  /** The Yjs document's own blocks as the build found them, and as it left them. */
+  readonly documentAfter: string[];
+  readonly documentBefore: string[];
   readonly looks: Look[];
   readonly markdown: string;
   readonly text: string;
@@ -165,6 +195,7 @@ async function build(markdown: string, act: (what: MidBuild) => void = () => {})
   const ydoc = new Y.Doc();
   const fragment = ydoc.getXmlFragment("prosemirror");
   prosemirrorToYXmlFragment(parseMarkdown(markdown), fragment);
+  const documentBefore = everyBlock(fragment);
   return withDomWindow(async (window) => {
     const root = window.document.body.appendChild(
       window.document.createElement("div")
@@ -202,6 +233,8 @@ async function build(markdown: string, act: (what: MidBuild) => void = () => {})
         blocks: blocksBuilt(root),
         displayWhenHandled,
         displayWhenRevealed,
+        documentAfter: everyBlock(fragment),
+        documentBefore,
         looks: watch.looks,
         markdown: handle.getMarkdown(),
         text: handle.view.dom.textContent ?? "",
@@ -284,6 +317,25 @@ describe("a document built in batches", () => {
       });
       standing = batch.after;
     }
+  });
+
+  // Nobody edited this document, so the build has to leave it block for block as it found it.
+  // It did not: Milkdown's `syncHeadingIdPlugin` dispatches an `id` for each heading a batch
+  // brought, inside the very `view.dispatch` that batch is placed with, and the write path
+  // reads that as a reader's edit and writes the editor's blocks through a window as many
+  // blocks wide as the frontier says. The frontier used to move after that dispatch, so the
+  // window was a batch short of the editor and `updateYFragment` wrote the difference into the
+  // Yjs document - the batch's blocks a second time - and then, a batch later, with the
+  // frontier counting that batch twice, deleted blocks the batches had still to reach. What
+  // the reader was left with was a document missing blocks of its own, and blocks under ids
+  // nothing had indexed (dispatch://INFRA-341, R11).
+  test("leaves the Yjs document's blocks as it found them, under the ids it was given", async () => {
+    const built = await build(sections(BLOCKS / 2));
+
+    expect(built.documentBefore.length).toBe(BLOCKS);
+    expect(built.documentAfter).toEqual(built.documentBefore);
+    expect(built.blocks).toBe(BLOCKS);
+    expect(partway(built).length).toBeGreaterThan(0);
   });
 });
 
@@ -519,5 +571,79 @@ describe("the host's own node views", () => {
         while (!view.isDestroyed) await Promise.resolve();
       }
     });
+  });
+});
+
+/** Runs `act` with `scheduler` standing in for the browsing context's own, and puts back
+ *  whatever was there. `undefined` runs it in a context that has none. */
+async function withScheduler(scheduler: unknown, act: () => Promise<void>): Promise<void> {
+  const had = Object.getOwnPropertyDescriptor(globalThis, "scheduler");
+  if (scheduler === undefined) {
+    Reflect.deleteProperty(globalThis, "scheduler");
+  } else {
+    Object.defineProperty(globalThis, "scheduler", {
+      configurable: true,
+      value: scheduler,
+      writable: true,
+    });
+  }
+  try {
+    await act();
+  } finally {
+    Reflect.deleteProperty(globalThis, "scheduler");
+    if (had !== undefined) Object.defineProperty(globalThis, "scheduler", had);
+  }
+}
+
+/** A real 0 ms timer, not a fake clock: what these rows read is the order the browsing
+ *  context's own queue serves two tasks in, which a fake clock would drive rather than
+ *  observe. Neither waits for anything. */
+function thePageSetsATimer(order: string[]): void {
+  setTimeout(() => order.push("the page's own timer"), 0);
+}
+
+// How the thread goes back between batches is the whole of whether anything else on the page
+// runs while a build lasts. `scheduler.yield()` stood here, and the browser serves its
+// continuation ahead of every posted task: for as long as a build lasted - about 35 s over one
+// screenful of the 406,319-character document and minutes over a whole drawn one - no socket
+// message, no fetch callback and no timer ran. `scheduler.postTask()` at its default priority
+// left the socket message served in 7 ms and a timer waiting 19,945 ms, because Chromium runs
+// a web-scheduling task of that priority ahead of a timer (dispatch://INFRA-341, R11).
+describe("the thread a batch hands back", () => {
+  test("is handed back behind a task the page is already waiting on", async () => {
+    const order: string[] = [];
+
+    await withScheduler(undefined, async () => {
+      thePageSetsATimer(order);
+      await endOfTask();
+      order.push("the build's next batch");
+    });
+
+    expect(order).toEqual(["the page's own timer", "the build's next batch"]);
+  });
+
+  test("is a timer even where the browsing context has a scheduler of its own", async () => {
+    const order: string[] = [];
+    const taken: string[] = [];
+    const scheduler = {
+      postTask: (work: () => void) => {
+        taken.push("postTask");
+        work();
+        return Promise.resolve();
+      },
+      yield: () => {
+        taken.push("yield");
+        return Promise.resolve();
+      },
+    };
+
+    await withScheduler(scheduler, async () => {
+      thePageSetsATimer(order);
+      await endOfTask();
+      order.push("the build's next batch");
+    });
+
+    expect(taken).toEqual([]);
+    expect(order).toEqual(["the page's own timer", "the build's next batch"]);
   });
 });

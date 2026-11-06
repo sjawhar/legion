@@ -163,27 +163,35 @@ function nextBatch(blocks: number, costMs: number): number {
   return Math.max(1, Math.min(Math.round(scaled), blocks * MAX_BATCH_GROWTH, MAX_BATCH_BLOCKS));
 }
 
-/** The scheduler, where the browsing context has one. Chromium 129 and later give it a
- *  `yield()`; TypeScript's DOM library does not declare it, so it is read through one cast of
- *  the global rather than one per call. */
-const theScheduler: { yield?: () => Promise<void> } | undefined = (
-  globalThis as typeof globalThis & { scheduler?: { yield?: () => Promise<void> } }
-).scheduler;
-
 /**
  * The end of this task, so what runs next is a task of its own and the browser has the thread
  * back in between: each batch of the build, the binding's adoption after the last of them, and
  * the host's swap after that (`createProofEditor`).
  *
- * `scheduler.yield()` where it exists, because what the build must not do is wait: it resumes
- * in the next task, ahead of the page's own timers, where a `setTimeout` waits behind every
- * task already queued. Measured on this pod, `iphone` at 4x CPU throttling, the 406,319-character
- * document's build is 4.2 s of work in 33 batches; through `setTimeout` those batches took
- * 58 s of wall clock, each one queued behind a slice of the document's own draw painting
- * (`DocumentPreview.tsx` in Dispatch), while the reader waited for an editor.
+ * A **timer**, so the continuation queues behind everything the page is already waiting on,
+ * which is the whole point of handing the thread back. Two other ways were measured on this
+ * pod, `iphone` at 4x CPU throttling, over the 406,319-character document of
+ * `e2e/large-documents.ts` in Dispatch (dispatch://INFRA-341, R11), and each of them starves
+ * the page:
+ *
+ * - `scheduler.yield()` stood here. The browser serves its continuation ahead of every posted
+ *   task, so for as long as a build lasted nothing else on the page ran at all: no socket
+ *   message, so another person's edit and a reconnect waited; no fetch callback; no timer, so
+ *   React, whose scheduler posts one, drew nothing. A `page.evaluate` poll was answered twice
+ *   and then not again for 209 s, while the page's own animation frames kept running
+ *   throughout.
+ * - `scheduler.postTask()` at its default `user-visible` priority lets a socket message
+ *   through - the worst one waited 7 ms across a build - and still starves the page's own
+ *   clock: Chromium runs a web-scheduling task of that priority ahead of a timer, and the
+ *   worst timer handed to the browser during a build waited 19,945 ms.
+ *
+ * A timer is the one hand-back behind both. Its cost is the 4 ms a nested timer is clamped
+ * to, which over the hundred-odd batches of that document is a tenth of a second. What the
+ * build does not lose by waiting is its throughput: the draw it used to queue behind - the
+ * document's own, painting a slice at a time - stops when the build begins
+ * (`DocumentPreview.tsx` in Dispatch), so what a batch now waits for is the page's own work.
  */
 export function endOfTask(): Promise<void> {
-  if (theScheduler?.yield !== undefined) return theScheduler.yield();
   const { promise, resolve } = Promise.withResolvers<void>();
   setTimeout(resolve, 0);
   return promise;
@@ -450,9 +458,30 @@ export async function buildTheDocumentInBatches({
       const began = performance.now();
       const batch = fragment.toArray().slice(built, built + take) as Block[];
       const landed = onBatch?.(idsOf(batch));
-      place(convert(batch), !replaced);
+      const content = convert(batch);
+      // The frontier moves before the dispatch that puts the batch on the screen, never after
+      // it. `place` is where the editor's own plugins first see those blocks, and one of them
+      // writes in that same call: Milkdown's `syncHeadingIdPlugin` is a plugin view, so
+      // ProseMirror runs its `update` inside `place`'s `view.dispatch` and it dispatches an
+      // `id` for each heading the batch brought (`@milkdown/preset-commonmark`'s
+      // `sync-heading-id-plugin`). That dispatch is a reader's edit as far as the write path
+      // above can tell, and the window it writes through is `built` blocks wide
+      // (`writableWindowOnto`), so a frontier still naming the batch before meant the window
+      // and the editor disagreed by exactly this batch: `updateYFragment` wrote the
+      // difference into the Yjs document, inserting the batch's blocks a second time, and
+      // `writeTheReadersEdits` then left `built` at the editor's own count for this loop to
+      // add the batch to a second time, which took the window past the editor on the next
+      // batch and had the same call delete the blocks the batches had still to reach. The
+      // document the reader opened came out of it with blocks of its own missing and others
+      // under ids nothing had indexed (dispatch://INFRA-341, R11).
+      //
+      // It counts what the conversion made rather than what the batch held, which is the same
+      // number except for a block `initProseMirrorDoc` refused: it deletes such a block from
+      // the fragment as it refuses it, so the editor holds this many of the fragment's
+      // leading blocks either way and the window stays the editor's own run of them.
+      built += content.childCount;
+      place(content, !replaced);
       replaced = true;
-      built += batch.length;
       if (batch.length > 0 && !open) {
         open = true;
         installTheWritePath();
