@@ -803,8 +803,8 @@ func TestACommandsBlockInsideATurnEndsNoStep(t *testing.T) {
 // A torn block — a `completed` row for a command that never started, a `started` row whose
 // `completed` never came — leaves the bridge working: the stream is a real process's output, and
 // a line that never arrives must not leave the bridge ignoring the result of every turn after it.
-// The bridge's own next user message closes whatever block is still open, since Claude Code
-// answers that message with a result of its own.
+// A `started` row owes one init and one result, and the lines after those two are read as any
+// other turn's, so the lost row costs the bridge that one block and nothing after it.
 func TestATornCommandBlockLeavesALaterTurnWorking(t *testing.T) {
 	for _, torn := range []struct{ name, stream string }{
 		{"a completed row for a command that never started", commandBlockUnstarted},
@@ -824,6 +824,64 @@ func TestATornCommandBlockLeavesALaterTurnWorking(t *testing.T) {
 			r.expect("prompt_result", map[string]any{"id": "p2", "agentInvoked": true})
 		})
 	}
+}
+
+// A command still running when the bridge writes its next user message — its `started` read, its
+// `completed` not — ends no step of the bridge's. A person sends `/compact` to an idle pane (6 to
+// 29 s, measured in this issue's earlier rounds), and while it runs an Envoy delivery or the
+// daemon's own prompt arrives, so the bridge starts a turn inside the open block. The command's
+// own result must not end that turn: a delivery answered errNotTaken is sent to the agent a
+// second time, and a prompt_result written before its turn has run leaves the real turn to be
+// read as one Claude Code started by itself.
+//
+// The fake writes the command's result before it reads the user message waiting on its stdin,
+// which is one of the two orders Claude Code can write them in; the bridge's rule — spend the one
+// result each `started` owes, close no block whose `completed` has not come — holds in either,
+// since no line of the stream says when Claude Code took its stdin.
+func TestACommandStillRunningEndsNoStepTheBridgeStarted(t *testing.T) {
+	t.Run("an Envoy delivery arrives inside the block", func(t *testing.T) {
+		r := newRig(t, "-p", "--resume", sessionID)
+		r.prompt("p1", commandBlockUnfinished)
+		r.expect("agent_start", nil)
+		r.expect("agent_end", nil)
+		r.expect("prompt_result", map[string]any{"id": "p1", "agentInvoked": true})
+		// The block is open: its `started` row and its own `init` are read, and its own `result`
+		// is the stream's last line, which the gate holds back.
+		r.logged("ignoring the init of the command Claude Code is running")
+		inbox := r.dialInbox()
+		inbox.deliver("ev1", "held h1")
+		r.expect("agent_start", nil)
+		inbox.noAnswer()
+		// The command's own result. Claude Code reads the delivery behind it, and answers it only
+		// once the test releases h1, so no frame of the delivery's turn stands in the way here.
+		r.open()
+		inbox.noAnswer()
+		r.quiet()
+		r.logged("ignoring the success result of the command Claude Code is running")
+		r.release("h1")
+		if answer := inbox.answer(); answer != (InboxAnswer{ID: "ev1", OK: true}) {
+			t.Fatalf("the inbox answered %+v, want the delivery taken by the turn begun inside the block", answer)
+		}
+		r.expect("agent_end", nil)
+		r.quiet()
+	})
+	t.Run("the daemon's prompt arrives inside the block", func(t *testing.T) {
+		r := newRig(t, "-p", "--resume", sessionID)
+		r.prompt("p1", commandBlockUnfinished)
+		r.expect("agent_start", nil)
+		r.expect("agent_end", nil)
+		r.expect("prompt_result", map[string]any{"id": "p1", "agentInvoked": true})
+		r.logged("ignoring the init of the command Claude Code is running")
+		r.prompt("p2", "held h2")
+		r.expect("agent_start", nil)
+		r.open()
+		// p2's turn has not run, so neither its agent_end nor its prompt_result may come yet.
+		r.quiet()
+		r.logged("ignoring the success result of the command Claude Code is running")
+		r.release("h2")
+		r.expect("agent_end", nil)
+		r.expect("prompt_result", map[string]any{"id": "p2", "agentInvoked": true})
+	})
 }
 
 // A delivery that carries a person's pictures reaches Claude Code as the blocks claude-envoy
