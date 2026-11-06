@@ -395,6 +395,7 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, dispatchTok
 		ProvidersSecrets:        providersSecrets(cfg, lookup),
 		SessionStore:            k.SessionStore,
 		Setup:                   k.Setup,
+		SkillsRepository:        k.SkillsRepository,
 		TestPostgres:            k.TestPostgres,
 		// Every launch key of the configuration this runtime is built from, which each pod
 		// template records and an update round reads a pod's launch-key drift from

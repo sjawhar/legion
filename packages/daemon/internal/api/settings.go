@@ -138,6 +138,11 @@ type KubernetesSettings struct {
 	// Setup is the argv every role runs before each start of its Oh My Pi, `[]` while the
 	// file sets none: every pod runs it, so every pod knows it, as with `omp_launch_prefix`.
 	Setup []string `json:"setup"`
+	// SkillsRepository is the skills marketplace every issue pod's roles install from
+	// (`runtime.kubernetes.skills_repository`), as `<owner>/<name>`; empty while the file names
+	// none. It is a public repository name, not a credential, and every pod's init container
+	// carries it on its command line already.
+	SkillsRepository string `json:"skills_repository"`
 	// TestPostgres is whether every issue pod serves its own PostgreSQL for tests, which every
 	// role of such a pod is told as LEGION_TEST_PG_DSN, so every pod may read it.
 	TestPostgres    bool                    `json:"test_postgres"`
@@ -412,9 +417,10 @@ func kubernetesSettingsOf(block *config.Kubernetes) *KubernetesSettings {
 			Issue:      reservationSettingsOf(block.Resources.Issue),
 			Controller: reservationSettingsOf(block.Resources.Controller),
 		},
-		SessionStore: string(block.SessionStore.Kind),
-		Setup:        stringsOf(block.Setup),
-		TestPostgres: block.TestPostgres,
+		SessionStore:     string(block.SessionStore.Kind),
+		Setup:            stringsOf(block.Setup),
+		SkillsRepository: skillsRepositorySetting(block.SkillsRepository),
+		TestPostgres:     block.TestPostgres,
 		RepositoryCache: RepositoryCacheSettings{
 			Volume:         block.RepositoryCache.Volume,
 			RefreshMinutes: block.RepositoryCache.RefreshMinutes,
@@ -463,6 +469,16 @@ func seconds(d time.Duration) int {
 // stringsOf is a copy of values that is `[]` on the wire when values is nil.
 func stringsOf(values []string) []string {
 	return append([]string{}, values...)
+}
+
+// skillsRepositorySetting is repository as `<owner>/<name>`, and "" for the zero repository, which
+// is what a file naming no skills marketplace leaves: ghrepo's own String() of the zero value is
+// not the empty string.
+func skillsRepositorySetting(repository ghrepo.Repository) string {
+	if repository.IsZero() {
+		return ""
+	}
+	return repository.String()
 }
 
 // endpointOf is one address key's value as the state shows it: the scheme, the host and the path,
