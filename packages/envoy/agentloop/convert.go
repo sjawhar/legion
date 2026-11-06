@@ -227,21 +227,12 @@ func openaiChatParts(blocks []Block) ([]provider.ContentPart, error) {
 	return parts, nil
 }
 
-// withCacheMark is options with Anthropic's ephemeral cache mark added. The run places the
-// marks unless the caller turns them off with Request.NoCache.
-func withCacheMark(options provider.ProviderOptions) provider.ProviderOptions {
+// withOption is options with option added under the provider key the option itself names, which
+// is how the SDK's own provider.BuildProviderOptions keys a value.
+func withOption(options provider.ProviderOptions, option provider.ProviderOption) provider.ProviderOptions {
 	marked := make(provider.ProviderOptions, len(options)+1)
 	maps.Copy(marked, options)
-	marked["anthropic"] = anthropic.CacheControl("ephemeral")
-	return marked
-}
-
-// withBreakpoint is options with OpenAI's explicit prompt cache breakpoint added. The run
-// places the marks unless the caller turns them off with Request.NoCache.
-func withBreakpoint(options provider.ProviderOptions) provider.ProviderOptions {
-	marked := make(provider.ProviderOptions, len(options)+1)
-	maps.Copy(marked, options)
-	marked["openai"] = openai.OpenAIPartOptions{PromptCacheBreakpoint: &openai.PromptCacheBreakpoint{Mode: "explicit"}}
+	marked[option.ProviderKey()] = option
 	return marked
 }
 
@@ -259,10 +250,10 @@ func withBreakpoint(options provider.ProviderOptions) provider.ProviderOptions {
 func markAnthropicHistory(messages []provider.Message, history int) {
 	for i := history - 1; i >= 0; i-- {
 		m := messages[i]
-		if len(m.Content) == 0 || m.Content[len(m.Content)-1].Type == provider.ContentPartTypeReasoning {
+		if m.Content[len(m.Content)-1].Type == provider.ContentPartTypeReasoning {
 			continue
 		}
-		messages[i].ProviderOptions = withCacheMark(m.ProviderOptions)
+		messages[i].ProviderOptions = withOption(m.ProviderOptions, anthropic.CacheControl("ephemeral"))
 		return
 	}
 }
@@ -278,6 +269,7 @@ func markAnthropicHistory(messages []provider.Message, history int) {
 // result an output of its own, so the mark goes on the part as it stands. The run places it
 // unless the caller turns the marks off with Request.NoCache.
 func markOpenAIHistory(messages []provider.Message, history int) {
+	breakpoint := openai.OpenAIPartOptions{PromptCacheBreakpoint: &openai.PromptCacheBreakpoint{Mode: "explicit"}}
 	for i := history - 1; i >= 0; i-- {
 		m := messages[i]
 		if m.Role != provider.RoleUser && m.Role != provider.RoleTool {
@@ -287,10 +279,10 @@ func markOpenAIHistory(messages []provider.Message, history int) {
 		switch {
 		case part.Type == provider.ContentPartTypeToolResult && part.Output.Type == provider.ToolOutputContent:
 			value := &part.Output.Content[len(part.Output.Content)-1]
-			value.ProviderOptions = withBreakpoint(value.ProviderOptions)
+			value.ProviderOptions = withOption(value.ProviderOptions, breakpoint)
 		case part.Type == provider.ContentPartTypeText, part.Type == provider.ContentPartTypeFile,
 			part.Type == provider.ContentPartTypeToolResult:
-			part.ProviderOptions = withBreakpoint(part.ProviderOptions)
+			part.ProviderOptions = withOption(part.ProviderOptions, breakpoint)
 		default:
 			continue
 		}

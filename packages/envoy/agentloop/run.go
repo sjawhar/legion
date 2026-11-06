@@ -239,8 +239,9 @@ type run struct {
 	// cancel ends the run's own context, which is how a callback's error stops the run.
 	cancel context.CancelFunc
 
-	// history is how many of a step's first messages are the request's own history, as the
-	// run converted it before the first call. The marks a step moves are the ones after it.
+	// history is how many messages the request's history converted to before the first
+	// call; afterHistory finds where they end in a step's messages, and the marks a step
+	// moves are the ones after them.
 	history int
 
 	mu sync.Mutex
@@ -393,7 +394,7 @@ func (r *run) prepareStep(state aisdk.PrepareStepState) (*aisdk.PrepareStepResul
 		}
 	}
 	last := len(messages) - 1
-	messages[last].ProviderOptions = withCacheMark(messages[last].ProviderOptions)
+	messages[last].ProviderOptions = withOption(messages[last].ProviderOptions, anthropic.CacheControl("ephemeral"))
 	result.Messages = messages
 	return result, nil
 }
