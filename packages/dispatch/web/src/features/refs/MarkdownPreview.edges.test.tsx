@@ -45,6 +45,7 @@ function askRead(question: string): AskRead {
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   };
 }

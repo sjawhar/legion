@@ -20,6 +20,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/legion/daemon/internal/api"
 	legionclaim "github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -141,9 +143,12 @@ func (s *memoryClaims) ClaimByBootTokenHash(_ context.Context, hash []byte) (sup
 }
 
 // The tree barrier is the store's, held to its own tests: here every tree is open at epoch 1, and
-// a close's cleanup releases the tree through the runtime at once.
-func (s *memoryClaims) OpenTreeLifecycle(_ context.Context, project, tree string, authority treelifecycle.Authority) (treelifecycle.Lifecycle, error) {
-	return treelifecycle.Lifecycle{Project: project, Tree: tree, Epoch: 1, Authority: authority}, nil
+// a close's cleanup releases the tree through the runtime at once. No tree is ever created here
+// (treelifecycle.Lifecycle.Created), so the open runs its created for none of them: this fake
+// holds no transaction for one to write in.
+func (s *memoryClaims) OpenOperatorTreeLifecycle(_ context.Context, project, tree string,
+	_ func(context.Context, pgx.Tx) error) (treelifecycle.Lifecycle, error) {
+	return treelifecycle.Lifecycle{Project: project, Tree: tree, Epoch: 1, Authority: treelifecycle.AuthorityOperator}, nil
 }
 
 func (s *memoryClaims) ReserveOperatorTreeCleanup(_ context.Context, project, tree string) (treelifecycle.Lifecycle, bool, error) {
@@ -617,9 +622,14 @@ func TestClaimsRetryFailedRetriesEveryFailedClaim(t *testing.T) {
 	}
 }
 
+// podUpdateNotSwept is the pod-update line of a daemon whose first sweep has not run, which every
+// listing these tests take from a daemon that sweeps nothing ends with.
+const podUpdateNotSwept = "pod update rounds: the daemon has not swept yet"
+
 // list prints one line per claim — token, role, issue, state, generation, plugin contract, the
 // update round the claim is in and the head its worker reported when it answered, each `-` when
-// there is none — in the daemon's token order, and --json prints the daemon's answer byte for byte.
+// there is none — in the daemon's token order, then the one line of what the last pod-update
+// sweep decided, and --json prints the daemon's answer byte for byte.
 func TestClaimsListPrintsOneLinePerClaim(t *testing.T) {
 	d := newOperatorDaemon(t)
 	d.succeed(d.spawnArgs()...)
@@ -632,7 +642,8 @@ func TestClaimsListPrintsOneLinePerClaim(t *testing.T) {
 
 	wantOperatorRequest(t, d.lastOperatorRequest(), http.MethodGet, "/legion/v1/operator/claims")
 	want := "legion-legion-legion-208-architect architect LEGION-208 ready 1 " + thisBinarysContract + " - -\n" +
-		"legion-legion-legion-209-implementer implementer LEGION-209 launching 1 0 - -\n"
+		"legion-legion-legion-209-implementer implementer LEGION-209 launching 1 0 - -\n" +
+		podUpdateNotSwept + "\n"
 	if out != want {
 		t.Fatalf("stdout = %q, want %q", out, want)
 	}
@@ -640,6 +651,91 @@ func TestClaimsListPrintsOneLinePerClaim(t *testing.T) {
 	out = d.succeed(append([]string{"list", "--json"}, d.reach()...)...)
 	if answer := d.lastOperatorRequest().answer; out != string(answer) {
 		t.Fatalf("list --json printed %q, want the daemon's answer %q verbatim", out, answer)
+	}
+}
+
+// The listing ends with one line for what the daemon's last pod-update sweep decided
+// (api.PodUpdateRounds): the project's two limits, the issues holding a round under them, and the
+// issues each limit held back. No claim row says either half — an issue a limit held back is
+// drifted and was posted nothing at all, so nothing of it is in the listing above — and this line
+// is what tells the operator whether a fleet-wide roll is being paced or is stuck.
+//
+// A limit the file does not set prints `no limit` rather than a number, since 0 would read as a
+// project that opens no round at all. A fleet-wide roll leaves a fleet's worth of issues waiting,
+// so a list is cut to its first twenty keys with the count of the rest: the whole count is in
+// front of them either way, and the claims themselves stay on the operator's screen. A daemon
+// whose first sweep has not run says so, where every list empty would read as a sweep that found
+// nothing to do.
+//
+// A daemon of a release before this record serves a body with no `pod_update_rounds` member at
+// all. decodeAnswer takes such a body — it refuses a member this binary does not know, never a
+// member it does not find — so the line says what that daemon is rather than printing the
+// not-swept sentence, which would be false of a daemon sweeping every minute.
+func TestClaimsListPodUpdateLine(t *testing.T) {
+	waiting := make([]string, 25)
+	for i := range waiting {
+		waiting[i] = fmt.Sprintf("INFRA-%d", 100+i)
+	}
+	for _, testCase := range []struct {
+		name string
+		// rounds is the record the daemon's answer carries; nil is an answer that carries no
+		// `pod_update_rounds` member at all.
+		rounds *api.PodUpdateRounds
+		want   string
+	}{
+		{
+			name: "both limits set",
+			rounds: &api.PodUpdateRounds{
+				Swept: true, MaxOpenRounds: new(2), RoundsPerMinute: new(1),
+				InRound: []string{"INFRA-10", "INFRA-1000"}, WaitingOnMaxOpenRounds: []string{"INFRA-2"},
+			},
+			want: "pod update rounds: max open 2, 1 a minute; in a round: 2 — INFRA-10, INFRA-1000; " +
+				"waiting on the open-round limit: 1 — INFRA-2; waiting on the limit a minute: none",
+		},
+		{
+			name:   "neither key set",
+			rounds: &api.PodUpdateRounds{Swept: true, InRound: []string{"INFRA-10"}},
+			want: "pod update rounds: max open no limit, no limit a minute; in a round: 1 — INFRA-10; " +
+				"waiting on the open-round limit: none; waiting on the limit a minute: none",
+		},
+		{
+			name: "more issues waiting than the line names",
+			rounds: &api.PodUpdateRounds{
+				Swept: true, MaxOpenRounds: new(2), RoundsPerMinute: new(1),
+				InRound: []string{"INFRA-10", "INFRA-1000"}, WaitingOnMaxOpenRounds: waiting,
+			},
+			want: "pod update rounds: max open 2, 1 a minute; in a round: 2 — INFRA-10, INFRA-1000; " +
+				"waiting on the open-round limit: 25 — " + strings.Join(waiting[:20], ", ") + ", and 5 more; " +
+				"waiting on the limit a minute: none",
+		},
+		{
+			name:   "a daemon that has not swept",
+			rounds: &api.PodUpdateRounds{},
+			want:   podUpdateNotSwept,
+		},
+		{
+			name:   "a daemon that does not report the rounds",
+			rounds: nil,
+			want:   "pod update rounds: this daemon does not report them; it is older than this binary",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			answer := []byte(`{"claims":[]}`)
+			if testCase.rounds != nil {
+				encoded, err := json.Marshal(api.OperatorClaims{PodUpdateRounds: testCase.rounds})
+				if err != nil {
+					t.Fatalf("encode the daemon's answer: %v", err)
+				}
+				answer = encoded
+			}
+			var out bytes.Buffer
+			if err := printClaims(&out, answer); err != nil {
+				t.Fatalf("print the listing: %v", err)
+			}
+			if out.String() != testCase.want+"\n" {
+				t.Fatalf("the listing is %q, want %q", out.String(), testCase.want+"\n")
+			}
+		})
 	}
 }
 
@@ -675,14 +771,20 @@ func TestAWorkerReportedHeadIsPrintedQuoted(t *testing.T) {
 	}
 }
 
-func TestClaimsListOfNoClaimsPrintsNothing(t *testing.T) {
+// A daemon that supervises no claim prints the pod-update line and nothing else: what the sweep
+// decided is a fact of the project rather than of any claim, and an operator served no line at all
+// could not tell a daemon that holds no issue back from a binary too old to know the limits.
+// --json stays the daemon's own answer, the empty claim list with that record beside it.
+func TestClaimsListOfNoClaimsPrintsThePodUpdateLineAlone(t *testing.T) {
 	d := newOperatorDaemon(t)
 
-	if out := d.succeed(append([]string{"list"}, d.reach()...)...); out != "" {
-		t.Fatalf("stdout = %q, want nothing", out)
+	if out := d.succeed(append([]string{"list"}, d.reach()...)...); out != podUpdateNotSwept+"\n" {
+		t.Fatalf("stdout = %q, want %q", out, podUpdateNotSwept+"\n")
 	}
-	if out := d.succeed(append([]string{"list", "--json"}, d.reach()...)...); out != "{\"claims\":[]}\n" {
-		t.Fatalf("list --json = %q, want the daemon's empty list", out)
+	const empty = `{"claims":[],"pod_update_rounds":{"swept":false,"max_open_rounds":null,` +
+		`"rounds_per_minute":null,"in_round":[],"waiting_on_max_open_rounds":[],"waiting_on_rounds_per_minute":[]}}` + "\n"
+	if out := d.succeed(append([]string{"list", "--json"}, d.reach()...)...); out != empty {
+		t.Fatalf("list --json = %q, want the daemon's empty list %q", out, empty)
 	}
 }
 

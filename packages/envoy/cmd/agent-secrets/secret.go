@@ -31,6 +31,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
+	"github.com/sjawhar/envoy/internal/brokerclient"
 	"github.com/sjawhar/envoy/internal/redact"
 )
 
@@ -120,7 +121,7 @@ func cmdSecret(args []string, stdout, stderr io.Writer) int {
 // trust the broker's settings to steer a write, so a plain-http broker a network attacker can answer
 // is refused before the first call; an unparseable URL is left to the client, which names it.
 func requireSecretBrokerURL(raw string) error {
-	base := strings.TrimSuffix(raw, "/")
+	base := brokerclient.WithoutTrailingSlashes(raw)
 	if base == "" {
 		return nil
 	}

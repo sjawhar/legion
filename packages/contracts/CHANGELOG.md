@@ -1,5 +1,69 @@
 # Changelog
 
+## [main@c5c94dbd542d] - 2026-11-05
+
+### Added
+
+- `ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS` is how long a holder that has stopped answering keeps its
+  issue claim, generated into Go beside its TypeScript declaration so the two languages cannot
+  disagree about when a claim becomes takeable. `IssueClaimHolderState` (`live`, `unresponsive`,
+  `gone`, `unknown`) and `IssueClaimLiveness` (`holder_state`, `last_seen`, `takeable_at`) carry
+  a claim holder's state on an issue read, beside the claim rather than inside it.
+  `ISSUE_ROUTE_STATUSES` gains `holder_unresponsive`, and `IssueRouteReach` gains
+  `route_status_reason` (`refilling` or `unreachable`), which says why a route reads `unknown`:
+  a listener whose agent list is refilling did answer and will judge the route in a moment,
+  where one that is unreachable did not answer at all.
+
+## [main@87fb43e754ba] - 2026-11-05
+
+### Changed
+
+- No Dispatch tool carries a length of its own. `DISPATCH_BODY_MAX` and `ASK_QUESTION_MAX` are
+  gone, and the server's own bounds take their place: `DISPATCH_BLOCK_UNITS` (32000), one block
+  of a body, `DISPATCH_ITEM_BLOCKS` (32768), how many blocks a body may hold, and
+  `DISPATCH_EVENT_BODY_MAX` (32000), how much of a body one event carries whole and the bound an
+  ask's question and its options share. Each is generated into Go for the server, which refuses
+  a longer write and names what passed the bound, and the Legion daemon reads the two block
+  bounds through the server's own splitter (`github.com/sjawhar/envoy/dispatchbody`), so it
+  refuses a close reason or a READY packet the server would refuse at the call that carries it
+  rather than losing the post. The new `dispatch_limits` spec reads them from the server
+  (`GET /api/v1/limits`, `DispatchLimits`).
+  Every ask instruction gives one rule and states no character count: an ask is short and asks
+  one thing, and its reasoning goes in the document. An event whose body is longer than it
+  carries says `body_truncated`; a search hit carries `block_id`, the block of it a meaning
+  match named; and a document, comment or message block carries `embedding`, where meaning
+  search stands on it.
+
+## [main@c82087d74996] - 2026-11-05
+
+### Added
+
+- LegionOperatorClaimsResponse carries pod_update_rounds: what the daemon's last pod-update sweep decided under the two new legion.yaml limits on opening pod-update rounds — each limit or null for no limit, the issues holding an open round, and the issues each limit held back.
+- Review and approval contracts expose approved content hashes and their provenance; runtime review-event validation preserves both fields. Document-version reads can report the SHA-256 of their stored UTF-8 bytes.
+
+## [main@f06073fb9ef4] - 2026-11-05
+
+### Added
+
+- Each issue of the Legion state carries its tree's memory draw: `memoryGroup`, `memoryDrawMode`
+  and `memoryDrawnAt`, all optional. A tree no draw has reached carries none of the three, and a
+  daemon before contract 49 sends none.
+
+### Fixed
+
+- The schemas that read the Legion daemon's answers now ignore a key they do not name, at every depth, so a plugin one contract behind its daemon reads the state instead of refusing the whole body for one field the daemon added. They still refuse a body that lacks a field they require or carries one of a type they do not describe, a refusal still arrives with its stable code, and every body the plugin sends is still refused for a key its schema does not name. The gate that holds the reader to the daemon's Go wire shape is now an equality between each golden's parse and the file, which names the path of the first key the parse dropped.
+
+## [main@804d3695e12e] - 2026-11-05
+
+### Added
+
+- `DISPATCH_SIGN_IN_REQUIRED` is the code of the `403` Dispatch answers a write by an access
+  token the secrets broker issued that names a session and a service and no person: the machine
+  holding it has signed nobody in, so there is nobody to record the write under. Reads are
+  unaffected, and the refusal's message names `agent-secrets login`. It is generated into Go as
+  `contracts.DispatchSignInRequired`, as `DISPATCH_LOGIN_CHANGED` is, so the server's refusal
+  and every client's reading of it cannot drift apart.
+
 ## [main@27c52d310319] - 2026-11-05
 
 ### Added

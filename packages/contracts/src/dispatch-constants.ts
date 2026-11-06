@@ -44,6 +44,24 @@ export function serviceSubjectLabel(subject: string): string {
 export const MAX_ISSUE_BLOCKERS = 20;
 
 /**
+ * How long an issue claim is held for a holder the Envoy registry calls `unresponsive`: a
+ * session past the listener's live window but inside its gone horizon has missed heartbeats, not
+ * ended, and under box load that is ordinary. Dispatch refuses another agent's claim or release
+ * while the holder was last seen no longer ago than this, so a stalled session keeps the issue
+ * it is working and two sessions never write the same branch; a person still forces the claim
+ * (`force`), which is the escape this grace leaves open.
+ *
+ * Twenty minutes is four times the listener's live window (`ENVOY_SESSION_LIVE_WINDOW`, 5m) and
+ * well inside its gone horizon (`ENVOY_SESSION_GONE_HORIZON`, 1h), so a session that is merely
+ * slow keeps its work while a box that really lost one frees it long before the horizon.
+ * `scripts/gen-go.ts` emits it as `contracts.IssueClaimUnresponsiveGrace`, so the refusal the
+ * server writes and the wait a client predicts are one number. It lives here rather than beside
+ * `IssueClaimLiveness` because `claim-holds.ts`, which the dashboard loads without zod, reads
+ * the number itself (`dispatch-api.ts`'s own guide row).
+ */
+export const ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS = 20 * 60 * 1000;
+
+/**
  * The longest issue title, in UTF-16 units, counted after the trim `POST /api/v1/issues` and
  * `PATCH /api/v1/issues/{key}` apply; a longer one is `400 CAP_EXCEEDED`. Production's longest
  * title was 326 characters when this was set. It bounds the duplicate-title check, which compares
@@ -187,6 +205,15 @@ export const DISPATCH_LOGIN_HEADER = "Dispatch-Login";
 /** The code of the `409` for a write whose `DISPATCH_LOGIN_HEADER` names a login that is not its
  *  caller's: nothing ran. The page drops every write that login pressed. */
 export const DISPATCH_LOGIN_CHANGED = "LOGIN_CHANGED";
+
+/**
+ * The code of the `403` for a write by an access token the secrets broker issued that names a
+ * session and a service but no person: the machine holding it has signed nobody in, so Dispatch
+ * has nobody to record the write under. Its reads are unaffected. The message names
+ * `agent-secrets login`, the one command that makes the write possible, because whoever reads
+ * the refusal is whoever must run it.
+ */
+export const DISPATCH_SIGN_IN_REQUIRED = "SIGN_IN_REQUIRED";
 
 /** The codes of a write Dispatch made and has no answer to give for: `409 KEY_COMMITTED`, or a
  *  replayed 2xx reading `ANSWER_NOT_KEPT`. A client treats either as landed. */

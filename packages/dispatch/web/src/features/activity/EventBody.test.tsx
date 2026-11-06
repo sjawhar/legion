@@ -281,3 +281,121 @@ test("EventBody reads a null selected list on an answer and its previous answer 
     view.unmount();
   }
 });
+
+// A body is bounded block by block, so one event carries its first part alone and says so with
+// `body_truncated`. The row then shows the text it has and a link to the item's own page, which
+// reads the stored body whole; an event that carries its body whole shows nothing extra.
+test("EventBody links to the whole item when the event carried the body in part", async () => {
+  const cut: Event = {
+    ...markdownMessage,
+    payload: { ...markdownMessage.payload, body: "The first part.", body_truncated: true },
+  };
+  const view = render(<EventBody event={cut} />, {
+    wrapper: ({ children }) => <MemoryRouter>{children}</MemoryRouter>,
+  });
+
+  try {
+    expect(await screen.findByText("The first part.")).not.toBeNull();
+    const link = screen.getByRole("link", { name: "Read the whole message" });
+    expect(link.getAttribute("href")).toBe("/issues/CORE-1/messages/message-1");
+
+    view.rerender(<EventBody event={markdownMessage} />);
+    await waitFor(() => expect(screen.queryByRole("link", { name: /Read the whole/ })).toBeNull());
+  } finally {
+    view.unmount();
+  }
+});
+
+// A comment's link reads "Read the whole comment" and opens the comment's own page.
+test("EventBody links to the whole comment when a comment event carried its body in part", async () => {
+  const cut: Event = {
+    actor: { id: "alice", kind: "user" },
+    created_at: "2026-09-10T00:00:00Z",
+    id: 2,
+    issue_key: "CORE-1",
+    notify: true,
+    payload: {
+      anchor: null,
+      artifact_name: "",
+      ask_id: null,
+      author: { id: "alice", kind: "user" },
+      body: "The first paragraph.",
+      body_truncated: true,
+      created_at: "2026-09-10T00:00:00Z",
+      deliveries: [],
+      edited_at: null,
+      id: "comment-1",
+      issue_key: "CORE-1",
+      mentions: [],
+      reply_to: null,
+      resolved: false,
+      resolved_at: null,
+      resolved_by: null,
+      suggestion: null,
+      turn: null,
+    },
+    seq: 2,
+    type: "comment.created",
+  };
+  const view = render(<EventBody event={cut} />, {
+    wrapper: ({ children }) => <MemoryRouter>{children}</MemoryRouter>,
+  });
+
+  try {
+    expect(await screen.findByText("The first paragraph.")).not.toBeNull();
+    expect(screen.getByRole("link", { name: "Read the whole comment" }).getAttribute("href")).toBe(
+      "/issues/CORE-1/comments/comment-1"
+    );
+  } finally {
+    view.unmount();
+  }
+});
+
+// A comment on a project document belongs to no issue: its link opens the document with the
+// comment in view, the address every other in-app link to one uses.
+test("EventBody links a cut comment on a project document through that document", async () => {
+  const cut: Event = {
+    actor: { id: "alice", kind: "user" },
+    created_at: "2026-09-10T00:00:00Z",
+    id: 3,
+    issue_key: null,
+    notify: true,
+    payload: {
+      anchor: null,
+      artifact_id: "artifact-1",
+      artifact_name: "runbook.md",
+      artifact_slug: "runbook",
+      ask_id: null,
+      author: { id: "alice", kind: "user" },
+      body: "The first paragraph.",
+      body_truncated: true,
+      created_at: "2026-09-10T00:00:00Z",
+      deliveries: [],
+      edited_at: null,
+      id: "comment-2",
+      issue_key: null,
+      mentions: [],
+      project_key: "CORE",
+      reply_to: null,
+      resolved: false,
+      resolved_at: null,
+      resolved_by: null,
+      suggestion: null,
+      turn: null,
+    },
+    seq: 3,
+    type: "comment.created",
+  };
+  const view = render(<EventBody event={cut} />, {
+    wrapper: ({ children }) => <MemoryRouter>{children}</MemoryRouter>,
+  });
+
+  try {
+    expect(await screen.findByText("The first paragraph.")).not.toBeNull();
+    expect(screen.getByRole("link", { name: "Read the whole comment" }).getAttribute("href")).toBe(
+      "/projects/CORE/documents/runbook?comment=comment-2"
+    );
+  } finally {
+    view.unmount();
+  }
+});

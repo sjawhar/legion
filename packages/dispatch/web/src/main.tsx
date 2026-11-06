@@ -6,6 +6,7 @@ import { BrowserRouter } from "react-router-dom";
 import { DispatchQueryClient, queryRetry, queryRetryDelay } from "./api/query-client";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ShellSkeleton } from "./components/ShellSkeleton";
+import { rememberEarlyKeys } from "./early-keys";
 import "./styles.css";
 
 /**
@@ -57,6 +58,10 @@ const queryClient = new DispatchQueryClient({
  * evaluation task in front of the reader's first screen. A boot that fails to load is not a
  * page that fails to show: the app renders, and asks for each read itself as it always did.
  */
+// Hold a shortcut the reader presses at the skeleton, from this task, so the app's keymap can
+// answer it when it binds (`early-keys.ts`).
+rememberEarlyKeys();
+
 void import("./features/shell/boot").then(
   ({ bootThePage }) => bootThePage(queryClient, window.location.pathname, window.location.search),
   () => undefined

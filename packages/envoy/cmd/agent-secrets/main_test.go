@@ -1046,8 +1046,8 @@ func TestEnrollWaitRidesOutTheLaunchersSetup(t *testing.T) {
 	keyDir := t.TempDir()
 	marker := writePendingMarker(t, keyDir, 0)
 
-	// The launcher writes each file whole (enroll's writeFileAtomic), so a waiting call never reads
-	// one half-written; the fixture does the same.
+	// The launcher writes each file whole (writeFileAtomic), so a waiting call never
+	// reads one half-written; the fixture does the same.
 	setupDone := make(chan error, 1)
 	go func() {
 		time.Sleep(time.Second)

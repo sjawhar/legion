@@ -1,4 +1,3 @@
-import { ASK_QUESTION_MAX, DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
 import { hashKey, type MutationKey } from "@tanstack/react-query";
 import {
   type FormEvent,
@@ -13,7 +12,13 @@ import {
   useState,
 } from "react";
 
-import { type ArtifactOwner, api, apiErrorMessage, isAnchorMissing } from "../../api/client";
+import {
+  type ArtifactOwner,
+  api,
+  apiErrorMessage,
+  isAnchorMissing,
+  isCapExceeded,
+} from "../../api/client";
 import type { Agent, AskOption, AskUrgency } from "../../api/types";
 import { Chip } from "../../components/Chip";
 import { QueryError } from "../../components/QueryError";
@@ -258,8 +263,8 @@ function draftRefusal(
 /** What the composer shows for `refusal`: the host's own words, where it has some about the mark
  *  this send names - the margin's, when the server refused the send for a mark it cannot see and
  *  the margin could not write that mark again - else the words of a refusal written for the
- *  reader (the server's missing anchor, a send they stopped), else the page's wording around what
- *  went wrong. */
+ *  reader (the server's missing anchor, a send they stopped, a text past a bound Dispatch holds
+ *  it to), else the page's wording around what went wrong. */
 function refusalMessage(
   refusal: Error,
   anchor: ComposerAnchor | undefined,
@@ -269,7 +274,7 @@ function refusalMessage(
   if (anchorMissing && anchorRefusal !== undefined && anchorRefusal.markId === anchor?.mark_id) {
     return anchorRefusal.text;
   }
-  return anchorMissing || refusal instanceof SendStoppedError
+  return anchorMissing || refusal instanceof SendStoppedError || isCapExceeded(refusal)
     ? refusal.message
     : `Couldn't send — ${apiErrorMessage(refusal, "network error")}`;
 }
@@ -418,9 +423,10 @@ export function MentionComposer({
   const [multiple, setMultiple] = useState(initial.ask?.multiple ?? false);
   const [urgency, setUrgency] = useState<AskUrgency>(initial.ask?.urgency ?? "med");
   const [referencePickerOpen, setReferencePickerOpen] = useState(false);
-  /** Everything the field's `@` picker needs (`useMentionOptions`): its options, and whether it
-   *  is open, which lifts a docked composer over the page under it. */
-  const { onPickerOpenChange, options, pickerOpen } = useMentionOptions(
+  /** Everything the field's `@` picker needs (`useMentionOptions`): its options, what the read
+   *  that gave them stands at, and whether the picker is open, which lifts a docked composer
+   *  over the page under it. */
+  const { listing, onPickerOpenChange, options, pickerOpen } = useMentionOptions(
     owner.kind !== "session",
     suppliedAgents
   );
@@ -986,7 +992,7 @@ export function MentionComposer({
         inline={inline}
         label={bodyLabel}
         labelHidden={compact}
-        maxLength={kind === "ask" ? ASK_QUESTION_MAX : DISPATCH_BODY_MAX}
+        listing={listing}
         mentions={mentions}
         onChange={onFieldChange}
         onDrop={uploadOwner === undefined ? undefined : (event) => upload.drop(event, uploadOwner)}

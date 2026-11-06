@@ -20,6 +20,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/roles"
 	"github.com/sjawhar/envoy/internal/session"
 	envoystore "github.com/sjawhar/envoy/internal/store"
 )
@@ -166,34 +167,47 @@ func (p *keepRecorder) keeps() []keptPublish {
 
 // roleClaimStub is a role-claim store and session reader with one claim and no session at all,
 // for a test that resolves a role without a NATS server: holder is the session the claim names,
-// empty for a role no session claims, and release is what the release of that claim comes to.
-// Every session read answers "gone", so a claim this store names is always a lapsed one.
+// empty for a role no session claims. Every session read answers "no record", which this build
+// judges session.Gone, so a claim this store names is always a lapsed one whose claim stands:
+// no resolution releases one (dispatch://INFRA-392).
 type roleClaimStub struct {
-	holder  string
-	release envoystore.ExpiredRoleClaimRelease
+	holder string
+	// lastSeen, when it is not zero, is the holder's last registration: a stub that names one
+	// answers that record, so the resolution judges the holder by its own state rather than by
+	// the absence of a record.
+	lastSeen int64
 }
 
 const retainedHolder = "ses_restored"
 
-// retainedClaim is the claim the restart grace retained: the holder's session is gone and the
-// release keeps the claim, which is the grace a listener gives a claim it restored
-// (store.Registry.ReleaseExpiredRoleClaim).
-var retainedClaim = roleClaimStub{holder: retainedHolder, release: envoystore.ExpiredRoleClaimRetained}
+// unresponsiveClaim is the claim of a holder that stopped answering: its record stands and its
+// last registration is past the live window, inside the gone horizon. This build keeps that
+// claim - nothing here releases one, and the listener's role-claim reaper is the one caller that
+// ever does - so nothing is kept for it either.
+var unresponsiveClaim = roleClaimStub{
+	holder:   retainedHolder,
+	lastSeen: time.Now().Add(-(session.LiveWindow + time.Minute)).UnixMilli(),
+}
 
-// unclaimedRoles is the store in which no role is claimed, which releases nothing.
-var unclaimedRoles = roleClaimStub{release: envoystore.ExpiredRoleClaimMissing}
+// unclaimedRoles is the store in which no role is claimed.
+var unclaimedRoles = roleClaimStub{}
 
 func (s roleClaimStub) RoleClaim(context.Context, string) (envoystore.RoleClaim, error) {
 	return envoystore.RoleClaim{HolderSessionID: s.holder}, nil
 }
 
-func (s roleClaimStub) ReleaseExpiredRoleClaim(context.Context, string, string, time.Duration) (envoystore.ExpiredRoleClaimRelease, error) {
-	return s.release, nil
+func (s roleClaimStub) Holder(context.Context, string) (session.SessionEntry, error) {
+	if s.lastSeen == 0 {
+		return session.SessionEntry{}, natsgo.ErrKeyNotFound
+	}
+	return session.SessionEntry{MachineID: "test-machine", UpdatedAt: s.lastSeen}, nil
 }
 
-func (roleClaimStub) Holder(context.Context, string, func(session.SessionEntry) bool) (session.SessionEntry, error) {
-	return session.SessionEntry{}, natsgo.ErrKeyNotFound
+func (roleClaimStub) EntryState(entry session.SessionEntry) session.State {
+	return roles.Windows{}.EntryState(entry)
 }
+
+func (roleClaimStub) LastSeen(string) int64 { return 0 }
 
 func (roleClaimStub) TTL() time.Duration { return 5 * time.Minute }
 
@@ -322,26 +336,27 @@ func TestAKeptRoleRouteWhoseKeepFailedStaysPendingAndIsKeptOnTheRetry(t *testing
 	}
 }
 
-// A claim the restart grace retained is the one no-holder case that is not kept: that holder keeps
-// its claim and writes no new one, so a copy kept for it would wait for a claim that never comes.
-// The event stays pending with the error it had before the kept lane, and nothing is kept.
-func TestARoleRouteWhoseClaimTheGraceRetainedErrsWithNothingKept(t *testing.T) {
-	const role = "kept-retained"
+// A holder that is only unresponsive is the one no-holder case that is not kept: it keeps its
+// claim and writes no new one, so a copy kept for it would wait for a claim that never comes,
+// and the stream holds the forward for the session itself (dispatch://INFRA-392). The event
+// stays pending with the error it had before the kept lane, and nothing is kept.
+func TestARoleRouteToAnUnresponsiveHolderErrsWithNothingKept(t *testing.T) {
+	const role = "kept-unresponsive"
 	database, broker, event := keptRoleEvent(t, "T-1", role)
 	publisher := &keepRecorder{}
-	deps := Deps{Store: database, Publisher: publisher, Broker: broker, RoleClaims: retainedClaim, Sessions: retainedClaim}
+	deps := Deps{Store: database, Publisher: publisher, Broker: broker, RoleClaims: unresponsiveClaim, Sessions: unresponsiveClaim}
 
 	holding(t, deps).scan(context.Background(), unfenced{})
 
 	if publishedAt(t, database, event.ID) != nil {
-		t.Fatal("the event of a claim the grace retained was published")
+		t.Fatal("the event of an unresponsive holder was published")
 	}
 	attempts, failure, _ := eventState(t, database, event.ID)
-	if attempts != 1 || failure == nil || !strings.Contains(*failure, "is gone and its claim was kept") {
-		t.Fatalf("attempt_count %d, publish_error %v: want it backed off naming the claim the grace kept", attempts, failure)
+	if attempts != 1 || failure == nil || !strings.Contains(*failure, "has not heartbeated") {
+		t.Fatalf("attempt_count %d, publish_error %v: want it backed off naming the unresponsive holder", attempts, failure)
 	}
 	if kept := publisher.keeps(); len(kept) != 0 {
-		t.Fatalf("the outbox kept %d copies for a claim the grace retained, want none: %+v", len(kept), kept)
+		t.Fatalf("the outbox kept %d copies for an unresponsive holder, want none: %+v", len(kept), kept)
 	}
 }
 

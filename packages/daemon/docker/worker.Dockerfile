@@ -89,8 +89,8 @@ ARG GH_TOOL=gh@2.98.0
 # (/opt/go), checked against GO_SHA256: the SHA-256 https://go.dev/dl/ publishes for
 # go${GO_VERSION}.linux-amd64.tar.gz (its ?mode=json&include=all listing), which a version bump reads
 # from there again.
-ARG GO_VERSION=1.27.1
-ARG GO_SHA256=63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445
+ARG GO_VERSION=1.27.3
+ARG GO_SHA256=65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40
 # gopls, which the go stage builds static from golang.org/x/tools/gopls at this tag (gopls/v<version>).
 ARG GOPLS_VERSION=0.23.0
 # The toolchain stage's pins: each is a release version and the SHA-256 of the linux/amd64 download the
@@ -168,6 +168,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends jq python3 make
 COPY package.json bun.lock ./
 COPY patches patches
 COPY packages/contracts/package.json packages/contracts/package.json
+COPY packages/broker-client/package.json packages/broker-client/package.json
 COPY packages/envoy-client/package.json packages/envoy-client/package.json
 COPY packages/pi-envoy/package.json packages/pi-envoy/package.json
 COPY packages/pi-legion/package.json packages/pi-legion/package.json
@@ -211,6 +212,7 @@ RUN mkdir -p /out \
     && /out/codegraph/node --version > /out/codegraph-node-version
 WORKDIR /repo
 COPY packages/contracts packages/contracts
+COPY packages/broker-client packages/broker-client
 COPY packages/envoy-client packages/envoy-client
 COPY packages/pi-shared packages/pi-shared
 COPY packages/pi-envoy packages/pi-envoy
@@ -313,8 +315,8 @@ RUN --mount=type=secret,id=github_token \
 # base. LEGION_REVISION is the commit the workflow builds; it is linked in so `legion version` names
 # it, and the build refuses without it.
 # The same toolchain builds gopls (static too) for the runtime stage's /usr/local/bin/gopls.
-# ghcr.io/cybermonklabs/legion/ci, the copy of golang:1.27.1-alpine (.github/ci-images.yaml)
-FROM ghcr.io/cybermonklabs/legion/ci@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS go
+# ghcr.io/cybermonklabs/legion/ci, the copy of golang:1.27.3-alpine (.github/ci-images.yaml)
+FROM ghcr.io/cybermonklabs/legion/ci@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS go
 WORKDIR /src
 
 # A `|` between proxy entries makes a go command fall through to the next source after any error,

@@ -18,6 +18,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	dispatchenvoy "github.com/sjawhar/envoy/internal/dispatch/envoy"
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -231,8 +232,8 @@ func validateBroadcastInput(body, delivery string, sessionIDs []string) ([]strin
 	if strings.TrimSpace(body) == "" {
 		return nil, errorf(http.StatusBadRequest, "INVALID_MESSAGE", "message body is required")
 	}
-	if length := len16(body); length > contracts.DispatchBodyMax {
-		return nil, capExceededError("body", length, contracts.DispatchBodyMax)
+	if err := blockBoundError(itemblocks.Check("body", body)); err != nil {
+		return nil, err
 	}
 	if !validDelivery(delivery) {
 		return nil, errorf(http.StatusBadRequest, "BROADCAST_INPUT", "delivery must be one of btw, aside, steer")
@@ -361,8 +362,13 @@ func (s *server) resolveBroadcastSessions(
 }
 
 // resolveBroadcastTargets judges each selected session against the record the session store
-// holds for it: it is a recipient when the store holds its session and that session advertises
-// the chosen mode, and otherwise carries the reason it was left out.
+// holds for it: it is a recipient when the store holds its session, that session has not gone,
+// and it advertises the chosen mode, and otherwise carries the reason it was left out.
+//
+// An unresponsive session is a recipient like any other: the listener stores what is sent to
+// it and hands it over when it answers again, which is exactly what a broadcast to a session
+// that missed its heartbeats should do. Only a record the registry itself calls gone is no
+// session to send to, as a missing record is.
 func resolveBroadcastTargets(
 	requested []string, delivery string, live map[string]dispatchenvoy.Session,
 ) []broadcastTarget {
@@ -370,7 +376,7 @@ func resolveBroadcastTargets(
 	for _, sessionID := range requested {
 		session, ok := live[sessionID]
 		switch {
-		case !ok:
+		case !ok, session.State == dispatchenvoy.StateGone:
 			targets = append(targets, broadcastTarget{sessionID: sessionID, reason: "no live session"})
 		case !hasCapability(session.Capabilities, delivery):
 			targets = append(targets, broadcastTarget{

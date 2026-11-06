@@ -1,4 +1,3 @@
-import { DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
 import {
   type Dispatch,
   type ReactNode,
@@ -79,7 +78,7 @@ export function AskAnswerArea({
   // (`useMentionOptions`): the registry is kept fresh through the shell's one poller while the
   // picker is open and read again the moment it opens, exactly as the Conversation tab's
   // composer keeps it. The sessions `@` lists are the same sessions, read the same way.
-  const { onPickerOpenChange, options } = useMentionOptions(true);
+  const { listing, onPickerOpenChange, options } = useMentionOptions(true);
   const ownFieldRef = useRef<MentionFieldHandle>(null);
   const field = fieldRef ?? ownFieldRef;
   const upload = useDraftUpload((text) =>
@@ -101,7 +100,7 @@ export function AskAnswerArea({
         handle={handle}
         label={label}
         labelHidden={labelHidden}
-        maxLength={DISPATCH_BODY_MAX}
+        listing={listing}
         mentions={draft.mentions}
         onChange={({ body, mentions }) => onDraftChange({ mentions, text: body })}
         onDrop={uploadOwner === undefined ? undefined : (event) => upload.drop(event, uploadOwner)}

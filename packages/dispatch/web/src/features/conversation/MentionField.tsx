@@ -15,9 +15,11 @@ import {
 } from "react";
 
 import type { Agent } from "../../api/types";
+import { AgentListRefilling } from "../../components/QueryError";
 import { TruncatedText } from "../../components/TruncatedText";
 import {
   borderDefault,
+  dangerText,
   inputClasses,
   selectedCardBorder,
   surfaceMutedHoverBg,
@@ -106,14 +108,21 @@ export function mentionOptions(
   ];
 }
 
+/** Where the agent list the picker offers stands: `current` is a read that landed, and the
+ *  three others are a list the picker must not speak for. A picker whose list is not current
+ *  never says nobody matches - it says what is true of the read instead, so a refilling or
+ *  unreachable listener never reads as an empty registry (`AgentListRefilling`). A host that
+ *  supplies its own agents is always current: that list is its own answer. */
+export type MentionListing = "current" | "loading" | "refilling" | "unreachable";
+
 /**
  * Everything a host of this field has to wire up to give it a working `@` picker: the option
- * list, whether the picker is open, and the report the field sends when that changes. Both
- * hosts take it from here - the Conversation tab's composer (`MentionComposer.tsx`) and an
- * ask's answer area (`features/inbox/AskAnswerArea.tsx`) - because they had written the same
- * four steps twice and the copies had already drifted: only the composer read the registry
- * again when its picker opened, so a session started inside the poller's 15 s was offered in
- * one picker and not the other.
+ * list, where the read that gave it stands, whether the picker is open, and the report the
+ * field sends when that changes. Both hosts take it from here - the Conversation tab's composer
+ * (`MentionComposer.tsx`) and an ask's answer area (`features/inbox/AskAnswerArea.tsx`) -
+ * because they had written the same four steps twice and the copies had already drifted: only
+ * the composer read the registry again when its picker opened, so a session started inside the
+ * poller's 15 s was offered in one picker and not the other.
  *
  * `enabled` is whether this host's channel takes a mention at all. `suppliedAgents`, where a
  * host has its own list, is offered in place of the registry and no registry read is made.
@@ -122,6 +131,8 @@ export function useMentionOptions(
   enabled: boolean,
   suppliedAgents?: readonly Agent[]
 ): {
+  /** For the field's `listing`. */
+  readonly listing: MentionListing;
   /** For the field's `onPickerOpenChange`. */
   readonly onPickerOpenChange: (open: boolean) => void;
   readonly options: MentionOption[];
@@ -135,6 +146,15 @@ export function useMentionOptions(
   const agents = suppliedAgents ?? live.agents;
   const text = useAgentText();
   const options = useMemo(() => mentionOptions(agents, text), [agents, text]);
+  const listing: MentionListing = !readsTheRegistry
+    ? "current"
+    : live.current
+      ? "current"
+      : live.refilling
+        ? "refilling"
+        : live.isPending
+          ? "loading"
+          : "unreachable";
   const { refetch } = live;
   useEffect(() => {
     // An open picker is kept fresh through the shell's one poller (`useAgents`), whose interval
@@ -144,7 +164,7 @@ export function useMentionOptions(
       void refetch();
     }
   }, [pickerOpen, readsTheRegistry, refetch]);
-  return { onPickerOpenChange: setPickerOpen, options, pickerOpen };
+  return { listing, onPickerOpenChange: setPickerOpen, options, pickerOpen };
 }
 
 /** Reconcile accepted mentions against the actual textarea edit range. */
@@ -256,7 +276,7 @@ export function MentionField({
   inline = false,
   label,
   labelHidden = false,
-  maxLength,
+  listing = "current",
   mentions,
   onChange,
   onDrop,
@@ -280,7 +300,10 @@ export function MentionField({
   /** The field's accessible name, shown above it unless `labelHidden`. */
   readonly label: string;
   readonly labelHidden?: boolean;
-  readonly maxLength: number;
+  /** Where the read that gave `options` stands (`useMentionOptions`). A picker whose list is
+   *  not current says so in place of "No live agents match.", which only a current list may
+   *  claim. */
+  readonly listing?: MentionListing;
   /** The mentions accepted in `body`, whose offsets are into that exact text. */
   readonly mentions: readonly AcceptedMention[];
   readonly onChange: (change: MentionFieldChange) => void;
@@ -490,7 +513,6 @@ export function MentionField({
           aria-label={label}
           className={`mt-1 block w-full rounded-lg border px-3 py-2 font-normal outline-none ${inline ? "min-h-11 resize-none" : "min-h-24"} ${inputClasses(true)} ${textPrimaryOnSurface}`}
           disabled={disabled}
-          maxLength={maxLength}
           onChange={(event) => changed(event.target.value, event.target.selectionStart)}
           onDrop={onDrop}
           onInput={
@@ -589,9 +611,27 @@ export function MentionField({
               </button>
             );
           })}
-          {filteredOptions.length === 0 ? (
-            <p className={`px-3 py-2 text-sm ${textMutedOnSurface}`}>No live agents match.</p>
-          ) : null}
+          {/* Only a current list may say nobody matches: one that is refilling, still out or
+              unreachable says that instead, so an absent registry never reads as an empty
+              one. */}
+          {listing === "current" ? (
+            filteredOptions.length === 0 ? (
+              <p className={`px-3 py-2 text-sm ${textMutedOnSurface}`}>No live agents match.</p>
+            ) : null
+          ) : listing === "refilling" ? (
+            <AgentListRefilling className={`px-3 py-2 text-sm ${textMutedOnSurface}`} />
+          ) : listing === "loading" ? (
+            <p
+              className={`px-3 py-2 text-sm ${textMutedOnSurface}`}
+              data-testid="agent-list-loading"
+            >
+              Loading live agents…
+            </p>
+          ) : (
+            <p className={`px-3 py-2 text-sm ${dangerText}`} data-testid="agent-list-unreachable">
+              Could not load live agents — Envoy listener unreachable.
+            </p>
+          )}
         </div>
       ) : null}
     </>
