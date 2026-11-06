@@ -54,6 +54,7 @@ import {
   activeDispatchSettings,
   dispatchSettings,
 } from "@legion/envoy-client/dispatch-config";
+import { defaultExec } from "@legion/envoy-client/dispatch-cwd";
 import {
   dispatchFirstSkillFile,
   readDispatchFirstContext,
@@ -73,6 +74,7 @@ import {
 import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe";
 import { askgateSetting, readEnvoyConfig } from "@legion/envoy-client/envoy-config";
 import {
+  DEFAULT_TMUX_PLACE_CACHE_MS,
   heartbeatRetryDelayMs,
   MIN_PASS_DEADLINE_MS,
   REGISTRATION_SETTLE_MS,
@@ -108,6 +110,7 @@ import {
   sessionSettings,
 } from "@legion/envoy-client/session-settings";
 import { postSlackReply } from "@legion/envoy-client/slack-post";
+import { readTmuxPlace, type TmuxPlace } from "@legion/envoy-client/tmux-place";
 import {
   EnvoyToolOperation,
   envoyToolSpecs,
@@ -2726,6 +2729,41 @@ export default function envoyExtension(pi: PiApi): void {
     await registrationState.deregister(id);
   };
 
+  // Where this session's pane sits in tmux, as the last reading left it, and when that reading
+  // was taken. Every registration carries the place, so Dispatch can draw the machine's layout
+  // from what the sessions themselves report; a tmux server driving a wall of panes answers
+  // slowly under load, so one reading serves every registration for `tmuxPlaceCacheMs` — several
+  // heartbeats — instead of each paying for its own round trip.
+  let tmuxPlace: TmuxPlace | undefined;
+  let tmuxPlaceReadAt: number | undefined;
+
+  // The place the registration going out now carries. A reading of any kind restamps the cache,
+  // so a session outside tmux and a server too loaded to answer each cost one call per lifetime
+  // rather than one per registration. `refused` drops the place, which clears the listener's
+  // entry for a session that has left its pane; `timedOut` keeps the last place read, so one slow
+  // call does not take a live session off the layout. A reader that throws says nothing about
+  // where the session sits, so it is kept like a timeout — and above all it never reaches the
+  // caller: a failed place read must not fail the registration, and with it the heartbeat.
+  const currentTmuxPlace = async (): Promise<TmuxPlace | undefined> => {
+    const lifetimeMs = active?.settings.tmuxPlaceCacheMs ?? DEFAULT_TMUX_PLACE_CACHE_MS;
+    if (tmuxPlaceReadAt !== undefined && Date.now() - tmuxPlaceReadAt < lifetimeMs) {
+      return tmuxPlace;
+    }
+    try {
+      const reading = await readTmuxPlace(
+        process.env,
+        defaultExec,
+        sessionDirectory || process.cwd()
+      );
+      if (reading.kind === "place") tmuxPlace = reading.place;
+      else if (reading.kind === "refused") tmuxPlace = undefined;
+    } catch (error) {
+      logger.debug("envoy: the tmux place reading failed", { error: messageFor(error) });
+    }
+    tmuxPlaceReadAt = Date.now();
+    return tmuxPlace;
+  };
+
   // What this session registers with the listener, read afresh at every registration. The
   // listener delivers nothing to a self-subscribed session (it takes its topics over its own
   // NATS subscriptions), so the registered topics serve recovery on resume; a role-bound subject
@@ -2734,7 +2772,10 @@ export default function envoyExtension(pi: PiApi): void {
   // While the session's relay subject is open, the registration asks for consumer delivery
   // (`delivery`: the relay's epoch and resume point), the relay taking the topics it carries as
   // followed first; its answer says whether the listener relays them.
-  const registrationInput = (asking: Relay | undefined): RegistrationInput => {
+  const registrationInput = (
+    asking: Relay | undefined,
+    place: TmuxPlace | undefined
+  ): RegistrationInput => {
     const own = agentSubject(sessionID);
     const topics = [
       ...new Set([
@@ -2762,6 +2803,7 @@ export default function envoyExtension(pi: PiApi): void {
       selfSubscribed: true,
       plugin: { name: packageName, version: packageVersion },
       ...(asking === undefined ? {} : { delivery: asking.delivery.registration() }),
+      ...(place === undefined ? {} : { place }),
     };
   };
 
@@ -2769,9 +2811,12 @@ export default function envoyExtension(pi: PiApi): void {
   // queue, a queued task's own fenced `handle.register` inside one. While this session's relay
   // subject is open the registration asks for consumer delivery, and the answer decides whether
   // the listener relays the topics it carried (`takeDeliveryAnswer`).
-  const sendRegistration = (
+  const sendRegistration = async (
     send: (input: RegistrationInput) => Promise<SubscribeResult>
   ): Promise<SubscribeResult> => {
+    // Before anything else the body is built from, so the first registration a session sends
+    // carries its place: nothing refreshes it out of band, and a cached reading costs no wait.
+    const place = await currentTmuxPlace();
     const registeringFor = sessionID;
     // While a sweep still owes the session's own inbox from the stream's oldest message (its start
     // could not be read when it registered with NATS down, `ReplayEngine.startPending`), the
@@ -2783,11 +2828,10 @@ export default function envoyExtension(pi: PiApi): void {
       replay?.startPending() !== true
         ? relay
         : undefined;
-    const input = registrationInput(asking);
-    return send(input).then((result) => {
-      takeDeliveryAnswer(registeringFor, input.topics, asking, result);
-      return result;
-    });
+    const input = registrationInput(asking, place);
+    const result = await send(input);
+    takeDeliveryAnswer(registeringFor, input.topics, asking, result);
+    return result;
   };
 
   // Registers the session outside any queue, carrying this instance's client instance id: a
