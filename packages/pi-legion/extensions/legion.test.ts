@@ -43,6 +43,7 @@ import type {
 } from "@legion/pi-shared/pi-types";
 import { DEFAULT_STALL_LIMITS } from "@legion/pi-shared/stall-limits";
 import { hostAgentRegistryMock, testAgentRoster } from "@legion/pi-shared/test/host-registry";
+import { restoreEnvironment } from "@legion/test-fixtures/environment";
 import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import { logger } from "@oh-my-pi/pi-utils";
 import pkg from "../package.json";
@@ -132,6 +133,44 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
   ...hostAgentRegistryMock,
 }));
 
+// Every name a test in this file sets or deletes. They are captured here, above the lines that
+// set ENVOY_CONFIG_FILE and delete OMP_PROFILE and PI_CODING_AGENT_DIR, so what the caller's own
+// process holds — a worker pane's live LEGION_* and DISPATCH_* among them — goes back after each
+// test and once more when this file ends: `bun test` runs every file of a package in one process,
+// and the next file reads the environment this one leaves.
+const environmentKeys = [
+  "ENVOY_NATS_URL",
+  "ENVOY_URL",
+  "LEGION_CONTROLLER",
+  "LEGION_CONTROLLER_START_MESSAGE",
+  "LEGION_CONTROLLER_SECRET",
+  "LEGION_DAEMON_URL",
+  "LEGION_BOOT_TOKEN",
+  "LEGION_TREE",
+  "LEGION_PROJECT",
+  "LEGION_ROLE",
+  "LEGION_ISSUE",
+  "LEGION_WORKSPACE",
+  "LEGION_STATE_DIR",
+  "LEGION_SLACK_CHANNELS",
+  "LEGION_STALL_REMINDER_MS",
+  "LEGION_STALL_WAITING_MS",
+  "LEGION_STALL_RESUME_MS",
+  "LEGION_STALL_ARCHITECT_AFTER",
+  "HOME",
+  "DISPATCH_URL",
+  "DISPATCH_TOKEN",
+  "LEGION_BOOT_TOKEN_FILE",
+  "LEGION_CONTROLLER_SECRET_FILE",
+  "DISPATCH_TOKEN_FILE",
+  "LEGION_WORKSPACE_RECREATED",
+  "DISPATCH_STATE_DIR",
+  "ENVOY_CONFIG_FILE",
+  "OMP_PROFILE",
+  "PI_CODING_AGENT_DIR",
+] as const;
+restoreEnvironment(environmentKeys);
+
 // The Envoy entry picks its envoy.json when its module loads: a file that holds no section, so
 // these panes take Dispatch and Envoy from the variables each test sets, never from the caller's
 // own envoy.json or Oh My Pi profile. `beforeEach` hands the same file on again.
@@ -182,46 +221,11 @@ type TestPi = {
 type Handler = (event: unknown, context: SessionContext) => Promise<unknown> | unknown;
 
 const originalFetch = globalThis.fetch;
-const environmentKeys = [
-  "ENVOY_NATS_URL",
-  "ENVOY_URL",
-  "LEGION_CONTROLLER",
-  "LEGION_CONTROLLER_START_MESSAGE",
-  "LEGION_CONTROLLER_SECRET",
-  "LEGION_DAEMON_URL",
-  "LEGION_BOOT_TOKEN",
-  "LEGION_TREE",
-  "LEGION_PROJECT",
-  "LEGION_ROLE",
-  "LEGION_ISSUE",
-  "LEGION_WORKSPACE",
-  "LEGION_STATE_DIR",
-  "LEGION_SLACK_CHANNELS",
-  "LEGION_STALL_REMINDER_MS",
-  "LEGION_STALL_WAITING_MS",
-  "LEGION_STALL_RESUME_MS",
-  "LEGION_STALL_ARCHITECT_AFTER",
-  "HOME",
-  "DISPATCH_URL",
-  "DISPATCH_TOKEN",
-  "LEGION_BOOT_TOKEN_FILE",
-  "LEGION_CONTROLLER_SECRET_FILE",
-  "DISPATCH_TOKEN_FILE",
-  "LEGION_WORKSPACE_RECREATED",
-  "DISPATCH_STATE_DIR",
-  "ENVOY_CONFIG_FILE",
-  "OMP_PROFILE",
-  "PI_CODING_AGENT_DIR",
-] as const;
-// The suite's baseline is "not a Legion pane": every key above except HOME starts unset and is
-// reset to unset after each test, and `beforeEach` hands on the Envoy entry's file again as
+// The suite's baseline is "not a Legion pane": every key above except HOME starts unset, and
+// `beforeEach` deletes them again before each test and hands on the Envoy entry's file as
 // ENVOY_CONFIG_FILE. Run from inside a worker pane — whose LEGION_BOOT_TOKEN_FILE, DISPATCH_URL,
 // and friends are live — the suite would otherwise boot fixtures with the pane's own boot token
-// and see a different environment from CI.
-const baselineEnvironment: Record<(typeof environmentKeys)[number], string | undefined> =
-  Object.fromEntries(
-    environmentKeys.map((key) => [key, key === "HOME" ? process.env.HOME : undefined])
-  ) as Record<(typeof environmentKeys)[number], string | undefined>;
+// and see a different environment from CI. The fixture above puts the pane's own values back.
 for (const key of environmentKeys) {
   if (key !== "HOME") delete process.env[key];
 }
@@ -282,11 +286,6 @@ afterEach(async () => {
   setLegionBootstrapExitForTests((code) => process.exit(code) as never);
   delete (globalThis as Record<symbol, unknown>)[LEGACY_LEGION_LOADED_KEY];
   testAgentRoster().splice(0);
-  for (const key of environmentKeys) {
-    const value = baselineEnvironment[key];
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  }
   await Promise.all(
     temporaryPaths.splice(0).map((directory) => rm(directory, { force: true, recursive: true }))
   );

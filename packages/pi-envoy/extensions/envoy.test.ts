@@ -68,6 +68,7 @@ import {
   subscribeLegionNotice,
 } from "@legion/pi-shared/role-claim-bridge";
 import { hostAgentRegistryMock, testAgentRoster } from "@legion/pi-shared/test/host-registry";
+import { restoreEnvironment } from "@legion/test-fixtures/environment";
 import type { UserInputBuiltinCommand } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/send-user-input-handler";
 import { logger, procmgr } from "@oh-my-pi/pi-utils";
 import { decode } from "@toon-format/toon";
@@ -352,6 +353,19 @@ const { recordBootstrappedSession } = await import("@legion/pi-shared/subagent-s
 
 const originalFetch = globalThis.fetch;
 
+// Both are read when an extension instance is created, and ENVOY_MACHINE_ID is what `machineID()`
+// reports: a row aborted at Bun's own timeout never runs its `finally`, so a row that sets one
+// must not decide a later row's timings or identity — and the next file in this bun process must
+// read what its caller set, never what a row here left.
+restoreEnvironment([
+  "ENVOY_RESUBSCRIBE_DELAY_MS",
+  "ENVOY_SUBSCRIBE_FLUSH_TIMEOUT_MS",
+  "ENVOY_MACHINE_ID",
+]);
+// The directory this process was started in. A row that chdirs elsewhere is put back in
+// `afterEach`, which a row aborted at Bun's own timeout reaches where its own `finally` does not.
+const originalStartCwd = process.cwd();
+
 const originalNatsUrl = process.env.ENVOY_NATS_URL;
 const originalEnvoyUrl = process.env.ENVOY_URL;
 const originalHome = process.env.HOME;
@@ -419,6 +433,7 @@ beforeEach(() => {
 afterEach(async () => {
   // A managed-timer callback that rejects fails the test that scheduled it.
   await Promise.all(contextTimers.splice(0));
+  process.chdir(originalStartCwd);
   if (originalNatsUrl === undefined) delete process.env.ENVOY_NATS_URL;
   else process.env.ENVOY_NATS_URL = originalNatsUrl;
   if (originalEnvoyUrl === undefined) delete process.env.ENVOY_URL;
@@ -458,10 +473,6 @@ afterEach(async () => {
   procmgr.__resetShellConfigCacheForTests();
   clipboardState.copiedSessionIDs.length = 0;
   clipboardState.error = undefined;
-  // Both are read when an extension instance is created, and a row aborted at Bun's own timeout
-  // never runs its `finally`, so a row that sets either must not decide a later row's timings.
-  delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
-  delete process.env.ENVOY_SUBSCRIBE_FLUSH_TIMEOUT_MS;
   natsState.connectedNames.length = 0;
   natsState.connects.length = 0;
   natsState.closedNames.length = 0;
@@ -4983,7 +4994,8 @@ console.log(JSON.stringify(args));
     // gate binds where the session's own envoy.json and variables name a Dispatch.
     test("astra 6: a checkout dispatch disable does not suppress the session's AskGate", async () => {
       const checkout = mkdtempSync(join(tmpdir(), "askgate-checkout-"));
-      const originalCwd = process.cwd();
+      // `afterEach` chdirs back to where the process started, so a row aborted at Bun's own
+      // timeout leaves no later row running in a removed directory.
       try {
         mkdirSync(join(checkout, ".envoy"));
         writeFileSync(
@@ -5016,7 +5028,6 @@ console.log(JSON.stringify(args));
         expect(result?.block).toBe(true);
         expect(completions).toEqual([MODEL, MODEL]);
       } finally {
-        process.chdir(originalCwd);
         rmSync(checkout, { recursive: true, force: true });
       }
     }, 30_000);
@@ -15043,9 +15054,22 @@ console.log(JSON.stringify(args));
     const whoami = fixture.tools.find((tool) => tool.name === "envoy_whoami");
     if (whoami === undefined) throw new Error("envoy_whoami was not registered");
 
-    const result = await whoami.execute("", {}, undefined, undefined, context);
+    // The machine id is `machineID()`: the logical name ENVOY_MACHINE_ID holds where a deployment
+    // sets one — a Legion pod does — and the kernel hostname where none is set. The row states
+    // both, so the machine the suite runs on decides nothing.
+    process.env.ENVOY_MACHINE_ID = "machine-under-test";
+    const named = await whoami.execute("", {}, undefined, undefined, context);
 
-    expect(JSON.parse(result.content[0]?.text ?? "")).toMatchObject({
+    expect(JSON.parse(named.content[0]?.text ?? "")).toMatchObject({
+      session_id: "ses_whoami",
+      machine_id: "machine-under-test",
+      dir: "/tmp/envoy-omp-test",
+    });
+
+    delete process.env.ENVOY_MACHINE_ID;
+    const unnamed = await whoami.execute("", {}, undefined, undefined, context);
+
+    expect(JSON.parse(unnamed.content[0]?.text ?? "")).toMatchObject({
       session_id: "ses_whoami",
       machine_id: hostname(),
       dir: "/tmp/envoy-omp-test",

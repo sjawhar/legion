@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { captureEnvironment } from "@legion/test-fixtures/environment";
 
 import { sql } from "../psql";
 
@@ -8,9 +9,13 @@ import { sql } from "../psql";
 const live = (process.env.DATABASE_URL ?? "") !== "";
 
 // First in the file on purpose: `sql` resolves the database when it starts its psql, and once a
-// later case has started one, no call reaches that refusal again.
+// later case has started one, no call reaches that refusal again. It is the refusal of this
+// process's own `sql` that the order proves, so the case runs here rather than in a child, and it
+// puts the two names back rather than replacing `process.env`: a replaced object is no longer the
+// runtime's environment, so every later `Bun.spawn` of the run would inherit the copy's values
+// and a later write would reach neither the real environment nor `Bun.env`.
 test("refuses when neither PLAYWRIGHT_DATABASE_URL nor DATABASE_URL names a database", async () => {
-  const named = { ...process.env };
+  const restore = captureEnvironment(["DATABASE_URL", "PLAYWRIGHT_DATABASE_URL"]);
   delete process.env.DATABASE_URL;
   delete process.env.PLAYWRIGHT_DATABASE_URL;
   try {
@@ -18,7 +23,7 @@ test("refuses when neither PLAYWRIGHT_DATABASE_URL nor DATABASE_URL names a data
       "PLAYWRIGHT_DATABASE_URL or DATABASE_URL must name the database for this e2e run"
     );
   } finally {
-    process.env = named;
+    restore();
   }
 });
 
