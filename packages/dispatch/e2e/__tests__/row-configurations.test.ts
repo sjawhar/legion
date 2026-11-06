@@ -13,10 +13,10 @@ import { harnessProcessCount } from "../harness-processes";
 
 // e2e/playwright.config.ts reads the command line as it evaluates: with no harness port set it
 // refuses the run unless that line is a listing, which starts no server and runs no spec
-// (e2e/playwright.config.ts:64-76, :101-128). This file reads the config for its projects' `use`
-// and starts nothing, so it says `--list` as the listings below do, and puts the command line back
-// for whatever test file this worker runs next. The imports are dynamic because a static one would
-// evaluate the config before this line could say so.
+// (`isListMode` and the unset-ports refusal after it, e2e/playwright.config.ts). This file reads
+// the config for its projects' `use` and starts nothing, so it says `--list` as the listings below
+// do, and puts the command line back for whatever test file this worker runs next. The imports
+// are dynamic because a static one would evaluate the config before this line could say so.
 const commandLine = process.argv;
 process.argv = [...commandLine, "--list"];
 const { default: realConfig } = await import("../playwright.config");
@@ -42,9 +42,9 @@ async function listing(configPath: string): Promise<Listing> {
       cwd: dispatchPackage,
       // No harness port or lane reaches the listing, so it is the plain one the config exempts
       // from its unset-port refusal whatever the shell that started this test holds. The process
-      // count does reach it: that is what chooses the project list
-      // (e2e/playwright.config.ts:363-364), and the configurations below are read from the config
-      // this process imported with the same environment.
+      // count does reach it: that is what chooses the project list (the config's `projects:`,
+      // e2e/playwright.config.ts), and the configurations below are read from the config this
+      // process imported with the same environment.
       env: {
         HOME: process.env.HOME ?? "",
         PATH: process.env.PATH ?? "",

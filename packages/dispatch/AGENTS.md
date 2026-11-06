@@ -1987,18 +1987,19 @@ and holds the body it applies to `after.json`. It also checks that the probe reo
 after a 4001, its second subscribe arriving within 500 ms of the close, and within the first
 attempt's spread after a 1012 (`RECONNECT_SPREAD_MS`, two seconds).
 
-The `webkit` Playwright project runs `e2e/collab-cursor.e2e.ts`, `e2e/deep-links.e2e.ts`,
-`e2e/keyboard-agents-picker.e2e.ts`, `e2e/keyboard-session-pickers.e2e.ts`, `e2e/keyed-send.e2e.ts`,
-`e2e/keyed-writes.e2e.ts`, `e2e/live-socket.e2e.ts`, and `e2e/offline-edits.e2e.ts`. Every row of
-the live-socket spec runs in every project that lists
-the spec - `chromium`, `iphone`, `firefox` and, in CI, `webkit`: the APIs its rows need
-(`routeWebSocket`, the request events it counts navigations with, `page.clock`) exist in all three
-engines, and what they prove - one socket per tab, an idle page holding no request, a rotation that
-loses no event, a resume from the sign-in check's event head, and a live view keeping the reader's
-place - is each engine's own connection and timer behaviour, so it is proven in each rather than
-once. A reload is counted as a navigation request of the main frame, not a `load` event, since
-Playwright's Firefox fires one for the page's initial `about:blank` and Chromium none. The
-`webkit-iphone` project still takes the one-socket row alone, by title. Where a caret lands beside
+The `webkit` Playwright project runs the rows tagged `@webkit` (`webkitTagged` in
+`e2e/playwright.config.ts`) of `e2e/collab-cursor.e2e.ts`, `e2e/deep-links.e2e.ts`,
+`e2e/heavy-streamed-turn.e2e.ts`, `e2e/keyboard-agents-picker.e2e.ts`,
+`e2e/keyboard-session-pickers.e2e.ts`, `e2e/keyed-send.e2e.ts`, `e2e/keyed-writes.e2e.ts`,
+`e2e/live-socket.e2e.ts`, `e2e/mermaid.e2e.ts` and `e2e/offline-edits.e2e.ts`, 33 rows; the comment
+above the project names each engine behaviour and the rows that exercise it, and a comment above
+each tagged row names which. Every row of the live-socket spec runs in `chromium`, and its one-socket
+row also runs in `firefox`, `webkit` and `webkit-iphone`: a tab holds one live socket in every
+engine, which is the one live-socket behaviour the config documents per engine. The APIs its rows
+need (`routeWebSocket`, the request events it counts navigations with, `page.clock`) exist in all
+three engines. A reload is counted as a navigation request of the main frame, not a `load` event,
+since Playwright's Firefox fires one for the page's initial `about:blank` and Chromium none. The
+`webkit-iphone` project takes the one-socket row alone, by title. Where a caret lands beside
 a collaborator's cursor differs by engine: Chromium drops typing there and WebKit misplaces it,
 while Firefox is unaffected, so that spec is the one that needs a second engine. The picker spec guards the Agents
 issue picker's keyboard-step rule (`markKeyStep` in `AgentMessageComposer.tsx`), which holds only because every engine
@@ -2007,27 +2008,30 @@ its arrows and type-ahead rows, each committed by Enter and driven through `page
 step commit at once in an engine that moved to the queued task, so it runs here and in `firefox` as well as in
 Chromium. Its rows that step and then leave the select by Tab, Shift+Tab or a click run in the same engines,
 since each engine takes focus out of a select its own way, and they assert that the select, the toggle and the
-send still name one issue. So do its rows on a message in flight (the picker and Reply held, no sent text back in
-the composer, and a refusal shown beside the draft that was sent) and on an issue closed after its pick (still
-named, marked closed). `e2e/keyboard-session-pickers.e2e.ts` runs here and in `firefox` for the same
+send still name one issue. Its rows on a message in flight (the picker and Reply held, no sent text back in the
+composer, and a refusal shown beside the draft that was sent) and on an issue closed after its pick (still named,
+marked closed) carry no engine tag and run in Chromium alone: the config's clause names only the rows that step a
+select from the keyboard or leave one without Enter. All five rows of `e2e/keyboard-session-pickers.e2e.ts` run
+here and in `firefox` for the same
 reason: the live view's header model and thinking pickers keep the same rule (`useKeySteps` in
 `SessionSettings.tsx`), and its arrows, type-ahead, Tab, click and held-picker rows would see a step
 switch the session at once in an engine that moved `change` to the queued task. The project selects
-every listed spec by file name, not title, so renaming
-a row cannot drop it. The offline-edits rows exercise browser-held IndexedDB updates and the
+by the tag in the title, so a row that loses the tag drops out with no failure: after writing or
+renaming one, run `bunx playwright test --config e2e/playwright.config.ts --project=webkit --list`
+and check that it is listed. The three tagged offline-edits rows exercise browser-held IndexedDB updates and the
 WebSocket acknowledgement flow in WebKit as they do in Firefox and Chromium. The keyed write path
-(`e2e/keyed-writes.e2e.ts`, `e2e/keyed-send.e2e.ts`) runs here and in `firefox` as well: each engine
-fails a request whose network is down, aborts one the page gives up on, reads an upload's answer (an
-answer Dispatch wrote with the body still coming, then closed on, reached WebKit as `Error sending
-data: Broken pipe` and Firefox as `NS_ERROR_NET_RESET` until Dispatch drained the body first, which
-the 20 MB in-flight upload row holds), keeps a tab's `sessionStorage` across a reload, asks before it
-unloads and tells its other tabs of a sign-out in its own way, and a write has to land once through
-every one of them. Its throttled-upload row skips outside Chromium, the one engine whose DevTools
-protocol paces a page's own upload; the in-flight upload row runs everywhere and is throttled only
-there.
+(five rows of `e2e/keyed-writes.e2e.ts`, two of `e2e/keyed-send.e2e.ts`) runs here and in `firefox`
+as well: each engine fails a request whose network is down, aborts one the page gives up on, reads an
+upload's answer (an answer Dispatch wrote with the body still coming, then closed on, reached WebKit
+as `Error sending data: Broken pipe` and Firefox as `NS_ERROR_NET_RESET` until Dispatch drained the
+body first, which the 20 MB in-flight upload row holds), keeps a tab's `sessionStorage` across a
+reload and asks before it unloads in its own way, and a write has to land once through every one of
+them. Its throttled-upload row carries no engine tag and skips outside Chromium, the one engine
+whose DevTools protocol paces a page's own upload; the in-flight upload row runs in all three
+engines and is throttled only in Chromium.
 CI installs WebKit beside Chromium for them (`bun run e2e:install` does the same locally).
 
-The `webkit` and `firefox` projects run the whole of `e2e/deep-links.e2e.ts` for two
+The `webkit` and `firefox` projects run six rows of `e2e/deep-links.e2e.ts`, tagged for two
 reasons. Both engines cancel the chunk downloads in flight when a navigation starts: a deep link followed while the page
 before it is still loading its document has to open the link rather than reload that page
 (`installChunkFailureRecovery`); the row that holds the first page's `yjs` chunk makes that case deterministic in
@@ -2037,8 +2041,9 @@ events and Suspense reveals. It reads a press in the document as the reader only
 margin shows has reported a visible layout: the previous route's editor stays mounted, hidden behind the next page's
 loading view, with its own layout reported, until that page's code arrives; and an issue's Spec editor or live editor
 stays registered while Conversation or a historical version hides it, but withdraws its report until it is shown
-again. The cross-document row runs once with `IssuePage`'s chunk held and once with the issue page shown while the
-document transport is held, so each state is pinned rather than raced. The hold tells a relayout's own scroll from the
+again. The cross-document row, which runs in Chromium alone, runs once with `IssuePage`'s chunk held and once with the
+issue page shown while the document transport is held, so each state is pinned rather than raced. The hold tells a
+relayout's own scroll from the
 reader's by counting rendering frames, not milliseconds, since a busy page can deliver a clamp's scroll after a long
 task (CI's WebKit did), and a text change in the margin opens that window too: a `dispatch://` reference resolving to
 its title can resize an ask card and make Firefox or WebKit anchor the margin's scroll.
@@ -2047,17 +2052,17 @@ The `webkit-iphone` project runs, in WebKit with the iPhone 13 profile, four row
 
 No Playwright hook asserts what a project's title `grep` selected, so that guard is a one-time manual check: rename one selected test in a scratch copy and confirm `bunx playwright test --config e2e/playwright.config.ts --project=webkit-iphone --list` drops it (the count falls by one, with no error), then restore it. Repeat it whenever the `grep` or the titles change.
 
-The `firefox` Playwright project runs `e2e/code-line-replace.e2e.ts`, `e2e/deep-links.e2e.ts`,
-`e2e/keyboard-agents-picker.e2e.ts`, `e2e/keyboard-session-pickers.e2e.ts`, `e2e/keyed-send.e2e.ts`,
-`e2e/keyed-writes.e2e.ts`, `e2e/live-socket.e2e.ts`, `e2e/offline-edits.e2e.ts`, and
-`e2e/picture-link-click.e2e.ts`: Firefox's native editing puts text
+The `firefox` Playwright project runs the rows tagged `@firefox` (`firefoxTagged` in
+`e2e/playwright.config.ts`), 33 rows: the same rows of the same specs as `webkit` but
+`e2e/collab-cursor.e2e.ts`'s, and the rows of `e2e/code-line-replace.e2e.ts` and
+`e2e/picture-link-click.e2e.ts`. Firefox's native editing puts text
 typed over a code block's last line before that line's newline, and deletes a paragraph's hard break
 along with the text after it, which Chromium and WebKit never do, so that spec is the one that needs
-a second engine; the two picker specs, the deep-links spec, the two keyed specs and the live-socket
-spec run for the reasons given under `webkit` above; and a click on a link inside the editor meets
-the engine's focus rule — Firefox focuses the editing host, not the link — so the picture view's
-fallback link is clicked there too. CI installs Firefox beside Chromium for them (`bun run
-e2e:install` does the same locally).
+a second engine; the picker, deep-link, keyed, live-socket, offline-edits, mermaid and streamed-turn
+rows run for the reasons given under `webkit` above and in the comment above the project; and a
+click on a link inside the editor meets the engine's focus rule — Firefox focuses the editing host,
+not the link — so the picture view's fallback link is clicked there too. CI installs Firefox beside
+Chromium for them (`bun run e2e:install` does the same locally).
 
 The `chromium-plain-http` project runs `e2e/plain-http-origin.e2e.ts` and
 `e2e/plain-http-proxy.e2e.ts`, selected by file name: Chromium maps `dispatch-e2e.test` to

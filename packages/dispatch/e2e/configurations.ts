@@ -3,9 +3,9 @@
  *
  * A configuration is what a repeat is counted by: the engine, the viewport, the origin with its
  * secure context, and how many Dispatch server processes the run has. Two projects may share a
- * configuration without repeating anything - `chromium` and `chromium-alone` do
- * (e2e/playwright.config.ts:184, :307), and so do `firefox` and `firefox-download-navigation` -
- * because they run disjoint files. A repeat is the same `(configuration, file, title)` twice,
+ * configuration without repeating anything - `chromium` and `chromium-alone` do (the projects of
+ * those names in e2e/playwright.config.ts), and so do `firefox` and `firefox-download-navigation`
+ * - because they run disjoint files. A repeat is the same `(configuration, file, title)` twice,
  * which `duplicateRows` below reports.
  *
  * Nothing here imports Playwright: the values come from a config object the caller passes and
@@ -117,11 +117,11 @@ function configurationKey(use: ConfigurationUse, processes: number): string | un
 
 /** Every project of `config` by name, with the configuration its rows run in. `processes` is how
  *  many Dispatch server processes the run has (e2e/harness-processes.ts), which is also what
- *  chooses the project list (e2e/playwright.config.ts:364). One listing is one run, so every key
- *  of it carries the same process count and that segment can never tell two of its rows apart.
- *  It is in the key because it is the only place the one-against-two-process distinction is
- *  written down, and a failure prints the key, so the reader sees which run's projects were
- *  compared.
+ *  chooses the project list (the config's `projects:`, e2e/playwright.config.ts). One listing is
+ *  one run, so every key of it carries the same process count and that segment can never tell two
+ *  of its rows apart. It is in the key because it is the only place the one-against-two-process
+ *  distinction is written down, and a failure prints the key, so the reader sees which run's
+ *  projects were compared.
  *
  * A project whose configuration cannot be read, and one with no `name` at all, is left out rather
  * than given a guessed key: the caller sees a project the map has none for. */
@@ -134,7 +134,7 @@ export function projectConfigurations(
     if (project.name === undefined) continue;
     // A project's `use` overrides the config's key by key, so the configuration is read from the
     // merge, not from either alone: `iphone` takes its viewport from the device it spreads and its
-    // origin from the config above it (e2e/playwright.config.ts:194, :355).
+    // origin from the config's top-level `use` above it (e2e/playwright.config.ts).
     const key = configurationKey({ ...config.use, ...project.use }, processes);
     if (key !== undefined) configurations.set(project.name, key);
   }

@@ -10,15 +10,14 @@ import realConfig from "../../playwright.config";
  *  would read the same whether it looked or not.
  *
  * Playwright resolves `testDir` against the directory its config file is in, so this one names
- * the `e2e` directory that the real config's `testDir: "."` means
- * (e2e/playwright.config.ts:336). Everything else - `testMatch`, `testIgnore`, `use` and every
- * project - is the real config's.
+ * the `e2e` directory that the real config's `testDir: "."` (e2e/playwright.config.ts) means.
+ * Everything else - `testMatch`, `testIgnore`, `use` and every project - is the real config's.
  */
 const e2eDirectory = fileURLToPath(new URL("../..", import.meta.url));
 
 /** The file whose rows the added project repeats. `chromium` runs it: it is no plain-HTTP,
- *  multiprocess or clock spec, which are the files that project ignores
- *  (e2e/playwright.config.ts:187). */
+ *  multiprocess or clock spec, which are the files that project ignores (its `testIgnore`,
+ *  e2e/playwright.config.ts). */
 export const doubledSpec = "activity.e2e.ts";
 
 /** The added project's name. Playwright refuses two projects of one name, so it is not
