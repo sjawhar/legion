@@ -154,7 +154,7 @@ CONTRACTS_SRC = "packages/contracts/src/**"
 ENVOY_CLIENT_SRC = "packages/envoy-client/src/**"
 
 # What packages/claude-envoy/scripts/verify-build.sh and the claude-envoy job's other steps read:
-# the claude-envoy gate, and the test job for two of its steps, verify-build and the
+# the claude-envoy gate, and the test job, for two of its steps: verify-build and the
 # build-input-list step (packages/claude-envoy/tests/build-inputs.test.ts).
 CLAUDE_ENVOY_BUILD = reads(
         ("packages/claude-envoy/**", f"{at('claude-envoy', 'Lint Claude Envoy plugin')}, typecheck, verify-build, test and pack in packages/claude-envoy"),
