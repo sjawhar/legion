@@ -54,10 +54,13 @@
 #      calls a workflow with no such step reporting for it, since a merge-group run that job's
 #      own result decides then gets no failing ci-ok until the ci-ok job has waited for every
 #      other job of the run; a job CI_OK_EXEMPT names that does report to ci-ok, or that
-#      CI_OK_SELECTED_BY also maps, or that is no job of the file at all; a job named pr-title,
-#      or named ci-ok while it is not the ci-ok job, since a job posts its own check and a
-#      skipped one posts a pass; and a ci-ok job — the verdict, whose own check run is the check
-#      main's ruleset requires — that is missing, that CI_OK_EXEMPT does not name, or whose
+#      CI_OK_SELECTED_BY also maps, or
+#      that is no job of the file at all; a job named for a check main's ruleset requires (ci-ok
+#      and pr-title) that is not the job of that name, and either of those two jobs renamed by a
+#      `name:`, since a job posts its own check under its display name and a skipped one posts a
+#      pass; a pr-title job that is missing, since nothing else reports that check on a pull
+#      request or a merge group; and a ci-ok job — the verdict, whose own check run is the other
+#      check that ruleset requires — that is missing, that CI_OK_EXEMPT does not name, or whose
 #      needs: is not every job of the file but itself and the exempt ones, since a job outside
 #      that list ends after a verdict that says nothing about it,
 #   8. a workflow ci_job_reads.py's PUSH_WORKFLOWS pairs with a filter whose on.push.paths do not
@@ -106,7 +109,11 @@
 #      tested once, and `gh run rerun --failed` leaves out a `changes` that succeeded and hands
 #      the attempt that job's outputs again, so a job gated on `needs.changes.outputs.<x>`
 #      alone runs in full on a re-run attempt of a merge-group run and posts a ci-ok on a head
-#      the queue has thrown away. Each job needs the one term and never both.
+#      the queue has thrown away. Each job needs the one term and never both, and the two jobs
+#      named for a check main's ruleset requires, `ci-ok` and `pr-title`, must hold neither: a
+#      skipped job's check run is a passing required check, so a term that held one of them back
+#      on such an attempt would hand the group that check concluded by nothing. Each of the two
+#      runs on every attempt and refuses one above the first in a step.
 #  14. a workspace of the root package.json that ci_job_reads.py's WORKSPACES does not name, or a
 #      WORKSPACES entry the root manifest does not list, naming the workspace. A frozen
 #      `bun install` reads every workspace manifest, so the table declares each of them a read of

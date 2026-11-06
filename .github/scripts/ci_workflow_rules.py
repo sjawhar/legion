@@ -9,7 +9,8 @@ manifest and the WORKSPACES table main() hands it, since what this module import
 engine's names, never the data's.
 
 It sits beside that engine (and workflow_paths.py, the path model) in the repository it checks,
-and imports the engine's names for the two workflow files, the repository root and the three
+and imports the engine's names for the two workflow files, the repository root, the checks
+main's ruleset requires and the three
 helpers that read an `if:`. main()
 imports this module rather than the other way round, so the one import here is of a module
 Python has finished loading by then.
@@ -21,7 +22,8 @@ from collections import defaultdict
 
 import yaml
 
-from ci_filter_coverage import CACHE_WORKFLOW, REPO, WORKFLOW, conditions, squash, where_if
+from ci_filter_coverage import (CACHE_WORKFLOW, REPO, REQUIRED_CHECKS, WORKFLOW, conditions, squash,
+                                where_if)
 
 
 # ---------------------------------------------------------------- the conditions ci.yaml cannot hold
@@ -73,6 +75,13 @@ def check_push_conditions(document: dict, problems: list) -> None:
 # its report step posts a ci-ok on the dead group's head. A job that runs on merge_group alone
 # (`cancel-started`) needs only the attempt half, so each job is asked for one term and never
 # for both.
+#
+# A job named for a required check (REQUIRED_CHECKS) is asked for neither, and refused one,
+# because a skip is no safe outcome for it: a job an `if:` holds back is skipped, and a skipped
+# job's check run is a passing required check, so the term that saves every other job from a dead
+# group would hand that group the check it merges on, concluded by nothing. Each of those jobs
+# runs on every attempt and refuses an attempt above the first in a step, which fails and makes
+# the check a failure; the comment above each one's `if:` in ci.yaml says so.
 RERUN_GUARD = ("(github.event_name != 'merge_group' || github.run_attempt == '1')",
                re.compile(r"\(\s*github\.event_name\s*!=\s*'merge_group'\s*\|\|"
                           r"\s*github\.run_attempt\s*==\s*'1'\s*\)"))
@@ -81,13 +90,23 @@ ATTEMPT_ONE = re.compile(r"github\.run_attempt\s*==\s*'1'")
 
 
 def check_rerun_guard(document: dict, problems: list) -> None:
-    """Every job of ci.yaml must hold, in its own `if:`, the term that skips it on a re-run
-    attempt of a merge-group run: the disjunction RERUN_GUARD names, or, for a job whose `if:`
-    admits merge_group alone, `github.run_attempt == '1'` by itself. Read off the if: text, as
-    check_push_conditions is: the same test written another way is the review's to catch."""
+    """Every job of ci.yaml but the REQUIRED_CHECKS ones must hold, in its own `if:`, the term
+    that skips it on a re-run attempt of a merge-group run: the disjunction RERUN_GUARD names,
+    or, for a job whose `if:` admits merge_group alone, `github.run_attempt == '1'` by itself. A
+    job named for a required check must hold neither, for the reason above: its skip is a passing
+    required check. Read off the if: text, as check_push_conditions is: the same test written
+    another way is the review's to catch."""
     wanted, found = RERUN_GUARD
     for job_id, job in (document.get("jobs") or {}).items():
         condition = str((job or {}).get("if", ""))
+        if job_id in REQUIRED_CHECKS:
+            if found.search(condition) or ATTEMPT_ONE.search(condition):
+                problems.append(f"::error file={WORKFLOW}::job {job_id} is named for a check main's ruleset "
+                                f"requires and its if: holds a term that skips it on a re-run attempt of a "
+                                f"merge-group run: a skipped job's check run is a passing required check, so that "
+                                f"attempt would merge on {job_id} concluded by nothing; drop the term and refuse "
+                                f"the attempt in a step of the job instead")
+            continue
         if found.search(condition):
             continue
         if MERGE_GROUP_ONLY.search(condition):

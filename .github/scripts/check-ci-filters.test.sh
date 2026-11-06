@@ -7,11 +7,13 @@
 # Go module's directory, a why that cites a step must name a workflow file that still holds it,
 # CI_OK_SELECTED_BY must map every job changes gates, it and CI_OK_PULL_REQUEST_ONLY must say what
 # each job's if: tests, every job but changes and those CI_OK_EXEMPT names must end with the ci-ok
-# report step, the ci-ok job must need every job but itself and the exempt ones and no other job
-# may be named for a required check, and a PUSH_WORKFLOWS workflow's
+# report step, the ci-ok job must need every job but itself and the exempt ones, each check
+# main's ruleset requires must be the ci.yaml job of that name and no other job may carry one,
+# and a PUSH_WORKFLOWS workflow's
 # on.push.paths must equal its filter, no `if:` of ci.yaml may test for a push event or compare
-# github.ref with a branch ref, every job's if: must hold the term that skips it on a
-# re-run attempt of a merge-group run, ci-caches.yaml's save of a cache family must carry
+# github.ref with a branch ref, every job's if: but those two jobs' must hold the term that skips
+# it on a re-run attempt of a merge-group run and theirs must not, ci-caches.yaml's save of a
+# cache family must carry
 # the key and the paths ci.yaml's restore of that family names, its own restores being lookups,
 # and ci_job_reads.py's WORKSPACES must name exactly the workspaces of the root package.json.
 #
@@ -38,7 +40,10 @@ source "$script_dir/test-lib.sh"
 # fixture <name>: a tree that passes. The app job runs `go test ./cmd/app ./lib`, whose closure is
 # cmd/app and lib (cmd/app imports lib); lib's test reads fixtures/data.json through `..`, which
 # RULES records; mod/other is a package nothing imports. The image job runs only on a pull
-# request, and both end with the ci-ok report step. The site filter gates no job: site.yaml, which
+# request, and both end with the ci-ok report step. pr-title and ci-ok are the two jobs named for
+# a check main's ruleset requires: CI_OK_EXEMPT holds both outside ci-ok's accounting, so neither
+# carries the report step and neither may carry the term that skips a job on a re-run attempt of
+# a merge-group run. The site filter gates no job: site.yaml, which
 # PUSH_WORKFLOWS pairs with it, runs on a push whose paths are that filter flattened. The root
 # package.json has the one workspace packages/widget, which WORKSPACES names, since rule 14 holds
 # those two lists to each other; no job here runs Bun, so that manifest is nothing the app gate
@@ -97,7 +102,7 @@ on: [pull_request]
 env:
   CI_OK_SELECTED_BY: '{"app": "app", "image": "image"}'
   CI_OK_PULL_REQUEST_ONLY: '["image"]'
-  CI_OK_EXEMPT: '["ci-ok"]'
+  CI_OK_EXEMPT: '["ci-ok", "pr-title"]'
 jobs:
   changes:
     if: (github.event_name != 'merge_group' || github.run_attempt == '1')
@@ -152,9 +157,15 @@ jobs:
         with:
           changes: ${{ toJSON(needs.changes) }}
           job-status: ${{ job.status }}
+  pr-title:
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check the pull request's text
+        run: echo text
   ci-ok:
     needs: [changes, app, image]
-    if: ${{ always() && (github.event_name != 'merge_group' || github.run_attempt == '1') }}
+    if: ${{ always() }}
     runs-on: ubuntu-24.04
     steps:
       - name: Judge every job of this run
@@ -390,8 +401,8 @@ YAML
 echo "case: a job CI_OK_EXEMPT names passes without the ci-ok report step"
 root=$(fixture ci-ok-exempt)
 cancel_job "$root"
-replace "$root/.github/workflows/ci.yaml" "CI_OK_EXEMPT: '[\"ci-ok\"]'" \
-  "CI_OK_EXEMPT: '[\"ci-ok\", \"cancel\"]'"
+replace "$root/.github/workflows/ci.yaml" "CI_OK_EXEMPT: '[\"ci-ok\", \"pr-title\"]'" \
+  "CI_OK_EXEMPT: '[\"ci-ok\", \"pr-title\", \"cancel\"]'"
 run_check "$root"
 check "exits 0" "$(is "$status" 0)"
 check "says what it checked" "$(contains "$out" 'every ci.yaml filter matches every file its job reads (1 gates)')"
@@ -435,6 +446,60 @@ check "fails" "$(is "$status" 1)"
 check "names the job and the check" \
   "$(contains "$out" "job image is named ci-ok, a check main's ruleset requires")"
 
+echo "case: a job named for the other required check"
+root=$(fixture pr-title-job)
+replace "$root/.github/workflows/ci.yaml" $'\n  image:\n' $'\n  image:\n    name: pr-title\n'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the job and the check" \
+  "$(contains "$out" "job image is named pr-title, a check main's ruleset requires, and is not the pr-title job")"
+
+echo "case: a job named for a required check renamed away from the check"
+root=$(fixture pr-title-renamed)
+replace "$root/.github/workflows/ci.yaml" $'\n  pr-title:\n' $'\n  pr-title:\n    name: PR title\n'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "says the check would be reported by nothing" \
+  "$(contains "$out" "job pr-title carries \`name: PR title\`, so its check run is called PR title and pr-title, a check main's ruleset requires, is reported by nothing")"
+
+echo "case: a job named for a required check holding the re-run term"
+root=$(fixture pr-title-rerun-guard)
+replace "$root/.github/workflows/ci.yaml" \
+  "    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'" \
+  "    if: (github.event_name != 'merge_group' || github.run_attempt == '1')"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "says a skipped required check passes" \
+  "$(contains "$out" "job pr-title is named for a check main's ruleset requires and its if: holds a term that skips it on a re-run attempt of a merge-group run")"
+
+echo "case: the verdict job holding the re-run term"
+root=$(fixture ci-ok-rerun-guard)
+replace "$root/.github/workflows/ci.yaml" "    if: \${{ always() }}" \
+  "    if: \${{ always() && (github.event_name != 'merge_group' || github.run_attempt == '1') }}"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the verdict and what a skip would hand the group" \
+  "$(contains "$out" "job ci-ok is named for a check main's ruleset requires and its if: holds a term that skips it on a re-run attempt of a merge-group run: a skipped job's check run is a passing required check, so that attempt would merge on ci-ok concluded by nothing")"
+
+echo "case: a job CI_OK_EXEMPT does not name the pr-title job"
+root=$(fixture pr-title-not-exempt)
+replace "$root/.github/workflows/ci.yaml" "CI_OK_EXEMPT: '[\"ci-ok\", \"pr-title\"]'" "CI_OK_EXEMPT: '[\"ci-ok\"]'"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "asks it for the report step no exempt job carries" \
+  "$(contains "$out" "job pr-title's last step is not \`uses: ./.github/actions/ci-ok-report\`")"
+check "and asks the verdict to need it" \
+  "$(contains "$out" "job ci-ok does not need pr-title, so it reaches the verdict while that job is still running and says nothing about it; add pr-title to its needs:")"
+
+echo "case: the file has no pr-title job"
+root=$(fixture pr-title-absent)
+replace "$root/.github/workflows/ci.yaml" $'  pr-title:\n    if: github.event_name == \'pull_request\' || github.event_name == \'merge_group\'\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Check the pull request\'s text\n        run: echo text\n' ""
+replace "$root/.github/workflows/ci.yaml" "CI_OK_EXEMPT: '[\"ci-ok\", \"pr-title\"]'" "CI_OK_EXEMPT: '[\"ci-ok\"]'"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the check nothing would carry" \
+  "$(contains "$out" "this file has no pr-title job, a check main's ruleset requires")"
+
 echo "case: the ci-ok job does not need a job of the file"
 root=$(fixture ci-ok-needs-missing)
 replace "$root/.github/workflows/ci.yaml" "    needs: [changes, app, image]" "    needs: [changes, app]"
@@ -446,8 +511,8 @@ check "names the job it would judge nothing of" \
 echo "case: the ci-ok job needs a job CI_OK_EXEMPT names"
 root=$(fixture ci-ok-needs-exempt)
 cancel_job "$root"
-replace "$root/.github/workflows/ci.yaml" "CI_OK_EXEMPT: '[\"ci-ok\"]'" \
-  "CI_OK_EXEMPT: '[\"ci-ok\", \"cancel\"]'"
+replace "$root/.github/workflows/ci.yaml" "CI_OK_EXEMPT: '[\"ci-ok\", \"pr-title\"]'" \
+  "CI_OK_EXEMPT: '[\"ci-ok\", \"pr-title\", \"cancel\"]'"
 replace "$root/.github/workflows/ci.yaml" "    needs: [changes, app, image]" "    needs: [changes, app, image, cancel]"
 run_check "$root"
 check "fails" "$(is "$status" 1)"
@@ -456,7 +521,7 @@ check "names the exempt job and why the verdict cannot read it" \
 
 echo "case: CI_OK_EXEMPT does not name the ci-ok job"
 root=$(fixture ci-ok-not-exempt)
-replace "$root/.github/workflows/ci.yaml" "  CI_OK_EXEMPT: '[\"ci-ok\"]'" "  CI_OK_EXEMPT: '[]'"
+replace "$root/.github/workflows/ci.yaml" "  CI_OK_EXEMPT: '[\"ci-ok\", \"pr-title\"]'" "  CI_OK_EXEMPT: '[\"pr-title\"]'"
 run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "says the verdict reports nothing to itself" \
@@ -468,7 +533,7 @@ echo "case: the file has no ci-ok job"
 # The job is the last of the fixture, and `replace` reads the file without its trailing newline,
 # so the block to cut starts at the newline before it and ends at its last line.
 root=$(fixture ci-ok-absent)
-replace "$root/.github/workflows/ci.yaml" $'\n  ci-ok:\n    needs: [changes, app, image]\n    if: ${{ always() && (github.event_name != \'merge_group\' || github.run_attempt == \'1\') }}\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Judge every job of this run\n        run: echo verdict' ""
+replace "$root/.github/workflows/ci.yaml" $'\n  ci-ok:\n    needs: [changes, app, image]\n    if: ${{ always() }}\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Judge every job of this run\n        run: echo verdict' ""
 run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the check nothing would carry" \

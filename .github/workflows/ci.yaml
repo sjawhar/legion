@@ -16,11 +16,14 @@ name: CI
 # at once when that job's own result decides a merge-group run, so the queue drops a doomed
 # group at the first failure rather than at the end of the run; the ci-ok job's last step then
 # sets every ci-ok check run on the head that is not its own to its own conclusion, so one
-# verdict stands at the end of every attempt. lint posts pr-title on a pull request whose head is
-# the base repository's and on the merge queue's group, the two events its check-pr-text step
-# runs on (pr-title.yaml posts it when the pull request is edited and when a review is submitted
-# or edited, the two events this workflow does not run on; its header says why it runs on nothing
-# else). The docs site's build on a push to main, and its GitHub Pages
+# verdict stands at the end of every attempt. pr-title, the other check that ruleset requires, is
+# the `pr-title` job at the end of this file, in the same shape and for the same reason: it runs
+# check-pr-text.sh on a pull request that is not a draft and on the merge queue's group, the two
+# events this workflow runs that carry a pull request's text, and its own check run is the report,
+# so it posts nothing. pr-title.yaml carries that same check when the pull request is edited and
+# when a review is submitted or edited, the two events this workflow does not run on, as its own
+# job's check run too; its header says why it runs on nothing else.
+# The docs site's build on a push to main, and its GitHub Pages
 # deploy, are docs-pages.yaml's, a workflow of its own whose header says why. Its paths are held
 # to the docs filter below.
 #
@@ -96,11 +99,12 @@ concurrency:
 
 # Read-only but for the two scopes the ci-ok steps use: `actions: read` reads the run's jobs,
 # which the ci-ok-report step names in the check it posts, and `checks: write` posts ci-ok (the
-# ci-ok job's reconcile step reads and PATCHes check runs with it too, and lint posts pr-title
-# with it). The token also clones, downloads pinned tools, and, in `changes`, reads the pull
+# ci-ok job's reconcile step reads and PATCHes check runs with it too). The token also clones,
+# downloads pinned tools, and, in `changes`, reads the pull
 # request's file list, which this public repository serves without `pull-requests: read`. The
-# jobs that need more declare it in blocks of their own, each repeating those two: lint (what
-# check-pr-text.sh reads), ci-images (the ghcr.io push its copy makes) and worker-image (the image
+# jobs whose scopes differ declare them in blocks of their own: pr-title (what check-pr-text.sh
+# and find-pr-payload.sh read, and neither of the two above, since it posts nothing), ci-images
+# (the ghcr.io push its copy makes) and worker-image (the image
 # push and its attestation's scopes). docs-pages.yaml publishes the site to GitHub Pages.
 permissions:
   contents: read
@@ -160,33 +164,42 @@ env:
   # `merge_group`, holds `actions: write`, runs no dependency code, reports no result to ci-ok
   # and is no job any verdict waits for. `ci-ok` is the verdict: it reports nothing to itself,
   # and the jobs it judges are its `needs:`, which check-ci-filters.sh holds to every job of this
-  # file but those two. That check asks none of the ci-ok rules of a job named here, and refuses
+  # file but these three. `pr-title` is the other check main's ruleset requires, carried by that
+  # job's own check run: its result is nothing the verdict waits for, it carries no report step,
+  # and the queue reads it as a check of its own, so a verdict that needed it would only make one
+  # required check wait for the other.
+  # That check asks none of the ci-ok rules of a job named here, and refuses
   # one that carries the ci-ok-report step: ci-ok.sh fails a result for a job CI_OK_SELECTED_BY
   # cannot map. The list is written as CI_OK_SELECTED_BY above is, a JSON array over lines rather
   # than one long one.
   CI_OK_EXEMPT: |
     [
       "cancel-started",
-      "ci-ok"
+      "ci-ok",
+      "pr-title"
     ]
 
 jobs:
   # Selects the jobs that read what this change touched. Skipped on a draft pull request, so no
   # test job runs; marking it ready for review starts a run that selects by the same diff.
   #
-  # Also skipped on a re-run attempt of a merge-group run, by a term every job of this file
-  # carries: `(github.event_name != 'merge_group' || github.run_attempt == '1')` in a job that
-  # runs on more than one event, and `github.run_attempt == '1'` in `cancel-started`, which runs
-  # on merge_group alone. No job may lean on this one's skip instead: `gh run rerun --failed`
-  # leaves out a `changes` that succeeded and hands the attempt that job's outputs again, so an
-  # `if:` testing only `needs.changes.outputs.<x> == 'true'` would run the job again in full,
-  # and the ci-ok job would carry a verdict for that attempt on the dead group's head, its own
-  # report step posting a failing one at once if it failed.
-  # .github/scripts/check-ci-filters.sh holds every job to its term. A group is tested once:
-  # the queue tests a pull request it removed again when it is added again, and a merge-group
-  # run `cancel-started` or .github/workflows/dequeued.yaml force-cancelled tests a group the
-  # queue has thrown away, so a passing re-run of it would put a ci-ok on a head no queue entry
-  # waits for. A re-run must therefore do nothing and post nothing.
+  # Also skipped on a re-run attempt of a merge-group run, by a term every job of this file but
+  # the two named for a required check — `ci-ok` and `pr-title`, each of which refuses such an
+  # attempt in a step instead — carries:
+  # `(github.event_name != 'merge_group' || github.run_attempt == '1')` in
+  # a job that runs on more than one event, and `github.run_attempt == '1'` in
+  # `cancel-started`, which runs on merge_group alone. No job may lean on this one's skip
+  # instead: `gh run rerun --failed` leaves out a `changes` that succeeded and hands the attempt
+  # that job's outputs again, so an `if:` testing only `needs.changes.outputs.<x> == 'true'`
+  # would run the job again in full, and its own report step would post a failing ci-ok on the
+  # dead group's head the moment it failed. .github/scripts/check-ci-filters.sh holds every such
+  # job to its term. A group is tested once: the queue tests a pull request it removed again
+  # when it is added again, and a merge-group run `cancel-started` or
+  # .github/workflows/dequeued.yaml force-cancelled tests a group the queue has thrown away, so
+  # a passing re-run of it would put a ci-ok on a head no queue entry waits for. A re-run must
+  # therefore test nothing and post nothing; the one job of it that does run is the `ci-ok` job,
+  # which cannot be skipped without leaving that passing ci-ok behind and so concludes failure
+  # instead (the comment above its `if:` says why).
   changes:
     if: ${{ !github.event.pull_request.draft && (github.event_name != 'merge_group' || github.run_attempt == '1') }}
     runs-on: ubuntu-24.04
@@ -1610,78 +1623,18 @@ jobs:
     if: ${{ !cancelled() && !github.event.pull_request.draft && (github.event_name != 'merge_group' || github.run_attempt == '1') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    # check-pr-text.sh reads a pull request's commits through the compare route (`contents: read`),
-    # its reviews and review comments (`pull-requests: read`) and its issue comments
-    # (`issues: read`); pr-title's post and the ci-ok-report step need `checks: write`, and that
-    # step `actions: read`.
+    # The ci-ok-report step is the whole of this job's GitHub writing: it posts a failing ci-ok
+    # with `checks: write` and names the run's jobs in it with `actions: read`. `contents: read`
+    # is the checkout's. The pull request's text is checked in the `pr-title` job now, which
+    # declares the scopes its own routes read.
     permissions:
       contents: read
-      issues: read
-      pull-requests: read
       actions: read
       checks: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-
-      # A pull request's title, body and commit messages reach main's squash commit, the
-      # generated release notes and GitHub's pages, and its comments and reviews are public on its
-      # page, so this job checks them, and that the title is a conventional commit subject, at
-      # every push to a pull request that is not a draft, when a draft is marked ready, and on the
-      # merge queue's group, and posts the verdict on the head as pr-title, the check main's
-      # ruleset requires. This post is what satisfies that requirement on a merge group, where
-      # pr-title.yaml does not run. A check run posted under GITHUB_TOKEN joins the Actions App's
-      # first check suite at that commit rather than the posting run's, and pr-title is posted
-      # that way, so what keeps this one in this run's own suite is that ci.yaml is the only
-      # workflow a merge group starts (pr-title.yaml's header holds the measurement and what its
-      # triggers cost). ci-ok is no longer posted at the end of a run at all: the ci-ok job at the
-      # end of this file carries it, and a job's check run is in its run's own suite whatever else
-      # runs at that head. A group carries no pull request, only the queue branch it
-      # runs on, so find-pr-payload.sh reads the pull request that branch names and writes it in
-      # the shape check-pr-text.sh wants; pr-title.yaml finds its payload with the same script, so
-      # neither workflow holds a copy of that logic. pr-title.yaml runs on an edit and a
-      # review alone, so a pull request opened or reopened on any head gets its pr-title from
-      # this job (a fork's head gets none, and needs none: a fork's token posts nothing at all,
-      # and its change merges only once a maintainer takes the branch into this repository).
-      # A dispatched run carries neither
-      # a pull request nor a group and checks none of this. These steps run first, so a failed
-      # check further down cannot keep pr-title from the head; a fork pull request's read-only
-      # token posts nothing (.github/actions/ci-ok-report says why that is no loss here).
-      - name: Check the pull request's title, body, branch name, commits, comments and reviews
-        id: pr-text
-        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          payload=$(.github/scripts/find-pr-payload.sh)
-          GITHUB_EVENT_PATH="$payload" .github/scripts/check-pr-text.sh
-
-      # The check lands on the group's commit on a merge group, which is the commit the queue
-      # waits for a report on, and on the head the event names on a pull request. The fork guard
-      # is the pull_request case alone: a merge group carries no head and base repository to
-      # compare, and GitHub reads two absent fields as equal, so the partner clause is what lets
-      # the group post
-      # (docs/solutions/github/a-same-event-id-pair-answers-is-this-a-fork-and-needs-a-partner-clause-pr2734.md).
-      - name: Post pr-title on the head
-        if: always() && steps.pr-text.outcome != 'skipped' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.id == github.event.pull_request.base.repo.id)
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}
-          CHECK_NAME: pr-title
-          CONCLUSION: ${{ steps.pr-text.outcome == 'success' && 'success' || 'failure' }}
-          OUTCOME: ${{ steps.pr-text.outcome }}
-          DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/job/${{ job.check_run_id }}
-          EXTERNAL_ID: pr-title:${{ github.run_id }}
-        run: |
-          export SUMMARY_FILE="$RUNNER_TEMP/pr-title-summary.md"
-          echo "check-pr-text.sh in this run's lint job: $OUTCOME. Its log names what it refused." > "$SUMMARY_FILE"
-          if [ "$CONCLUSION" = success ]; then
-            TITLE="The title is conventional and the pull request's text names nothing private"
-          else
-            TITLE="check-pr-text.sh ended $OUTCOME; see the lint job's log"
-          fi
-          TITLE=$TITLE .github/scripts/post-check-run.sh
 
       # This job runs on every change, so the pin check runs on every change rather than only on
       # one that touches a package.
@@ -3965,6 +3918,78 @@ jobs:
     with:
       ci-ok-changes: ${{ toJSON(needs.changes) }}
 
+  # pr-title, the other check main's ruleset requires of this router, and with `ci-ok` one of the
+  # two jobs of this file named for a required check. A pull request's title, body and commit
+  # messages reach main's squash commit, the generated release notes and GitHub's pages, and its
+  # comments and reviews are public on its page, so this job checks them, and that the title is a
+  # conventional commit subject, at every push to a pull request that is not a draft, when a
+  # draft is marked ready, and on the merge queue's group.
+  #
+  # It posts nothing: pr-title is this job's own check run, which GitHub puts in this run's own
+  # check suite. A check run created with POST /repos/.../check-runs under GITHUB_TOKEN joins the
+  # Actions App's first suite at that commit instead (the comment above `ci-ok` holds what that
+  # cost and where it was measured), and the pr-title lint posted did exactly that: at head
+  # 44af468c it landed in the suite of "Fold Changelog Fragments" (check run 127894229103, suite
+  # 114391379333), the shape that made the queue refuse to enqueue #2847 with
+  # `Required status check "ci-ok" is expected` while that check was green. So no step here calls
+  # .github/scripts/post-check-run.sh, and the job holds no `checks: write`.
+  #
+  # A merge group carries no pull request, only the queue branch it runs on, so
+  # find-pr-payload.sh reads the pull request that branch names and writes it in the shape
+  # check-pr-text.sh wants; pr-title.yaml finds its payload with the same script, so neither
+  # workflow holds a copy of that logic. pr-title.yaml runs on an edit and a review alone, so a
+  # pull request that is opened, reopened or pushed to gets its pr-title from this job, and a
+  # fork's head gets one too: a job's check run costs no token scope, where the post this job
+  # replaced was guarded off on a fork, whose GITHUB_TOKEN is read-only. A dispatched run carries
+  # neither a pull request nor a group and has no text to check, which is why the `if:` names the
+  # two events this job runs on rather than excluding the draft alone.
+  pr-title:
+    if: ${{ !github.event.pull_request.draft && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # What the two scripts below read through gh, and nothing else: the pull request's commits
+    # from the compare route (`contents: read`), the pull request itself, its reviews and its
+    # review comments (`pull-requests: read`, which find-pr-payload.sh's read of the pull request
+    # a queue branch names needs too), and its issue comments (`issues: read`). No
+    # `checks: write`, since this job posts no check run, and no `actions: read`, since it carries
+    # no ci-ok-report step: CI_OK_EXEMPT holds it outside ci-ok's accounting (this file's env says
+    # why).
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    steps:
+      # A merge group is tested once: the queue builds a new group rather than re-running one, so
+      # an attempt above the first checks a tree the queue is no longer waiting on. This job
+      # therefore carries no `github.run_attempt == '1'` term, unlike every job of this file but
+      # the verdict, and refuses such an attempt in a step instead. `ci-ok` carries that same step
+      # for the same reason, and the two share the rule because they are the two jobs named for a
+      # check main's ruleset requires: an `if:` can only take the job away, a skipped job's check
+      # run is a passing required check, and a dead group must get a real failure rather than the
+      # check concluded by nothing. It comes before the checkout because no step after it runs
+      # once it has failed.
+      - name: Refuse a re-run attempt of a merge-group run
+        if: ${{ github.event_name == 'merge_group' && github.run_attempt != '1' }}
+        env:
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          echo "::error::pr-title is failure on attempt $RUN_ATTEMPT of this merge-group run, whatever the pull request's text says: a merge group is tested once, the queue builds a new group rather than re-running one, and this attempt checks a tree the queue is no longer waiting on."
+          exit 1
+
+      # The job reads nothing of the tree but find-pr-payload.sh, check-pr-text.sh and the
+      # check-private-names.sh that one runs, so the .github cone is the whole checkout it needs.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .github
+          persist-credentials: false
+
+      - name: Check the pull request's title, body, branch name, commits, comments and reviews
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          payload=$(.github/scripts/find-pr-payload.sh)
+          GITHUB_EVENT_PATH="$payload" .github/scripts/check-pr-text.sh
+
   # The merge queue's cancel act. Main's queue builds each group on top of the group below it,
   # so when a group fails, every group built on it can no longer merge: the queue takes that
   # pull request out and rebuilds the groups above it. That removal is a dequeue, so
@@ -4041,8 +4066,9 @@ jobs:
               echo "::warning::force-cancel of run $id failed; it may have completed already"
           done <<<"$acts"
 
-  # The verdict, and the check main's ruleset requires of this router. It needs every job of this
-  # file but itself and `cancel-started` (the CI_OK_EXEMPT comment above says why those two are
+  # The verdict, and one of the two checks main's ruleset requires of this router. It needs every
+  # job of this file but itself, `cancel-started` and `pr-title` (the CI_OK_EXEMPT comment above
+  # says why those three are
   # outside ci-ok's accounting), runs under `always()` so that a failed, skipped or cancelled job
   # still reaches a verdict, and fails when .github/scripts/ci-ok.sh's verdict over `toJSON(needs)`
   # is failure. ci-ok is therefore this job's own check run, which GitHub puts in this run's own
@@ -4069,8 +4095,16 @@ jobs:
   # end.
   #
   # The draft term is `changes`' own: every job skips on a draft pull request, and a verdict over
-  # nothing but skips would put a failing ci-ok on a head nobody has asked to test. The re-run
-  # term is the one every job of this file carries (the comment above `changes` says why).
+  # nothing but skips would put a failing ci-ok on a head nobody has asked to test. It is safe to
+  # skip this job there, where no attempt term would be: a draft pull request cannot be queued
+  # and cannot merge, so the skipped, passing ci-ok it leaves counts for nothing, and marking it
+  # ready starts a run that selects by the same diff and concludes a real verdict over it. So
+  # this job carries no `github.run_attempt == '1'` term, unlike every job of this file but
+  # `pr-title`, which is held to the same rule for the same reason
+  # (the comment above `changes` says what that term does for them): a merge group reads this
+  # check to merge by, and a skipped job's check run is a passing required check. It runs on
+  # every attempt of a merge-group run instead, and the refusal step below is what concludes the
+  # failure such an attempt must get.
   #
   # `checks: write` and nothing else: the verdict step makes no GitHub call, and the step after it
   # reads this head's ci-ok check runs and PATCHes them with that scope. The checkout needs no
@@ -4110,7 +4144,7 @@ jobs:
       - envoy-session-stall
       - ci-filters
       - worker-image
-    if: ${{ always() && !github.event.pull_request.draft && (github.event_name != 'merge_group' || github.run_attempt == '1') }}
+    if: ${{ always() && !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -4122,6 +4156,26 @@ jobs:
         with:
           sparse-checkout: .github
           persist-credentials: false
+
+      # A merge group is tested once: the queue builds a new group rather than re-running one, so
+      # an attempt above the first judges a tree the queue is no longer waiting on, and the
+      # verdict over it is failure whatever the jobs of the run did. Every other job of the file
+      # is held back on such an attempt by a term of its own `if:`, so what this job would read
+      # there is a run of skips; this step refuses it before the verdict step reads them.
+      #
+      # The refusal is a step and not a term of this job's `if:` because a job an `if:` holds
+      # back is skipped, and a skipped job's check run is a passing required check: the group
+      # would read a ci-ok nothing judged and merge on it. An `if:` can only take the job away,
+      # and what a dead group must get is a verdict, so the job runs and a step of it fails.
+      # It comes after the checkout because the reconciliation step below runs under `always()`
+      # and reads ci-ok-reconcile.sh out of the tree.
+      - name: Refuse a re-run attempt of a merge-group run
+        if: ${{ github.event_name == 'merge_group' && github.run_attempt != '1' }}
+        env:
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          echo "::error::ci-ok is failure on attempt $RUN_ATTEMPT of this merge-group run, whatever the jobs of it did: a merge group is tested once, the queue builds a new group rather than re-running one, and this attempt judges a tree the queue is no longer waiting on."
+          exit 1
 
       # NEEDS is `toJSON(needs)`: `changes`' result and outputs with every other job's result,
       # which is the shape ci-ok.sh takes. A failure here fails the job, and the job's check run

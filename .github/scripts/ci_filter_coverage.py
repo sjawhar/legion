@@ -757,15 +757,20 @@ EVENT_LISTS = {
 REPORT_ACTION = "./.github/actions/ci-ok-report"
 REPORT_CHANGES = "${{ toJSON(needs.changes) }}"
 REPORT_STATUS = "${{ job.status }}"
-# The checks main's ruleset requires. ci-ok is the job of that name, whose own check run is the
-# verdict, and no other job of ci.yaml may be named for one: a job posts its own check, and a
-# skipped job posts a passing one.
+# The checks main's ruleset requires, each carried by the ci.yaml job of that name: a job's own
+# check run is in its run's own check suite, where one POSTed with POST /repos/.../check-runs
+# joins the Actions App's first suite at that commit. ci-ok is the verdict over every other job,
+# pr-title runs check-pr-text.sh on a pull request and a merge group. No other job of ci.yaml may
+# carry one of these names, and neither of the two may be renamed by a `name:`, since a job posts
+# the check its display name gives and a skipped job posts a passing one.
 REQUIRED_CHECKS = ("ci-ok", "pr-title")
 VERDICT_JOB = "ci-ok"
 # ci.yaml's env entry naming the jobs outside ci-ok's accounting: the job that exists to stop a
 # doomed merge-group run, which runs only on merge_group, holds `actions: write`, runs no
-# dependency code, reports no result to ci-ok and is no job a verdict waits for, and VERDICT_JOB,
-# which reports no verdict to itself and judges the jobs its needs: names.
+# dependency code, reports no result to ci-ok and is no job a verdict waits for, VERDICT_JOB,
+# which reports no verdict to itself and judges the jobs its needs: names, and the other
+# REQUIRED_CHECKS job, whose own check run is a required check of its own: the queue reads it
+# rather than the verdict, so it carries no report step and the verdict waits for nothing of it.
 EXEMPT_LIST = "CI_OK_EXEMPT"
 # ENV_ALLOWED above and ci-ok-report.sh's yq read write the same keys again.
 
@@ -778,8 +783,9 @@ def check_ci_ok(document: dict, problems: list) -> None:
     EVENT_LISTS list exactly the jobs whose if: holds its term. Every job but `changes` must end
     with the report step, or a merge-group run that job's failure decides posts no ci-ok until
     the verdict job has waited for every other job, and a job that calls
-    a workflow must hand that workflow `ci-ok-changes` for its job's report step. VERDICT_JOB is
-    the one job named for a required check, and it must need every job of the file but itself and
+    a workflow must hand that workflow `ci-ok-changes` for its job's report step. Each
+    REQUIRED_CHECKS name is a job of this file and no other job carries it, and VERDICT_JOB must
+    need every job of the file but itself and
     the exempt ones: a job outside its needs: ends after the verdict that says nothing about it.
     A job EXEMPT_LIST names is outside all of that: it is no job of
     CI_OK_SELECTED_BY, it needs no report step, and it must carry none, since ci-ok.sh fails a
@@ -810,13 +816,21 @@ def check_ci_ok(document: dict, problems: list) -> None:
                         f"drop it, or name the job it was meant for")
     for job_id, job in jobs.items():
         named = str((job or {}).get("name", job_id))
-        if job_id == VERDICT_JOB and named == VERDICT_JOB:
+        if job_id in REQUIRED_CHECKS:
+            if named != job_id:
+                problems.append(f"::error file={WORKFLOW}::job {job_id} carries `name: {named}`, so its check run "
+                                f"is called {named} and {job_id}, a check main's ruleset requires, is reported by "
+                                f"nothing; drop the name:")
             continue
-        if job_id in REQUIRED_CHECKS or named in REQUIRED_CHECKS:
+        if named in REQUIRED_CHECKS:
             problems.append(f"::error file={WORKFLOW}::job {job_id} is named {named}, a check main's ruleset "
-                            f"requires, and is not the {VERDICT_JOB} job: a job posts its own check, and a "
-                            f"skipped one posts a pass; {VERDICT_JOB} is the job of that name and pr-title comes "
-                            f"from lint's post")
+                            f"requires, and is not the {named} job: a job posts its own check, and a skipped one "
+                            f"posts a pass, so the job of that name is the only one that may carry it")
+    for check in REQUIRED_CHECKS:
+        if check != VERDICT_JOB and check not in jobs:
+            problems.append(f"::error file={WORKFLOW}::this file has no {check} job, a check main's ruleset "
+                            f"requires: its own check run is that check on a pull request and on a merge group, "
+                            f"and the queue cannot merge a group nothing reports it on")
     verdict = jobs.get(VERDICT_JOB)
     if verdict is None:
         problems.append(f"::error file={WORKFLOW}::this file has no {VERDICT_JOB} job, the check main's ruleset "
