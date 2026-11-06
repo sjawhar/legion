@@ -282,6 +282,8 @@ jobs:
               - 'packages/envoy/internal/ratelimit/*'
               - 'packages/envoy/internal/redact/*'
               - 'packages/envoy/internal/testnats/*'
+              # storetest's DatabaseURL makes a test's own database with internal/testpg.
+              - 'packages/envoy/internal/testpg/*'
               - 'packages/envoy/listenfd/*'
               - 'packages/envoy/migrationid/*'
               - 'packages/envoy/testnatsimages/*'
@@ -898,6 +900,8 @@ jobs:
               - 'packages/envoy/internal/broker/wake/*'
               - 'packages/envoy/internal/oidc/oidctest/*'
               - 'packages/envoy/internal/ratelimit/*'
+              # storetest's DatabaseURL makes a test's own database with internal/testpg.
+              - 'packages/envoy/internal/testpg/*'
             # The browser suite's two-process mode (dispatch-browser-multiprocess): what the
             # dispatch filter names. The dev OIDC issuer its sign-in step signs the browser in at
             # (e2e/run-signin-issuer.sh:34 builds it) compiles no package beyond the closure of the
@@ -1175,6 +1179,8 @@ jobs:
               - 'packages/envoy/internal/pgmigrate/*'
               - 'packages/envoy/internal/ratelimit/*'
               - 'packages/envoy/internal/redact/*'
+              # storetest's DatabaseURL makes a test's own database with internal/testpg.
+              - 'packages/envoy/internal/testpg/*'
             # Every file packages/envoy/docker/Dockerfile builds from, so envoy-smoke runs whenever
             # the image it smokes changes, every file the held-port image built on top of it reads
             # (packages/envoy/infra/host/heldportwrapper/Dockerfile and its .dockerignore), and what
