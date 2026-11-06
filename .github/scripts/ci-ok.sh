@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # ci-ok is the one check main's ruleset requires of ci.yaml's router, and this script is its
-# verdict. No job of ci.yaml is ci-ok: the last job of a run to finish posts it from its own last
-# step (ci-ok-report.sh), so the verdict never waits for a runner of its own. It passes only when
-# `changes` succeeded (it selected the jobs from this head's diff), lint succeeded (it runs on
-# every change), every job `changes` selected succeeded, and every job it did not select
+# verdict. ci.yaml's `ci-ok` job runs it over `toJSON(needs)`, needing every job of the file but
+# itself and those CI_OK_EXEMPT names, and fails when this script does, so the job's own check
+# run carries the verdict — and a job's check run is in its run's own check suite, where a check
+# run posted with POST /repos/.../check-runs joins the first suite at that commit, which is
+# another workflow's as often as not (ci-ok-report.sh's header holds the measurement). It passes
+# only when `changes` succeeded (it selected the jobs from this head's diff), lint succeeded (it
+# runs on every change), every job `changes` selected succeeded, and every job it did not select
 # succeeded or was skipped.
 #
 # A selected job must succeed: skipped, cancelled or absent fails. A skip there means the job's
@@ -17,7 +20,7 @@
 # because a group is tested once, and a pull request the queue removed is tested again when it
 # is added again.
 #
-# Its inputs, from ci-ok-report.sh:
+# Its inputs, from the ci-ok job's step and from ci-ok-report.sh:
 #   NEEDS              `changes`' result and outputs, as `toJSON(needs.changes)` gives them, and
 #                      every other job's result, in the shape `toJSON(needs)` would give it.
 #   EVENT              `github.event_name`.
@@ -35,8 +38,9 @@
 #
 # Run from anywhere:
 #   NEEDS=... EVENT=... SELECTED_BY=... PULL_REQUEST_ONLY=... .github/scripts/ci-ok.sh
-# ci-ok-report.sh runs it in the last step of every job of ci.yaml but `changes`; its tests are in
-# ci.yaml's test job.
+# ci.yaml's ci-ok job runs it over every job's result, and ci-ok-report.sh over the results it
+# reads for the failing ci-ok it posts at once on a decided merge-group run; its tests are in
+# ci-ok.test.sh, which ci.yaml's test job runs.
 set -euo pipefail
 shopt -s inherit_errexit
 

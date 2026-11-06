@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Posts one completed check run on a commit as this workflow's GITHUB_TOKEN, which is the GitHub
 # Actions App (integration 15368, the source main's ruleset names for its required checks): the
-# way ci.yaml reports ci-ok (ci-ok-report.sh) and its lint job reports pr-title, each from a step
-# of a job that already holds a runner rather than from a job of its own, which would wait in the
-# account's runner queue first. The job needs `checks: write`.
+# way ci.yaml's lint job reports pr-title, and the way ci-ok-report.sh reports the failing ci-ok
+# of a merge-group run one job's result has already decided, each from a step of a job that
+# already holds a runner. A check run posted this way joins the Actions App's first check suite
+# at that commit rather than the posting run's (ci-ok-report.sh's header holds the measurement),
+# so no check whose suite must be its run's own is posted here: ci-ok's verdict is a job of
+# ci.yaml, whose own check run carries it. The job needs `checks: write`.
 #
 # Its inputs, from the step's env:
 #   GH_TOKEN           the job's github.token.

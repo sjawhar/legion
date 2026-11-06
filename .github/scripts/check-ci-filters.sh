@@ -48,14 +48,18 @@
 #   7. a CI_OK_SELECTED_BY in ci.yaml's env that is not exactly {job: the output its if: tests}
 #      for every job whose if: tests an output of changes, or a CI_OK_PULL_REQUEST_ONLY that is
 #      not exactly the jobs whose if: restricts to github.event_name == 'pull_request': ci-ok.sh
-#      fails a job that map says changes selected unless it succeeded, and ci-ok-report.sh waits
-#      for exactly those jobs, so a wrong entry fails a job that was rightly skipped, passes one a
-#      failed-only re-run left skipped, or posts ci-ok before a job reported; a job but changes
-#      and those CI_OK_EXEMPT names whose last step is not the ci-ok-report step, or that calls a
-#      workflow with no such step reporting for it, since a run that job ends never gets ci-ok;
-#      a job CI_OK_EXEMPT names that does report to ci-ok, or that CI_OK_SELECTED_BY also maps,
-#      or that is no job of the file at all; and a job named ci-ok or pr-title, which would post
-#      a required check itself,
+#      fails a job that map says changes selected unless it succeeded, so a wrong entry fails a
+#      job that was rightly skipped or passes one a failed-only re-run left skipped; a job but
+#      changes and those CI_OK_EXEMPT names whose last step is not the ci-ok-report step, or that
+#      calls a workflow with no such step reporting for it, since a merge-group run that job's
+#      own result decides then gets no failing ci-ok until the ci-ok job has waited for every
+#      other job of the run; a job CI_OK_EXEMPT names that does report to ci-ok, or that
+#      CI_OK_SELECTED_BY also maps, or that is no job of the file at all; a job named pr-title,
+#      or named ci-ok while it is not the ci-ok job, since a job posts its own check and a
+#      skipped one posts a pass; and a ci-ok job — the verdict, whose own check run is the check
+#      main's ruleset requires — that is missing, that CI_OK_EXEMPT does not name, or whose
+#      needs: is not every job of the file but itself and the exempt ones, since a job outside
+#      that list ends after a verdict that says nothing about it,
 #   8. a workflow ci_job_reads.py's PUSH_WORKFLOWS pairs with a filter whose on.push.paths do not
 #      name exactly that filter's patterns (anchors flattened), naming each missing and extra one,
 #      or that is missing or has no on.push.paths: it runs on main the work the filter's job runs

@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+# Tests for `ci-ok-reconcile.sh`, the last step of ci.yaml's ci-ok job: every other ci-ok check
+# run on the head is PATCHed to what that job concluded, so one verdict stands at the end of
+# every attempt. It leaves alone this job's own check run, one that already carries this
+# conclusion and one that is not completed; a refused read or PATCH warns and never fails the
+# job, since failing it would turn a passing verdict red on the head this step exists to unblock.
+#
+# Each case writes the head's ci-ok check runs as the script's `gh --jq` prints them (id, status,
+# conclusion) and runs the real script with a stand-in `gh` first on PATH, which answers that read
+# and records the body of each PATCH it is sent.
+#
+# Run from anywhere: .github/scripts/ci-ok-reconcile.test.sh
+# CI runs it in ci.yaml's test job.
+set -euo pipefail
+shopt -s inherit_errexit
+
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+# shellcheck source=.github/scripts/test-lib.sh
+source "$script_dir/test-lib.sh"
+
+mkdir "$work/bin"
+cat > "$work/bin/gh" <<GH
+#!/usr/bin/env bash
+set -euo pipefail
+case "\$*" in
+  *"/commits/abc123/check-runs?check_name=ci-ok&filter=all&per_page=100"*)
+    if [ -e "$work/list-fails" ]; then echo "HTTP 502" >&2; exit 1; fi
+    cat "$work/check-runs" ;;
+  *"--method PATCH repos/o/r/check-runs/"*)
+    # The body goes as a file, so that a retried PATCH sends it again (post-check-run.sh says why).
+    id=
+    body=
+    while [ \$# -gt 0 ]; do
+      case \$1 in
+        --input) body=\$2 ;;
+        repos/o/r/check-runs/*) id=\${1##*/} ;;
+      esac
+      shift
+    done
+    n=\$(find "$work" -maxdepth 1 -name 'patched.*.json' | wc -l)
+    cp "\$body" "$work/patched.\$n.json"
+    printf '%s\n' "\$id" >> "$work/patched-ids"
+    if [ -e "$work/patch-fails" ]; then echo "HTTP 403" >&2; exit 1; fi ;;
+  *) echo "unexpected gh \$*" >&2; exit 2 ;;
+esac
+GH
+chmod +x "$work/bin/gh"
+
+# check_runs <id>=<status>[/<conclusion>]...: the head's ci-ok check runs, one per line, as
+# `gh api --jq '.check_runs[] | "\(.id) \(.status) \(.conclusion)"'` prints them.
+check_runs() {
+  local pair rest
+  : > "$work/check-runs"
+  for pair in "$@"; do
+    rest=${pair#*=}
+    printf '%s %s %s\n' "${pair%%=*}" "${rest%%/*}" "${rest#*/}" >> "$work/check-runs"
+  done
+  rm -f "$work"/patched.*.json "$work/patched-ids" "$work/list-fails" "$work/patch-fails"
+}
+
+# run_reconcile <conclusion> [<own check run id>]: sets out and status.
+run_reconcile() {
+  set +e
+  out=$(PATH="$work/bin:$PATH" GH_TOKEN=t GITHUB_REPOSITORY=o/r HEAD_SHA=abc123 \
+    GITHUB_SERVER_URL=https://github.com GITHUB_RUN_ID=41 GH_RETRY_SECONDS=0 \
+    CHECK_RUN_ID=${2:-900} CONCLUSION=$1 "$script_dir/ci-ok-reconcile.sh" 2>&1)
+  status=$?
+  set -e
+}
+
+patched() { [ -e "$work/patched-ids" ] && tr '\n' ' ' < "$work/patched-ids" || echo ""; }
+calls() { find "$work" -maxdepth 1 -name 'patched.*.json' | wc -l | tr -d ' '; }
+field() { jq -r "$1" "$work/patched.0.json"; }
+
+echo "case: a stale failing ci-ok on a head this attempt passed"
+check_runs "900=in_progress/null" "100=completed/failure"
+run_reconcile success
+check "exits 0" "$(is "$status" 0)"
+check "patches the stale one alone" "$(is "$(patched)" "100 ")"
+check "to this job's conclusion" "$(is "$(field .conclusion)" success)"
+check "linking this job" "$(is "$(field .details_url)" https://github.com/o/r/actions/runs/41/job/900)"
+check "titled with the run that decided it" \
+  "$(is "$(field .output.title)" "ci-ok is success on this head: the ci-ok job of run 41 decided it")"
+check "says a posted check run is updated by no re-run" \
+  "$(contains "$(field .output.summary)" 'posted by a job of a run rather than concluded by one, so no re-run updates it')"
+check "says what it did" "$(contains "$out" '^set ci-ok check run 100 from failure to success$')"
+check "and counts it" "$(contains "$out" '^ci-ok on abc123 is success; 1 other check run(s) of that name were set to it$')"
+
+echo "case: this job's own check run"
+check_runs "900=completed/failure"
+run_reconcile failure
+check "is left alone" "$(is "$(patched)" "")"
+check "and named as this job's own" "$(contains "$out" "^ci-ok check run 900 is this job's own (failure)$")"
+
+echo "case: a ci-ok that already carries this conclusion"
+check_runs "900=in_progress/null" "100=completed/success"
+run_reconcile success
+check "is not written again" "$(is "$(patched)" "")"
+check "and says so" "$(contains "$out" '^ci-ok check run 100 already concluded success$')"
+
+echo "case: a ci-ok another run is still deciding"
+check_runs "900=in_progress/null" "100=in_progress/null" "101=queued/null"
+run_reconcile success
+check "is left to that run" "$(is "$(patched)" "")"
+check "naming each" "$(contains "$out" '^ci-ok check run 101 is queued, so the run deciding it writes its conclusion$')"
+
+echo "case: a failing attempt"
+check_runs "900=in_progress/null" "100=completed/success" "101=completed/success"
+run_reconcile failure
+check "sets every other ci-ok to failure" "$(is "$(patched)" "100 101 ")"
+check "to this job's conclusion" "$(is "$(field .conclusion)" failure)"
+check "and counts them" "$(contains "$out" '^ci-ok on abc123 is failure; 2 other check run(s) of that name were set to it$')"
+
+echo "case: a cancelled attempt"
+check_runs "900=in_progress/null" "100=completed/success"
+run_reconcile cancelled
+check "carries job.status through" "$(is "$(field .conclusion)" cancelled)"
+
+echo "case: no other ci-ok on the head"
+check_runs "900=in_progress/null"
+run_reconcile success
+check "exits 0" "$(is "$status" 0)"
+check "writes nothing" "$(is "$(calls)" 0)"
+check "and says the verdict stands" \
+  "$(contains "$out" '^ci-ok on abc123 is success; 0 other check run(s) of that name were set to it$')"
+
+echo "case: GitHub refuses the check-run list"
+check_runs "900=in_progress/null" "100=completed/failure"
+touch "$work/list-fails"
+run_reconcile success
+check "exits 0 rather than failing the job" "$(is "$status" 0)"
+check "writes nothing" "$(is "$(calls)" 0)"
+check "warns, naming this job's verdict" \
+  "$(contains "$out" "::warning::GitHub refused this head's ci-ok check runs three times")"
+
+echo "case: GitHub refuses a PATCH"
+check_runs "900=in_progress/null" "100=completed/failure"
+touch "$work/patch-fails"
+run_reconcile success
+check "exits 0 rather than failing the job" "$(is "$status" 0)"
+check "tried three times" "$(is "$(calls)" 3)"
+check "warns, naming the check run and both verdicts" \
+  "$(contains "$out" '::warning::GitHub refused the PATCH of ci-ok check run 100 three times, so it stands at failure while this attempt.s verdict is success')"
+
+echo "case: a conclusion that is no job.status"
+check_runs "900=in_progress/null" "100=completed/failure"
+run_reconcile skipped
+check "fails the step" "$(is "$status" 1)"
+check "writes nothing" "$(is "$(calls)" 0)"
+check "says what it takes" "$(contains "$out" "ci-ok-reconcile.sh takes job.status, which is success, failure or cancelled, not 'skipped'")"
+
+echo "case: an input the step did not set"
+check_runs "900=in_progress/null"
+set +e
+out=$(PATH="$work/bin:$PATH" GH_TOKEN=t GITHUB_REPOSITORY=o/r HEAD_SHA=abc123 \
+  GITHUB_SERVER_URL=https://github.com GITHUB_RUN_ID=41 CONCLUSION=success \
+  "$script_dir/ci-ok-reconcile.sh" 2>&1)
+status=$?
+set -e
+check "fails the step" "$(is "$status" 1)"
+check "names the input" "$(contains "$out" 'ci-ok-reconcile.sh needs CHECK_RUN_ID in its environment')"
+
+summary "ci-ok-reconcile.sh leaves one ci-ok verdict on the head"

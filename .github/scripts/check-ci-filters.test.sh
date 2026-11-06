@@ -7,7 +7,8 @@
 # Go module's directory, a why that cites a step must name a workflow file that still holds it,
 # CI_OK_SELECTED_BY must map every job changes gates, it and CI_OK_PULL_REQUEST_ONLY must say what
 # each job's if: tests, every job but changes and those CI_OK_EXEMPT names must end with the ci-ok
-# report step and no job may be named for a required check, and a PUSH_WORKFLOWS workflow's
+# report step, the ci-ok job must need every job but itself and the exempt ones and no other job
+# may be named for a required check, and a PUSH_WORKFLOWS workflow's
 # on.push.paths must equal its filter, no `if:` of ci.yaml may test for a push event or compare
 # github.ref with a branch ref, every job's if: must hold the term that skips it on a
 # re-run attempt of a merge-group run, ci-caches.yaml's save of a cache family must carry
@@ -96,7 +97,7 @@ on: [pull_request]
 env:
   CI_OK_SELECTED_BY: '{"app": "app", "image": "image"}'
   CI_OK_PULL_REQUEST_ONLY: '["image"]'
-  CI_OK_EXEMPT: '[]'
+  CI_OK_EXEMPT: '["ci-ok"]'
 jobs:
   changes:
     if: (github.event_name != 'merge_group' || github.run_attempt == '1')
@@ -132,7 +133,7 @@ jobs:
       - name: Test the app
         run: go test ./cmd/app ./lib
         working-directory: mod
-      - name: Report ci-ok when this is the run's last job
+      - name: Report ci-ok when this job decides a merge-group run
         if: always()
         uses: ./.github/actions/ci-ok-report
         with:
@@ -145,12 +146,19 @@ jobs:
     steps:
       - name: Build
         run: go build ./...
-      - name: Report ci-ok when this is the run's last job
+      - name: Report ci-ok when this job decides a merge-group run
         if: always()
         uses: ./.github/actions/ci-ok-report
         with:
           changes: ${{ toJSON(needs.changes) }}
           job-status: ${{ job.status }}
+  ci-ok:
+    needs: [changes, app, image]
+    if: ${{ always() && (github.event_name != 'merge_group' || github.run_attempt == '1') }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Judge every job of this run
+        run: echo verdict
 YAML
   cat > "$root/.github/workflows/site.yaml" <<'YAML'
 name: Site
@@ -330,7 +338,7 @@ replace "$root/.github/workflows/ci.yaml" "CI_OK_SELECTED_BY: '{\"app\": \"app\"
 run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the job and the output to map it to" \
-  "$(contains "$out" "CI_OK_SELECTED_BY does not map app, whose if: tests needs.changes.outputs.app, so ci-ok-report.sh never waits for its report and ci-ok.sh fails any it finds; add \"app\": \"app\"")"
+  "$(contains "$out" "CI_OK_SELECTED_BY does not map app, whose if: tests needs.changes.outputs.app, so ci-ok.sh does not know what selects it and fails its result; add \"app\": \"app\"")"
 
 echo "case: CI_OK_SELECTED_BY maps a job to an output its if: does not test"
 root=$(fixture ci-ok-wrong)
@@ -382,8 +390,8 @@ YAML
 echo "case: a job CI_OK_EXEMPT names passes without the ci-ok report step"
 root=$(fixture ci-ok-exempt)
 cancel_job "$root"
-replace "$root/.github/workflows/ci.yaml" "CI_OK_EXEMPT: '[]'" \
-  "CI_OK_EXEMPT: '[\"cancel\"]'"
+replace "$root/.github/workflows/ci.yaml" "CI_OK_EXEMPT: '[\"ci-ok\"]'" \
+  "CI_OK_EXEMPT: '[\"ci-ok\", \"cancel\"]'"
 run_check "$root"
 check "exits 0" "$(is "$status" 0)"
 check "says what it checked" "$(contains "$out" 'every ci.yaml filter matches every file its job reads (1 gates)')"
@@ -426,6 +434,45 @@ run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the job and the check" \
   "$(contains "$out" "job image is named ci-ok, a check main's ruleset requires")"
+
+echo "case: the ci-ok job does not need a job of the file"
+root=$(fixture ci-ok-needs-missing)
+replace "$root/.github/workflows/ci.yaml" "    needs: [changes, app, image]" "    needs: [changes, app]"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the job it would judge nothing of" \
+  "$(contains "$out" "job ci-ok does not need image, so it reaches the verdict while that job is still running and says nothing about it; add image to its needs:")"
+
+echo "case: the ci-ok job needs a job CI_OK_EXEMPT names"
+root=$(fixture ci-ok-needs-exempt)
+cancel_job "$root"
+replace "$root/.github/workflows/ci.yaml" "CI_OK_EXEMPT: '[\"ci-ok\"]'" \
+  "CI_OK_EXEMPT: '[\"ci-ok\", \"cancel\"]'"
+replace "$root/.github/workflows/ci.yaml" "    needs: [changes, app, image]" "    needs: [changes, app, image, cancel]"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the exempt job and why the verdict cannot read it" \
+  "$(contains "$out" "job ci-ok needs cancel, but CI_OK_EXEMPT holds it outside ci-ok's accounting, and ci-ok.sh fails a result for a job CI_OK_SELECTED_BY does not map; drop it from its needs:")"
+
+echo "case: CI_OK_EXEMPT does not name the ci-ok job"
+root=$(fixture ci-ok-not-exempt)
+replace "$root/.github/workflows/ci.yaml" "  CI_OK_EXEMPT: '[\"ci-ok\"]'" "  CI_OK_EXEMPT: '[]'"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "says the verdict reports nothing to itself" \
+  "$(contains "$out" "CI_OK_EXEMPT does not name ci-ok, which reports no verdict to itself")"
+check "and asks it for the report step no exempt job carries" \
+  "$(contains "$out" "job ci-ok's last step is not \`uses: ./.github/actions/ci-ok-report\`")"
+
+echo "case: the file has no ci-ok job"
+# The job is the last of the fixture, and `replace` reads the file without its trailing newline,
+# so the block to cut starts at the newline before it and ends at its last line.
+root=$(fixture ci-ok-absent)
+replace "$root/.github/workflows/ci.yaml" $'\n  ci-ok:\n    needs: [changes, app, image]\n    if: ${{ always() && (github.event_name != \'merge_group\' || github.run_attempt == \'1\') }}\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Judge every job of this run\n        run: echo verdict' ""
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the check nothing would carry" \
+  "$(contains "$out" "this file has no ci-ok job, the check main's ruleset requires")"
 
 echo "case: a push workflow's paths miss a pattern of its filter"
 root=$(fixture push-paths-missing)

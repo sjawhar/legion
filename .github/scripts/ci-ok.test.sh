@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # Tests for `ci-ok.sh`: ci-ok passes only when `changes` and lint succeeded, every job `changes`
-# selected succeeded, and every job it did not select succeeded or was skipped. The last case
-# holds the other half of `ci-ok.jq` — the two artifact names of the report step — to the
-# .github/actions/ci-ok-report that uploads them.
+# selected succeeded, and every job it did not select succeeded or was skipped.
 #
-# ci-ok.sh reads only its environment, so each case hands it the NEEDS ci-ok-report.sh would build
+# ci-ok.sh reads only its environment, so each case hands it the NEEDS ci.yaml's ci-ok job builds
+# with `toJSON(needs)`, which ci-ok-report.sh builds for its early post too,
 # and the SELECTED_BY and PULL_REQUEST_ONLY of ci.yaml's env, shrunk to four jobs: typecheck,
 # envoy-client and docs, each selected by its own output, and worker-image, which also runs only
 # on a pull request. Some cases pass another event than pull_request, which is what
@@ -144,27 +143,11 @@ check "fails" "$(is "$status" 1)"
 check "names it as absent" "$(contains "$out" '^::error::envoy-client is absent from NEEDS')"
 check "prints it" "$(contains "$out" '^envoy-client: absent ')"
 
-echo "case: the artifact name ci-ok.jq reads is the name the report action uploads"
-# ci-ok.jq holds the one reading of it, for ci-ok-report.sh (every job's report). The name
-# itself is written in .github/actions/ci-ok-report/action.yml, which no jq of a run can read,
-# so the two are held together here: a rename only one side followed would leave ci-ok waiting
-# for reports it cannot see. The action's expressions are filled in for a typecheck job of
-# attempt 2 that ended `failure`.
-uploaded() { # uploaded <n>: the name: of the action's n-th upload-artifact step, filled in
-  yq -r '[.runs.steps[] | select((.uses // "") | test("actions/upload-artifact")) | .with.name]' \
-    "$script_dir/../actions/ci-ok-report/action.yml" |
-    yq -r ".[$1]" |
-    sed -e 's/${{ inputs.job }}/typecheck/' -e 's/${{ github.run_attempt }}/2/' \
-        -e 's/${{ inputs.job-status }}/failure/'
-}
-reading() { # reading <jq filter> <artifact name>...: that filter of ci-ok.jq over those names
-  local filter=$1
-  shift
-  jq -r -n -L "$script_dir" --argjson names "$(printf '%s\n' "$@" | jq -R . | jq -s .)" \
-    "include \"ci-ok\"; $filter"
-}
-report_name=$(uploaded 0)
-check "the report artifact's name reads back as that job's result" \
-  "$(is "$(reading 'reports($names)[0] | "\(.job) \(.attempt) \(.status)"' "$report_name")" "typecheck 2 failure")"
+echo "case: a job changes selected failed"
+run_ci_ok "$(needs success "$selects" success typecheck=failure envoy-client=skipped worker-image=success docs=skipped)"
+check "fails, so the ci-ok job's own check run carries the failure" "$(is "$status" 1)"
+check "names the job, its result and why" \
+  "$(contains "$out" '^::error::typecheck ended failure, but changes selected it (needs.changes.outputs.typecheck is true)')"
+check "prints every other job's result" "$(contains "$out" '^worker-image: success (selected')"
 
 summary "ci-ok.sh fails unless every job changes selected succeeded"

@@ -16,8 +16,13 @@ name: PR Title
 # workflow's suite. On pull request #2847 that rule put ci.yaml's `ci-ok` into this workflow's
 # suite (114222733751 against CI's 114222734375, created in the same second), the rollup reported
 # the required `ci-ok` under workflow "PR Title", and the merge queue refused to enqueue with
-# `Required status check "ci-ok" is expected`. So CI's suite must be the only github-actions check
-# suite at a head ci.yaml runs on, and this workflow gives up two of its triggers:
+# `Required status check "ci-ok" is expected`. `ci-ok` no longer rides on that rule — it is a job
+# of ci.yaml, and a job's check run is in its run's own suite whatever else runs at that head —
+# but `pr-title` still does, since ci.yaml's lint job posts it. The two triggers stay gone, for
+# what each of them costs rather than for the suites a pull request's head carries anyway
+# (claude-envoy-rebuild.yaml, changelog-fold.yaml and codeql.yaml run on a pull request too:
+# measured on #2860 at 57182d42, where CI's posted `ci-ok` landed in the suite of "Rebuild Claude
+# Envoy plugin"):
 #   * no merge_group. ci.yaml's lint job runs on the group, checks the queued pull request's text
 #     there (it finds the pull request the group's branch names with find-pr-payload.sh, the
 #     script both workflows find their payload with) and posts `pr-title` on the group's commit
@@ -25,29 +30,32 @@ name: PR Title
 #     report on the merge group fails the group ("The merge will fail as the required status check
 #     will not be reported",
 #     https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue#triggering-merge-group-checks-with-github-actions).
+#     A run here would report the same verdict a second time, and ci.yaml is the only workflow a
+#     merge group starts, so keeping this one off the group is also what leaves lint's posted
+#     `pr-title` in CI's own suite there.
 #   * no `opened` and no `reopened`. ci.yaml runs on both, and its lint job checks the same text
-#     and posts `pr-title` on the same head, so a run here reports that verdict a second time and
-#     its suite can be the older one at that head, which is how #2847 lost its `ci-ok`. The
+#     and posts `pr-title` on the same head, so a run here is a second run of the same check at
+#     the same head: it buys work, not suites. The
 #     trigger goes rather than the job, because a job-level `if:` would not have helped: GitHub
 #     creates the run, and its check suite, before it reads one. At the draft heads f5fc75a0 and
 #     e26c2054, where every job of ci.yaml is skipped, that run still holds a suite of 30 skipped
 #     check runs (114131780811 and 113923512090) — a skipped job is a suite all the same.
 # What that costs is a fork's pull request, which gets no `pr-title` until somebody edits it or
 # reviews it, and that costs nothing that could have merged: a fork's GITHUB_TOKEN is read-only,
-# so ci.yaml's `ci-ok` post fails there and lint's `pr-title` post is guarded off, and a fork's
+# so lint's `pr-title` post is guarded off there, and a fork's
 # change reaches the merge queue only once a maintainer takes the branch into this repository,
 # where every event is same-repo again.
 #
 # `edited` and `pull_request_review` stay for every head: ci.yaml runs on neither, so nothing else
 # checks the text an edit or a review brings. They leave one race, and nothing here closes it: an
 # edit or a review in the seconds before CI's suite exists at that head — a title edited the
-# moment the pull request opens — makes this workflow's suite the older at that commit, and the
-# CI run's `ci-ok` lands in it.
+# moment the pull request opens — makes this workflow's suite the older at that commit, so lint's
+# posted `pr-title` lands in it and the rollup reports that required check under "PR Title".
 #
 # A push starts no run here: ci.yaml's lint job, which runs at every push to a pull request that is
 # not a draft and when a draft is marked ready, runs the same check and posts `pr-title` on the
 # new head itself, from a runner it already holds (a job of this workflow at every push waited for
-# a runner of its own; ci.yaml's header says why that matters). A draft's new head has no
+# a runner of its own to repeat a check lint had already run). A draft's new head has no
 # `pr-title` until it is marked ready or edited, and a draft cannot merge. Comments and review
 # comments start no run of their own: GitHub leaves those events' checks out of a pull request's
 # checks, an inline comment posted alone arrives with a review event that does run, and every run
