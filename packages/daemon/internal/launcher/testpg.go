@@ -17,8 +17,10 @@ import (
 // whose user is a `createdb createrole nosuperuser` role of the cluster rather than its superuser,
 // so a test that reaches it can make the roles its own suite needs and still cannot run programs
 // as the server's process. The database the DSN names is that login's own, which `legion-testpg
-// ensure` creates with the login as its owner, so a test may create a schema or an extension in
-// it. TestPGDirName is the directory
+// ensure` creates with the login as its owner, so a test may create a schema or a trusted
+// extension in it; an untrusted one still needs the superuser, which is why `ensure` puts
+// `vector` in template1, where every database made from it carries it.
+// TestPGDirName is the directory
 // the server's data and admin socket live in, under the roles directory, which every role's
 // namespace covers (role-init), so no role can edit the cluster's configuration and have the
 // launcher load it at the next start.
