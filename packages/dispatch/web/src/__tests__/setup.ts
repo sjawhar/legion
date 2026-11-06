@@ -1,4 +1,4 @@
-import { afterAll, afterEach } from "bun:test";
+import { afterAll, afterEach, jest } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 // happy-dom has no IndexedDB; the store of a document's unsent edits (`pending-edits.ts`) runs on
 // this in-memory one, which keeps IndexedDB's transaction ordering.
@@ -18,6 +18,16 @@ import { guardWritesToNetwork, writesThatReachedNetwork } from "./network-guard"
 import { resetRouteAnswers } from "./send-answers";
 
 GlobalRegistrator.register();
+
+// Testing Library reads a global `jest` to tell whether fake timers are installed:
+// `jestFakeTimersAreEnabled` (@testing-library/dom@10.4.1, dist/@testing-library/dom.esm.js:171)
+// begins `if (typeof jest !== 'undefined' && jest !== null)`. Bun's `jest` is a module binding
+// from `bun:test` and no global, so without this line every `waitFor` and `findBy*` under
+// `jest.useFakeTimers()` takes the real-clock path and polls timers the test is holding still:
+// a wait whose node is already there passes by its first synchronous check, and a wait that
+// needs the clock to move never ends. `testing-library-fake-timers.test.tsx` is the proof.
+// (dispatch://INFRA-983 found the same line; this change carries it.)
+(globalThis as unknown as { jest: typeof jest }).jest = jest;
 
 // Unit tests have no Dispatch server to answer GET /api/v1/schema/blocks, so the session cache
 // starts already holding the checked-in server schema: every MarkdownBody, ask card, and
