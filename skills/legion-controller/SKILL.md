@@ -17,6 +17,7 @@ except a clear defect a role reports ([Issues handed to Legion](#issues-handed-t
 - A direct Dispatch message that decides scope, priority or an owner is a ruling: after you answer it, run the weekly-plan reconciliation (`skill://legion-controller/references/backlog-stewardship.md`), because the plan must record the rule.
 - Handle one wake per turn, then end the turn. Never poll or wait for an event, because the daemon wakes you again (`tick` at least every `controller_wake_interval_seconds`).
 - Before any side effect, read `read_state` and the Dispatch issue, because a wake can be stale or sent twice.
+- Read a session's state from the Envoy registry, never from its absence from a list: a session is `live`, `unresponsive` or `gone`. An `unresponsive` session is past the live window and inside the gone horizon; it is working, it keeps its role claim and its issue claim, and messages wait for it. Only a `gone` session is stopped. Start no replacement for an `unresponsive` session, take nothing from it, and never report it as gone.
 - Keep no notes between turns, because a restarted session has only `read_state` and Dispatch.
 - Reach the daemon only through the `legion` tool: `read_state`, and `set_status` to `todo`, `backlog` or `icebox`. Run no `legion` from bash, because the tool holds the controller grant.
 - Never edit a repository, push a commit or call `handoff_complete`, and never forward a raw event to an architect, because the daemon runs the phases and raw events only fill the architect's context.
@@ -80,7 +81,7 @@ Wake details: `skill://legion-controller/references/wakes.md`.
 ## Trees waiting on a root claim
 
 A root architect whose claim on its root was refused waits, holding its slot, and nothing tells it
-when the holder lets go. `dispatch read` each root in `admission.active` whose `phase` is still
+when the holder lets go. `dispatch read` each root in `admission.trees` whose `phase` is still
 `admitted`. When `Claimed by:` is `nobody` or ends `· not running`, `envoy_publish` `<KEY>: the
 claim is free; claim it again.` to `notifications.role.<issues.<KEY>.architect.locator.claim>`.
 
@@ -111,9 +112,12 @@ you label at a person's request or file yourself.
 A free slot is no reason to take an issue: a labelled root in `todo` takes the next slot through
 `admission.waiting` without you, and a parked issue (status `backlog` or `icebox`) means "do not
 run now". Move an issue out of `backlog` or `icebox` only on a request or a plan ruling that names
-it, and cite that request. The free slots are `admission.cap` minus the roots in
-`admission.active` and the roots in `admission.waiting` that are not in `admission.blocked`, since
-a blocked root takes no slot until its blockers are done. Every move to `todo` you make is one of
+it, and cite that request. A slot is one issue with work, a root or a child, not one tree: a tree
+of four working issues holds four slots, and a tree whose root only waits holds none of its own,
+so `admission.trees` is what names the roots of the live trees. The free slots are
+`admission.cap` minus the issues in `admission.active` and the issues in `admission.waiting` that
+are not in `admission.blocked`, since an issue its blockers or its own open children hold takes no
+slot until they are done. Every move to `todo` you make is one of
 these:
 
 - a root you labelled at a person's request or filed for a clear defect no tree owns, at triage (a

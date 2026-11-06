@@ -1,5 +1,48 @@
 # Changelog
 
+This file is history: every entry after the last section below is in the package's GitHub
+releases, one per `claude-envoy-v*` tag.
+
+## [main@0abb1e50da7d] - 2026-11-06
+
+### Changed
+
+- A retro learning cites a file and a symbol, or text quoted from the file at the head it commits, instead of a line number, and the claim rule in the shared role-prompt core asks for the same.
+
+## [main@c5c94dbd542d] - 2026-11-05
+
+### Added
+
+- The Envoy tools render a session's `state` and `last_seen`, and the lists ask for unresponsive
+  sessions too. A session that ends is `gone` at once: `shutdown` waits for a registration
+  already in flight before it deletes the session, rather than queueing behind a write that is
+  stuck, and adopting a handoff deletes the session id it leaves. The shutdown wait is a quarter
+  of a second in all, since the process is killed five seconds after it is asked to stop and a
+  delete never sent would leave the row behind for an hour. An `envoy_publish` answer names
+  every session its message was only stored for, under `unresponsive`, and for a role publish
+  the holder and the state the listener resolved that holder in (`holder_state`), with the rule
+  for an unresponsive peer beside them: it has not taken the message yet, and nothing is to be
+  taken from it.
+
+### Fixed
+
+- A session registration that fails is tried once more between 20 and 40 seconds later, instead
+  of at once: a listener slow enough to time the call out was asked again in the same breath,
+  and every session that failed asked together. The extra call is one per failing session per
+  interval — a second failure waits for the next heartbeat rather than asking again — and its
+  delay is drawn afresh each time, so the sessions one slow listener failed come back spread
+  out. Any registration that succeeds returns the session to the plain heartbeat at once, and
+  shutdown drops a call still waiting. The warning says how far out the extra call is.
+
+## [main@87fb43e754ba] - 2026-11-05
+
+### Changed
+
+- The bundled `dispatch` command and tools carry no length bound of their own: a question, a
+  body, an option, a closing reason and a reply are sent as written, and Dispatch's refusal,
+  which names the block or the field that passed the bound, is what a session reads. The
+  bundled `dispatch limits` prints the bounds the server holds a write to.
+
 ## [main@f06073fb9ef4] - 2026-11-05
 
 ### Changed

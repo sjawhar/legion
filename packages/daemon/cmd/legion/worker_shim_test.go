@@ -317,10 +317,6 @@ func TestWorkerShimStartsAPodsAgentOnTheBaselineAndAPanesAsBefore(t *testing.T) 
 		t.Fatal(err)
 	}
 	t.Setenv("PI_CONFIG_FILES", "/etc/operator.yml")
-	// Restored by t.Setenv's cleanup; unset so the pod row proves the baseline fills it and the
-	// pane row that nothing does.
-	t.Setenv("OMP_SESSION_STORAGE", "")
-	os.Unsetenv("OMP_SESSION_STORAGE")
 	t.Setenv("OMP_PROFILE", "legion")
 	marker := filepath.Join(dir, "spawned")
 	// told is every scratch directory the role was told of, as the child reads it: the shim's own

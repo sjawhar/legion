@@ -823,6 +823,7 @@ test("a bare dispatch ask reference renders an inline link to the ask route with
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);
@@ -954,6 +955,7 @@ test("two references in one body each resolve their own inline link and title, r
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);
@@ -1038,6 +1040,7 @@ test("a hand-authored Markdown link to a dispatch:// target resolves through dat
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);

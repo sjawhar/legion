@@ -106,9 +106,9 @@ func (e *Engine) Ancestry(ctx context.Context, tx pgx.Tx, issue record.Issue, ch
 // checks (its linger's close, its supervise rows, its issue suspend), with no linger, hold,
 // pending READY or Dispatch chain (record.Issue.Ancestry: a member waits in no line), no
 // hand-over fence and its generation's facts cleared. A todo record enters the tree's run
-// admitted, as an unrecorded todo child does (enterChild), so an open gate starts its planning,
-// unless it waits on an unfinished Dispatch issue: enterChild then holds it at phase.Admitted
-// (blockers.Holds), and StartUnblockedChildren starts it once nothing holds it. Any other status
+// admitted, as an unrecorded todo child does (enterChild), so it starts its first phase at the
+// slot the waiting line gives it, unless it waits on an unfinished Dispatch issue, which keeps it
+// out of that line until the last of them closes. Any other status
 // keeps it as a parked child at done, which a todo runs again (ReenterChild).
 // The tree's architect is told with a child-status notice. Everything is written in the caller's
 // transaction.

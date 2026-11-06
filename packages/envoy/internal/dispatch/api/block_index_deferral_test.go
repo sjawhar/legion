@@ -83,7 +83,7 @@ func TestADocumentPastTheBlockBoundLeavesItsBlocksToTheReconciliation(t *testing
 		t.Fatalf("before the block-index reconciliation the mention of %s comes from %#v, want the document itself", target, edge.Node)
 	}
 
-	tick, err := deps.Docs.(*docs.Service).ReconcileBlockIndex(ctx, "", nil)
+	tick, err := deps.Docs.(*docs.Service).ReconcileBlockIndex(ctx, docs.BlockIndexCursors{}, nil)
 	if err != nil {
 		t.Fatalf("one pass of the block-index reconciliation: %v", err)
 	}

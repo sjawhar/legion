@@ -90,7 +90,12 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is the one `DaemonAPIVersion` declares, last bumped by contract 49's memory group (each
+number is the one `DaemonAPIVersion` declares, last bumped by contract 51's admission cap over the
+issues at work (`admission.active` and `admission.waiting` on `GET /legion/v1/state` name issues
+rather than trees, `admission.trees` is the root of every live tree, and each issue record carries
+its `tree`; a strict reader before 51 refuses a state carrying either new key, so a caller from a
+pod below 51 is served the state without them, and a controller below 51 reads `active` as the
+trees at work), after contract 49's memory group (each
 issue of `GET /legion/v1/state` carries its tree's `memoryGroup`, `memoryDrawMode` and
 `memoryDrawnAt`, which a strict reader before 49 refuses, and a caller from a pod below 49 is
 served the state without them), after contract 48's idle release (the plugin reports each

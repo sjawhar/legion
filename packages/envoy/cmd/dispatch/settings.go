@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/sjawhar/envoy/internal/dispatch/embed"
 )
 
 // setting is one row of envoy-dispatch's settings table: a Dispatch setting, an environment
@@ -36,8 +38,8 @@ type setting struct {
 
 // settings is every Dispatch setting, in the order an operator meets them: storage, identity,
 // where the server listens, NATS, the Envoy listener, projects, the GitHub App, cookies,
-// service-account tokens, the secrets broker, meaning search's model service, the dashboard, and
-// local and test runs.
+// service-account tokens, the secrets broker, meaning search's model service, the model the
+// server generates text with, the dashboard, and local and test runs.
 var settings = []setting{
 	{Name: "DATABASE_URL", Required: "yes",
 		Description: "Postgres connection string. The server migrates the database before serving; `census`, `backfill-block-ids`, `backfill-anchor-blocks`, `backfill-files`, `rebuild-refs` and `stored-order` read it too. A `pool_max_conns` parameter is refused."},
@@ -89,6 +91,10 @@ var settings = []setting{
 		Description: "Base URL of the Envoy listener Dispatch delivers mentions and messages through and reads live sessions from."},
 	{Name: "ENVOY_TOKEN", Required: "no",
 		Description: "Bearer token Dispatch sends on every Envoy listener call; unset, it sends none."},
+	{Name: "ENVOY_SESSION_LIVE_WINDOW", Default: "`5m`", Required: "no",
+		Description: "How long after its last registration a session counts as live, as a positive Go duration. Dispatch judges a role route's holder by it, as the Envoy listener judges every session: within it the holder is live and the event is forwarded. Give the listeners of a deployment and Dispatch the same value, or Dispatch calls a holder the listener still serves lapsed, and the other way round. A value that is not a positive duration refuses startup; one no Go duration can be read from is a warning and the default."},
+	{Name: "ENVOY_SESSION_GONE_HORIZON", Default: "`1h`", Required: "no",
+		Description: "How long after its last registration a session reads unresponsive before it reads gone, as a positive Go duration. Dispatch holds a role-routed event pending for an unresponsive holder, with its claim untouched, and counts the route reached with nothing sent only for a gone one. Give the listeners of a deployment and Dispatch the same value: with a horizon only the listener carries, Dispatch marks an event sent to nobody while the listener still calls that holder unresponsive and keeps its role, so the event reaches it never. A value that is not a positive duration refuses startup; one no Go duration can be read from is a warning and the default."},
 	{Name: "DISPATCH_REPO_PROJECTS", Required: "no",
 		Description: "Comma-separated `owner/repo=KEY` mappings seeded at startup; a mapping saved in the dashboard wins."},
 	{Name: "DISPATCH_DEFAULT_PROJECT", Required: "no",
@@ -96,9 +102,11 @@ var settings = []setting{
 	{Name: "DISPATCH_APP_CLIENT_ID", Required: "no",
 		Description: "GitHub App client ID, which names the App in the JWT its private key signs. Set, the App comes from the `DISPATCH_APP_*` variables instead of `~/.local/share/dispatch/app.json`."},
 	{Name: "DISPATCH_APP_PEM_B64", Required: "no",
-		Description: "GitHub App private key, as a PEM or the base64 of a PEM, which signs every App call: the web app's GitHub reads, the architecture import and webhook redelivery are off without one."},
+		Description: "GitHub App private key, as a PEM or the base64 of a PEM, which signs every App call: the web app's GitHub reads, the architecture import, webhook redelivery and the CI reconcile pass are off without one."},
 	{Name: "DISPATCH_APP_ID", Required: "no",
 		Description: "The GitHub App's numeric ID."},
+	{Name: "DISPATCH_REVIEWER_APP_ID", Required: "no",
+		Description: "The review App's numeric ID, the App that posts the `tester` and `architect` verdict check runs, which the CI reconcile pass compares a check run's `app.id` against; unset, the pass records no verdict check run."},
 	{Name: "DISPATCH_APP_SLUG", Required: "no",
 		Description: "The GitHub App's slug."},
 	{Name: "DISPATCH_APP_NAME", Required: "no",
@@ -118,7 +126,7 @@ var settings = []setting{
 	{Name: "DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE", Required: "when `DISPATCH_AGENT_SECRETS_URL` is set",
 		Description: "File holding Dispatch's own projected Kubernetes service-account token, which every call to the secrets broker presents; the broker verifies it and reads the caller from `BROKER_API_ACCOUNTS`. In the cluster it is the projected-token volume's path (`/var/run/secrets/…/token`), which the kubelet rewrites in place; the file is read at call time, so a rotation needs no restart, and a local run writes a token into a file of its own and names that."},
 	{Name: "DISPATCH_EMBEDDER", Default: "`bedrock`", Required: "no",
-		Description: "Where meaning search reaches Cohere Embed v4: `bedrock` (AWS Bedrock, on the AWS SDK's own region and credentials; with no region, search is keyword-only) or `azure` (Azure AI Foundry, configured by the `DISPATCH_AZURE_*` settings, each of which `bedrock` refuses)."},
+		Description: "Where meaning search reaches Cohere Embed v4: `bedrock` (AWS Bedrock, on the AWS SDK's own region and credentials; with no region, search is keyword-only) or `azure` (Azure AI Foundry, configured by the `DISPATCH_AZURE_EMBED_*` settings, each of which `bedrock` refuses, and by the shared Azure sign-in, which `DISPATCH_ANSWERER=azure` reads too)."},
 	{Name: "DISPATCH_AZURE_EMBED_ENDPOINT", Required: "when `DISPATCH_EMBEDDER` is `azure`",
 		Description: "The base URL the embeddings route is appended to, such as `https://<resource>.services.ai.azure.com/models`: an absolute https URL with a host and no query or fragment."},
 	{Name: "DISPATCH_AZURE_EMBED_DEPLOYMENT", Default: "`embed-v-4-0`", Required: "no",
@@ -127,18 +135,38 @@ var settings = []setting{
 		Description: "The deployment's tokens-per-minute quota, a positive integer; background embedding takes two thirds of it, leaving the rest to search queries."},
 	{Name: "DISPATCH_AZURE_EMBED_KEY", File: true, Required: "when `DISPATCH_EMBEDDER` is `azure` and the keyless sign-in is unset",
 		Description: "The deployment's API key, the key form of credential; refused alongside the keyless sign-in (`DISPATCH_AZURE_TENANT_ID`, `DISPATCH_AZURE_CLIENT_ID`, `DISPATCH_AZURE_FEDERATED_TOKEN_FILE`)."},
-	{Name: "DISPATCH_AZURE_TENANT_ID", Required: "when `DISPATCH_EMBEDDER` is `azure` and `DISPATCH_AZURE_EMBED_KEY` is unset",
-		Description: "Microsoft Entra tenant of the identity Dispatch signs in to Azure as, the keyless form of credential: it, `DISPATCH_AZURE_CLIENT_ID` and `DISPATCH_AZURE_FEDERATED_TOKEN_FILE` are set together or not at all."},
-	{Name: "DISPATCH_AZURE_CLIENT_ID", Required: "when `DISPATCH_EMBEDDER` is `azure` and `DISPATCH_AZURE_EMBED_KEY` is unset",
+	{Name: "DISPATCH_AZURE_TENANT_ID", Required: "when `DISPATCH_EMBEDDER` or `DISPATCH_ANSWERER` is `azure`, except with `DISPATCH_AZURE_EMBED_KEY` set for the embedder alone",
+		Description: "Microsoft Entra tenant of the identity Dispatch signs in to Azure as, the keyless form of credential: it, `DISPATCH_AZURE_CLIENT_ID` and `DISPATCH_AZURE_FEDERATED_TOKEN_FILE` are set together or not at all. The embedder and the answerer share the three, read by whichever of them is `azure`, so a deployment that embeds on Bedrock and answers on Azure sets them for the answerer."},
+	{Name: "DISPATCH_AZURE_CLIENT_ID", Required: "when `DISPATCH_EMBEDDER` or `DISPATCH_ANSWERER` is `azure`, except with `DISPATCH_AZURE_EMBED_KEY` set for the embedder alone",
 		Description: "Client ID of that identity, whose federated credential trusts the token `DISPATCH_AZURE_FEDERATED_TOKEN_FILE` holds."},
-	{Name: "DISPATCH_AZURE_FEDERATED_TOKEN_FILE", Required: "when `DISPATCH_EMBEDDER` is `azure` and `DISPATCH_AZURE_EMBED_KEY` is unset",
+	{Name: "DISPATCH_AZURE_FEDERATED_TOKEN_FILE", Required: "when `DISPATCH_EMBEDDER` or `DISPATCH_ANSWERER` is `azure`, except with `DISPATCH_AZURE_EMBED_KEY` set for the embedder alone",
 		Description: "Path of the federated token (a Kubernetes projected service-account token) Dispatch exchanges with Entra for an Azure access token; re-read on every exchange, since the token rotates."},
+	{Name: "DISPATCH_ANSWERER", Required: "no",
+		Description: "Where Dispatch's server generates text: `azure` (a chat deployment of an Azure AI Foundry resource, configured by the `DISPATCH_AZURE_CHAT_*` settings and the shared Azure sign-in) or `endpoint` (any OpenAI-shaped chat completions service, configured by the `DISPATCH_CHAT_*` settings). Unset, no model is configured and the server starts and says so; each group is refused by the place that does not read it."},
+	{Name: "DISPATCH_AZURE_CHAT_ENDPOINT", Required: "when `DISPATCH_ANSWERER` is `azure`",
+		Description: "The base URL `/chat/completions` is appended to, such as `https://<resource>.services.ai.azure.com/models`: an absolute https URL with a host and no query or fragment."},
+	{Name: "DISPATCH_AZURE_CHAT_DEPLOYMENT", Required: "when `DISPATCH_ANSWERER` is `azure`",
+		Description: "Name of the chat deployment the endpoint serves, sent as each request's model."},
+	{Name: "DISPATCH_AZURE_CHAT_API_VERSION", Required: "no",
+		Description: "The `api-version` query value each request carries, such as `2024-05-01-preview`; unset, a request sends no `api-version`, which is what the Azure OpenAI endpoint takes."},
+	{Name: "DISPATCH_AZURE_CHAT_SCOPE", Default: "`" + embed.DefaultEntraScope + "`, the scope the embedder asks for", Required: "no",
+		Description: "The token scope the federated sign-in asks for. It is configuration because one Azure AI Foundry resource serves two inference families: the models inference endpoint (`https://<resource>.services.ai.azure.com/models`, an `api-version`, scope `https://cognitiveservices.azure.com/.default`) and the Azure OpenAI endpoint (`https://<resource>.services.ai.azure.com/openai/v1`, no `api-version`, scope `https://ai.azure.com/.default`), and which of the two a deployment serves is named by that deployment rather than here."},
+	{Name: "DISPATCH_AZURE_CHAT_TOKENS_PER_MINUTE", Required: "when `DISPATCH_ANSWERER` is `azure`",
+		Description: "The deployment's tokens-per-minute quota, a positive integer, which paces the answerer's calls."},
+	{Name: "DISPATCH_CHAT_ENDPOINT", Required: "when `DISPATCH_ANSWERER` is `endpoint`",
+		Description: "The base URL `/chat/completions` is appended to: an absolute https URL with a host and no query or fragment."},
+	{Name: "DISPATCH_CHAT_TOKEN_FILE", Required: "when `DISPATCH_ANSWERER` is `endpoint`",
+		Description: "Path of the file holding the bearer token every call to that endpoint presents, re-read on each call, as `DISPATCH_AZURE_FEDERATED_TOKEN_FILE` is, so a rotation needs no restart. It names a file rather than being the `_FILE` form of a value: there is no `DISPATCH_CHAT_TOKEN`."},
+	{Name: "DISPATCH_CHAT_MODEL", Required: "when `DISPATCH_ANSWERER` is `endpoint`",
+		Description: "The model each request names."},
 	{Name: "DISPATCH_WEB_DIST", Default: "the `packages/dispatch/web/dist` directory found from the binary's location", Required: "no",
 		Description: "Directory of the built dashboard the server serves."},
 	{Name: "DISPATCH_DEV_SIGNIN", Required: "no",
 		Description: "Set to `1` on a loopback-only local server to sign anyone in by email at `/auth/_dev/signin` without the sign-in issuer; refused alongside any `DISPATCH_SIGNIN_*` setting, `DISPATCH_SIGNIN_DOMAIN` included."},
 	{Name: "DISPATCH_DEV_SIGNIN_SHARED_KEY", Default: "a key generated for each process", Required: "no",
 		Description: "With `DISPATCH_DEV_SIGNIN=1`, a secret every process of one local harness is given, so a session cookie one of them mints is accepted by the others; each signs with HMAC-SHA256 of it under a dev-only label, never with the value itself, so no value placed here signs a cookie a production server accepts. Refused without `DISPATCH_DEV_SIGNIN=1`."},
+	{Name: "DISPATCH_DEV_EMBEDDER", Required: "no",
+		Description: "Set to `1` on a local harness to embed meaning search's text by hashing its words, in the process and calling no model service, so searching by meaning works with no AWS or Azure account. Its vectors say only how many words two texts share, and the identity it records (`dev:…`) keeps them apart from a model's. Refused without `DISPATCH_DEV_SIGNIN=1`, and refused alongside `DISPATCH_EMBEDDER` and the `DISPATCH_AZURE_*` settings."},
 	{Name: "DISPATCH_TEST_HOOKS", Required: "no",
 		Description: "Set to `1` to mount the end-to-end tests' hook routes; never in a real deployment."},
 	{Name: "DISPATCH_TEST_SETTLE_DELAY", Default: "`2s`", Required: "no",
@@ -159,6 +187,8 @@ var settings = []setting{
 		Description: "Set to `1` so the server builds no embedder whatever `DISPATCH_EMBEDDER` and the AWS SDK's own variables would have built: meaning search answers keyword-only and says so, and the embedding queue does nothing, for an end-to-end test process whose AWS variables address a file store rather than a model service. Set only with `DISPATCH_TEST_HOOKS=1`."},
 	{Name: "DISPATCH_TEST_RECONCILE_AT_START", Required: "no",
 		Description: "Set to `1` so a test process runs the delivery reconcile's first pass as it starts, rather than at a random moment within its first 5 minutes, for an end-to-end test that must see a pass inside its window. Set only with `DISPATCH_TEST_HOOKS=1`."},
+	{Name: "DISPATCH_TEST_CI_RECONCILE_INTERVAL", Default: "`5m`", Required: "no",
+		Description: "How often a test process's CI reconcile pass runs, in place of the five minutes a deployment runs it at; a positive Go duration, for an end-to-end test only and never a real deployment. Set only with `DISPATCH_TEST_HOOKS=1`."},
 }
 
 // removedSettings are the variables a release stopped reading, each with what replaced it. None is
@@ -168,7 +198,7 @@ var settings = []setting{
 var removedSettings = []struct{ Name, Replacement string }{
 	{"DISPATCH_ALLOWED_LOGINS", "people sign in; DISPATCH_SIGNIN_GROUP or DISPATCH_SIGNIN_DOMAIN names who may"},
 	{"DISPATCH_APP_CLIENT_SECRET", "nobody signs in through the GitHub App; its JWT needs only DISPATCH_APP_CLIENT_ID and DISPATCH_APP_PEM_B64"},
-	{"COHERE_API_KEY", "meaning search (LEGION-549) calls Cohere Embed v4 through AWS Bedrock (the AWS SDK's default credential chain) or Azure AI Foundry (the DISPATCH_AZURE_* settings), chosen by DISPATCH_EMBEDDER, never with a Cohere API key"},
+	{"COHERE_API_KEY", "meaning search (LEGION-549) calls Cohere Embed v4 through AWS Bedrock (the AWS SDK's default credential chain) or Azure AI Foundry (the DISPATCH_AZURE_EMBED_* settings and the shared Azure sign-in), chosen by DISPATCH_EMBEDDER, never with a Cohere API key"},
 	{"DISPATCH_AGENT_SECRETS_TOKEN", noSharedBrokerBearer},
 	{"DISPATCH_AGENT_SECRETS_TOKEN_FILE", noSharedBrokerBearer},
 	{"DISPATCH_ASSET_STORE_BUCKET", "every server process now keeps its build's dashboard assets in Dispatch's database"},

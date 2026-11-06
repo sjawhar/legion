@@ -7,6 +7,7 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/goroutinetest"
 	"github.com/sjawhar/envoy/internal/kvwatch"
@@ -48,9 +49,9 @@ func testConsumers(t *testing.T, conn *natsgo.Conn) []string {
 func TestEndEndsAWatcherArmedAfterTheStop(t *testing.T) {
 	uri := testnats.URL(t)
 	conn, kv := bucket(t, uri)
-	held := &heldWatchKV{KeyValue: kv, watched: make(chan struct{}), release: make(chan struct{})}
+	held := holdWatch(kv)
 	logger, records := jsonLogger(t)
-	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: held}, newSeen().apply, func() {}, kvwatch.WithLogger(logger))
+	w := kvwatch.New("test cache", held.handle(), newSeen(), kvwatch.WithLogger(logger))
 	w.Start()
 	select {
 	case <-held.watched:
@@ -86,9 +87,9 @@ func TestEndEndsAWatcherArmedAfterTheStop(t *testing.T) {
 func TestAWatchStillStartingAtEndsDeadlineIsAnError(t *testing.T) {
 	uri := testnats.URL(t)
 	conn, kv := bucket(t, uri)
-	held := &heldWatchKV{KeyValue: kv, watched: make(chan struct{}), release: make(chan struct{})}
+	held := holdWatch(kv)
 	logger, records := jsonLogger(t)
-	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: held}, newSeen().apply, func() {}, kvwatch.WithLogger(logger))
+	w := kvwatch.New("test cache", held.handle(), newSeen(), kvwatch.WithLogger(logger))
 	w.Start()
 	select {
 	case <-held.watched:
@@ -109,17 +110,20 @@ func TestAWatchStillStartingAtEndsDeadlineIsAnError(t *testing.T) {
 // drainingStopKV is heldWatchKV whose watcher's Stop answers as nats.go's Unsubscribe does once its
 // connection's drain has begun (nats.go v1.50.0, nats.go:5069-5070): "connection draining". It
 // stops the real watcher first, so the test leaves no consumer behind.
-type drainingStopKV struct{ heldWatchKV }
+type drainingStopKV struct{ *heldWatchKV }
 
-func (k *drainingStopKV) WatchAll(opts ...natsgo.WatchOpt) (natsgo.KeyWatcher, error) {
-	watcher, err := k.heldWatchKV.WatchAll(opts...)
+func (k drainingStopKV) Watch(ctx context.Context, keys string, opts ...jetstream.WatchOpt) (jetstream.KeyWatcher, error) {
+	watcher, err := k.heldWatchKV.Watch(ctx, keys, opts...)
 	if err != nil {
 		return watcher, err
 	}
 	return drainingStop{watcher}, nil
 }
 
-type drainingStop struct{ natsgo.KeyWatcher }
+// handle is k as the bus.KeyValue a watcher takes.
+func (k drainingStopKV) handle() bus.KeyValue { return bus.NewKeyValue(k.legacy, k, k.streams) }
+
+type drainingStop struct{ jetstream.KeyWatcher }
 
 func (w drainingStop) Stop() error {
 	_ = w.KeyWatcher.Stop()
@@ -133,9 +137,9 @@ func (w drainingStop) Stop() error {
 func TestALateWatchAfterALostConnectionIsAWarning(t *testing.T) {
 	uri := testnats.URL(t)
 	_, kv := bucket(t, uri)
-	held := &drainingStopKV{heldWatchKV{KeyValue: kv, watched: make(chan struct{}), release: make(chan struct{})}}
+	held := drainingStopKV{holdWatch(kv)}
 	logger, records := jsonLogger(t)
-	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: held}, newSeen().apply, func() {}, kvwatch.WithLogger(logger))
+	w := kvwatch.New("test cache", held.handle(), newSeen(), kvwatch.WithLogger(logger))
 	w.Start()
 	select {
 	case <-held.watched:
@@ -175,9 +179,9 @@ func endsWaiting() int {
 func TestEndCalledTwiceAtOnceReturnsForBoth(t *testing.T) {
 	uri := testnats.URL(t)
 	conn, kv := bucket(t, uri)
-	held := &heldWatchKV{KeyValue: kv, watched: make(chan struct{}), release: make(chan struct{})}
+	held := holdWatch(kv)
 	logger, records := jsonLogger(t)
-	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: held}, newSeen().apply, func() {}, kvwatch.WithLogger(logger))
+	w := kvwatch.New("test cache", held.handle(), newSeen(), kvwatch.WithLogger(logger))
 	w.Start()
 	select {
 	case <-held.watched:
@@ -217,7 +221,7 @@ func TestAFailedConsumerDeleteAtTheEndIsAnError(t *testing.T) {
 	uri := testnats.URL(t)
 	conn, kv := bucket(t, uri)
 	logger, records := jsonLogger(t)
-	w := kvwatch.New("test cache", kv, newSeen().apply, func() {}, kvwatch.WithLogger(logger))
+	w := kvwatch.New("test cache", kv, newSeen(), kvwatch.WithLogger(logger))
 	w.Start()
 	eventually(t, "the first scan", w.Ready)
 	js, err := conn.JetStream()
@@ -241,7 +245,7 @@ func TestEndIsBoundedByItsContext(t *testing.T) {
 	srv, uri := testnats.Start(t)
 	_, kv := bucket(t, uri)
 	logger, records := jsonLogger(t)
-	w := kvwatch.New("test cache", kv, newSeen().apply, func() {}, kvwatch.WithLogger(logger))
+	w := kvwatch.New("test cache", kv, newSeen(), kvwatch.WithLogger(logger))
 	w.Start()
 	eventually(t, "the first scan", w.Ready)
 

@@ -34,11 +34,11 @@ const (
 	documentSearchOldWord = "quagga"
 )
 
-// documentSearchStatement is one of R1's five statements: the package's own text, the text the
-// release before this change ran over the same rows (document_search_oracle_test.go), and the
-// arguments each is run with. sorted says the statement declares no order of its own, so its
-// rows are compared as a set; holds and lacks are what the rows must and must not name, which
-// is what says the comparison decided something rather than comparing two empty answers.
+// documentSearchStatement is one of R1's five statements: the package's own text, the oracle it
+// is held against (document_search_oracle_test.go), and the arguments each is run with. sorted
+// says the statement declares no order of its own, so its rows are compared as a set; holds and
+// lacks are what the rows must and must not name, which is what says the comparison decided
+// something rather than comparing two empty answers.
 type documentSearchStatement struct {
 	name      string
 	statement string
@@ -176,7 +176,7 @@ func (f documentSearchFixture) statements() []documentSearchStatement {
 		{
 			name:      "search, meaning and keywords",
 			statement: searchQueryMeaning,
-			oracle:    mainSearchQueryMeaning,
+			oracle:    searchQueryMeaningOverMainsDocumentArm,
 			arguments: slices.Concat(searchArguments, meaning),
 			holds:     documents,
 		},
@@ -190,7 +190,7 @@ func (f documentSearchFixture) statements() []documentSearchStatement {
 		{
 			name:      "the related-item check's meaning stage",
 			statement: relatedMeaningQuery,
-			oracle:    mainRelatedMeaningQuery,
+			oracle:    relatedMeaningQueryOverMainsDocumentArm,
 			arguments: slices.Concat(relatedArguments, meaning, []any{lexemes, weights}),
 			holds:     documents,
 		},
@@ -249,10 +249,16 @@ func TestMainsDocumentArmSearchesNoDocumentSearchIndex(t *testing.T) {
 	}
 }
 
-// A2. Each statement of R1 answers exactly what the released statement answers over the same
-// rows. The oracle is that released text held in the test, not a statement built from this
-// package's helpers, so an edit that changed what the document arm returns would move one side
-// and not the other.
+// A2. Each statement of R1 answers exactly what its oracle answers over the same rows. For the
+// three whose text main still runs - search's keyword query, the related-item check's keyword
+// stage and the related-terms probe - the oracle is main's released text, held in the test
+// rather than built from this package's helpers, so an edit that changed what the document arm
+// returns would move one side and not the other. For the two meaning statements it is this
+// release's meaning body over main's keyword legs: main's meaning arms read whole-text vectors
+// this release no longer writes, so main's meaning text answers nothing over these rows and
+// would decide nothing, where the substitute differs from the statement under test in the
+// document keyword arm and in nothing else. Either way the one thing that can move a side is the
+// arm this change rewrote.
 func TestEveryDocumentArmAnswersWhatMainsStatementDoes(t *testing.T) {
 	fixture := newDocumentSearchFixture(t)
 	ctx := context.Background()

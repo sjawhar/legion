@@ -286,15 +286,33 @@ type DaemonInfo struct {
 // Admission is the issue cap and the issues under it, in Dispatch rank order. Concurrency is
 // capped on issues, never on workers, so there is no worker queue here.
 type Admission struct {
-	Cap     int      `json:"cap"`
-	Active  []string `json:"active"`
+	Cap int `json:"cap"`
+	// Active is every issue holding an admission slot, a child as much as a root: the cap counts
+	// the issues at work rather than the trees (dispatch://INFRA-980), so one tree with three
+	// working children holds three of these and a tree whose every issue only waits holds none.
+	Active []string `json:"active"`
+	// Waiting is the admission line, in the line's own order: the issues whose work came back and
+	// wait for a slot before their worker is started again, oldest first, then the issues whose
+	// first phase can start, by their tree root's Dispatch rank. It carries children as well as
+	// roots, for the same reason `active` does.
 	Waiting []string `json:"waiting"`
+	// Trees is the root of every live tree the daemon judges (record.TreeLive), sorted by key: a
+	// tree whose lifecycle stands open under the workflow and does not linger, one whose root
+	// waits in the line, and one whose root waits on a person. A slot is no longer one per tree,
+	// so a running tree can hold no slot at all — its root accepting or awaiting its merge while
+	// its children work, or every issue of it waiting — and `active` alone no longer tells a
+	// reader such as the controller which trees run. Never null; empty when no tree is live.
+	Trees []string `json:"trees"`
 	// Blocked is every issue Legion is waiting to start that waits on a Dispatch issue nobody has
 	// finished (INFRA-225), by issue key: a waiting root admission skips and a child the workflow
-	// holds at `admitted`, together in one list, each with what it still waits on. Waiting is the
-	// waiting line and stays roots alone, so a blocked root is in both. Never null; empty when
-	// nothing waits on a link.
+	// holds at `admitted`, together in one list, each with what it still waits on. A blocked issue
+	// the line carries is in Waiting too. Never null; empty when nothing waits on a link.
 	Blocked []BlockedIssue `json:"blocked"`
+	// treesHidden is set on the copy the state route serves a caller whose plugin is older than
+	// the contract that added Trees (api's withoutTrees, below server.go's treeContract): that
+	// reader knows no `trees` and refuses the key as surely when it is empty as when it names a
+	// tree, so MarshalJSON leaves the key off that one body rather than writing it empty.
+	treesHidden bool
 }
 
 // BlockedIssue is one issue of Blocked and the issues it waits on that are not done. It is
@@ -302,8 +320,11 @@ type Admission struct {
 // read two ways, and the row is declared once, under both.
 type BlockedIssue = record.BlockedIssue
 
-// MarshalJSON keeps `active`, `waiting` and `blocked` arrays on the wire, empty rather than
-// `null`.
+// MarshalJSON keeps `active`, `waiting`, `trees` and `blocked` arrays on the wire, empty rather
+// than `null` — except on an admission whose trees are hidden, which carries no `trees` key at
+// all. That body is marshaled through a value whose own nil `trees` field, being `omitempty`,
+// shadows the embedded one and so is written by nothing; every other key of the block, including
+// one a later contract adds above, is still written from the one place that writes it.
 func (a Admission) MarshalJSON() ([]byte, error) {
 	type wire Admission
 	out := wire(a)
@@ -315,6 +336,16 @@ func (a Admission) MarshalJSON() ([]byte, error) {
 	}
 	if out.Blocked == nil {
 		out.Blocked = []BlockedIssue{}
+	}
+	if a.treesHidden {
+		out.Trees = nil
+		return json.Marshal(struct {
+			wire
+			Trees []string `json:"trees,omitempty"`
+		}{wire: out})
+	}
+	if out.Trees == nil {
+		out.Trees = []string{}
 	}
 	return json.Marshal(out)
 }
@@ -329,6 +360,12 @@ type Issue struct {
 	// write is queued, and go on differing where one was lost until the status repair puts it
 	// back, so a reader who wants the status Dispatch shows must read Dispatch.
 	Status string `json:"status"`
+	// Tree is the key of the root of the issue's tree, which equals Key on a root. Since a child
+	// holds a slot of its own, neither `admission.active` nor `admission.waiting` says any more
+	// which tree an issue belongs to, and a reader needs it to tell a child from a root and to
+	// find the members of a tree that lingers. Absent on an issue the workflow does not record
+	// (an operator's claim, Unrecorded), which stands in no tree.
+	Tree string `json:"tree,omitempty"`
 	// Repo is the repository (owner/name) the issue targets and DefaultBranch that repository's
 	// default branch, both taken when the daemon first recorded the issue and never changed after.
 	// Both are absent on an issue the workflow does not record (an operator's claim, Unrecorded).

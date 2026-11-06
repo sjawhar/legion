@@ -113,8 +113,24 @@ func (s *server) itemBlocks(ctx context.Context, kind refs.ItemKind, id string) 
 			ChangedAt:       row.changedAt,
 		}
 	}
+	embedding, err := refs.BlockEmbeddingStates(ctx, s.deps.Store.Pool, kind.WindowKind(), kind.WindowOwnerKey(id))
+	if err != nil {
+		return model.ItemBlocks{}, err
+	}
+	for index := range blocks {
+		blocks[index].Embedding = blockEmbedding(embedding, blocks[index].ID)
+	}
 	answer.Indexed, answer.Blocks = true, blocks
 	return answer, nil
+}
+
+// blockEmbedding is where the states refs.BlockEmbeddingStates read put block blockID: a block
+// no window covers is in no window's covers and so in no entry of the map.
+func blockEmbedding(states map[string]string, blockID string) string {
+	if state, covered := states[blockID]; covered {
+		return state
+	}
+	return model.BlockNotEmbedded
 }
 
 // storedItemBlocks is an item's stored body, its block state (revision a comment's, nil for a
