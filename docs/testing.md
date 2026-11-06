@@ -161,6 +161,8 @@ So a test whose jj child names no directory opens and writes that clone, and the
 
 - Set `Dir` on every `exec.Command` a test starts that runs `jj`, and on every one that runs `git`, to a directory the test made.
   A `--git-dir` is not enough on its own: it tells git which repository to act on and leaves the child standing wherever the test process stands, which is what the next reader of the command has to work out again.
+  `Dir` is not enough on its own either, and this is the step the rule stopped short of: an inherited `GIT_DIR` names the repository git acts on whatever directory the child stands in, so it outranks `Dir` and `-C` alike, and a Legion issue pod hands every process such a block.
+  So a test that starts git takes those variables out of the child's environment as well as placing it: `fixtureenv.Guard` in the package's `TestMain` for a child that inherits `os.Environ()`, or `fixtureenv.Isolated` for one given an environment of its own.
 
 - The two probes that got this wrong were copies of one helper, now `testbin.RequireJJFilters` in `packages/daemon/internal/testbin`, each running `jj config list` with no `Dir`.
   A probe is as much a jj child as a fixture is.
