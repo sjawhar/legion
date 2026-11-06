@@ -303,6 +303,12 @@ const parallelProjects = [
  * `webkit`, for the reasons written above those projects, and runs here in all three;
  * `heavy-document-writes.e2e.ts`, which drives no browser, and `nested-directive.e2e.ts` ran in
  * `chromium` alone and run in `chromium-alone` alone.
+ *
+ * Each also sets `retries: 0`, which Playwright takes per project as it takes `workers`,
+ * against the one retry the run takes on CI. A row whose claim is a wall-clock time has nothing
+ * to gain from a second attempt: a threshold that a regression misses half the time would fail
+ * the first attempt, pass the retry, be reported `flaky`, and leave the run green where it
+ * should be red.
  */
 const aloneProjects = [
   {
@@ -311,6 +317,7 @@ const aloneProjects = [
     testMatch: clockSpecs,
     use: { ...devices["Desktop Chrome"] },
     workers: 1,
+    retries: 0,
   },
   {
     name: "firefox-alone",
@@ -318,6 +325,7 @@ const aloneProjects = [
     testMatch: /heavy-bodies\.e2e\.ts/,
     use: { ...devices["Desktop Firefox"] },
     workers: 1,
+    retries: 0,
   },
   {
     name: "webkit-alone",
@@ -329,6 +337,7 @@ const aloneProjects = [
     testMatch: /heavy-bodies\.e2e\.ts/,
     use: { ...devices["Desktop Safari"] },
     workers: 1,
+    retries: 0,
   },
 ] satisfies Project[];
 
@@ -359,12 +368,15 @@ export default defineConfig({
     ...devices["Desktop Chrome"],
     baseURL: baseUrl,
     headless: true,
-    // Two values, because one value cannot serve both runs. On CI, where `retries` above is 1,
-    // `on-first-retry` records the trace of the retry alone, which is the one run a flaky row
-    // explains itself by, and costs nothing on the rows that pass. Locally `retries` is 0, so
-    // `on-first-retry` would record no trace at all and a failed row would lose the trace this
-    // suite has today; `retain-on-failure` keeps it.
-    trace: process.env.CI ? "on-first-retry" : "retain-on-failure",
+    // One value for both runs. `retain-on-first-failure` records the first attempt and keeps it
+    // when that attempt failed (`mode === "retain-on-first-failure" && this._testInfo.retry
+    // === 0`, node_modules/.bun/playwright@1.64.1/node_modules/playwright/lib/worker/
+    // workerProcessEntry.js:554), so a flaky row carries the trace of the attempt that failed,
+    // which is the one that explains it. `on-first-retry` records on the retry alone (:550,
+    // `retry === 1`), and a row is flaky exactly when its retry passed, so that mode would keep
+    // a trace of a green run and leave the failure none. Locally, with `retries: 0`, the first
+    // attempt is the only attempt, so this is the `retain-on-failure` the suite had before.
+    trace: "retain-on-first-failure",
   },
   // Runs before any row, against the servers the checks above require: it refuses a target that
   // does not read this run's fake Envoy, and in two-process mode a pair whose processes do not

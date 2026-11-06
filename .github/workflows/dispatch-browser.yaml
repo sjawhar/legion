@@ -46,8 +46,10 @@ on:
         default: ""
       engines:
         description: >-
-          The browsers the install step downloads, passed to `playwright install`. The full lane
-          needs all three; a caller that runs Chromium rows alone can narrow it.
+          The browsers the shard job's install step downloads, passed to `playwright install`.
+          The full lane launches all three; the pull-request lane launches Chromium alone and
+          its caller narrows this to match. The alone job ignores it and installs its own leg's
+          engine.
         type: string
         default: "chromium webkit firefox"
 
@@ -183,10 +185,10 @@ jobs:
           key: playwright-${{ runner.os }}-${{ hashFiles('bun.lock') }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('playwright-{0}-', runner.os) || '' }}
       # This step installs the system packages itself instead of through `playwright install
-      # --with-deps`, which installs Playwright's whole ubuntu24.04-x64 list. The pinned list
-      # below is that list less four media packages - gstreamer1.0-libav,
-      # gstreamer1.0-plugins-bad, gstreamer1.0-plugins-good and libavcodec60 - which is what
-      # makes this step small enough to bound. Measured on this
+      # --with-deps`, which installs Playwright's whole ubuntu24.04-x64 list. The pinned list it
+      # reads from .github/scripts/playwright-packages.txt is that list less four media packages
+      # - gstreamer1.0-libav, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-good and
+      # libavcodec60 - which is what makes this step small enough to bound. Measured on this
       # image: Playwright's whole list resolves to 181 packages and 114 MB; without those four it
       # is 60 packages and 51.4 MB. The four carry 121 of the 181 packages and 62.8 of the
       # 114.2 MB, through the ffmpeg stack and the GStreamer plugin trees.
@@ -203,12 +205,9 @@ jobs:
       # firefox-download-navigation and firefox-alone (e2e/playwright.config.ts) - which the
       # browser step below and the alone job run.
       #
-      # On a Playwright upgrade, re-derive the list as the union of the `tools`, `chromium`,
-      # `firefox` and `webkit` entries of the ubuntu24.04-x64 table in playwright-core's
-      # lib/coreBundle.js, less those four. Deriving it at run time by subtracting one apt
-      # closure from the other does not work and must not be written: the two closures share 35
-      # packages Playwright's own list names or needs, and the subtraction leaves WebKit unable
-      # to launch.
+      # The list lives in .github/scripts/playwright-packages.txt, one package per line, and
+      # this step and the alone job's copy both read it, so the two machines cannot drift apart.
+      # How to re-derive it on a Playwright upgrade is in that file's own head comment.
       #
       # The 22-minute budget is the step's own retry arithmetic, not its measured maximum, which
       # the bounds make unreachable: two bounded attempts of `apt-get update` at 90 s, two of the
@@ -220,8 +219,8 @@ jobs:
       # to 22 min. The budget has to carry the fallback's own update, because the path that
       # needs every one of those bounds is the path on which the step still succeeds. Healthy
       # today is a 38 s median and a 102 s 95th percentile for the whole step. The apt half of
-      # that arithmetic does not move with `engines`: the package list below is fixed, and only
-      # the browser download at the end of the step takes the input.
+      # that arithmetic does not move with `engines`: the pinned list is the three-engine list
+      # on every leg, and only the browser download at the end of the step takes the input.
       #
       # Each bound is derived from its own phase: each job's two apt rates, as apt logged them,
       # scaled onto the head's smaller fetch of 12.9 MB of indexes and 51.4 MB of packages. The
@@ -284,7 +283,7 @@ jobs:
       # at 300 s, the fallback origin's update stopped at 90 s and a third download attempt
       # stopped at 300 s. The step fails by its own name in at most 1170 s, against the
       # 40-minute job cancel it replaces.
-      - name: Install Playwright Chromium, WebKit and Firefox
+      - name: Install the lane's Playwright browsers
         # The runner image preconfigures Google's chrome-stable apt source, whose index
         # intermittently fails `apt-get update` with a hash-sum mismatch and takes the install
         # down with it. Chrome is already installed there; the source only serves upgrades, so
@@ -292,18 +291,11 @@ jobs:
         timeout-minutes: 22
         run: |
           grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
-          packages="fonts-freefont-ttf fonts-ipafont-gothic fonts-liberation fonts-noto-color-emoji
-          fonts-tlwg-loma-otf fonts-unifont fonts-wqy-zenhei gstreamer1.0-plugins-base libasound2t64
-          libatk-bridge2.0-0t64 libatk1.0-0t64 libatomic1 libatspi2.0-0t64 libavif16 libcairo-gobject2
-          libcairo2 libcups2t64 libdbus-1-3 libdrm2 libenchant-2-2 libepoxy0 libevent-2.1-7t64
-          libflite1 libfontconfig1 libfreetype6 libgbm1 libgdk-pixbuf-2.0-0 libgles2 libglib2.0-0t64
-          libgstreamer-gl1.0-0 libgstreamer-plugins-bad1.0-0 libgstreamer-plugins-base1.0-0
-          libgstreamer1.0-0 libgtk-3-0t64 libgtk-4-1 libharfbuzz-icu0 libharfbuzz0b libhyphen0
-          libicu74 libjpeg-turbo8 liblcms2-2 libmanette-0.2-0 libnspr4 libnss3 libopus0 libpango-1.0-0
-          libpangocairo-1.0-0 libpng16-16t64 libsecret-1-0 libvpx9 libwayland-client0 libwayland-egl1
-          libwayland-server0 libwebp7 libwebpdemux2 libwoff1 libx11-6 libx11-xcb1 libx264-164
-          libxcb-shm0 libxcb1 libxcomposite1 libxcursor1 libxdamage1 libxext6 libxfixes3 libxi6
-          libxkbcommon0 libxml2 libxrandr2 libxrender1 libxslt1.1 xfonts-cyrillic xfonts-scalable xvfb"
+          # The pinned list, read from the repository rather than written here, so this step and
+          # the alone job's copy install the same set. $GITHUB_WORKSPACE is the checkout root,
+          # reached that way because the step's working-directory is packages/dispatch, as the
+          # list check at the end of this step is reached.
+          packages=$(cat "$GITHUB_WORKSPACE/.github/scripts/playwright-packages.txt")
           # A bounded attempt, retried: the attempt count, then what the log calls the phase,
           # then the command. Each failed attempt prints the phase, that attempt's exit status
           # and how many attempts are left; `timeout` exits 124 when it killed the command, so
@@ -357,11 +349,12 @@ jobs:
           fi
           # Unbounded and unretried: the archive is on disk now, so this takes no network.
           sudo apt-get install -y --no-install-recommends $packages
-          # The browsers alone, and the caller's: `engines` names them, because the pull-request
-          # lane runs Chromium rows only and need not download WebKit and Firefox. Named either
-          # way, because with no argument Playwright resolves its own default set rather than the
-          # suite's three. The step's name says those three, which is what both lanes ask for
-          # today.
+          # The browsers alone, and the caller's whole set: `engines` names them, because the
+          # pull-request lane launches Chromium rows only (chromium and iphone, the latter an
+          # iPhone 13 on Chromium) and need not download WebKit and Firefox. Named either way,
+          # because with no argument Playwright resolves its own default set rather than the
+          # suite's. The apt list above does not narrow with them: it stays the three-engine
+          # list, for the reason the step's head comment gives.
           bunx playwright install ${{ inputs.engines }}
           # Has the pinned list fallen behind Playwright? The check is the repository's
           # .github/scripts/playwright-deps-current.sh, and it runs here, against the list it is
@@ -555,11 +548,12 @@ jobs:
       # above pointed at $RUNNER_TEMP; mkdtempSync gives the directory a random suffix, so the
       # glob matches it however many lanes ran.
       #
-      # Always, not `if: failure()`: the config now retries a failed row once on CI
-      # (`retries: process.env.CI ? 1 : 0`), so a flaky row passes on its retry and leaves this
-      # job green - and `if: failure()` would drop exactly the trace the merge job's flake
-      # reading exists to explain. A green run's upload is small; the trace is kept on the first
-      # retry alone (`trace: 'on-first-retry'`).
+      # Always, not `if: failure()`: the config retries a failed row once on CI
+      # (`retries: process.env.CI ? 1 : 0`), so a flaky row passes on its retry and this leg
+      # ends green - and `if: failure()` would then upload nothing of that row at all, the trace
+      # the merge job's flake reading exists to explain among it. The trace it carries is of the
+      # attempt that failed: the config's `trace: 'retain-on-first-failure'` records the first
+      # attempt and keeps it when that attempt failed. A green run's upload is small.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
@@ -577,10 +571,12 @@ jobs:
     # lane alone: a pull request runs no clock row, since a shard job's machine cannot hold one
     # still enough to measure.
     #
-    # Its steps are the shard job's, with two differences - one worker rather than four, and the
-    # Playwright command below - and are kept textually identical everywhere else, so the two can
-    # be diffed. They are not one composite action for the reason this file's head gives. The
-    # `env:` rule of the shard job's head holds here too, and so does its reason.
+    # Its steps are the shard job's, with four differences - one worker rather than four, the
+    # Playwright command below, an install of this leg's own engine rather than the caller's
+    # whole set, and no file store on the machine - and are kept textually identical everywhere
+    # else, so the two can be diffed. They are not one composite action for the reason this
+    # file's head gives. The `env:` rule of the shard job's head holds here too, and so does its
+    # reason.
     #
     # The budget is a projection like the shard job's, from the same figures and the same model.
     # The shard job's comment puts the `-alone` phase of today's 1671 s step at 206 s for all 55
@@ -633,25 +629,6 @@ jobs:
           bun run build:web
           ls -l web/dist/THIRD_PARTY_NOTICES.txt
         working-directory: packages/dispatch
-      # The file store the step below starts, pulled first for the reason the action gives. The
-      # image comes from ghcr.io/cybermonklabs/legion/ci, a registry this repository publishes, so a
-      # failed pull is a fault of this repository. The action must show it, not retry it.
-      - name: Pull the file store image
-        uses: ./.github/actions/pull-test-images
-        with:
-          consts: packages/envoy/internal/tests3/seaweedfs.go Image
-      - name: Start an S3-compatible server for uploaded files
-        # The browser suite runs the server with DISPATCH_FILE_STORE_BUCKET set (e2e/run-server.sh
-        # reads DISPATCH_E2E_FILE_STORE_ENDPOINT), so every upload and download the dashboard makes
-        # goes through the file store, as production's does. Same image as the Go tests
-        # (internal/tests3), read from its declaration again to name it for the docker run below.
-        # Started before the Playwright install, and waited for after it, so the container's own
-        # start overlaps that install instead of following it.
-        run: |
-          image=$(sed -n 's/^const Image = "\(.*\)"$/\1/p' ../envoy/internal/tests3/seaweedfs.go)
-          [ -n "$image" ] || { echo "::error::no const Image in packages/envoy/internal/tests3/seaweedfs.go"; exit 1; }
-          docker run -d --name dispatch-e2e-files -p 127.0.0.1:18333:8333 "$image" server -s3 -dir=/data -ip=0.0.0.0 -s3.port=8333
-        working-directory: packages/dispatch
       # The browsers the install step below downloads, under the Playwright version bun.lock
       # pins, which is what decides their revisions. Restore only: this job saves no cache entry,
       # since the shard job's first leg saves the one key both jobs restore.
@@ -661,11 +638,12 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('bun.lock') }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('playwright-{0}-', runner.os) || '' }}
-      # The shard job's install step, word for word, including its 22-minute budget and the
-      # arithmetic behind it: the package list, the bounded apt attempts and the fallback origin
-      # are the same on this machine. Its whole comment is above that copy; nothing here changes
-      # what it says, so it is not repeated.
-      - name: Install Playwright Chromium, WebKit and Firefox
+      # The shard job's install step, with one difference: the browsers it downloads are this
+      # leg's own engine, not the caller's whole set. Its 22-minute budget and the arithmetic
+      # behind it, the package list, the bounded apt attempts and the fallback origin are the
+      # same on this machine. That whole comment is above the shard job's copy; nothing here
+      # changes what it says, so it is not repeated.
+      - name: Install the lane's Playwright browsers
         # The runner image preconfigures Google's chrome-stable apt source, whose index
         # intermittently fails `apt-get update` with a hash-sum mismatch and takes the install
         # down with it. Chrome is already installed there; the source only serves upgrades, so
@@ -673,18 +651,11 @@ jobs:
         timeout-minutes: 22
         run: |
           grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
-          packages="fonts-freefont-ttf fonts-ipafont-gothic fonts-liberation fonts-noto-color-emoji
-          fonts-tlwg-loma-otf fonts-unifont fonts-wqy-zenhei gstreamer1.0-plugins-base libasound2t64
-          libatk-bridge2.0-0t64 libatk1.0-0t64 libatomic1 libatspi2.0-0t64 libavif16 libcairo-gobject2
-          libcairo2 libcups2t64 libdbus-1-3 libdrm2 libenchant-2-2 libepoxy0 libevent-2.1-7t64
-          libflite1 libfontconfig1 libfreetype6 libgbm1 libgdk-pixbuf-2.0-0 libgles2 libglib2.0-0t64
-          libgstreamer-gl1.0-0 libgstreamer-plugins-bad1.0-0 libgstreamer-plugins-base1.0-0
-          libgstreamer1.0-0 libgtk-3-0t64 libgtk-4-1 libharfbuzz-icu0 libharfbuzz0b libhyphen0
-          libicu74 libjpeg-turbo8 liblcms2-2 libmanette-0.2-0 libnspr4 libnss3 libopus0 libpango-1.0-0
-          libpangocairo-1.0-0 libpng16-16t64 libsecret-1-0 libvpx9 libwayland-client0 libwayland-egl1
-          libwayland-server0 libwebp7 libwebpdemux2 libwoff1 libx11-6 libx11-xcb1 libx264-164
-          libxcb-shm0 libxcb1 libxcomposite1 libxcursor1 libxdamage1 libxext6 libxfixes3 libxi6
-          libxkbcommon0 libxml2 libxrandr2 libxrender1 libxslt1.1 xfonts-cyrillic xfonts-scalable xvfb"
+          # The pinned list, read from the repository rather than written here, so this step and
+          # the shard job's copy install the same set. $GITHUB_WORKSPACE is the checkout root,
+          # reached that way because the step's working-directory is packages/dispatch, as the
+          # list check at the end of this step is reached.
+          packages=$(cat "$GITHUB_WORKSPACE/.github/scripts/playwright-packages.txt")
           # A bounded attempt, retried: the attempt count, then what the log calls the phase,
           # then the command. Each failed attempt prints the phase, that attempt's exit status
           # and how many attempts are left; `timeout` exits 124 when it killed the command, so
@@ -738,12 +709,15 @@ jobs:
           fi
           # Unbounded and unretried: the archive is on disk now, so this takes no network.
           sudo apt-get install -y --no-install-recommends $packages
-          # The browsers alone, and the caller's: `engines` names them, because the pull-request
-          # lane runs Chromium rows only and need not download WebKit and Firefox. Named either
-          # way, because with no argument Playwright resolves its own default set rather than the
-          # suite's three. The step's name says those three, which is what both lanes ask for
-          # today.
-          bunx playwright install ${{ inputs.engines }}
+          # One engine, this leg's: each project of the matrix runs one browser and its name is
+          # that browser with `-alone` after it (chromium-alone is Desktop Chrome,
+          # firefox-alone Desktop Firefox and webkit-alone Desktop Safari,
+          # e2e/playwright.config.ts), so the engine is the name with that suffix cut off. The
+          # caller's `engines` is the shard job's business, which runs the whole lane. The apt
+          # list above does not narrow with this: it stays the three-engine list, for the reason
+          # the shard job's install comment gives.
+          engine="${{ matrix.project }}"
+          bunx playwright install "${engine%-alone}"
           # Has the pinned list fallen behind Playwright? The check is the repository's
           # .github/scripts/playwright-deps-current.sh, and it runs here, against the list it is
           # given on this line: $packages, unquoted so it splits into words, as apt takes it
@@ -755,19 +729,6 @@ jobs:
           # this suite's Playwright.
           "$GITHUB_WORKSPACE/.github/scripts/playwright-deps-current.sh" $packages
         working-directory: packages/dispatch
-      - name: Wait for the S3-compatible server
-        # The readiness wait of the step that started the container, after the install the
-        # container came up during. An anonymous PUT makes the bucket; each lane makes its own
-        # (dispatch-e2e-files-lane-N) with the same request (e2e/run.ts), so this one proves the
-        # store answers a PUT and serves the one-lane run its own bucket.
-        run: |
-          for attempt in $(seq 1 60); do
-            curl -sf -o /dev/null http://127.0.0.1:18333/ && break
-            [ "$attempt" -lt 60 ] || { docker logs dispatch-e2e-files; exit 1; }
-            sleep 1
-          done
-          curl -sf -X PUT -o /dev/null http://127.0.0.1:18333/dispatch-e2e-files
-        working-directory: packages/dispatch
       - name: Browser-test dispatch dashboard (${{ matrix.project }})
         # `bun run e2e` builds the SPA itself, which would rebuild it a second time in this job.
         # Calling the wrapper directly reuses the "Build dispatch dashboard" step's dist above and
@@ -778,11 +739,19 @@ jobs:
         # server.
         #
         # DISPATCH_E2E_WORKERS is how many lanes e2e/run.ts starts, one per Playwright worker,
-        # each a harness, a bucket and a Postgres of its own, that last one a `docker run` of
+        # each a harness and a Postgres of its own, that last one a `docker run` of
         # DISPATCH_E2E_PG_IMAGE (e2e/harness-postgres.ts). They are set on the command line, not
         # in this step's `env:`, for the reason the job's head gives. One lane here, not four:
         # these projects' rows are read from the wall clock, and three other lanes on the machine
         # would be in the reading.
+        #
+        # No file store on this machine, and no DISPATCH_E2E_FILE_STORE_* names: these three
+        # projects run the clock specs alone (heavy-bodies, heavy-document-writes and
+        # nested-directive, e2e/playwright.config.ts's clockSpecs), none of which uploads or
+        # downloads anything, and e2e/run.ts:126-130 makes no lane bucket at one worker. A
+        # container serving nothing would be charged to the very reading these rows exist for.
+        # A clock spec that later uploads fails here by name rather than quietly: the same
+        # bargain the install step takes with the media packages it drops.
         #
         # MemAvailable every 5 s for the length of this step, kept for the upload below and its
         # lowest value printed at the end: the lane's Postgres container runs outside this job's
@@ -802,8 +771,8 @@ jobs:
         # and died inside one tick, and the last seconds of one that died between ticks.
         # `everything else` is the machine's own busy time (/proc/stat) less the named groups, so
         # a reader sees the whole step without downloading the samples: it holds that loss, the
-        # runner's own work, the file-store container and the sampler itself. On this job it is
-        # also the reading that says the machine was quiet, which is the claim these rows rest on.
+        # runner's own work and the sampler itself. On this job it is also the reading that says
+        # the machine was quiet, which is the claim these rows rest on.
         timeout-minutes: 4
         run: |
           # $RUNNER_TEMP holds everything this step writes, the run directory of e2e/run.ts
@@ -877,12 +846,6 @@ jobs:
             }' "$RUNNER_TEMP/cpu-samples.txt"
           exit "$status"
         working-directory: packages/dispatch
-        # The file store the step above started. Set here, not written to $GITHUB_ENV, which every
-        # later step would inherit, and which check-ci-filters.sh treats as reaching the job's go
-        # commands unseen.
-        env:
-          DISPATCH_E2E_FILE_STORE_ENDPOINT: http://127.0.0.1:18333
-          DISPATCH_E2E_FILE_STORE_BUCKET: dispatch-e2e-files
       # This leg's half of the run's report. Always, not on failure alone: the merge job reads
       # every leg's blob, and a leg whose blob is missing fails it by name.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -908,11 +871,12 @@ jobs:
       # above pointed at $RUNNER_TEMP; mkdtempSync gives the directory a random suffix, so the
       # glob matches it however many lanes ran.
       #
-      # Always, not `if: failure()`: the config now retries a failed row once on CI
-      # (`retries: process.env.CI ? 1 : 0`), so a flaky row passes on its retry and leaves this
-      # job green - and `if: failure()` would drop exactly the trace the merge job's flake
-      # reading exists to explain. A green run's upload is small; the trace is kept on the first
-      # retry alone (`trace: 'on-first-retry'`).
+      # Always, not `if: failure()`: a green leg's logs are worth as much as a red one's here,
+      # since they say what the lane's servers did while the clock was read. These three
+      # projects set `retries: 0` of their own (e2e/playwright.config.ts), so no row of this job
+      # is retried and none is reported flaky; a row that fails fails the leg, and the trace it
+      # carries is of its one attempt, which the config's `trace: 'retain-on-first-failure'`
+      # keeps. A green run's upload is small.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:

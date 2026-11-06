@@ -31,8 +31,8 @@ name: CI
 # actions/cache/restore: go-daemon (typecheck, test and pi-legion), go-docs (docs, and the build job
 # of docs-pages.yaml, which saves it), go-envoy (envoy-e2e-local and envoy-session-stall, which
 # build the same listener and natsd, listener-server-change, which builds the listener, and
-# dispatch, envoy-go-race-docs and the shard, alone and multiprocess jobs of
-# dispatch-browser.yaml, which save none), go-envoy-test
+# envoy-go-race-docs and the shard, alone and multiprocess jobs of dispatch-browser.yaml, which
+# save none), go-envoy-test
 # (envoy-go alone, which saves it: it builds the test binary of every package of the envoy module,
 # a set no other job builds), go-envoy-infra (envoy-infra-go) and go-notices (lint's notices step).
 # Each family keeps one entry, keyed on the Go version its job's setup-go installed, so it is
@@ -881,9 +881,11 @@ jobs:
               # being started from the default branch alone.
               - '.github/workflows/dispatch-browser.yaml'
               - '.github/workflows/dispatch-browser-nightly.yaml'
-              # The browser suite's install step runs it (dispatch-browser.yaml), so a change to
-              # it must re-run that job, which this anchor gates through dispatch_browser.
+              # The browser suite's install steps run it and read the pinned apt list beside it
+              # (dispatch-browser.yaml), so a change to either must re-run that job, which this
+              # anchor gates through dispatch_browser.
               - '.github/scripts/playwright-deps-current.sh'
+              - '.github/scripts/playwright-packages.txt'
               - *bun_install
               - *biome
               - 'packages/dispatch/**'
@@ -2430,6 +2432,14 @@ jobs:
     # of its steps' `env:` drops that build out of check-ci-filters.sh's reduction, which then
     # counts it as reading every Go file of the repository.
     #
+    # No cache of the Go families: the job runs no go command. Its steps are lint, typecheck,
+    # test, build, check:classes and check:asset-sizes, and the one path to `go` was the browser
+    # step, which moved. The four `bash e2e/run-server.sh` call sites the test step reaches all
+    # assert a refusal and return before that script's `go build`
+    # (.github/scripts/ci_job_reads.py says the same above its script_run claim), so a go-envoy
+    # restore would download a module and build cache nothing here reads, inside a five-minute
+    # budget. setup-go stays, so `go` is on PATH if a refusal path ever changes.
+    #
     # The budget is measured: GitHub's jobs API over the 397 of the newest 400 ci.yaml runs that
     # could be read, created between 2026-11-05T04:52:45Z and 2026-11-05T21:06:27Z (268
     # pull_request, 120 merge_group, 12 push), over the 217 jobs of this name that concluded
@@ -2466,19 +2476,6 @@ jobs:
         with:
           go-version-file: packages/envoy/go.mod
           cache: false
-      # go-envoy, restored only: this job saves nothing into the family, building neither the
-      # listener nor the natsd its saving jobs build. It is here for the `go build` inside
-      # packages/dispatch/e2e/run-server.sh, which the test step's rows start and the script's
-      # own refusals stop short of; the browser rows that do reach it are now
-      # dispatch-browser.yaml's, whose jobs restore the same family.
-      - id: go-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: go-envoy-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
-          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-{0}-', runner.os) || '' }}
       - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
       - name: Build contracts for dispatch e2e
@@ -2548,6 +2545,14 @@ jobs:
   # them. The nightly (.github/workflows/dispatch-browser-nightly.yaml) calls the same file with
   # the full lane, from main.
   #
+  # The two lanes need different browsers, so each is given its own `engines`. The
+  # pull-request lane runs `chromium` and `iphone`, and `iphone` is an iPhone 13 on Chromium
+  # (`browserName: "chromium"`, packages/dispatch/e2e/playwright.config.ts), so that lane
+  # launches Chromium alone and downloading WebKit and Firefox on each of its four shard legs
+  # buys nothing. The full lane runs the WebKit and Firefox projects too and needs all three.
+  # Only the browser download narrows: the apt list the install step pins is the three-engine
+  # list on every leg, for the reason that step's own comment gives.
+  #
   # The matrix is in the called workflow and cannot be here. Every leg of a matrix shares one
   # job id; .github/actions/ci-ok-report/action.yml names its artifact
   # ci-ok-<job>-<run attempt>-<status>, and .github/scripts/ci-ok-report.sh groups the reports
@@ -2563,6 +2568,7 @@ jobs:
     uses: ./.github/workflows/dispatch-browser.yaml
     with:
       lane: ${{ github.event_name == 'pull_request' && 'pull-request' || 'full' }}
+      engines: ${{ github.event_name == 'pull_request' && 'chromium' || 'chromium webkit firefox' }}
       ci-ok-changes: ${{ toJSON(needs.changes) }}
 
   claude-envoy:

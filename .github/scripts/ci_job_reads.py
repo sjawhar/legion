@@ -676,7 +676,7 @@ BROWSER_SHARD_SPECS = "Browser-test dispatch dashboard (shard ${{ matrix.shard }
 BROWSER_ALONE_SPECS = "Browser-test dispatch dashboard (${{ matrix.project }})"
 BROWSER_MP_SPECS = "Browser-test dispatch dashboard against two server processes"
 BROWSER_MP_SIGNIN = "Browser-test a sign-in across two server processes"
-BROWSER_INSTALL = "Install Playwright Chromium, WebKit and Firefox"
+BROWSER_INSTALL = "Install the lane's Playwright browsers"
 BROWSER_MERGE_STEP = "Merge the legs' blob reports into one report"
 STALL = "envoy-session-stall"
 STALL_CLIENT = "Stall test of envoy-client's NATS connection options"
@@ -941,6 +941,8 @@ GATES = [
         ("bun.lock", f"{at_browser('playwright-cache')} keys the browser cache on hashFiles('bun.lock'), "
          f"which pins the Playwright version whose browsers {at_browser(BROWSER_INSTALL)} downloads"),
         (".github/scripts/playwright-deps-current.sh", at_browser(BROWSER_INSTALL)),
+        (".github/scripts/playwright-packages.txt", f"{at_browser(BROWSER_INSTALL)} reads it as the apt list it installs, "
+         "and the alone job's copy of that step reads the same file"),
         ("scripts/third-party-notices.ts", "packages/dispatch/web/vite.config.ts:11 (build:web writes dist/THIRD_PARTY_NOTICES.txt)"),
     ) + setup_go(BROWSER_SHARD, f"{ENVOY}/go.mod", BROWSER_SITE) + bun_job(BROWSER_SHARD, BROWSER_SITE)
       + CI_SELF + BROWSER_SITE_SELF),

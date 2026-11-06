@@ -1,27 +1,30 @@
 #!/usr/bin/env bash
-# Has the pinned apt list of ci.yaml's "Install Playwright Chromium, WebKit and Firefox" step
-# fallen behind Playwright? That step installs Playwright's whole ubuntu24.04-x64 list less four
-# media packages, and this script is what keeps that subtraction honest. It holds names against
-# names: every package Playwright asks for must be one the pinned list holds or one of the four.
-# It then holds what `playwright install-deps --dry-run` reports missing against the apt closure
-# of those four. Either half failing is a list that has fallen behind, and this fails on it.
+# Has the pinned apt list of .github/workflows/dispatch-browser.yaml's "Install the lane's
+# Playwright browsers" step fallen behind Playwright? That step installs Playwright's whole
+# ubuntu24.04-x64 list less four media packages, and this script is what keeps that subtraction
+# honest. It holds names against names: every package Playwright asks for must be one the
+# pinned list holds or one of the four. It then holds what `playwright install-deps --dry-run`
+# reports missing against the apt closure of those four. Either half failing is a list that has
+# fallen behind, and this fails on it.
 #
 # Both halves are needed. A package Playwright adds can be a dependency of one of the four - on
 # noble, gstreamer1.0-plugins-good pulls in libsoup-3.0-0, libgudev-1.0-0 and libxtst6 - so the
 # closure accounts for names the step never installs, and only the pinned list decides them.
 #
-# `dropped_packages` below is the list of four this check uses; the comment above the step's
-# `packages=` names the same four for a reader of the workflow.
+# `dropped_packages` below is the list of four this check uses; the comment above that install
+# step names the same four for a reader of the workflow, and the list itself is
+# .github/scripts/playwright-packages.txt, one package per line, which both copies of the step
+# read.
 #
-# Its one caller is that step, which runs it from packages/dispatch after `bunx playwright
-# install chromium webkit firefox`, so both sides are read from the same state. It changes no
-# directory, and the one file it writes, the record of Playwright's apt call, is in a temporary
-# directory it removes on exit.
+# Its callers are the two copies of that step, in dispatch-browser.yaml's shard and alone jobs.
+# Each runs it from packages/dispatch after its own `bunx playwright install`, so both sides are
+# read from the same state. It changes no directory, and the one file it writes, the record of
+# Playwright's apt call, is in a temporary directory it removes on exit.
 #
 # It takes the pinned list as its arguments, and `bunx` resolves Playwright from the caller's
 # working directory, so it reads the Dispatch suite's Playwright only when it is run from
 # packages/dispatch: .github/scripts/playwright-deps-current.sh $packages
-# CI runs it in ci.yaml's dispatch job, and its tests in ci.yaml's test job.
+# CI runs it in those two jobs of dispatch-browser.yaml, and its tests in ci.yaml's test job.
 set -euo pipefail
 shopt -s inherit_errexit
 
