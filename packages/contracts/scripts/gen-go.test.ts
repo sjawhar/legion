@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
+import { skipWithout } from "@legion/test-fixtures/host-tools";
 
 const output = resolve(import.meta.dir, "../../envoy/internal/contracts/generated.go");
 const blockSchemaOutput = resolve(
@@ -16,7 +17,11 @@ const questionSchema = resolve(import.meta.dir, "../schemas/dispatch-question.sc
 const generator = resolve(import.meta.dir, "gen-go.ts");
 const repoRoot = resolve(import.meta.dir, "../../..");
 
-describe("gen-go", () => {
+// Every case here runs `gen-go --check`, which renders each Go file through gofmt and refuses to
+// compare without it, so a host with no gofmt is one where these cases say nothing.
+const skip = skipWithout("gofmt");
+
+describe.skipIf(skip)("gen-go", () => {
   // The generator shells out to gofmt, so Bun's 5 s default cannot cover a cold CI runner.
   // `--check` compares a fresh render with the committed file and never writes it, so a constant
   // changed in TypeScript without regenerating fails here instead of being rewritten in place.

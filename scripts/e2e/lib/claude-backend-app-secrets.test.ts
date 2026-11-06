@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { hostTool, skipWithout } from "@legion/test-fixtures/host-tools";
 
 // claude-backend-tmux.sh's prerequisites on a box whose own `secrets` store holds no App credential
 // (the devbox once its local copies of another deployment's keys were removed): the run must reach
@@ -40,7 +41,10 @@ const asked = join(dir, "secrets-asked");
 stub("secrets", `printf '%s\\n' "$*" >> '${asked}'\necho "no secret named $2" >&2\nexit 1`);
 // The broker's client the tokens come through: runs its command with a release in its environment.
 stub("agent-secrets", 'name=$1; shift; [ "$1" = -- ] && shift; export "$name={}"; exec "$@"');
-for (const name of [
+// The real programs the run needs on the PATH it is given: each is linked into the run's own bin
+// below. A host missing one of them would run the script against a PATH without it, which fails
+// at whichever line first calls it, so the row is skipped and names what is missing instead.
+const tools = [
   "bash",
   "sh",
   "jq",
@@ -85,27 +89,33 @@ for (const name of [
   "flock",
   "ps",
   "sha256sum",
-]) {
-  const found = Bun.which(name);
+];
+const skip = skipWithout(...tools);
+for (const name of tools) {
+  const found = hostTool(name);
   if (found !== null) symlinkSync(found, join(bin, name));
 }
 const keyFile = join(dir, "anthropic-key");
 writeFileSync(keyFile, "sk-test\n", { mode: 0o600 });
 
-test("the prerequisites never ask the box's own secrets store for an App credential", () => {
-  const run = Bun.spawnSync(["bash", script], {
-    env: {
-      HOME: dir,
-      PATH: bin,
-      TMPDIR: scratch,
-      LEGION_E2E_MODEL_ROUTE: "key-file",
-      LEGION_E2E_ANTHROPIC_KEY_FILE: keyFile,
-    },
-    stdout: "pipe",
-    stderr: "pipe",
-    timeout: 60_000,
-  });
-  const output = run.stdout.toString() + run.stderr.toString();
-  expect(output).not.toMatch(/^FAIL prerequisites: secrets\b/m);
-  expect(existsSync(asked) ? readFileSync(asked, "utf8") : "").toBe("");
-}, 90_000);
+test.skipIf(skip)(
+  "the prerequisites never ask the box's own secrets store for an App credential",
+  () => {
+    const run = Bun.spawnSync(["bash", script], {
+      env: {
+        HOME: dir,
+        PATH: bin,
+        TMPDIR: scratch,
+        LEGION_E2E_MODEL_ROUTE: "key-file",
+        LEGION_E2E_ANTHROPIC_KEY_FILE: keyFile,
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: 60_000,
+    });
+    const output = run.stdout.toString() + run.stderr.toString();
+    expect(output).not.toMatch(/^FAIL prerequisites: secrets\b/m);
+    expect(existsSync(asked) ? readFileSync(asked, "utf8") : "").toBe("");
+  },
+  90_000
+);

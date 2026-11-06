@@ -2502,17 +2502,18 @@ jobs:
       - name: Typecheck dispatch dashboard
         run: bun run typecheck
         working-directory: packages/dispatch
-      # The lane cases of e2e/__tests__/psql-session.test.ts and harness-lanes.test.ts skip
-      # themselves where no database is named, so in this job they do not run: it has no
-      # `postgres:` service on purpose, since a run of more than one lane refuses a caller-set
-      # DATABASE_URL, one database being unable to serve lanes that truncate it per row. A
-      # container of the pinned image for this step alone was tried and taken out again: it cost
-      # an image pull and a readiness wait, about 90 s of a job whose own budget is the thing
+      # The database cases of e2e/__tests__/psql-session.test.ts and harness-lanes.test.ts skip
+      # themselves where LEGION_TEST_PG_DSN names no server, so in this job they do not run: it
+      # has no `postgres:` service on purpose, since a run of more than one lane refuses a
+      # caller-set DATABASE_URL, one database being unable to serve lanes that truncate it per
+      # row. A container of the pinned image for this step alone was tried and taken out again: it
+      # cost an image pull and a readiness wait, about 90 s of a job whose own budget is the thing
       # under scrutiny, and the wait timed out on one runner in three. What those cases prove -
       # that a lane's psql reads its own lane's database and not the plain name - is proven on any
-      # machine with DATABASE_URL set, which is how a developer and an issue pod run them
-      # (`bun run test` in packages/dispatch), and the lane contract they guard is also covered
-      # end to end by every multi-lane run of the suite itself.
+      # machine with LEGION_TEST_PG_DSN set, which is how a developer and an issue pod run them
+      # (`bun run test` in packages/dispatch; psql-session makes a database of its own there), and
+      # the lane contract they guard is also covered end to end by every multi-lane run of the
+      # suite itself.
       - name: Test dispatch dashboard
         run: bun run test
         working-directory: packages/dispatch

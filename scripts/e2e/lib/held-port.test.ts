@@ -11,10 +11,11 @@ import {
 import { type AddressInfo, connect, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { skipWithout } from "@legion/test-fixtures/host-tools";
 
 // held-port.py's real-process tests: the helper hands its socket to the real envoy-listener of
-// this branch, which serves on it through ENVOY_LISTEN_FD. They read /proc, so they run on Linux;
-// on any other platform, or without go to build the listener, they fail rather than skip.
+// this branch, which serves on it through ENVOY_LISTEN_FD. They read /proc, so they run on Linux,
+// and they build the listener with go; a host that is neither skips them, naming what it lacks.
 
 const helper = join(import.meta.dir, "held-port.py");
 const envoy = join(import.meta.dir, "..", "..", "..", "packages", "envoy");
@@ -37,11 +38,19 @@ let nats: Server | undefined;
 const natsClients: Socket[] = [];
 let natsUrl = "";
 
+const onLinux = process.platform === "linux";
+if (!onLinux) {
+  console.warn(
+    `Skipped the tests in ${import.meta.path}. They read /proc, which this host's ` +
+      `${process.platform} does not have; they run on linux.`
+  );
+}
+// Both gates are read, so a host that has neither says so about both.
+const withoutGo = skipWithout("go");
+const skip = !onLinux || withoutGo;
+
 beforeAll(async () => {
-  if (process.platform !== "linux") {
-    throw new Error(`held-port.py's tests read /proc and run on linux, not ${process.platform}`);
-  }
-  if (!Bun.which("go")) throw new Error("building envoy-listener needs go on PATH, and none is");
+  if (skip) return;
   const build = Bun.spawnSync(["go", "build", "-o", listener, "./cmd/listener"], {
     cwd: envoy,
     stdout: "pipe",
@@ -264,7 +273,7 @@ function closeOnExec(pid: number, fd: number): boolean {
   return (Number.parseInt(flags[1], 8) & O_CLOEXEC) !== 0;
 }
 
-describe("held-port.py exec", () => {
+describe.skipIf(skip)("held-port.py exec", () => {
   test("the listener serves the handed socket on the port in the port file, in the helper's own process", async () => {
     const portFile = join(work, "serves.port");
     const running = exec("exec of the listener", portFile, [listener]);
@@ -341,7 +350,7 @@ describe("held-port.py exec", () => {
   }, 60_000);
 });
 
-describe("held-port.py keep", () => {
+describe.skipIf(skip)("held-port.py keep", () => {
   test("two listeners started from one keeper serve its port, which stays held between them", async () => {
     const portFile = join(work, "kept.port");
     const socket = join(work, "keeper.sock");

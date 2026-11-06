@@ -164,10 +164,17 @@ test("e2e/run.ts refuses each of them before it starts anything", async () => {
   expect(noProvider.stderr).toContain("DISPATCH_E2E_PG_BIN");
 });
 
-// The database a lane reads is the psql it starts, so the cases that prove which one it picked
-// need a live database to answer; where none is named they would prove nothing and are skipped,
-// as e2e/__tests__/psql-session.test.ts's are.
-const live = (process.env.DATABASE_URL ?? "").trim();
+// The database a lane reads is the psql it starts, so the case that proves which one it picked
+// needs a live database to answer; where no server is named it would prove nothing and is
+// skipped, as e2e/__tests__/psql-session.test.ts's cases are. The case runs `select 1` and
+// writes nothing, so it runs on the server's own database rather than one of its own.
+const live = (process.env.LEGION_TEST_PG_DSN ?? "").trim();
+if (live === "") {
+  console.warn(
+    `Skipped the test in ${import.meta.path} that needs a database. LEGION_TEST_PG_DSN names ` +
+      "no PostgreSQL server. Set it to a server this run may read and run the tests again."
+  );
+}
 
 test.skipIf(live === "")("psql reads its own lane's database", async () => {
   // A process of its own per case, which imports e2e/psql.ts in the environment under test: it

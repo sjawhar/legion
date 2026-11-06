@@ -10,12 +10,17 @@ import {
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
+import { skipWithout } from "@legion/test-fixtures/host-tools";
 import { scriptFunctions } from "../../../../scripts/e2e/lib/script-functions";
 
 // Every test here runs rig.sh and its stand-ins as real processes. On a loaded machine one test
 // takes longer than bun's 5 s default (the eight-turn conversation took 11 s), so each test gets
 // one minute.
 setDefaultTimeout(60_000);
+
+// The judge runs in a Docker container; every other row here needs no container. Read once, so
+// one warning names docker for the whole file.
+const withoutDocker = skipWithout("docker");
 
 // rig.sh's install_model_route, run with the checkout's real installers: the route a label's
 // profile reaches Anthropic by, picked by LEGION_E2E_MODEL_ROUTE.
@@ -797,8 +802,9 @@ echo done
 // rig.sh judge-omp, the whole script, in its Docker container (Docker is on the devbox and on CI's
 // ubuntu-24.04 runners), with the real key-file route and a stand-in omp that records its argv and
 // environment. SKILL_SCENARIOS_JUDGE_OMP puts the stand-in where the pinned omp's binary is
-// mounted, so no test needs a model. The checkout's own skills/asd-ste100 is the ste skill.
-describe("judge-omp", () => {
+// mounted, so no test needs a model. The checkout's own skills/asd-ste100 is the ste skill. A host
+// with no docker runs the container nowhere, so these rows are skipped there.
+describe.skipIf(withoutDocker)("judge-omp", () => {
   const work = freshDir("judge-work");
   const outside = path.join(work, "outside.txt");
   writeFileSync(outside, "a file beside the judge's directory\n");
@@ -988,7 +994,7 @@ exit "$(cat "$PWD/exit-status" 2>/dev/null || echo 0)"
   // The gateway route with the real installer and key command, and a stand-in hawk-token first on
   // PATH that mints a JWT and counts each mint. The key command needs the operator's home and
   // session bus, so it runs on the host; the container gets only the token it printed.
-  describe("on the gateway route", () => {
+  describe.skipIf(withoutDocker)("on the gateway route", () => {
     const gatewayWork = freshDir("judge-gateway-work");
     mkdirSync(path.join(gatewayWork, "runs"), { recursive: true });
     const fakeBin = freshDir("judge-gateway-bin");

@@ -1,12 +1,63 @@
-import { expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
+import { randomUUID } from "node:crypto";
 import { captureEnvironment } from "@legion/test-fixtures/environment";
 
-import { sql } from "../psql";
+import { sql, sqlAt } from "../psql";
 
-/** The pod's or CI's database. The session protocol is psql's answer to real statements, so the
- *  cases that need one are skipped where no database is named rather than faked against a mock
- *  psql that could agree with a wrong reading of the protocol. */
-const live = (process.env.DATABASE_URL ?? "") !== "";
+/** The PostgreSQL server this run may make a database on: an issue pod names it, a developer
+ *  names it, and the `dispatch` CI job has no Postgres at all, so these cases skip there. The
+ *  session protocol is psql's answer to real statements, so the cases that need a database are
+ *  skipped where no server is named rather than faked against a mock psql that could agree with a
+ *  wrong reading of the protocol. */
+const server = process.env.LEGION_TEST_PG_DSN ?? "";
+const live = server !== "";
+if (!live) {
+  console.warn(
+    `Skipped the tests in ${import.meta.path} that need a database. LEGION_TEST_PG_DSN names ` +
+      "no PostgreSQL server. Set it to a server this run may create a database on and run the " +
+      "tests again."
+  );
+}
+
+/** The database of this run alone, made in `beforeAll` and dropped in `afterAll`. The cases here
+ *  create temporary tables and read pg_stat_activity, so they run on a database nobody else is
+ *  using rather than on whatever a developer's own DATABASE_URL happens to name. `create
+ *  database` copies template1, which carries the `vector` extension on the servers this runs on,
+ *  and nothing here needs it anyway. */
+const database = `dispatch_psql_session_${randomUUID().replaceAll("-", "_")}`;
+const databaseUrl = (): string => {
+  const url = new URL(server);
+  url.pathname = `/${database}`;
+  return url.href;
+};
+
+/** Puts back what the environment held before this file pointed `sql` at its own database. */
+let restoreNames: (() => void) | undefined;
+
+beforeAll(async () => {
+  if (!live) return;
+  await sqlAt(server, [`create database ${database}`]);
+  // `sql` resolves its database from the environment when it starts its psql, so this is where
+  // the run's own database replaces whatever the caller's environment named. A deployed URL wins
+  // over DATABASE_URL in that resolution, so both names of that pair go.
+  restoreNames = captureEnvironment([
+    "DATABASE_URL",
+    "PLAYWRIGHT_BASE_URL",
+    "PLAYWRIGHT_DATABASE_URL",
+  ]);
+  process.env.DATABASE_URL = databaseUrl();
+  delete process.env.PLAYWRIGHT_BASE_URL;
+  delete process.env.PLAYWRIGHT_DATABASE_URL;
+}, 60_000);
+
+afterAll(async () => {
+  restoreNames?.();
+  if (!live) return;
+  // FORCE because this process's own psql still holds a connection to the database: it is killed
+  // by the `exit` handler e2e/psql.ts installs, which runs after this one. The connection is the
+  // test role's own, which that role may terminate.
+  await sqlAt(server, [`drop database if exists ${database} with (force)`]);
+}, 60_000);
 
 // First in the file on purpose: `sql` resolves the database when it starts its psql, and once a
 // later case has started one, no call reaches that refusal again. It is the refusal of this

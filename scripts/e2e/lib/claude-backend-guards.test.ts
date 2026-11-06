@@ -2,6 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { hostTool, skipWithout } from "@legion/test-fixtures/host-tools";
 import { scriptFunctions } from "./script-functions";
 
 // The Claude Code backend proof's process guards (claude-backend-tmux.sh), taken from the script by
@@ -23,8 +24,11 @@ const guards = [
 
 const dir = mkdtempSync(join(tmpdir(), "claude-backend-guards-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
+// The stand-in processes are copies of two real programs, so a host without them has nothing to
+// start and every row here is skipped.
+const skip = skipWithout("bash", "sleep");
 function tool(name: string): string {
-  const found = Bun.which(name);
+  const found = hostTool(name);
   if (found === null) throw new Error(`${name} is not on PATH`);
   return found;
 }
@@ -33,17 +37,19 @@ function tool(name: string): string {
 // directory, which starts its second argument as its child and waits on it, as the bridge waits on
 // Claude Code.
 const work = join(dir, "work");
-mkdirSync(work);
-copyFileSync(tool("bash"), join(work, "legion"));
 // The run's claude is a copy of sleep, under a directory whose name holds a space.
 const claudeDir = join(dir, "bin with space");
-mkdirSync(claudeDir);
 const claude = join(claudeDir, "claude");
-copyFileSync(tool("sleep"), claude);
 const cwd = join(dir, "cwd");
-mkdirSync(cwd);
-for (const script of ["claude-bridge", "worker-shim"]) {
-  writeFileSync(join(cwd, script), '"$2" 600\n:\n');
+if (!skip) {
+  mkdirSync(work);
+  copyFileSync(tool("bash"), join(work, "legion"));
+  mkdirSync(claudeDir);
+  copyFileSync(tool("sleep"), claude);
+  mkdirSync(cwd);
+  for (const script of ["claude-bridge", "worker-shim"]) {
+    writeFileSync(join(cwd, script), '"$2" 600\n:\n');
+  }
 }
 
 // run runs BODY after the guards, with the rig's globals set, a scratch directory of its own in
@@ -91,7 +97,7 @@ await_child() {
 
 const slow = 60_000;
 
-describe("bridged", () => {
+describe.skipIf(skip)("bridged", () => {
   test(
     "accepts the run's legion claude-bridge -- <claude> every time, with a pane-sized multi-line argument",
     () => {
@@ -144,7 +150,7 @@ if bridged "$child"; then echo "other claude: accepted"; else echo "other claude
   );
 });
 
-describe("claude_pid", () => {
+describe.skipIf(skip)("claude_pid", () => {
   test(
     "finds Claude Code under the bridge when its executable's path holds a space",
     () => {
@@ -161,7 +167,7 @@ if [ "$found" = "$child" ]; then echo "found the child"; else echo "found $found
   );
 });
 
-describe("endpoint_mismatch", () => {
+describe.skipIf(skip)("endpoint_mismatch", () => {
   const rig = [
     "DISPATCH_URL=http://127.0.0.1:1",
     "DISPATCH_TOKEN_FILE=/rig/secrets/dispatch-token",

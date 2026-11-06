@@ -3,9 +3,13 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { skipWithout } from "@legion/test-fixtures/host-tools";
 import { connect, type NatsConnection } from "nats";
 import { readLast } from "./nats-stream";
 
+// The NATS server these rows read is a container this file starts, so a host with no docker runs
+// none of them.
+const skip = skipWithout("docker");
 const root = join(import.meta.dir, "..", "..", "..");
 const container = `legion-nats-stream-${randomUUID()}`;
 const stream = `NATS_STREAM_${randomUUID().replaceAll("-", "_")}`;
@@ -109,6 +113,7 @@ async function cleanup(): Promise<void> {
 }
 
 beforeAll(async () => {
+  if (skip) return;
   try {
     await startNats();
     mkdirSync(configDirectory, { recursive: true });
@@ -137,9 +142,17 @@ beforeAll(async () => {
   }
 }, 120_000);
 
-afterAll(cleanup, 120_000);
+afterAll(async () => {
+  // With no docker nothing was started, and the scratch directory this file's module scope made
+  // is all there is to remove.
+  if (skip) {
+    rmSync(configDirectory, { recursive: true, force: true });
+    return;
+  }
+  await cleanup();
+}, 120_000);
 
-describe("nats-stream last", () => {
+describe.skipIf(skip)("nats-stream last", () => {
   test("reads the newest matching message without draining every subject", () => {
     const result = runLast("events.>");
     if (result.exitCode !== 0) {
