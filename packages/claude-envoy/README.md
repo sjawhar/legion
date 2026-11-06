@@ -78,8 +78,10 @@ message from Dispatch's Agents page as that person's own turn.
   messages to a role it holds, and every followed topic the stream stores, in stream order. The
   server answers each frame `received` as it decodes and `done` once the session has it: in a
   Legion pane once the bridge reports that Claude Code took the delivery, and in a terminal
-  session once the mod has put the line into the conversation (`$.session.append`, or
-  `$.prompt.submit` while the session is idle).
+  session once the mod has stored the row in the turn running (`$.session.append`), or, while
+  the session is idle, once Claude Code has written the row of the prompt the card became
+  (`$.prompt.submit`). A card whose submit entered the session without that row coming in time
+  is answered on its resend rather than submitted again.
   A frame not taken yet when Claude Code stops, or published while the session was not running
   or disconnected, comes again and is delivered once, for up to 72 hours.
   Team and other ad-hoc topics, which the

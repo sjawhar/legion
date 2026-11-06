@@ -269,10 +269,12 @@ export interface ModSession {
    * unanswered, and the listener sends it again (INFRA-1026, check k7's SIGSTOP, message,
    * SIGKILL and `claude --resume <id>` clause).
    *
-   * Every rejection is a `CardNotShown` saying whether the submit entered the session all the
-   * same, which the row cannot say and the caller cannot work out: a card the session took
-   * into a turn whose row comes late is in front of the model already, so its caller answers
-   * Envoy's resend instead of submitting it a second time.
+   * While the session is idle every rejection is a `CardNotShown` saying whether the submit
+   * entered the session all the same, which the row cannot say and the caller cannot work out: a
+   * card the session took into a turn whose row comes late is in front of the model already, so
+   * its caller answers Envoy's resend instead of submitting it a second time. During a turn a
+   * rejection is the append's own error (a refusal, or the link giving up), which the caller
+   * reads as a card that did not enter.
    */
   show(card: { readonly text: string; readonly content: readonly ModContentBlock[] }): Promise<void>
   /**
