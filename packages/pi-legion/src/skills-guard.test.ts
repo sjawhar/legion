@@ -537,3 +537,35 @@ test("the worker skill tells a role to read the pull request's head after its ow
     "When the last read still is not your commit, carry the pull request with a commit of its own, an empty one when your work is complete and an empty one just as much when `@` holds work of yours, since a push of a commit the branch already holds moves no ref; the push section of your role prompt gives the one `jj` recipe, which leaves `@` and everything in it where it is."
   );
 });
+
+// dispatch://INFRA-924's rule, beside dispatch://INFRA-332's eight above: a retro learning cites
+// a file and a symbol, or text quoted from it, read at the head the pull request commits, never a
+// line number the next edit above it moves.
+test("a retro learning cites a symbol or quoted text at the committed head, never a line number", () => {
+  const learnings = collapsed(path.join(staged, "legion-retro", "references", "learnings.md"));
+  expect(learnings).toContain(
+    "**The evidence** below the rule: the file and symbol, or text quoted from the file, read at the head you commit, and what went wrong before the rule."
+  );
+  expect(learnings).toContain(
+    "Never a line number: the next edit above it moves it. Where the head no longer shows what your sentence says, quote the text and name the commit you read it at."
+  );
+  expect(learnings).toContain(
+    "Evidence: <file and symbol, or text quoted from it, of this pull request, and what went wrong>."
+  );
+  countedOncePerFile(
+    "Drop a point that cites no file, symbol, quoted text or commit of this pull request",
+    ["skills/legion-retro/references/learnings.md", "skills/legion-retro/SKILL.md"]
+  );
+  // The two files this change touches, named rather than swept: four other staged skills carry
+  // these strings, in seven files, in finding formats the specification scopes out
+  // (dispatch://INFRA-924).
+  const retired = ["file, line or commit", "file:line", "file and line"];
+  const retroFiles: [string, string][] = [
+    ["references/learnings.md", learnings],
+    ["SKILL.md", collapsed(path.join(staged, "legion-retro", "SKILL.md"))],
+  ];
+  const carried = retroFiles.flatMap(([file, text]) =>
+    retired.filter((phrase) => text.includes(phrase)).map((phrase) => `${file}: ${phrase}`)
+  );
+  expect(carried).toEqual([]);
+});
