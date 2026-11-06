@@ -5,7 +5,13 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { createElement } from "react";
 import { MemoryRouter } from "react-router-dom";
 
-import { keptTab, keyMinted, memoryFiles } from "../../__tests__/kept-sends-harness";
+import {
+  keptTab,
+  keyMinted,
+  memoryFiles,
+  onFakeClock,
+  settle,
+} from "../../__tests__/kept-sends-harness";
 import { ApiError, api } from "../../api/client";
 import type {
   BroadcastCreated,
@@ -78,21 +84,6 @@ function signedIn(login = "alice"): QueryClient {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   client.setQueryData(["whoami"], { event_head: "0", kind: "user", login });
   return client;
-}
-
-async function settle(): Promise<void> {
-  for (let turn = 0; turn < 30; turn += 1) await Promise.resolve();
-}
-
-/** Runs `body` on a fake clock, so a row that waits out a backoff waits no real time. */
-async function onFakeClock(body: () => Promise<void>): Promise<void> {
-  jest.useFakeTimers();
-  try {
-    await body();
-  } finally {
-    jest.advanceTimersByTime(1);
-    jest.useRealTimers();
-  }
 }
 
 // Broadcasts go one request at a time in press order, each under its key, so a reload that

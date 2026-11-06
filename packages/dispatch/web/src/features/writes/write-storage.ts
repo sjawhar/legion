@@ -10,11 +10,11 @@ import { keySpent, SendExpiredError, SendInterruptedError, SendStoppedError } fr
  * resumes it on load under its key. Each write is one entry, `dispatch.write:<key>`, in one
  * versioned format for every kind (`KeptWrite`): its key, its kind and how it is shown, the login
  * of the person who pressed it and when, the target its line is ordered on, where it stood and its
- * refusal, the request as it last went out, and its kind's own record. An entry that does not
- * parse - another version's, or damaged - is dropped when the page loads, as is every entry of
- * another person's. While any of them the reader sees is unconfirmed the page asks the browser to
- * confirm leaving (`beforeunload`), since a closed tab would lose it; a quiet one (a read mark) is
- * never shown, so it never asks.
+ * refusal, the request as it last went out, what its key has carried, and its kind's own record.
+ * An entry that does not parse - another version's, or damaged - is dropped when the page loads,
+ * as is every entry of another person's. While any of them the reader sees is unconfirmed the
+ * page asks the browser to confirm leaving (`beforeunload`), since a closed tab would lose it; a
+ * quiet one (a read mark) is never shown, so it never asks.
  */
 
 const ENTRY_PREFIX = "dispatch.write:";
@@ -91,6 +91,15 @@ export interface KeptWrite {
   /** Whether an attempt of it went out under its key: one that never did is the reader's to
    *  discard while it waits its turn. */
   readonly sent: boolean;
+  /** The method of the request this write's key has already carried, which decides whether the
+   *  key is spent (`keySpent`), or `undefined` for a key nothing has gone out under. It is the
+   *  store's own record of the key (`Writes` `#carried`), not what `sent` and `request` say: a
+   *  write re-pressed under the key of the one it replaces (a composer's Retry, `supersede`) is
+   *  kept as a write that has sent nothing and holds no request, while its key has carried that
+   *  earlier press's request all the same. Left out by the release before this one, and read then
+   *  as what `sent` and the kept request say (`Writes.resume`), which is what that release
+   *  decided by: so an entry it wrote still loads, and none of the writes it kept is dropped. */
+  readonly carried?: WriteMethod;
   readonly detail: unknown;
 }
 
@@ -173,8 +182,12 @@ const keptRequestShape = shape.either(
   shape.record({ body: shape.unknown, method: shape.oneOf(...WRITE_METHODS), path: shape.string })
 ) satisfies Shape<KeptRequest>;
 
-/** An entry as it is written: the write and the format's version. */
+/** An entry as it is written: the write and the format's version. The version stands still while
+ *  a field is only added and left optional (`carried`): an entry the release before this one
+ *  wrote has every field this shape names, so it still loads, and an entry this one writes has
+ *  every field that release reads, so it loads there too. */
 const keptEntryShape = shape.record({
+  carried: shape.optional(shape.oneOf(...WRITE_METHODS)),
   detail: shape.unknown,
   key: shape.string,
   kind: shape.string,
@@ -200,21 +213,21 @@ export function keptRefusal(error: Error): KeptRefusal {
 }
 
 /** The refusal `kept` names, rebuilt as the error the write was refused with. `key` is the key of
- *  the write it refused, `request` the one that went out under that key - `null` where nothing
- *  went out, which is what `KeptWrite.sent` says and not what a kept request says, since a write
- *  waiting its turn is kept with the request it is planned as - and `now` the time it is read
- *  back: a write that ended without Dispatch's verdict under a key Dispatch has forgotten since
- *  comes back expired, since a Retry of it is now a new write rather than the same one asked
- *  again. Which writes those are is `keySpent`'s to say, the same question the retry loop asks
- *  before each attempt: a `PUT` or a `DELETE` sends no key, and a key nothing went out under has
- *  never been seen by Dispatch. */
+ *  the write it refused, `carried` the method of the request that went out under that key -
+ *  `null` where nothing went out, which is the store's own record of the key
+ *  (`KeptWrite.carried`) and not what a kept request says, since a write waiting its turn is kept
+ *  with the request it is planned as - and `now` the time it is read back: a write that ended
+ *  without Dispatch's verdict under a key Dispatch has forgotten since comes back expired, since
+ *  a Retry of it is now a new write rather than the same one asked again. Which writes those are
+ *  is `keySpent`'s to say, the same question the retry loop asks before each attempt: a `PUT` or
+ *  a `DELETE` sends no key, and a key nothing went out under has never been seen by Dispatch. */
 export function refusalFrom(
   kept: KeptRefusal,
   key: string,
-  request: KeptRequest | null,
+  carried: WriteMethod | null,
   now: number
 ): Error {
-  const spent = keySpent(request === null ? null : request.method, key, now);
+  const spent = keySpent(carried, key, now);
   switch (kept.kind) {
     case "interrupted":
       return spent ? new SendExpiredError() : new SendInterruptedError();

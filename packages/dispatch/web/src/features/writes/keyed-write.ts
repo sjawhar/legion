@@ -90,11 +90,12 @@ export function keyExpired(key: string, now: number): boolean {
  * key whose request was a `PUT` or a `DELETE` is never spent either, since neither sends a key
  * and making one again is the same change however late.
  *
- * This is the one place that question is answered: the retry loop asks it before each attempt
+ * This is the one place that question is answered, and both askers are told the same fact: the
+ * store keeps what each key has carried (`Writes` `#carried`, kept with the write as
+ * `KeptWrite.carried` and read back after a reload). The retry loop asks it before each attempt
  * (`writeUnderKey`, from what it is told the key has carried and from its own attempts) and a
- * kept refusal asks it of the write's own record (`refusalFrom`, `null` where the write sent
- * nothing, which is what `KeptWrite.sent` says). Neither decides on its own, so the two cannot
- * answer the same write differently.
+ * kept refusal asks it of the same record (`refusalFrom`). Neither decides on its own, so the
+ * two cannot answer the same write differently.
  */
 export function keySpent(carried: WriteMethod | null, key: string, now: number): boolean {
   return carried !== null && goesUnderKey(carried) && keyExpired(key, now);

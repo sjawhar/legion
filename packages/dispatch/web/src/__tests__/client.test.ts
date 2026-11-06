@@ -19,6 +19,7 @@ import {
 } from "../api/client";
 import { QUERY_RETRY_DELAY_MS, queryRetryDelay } from "../api/query-client";
 import { FIRST_BACKOFF_MS, writeUnderKey } from "../features/writes/keyed-write";
+import { onFakeClock, settle } from "./kept-sends-harness";
 
 interface RecordedRequest {
   body?: BodyInit | null;
@@ -80,23 +81,6 @@ function outcome(pending: Promise<unknown>): Promise<unknown> {
  *  `Idempotency-Key` and a `PUT` or a `DELETE` leaves off. */
 function keyed(key: string): { key: string } {
   return { key };
-}
-
-/** Runs `body` on the fake clock. A timer left at zero delay would hang a later test's `waitFor`
- *  once the real clock is back, so the fake one moves a millisecond before it goes. */
-async function onFakeClock(body: () => Promise<void>): Promise<void> {
-  jest.useFakeTimers();
-  try {
-    await body();
-  } finally {
-    jest.advanceTimersByTime(1);
-    jest.useRealTimers();
-  }
-}
-
-/** Lets every promise a write chained run as far as it goes without the clock moving. */
-async function settle(): Promise<void> {
-  for (let turn = 0; turn < 30; turn += 1) await Promise.resolve();
 }
 
 // A read Dispatch never answers would leave its page loading for good: every GET gives up at the

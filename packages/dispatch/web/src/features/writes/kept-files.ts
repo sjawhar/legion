@@ -160,20 +160,20 @@ export function indexedDbFiles(): KeptFiles {
     },
     get: async (key) => fileFrom(await run("readonly", (store) => settled(store.get(key)))),
     keepOnly: async (login, now = Date.now()) => {
+      // What this sweep takes out: a file of another person, or one older than the day a key
+      // lives. One rule, asked of the rows and of the puts still on their way.
+      const sweeps = (file: { readonly at: number; readonly login: string }): boolean =>
+        file.login !== login || now - file.at > IDEMPOTENCY_KEY_TTL_MS;
       await run("readwrite", async (store) => {
         // Both shapes name the three fields this reads, so a row of either answers for them.
         const rows = (await settled(store.getAll())) as Pick<KeptFileRow, "at" | "key" | "login">[];
-        const swept = rows.filter(
-          (row) => row.login !== login || now - row.at > IDEMPOTENCY_KEY_TTL_MS
-        );
+        const swept = rows.filter(sweeps);
         // A put still reading its bytes would write its row back behind the sweep, as it would
-        // behind a `delete`, so the sweep marks every put its own rule covers: one of another
-        // person, or one older than the day. A pending put has no row here to be swept, so the
-        // rule is read off the put rather than off the rows going out.
+        // behind a `delete`, so the sweep marks every put its own rule covers. A pending put has
+        // no row here to be swept, so the rule is read off the put rather than off the rows
+        // going out.
         for (const pending of putting) {
-          if (pending.login !== login || now - pending.at > IDEMPOTENCY_KEY_TTL_MS) {
-            pending.discarded = true;
-          }
+          if (sweeps(pending)) pending.discarded = true;
         }
         await Promise.all(swept.map((row) => settled(store.delete(row.key))));
       });

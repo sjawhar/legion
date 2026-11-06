@@ -2,7 +2,14 @@ import { afterEach, beforeEach, expect, jest, spyOn, test } from "bun:test";
 import { IDEMPOTENCY_KEY_TTL_MS } from "@legion/contracts";
 import { QueryClient, QueryObserver } from "@tanstack/react-query";
 
-import { type KeptTab, keptTab, keyMinted, memoryFiles } from "../../__tests__/kept-sends-harness";
+import {
+  type KeptTab,
+  keptTab,
+  keyMinted,
+  memoryFiles,
+  onFakeClock,
+  settle,
+} from "../../__tests__/kept-sends-harness";
 import { answerSends, type SendAnswers } from "../../__tests__/send-answers";
 import {
   ApiError,
@@ -31,23 +38,6 @@ function signedIn(login = "alice"): QueryClient {
   const client = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
   client.setQueryData(["whoami"], { event_head: "0", kind: "user", login });
   return client;
-}
-
-/** Lets every promise the store chained run as far as it goes without the clock moving. */
-async function settle(): Promise<void> {
-  for (let turn = 0; turn < 30; turn += 1) await Promise.resolve();
-}
-
-/** Runs `body` on the fake clock, which moves a millisecond before the real one comes back: a
- *  timer left at zero delay would otherwise hang a later test's `waitFor`. */
-async function onFakeClock(body: () => Promise<void>): Promise<void> {
-  jest.useFakeTimers();
-  try {
-    await body();
-  } finally {
-    jest.advanceTimersByTime(1);
-    jest.useRealTimers();
-  }
 }
 
 /** Moves the clock `ms` on, letting each timer's continuation run as it fires. */
@@ -1622,6 +1612,32 @@ test("a Retry under the write's own key stops when that key runs out", async () 
       expect(ended?.key).toBe(nearlySpent);
       expect(ended?.status === "refused" && ended.refusal).toBeInstanceOf(SendExpiredError);
       expect(send).toHaveBeenCalledTimes(2);
+    } finally {
+      send.mockRestore();
+      tab.close();
+    }
+  });
+});
+
+// The release before this one kept no record of what a key had carried (`KeptWrite.carried`), so
+// an entry it wrote holds none. The format's version stands and the field is the only one left
+// out, so that entry still loads - none of the person's unresumed writes is dropped - and it is
+// read as the release that wrote it read it: `sent` says whether a request went out under the
+// key, and the request it holds says what that was. A day-old key a `PATCH` went out under comes
+// back expired, and the entry this page keeps in its place holds the record from now on.
+test("an entry kept with no carried loads, and reads as what it sent", async () => {
+  await onFakeClock(async () => {
+    const tab = keptTab();
+    const send = spyOn(api, "send").mockResolvedValue({ key: "CORE-1" } as never);
+    try {
+      const spent = keyMinted(Date.now() - IDEMPOTENCY_KEY_TTL_MS);
+      // `resuming` writes the entry as that release wrote it, `carried` and all its kin absent.
+      const writes = resuming(tab, spent, { refusal: { kind: "stopped" }, status: "refused" });
+      await settle();
+      const resumed = row(writes);
+      expect(resumed?.status === "refused" && resumed.refusal).toBeInstanceOf(SendExpiredError);
+      expect(send).not.toHaveBeenCalled();
+      expect(tab.kept(spent)).toMatchObject({ carried: "PATCH", sent: true, version: 1 });
     } finally {
       send.mockRestore();
       tab.close();
