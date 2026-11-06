@@ -650,6 +650,7 @@ The table is the daemon's own (`Classes`, `packages/daemon/internal/config/class
 | `runtime.kubernetes.scheduling.tolerations[].value` | launch | `runtime` |
 | `runtime.kubernetes.session_store` | launch | `runtime` |
 | `runtime.kubernetes.setup` | launch | `runtime` |
+| `runtime.kubernetes.skills_repository` | launch | `runtime` |
 | `runtime.kubernetes.storage_class` | launch | `runtime` |
 | `runtime.kubernetes.test_postgres` | launch | `runtime` |
 | `runtime.tmux` | fixed | — |

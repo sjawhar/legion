@@ -380,6 +380,10 @@ var Classes = []Row{
 	{Field: "Kubernetes.SessionStore", Path: "runtime.kubernetes.session_store", Class: ClassLaunch, Holder: HolderRuntime, Secret: true},
 	{Field: "Kubernetes.Setup", Path: "runtime.kubernetes.setup", Class: ClassLaunch, Holder: HolderRuntime},
 	{Field: "Kubernetes.TestPostgres", Path: "runtime.kubernetes.test_postgres", Class: ClassLaunch, Holder: HolderRuntime},
+	// The skills marketplace an issue pod's own init container clones: the runtime holds it, it
+	// shapes the pod (runtime/sandbox's podShapeRecord.SkillsRepository, which the drift read
+	// compares), and a change of it reaches a role at its next launch.
+	{Field: "Kubernetes.SkillsRepository", Path: "runtime.kubernetes.skills_repository", Class: ClassLaunch, Holder: HolderRuntime},
 	{Field: "Kubernetes.Scheduling", Path: "runtime.kubernetes.scheduling", Class: ClassLaunch, Holder: HolderRuntime, Block: true},
 	{Field: "Scheduling.NodeSelector", Path: "runtime.kubernetes.scheduling.node_selector", Class: ClassLaunch, Holder: HolderRuntime},
 	{Field: "Scheduling.Tolerations", Path: "runtime.kubernetes.scheduling.tolerations", Class: ClassLaunch, Holder: HolderRuntime},
