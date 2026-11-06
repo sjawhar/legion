@@ -23,6 +23,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/rescue/rescuetest"
 	"github.com/sjawhar/legion/daemon/internal/shim"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/testlog"
 	"github.com/sjawhar/legion/daemon/internal/testtmp"
 )
 
@@ -245,28 +246,19 @@ func (c *fakeClock) idle(t *testing.T) {
 // syncBuffer is the shim's log: what the pane shows. changed signals each write so tests wait on
 // a real event rather than polling the log on a wall clock.
 type syncBuffer struct {
-	mu      sync.Mutex
-	buf     bytes.Buffer
+	testlog.Buffer
 	changed chan struct{}
 }
 
 func newSyncBuffer() *syncBuffer { return &syncBuffer{changed: make(chan struct{}, 1)} }
 
 func (b *syncBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	n, err := b.buf.Write(p)
-	b.mu.Unlock()
+	n, err := b.Buffer.Write(p)
 	select {
 	case b.changed <- struct{}{}:
 	default:
 	}
 	return n, err
-}
-
-func (b *syncBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
 }
 
 // count is how many log lines contain substr.

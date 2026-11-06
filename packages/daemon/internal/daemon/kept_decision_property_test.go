@@ -27,6 +27,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testlog"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
@@ -1015,28 +1016,16 @@ func newKeptRun(t *testing.T, seed int64, steps int) *keptRun {
 // keptLog is the engine's log as the run reads it: the JSON lines slog writes, under a lock,
 // since a step that runs rows at once logs from several lanes.
 type keptLog struct {
-	mu    sync.Mutex
-	lines []byte
-}
-
-func (l *keptLog) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.lines = append(l.lines, p...)
-	return len(p), nil
+	testlog.Buffer
 }
 
 // since is everything written to the log after mark, and mark is how much it holds now.
 func (l *keptLog) since(mark int) string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return string(l.lines[mark:])
+	return l.String()[mark:]
 }
 
 func (l *keptLog) mark() int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return len(l.lines)
+	return len(l.String())
 }
 
 // mirror writes what Dispatch says of key — its status and the keys it waits on — as the

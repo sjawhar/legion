@@ -1,7 +1,6 @@
 package agentsecrets
 
 import (
-	"bytes"
 	"context"
 	"crypto"
 	"crypto/ecdsa"
@@ -26,6 +25,8 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+
+	"github.com/sjawhar/legion/daemon/internal/testlog"
 )
 
 // jwkThumbprint is the RFC 7638 thumbprint of the ECDSA JWK a JWS header embeds.
@@ -284,22 +285,7 @@ var podEnrollment = PodEnrollment{
 }
 
 // lockedLog is a log a test reads while the login loop writes it.
-type lockedLog struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (l *lockedLog) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.buf.Write(p)
-}
-
-func (l *lockedLog) String() string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.buf.String()
-}
+type lockedLog = testlog.Buffer
 
 // TestLoginPostsTheTokenAndAKeyItThenSignsWith pins the token login: Login reads the token file and
 // posts its token beside a request object naming legion-daemon, signed by a fresh key, to

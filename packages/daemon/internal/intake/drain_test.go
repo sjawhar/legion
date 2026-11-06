@@ -1,7 +1,6 @@
 package intake_test
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -29,6 +28,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 	legionstore "github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testlog"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testpg"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
@@ -82,22 +82,7 @@ func (c *transactions) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pg
 func (c *transactions) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
 
 // warnings keeps every log line at warn or above the consumer and the handlers write.
-type warnings struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (w *warnings) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.buf.Write(p)
-}
-
-func (w *warnings) String() string {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.buf.String()
-}
+type warnings = testlog.Buffer
 
 // A repository Legion works in carries far more GitHub events than Legion's own pull requests:
 // other pull requests opened and pushed to, their reviews and CI settlements, and every workflow
