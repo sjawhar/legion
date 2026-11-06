@@ -1114,11 +1114,15 @@ func TestAPullRequestOpenedAtASettledCommitIsSeenOnceTheSpanEnds(t *testing.T) {
 		return "[" + pushedPast(repo) + "," + openedAtTheCommit(repo, sha) + "]"
 	})
 
-	// 3. Inside the span the settling still refuses the read, which is what bounds its cost: a
-	// tab left open spends no call an hour on a commit GitHub has answered about.
+	// 3. Inside the span no second call is spent. This step runs within
+	// delivery.CommitPullReadStaleAfter of the claim above, so that bound alone refuses the read
+	// and the settling is not what this step proves: the settle itself is pinned by
+	// TestASupersededResultsCommitIsAskedOfGitHubOnceAndNotAgainWithinTheSpan and by the span
+	// tests of delivery/commit_pull_reads_test.go. What it does prove is the cost a tab left
+	// open carries: a commit GitHub has answered about is not asked again inside the span.
 	spent := fake.asks("acme/widgets")
 	if got := currencyOf(t, readResults(t, handler, issue.Key), "k1", recorded.Result.ID); got != model.CurrencyOlder {
-		t.Fatalf("the read inside the settled span = %q, want older: the settling stands", got)
+		t.Fatalf("the read inside the span = %q, want older: no call is spent, so the stored answer stands", got)
 	}
 	if asked := fake.asks("acme/widgets") - spent; asked != 0 {
 		t.Fatalf("the read inside the settled span asked GitHub %d times, want none", asked)

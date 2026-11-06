@@ -10,15 +10,17 @@ import (
 // whose mapping names no rename, is its own canonical name, so a repository Dispatch does not
 // map is unaffected by this rule: it reads exactly as it did before the column existed.
 //
-// This is the server's one repository-renaming rule, and it is written here once because five
+// This is the server's one repository-renaming rule, and it is written here once because six
 // sites must come to the same answer or the rename is only half known: delivery's attributionHeld
 // puts both the issue's resolved repository and the pull request's own through it, the results
 // route canonicalises the repository of a check's issue before it asks GitHub anything
 // (api/results_currency.go, currencyReader.repositoryOf), the three writers of a
 // pull_request_heads row key the row by it (delivery/pull_request_heads.go:
-// RefreshPullRequestHead, ReadThroughCommitPulls and Intake.recordPullRequestHead), and the
+// RefreshPullRequestHead, ReadThroughCommitPulls and Intake.recordPullRequestHead), the
 // settings route reads it to decide whether a rename's target is itself renamed
-// (api/repo_projects.go, refuseRepoRenameChain).
+// (api/repo_projects.go, refuseRepoRenameChain), and the CI reconcile reads every mapping under
+// the name its repository has now, so no pass asks GitHub about a name it cannot read
+// (cireconcile/cireconcile.go, Reconciler.mapped).
 //
 // One step is enough: the settings route refuses a pair pointing at a repository that is itself
 // renamed, and refuses renaming a repository another row already points at, so no chain and no

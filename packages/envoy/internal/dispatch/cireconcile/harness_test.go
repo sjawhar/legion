@@ -201,6 +201,20 @@ func (h *harness) mapRepository(repository string) {
 	}
 }
 
+// mapRenamedRepository maps one repository and records the full `owner/name` it is called today,
+// as Settings → Repositories does for a renamed repository: repo_projects.renamed_to is the one
+// place Dispatch holds a rename, and an operator declares it, since GitHub answers 404 for the
+// installation of the name the repository was renamed away from.
+func (h *harness) mapRenamedRepository(repository, renamedTo string) {
+	h.t.Helper()
+	h.mapRepository(repository)
+	if _, err := h.pool.Exec(h.ctx, `
+		update repo_projects set renamed_to = $2 where repo = $1
+	`, repository, renamedTo); err != nil {
+		h.t.Fatalf("record that %s is called %s today: %v", repository, renamedTo, err)
+	}
+}
+
 // listHead makes the stand-in answer with one open pull request at one head, of the repository
 // the row names and of the name GitHub gives it.
 func (h *harness) listHead() {

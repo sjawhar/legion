@@ -39,6 +39,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp/ratelimit"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -312,11 +313,22 @@ func (r *Reconciler) reconcile(ctx context.Context, writer Writer, c *counts) *s
 	return nil
 }
 
-// mapped is every repository repo_projects maps to a project, as the rows spell it: `owner/name`,
-// lower-cased with any `.git` stripped. They are read in one order so two passes read GitHub in
-// the same order.
+// mapped is every repository repo_projects maps to a project, each named as the repository is
+// called today: the row's own `owner/name`, lower-cased with any `.git` stripped, or, where the
+// row names a rename, what its renamed_to names. They are read in one order so two passes read
+// GitHub in the same order, and each distinct name comes back once, since two rows naming one
+// repository are one repository to read.
+//
+// The canonical name is read rather than the row's own because a pass must never ask GitHub
+// about a name a repository was renamed away from: GitHub answers 404 for that name's
+// installation, so RepositoryToken fails for it and the row is skipped with `ci reconcile
+// skipped a repository it holds no token for`, a WARN every pass would log for ever about a
+// name no one can read by design. The rule is the server's one renaming rule spliced in rather
+// than written again here (refs.CanonicalRepoSQL), so this read and every other reader of the
+// rule cannot come to different answers.
 func (r *Reconciler) mapped(ctx context.Context) ([]string, error) {
-	rows, err := r.Pool.Query(ctx, `select repo from repo_projects order by repo`)
+	rows, err := r.Pool.Query(ctx, `select distinct `+refs.CanonicalRepoSQL("repo")+` as repository
+		from repo_projects order by repository`)
 	if err != nil {
 		return nil, fmt.Errorf("read the repositories mapped to projects: %w", err)
 	}
