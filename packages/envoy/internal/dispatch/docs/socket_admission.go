@@ -1,10 +1,13 @@
 package docs
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"path"
 	"time"
@@ -52,30 +55,20 @@ type preloadedDocument struct {
 // and rendered of it (admissionRendering, whose rendering is nil for an empty history), while the
 // durable head is still the one it loaded: every write that changes a document's stored state
 // raises its head (an append, a rebuild), and compaction keeps both the head and the state. The
-// head is the head tracker's when it trusts itself (headTracker.head), which costs no read, and
-// otherwise read from the store. A stale or absent preload is no answer, and the caller loads the
-// room itself. Either way the entry gives up the state it held, and no preload outlives this load
-// of the room: one offered while the load runs is swept where the load records itself
-// (onLoadDocument), and one offered after is not stored (offerPreload). The preload's hold on
-// room's head-tracker entry ends once the head is read.
+// head is read from the store, one query. A stale or absent preload is no answer, and the caller
+// loads the room itself. Either way the entry gives up the state it held, and no preload outlives
+// this load of the room: one offered while the load runs is swept where the load records itself
+// (onLoadDocument), and one offered after is not stored (offerPreload).
 func (s *Service) takePreload(room string) (persistence.LoadResult, admissionRendering, bool) {
 	value, ok := s.preloads.LoadAndDelete(room)
 	if !ok {
 		return persistence.LoadResult{}, admissionRendering{}, false
 	}
-	defer s.heads.release(room)
 	preload := value.(*preloadedDocument)
 	loaded, rendered := preload.loaded, preload.rendered
 	preload.loaded, preload.rendered = persistence.LoadResult{}, admissionRendering{}
-	head, trusted := s.heads.head(room)
-	if !trusted {
-		stored, err := s.persistence.Head(context.Background(), room)
-		if err != nil {
-			return persistence.LoadResult{}, admissionRendering{}, false
-		}
-		head = int64(stored)
-	}
-	if head != int64(loaded.Version) {
+	head, err := s.persistence.Head(context.Background(), room)
+	if err != nil || head != loaded.Version {
 		return persistence.LoadResult{}, admissionRendering{}, false
 	}
 	return loaded, rendered, true
@@ -141,6 +134,10 @@ func socketRoom(r *http.Request) string {
 // load failed or panicked - gives it back. The room's place the socket gives back however it ends,
 // and a room ygo loaded keeps a place of its own until it unloads (releaseUnloadedRoom).
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.hostname != "" {
+		w.Header().Set(ProcessHeader, s.hostname)
+		w = &processHeaderWriter{ResponseWriter: w, line: []byte(ProcessHeader + ": " + s.hostname + "\r\n")}
+	}
 	room := socketRoom(r)
 	actor, err := s.requestActor(r)
 	if err != nil {
@@ -198,7 +195,75 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer withdraw()
 	ctx := context.WithValue(r.Context(), connectionContextKey{}, connection)
-	s.srv.ServeHTTP(w, r.WithContext(ctx))
+	// The awareness clients the socket's peer may announce are bounded before ygo reads its
+	// frames (awareness_limit.go).
+	s.srv.ServeHTTP(&awarenessLimitWriter{ResponseWriter: w, room: room}, r.WithContext(ctx))
+}
+
+// ProcessHeader names, on every answer to a document socket's request and on its upgrade above
+// all, the host name of the process serving it - the pod's name in production - so a check that
+// opens sockets through a load balancer can record which process each one reached (plan D10).
+const ProcessHeader = "X-Dispatch-Process"
+
+// processHeaderWriter puts its line, ProcessHeader's, on a websocket upgrade made through it. The
+// upgrader (gorilla/websocket, which ygo's ServeHTTP and refuseOutsideSchema both use) takes the
+// connection and writes its 101 answer on it in one write, reading no header of the writer's, and
+// ygo passes it none of its own; so the connection this Hijack hands out adds the line to that
+// first write, right after its status line. Every other answer carries the header the ordinary
+// way (ServeHTTP sets it).
+type processHeaderWriter struct {
+	http.ResponseWriter
+	line []byte
+}
+
+func (w *processHeaderWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, http.ErrNotSupported
+	}
+	conn, buffered, err := hijacker.Hijack()
+	if err != nil {
+		return nil, nil, err
+	}
+	return &processHeaderConn{Conn: conn, line: w.line}, buffered, nil
+}
+
+// Unwrap gives http.ResponseController the writer underneath.
+func (w *processHeaderWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// processHeaderConn is a hijacked connection whose first write, the upgrade's answer, gains line
+// after its status line. line is cleared by that write, which the upgrade makes before it hands
+// the connection to any other goroutine, so every later write passes straight through.
+type processHeaderConn struct {
+	net.Conn
+	line []byte
+}
+
+func (c *processHeaderConn) Write(p []byte) (int, error) {
+	line := c.line
+	if line == nil {
+		return c.Conn.Write(p)
+	}
+	c.line = nil
+	status := bytes.Index(p, []byte("\r\n"))
+	if status < 0 || !bytes.HasPrefix(p, []byte("HTTP/1.1 101 ")) {
+		return c.Conn.Write(p)
+	}
+	status += len("\r\n")
+	answer := make([]byte, 0, len(p)+len(line))
+	answer = append(answer, p[:status]...)
+	answer = append(answer, line...)
+	answer = append(answer, p[status:]...)
+	written, err := c.Conn.Write(answer)
+	// What was written, counted in p's bytes.
+	switch {
+	case written <= status:
+	case written < status+len(line):
+		written = status
+	default:
+		written -= len(line)
+	}
+	return written, err
 }
 
 // admitDocument decides whether a socket may join room's document. A browser editor normalizes a
@@ -252,36 +317,24 @@ func (s *Service) admitDocument(ctx context.Context, room string) (withdraw func
 // the first stands (LoadOrStore): every offer is of a state the load checks against the head before
 // it takes it, and a socket whose offer lost keeps no reference to it, so its whole history is
 // released at once rather than when the socket ends, which can be hours later. It returns what the
-// socket's end runs: withdraw its own offer if no load took or swept it. An offer that stands holds
-// room's head-tracker entry (headTracker.hold) from before it is stored until a load takes or
-// sweeps it or the socket withdraws it, so the head the load checks it against is one the tracker
-// heard of while the offer stood, or else one read from the store. Exactly one release ends that
-// hold: a withdraw whose preload has gone finds the entry no longer its own (CompareAndDelete) and
-// releases nothing.
+// socket's end runs: withdraw its own offer if no load took or swept it. A withdraw whose preload
+// has gone finds the entry no longer its own (CompareAndDelete) and withdraws nothing.
 func (s *Service) offerPreload(room string, loaded *persistence.LoadResult, rendered admissionRendering) (withdraw func()) {
 	preload := &preloadedDocument{loaded: *loaded, rendered: rendered}
 	state := s.lockState(room)
 	resident := s.roomLoadedHere(room)
 	var lost bool
 	if !resident {
-		s.heads.hold(room)
 		_, lost = s.preloads.LoadOrStore(room, preload)
 	}
 	s.unlockState(room, state)
-	if lost {
-		s.heads.release(room)
-	}
 	if s.afterSocketPreload != nil {
 		s.afterSocketPreload(room, loaded)
 	}
 	if resident || lost {
 		return func() {}
 	}
-	return func() {
-		if s.preloads.CompareAndDelete(room, preload) {
-			s.heads.release(room)
-		}
-	}
+	return func() { s.preloads.CompareAndDelete(room, preload) }
 }
 
 // authorize is ygo's authorization of a document socket ServeHTTP admitted. It registers the
@@ -291,7 +344,7 @@ func (s *Service) offerPreload(room string, loaded *persistence.LoadResult, rend
 // more, and no cap refuses it here, where a refusal would reach the browser as ygo's 401, which
 // says it is not signed in. The issue is closed for the socket when that read says so or the
 // room's state records it closed: ServeHTTP's hold on the state (holdForAdmission) is where a close
-// made while the socket loaded its document is recorded (SetIssueClosed), so such a socket is
+// made while the socket loaded its document is recorded (setRoomIssueOpen), so such a socket is
 // admitted read-only, as one opened after the close is. A closed issue, or a client schema version
 // other than the server's, admits the socket read-only; a request no admission read the issue for
 // is refused, as is a socket to a failed room.
@@ -313,6 +366,13 @@ func (s *Service) authorize(r *http.Request) (websocket.ConnectionConfig, bool) 
 	connection.added = true
 	s.registerConnectionLocked(state, connection.id, connection.actor)
 	s.unlockState(room, state)
+	// A reader joining a room already resident here asks the other processes for their readers'
+	// awareness, so their cursors reach it at once; a room this join has yet to load asks once its
+	// load finishes (awarenessRelay.RoomActivated), and the connection registered above is what
+	// lets the answers in (holdsRoomForReaders).
+	if s.srv.GetDoc(room) != nil {
+		s.awarenessRelay.query(room)
+	}
 	return websocket.ConnectionConfig{
 		ReadOnly: schemaReadOnly(open, r.URL.Query().Get("schema_version")),
 	}, true

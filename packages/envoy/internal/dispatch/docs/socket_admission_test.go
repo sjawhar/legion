@@ -17,7 +17,6 @@ import (
 
 	"github.com/reearth/ygo/persistence"
 
-	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
@@ -209,11 +208,6 @@ func TestAPreloadOvertakenByTheRoomsLoadIsReleasedWhileItsSocketStaysOpen(t *tes
 	}
 
 	admitSocket(t, server.URL, artifactID, "the socket whose load makes the room resident")
-	// The room's load holds the document's head-tracker entry while the room is resident
-	// (roomLoaded), and the socket that loaded it left no preload behind: its own load took it.
-	// Nothing the overtaken socket does may add to this.
-	held := headHolds(service, artifactID)
-
 	releaseOvertaken()
 	overtakenSocket := <-cold
 	if overtakenSocket.err != nil {
@@ -228,9 +222,6 @@ func TestAPreloadOvertakenByTheRoomsLoadIsReleasedWhileItsSocketStaysOpen(t *tes
 	if _, kept := service.preloads.Load(artifactID); kept {
 		t.Error("a preload is held for a room already loaded here, want none: no load of this room will ever read it")
 	}
-	if holds := headHolds(service, artifactID); holds != held {
-		t.Errorf("the head tracker holds the document %d times while the overtaken socket is open, want the %d the resident room holds", holds, held)
-	}
 
 	// The socket joined the room it never loaded, so what the room commits reaches it: the
 	// release above took its offer back, not its place in the room.
@@ -241,19 +232,6 @@ func TestAPreloadOvertakenByTheRoomsLoadIsReleasedWhileItsSocketStaysOpen(t *tes
 	if _, message, err := overtakenSocket.connection.ReadMessage(); err != nil {
 		t.Fatalf("the overtaken socket's frame after a write = %q (%v), want the write's update", message, err)
 	}
-}
-
-// headHolds is how many holders the head tracker counts for room (headTracker.hold), read under
-// the tracker's own lock by the test itself: a resident room's load, each cached cold read of the
-// document, and each preload a cold socket has offered and no load has taken.
-func headHolds(service *Service, room string) int {
-	service.heads.mu.Lock()
-	defer service.heads.mu.Unlock()
-	entry := service.heads.entries[room]
-	if entry == nil {
-		return 0
-	}
-	return entry.holds
 }
 
 // A socket's admission reads the document's issue once, before it loads the document. An issue
@@ -273,15 +251,24 @@ func TestAnIssueClosedWhileASocketLoadsAdmitsItReadOnly(t *testing.T) {
 			t.Errorf("close the document's issue while the socket loads: %v", err)
 			return
 		}
-		service.SetIssueClosed(ctx, "DOC-1", true)
+		service.issueOpenChanged(ctx, "DOC-1")
 	}
 
-	connection := admitSocket(t, server.URL, artifactID, "a socket whose issue closes while it loads")
+	peer := connectPeer(t, server.URL, artifactID, "alice")
 	if !closed.Load() {
 		t.Fatal("the socket's admission never reached the hook that closes the issue, so nothing here is tested")
 	}
-	if scope := docstest.AuthenticationScope(t, connection, artifactID, strconv.Itoa(pmdoc.SchemaVersion())); scope != "readonly" {
-		t.Fatalf("the socket whose issue closed while it loaded is authenticated %q, want readonly", scope)
+	// The room's answer to the peer's sync step 1 says its load is done, as the first frame does
+	// for any socket here: the load is what reads the issue the close left (admittedIssueRead),
+	// and the scope the room grants is what it recorded (authorizeSchemaVersion).
+	select {
+	case <-peer.Answers:
+	case <-time.After(roomWait(t)):
+		t.Fatal("the socket never received the document from the room it loaded")
+	}
+	scope, err := peer.Authenticate(strconv.Itoa(pmdoc.SchemaVersion()), roomWait(t))
+	if err != nil || scope != "readonly" {
+		t.Fatalf("the socket whose issue closed while it loaded is authenticated %q (%v), want readonly", scope, err)
 	}
 }
 
@@ -548,8 +535,6 @@ func TestAPreloadOfferedAfterAnEarlierRoomsLateUnloadIsNotKeptWhileTheRoomIsLoad
 	if err := <-closed; err != nil {
 		t.Fatalf("close the first room: %v", err)
 	}
-	// The first room's unload took back its own hold, so what is left is the resident room's.
-	holds := headHolds(service, artifactID)
 	if service.srv.GetDoc(artifactID) == nil {
 		t.Fatal("the second room is not resident after the first room's unload")
 	}
@@ -566,9 +551,6 @@ func TestAPreloadOfferedAfterAnEarlierRoomsLateUnloadIsNotKeptWhileTheRoomIsLoad
 	}
 	if _, kept := service.preloads.Load(artifactID); kept {
 		t.Error("a preload is held for a room loaded here while its socket stays open, want none: no load of this room will ever read it")
-	}
-	if got := headHolds(service, artifactID); got != holds {
-		t.Errorf("the head tracker holds the document %d times while the held socket is open, want the %d the resident room holds", got, holds)
 	}
 }
 
@@ -815,8 +797,5 @@ func TestAPreloadOfferedWhileTheRoomLoadsIsReleasedAtThatLoad(t *testing.T) {
 	}
 	if _, kept := service.preloads.Load(artifactID); kept {
 		t.Error("a preload offered while the room loaded is still held after that load, want none: no load of this room will ever read it")
-	}
-	if got := headHolds(service, artifactID); got != 1 {
-		t.Errorf("the head tracker holds the document %d times while the cold socket is open, want the 1 the resident room holds", got)
 	}
 }

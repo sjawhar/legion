@@ -81,12 +81,12 @@ var coldReadTimeout = 60 * time.Second
 
 // documentRead is everything the four reads of a document no room holds answer (Text,
 // TextWithToken, TextWithBlocks and BlockPath), rendered from one tree of one stored state, the
-// state stamp names. Nothing writes it once it is built but heads, under documentReads.mu: a read
-// hands out its strings, a copy of its blocks (a caller writes References into its slice) and a
-// copy of a path's entries. A table block's DescendantIDs and Table, and a path's table position
-// (its Row, Column, Header and Cells), are handed out as they are, shared with every later read of
-// the same stored head, so no caller may write through them; none does, and copying them would
-// cost every hit an allocation for a table's size.
+// state stamp names. Nothing writes it once it is built: a read hands out its strings, a copy of
+// its blocks (a caller writes References into its slice) and a copy of a path's entries. A table
+// block's DescendantIDs and Table, and a path's table position (its Row, Column, Header and Cells),
+// are handed out as they are, shared with every later read of the same stored head, so no caller
+// may write through them; none does, and copying them would cost every hit an allocation for a
+// table's size.
 type documentRead struct {
 	artifactID string
 	stamp      DocumentStamp
@@ -95,19 +95,12 @@ type documentRead struct {
 	blocks     []model.ArtifactBlock
 	paths      map[string]pmdoc.BlockPath
 	weight     int64
-	// heads is the head tracker's token taken before the store was read for stamp
-	// (headTracker.token): while nothing has written the document since (headTracker.unchanged),
-	// the rendering is served with no database read at all (documentReads.current). A read that
-	// finds the store still at stamp moves it on to the token that read took (documentReads.get).
-	heads headToken
 }
 
 // documentReads holds a documentRead for each document a cold read rendered, the most recently
 // read first, while their weights together stay within budget: one entry for a document, a
 // rendering of a newer stamp replacing the older. A read uses an entry only while the store's stamp
-// is still its stamp, or while the head tracker says nothing has written the document since the
-// store was read for it, so an entry another task's write has moved past is never served past the
-// notification that announces that write.
+// is still its stamp, so an entry another task's write has moved past is never served.
 type documentReads struct {
 	mu      sync.Mutex
 	entries map[string]*list.Element
@@ -129,29 +122,9 @@ func (r *documentReads) figures() ReadCacheFigures {
 	return ReadCacheFigures{Bytes: r.bytes, Entries: len(r.entries), Budget: r.budget}
 }
 
-// current is artifactID's rendering when heads says nothing has written the document since the
-// store was read for it (headTracker.unchanged), which it marks the most recently read; nil
-// otherwise, and the caller reads the store's stamp (get).
-func (r *documentReads) current(artifactID string, heads *headTracker) *documentRead {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	element, ok := r.entries[artifactID]
-	if !ok {
-		return nil
-	}
-	read := element.Value.(*documentRead)
-	if !heads.unchanged(artifactID, read.heads) {
-		return nil
-	}
-	r.order.MoveToFront(element)
-	return read
-}
-
 // get is artifactID's rendering when it was rendered from the state stamp names, which it marks the
-// most recently read; nil otherwise. heads is the head tracker's token the caller took before it
-// read stamp: the rendering holds the store's state as of that read, so it is current for as long
-// as nothing writes the document after that token, and the entry keeps it (current).
-func (r *documentReads) get(artifactID string, stamp DocumentStamp, heads headToken) *documentRead {
+// most recently read; nil otherwise.
+func (r *documentReads) get(artifactID string, stamp DocumentStamp) *documentRead {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	element, ok := r.entries[artifactID]
@@ -162,50 +135,35 @@ func (r *documentReads) get(artifactID string, stamp DocumentStamp, heads headTo
 	if read.stamp != stamp {
 		return nil
 	}
-	read.heads = heads
 	r.order.MoveToFront(element)
 	return read
 }
 
-// put stores read as its document's rendering in place of any it held, under token, the head
-// tracker's token its fold took before it read the store (set under the cache's lock, as get sets
-// a hit's), then drops the least recently read renderings until the cache's weight is within its
-// budget. A rendering heavier than an eighth of the budget is not stored, and the one it replaces
-// goes. put does not compare stamps: a slow fold of an older stamp can replace a newer rendering,
-// which costs the next read a refold, never a stale read, since get serves an entry only at the
-// stamp its caller just read. A document with a rendering stored holds its entry in heads
-// (headTracker.hold) until its rendering goes, so every write the tracker hears of it while it is
-// cached moves the generation current compares.
-func (r *documentReads) put(read *documentRead, token headToken, heads *headTracker) {
+// put stores read as its document's rendering in place of any it held, then drops the least
+// recently read renderings until the cache's weight is within its budget. A rendering heavier than
+// an eighth of the budget is not stored, and the one it replaces goes. put does not compare stamps:
+// a slow fold of an older stamp can replace a newer rendering, which costs the next read a refold,
+// never a stale read, since get serves an entry only at the stamp its caller just read.
+func (r *documentReads) put(read *documentRead) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	read.heads = token
-	element, held := r.entries[read.artifactID]
-	if held {
+	if element, ok := r.entries[read.artifactID]; ok {
 		r.removeLocked(element)
 	}
 	if read.weight > r.budget/8 {
-		if held {
-			heads.release(read.artifactID)
-		}
 		return
-	}
-	if !held {
-		heads.hold(read.artifactID)
 	}
 	r.entries[read.artifactID] = r.order.PushFront(read)
 	r.bytes += read.weight
 	for r.bytes > r.budget {
-		heads.release(r.removeLocked(r.order.Back()))
+		r.removeLocked(r.order.Back())
 	}
 }
 
-// removeLocked takes element's rendering out of the cache and returns its document.
-func (r *documentReads) removeLocked(element *list.Element) string {
+func (r *documentReads) removeLocked(element *list.Element) {
 	read := r.order.Remove(element).(*documentRead)
 	delete(r.entries, read.artifactID)
 	r.bytes -= read.weight
-	return read.artifactID
 }
 
 // Overheads documentRead.weight counts beside the bytes its strings and slices hold: the entry's
@@ -346,32 +304,12 @@ type coldFold struct {
 // returns the rendering, or a nil rendering and the tree when the tree is outside what the
 // rendering takes, or neither for a document with no stored state.
 //
-// A cached rendering nothing has written the document since it was read for is served with no
-// database read at all (documentReads.current): every write that changes a document's content
-// notifies, this process's own reach the tracker before the call that committed them returns, and
-// with LISTEN down nothing is trusted. Otherwise it holds the document in the head tracker
-// (headTracker.hold) and takes its token (headTracker.token) before anything reads the store, then
-// reads the stamp and compares it, and a rendering found or folded keeps the token taken here, so
-// a write the tracker hears of during the read leaves it to be checked against the store again on
-// its next read. The hold lasts until the read returns, by which time a rendering its fold stored
-// holds the document itself (documentReads.put), and a read that stored nothing takes its hold
-// back. A fold that outlives every read waiting on it may store its rendering after the entry its
-// token was taken under has gone, and such a token is never unchanged (headTracker.unchanged): the
-// next read checks the store's stamp. The bound is the notification's delivery: another process's
-// write can be read as not yet written for as long as its notification takes to arrive.
-//
 // The fold is the document's: it runs on a context no request's end cancels, bounded by the
 // cache's timeout, so a read whose request ends gets its own context's error at once and leaves
 // the fold to the others. Only the read's own context decides that it ended. A fold that fails
 // fails the room, as a failed room load does, and reaches each read as ErrServiceUnavailable,
 // unless the history does not decode, which is ErrDocumentUnloadable, the state a rebuild repairs.
 func (s *Service) coldRead(ctx context.Context, artifactID string) (*documentRead, *pmdoc.Node, error) {
-	if read := s.reads.current(artifactID, s.heads); read != nil {
-		return read, nil, nil
-	}
-	s.heads.hold(artifactID)
-	defer s.heads.release(artifactID)
-	heads := s.heads.token(artifactID)
 	stamp, err := s.persistence.DocumentStamp(ctx, artifactID)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -383,12 +321,12 @@ func (s *Service) coldRead(ctx context.Context, artifactID string) (*documentRea
 	if stamp.Version == 0 {
 		return nil, nil, nil
 	}
-	if read := s.reads.get(artifactID, stamp, heads); read != nil {
+	if read := s.reads.get(artifactID, stamp); read != nil {
 		return read, nil, nil
 	}
 	key := artifactID + "@" + strconv.FormatInt(stamp.Version, 10) + "/" + stamp.Row
 	flight := s.reads.flights.DoChan(key, func() (any, error) {
-		fold, err := s.foldDocument(ctx, artifactID, heads)
+		fold, err := s.foldDocument(ctx, artifactID)
 		if err != nil {
 			s.failRoom(artifactID, err)
 		}
@@ -412,11 +350,11 @@ func (s *Service) coldRead(ctx context.Context, artifactID string) (*documentRea
 // foldDocument loads artifactID's stored history decoded once (LoadDocument), reads its tree and
 // renders it (foldLoaded), storing the rendering under the stamp the load read in its own
 // transaction, never the one read before the miss, so a write between the two cannot store old
-// content under a new stamp, and under heads, the head tracker's token taken before either read.
+// content under a new stamp.
 // Its error is the load's, or a panic recovered from any of it: singleflight re-panics an
 // unrecovered panic of a call it has waiters for in a goroutine nothing can recover, where a read
 // panicking on the request's own goroutine would fail that one request.
-func (s *Service) foldDocument(ctx context.Context, artifactID string, heads headToken) (fold coldFold, err error) {
+func (s *Service) foldDocument(ctx context.Context, artifactID string) (fold coldFold, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("cold document read panicked: %v\n%s", recovered, debug.Stack())
@@ -436,7 +374,7 @@ func (s *Service) foldDocument(ctx context.Context, artifactID string, heads hea
 	// and refusal, as it would without the cache.
 	fold, _ = foldLoaded(artifactID, loaded)
 	if fold.read != nil {
-		s.reads.put(fold.read, heads, s.heads)
+		s.reads.put(fold.read)
 	}
 	return fold, nil
 }

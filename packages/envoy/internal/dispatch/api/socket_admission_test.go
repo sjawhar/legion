@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	gws "github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
+	"github.com/reearth/ygo/crdt"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
@@ -121,13 +121,10 @@ func TestASocketOpenReadsTheIssueAndTheCallerOnce(t *testing.T) {
 	header := http.Header{"Cookie": []string{cookie.Name + "=" + cookie.Value}}
 	for _, open := range []string{"a cold open", "a warm open"} {
 		since := counter.mark()
-		connection, response, err := gws.DefaultDialer.Dial(url, header)
-		if err != nil {
-			t.Fatalf("%s: connect the document socket: response=%v err=%v", open, response, err)
-		}
-		t.Cleanup(func() { _ = connection.Close() })
-		if scope := docstest.AuthenticationScope(t, connection, room, schemaVersion); scope != "read-write" {
-			t.Fatalf("%s: the socket is authenticated %q, want read-write", open, scope)
+		peer := docstest.Dial(t, url, header, room, crdt.New())
+		scope, err := peer.Authenticate(schemaVersion, 10*time.Second)
+		if err != nil || scope != "read-write" {
+			t.Fatalf("%s: the socket is authenticated %q (%v), want read-write", open, scope, err)
 		}
 		if reads := counter.count(since, issueReadText, room); reads != 1 {
 			t.Errorf("%s read the document's issue %d times, want once", open, reads)

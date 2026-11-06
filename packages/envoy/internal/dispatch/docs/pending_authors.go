@@ -54,7 +54,20 @@ type UpdateCredit struct {
 	// hold is the room instance whose update this is (roomHold), which holds the update once its
 	// append commits.
 	hold *roomHold
-	done bool
+	// askAuthors are the ask blocks the update's render first showed with no write's registration,
+	// each with the author the update observer named (observeAskBlocks), which the append records
+	// in its own transaction (recordAskAuthors) whether or not a version already listed the credit.
+	askAuthors map[string]model.Actor
+	done       bool
+}
+
+// takeAskAuthors is the ask block authors the update's append records. It is fixed before the
+// update's class is recorded anywhere, so it needs no lock.
+func (credit *UpdateCredit) takeAskAuthors() map[string]model.Actor {
+	if credit == nil {
+		return nil
+	}
+	return credit.askAuthors
 }
 
 // take is what the update's append writes: the credit's authors and latest edit source, and
@@ -108,10 +121,10 @@ func (credit *UpdateCredit) held(version persistence.Version) {
 
 // roomHold is which durable updates one instance of a room holds: every update through loaded,
 // the head the instance loaded at, and each later update the instance itself took whose write
-// can have recorded a pending author - a browser update it appended, and a committed live write
-// it published. Another process's append after the load is in neither, since only a reload brings
-// it into this instance. An upload deletes only the pending-author rows whose writing update its
-// room's instance holds (heldUpdates).
+// can have recorded a pending author - a browser update it appended, a committed live write it
+// published, and another process's append its catch-up applied (Service.catchUpRoom). An upload
+// deletes only the pending-author rows whose writing update its room's instance holds
+// (heldUpdates).
 //
 // It stays bounded: an update just past loaded folds into loaded, with the run of updates since
 // that follows it, and an upload's commit drops the updates it consumed the rows of (consumed).
@@ -356,12 +369,12 @@ func cloneActor(actor *model.Actor) *model.Actor {
 // room, whose room stands behind the durable head (captureLiveTextAndAuthors). The store holds no
 // change still in flight in the room, so the version lists none of the room's in-flight credits
 // and its commit consumes none: each stays in F, to reach R when its append lands, or, when the
-// gate refuses that append from a room behind the head, to be credited again when its browser
-// resends the edit to the reloaded room. Listed here, that author would be listed again on the
-// version holding the resent edit. The pending authors it read (R) and actor stay, as
-// captureAuthors gave them. The person who edited last is read again without those credits
-// (latestEditSource over the stored person alone), since an edit the version does not hold cannot
-// name its notice.
+// gate refuses that append from a room whose stored history was replaced, to be credited again
+// when its browser resends the edit to the reloaded room. Listed here, that author would be
+// listed again on the version holding the resent edit. The pending authors it read (R) and actor
+// stay, as captureAuthors gave them. The person who edited last is read again without those
+// credits (latestEditSource over the stored person alone), since an edit the version does not
+// hold cannot name its notice.
 func (capture authorCapture) withoutInflight(actor *model.Actor) authorCapture {
 	authors := make(map[string]model.Actor, len(capture.rAuthors)+1)
 	for _, author := range capture.rAuthors {
@@ -720,7 +733,8 @@ func readLastPerson(ctx context.Context, q Queryer, room string) (*model.Actor, 
 
 // readOwedSettlement reports whether room owes a settlement and the latest edit source its row
 // names. A room's load reads it on the pool reserved for loads and takes no advisory lock, which
-// a durable writer can hold for as long as its transaction runs.
+// a durable writer can hold for as long as its transaction runs; a settlement reads it in its own
+// transaction under that lock, for the actor its version names (settlementAuthors).
 func readOwedSettlement(ctx context.Context, q Queryer, room string) (owed bool, lastActor *model.Actor, err error) {
 	var encoded []byte
 	err = q.QueryRow(ctx, `

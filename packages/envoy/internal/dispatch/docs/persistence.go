@@ -36,15 +36,17 @@ type PgVersioned struct {
 	// Nil outside tests; tests use it to hold a reader of the cursor and the head in that window
 	// (TestAWriteDoesNotForkFromTheStoreInsideAnAppendsCursorWindow).
 	afterAppendCommit func(room string, version persistence.Version)
-	// processID is the id of the process whose Service was built on this store (Service.ProcessID),
-	// which every content-changing write's documentHeadChannel notification names, so a listener
-	// can tell this process's own writes from another's. heads is that Service's head tracker,
-	// which every content-changing write of this store reports itself to (beginOwnWrite). New sets
-	// both through pgVersioned, with noteStored, before the Service it builds runs anything; a store
-	// no Service was built on - a test's, a seed's - leaves them empty, and its writes report to no
-	// tracker.
+	// storedHistoryHeld runs when the gate admits a browser's append on a stored history that was
+	// replaced under its room and still holds every item the update builds on
+	// (storedHistoryHolds), inside the append's transaction. Nil outside tests; tests count the
+	// appends that take that path.
+	storedHistoryHeld func(room string)
+	// processID is the id of the process this store writes for (Service.ProcessID), which every
+	// announcement of a stored change carries (documentHeadChannel) so that process's own room
+	// sync knows the change for its own. New sets it on the store it builds; a store built
+	// elsewhere announces its changes with an empty sender, which every process's room sync takes
+	// for another process's.
 	processID string
-	heads     *headTracker
 	// unfoldableMu guards unfoldable: for each room whose rows at or below a compaction's fold
 	// point did not fold into a state that reads back as them, that fold point, so the next
 	// compaction of the same rows skips them rather than folding and logging them again
@@ -78,8 +80,8 @@ type PgVersioned struct {
 	noteStored atomic.Pointer[func(room string, head int64)]
 }
 
-// pgVersioned is p itself, the PgVersioned New hands the Service's per-process values: its process
-// id and head tracker (processID, heads) and its note of each append and load (noteStored).
+// pgVersioned is p itself, the PgVersioned New hands the Service's note of each append and load
+// (noteStored), through the store that wraps it where a test wraps one.
 func (p *PgVersioned) pgVersioned() *PgVersioned {
 	return p
 }
@@ -454,9 +456,8 @@ func (p *PgVersioned) RestoreSnapshot(ctx context.Context, room, name string) ([
 // PruneAfter makes target the visible head. Its checkpoint is committed before
 // deleting newer updates so a crash cannot make them visible again. The checkpoint's transaction
 // is the write that changes the document's content - the head reads the checkpoint's ceiling from
-// its commit on (headVersion) - so it is the one that announces the change, with target as the
-// head (notifyDocumentChanged), and the head tracker follows it as this process's write from the
-// checkpoint to the end of the prune.
+// its commit on (headVersion) - so it is the one that announces the change
+// (announceDocumentChange).
 func (p *PgVersioned) PruneAfter(ctx context.Context, room string, target persistence.Version, rolledBack []byte) error {
 	return p.withRoomLock(ctx, room, func(conn *pgxpool.Conn) error {
 		tx, err := conn.Begin(ctx)
@@ -467,9 +468,6 @@ func (p *PgVersioned) PruneAfter(ctx context.Context, room string, target persis
 		if err := lockDocumentRoom(ctx, tx, room); err != nil {
 			return err
 		}
-		write := p.heads.beginOwnWrite(room)
-		checkpointed := false
-		defer func() { write.end(checkpointed, int64(target)) }()
 		var exists bool
 		if err := tx.QueryRow(ctx, `select exists(select 1 from doc_updates where artifact_id = $1)`, room).Scan(&exists); err != nil {
 			return fmt.Errorf("check document room: %w", err)
@@ -483,13 +481,12 @@ func (p *PgVersioned) PruneAfter(ctx context.Context, room string, target persis
 		`, room, int64(target), rolledBack); err != nil {
 			return fmt.Errorf("checkpoint document prune: %w", err)
 		}
-		if err := p.notifyDocumentChanged(ctx, tx, room, int64(target)); err != nil {
+		if err := announceDocumentChange(ctx, tx, room, p.processID); err != nil {
 			return err
 		}
 		if err := tx.Commit(ctx); err != nil {
 			return fmt.Errorf("commit checkpoint document prune: %w", err)
 		}
-		checkpointed = true
 
 		tx, err = conn.Begin(ctx)
 		if err != nil {
@@ -502,6 +499,12 @@ func (p *PgVersioned) PruneAfter(ctx context.Context, room string, target persis
 		if _, err := tx.Exec(ctx, `delete from doc_checkpoints where artifact_id = $1`, room); err != nil {
 			return fmt.Errorf("clear document prune checkpoint: %w", err)
 		}
+		// The prune lowered the head, which every process's room of the document has to hear:
+		// one resident across it stands past the head, with a history the store no longer has
+		// (historyReplaced), and is closed and reloaded.
+		if err := announceDocumentChange(ctx, tx, room, p.processID); err != nil {
+			return err
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return fmt.Errorf("commit document prune: %w", err)
 		}
@@ -511,20 +514,30 @@ func (p *PgVersioned) PruneAfter(ctx context.Context, room string, target persis
 
 // RebuildTx replaces a room's durable history with one fresh update at the next version, inside
 // tx, which holds the room's lock until it ends. Its caller has already proved that ygo cannot load
-// the old merged history; this method never makes that destructive decision itself. It announces
-// the new head in tx (notifyDocumentChanged), and from the head's read on it is a write of this
-// process the head tracker follows until tx ends (headTracker.ownWriteIn).
-func (p *PgVersioned) RebuildTx(ctx context.Context, tx pgx.Tx, room string, seed []byte) (RebuildReport, error) {
+// the old merged history, as it stood at loaded; this method never makes that destructive decision
+// itself, and refuses with ErrDocumentLive, writing nothing, when the head it reads under the lock
+// is no longer loaded. Another rebuild committed since (on this process or another, which loaded
+// the same history and was let through the owner row first), or an append landed: either way the
+// history the caller judged is not the one it would replace.
+func (p *PgVersioned) RebuildTx(ctx context.Context, tx pgx.Tx, room string, loaded persistence.Version, seed []byte) (RebuildReport, error) {
 	if err := validateUpdate(seed, p.maxPendingItems); err != nil {
 		return RebuildReport{}, wrapUnlessTooLarge(itemCapError(seed, p.maxPendingItems, err), "validate rebuilt document seed")
 	}
 	if err := lockDocumentRoom(ctx, tx, room); err != nil {
 		return RebuildReport{}, err
 	}
+	// The head as Load reads it, a pending prune's ceiling included, before the prune's recovery
+	// below lowers it.
+	current, err := p.head(ctx, tx, room)
+	if err != nil {
+		return RebuildReport{}, err
+	}
+	if current != loaded {
+		return RebuildReport{}, fmt.Errorf("%w: document %s changed while it was being rebuilt (its head moved from %d to %d), by another rebuild or an edit; read it again before rebuilding", ErrDocumentLive, room, loaded, current)
+	}
 	if _, err := p.recoverPruneTx(ctx, tx, room); err != nil {
 		return RebuildReport{}, err
 	}
-	wrote := p.heads.ownWriteIn(tx, room)
 	head, err := p.head(ctx, tx, room)
 	if err != nil {
 		return RebuildReport{}, err
@@ -555,16 +568,14 @@ func (p *PgVersioned) RebuildTx(ctx context.Context, tx pgx.Tx, room string, see
 	`, room, report.Head, seed); err != nil {
 		return RebuildReport{}, fmt.Errorf("seed rebuilt document: %w", err)
 	}
-	if err := p.notifyDocumentChanged(ctx, tx, room, report.Head); err != nil {
+	if err := announceDocumentChange(ctx, tx, room, p.processID); err != nil {
 		return RebuildReport{}, err
 	}
-	wrote(report.Head)
 	return report, nil
 }
 
-// Delete removes all persisted Yjs data for a document room, and announces the head it leaves, 0,
-// in the same transaction (notifyDocumentChanged); the head tracker follows it as this process's
-// write until it has committed or rolled back.
+// Delete removes all persisted Yjs data for a document room, and announces the change in the same
+// transaction (announceDocumentChange).
 func (p *PgVersioned) Delete(ctx context.Context, room string) error {
 	return p.withRoomLock(ctx, room, func(conn *pgxpool.Conn) error {
 		tx, err := conn.Begin(ctx)
@@ -575,9 +586,6 @@ func (p *PgVersioned) Delete(ctx context.Context, room string) error {
 		if err := lockDocumentRoom(ctx, tx, room); err != nil {
 			return err
 		}
-		write := p.heads.beginOwnWrite(room)
-		deleted := false
-		defer func() { write.end(deleted, 0) }()
 		for _, query := range []string{
 			`delete from doc_snapshots where artifact_id = $1`,
 			`delete from doc_updates where artifact_id = $1`,
@@ -588,13 +596,12 @@ func (p *PgVersioned) Delete(ctx context.Context, room string) error {
 				return fmt.Errorf("delete document data: %w", err)
 			}
 		}
-		if err := p.notifyDocumentChanged(ctx, tx, room, 0); err != nil {
+		if err := announceDocumentChange(ctx, tx, room, p.processID); err != nil {
 			return err
 		}
 		if err := tx.Commit(ctx); err != nil {
 			return fmt.Errorf("commit delete document: %w", err)
 		}
-		deleted = true
 		return nil
 	})
 }
@@ -620,12 +627,17 @@ func (p *PgVersioned) head(ctx context.Context, q Queryer, room string) (persist
 // takePruneCheckpointStatement takes the checkpoint row a prune its crash left half done holds for
 // the room $1 names (PruneAfter commits it before it deletes), and answers its ceiling, or no row
 // when there is no prune to finish. Every durable append runs it under the document's advisory
-// lock before its gate reads the head: recoverPruneTx in a caller's transaction, and a room's
-// batch in its first pipeline (appendRoomTx). It names doc_checkpoints alone. A statement that
-// names a delete from doc_updates takes that table's ROW EXCLUSIVE lock whether or not it deletes a
-// row, so folding finishPruneStatement into it would take that lock ahead of the insert on every
-// append rather than only on the rare one that finishes a prune.
+// lock, but only where the gate's read found a checkpoint standing (appendGateRead.pruneCeiling):
+// recoverPruneTx in a caller's transaction, and a room's batch in a pipeline of its own
+// (appendRoomTx). It names doc_checkpoints alone. A statement that names a delete from doc_updates
+// takes that table's ROW EXCLUSIVE lock whether or not it deletes a row, so folding
+// finishPruneStatement into it would take that lock ahead of the insert on every append rather
+// than only on the rare one that finishes a prune.
 const takePruneCheckpointStatement = `delete from doc_checkpoints where artifact_id = $1 returning ceiling`
+
+// takePruneCheckpointWhat is what a takePruneCheckpointStatement the database refuses is reported
+// as, where the statement runs in a pipeline that reads no row of it (appendRoomTx).
+const takePruneCheckpointWhat = "take the document's prune checkpoint"
 
 // finishPruneStatement deletes the updates of the room $1 names above $2, the ceiling a prune's
 // checkpoint recorded (takePruneCheckpointStatement): the rest of the prune that checkpoint began.

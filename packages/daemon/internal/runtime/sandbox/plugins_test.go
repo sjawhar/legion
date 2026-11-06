@@ -130,7 +130,7 @@ func TestInstallScriptQuotesShellUnsafeSources(t *testing.T) {
 		t.Skip("no /bin/sh in this environment")
 	}
 	plugins := &runtime.PluginInstall{PiLegion: "/tmp/odd dir/pi-legion's.tgz", PiEnvoy: "/tmp/another 'one'.tgz", Contract: 24}
-	script := startScript("/home/legion/.local/state/tester", 3, plugins, "", installLockWait(2*time.Second, 3))
+	script := startScript("/home/legion/.local/state/tester", 3, plugins, "", nil, installLockWait(2*time.Second, 3))
 	// The two sources carry a space and a single quote; verified below (sh -n) rather than as a
 	// literal substring, since the quoting itself breaks one.
 	if !strings.Contains(script, "pi-legion") || !strings.Contains(script, "another") {
@@ -174,7 +174,7 @@ func bunInstallArgs(t *testing.T, plugins *runtime.PluginInstall) []string {
 	if err := os.WriteFile(stub, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+recorded+"\nexit 1\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	script := startScript(filepath.Join(dir, "state"), 3, plugins, "", installLockWait(2*time.Second, 3))
+	script := startScript(filepath.Join(dir, "state"), 3, plugins, "", nil, installLockWait(2*time.Second, 3))
 	if !strings.Contains(script, "/usr/local/bin/bun") {
 		t.Fatalf("the install script does not call bun by the image path:\n%s", script)
 	}
@@ -233,7 +233,7 @@ func TestAnUppercaseSchemeReachesBunVerbatim(t *testing.T) {
 func TestStartArgvIsAgentUnchangedWithoutPluginsOrSetup(t *testing.T) {
 	agent := []string{"/opt/omp/bin/omp", "--mode", "rpc"}
 	for name, setup := range map[string][]string{"nil": nil, "empty": {}} {
-		got := startArgv("/home/legion/.local/state/tester", 1, nil, "", setup, agent, installLockWait(2*time.Second, 3))
+		got := startArgv("/home/legion/.local/state/tester", 1, nil, "", nil, setup, agent, installLockWait(2*time.Second, 3))
 		if !slices.Equal(got, agent) {
 			t.Fatalf("startArgv(nil plugins, %s setup) = %q, want %q unchanged", name, got, agent)
 		}
@@ -389,7 +389,7 @@ func runClaudeStart(t *testing.T, npmBody string, seedCache ...func(t *testing.T
 	if err := os.WriteFile(npm, []byte(stub), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	script := startScript(run.stateHome, 3, nil, run.configDir, installLockWait(2*time.Second, 3))
+	script := startScript(run.stateHome, 3, nil, run.configDir, nil, installLockWait(2*time.Second, 3))
 	if !strings.Contains(script, "/usr/local/bin/npm ") || !strings.Contains(script, claudeCodePin+"/") {
 		t.Fatalf("the start script does not call npm by the image path or install from the image's pin:\n%s", script)
 	}
@@ -589,7 +589,7 @@ func installLockProbe(t *testing.T, unlock bool) []string {
 	}
 	var wg sync.WaitGroup
 	for _, id := range []string{"a", "b"} {
-		script := startScript(filepath.Join(dir, "state-"+id), 3, testPlugins(), "", installLockWait(2*time.Second, 3))
+		script := startScript(filepath.Join(dir, "state-"+id), 3, testPlugins(), "", nil, installLockWait(2*time.Second, 3))
 		script = strings.Replace(script, "/usr/local/bin/bun", stub, 1)
 		if unlock {
 			// Everything from flock's own path through the locked directory goes, so the control
@@ -850,7 +850,7 @@ func runStart(t *testing.T, start, bin, bun, cache string, plugins *runtime.Plug
 	if cache == "" {
 		cache = filepath.Join(dir, "cache")
 	}
-	argv := startArgv(filepath.Join(dir, "state"), 3, plugins, "", setup, agent, installLockWait(2*time.Second, 3))
+	argv := startArgv(filepath.Join(dir, "state"), 3, plugins, "", nil, setup, agent, installLockWait(2*time.Second, 3))
 	if bun != "" {
 		argv[2] = strings.Replace(argv[2], "/usr/local/bin/bun", bun, 1)
 	}

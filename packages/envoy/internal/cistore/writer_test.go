@@ -48,7 +48,7 @@ func TestAWriterRecordSettlesThroughTheListenersSummaryLoop(t *testing.T) {
 	}
 	defer client.Close()
 	store := openListener(t, client.Conn)
-	writer, err := cistore.OpenWriter(client.JS(), logging.New("writer"))
+	writer, err := cistore.OpenWriter(client.Connection(), client.JS(), logging.New("writer"))
 	if err != nil {
 		t.Fatalf("open the writer: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestOpenWriterFailsAndCreatesNothingWithoutTheBucket(t *testing.T) {
 	}
 	defer client.Close()
 
-	writer, err := cistore.OpenWriter(client.JS(), logging.New("writer"))
+	writer, err := cistore.OpenWriter(client.Connection(), client.JS(), logging.New("writer"))
 	if !errors.Is(err, natsgo.ErrBucketNotFound) {
 		t.Fatalf("OpenWriter without the bucket = %v, want %v", err, natsgo.ErrBucketNotFound)
 	}
@@ -170,7 +170,7 @@ func TestHasRecordReadsTheBucketRatherThanACache(t *testing.T) {
 	}
 	defer client.Close()
 	store := openListener(t, client.Conn)
-	writer, err := cistore.OpenWriter(client.JS(), logging.New("writer"))
+	writer, err := cistore.OpenWriter(client.Connection(), client.JS(), logging.New("writer"))
 	if err != nil {
 		t.Fatalf("open the writer: %v", err)
 	}
@@ -235,7 +235,7 @@ func TestAWriterReportsWhetherTheObservationChangedTheRecord(t *testing.T) {
 	// The listener's store makes the bucket a writer only binds; no cache of this test's own is
 	// read, since the writer answers from what it wrote.
 	openListener(t, client.Conn)
-	writer, err := cistore.OpenWriter(client.JS(), logging.New("writer"))
+	writer, err := cistore.OpenWriter(client.Connection(), client.JS(), logging.New("writer"))
 	if err != nil {
 		t.Fatalf("open the writer: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestConcurrentCallersOfOneHeadEachReportTheirOwnChange(t *testing.T) {
 	// The listener's store makes the bucket a writer only binds; the record itself is read out of
 	// that bucket below, since a writer keeps no cache to read it from.
 	openListener(t, client.Conn)
-	writer, err := cistore.OpenWriter(client.JS(), logging.New("writer"))
+	writer, err := cistore.OpenWriter(client.Connection(), client.JS(), logging.New("writer"))
 	if err != nil {
 		t.Fatalf("open the writer: %v", err)
 	}

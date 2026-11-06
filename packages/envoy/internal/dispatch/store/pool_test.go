@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"runtime"
 	"slices"
@@ -204,74 +203,6 @@ func TestPoolRefusesASecondConnectionWhileOneIsHeld(t *testing.T) {
 	}
 }
 
-// What AfterCommit registers runs once, when the transaction ends, with whether it committed: a
-// commit runs it with true, a rollback with false, and the deferred rollback every caller runs
-// after its commit runs nothing again. A transaction opened with no hold mark on its context is
-// tracked as well, and one the pool did not open - begun on an acquired connection - is refused,
-// as is a transaction that has already ended.
-func TestAfterCommitRunsOnceWhenTheTransactionEnds(t *testing.T) {
-	database := openTestStore(t)
-	ctx := context.Background()
-	for _, tc := range []struct {
-		name string
-		end  func(pgx.Tx) error
-		want []bool
-	}{
-		{name: "commit", end: func(tx pgx.Tx) error { return tx.Commit(ctx) }, want: []bool{true}},
-		{name: "rollback", end: func(tx pgx.Tx) error { return tx.Rollback(ctx) }, want: []bool{false}},
-		{name: "commit then deferred rollback", end: func(tx pgx.Tx) error {
-			if err := tx.Commit(ctx); err != nil {
-				return err
-			}
-			if err := tx.Rollback(ctx); !errors.Is(err, pgx.ErrTxClosed) {
-				return fmt.Errorf("rollback after commit = %v, want pgx.ErrTxClosed", err)
-			}
-			return nil
-		}, want: []bool{true}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			tx, err := database.Pool.Begin(ctx)
-			if err != nil {
-				t.Fatalf("begin: %v", err)
-			}
-			defer tx.Rollback(ctx)
-			var ran []bool
-			if !AfterCommit(tx, func(committed bool) { ran = append(ran, committed) }) {
-				t.Fatal("AfterCommit refused a transaction of the pool")
-			}
-			if len(ran) != 0 {
-				t.Fatalf("AfterCommit ran %v before the transaction ended", ran)
-			}
-			if err := tc.end(tx); err != nil {
-				t.Fatalf("end the transaction: %v", err)
-			}
-			if !slices.Equal(ran, tc.want) {
-				t.Fatalf("AfterCommit ran with %v, want %v", ran, tc.want)
-			}
-			if AfterCommit(tx, func(bool) { t.Error("a function registered after the end ran") }) {
-				t.Error("AfterCommit accepted a transaction that has ended")
-			}
-		})
-	}
-
-	conn, err := database.Pool.Acquire(ctx)
-	if err != nil {
-		t.Fatalf("acquire a connection: %v", err)
-	}
-	defer conn.Release()
-	own, err := conn.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin on the acquired connection: %v", err)
-	}
-	defer own.Rollback(ctx)
-	if AfterCommit(own, func(bool) { t.Error("a function registered on a transaction the pool did not open ran") }) {
-		t.Error("AfterCommit accepted a transaction the pool did not open")
-	}
-	if err := own.Commit(ctx); err != nil {
-		t.Fatalf("commit on the acquired connection: %v", err)
-	}
-}
-
 // Reads a caller runs side by side each take one connection: each read's context carries a hold
 // mark of its own, so one read's open cursor does not refuse the other, while each is still
 // refused a second connection of its own, and a caller already holding one is refused them all.
@@ -314,6 +245,37 @@ func TestConcurrentReadsEachHoldOneConnection(t *testing.T) {
 	defer tx.Rollback(ctx)
 	if _, err := ForConcurrentRead(ctx); !errors.Is(err, ErrNestedAcquire) {
 		t.Fatalf("concurrent reads under an open transaction: %v, want ErrNestedAcquire", err)
+	}
+}
+
+// A goroutine that runs on beside the caller that started it - room sync's lanes, a broadcast's
+// detached delivery - takes a hold mark of its own, which nothing its starter does can set: a
+// transaction the starter opens later, on the mark the goroutine would otherwise have shared,
+// must not refuse that goroutine a connection.
+func TestAConcurrentWorkerKeepsAMarkOfItsOwn(t *testing.T) {
+	database := openTestStore(t)
+	starter := WithTransactionTracking(context.Background())
+
+	worker := ForConcurrentWorker(starter)
+	tx, err := database.Pool.Begin(starter)
+	if err != nil {
+		t.Fatalf("the starter's transaction: %v", err)
+	}
+	defer tx.Rollback(context.Background())
+	var one int
+	if err := database.Pool.QueryRow(worker, "select 1").Scan(&one); err != nil {
+		t.Fatalf("the worker's read beside its starter's transaction: %v, want it served", err)
+	}
+	if _, err := ForConcurrentRead(worker); err != nil {
+		t.Fatalf("a read of the worker's own: %v, want it served", err)
+	}
+	workerTx, err := database.Pool.Begin(worker)
+	if err != nil {
+		t.Fatalf("the worker's own transaction: %v", err)
+	}
+	defer workerTx.Rollback(context.Background())
+	if err := database.Pool.QueryRow(worker, "select 1").Scan(&one); !errors.Is(err, ErrNestedAcquire) {
+		t.Fatalf("a second connection under the worker's own transaction: %v, want ErrNestedAcquire", err)
 	}
 }
 

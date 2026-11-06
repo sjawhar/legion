@@ -3,8 +3,8 @@ package docs
 // The fold and decode of a room's stored history: the read of its rows a load and a compaction
 // share (foldRead), which folds rows totalling at most foldBufferBytes from memory once its
 // transaction has ended and streams larger logs inside it; the state the rows make (stateThrough);
-// the document that state decodes into (documentThrough, LoadDocument); and the fold itself (fold,
-// readsBackOtherwise).
+// the document that state decodes into (documentThrough, LoadDocument); the fold itself (fold,
+// readsBackOtherwise); and whether a document holds anything it cannot place (parks).
 
 import (
 	"context"
@@ -19,6 +19,14 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
+
+// parks reports whether doc holds anything it cannot place: an item whose origin or predecessor
+// has not arrived, or a delete of an item it does not hold. A document that parks nothing holds
+// whole every update applied to it.
+func parks(doc *crdt.Doc) bool {
+	parked := doc.PendingStats()
+	return parked.Items > 0 || parked.DeleteRanges > 0
+}
 
 // stateThrough returns the state the room's stored updates through version, which updates replays,
 // make, as one V1 update. It applies the updates one at a time, oldest first, to one document that
@@ -220,10 +228,10 @@ var errUnfoldable = errors.New("apply a stored document update")
 type updateSource func(use func([]byte) error) error
 
 // storedUpdates replays the room's stored updates through version, reading them one row at a time
-// in tx (eachUpdateThrough).
-func storedUpdates(ctx context.Context, tx pgx.Tx, room string, version persistence.Version) updateSource {
+// through q, the transaction or connection the caller is inside (eachUpdateThrough).
+func storedUpdates(ctx context.Context, q Queryer, room string, version persistence.Version) updateSource {
 	return func(use func([]byte) error) error {
-		return eachUpdateThrough(ctx, tx, room, version, use)
+		return eachUpdateThrough(ctx, q, room, version, use)
 	}
 }
 
@@ -287,7 +295,7 @@ func fold(updates updateSource, maxPending int) (state []byte, readBack *crdt.Do
 	}
 	state = crdt.EncodeStateAsUpdateV1(doc, nil)
 	made := doc.StateVector()
-	if parked := doc.PendingStats(); parked.Items > 0 || parked.DeleteRanges > 0 {
+	if parks(doc) {
 		parts := [][]byte{state}
 		if err := updates(func(update []byte) error {
 			rest, err := crdt.DiffUpdateV1(update, made)
@@ -335,9 +343,9 @@ func readsBackOtherwise(state []byte, made crdt.StateVector, maxPending int) (*c
 }
 
 // eachUpdateThrough calls use with each of the room's stored updates through version, oldest first,
-// reading one row at a time.
-func eachUpdateThrough(ctx context.Context, tx pgx.Tx, room string, version persistence.Version, use func([]byte) error) error {
-	rows, err := tx.Query(ctx, `
+// reading one row at a time through q.
+func eachUpdateThrough(ctx context.Context, q Queryer, room string, version persistence.Version, use func([]byte) error) error {
+	rows, err := q.Query(ctx, `
 		select update from doc_updates
 		where artifact_id = $1 and version <= $2
 		order by version asc

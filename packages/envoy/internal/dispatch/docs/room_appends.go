@@ -93,7 +93,8 @@ import (
 // roomAppendLinger is how long after an update was recorded its call waits for the room's queue to
 // fill before its batch goes to the store. A keystroke's durability then lags its commit by at most
 // this beyond its transaction; a settlement, a shutdown or anything else that waits on the room's
-// appends asks for them at once instead (waitForRoomIdle), so it waits out no linger.
+// appends asks for them at once instead (waitForRoomIdle), as does another process's room query
+// of this room (askRoomAppends), so neither waits out a linger.
 const roomAppendLinger = 50 * time.Millisecond
 
 // roomAppendBatchUpdates and roomAppendBatchBytes bound one batch: at most this many updates and
@@ -105,13 +106,16 @@ const (
 )
 
 // BrowserUpdate is one update an append transaction stores (appendWrites): its bytes, whether it
-// changes the document's rendered content, and the browser edit's in-flight credit, nil for an
-// update no browser edit credited. Its fields are exported so a test store in another package can
-// hand a batch on; UpdateCredit's are not.
+// changes the document's rendered content, the browser edit's in-flight credit, nil for an update
+// no browser edit credited, and when the room's observer took it, which the gate judges against
+// the document's issue close (observedBeforeClose); zero for an update no room observed. Its
+// fields are exported so a test store in another package can hand a batch on; UpdateCredit's are
+// not.
 type BrowserUpdate struct {
 	Update         []byte
 	ContentChanged bool
 	Credit         *UpdateCredit
+	Observed       time.Time
 }
 
 // AppendRoomFlush is the room's persistence worker's append of its own update (StoreUpdateContext),
@@ -164,16 +168,19 @@ func (p *PgVersioned) appendUpdates(ctx context.Context, room string, updates []
 // statements as pgx pipelines, three round trips from the document's session lock to its
 // release, and four on the rare append that finds a prune's checkpoint:
 //
-//  1. pg_advisory_lock, begin, pg_advisory_xact_lock, the prune checkpoint's read
-//     (takePruneCheckpointStatement) and the gate's read (queueAppendGate), with one more round
-//     trip, the prune's rest and the gate read again, on the rare append that finds a checkpoint;
-//  2. once the gate has passed, the append's writes (appendWrites) and commit;
+//  1. pg_advisory_lock, begin and the gate's read (queueAppendGate), with one more round trip,
+//     the prune's rest and the gate read again, on the rare append whose gate read finds a
+//     checkpoint (appendGateRead.pruneCeiling, recoverPruneTx's two statements);
+//  2. once the gate has passed (gateAppend), the append's writes (appendWrites) and commit;
 //  3. pg_advisory_unlock, once the commit's bookkeeping is done: each stored class marked stored
 //     with its credit held at its version (RoomFlush.markStored), afterAppendCommit, the room
-//     instance's cursor advanced once per version, the room's figures, and the end of the write the
-//     head tracker has followed since the gate (beginOwnWrite), with the head it left. credit lands
-//     before this, committed or not. Once the locks are released, a committed transaction notes its
+//     instance's cursor advanced once per version and the room's figures. credit lands before
+//     this, committed or not. Once the locks are released, a committed transaction notes its
 //     last version to the compaction queue (PgVersioned.noted).
+//
+// No pg_advisory_xact_lock is taken: the session already holds the document's lock on this very
+// connection, so a second acquisition would grant what the session has (appendUpdatesTx's rule
+// for a flush, which runs under a lock its caller took).
 //
 // What it stores is flush's run through `through`, read under the document's lock once the first
 // pipeline holds it (Service.flushRun), or, for a nil flush, given, whose credits are held at
@@ -212,18 +219,13 @@ func (p *PgVersioned) appendRoomTx(ctx context.Context, room string, flush *Room
 		trips++
 		return conn.SendBatch(ctx, batch).Close()
 	}
-	// The head tracker follows the transaction as this process's write from its gate until the
-	// commit's bookkeeping is done, the cursor's advance among it (beginOwnWrite, ownWrite.end).
-	write := p.heads.beginOwnWrite(room)
 	open := true
-	// finish ends the append however it ends, in this order: the head tracker's write ends while
-	// the session lock still orders it with every other writer of the document; the call's own
-	// credit lands while that lock is still held, whether the transaction committed or not, so no
-	// version reads the pending authors between a commit and its credits leaving the room's
-	// in-flight credits; then what is open is rolled back and the session lock released; and last
-	// the round trips spent, the unlock's among them, go to the room's figures.
+	// finish ends the append however it ends, in this order: the call's own credit lands while
+	// the session lock is still held, whether the transaction committed or not, so no version
+	// reads the pending authors between a commit and its credits leaving the room's in-flight
+	// credits; then what is open is rolled back and the session lock released; and last the round
+	// trips spent, the unlock's among them, go to the room's figures.
 	finish := func() {
-		write.end(stored >= 0, stored)
 		credit.landed()
 		for _, update := range given {
 			update.Credit.landed()
@@ -243,29 +245,33 @@ func (p *PgVersioned) appendRoomTx(ctx context.Context, room string, flush *Room
 	opening := &pgx.Batch{}
 	opening.Queue(`select pg_advisory_lock(hashtext($1))`, room)
 	opening.Queue(`begin`)
-	opening.Queue(`select pg_advisory_xact_lock(hashtext($1))`, room)
-	var checkpoint pruneCheckpoint
-	opening.Queue(takePruneCheckpointStatement, room).QueryRow(checkpoint.scan)
-	gate := queueAppendGate(opening, room, appendBrowser)
+	gate := queueAppendGate(opening, room)
 	if err := send(ctx, opening); err != nil {
 		return 0, fmt.Errorf("begin document update: %w", err)
 	}
-	if checkpoint.found {
-		// A prune its crash left half done: the rest of it, and the gate read again on the head
-		// that leaves, cost this append one more round trip (takePruneCheckpointStatement's
-		// comment says why the first pipeline does not hold the delete).
-		finishing := &pgx.Batch{}
-		store.QueueExec(finishing, finishPruneWhat, finishPruneStatement, room, checkpoint.ceiling)
-		gate = queueAppendGate(finishing, room, appendBrowser)
-		if err := send(ctx, finishing); err != nil {
-			return 0, fmt.Errorf("finish the document's prune: %w", err)
-		}
-	}
-	head, err := gate.head(appendingThrough(ctx, room, flush))
+	read, err := gate.result()
 	if err != nil {
 		return 0, err
 	}
-	first = persistence.Version(head + 1)
+	if read.pruneCeiling != nil {
+		// A prune its crash left half done: the rest of it (recoverPruneTx's two statements), and
+		// the gate read again on the head that leaves, cost this append one more round trip
+		// (takePruneCheckpointStatement's comment says why the first pipeline does not hold the
+		// delete).
+		finishing := &pgx.Batch{}
+		store.QueueExec(finishing, takePruneCheckpointWhat, takePruneCheckpointStatement, room)
+		store.QueueExec(finishing, finishPruneWhat, finishPruneStatement, room, *read.pruneCeiling)
+		gate = queueAppendGate(finishing, room)
+		if err := send(ctx, finishing); err != nil {
+			return 0, fmt.Errorf("finish the document's prune: %w", err)
+		}
+		if read, err = gate.result(); err != nil {
+			return 0, err
+		}
+	}
+	// The cursor is read here, after the opening pipeline returned, under the lock that pipeline
+	// took: neither it nor the head can move while this transaction holds it.
+	heldThrough, gated := appendingThrough(ctx, room, flush)
 	var updates []BrowserUpdate
 	var taking []*queuedClass
 	if flush != nil {
@@ -276,7 +282,23 @@ func (p *PgVersioned) appendRoomTx(ctx context.Context, room string, flush *Room
 	if len(updates) == 0 {
 		return 0, nil
 	}
-	statements, last, err := p.appendWrites(room, head, updates, owes)
+	head, admitted := read.latest, len(updates)
+	if gated {
+		var replaced bool
+		head, admitted, replaced, err = gateAppend(ctx, conn, room, heldThrough, appendBrowser, updates, read, p.maxPendingItems)
+		if err != nil {
+			return 0, err
+		}
+		if replaced {
+			p.markRunReplaced(room, roomCursorFrom(ctx), flush)
+		}
+	}
+	// A closed issue admits only the updates the room took in time (gateAppend): the rest stay
+	// queued, and each meets the gate again on its own call.
+	updates = updates[:admitted]
+	taking = taking[:min(admitted, len(taking))]
+	first = persistence.Version(head + 1)
+	statements, last, err := p.appendWrites(ctx, room, head, updates, owes)
 	if err != nil {
 		return 0, err
 	}
@@ -316,8 +338,9 @@ func (p *PgVersioned) appendRoomTx(ctx context.Context, room string, flush *Room
 	}
 	state := flush.state
 	state.mu.Lock()
-	state.dropDrainedShadowLocked()
+	dropped := state.dropDrainedShadowLocked()
 	flush.service.unlockState(room, state)
+	dropped.release()
 	flush.service.appendFigures.committed(len(updates))
 	return first, nil
 }
@@ -328,9 +351,9 @@ func (p *PgVersioned) appendRoomTx(ctx context.Context, room string, flush *Room
 // out of the run, or when the queue no longer holds the class. With linger, a run that is not full
 // yet answers no position but the channel its linger waits on and how long it waits: until
 // roomAppendLinger after the class was recorded, none while the service is stopping, while a wait
-// for the room's appends is waiting (appendWaiters, waitForRoomIdle), or once something asked the
-// room's appends to go after the class was recorded (appendsFlushed, waitForRoomIdle). The call then
-// asks again without linger, and the run is read then.
+// for the room's appends is waiting (appendWaiters, waitForRoomIdle, askRoomAppends), or once
+// something asked the room's appends to go after the class was recorded (appendsFlushed). The call
+// then asks again without linger, and the run is read then.
 func (s *Service) roomBatchThrough(room string, class *queuedClass, linger bool) (through uint64, wake <-chan struct{}, wait time.Duration) {
 	state := s.lockExistingState(room)
 	if state == nil {
@@ -342,12 +365,37 @@ func (s *Service) roomBatchThrough(room string, class *queuedClass, linger bool)
 		return class.seq, nil, 0
 	}
 	end, full := batchRunLocked(state.updateClasses, at)
-	if linger && !full && state.appendWaiters == 0 && !s.stopping.Load() && !s.shuttingDown(room) && class.recorded.After(state.appendsFlushed) {
-		if wait = time.Until(class.recorded.Add(roomAppendLinger)); wait > 0 {
+	if linger && !full && state.appendWaiters == 0 && !s.stopping.Load() && !s.shuttingDown(room) && class.observed.After(state.appendsFlushed) {
+		if wait = time.Until(class.observed.Add(roomAppendLinger)); wait > 0 {
 			return 0, state.appendLinger.wait(), wait
 		}
 	}
 	return state.updateClasses[end-1].seq, nil, 0
+}
+
+// askRoomAppends asks room's pending browser appends to go now rather than wait their linger out
+// (roomAppendLinger), as a wait for the room's own appends does (waitForRoomIdle): it records
+// appendsFlushed, so no update the room recorded before the ask lingers any more, wakes every
+// linger already waiting, and counts the asker among the room's append waiters until done is
+// called, so nothing lingers while it waits. A room this process holds no record of has nothing
+// to ask of: done is then a call that does nothing. Another process's room query asks for this
+// before it waits for the room's updates to be stored (roomQueries.query), which it has only
+// roomQueryWait to answer in - ten times the linger, but a wait the asker spends holding
+// whatever it asked the flush for.
+func (s *Service) askRoomAppends(room string) (done func()) {
+	state := s.lockExistingState(room)
+	if state == nil {
+		return func() {}
+	}
+	state.appendsFlushed = time.Now()
+	state.appendWaiters++
+	state.appendLinger.wake()
+	s.unlockState(room, state)
+	return func() {
+		state.mu.Lock()
+		state.appendWaiters--
+		s.unlockState(room, state)
+	}
 }
 
 // batchRunLocked is the run of queue a batch for the class at index at takes: from at to end, the
@@ -427,15 +475,16 @@ func (f *roomAppendFigures) committed(size int) {
 // dropUpdate takes an update the room's persistence does not store off its record: a failed
 // room's, or one a suppression slot matched, which its writer made durable. A failed room's update
 // is dropped and its browser resends it to the room that replaces this one, but its class is taken
-// all the same, so the work the record counts for it ends here. Left counted, it would be an
-// append no callback can ever finish: the record - or the one registered in its place, which
-// carries the updates the room's persistence never took (handOverFailedRoomLocked) - would wait on
-// it for ever, so its settlement would retry without end, never closing a room behind the head
-// (reloadRoomBehindHead), and the record would never be released (unusedLocked).
+// all the same, so the work the record counts for it ends here, and the update leaves its
+// instance's unstored updates. Left counted, it would be an append no callback can ever finish:
+// the record - or the one registered in its place, which carries the updates the room's
+// persistence never took (handOverFailedRoomLocked) - would wait on it for ever, so its settlement
+// would retry without end, and the record would never be released (unusedLocked).
 func (a *servicePersistenceAdapter) dropUpdate(room string, update []byte) {
 	class, counted, found := a.service.consumeUpdateClass(room, update)
 	if found {
 		a.service.finishUpdateClass(room, counted, class)
 	}
+	class.instance.unlistUnstored(class)
 	class.credit.landed()
 }

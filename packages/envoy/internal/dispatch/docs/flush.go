@@ -42,10 +42,12 @@ type roomPoint struct {
 // lock.
 //
 // copied is the room's state, encoded under the document's own lock, for the reads take could
-// not be run for: a replica holding no state, and a document whose load listed no replica, which
-// has had no update recorded, so its state is taken at position 0 and nothing is known of it
-// beyond the state. Its caller decodes that state holding no lock. copied is nil for every read
-// take ran on. The caller holds no state lock and is not inside a Yjs transaction on live.
+// not be run for: a document whose load listed no replica, which has had no update recorded, so
+// its state is taken at position 0 and nothing is known of it beyond the state, and a copy the
+// replica could not start from. Its caller decodes that state holding no lock. A replica holding
+// no state is started from the copy the read takes from the room, and take then reads it
+// (renderedReplica.atPoint), so copied is nil for every read take ran on. The caller holds no
+// state lock and is not inside a Yjs transaction on live.
 func (s *Service) atPoint(room string, live *crdt.Doc, take func(point roomPoint, doc *crdt.Doc)) (copied []byte, point roomPoint, read replicaRead, settles bool, err error) {
 	if live == nil {
 		return nil, roomPoint{}, replicaRead{}, false, errDocUnloaded
@@ -66,8 +68,9 @@ func (s *Service) atPoint(room string, live *crdt.Doc, take func(point roomPoint
 // readPoint is live, the room document resident for room, as of an exact commit position: its
 // state, encoded under the replica's lock, the position it holds every update through, and what
 // the room's replica knows of that state beyond the state itself (atPoint, replicaRead). A
-// replica holding no state, and a document whose load listed no replica, have their state taken
-// under the document's own lock instead (atPoint). The updates the drain classified arm the
+// replica holding no state is started from a copy taken under the document's own lock, which
+// the replica then encodes; a document whose load listed no replica has its state taken under
+// the document's own lock instead (atPoint). The updates the drain classified arm the
 // room's settlement, as their update observers would have.
 func (s *Service) readPoint(room string, live *crdt.Doc) ([]byte, roomPoint, replicaRead, error) {
 	var encoded []byte
@@ -101,9 +104,10 @@ func (s *Service) readPoint(room string, live *crdt.Doc) ([]byte, roomPoint, rep
 // UndoManager attached, which keeps the content of a deleted struct the decode collects; the
 // replica has none.
 //
-// A replica holding no state has no document to clone, and neither has a room whose load listed
-// no replica: the copy that read took from the room itself is decoded here, holding no lock
-// (buildFork). Either way the caller is handed the document that decode builds.
+// A replica holding no state is started from the copy that read takes from the room, and the
+// fork is then cloned from it like any other. A room whose load listed no replica has no
+// document to clone, nor has a copy the replica could not start from: that copy is decoded here,
+// holding no lock (buildFork). Either way the caller is handed the document that decode builds.
 //
 // at, when it is not nil, is the point the room must still stand at (rebuildFork): a read that
 // drains the room to another point clones nothing and answers errForkReleased, so the replica's
@@ -139,9 +143,10 @@ func (s *Service) forkPoint(room string, live *crdt.Doc, client crdt.ClientID, a
 // through pmdoc.ReadUnshared (treeOfUnshared), with the position it was read at (atPoint). Only a
 // holder of the replica's mu reads or writes the replica (renderedReplica), which is what
 // ReadUnshared's lock-free walk of each text asks for, and the tree it hands back is the caller's
-// own (ownedValue), as pmdoc.Read's is. A replica holding no state has no tree to walk, and
-// neither has a room whose load listed no replica: the copy that read took from the room itself
-// is decoded and read here, holding no lock (stateTree).
+// own (ownedValue), as pmdoc.Read's is. A replica holding no state is started from the copy the
+// read takes from the room, and its tree is then walked. A room whose load listed no replica has
+// no tree to walk, nor has a copy the replica could not start from: that copy is decoded and
+// read here, holding no lock (stateTree).
 //
 // It arms no settlement for the updates it classified and reports instead whether any is one a
 // settlement follows: the settlement reading them is the one they would arm, and arming another
@@ -168,7 +173,7 @@ func (s *Service) treePoint(room string, live *crdt.Doc) (*pmdoc.Node, roomPoint
 
 // stateTree is the tree of state, a room's state as a read point copied it (readPoint): a
 // version's capture of the room it versions, and the tree read of a room that has no replica to
-// read, or whose replica holds no state (treePoint).
+// read, or whose copy its replica could not start from (treePoint).
 func stateTree(state []byte) (*pmdoc.Node, error) {
 	doc := newDocumentCopy()
 	if err := crdt.ApplyUpdateV1(doc, state, nil); err != nil {
@@ -278,11 +283,20 @@ func foldAppended(base int64, versions []persistence.Version) int64 {
 // flush, and the transaction's commit marks them stored and lands their credits (markStored); a
 // transaction that rolls back marks nothing, and the room's persistence stores them later.
 //
-// The caller holds the document's advisory lock in tx from before it read the head, and calls this
-// before its own append. The classes are read under that lock, and every writer marks what it
-// stored before the lock passes on, so no update is stored twice. Every class is measured before
-// the append: it renders and decodes nothing between the read of the room's queue and the write,
-// so the flush is the lock, that read, the measures, and one statement.
+// Every flush runs on a transaction or a session that already holds the room's advisory lock,
+// taken before the head it is gated on was read: the room's own persistence worker holds the
+// session-level lock on its connection across the whole transaction (AppendRoomFlush,
+// appendRoomTx), and every caller of Ledger.flushThrough took the transaction-level lock in the
+// same transaction - a live write's one read of the document (readFork, lockedHead), a version
+// capture's (captureLiveTextAndAuthors) and the write's own (captureWrite, through its read), a
+// settlement's (lockSettlementCursor) and the block-id backfill's (lockDocumentRoom), which a
+// repair's flush runs under too (storeRepair). So the append this makes takes no lock of its own:
+// a second acquisition would cost a round trip and grant what the caller holds (appendUpdatesTx).
+// The caller calls this before its own append. The classes are read under that lock, and every
+// writer marks what it stored before the lock passes on, so no update is stored twice. Every
+// class is measured before the append: it renders and decodes nothing between the read of the
+// room's queue and the write, so the flush is the lock, that read, the measures, and one
+// statement.
 func (s *Service) flushThrough(ctx context.Context, tx pgx.Tx, flush *RoomFlush, through uint64) error {
 	updates, taking := s.flushRun(flush, through)
 	if len(updates) == 0 {
@@ -322,10 +336,18 @@ func (s *Service) flushRun(flush *RoomFlush, through uint64) ([]BrowserUpdate, [
 	if len(taking) == 0 {
 		return nil, nil
 	}
+	if s.beforeFlushMeasure != nil {
+		s.beforeFlushMeasure(flush.room)
+	}
 	stored := storedClasses(flush.room, window, taking)
 	updates := make([]BrowserUpdate, len(taking))
 	for index, class := range taking {
-		updates[index] = BrowserUpdate{Update: class.update, ContentChanged: stored[index].changed, Credit: stored[index].credit}
+		updates[index] = BrowserUpdate{
+			Update:         class.update,
+			ContentChanged: stored[index].changed,
+			Credit:         stored[index].credit,
+			Observed:       class.observed,
+		}
 	}
 	return updates, taking
 }

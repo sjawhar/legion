@@ -248,9 +248,9 @@ func privateHome(cfg RoleInitConfig, homes, work string) error {
 		return fmt.Errorf("the home %s carries mounts (%s): the container mounts what belongs under the home under %s instead",
 			cfg.Home, strings.Join(carried, ", "), cfg.HomeMounts)
 	}
-	options := "lowerdir=" + cfg.Home + ",upperdir=" + filepath.Join(homes, "upper") + ",workdir=" + work
+	options := homeOverlayOptions(cfg.Home, filepath.Join(homes, "upper"), work)
 	if err := unix.Mount("overlay", cfg.Home, "overlay", 0, options); err != nil {
-		return fmt.Errorf("give the role its own layer over %s: %w", cfg.Home, err)
+		return fmt.Errorf("give the role its own layer over %s with %s: %w", cfg.Home, options, err)
 	}
 	// The image reaches the home mounts directory through a link (its /var/run is /run), and
 	// mountinfo names each mount by the path the link resolves to, so each is placed relative to
@@ -288,6 +288,17 @@ func privateHome(cfg RoleInitConfig, homes, work string) error {
 		}
 	}
 	return nil
+}
+
+// homeOverlayOptions is the option string for the role's own layer over its home. userxattr is
+// there because gVisor marks a renamed directory opaque by writing the extended attribute
+// trusted.overlay.opaque, which a task in a nested user namespace may not write, and gVisor panics
+// when that write is refused, which ends the pod's whole sandbox. userxattr puts the mark in the
+// user.overlay. namespace instead, which the role's own upper layer keeps and its owner may write.
+// gVisor turns the option on by itself only when the upper layer is a gofer mount, and a role's
+// upper layer is a sandbox tmpfs.
+func homeOverlayOptions(home, upper, work string) string {
+	return "lowerdir=" + home + ",upperdir=" + upper + ",workdir=" + work + ",userxattr"
 }
 
 // ownConfigHome is the role's own config home, own, made the first time a generation of the role

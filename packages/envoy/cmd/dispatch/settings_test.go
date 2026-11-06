@@ -45,6 +45,7 @@ import (
 	"github.com/sjawhar/envoy/internal/githubappjwt"
 	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
+	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/testnats"
 	"github.com/sjawhar/envoy/internal/testsocks5"
 )
@@ -1013,6 +1014,35 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 			refusedWith(t, map[string]string{"ENVOY_URL": "listener.example:9020"}, "ENVOY_URL")
 		},
+		"ENVOY_SESSION_LIVE_WINDOW": func(t *testing.T) {
+			// The window the outbox judges a role route's holder by (roleHolderWindows,
+			// roles.NewBuckets): a holder that registered 10 minutes ago is live under a window
+			// the deployment widened, and unresponsive under the compiled five minutes, which
+			// holds its event pending rather than forwarding it.
+			holder := session.SessionEntry{UpdatedAt: time.Now().Add(-10 * time.Minute).UnixMilli()}
+			if state := resolveWith(t, map[string]string{"ENVOY_SESSION_LIVE_WINDOW": "30m"}).RoleHolderWindows.EntryState(holder); state != session.Live {
+				t.Errorf("ENVOY_SESSION_LIVE_WINDOW=30m: a holder that registered 10m ago reads %s, want live", state)
+			}
+			if state := resolveWith(t, nil).RoleHolderWindows.EntryState(holder); state != session.Unresponsive {
+				t.Errorf("unset: a holder that registered 10m ago reads %s, want unresponsive on the compiled 5m window", state)
+			}
+			refusedWith(t, map[string]string{"ENVOY_SESSION_LIVE_WINDOW": "0s"}, "ENVOY_SESSION_LIVE_WINDOW")
+		},
+		"ENVOY_SESSION_GONE_HORIZON": func(t *testing.T) {
+			// The horizon that decides whether a stalled holder's event waits for it or is
+			// counted reached with nothing sent (forwardOf). A deployment that raises it for a
+			// stall longer than an hour raises it here too: with the raise in the listener
+			// alone, Dispatch calls gone a holder whose role that listener still keeps, and the
+			// event reaches it never (dispatch://INFRA-392).
+			holder := session.SessionEntry{UpdatedAt: time.Now().Add(-90 * time.Minute).UnixMilli()}
+			if state := resolveWith(t, map[string]string{"ENVOY_SESSION_GONE_HORIZON": "3h"}).RoleHolderWindows.EntryState(holder); state != session.Unresponsive {
+				t.Errorf("ENVOY_SESSION_GONE_HORIZON=3h: a holder that registered 90m ago reads %s, want unresponsive", state)
+			}
+			if state := resolveWith(t, nil).RoleHolderWindows.EntryState(holder); state != session.Gone {
+				t.Errorf("unset: a holder that registered 90m ago reads %s, want gone on the compiled 1h horizon", state)
+			}
+			refusedWith(t, map[string]string{"ENVOY_SESSION_GONE_HORIZON": "-1m"}, "ENVOY_SESSION_GONE_HORIZON")
+		},
 		"ENVOY_TOKEN": func(t *testing.T) {
 			// The bearer the Envoy listener receives when a signed-in human's GET /api/v1/agents
 			// reads its sessions.
@@ -1876,7 +1906,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 }
 
 // Every setting the document service takes from boot reaches the service main builds
-// (newDocumentService, through documentDeps): boot's six values, each one distinct, are each
+// (newDocumentService, through documentDeps): boot's seven values, each one distinct, are each
 // found on the dependencies the service is built from.
 func TestDocumentDepsCarryEveryBootSetting(t *testing.T) {
 	boot := bootConfig{
@@ -1886,6 +1916,7 @@ func TestDocumentDepsCarryEveryBootSetting(t *testing.T) {
 		EditNoticeQuiet:   14 * time.Second,
 		MaxLiveRooms:      15,
 		MaxDocConnections: 16,
+		TestHooksEnabled:  true,
 	}
 	got := documentDeps(boot, docs.Deps{})
 	for _, field := range []struct {
@@ -1898,6 +1929,7 @@ func TestDocumentDepsCarryEveryBootSetting(t *testing.T) {
 		{"EditNoticeQuiet", got.EditNoticeQuiet, boot.EditNoticeQuiet},
 		{"MaxLiveRooms", got.MaxLiveRooms, boot.MaxLiveRooms},
 		{"MaxDocConnections", got.MaxDocConnections, boot.MaxDocConnections},
+		{"TestHooks", got.TestHooks, boot.TestHooksEnabled},
 	} {
 		if field.got != field.want {
 			t.Errorf("docs.Deps.%s = %v, want boot's %v: documentDeps drops the setting", field.name, field.got, field.want)

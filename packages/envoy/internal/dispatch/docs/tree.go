@@ -378,7 +378,7 @@ func renderFragmentMarkdown(fragment *crdt.YXmlFragment) (string, error) {
 // snapshotDocument copies doc's state as of one moment. Encoding it takes the document's lock, which
 // every peer update and service write holds while it applies, so the copy is never a tree half
 // way through a write - which a direct walk of a resident room's live tree can read, since the
-// walk takes no lock (sjawhar/ygo v1.51.3-sami.1, crdt/yxml.go:353-369) - and nothing writes the
+// walk takes no lock (sjawhar/ygo v1.55.1-sami.2, crdt/yxml.go:351-367) - and nothing writes the
 // copy.
 func snapshotDocument(doc *crdt.Doc) (*crdt.Doc, error) {
 	snapshot := newDocumentCopy()
@@ -440,9 +440,21 @@ type forkTreeCounts struct {
 
 // listResident lists value under live, a room's resident document, in listing until live is
 // collected: the key holds live weakly, so the listing never keeps an evicted room's document
-// alive, and the entry goes once that document is collected.
+// alive, and the entry goes once that document is collected, unless the listing went first.
 func listResident(listing *sync.Map, live *crdt.Doc, value any) {
 	key := weak.Make(live)
 	listing.Store(key, value)
-	runtime.AddCleanup(live, func(key weak.Pointer[crdt.Doc]) { listing.Delete(key) }, key)
+	// The cleanup holds the listing weakly because runtime.AddCleanup keeps a cleanup's closure
+	// alive for as long as the object it is attached to, and every listing here is a field of the
+	// service (Service.instances, Service.replicas), which reaches every resident room document
+	// through ygo's room table: a closure holding the listing strongly would be a cycle through
+	// live, which would then never be collected, and nor would anything it holds. The nil check
+	// skips the delete only where the listing went first, and a listing that is gone has no entry
+	// left to drop (dispatch://INFRA-1085).
+	owner := weak.Make(listing)
+	runtime.AddCleanup(live, func(key weak.Pointer[crdt.Doc]) {
+		if listing := owner.Value(); listing != nil {
+			listing.Delete(key)
+		}
+	}, key)
 }

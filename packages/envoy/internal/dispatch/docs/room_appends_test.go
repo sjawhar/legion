@@ -46,11 +46,11 @@ import (
 // The count is of the statements and pipelines the code sends, which is what the code decides.
 type statementTracer struct {
 	mu    sync.Mutex
-	trips []roundTrip
+	trips []tracedTrip
 }
 
-// roundTrip is one statement, or one pipeline of statements, a connection sent.
-type roundTrip struct {
+// tracedTrip is one statement, or one pipeline of statements, a connection sent.
+type tracedTrip struct {
 	conn       *pgx.Conn
 	statements []tracedStatement
 }
@@ -69,7 +69,7 @@ func (statement tracedStatement) names(room string) bool {
 func (t *statementTracer) record(conn *pgx.Conn, statements []tracedStatement) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.trips = append(t.trips, roundTrip{conn: conn, statements: statements})
+	t.trips = append(t.trips, tracedTrip{conn: conn, statements: statements})
 }
 
 func (t *statementTracer) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
@@ -462,15 +462,20 @@ func failDocumentCommits(t *testing.T, database *store.Store, artifactID string)
 	}
 }
 
-// A room whose queued updates the store cannot take - the gate refuses them, the room standing
-// behind the head another process's append moved, or their commit fails - stores none of them, and
-// every one of them ends exactly once: the first one's call fails the room and returns the error,
-// and each other meets the failed room on its own call and is dropped, its credit landed, its
-// pending and durable counts ended. That holds for the one ygo hands on late, after the failed
-// room's eviction has handed its record over to the one registered in its place: it is still
-// gated on the instance it was made in, so it is refused rather than stored with no gate at all.
-// The three updates are recorded and handed to the room's persistence here as the room's own
+// A room whose queued updates the store cannot take - the gate refuses them, the room's stored
+// history replaced under it, or their commit fails - stores none of them, and every one of them
+// ends exactly once: the first one's call fails the room and returns the error, and each other
+// meets the failed room on its own call and is dropped, its credit landed, its pending and
+// durable counts ended. That holds for the one ygo hands on late, after the failed room's
+// eviction has handed its record over to the one registered in its place: it is still gated on
+// the instance it was made in, so it is refused rather than stored with no gate at all. The
+// three updates are recorded and handed to the room's persistence here as the room's own
 // observer and ygo's worker do, so the test decides when each call is made.
+//
+// A room merely behind the head is not one of these cases: the gate admits a browser's updates
+// from a room whose stored history is intact, and the room's cursor folds them in once catch-up
+// fills the gap (gateAppend). What it refuses is a room whose history was replaced under it, a
+// rebuild on another process here.
 func TestAGateRefusalOrFailedCommitStoresNothingOfTheBatchAndEachUpdateEndsOnce(t *testing.T) {
 	cases := []struct {
 		name string
@@ -478,10 +483,7 @@ func TestAGateRefusalOrFailedCommitStoresNothingOfTheBatchAndEachUpdateEndsOnce(
 		fail func(t *testing.T, database *store.Store, artifactID string)
 	}{
 		{name: "the gate refuses the batch", fail: func(t *testing.T, database *store.Store, artifactID string) {
-			other := NewPgVersioned(storetest.SecondProcess(t, database))
-			if _, err := other.AppendUpdate(context.Background(), artifactID, paragraphUpdate()); err != nil {
-				t.Fatalf("append from the other process: %v", err)
-			}
+			replaceStoredHistory(t, database, artifactID, "Rebuilt.\n")
 		}},
 		{name: "the batch's commit fails", fail: failDocumentCommits},
 	}
@@ -530,7 +532,7 @@ func TestAGateRefusalOrFailedCommitStoresNothingOfTheBatchAndEachUpdateEndsOnce(
 			browser := &browserOrigin{}
 			for index := range updates {
 				_, updates[index] = peerEdit(t, live, appendBlocks(t, fmt.Sprintf("Queued %d.\n", index)))
-				credits[index] = service.creditContentChange(artifactID, browser, &instance.hold)
+				credits[index] = service.creditContentChange(artifactID, browser, &instance.hold, nil)
 				service.queueUpdateClass(artifactID, updates[index],
 					documentUpdateClass{seq: uint64(index + 1), contentChanged: true, durable: true, credit: credits[index], cursor: &instance.cursor}, false)
 			}
@@ -633,7 +635,7 @@ func TestABatchStopsAtASuppressedUpdateAndAtAnotherRoomInstance(t *testing.T) {
 		waitForLandedAppends(t, service, artifactID)
 		live := service.srv.GetDoc(artifactID)
 		before := storedHead(t, database, artifactID)
-		gate := &heldAppendGate{entered: make(chan struct{}), release: make(chan struct{})}
+		gate := &burstGate{entered: make(chan struct{}), release: make(chan struct{})}
 		t.Cleanup(gate.let)
 		appends.mu.Lock()
 		appends.gates = append(appends.gates, gate)
@@ -829,7 +831,7 @@ func TestALoneUpdateAndABatchHoldingItStoreItOnce(t *testing.T) {
 			ctx := context.Background()
 			database := storetest.Open(t)
 			artifactID := createDocument(t, database, "# First")
-			gates := []*heldAppendGate{
+			gates := []*burstGate{
 				{entered: make(chan struct{}), release: make(chan struct{})},
 				{entered: make(chan struct{}), release: make(chan struct{})},
 			}

@@ -51,14 +51,15 @@ type roomState struct {
 	askBlocks         map[string]struct{}
 	askAuthors        map[string]model.Actor
 	pendingAskAuthors map[string]model.Actor
-	// lastActor is the most recent edit's source: the actor of a service mutation, or the sole
-	// connected peer of a browser edit. A version lists its authors, so a settlement that runs
-	// after an edit's own version was committed would otherwise attribute the block asks it
-	// indexes to nobody.
+	// lastActor is the most recent edit's source this process saw: the actor of a service
+	// mutation, or the sole connected peer of a browser edit. A settlement names the source the
+	// document's pending-settlement row holds, which every process's appends and commits write
+	// (settlementAuthors), not this one; the record keeps its own for what has not reached that row
+	// - closing an issue writes it there (setRoomIssueOpen) - and takes the row's when a room loads.
 	lastActor *model.Actor
 	// unsettled marks a lastActor no settlement has read since: the settlement it was recorded
 	// for names it, so the state holds it until one commits (settleRoomWithin). Closing persists
-	// it on the pending-settlement row before clearing it (SetIssueClosed), so that row carries it
+	// it on the pending-settlement row before clearing it (setRoomIssueOpen), so that row carries it
 	// through a room release or restart. The authors themselves are in F and R, never only here.
 	unsettled bool
 	// updateClasses is the queue of classes the room's update observer recorded, in the order it
@@ -70,11 +71,11 @@ type roomState struct {
 	pendingUpdates int
 	queuedBytes    int
 	// appendLinger is what a lingering browser append of the room waits on, woken to end every
-	// linger at once: when a wait for the room's appends begins (waitForRoomIdle, which also
-	// records appendsFlushed, so an update recorded before that ask no longer lingers, and counts
-	// itself in appendWaiters, so no append lingers while it waits), when the queue reaches a
-	// batch's cap (queueUpdateClass), and when the record is handed over
-	// (handOverFailedRoomLocked).
+	// linger at once: when a wait for the room's appends begins (waitForRoomIdle) or another
+	// process's room query asks for them (askRoomAppends) - each records appendsFlushed, so an
+	// update recorded before the ask no longer lingers, and counts itself in appendWaiters, so
+	// no append lingers while it waits - when the queue reaches a batch's cap
+	// (queueUpdateClass), and when the record is handed over (handOverFailedRoomLocked).
 	appendLinger   wakeSignal
 	appendsFlushed time.Time
 	appendWaiters  int
@@ -123,7 +124,7 @@ type roomState struct {
 	settling int
 	// closed is whether the document's issue is closed as of closedRead: when the newest read of
 	// the issue recorded here began, or when a close or reopen of the issue was recorded
-	// (SetIssueClosed). A read that began earlier than the one recorded never replaces it
+	// (setRoomIssueOpen). A read that began earlier than the one recorded never replaces it
 	// (recordIssueLocked), so the record is at least as fresh as any read a holder made before it.
 	// A zero closedRead is no record, and closed then says nothing.
 	closed     bool
@@ -158,10 +159,17 @@ type roomState struct {
 // stored in seq order (flushThrough). roomCredit is, for a browser update measured as no change
 // while a live write was open, the peers connected as the room took it, outside F and with no
 // credit sequence of its own: the credit its append takes if the room's shadow measures it a
-// change after all (storedClasses). recorded is when a durable class was recorded, which the batch
-// its own call takes lingers from (roomAppendLinger). resident is the token of the load whose
-// room instance committed the update, which the update's bytes count against (queueUpdateClass),
-// nil for a class no room instance made.
+// change after all (storedClasses). resident is the token of the load whose room instance
+// committed the update, which the update's bytes count against (queueUpdateClass), nil for a class
+// no room instance made. observed is when the observer classified the update, on this process's
+// monotonic clock, which tells the gate an update the room took before its issue closed from one
+// taken after (observedBeforeClose) and is the instant the batch its own call runs lingers from
+// (roomAppendLinger); zero for a class no observer of the room's log classified.
+//
+// An update only the room holds - not a published live write's nor a catch-up's, which are stored
+// already - also names instance, the room instance it was made in, whose list of unstored updates
+// holds it from the moment the observer classified it until its append has returned
+// (roomInstance.unstored), so a room query of another process can answer with it (unstoredShare).
 type documentUpdateClass struct {
 	update         []byte
 	seq            uint64
@@ -171,7 +179,8 @@ type documentUpdateClass struct {
 	roomCredit     *UpdateCredit
 	cursor         *roomCursor
 	resident       *residentLoad
-	recorded       time.Time
+	observed       time.Time
+	instance       *roomInstance
 }
 
 // queuedClass is a class in the room's queue (roomState.updateClasses), with where it stands:
@@ -306,7 +315,7 @@ func (s *Service) forgetLocked(room string, state *roomState) {
 // registered in its place. The record has to go: it carries the failure, which every holder of it
 // still reads (failure) and no later access may (roomFailure, which refuses a load and a connect).
 //
-// ygo takes the closed room out of its map before CloseRoom returns (sjawhar/ygo v1.51.3-sami.1,
+// ygo takes the closed room out of its map before CloseRoom returns (sjawhar/ygo v1.55.1-sami.2,
 // provider/websocket/inject.go), and a browser registers as it is authorized, before its room is
 // loaded or joined (authorize), so a browser that opened the document while the eviction ran is on
 // this record. Dropping it outright loses that browser, and with it the credit for the person's
@@ -399,13 +408,10 @@ type parkedBytes struct {
 // also where the bytes it took count as resident, against the token of the load whose instance
 // committed it (residentLoad, countResidentBytes), which an unload of the name ends. A class
 // carrying no token - one a test built by hand - counts no bytes.
-func (s *Service) queueUpdateClass(room string, update []byte, class documentUpdateClass, stored bool) {
+func (s *Service) queueUpdateClass(room string, update []byte, class documentUpdateClass, stored bool) *queuedClass {
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
 	class.update = update
-	if class.durable {
-		class.recorded = time.Now()
-	}
 	queued := &queuedClass{documentUpdateClass: class}
 	queued.stored.Store(stored)
 	state.updateClasses = append(state.updateClasses, queued)
@@ -420,6 +426,7 @@ func (s *Service) queueUpdateClass(room string, update []byte, class documentUpd
 	if len(state.updateClasses) >= roomAppendBatchUpdates || state.queuedBytes >= roomAppendBatchBytes {
 		state.appendLinger.wake()
 	}
+	return queued
 }
 
 // consumeUpdateClass takes the class the room's update observer recorded for update, wherever it
@@ -563,34 +570,14 @@ func (w *wakeSignal) wake() {
 	}
 }
 
-// hasOpenLiveWrite is whether an open live-write transaction of this process is writing room's
-// document (liveWrite). The stale-room evictor asks it before it closes a room another process's
-// write left behind, because that writer alone is out of reach of the confirmation the evictor
-// makes under the document's advisory lock (roomBehindDurableHead): an open write holds no lock
-// between its operations, and between its commit and its publish it has moved the cursor of the
-// room it forked past what that room holds (Ledger.takeRoomCursors, publish), so the room it
-// publishes into is the room the evictor would close.
-//
-// The other writers of this process take the document's lock and are ordered by that
-// confirmation instead, so they are not asked about here. A batch of a room's browser updates
-// (PgVersioned.AppendUpdatesWithCredit, under the document's session lock on its own connection)
-// and a settlement (settleRoomWithin, under lockSettlementCursor) each either advance the
-// instance's cursor, once for each version they stored, before they drop the lock, or are refused
-// by the gate on a room behind the head (ErrRoomBehindHead), and a cursor moves only by the
-// version after the one it stands at (advanceRoomCursor), so a room the confirmation finds behind
-// is one none of them can bring back to the head.
-func (s *Service) hasOpenLiveWrite(room string) bool {
-	state := s.lockExistingState(room)
-	if state == nil {
-		return false
-	}
-	defer s.unlockState(room, state)
-	return state.openLiveWriteLocked()
-}
-
-// openLiveWriteLocked is hasOpenLiveWrite for a state its caller holds state.mu on: the close of
-// a room behind the durable head reads it again under the hold that reserves the close, so no
-// write is admitted between the evictor's own unlocked read and the reservation.
+// openLiveWriteLocked is whether an open live-write transaction of this process is writing the
+// document of state (liveWrite), for a caller holding state.mu: the close of a room whose stored
+// history was replaced reads it under the hold that reserves the close (closeRoomBehindHead), so
+// no write is admitted between the check and the reservation. That writer alone is out of reach of
+// the document's advisory lock the catch-up confirms its verdict under (historyReplacedUnderLock):
+// an open write holds no lock between its operations, and between its commit and its publish it
+// has moved the cursor of the room it forked past what that room holds (Ledger.takeRoomCursors,
+// publish), so the room it publishes into is the room the close would retire.
 func (state *roomState) openLiveWriteLocked() bool {
 	return state.liveWriter != nil
 }
@@ -748,7 +735,7 @@ func (s *Service) admittedIssueRead(room string) (issueRead, bool) {
 
 // holdForAdmission holds room's state for a document socket's admission, from its read of the
 // issue, which it records there, until releaseAdmission, which the socket's end runs. While it
-// holds the state, a close of the issue (SetIssueClosed) finds the state and records the close on
+// holds the state, a close of the issue (setRoomIssueOpen) finds the state and records the close on
 // it, so a socket whose issue closes while it loads its document is still admitted read-only
 // (authorize), and the room the socket's load opens takes the record rather than reading the
 // issue again (admittedIssueRead).
@@ -872,12 +859,9 @@ func (s *Service) releaseRoom(room string) {
 
 // roomLoaded counts a load of room among the resident rooms (residentRooms) and among the room
 // cap's places, where it takes the place a socket reserved for the room, if one did, rather than
-// a second one, and holds room's head-tracker entry (headTracker.hold) for the room's evictor
-// decisions (staleRoomEvictor.roomHolds). It answers with the load's own token: what the load
-// takes counts against that token (countResidentBytes), and an unload of the name ends it
-// (roomUnloaded).
+// a second one. It answers with the load's own token: what the load takes counts against that
+// token (countResidentBytes), and an unload of the name ends it (roomUnloaded).
 func (s *Service) roomLoaded(room string) *residentLoad {
-	s.heads.hold(room)
 	s.roomSlots.mu.Lock()
 	defer s.roomSlots.mu.Unlock()
 	load := &residentLoad{}
@@ -907,15 +891,14 @@ func (s *Service) roomLoadedHere(room string) bool {
 }
 
 // roomUnloaded takes back what roomLoaded counted for one load of room - its place among the
-// resident rooms and under the room cap, its hold on room's head-tracker entry, and the bytes
-// counted against its token - and is the only place a load's bytes leave the service's count.
+// resident rooms and under the room cap, and the bytes counted against its token - and is the only
+// place a load's bytes leave the service's count.
 // load is the token to end: a failed load names its own (onLoadDocument), and an unload names
 // none, which ends the oldest load of the name (releaseUnloadedRoom says why that one has ended).
 // The token is chosen and taken out under the one hold of roomSlots.mu that ends it, so two
 // unloads of a name never end the same load. The room keeps its place while a socket still holds
 // a reservation on it.
 func (s *Service) roomUnloaded(room string, load *residentLoad) {
-	s.heads.release(room)
 	s.roomSlots.mu.Lock()
 	defer s.roomSlots.mu.Unlock()
 	slot := s.roomSlots.rooms[room]
