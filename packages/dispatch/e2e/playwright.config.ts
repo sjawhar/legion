@@ -161,15 +161,27 @@ const expectTimeout = 15_000;
 
 // The per-test budget, measured rather than inherited. Playwright's own default is 30 s, chosen
 // when this suite ran one row at a time; it now runs four lanes on a four-core runner, and the
-// slowest row of the whole suite finished 144 ms under that default. Read from the report.json
+// slowest row this budget governs finished 144 ms under that default. Read from the report.json
 // artifact of 201 ci.yaml runs between 2026-11-05T08:51:42Z and 2026-11-05T20:27:47Z (78
-// merge_group, 119 pull_request, 4 push), over the 324,871 results that passed on rows this tree
-// has: median 2,562 ms, 95th percentile 7,176 ms, 99th 11,272 ms, 99.9th 18,066 ms, maximum
-// 29,856 ms (deep-links.e2e.ts's "emitted document item hrefs select and scroll their anchored
-// quote" in WebKit). The budget is twice that maximum, so a healthy row has as long again as the
-// slowest one ever took, and a row that hangs still fails inside a minute: 3.3 times the suite's
-// 99.9th percentile and 23 times its median. It lengthens no row's work; a row that needs it has
-// already lost whatever it was waiting for. Raise it only from a measurement of the same shape.
+// merge_group, 119 pull_request, 4 push).
+//
+// The population is the one this number governs, and the filter is the point of it: the 301,975
+// results that passed on rows of the spec files this tree has whose tests set no timeout of
+// their own. Left out are 279 results of 26 spec files this tree does not have, which are other
+// branches' rows, and every row of the 16 files that call `test.setTimeout` (the refilling
+// files among them, whose rows ask for 200 s and 300 s): this budget is not theirs, and reading
+// them into it would raise it for rows it never applies to. Over that population: median
+// 2,515 ms, 95th percentile 6,778 ms, 99th 10,015 ms, 99.9th 15,596 ms, maximum 29,856 ms
+// (deep-links.e2e.ts's "emitted document item hrefs select and scroll their anchored quote" in
+// WebKit). Over the whole of what this tree has, rows with their own timeout included, the
+// maximum is 126,560 ms, and the 21 results above this budget are all in three rows of
+// agent-list-refilling.e2e.ts, which asks for 300 s itself.
+//
+// The budget is twice the governed maximum, so a healthy row has as long again as the slowest
+// one ever took, and a row that hangs still fails inside a minute: 3.8 times that population's
+// 99.9th percentile and 24 times its median, and no governed result of the window reaches it.
+// It lengthens no row's work; a row that needs it has already lost whatever it was waiting for.
+// Raise it only from a measurement of the same shape, over the same population.
 const testTimeout = 60_000;
 
 // Two-process mode's one project: the multiprocess specs, in Chromium, the sign-in spec alone under

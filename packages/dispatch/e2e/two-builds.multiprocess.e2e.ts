@@ -594,7 +594,7 @@ async function walk(
 }
 
 // A walk opens about twenty-five pages, each waiting on its own content, so it outlasts the
-// suite's 30 s test timeout by design.
+// suite's 60 s test timeout (e2e/playwright.config.ts) by design.
 const walkTimeout = 300_000;
 
 test("every route renders with its page from Dispatch A and every asset from Dispatch B", async ({
