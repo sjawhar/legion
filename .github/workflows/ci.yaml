@@ -120,6 +120,7 @@ env:
       "dispatch-multiprocess": "dispatch_multiprocess",
       "listener-server-change": "listener_server_change",
       "broker-multiprocess": "broker_multiprocess",
+      "airlock-lean": "airlock_lean",
       "envoy-smoke": "envoy_smoke",
       "envoy-e2e-local": "envoy_e2e_local",
       "envoy-session-stall": "envoy_session_stall",
@@ -162,6 +163,7 @@ jobs:
       dispatch_multiprocess: ${{ steps.filter.outputs.dispatch_multiprocess }}
       listener_server_change: ${{ steps.filter.outputs.listener_server_change }}
       broker_multiprocess: ${{ steps.filter.outputs.broker_multiprocess }}
+      airlock_lean: ${{ steps.filter.outputs.airlock_lean }}
       envoy_smoke: ${{ steps.filter.outputs.envoy_smoke }}
       envoy_e2e_local: ${{ steps.filter.outputs.envoy_e2e_local }}
       envoy_session_stall: ${{ steps.filter.outputs.envoy_session_stall }}
@@ -246,6 +248,11 @@ jobs:
               # would refuse with (packages/daemon/internal/api): internal/dispatch/itemblocks
               # below, and the document parser under it, are in the daemon's build through it.
               - 'packages/envoy/dispatchbody/*'
+              # The airlock's rules, its decision and its header swap, and the fuzz seeds the
+              # daemon's test run reads as the testdata of a package it compiles. Not the whole
+              # tree: lean/ holds the model, which airlock-lean alone reads.
+              - 'packages/envoy/internal/broker/airlock/*'
+              - 'packages/envoy/internal/broker/airlock/testdata/**'
               - 'packages/envoy/internal/broker/api/*'
               # The approval page's own files, its embedded templates and stylesheet included.
               - 'packages/envoy/internal/broker/approval/**'
@@ -654,6 +661,7 @@ jobs:
               - 'packages/envoy/cmd/agent-secrets-helper/*'
               - 'packages/envoy/cmd/broker/*'
               - 'packages/envoy/cmd/broker-refgen/*'
+              - 'packages/envoy/internal/broker/airlock/*'
               - 'packages/envoy/internal/broker/api/*'
               # The approval page's own files, its embedded templates and stylesheet included.
               - 'packages/envoy/internal/broker/approval/**'
@@ -875,6 +883,7 @@ jobs:
               # Dispatch server's, which e2e/run-broker.sh:95 builds in one go build.
               - 'packages/envoy/cmd/broker/*'
               - 'packages/envoy/cmd/dev-oidc-issuer/*'
+              - 'packages/envoy/internal/broker/airlock/*'
               - 'packages/envoy/internal/broker/api/*'
               # The approval page's own files, its embedded templates and stylesheet included.
               - 'packages/envoy/internal/broker/approval/**'
@@ -1142,6 +1151,8 @@ jobs:
               - 'packages/envoy/cmd/agent-secrets/*'
               # cmd/broker/main_test.go:220 (sslrootcert).
               - 'packages/envoy/docker/rds-global-bundle.pem'
+              - 'packages/envoy/internal/broker/airlock/*'
+              - 'packages/envoy/internal/broker/airlock/testdata/**'
               - 'packages/envoy/internal/broker/api/*'
               # The approval page's own files, its embedded templates and stylesheet included.
               - 'packages/envoy/internal/broker/approval/**'
@@ -1175,6 +1186,16 @@ jobs:
               - 'packages/envoy/internal/pgmigrate/*'
               - 'packages/envoy/internal/ratelimit/*'
               - 'packages/envoy/internal/redact/*'
+            # The Lean model of the airlock and the Go code it covers (airlock-lean): `lake build`
+            # and the axiom print read the model's own project, and the two fuzz runs compile the
+            # airlock package and compare it against the model's program, so a change to either
+            # side runs the job. Both sides live under internal/broker/airlock, which one glob
+            # names; the Lean toolchain comes from the elan the job's action installs.
+            airlock_lean:
+              - '.github/workflows/ci.yaml'
+              - *go_workspace
+              - 'packages/envoy/internal/broker/airlock/**'
+              - '.github/actions/install-elan/**'
             # Every file packages/envoy/docker/Dockerfile builds from, so envoy-smoke runs whenever
             # the image it smokes changes, every file the held-port image built on top of it reads
             # (packages/envoy/infra/host/heldportwrapper/Dockerfile and its .dockerignore), and what
@@ -3407,6 +3428,82 @@ jobs:
       - name: Two-process tests of the secrets broker
         run: go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/broker
         working-directory: packages/envoy
+
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
+
+  # The Lean model of the airlock and the Go code it covers: the model is built, the axioms its
+  # five theorems rest on are printed and held to the three Lean's own kernel admits, and
+  # FuzzAirlock drives Validate, Decide and Rewrite against the model's program, so a change made
+  # on one side and not on the other fails here rather than in production.
+  #
+  # The fuzz run is two minutes, because this is a required check and a required check stays
+  # short. The ten-minute run the issue's verification asks for is the implementer's recorded
+  # result on the head that merges, not this job.
+  airlock-lean:
+    needs: changes
+    if: needs.changes.outputs.airlock_lean == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      # The built model the two runs below compare the Go code against. Naming no file makes
+      # FuzzAirlock skip (internal/broker/airlock/airlock_fuzz_test.go:32-46), and a skip is a
+      # pass, so the build step checks the binary is there before those runs read this.
+      AIRLOCK_MODEL: ${{ github.workspace }}/packages/envoy/internal/broker/airlock/lean/.lake/build/bin/airlock-model
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/go.mod
+          cache: false
+      # No Go cache family: the airlock package imports the standard library alone, so this job
+      # downloads no module and compiles no third-party code, as envoy-go-race-api does.
+      #
+      # elan and the Lean toolchain it installs, under the ELAN_HOME
+      # .github/actions/install-elan sets ($RUNNER_TEMP/elan, under the runner's work directory),
+      # keyed on the content of the lean-toolchain the model is built with. No restore-keys: an
+      # entry of another toolchain is exactly what this key keeps out, and `lake` would download
+      # the named one anyway. Only a push to main saves, as every other cache here does.
+      - id: elan-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/elan
+          key: elan-${{ runner.os }}-${{ hashFiles('packages/envoy/internal/broker/airlock/lean/lean-toolchain') }}
+      - uses: ./.github/actions/install-elan
+      - name: Build the Lean model
+        run: |
+          lake build
+          test -x .lake/build/bin/airlock-model
+        working-directory: packages/envoy/internal/broker/airlock/lean
+      # `#print axioms` names, per theorem, the axioms its proof rests on. propext,
+      # Classical.choice and Quot.sound are Lean's own three, which its kernel admits; any other
+      # name is an assumption this model added, and a `sorry` prints sorryAx. Fewer than five
+      # lines naming a theorem means one was renamed, dropped or no longer compiled, which would
+      # leave the job printing nothing and passing.
+      - name: Print the theorems' axioms
+        run: |
+          lake env lean Axioms.lean > "$RUNNER_TEMP/axioms.txt"
+          cat "$RUNNER_TEMP/axioms.txt"
+          awk -F'[][]' '/^.Airlock\./ { printed++; split($2, a, ", "); for (i in a) if (a[i] != "propext" && a[i] != "Classical.choice" && a[i] != "Quot.sound") { print "axiom outside the three: " a[i]; bad = 1 } } END { if (printed != 5) { print "theorems printed: " printed+0 ", expected 5"; bad = 1 } exit bad }' "$RUNNER_TEMP/axioms.txt"
+        working-directory: packages/envoy/internal/broker/airlock/lean
+      # The committed seed corpus (testdata/fuzz/FuzzAirlock): every seed through both sides.
+      - name: Compare the Go airlock with the model over the seed corpus
+        run: go test -run FuzzAirlock ./internal/broker/airlock/
+        working-directory: packages/envoy
+      - name: Fuzz the Go airlock against the model
+        run: go test -fuzz FuzzAirlock -fuzztime=120s -run FuzzAirlock ./internal/broker/airlock/
+        working-directory: packages/envoy
+      - if: github.event_name == 'push' && success() && steps.elan-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/elan
+          key: ${{ steps.elan-cache.outputs.cache-primary-key }}
 
       - name: Report ci-ok when this is the run's last job
         if: always()

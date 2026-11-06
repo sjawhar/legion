@@ -1,0 +1,28 @@
+name: Install elan
+description: >-
+  Installs elan v4.2.4, the Lean toolchain manager the airlock-lean job builds
+  packages/envoy/internal/broker/airlock/lean with, checked against its SHA-256 before it is run,
+  and puts ELAN_HOME and its bin on the job's environment for the later steps. ELAN_HOME is
+  $RUNNER_TEMP/elan, which ci.yaml's airlock-lean job caches on the content of that project's
+  lean-toolchain: with the cache restored this step finds elan and the Lean toolchain already
+  there and downloads nothing, and with it missed `lake` installs the toolchain lean-toolchain
+  names on its first build.
+runs:
+  using: composite
+  steps:
+    - name: Install elan
+      shell: bash
+      run: |
+        elan_home="$RUNNER_TEMP/elan"
+        echo "ELAN_HOME=$elan_home" >> "$GITHUB_ENV"
+        echo "$elan_home/bin" >> "$GITHUB_PATH"
+        if [ -x "$elan_home/bin/elan" ]; then
+          exit 0
+        fi
+        tarball="$RUNNER_TEMP/elan-x86_64-unknown-linux-gnu.tar.gz"
+        curl -fsSL -o "$tarball" https://github.com/leanprover/elan/releases/download/v4.2.4/elan-x86_64-unknown-linux-gnu.tar.gz
+        echo "42b94d4244e8353142c456ec0e4ca6528fd898a6c604d4059f494e706e431f63  $tarball" | sha256sum -c -
+        mkdir -p "$RUNNER_TEMP/elan-init"
+        tar -xzf "$tarball" -C "$RUNNER_TEMP/elan-init" elan-init
+        ELAN_HOME="$elan_home" "$RUNNER_TEMP/elan-init/elan-init" -y --no-modify-path --default-toolchain none
+        "$elan_home/bin/elan" --version

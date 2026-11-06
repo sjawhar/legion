@@ -472,6 +472,7 @@ def reduce_line(line: str) -> tuple:
 # them either. CI_OK_SELECTED_BY and CI_OK_PULL_REQUEST_ONLY are ci.yaml's ci-ok map, which only
 # ci-ok-report.sh and ci-ok.sh read.
 ENV_ALLOWED = frozenset({
+    "AIRLOCK_MODEL",
     "BROKER_TEST_DATABASE_URL", "CI_OK_PULL_REQUEST_ONLY", "CI_OK_SELECTED_BY", "DATABASE_URL",
     "DISPATCH_E2E_FILE_STORE_BUCKET", "DISPATCH_E2E_FILE_STORE_ENDPOINT",
     "DISPATCH_TEST_DATABASE_URL", "ENVOY_INFRA_DOCKER_PLUGIN", "ENVOY_SMOKE_HELD_PORT_IMAGE", "ENVOY_SMOKE_IMAGE",
