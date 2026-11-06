@@ -616,9 +616,6 @@ jobs:
               # own name, to no `version` of its own, and to a source range that leaves out the
               # 0.0.0 placeholder and admits the first release.
               - '.claude-plugin/marketplace.json'
-              # tests/build-inputs.test.ts holds the rebuild's on.push.paths to the files
-              # scripts/build-inputs.txt matches.
-              - '.github/workflows/claude-envoy-rebuild.yaml'
             # The daemon's tests (every package once: the three concurrent packages under the race
             # detector, the rest in the plain step, and the daemon
             # scripts/e2e/stage1-skeleton.sh builds) and every file the job's other steps read.
