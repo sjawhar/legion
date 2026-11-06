@@ -12,10 +12,35 @@ and a socket under it, or under a directory made from it (an `XDG_RUNTIME_DIR`, 
 directory a test sets to `t.TempDir()`), a temporary directory of about 20 bytes is enough to pass
 the limit, as on a dev box whose `TMPDIR` is on a data disk.
 
-- Put a test's socket under a short directory of its own: `os.MkdirTemp("", "<short prefix>")`,
-  removed in `t.Cleanup`. A package that binds sockets in its tests keeps one helper for it,
-  `shortTempDir` (`packages/daemon/internal/daemon/daemon_test.go` is one). Use the package's
-  helper, or add one where the package has none.
+- Take a test's socket directory from the module's `internal/testtmp`, the one helper every test
+  that binds a socket calls (`packages/daemon/internal/testtmp`, and the same file in
+  `packages/envoy`). `testtmp.Dir(t, longest)` is a fresh directory of the test's own, removed
+  when the test ends, where `longest` is the longest path the test puts inside it, written
+  relative to the directory (`"g9/.s.PGSQL.5432"`); `testtmp.Socket(t, name)` is the path of a
+  socket named `name` in such a directory. `Dir` makes the directory under `TMPDIR` and measures
+  what `longest` would come to there; only when that passes 107 bytes, or `TMPDIR` holds no
+  directory at all, does it fall back to `/tmp`, and it says so with `t.Logf` when it does. Each
+  module's `internal/testtmp` keeps a test that fails a new `os.TempDir()`, or a new
+  `os.MkdirTemp` whose first argument is a string literal naming a directory, anywhere in that
+  module's tests. It reads no other shape: a directory named by a variable or a constant, or an
+  `os.CreateTemp`, is left to review.
+- Two kinds of site keep a directory of their own on purpose.
+  `packages/daemon/internal/shim/socketpath_test.go`'s `roleTempDir` builds a deliberately long
+  one, as long as the `TMPDIR` a Legion role is told, so that its test proves sockets still bind
+  where a role runs; a short directory would take the proof away. The once-per-binary
+  directories a package's `TestMain` owns (the build directories of `internal/daemon`,
+  `internal/stream` and `internal/runtime/tmux`, the jj configuration directory of
+  `cmd/legion/main_test.go` and the home of `internal/workspace/workspace_test.go` in the daemon
+  module; the sign-in secret directory of `internal/broker/config` and the certificate directory
+  of `infra/seed/main_test.go` in the envoy module) bind no socket, so they need no byte budget,
+  and no `*testing.T` outlives them, so they keep `os.MkdirTemp("", …)` and a removal in that
+  `TestMain`.
+- A test changes a process variable, `TMPDIR` above all, only through `t.Setenv`, and a test
+  that must unset one calls the module's `fixtureenv.Unset`, which goes through `t.Setenv`,
+  never a bare `os.Setenv` or `os.Unsetenv`. `t.Setenv` puts back what the process held when the
+  test ends, and Go refuses it in a parallel test or under a parallel parent, while a parallel
+  test runs only beside other parallel tests, so no test can read a value another test changed.
+  A bare call has neither fence.
 - Before you call a test that binds a socket done, run it with a temporary directory of about 64
   bytes. A pass under `/tmp` does not show that the test works under a longer one. Set `GOTMPDIR`
   as well, since `t.TempDir()` reads it first:
@@ -143,6 +168,8 @@ So a test whose jj child names no directory opens and writes that clone, and the
 
 - Set `Dir` on every `exec.Command` a test starts that runs `jj`, and on every one that runs `git`, to a directory the test made.
   A `--git-dir` is not enough on its own: it tells git which repository to act on and leaves the child standing wherever the test process stands, which is what the next reader of the command has to work out again.
+  `Dir` is not enough on its own either, and this is the step the rule stopped short of: an inherited `GIT_DIR` names the repository git acts on whatever directory the child stands in, so it outranks `Dir` and `-C` alike, and a Legion issue pod hands every process such a block.
+  So a test that starts git takes those variables out of the child's environment as well as placing it: `fixtureenv.Guard` in the package's `TestMain` for a child that inherits `os.Environ()`, or `fixtureenv.Isolated` for one given an environment of its own.
 
 - The two probes that got this wrong were copies of one helper, now `testbin.RequireJJFilters` in `packages/daemon/internal/testbin`, each running `jj config list` with no `Dir`.
   A probe is as much a jj child as a fixture is.

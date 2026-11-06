@@ -65,5 +65,8 @@ func runTrustingTheFake(m *testing.M) int {
 		return 1
 	}
 	gcpCert = tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+	// oauthenv_test.go reads GOOGLE_OAUTH_ACCESS_TOKEN again once every test has run, so the
+	// snapshot is taken here, before any of them.
+	snapshotStartupOAuthToken()
 	return m.Run()
 }
