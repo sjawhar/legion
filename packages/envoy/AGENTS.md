@@ -686,7 +686,7 @@ The replica is listed for its document's reads (`Service.replicas`), the documen
 the update observer, which the document holds, is the replica's one strong holder, so the replica is collected with an evicted document, in the same collection, and the listing goes once the document is collected (`keepReplica`, `TestAnEvictedRoomsReplicaGoesWithIt`).
 A reader holding an evicted instance of a room reaches that instance's replica or none, never its successor's.
 `TestReadsOfALiveDocumentRunBesideItsPeers` runs each of these reads while a websocket peer types, until 50 of its runs have overlapped one of the peer's updates, and CI runs the `docs` and `api` packages under `-race`, each in a race job of its own, which reports a walk of the live tree beside a write;
-the `docs` package's is `envoy-go-race-docs` and the `api` package's is `envoy-go-race-api`, and the unit tests' own step runs without `-race`.
+the `docs` package's is `envoy-go-race-docs` and the `api` package's is `envoy-go-race-api`, and each of those two packages runs under the detector there and nowhere else: `envoy-go`'s unit step leaves both out, and the only plain run it keeps of them is its step "Test what the race build cannot run at all or at full size", which runs the few tests the detector makes impossible or shrinks.
 Each race job runs only when a file its own filter in `.github/workflows/ci.yaml` names changes
 — `envoy_go_race_docs`, the closure of the `docs` package alone, whose job gives it a 60-minute deadline, and `envoy_go_race_api` for the API;
 see Critical conventions for what keeps those filters current.
@@ -3086,12 +3086,12 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   When using the MCP bridge, Envoy should stay naive about the message content — the MCP server owns the domain logic.
 
 - Every Go job of `.github/workflows/ci.yaml` runs only when a file its own filter there names changes, the Envoy jobs this module's tagged and race suites run in among them:
-  `dispatch-memory` (`dispatch_memory`), `dispatch-multiprocess` (`dispatch_multiprocess`), `listener-server-change` (`listener_server_change`), `broker-multiprocess` (`broker_multiprocess`), `envoy-go-race` (`envoy_go_race`), `envoy-go-race-pmdoc` (`envoy_go_race_pmdoc`), `envoy-go-race-api` (`envoy_go_race_api`), `envoy-go-race-docs` (`envoy_go_race_docs`) and `envoy-infra-go` (`envoy_infra_go`).
+  `dispatch-memory` (`dispatch_memory`), `dispatch-multiprocess` (`dispatch_multiprocess`), `listener-server-change` (`listener_server_change`), `broker-multiprocess` (`broker_multiprocess`), `envoy-go-race` (`envoy_go_race`), `envoy-go-race-api` (`envoy_go_race_api`), `envoy-go-race-docs` (`envoy_go_race_docs`) and `envoy-infra-go` (`envoy_infra_go`).
   Each filter lists the packages the job's command compiles with its build tags, the packages of each binary its tests build, and the files its tests read.
   Any change that makes a job's command, or a binary its tests build, compile a new package or read a new file - production code included, not only a test - adds that package or file to that job's filter in the same pull request.
   `.github/scripts/check-ci-filters.sh` (ci.yaml's `ci-filters` job) recomputes each go command's package closure and fails naming a file a filter misses;
   a file a test reads through `..` and a go command a test starts are rows of `.github/scripts/ci_job_reads.py`, which the change that adds them extends, since the check finds neither by itself.
-  `envoy-go`, gated by its broad `envoy_go` filter, runs every untagged unit test of the `packages/envoy` module on every Envoy change (`internal/integration` in a step of its own in that job), so it also runs the untagged tests of every other job's packages in that module;
+  `envoy-go`, gated by its broad `envoy_go` filter, runs on every Envoy change the untagged unit tests of every package of the `packages/envoy` module that no other job runs (`internal/integration` in a step of its own in that job, and the packages the race lane runs left to it), so a package with no job of its own is tested there;
   `packages/envoy/infra` is a module of its own, which that `go test` does not reach, so envoy-infra's unit tests run only in `envoy-infra-go`.
 
 ## Security

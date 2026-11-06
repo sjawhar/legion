@@ -274,10 +274,15 @@ func TestRedeliverWebhooksRaisesAnR1RedeliveryBucketToTheReplicaSetting(t *testi
 	cluster := testnats.StartCluster(t, 3)
 	conn := testnats.Connect(t, cluster.URL())
 	t.Cleanup(conn.Close)
-	js := cluster.JetStream(t)
-	if _, err := redeliver.OpenState(conn, js, 1); err != nil {
+	// The earlier sweep's own start creates the bucket, so its requests are bounded by the hang
+	// guard a clustered create needs rather than by Cluster.JetStream's ten seconds, which one
+	// create can use up on a loaded machine. The command below connects for itself and looks the
+	// bucket up on whichever member answers it, so every member answers for the bucket first.
+	if _, err := redeliver.OpenState(conn, testnats.BucketJetStream(t, conn), 1); err != nil {
 		t.Fatalf("create the R1 redelivery bucket: %v", err)
 	}
+	cluster.AwaitBucket(t, bus.WebhookRedeliveryBucket)
+	js := cluster.JetStream(t)
 	stream := "KV_" + bus.WebhookRedeliveryBucket
 	if info := testnats.AwaitSettledStream(t, js, stream); testnats.Copies(info.Cluster) != 1 {
 		t.Fatalf("the redelivery bucket has %d copies, want 1", testnats.Copies(info.Cluster))

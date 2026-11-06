@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -62,27 +64,114 @@ type KeyValue struct {
 // handle carries.
 const RequestTimeout = 10 * time.Second
 
+// A create a clustered server answers is committed to the JetStream metadata group, not applied
+// by every member yet: a member that has not applied the new stream assignment answers a read of
+// the bucket's stream "stream not found", the member the create was sent through included. A probe
+// over 25 fresh three-member clusters asked every member for a bucket's stream the instant
+// CreateKeyValue answered, and 67 of the 75 member reads still said so, the slowest for 206 ms. So
+// a read of a bucket this start has just created, or that a concurrent start created while this
+// one looked, is taken again every bucketAppliedInterval until the member answers for it, and
+// given up at bucketAppliedDeadline.
+//
+// bucketAppliedInterval is short against that 206 ms, so the wait ends within a small fraction of
+// the catch-up it waits out, and each miss is one STREAM.INFO a member answers from memory.
+// bucketAppliedDeadline is RequestTimeout, the wait every other read of a bucket's stream already
+// takes (WrapKeyValue, ReadStreamState), and roughly fifty times the slowest catch-up measured, so
+// a member that is not merely behind fails the start where that read would have failed it rather
+// than hanging it.
+const (
+	bucketAppliedInterval = 25 * time.Millisecond
+	bucketAppliedDeadline = RequestTimeout
+)
+
+// awaitBucketApplied is read, a read of the bucket a start has just created, taken again every
+// bucketAppliedInterval while the member answering reports the bucket missing (missing) and no
+// longer than bucketAppliedDeadline. It returns the first answer that is not that, and the last
+// miss as it is once the deadline passes, so its caller wraps one error however the wait ended.
+// Any other error, a refusal included, is returned at once: only a member that has not caught up
+// is waited out. The first miss is logged, as bindListenerDurable logs its first refusal, so a
+// start that waited says which bucket it waited for.
+func awaitBucketApplied[T any](bucket string, missing func(error) bool, read func() (T, error)) (T, error) {
+	start := time.Now()
+	for attempt := 1; ; attempt++ {
+		value, err := read()
+		if err == nil || !missing(err) {
+			return value, err
+		}
+		if time.Since(start) >= bucketAppliedDeadline {
+			return value, err
+		}
+		if attempt == 1 {
+			slog.Warn("envoy nats kv bucket not applied yet, waiting",
+				slog.String("bucket", bucket),
+				slog.String("error", err.Error()),
+				slog.String("retry_in", bucketAppliedInterval.String()),
+				slog.String("deadline", bucketAppliedDeadline.String()))
+		}
+		time.Sleep(bucketAppliedInterval)
+	}
+}
+
+// bucketMissing reports whether err is a member's answer that the bucket's stream is not there,
+// however the legacy or the jetstream package names it: the answer a member that has not applied
+// a create of it gives (bucketAppliedInterval).
+func bucketMissing(err error) bool {
+	return errors.Is(err, nats.ErrBucketNotFound) || errors.Is(err, jetstream.ErrBucketNotFound) ||
+		errors.Is(err, nats.ErrStreamNotFound) || errors.Is(err, jetstream.ErrStreamNotFound)
+}
+
 // EnsureKeyValue opens the KV bucket config names on conn, through js, creating it with config when
 // it does not exist. config.Replicas is the deployment's replica count (ReplicasEnvVar): a new
 // bucket is created at it, and an existing bucket with fewer copies is raised to it
 // (raiseReplicas). A refused create or raise of more than one copy names the setting
-// (refusedSettings). A bucket a ConnectOwningStream client names (WithKeptBuckets) is raised to
+// (refusedSettings), and is returned as soon as the server answers it: nothing a server refuses is
+// waited out. A bucket a ConnectOwningStream client names (WithKeptBuckets) is raised to
 // the deployment's count again by that client's keeper from then on, which also ends a lowering by
 // a concurrent start with a lower count; the count holds while every program of the deployment
 // carries the same one.
+//
+// A bucket this start created, and one a concurrent start created while this one looked (the
+// server answers that create "stream name already in use"), is waited for on the member answering
+// before the handle is opened on it (awaitBucketApplied), since a clustered create is answered
+// before every member has applied it.
 func EnsureKeyValue(conn *nats.Conn, js nats.JetStreamContext, config *nats.KeyValueConfig) (KeyValue, error) {
 	kv, err := js.KeyValue(config.Bucket)
+	created := false
 	switch {
 	case errors.Is(err, nats.ErrBucketNotFound):
 		kv, err = js.CreateKeyValue(config)
-		err = refusedSettings(err, nil, &nats.StreamConfig{Replicas: config.Replicas})
+		if errors.Is(err, nats.ErrStreamNameAlreadyInUse) {
+			// The bucket was created between this start's lookup and its create, by another start
+			// of this deployment, and the member answering may not have applied that create
+			// either: the lookup is taken again until it has. The copies are not raised here, as
+			// they are for a bucket this start found: the start that created it just now carries
+			// the deployment's count too.
+			kv, err = awaitBucketApplied(config.Bucket, bucketMissing, func() (nats.KeyValue, error) {
+				return js.KeyValue(config.Bucket)
+			})
+		} else {
+			err = refusedSettings(err, nil, &nats.StreamConfig{Replicas: config.Replicas})
+		}
+		created = err == nil
 	case err == nil:
-		_, err = raiseReplicas(js, config.Bucket, config.Replicas)
+		var before int
+		before, err = raiseReplicas(js, config.Bucket, config.Replicas)
+		if err == nil && before > 0 {
+			// The copies this raise added are behind until they have caught up with the bucket's
+			// stream, and a KV read is a direct get, which nats-server hands a copy the queue
+			// group at 90% caught up rather than when it is current (server/jetstream_cluster.go:
+			// 2622-2641, v2.10.29): a read taken now can be answered "key not found" by a copy
+			// that does not hold the key yet. The caller reads keys as soon as this call answers
+			// (the webhook redelivery sweep reads its cursor and its index), and a stale miss
+			// there asks GitHub for a delivery it has already redelivered, so the start waits for
+			// the copies and fails rather than reading early.
+			err = awaitReplicasCurrent(js, config.Bucket, config.Replicas)
+		}
 	}
 	if err != nil {
 		return KeyValue{}, err
 	}
-	return WrapKeyValue(conn, kv)
+	return wrapKeyValue(conn, kv, created)
 }
 
 // raiseReplicas raises the stream of the existing bucket to replicas copies when it has fewer, and
@@ -115,6 +204,73 @@ func raiseReplicas(js nats.JetStreamContext, bucket string, replicas int) (int, 
 		return 0, fmt.Errorf("raise %s: %w", stream, refusedSettings(err, &info.Config, &raised))
 	}
 	return info.Config.Replicas, nil
+}
+
+// awaitReplicasCurrent waits until the bucket's stream reports replicas copies, each one current
+// with its leader and none of them offline or lagging, read every bucketAppliedInterval and given
+// up at bucketAppliedDeadline. It is what EnsureKeyValue runs after a raise that added copies, and
+// nothing else needs it: a bucket nobody raised has no copy that is behind.
+//
+// The deadline is an error naming the bucket's stream, the copies it asked for and what each copy
+// that was not current had to say (copiesBehind), the way a refused raise names its setting, and
+// the caller fails its start on it. Carrying on instead would hand the caller a bucket whose
+// direct gets a copy that is 90% caught up may answer "key not found" for a key that is there
+// (server/jetstream_cluster.go:2622-2641, v2.10.29), and a start that reads one wrong answer is
+// worse than a start that does not come up: the webhook redelivery sweep reads its records the
+// moment this call answers, and a stale miss there asks GitHub for a redelivery it already made.
+//
+// A read that fails is returned as it is, since the stream is there: this runs only after a raise
+// of it answered.
+func awaitReplicasCurrent(js nats.JetStreamContext, bucket string, replicas int) error {
+	stream := "KV_" + bucket
+	start := time.Now()
+	for attempt := 1; ; attempt++ {
+		info, err := js.StreamInfo(stream)
+		if err != nil {
+			return fmt.Errorf("raise %s: read the raised stream: %w", stream, err)
+		}
+		behind := copiesBehind(info, replicas)
+		if behind == "" {
+			return nil
+		}
+		if time.Since(start) >= bucketAppliedDeadline {
+			return fmt.Errorf("raise %s: %d copies were not current within %s: %s", stream, replicas, bucketAppliedDeadline, behind)
+		}
+		if attempt == 1 {
+			slog.Warn("envoy nats kv raised copies not current yet, waiting",
+				slog.String("bucket", bucket),
+				slog.Int("replicas", replicas),
+				slog.String("behind", behind),
+				slog.String("retry_in", bucketAppliedInterval.String()),
+				slog.String("deadline", bucketAppliedDeadline.String()))
+		}
+		time.Sleep(bucketAppliedInterval)
+	}
+}
+
+// copiesBehind says what keeps the stream info describes short of replicas copies that are all
+// current, and is empty when none does: the stream has a leader, as many copies as were asked for,
+// and every copy of it is current, online and not lagging. Each copy that is not is named with
+// what it reported, so a start that gave up says which member it waited for.
+func copiesBehind(info *nats.StreamInfo, replicas int) string {
+	if info.Cluster == nil || info.Cluster.Leader == "" {
+		return "the stream has no leader yet"
+	}
+	var behind []string
+	if copies := 1 + len(info.Cluster.Replicas); copies != replicas {
+		behind = append(behind, fmt.Sprintf("%d copies of %d", copies, replicas))
+	}
+	for _, peer := range info.Cluster.Replicas {
+		switch {
+		case peer.Offline:
+			behind = append(behind, peer.Name+" offline")
+		case !peer.Current:
+			behind = append(behind, fmt.Sprintf("%s not current, lag %d", peer.Name, peer.Lag))
+		case peer.Lag > 0:
+			behind = append(behind, fmt.Sprintf("%s lag %d", peer.Name, peer.Lag))
+		}
+	}
+	return strings.Join(behind, ", ")
 }
 
 // SetKeyValueMaxAge sets the maximum age of the existing bucket's stream to maxAge when it carries
@@ -162,15 +318,35 @@ func OpenKeyValue(conn *nats.Conn, js nats.JetStreamContext, bucket string) (Key
 
 // WrapKeyValue pairs kv, a legacy handle opened on conn, with the jetstream handle of the same
 // bucket on conn that its watches go through. Opening that handle is one STREAM.INFO, bounded by
-// RequestTimeout.
+// RequestTimeout. The bucket is read as it is: a caller that holds a handle on it has had an
+// answer for it already. EnsureKeyValue's create path waits the member out instead
+// (wrapKeyValue).
 func WrapKeyValue(conn *nats.Conn, kv nats.KeyValue) (KeyValue, error) {
+	return wrapKeyValue(conn, kv, false)
+}
+
+// wrapKeyValue is WrapKeyValue, with the STREAM.INFO that opens the jetstream handle taken again
+// until the member answering has applied the create of the bucket, when created says this start
+// has just created it
+// (awaitBucketApplied): the create's own answer came from the metadata group, and this read goes
+// to whichever member conn is on, which may not have applied it yet. Each read is bounded by
+// RequestTimeout as a lone read is, and every one of them together by bucketAppliedDeadline.
+func wrapKeyValue(conn *nats.Conn, kv nats.KeyValue, created bool) (KeyValue, error) {
 	js, err := jetstream.New(conn)
 	if err != nil {
 		return KeyValue{}, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), RequestTimeout)
-	defer cancel()
-	watch, err := js.KeyValue(ctx, kv.Bucket())
+	open := func() (jetstream.KeyValue, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), RequestTimeout)
+		defer cancel()
+		return js.KeyValue(ctx, kv.Bucket())
+	}
+	var watch jetstream.KeyValue
+	if created {
+		watch, err = awaitBucketApplied(kv.Bucket(), bucketMissing, open)
+	} else {
+		watch, err = open()
+	}
 	if err != nil {
 		return KeyValue{}, fmt.Errorf("open the jetstream handle of KV bucket %s: %w", kv.Bucket(), err)
 	}
