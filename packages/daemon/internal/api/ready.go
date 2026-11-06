@@ -199,7 +199,8 @@ const unreviewedChangeNamed = 10
 // head's ancestor ("ahead", or "identical" for a READY at the approved head itself; "diverged" or
 // "behind" is not the approved code plus anything), list its files, and list fewer than
 // githubrest.CompareFilesLimit of them, counted over the whole list rather than what the exemption
-// leaves; every path it lists, a rename's old name included, must be retro's or under .legion/.
+// leaves; every entry it lists must have every path under .legion/ (underLegion), or every path,
+// a rename's old name included, under docs/solutions/.
 // Anything else is refused READY_UNREVIEWED_CHANGE, naming what it found, and the remedy for each is
 // the same: the reviewer reviews this head as a new round. An approved head GitHub does not know is
 // refused the same way; any other failure of the read (githubrest.Client.Compare) is GitHub's, to
