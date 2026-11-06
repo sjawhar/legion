@@ -9,7 +9,8 @@
 # observed and `ok <name>`; the first that fails ends the run non-zero, naming it:
 #   - A6: a 40 KB body written with `dispatch handoff-write` reads back byte for byte with
 #     `dispatch handoff-read`, and two writes are versions 1 and 2; control: a body of the cap plus
-#     one byte (262145) is refused by the CLI, and by Dispatch itself, sent raw, 413 CAP_EXCEEDED;
+#     one byte (262145) is refused 413 CAP_EXCEEDED by Dispatch, which owns every bound, both
+#     through the CLI and sent raw;
 #   - A3: the planner's completion naming a record another session wrote is refused
 #     HANDOFF_SESSION_MISMATCH naming both sessions, and the issue stays in planning; control: after
 #     the planner writes its own, the same completion moves the issue to implementing;

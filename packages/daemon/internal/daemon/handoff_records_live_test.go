@@ -281,9 +281,10 @@ func (r *handoffRecordsLive) a6RoundTrip() {
 	}
 }
 
-// Step A6's control. A body of the cap plus one byte is refused: the CLI refuses it before it
-// sends anything, and Dispatch itself, sent it raw, answers 413 CAP_EXCEEDED. The issue still
-// holds two versions.
+// Step A6's control. A body of the cap plus one byte is refused, by Dispatch, which owns every
+// bound: the CLI sends it and exits non-zero carrying the server's 413 CAP_EXCEEDED (contracts'
+// handoffProblem checks no length of its own), and Dispatch itself, sent the same body raw,
+// answers 413 CAP_EXCEEDED. The issue still holds two versions.
 func (r *handoffRecordsLive) a6OverCap() {
 	t := r.t
 	const session = "ses_a6_writer"
@@ -291,8 +292,8 @@ func (r *handoffRecordsLive) a6OverCap() {
 	file := r.bodyFile("over-cap", body)
 	out, code := r.cli(session, "handoff-write", "--issue", r.a6, "--phase", "implement", "--body-file", file)
 	over := fmt.Sprintf("1 bytes over the %d-byte limit", handoffBodyMax)
-	if code == 0 || !strings.Contains(out, "was not called") || !strings.Contains(out, over) {
-		t.Fatalf("handoff-write of %d bytes exited %d: %q, want a refusal before the call naming %q", len(body), code, out, over)
+	if code == 0 || !strings.Contains(out, "CAP_EXCEEDED") || !strings.Contains(out, over) {
+		t.Fatalf("handoff-write of %d bytes exited %d: %q, want a refusal naming CAP_EXCEEDED and %q", len(body), code, out, over)
 	}
 	r.note("handoff-write of a %d-byte body exited %d: %s", len(body), code, strings.Join(strings.Fields(out), " "))
 	status, answer := r.dispatch.agentPost("/api/v1/issues/"+r.a6+"/handoffs/implement", map[string]any{
