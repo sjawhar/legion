@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 )
 
@@ -653,8 +654,13 @@ func TestReadGitRemotesReadsWhatGhReads(t *testing.T) {
 	} {
 		command := exec.Command("git", args...)
 		// readGitRemotes reads the process's working directory, so the fixture runs in the same
-		// directory by name rather than inheriting whatever the process has.
+		// directory by name rather than inheriting whatever the process has, and it carries an
+		// environment of its own rather than the test process's. The two t.Setenv lines above are
+		// not for this git: readGitRemotes runs in-process, in the test binary, and reads them
+		// there, while fixtureenv.Isolated keeps this git off any repository, configuration or
+		// credential a GIT_ variable planted back after the guard could name.
 		command.Dir = repository
+		command.Env = fixtureenv.Isolated(t.TempDir())
 		if out, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)
 		}
@@ -698,8 +704,12 @@ func TestReadGitRemotesRefusesALineGhReadsOtherwise(t *testing.T) {
 			for _, args := range config {
 				command := exec.Command("git", args...)
 				// The fixture configures the repository readGitRemotes reads, which is the
-				// directory this case chdirs into, named here rather than inherited.
+				// directory this case chdirs into, named here rather than inherited, and its
+				// environment is its own too. The two t.Setenv lines above serve readGitRemotes,
+				// which runs in-process in the test binary; fixtureenv.Isolated is what shuts this
+				// git out of any other repository, configuration or credential.
 				command.Dir = repository
+				command.Env = fixtureenv.Isolated(t.TempDir())
 				if out, err := command.CombinedOutput(); err != nil {
 					t.Fatalf("git %v: %v: %s", args, err, out)
 				}

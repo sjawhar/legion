@@ -467,8 +467,10 @@ func TestWorkspaceInitProvisionsTheIssueWorkspace(t *testing.T) {
 	}
 	read := exec.Command("git", "--git-dir="+filepath.Join(v.clone(), ".git"), "config", "--get-all", "credential.helper")
 	// --git-dir is not a working directory: the read runs in the clone provisioning just made,
-	// never in the directory the test process happens to have.
+	// never in the directory the test process happens to have, and under an environment of its
+	// own, as v.jj, v.git and the setup fixture do.
 	read.Dir = v.clone()
+	read.Env = fixtureenv.Isolated(t.TempDir())
 	helpers, err := read.Output()
 	if err != nil || !strings.HasSuffix(string(helpers), "\n"+winitHelper+"\n") {
 		t.Fatalf("the clone's credential helpers are %q (%v), want the named helper last", helpers, err)

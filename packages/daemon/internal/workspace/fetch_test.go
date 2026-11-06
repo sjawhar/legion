@@ -794,8 +794,11 @@ func TestFetchRemovesTheLocksAnInterruptedFetchLeftInTheFeed(t *testing.T) {
 		t.Errorf("the partial pack's removal was not logged: %q", logged)
 	}
 	for _, object := range objects {
+		// The probe reads the feed the fetch left, under the package's fixture environment, so
+		// the home it reads is the one the code under test and every other fixture read.
 		held := exec.Command("git", "--git-dir="+feed, "cat-file", "-e", object)
 		held.Dir = feed
+		held.Env = setupEnvironment()
 		if err := held.Run(); err != nil {
 			t.Errorf("the feed lost %s, an object the clone may borrow", object)
 		}
@@ -1511,8 +1514,11 @@ func incompleteCacheOf(t *testing.T, remote string) string {
 		t.Fatal("the remote's history holds no blob to drop")
 	}
 	old := packOf(t, cache)
+	// The repack runs in the cache it rewrites, under the package's fixture environment, as every
+	// other git of these fixtures does.
 	command := exec.Command("git", "--git-dir="+cache, "pack-objects", "--quiet", filepath.Join(cache, "objects", "pack", "pack"))
 	command.Dir = cache
+	command.Env = setupEnvironment()
 	command.Stdin = strings.NewReader(strings.Join(kept, "\n") + "\n")
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("pack the cache without %s: %v\n%s", dropped, err, output)
