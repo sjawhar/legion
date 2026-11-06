@@ -92,7 +92,7 @@ import {
 } from "./sections";
 import { ThreadRowCard } from "./ThreadRowCard";
 import { ThreadTitle } from "./ThreadTitle";
-import { dismissRowId } from "./useInboxDismiss";
+import { dismissRow, type InboxDismissRow } from "./useInboxDismiss";
 import { useInboxSelection } from "./useInboxSelection";
 import { useInboxThreadRows } from "./useInboxThreadRows";
 
@@ -1075,11 +1075,12 @@ export function Inbox({
     const row = handRow();
     return row === undefined ? undefined : rowId(row);
   };
-  /** The row `e` dismisses: the thread row in hand, by the id the route names it with. An Ask or
-   *  an Approval row has no Dismiss at all (`dismissRowId`). */
-  const dismissableRow = (): string | undefined => {
+  /** The row `e` dismisses: the thread row in hand, as the route names it - its id and the
+   *  version the page is showing it at. An Ask or an Approval row has no Dismiss at all
+   *  (`dismissRow`). */
+  const dismissableRow = (): InboxDismissRow | undefined => {
     const row = handRow();
-    return row === undefined ? undefined : dismissRowId(row);
+    return row === undefined ? undefined : dismissRow(row);
   };
   /** Where the Inbox's keys act: the reading column while it is on - its head's Snooze, owner
    *  link and Copy ref, and the answer form of whatever it is showing - else the row holding
@@ -1288,8 +1289,8 @@ export function Inbox({
         ? `Move the ${acted} thread back to the Inbox`
         : `Dismiss the ${acted} thread`,
       run: () => {
-        const id = dismissableRow();
-        if (id !== undefined) dismissRows([id]);
+        const named = dismissableRow();
+        if (named !== undefined) dismissRows([named]);
       },
       // Not from inside an ask the reader is answering, the rule `h` holds to: the card's own
       // controls are not the list's, and a typed `e` belongs to whatever holds the focus.
@@ -1547,7 +1548,7 @@ export function Inbox({
     // Dismiss from here (`DismissControl`).
     <RowDismissContext
       value={{
-        dismiss: (id) => dismissRows([id]),
+        dismiss: (named) => dismissRows([named]),
         pending: dismissWrite.pending,
         show,
       }}

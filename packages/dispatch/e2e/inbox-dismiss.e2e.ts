@@ -38,6 +38,10 @@ import { asUser } from "./users";
  * out and **Move to Inbox** puts it back; a reply somebody else writes brings a dismissed thread
  * back unread, and the reader's own reply leaves it where it is.
  *
+ * A press that names its rows names the version it dismisses each of them by (`seen_replies`),
+ * the newest reply that row showed, so the server writes no mark over a reply the page never
+ * drew; a **Move to Inbox** names none, which is what the route takes a restore as.
+ *
  * Everything here is made up: this repository is public, so nothing names a real person, host or
  * project.
  */
@@ -140,6 +144,20 @@ async function inboxThreads(): Promise<number> {
   return (await listMyReplies({ kind: ["reply", "agent"], state: "inbox" })).total;
 }
 
+/** The version each Inbox row is dismissed by, read out of the same list route the page reads:
+ *  the newest reply the row shows (`reply.id`), keyed by that row's own id, which is exactly
+ *  what a dismissal of it carries in `seen_replies`. Read before the press, since the rows it
+ *  takes out are gone from this state afterwards. */
+async function seenReplies(): Promise<Record<string, string>> {
+  const { rows } = await listMyReplies({ kind: ["reply", "agent"], state: "inbox" });
+  return Object.fromEntries(
+    rows.map((row) => [
+      row.kind === "agent" ? agentRowId(row.thread_id) : replyRowId(row.thread_id),
+      row.reply.id,
+    ])
+  );
+}
+
 /** Picks one choice of the **View** menu's **Show** section and shuts the menu again. */
 async function chooseShow(page: Page, label: string): Promise<void> {
   const menu = page.getByRole("menu", { name: "View" });
@@ -232,10 +250,15 @@ test("the row's Dismiss takes a thread out of the list, the counts and the Inbox
     await expect(control.first()).toHaveText("Dismiss");
 
     // One press: the row goes, the selection moves to the next row, and the unread thread it
-    // took goes off the reader's Inbox number.
+    // took goes off the reader's Inbox number. The body names the row and the newest reply the
+    // list answered for it, which is the version the server writes the mark under.
+    const seen = await seenReplies();
     const sent = nextDismiss(page);
     await control.first().click();
-    expect((await sent).postDataJSON()).toEqual({ threads: [replyRowId(seeded.reply)] });
+    expect((await sent).postDataJSON()).toEqual({
+      seen_replies: { [replyRowId(seeded.reply)]: seen[replyRowId(seeded.reply)] },
+      threads: [replyRowId(seeded.reply)],
+    });
     await expect(replyRow).toHaveCount(0);
     await expect(rows).toHaveCount(2);
     await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", seeded.ask);
@@ -358,11 +381,16 @@ test("three thread rows picked with x go out together in one bulk Dismiss", asyn
     const dismiss = bar.getByRole("button", { name: "Dismiss selected threads" });
     await expect(dismiss).toBeVisible();
 
-    // One press names all three rows, and all three leave the list.
+    // One press names all three rows, each with its own version, and all three leave the list.
+    const seen = await seenReplies();
     const sent = nextDismiss(page);
     await dismiss.click();
-    const body = (await sent).postDataJSON() as { threads?: string[] };
+    const body = (await sent).postDataJSON() as {
+      seen_replies?: Record<string, string>;
+      threads?: string[];
+    };
     expect(new Set(body.threads)).toEqual(new Set(picked));
+    expect(body.seen_replies).toEqual(Object.fromEntries(picked.map((id) => [id, seen[id]])));
     for (const id of picked) {
       await expect(page.locator(`[data-inbox-row="${id}"]`)).toHaveCount(0);
     }
@@ -409,21 +437,25 @@ test("Select all dismisses every row of the group in one request that names each
     await bar.getByRole("button", { name: "Select all" }).click();
     await expect(bar).toContainText("Every row selected");
 
-    // One request, and it names every row of the group by id - the Inbox's own read is unpaged,
-    // so all of them are in hand, the ones behind **Show more** as much as the fifty drawn -
-    // rather than the narrowing, which only the paged Dismissed view has to fall back on.
+    // One request, and it names every row of the group by id and version - the Inbox's own read
+    // is unpaged, so all of them are in hand, the ones behind **Show more** as much as the fifty
+    // drawn - rather than the narrowing, which only the paged Dismissed view has to fall back on.
+    const seen = await seenReplies();
     const sent = nextDismiss(page);
     await bar.getByRole("button", { name: "Dismiss selected threads" }).click();
     const body = (await sent).postDataJSON() as {
       dismiss_through?: string;
       kind?: string[];
+      seen_replies?: Record<string, string>;
       threads?: string[];
     };
-    expect(Object.keys(body)).toEqual(["threads"]);
+    expect(Object.keys(body).sort()).toEqual(["seen_replies", "threads"]);
     const named = new Set(body.threads);
     expect(named.size).toBe(THREADS);
     expect([...named].every((id) => id.startsWith("reply:"))).toBe(true);
     for (const id of drawn) expect(named.has(id)).toBe(true);
+    // One version per row it names, each the newest reply the list answered for that row.
+    expect(body.seen_replies).toEqual(seen);
 
     // Every row of the band goes, the ones behind **Show more** with them.
     await expect(rows).toHaveCount(0);
@@ -487,12 +519,22 @@ test("Select all under a search dismisses every matching row of a band wider tha
 
     // Every row the word matches goes, not the fifty on the page: the server's narrowing knows
     // nothing of that word, so the press names the ids - and only the matching ones, which is
-    // why the three the word hides are still in the Inbox afterwards.
+    // why the three the word hides are still in the Inbox afterwards - each with its version.
+    const seen = await seenReplies();
     const sent = nextDismiss(page);
     await bar.getByRole("button", { name: "Dismiss selected threads" }).click();
-    const body = (await sent).postDataJSON() as { dismiss_through?: string; threads?: string[] };
-    expect(Object.keys(body)).toEqual(["threads"]);
+    const body = (await sent).postDataJSON() as {
+      dismiss_through?: string;
+      seen_replies?: Record<string, string>;
+      threads?: string[];
+    };
+    expect(Object.keys(body).sort()).toEqual(["seen_replies", "threads"]);
     expect(new Set(body.threads).size).toBe(MATCHING);
+    // One entry per row it named, and the version of each is the list's own.
+    expect(new Set(Object.keys(body.seen_replies ?? {}))).toEqual(new Set(body.threads));
+    for (const [id, version] of Object.entries(body.seen_replies ?? {})) {
+      expect(version).toBe(seen[id]);
+    }
 
     await expect(rows).toHaveCount(0);
     await expect.poll(async () => dismissedThreads()).toBe(MATCHING);

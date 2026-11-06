@@ -12,7 +12,12 @@ import { type RefObject, useCallback, useEffect, useRef, useState } from "react"
 import type { InboxFilters } from "./InboxBar";
 import { type InboxListRow, rowId } from "./list-row";
 import { type AskSnoozeFailure, useAskSnoozeMany } from "./useAskSnooze";
-import { type InboxDismiss, useInboxDismiss } from "./useInboxDismiss";
+import {
+  dismissRow,
+  type InboxDismiss,
+  type InboxDismissRow,
+  useInboxDismiss,
+} from "./useInboxDismiss";
 
 /**
  * What the bar says after a pick the server refused in part. The count alone cannot tell a
@@ -48,8 +53,9 @@ export interface InboxSelection {
   readonly dismissedHere: (id: string) => boolean;
   /** One press over the threads the bar is counting. */
   readonly dismissPick: () => void;
-  /** One press over the ids given, from a row's own control or from `e`. */
-  readonly dismissRows: (ids: readonly string[]) => void;
+  /** One press over the rows given, from a row's own control or from `e`: each row with the
+   *  version it is dismissed by (`InboxDismissRow`). */
+  readonly dismissRows: (rows: readonly InboxDismissRow[]) => void;
   /** The one dismiss write this list shares, for what it is doing and what it was refused. */
   readonly dismissWrite: InboxDismiss;
   /** Every row the reader has marked, by `rowId`, a folded one's included. */
@@ -58,8 +64,9 @@ export interface InboxSelection {
   readonly selectAll: () => void;
   /** The marked asks the view is drawing, which is what **Snooze** defers. */
   readonly selectedAsks: readonly string[];
-  /** The thread ids a **Dismiss** press names, which is what the bar counts for that press. */
-  readonly selectedThreads: readonly string[];
+  /** The thread rows a **Dismiss** press names, each with the version it dismisses that row by,
+   *  which is what the bar counts for that press. */
+  readonly selectedThreads: readonly InboxDismissRow[];
   readonly snoozePick: (until: string) => void;
   /** What the reader is told about the last bulk snooze the server refused in part. */
   readonly snoozeRefusal: string | undefined;
@@ -150,10 +157,14 @@ export function useInboxSelection({
   const selected = [...marked].filter((id) => drawnIds.has(id));
   const selectedAsks = selected.filter((id) => rows.get(id)?.kind === "ask");
   // Under **Select all** the press covers every thread row the narrowing matches, drawn or not:
-  // the Inbox's read is unpaged, so these are all of them, and one request names them all.
-  const selectedThreads = allRows
-    ? [...rows.values()].filter((row) => row.kind === "thread").map((row) => rowId(row))
-    : selected.filter((id) => rows.get(id)?.kind === "thread");
+  // the Inbox's read is unpaged, so these are all of them, and one request names them all, each
+  // with the version its own row is showing (`dismissRow`).
+  const selectedThreads: InboxDismissRow[] = [];
+  for (const id of allRows ? [...rows.keys()] : selected) {
+    const row = rows.get(id);
+    const named = row === undefined ? undefined : dismissRow(row);
+    if (named !== undefined) selectedThreads.push(named);
+  }
   // One pick, over the ids the bar is counting: the same optimistic move and rollback the per-row
   // control makes, once per ask. The ids the server took leave the selection; the ones it refused
   // are marked again under its own reason, even if Clear ran while the write was in flight, so a
@@ -176,9 +187,9 @@ export function useInboxSelection({
   };
   /** One press of the reader's, from a row's own control, from `e`, or from the bar: the ids go
    *  into the hold's exception list first, so the rows leave the list under their hand. */
-  const dismissRows = (ids: readonly string[]) => {
-    for (const id of ids) pressedHere.current.add(id);
-    dismissWrite.submit({ restore: showDismissed, rows: [...ids] });
+  const dismissRows = (named: readonly InboxDismissRow[]) => {
+    for (const { id } of named) pressedHere.current.add(id);
+    dismissWrite.submit({ restore: showDismissed, rows: [...named] });
   };
   // One press over the threads the bar is counting, through the one dismiss write. The ids are
   // in hand wherever the list that holds them is unpaged, which the Inbox's own read is, so the
@@ -188,7 +199,7 @@ export function useInboxSelection({
   // all read** does, which is offered only where nothing is typed in the search box (`asOf`).
   const dismissPick = () => {
     if (allRows && showDismissed && asOf !== undefined) {
-      for (const id of selectedThreads) pressedHere.current.add(id);
+      for (const { id } of selectedThreads) pressedHere.current.add(id);
       dismissWrite.submit({ filters, restore: true, through: asOf });
     } else {
       dismissRows(selectedThreads);

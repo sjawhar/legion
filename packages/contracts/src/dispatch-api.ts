@@ -1429,7 +1429,8 @@ export interface MarkInboxReadResponse {
 /** A row id `POST /api/v1/me/inbox/dismiss` names a thread by, as the Inbox draws its rows: a Reply
  *  row is `reply:<thread id>` and an Agent row `agent:<root message id>`, each id a uuid. An Ask
  *  row, the third kind the Inbox draws, has no Dismiss at all, and naming `ask:<id>` is
- *  400 INVALID_QUERY; the Reply row of an open ask's thread is an ordinary `reply:` id. */
+ *  400 INVALID_QUERY; the Reply row of an open ask's thread is an ordinary `reply:` id. A
+ *  dismissal's `seen_replies` keys its entries by these same ids. */
 export const INBOX_DISMISS_ROW_PREFIXES = { reply: "reply:", agent: "agent:" } as const;
 
 /** The body of `POST /api/v1/me/inbox/dismiss`, which takes a thread out of the Inbox and puts it
@@ -1441,6 +1442,12 @@ export const INBOX_DISMISS_ROW_PREFIXES = { reply: "reply:", agent: "agent:" } a
  *  threads `GET /api/v1/me/replies` answers under it whose newest reply, or whose dismissal, is at
  *  or before that mark, which is the list's own `as_of`, as Mark all read reads `read_through`.
  *
+ *  A dismissal that names `threads` carries `seen_replies` with them, the newest reply each of
+ *  those rows showed: the server writes a row's mark only while the row still holds that reply,
+ *  so a press can never bury a reply the page never drew. A timestamp cannot tell one from the
+ *  other, because a write is stamped when its transaction begins, before anybody else can see
+ *  it, so a reply that lands while the press is in flight can carry the older stamp of the two.
+ *
  *  Dismissing marks a thread read as well, so a dismissed thread never counts as unread. A later
  *  write by somebody else brings a dismissed thread back unread; the caller's own reply does not,
  *  so a reply sent from the Dismissed view leaves the thread there. */
@@ -1448,6 +1455,16 @@ export interface InboxDismissRequest {
   /** The rows to change, as `INBOX_DISMISS_ROW_PREFIXES` spells them. With any narrowing field,
    *  `dismiss_through` included, it is 400 INVALID_QUERY. */
   readonly threads?: string[];
+  /** The version each row `threads` names is dismissed by, keyed by that same row id: the newest
+   *  reply the page showed in the row, which is what `GET /api/v1/me/replies` answers as the
+   *  row's `reply.id` (`MyReplyReply.id`) - `user_threads.last_reply_id` for a Reply row, the
+   *  newest session reply's id for an Agent row - or null for a row that showed no reply.
+   *
+   *  Five refusals, each 400 INVALID_QUERY: a row `threads` names that this leaves out, which is
+   *  an old client; a key naming no row `threads` names; a value that is neither null nor a uuid;
+   *  this field on a restore, which clears the marks and checks no version; and this field with
+   *  the filtered form, where the server reads each row's own version instead. */
+  readonly seen_replies?: Readonly<Record<string, string | null>>;
   /** RFC3339; stored as no later than now. Required when the request names the narrowing rather
    *  than `threads`: missing, unparsable or more than a minute ahead of the server is
    *  400 INVALID_STATE. */

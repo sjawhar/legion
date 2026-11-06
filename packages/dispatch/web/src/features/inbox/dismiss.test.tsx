@@ -76,16 +76,29 @@ function rowIds(): string[] {
   );
 }
 
-test("the body names either the row ids or the list's narrowing with its read mark", () => {
-  expect(inboxDismissBody({ rows: ["reply:c1", "agent:message-1"] })).toEqual({
+test("the body names either the rows with their versions or the list's narrowing with its read mark", () => {
+  // A dismissal names every row it changes with the version it dismisses that row by: the newest
+  // reply the page showed in it, one entry per row, which is what keeps the press from burying a
+  // reply the page never drew.
+  expect(
+    inboxDismissBody({
+      rows: [
+        { id: "reply:c1", seen: "c1-reply" },
+        { id: "agent:message-1", seen: "reply-1" },
+      ],
+    })
+  ).toEqual({
+    seen_replies: { "agent:message-1": "reply-1", "reply:c1": "c1-reply" },
     threads: ["reply:c1", "agent:message-1"],
   });
-  expect(inboxDismissBody({ restore: true, rows: ["reply:c1"] })).toEqual({
-    restore: true,
-    threads: ["reply:c1"],
-  });
-  // **Select all**: the ids are not all loaded, so the narrowing and the list's own `as_of` go
-  // instead - never both, which the route refuses.
+  // A restore clears the marks and checks no version, so it carries none: the route refuses a
+  // restore that names one.
+  expect(inboxDismissBody({ restore: true, rows: [{ id: "reply:c1", seen: "c1-reply" }] })).toEqual(
+    { restore: true, threads: ["reply:c1"] }
+  );
+  // **Select all** of the paged view: the ids are not all loaded, so the narrowing and the list's
+  // own `as_of` go instead - never both, which the route refuses - and it carries no version
+  // either, the server reading each row's own there.
   expect(inboxDismissBody({ filters: { type: ["reply"] }, through: AS_OF })).toEqual({
     dismiss_through: AS_OF,
     kind: ["reply"],
@@ -101,11 +114,15 @@ test("a press under the narrowing changes the threads the list answers at or bef
     dismissesThread({ ...row, reply: { ...row.reply, created_at: "2026-10-12T03:00:00Z" } }, body)
   ).toBe(false);
   // By id, the narrowing says nothing: the ids alone decide.
-  expect(dismissesThread(row, inboxDismissBody({ rows: ["reply:c1"] }))).toBe(true);
-  expect(dismissesThread(row, inboxDismissBody({ rows: ["reply:c9"] }))).toBe(false);
+  expect(
+    dismissesThread(row, inboxDismissBody({ rows: [{ id: "reply:c1", seen: "c1-reply" }] }))
+  ).toBe(true);
+  expect(
+    dismissesThread(row, inboxDismissBody({ rows: [{ id: "reply:c9", seen: "c9-reply" }] }))
+  ).toBe(false);
 });
 
-test("the row's Dismiss sends the row's own id and takes it out of the list at once", async () => {
+test("the row's Dismiss sends the row's own id and version and takes it out of the list at once", async () => {
   const dismissed = answerInboxDismisses();
   const settle = Promise.withResolvers<{ dismissed: number }>();
   dismissed.mockReturnValue(settle.promise);
@@ -118,7 +135,10 @@ test("the row's Dismiss sends the row's own id and takes it out of the list at o
   // At once, with the request still out: the row is gone and the shared unread count has dropped
   // by the one unread row it took.
   await waitFor(() => expect(rowIds()).toEqual(["reply:c9"]));
-  expect(dismissed.mock.calls[0]?.[0]).toEqual({ threads: ["reply:c1"] });
+  expect(dismissed.mock.calls[0]?.[0]).toEqual({
+    seen_replies: { "reply:c1": "c1-reply" },
+    threads: ["reply:c1"],
+  });
   settle.resolve({ dismissed: 1 });
   await waitFor(() => expect(dismissed).toHaveBeenCalledTimes(1));
 });
@@ -179,7 +199,10 @@ test("`e` dismisses the thread row in hand and does nothing on an ask", async ()
   act(() => threadRow?.focus());
   fireEvent.keyDown(document.body, { key: "e" });
   await waitFor(() => expect(dismissed).toHaveBeenCalledTimes(1));
-  expect(dismissed.mock.calls[0]?.[0]).toEqual({ threads: ["reply:c1"] });
+  expect(dismissed.mock.calls[0]?.[0]).toEqual({
+    seen_replies: { "reply:c1": "c1-reply" },
+    threads: ["reply:c1"],
+  });
   expect(rowIds()).not.toContain("reply:c1");
   settle.resolve({ dismissed: 1 });
 });
@@ -206,10 +229,13 @@ test("the bulk bar offers Snooze for the asks among the selection and Dismiss fo
 
   fireEvent.click(screen.getByRole("button", { name: "Dismiss selected threads" }));
   await waitFor(() => expect(rowIds()).not.toContain("reply:c1"));
-  expect(dismissed.mock.calls[0]?.[0]).toEqual({ threads: ["reply:c1"] });
+  expect(dismissed.mock.calls[0]?.[0]).toEqual({
+    seen_replies: { "reply:c1": "c1-reply" },
+    threads: ["reply:c1"],
+  });
 });
 
-test("Select all over the Inbox's own read names every row of the group by id", async () => {
+test("Select all over the Inbox's own read names every row of the group by id and version", async () => {
   const dismissed = answerInboxDismisses();
   dismissed.mockResolvedValue({ dismissed: 2 });
   renderInbox(seeded([replyRow("c1"), replyRow("c9")]));
@@ -221,10 +247,14 @@ test("Select all over the Inbox's own read names every row of the group by id", 
   await screen.findByText("Every row selected");
 
   // The Inbox's thread read is unpaged, so every id of the group is in hand - the rows behind
-  // **Show more** and inside a folded band with them - and one request names them all.
+  // **Show more** and inside a folded band with them - and one request names them all, each
+  // under the version its own row is showing.
   fireEvent.click(screen.getByRole("button", { name: "Dismiss selected threads" }));
   await waitFor(() => expect(dismissed).toHaveBeenCalledTimes(1));
-  expect(dismissed.mock.calls[0]?.[0]).toEqual({ threads: ["reply:c1", "reply:c9"] });
+  expect(dismissed.mock.calls[0]?.[0]).toEqual({
+    seen_replies: { "reply:c1": "c1-reply", "reply:c9": "c9-reply" },
+    threads: ["reply:c1", "reply:c9"],
+  });
 });
 
 test("Select all in the paged Dismissed view sends the narrowing with that list's read mark", async () => {

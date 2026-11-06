@@ -3,15 +3,16 @@ import { createContext, type ReactNode, useContext } from "react";
 import type { MyReplyRow } from "../../api/types";
 import { linkHoverText, linkText } from "../../theme/classes";
 import type { InboxShow } from "../refs/routes";
-import { rowId } from "./list-row";
 import { questionLine } from "./question-line";
+import { dismissThreadRow, type InboxDismissRow } from "./useInboxDismiss";
 
 /** What a thread row's Dismiss does, as the Inbox hands it to the three surfaces that draw one:
  *  the short row, the reading column's head and the card. */
 export interface RowDismiss {
   /** Takes the row out of the view it is drawn in: out of the Inbox, or - in the Dismissed view -
-   *  back into it. */
-  dismiss: (id: string) => void;
+   *  back into it. The row carries the version it is dismissed by, which the control reads off
+   *  the row it is drawn on, so a press names what the reader was shown. */
+  dismiss: (row: InboxDismissRow) => void;
   /** The row ids whose own press is still out. */
   pending: ReadonlySet<string>;
   /** Which view the row is drawn in, which is what its control is called. */
@@ -47,19 +48,19 @@ export function DismissControl({
 }): ReactNode {
   const dismiss = useContext(RowDismissContext);
   if (dismiss === undefined) return null;
-  const id = rowId({ kind: "thread", thread });
+  const named = dismissThreadRow(thread);
   const restoring = dismiss.show === "dismissed";
   const label = restoring ? "Move to Inbox" : "Dismiss";
-  const live = dismiss.pending.has(id);
+  const live = dismiss.pending.has(named.id);
   return (
     <button
       aria-label={`${label}: ${questionLine(thread.subject)}`}
       className={`min-h-11 shrink-0 text-sm font-medium md:min-h-8 ${linkText} ${linkHoverText} ${
         shown ? "" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
       }`}
-      data-inbox-dismiss={id}
+      data-inbox-dismiss={named.id}
       disabled={live}
-      onClick={() => dismiss.dismiss(id)}
+      onClick={() => dismiss.dismiss(named)}
       type="button"
     >
       {live ? (restoring ? "Moving…" : "Dismissing…") : label}
