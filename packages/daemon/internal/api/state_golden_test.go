@@ -208,6 +208,9 @@ func populatedState(t *testing.T) State {
 			Cap:     2,
 			Active:  []string{"LEGION-208", "LEGION-210"},
 			Waiting: []string{"LEGION-211"},
+			// The roots of the live trees, which the slots no longer name: LEGION-207 closed, and
+			// each of the other three roots a tree of its own.
+			Trees: []string{"LEGION-208", "LEGION-210", "LEGION-212"},
 			// LEGION-211 is the waiting root admission skips, so it is in `waiting` too;
 			// LEGION-209 is a child of LEGION-208's tree the workflow holds at `admitted`, which
 			// no waiting line carries. Both are listed, by issue key, with what each waits on —
@@ -223,6 +226,7 @@ func populatedState(t *testing.T) State {
 				Generation:    3,
 				Phase:         phase.Implementing,
 				Status:        "in_progress",
+				Tree:          "LEGION-208",
 				Repo:          "acme/widgets",
 				DefaultBranch: "main",
 				Architect: &ClaimView{
@@ -311,6 +315,7 @@ func populatedState(t *testing.T) State {
 				Generation:    1,
 				Phase:         phase.Held,
 				Status:        "in_progress",
+				Tree:          "LEGION-210",
 				Repo:          "zeta/tools",
 				DefaultBranch: "release/v7.1",
 				HoldReason:    "escalated",
@@ -325,6 +330,7 @@ func populatedState(t *testing.T) State {
 				Generation:    1,
 				Phase:         phase.AwaitingPerson,
 				Status:        "in_progress",
+				Tree:          "LEGION-212",
 				Repo:          "acme/widgets",
 				DefaultBranch: "main",
 				Workers:       map[claim.Role]PhaseView{},
@@ -343,6 +349,7 @@ func populatedState(t *testing.T) State {
 				Generation:    2,
 				Phase:         phase.Done,
 				Status:        "done",
+				Tree:          "LEGION-207",
 				Repo:          "acme/widgets",
 				DefaultBranch: "main",
 				Workers: map[claim.Role]PhaseView{
@@ -498,13 +505,17 @@ func TestStateStage3Golden(t *testing.T) {
 			FirstBootAt:   time.Date(2026, 9, 18, 14, 3, 27, 0, time.UTC),
 			StartedAt:     time.Date(2026, 9, 22, 17, 30, 0, 0, time.UTC),
 		},
-		Admission: Admission{Cap: 2, Active: []string{"LEGION-208"}, Waiting: []string{"LEGION-209"}},
+		Admission: Admission{
+			Cap: 2, Active: []string{"LEGION-208"}, Waiting: []string{"LEGION-209"},
+			Trees: []string{"LEGION-208"},
+		},
 		Issues: map[string]Issue{
 			"LEGION-208": {
 				Key:           "LEGION-208",
 				Generation:    4,
 				Phase:         phase.Reviewing,
 				Status:        "needs_review",
+				Tree:          "LEGION-208",
 				Repo:          "sjawhar/legion-smoke",
 				DefaultBranch: "main",
 				Workers:       map[claim.Role]PhaseView{},
