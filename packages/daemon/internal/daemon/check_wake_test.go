@@ -26,13 +26,8 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
-// The commits this rig is driven with: the merge the check was opened on, and the build the daemon
-// under test is built from, which contains that merge — GitHub answers `ahead` for it, so a daemon
-// that still compared its build against the open checks would wake this one.
-const (
-	checkWakeMerge       = "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0"
-	checkWakeDaemonBuild = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
-)
+// The commit this rig is driven with: the merge the check was opened on.
+const checkWakeMerge = "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0"
 
 // checkWakeMergedAt is when sjawhar/legion#1300 merged, GitHub's merged_at.
 var checkWakeMergedAt = time.Date(2026, 10, 19, 5, 0, 0, 0, time.UTC)
@@ -99,12 +94,11 @@ func checkWakeDispatch(t *testing.T, project string) string {
 	return server.URL
 }
 
-// checkWakeRig is a release build of the daemon, built from sjawhar/legion at checkWakeDaemonBuild,
-// over a closed root of its project whose tree lingers for another hour, the root's implementer
-// suspended by the daemon as the close left it, and the root's production check on
-// sjawhar/legion#1300 at checkWakeMerge, its first look (the merge's) ended as pending. It is the
-// state a wake would reach: a check with no look open, its implementer's session kept. The
-// daemon's log is kept.
+// checkWakeRig is a daemon over a closed root of its project whose tree lingers for another hour,
+// the root's implementer suspended by the daemon as the close left it, and the root's production
+// check on sjawhar/legion#1300 at checkWakeMerge, its first look (the merge's) ended as pending.
+// It is the state a wake would reach: a check with no look open, its implementer's session kept.
+// The daemon's log is kept.
 type checkWakeRig struct {
 	cfg         config.Config
 	root        string
@@ -184,7 +178,7 @@ func (rig *checkWakeRig) boot(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, rig.cfg, Build{Revision: checkWakeDaemonBuild, Repository: "sjawhar/legion"}, slog.New(slog.NewJSONHandler(rig.logs, nil)), overrides{
+		done <- run(ctx, rig.cfg, slog.New(slog.NewJSONHandler(rig.logs, nil)), overrides{
 			listen: heldListen, runtime: fakeRuntime(rig.rt, rig.built).runtime, clock: stillClock{},
 			workflowTokens: &workflowTokenRecorder{}, githubAPI: rig.github.url,
 		})

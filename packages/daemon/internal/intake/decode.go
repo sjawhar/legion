@@ -870,18 +870,8 @@ func rawInt64Value(value json.RawMessage) (int64, bool) {
 
 // decimalDigits is a number as Envoy writes GitHub's numeric fields into a payload: decimal digits
 // alone, with none of the sign or base prefix strconv would otherwise accept. rawNumber holds a
-// number written as a string to it, and rawPositiveDecimal every number it reads.
+// number written as a string to it.
 var decimalDigits = regexp.MustCompile(`^[0-9]+$`)
-
-// rawPositiveDecimal reads a positive integer of at most bits bits written as a decimal string.
-func rawPositiveDecimal(raw map[string]json.RawMessage, key string, bits int) (int64, bool) {
-	text, ok := rawString(raw, key)
-	if !ok || !decimalDigits.MatchString(text) {
-		return 0, false
-	}
-	value, err := strconv.ParseInt(text, 10, bits)
-	return value, err == nil && value > 0
-}
 
 // rawTimestamp reads an optional RFC 3339 time: an absent, null or empty field is the zero time,
 // and ok is false only when the field holds anything else, which is taken as the zero time too.

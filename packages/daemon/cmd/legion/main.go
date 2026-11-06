@@ -49,13 +49,6 @@ const (
 // with `-ldflags "-X main.revision=<commit>"`; empty otherwise.
 var revision string
 
-// builtFromRepository is the repository this binary is built from: with revision, what the boot
-// compares the open production checks of that repository against (daemon.Build), and so what a
-// release build's boot wakes — a check whose merge the build carries. A Go constant is never
-// empty, so a non-release build's empty revision is what makes its boot compare nothing, as does
-// a deployment whose configured repository is another (the smoke rig's).
-const builtFromRepository = "cybermonklabs/legion"
-
 // release is the legion-v* version a release binary was built for, linked in by the release
 // workflow with `-ldflags "-X main.release=v<version>"`; empty in every other build.
 var release string
@@ -314,7 +307,7 @@ func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, warning)
 	}
 	for _, key := range slices.Sorted(maps.Keys(cfg.Projects)) {
-		fmt.Fprintln(stdout, productionCheckLine(key, cfg.Projects[key].ProductionCheck))
+		fmt.Fprintln(stdout, productionCheckLine(key, cfg.Projects[key]))
 	}
 	for _, rename := range cfg.RepositoryRenames.Pairs() {
 		fmt.Fprintf(stdout, "repository rename: %s and %s are one repository wherever the daemon compares a name; keep the pair configured for as long as any record names %s\n",
@@ -341,14 +334,16 @@ func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 }
 
 // productionCheckLine is `--check-config`'s line for one project's `production_check`: the word
-// the file writes (`tester` or `off`) and what it decides. The role the key names works the
-// check, and `off` opens none; either way the key decides only the checks opened after the load,
-// never one already open, which keeps the role it opened with.
-func productionCheckLine(key string, role legionclaim.Role) string {
-	if role == "" {
-		return fmt.Sprintf("projects.%s.production_check: off — a merge that closes one of its issues opens no production check", key)
+// the file writes (`tester` or `off`, config.Project.ProductionCheckWord) and what it decides.
+// The role the key names works the check, and `off` opens none; either way the key decides only
+// the checks opened after the load, never one already open, which keeps the role it opened with.
+func productionCheckLine(key string, project config.Project) string {
+	effect := "no production check"
+	if role := project.ProductionCheck; role != "" {
+		effect = fmt.Sprintf("a production check the %s works", role)
 	}
-	return fmt.Sprintf("projects.%s.production_check: %s — a merge that closes one of its issues opens a production check the %s works", key, role, role)
+	return fmt.Sprintf("projects.%s.production_check: %s — a merge that closes one of its issues opens %s",
+		key, project.ProductionCheckWord(), effect)
 }
 
 // reservedUnder is a cpu or memory reservation as --check-config names it: the one quantity when
@@ -449,7 +444,7 @@ func start(ctx context.Context, configPath string, stderr io.Writer) int {
 		}
 	}()
 
-	if err := daemon.Run(ctx, cfg, daemon.Build{Revision: revision, Repository: builtFromRepository}, log, inherited); err != nil {
+	if err := daemon.Run(ctx, cfg, log, inherited); err != nil {
 		fmt.Fprintf(stderr, "legion start: %v\n", err)
 		return 1
 	}

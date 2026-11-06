@@ -187,7 +187,7 @@ func TestACheckReportIsRefusedWhereNoLookIsOpenToIt(t *testing.T) {
 	if check := productionCheck(t, rig.pool, "LEGION-209"); check == nil || !check.Open() || !check.LookOpen || check.Looks != 1 {
 		t.Fatalf("the check after the refused reports = %+v, want it untouched at look 1 open", check)
 	}
-	rig.apply("pending", intake.CheckReport{Issue: "LEGION-209", Look: 1, Verdict: "pending"})
+	rig.apply("pending", intake.CheckReport{Issue: "LEGION-209", Look: 1, Verdict: "pending", Summary: "nothing in production yet"})
 	if got := refusalCode(rig.apply("old-look", intake.CheckReport{Issue: "LEGION-209", Look: 1, Verdict: "pass"})); got != "CHECK_LOOK_NOT_OPEN" {
 		t.Fatalf("a second report of look 1 = %q, want CHECK_LOOK_NOT_OPEN", got)
 	}

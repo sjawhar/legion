@@ -413,7 +413,7 @@ func (r *idleWakeRig) boot() {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, r.cfg, Build{}, slog.New(slog.NewJSONHandler(io.MultiWriter(r.logs, r.logFile()), &slog.HandlerOptions{Level: slog.LevelDebug})), overrides{
+		done <- run(ctx, r.cfg, slog.New(slog.NewJSONHandler(io.MultiWriter(r.logs, r.logFile()), &slog.HandlerOptions{Level: slog.LevelDebug})), overrides{
 			listen: heldListen, runtime: r.newRuntime, clock: stillClock{}, idleTick: idleRigTick,
 			workflowTokens: idleRigAppTokens{workflowTokenRecorder: &workflowTokenRecorder{}}, githubAPI: repositoriesGitHub(r.t),
 		})

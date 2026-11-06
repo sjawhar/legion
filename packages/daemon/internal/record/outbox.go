@@ -628,10 +628,10 @@ func (ReadyMerge) OutboxKind() OutboxKind { return OutboxKindReadyMerge }
 // CheckWakeDue is the one row that can start a production check's next look beside the check's
 // own bound (CheckBound): the wake the checking agent named for itself on a pending report
 // (ProductionCheck.WakeAt), or the retry of a look nobody reported. There is at most one such row
-// per check — the daemon keeps it as one durable outbox row, replacing the payload and the due
-// time whenever the check names a new wake — so a check that has named its next look never
-// collects a queue of them. Nothing else wakes a check: no boot, no build and no deploy event
-// reads production any more.
+// per check: it is enqueued once, at the end of a look, and consumed when it fires, and the one
+// deferral that queues another — workflow's checkWakeDue, for an issue back in the workflow —
+// queues it in the transaction that finishes the row it came from. Nothing else wakes a check: no
+// boot, no build and no deploy event reads production any more.
 //
 // Look is the look the check stood at when the wake was named, so a row left over from an earlier
 // look starts nothing; OpenedAt is the check instance it was named for
@@ -953,7 +953,7 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		if value.ResumeTask && (value.Op != "start" || value.Task == "" || value.Phase == "") {
 			return fmt.Errorf("a supervise resume task requires a start with a task and a phase")
 		}
-		if value.CheckLook != 0 && (value.CheckLook < 0 || value.Op != "start" || !checkRole(value.Role) || value.Phase != "") {
+		if value.CheckLook != 0 && (value.CheckLook < 0 || value.Op != "start" || !worksCheck(value.Role) || value.Phase != "") {
 			return fmt.Errorf("a supervise check look names a start of the implementer or the tester with no phase, and only a start carries one")
 		}
 		if value.Kept != nil {
@@ -1038,9 +1038,9 @@ func validSuperviseOp(op SuperviseOp) bool {
 	}
 }
 
-// checkRole says whether role may work a production check's look: the two values a check's record
-// can hold, the migration's default (implementer) and the one value the project's
+// worksCheck says whether role may work a production check's look: the two values a check's
+// record can hold, the migration's default (implementer) and the one value the project's
 // `production_check` setting takes (tester). An architect's look is refused.
-func checkRole(role claim.Role) bool {
+func worksCheck(role claim.Role) bool {
 	return role == claim.RoleImplementer || role == claim.RoleTester
 }

@@ -69,6 +69,20 @@ type Project struct {
 	ProductionCheck claim.Role
 }
 
+// ProductionCheckOff is the one word of `production_check` that takes the check away, which the
+// loader reads as the empty role (readProject).
+const ProductionCheckOff = "off"
+
+// ProductionCheckWord is the setting as a record or a reader of it sees it: the role that works
+// the project's production checks, and ProductionCheckOff for the project that opens none, never
+// the empty string the role takes for off, as Memory.Word gives back a word for the absent mode.
+func (p Project) ProductionCheckWord() string {
+	if p.ProductionCheck == "" {
+		return ProductionCheckOff
+	}
+	return string(p.ProductionCheck)
+}
+
 // MergeRules is the project's `merge` policy. A path matching ByHand is never auto-armed.
 type MergeRules struct {
 	ByHand []PathPattern
@@ -239,12 +253,12 @@ func readProject(value *yaml.Node, key string) (Project, []string, error) {
 			return Project{}, nil, err
 		}
 		switch word {
-		case "off":
+		case ProductionCheckOff:
 			project.ProductionCheck = ""
 		case string(claim.RoleTester):
 			project.ProductionCheck = claim.RoleTester
 		default:
-			return Project{}, nil, fmt.Errorf("%s.production_check must be off or tester (got %q)", key, word)
+			return Project{}, nil, fmt.Errorf("%s.production_check must be %s or %s (got %q)", key, ProductionCheckOff, claim.RoleTester, word)
 		}
 	}
 	return project, warnings, nil

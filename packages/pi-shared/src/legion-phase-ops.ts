@@ -52,23 +52,33 @@ const requiredString = (op: PhaseOp, field: string) => {
   return z.string({ error: message }).refine((value) => value.trim() !== "", { error: message });
 };
 
-/** `read_release_records`' window: the instant it reads from, in the RFC 3339 form the route
- * takes (`LegionReleaseRecordsRequest`'s `since`). A value the route could not read is refused
- * here by the op's own name, rather than as the request schema's parse failure, and a blank one
- * is refused as missing alone. */
-const windowStart = requiredString("read_release_records", "since").refine(
-  (value) => value.trim() === "" || z.iso.datetime({ offset: true }).safeParse(value).success,
-  { error: "read_release_records' since is an RFC 3339 time, as 2026-11-02T09:00:00Z is" }
+/** The RFC 3339 schema `rfc3339String` validates against, built once rather than on every
+ * validation. */
+const rfc3339 = z.iso.datetime({ offset: true });
+
+/** A string field `op` requires in the RFC 3339 form the route takes, refused here by the op's
+ * own name with message rather than as the request schema's parse failure; a blank one is
+ * refused as missing alone (requiredString). */
+const rfc3339String = (op: PhaseOp, field: string, message: string) =>
+  requiredString(op, field).refine(
+    (value) => value.trim() === "" || rfc3339.safeParse(value).success,
+    { error: message }
+  );
+
+/** `read_release_records`' window: the instant it reads from (`LegionReleaseRecordsRequest`'s
+ * `since`). */
+const windowStart = rfc3339String(
+  "read_release_records",
+  "since",
+  "read_release_records' since is an RFC 3339 time, as 2026-11-02T09:00:00Z is"
 );
 
-/** `handoff_complete`'s `wake_at`: when the checking agent asks to be woken for its next look,
- * in the RFC 3339 form the route takes (`LegionHandoffCompleteRequest`'s `wakeAt`, which is what
- * goes on the wire). Refused here as `read_release_records`' `since` is, by the op's own name
- * rather than as the request schema's parse failure, and a blank one is refused as missing
- * alone. */
-const nextLook = requiredString("handoff_complete", "wake_at").refine(
-  (value) => value.trim() === "" || z.iso.datetime({ offset: true }).safeParse(value).success,
-  { error: "handoff_complete's wake_at is an RFC 3339 time, as 2026-11-02T09:00:00Z is" }
+/** `handoff_complete`'s `wake_at`: when the checking agent asks to be woken for its next look
+ * (`LegionHandoffCompleteRequest`'s `wakeAt`, which is what goes on the wire). */
+const nextLook = rfc3339String(
+  "handoff_complete",
+  "wake_at",
+  "handoff_complete's wake_at is an RFC 3339 time, as 2026-11-02T09:00:00Z is"
 );
 
 /** One operation's arguments: `op` and `shape`, and nothing else. */
