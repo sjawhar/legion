@@ -27,6 +27,25 @@ func reaches(key string) bool {
 	return key == "SSH_AUTH_SOCK" || key == "SSH_ASKPASS"
 }
 
+// placesSession is whether a variable places an Oh My Pi session. OMP_SESSION_SQL_DSN_FILE and
+// OMP_SESSION_STORAGE are the two Oh My Pi reads to do that; in a Legion pod they name the
+// deployment's live session database, which holds every agent's conversation, so a test that
+// inherited them would read and write that store. OMP_SESSION_SQL_DSN carries the same URL by
+// value, where a deployment exports the file's contents rather than its name. The three are named
+// rather than an OMP_ or PI_ prefix taken because a test may set a variable of either prefix for
+// the code under test to read: OMP_PROFILE (cmd/legion's probe-image, worker-shim and controller
+// tests) and PI_CONFIG_DIR and PI_CODING_AGENT_DIR (cmd/legion's controller test).
+func placesSession(key string) bool {
+	return key == "OMP_SESSION_SQL_DSN_FILE" || key == "OMP_SESSION_STORAGE" ||
+		key == "OMP_SESSION_SQL_DSN"
+}
+
+// guarded is every variable the guard takes out: the ones git and jj reach through, and the ones
+// that place the session store.
+func guarded(key string) bool {
+	return reaches(key) || placesSession(key)
+}
+
 // testInput is whether a variable is one a person or CI sets for the tests themselves, which Guard
 // keeps: the LEGION_TEST_* and LEGION_E2E* services and binaries (LEGION_TEST_PG_DSN,
 // LEGION_TEST_OMP), and GITHUB_ACTIONS, which turns a missing prerequisite's skip into a failure.
@@ -56,7 +75,7 @@ func Guard(keep ...string) error {
 	first := guardedKeep == nil
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
-		if !reaches(key) || testInput(key, keep) {
+		if !guarded(key) || testInput(key, keep) {
 			continue
 		}
 		if first {
@@ -106,7 +125,7 @@ func RequireGuarded(t testing.TB) {
 	}
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
-		if reaches(key) && !testInput(key, guardedKeep) && key != "GIT_ALLOW_PROTOCOL" && key != "JJ_CONFIG" {
+		if guarded(key) && !testInput(key, guardedKeep) && key != "GIT_ALLOW_PROTOCOL" && key != "JJ_CONFIG" {
 			t.Errorf("the test process holds %s, which Guard takes out", key)
 		}
 	}
@@ -134,7 +153,7 @@ func RequireGuarded(t testing.TB) {
 func Isolated(home string) []string {
 	env := slices.DeleteFunc(os.Environ(), func(entry string) bool {
 		key, _, _ := strings.Cut(entry, "=")
-		return reaches(key) || key == "HOME" || key == "XDG_CONFIG_HOME"
+		return guarded(key) || key == "HOME" || key == "XDG_CONFIG_HOME"
 	})
 	env = append(env, Home(home)...)
 	return append(env,

@@ -41,7 +41,9 @@ func TestGuardTakesOutWhatAPodSetsAndKeepsTheTestsInputs(t *testing.T) {
 	pod := map[string]string{
 		"LEGION_WORKSPACE": "/legion/workspaces/acme/widgets/widgets-42", "GIT_DIR": "/legion/repos/x/.git",
 		"GIT_CONFIG_COUNT": "1", "JJ_USER": "a role", "GH_TOKEN": "a pod's token", "GITHUB_TOKEN": "a pod's token",
-		"SSH_AUTH_SOCK": "/run/agent.sock",
+		"SSH_AUTH_SOCK":            "/run/agent.sock",
+		"OMP_SESSION_SQL_DSN_FILE": "/legion/secrets/session-dsn", "OMP_SESSION_STORAGE": "sql",
+		"OMP_SESSION_SQL_DSN": "postgres://legion@postgres.legion:5432/sessions",
 	}
 	inputs := map[string]string{
 		"LEGION_TEST_PG_DSN": "postgres://test", "LEGION_E2E_REPO": "acme/widgets", "GITHUB_ACTIONS": "true",
@@ -112,10 +114,16 @@ func TestIsolatedDropsTheProcesssRepositoryWorkspaceAndCredential(t *testing.T) 
 	t.Setenv("GIT_WORK_TREE", decoy)
 	t.Setenv("LEGION_WORKSPACE", decoy)
 	t.Setenv("GH_TOKEN", "a pod's credential")
+	t.Setenv("OMP_SESSION_SQL_DSN_FILE", "/legion/secrets/session-dsn")
+	t.Setenv("OMP_SESSION_STORAGE", "sql")
+	t.Setenv("OMP_SESSION_SQL_DSN", "postgres://legion@postgres.legion:5432/sessions")
 	env := fixtureenv.Isolated(t.TempDir())
 	for _, entry := range env {
 		key, _, _ := strings.Cut(entry, "=")
-		if slices.Contains([]string{"GIT_DIR", "GIT_WORK_TREE", "LEGION_WORKSPACE", "GH_TOKEN"}, key) {
+		if slices.Contains([]string{
+			"GIT_DIR", "GIT_WORK_TREE", "LEGION_WORKSPACE", "GH_TOKEN",
+			"OMP_SESSION_SQL_DSN_FILE", "OMP_SESSION_STORAGE", "OMP_SESSION_SQL_DSN",
+		}, key) {
 			t.Errorf("Isolated holds %s, want none of the process's", entry)
 		}
 	}
