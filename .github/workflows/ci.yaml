@@ -39,7 +39,7 @@ name: CI
 # nothing about it, and a gate in
 # .github/scripts/ci_job_reads.py. An output an event must force is written in `changes`' outputs
 # rather than left to its filter, as every output's workflow_dispatch case is, and so is one an
-# event must hold back, as the nine slow suites' pull-request case is (the comment on them
+# event must hold back, as the eight slow suites' pull-request case is (the comment on them
 # below). The ci-filters job's .github/scripts/check-ci-filters.sh holds the filter to that gate,
 # CI_OK_SELECTED_BY to the `if:`s, the report step to every job, the ci-ok job's `needs:` to
 # every job of the file but the exempt ones, and the re-run term to every job.
@@ -231,7 +231,7 @@ jobs:
       pi_shared: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.pi_shared }}
       pi_envoy: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.pi_envoy }}
       pi_legion: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.pi_legion }}
-      # The nine slow suites, whose runner time dwarfs every other job's. The merge queue runs
+      # The eight slow suites, whose runner time dwarfs every other job's. The merge queue runs
       # them on the tree the change lands as, and that is where their result normally comes from;
       # a pull request runs them only when it carries the label `full-ci`. Each is false on a
       # pull-request run without that label, so the skip is one `changes` chose: ci-ok reads it as
@@ -2552,7 +2552,7 @@ jobs:
           job-status: ${{ job.status }}
 
   # The dashboard's and the proof editor's lint, typecheck, unit tests, build and asset checks,
-  # split out of the `dispatch` job below: that job's browser suite is one of the nine slow
+  # split out of the `dispatch` job below: that job's browser suite is one of the eight slow
   # suites, which run in the merge queue and on a pull request labelled `full-ci`, while these
   # checks must come back on every push. No Postgres service, no Go and no contracts build: tsc
   # and bun read @legion/contracts through the workspace's "bun" export condition and the
@@ -2629,7 +2629,7 @@ jobs:
           changes: ${{ toJSON(needs.changes) }}
           job-status: ${{ job.status }}
 
-  # The browser suite, one of the nine slow suites: the dashboard's lint, typecheck, unit tests,
+  # The browser suite, one of the eight slow suites: the dashboard's lint, typecheck, unit tests,
   # build and asset checks are dispatch-ui's above.
   dispatch:
     needs: changes
@@ -3245,7 +3245,7 @@ jobs:
   # envoy-go's fast half: the Go format check, the two generated-code checks, the seven
   # shell-script tests and the build and pack of the envoy commands. The slow half below (the
   # module's unit tests, the container-backed NATS matrix and the integration suite) is one of
-  # the nine slow suites, which run in the merge queue and on a pull request labelled `full-ci`,
+  # the eight slow suites, which run in the merge queue and on a pull request labelled `full-ci`,
   # while these checks must come back on every push. No Postgres service: nothing here opens a
   # database. It restores go-envoy rather than go-envoy-test, which is the slow half's family
   # alone (the test binary of every package of the envoy module).

@@ -40,7 +40,7 @@
 #                      pull_request: one is selected only when EVENT is pull_request too.
 #                      check-ci-filters.sh holds it to ci.yaml. (A job an event must hold back
 #                      otherwise needs no list: `changes` sets its output false there, as it does
-#                      for the nine slow suites on a pull request without the label full-ci.)
+#                      for the eight slow suites on a pull request without the label full-ci.)
 #   ALWAYS_RUN         a JSON array of the jobs no `changes` output gates, `changes` among them:
 #                      each runs on every change, so ci-ok passes only when it succeeded, and a
 #                      skip, a cancellation or an absence fails. ci.yaml's env names them in
