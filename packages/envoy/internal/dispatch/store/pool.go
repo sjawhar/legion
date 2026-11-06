@@ -261,10 +261,11 @@ func (p *Pool) Healthy(ctx context.Context) (int, error) {
 }
 
 // listenerPoolSize bounds the pool Listener and Dedicated take their connections from. Five
-// permanent connections dial through it - the delivery hub's, the event stream relay's and the
-// events outbox's listeners, the process's shared listener hub (pglisten.Hub, on which the
-// document rooms' room sync and cmd/dispatch's woken background loops are registered, one
-// connection for all of their channels) and the document rooms' NOTIFY sender - and a sixth, the
+// connections dial through it - the delivery hub's and the event stream relay's listeners, each
+// held only while something subscribes to them, the events outbox's listener, the process's shared
+// listener hub (pglisten.Hub, on which the document rooms' room sync and cmd/dispatch's woken
+// background loops are registered, one connection for all of their channels) and the document
+// rooms' NOTIFY sender - and a sixth, the
 // test hooks' (api/test_hooks_fanout.go), under DISPATCH_TEST_HOOKS alone, which production never
 // sets. Each connection is hijacked as soon as it is opened, so it leaves with its caller and the
 // pool holds none between dials: what one bounds is dials in flight, not connections held. A

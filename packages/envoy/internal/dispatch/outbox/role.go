@@ -116,9 +116,9 @@ func resolveRole(ctx context.Context, deps Deps, role string) (roles.Resolution,
 // its claim. Events that are not due are resolved too: their unreached role destinations hold
 // later events back from the holder's agent subject.
 //
-// A destination whose copy would be given to the comment's mentioned sessions out of order waits
-// for the mention that decides its key, rather than being sent under a key that mention has not
-// claimed yet. Two copies wait, each on the mention its own key comes from
+// A role copy of a new comment waits for the mention that decides its dedupe key, rather than
+// being sent under a key that mention has not claimed yet, which would show the mentioned session
+// the comment twice. Two copies wait, each on the mention its own key comes from
 // (roleCopyWaitsForAMention):
 //
 //   - a keep of the copy for a role nobody holds, while an attempt of any of the comment's

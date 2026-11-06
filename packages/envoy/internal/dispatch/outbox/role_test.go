@@ -1372,8 +1372,9 @@ func roleRoutedMentioningComment(
 // (TestAKeptCopyHandedToAHolderWhoseMentionLandedCarriesItsOwnMentionsKey).
 //
 // So the keep waits. While an attempt of any of the comment's mentions is live, the role
-// destination is left out of the event's list and the event blocked for mentionPendingDelay
-// (resolveRoleHolders, batchEvent.mentionPending), and the copy is kept once they have settled,
+// destination stays in the event's list marked waiting, sending nothing and holding its key, and
+// the event is blocked for mentionPendingDelay (resolveRoleHolders, destination.waiting,
+// batchEvent.mentionPending), and the copy is kept once they have settled,
 // carrying each mentioned session's own key. Nobody waits on that copy: one is kept only for a
 // role no session holds, and it waits for the role's next claim however soon it is stored.
 //
@@ -1766,7 +1767,7 @@ func TestAFallbackRoleCopyReachingASecondMentionedHolderCarriesItsOwnMentionsKey
 }
 
 // A copy the fallback pass keeps for a role nobody holds waits for the comment's own live
-// mentions, as the keep of a batch's role route does (keepWaitsForAMention,
+// mentions, as the keep of a batch's role route does (roleCopyWaitsForAMention,
 // TestACopyKeptForARoleWaitsForTheCommentsLiveMentions). The row is no reading of the comment's
 // other mentions: it was written because the attempt of its own key had lapsed past that
 // attempt's lease (model.MentionResumedSQL), while another session the comment mentions can have

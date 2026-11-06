@@ -776,7 +776,7 @@ What the two processes share, and what each keeps to itself:
 
 - The delivery live hub, the event-stream relay and the events outbox run in every process, each on a `LISTEN` connection of its own (`api/delivery_live_hub.go`, `api/event_stream_relay.go`, `outbox/lease.go`), and the document rooms' room sync shares the process's listener hub with the woken background loops (`docs/room_sync.go`, Background loops, above).
   Each process serves its own browser sockets - the Delivery and Pipeline pages' `GET /ws/delivery`, every SSE stream, every live document - so each needs the notifications and the recomputed views for them, and sharing them would need a cache across the processes.
-  The cost is up to five Postgres connections per process outside the shared pool (`store.permanentListeners`): those three, the shared listener hub and the room sync's NOTIFY sender.
+  The cost is up to five Postgres connections per process outside the shared pool (`store.listenerConnections`): those three, the shared listener hub and the room sync's NOTIFY sender, the hub's and the relay's held only while something subscribes to them.
 
 - A Delivery page configuration warning is logged once across the processes.
   Every read judges each deploy run, and a successful run holding none of `production_job_names`, or whose production job lists no step named `production_apply_step_name`, is named in the log;
