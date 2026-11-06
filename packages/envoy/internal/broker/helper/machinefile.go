@@ -52,8 +52,9 @@ func decodeKeyDER(encoded string) (any, error) {
 }
 
 // encodeKeyDER is decodeKeyDER's inverse: key as PKCS#8 DER, base64 (standard, padded). The
-// marshal error reaches the caller bare as well — the machine file's save returns it, and
-// encodeKey records the key as none instead.
+// marshal error reaches the caller bare as well — the machine file's save returns it, and so
+// does encodeKey, whose caller keeps the record it was making without the key and returns the
+// error for the session's own caller to log (Registry.record).
 func encodeKeyDER(key *ecdsa.PrivateKey) (string, error) {
 	der, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {

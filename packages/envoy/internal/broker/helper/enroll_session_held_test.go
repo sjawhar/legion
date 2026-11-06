@@ -1,13 +1,20 @@
 // packages/envoy/internal/broker/helper/enroll_session_held_test.go
 //go:build linux
 
-// What enrollLoop does with the one broker refusal that never comes free: 403 SESSION_HELD, the
-// broker keeping this session's name for another principal (dispatch://INFRA-1167). Every other
-// enroll failure is worth another try — a credential not installed yet, a broker that is down,
-// a lapsed row still being revoked — and the loop retries each for as long as the session
-// lives. This one is not: the holder is another person, another Google account or another
-// service account, and nothing this helper does changes whose the name is. The loop must stop
-// and leave the refusal on the session for the launcher to read.
+// What enrollLoop does with 403 SESSION_HELD, the broker keeping this session's name for
+// another principal (dispatch://INFRA-1167).
+//
+// The refusal is of the principal THIS attempt enrolled under, and not of the name for ever:
+// the helper chooses that principal again at every attempt (Broker.signingAuthority), so the
+// person who holds the name signing in on this box makes the next attempt theirs, and that one
+// enrols and adopts what their session left on the box it came from — the carry this whole
+// change exists for. Nothing else starts an enrollment of a session that is already live, so a
+// loop that gave up here would leave the session signing nothing until its process restarted.
+//
+// So the loop keeps asking, on a ladder of its own up to heldRetryCap rather than the minute
+// every other enroll failure retries on; it keeps the refusal on the session as its last error,
+// which `sessions`, a register reply and every sign answer report; and it enrols the moment the
+// principal changes.
 package helper
 
 import (
@@ -16,21 +23,79 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/brokerclient"
 )
 
-func TestAnEnrollRefusedSessionHeldStopsRetrying(t *testing.T) {
+// holderSignIns is the box's sign-ins, and with them the fake broker's rule about the name.
+// Current answers no sign-in until signIn, and that machine's own credential is what the
+// helper enrols under; from signIn on it answers the holder's own credential and frees the
+// name in the fake at the same moment, because the fake refuses a held name to whatever
+// authority asks (heldSessions is keyed on the name alone) while the real broker refuses it to
+// every principal but the one holding it. So the first attempt made under the holder's
+// credential is the one the broker accepts, and every attempt before it is refused.
+type holderSignIns struct {
+	mu        sync.Mutex
+	authority *brokerclient.Authority
+	free      func()
+}
+
+func (h *holderSignIns) Current(context.Context) (*brokerclient.Authority, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.authority != nil && h.free != nil {
+		h.free()
+		h.free = nil
+	}
+	return h.authority, nil
+}
+
+func (h *holderSignIns) Refused(string) {}
+
+func (h *holderSignIns) signIn(authority *brokerclient.Authority) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.authority = authority
+}
+
+// waitUpTo polls cond every 10 ms for as long as d, and fails with why when it never holds. It
+// is waitFor with a deadline of the test's own, because the attempt that enrols here waits out
+// the held ladder first and that outlasts waitFor's five seconds.
+func waitUpTo(t *testing.T, d time.Duration, cond func() bool, why string) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal(why)
+}
+
+func TestAnEnrollRefusedSessionHeldBacksOffAndEnrolsWhenThePrincipalChanges(t *testing.T) {
 	const heldName = "99999999-8888-4777-8666-555555555555"
 	f := newFakeBroker(t)
 	f.heldSessions = map[string]bool{heldName: true}
-	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	// The log goes to a buffer, because how OFTEN the refusal is written is part of what
+	// this measures.
+	var out syncBuffer
+	log := slog.New(slog.NewJSONHandler(&out, nil))
+	// The machine's login was approved by ada, so an enrolment under it is ada's; the name is
+	// grace's, and grace is not signed in on this box yet.
+	signIns := &holderSignIns{free: func() {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		delete(f.heldSessions, heldName)
+	}}
 	srv := &Server{
 		Registry: NewRegistry(filepath.Join(t.TempDir(), "sessions.json")),
 		Broker: &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"),
-			MachineFile: machineFilePath(t), HTTP: f.srv.Client(), Log: log},
+			MachineFile: machineFilePath(t), HTTP: f.srv.Client(), Log: log, SignIns: signIns},
 		Hostname: "testhost", PeerOf: PeerOf, Log: log, MinRenew: time.Second,
 	}
 	t.Cleanup(srv.Broker.Close)
@@ -57,26 +122,78 @@ func TestAnEnrollRefusedSessionHeldStopsRetrying(t *testing.T) {
 		srv.enrollLoop(ctx, sess)
 		close(done)
 	}()
+
+	// It asks again: a loop that read the refusal as the name's final answer would send one
+	// POST and return, and this session would sign nothing ever again.
+	posts := func() int {
+		sent, _, _ := f.snapshot()
+		return len(sent)
+	}
+	waitUpTo(t, 10*time.Second, func() bool { return posts() > 1 },
+		"the helper sent one enroll for a name another principal holds and stopped; the refusal is of the principal that attempt enrolled under, which a sign-in changes with no restart")
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
-		// The retry's backoff is a second doubling to a minute, so a loop that treats this as
-		// transient is still going here — and would be for as long as the session lives.
-		t.Fatal("enrollLoop kept retrying 403 SESSION_HELD; a session name another principal holds never comes free")
+		t.Fatal("enrollLoop returned while the session was refused SESSION_HELD; nothing would start it again for a live session")
+	default:
 	}
 
-	// It asked exactly once. A second POST would mean the refusal was read as transient.
-	posts, _, _ := f.snapshot()
-	if len(posts) != 1 {
-		t.Fatalf("the helper sent %d enrolls for a name another principal holds, want 1: %+v", len(posts), posts)
+	// And it backs off rather than spinning: the ladder is 1 s doubling, so a couple of
+	// seconds hold a handful of attempts, where a loop with no wait at all would hold
+	// thousands.
+	before := posts()
+	time.Sleep(2500 * time.Millisecond)
+	if spun := posts() - before; spun > 3 {
+		t.Fatalf("the helper sent %d enrolls in 2.5 s for a held name, want the backoff's handful", spun)
 	}
-	// And the session keeps the refusal: `sessions`, a register reply and every sign answer
-	// report it, so the launcher learns why this session will never enrol.
+
+	// The session keeps the refusal meanwhile: `sessions`, a register reply and every sign
+	// answer report it, so the launcher learns why this session is not signing yet.
 	snap := sess.snapshot()
 	if snap.State != "enrolling" || snap.EnrollmentID != "" {
 		t.Fatalf("a refused session must hold no enrollment: %+v", snap)
 	}
 	if !strings.Contains(snap.LastError, "SESSION_HELD") || !strings.Contains(snap.LastError, heldName) {
 		t.Fatalf("the session's last error is %q; want the broker's own refusal, naming the session", snap.LastError)
+	}
+
+	// grace, who holds the name, signs in on this box, with a box key of her own as a real
+	// sign-in has. The helper chooses the credential again at the next attempt, so that
+	// attempt is grace's and the broker takes it.
+	graceKey, err := proof.NewKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	signIns.signIn(&brokerclient.Authority{Key: graceKey, CredentialID: "credential-of-graces-sign-in", Operator: "grace@example.com"})
+	waitUpTo(t, 60*time.Second, func() bool { return sess.snapshot().EnrollmentID != "" },
+		"the session never enrolled after the person holding its name signed in on this box")
+
+	sent, _, _ := f.snapshot()
+	if got := sent[0]["operator"]; got != "ada@example.com" {
+		t.Errorf("the refused enrolment stated operator %v, want this machine's login's approver", got)
+	}
+	if got := sent[len(sent)-1]["operator"]; got != "grace@example.com" {
+		t.Errorf("the enrolment that was accepted stated operator %v, want the person who signed in: the principal must be chosen afresh at every attempt, never kept from the first", got)
+	}
+
+	// One line for the whole stretch, not one per attempt: a name held for hours must not
+	// fill the journal. The line is written when the principal the attempt enrolled under
+	// changes, nothing changed it until grace signed in, and that attempt enrolled rather
+	// than being refused — so one line is all of them.
+	lines := 0
+	for _, rec := range logRecords(t, &out) {
+		msg, _ := rec["msg"].(string)
+		if !strings.Contains(msg, "the broker holds this session name for another principal") {
+			continue
+		}
+		lines++
+		if got := rec["enrolling_as"]; got != "the person ada@example.com" {
+			t.Errorf("the line says the session enrolled as %v, want the principal of the credential this box enrolled under", got)
+		}
+		if !strings.Contains(msg, "signing in on this box") {
+			t.Errorf("the line reads %q; it must say that the person holding the name signing in on this box enrols the session, never that the session should give the name up", msg)
+		}
+	}
+	if lines != 1 {
+		t.Errorf("the helper wrote %d lines about the held name under one principal, want one: %d enrolments were refused", lines, len(sent)-1)
 	}
 }

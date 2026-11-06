@@ -181,24 +181,14 @@ func DefaultSocket(getenv func(string) string) string {
 // UnitName is the helper's systemd user unit.
 const UnitName = "agent-secrets-helper.service"
 
-// configDir is the directory this helper's per-user files live under: $XDG_CONFIG_HOME, and
-// $HOME/.config when that is unset, which is the default the XDG base directory specification
-// names. UnitPath reads it, and so does the default machine login StatePath puts the session
-// records beside (cmd/agent-secrets-helper's loadConfig), so a helper with nothing set keeps
-// its unit, its login and its records under one directory. getenv is injectable for the reason
-// it is on DefaultSocket: so a caller can test its own defaulting against a fake environment.
-func configDir(getenv func(string) string) string {
+// UnitPath is where `agent-secrets-helper install` writes the helper's user unit: under
+// $XDG_CONFIG_HOME, default $HOME/.config. Its presence says the helper is installed here.
+func UnitPath(getenv func(string) string) string {
 	dir := getenv("XDG_CONFIG_HOME")
 	if dir == "" {
 		dir = filepath.Join(getenv("HOME"), ".config")
 	}
-	return dir
-}
-
-// UnitPath is where `agent-secrets-helper install` writes the helper's user unit: under
-// $XDG_CONFIG_HOME, default $HOME/.config. Its presence says the helper is installed here.
-func UnitPath(getenv func(string) string) string {
-	return filepath.Join(configDir(getenv), "systemd", "user", UnitName)
+	return filepath.Join(dir, "systemd", "user", UnitName)
 }
 
 // LegacyStatePath is where the helper's session records used to live: beside socket, the socket
