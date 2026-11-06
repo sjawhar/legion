@@ -1109,10 +1109,13 @@ func TestARetryOfAHoldWithASettledHeadRestoresThePhase(t *testing.T) {
 			if got := noticeKinds(t, pool, "LEGION-208"); containsNotice(got, "checks-red") {
 				t.Fatalf("notices %v, want no checks-red", got)
 			}
+			// A start is two rows (workflow.StartOrOwe) and only the one carrying the task is the
+			// start: the other is the relaunch, which brings the role's session back and asks it
+			// nothing.
 			starts := func(role claim.Role) int {
 				var n int
 				if err := pool.QueryRow(t.Context(), `select count(*) from outbox where kind = 'supervise' and payload->>'op' = 'start'
-					and payload->>'role' = $1`, string(role)).Scan(&n); err != nil {
+					and payload->>'role' = $1 and coalesce(payload->>'task', '') <> ''`, string(role)).Scan(&n); err != nil {
 					t.Fatalf("count the %s's starts: %v", role, err)
 				}
 				return n

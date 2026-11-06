@@ -94,7 +94,9 @@ func TestTheStatusRepairSkipsEveryIssueItsRulesExclude(t *testing.T) {
 			seedIssue(t, pool, repairIssue("LEGION-208", "LEGION-208", phase.Done, "in_progress", "in_progress"))
 			seedSlot(t, pool, record.Slot{Issue: "LEGION-208", Index: 0})
 		}},
-		{name: "an issue whose tree's root holds no slot", seed: func(t *testing.T, pool *pgxpool.Pool) {
+		// The tree is never opened here, so it does not run (record.TreeRuns): a slot row is no
+		// longer what says it does, and the fixture grants neither.
+		{name: "an issue whose tree the daemon is not running", seed: func(t *testing.T, pool *pgxpool.Pool) {
 			seedIssue(t, pool, repairIssue("LEGION-208", "LEGION-208", phase.Implementing, "in_progress", "todo"))
 		}},
 		// The lingering root is seeded as the daemon leaves one: beginLinger sets the root's phase

@@ -174,8 +174,9 @@ func lastCatchUp(t *testing.T, pool *pgxpool.Pool) record.CatchUp {
 // An issue in accepting waits for its tree architect alone: no worker runs there, and the one
 // phase-finished notice that moved it there is ended undelivered when the architect's claim has
 // failed (the outbox's notice), so a retried architect was never told. Its catch-up is its only
-// wake, and it names every issue of the tree in accepting, a root whose children still run among
-// them: nothing beneath an issue holds its acceptance (signOff).
+// wake, and it names every issue of the tree in accepting, whatever each is waiting for: the
+// acceptance itself is refused while an issue beneath it is still in the workflow (signOff), and
+// the catch-up is what tells the architect the issue is there to be decided.
 func TestACatchUpNamesEveryIssueWaitingForTheArchitectsAcceptance(t *testing.T) {
 	const base = "the tree of LEGION-1 at generation 1 as the daemon records it now; start or resume it as your role says"
 	awaiting := func(keys string) string {

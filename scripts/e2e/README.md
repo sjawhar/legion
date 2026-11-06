@@ -639,8 +639,8 @@ It reads the operator's Dispatch as a command run from the operator's shell reso
 A file, URL or token that prevents Dispatch fails the baseline read, naming it; with no Dispatch configured, there is none to audit.
 The scratch Dispatch runs with `HOME` and `XDG_CONFIG_HOME` in the run's work directory, so it reads no envoy.json of the operator's.
 
-It proves admission order and slotless children
-— the child is parked to `backlog` as soon as it is seen slotless, which is all it was filed for, so it holds up no close above it
+It proves admission order and a child that stands in its tree with no slot of its own
+— a slot is one issue with work, and this child's tree has not opened its design gate, so it waits at `admitted` in no line; it is parked to `backlog` as soon as that is seen, which is all it was filed for, so it holds up no issue above it
 — then drives a root from `todo` through an architect's spec and gate registration, which the architect does on its own (the proof never prompts it:
 its first turn is the daemon's `catch-up` notice, and the root's primary document is the proof's one-file smoke spec), the root's wait on the human at its gate (`awaiting_person`, no slot, architect live), the human approval, the root's return to a slot, planner, implementer pull request, tester, reviewer, the architect's acceptance at `accepting`, retro, the merger's own merge of the head it read, which closes the issue (`merger-merge`), and the implementer's production check after the close, its first look and the bound's last look (`production-check-bound`).
 It also proves three changes-requested rounds, each posted by the reviewer pane and ended by that reviewer's completion
@@ -1892,10 +1892,10 @@ The daemon runs on the devbox as the Legion daemon's restricted identity, with `
 the daemon requires a store that keeps sessions in a database, since an issue pod's disk dies with the pod).
 Tree 1 runs the whole workflow to `done`;
 while its planner holds, the driver files two children under it, each in an issue pod and on a disk of its own, closes one as `done` and parks the other in backlog.
-Two more children are still in the workflow when tree 1's pull request merges, so the merge is recorded and the root waits in `merging` until the proof human has parked both; the last park closes it.
+Two more children are in the workflow while tree 1 stands in `accepting`, so the daemon refuses its sign-off until the proof human has parked both, one at a time; the merge then closes it.
 Its `legion.yaml` names `runtime.kubernetes.plugins` with the latest published `@sjawhar/pi-legion` and `@sjawhar/pi-envoy`, resolved at run time:
 the branch-built daemon links no release plugin pair, so without it the run would boot in the degraded mode (`plugins: none` from `--check-config`) instead of the pair a stale-plugin relaunch would install, even though this run's own claims register at the branch daemon's own contract and so never go stale enough to trigger that install.
-It sets `linger_hours: 0.5` (tree 1's linger runs from the close its last child's park brought on, and holds its production check's first look and suspension, the smoke main's cleanup and the check's bound;
+It sets `linger_hours: 0.5` (tree 1's linger runs from the close its merge brought on, and holds its production check's first look and suspension, the smoke main's cleanup and the check's bound;
 `close` then waits for the expiry) and `production_check_hours: 0.25` (the check's bound, 14 days by default, brought inside the run:
 15 minutes, after the first look's report, since a look open at the bound defers it by the look's own two-hour bound).
 
@@ -2002,7 +2002,7 @@ the revision raises a block; the human answers it;
 and the architect hands the request back, or requests approval again, which opens a new request since Request changes answered the old one.
 It keeps the issue's asks as `<issue>-asks.json`, approval events as `<issue>-events.json`, each requested version as `<issue>-spec-v<N>.json`, and the verdict as `<issue>-gate-verdict.json`.
 While tree 1 waits on the human (its question, or a closed gate it registered) it is in `awaiting_person` with no slot and its architect live;
-once the gate opens, `spec-posted` waits for the root to hold a slot again (`await_root_slot`, which tree 1, the run's one root under `admission_cap: 2`, takes at once) before it waits for planning, and notes how many times the daemon logged the root giving its slot back.
+once the gate opens, `spec-posted` waits for the root to hold a slot again (`await_root_slot`, which tree 1, the run's one issue at work under `admission_cap: 4`, takes at once) before it waits for planning, and notes how many times the daemon logged the root giving its slot back.
 
 `LEGION_E2E_POD_FILE` names a JSON file holding a deployment's own worker pod block, the `runtime.kubernetes.pod` value its configuration renders (`service_account`, `env`, `volumes`, `volume_mounts`, in the shape `packages/daemon/internal/config/kubernetes.go` reads).
 The run copies it once, at prerequisites, as `jq -cS .` into its work directory and records the copy's sha256;
@@ -2028,27 +2028,28 @@ A pass proves that and no more:
 
 - The pod is an issue pod; the daemon's own controller pod, under `controller: daemon`, is not launched or checked.
 
-Three roots are set todo under `admission_cap: 2`:
+Four roots run under `admission_cap: 4`, a cap of issues at work rather than of trees (dispatch://INFRA-980):
 
 - Tree 1 runs the whole workflow with real agents to `done`, through one changes-requested review round in a thread the reviewer opens and the architect's acceptance at `accepting`;
-  the daemon's merge is recorded while the rest of its tree still runs, the last of that tree's parks closes it, its implementer runs the production check after the close (the first look, then the bound's last look) while the tree lingers, and the tree closes at the linger's expiry.
+  the daemon's merge closes it, its implementer runs the production check after the close (the first look, then the bound's last look) while the tree lingers, and the tree closes at the linger's expiry.
   While its planner holds, the driver files two children under it, each in an issue pod and on a disk of its own:
-  child 1 is closed as `done` and released, child 2 parked in backlog, which deletes its Sandbox as a close does — no Sandbox, no pod and so no disk.
-  Children 3 and 4, filed just before `done`, are still in the workflow when the pull request merges:
-  the daemon records the merge, leaves the root in `merging` with nothing suspended, no linger, its slot and its roles kept, and tells its architect once, naming the pull request and both children.
-  The proof human then parks them one at a time, each park leaving the child no Sandbox, no pod and no disk;
-  child 3's park moves nothing of the root, and child 4's closes it, as the merge of a finished tree's root does.
+  the four issues at work fill the cap and hold tree 3 in the line, then child 1 is closed as `done` and released, child 2 parked in backlog, which deletes its Sandbox as a close does — no Sandbox, no pod and so no disk — and the slots they held go to tree 3 and, later, to child 2's re-entry.
+  Children 3 and 4, filed while the root stands in `accepting` and holds no slot of its own, hold its sign-off:
+  the daemon refuses it `SIGNOFF_CHILD_IN_WORKFLOW` naming both, the proof human parks them one at a time, the refusal after the first park names the one that remains, and the sign-off lands only once the last has left.
 
 - Tree 2 runs through its planner beside tree 1, in an issue pod of its own, carrying the repository-configuration fixture (the loading paths' markers, two skills, a Go, a TypeScript and a Python root, and a `.omp/config.yml`), whose tools its planner uses in its checkout (`repository-tools`), supplies the capability report every session sends at its start (`full-agent`), and is then moved to backlog.
 
-- Tree 3 is admitted when tree 2 leaves the line.
+- Tree 3 is set todo while tree 1's root, its two children and tree 2's root hold the whole cap, and waits in the line until the first two of those children leave.
   It supplies the held phase the controller checkpoint needs and, held, the planner whose workspace turns a capability off and on again (`full-agent-negative`), and is taken out from an operator shell (`controller-walk`).
 
 - Tree 4 is admitted when tree 3 has been taken out.
   It supplies the deaths of a worker whose task is outstanding, and is taken out the same way.
 
-**Two checkpoints are gone with INFRA-229**, `mid-turn-carry` and `carried-child`, with the setups that left a child mid-run and mid-turn under a closing root.
-Each needed a root to close while a child of its tree was still in the workflow, and no merge does that any more: the merge is recorded and the root waits.
+**Three checkpoints are gone with INFRA-229 and INFRA-980**, `mid-turn-carry` and `carried-child`, with the setups that left a child mid-run and mid-turn under a closing root, and `children-at-the-merge`, whose children entered tree 1 after its root had been accepted.
+Each needed a root to close, or to merge, while a child of its tree was still in the workflow.
+No merge closes a root that way any more, and since INFRA-980 no issue enters a tree beneath an ancestor already accepted either (`CHILD_UNDER_ACCEPTED_PARENT`, and a person's own move held at `admitted`), so a merged root waiting for the rest of its tree is a state no tree started on this release reaches at all.
+That wait is still the daemon's, for the states a deploy meets — a root a migration finds already in `merging` with an issue of its tree in a phase, a carried child's hand-over, and a close delivered late — and it is proven where that shape can be written down, in the daemon's own tests of the close (`packages/daemon/internal/workflow/merged_chain_close_test.go` and `merged_child_close_test.go`).
+Stage 4b proves instead the rule that makes it unreachable, against real pods: the sign-off the daemon refuses while an issue beneath the root is in the workflow (`children-first-acceptance`).
 The one close that still lingers a tree children and all is a person's own in the Dispatch dashboard, which this driver cannot make
 — every write it sends production Dispatch names a session as its author (`lib/workflow.sh`), the daemon sets a live root's status back when the session writing it holds no claim in the tree, and the operator's `legion status` writes only `todo`, `backlog` or `icebox`, never the `done` a hand-over needs.
 A finished root's hand-over of a child keeps its cover in the daemon's own tests (`packages/daemon/internal/admit/finished_root_test.go`).
@@ -2087,8 +2088,8 @@ A second lane's pack landing mid-read reads as this lane's own tree having chang
 Run concurrent lanes from separate checkouts (`jj workspace add`, or separate clones) of the same commit.
 
 **Two lanes can race the legion pool's own capacity preflight, and that is a finding, not a bug to fix here.**
-`prerequisites` reads the legion NodePool's current room (`pool_pod_room`) before either lane has placed a pod, and refuses, BLOCKED, only if that one read already can't fit `run_pods_at_once` pods (4:
-the cap's two roots and tree 1's two children).
+`prerequisites` reads the legion NodePool's current room (`pool_pod_room`) before either lane has placed a pod, and refuses, BLOCKED, only if that one read already can't fit `run_pods_at_once` pods (4, the cap:
+tree 1's root and its two children beside tree 2's root).
 Two lanes starting close together can each read room enough for itself alone
 — the read is not a reservation — so a true shortfall surfaces only once both are actually scheduling.
 That is never silent: every pod-placement wait is wrapped (`on_tree`/`on_issue`), so a wait stalled on the pool's own limits while its subject pod is still Pending, or after its claim has given up, ends its checkpoint `BLOCKED: capacity: …`, naming the pod the scheduler could not place
@@ -2239,7 +2240,8 @@ Each item below names a checkpoint, then what it holds; an item that names no ch
 
 - `admitted-issue-cap`
 
-  the three roots: two admitted and one waiting, in rank order
+  the cap counts issues at work, so two roots fill none of a cap of 4: both are admitted at once, in rank order, with `admission.waiting` empty.
+  Tree 3 is filed here and set todo at `issue-independence`, where the cap is full
 
 - `spec-posted`
 
@@ -2264,6 +2266,7 @@ Each item below names a checkpoint, then what it holds; an item that names no ch
   and no pod can read another issue's workspace, each way between the root's pod and child 1's (`ls` of the other's workspace path answers `No such file or directory`, while the same path exists in its own pod).
   Their nodes are recorded (`issue-independence-pods.txt`);
   two or more are asserted only when preflight read the NodePool's instance bounds as holding no two of the run's pods, otherwise the count is noted.
+  Tree 3 is then set todo, and the state reads the cap full of the four issues at work — tree 1's root, both its children and tree 2's root — with tree 3 alone in `admission.waiting`: a slot is one issue with work, so one tree's children fill a cap beside another tree's root.
   Tree 1's planner is then told to plan.
   Tree 2's planner has held for the driver: a tree 2 that left planning before the driver sent it anything fails here by name.
   The proof's instructions tell every phase worker that the daemon's task line (`Continue <title>. Issue: <key>. Phase: <phase>.`) is not the driver's instruction.
@@ -2274,7 +2277,8 @@ Each item below names a checkpoint, then what it holds; an item that names no ch
   while tree 1 keeps running: the proof human sets child 1 `done`, and its Sandbox and pod are gone (`kubectl get sandboxes,pods -l legion.dev/issue=<child 1>` lists nothing) and so is the disk that pod owned, the daemon logged `sandbox runtime: deleted the closed issue's Sandbox and the role Secrets it owned` for it exactly once and no lost volume, every claim of child 1 is `retired` with no session, and the root's Sandbox stays Running, its pod's own disk Bound and its pod the same uid.
   The proof human then sets child 2 `backlog`, and within 600 s it has no Sandbox, no pod and no disk (`kubectl get sandboxes,pods -l legion.dev/issue=<child 2>` lists nothing, and `<pod>-issue` answers none):
   a park reaches the same durable suspend effect as a close, which deletes the Sandbox with the six role Secrets it owned once the pod is gone, so nothing of the parked child is kept and its next `todo` makes the Sandbox afresh.
-  Each of these waits reads the disk inside it, since a pod's own claim is reaped a moment after the pod object goes
+  Each of these waits reads the disk inside it, since a pod's own claim is reaped a moment after the pod object goes.
+  The two slots those children held are freed with them, and tree 3, waiting since `issue-independence`, takes one: a child's slot going to a root is the cap counting issues
 
 - `child-reentered`
 
@@ -2342,7 +2346,8 @@ Each item below names a checkpoint, then what it holds; an item that names no ch
 
   the proof human's `backlog` on tree 2's live root is set back:
   the next status write is `legion-daemon:LEGSMOKE`'s (a control re-attributing it must fail), tree 2's architect receives a `status-reasserted` notice naming the proof human, and tree 2 keeps its slot;
-  `legion status … backlog` then frees the slot, tree 3 is admitted, and tree 2's pods are gone
+  `legion status … backlog` then takes tree 2 out, the slot its root held is freed (`admission.active` and `admission.trees` name it no longer), and its pods are gone.
+  Nothing waits for that slot here: the line's one waiting root took one at `child-release`
 
 - `tree-moved`
 
@@ -2370,7 +2375,7 @@ Each item below names a checkpoint, then what it holds; an item that names no ch
 
 - `tree-reviewed`
 
-  tree 1 runs planner, implementer, tester, reviewer, the architect's acceptance and retro to merging with real agents;
+  tree 1 runs planner, implementer, tester and reviewer to `accepting` with real agents;
   the tester's adoption leaves a new empty change and keeps the implementer's author.
   Once both thermonuclear dispatches have an outcome, the reviewer's session, its subagents' sessions and each dispatch are kept under `review-pair/`.
   The reviewer first submits `COMMENT` and completes without a decision:
@@ -2386,9 +2391,18 @@ Each item below names a checkpoint, then what it holds; an item that names no ch
   the bot's may still be open there, since the approval does not wait for the implementer's resolution).
   The approval moves the issue to `accepting`, read directly:
   no worker starts (the implementer's claim holds no retro task, `claim_pending_phase`;
-  its state alone says nothing, since it may still be resolving the bot's thread), the daemon queues no status write and Dispatch keeps `needs_review`, and the architect holds the reviewer's `phase-finished` notice, its acceptance cue.
-  The driver prompts the architect to accept:
-  its `sign_off` moves the issue to `retro` (the daemon log's `workflow: phase changed … from=accepting to=retro trigger=sign_off`, `phase_change_logged`), Dispatch to `retro`, and starts the implementer's retro, which takes the issue to merging
+  its state alone says nothing, since it may still be resolving the bot's thread), the daemon queues no status write and Dispatch keeps `needs_review`, the root holds no admission slot there while `admission.trees` still names its tree, and the architect holds the reviewer's `phase-finished` notice, its acceptance cue
+
+- `children-first-acceptance`
+
+  children-first, live: a parent is accepted only once every issue beneath it has left the workflow.
+  Two more children of tree 1 are filed while it stands in `accepting`, as at `issue-independence` (todo in Dispatch, no `legion` label, each entered by the daemon under tree 1's open gate), and each one's planner registers from an issue pod of its own, at generation 1 in planning, its claim recording tree 1 and its pod's own disk Bound.
+  The driver then prompts the architect to accept, three times, and reads each answer in the architect's session, where the `legion` tool puts it:
+  the first `sign_off` is refused `SIGNOFF_CHILD_IN_WORKFLOW` naming both children, and tree 1 stays in `accepting`;
+  the proof human parks child 3 (`backlog`, leaving it no Sandbox, no pod and no disk, its planner suspended), and the next `sign_off` is refused naming child 4 alone, which is what makes the rule every issue beneath rather than any;
+  the proof human parks child 4, and the last `sign_off` moves tree 1 to `retro` (`workflow: phase changed … from=accepting to=retro trigger=sign_off`), Dispatch to `retro`, and starts the implementer's retro, which takes the issue to merging.
+  They are filed here and nowhere else:
+  later, beneath a root already accepted, the daemon holds a child at `admitted` and starts nothing for it, and earlier they would live through the checkpoints that judge every live claim of tree 1
 
 - `review-thread`
 
@@ -2611,13 +2625,6 @@ Each item below names a checkpoint, then what it holds; an item that names no ch
   `legion status … backlog` then takes tree 4 out.
   A kill of either that lands after its task's turn has ended is given a new task and repeated, as in `controller`, and restarts the implementer's run of deaths
 
-- `children-at-the-merge`
-
-  the driver files children 3 and 4 under tree 1 and sets each todo, with no `legion` label;
-  each one's planner registers from an issue pod of its own and holds in planning, its planner claim records tree 1 (`legion claims list --json`), the state view shows it at generation 1 in planning, and its pod's own disk (`<pod>-issue`, owned by the pod) is Bound.
-  They are filed after every checkpoint that judges each live claim of tree 1 (the restart and both address moves), and once child 1 is released and child 2 parked, so they raise no peak the room check sizes;
-  they run beside the root, no more of tree 1's pods at once than `issue-independence`'s
-
 - `done`
 
   before the merger merges, since that merge can follow its assignment by seconds: the smoke main's lock is taken (`hold_smoke_main`).
@@ -2634,6 +2641,7 @@ Each item below names a checkpoint, then what it holds; an item that names no ch
   `merging` → `done` within 900 s (the daemon log's `workflow: phase changed … from=merging to=done trigger=pull_request_merged` and, once, `workflow: a merged root closes once its last child left the workflow`;
   Dispatch `done` within 120 s), the production check opens on the merge commit at its first look, woken by the merge (`check_opened_on`:
   `looks: 1`, `lookOpen: true`, `lastWake.kind: merge`), and the close hands the implementer that look in the still-live pod.
+  No issue of tree 1 holds an admission slot at the close: the root gave its own up at `accepting`, its children theirs at their parks, and the close frees whatever is left.
   The proof sends it nothing there: the issue is closed, and a closed issue takes no Dispatch write (409 `ISSUE_CLOSED`), so the fixture's instructions say a check task waits for no targeted message and acts on the daemon's task as written
   — this proof has no production and no deploy role, so the implementer leaves `Production: pending deploy of <merge commit>` on the pull request and reports `pending` (`check_look_reported`, within 600 s of the look's start:
   `looks: 1, lookOpen: false`, the check still open); the smoke main's cleanup (`clean_smoke_main`) runs while it works.
@@ -2659,7 +2667,7 @@ Each item below names a checkpoint, then what it holds; an item that names no ch
 
 - `node-release`
 
-  tree 1 lingers (`linger_hours: 0.5`, from the close its last child's park brought on):
+  tree 1 lingers (`linger_hours: 0.5`, from the close its merge brought on):
   the root and its parked children 2, 3 and 4 each have no Sandbox and no disk, and so no pod, read first
   — each stop deleted the member's Sandbox once its pod was gone, the children's at their parks and the root's at its production check's close;
   then every node any pod of tree 1 ran on (read from the pod watch:
@@ -2674,11 +2682,11 @@ Each item below names a checkpoint, then what it holds; an item that names no ch
 
 - `close`
 
-  at linger expiry (30 minutes from the close that followed tree 1's merge;
+  at linger expiry (30 minutes from the close its merge brought on;
   the close waits while a member's production check is open, which `production-check-bound` saw closed) no Sandbox or pod carries tree 1's label any more, and none of the pods of the root and children 2, 3 and 4 has a disk.
   The cleanup finds little left to delete:
   each member's own stop already took its Sandbox, and the disk its pod owned went with that pod
-  — child 1's at its `done`, child 2's at its parks, those of children 3 and 4 at the parks that closed the root, the root's at the linger's suspension and again when its production check closed.
+  — child 1's at its `done`, child 2's at its parks, those of children 3 and 4 at the parks that let the sign-off land, the root's at the linger's suspension and again when its production check closed.
   Every member of the tree left the workflow before the close, so none is handed over
 
 - `re-admission`

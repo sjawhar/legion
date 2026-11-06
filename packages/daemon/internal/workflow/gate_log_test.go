@@ -57,8 +57,10 @@ func TestTheDesignGateLogsItsRegistrationAndEachOpenOrClose(t *testing.T) {
 		{"a version after the approval", intake.DispatchArtifact{Key: "LEGION-1", ArtifactID: "art-1", Kind: intake.DispatchArtifactVersion, Version: 4},
 			[]string{
 				`msg="workflow: design gate closed" issue=LEGION-1 artifact=art-1 event=version version=4`,
-				// The approval started the root's planning, so the close reaches its planner too.
-				`msg="workflow: the design gate moved and every phase holder of the tree is told" issue=LEGION-1 tree=LEGION-1 version=4 open=false told=2`,
+				// The root is still admitted: an approval opens the gate and the waiting line
+				// starts the first phase at its slot (StartFirstPhase), which this test's
+				// admission stub does not do, so the architect is the one holder there is.
+				`msg="workflow: the design gate moved and every phase holder of the tree is told" issue=LEGION-1 tree=LEGION-1 version=4 open=false told=1`,
 			}},
 	} {
 		if got := apply(step.name, step.fact); strings.Join(got, "\n") != strings.Join(step.want, "\n") {

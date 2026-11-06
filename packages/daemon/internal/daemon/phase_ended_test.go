@@ -193,6 +193,7 @@ func conflictRunner(t *testing.T, from phase.Phase, status string, uncompleted b
 	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION",
 		Tree: "LEGION-208", Title: "Workflow", Phase: from, Generation: 1, Status: status, Rank: "U", LastDispatchSeq: 5}
 	putOutboxIssue(t, pool, records, issue)
+	holdSlot(t, pool, issue.Key)
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		if err := records.PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestOpen, Issue: issue.Key, Repo: "acme/widgets",
 			Number: 86, Branch: "legion/LEGION-208", HeadSHA: "sha-1", HeadUpdatedAt: time.Now(), Failing: []string{},

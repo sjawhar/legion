@@ -37,7 +37,7 @@ const (
 // no session (TestDecodeDispatchIssueNamesASessionActor). A session holding a claim in the tree is an
 // agent, never a human move, since a phase ends only by its completion and an issue only by its
 // merge; here the implementer closes its own issue while it awaits its merge instead of leaving
-// that to the merge. The workflow does not react (no linger, the slot kept, the phase
+// that to the merge. The workflow does not react (no linger, the tree still running, the phase
 // unchanged) and the daemon re-asserts its own status through the outbox. Any other session —
 // another tree's agent, or one outside Legion that took the issue for its own — cannot end or park
 // the tree either: the daemon re-asserts its status, and the tree's architect is told who wrote what.
@@ -107,6 +107,10 @@ func TestWhoseStatusWriteTakesARunningRootOutOfTheWorkflow(t *testing.T) {
 				if got.Phase != phase.Merging || got.LingerUntil != nil || got.Status != "retro" || got.LastDispatchSeq != 2 || reasserted != 1 {
 					t.Fatalf("root after %s = %#v with %d re-asserted status writes, want merging, not lingering, status retro kept, seq 2, and retro re-asserted over %s once", tc.name, got, reasserted, tc.status)
 				}
+				// The root stands in merging, a worker's phase on this release, so it keeps the
+				// slot that phase takes whoever wrote on it; what the write must not do is end
+				// its tree, which the kept phase, the absent linger and LEGION-9's slot beside
+				// it say.
 				assertSlots(t, pool, []record.Slot{{Issue: "LEGION-1", Index: 0, AdmittedAt: fixedNow}, {Issue: "LEGION-9", Index: 1, AdmittedAt: fixedNow}})
 				wantTold := 0
 				if tc.outcome == setBackAndTold {

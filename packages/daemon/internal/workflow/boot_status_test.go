@@ -79,10 +79,13 @@ func TestTheBootCorrectsNoStatusOfATreeThatHoldsNoSlot(t *testing.T) {
 	pool := migratedPool(t)
 	seedBootTree(t, pool)
 	// The waiting root: handed over in implementing, carrying the phase of its old tree, recorded
-	// todo, which is what Dispatch shows and what keeps it in the line.
+	// todo, which is what Dispatch shows and what keeps it in the line. HandedOverFrom is the
+	// arrival itself (record.ran): a root carrying a phase of the tree it left queues for a slot
+	// of its own, and the promotion that opens its tree clears the mark.
 	seedIssue(t, pool, record.Issue{Key: "LEGION-300", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion",
 		Tree: "LEGION-300", Project: "LEGION", Title: "a root waiting for a slot with a carried phase",
-		Phase: phase.Implementing, Generation: 2, Status: "todo", DispatchStatus: "todo", Rank: "Y", HandedOver: true})
+		Phase: phase.Implementing, Generation: 2, Status: "todo", DispatchStatus: "todo", Rank: "Y", HandedOver: true,
+		HandedOverFrom: "LEGION-200"})
 	// A child of that waiting root waits with it, and is corrected by no boot either.
 	seedIssue(t, pool, record.Issue{Key: "LEGION-301", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion",
 		Tree: "LEGION-300", Project: "LEGION", Title: "a child of the waiting root", Parent: new("LEGION-300"),
@@ -132,8 +135,12 @@ func waitingNow(t *testing.T, pool *pgxpool.Pool) []string {
 		if err != nil {
 			return err
 		}
-		for _, issue := range record.Waiting(issues, slots) {
-			keys = append(keys, issue.Key)
+		facts, err := record.ReadLineFacts(t.Context(), tx, store, "LEGION", issues)
+		if err != nil {
+			return err
+		}
+		for _, issue := range record.Waiting(issues, slots, facts) {
+			keys = append(keys, issue.Issue.Key)
 		}
 		return nil
 	})

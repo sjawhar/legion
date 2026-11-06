@@ -153,11 +153,12 @@ func (e *Engine) tellReparented(ctx context.Context, tx pgx.Tx, issue *record.Is
 // checks (its linger's close, its supervise rows, its issue suspend), with no linger, hold or
 // Dispatch chain (record.Issue.Ancestry: a member waits in no line), no
 // hand-over fence and its generation's facts cleared. A todo record enters the tree's run
-// admitted, as an unrecorded todo child does (enterChild), so an open gate starts its planning,
-// unless it waits on an unfinished Dispatch issue: enterChild then holds it at phase.Admitted, on
-// the union of the mirror's row and the list the release read, and StartUnblockedChildren starts
-// it once nothing holds it. Only the adopted root itself carries that list: a member of its tree
-// was named by no release, and waits on what the mirror says. Any other status
+// admitted, as an unrecorded todo child does (enterChild), so it starts its first phase at the
+// slot the waiting line gives it, unless it waits on an unfinished Dispatch issue: enterChild then
+// holds it at phase.Admitted, on the union of the mirror's row and the list the release read, and
+// StartUnblockedChildren starts it once nothing holds it. Only the adopted root itself carries
+// that list: a member of its tree was named by no release, and waits on what the mirror says. Any
+// other status
 // keeps it as a parked child at done, which a todo runs again (ReenterChild).
 // The tree's architect is told with a child-status notice. Everything is written in the caller's
 // transaction.

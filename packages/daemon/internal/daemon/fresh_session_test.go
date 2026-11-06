@@ -62,6 +62,11 @@ func newFreshSessionRig(t *testing.T) *freshSessionRig {
 	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION",
 		Tree: "LEGION-208", Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"}
 	putOutboxIssue(t, pool, records, issue)
+	// The issue is at work, so it holds the admission slot its work holds: the task half of a
+	// start is claimable only while its issue holds one (workflow.StartOrOwe, record.NeedsSlot).
+	if _, err := pool.Exec(ctx, `insert into slots (issue, index, admitted_at) values ($1, 0, now())`, issue.Key); err != nil {
+		t.Fatalf("seed the issue's admission slot: %v", err)
+	}
 	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 	sup.deps.PhaseHolds = (&workflowRuntime{pool: pool, records: records}).phaseHolds
 	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
@@ -239,8 +244,12 @@ func TestAnArchitectsRetryOfARefusedClaimStartsANewSessionWithThePhaseTask(t *te
 		intake.RetryOrEscalate{Issue: rig.issue.Key, Decision: intake.RetryDecision}, rig.engine); err != nil {
 		t.Fatalf("the architect's retry: %v", err)
 	}
-	if err := rig.runner.RunOnce(ctx); err != nil {
-		t.Fatalf("run what the retry queued: %v", err)
+	// A start is two rows now (workflow.StartOrOwe): the relaunch leaves a failed claim to the row
+	// that carries the task, so the drain runs until both have run.
+	for range 3 {
+		if err := rig.runner.RunOnce(ctx); err != nil {
+			t.Fatalf("run what the retry queued: %v", err)
+		}
 	}
 	rig.machine.Wait()
 
@@ -294,8 +303,12 @@ func TestTheOperatorsFreshSessionRetryOfAStoppedWorkerStartsANewSessionWithThePh
 	if recorder.Code != http.StatusAccepted {
 		t.Fatalf("retry --fresh-session of the stopped implementer = %d, want 202; body %s", recorder.Code, recorder.Body)
 	}
-	if err := rig.runner.RunOnce(ctx); err != nil {
-		t.Fatalf("run what the retry queued: %v", err)
+	// A start is two rows now (workflow.StartOrOwe): the relaunch leaves a failed claim to the row
+	// that carries the task, so the drain runs until both have run.
+	for range 3 {
+		if err := rig.runner.RunOnce(ctx); err != nil {
+			t.Fatalf("run what the retry queued: %v", err)
+		}
 	}
 	rig.machine.Wait()
 

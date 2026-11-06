@@ -442,6 +442,129 @@ func TestConstructRefusesASeedInAnAzureInput(t *testing.T) {
 	}
 }
 
+// answererConstructForms are the answerer's two forms as Construct inputs: the Inputs each sets,
+// its endpoint among them, with the plain inputs that endpoint needs beside them.
+var answererConstructForms = []struct {
+	name   string
+	inputs map[string]string
+	plain  map[string]property.Value
+}{
+	{
+		"azure chat",
+		map[string]string{"azureChatEndpoint": azureChatEndpoint, "azureChatDeployment": "example-chat-deployment", "azureTenantId": azureTenantID, "azureClientId": azureClientID},
+		map[string]property.Value{"azureChatTokensPerMinute": property.New(120000.0)},
+	},
+	{
+		"chat endpoint",
+		map[string]string{"chatEndpoint": chatEndpointURL, "chatTokenSecret": chatTokenSecret},
+		map[string]property.Value{"chatModel": property.New("example-chat-model")},
+	},
+}
+
+// The answerer's endpoint, the Azure deployment, the shared sign-in and the chat token's secret
+// path are Inputs, typically an Azure resource's or a secret store's outputs: Construct takes
+// them from another resource and renders them as they resolve.
+func TestConstructTakesAnswererInputsFromAnotherResource(t *testing.T) {
+	for _, form := range answererConstructForms {
+		t.Run(form.name, func(t *testing.T) {
+			inputs := dispatchConstructBaseInputs()
+			for key, value := range form.plain {
+				inputs[key] = value
+			}
+			for key, value := range form.inputs {
+				inputs[key] = property.New(value).WithDependencies([]resource.URN{upstream})
+			}
+			m, _, err := constructDispatch(t, inputs, false)
+			require.NoError(t, err)
+			env := appEnv(t, m)
+			if form.name == "azure chat" {
+				require.Equal(t, "azure", env["DISPATCH_ANSWERER"])
+				require.Equal(t, azureChatEndpoint, env["DISPATCH_AZURE_CHAT_ENDPOINT"])
+				require.Equal(t, "example-chat-deployment", env["DISPATCH_AZURE_CHAT_DEPLOYMENT"])
+				require.Equal(t, "120000", env["DISPATCH_AZURE_CHAT_TOKENS_PER_MINUTE"])
+				require.Equal(t, azureTenantID, env["DISPATCH_AZURE_TENANT_ID"])
+				require.Equal(t, azureClientID, env["DISPATCH_AZURE_CLIENT_ID"])
+				require.Equal(t, "/var/run/secrets/azure-federation/token", env["DISPATCH_AZURE_FEDERATED_TOKEN_FILE"])
+				require.NotContains(t, env, "DISPATCH_EMBEDDER", "meaning search stays on Bedrock")
+				return
+			}
+			require.Equal(t, "endpoint", env["DISPATCH_ANSWERER"])
+			require.Equal(t, chatEndpointURL, env["DISPATCH_CHAT_ENDPOINT"])
+			require.Equal(t, "example-chat-model", env["DISPATCH_CHAT_MODEL"])
+			require.Equal(t, "/var/run/secrets/chat-token/token", env["DISPATCH_CHAT_TOKEN_FILE"])
+			require.Equal(t, chatTokenSecret, m.Named(t, "gcp:secretmanager/secretIamMember:SecretIamMember", "example-dispatch-chat-token-accessor").Inputs.Mappable()["secretId"])
+		})
+	}
+}
+
+// At preview the answerer's Inputs may not be known yet (the Azure resources or the token's secret
+// are created in the same update): the resolver judges them by being set, so the component
+// previews, with the unknown values rendered as unknown.
+func TestConstructAcceptsUnknownAnswererInputsUnderPreview(t *testing.T) {
+	for _, form := range answererConstructForms {
+		t.Run(form.name, func(t *testing.T) {
+			inputs := dispatchConstructBaseInputs()
+			for key, value := range form.plain {
+				inputs[key] = value
+			}
+			for key := range form.inputs {
+				inputs[key] = property.New(property.Computed).WithDependencies([]resource.URN{upstream})
+			}
+			m, _, err := constructDispatch(t, inputs, true)
+			require.NoError(t, err)
+			env := appEnv(t, m)
+			if form.name == "azure chat" {
+				require.Equal(t, "azure", env["DISPATCH_ANSWERER"])
+				require.Equal(t, "<unknown>", env["DISPATCH_AZURE_CHAT_ENDPOINT"])
+				require.Equal(t, "<unknown>", env["DISPATCH_AZURE_CHAT_DEPLOYMENT"])
+				return
+			}
+			require.Equal(t, "endpoint", env["DISPATCH_ANSWERER"])
+			require.Equal(t, "<unknown>", env["DISPATCH_CHAT_ENDPOINT"])
+			m.Named(t, "gcp:secretmanager/secretIamMember:SecretIamMember", "example-dispatch-chat-token-accessor")
+		})
+	}
+}
+
+// The answerer's endpoint, the Azure chat deployment and the chat token's secret path are Inputs,
+// read only once they resolve: a value holding an nkey seed is refused then, naming the input and
+// never the value, so no child is registered with it.
+func TestConstructRefusesASeedInAnAnswererInput(t *testing.T) {
+	seed, _ := testnats.User(t)
+	lower := strings.ToLower(seed)
+	for _, row := range []struct {
+		name, form, input, value string
+	}{
+		{"a seed inside the Azure chat endpoint", "azure chat", "azureChatEndpoint", "https://" + lower + ".services.ai.azure.com/models"},
+		{"a seed as the Azure chat deployment", "azure chat", "azureChatDeployment", seed},
+		{"a seed inside the chat endpoint", "chat endpoint", "chatEndpoint", "https://" + lower + ".internal.example/v1"},
+		{"a seed inside the chat token secret id", "chat endpoint", "chatTokenSecret", "projects/example-project/secrets/" + seed},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			inputs := dispatchConstructBaseInputs()
+			for _, form := range answererConstructForms {
+				if form.name == row.form {
+					for key, value := range form.plain {
+						inputs[key] = value
+					}
+					for key, value := range form.inputs {
+						inputs[key] = property.New(value)
+					}
+				}
+			}
+			inputs[row.input] = property.New(row.value).WithDependencies([]resource.URN{upstream})
+			m, _, err := constructDispatch(t, inputs, false)
+			require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: "+row.input+" holds an nkey seed (not echoed)")
+			require.NotContains(t, strings.ToUpper(err.Error()), seed)
+			for _, r := range m.Registrations() {
+				for _, s := range allStrings(resource.NewProperty(r.Inputs)) {
+					require.NotContains(t, strings.ToUpper(s), seed, "%s %s holds the seed", r.Type, r.Name)
+				}
+			}
+		})
+	}
+}
+
 // The issuer and subject an Azure federated credential trusts are outputs, so the Azure side reads
 // them rather than rebuilding them: the cluster's token issuer, and the pods' ServiceAccount
 // <hostname> in the component's namespace. Neither is secret, and both are there with no Azure
@@ -485,7 +608,7 @@ func TestConstructOutputsTheServiceAccountIssuerAndSubject(t *testing.T) {
 // the component and the input, before anything registers, and never quotes a secret one
 // (provider's TestConstructRefusesAFractionInEveryIntegerInput covers every component's).
 func TestConstructRefusesAFractionalDispatchInteger(t *testing.T) {
-	for _, input := range []string{"replicas", "pprofPort", "azureEmbedTokensPerMinute"} {
+	for _, input := range []string{"replicas", "pprofPort", "azureEmbedTokensPerMinute", "azureChatTokensPerMinute"} {
 		for _, row := range []struct {
 			value property.Value
 			want  string

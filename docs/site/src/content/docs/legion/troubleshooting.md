@@ -260,7 +260,10 @@ Check, in order:
    legion state --config legion.yaml --json | jq .admission
    ```
 
-   `active` lists the running roots, `waiting` the ones in line, `cap` the slots (`admission_cap`).
+   `active` lists the issues holding a slot, roots and children alike, `waiting` the issues in
+   line, `trees` the roots of the trees that run, and `cap` the slots (`admission_cap`, which
+   counts issues at work, not trees). A parent whose own first phase waits for its open children
+   is in `blocked`, with each child it waits for.
 5. **GitHub refuses its branch.** Before the architect starts, the daemon creates the issue's
    branch, `legion/<KEY>`, on GitHub in the issue's recorded repository at its recorded default
    branch, as the implement App, and again before each tree member's planner starts, so no agent's
@@ -301,7 +304,9 @@ the approval request is on the architect's turn), `closed` (a session or anyone 
 person closed the question), `turn` (a session handed it back to the agent's turn), `retracted`
 (Dispatch's settlement), and `approved` also when the spec's gate stands open with nobody's
 approval under `gates.design: off`, or when the gate was switched off while the root waited on it. The root is
-at the front of `admission.waiting` and resumes itself at the next free slot. Do not park it or
+at the front of `admission.waiting` and resumes itself there: at once, holding no slot, once its
+design gate has opened, and at the next free slot while its architect is still writing the first
+spec. Do not park it or
 start it by hand. Without `answeredAt`, check, in order:
 
 1. **The question is still with the person.** `dispatch read <KEY>` shows the root's asks. A
@@ -332,7 +337,7 @@ start it by hand. Without `answeredAt`, check, in order:
    turn with the agent: that new act wakes the root on its own event.
 
 A root whose architect registered its spec while the approval request waits on the person is in
-`awaiting_person` with `waitingOn.kind` `gate`, once nothing else holds its slot; one still
+`awaiting_person` with `waitingOn.kind` `gate`, once nothing else of its tree is at work; one still
 `admitted` waiting on its design gate keeps its slot for one of the reasons above, or because
 Dispatch shows the request on the architect's turn (a reply or a newer version since the request),
 when the architect has nothing handed to the person. A root waiting on its gate at a daemon's deploy
@@ -426,7 +431,7 @@ architect that failed (`architect.state` is `failed`) leaves its tree with nobod
 and the controller is woken to re-admit the tree. What brings the architect back depends on where
 its tree stands:
 
-- **Its root holds its admission slot and does not linger:** `legion state`'s `claims nothing will
+- **Its tree runs and does not linger:** `legion state`'s `claims nothing will
   wake` line names the architect under `failed, retry`. Retry it, as
   [A tree does not move after a restart](#a-tree-does-not-move-after-a-restart) shows: the daemon
   relaunches it on the session it kept, with fresh budgets, and the tree carries on at the
@@ -563,10 +568,11 @@ is `legion-<project>-<issue, lowercased>-<role>`, as `legion claims list` shows.
   it to the controller; `legion claims retry` applies the same retry when the architect cannot. A
   failed claim ignores `legion claims resume` and `legion claims deliver`.
 
-The list names only claims of trees that hold an admission slot, and leaves out claims that
+The list names only claims of trees that run — the trees `admission.trees` names, whether or not
+an issue of them holds a slot — and leaves out claims that
 something will still start: a worker whose phase is not its own is started again when its phase
-comes, a parked tree's claims wait for its re-admission, and the architect of a tree re-admitted
-while every slot was taken waits for admission to start it once one frees. A root in
+comes, a parked tree's claims wait for its re-admission, and an issue whose start waits for a free
+slot has that start queued already. A root in
 `awaiting_person` is different: its architect stays live while it waits for the person's answer,
 and the answer's task is delivered once the root takes a slot. Never resume or retry by hand a
 claim of a lingering tree or of an issue parked out of the workflow; re-admission or the issue's
@@ -581,7 +587,8 @@ is queued for it, since the next phase start or re-admission resumes it as befor
   an issue pod at the defaults) and lands wherever the pool has room, so a pool at its limits leaves
   the next pod unscheduled until the daemon reads it dead past `worker_boot_timeout_seconds` and,
   once its launch failures run out, fails the claim. `kubectl -n legion describe pod <pod>` names the
-  reason. Keep `admission_cap`, and the children a tree runs at once, within what the pool's limits
+  reason. `admission_cap` counts the issues at work, and an issue that only waits keeps its pod,
+  so keep the pods a deployment's open trees run within what the pool's limits
   can place ([The cluster](/legion/legion/running-legion/#the-cluster)). A pod replaced on another
   node waits for no volume to detach: an issue's disk is its own pod's, created with it and
   deleted with it, so a replacement brings a disk of its own. The image probe pod,
