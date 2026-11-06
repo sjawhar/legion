@@ -2342,9 +2342,9 @@ jobs:
     # The rule: a step budget is that step's measured maximum plus 15 per cent, rounded up to the
     # next whole minute, with a floor of two minutes; an install step's budget comes from its own
     # retry arithmetic instead. So 1671 s x 1.15 = 1922 s -> 33 min for the browser step, and
-    # 14 min for the install step, for the reason its own comment gives. The job budget is the
+    # 16 min for the install step, for the reason its own comment gives. The job budget is the
     # sum of its step budgets plus the measured maximum of every step without one, rounded up:
-    # 840 + 1980 + 232 s = 3052 s -> 51 min. The spread is the fleet's rather than the suite's,
+    # 960 + 1980 + 232 s = 3172 s -> 53 min. The spread is the fleet's rather than the suite's,
     # which is why each budget is that measured maximum plus a margin rather than a figure near
     # the median.
     #
@@ -2354,7 +2354,7 @@ jobs:
     # upload steps below still run and the Playwright report, the memory samples and the CPU
     # samples still reach the run, which a cancelled job loses. The job budget is the backstop
     # above the sum of the step budgets, so it never fires first.
-    timeout-minutes: 51
+    timeout-minutes: 53
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2484,34 +2484,44 @@ jobs:
       # packages Playwright's own list names or needs, and the subtraction leaves WebKit unable
       # to launch.
       #
-      # The 14-minute budget is the step's own retry arithmetic, not its measured maximum, which
+      # The 16-minute budget is the step's own retry arithmetic, not its measured maximum, which
       # the bounds make unreachable: two bounded attempts of `apt-get update` at 90 s, two of the
-      # download at 250 s, then the unpack, the browser download and the two apt simulations of
+      # download at 300 s, then the unpack, the browser download and the two apt simulations of
       # the list check, none of which touch the Ubuntu mirror. So the arithmetic is
-      # 2 x 90 + 2 x 250 s of bounded apt, about 20 s of unpack, about 90 s for the browsers and
-      # about 30 s for the list check: 820 s, rounded up to 14 min. Healthy today is a 38 s
+      # 2 x 90 + 2 x 300 s of bounded apt, about 20 s of unpack, about 90 s for the browsers and
+      # about 30 s for the list check: 920 s, rounded up to 16 min. Healthy today is a 38 s
       # median and a 102 s 95th percentile for the whole step.
       #
-      # The two bounds are the smallest pair that fails none of the 205 green dispatch jobs of
-      # the tester's window (2026-11-05T08:51:42Z to 23:07:42Z, a different window from the
-      # table above, which is why its count differs), modelled by scaling each job's merge-base
-      # mirror rate onto the head's smaller fetch. The job that sets them is 127238648049, the
-      # slowest install this job has run: apt logged `Fetched 114 MB in 10min 13s (186 kB/s)`
-      # there, 613 of its 634 s, which the model reads as 126.9 MB over 614 s, or 207 kB/s, so
-      # the head's 12.9 MB of indexes would take 62 s and its 51.4 MB of packages 249 s. A 90 s
-      # download bound, the first value tried, would have failed 5 of those 205 jobs, which
-      # would be a new class of red on pull requests that broke nothing. The model assumes a
-      # retry meets the same mirror rate, and azure.archive.ubuntu.com is a pool, so the real
-      # rate is at or below every figure here and the zero is a modelled zero.
+      # Each bound is derived from its own phase, by scaling the measured mirror rates of the
+      # 205 green dispatch jobs of the tester's window (2026-11-05T08:51:42Z to 23:07:42Z, a
+      # different window from the table above, which is why its count differs) onto the head's
+      # smaller fetch. The job that sets them is 127238648049, the slowest install this job has
+      # run: there apt logged `Fetched 10.5 MB in 1s (9797 kB/s)` for `apt-get update` at
+      # 12:18:39Z and `Fetched 114 MB in 10min 13s (186 kB/s)` for the packages at 12:28:54Z. At
+      # those two rates the head's 12.9 MB of indexes take about 1.3 s and its 51.4 MB of
+      # packages about 276 s. Reading the two phases at one blended rate - 126.9 MB over 614 s,
+      # or 207 kB/s - mixes that fast update into the slow download and understates the
+      # download, which is why the bound is derived per phase.
       #
-      # The worst case the step now carries: both attempts of both phases end, so it fails by its
-      # own name in at most 680 s, against the 40-minute job cancel it replaces.
+      # The 300 s download bound leaves 24 s over that modelled 276 s, about 9 per cent, which
+      # is wider than the model's own uncertainty: as the overhead constant moves 10, 14, 20,
+      # 25, 30 s, the modelled failure count moves 1, 1, 0, 0, 0. So on a model that reads the
+      # two phases apart, the two bounds fail at most one of those 205 green jobs. The model
+      # assumes a retry meets the same mirror rate, and azure.archive.ubuntu.com is a pool, so
+      # the real rate is at or below every figure here. Both bounds come from the slowest mirror
+      # this repository has seen, and are read again when a slower one appears.
+      #
+      # The worst case the step now carries: if both `apt-get update` attempts fail, `twice`
+      # returns 1 and the step stops after about 180 s, so the longest the bounded apt phases
+      # can run is one update attempt stopped at 90 s, a second ending just inside 90 s, then
+      # both download attempts stopped at 300 s. The step fails by its own name in at most
+      # 780 s, against the 40-minute job cancel it replaces.
       - name: Install Playwright Chromium, WebKit and Firefox
         # The runner image preconfigures Google's chrome-stable apt source, whose index
         # intermittently fails `apt-get update` with a hash-sum mismatch and takes the install
         # down with it. Chrome is already installed there; the source only serves upgrades, so
         # drop it before installing our deps.
-        timeout-minutes: 14
+        timeout-minutes: 16
         run: |
           grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
           packages="fonts-freefont-ttf fonts-ipafont-gothic fonts-liberation fonts-noto-color-emoji
@@ -2544,24 +2554,26 @@ jobs:
           # `sudo timeout`, not `timeout sudo`: the signal has to reach apt-get itself, not a
           # sudo holding it.
           twice "apt-get update" sudo timeout 90 apt-get update
-          # Download only, so an attempt the timeout kills holds no dpkg lock and the retry is
-          # free to start. It prints what it fetched, which is this step's own byte record.
-          # $packages is left unquoted on purpose, to split into words.
-          twice "the package download" sudo timeout 250 apt-get install -y --no-install-recommends -d $packages
+          # Download only (`-d`): a killed apt releases its fcntl locks either way, but with
+          # nothing unpacked in this phase no dpkg run is ever stopped part way, so the retry and
+          # the unbounded install after it start from a clean package state. It prints what it
+          # fetched, which is this step's own byte record. $packages is left unquoted on purpose,
+          # to split into words.
+          twice "the package download" sudo timeout 300 apt-get install -y --no-install-recommends -d $packages
           # Unbounded and unretried: the archive is on disk now, so this takes no network.
           sudo apt-get install -y --no-install-recommends $packages
           # The browsers alone. Named, because with no argument Playwright resolves its own
           # default set rather than this job's three.
           bunx playwright install chromium webkit firefox
-          # Has the pinned list fallen behind Playwright?
-          # .github/scripts/playwright-deps-current.sh answers that, against the list it is given
-          # here: $packages, unquoted so it splits into words, as apt takes it above. It holds
-          # every package Playwright asks for against that list and the four media packages this
-          # step drops. It runs after the install, so Playwright's list, its missing set and the
-          # apt closure they are held against are read from the same state. The step's
-          # working-directory is packages/dispatch, so the script is reached through
-          # $GITHUB_WORKSPACE, the checkout root GitHub sets, and the bunx it runs resolves this
-          # suite's Playwright.
+          # Has the pinned list fallen behind Playwright? The check is the repository's
+          # .github/scripts/playwright-deps-current.sh, and it runs here, against the list it is
+          # given on this line: $packages, unquoted so it splits into words, as apt takes it
+          # above. It holds every package Playwright asks for against that list and the four
+          # media packages this step drops. It runs after the install, so Playwright's list, its
+          # missing set and the apt closure they are held against are read from the same state.
+          # The step's working-directory is packages/dispatch, so the script is reached through
+          # $GITHUB_WORKSPACE, the checkout root GitHub sets, and the bunx it runs resolves
+          # this suite's Playwright.
           "$GITHUB_WORKSPACE/.github/scripts/playwright-deps-current.sh" $packages
         working-directory: packages/dispatch
       # Beside the install, not at the end of the job: it keeps what the install just downloaded,
@@ -2730,14 +2742,14 @@ jobs:
     #   every other step summed                                         68 s   94 s  135 s
     #   the whole job                                                  207 s  305 s  516 s
     #
-    # The rule, and the reason the budgets sit on the steps rather than on the job alone, are the
-    # dispatch job's head's; this job states only what it measured and what that rule gives here.
-    # 202 s x 1.15 = 232 s -> 4 min for the dashboard step, 13 s x 1.15 = 15 s -> the two-minute
-    # floor for the sign-in step, and 4 min for the install step, for the reason its own comment
-    # gives. The job budget is the sum of its step budgets plus the measured maximum of every
-    # step without one, rounded up: 4 + 4 + 2 min plus 135 s = 13 min. The step budget that a
-    # cancellation preserves here is the `if: failure()` upload below, which a cancelled job
-    # leaves unrun.
+    # The rule, and the reason the budgets sit on the steps rather than on the job alone, are in
+    # the dispatch job's comment above its `timeout-minutes`; this job states only what it
+    # measured and what that rule gives here. 202 s x 1.15 = 232 s -> 4 min for the dashboard
+    # step, 13 s x 1.15 = 15 s -> the two-minute floor for the sign-in step, and 4 min for the
+    # install step, for the reason its own comment gives. The job budget is the sum of its step
+    # budgets plus the measured maximum of every step without one, rounded up: 4 + 4 + 2 min
+    # plus 135 s = 13 min. With budgets on the steps, the `if: failure()` upload below still
+    # runs, which a cancelled job skips.
     timeout-minutes: 13
     services:
       postgres:
@@ -2802,11 +2814,12 @@ jobs:
         # fonts-noto-color-emoji are on the image already. A row that later needs CJK or Thai
         # glyphs would fail visibly.
         #
-        # The 4-minute budget: this step downloads browsers only, and Playwright's own download
-        # retries five times across mirrors inside it. Of the 339 s maximum above, measured in
-        # job 127214381394, 317 s were the Ubuntu mirror serving 21.1 MB at 66.4 kB/s, which this
-        # step no longer asks for; Chromium, its headless shell and ffmpeg downloaded in 6 s
-        # there. Healthy today is a 20 s median and a 34 s 95th percentile for the whole step.
+        # The 4-minute budget: this step downloads browsers only, and Playwright makes up to
+        # five attempts, across its download hosts, inside it. Of the 339 s maximum above,
+        # measured in job 127214381394, 317 s were the Ubuntu mirror serving 21.1 MB at
+        # 66.4 kB/s, which this step no longer asks for; Chromium, its headless shell and
+        # ffmpeg downloaded in 6 s there. Healthy today is a 20 s median and a 34 s 95th
+        # percentile for the whole step.
         #
         # No browser cache here: it would save about 4 s, since the three archives - Chrome for
         # Testing, its headless shell and ffmpeg - download in 8 to 9 s, and it would add about
