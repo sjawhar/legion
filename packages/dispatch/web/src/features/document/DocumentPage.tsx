@@ -1,11 +1,10 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useCallback, useState } from "react";
+import { lazy, type ReactNode, Suspense, useCallback, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
 import { QueryError } from "../../components/QueryError";
 import { dangerText } from "../../theme/classes";
-import { ArtifactDocument } from "../artifacts/ArtifactDocument";
 import { ArtifactBlobView, ArtifactHeader } from "../artifacts/ArtifactHeader";
 import { ArtifactQueryStates } from "../artifacts/ArtifactQueryStates";
 import type { DocumentToolbar } from "../doc/ProofDocument";
@@ -22,6 +21,18 @@ import { firstHighlightTerm } from "../search/search-model";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { useProjectArtifact } from "./useProjectArtifact";
+
+/** The document surface, in a chunk of its own: a chunk and everything it statically imports
+ *  evaluate in one main-thread task, and the editor's host, its Markdown renderer and the diff
+ *  view are the larger half of this page (dispatch://INFRA-341, R11). The document address
+ *  preloads it beside this page's own chunk (`DOCUMENT_ADDRESS_MODULES` in
+ *  `web/vite.config.ts`), so what it costs the reader is the task it evaluates in rather than
+ *  a request. The issue page loads it the same way (`features/issue/IssuePage.tsx`). */
+const ArtifactDocument = lazy(() =>
+  import("../artifacts/ArtifactDocument").then((module) => ({
+    default: module.ArtifactDocument,
+  }))
+);
 
 export function DocumentPage(): ReactNode {
   const location = useLocation();
@@ -145,18 +156,20 @@ export function DocumentPage(): ReactNode {
           />
         ) : null}
         {artifact.data.kind === "doc" ? (
-          <ArtifactDocument
-            artifact={artifact.data}
-            askId={item?.kind === "ask" ? item.id : undefined}
-            commentId={item?.kind === "comment" ? item.id : undefined}
-            highlightTerm={highlightTerm}
-            isClosed={false}
-            onToolbarChange={handleToolbarChange}
-            onVersionChange={selectVersion}
-            owner={owner}
-            showDiff={showDiff}
-            version={version}
-          />
+          <Suspense fallback={null}>
+            <ArtifactDocument
+              artifact={artifact.data}
+              askId={item?.kind === "ask" ? item.id : undefined}
+              commentId={item?.kind === "comment" ? item.id : undefined}
+              highlightTerm={highlightTerm}
+              isClosed={false}
+              onToolbarChange={handleToolbarChange}
+              onVersionChange={selectVersion}
+              owner={owner}
+              showDiff={showDiff}
+              version={version}
+            />
+          </Suspense>
         ) : (
           <ArtifactBlobView artifact={artifact.data} version={version} />
         )}

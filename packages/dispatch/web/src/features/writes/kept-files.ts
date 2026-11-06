@@ -7,7 +7,7 @@
  * forgets a key after `IDEMPOTENCY_KEY_TTL_MS`, and a tab closed with an upload still kept leaves
  * its row behind), are deleted as the page resumes.
  */
-import { IDEMPOTENCY_KEY_TTL_MS } from "@legion/contracts";
+import { IDEMPOTENCY_KEY_TTL_MS } from "@legion/contracts/dispatch-constants";
 
 const DATABASE = "dispatch-kept-files";
 const STORE = "files";

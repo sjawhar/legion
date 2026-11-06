@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { LIVE_SOCKET_MAX_AGE_CLOSE } from "@legion/contracts";
+import { LIVE_SOCKET_MAX_AGE_CLOSE } from "@legion/contracts/dispatch-constants";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, renderHook } from "@testing-library/react";
 import type { ReactNode } from "react";

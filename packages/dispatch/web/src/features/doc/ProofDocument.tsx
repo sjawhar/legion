@@ -1,4 +1,4 @@
-import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
   useCallback,
@@ -8,7 +8,8 @@ import {
   useRef,
   useState,
 } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { flushSync } from "react-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import {
   api,
@@ -40,6 +41,7 @@ import {
 import { useMargin } from "../margin/margin-context";
 import type { MarginOwner } from "../margin/useMarginItems";
 import { blockFragment } from "../refs/block-reference";
+import { TextAskCard } from "../refs/markdown-cards";
 import { fetchReferencePath, needsSpecSlug, watchPicturePath } from "../refs/reference-target";
 import {
   buildDispatchReference,
@@ -53,13 +55,16 @@ import { importWhenOnline } from "../shell/DeploymentResilience";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
-import { AskBlockCard } from "./AskBlockCard";
+import { AskBlockCard, PreviewDecisionCard, PreviewDecisionsContext } from "./AskBlockCard";
 import { ChangeView } from "./ChangeView";
 import type { ConnectionState, DocumentConnection } from "./connection";
 import { colorForLogin } from "./connection";
+import { DocumentPreview, documentPreview, takeTheBuiltBlocks } from "./DocumentPreview";
 import type { EditorHandle } from "./editor";
 import { bindRemoteMarks } from "./editor";
+import { currentAddress, firstScreenAwaits } from "./first-screen";
 import type { Highlight } from "./highlight";
+import { liveTextQueryOptions } from "./live-text";
 import {
   blockOffsets,
   blockPlacements as collectBlockPlacements,
@@ -68,6 +73,7 @@ import {
   selectionBarKindFor,
 } from "./marks";
 import { NameVersionDialog } from "./NameVersionDialog";
+import { takeEarlyTextRead } from "./open-document-early";
 import type { PendingState } from "./pending-sync";
 import { createPendingWaiter } from "./pending-waiter";
 import { refocusAfterDiagrams } from "./refocus-after-diagrams";
@@ -76,17 +82,10 @@ import { DocumentRuntime } from "./runtime";
 import { loadBlockSchema } from "./schema";
 import { readLineText, useSpecMarks } from "./spec-marks";
 import type { AskBlockHost } from "./typed-block-drawing";
+import { useAskCardsDrawnInTasks } from "./useAskCardsDrawnInTasks";
 import { VersionView } from "./VersionView";
 
 const CONTROL_CHARACTERS = /\p{Cc}/gu;
-
-/** The live document's text as the server reads it now. A read of it decides whether the editor
- * may connect: the server answers `409 DOC_SCHEMA` for a stored tree outside the Proof schema. */
-export const liveTextQueryOptions = (artifactId: string) =>
-  queryOptions({
-    queryKey: ["artifact", artifactId, "text"],
-    queryFn: () => api.getArtifactText(artifactId),
-  });
 
 /** Why an admission left the live editor closed, from its own `/text` read: a tree outside the
  * Proof schema the page offers to repair from markdown, a stored history that cannot load the page
@@ -195,6 +194,68 @@ function dispatchHrefOf(anchor: Element): string | null {
   return href?.startsWith("dispatch://") ? href : null;
 }
 
+/** Where a reader is in a document drawn as a run of top-level blocks: the first block the top
+ *  of the scrollport is in or above, and how far that block's own top sits from it. `undefined`
+ *  where there is nothing to keep: no draw, or a reader still at the document's first block and
+ *  above its top, whom any draw of it leaves where they are. */
+interface ReadersBlock {
+  readonly index: number;
+  readonly top: number;
+}
+
+function readersBlock(drawn: HTMLElement | null): ReadersBlock | undefined {
+  if (drawn === null) {
+    return undefined;
+  }
+  const blocks = drawn.children;
+  for (let index = 0; index < blocks.length; index += 1) {
+    const { bottom, top } = blocks[index].getBoundingClientRect();
+    if (bottom > 0) {
+      return index === 0 && top >= 0 ? undefined : { index, top };
+    }
+  }
+  return undefined;
+}
+
+/** What scrolls `element`: the nearest ancestor that scrolls its own content, or the page
+ *  itself. A document is the page's own scroll on its page and a column's scroll in a reading
+ *  pane, and the reader's place is kept against whichever is carrying them. */
+function whatScrolls(element: HTMLElement): HTMLElement | null {
+  for (let box = element.parentElement; box !== null; box = box.parentElement) {
+    const overflow = window.getComputedStyle(box).overflowY;
+    if ((overflow === "auto" || overflow === "scroll") && box.scrollHeight > box.clientHeight) {
+      return box;
+    }
+  }
+  return null;
+}
+
+/** Scrolls whatever carries `within` by `moved` pixels, so what the reader is looking at stays
+ *  on the same line of their screen while the page changes above it. */
+function moveTheScroll(within: HTMLElement, moved: number): void {
+  if (moved === 0) {
+    return;
+  }
+  const scroller = whatScrolls(within);
+  if (scroller === null) {
+    window.scrollBy(0, moved);
+    return;
+  }
+  scroller.scrollTop += moved;
+}
+
+/** Puts the reader back where `place` left them, in a document `drawn` draws the same blocks of
+ *  in the same order. A block the new draw does not have - a document edited between the two -
+ *  leaves the page where it is, which is the browser's own scroll anchoring rather than a jump
+ *  to the wrong words. */
+function putTheReaderBack(drawn: HTMLElement, place: ReadersBlock | undefined): void {
+  const block = place === undefined ? undefined : drawn.children[place.index];
+  if (block === undefined || place === undefined) {
+    return;
+  }
+  moveTheScroll(drawn, block.getBoundingClientRect().top - place.top);
+}
+
 export function ProofDocument({
   artifact,
   highlight,
@@ -214,6 +275,12 @@ export function ProofDocument({
   const editorRef = useRef<EditorHandle | undefined>(undefined);
   // The dispose of the latest focus's re-run after the diagrams draw (`focusInEditor`).
   const disposeRefocusRef = useRef<(() => void) | undefined>(undefined);
+  // The bound editor's placement report, so a change in who stands at a block's pixel can ask
+  // for one outside the effect that built the editor; undefined while no editor is bound.
+  const publishPlacementsRef = useRef<(() => void) | undefined>(undefined);
+  // What `placed` is now, read inside that report rather than listed as a dependency of the
+  // effect that builds the editor, which no change of it may rebuild.
+  const placedRef = useRef(false);
   const isClosedRef = useRef(isClosed);
   const schemaReadOnlyRef = useRef(false);
   const userRef = useRef(user);
@@ -237,14 +304,24 @@ export function ProofDocument({
   // reconnect's admission decides again.
   const [closedAdmission, setClosedAdmission] = useState(false);
   const [openDecisionIndex, setOpenDecisionIndex] = useState(0);
+  // Whether this effect's editor has been revealed in the page, which is what the document's own
+  // first draw gives way to (`DocumentPreview`). It is set in the same task the editor's root is
+  // shown in, so the two are never both on the page and never both off it.
+  const [editorDrawn, setEditorDrawn] = useState(false);
+  // Whether this effect's editor is being built, from the task the build begins in. The
+  // document's own draw stops painting then (`DocumentPreview`): every batch of the build yields
+  // the thread, and a paint of the whole document into a draw the editor is about to replace
+  // takes those gaps from the reader's own editor.
+  const [editorBuilding, setEditorBuilding] = useState(false);
   const {
     blockSchema: runtimeBlockSchema,
     createEditor,
+    loadEditor,
     loadTransport,
   } = useContext(DocumentRuntime);
   const navigate = useNavigate();
   const margin = useMargin();
-  const { blockPlacements } = margin;
+  const { blockPlacements, placesItems } = margin;
   // The editor effect and its callbacks reach the margin's latest functions through this ref
   // rather than listing them as dependencies, so a margin re-render never rebuilds the editor.
   const marginRef = useRef(margin);
@@ -257,7 +334,14 @@ export function ProofDocument({
     queryKey: ["block-schema"],
     staleTime: Number.POSITIVE_INFINITY,
   });
+  // The artifact's own read waits for the editor's draw, as the badges' read below does. The
+  // one thing it gives this component is a fresher `versions` list, and the artifact the issue
+  // named already carries that list - it is the fallback two lines of this file use anyway
+  // (`versions`, below) - so nothing a reader sees before the editor is drawn comes from here,
+  // while reading it landed 200-350 ms in front of the document's own first draw
+  // (dispatch://INFRA-341, R11).
   const artifactQuery = useQuery({
+    enabled: editorDrawn,
     queryKey: ["artifact", artifact.id],
     queryFn: () => api.getArtifact(artifact.id),
   });
@@ -283,6 +367,9 @@ export function ProofDocument({
    *  toolbar), takes edits, and offers the repair and rebuild prompts. `surface` is fixed for
    *  the life of a mount, so every effect below lists this and none is rebuilt for it. */
   const page = surface === "page";
+  /** The address the reader has this document open at, as the server spells it, which is what
+   *  names the blocks the server drew into this page (`first-screen.ts`). */
+  const address = currentAddress(useLocation().pathname);
   useEffect(() => {
     if (page || admission === undefined) {
       return;
@@ -292,10 +379,28 @@ export function ProofDocument({
   const repairError = page && admission?.kind === "repair" ? admission : undefined;
   const rebuildError = page && admission?.kind === "rebuild" ? admission : undefined;
   const shownLoadError = admission?.kind === "failed" ? admission.message : loadError;
+  // The badges' read waits for the editor's own draw. It is one row per block of the document -
+  // 639 KB for the 406,000-character document R11 measures - and nothing of the document is
+  // drawn from it: it says which blocks carry a comment or an ask, which is a mark down the
+  // right edge of blocks the reader already has. Read with everything else it landed in the
+  // seconds before the document's first draw and was decoded on the thread that draw was
+  // waiting for (dispatch://INFRA-341, R11); read after it, it costs the reader nothing they
+  // are waiting on. A version shows no badges at all.
   const blockReferencesQuery = useQuery({
     ...artifactBlocksQuery(artifact.id),
-    enabled: version === undefined,
+    enabled: version === undefined && editorDrawn,
   });
+  /** Whether the document draws the reference badges down its right edge, which stand at the
+   *  pixel each block sits at. */
+  const showsBlockBadges =
+    blockReferencesQuery.data?.some(
+      (block) => block.references.comments + block.references.asks > 0
+    ) ?? false;
+  /** Whether anything on the page stands at the pixel a block or a mark sits at: the margin
+   *  laying its cards out beside the document, or those badges. Nothing else reads the numbers,
+   *  and measuring them costs a forced layout of the whole document each time
+   *  (`marks.ts`'s `blockOffsets`), so a reader with neither is measured for nothing. */
+  const placed = placesItems || showsBlockBadges;
   const versionQuery = useQuery({
     enabled: version !== undefined,
     queryKey: ["artifact", artifact.id, "version", version],
@@ -317,6 +422,9 @@ export function ProofDocument({
   );
   const blocksReadOnly = isClosed || schemaReadOnly;
   const [askBlockHosts, setAskBlockHosts] = useState<readonly AskBlockHost[]>([]);
+  // One card to a task, so the set of them never draws in the task the editor is swapped in
+  // with (`useAskCardsDrawnInTasks`, dispatch://INFRA-341, R11).
+  const drawnAskBlockHosts = useAskCardsDrawnInTasks(askBlockHosts);
   const [isNameDialogOpen, setIsNameDialogOpen] = useState(false);
   // Naming a version is the name dialog's form, which shows a refusal itself; a rebuild shows
   // its own beside its button.
@@ -349,6 +457,19 @@ export function ProofDocument({
     write: (_variables, bounds) => api.rebuildArtifact(artifact.id, undefined, bounds),
   });
   const liveMarkdown = liveTextQuery.data?.markdown ?? "";
+  /** Whether this page was sent the document's opening blocks, read once, since the draw this
+   *  asks about is taken out of the page by the element that adopts it (`first-screen.ts`). */
+  const serverDrew = useRef<boolean | undefined>(undefined);
+  serverDrew.current ??= page && version === undefined && firstScreenAwaits(address);
+  /** Whether the reader reads the document's own markdown rather than the editor's draw of it:
+   *  from the moment `/text` lands - or, where the server drew the document's opening blocks
+   *  into the page it sent, from this page's first commit, so those blocks are adopted rather
+   *  than left standing under the app - until this effect's editor has its DOM in the page
+   *  (`DocumentPreview`). A version is its own view, and a pane is not it either: a reading
+   *  column places itself at the block its reader chose, and only the editor's blocks carry the
+   *  ids the server minted for them (`scroll-block.ts`). */
+  const showsOwnText =
+    page && !editorDrawn && version === undefined && (liveMarkdown !== "" || serverDrew.current);
   const versionMarkdown =
     versionQuery.data !== undefined && "markdown" in versionQuery.data
       ? versionQuery.data.markdown
@@ -388,6 +509,19 @@ export function ProofDocument({
       onAskAnswered?.(askId);
     },
     [queryClient, artifact.id, onAskAnswered]
+  );
+  /** What a decision block in the document's own draw answers its ask with, before the editor
+   *  that would host it exists (`PreviewDecisionCard`): the same asks, the same callbacks and
+   *  the same read-only rule the editor's own blocks are given. */
+  const previewDecisions = useMemo(
+    () => ({
+      asks: blockAsks,
+      onAnswered: blockAnswered,
+      owner: owner.kind === "document" ? owner : undefined,
+      readOnly: blocksReadOnly,
+      rowResolution: isClosed,
+    }),
+    [blockAsks, blockAnswered, owner, blocksReadOnly, isClosed]
   );
   const openBlockAsks = useMemo(
     () =>
@@ -429,6 +563,13 @@ export function ProofDocument({
     focus();
     disposeRefocusRef.current = refocusAfterDiagrams(refocus);
   }, []);
+  // The margin coming up or going down, and the reference badges arriving, change whether the
+  // document is measured; the bound editor reports again, so a margin the reader has just opened
+  // places its cards against fresh numbers rather than the zeroes of a document nobody measured.
+  useEffect(() => {
+    placedRef.current = placed;
+    publishPlacementsRef.current?.();
+  }, [placed]);
   // Google Docs' chord for the selection bar's Comment button, on the button's own path. It is
   // offered while this editor has focus, holds a selection and takes edits, which is when the bar
   // offers Comment; anywhere else - a comment composer, an ask card's field, a read-only or
@@ -514,6 +655,11 @@ export function ProofDocument({
     // Sockets the server refused in a row, since this editor last synced or a repair re-admitted it.
     let refusals = 0;
     let refusalTimer: number | undefined;
+    // This effect builds an editor of its own, so until it has one the reader reads the
+    // document's own text (`DocumentPreview`) - at a mount, and again wherever a rebuilt editor
+    // follows a torn-down one.
+    setEditorDrawn(false);
+    setEditorBuilding(false);
     setConnection("connecting");
     setPending(undefined);
     setLoadError(undefined);
@@ -531,6 +677,9 @@ export function ProofDocument({
       }
       failed = true;
       setConnection("failed");
+      // No editor is coming, so the draw in front of the reader is the document: it paints the
+      // whole of itself again rather than holding the screenful it stopped at.
+      setEditorBuilding(false);
       setLoadError(error instanceof Error ? error.message : String(error));
     };
     const teardown = () => {
@@ -540,13 +689,20 @@ export function ProofDocument({
       if (editorRef.current === editor) {
         editorRef.current = undefined;
       }
+      // Whatever the editor drew has gone with it, so the document's own text is what the reader
+      // reads again until the next one is built, and paints the whole of itself again while it
+      // waits.
+      setEditorDrawn(false);
+      setEditorBuilding(false);
       disposeEditorBindings = undefined;
       editor = undefined;
       document = undefined;
     };
-    // The editor's place in the page - the margin, search highlights, a block link - for as long
-    // as it is this effect's editor. It returns what undoes it. The typed-block node views are
-    // installed by `createEditor`, with the editor library they are written against.
+    // The editor's place in the page - the margin, search highlights, a block link - for as
+    // long as it is this effect's editor. It returns what undoes it. Its typed blocks are not
+    // here: `createEditor` installs them, with the editor library they are written against,
+    // and before the build, so no task of the build's end re-creates every node view of the
+    // document (`features/doc/editor.ts`).
     const bindEditor = (handle: EditorHandle, connection: DocumentConnection) => {
       handle.setBlockMarks(blockMarksRef.current);
       // False once this editor unbinds, so a focus a frame late never reaches a destroyed editor
@@ -612,14 +768,19 @@ export function ProofDocument({
             marginRef.current.withdrawPlacements();
             return;
           }
+          // Which marks and blocks the document draws is read whatever is on screen - the margin
+          // reads it to know a mark is there to focus - but where each one sits is measured only
+          // for a reader standing something at that pixel (`placedRef`).
+          const placedNow = placedRef.current;
           marginRef.current.setMarkPlacements(
-            markPlacements(handle.view.state.doc, handle.markOffsets())
+            markPlacements(handle.view.state.doc, handle.markOffsets(placedNow))
           );
           marginRef.current.setBlockPlacements(
-            collectBlockPlacements(handle.view.state.doc, blockOffsets(handle.view.dom))
+            collectBlockPlacements(handle.view.state.doc, blockOffsets(handle.view.dom, placedNow))
           );
         });
       };
+      publishPlacementsRef.current = publishPlacements;
       const resizeObserver = new ResizeObserver(publishPlacements);
       resizeObserver.observe(handle.view.dom);
       publishPlacements();
@@ -628,6 +789,7 @@ export function ProofDocument({
         bound = false;
         disposeRefocusRef.current?.();
         disposeRefocusRef.current = undefined;
+        publishPlacementsRef.current = undefined;
         cancelAnimationFrame(frame);
         cancelAnimationFrame(searchFrame);
         resizeObserver.disconnect();
@@ -640,35 +802,43 @@ export function ProofDocument({
       };
     };
     // Each admission - this mount, a socket the server refused as outside the Proof schema, and a
-    // blocked admission's re-admission - opens a connection only once its own fresh `/text` read
-    // succeeds, and that read alone decides: a browser editor normalizes a tree it cannot
-    // represent and writes the result back. A read that fails closes nothing already open, since
+    // blocked admission's re-admission - opens a connection only once a `/text` read succeeds,
+    // and that read alone decides: a browser editor normalizes a tree it cannot represent and
+    // writes the result back. A read that fails closes nothing already open, since
     // only an admission opens anything, so a later refetch that fails - an outage during an
     // artifact event's invalidation, say - leaves a connected editor and its unsent edits alone.
     // A blocked admission waits for the next successful read of the text, which a repair upload
     // or a rebuild brings about, and is admitted again (`readmitRef`).
+    //
+    // The first admission takes the read the shell already made for this opening of this
+    // document, where there is one (`takeEarlyTextRead`): it is a read, made because this
+    // address was opened, so it says what a read made here would say, and taking it is what
+    // keeps a large document from being downloaded twice for one opening - once for the reader
+    // to read, once for the socket. Every admission after it reads afresh, since each is
+    // answering a refusal, a repair or a rebuild that changed the stored tree.
     const admit = () => {
-      const textRead = queryClient
-        .fetchQuery({ ...liveTextQueryOptions(artifact.id), staleTime: 0 })
-        .then(
-          () => undefined,
-          async (error: unknown) => {
-            if (isArtifactNotFound(error)) {
-              try {
-                const { deletePendingEdits } = await importWhenOnline(
-                  () => import("./pending-edits")
-                );
-                await deletePendingEdits(artifact.id);
-              } catch (deleteError) {
-                console.error(
-                  "Could not delete pending browser edits for a removed document",
-                  deleteError
-                );
-              }
+      const textRead = (
+        takeEarlyTextRead(artifact.id) ??
+        queryClient.fetchQuery({ ...liveTextQueryOptions(artifact.id), staleTime: 0 })
+      ).then(
+        () => undefined,
+        async (error: unknown) => {
+          if (isArtifactNotFound(error)) {
+            try {
+              const { deletePendingEdits } = await importWhenOnline(
+                () => import("./pending-edits")
+              );
+              await deletePendingEdits(artifact.id);
+            } catch (deleteError) {
+              console.error(
+                "Could not delete pending browser edits for a removed document",
+                deleteError
+              );
             }
-            return admissionBlock(error);
           }
-        );
+          return admissionBlock(error);
+        }
+      );
       void Promise.all([textRead, loadTransport()])
         .then(([block, connect]) => {
           if (!mounted) {
@@ -725,6 +895,16 @@ export function ProofDocument({
             },
             onSynced: () => {
               refusals = 0;
+              // From here the editor is being built, so the draw the reader is reading stops
+              // painting the rest of itself into a page this editor is about to replace
+              // (`DocumentPreview`).
+              setEditorBuilding(true);
+              // Where the reader had got to in the document's own draw, read before the first
+              // batch takes any of it: both draws hold the same document's top-level blocks in
+              // the same order, so the block they were reading is the editor's block of the
+              // same index (`readersBlock`), and the editor holds every one of them by the
+              // time the build ends.
+              const place = readersBlock(documentPreview(parent.parentElement));
               void createEditor(parent, {
                 // Cursor labels are outside the compact acceptance bar. Even with inline labels,
                 // yCursor's edge widget disrupts the mobile browser's post-update text selection.
@@ -763,6 +943,28 @@ export function ProofDocument({
                 },
                 onMarkClick: (markId) => marginRef.current.focusItemForMark(markId),
                 onMarkHover: (markId) => marginRef.current.hoverItemForMark(markId),
+                // Each batch of the build, in the batch's own task: the draw the reader is
+                // reading gives up the blocks the editor has just built, so the frame the
+                // browser draws next holds each of them once (dispatch://INFRA-341, R11). The
+                // blocks go above the rest of the draw, which is why the editor's root stands
+                // before it in the page. Where the splice is above the top of the screen, the
+                // scroll moves with it: the editor's copy of a block is not the same height as
+                // the draw's once either has painted, and the reader's words must not slide
+                // under them a batch at a time.
+                onBatch: (built) => {
+                  const preview = documentPreview(parent.parentElement);
+                  if (preview === null) {
+                    return undefined;
+                  }
+                  const before = preview.getBoundingClientRect();
+                  return () => {
+                    takeTheBuiltBlocks(preview, built);
+                    if (before.top >= 0 || preview.childElementCount === 0) {
+                      return;
+                    }
+                    moveTheScroll(preview, preview.getBoundingClientRect().bottom - before.bottom);
+                  };
+                },
                 // A pane takes no edits: a reader who clicks into the text from a list never
                 // changes the document they are reading.
                 readOnly: !page || isClosedRef.current || schemaReadOnlyRef.current,
@@ -787,12 +989,34 @@ export function ProofDocument({
                   }
                   editor = handle;
                   editorRef.current = handle;
+                  // The swap, in a task of its own after the binding's connect
+                  // (`@legion/proof-editor`'s `progressive-build.ts`): what is left of the
+                  // draw by now is the empty element the batches emptied, block by block, and
+                  // this commit takes it off the page.
+                  flushSync(() => {
+                    handle.reveal();
+                    setEditorDrawn(true);
+                  });
+                  // Put them back now, and again once the page's diagrams have drawn and it has
+                  // settled, exactly as a block link's focus is (`focusInEditor`): a diagram
+                  // drawn above them, and a block painting at its own height in place of the one
+                  // `contain-intrinsic-size` estimated, each move their block. A focus asked for
+                  // after this one - a block link's - drops that re-run, which is the order the
+                  // reader wants, and so does their own first scroll.
+                  if (place !== undefined) {
+                    focusInEditor(() => putTheReaderBack(handle.view.dom, place));
+                  }
                   disposeEditorBindings = bindEditor(handle, connection);
                 })
                 .catch(reportLoadFailure);
             },
           });
           document = connection;
+          // The editor's chunk is the largest the document loads and nothing about it depends on
+          // the document's state, so it downloads while the socket is admitted and the whole Yjs
+          // document arrives, rather than after (dispatch://INFRA-341, R11). `createEditor`
+          // below finds it loaded.
+          loadEditor();
         })
         .catch(reportLoadFailure);
     };
@@ -810,6 +1034,7 @@ export function ProofDocument({
     createEditor,
     documentRef,
     focusInEditor,
+    loadEditor,
     loadTransport,
     page,
     pendingWaiter,
@@ -962,6 +1187,7 @@ export function ProofDocument({
       <article
         aria-label="Document"
         className="dispatch-doc relative"
+        data-placed={placed}
         data-read-only={isClosed || schemaReadOnly}
         hidden={version !== undefined || repairError !== undefined || rebuildError !== undefined}
         onClick={(event) => {
@@ -993,8 +1219,23 @@ export function ProofDocument({
           navigate(buildReferencePath(route));
         }}
       >
+        {/* The editor's root stands before the document's own draw, because the build fills it
+        from the top: while it runs the page is the editor's blocks, then the draw's blocks the
+        editor has not reached, which is the document in order and each of its blocks once
+        (dispatch://INFRA-341, R11). */}
         <div ref={root} />
-        {askBlockHosts.map((host) => {
+        {showsOwnText ? (
+          <TextAskCard.Provider value={PreviewDecisionCard}>
+            <PreviewDecisionsContext.Provider value={previewDecisions}>
+              <DocumentPreview
+                address={address}
+                building={editorBuilding}
+                markdown={liveMarkdown}
+              />
+            </PreviewDecisionsContext.Provider>
+          </TextAskCard.Provider>
+        ) : null}
+        {drawnAskBlockHosts.map((host) => {
           const blockId = String(host.node.attrs.blockId);
           return (
             <AskBlockCard
@@ -1008,9 +1249,7 @@ export function ProofDocument({
             />
           );
         })}
-        {blockReferencesQuery.data?.some(
-          (block) => block.references.comments + block.references.asks > 0
-        ) ? (
+        {showsBlockBadges && blockReferencesQuery.data !== undefined ? (
           <aside
             aria-label="Block references"
             className="pointer-events-none absolute top-0 right-0 z-10 w-8"

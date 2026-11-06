@@ -1,6 +1,9 @@
-/** How wide the margin column may be. Its own module because the shell reads the default while
- *  `features/margin/Margin.tsx` is still loading: the margin's code is fetched after the first
- *  paint, and the width the shell restores from the reader's preference must not wait for it. */
+/** How wide the margin column may be.
+ *
+ *  Its own module because the shell reads the default for the stored preference it hands
+ *  `Margin` (`app.tsx`), while `Margin` itself is a chunk the shell loads only once it is up
+ *  (`features/shell/deferred-shell.ts`): a handful of numbers must not pull the margin's whole
+ *  column, its sheet and its composer into the entry chunk. */
 
 export const DEFAULT_MARGIN_WIDTH = 384;
 export const MIN_MARGIN_WIDTH = 280;

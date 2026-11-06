@@ -14,7 +14,8 @@ import type {
   IssueDetails,
   IssueReferenceSummary,
 } from "../../api/types";
-import { closeRefPreview, RefPreviewHost, referenceTriggerProps } from "./RefPreview";
+import { RefPreviewHost } from "./RefPreview";
+import { closeRefPreview, referenceTriggerProps } from "./ref-preview-state";
 import { REF_PREVIEW_CLOSE_DELAY_MS, REF_PREVIEW_OPEN_DELAY_MS } from "./ref-preview-timing";
 import { shortForm } from "./routes";
 
@@ -152,6 +153,29 @@ test("the card opens only after the hover delay, loads populated, and closes whe
     });
     expect(screen.queryByRole("tooltip")).toBeNull();
     expect(first.hasAttribute("aria-describedby")).toBe(false);
+  } finally {
+    view.unmount();
+    getIssue.mockRestore();
+  }
+});
+
+// INFRA-341 (R7). The server's statuses are not the client's list: one the client does not know
+// is shown on the card as the server wrote it (`statusText`), never as an empty pill.
+test("the card shows a status the client does not know as the server wrote it", async () => {
+  const getIssue = spyOn(api, "getIssue").mockResolvedValue({
+    ...issue("CORE-1", "Design decision"),
+    status: "parked",
+  });
+  jest.useFakeTimers();
+  const view = render(<Harness />);
+  try {
+    fireEvent.pointerOver(screen.getByRole("link", { name: "first" }), { pointerType: "mouse" });
+    act(() => {
+      jest.advanceTimersByTime(REF_PREVIEW_OPEN_DELAY_MS);
+    });
+    const card = screen.getByRole("tooltip");
+    await act(async () => {});
+    expect(card.textContent).toContain("parked");
   } finally {
     view.unmount();
     getIssue.mockRestore();

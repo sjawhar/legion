@@ -1,5 +1,14 @@
 import { type QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
-import { lazy, type ReactNode, type RefObject, Suspense, useEffect, useRef, useState } from "react";
+import {
+  lazy,
+  type ReactNode,
+  type RefObject,
+  Suspense,
+  startTransition,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { Link, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 import { api, isNoIdentity, isUnauthorized } from "./api/client";
@@ -7,19 +16,19 @@ import { useEventFeed } from "./api/event-feed";
 import { useLiveSocketPill } from "./api/live-socket";
 import { userAgentStateQuery, whoAmIQuery } from "./api/queries";
 import type { AuthenticatedUser } from "./api/types";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+import { ShellSkeleton } from "./components/ShellSkeleton";
 import { totalUnreadReplies, unreadRepliesLabel } from "./features/agents/unread";
 import { MachineLoginRoute } from "./features/credentials/MachineLoginRoute";
-import { TextAskBlockCard } from "./features/doc/AskBlockCard";
+import { DeferredAskCard } from "./features/doc/DeferredAskCard";
+import { openDocumentEarly } from "./features/doc/open-document-early";
 import { useNeedsYouCount } from "./features/inbox/BlockedOnYou";
-import { Inbox } from "./features/inbox/Inbox";
-import { InboxDrawer } from "./features/inbox/InboxDrawer";
-import { CreateIssueDialog } from "./features/issue/CreateIssueDialog";
+import { InboxList, importInbox } from "./features/inbox/InboxList";
+import { IssueHeaderSkeleton, IssueTabsSkeleton } from "./features/issue/issue-page-skeleton";
 import { MarginColumn } from "./features/margin/MarginColumn";
 import { MarginProvider } from "./features/margin/margin-context";
 import { DEFAULT_MARGIN_WIDTH } from "./features/margin/margin-width";
-import { AgentRegistryPoller } from "./features/refs/agent-registry";
 import { TextAskCard } from "./features/refs/markdown-cards";
-import { RefPreviewHost } from "./features/refs/RefPreview";
 import {
   AGENT_ARTIFACT_PATH,
   AGENT_LIVE_PATH,
@@ -34,8 +43,14 @@ import {
   routeProjectOf,
 } from "./features/refs/routes";
 import { useRepliesCount } from "./features/replies/useRepliesCount";
-import { type PaletteMode, SearchPalette } from "./features/search/SearchPalette";
-import { ErrorBoundary } from "./features/shell/ErrorBoundary";
+import type { PaletteMode } from "./features/search/SearchPalette";
+import {
+  AgentRegistryPoller,
+  CreateIssueDialog,
+  InboxDrawer,
+  RefPreviewHost,
+  SearchPalette,
+} from "./features/shell/deferred-shell";
 import { KeymapProvider } from "./features/shell/KeymapProvider";
 import {
   appKeymap,
@@ -69,9 +84,6 @@ import { type Write, writesOf } from "./features/writes/write-store";
 import {
   backdrop50,
   badgeBlocking,
-  borderDefault,
-  borderStrong,
-  borderTransparent,
   calloutDangerBg,
   calloutDangerBorder,
   calloutWarningBorder,
@@ -83,7 +95,6 @@ import {
   primaryButtonHoverBg,
   railAccentHoverText,
   railAccentText,
-  railActiveBg,
   railBg,
   railBorder,
   railDangerText,
@@ -98,19 +109,46 @@ import {
   statusConnecting,
   textMutedOnSurface,
   textSecondaryOnSurface,
-  textTransparent,
 } from "./theme/classes";
 
-const IssuePage = lazy(() =>
-  import("./features/issue/IssuePage").then((module) => ({ default: module.IssuePage }))
-);
+const importIssuePage = () => import("./features/issue/IssuePage");
+const IssuePage = lazy(() => importIssuePage().then((module) => ({ default: module.IssuePage })));
 
 const ProjectPage = lazy(() =>
   import("./features/project/ProjectPage").then((module) => ({ default: module.ProjectPage }))
 );
+const importDocumentPage = () => import("./features/document/DocumentPage");
 const DocumentPage = lazy(() =>
-  import("./features/document/DocumentPage").then((module) => ({ default: module.DocumentPage }))
+  importDocumentPage().then((module) => ({ default: module.DocumentPage }))
 );
+/**
+ * Requests the chunk of the page this address opens, as this module evaluates - which is while
+ * the shell is still asking who is signed in, and well before the route tree that would ask for
+ * it renders. A document's page used to wait for that check before its chunk was so much as
+ * requested, and then for the chunk before anything of the document was asked for
+ * (dispatch://INFRA-341, R11); the chunk needs neither, and a request for it changes nothing
+ * about what the page then shows or who may see it.
+ *
+ * The two pages that open a document are the ones worth the request, and so is the Inbox, whose
+ * list left this module's chunk for one of its own and which the shell lands on: every other
+ * route's chunk is asked for by its own `lazy` as it always was, and so is each of these on a
+ * later navigation, where the shell is long since up and the chunk is usually in hand.
+ */
+function requestTheOpenPagesChunk(pathname: string): void {
+  if (parseIssuePath(pathname) !== undefined) {
+    void importIssuePage().catch(() => undefined);
+    return;
+  }
+  if (parseProjectPath(pathname)?.kind === "document") {
+    void importDocumentPage().catch(() => undefined);
+    return;
+  }
+  if (routeIsInbox(pathname)) {
+    void importInbox().catch(() => undefined);
+  }
+}
+
+requestTheOpenPagesChunk(window.location.pathname);
 
 const AgentsPage = lazy(() =>
   import("./features/agents/AgentsPage").then((module) => ({ default: module.AgentsPage }))
@@ -156,39 +194,8 @@ const SettingsPage = lazy(() =>
 function IssuePageFallback(): ReactNode {
   return (
     <div aria-busy="true">
-      <header className={`mb-6 border-b pb-6 ${borderDefault}`}>
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <p className={`text-sm font-semibold ${linkText}`}>
-            <span
-              className={`inline-block h-4 w-16 animate-pulse rounded align-middle ${skeletonBg}`}
-            />
-          </p>
-          <button
-            className={`rounded-lg border px-3 py-2 text-sm font-medium ${textTransparent} ${borderStrong}`}
-            disabled
-            type="button"
-          >
-            Pin issue
-          </button>
-        </div>
-        <h1
-          className={`mt-2 w-full rounded-lg border px-2 py-1 text-2xl font-semibold ${borderTransparent}`}
-        >
-          <span
-            className={`inline-block h-7 w-2/3 animate-pulse rounded align-middle ${skeletonBg}`}
-          />
-        </h1>
-      </header>
-      <div className={`mb-4 flex gap-2 border-b ${borderDefault}`} role="tablist">
-        {["Spec", "Conversation", "Children", "Artifacts", "Activity"].map((label) => (
-          <span
-            className={`animate-pulse rounded px-3 py-2 text-sm ${textTransparent} ${skeletonBg}`}
-            key={label}
-          >
-            {label}
-          </span>
-        ))}
-      </div>
+      <IssueHeaderSkeleton />
+      <IssueTabsSkeleton />
       <div className="space-y-3">
         {[0, 1, 2, 3].map((row) => (
           <div className={`h-4 w-full animate-pulse rounded ${skeletonBg}`} key={row} />
@@ -196,6 +203,29 @@ function IssuePageFallback(): ReactNode {
       </div>
     </div>
   );
+}
+
+/**
+ * The issue page, rendered at transition priority.
+ *
+ * An issue page is the largest first render the app does, and a document's is the largest of
+ * those: the header, the tab strip, the margin's reads and the document surface are one commit,
+ * measured at about 0.7 s on a phone at 4x CPU throttling, and nothing a reader does reaches
+ * the main thread while it runs (dispatch://INFRA-341, R11). React renders a transition in
+ * short pieces, yielding to the browser between them, so the page's own paint and the reader's
+ * scroll are not held behind the whole of it.
+ *
+ * The shell paints its own skeleton first - the same `IssuePageFallback` the `Suspense`
+ * boundary above shows while the page's chunk arrives - and the effect then starts the
+ * transition. So the page appears exactly as it does today: the skeleton, then the page, with
+ * nothing in between that a reader did not see before.
+ */
+function IssuePageInATransition(): ReactNode {
+  const [renderThePage, setRenderThePage] = useState(false);
+  useEffect(() => {
+    startTransition(() => setRenderThePage(true));
+  }, []);
+  return renderThePage ? <IssuePage /> : <IssuePageFallback />;
 }
 
 function ShellMessagePage({ children, title }: { children?: ReactNode; title: string }): ReactNode {
@@ -226,7 +256,11 @@ function InboxPage(): ReactNode {
           Answered by you
         </Link>
       </div>
-      <Inbox />
+      {/* The heading and its link are this module's own, so they are on the screen while the
+          list's chunk is still arriving, as they are while the list's own read is out. */}
+      <Suspense fallback={null}>
+        <InboxList />
+      </Suspense>
     </section>
   );
 }
@@ -270,35 +304,6 @@ function ConnectionErrorPage({ onRetry }: { onRetry: () => void }): ReactNode {
         </button>
       </div>
     </ShellMessagePage>
-  );
-}
-
-function ShellSkeleton(): ReactNode {
-  return (
-    <div aria-busy="true" className={`xl:flex ${canvasText}`}>
-      <header
-        className={`flex items-center px-3 xl:hidden ${railBorder} ${railBg} ${railText} border-b`}
-      >
-        <span className="text-lg font-semibold">Dispatch</span>
-      </header>
-      <aside
-        className={`hidden p-5 xl:block xl:min-h-dvh xl:w-80 xl:border-r ${railBorder} ${railBg} ${railText}`}
-      >
-        <span className="text-lg font-semibold">Dispatch</span>
-        <div aria-label="Loading navigation" className="mt-6 space-y-2" role="status">
-          {[0, 1, 2, 3].map((row) => (
-            <div className={`h-4 w-full animate-pulse rounded ${railActiveBg}`} key={row} />
-          ))}
-        </div>
-      </aside>
-      <main className="min-w-0 flex-1 p-6">
-        <div aria-label="Loading Dispatch" className="space-y-3" role="status">
-          {[0, 1, 2].map((row) => (
-            <div className={`h-4 w-full animate-pulse rounded ${skeletonBg}`} key={row} />
-          ))}
-        </div>
-      </main>
-    </div>
   );
 }
 
@@ -823,7 +828,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
                 <Route element={<BroadcastPage />} path="/agents/broadcasts/:id" />
                 <Route element={<AgentConversationPage />} path={AGENT_LIVE_PATH} />
                 <Route element={<AgentArtifactPage />} path={AGENT_ARTIFACT_PATH} />
-                <Route element={<IssuePage />} path="/issues/:key/*" />
+                <Route element={<IssuePageInATransition />} path="/issues/:key/*" />
                 <Route element={<ProjectPage />} path="/projects/:key" />
                 <Route element={<ProjectPage />} path="/projects/:key/architecture" />
                 <Route element={<ProjectPage />} path="/projects/:key/issues" />
@@ -847,14 +852,42 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
             width={marginWidth}
           />
         </ErrorBoundary>
-        <SearchPalette mode={paletteMode} onClose={() => setPaletteMode(null)} />
-        <InboxDrawer onClose={() => setInboxDrawerOpen(false)} open={inboxDrawerOpen} />
+        {/* Mounted on every route, closed: it keeps the last `/` search and the row a close is
+            about to run, so unmounting it when nothing is open would lose both. Closed it draws
+            nothing, so the frames before its chunk arrives look exactly as the frames after. */}
+        <Suspense fallback={null}>
+          <SearchPalette mode={paletteMode} onClose={() => setPaletteMode(null)} />
+        </Suspense>
+        {inboxDrawerOpen ? (
+          <Suspense fallback={null}>
+            <InboxDrawer onClose={() => setInboxDrawerOpen(false)} />
+          </Suspense>
+        ) : null}
         <ShortcutHelp onClose={() => setHelpSnapshot(null)} snapshot={helpSnapshot} />
-        {createOpen ? <CreateIssueDialog onClose={() => setCreateOpen(false)} /> : null}
-        <RefPreviewHost />
+        {createOpen ? (
+          <Suspense fallback={null}>
+            <CreateIssueDialog onClose={() => setCreateOpen(false)} />
+          </Suspense>
+        ) : null}
+        <Suspense fallback={null}>
+          <RefPreviewHost />
+        </Suspense>
       </div>
     </MarginProvider>
   );
+}
+
+/** The open document's own reads, started from the address the moment the shell is up rather
+ *  than when the page that shows the document finally renders (`openDocumentEarly`). It renders
+ *  nothing, and is its own component so that a navigation re-runs this effect alone instead of
+ *  rendering the shell again. */
+function OpenDocumentEarly(): null {
+  const queryClient = useQueryClient();
+  const { pathname, search } = useLocation();
+  useEffect(() => {
+    openDocumentEarly(queryClient, pathname, search);
+  }, [pathname, queryClient, search]);
+  return null;
 }
 
 function AuthenticatedApp({ user }: { user: AuthenticatedUser }): ReactNode {
@@ -870,11 +903,15 @@ function AuthenticatedApp({ user }: { user: AuthenticatedUser }): ReactNode {
   }, [login, queryClient]);
   useEventFeed();
   // Every Markdown body the shell renders - routes, the margin, the inbox drawer, previews and
-  // dialogs - draws a decision block in its text as the read-only card (`TextAskCard`).
+  // dialogs - draws a decision block in its text as the read-only card (`TextAskCard`), which is
+  // fetched after the first paint (`features/doc/DeferredAskCard.tsx`).
   return (
     <KeymapProvider>
-      <AgentRegistryPoller />
-      <TextAskCard.Provider value={TextAskBlockCard}>
+      <Suspense fallback={null}>
+        <AgentRegistryPoller />
+      </Suspense>
+      <OpenDocumentEarly />
+      <TextAskCard.Provider value={DeferredAskCard}>
         <AppShell user={user} />
       </TextAskCard.Provider>
     </KeymapProvider>

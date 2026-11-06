@@ -9,6 +9,7 @@ import type {
 } from "../../api/types";
 import { StatusPill } from "../../components/Pill";
 import { TruncatedText } from "../../components/TruncatedText";
+import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
 import {
   badgeHigh,
   borderDefault,
@@ -24,7 +25,7 @@ import {
 } from "../../theme/classes";
 import { type IssueComponentsWrite, useIssueComponents } from "../issue/useIssueComponents";
 import { statusText } from "../project/board-model";
-import { referenceTriggerProps } from "../refs/RefPreview";
+import { referenceTriggerProps } from "../refs/ref-preview-state";
 import { buildIssuePath } from "../refs/routes";
 import { ComponentPicker } from "./ComponentPicker";
 
@@ -302,6 +303,8 @@ function UnassignedRow({
             <textarea
               className={`min-h-11 rounded-lg border px-2 py-1 text-sm ${inputClasses(true)} ${textPrimaryOnSurface}`}
               onChange={(event) => setReason(event.target.value)}
+              // Enter writes a line; Ctrl/Cmd+Enter saves, through the form's own submit.
+              onKeyDown={(event) => submitOnModifiedEnter(event)}
               required
               rows={2}
               value={reason}

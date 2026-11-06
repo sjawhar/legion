@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
-import { DELIVERY_DUPLICATE_WINDOW_MS, RECEIPT_TIMEOUT_CAUSE } from "@legion/contracts";
+import {
+  DELIVERY_DUPLICATE_WINDOW_MS,
+  RECEIPT_TIMEOUT_CAUSE,
+} from "@legion/contracts/dispatch-constants";
 
 import {
   broadcastDelivery,

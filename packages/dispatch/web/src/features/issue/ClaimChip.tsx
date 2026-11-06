@@ -4,7 +4,7 @@ import {
   claimHolds,
   claimTakeableAt,
   claimTakeableNow,
-} from "@legion/contracts";
+} from "@legion/contracts/claim-holds";
 import type { ReactNode } from "react";
 
 import { AGENT_LIST_REFILLING } from "../../api/client";

@@ -8,8 +8,8 @@ import {
   IDEMPOTENCY_KEY_IN_FLIGHT,
   IDEMPOTENCY_REPLAYED_HEADER,
   type IdempotencyLandedCode,
-} from "@legion/contracts";
-
+} from "@legion/contracts/dispatch-constants";
+import { takeEarlyDocumentRead } from "./early-document-read";
 import { reachable, routeOf, unreachable } from "./reachability";
 
 import type {
@@ -1320,6 +1320,17 @@ export class DispatchApiClient {
     return this.json<ArtifactText>(`/api/v1/artifacts/${pathSegment(id)}/text`);
   }
 
+  /** The same markdown as `getArtifactText`, by the address a reader opens the document at
+   *  rather than by the id only the issue's own read names
+   *  (`GET /api/v1/issues/{key}/artifacts/{slug}/text`, the same handler and the same check).
+   *  It is how a document route reads its document in one round trip instead of two
+   *  (`features/doc/open-document-early.ts`, dispatch://INFRA-341 R11). */
+  getIssueArtifactText(issueKey: string, slug: string): Promise<ArtifactText> {
+    return this.json<ArtifactText>(
+      `/api/v1/issues/${pathSegment(issueKey)}/artifacts/${pathSegment(slug)}/text`
+    );
+  }
+
   rebuildArtifact(
     id: string,
     markdown: string | undefined,
@@ -1659,13 +1670,20 @@ export class DispatchApiClient {
 
 /** A client over `fetchImpl`. The page's own (`api`) sends its uploads through `XMLHttpRequest`
  *  (`xhrUpload`), so their progress counts against the silence deadline; one given a `fetchImpl`
- *  of its own sends them through it unless it is given an `upload` too. */
+ *  of its own sends them through it unless it is given an `upload` too. The page's own also
+ *  takes the one read `web/index.html` started before this module existed
+ *  (`takeEarlyDocumentRead`), so that read is this client's in every other way: the same
+ *  deadline on Dispatch's silence, the same abort, the same refusals and the same reachability.
+ *  A client of a caller's own `fetchImpl` takes nothing: the early read is the page's. */
 export function createApiClient(
   fetchImpl?: FetchImplementation,
   upload?: UploadImplementation
 ): DispatchApiClient {
   return fetchImpl === undefined
-    ? new DispatchApiClient((...args) => fetch(...args), upload ?? xhrUpload())
+    ? new DispatchApiClient(
+        (input, init) => takeEarlyDocumentRead(input, init) ?? fetch(input, init),
+        upload ?? xhrUpload()
+      )
     : new DispatchApiClient(fetchImpl, upload);
 }
 

@@ -54,6 +54,7 @@ import {
   ASK_URGENCIES,
   actorActText,
   actorLabel,
+  answerSelected,
   claimHolds,
   claimTakeableAt,
   DEFAULT_ISSUE_PAGE_LIMIT,
@@ -2701,6 +2702,7 @@ function askSummary(
   outgoing: GraphReferences | string
 ): string {
   const answer = ask.answer;
+  const selected = answer === null ? [] : answerSelected(answer);
   const earlierAnswers = answers.slice(0, -1);
   const parts = askPartEdges(ask, incoming);
   const partRef = (id: string) => `${askRef}#b-${encodeBlockId(id)}`;
@@ -2726,7 +2728,7 @@ function askSummary(
       ? ["- none"]
       : [
           `- By: ${actorActText(answer.user, answer.act)}`,
-          `- Selected: ${answer.selected.length === 0 ? "none" : answer.selected.join(", ")}`,
+          `- Selected: ${selected.length === 0 ? "none" : selected.join(", ")}`,
           ...(answer.text === null ? [] : [`- Text: ${answer.text}`]),
           ...(answer.id === undefined ? [] : [`- Reference: ${partRef(answer.id)}`]),
           ...partReferenceLines(parts.at, answer.id),

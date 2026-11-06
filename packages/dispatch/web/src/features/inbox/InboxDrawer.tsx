@@ -1,4 +1,4 @@
-import { type ReactNode, useRef, useState } from "react";
+import { type ReactNode, Suspense, useRef, useState } from "react";
 
 import {
   backdrop50,
@@ -10,13 +10,16 @@ import {
 import type { InboxRoute } from "../refs/routes";
 import { DIALOG_SCOPE } from "../shell/keymap";
 import { useCloseOnNavigation, useDialog } from "../shell/useDialog";
-import { Inbox } from "./Inbox";
+
+import { InboxList } from "./InboxList";
 
 /**
  * The Inbox as a peek over whatever page is open (LEGION-547): the same list, cards and actions
- * as the Inbox page, mounted once in the app shell as a sibling of `<main>` so a route change
+ * as the Inbox page, mounted by the app shell as a sibling of `<main>` so a route change
  * underneath never unmounts the page beneath it - the drawer itself closes instead
- * (`useCloseOnNavigation`), which is also what "open the item" from inside it does.
+ * (`useCloseOnNavigation`), which is also what "open the item" from inside it does. The shell
+ * mounts it while it is open and takes it down when it closes, so its chunk is asked for the
+ * first time a reader opens it (`features/shell/deferred-shell.ts`).
  *
  * Its assignee filter and its search box are its own `useState`, never the URL: `Inbox`'s
  * `filter`/`onAssigneesChange`/`onQueryChange` exist exactly so a peek embedded on, say, the
@@ -27,7 +30,7 @@ import { Inbox } from "./Inbox";
  * the page it covers, not a two-column reader, so it keeps the card in the row at every width -
  * the Inbox the page itself shows below 1280 px.
  */
-export function InboxDrawer({ onClose, open }: { onClose: () => void; open: boolean }): ReactNode {
+export function InboxDrawer({ onClose }: { onClose: () => void }): ReactNode {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   // `undefined` is the reader alone, the same default the page reads from an address without
   // `?assignee=`.
@@ -35,12 +38,8 @@ export function InboxDrawer({ onClose, open }: { onClose: () => void; open: bool
   // The text the box narrows by, local for the same reason: a peek must not rewrite the address
   // of the page it covers.
   const [query, setQuery] = useState("");
-  const dialog = useDialog<HTMLElement>({ initialFocusRef: closeButtonRef, onClose, open });
-  useCloseOnNavigation(open, onClose);
-
-  if (!open) {
-    return null;
-  }
+  const dialog = useDialog<HTMLElement>({ initialFocusRef: closeButtonRef, onClose, open: true });
+  useCloseOnNavigation(true, onClose);
 
   const filter: InboxRoute = { assignees, q: query };
 
@@ -66,13 +65,15 @@ export function InboxDrawer({ onClose, open }: { onClose: () => void; open: bool
             Close
           </button>
         </div>
-        <Inbox
-          filter={filter}
-          keymapScope={DIALOG_SCOPE}
-          onAssigneesChange={setAssignees}
-          onQueryChange={setQuery}
-          pane={false}
-        />
+        <Suspense fallback={null}>
+          <InboxList
+            filter={filter}
+            keymapScope={DIALOG_SCOPE}
+            onAssigneesChange={setAssignees}
+            onQueryChange={setQuery}
+            pane={false}
+          />
+        </Suspense>
       </aside>
     </>
   );

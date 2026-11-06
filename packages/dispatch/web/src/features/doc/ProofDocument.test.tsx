@@ -13,6 +13,9 @@ import { ApiError, api } from "../../api/client";
 import type { Ask, IssueDetails } from "../../api/types";
 import { heldSends } from "../conversation/held-sends";
 import { marginComposeSendKey } from "../margin/margin-context";
+import { warmMarkdownRenderer } from "../refs/markdown-engine";
+import { markdownWorkerThreshold } from "../refs/markdown-worker-threshold";
+import { installFakeParseWorker, restoreParseWorker } from "../refs/parse-worker-fixture";
 import { appKeymap } from "../shell/keymap";
 import { colorForLogin } from "./connection";
 
@@ -38,6 +41,94 @@ test("ProofDocument creates the editor on the synced document as the signed-in u
     expect(editors[0]?.root.getAttribute("aria-multiline")).toBe("true");
     expect(editors[0]?.root.getAttribute("role")).toBe("textbox");
   } finally {
+    view.unmount();
+  }
+});
+
+// The document's typed blocks go on the view before the build, not after the handle arrives: a
+// `setProps` with a new `nodeViews` map over a built document re-runs ProseMirror's view update
+// across every node of it, which for the 406,319-character document was one task of 1,218 ms on
+// a phone at 4x CPU throttling - longer than any batch of the build it followed
+// (dispatch://INFRA-341, R11). `createEditor` is what installs them, from the chunk the editor
+// library is in (`features/doc/editor.ts`), out of what this page hands it.
+test("the document's typed blocks are on the view before the editor's build", async () => {
+  const { editors, sync, view } = renderProofDocument();
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+
+    // `callout` is the one host-rendered type of the suites' block schema; `ask` and `image`
+    // every document has.
+    expect(editors[0]?.nodeViewsAtBuild).toEqual(
+      expect.arrayContaining(["ask", "callout", "image"])
+    );
+  } finally {
+    view.unmount();
+  }
+});
+
+// What a reader has while the editor is built for them (`DocumentPreview`): the document, drawn
+// from the markdown `/text` answered, with a `data-block-id` on every block as the editor's
+// draw has. It is named for what it is, `Document text` under a `document` role, never for the
+// editor: nothing here takes an edit, and the page holds one document textbox, not two.
+test("ProofDocument draws the document's own text until its editor is built, and lets go of it then", async () => {
+  await warmMarkdownRenderer();
+  const { editors, sync, view } = renderProofDocument();
+
+  try {
+    const drawn = await screen.findByRole("document", { name: "Document text" });
+    expect(drawn.textContent).toContain("The live document");
+    expect(drawn.querySelectorAll("[data-block-id]").length).toBeGreaterThan(0);
+    expect(editors).toHaveLength(0);
+    expect(screen.queryByRole("textbox", { name: "Document editor" })).toBeNull();
+
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    expect(screen.queryByRole("document", { name: "Document text" })).toBeNull();
+    expect(editors[0]?.root.textContent).toContain("The live document");
+  } finally {
+    view.unmount();
+  }
+});
+
+// A document too long for the page's own thread is drawn in two passes (`DocumentPreview`): the
+// blocks it opens with, parsed in the commit that mounts it, and the whole of it when the parse
+// worker answers. The first pass is what a reader meets, and on a phone it is seconds - often
+// the whole of the wait, since the editor can replace this draw before that answer ever lands
+// (dispatch://INFRA-341, R11).
+test("ProofDocument draws a long document's first blocks before the whole of it has been parsed", async () => {
+  await warmMarkdownRenderer();
+  const worker = installFakeParseWorker();
+  const opening = "# The lease ledger\n\nThe paragraph a reader meets first.";
+  const buried = "The paragraph at the end of it.";
+  // One paragraph past the budget of the first pass, so the cut falls after the opening's two
+  // blocks rather than part-way through a third.
+  const between = `A paragraph longer than the first draw takes. ${"Every lease settles. ".repeat(markdownWorkerThreshold / 20)}`;
+  const markdown = `${opening}\n\n${between}\n\n${buried}\n`;
+  expect(markdown.length).toBeGreaterThan(markdownWorkerThreshold);
+  const { view } = renderProofDocument({ fake: fakeDocumentRuntime({ text: markdown }) });
+
+  try {
+    const drawn = await screen.findByRole("document", { name: "Document text" });
+    // The opening is formatted - a heading, not its syntax - and the rest of the document is
+    // not here yet.
+    await waitFor(() =>
+      expect(within(drawn).getByRole("heading").textContent).toBe("The lease ledger")
+    );
+    expect(drawn.querySelectorAll("[data-block-id]")).toHaveLength(2);
+    expect(drawn.textContent).not.toContain(buried);
+    expect(drawn.textContent).not.toContain("#");
+
+    // And the whole document is what the worker was given, so the pass that follows is the
+    // document itself rather than the rest of it bolted on.
+    await worker.waitForRequests(1);
+    expect(worker.requests[0]?.markdown).toBe(markdown);
+    await act(() => worker.answer(0));
+    await waitFor(() => expect(drawn.textContent).toContain(buried));
+    expect(within(drawn).getByRole("heading").textContent).toBe("The lease ledger");
+  } finally {
+    restoreParseWorker();
     view.unmount();
   }
 });

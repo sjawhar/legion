@@ -124,20 +124,29 @@ test("project page groups issues by status in board order; filters narrow issues
 
     // Status is a multi-select: one status narrows, a second widens (OR), each is a chip. Rows
     // and chips read the display label; the URL keeps the key.
+    //
+    // Every row below is named inside the issue list. An issue's title is on the page twice
+    // whenever a pointer rests on its row: the row's own link, and the reference preview card
+    // that link opens (`features/refs/RefPreview.tsx`, whose heading is the key and the title
+    // and whose link's accessible name is `CORE-1Triage work Triage`, the status pill with
+    // them). A press that leaves the pointer over a row - every filter press here, at the width
+    // where the strip sits above the list - opens that card, so an unscoped `getByText` names
+    // two elements and fails as a strict-mode violation rather than as a product fault.
+    const issues = page.getByRole("region", { name: "Project issues" });
     await page.getByRole("button", { name: "Filters · 0 active" }).click();
     await pickFilterOption(page, "Status", "Testing");
     await expect(page).toHaveURL(/\?status=testing$/);
-    await expect(page.getByText("Child work")).toBeVisible();
-    await expect(page.getByText("Triage work")).toHaveCount(0);
+    await expect(issues.getByText("Child work")).toBeVisible();
+    await expect(issues.getByText("Triage work")).toHaveCount(0);
     await pickFilterOption(page, "Status", "Triage");
     await expect(page).toHaveURL(/\?status=testing&status=triage$/);
-    await expect(page.getByText("Triage work")).toBeVisible();
-    await expect(page.getByText("Backlog work")).toHaveCount(0);
+    await expect(issues.getByText("Triage work")).toBeVisible();
+    await expect(issues.getByText("Backlog work")).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Filters · 2 active" })).toBeVisible();
     await page.getByRole("button", { name: "Remove Status: Testing filter" }).click();
-    await expect(page.getByText("Child work")).toHaveCount(0);
+    await expect(issues.getByText("Child work")).toHaveCount(0);
     await page.getByRole("button", { name: "Remove Status: Triage filter" }).click();
-    await expect(page.getByText("Backlog work")).toBeVisible();
+    await expect(issues.getByText("Backlog work")).toBeVisible();
 
     // Removing the last filter leaves the strip open under the user; only they close it.
     await expect(page.getByRole("button", { name: "Filters · 0 active" })).toHaveAttribute(
@@ -145,20 +154,20 @@ test("project page groups issues by status in board order; filters narrow issues
       "true"
     );
     await page.getByRole("button", { exact: true, name: "Needs you" }).click();
-    await expect(page.getByText("Needs attention")).toBeVisible();
-    await expect(page.getByText("Triage work")).toHaveCount(0);
+    await expect(issues.getByText("Needs attention")).toBeVisible();
+    await expect(issues.getByText("Triage work")).toHaveCount(0);
     await page.getByRole("button", { exact: true, name: "Needs you" }).click();
 
     await page.getByRole("button", { exact: true, name: "Unread" }).click();
-    await expect(page.getByText("Unread work")).toBeVisible();
-    await expect(page.getByText("Needs attention")).toHaveCount(0);
+    await expect(issues.getByText("Unread work")).toBeVisible();
+    await expect(issues.getByText("Needs attention")).toHaveCount(0);
     await page.getByRole("button", { exact: true, name: "Unread" }).click();
 
     await pickFilterOption(page, "Labels", "frontend");
-    await expect(page.getByText("Needs attention")).toBeVisible();
-    await expect(page.getByText("Unread work")).toHaveCount(0);
+    await expect(issues.getByText("Needs attention")).toBeVisible();
+    await expect(issues.getByText("Unread work")).toHaveCount(0);
     await page.getByRole("searchbox", { name: "Search issues" }).fill("attention");
-    await expect(page.getByText("Needs attention")).toBeVisible();
+    await expect(issues.getByText("Needs attention")).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath("project-issues.png"), fullPage: true });
 
     await page.getByRole("tab", { name: "Documents" }).click();

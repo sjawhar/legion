@@ -17,7 +17,7 @@ import type { DocumentJSON, ParseReply, ParseRequest } from "./markdown-parse.wo
  * protocol runs unchanged:
  *
  * - the worker posts `{ ready: true }` once its imports have loaded, on a later task;
- * - the engine posts each body as `{ id, markdown, softBreaks }`;
+ * - the engine posts each body as `{ id, markdown, rawHtml, softBreaks }`;
  * - the worker answers `{ id, doc }`, where `doc` is the parsed document as the plain JSON
  *   `ProseMirrorNode.toJSON()` gives, and `{ id }` with no `doc` for a body the parser refused;
  * - a worker that crashed fires `error` and answers nothing;
@@ -178,7 +178,9 @@ export function installFakeParseWorker({
       const engine = await headless;
       let doc: DocumentJSON | undefined;
       try {
-        doc = engine.parseMarkdown(request.markdown, request.softBreaks).toJSON() as DocumentJSON;
+        doc = engine
+          .parseMarkdown(request.markdown, request.softBreaks, request.rawHtml)
+          .toJSON() as DocumentJSON;
       } catch {
         doc = undefined;
       }

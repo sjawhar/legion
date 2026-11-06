@@ -1,4 +1,7 @@
-import { DELIVERY_CAPABILITIES, type MessageDeliveryMode } from "@legion/contracts";
+import {
+  DELIVERY_CAPABILITIES,
+  type MessageDeliveryMode,
+} from "@legion/contracts/dispatch-constants";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useState } from "react";
 import { Link, useParams } from "react-router-dom";
@@ -6,6 +9,7 @@ import { Link, useParams } from "react-router-dom";
 import { agentMessageRequest, apiErrorMessage } from "../../api/client";
 import { agentMessagesQuery, whoAmIQuery } from "../../api/queries";
 import type { Message } from "../../api/types";
+import { ErrorBoundary } from "../../components/ErrorBoundary";
 import { AgentListRefilling } from "../../components/QueryError";
 import {
   connectionDotConnecting,
@@ -23,7 +27,6 @@ import { MODE_LABELS } from "../conversation/delivery";
 import { useAgents } from "../conversation/useAgents";
 import { useSessionSends } from "../conversation/useSessionSends";
 import { AgentName, AgentUnresponsiveNote, useAgentText } from "../refs/AgentName";
-import { ErrorBoundary } from "../shell/ErrorBoundary";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { SendStoppedError } from "../writes/keyed-write";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
@@ -55,6 +58,13 @@ function deliveryModes(capabilities: readonly string[]): MessageDeliveryMode[] {
     (left, right) => MODE_ORDER[left] - MODE_ORDER[right]
   );
   return advertised.length === 0 ? ["aside"] : advertised;
+}
+
+/** What the composer's placeholder says the `/` list holds. It always holds the delivery modes
+ *  (`deliveryModes` answers with at least one, so there is no list without them), and a session
+ *  that published commands of its own has those in the list above them. */
+function slashHint(hasCommands: boolean): string {
+  return hasCommands ? ", / for commands" : ", / for send modes";
 }
 
 /**
@@ -288,13 +298,15 @@ export function AgentConversationPage(): ReactNode {
           commands={commands}
           conversation={conversation}
           empty={emptyText(responding)}
+          modes={modes}
+          onPickMode={setPicked}
           onSend={onSend}
           ownSendCount={ownSendCount}
           sends={sends}
           placeholder={
             switchPending
               ? "Waiting for the session to answer the switch…"
-              : `Message ${label} — delivered as ${MODE_LABELS[mode]}${commands === undefined ? "" : ", / for commands"}…`
+              : `Message ${label} — delivered as ${MODE_LABELS[mode]}${slashHint(commands !== undefined)}…`
           }
           replayCount={replays}
           resetKey={sessionId}

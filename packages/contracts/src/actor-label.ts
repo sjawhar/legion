@@ -1,4 +1,5 @@
-import { type Actor, type ActorAct, serviceSubjectLabel } from "./dispatch-api";
+import type { Actor, ActorAct } from "./dispatch-api";
+import { serviceSubjectLabel } from "./dispatch-constants";
 
 /**
  * The one way an actor is named, shared by every surface that names one: the Dashboard's

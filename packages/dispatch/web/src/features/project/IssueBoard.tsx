@@ -41,7 +41,7 @@ import { ClaimChip } from "../issue/ClaimChip";
 import { PriorityControl } from "../issue/PriorityControl";
 import { ProgressChips } from "../issue/ProgressChips";
 import { UnreachableRouteMarker } from "../issue/RouteReach";
-import { closeRefPreview, referenceTriggerProps } from "../refs/RefPreview";
+import { closeRefPreview, referenceTriggerProps } from "../refs/ref-preview-state";
 import { buildDispatchReference, buildIssuePath } from "../refs/routes";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { closestMatching } from "../shell/roving";

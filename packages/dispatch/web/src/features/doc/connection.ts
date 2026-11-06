@@ -1,5 +1,5 @@
 import type { HocuspocusProvider } from "@hocuspocus/provider";
-import { DOCUMENT_SCHEMA_CLOSE_CODE } from "@legion/contracts";
+import { DOCUMENT_SCHEMA_CLOSE_CODE } from "@legion/contracts/dispatch-constants";
 import type { Awareness } from "y-protocols/awareness";
 import type { Doc } from "yjs";
 

@@ -1,4 +1,7 @@
-import { DELIVERY_CAPABILITIES, MAX_BROADCAST_RECIPIENTS } from "@legion/contracts";
+import {
+  DELIVERY_CAPABILITIES,
+  MAX_BROADCAST_RECIPIENTS,
+} from "@legion/contracts/dispatch-constants";
 
 import { AGENT_LIST_REFILLING } from "../../api/client";
 import type { Agent, CreateBroadcastInput, MessageDeliveryMode } from "../../api/types";

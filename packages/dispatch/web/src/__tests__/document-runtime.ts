@@ -28,10 +28,18 @@ export interface FakeEditor {
   focused: string[];
   markdown: string | undefined;
   focusedBlocks: string[];
+  /** The node views the host had installed when the fragment was first drawn into the root -
+   *  the real editor's first batch (`@legion/proof-editor`'s `beforeBuild`). A host that
+   *  installs them afterwards leaves this empty, and the real editor then re-creates every
+   *  node view of the built document in one task (dispatch://INFRA-341, R11). */
+  nodeViewsAtBuild: readonly string[];
   options: EditorOptions;
   readOnly: boolean;
   remoteMarks: Record<string, StoredMark>[];
   root: HTMLElement;
+  /** Whether the host has shown the editor's root (`reveal`), which the real editor keeps
+   *  hidden from before the first batch of its build until the host swaps it in. */
+  revealed: boolean;
   /** Whether the fake view's selection is empty (a caret); a test sets it to select text. */
   selectionEmpty: boolean;
   /** The innermost block with an id that holds the selection, as `blockIdAtSelection` answers;
@@ -101,6 +109,11 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
     for (const [name, value] of Object.entries(editorAttributes)) {
       root.setAttribute(name, value);
     }
+    // The real editor's root is hidden from before the first batch of its build until the host
+    // swaps it in (`@legion/proof-editor`'s `reveal`), so the fake's is too: a host that never
+    // revealed its editor would otherwise be the only one with nothing to show for it.
+    const shown = root.style.display;
+    root.style.display = "none";
     const editor: FakeEditor = {
       blockMarks: [],
       commented: 0,
@@ -108,15 +121,16 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       focused: [],
       focusedBlocks: [],
       markdown: undefined,
+      nodeViewsAtBuild: [],
       options,
       readOnly: options.readOnly ?? false,
       remoteMarks: [],
       root,
+      revealed: false,
       selectionEmpty: true,
       selectedBlock: null,
       viewProps: { nodeViews: {} },
     };
-    root.textContent = options.ydoc.getXmlFragment("prosemirror").toString();
     const handle = {
       applyRemoteMarks(metadata: Record<string, StoredMark>) {
         editor.remoteMarks.push(metadata);
@@ -130,6 +144,7 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       },
       destroy() {
         editor.destroyed = true;
+        root.style.display = shown;
       },
       focusBlock(blockId: string) {
         editor.focusedBlocks.push(blockId);
@@ -147,6 +162,10 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       },
       retypeMark() {
         return { refused: "missing" as const };
+      },
+      reveal() {
+        editor.revealed = true;
+        root.style.display = shown;
       },
       setActiveBlocks() {},
       setBlockMarks(marks: readonly BlockMark[]) {
@@ -182,14 +201,21 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       },
     } as unknown as EditorHandle;
     // The real `createEditor` installs Dispatch's node views once the editor library has
-    // loaded (`features/doc/editor.ts`); the fake stands in for that call too, so a test reads
-    // the same `viewProps.nodeViews` the host would.
+    // loaded, and does it over the still-empty document, before the first batch of the build
+    // (`features/doc/editor.ts`; `@legion/proof-editor`'s `beforeBuild`). The fake stands in
+    // for that call and for the host's own `beforeBuild` after it, so what is on the view when
+    // it draws the fragment is what the build would have drawn with.
     installTypedBlocks(
       handle.view,
       options.blockSchema,
       options.onAskBlockHosts,
       options.watchPicture
     );
+    options.beforeBuild?.(handle.view);
+    editor.nodeViewsAtBuild = Object.keys(
+      (editor.viewProps.nodeViews ?? {}) as Record<string, unknown>
+    );
+    root.textContent = options.ydoc.getXmlFragment("prosemirror").toString();
     editors.push(editor);
     return handle;
   };
@@ -210,7 +236,13 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
     refuse() {
       callbacks.at(-1)?.onOutsideSchema();
     },
-    runtime: { blockSchema, createEditor, loadTransport: async () => connect },
+    runtime: {
+      blockSchema,
+      createEditor,
+      // The fake builds its editor from nothing, so there is no chunk to start.
+      loadEditor: () => undefined,
+      loadTransport: async () => connect,
+    },
     status(state) {
       for (const callback of callbacks) {
         callback.onStatus(state);

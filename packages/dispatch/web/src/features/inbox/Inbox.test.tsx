@@ -4049,8 +4049,10 @@ test("the answer keys act on the selected decision block, not the first one in t
       editor.root.append(construct(askBlockNode("block-a", first.question)).dom);
       editor.root.append(construct(askBlockNode("block-b", second.question)).dom);
     });
+    // Each decision card is drawn in a task of its own (`useAskCardsDrawnInTasks`), so the
+    // second of them is awaited rather than read off the commit the first one landed in.
     const selectedCard = await within(pane).findByTestId("ask-ask-b");
-    const firstCard = within(pane).getByTestId("ask-ask-a");
+    const firstCard = await within(pane).findByTestId("ask-ask-a");
 
     // `1` is the selected question's first option, not the first block's.
     fireEvent.keyDown(document.body, { key: "1" });

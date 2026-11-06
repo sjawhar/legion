@@ -73,6 +73,13 @@ function renderDialog(
   };
 }
 
+/** The reason a refused control carries, as a reader meets it: the text of the line its
+ *  `aria-describedby` names. */
+function refusalOf(control: HTMLElement): string | null {
+  const describedBy = control.getAttribute("aria-describedby");
+  return describedBy === null ? null : (document.getElementById(describedBy)?.textContent ?? null);
+}
+
 test("preselects the route's project, submits title and spec, and opens the created issue", async () => {
   const calls: CreateIssueInput[] = [];
   let closed = 0;
@@ -88,12 +95,12 @@ test("preselects the route's project, submits title and spec, and opens the crea
     const select = await screen.findByRole<HTMLSelectElement>("combobox", { name: "Project" });
     await waitFor(() => expect(select.value).toBe("OPS"));
     const create = screen.getByRole("button", { name: "Create" });
-    expect(create.hasAttribute("disabled")).toBe(true);
+    expect(create.getAttribute("aria-disabled")).toBe("true");
 
     fireEvent.change(screen.getByRole("textbox", { name: "Title" }), {
       target: { value: "  Ship the keymap  " },
     });
-    expect(create.hasAttribute("disabled")).toBe(false);
+    expect(create.hasAttribute("aria-disabled")).toBe(false);
     fireEvent.change(screen.getByRole("textbox", { name: /Spec/ }), {
       target: { value: "One line of spec." },
     });
@@ -212,6 +219,59 @@ test("a possible duplicate names the candidate and Create anyway forces the crea
       expect(screen.getByTestId("current-route").textContent).toBe("/issues/CORE-2")
     );
     expect(calls.map((call) => call.force)).toEqual([undefined, true]);
+  } finally {
+    view.unmount();
+  }
+});
+
+// A draft with no title cannot be filed, so Create refuses it: it stays in the tab order, where
+// a greyed-out button would have dropped out of it, sends nothing, and says what is missing.
+test("Create refused by an empty draft keeps focus, sends nothing and says why", async () => {
+  const calls: CreateIssueInput[] = [];
+  const view = renderDialog(async (input) => {
+    calls.push(input);
+    return issue(input, "CORE-3");
+  });
+  try {
+    await screen.findByRole("combobox", { name: "Project" });
+    const create = screen.getByRole("button", { name: "Create" });
+    create.focus();
+    fireEvent.click(create);
+
+    expect(calls).toEqual([]);
+    expect(document.activeElement).toBe(create);
+    expect(refusalOf(create)).toBe("Pick a project and write a title.");
+  } finally {
+    view.unmount();
+  }
+});
+
+// The duplicate's override is refused by the same empty draft, and the same way: the title
+// cleared after the refusal leaves nothing to file.
+test("Create anyway refused by a cleared title keeps focus, sends nothing and says why", async () => {
+  const calls: CreateIssueInput[] = [];
+  const view = renderDialog(async (input) => {
+    calls.push(input);
+    throw new ApiError(409, {
+      code: "POSSIBLE_DUPLICATE",
+      error: "possible duplicate of CORE-1: Calibrate the astrolabe",
+    });
+  });
+  try {
+    await screen.findByRole("combobox", { name: "Project" });
+    const title = screen.getByRole("textbox", { name: "Title" });
+    fireEvent.change(title, { target: { value: "Astrolabe calibration" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    await screen.findByRole("alert");
+    fireEvent.change(title, { target: { value: "" } });
+
+    const anyway = screen.getByRole("button", { name: "Create anyway" });
+    anyway.focus();
+    fireEvent.click(anyway);
+
+    expect(calls).toHaveLength(1);
+    expect(document.activeElement).toBe(anyway);
+    expect(refusalOf(anyway)).toBe("Pick a project and write a title.");
   } finally {
     view.unmount();
   }

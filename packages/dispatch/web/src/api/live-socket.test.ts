@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, jest, spyOn, test } from "bun:test";
-import { type AgentStreamFrame, LIVE_SOCKET_MAX_AGE_CLOSE } from "@legion/contracts";
+import type { AgentStreamFrame } from "@legion/contracts/agent-stream";
+import { LIVE_SOCKET_MAX_AGE_CLOSE } from "@legion/contracts/dispatch-constants";
 import { QueryClient, QueryClientProvider, QueryObserver } from "@tanstack/react-query";
 import { act, renderHook } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";

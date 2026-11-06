@@ -1,0 +1,2087 @@
+[
+  {
+    "blocks": [
+      "Characters a page must not read as markup",
+      "A paragraph with &, <, >, \" and ' in it, and a <b>span of raw HTML</b> beside them.",
+      "A quotation, with a & b < c inside it. Its second line.",
+      "",
+      "A picture of the web: .",
+      "A picture of this site: .",
+      "A footnote referencenote, and its note below.",
+      "noteThe note's own text, with <em>markup</em> in it.",
+      "A fence with no language, holding <script>alert(\"x\")</script>."
+    ],
+    "markdown": "# Characters a page must not read as markup\n\nA paragraph with &, <, >, \" and ' in it, and a <b>span of raw HTML</b> beside them.\n\n> A quotation, with `a & b < c` inside it.\n> Its second line.\n\n---\n\nA picture of the web: ![a chart](https://example.test/chart.png \"A chart\").\n\nA picture of this site: ![a diagram](dispatch://CORE-1/artifact/diagram-png).\n\nA footnote reference[^note], and its note below.\n\n[^note]: The note's own text, with <em>markup</em> in it.\n\n```\nA fence with no language, holding <script>alert(\"x\")</script>.\n```\n",
+    "name": "escapes",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "id": "",
+            "level": 1,
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Characters a page must not read as markup"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A paragraph with &, <, >, \" and ' in it, and a "
+            },
+            {
+              "type": "html",
+              "attrs": {
+                "value": "<b>",
+                "blockId": null
+              }
+            },
+            {
+              "type": "text",
+              "text": "span of raw HTML"
+            },
+            {
+              "type": "html",
+              "attrs": {
+                "value": "</b>",
+                "blockId": null
+              }
+            },
+            {
+              "type": "text",
+              "text": " beside them."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000003"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000004"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "A quotation, with "
+                },
+                {
+                  "type": "text",
+                  "marks": [
+                    {
+                      "type": "inlineCode"
+                    }
+                  ],
+                  "text": "a & b < c"
+                },
+                {
+                  "type": "text",
+                  "text": " inside it. Its second line."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "hr",
+          "attrs": {
+            "blockId": "b-000005"
+          }
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000006"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A picture of the web: "
+            },
+            {
+              "type": "image",
+              "attrs": {
+                "src": "https://example.test/chart.png",
+                "alt": "a chart",
+                "title": "A chart"
+              }
+            },
+            {
+              "type": "text",
+              "text": "."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000007"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A picture of this site: "
+            },
+            {
+              "type": "image",
+              "attrs": {
+                "src": "dispatch://CORE-1/artifact/diagram-png",
+                "alt": "a diagram",
+                "title": null
+              }
+            },
+            {
+              "type": "text",
+              "text": "."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000008"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A footnote reference"
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "note"
+              }
+            },
+            {
+              "type": "text",
+              "text": ", and its note below."
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "note",
+            "blockId": "b-000009"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000010"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "The note's own text, with "
+                },
+                {
+                  "type": "html",
+                  "attrs": {
+                    "value": "<em>",
+                    "blockId": null
+                  }
+                },
+                {
+                  "type": "text",
+                  "text": "markup"
+                },
+                {
+                  "type": "html",
+                  "attrs": {
+                    "value": "</em>",
+                    "blockId": null
+                  }
+                },
+                {
+                  "type": "text",
+                  "text": " in it."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "code_block",
+          "attrs": {
+            "language": null,
+            "blockId": "b-000011"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A fence with no language, holding <script>alert(\"x\")</script>."
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "blocks": [
+      "A tight list, whose items read as lines:",
+      "onetwonested under twothree",
+      "A loose list, whose items keep their paragraphs:",
+      "onetwo",
+      "An ordered list that does not start at one:",
+      "thirdfourth",
+      "Task items, ticked and not:",
+      "open the windowclose it",
+      "A list item holding more than a line:",
+      "the first lineand a paragraph under it"
+    ],
+    "markdown": "A tight list, whose items read as lines:\n\n- one\n- two\n  - nested under two\n- three\n\nA loose list, whose items keep their paragraphs:\n\n- one\n\n- two\n\nAn ordered list that does not start at one:\n\n3. third\n4. fourth\n\nTask items, ticked and not:\n\n- [ ] open the window\n- [x] close it\n\nA list item holding more than a line:\n\n- the first line\n\n  and a paragraph under it\n",
+    "name": "lists",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A tight list, whose items read as lines:"
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000003"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000004"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "one"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000005"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000006"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "two"
+                    }
+                  ]
+                },
+                {
+                  "type": "bullet_list",
+                  "attrs": {
+                    "spread": false,
+                    "blockId": "b-000007"
+                  },
+                  "content": [
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "label": "•",
+                        "listType": "bullet",
+                        "spread": false,
+                        "checked": null,
+                        "blockId": "b-000008"
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "attrs": {
+                            "blockId": "b-000009"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "nested under two"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000010"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000011"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "three"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000012"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A loose list, whose items keep their paragraphs:"
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": true,
+            "blockId": "b-000013"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000014"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000015"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "one"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000016"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000017"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "two"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000018"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "An ordered list that does not start at one:"
+            }
+          ]
+        },
+        {
+          "type": "ordered_list",
+          "attrs": {
+            "order": 3,
+            "spread": false,
+            "blockId": "b-000019"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000020"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000021"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "third"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000022"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000023"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "fourth"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000024"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Task items, ticked and not:"
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000025"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": false,
+                "blockId": "b-000026"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000027"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "open the window"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": true,
+                "blockId": "b-000028"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000029"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "close it"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000030"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A list item holding more than a line:"
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000031"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": true,
+                "checked": null,
+                "blockId": "b-000032"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000033"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "the first line"
+                    }
+                  ]
+                },
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000034"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "and a paragraph under it"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "blocks": [
+      "A document longer than one screen",
+      "Paragraph 1 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 2 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 3 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 4 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 5 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 6 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 7 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 8 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 9 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 10 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 11 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 12 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 13 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 14 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 15 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 16 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 17 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 18 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 19 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 20 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 21 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 22 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 23 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 24 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 25 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 26 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 27 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 28 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 29 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 30 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 31 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 32 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 33 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 34 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 35 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 36 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 37 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 38 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 39 of the forty this document holds, so the cut has something to cut.",
+      "Paragraph 40 of the forty this document holds, so the cut has something to cut."
+    ],
+    "markdown": "# A document longer than one screen\n\nParagraph 1 of the forty this document holds, so the cut has something to cut.\n\nParagraph 2 of the forty this document holds, so the cut has something to cut.\n\nParagraph 3 of the forty this document holds, so the cut has something to cut.\n\nParagraph 4 of the forty this document holds, so the cut has something to cut.\n\nParagraph 5 of the forty this document holds, so the cut has something to cut.\n\nParagraph 6 of the forty this document holds, so the cut has something to cut.\n\nParagraph 7 of the forty this document holds, so the cut has something to cut.\n\nParagraph 8 of the forty this document holds, so the cut has something to cut.\n\nParagraph 9 of the forty this document holds, so the cut has something to cut.\n\nParagraph 10 of the forty this document holds, so the cut has something to cut.\n\nParagraph 11 of the forty this document holds, so the cut has something to cut.\n\nParagraph 12 of the forty this document holds, so the cut has something to cut.\n\nParagraph 13 of the forty this document holds, so the cut has something to cut.\n\nParagraph 14 of the forty this document holds, so the cut has something to cut.\n\nParagraph 15 of the forty this document holds, so the cut has something to cut.\n\nParagraph 16 of the forty this document holds, so the cut has something to cut.\n\nParagraph 17 of the forty this document holds, so the cut has something to cut.\n\nParagraph 18 of the forty this document holds, so the cut has something to cut.\n\nParagraph 19 of the forty this document holds, so the cut has something to cut.\n\nParagraph 20 of the forty this document holds, so the cut has something to cut.\n\nParagraph 21 of the forty this document holds, so the cut has something to cut.\n\nParagraph 22 of the forty this document holds, so the cut has something to cut.\n\nParagraph 23 of the forty this document holds, so the cut has something to cut.\n\nParagraph 24 of the forty this document holds, so the cut has something to cut.\n\nParagraph 25 of the forty this document holds, so the cut has something to cut.\n\nParagraph 26 of the forty this document holds, so the cut has something to cut.\n\nParagraph 27 of the forty this document holds, so the cut has something to cut.\n\nParagraph 28 of the forty this document holds, so the cut has something to cut.\n\nParagraph 29 of the forty this document holds, so the cut has something to cut.\n\nParagraph 30 of the forty this document holds, so the cut has something to cut.\n\nParagraph 31 of the forty this document holds, so the cut has something to cut.\n\nParagraph 32 of the forty this document holds, so the cut has something to cut.\n\nParagraph 33 of the forty this document holds, so the cut has something to cut.\n\nParagraph 34 of the forty this document holds, so the cut has something to cut.\n\nParagraph 35 of the forty this document holds, so the cut has something to cut.\n\nParagraph 36 of the forty this document holds, so the cut has something to cut.\n\nParagraph 37 of the forty this document holds, so the cut has something to cut.\n\nParagraph 38 of the forty this document holds, so the cut has something to cut.\n\nParagraph 39 of the forty this document holds, so the cut has something to cut.\n\nParagraph 40 of the forty this document holds, so the cut has something to cut.\n",
+    "name": "many-blocks",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "id": "",
+            "level": 1,
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A document longer than one screen"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 1 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000003"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 2 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000004"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 3 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000005"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 4 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000006"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 5 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000007"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 6 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000008"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 7 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000009"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 8 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000010"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 9 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000011"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 10 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000012"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 11 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000013"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 12 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000014"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 13 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000015"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 14 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000016"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 15 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000017"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 16 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000018"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 17 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000019"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 18 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000020"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 19 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000021"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 20 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000022"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 21 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000023"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 22 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000024"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 23 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000025"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 24 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000026"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 25 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000027"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 26 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000028"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 27 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000029"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 28 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000030"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 29 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000031"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 30 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000032"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 31 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000033"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 32 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000034"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 33 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000035"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 34 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000036"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 35 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000037"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 36 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000038"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 37 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000039"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 38 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000040"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 39 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000041"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Paragraph 40 of the forty this document holds, so the cut has something to cut."
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "blocks": [
+      "A synthetic document of 28 sections",
+      "The ledger holds three leases, and the window closes once the last of them has settled, so a reader who opens this document late still reads the same order of events as the reader who opened it first.",
+      "1. The lease window",
+      "Some emphasis, strong, code, withdrawn, and a link.",
+      "What it holds",
+      "The window opens on the first lease.The window closes on the last.Nothing is read between them.",
+      "LeaseOpensClosesFirst00:0100:09Last00:0400:12",
+      "const window = leases.map((lease) => lease.opens);",
+      "flowchart TD\n  A[Open] --> B[Settle]\n  B --> C[Close]",
+      "2. The settlement",
+      "A second section, so the cut has more than one heading to reach past."
+    ],
+    "markdown": "# A synthetic document of 28 sections\n\nThe ledger holds three leases, and the window closes once the last of them has settled, so a\nreader who opens this document late still reads the same order of events as the reader who\nopened it first.\n\n## 1. The lease window\n\nSome *emphasis*, **strong**, `code`, ~~withdrawn~~, and a [link](https://example.test/a \"Title\").\n\n### What it holds\n\n- The window opens on the first lease.\n- The window closes on the last.\n- Nothing is read between them.\n\n| Lease | Opens | Closes |\n| --- | :-: | ---: |\n| First | 00:01 | 00:09 |\n| Last | 00:04 | 00:12 |\n\n```ts\nconst window = leases.map((lease) => lease.opens);\n```\n\n```mermaid\nflowchart TD\n  A[Open] --> B[Settle]\n  B --> C[Close]\n```\n\n## 2. The settlement\n\nA second section, so the cut has more than one heading to reach past.\n",
+    "name": "opening",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "id": "",
+            "level": 1,
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A synthetic document of 28 sections"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "The ledger holds three leases, and the window closes once the last of them has settled, so a reader who opens this document late still reads the same order of events as the reader who opened it first."
+            }
+          ]
+        },
+        {
+          "type": "heading",
+          "attrs": {
+            "id": "",
+            "level": 2,
+            "blockId": "b-000003"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "1. The lease window"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000004"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Some "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "emphasis",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                }
+              ],
+              "text": "emphasis"
+            },
+            {
+              "type": "text",
+              "text": ", "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "strong",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                }
+              ],
+              "text": "strong"
+            },
+            {
+              "type": "text",
+              "text": ", "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "inlineCode"
+                }
+              ],
+              "text": "code"
+            },
+            {
+              "type": "text",
+              "text": ", "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "strike_through"
+                }
+              ],
+              "text": "withdrawn"
+            },
+            {
+              "type": "text",
+              "text": ", and a "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://example.test/a",
+                    "title": "Title"
+                  }
+                }
+              ],
+              "text": "link"
+            },
+            {
+              "type": "text",
+              "text": "."
+            }
+          ]
+        },
+        {
+          "type": "heading",
+          "attrs": {
+            "id": "",
+            "level": 3,
+            "blockId": "b-000005"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "What it holds"
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000006"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000007"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000008"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "The window opens on the first lease."
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000009"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000010"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "The window closes on the last."
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000011"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000012"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "Nothing is read between them."
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "attrs": {
+            "blockId": "b-000013"
+          },
+          "content": [
+            {
+              "type": "table_header_row",
+              "attrs": {
+                "blockId": "b-000014"
+              },
+              "content": [
+                {
+                  "type": "table_header",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": null,
+                    "blockId": "b-000015"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000016"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "Lease"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "table_header",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": "center",
+                    "blockId": "b-000017"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000018"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "Opens"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "table_header",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": "right",
+                    "blockId": "b-000019"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000020"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "Closes"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "table_row",
+              "attrs": {
+                "blockId": "b-000021"
+              },
+              "content": [
+                {
+                  "type": "table_cell",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": null,
+                    "blockId": "b-000022"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000023"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "First"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "table_cell",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": "center",
+                    "blockId": "b-000024"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000025"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "00:01"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "table_cell",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": "right",
+                    "blockId": "b-000026"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000027"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "00:09"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "table_row",
+              "attrs": {
+                "blockId": "b-000028"
+              },
+              "content": [
+                {
+                  "type": "table_cell",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": null,
+                    "blockId": "b-000029"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000030"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "Last"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "table_cell",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": "center",
+                    "blockId": "b-000031"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000032"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "00:04"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "table_cell",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": "right",
+                    "blockId": "b-000033"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000034"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "00:12"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "code_block",
+          "attrs": {
+            "language": "ts",
+            "blockId": "b-000035"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "const window = leases.map((lease) => lease.opens);"
+            }
+          ]
+        },
+        {
+          "type": "code_block",
+          "attrs": {
+            "language": "mermaid",
+            "blockId": "b-000036"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "flowchart TD\n  A[Open] --> B[Settle]\n  B --> C[Close]"
+            }
+          ]
+        },
+        {
+          "type": "heading",
+          "attrs": {
+            "id": "",
+            "level": 2,
+            "blockId": "b-000037"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "2. The settlement"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000038"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A second section, so the cut has more than one heading to reach past."
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "blocks": [
+      "A document whose opening holds both typed blocks.",
+      "calloutwarningRead the window firstThe window closes once the last lease has settled.",
+      "Which lease closes the window?The firstThe last",
+      "A paragraph after them both."
+    ],
+    "markdown": "A document whose opening holds both typed blocks.\n\n:::callout{kind=\"warning\" title=\"Read the window first\"}\nThe window closes once the last lease has settled.\n:::\n\n:::ask{id=\"decision-1\" urgency=\"high\" multiple=\"false\"}\nWhich lease closes the window?\n\n- The first\n- The last\n:::\n\nA paragraph after them both.\n",
+    "name": "typed-blocks",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A document whose opening holds both typed blocks."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "kind": "warning",
+            "title": "Read the window first",
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000003"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "The window closes once the last lease has settled."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "ask",
+          "attrs": {
+            "urgency": "high",
+            "multiple": false,
+            "state": "open",
+            "blockId": "decision-1"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000004"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Which lease closes the window?"
+                }
+              ]
+            },
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000005"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000006"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000007"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "The first"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000008"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000009"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "The last"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000010"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A paragraph after them both."
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "blocks": [
+      "What a document may not do to the page it is drawn into",
+      "A paragraph holding <script>alert(\"one\")</script> as text, and </p><script> in code.",
+      "A link a reader must not run, beside a link they may follow and a reference.",
+      "A picture whose source must not run: .",
+      "A quotation holding </blockquote> and an & ampersand.",
+      "<script>alert(\"four\")</script>"
+    ],
+    "markdown": "# What a document may not do to the page it is drawn into\n\nA paragraph holding <script>alert(\"one\")</script> as text, and `</p><script>` in code.\n\nA [link a reader must not run](javascript:alert('two')), beside a\n[link they may follow](https://example.test/safe) and a [reference](dispatch://CORE-1/spec).\n\nA picture whose source must not run: ![nothing](javascript:alert('three')).\n\n> A quotation holding </blockquote> and an & ampersand.\n\n```html\n<script>alert(\"four\")</script>\n```\n",
+    "name": "unsafe",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "id": "",
+            "level": 1,
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "What a document may not do to the page it is drawn into"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A paragraph holding "
+            },
+            {
+              "type": "html",
+              "attrs": {
+                "value": "<script>",
+                "blockId": null
+              }
+            },
+            {
+              "type": "text",
+              "text": "alert(\"one\")"
+            },
+            {
+              "type": "html",
+              "attrs": {
+                "value": "</script>",
+                "blockId": null
+              }
+            },
+            {
+              "type": "text",
+              "text": " as text, and "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "inlineCode"
+                }
+              ],
+              "text": "</p><script>"
+            },
+            {
+              "type": "text",
+              "text": " in code."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000003"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "javascript:alert('two')",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "link a reader must not run"
+            },
+            {
+              "type": "text",
+              "text": ", beside a "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://example.test/safe",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "link they may follow"
+            },
+            {
+              "type": "text",
+              "text": " and a "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "dispatch://CORE-1/spec",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "reference"
+            },
+            {
+              "type": "text",
+              "text": "."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000004"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A picture whose source must not run: "
+            },
+            {
+              "type": "image",
+              "attrs": {
+                "src": "javascript:alert('three')",
+                "alt": "nothing",
+                "title": null
+              }
+            },
+            {
+              "type": "text",
+              "text": "."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000005"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000006"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "A quotation holding "
+                },
+                {
+                  "type": "html",
+                  "attrs": {
+                    "value": "</blockquote>",
+                    "blockId": null
+                  }
+                },
+                {
+                  "type": "text",
+                  "text": " and an & ampersand."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "code_block",
+          "attrs": {
+            "language": "html",
+            "blockId": "b-000007"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "<script>alert(\"four\")</script>"
+            }
+          ]
+        }
+      ]
+    }
+  }
+]

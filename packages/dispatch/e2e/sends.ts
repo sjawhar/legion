@@ -150,3 +150,20 @@ export async function pastePicture(field: Locator, name: string): Promise<void> 
     { base64: ONE_PIXEL_PNG, name }
   );
 }
+
+/** Drops a PNG named `name` on `target`, as a file manager hands one to it. Playwright drives no
+ *  file drag from outside the page, so the test builds the `DataTransfer` the browser would have
+ *  handed the drop and dispatches the event itself, as `pastePicture` does for the clipboard. */
+export async function dropPicture(target: Locator, name: string): Promise<void> {
+  await target.evaluate(
+    (node, file) => {
+      const bytes = Uint8Array.from(atob(file.base64), (char) => char.charCodeAt(0));
+      const data = new DataTransfer();
+      data.items.add(new File([bytes], file.name, { type: "image/png" }));
+      const drop = new Event("drop", { bubbles: true, cancelable: true });
+      Object.defineProperty(drop, "dataTransfer", { value: data });
+      node.dispatchEvent(drop);
+    },
+    { base64: ONE_PIXEL_PNG, name }
+  );
+}

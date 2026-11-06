@@ -21,7 +21,18 @@ export interface IntersectionControl {
   readonly restore: () => void;
 }
 
-export function installIntersectionObserver(): IntersectionControl {
+/**
+ * Installs the stub. With `showOnObserve`, every element an observer watches is reported wholly
+ * on screen on the task after it is observed, as a browser showing the whole page would:
+ * happy-dom lays nothing out and its own observer reports nothing ever, so a test whose subject
+ * is not an on-screen rule - a diagram's drawing, say - would otherwise see a page where
+ * nothing is on screen. Without it nothing is reported until the test says so.
+ */
+export function installIntersectionObserver({
+  showOnObserve = false,
+}: {
+  showOnObserve?: boolean;
+} = {}): IntersectionControl {
   const original = globalThis.IntersectionObserver;
   const live = new Set<ObserverStub>();
 
@@ -41,6 +52,9 @@ export function installIntersectionObserver(): IntersectionControl {
 
     observe(target: Element): void {
       this.targets.add(target);
+      if (showOnObserve) {
+        setTimeout(() => report(target, undefined), 0);
+      }
     }
 
     takeRecords(): IntersectionObserverEntry[] {

@@ -7,7 +7,7 @@ import {
   type AgentStreamFrame,
   type AgentStreamSettings,
   type AgentStreamSettingsReported,
-} from "@legion/contracts";
+} from "@legion/contracts/agent-stream";
 
 import {
   applyFrame,

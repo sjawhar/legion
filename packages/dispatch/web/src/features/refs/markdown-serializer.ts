@@ -66,9 +66,9 @@ export function buildEngine(proof: HeadlessProofEditor, blockSchema: BlockSchema
     schema: proof.schema,
     renderSpec: DOMSerializer.renderSpec as RenderSpecWithAttrs,
     serializer: pictureSerializer(proof.schema),
-    parse(markdown, softBreaks = "space") {
+    parse(markdown, softBreaks = "space", rawHtml = "refuse") {
       try {
-        return proof.parseMarkdown(markdown, softBreaks);
+        return proof.parseMarkdown(markdown, softBreaks, rawHtml);
       } catch {
         return undefined;
       }

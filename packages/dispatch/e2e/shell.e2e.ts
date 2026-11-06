@@ -182,9 +182,13 @@ test("a page chunk that fails on every load reloads three times and then shows t
   // Every download of the issue page's code fails, the way a request does when the network
   // changes under it (a VPN reconnect, a Wi-Fi switch).
   await page.route(/\/assets\/IssuePage-[^/]+\.js$/u, (route) => route.abort());
+  // Navigations, not `load` events: the page preloads that chunk from its body
+  // (`web/index.html`), so the failure can reach the recovery script before the document has
+  // finished loading, and a reload it starts there fires no `load` of its own. Each navigation
+  // is one of the page's four lives here.
   let loads = 0;
-  page.on("load", () => {
-    loads += 1;
+  page.on("framenavigated", (frame) => {
+    if (frame === page.mainFrame()) loads += 1;
   });
 
   try {

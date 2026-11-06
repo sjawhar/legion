@@ -94,8 +94,18 @@ export function Tabs<Id extends string>({
     revealTab(node);
   };
 
+  // In a frame of its own, never in the commit that mounted or switched the tab: the two
+  // rectangles are the first thing on the page to ask for a layout, so inside the commit they
+  // force the whole page's style and layout to be computed there. On a phone at 4x CPU
+  // throttling that was 170-200 ms of the one task that mounts an issue page - a task already
+  // over the 500 ms a reader feels as a freeze (dispatch://INFRA-341, R11). An animation frame
+  // reads the layout the browser was about to compute anyway, and scrolls the tablist before
+  // that frame is painted, so nothing a reader sees moves later than it did. A tab the reader
+  // reached from the keyboard is still revealed in their own keystroke (`onTabKeyDown`), where
+  // the measurement is all the task holds.
   useEffect(() => {
-    revealTab(tabRefs.current[activeTab]);
+    const frame = requestAnimationFrame(() => revealTab(tabRefs.current[activeTab]));
+    return () => cancelAnimationFrame(frame);
   }, [activeTab]);
 
   const tabMinHeight = compact ? "min-h-11 md:min-h-9" : "min-h-11";

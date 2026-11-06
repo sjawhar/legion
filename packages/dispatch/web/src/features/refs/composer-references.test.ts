@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { DISPATCH_TEXT_REFERENCES } from "@legion/contracts";
+import { DISPATCH_TEXT_REFERENCES } from "@legion/contracts/dispatch-text-references";
 
 import { composerReferences } from "./routes";
 

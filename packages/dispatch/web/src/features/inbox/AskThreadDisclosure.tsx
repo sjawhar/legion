@@ -17,6 +17,9 @@ interface AskThreadDisclosureProps {
   markNewest?: DwellRef;
   /** The reply a deep link named (`AskThread`); only the Conversation passes one. */
   currentReplyId?: string;
+  /** The project document that owns a document ask, so each reply names its own reference
+   *  (`AskThread`). */
+  owner?: { project: string; slug: string };
 }
 
 export function AskThreadDisclosure({
@@ -27,6 +30,7 @@ export function AskThreadDisclosure({
   uploadOwner,
   markNewest,
   currentReplyId,
+  owner,
 }: AskThreadDisclosureProps): ReactNode {
   const [composerOpen, setComposerOpen] = useState(false);
   const composerId = useId();
@@ -63,6 +67,7 @@ export function AskThreadDisclosure({
           currentReplyId={currentReplyId}
           embedded={embedded}
           markNewest={markNewest}
+          owner={owner}
           showComposer={false}
           thread={thread}
         />

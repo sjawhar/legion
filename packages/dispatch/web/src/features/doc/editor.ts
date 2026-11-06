@@ -47,24 +47,48 @@ export const editorAttributes = {
 // ProseMirror's `DOMSerializer`, `Plugin` and `PluginKey`, so a page that imported them to call
 // them after the editor existed would parse a quarter of a megabyte of the editor's library
 // before its first paint - which is the very thing this `import()` is here to prevent.
-export const createEditor: CreateEditor = async (root, options) => {
-  const [{ createProofEditor }, { installTypedBlocks }] = await importWhenOnline(() =>
+const editorModule = () =>
+  importWhenOnline(() =>
     Promise.all([
       import("@legion/proof-editor"),
       import("./ask-block"),
       import("@legion/proof-editor/style.css"),
     ])
   );
-  const handle = await createProofEditor(root, { ...options, drawMermaid: requestMermaidDrawing });
+
+/**
+ * Starts the editor chunk's download without building anything with it, for a host that knows an
+ * editor is coming before it has what to build one from: `ProofDocument` asks as the socket is
+ * admitted, so the chunk arrives while the whole Yjs document does, rather than after it
+ * (dispatch://INFRA-341, R11). A second call costs nothing - the module cache answers it - and a
+ * failure is the business of the `createEditor` that follows, which reports it where a reader
+ * sees it.
+ */
+export const loadEditor = (): void => {
+  void editorModule().catch(() => undefined);
+};
+
+/**
+ * The document's typed blocks go on the view before the build, not after the handle arrives:
+ * every `ask`, every host-rendered block and every picture gets its node view inside the batch
+ * that builds its block, where a `setProps` with a new `nodeViews` map over a built document
+ * re-runs ProseMirror's view update across every node of it - one task of 1,218 ms for the
+ * 406,319-character document on a phone at 4x CPU throttling (dispatch://INFRA-341, R11). The
+ * host's own `beforeBuild`, where it passes one, runs after them, over the same empty document.
+ */
+export const createEditor: CreateEditor = async (root, options) => {
+  const [{ createProofEditor }, { installTypedBlocks }] = await editorModule();
+  const handle = await createProofEditor(root, {
+    ...options,
+    beforeBuild: (view) => {
+      installTypedBlocks(view, options.blockSchema, options.onAskBlockHosts, options.watchPicture);
+      options.beforeBuild?.(view);
+    },
+    drawMermaid: requestMermaidDrawing,
+  });
   for (const [name, value] of Object.entries(editorAttributes)) {
     handle.view.dom.setAttribute(name, value);
   }
-  installTypedBlocks(
-    handle.view,
-    options.blockSchema,
-    options.onAskBlockHosts,
-    options.watchPicture
-  );
   return handle;
 };
 

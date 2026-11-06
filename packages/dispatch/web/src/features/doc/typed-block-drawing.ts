@@ -1,4 +1,4 @@
-import { parseBlockPointerValue } from "@legion/contracts";
+import { parseBlockPointerValue } from "@legion/contracts/dispatch-block-ref";
 import type { DOMOutputSpec, Node as ProseMirrorNode } from "prosemirror-model";
 
 import type { AskOption, AskUrgency, BlockTypeSchema } from "../../api/types";

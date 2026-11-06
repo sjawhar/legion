@@ -1,4 +1,5 @@
-import { actorActText } from "@legion/contracts";
+import { actorActText } from "@legion/contracts/actor-label";
+import { answerSelected } from "@legion/contracts/dispatch-constants";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
@@ -6,11 +7,12 @@ import type { Event } from "../../api/types";
 import { linkText, textMutedOnSurface, textPrimaryOnSurface } from "../../theme/classes";
 import { AskOptionList } from "../inbox/AskOptionList";
 import { eventDescription } from "../issue/event-description";
-import { AgentParts, AskResolutionLine } from "../refs/AgentName";
+import { AskResolutionLine } from "../refs/AgentName";
 import { askResolutionReason } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildIssuePath, buildReferencePath, itemRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
+import { LineParts } from "./ActivityLine";
 
 type AskEvent = Extract<Event, { type: "ask.opened" | "ask.answered" | "ask.resolved" }>;
 
@@ -38,7 +40,7 @@ function AskEventBody({
         {event.type === "ask.opened" ? "Ask opened:" : "Ask:"}
       </p>
       <MarkdownBody markdown={question} onRendered={onRendered} />
-      <AskOptionList options={options} selected={answer?.selected ?? []} />
+      <AskOptionList options={options} selected={answer === null ? [] : answerSelected(answer)} />
       <p className={`mt-2 text-xs ${textMutedOnSurface}`}>
         Opened <Timestamp at={created_at} />
       </p>
@@ -56,7 +58,7 @@ function AskEventBody({
             <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
               <s>
                 was:{" "}
-                {[(previous.selected ?? []).join(", "), previous.text ?? ""]
+                {[answerSelected(previous).join(", "), previous.text ?? ""]
                   .filter((part) => part !== "")
                   .join(" - ")}
               </s>
@@ -142,9 +144,11 @@ export function EventBody({
       </>
     );
   }
+  // A question the line quotes is Markdown its author wrote, so the margin shows it formatted
+  // and cut to the line, as the Activity tab's own line does.
   return (
     <p className={`font-medium ${textPrimaryOnSurface}`}>
-      <AgentParts parts={eventDescription(event)} />
+      <LineParts description={eventDescription(event)} />
     </p>
   );
 }

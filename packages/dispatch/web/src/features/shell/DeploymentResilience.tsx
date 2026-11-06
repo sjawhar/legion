@@ -10,6 +10,7 @@ import {
   primaryButtonHoverBg,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import { currentAddress, firstScreenAwaits } from "../doc/first-screen";
 import * as markdownEngine from "../refs/markdown-engine";
 
 // The tab's recovery reloads, as a JSON array of the epoch-millisecond times they started: a chunk
@@ -292,6 +293,18 @@ export function DeploymentResilience(): ReactNode {
   const lastVersionCheckAt = useRef(0);
 
   useEffect(() => {
+    // Not on a page the server drew a document into (`features/doc/first-screen.ts`). There
+    // the reader is already reading that document, and the page they are waiting for is the
+    // one that takes those blocks over: its surface, its socket and its editor. Building the
+    // engine first puts 461 KB of headless editor to compile and an engine to build - about a
+    // second and a half of the page's own thread on a phone at 4x CPU throttling - in front
+    // of that render, and buys the reader nothing, because the document's own preview loads
+    // the same engine as it mounts and is the only surface on the page that needs it
+    // (dispatch://INFRA-341, R11). So that page warms it, through the surface that uses it,
+    // and this holds off.
+    if (firstScreenAwaits(currentAddress(window.location.pathname))) {
+      return;
+    }
     const timer = window.setTimeout(() => {
       void markdownEngine.warmMarkdownRenderer().catch(() => undefined);
     }, 0);

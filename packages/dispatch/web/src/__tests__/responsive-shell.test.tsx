@@ -154,13 +154,15 @@ afterEach(() => {
 test("tablet uses the drawer and bottom-sheet controls instead of hidden desktop landmarks", async () => {
   renderShellAt(800);
 
-  await waitFor(() =>
-    expect(screen.queryByRole("button", { name: "Open navigation" })).not.toBeNull()
-  );
-  // The margin's own code is fetched after the first paint (`features/margin/MarginColumn.tsx`),
-  // so its control arrives on a later frame than the shell's.
-  await waitFor(() =>
-    expect(screen.queryByRole("button", { name: /Open review panel/ })).not.toBeNull()
+  // The margin's own code is fetched after the first paint
+  // (`features/margin/MarginColumn.tsx`), so both its controls arrive a module load after the
+  // shell's own first commit - longer than `waitFor`'s default second under a loaded machine.
+  await waitFor(
+    () => {
+      expect(screen.queryByRole("button", { name: "Open navigation" })).not.toBeNull();
+      expect(screen.queryByRole("button", { name: /Open review panel/ })).not.toBeNull();
+    },
+    { timeout: 5_000 }
   );
   expect(screen.queryByRole("navigation", { name: "Issues" })).toBeNull();
   expect(screen.queryByRole("complementary", { name: "Review margin" })).toBeNull();
@@ -169,12 +171,12 @@ test("tablet uses the drawer and bottom-sheet controls instead of hidden desktop
 test("desktop exposes the persistent sidebar navigation and review margin", async () => {
   renderShellAt(1280);
 
-  await waitFor(() =>
-    expect(screen.queryByRole("navigation", { name: "Navigation" })).not.toBeNull()
-  );
-  // As above: the margin lands once its chunk has.
-  await waitFor(() =>
-    expect(screen.queryByRole("complementary", { name: "Review margin" })).not.toBeNull()
+  await waitFor(
+    () => {
+      expect(screen.queryByRole("navigation", { name: "Navigation" })).not.toBeNull();
+      expect(screen.queryByRole("complementary", { name: "Review margin" })).not.toBeNull();
+    },
+    { timeout: 5_000 }
   );
   expect(screen.queryByRole("button", { name: "Open navigation" })).toBeNull();
   expect(screen.queryByRole("button", { name: /Open review panel/ })).toBeNull();

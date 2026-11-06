@@ -1,4 +1,4 @@
-import { itemFromSearch } from "@legion/contracts";
+import { itemFromSearch } from "@legion/contracts/dispatch-href";
 import { useQuery } from "@tanstack/react-query";
 import { useLocation } from "react-router-dom";
 

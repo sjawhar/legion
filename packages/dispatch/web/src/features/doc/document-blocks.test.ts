@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { splitBlocks } from "./document-blocks";
+import { leadingBlocks, splitBlocks } from "./document-blocks";
 
 test("a fenced code block holding a decision block as an example stays one code block", () => {
   const fenced = [
@@ -105,4 +105,39 @@ test("every kind of block is cut out, and the blocks re-join to the document", (
 test("a document with nothing in it has no blocks", () => {
   expect(splitBlocks("")).toEqual([]);
   expect(splitBlocks("\n\n")).toEqual([]);
+});
+
+test("the first blocks under the budget are what a document opens with, cut at a block boundary", () => {
+  const document = [
+    "# The lease ledger",
+    "",
+    "The first paragraph, which is the one a reader meets.",
+    "",
+    "The second paragraph, which is the one that does not fit.",
+    "",
+    "The third paragraph, which is further still.",
+    "",
+  ].join("\n");
+
+  expect(leadingBlocks(document, 80)).toBe(
+    "# The lease ledger\n\nThe first paragraph, which is the one a reader meets."
+  );
+});
+
+test("a document whose every block fits is its own first blocks, to the character", () => {
+  const document = "# The lease ledger\n\nOne short paragraph.\n";
+
+  expect(leadingBlocks(document, 2_000)).toBe(document);
+});
+
+test("the first block comes whole however long it is, and a fence inside it with it", () => {
+  const fenced = ["```markdown", "# Not a heading of its own", "", "- An item", "```"].join("\n");
+  const document = `${fenced}\n\nThe paragraph after it.\n`;
+
+  expect(leadingBlocks(document, 10)).toBe(fenced);
+});
+
+test("a document with nothing in it has nothing to open with", () => {
+  expect(leadingBlocks("", 2_000)).toBe("");
+  expect(leadingBlocks("\n\n", 2_000)).toBe("\n\n");
 });

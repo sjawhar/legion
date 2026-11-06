@@ -1,4 +1,4 @@
-import type { AgentStreamSettingsReported } from "@legion/contracts";
+import type { AgentStreamSettingsReported } from "@legion/contracts/agent-stream";
 import {
   type ChangeEvent,
   type KeyboardEvent,

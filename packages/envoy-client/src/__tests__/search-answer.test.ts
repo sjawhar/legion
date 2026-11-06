@@ -137,6 +137,24 @@ describe("searchAnswer: where an ask hit stands", () => {
     ]);
   });
 
+  // A server from before the server-side fix sends `selected: null` rather than an empty list;
+  // the hit reads as one with no option chosen, and still shows the answer's text.
+  test("an answered ask whose selected is null reads as none chosen and keeps its text", () => {
+    const lines = searchText(
+      askHit({
+        state: "answered",
+        answer: { user: "ada@example.com", selected: null, text: "The silvered one.", at: "t1" },
+      })
+    );
+
+    expect(lines).toEqual([
+      askHeader,
+      askLine,
+      "  Answered by ada@example.com at t1 · options chosen: none",
+      "  Answer text: The silvered one.",
+    ]);
+  });
+
   test("an answered ask lists its options and indents every later line of its text", () => {
     const lines = searchText(
       askHit({

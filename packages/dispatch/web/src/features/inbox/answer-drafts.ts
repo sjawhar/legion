@@ -11,6 +11,10 @@ import { createDraftStore } from "./draft-store";
  * their text under it - until they select another row (`pane-selection.ts`, `paneAsk`;
  * `AskCard.tsx`, `unsentAnswer`). An answer the server records drops the draft, since it is no
  * longer unsent.
+ *
+ * The draft is the text and the mentions picked in it (`draft-store.ts`), so a box that closes
+ * and opens again holds both. An answer cannot carry a mention, so the card refuses to send one
+ * rather than dropping it (`AskAnswerArea.tsx`).
  */
 const store = createDraftStore();
 

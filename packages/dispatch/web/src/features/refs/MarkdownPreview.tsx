@@ -322,6 +322,9 @@ export function MarkdownPreview({
   const { isFallback, isPending, portals } = useRenderedMarkdown(root, markdown, paintOneLine, {
     pictures: "inline",
     decorate,
+    // A preview shows a body, so raw HTML in one reads as the text it shows: an HTML comment
+    // draws as nothing and any other raw HTML as its own characters (`MarkdownBody`).
+    rawHtml: "text",
   });
   const title = useMarkdownHeadline(fullTitle ? markdown : undefined, Number.POSITIVE_INFINITY);
 

@@ -15,6 +15,7 @@ import { TextAskCard } from "./markdown-cards";
 import {
   type MarkdownEngine,
   parsesInTheWorker,
+  type RawHtml,
   renderWithEngine,
   type SoftBreaks,
 } from "./markdown-engine";
@@ -201,11 +202,44 @@ export interface RenderedMarkdownOptions {
   decorate?: DecorateMarkdown;
   /** Called after each render lands; none by default. */
   onRendered?: () => void;
-  /** The parse policy (`SoftBreaks`): `space`, the default, or `line`. */
+  /** The soft-break parse policy (`SoftBreaks`): `space`, the default, or `line`. */
   softBreaks?: SoftBreaks;
+  /** The raw-HTML parse policy (`RawHtml`): `refuse`, the default, which leaves a body holding
+   *  raw HTML to the literal-text fallback, or `text`, which every body renderer passes - an
+   *  HTML comment draws as nothing and any other raw HTML as its literal characters. */
+  rawHtml?: RawHtml;
   /** `paint`, a piece at a time (`PaintMarkdownInSlices`), for a body the parse worker parsed;
    *  without one such a body is painted in one go, as every other body is. */
   paintInSlices?: PaintMarkdownInSlices;
+  /** What the element holds while the parse worker still owes this source its formatting:
+   *  `"source"`, the default, the body's own literal text, which the reader reads meanwhile;
+   *  `"hold"` for a surface whose source is no text a reader would read, which keeps whatever
+   *  the element holds instead - a whole document, whose markdown is as long as the page it
+   *  draws, where the reader would meet 400,000 characters of syntax in one text node and the
+   *  page would lay every line of it out twice, and whose element may already hold the blocks
+   *  its own server drew (`features/doc/DocumentPreview.tsx`). */
+  whilePending?: "source" | "hold";
+  /** Whether this element draws nothing at all for now and keeps what it holds. A surface passes
+   *  it while what is on the screen is not this hook's to replace: the document preview holds the
+   *  blocks the server drew until the whole document has been parsed, and holds whatever it has
+   *  drawn from the task the editor's build begins in (`features/doc/DocumentPreview.tsx`). */
+  holding?: boolean;
+  /** Whether an answer to a source this element has moved on from is still worth painting, by
+   *  keeping the element's place on a parse the worker had already been posted when the render
+   *  was cancelled (`markdown-engine.ts`, `keepAPostedParse`). `true` by default, because the
+   *  streaming turn in the live view needs it: the frame the worker is holding is the newest
+   *  parse its reader can be shown before the stream pauses. A surface whose source does not
+   *  stream passes `false`, so an unmount leaves the queue nothing to build on the reader's
+   *  thread for a paint that would be thrown away and a cache place that would be taken
+   *  (`features/doc/DocumentPreview.tsx`). */
+  keepAPostedParse?: boolean;
+  /** Whether this element takes the worker's own answer or none at all, rather than a parse the
+   *  page makes on the reader's thread when the worker misses its deadline, crashes or cannot
+   *  be created (`markdown-engine.ts`, `theWorkerOrNothing`). `false` by default, because a
+   *  body must end formatted whatever became of the worker; the document preview passes `true`,
+   *  since its source is a whole document and it already has its first screenful drawn with the
+   *  editor arriving behind it. */
+  theWorkerOrNothing?: boolean;
 }
 
 /** Every anchor a paint leaves for a portal: the reference anchors the link pass found, as
@@ -346,7 +380,9 @@ function keepTheReadersPlace(element: HTMLElement): ReadersPlace {
  * A body longer than `markdownWorkerThreshold` is parsed off the page's own thread
  * (`markdown-engine.ts`), so it lands a frame or more after the commit that rendered it. Until
  * it does, `isPending` is set and the element holds the body's own literal text - selectable,
- * under nothing - unless it already holds a paint of an earlier source, which it keeps instead,
+ * under nothing - or whatever it already holds where the surface asked for that
+ * (`whilePending: "hold"`: nothing, or the blocks its own server drew), unless
+ * it already holds a paint of an earlier source, which it keeps instead,
  * so a streaming turn never flips back to its source between frames. Every paint, the pending
  * one included, recomputes the ask hosts, the reference anchors and the picture anchors in the
  * same callback, so no portal is left pointing into a page that has been replaced; a kept paint
@@ -400,9 +436,14 @@ export function useRenderedMarkdown(
   {
     pictures = "block",
     decorate,
+    keepAPostedParse = true,
     onRendered,
     paintInSlices,
+    rawHtml = "refuse",
     softBreaks = "space",
+    holding = false,
+    theWorkerOrNothing = false,
+    whilePending = "source",
   }: RenderedMarkdownOptions = {}
 ): RenderedMarkdown {
   const onRenderedRef = useRef(onRendered);
@@ -451,6 +492,11 @@ export function useRenderedMarkdown(
     if (element === null) {
       throw new Error("The Markdown element is unavailable.");
     }
+    // A held element draws nothing: what is in front of the reader is the surface's own, and
+    // this hook neither replaces it nor asks for a parse it would replace it with.
+    if (holding) {
+      return;
+    }
     setIsFallback(false);
     renders.current += 1;
     const render = renders.current;
@@ -460,6 +506,7 @@ export function useRenderedMarkdown(
     const cancelRender = renderWithEngine(
       markdown,
       softBreaks,
+      rawHtml,
       ({ engine, openMermaidFence, parsed, pending }) => {
         // Nothing of an answer reaches an element that has gone, or one a newer frame has
         // already painted: those are the two ways a kept answer stops being worth having.
@@ -475,6 +522,12 @@ export function useRenderedMarkdown(
             // tasks is one of those: nothing but the paint that replaces it, or the unmount,
             // stops it, so this source's text written here would stand in front of the batches
             // that paint goes on attaching (sjawhar/legion#2519).
+            return;
+          }
+          // A surface whose source reads as nothing until it is formatted keeps whatever its
+          // element holds meanwhile (`whilePending`) - nothing, or the blocks its own server
+          // drew; every other one holds the body's own text.
+          if (whilePending === "hold") {
             return;
           }
           element.replaceChildren(document.createTextNode(markdown));
@@ -527,7 +580,7 @@ export function useRenderedMarkdown(
               element,
               parsed,
               markdown,
-              (source) => engine.parse(source, softBreaks),
+              (source) => engine.parse(source, softBreaks, rawHtml),
               openMermaidFence
             );
           }
@@ -602,13 +655,28 @@ export function useRenderedMarkdown(
           painting.current = stop;
         }
       },
-      // The frame the worker is holding is the newest parse a streaming turn can be shown
-      // before it pauses, so this element is still given that answer after it has asked for a
-      // newer frame (`markdown-engine.ts`).
-      { keepAPostedParse: true }
+      // What this surface wants of a parse it has moved on from, and of one the worker never
+      // answers: both are the surface's own call (`RenderedMarkdownOptions`), and the defaults
+      // are the live view's - the frame the worker is holding is the newest parse a streaming
+      // turn can be shown before it pauses, and every other body must end formatted whatever
+      // became of the worker.
+      { keepAPostedParse, theWorkerOrNothing }
     );
     return cancelRender;
-  }, [Card, decorate, markdown, paint, paintInSlices, root, softBreaks]);
+  }, [
+    Card,
+    decorate,
+    holding,
+    keepAPostedParse,
+    markdown,
+    paint,
+    paintInSlices,
+    rawHtml,
+    root,
+    softBreaks,
+    theWorkerOrNothing,
+    whilePending,
+  ]);
 
   return {
     isFallback,

@@ -28,7 +28,8 @@ import { ThreadCard } from "../margin/ThreadCard";
 import type { Thread } from "../margin/useMarginItems";
 import { SearchPalette } from "../search/SearchPalette";
 import { KeymapProvider } from "../shell/KeymapProvider";
-import { closeRefPreview, RefPreviewHost, referenceTriggerProps } from "./RefPreview";
+import { RefPreviewHost } from "./RefPreview";
+import { closeRefPreview, referenceTriggerProps } from "./ref-preview-state";
 import { REF_PREVIEW_OPEN_DELAY_MS } from "./ref-preview-timing";
 import { Unfurl } from "./Unfurl";
 
@@ -107,6 +108,8 @@ function Transcript({ messages }: { messages: KeyedMessage[] }): ReactNode {
         contentIds={messages.map((message) => turnKey(message.metadata?.custom ?? {}, message.id))}
         empty="Nothing yet."
         held={false}
+        modes={["steer"]}
+        onPickMode={() => {}}
         ownSendCount={0}
         placeholder="Message the session…"
         replayCount={0}

@@ -9,6 +9,8 @@
     "build:web": "vite build --config web/vite.config.ts",
     "check:classes": "bun web/src/theme/classes-in-build-css.ts",
     "check:asset-sizes": "bun web/src/asset-sizes-in-build.ts",
+    "check:entry-chunk": "bun web/src/entry-chunk-contents.ts",
+    "check:no-zod": "bun web/src/zod-in-entry-chunk.ts",
     "test": "bun test --parallel web/src e2e/__tests__",
     "dispatch:local": "bun e2e/local-instance.ts",
     "e2e": "bun run build:web && bun e2e/run.ts -- playwright test --config e2e/playwright.config.ts",
@@ -65,7 +67,7 @@
     "react-router-dom": "^6",
     "remark-frontmatter": "^5.0.0",
     "tailwindcss": "^4.3.3",
-    "y-prosemirror": "^1.3.7",
+    "y-prosemirror": "1.3.7",
     "y-protocols": "^1.0.6",
     "yjs": "^13.6.32"
   }

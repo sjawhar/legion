@@ -1,4 +1,4 @@
-import { PROJECT_NAME_MAX } from "@legion/contracts";
+import { PROJECT_NAME_MAX } from "@legion/contracts/dispatch-constants";
 import type { Mutation } from "@tanstack/react-query";
 import { useMutationState, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";

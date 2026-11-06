@@ -1,8 +1,32 @@
-// The init-script and worker helpers `e2e/mermaid.e2e.ts`'s rows share: the wrappers that record,
-// hold, refuse or fail the page's `Worker`, the two scroll helpers (one turns the browser's scroll
-// anchoring off, one reads the offset once it settles), and the route that makes the real worker
-// chunk hold a diagram's source.
-import { expect, type Page } from "@playwright/test";
+// The helpers the rows that draw diagrams share: the wrappers that record, hold, refuse or fail
+// the page's `Worker`, the two scroll helpers (one turns the browser's scroll anchoring off, one
+// reads the offset once it settles), the route that makes the real worker chunk hold a diagram's
+// source, and the way a comment thread is opened so its bodies render in full.
+import { expect, type Locator, type Page, type TestInfo } from "@playwright/test";
+
+/** The comment thread `rootId` opened in the Conversation, where its bodies render in full rather
+ *  than as the collapsed card's preview: the turn itself on a desktop, the full-screen Thread
+ *  view on a phone. The turn shows `lead`, the root comment's first text, before it is expanded,
+ *  so the click lands on a turn that has rendered. */
+export async function openCommentThread(
+  page: Page,
+  testInfo: TestInfo,
+  rootId: string,
+  lead: string
+): Promise<Locator> {
+  const turn = page
+    .getByRole("list", { name: "Conversation turns" })
+    .locator(`:scope > li[data-turn="comment:${rootId}"]`);
+  await expect(turn).toContainText(lead);
+  await turn.getByRole("button", { exact: true, name: "Expand thread" }).click();
+  if (testInfo.project.name === "iphone") {
+    const thread = page.getByRole("dialog", { name: "Thread" });
+    await expect(thread).toBeVisible();
+    return thread.locator(`li[data-turn="comment:${rootId}"]`);
+  }
+  await expect(turn.getByRole("button", { exact: true, name: "Collapse thread" })).toBeVisible();
+  return turn;
+}
 
 // What this file's init scripts keep on the page's window.
 declare global {

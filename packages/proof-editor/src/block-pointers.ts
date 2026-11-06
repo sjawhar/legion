@@ -16,7 +16,7 @@ import {
   blockPointerValueProblem,
   parseBlockPointerValue,
   parseCanonicalBlockReference,
-} from "@legion/contracts";
+} from "@legion/contracts/dispatch-block-ref";
 import type { Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
 import type { BlockTypeSchema } from "./block-schema";
 import { blockIdOf } from "./editor/schema/block-ids";
