@@ -178,6 +178,7 @@ func (r *natsCut) Restore() {
 // and the GitHub it fetches each merged pull request from, which counts the fetches by number.
 type intakeProcess struct {
 	client *bus.Client
+	intake *Intake
 	leases *cuttableLeases
 	stop   func()
 	// release lets every fetch its GitHub holds answer.
@@ -192,6 +193,22 @@ func (p *intakeProcess) fetches(number int) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.fetched[number]
+}
+
+// keyedRunnerStopped reports whether this process's intake has stopped the keyed runner of the
+// delivery it is subscribed with. That is the point of its stop at which the messages queued
+// behind a handler still running have been handed back and the runner takes no further one: a
+// handler that returns after it starts nothing else.
+func (p *intakeProcess) keyedRunnerStopped() bool {
+	p.intake.mu.Lock()
+	delivering := p.intake.delivering
+	p.intake.mu.Unlock()
+	if delivering == nil {
+		return false
+	}
+	delivering.keys.mu.Lock()
+	defer delivering.keys.mu.Unlock()
+	return delivering.keys.stopped
 }
 
 // startIntakeProcess runs a delivery intake as a process of its own on pool's database (a pool of
@@ -235,6 +252,7 @@ func startIntakeProcess(t *testing.T, pool *store.Pool, natsURL string, block fu
 	t.Cleanup(process.release)
 
 	intake := newIntake(client, second.Pool, process.leases, github, events.NewBroker(), loadedSettingsCache(t, t.Context(), second.Pool))
+	process.intake = intake
 	runCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -314,7 +332,15 @@ func TestAGracefulStopHandsTheBufferedMessagesToTheStandby(t *testing.T) {
 
 	stopped := time.Now()
 	go holder.stop()
-	// The message in the holder's handler finishes as the stop begins.
+	// The stop hands the four queued messages back as it stops the keyed runner, and only then
+	// waits for the handler holding the fifth. Released before that, the handler would return
+	// while the runner still ran, and the runner would hand it the next queued message of the
+	// same key rather than leaving it to the standby. The wait for the handler cannot return
+	// while that fetch is held, so waiting for the runner here cannot deadlock.
+	waitFor(t, 20*time.Second, holder.keyedRunnerStopped, func() string {
+		return "the stopping holder has not stopped its keyed runner: " + consumerState(publisher)
+	})
+	// The message in the holder's handler finishes as the stop waits for it.
 	holder.release()
 
 	waitFor(t, 10*time.Second, func() bool { return standby.fetches(inFlight) == queued }, func() string {
