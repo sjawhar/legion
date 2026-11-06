@@ -137,11 +137,12 @@ func claimViews(t *testing.T, body []byte) []map[string]any {
 // tool call of a worker the update round is still serving (read_record, handoff_complete). The
 // route authenticates nobody, so it knows that plugin by the pod the request came from: a pod
 // whose claims record a contract below supervise.PodUpdateContract is served claim views with
-// only the keys contract 45 knows, and the rest of the body as it is — the wakes the pacing holds
-// among the keys it is served without, since such a pod is below wakesWaitingContract too. A pod
-// at this contract, and a caller in no pod — the operator's `legion state`, whose open-rounds
-// line reads both fields and whose queue line reads those wakes — are served everything; a pod
-// whose claims cannot be read is served the body every reader since 45 takes.
+// only the keys contract 45 knows, and the rest of the body as it is — the trees and the wakes
+// the pacing holds among the keys it is served without, since such a pod is below treeContract
+// and wakesWaitingContract too. A pod at this contract, and a caller in no pod — the operator's
+// `legion state`, whose open-rounds line reads both fields and whose queue line reads those
+// wakes — are served everything; a pod whose claims cannot be read is served the body every
+// reader since 45 takes.
 func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 	full := stateFrom(t, populatedState(t), "192.0.2.1:41000", podClaims(supervise.PodUpdateContract-1))
 	if !strings.Contains(string(full), `"updateRound"`) || !strings.Contains(string(full), `"updateHead"`) || !wakesServed(t, full) {
@@ -183,8 +184,10 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 			}
 			// Nothing else of the body differs: it is the full state with the two claim keys gone,
 			// with the three memory keys gone too, since a pod below this contract's own reader
-			// refuses those as well (memory_test.go holds that half), and with `wakesWaiting`
-			// emptied, the key being on the wire whoever asks (withoutWakesWaiting).
+			// refuses those as well (memory_test.go holds that half), with contract 51's two tree
+			// keys — `admission.trees` and each issue's `tree` — gone (tree_test.go holds that
+			// half), and with `wakesWaiting` emptied, the key being on the wire whoever asks
+			// (withoutWakesWaiting).
 			var want, got map[string]any
 			if err := json.Unmarshal(full, &want); err != nil {
 				t.Fatal(err)
@@ -192,6 +195,7 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 			if !tc.wakes {
 				want["wakesWaiting"] = []any{}
 			}
+			delete(want["admission"].(map[string]any), "trees")
 			for _, issue := range want["issues"].(map[string]any) {
 				issue := issue.(map[string]any)
 				views := []any{issue["architect"]}
@@ -207,6 +211,7 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 				delete(issue, "memoryGroup")
 				delete(issue, "memoryDrawMode")
 				delete(issue, "memoryDrawnAt")
+				delete(issue, "tree")
 			}
 			if err := json.Unmarshal(body, &got); err != nil {
 				t.Fatal(err)

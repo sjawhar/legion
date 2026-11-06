@@ -22,7 +22,7 @@ import (
 // contract. What it cannot take past the constant is a plugin an install never reaches — a
 // Claude Code role's in a pod, which is its image's own — and that claim needs none: a new
 // image carries it, and the round over its pod is what brings the new image in, with no operator
-// and no drain. A Claude Code pane is not that claim: its plugin is the built checkout
+// and no drain. A Claude Code pane is not that claim: its plugin is the built tree
 // LEGION_CLAUDE_PLUGIN_DIR names, which a relaunch brings it up on like any other pane's
 // (internal/daemon's noPluginInstall).
 //

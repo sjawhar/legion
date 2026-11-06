@@ -1633,7 +1633,7 @@ describe("Legion OMP extension", () => {
           firstBootAt: "2026-09-18T14:03:27Z",
           startedAt: "2026-09-22T09:15:02Z",
         },
-        admission: { cap: 1, active: ["REPO-42"], waiting: [], blocked: [] },
+        admission: { cap: 1, active: ["REPO-42"], waiting: [], trees: ["REPO-42"], blocked: [] },
         issues: {
           "REPO-43": {
             key: "REPO-43",

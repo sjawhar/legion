@@ -12,8 +12,9 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
-// awaitRootView is a slotted admitted root whose architect handed a question back at 5, with its
-// architect's claim working and its task taken: the view decideAwait would enter on.
+// awaitRootView is an admitted root holding its admission slot whose architect handed a question
+// back at 5, with its architect's claim working and its task taken: the view decideAwait would
+// enter on.
 func awaitRootView() awaitView {
 	root := askRoot()
 	root.DeclaredSeq, root.DeclaredAt = 5, time.Date(2026, 9, 22, 23, 0, 0, 0, time.UTC)
@@ -38,7 +39,6 @@ func TestDecideAwaitsTable(t *testing.T) {
 		why  string
 	}{
 		{"a root in a phase of its own", func(v *awaitView) { v.Root.Phase = phase.Planning }, actStay, "not an admitted root"},
-		{"a root holding no slot", func(v *awaitView) { v.Slotted = false }, actStay, "not an admitted root"},
 		{"a root that left the workflow", func(v *awaitView) { v.Root.Status = "backlog" }, actStay, "not an admitted root"},
 		{"a child", func(v *awaitView) { v.Root.Tree = "LEGION-1" }, actStay, "not an admitted root"},
 		{"an architect that handed nothing back", func(v *awaitView) { v.Root.DeclaredSeq = 0 }, actStay, "handed nothing"},
@@ -263,9 +263,8 @@ func TestTheResumeTaskNamesEveryItemStillWithThePerson(t *testing.T) {
 // take the resume task that says the gate is open as that wake: the skill's release rule, the
 // design gate reference, the wake routing table and the root architect's prompt each name the
 // resume's phrase. The claude-envoy plugin's copies under packages/claude-envoy/legion/ are
-// generated from these three skill files on main by the Rebuild Claude Envoy plugin workflow, so a
-// pull request's tree holds main's copies and they are not read here. (Round 2, adversarial P2-1
-// and outside-whole P2-1.)
+// generated from these three skill files, and nothing commits that tree, so a pull request has no
+// copies to read here. (Round 2, adversarial P2-1 and outside-whole P2-1.)
 func TestTheArchitectsInstructionsTakeTheResumeAsTheDesignApprovedWake(t *testing.T) {
 	root := filepath.Join("..", "..", "..", "..")
 	for _, file := range []string{

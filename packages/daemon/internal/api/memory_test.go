@@ -16,9 +16,9 @@ var memoryDrawnAt = time.Date(2026, 9, 20, 11, 4, 5, 0, time.UTC)
 
 // The state the fixture builds carries one drawn tree (populatedState): the root LEGION-208 and
 // LEGION-209, a child of it, both showing the root's draw as internal/projection fills them,
-// beside the issues no draw has reached. Its claim views carry the pod's update round and it
-// carries the wakes the pacing holds, so one state proves all three downgrades and that they
-// compose.
+// beside the issues no draw has reached. Its claim views carry the pod's update round, its
+// admission block names the live trees and it carries the wakes the pacing holds, so one state
+// proves all four downgrades and that they compose.
 
 // issueViews is every issue of a state body, decoded as the plugin's reader sees it, by key.
 func issueViews(t *testing.T, body []byte) map[string]map[string]any {
@@ -75,11 +75,12 @@ var contract46Issue = []string{
 
 // The route authenticates nobody, so it knows a plugin by the pod the request came from: a pod
 // whose claims record a contract below memoryContract is served issues with only the keys
-// the last strict reader before it knows, and the rest of the body as it is. The three downgrades
-// compose: a pod at 46 to 48 is served the update rounds it reads and neither the memory draws nor
-// the wakes the pacing holds, a pod below 46 none of the three, and a pod at this contract, a pod
-// whose claims record none and a caller in no pod — the operator's `legion state`, whose memory
-// line reads the draws and whose queue line reads the wakes — are served all of them.
+// the last strict reader before it knows, and the rest of the body as it is. The four downgrades
+// compose: a pod at 46 to 48 is served the update rounds it reads and neither the memory draws,
+// the trees nor the wakes the pacing holds, a pod below 46 none of the four, and a pod at this
+// contract, a pod whose claims record none and a caller in no pod — the operator's `legion
+// state`, whose memory line reads the draws and whose queue line reads the wakes — are served all
+// of them.
 func TestTheStateRouteServesAPodItsPluginContractsIssues(t *testing.T) {
 	full := stateFrom(t, populatedState(t), "192.0.2.1:41000", podClaims(memoryContract-1))
 	if !strings.Contains(string(full), `"memoryGroup"`) || !strings.Contains(string(full), `"updateRound"`) || !wakesServed(t, full) {
@@ -95,7 +96,7 @@ func TestTheStateRouteServesAPodItsPluginContractsIssues(t *testing.T) {
 		wakes  bool
 	}{
 		{name: "a pod whose plugin is a contract behind", remote: statePodAddr + ":41000", sup: podClaims(memoryContract - 1), rounds: true},
-		{name: "a pod below PodUpdateContract, below all three", remote: statePodAddr + ":41000", sup: podClaims(supervise.PodUpdateContract - 1)},
+		{name: "a pod below PodUpdateContract, below all four", remote: statePodAddr + ":41000", sup: podClaims(supervise.PodUpdateContract - 1)},
 		{name: "the same pod asking over IPv6", remote: "[::ffff:" + statePodAddr + "]:41000", sup: podClaims(memoryContract - 1), rounds: true},
 		{name: "a pod at this contract", remote: statePodAddr + ":41000", sup: podClaims(DaemonAPIVersion), memory: true, rounds: true, wakes: true},
 		{name: "a pod whose claims record no contract", remote: statePodAddr + ":41000", sup: podClaims(0), memory: true, rounds: true, wakes: true},
@@ -138,12 +139,19 @@ func TestTheStateRouteServesAPodItsPluginContractsIssues(t *testing.T) {
 			if !tc.wakes {
 				want["wakesWaiting"] = []any{}
 			}
+			// A pod below memoryContract is below treeContract too, so the body it is served
+			// also lacks `admission.trees` and the issues' `tree`, the two keys contract 51
+			// added (api's withoutTrees): they come off the baseline with the memory group.
+			if !tc.memory {
+				delete(want["admission"].(map[string]any), "trees")
+			}
 			for _, issue := range want["issues"].(map[string]any) {
 				issue := issue.(map[string]any)
 				if !tc.memory {
 					delete(issue, "memoryGroup")
 					delete(issue, "memoryDrawMode")
 					delete(issue, "memoryDrawnAt")
+					delete(issue, "tree")
 				}
 				if tc.rounds {
 					continue
