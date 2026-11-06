@@ -68,10 +68,13 @@ const (
 	tick = 10 * time.Millisecond
 )
 
-// burstSizes and strategies are the cells of the concurrency table.
+// burstSizes are the cells of the concurrency table. There is one strategy, file_copy: the
+// repository requires it of every database a Go file creates (internal/testpg's check), and the
+// wal_log arm this measurement once carried has answered its question - on a non-durable server
+// file_copy amortised to 139-141 ms a clone against wal_log's 208-214, both CPU-bound
+// (dispatch://INFRA-1075).
 var (
 	burstSizes = []int{8, 24}
-	strategies = []string{"file_copy", "wal_log"}
 )
 
 // cpuReading is the CPU this process and this machine have burned so far.
@@ -288,8 +291,14 @@ func (m *measure) try(statement string) error {
 	return nil
 }
 
-func cloneOf(name, template, strategy string) string {
-	return "create database " + name + " template " + template + " strategy " + strategy
+// cloneOf opens a clone of template as name. The strategy is `strategy file_copy` and nothing
+// else: internal/testpg's check reads every Go file of the module for a creation without that
+// clause, and the wal_log arm this measurement once ran against it is answered - on a
+// non-durable server file_copy amortised to 139-141 ms a clone where wal_log took 208-214, both
+// CPU-bound, so the cheaper strategy is the one the repository already requires
+// (dispatch://INFRA-1075).
+func cloneOf(name, template string) string {
+	return "create database " + name + " template " + template + " strategy file_copy"
 }
 
 func dropOf(name string) string {
@@ -611,7 +620,7 @@ func (m *measure) floorRun(t *testing.T, label string, parts *floorParts) {
 		// Registered first, so it runs last: the end of the test's own cleanups.
 		t.Cleanup(func() { cleanupEnd = time.Now(); cleanupCPU = readCPU().since(cleanupCPU) })
 		parts.time("clone (create database … template … strategy file_copy)", true, func() {
-			m.exec(t, cloneOf(name, m.template, "file_copy"))
+			m.exec(t, cloneOf(name, m.template))
 		})
 		parts.time("open the pool (store.Open: pgxpool + one Ping)", true, func() {
 			var err error
@@ -715,7 +724,7 @@ func (m *measure) concurrencyTables(t *testing.T) {
 		"active with no wait event, from pg_stat_activity sampled every " + sampleInterval.String() + ": a backend " +
 		"counted there is running or waiting for a core, so it is not core-seconds."
 	clones := &table{
-		title:   "(b) `create database … template … strategy …`, concurrent",
+		title:   "(b) the clone, concurrent",
 		caption: caption,
 		head:    append([]string{"strategy", "at once", "clones"}, columns...),
 	}
@@ -734,24 +743,22 @@ func (m *measure) concurrencyTables(t *testing.T) {
 			secs(c.cpu.self), secs(c.cpu.machine), fmt.Sprintf("%.0f", 100*busy), secs(c.onCPU),
 			limitOf(c.seen, c.backend, busy), top(c.seen, c.backend, 3))
 	}
-	for _, strategy := range strategies {
-		for _, size := range burstSizes {
-			var cloneCell, dropCell cell
-			for range burstRounds {
-				names := make([]string, size)
-				for i := range names {
-					names[i] = m.name("burst")
-				}
-				cloneCell.merge(m.burst(t, "create database "+measurePrefix+"%", size, func(i int) error {
-					return m.try(cloneOf(names[i], m.template, strategy))
-				}))
-				dropCell.merge(m.burst(t, "drop database "+measurePrefix+"%", size, func(i int) error {
-					return m.try(dropOf(names[i]))
-				}))
+	for _, size := range burstSizes {
+		var cloneCell, dropCell cell
+		for range burstRounds {
+			names := make([]string, size)
+			for i := range names {
+				names[i] = m.name("burst")
 			}
-			row(clones, strategy, size, cloneCell)
-			row(drops, strategy, size, dropCell)
+			cloneCell.merge(m.burst(t, "create"+" database "+measurePrefix+"%", size, func(i int) error {
+				return m.try(cloneOf(names[i], m.template))
+			}))
+			dropCell.merge(m.burst(t, "drop database "+measurePrefix+"%", size, func(i int) error {
+				return m.try(dropOf(names[i]))
+			}))
 		}
+		row(clones, "file_copy", size, cloneCell)
+		row(drops, "file_copy", size, dropCell)
 	}
 	clones.print()
 	drops.print()
@@ -776,7 +783,7 @@ func (m *measure) dropPathTable(t *testing.T) {
 			"the body is a stand-in, so what the two rows compare is the drop. `databases standing` counts this "+
 			"simulation's databases alive at once, sampled every 10 ms: with the drop waited for, that is about one per "+
 			"worker; with it in the background, it is one per worker plus the drops still running. A database does not "+
-			"exist until its `create database` commits, so a worker holds one only for the part of its cycle after the "+
+			"exist until its creation commits, so a worker holds one only for the part of its cycle after the "+
 			"clone: that is why the mean is far below the number of workers.", simTests, apiTestParallelism),
 		head: []string{"where the drop runs", "tests", "at once", "last test ended (s)", "every drop done (s)",
 			"mean test wall (ms)", "client CPU (core-s)", "host CPU (core-s)", "peak databases standing", "mean databases standing"},
@@ -846,7 +853,7 @@ func (m *measure) simulate(t *testing.T, background bool) simulation {
 			for range jobs {
 				name := fmt.Sprintf("%s%s_%s_%d", measurePrefix, kind, m.suffix, m.next.Add(1))
 				testStart := time.Now()
-				if _, err := m.admin.Exec(ctx, cloneOf(name, m.template, "file_copy")); err != nil {
+				if _, err := m.admin.Exec(ctx, cloneOf(name, m.template)); err != nil {
 					t.Errorf("clone %s: %v", name, err)
 					return
 				}
