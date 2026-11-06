@@ -170,4 +170,10 @@ require (
 // room is that room's replica cloned (warmFork, forkPoint). Server.OnPeerUpdate, upstream ygo
 // #304, is in upstream v1.55.0; the document service sets it to weigh each browser's update
 // (weighPeerUpdate).
-replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.55.1-sami.1
+// v1.55.1-sami.6 adds what this branch's memory work is built on: Doc.StructCount, the per-apply
+// ApplyBudget (Decoded, Structs, Bytes) with its rollback, WithAllowedRoots as a containment rule
+// over everything an apply adds or deletes, RefusedUpdateError's counts, ParseUpdateMeta and
+// ErrPendingCap, which together replaced 899 lines of update decoder in this package
+// (dispatch://INFRA-179). It also brings sami.2's and sami.3's breaking changes with it:
+// Content.Len answers uint64 and Content.Splice takes one.
+replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.55.1-sami.6
