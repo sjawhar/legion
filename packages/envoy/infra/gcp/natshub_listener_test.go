@@ -11,6 +11,14 @@ import (
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
+// The three values of a hub listener's broker check: the secrets broker, the audience of the
+// VM's own Google identity token, and the origin a client reaches this listener at.
+const (
+	brokerURL      = "https://example-broker.internal.example"
+	brokerAudience = "example-broker-audience"
+	listenerOrigin = "http://example-hub.example-tailnet.ts.net:9020"
+)
+
 // A hub without a listener registers no grant on a seed secret, and its group waits for the key's
 // grant alone.
 func TestNatsHubWithoutAListenerGrantsNoSeedSecret(t *testing.T) {
@@ -145,12 +153,57 @@ func TestNatsHubResolverRefusesInvalidListenerAndSessionUserInputs(t *testing.T)
 			edit: func(a *gcp.NatsHubArgs) { a.SessionUser.NKey = keyListener },
 			err:  []string{`sessionUser "example-sessions"`, `nkey repeats listener "example-hub"`},
 		},
+		// The listener reads its broker check as one all-or-nothing set and refuses a partial
+		// one when it boots, which the group would answer by recreating a VM that cannot
+		// start, so the hub refuses it while Pulumi previews, naming the input left out and
+		// the one that asks for it.
+		{
+			name: "a broker URL without an audience or an origin",
+			edit: func(a *gcp.NatsHubArgs) { a.Listener.AgentSecretsUrl = brokerURL },
+			err:  []string{"listener.agentSecretsAudience is required when listener.agentSecretsUrl is set"},
+		},
+		{
+			name: "a broker URL and an audience without an origin",
+			edit: func(a *gcp.NatsHubArgs) {
+				a.Listener.AgentSecretsUrl, a.Listener.AgentSecretsAudience = brokerURL, brokerAudience
+			},
+			err: []string{"listener.publicUrl is required when listener.agentSecretsUrl is set"},
+		},
+		{
+			name: "an audience with no broker to present it to",
+			edit: func(a *gcp.NatsHubArgs) { a.Listener.AgentSecretsAudience = brokerAudience },
+			err:  []string{"listener.agentSecretsUrl is required when listener.agentSecretsAudience is set"},
+		},
+		{
+			name: "an origin with no broker",
+			edit: func(a *gcp.NatsHubArgs) { a.Listener.PublicUrl = listenerOrigin },
+			err:  []string{"listener.agentSecretsUrl is required when listener.publicUrl is set"},
+		},
+		// Each is rendered as one KEY=value argument of the listener's docker run command,
+		// which a space would split, and the listener trims what it reads, so a value that is
+		// whitespace alone is no value there.
+		{
+			name: "a broker URL carrying a space",
+			edit: func(a *gcp.NatsHubArgs) {
+				a.Listener.AgentSecretsUrl = brokerURL + " --privileged"
+				a.Listener.AgentSecretsAudience, a.Listener.PublicUrl = brokerAudience, listenerOrigin
+			},
+			err: []string{"listener.agentSecretsUrl holds whitespace or a control character", "ENVOY_AGENT_SECRETS_URL"},
+		},
+		{
+			name: "an origin carrying a line break",
+			edit: func(a *gcp.NatsHubArgs) {
+				a.Listener.AgentSecretsUrl, a.Listener.AgentSecretsAudience = brokerURL, brokerAudience
+				a.Listener.PublicUrl = listenerOrigin + "\nENVEOF"
+			},
+			err: []string{"listener.publicUrl holds whitespace or a control character", "ENVOY_PUBLIC_URL"},
+		},
 	})
 }
 
-// A seed in the listener's image or seed secret, which the user data holds, is refused naming the
-// input by its path, never the value, as TestNatsHubRefusesASeedInAnyPlainInput refuses one in the
-// hub's other plain inputs.
+// A seed in the listener's image, seed secret or broker check, each of which the user data
+// holds, is refused naming the input by its path, never the value, as
+// TestNatsHubRefusesASeedInAnyPlainInput refuses one in the hub's other plain inputs.
 func TestNatsHubRefusesASeedInTheListenersInputs(t *testing.T) {
 	seed, _ := testnats.User(t)
 	lower := strings.ToLower(seed)
@@ -162,6 +215,18 @@ func TestNatsHubRefusesASeedInTheListenersInputs(t *testing.T) {
 		{"a seed as the listener's seed secret", "listener.seedSecret", func(a *gcp.NatsHubArgs) { a.Listener.SeedSecret = seed }},
 		{"a listener seed secret split by a hyphen", "listener.seedSecret", func(a *gcp.NatsHubArgs) {
 			a.Listener.SeedSecret = splitSeed(lower, "-")
+		}},
+		{"a seed as the listener's broker URL", "listener.agentSecretsUrl", func(a *gcp.NatsHubArgs) {
+			a.Listener.AgentSecretsUrl = "https://" + strings.ToLower(seed) + ".internal.example"
+			a.Listener.AgentSecretsAudience, a.Listener.PublicUrl = brokerAudience, listenerOrigin
+		}},
+		{"a seed as the listener's broker audience", "listener.agentSecretsAudience", func(a *gcp.NatsHubArgs) {
+			a.Listener.AgentSecretsUrl, a.Listener.PublicUrl = brokerURL, listenerOrigin
+			a.Listener.AgentSecretsAudience = seed
+		}},
+		{"a seed in the listener's own origin, split by a hyphen", "listener.publicUrl", func(a *gcp.NatsHubArgs) {
+			a.Listener.AgentSecretsUrl, a.Listener.AgentSecretsAudience = brokerURL, brokerAudience
+			a.Listener.PublicUrl = "http://" + splitSeed(lower, "-") + ".example-tailnet.ts.net:9020"
 		}},
 	})
 }
