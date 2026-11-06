@@ -1,0 +1,9 @@
+kind: Fixed
+body: |
+  A migration collision is refused with the remedy the set that refused it takes: the next number
+  for a set numbered 1 to N, such as the broker's, and a 14-digit UTC timestamp for a set whose
+  numbered series has closed, such as Dispatch's and the daemon's. The message told every caller
+  to use a timestamp, which the broker's own guard then rejected.
+time: 2026-11-05T16:03:00.000000000Z
+custom:
+  Issue: pr2807

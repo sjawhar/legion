@@ -13,6 +13,16 @@
 // approver's, or anyone's for a record whose approver is record.AnyoneApprover. Every release of a
 // grant it produced re-verifies the whole chain — record hash, requester signature, one approval
 // by a login the record allows — so a row written by anyone but the broker releases nothing.
+//
+// One column of a request row is not frozen: its enrollment_id, and the same holds for a grant's
+// and a withheld name's. A session that enrols on a box it has not run on before takes what the
+// enrollment it is moving off holds — its grants, its requests and the names its operator withheld
+// from it — because an approval a person gives hours later, and the grant that comes of it, belong
+// to the session rather than to the box that asked (enroll.Create's adoption,
+// dispatch://INFRA-1167). So every read and every transition here is keyed by the enrollment the
+// row itself names now, never by the one the append-only credential_requests record froze: that is
+// what gets a moved session its own grant back, lets it cancel its own request, and still refuses
+// it another session's. moved_session_test.go drives each of those surfaces across a move.
 package requests
 
 import (
@@ -183,6 +193,11 @@ type Machine struct {
 	// missRereads is MissRereads' per-enrollment buckets, built on first use (missRereadLimiter).
 	missRereads     *ratelimit.Keyed
 	missRereadsOnce sync.Once
+	// testAdoptionHook, when set, runs in applyDecisionAttempt between the read that locks the
+	// requesting enrollment and the read that locks the request. It exists only so a test can
+	// deterministically move the request to another enrollment in that window, which is where an
+	// adoption's commit lands; no production caller sets it.
+	testAdoptionHook func()
 }
 
 // missRereadLimiter is the per-enrollment buckets MissRereads names, built on the first miss.
@@ -226,6 +241,9 @@ type enrollmentRow struct {
 // its lease's end. A caller that decides
 // for the session reads it after locking the session's row, which RevokeByApprover holds while it
 // withholds, so a withhold either committed before the read or waits for the caller.
+// The withheld names are read by the enrollment's own id, and an adoption carries a session's
+// withheld_secrets rows to the enrollment it moves to, so these are the names withheld from the
+// session rather than from a box it has left.
 func (m *Machine) requester(ctx context.Context, q querier, e enrollmentRow) (policy.Requester, error) {
 	rows, err := q.Query(ctx, `select name from withheld_secrets where enrollment_id=$1`, e.ID)
 	if err != nil {
@@ -257,7 +275,6 @@ func (m *Machine) requester(ctx context.Context, q querier, e enrollmentRow) (po
 // seam), requires iss to be this enrollment's own key and no login_hint (session requests never
 // name their own approver — that's the policy's job), rereads each name the live policy does not
 // serve (rereadMissing), and hands back a live grant for exactly these names when one may be
-// reused (reuseLiveGrant). Otherwise it decides and writes the request in one
 // reused (reuseLiveGrant). Otherwise it decides and writes the request in one transaction: it
 // takes the advisory locks that serialize pending requests for each requested name in one
 // enrollment (lockPendingNames), then locks the enrollment live (lockLiveEnrollment), so no
@@ -587,6 +604,9 @@ func lockPendingNames(ctx context.Context, tx pgx.Tx, enrollmentID string, sorte
 // Cancel ends a still-pending request the requesting session no longer wants, writing the
 // transition, its audit row, and — when the request has a credential-request record — the
 // record's cancelled event, all in one transaction (store.EndPendingRequests).
+// The owner check compares the caller against the requests row's own enrollment_id, which an
+// adoption rewrites, so the moved session cancels the request that moved with it and the box it
+// moved off is ErrNotYours.
 func (m *Machine) Cancel(ctx context.Context, id, enrollmentID string) error {
 	tx, err := m.Store.Pool.Begin(ctx)
 	if err != nil {
@@ -642,8 +662,11 @@ func (m *Machine) expirePending(ctx context.Context, now time.Time) ([]store.End
 
 // ApplyDecision decides a pending agent_secret record by login, the login of the person deciding
 // it on the broker's own approval page (approval.Page.decide, its one caller). approve=true mints
-// the grant while the requesting enrollment is still live; otherwise the request is denied. It
-// re-reads the record body, recomputes its id, refuses any login but the record's own approver
+// the grant while the requesting enrollment may still take one — live, dormant and holding what
+// the session's next box will adopt, or lapsed with no end written against it yet, where the end
+// the sweep is about to write would leave it dormant (mayGrant below) — and otherwise the
+// request is denied.
+// It re-reads the record body, recomputes its id, refuses any login but the record's own approver
 // (record.ErrNotApprover) whatever the record's state, and an approval by any login the current
 // policy would not have approve one of the request's names (currentPolicyAdmits). A denial
 // releases nothing, so the record's approver may still deny a request an owner change left them
@@ -651,42 +674,141 @@ func (m *Machine) expirePending(ctx context.Context, now time.Time) ([]store.End
 // that login), the request transition and the audit row in one transaction. For its approver, a
 // record that expired undecided — expired by the sweeper, or past its pending_expires_at before
 // the sweeper got to it — is ErrExpired, and any other non-pending record ErrTerminal: a
-// duplicate or late decision changes nothing. The enrollment row is locked before the request row
-// — the same order every other enrollment-then-request writer in this package takes them in, so
-// none of them deadlock.
+// duplicate or late decision changes nothing.
+//
+// The enrollment the decision grants to is the one the `requests` row names, never the one
+// `credential_requests` recorded. The record is append-only (credential_requests_refuse_update,
+// migration 0005), so nothing can re-point it when a session moves to another box, while the
+// request row moves with the grant: enroll.Create hands what a predecessor held to the next
+// enrollment of that session name under the same principal. Reading the record's own column
+// would answer an approval given after a move with "the requesting enrollment is no longer live"
+// and mint nothing, which is the half of the incident dispatch://INFRA-1167 reports.
+//
+// The work is one attempt (applyDecisionAttempt), made again when the request moves out from
+// under it. A session moves once per enrolment, so the attempt after a move reads one enrollment
+// under both of its locks; the bound on how many are made is the one enroll.Service.Create puts
+// on its own retries.
 func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bool, login string) (Decision, error) {
+	const maxAttempts = 3
+	for range maxAttempts {
+		decision, moved, err := m.applyDecisionAttempt(ctx, recordID, approve, login)
+		if moved {
+			continue
+		}
+		return decision, err
+	}
+	return Decision{}, fmt.Errorf("decide record %s: exhausted retries while the request kept moving to another enrollment", recordID)
+}
+
+// enrollmentHoldsForItsSession is "enrollment e still holds something for its session": a live
+// grant, or a request nobody has answered yet. It is enroll's own holdsForItsSession word for
+// word, and must stay word for word that. Three statements read the one rule — endEnrollment's
+// dormancy probe, which decides whether an end of the box leaves the row dormant instead of
+// revoking what it holds, adopt's predecessor query, and mayGrant's third case below — and
+// mayGrant's job is to grant on a lapsed row exactly when the end the sweep is about to write
+// would leave that row dormant. Were this copy the wider of the two, an approval would be
+// granted onto a row the sweep then revokes; were it the narrower, an approval would be denied
+// on a row the sweep then carries. Either way the answer a person gets would turn on which of
+// the two ran first.
+//
+// It is a copy rather than one shared constant because enroll's is unexported, and a SQL
+// fragment that means anything only when it is spliced against an alias named e is a poor thing
+// for a package to export. What holds the copies together instead is
+// TestTheLapsedRowGrantRuleAnswersWhatTheEndThatFollowsDoes, which runs this rule and
+// enroll.Service.EndLapsed over every shape of row and compares their two answers, the way
+// enroll's own serving_test.go pins its copy of a SQL rule against the rule itself.
+const enrollmentHoldsForItsSession = `exists (select 1 from grants g where g.enrollment_id=e.id and g.revoked_at is null and (g.expires_at is null or g.expires_at > now()))
+				or exists (select 1 from requests r where r.enrollment_id=e.id and r.state='pending')`
+
+// enrollmentWouldGoDormant is "an end of this box, written now, would leave enrollment e dormant
+// rather than revoke what it holds": the row names a session, records the principal that session
+// belongs to, and still holds a live grant or a request nobody has answered. It is
+// enroll.endEnrollment's own dormancy probe — the same two tests, in the same order, around the
+// same holdsForItsSession text — because it has to answer what that probe will answer about the
+// same row a moment later.
+const enrollmentWouldGoDormant = `coalesce(e.session_id,'') <> '' and e.carry_principal is not null and (
+				` + enrollmentHoldsForItsSession + `)`
+
+// applyDecisionAttempt makes one of ApplyDecision's attempts, writing everything that decision
+// writes or nothing at all. moved is true when the request moved to another enrollment between
+// the read that locks the enrollment and the read that locks the request — an adoption
+// committing in that window — in which case the attempt has written nothing and ApplyDecision
+// makes another, which reads the enrollment the request names now.
+//
+// The enrollment row is locked before the request row — the same order every other
+// enrollment-then-request writer in this package takes them in, so none of them deadlock — and
+// the join below is what keeps that order while reading the enrollment's id off the request: it
+// locks the enrollment alone (for share of e) and takes no lock on the request. Taking no lock on
+// the request is what lets the request move between the two reads. An adoption holds the
+// predecessor's enrollment row for update while it moves the requests off it (enroll.adopt), and
+// when it commits Postgres rechecks the row this statement locked, never the request row the join
+// read beside it, so the join answers with the predecessor — live, or ended and dormant — though
+// the request hangs off it no longer. So the second read, under a snapshot of its own, reads the
+// request's own enrollment_id, and the attempt is abandoned when the two disagree. Nothing is
+// written against a box the session has moved off, and nothing is denied for a move that was
+// already done when the decision arrived.
+func (m *Machine) applyDecisionAttempt(ctx context.Context, recordID string, approve bool, login string) (_ Decision, moved bool, _ error) {
 	tx, err := m.Store.Pool.Begin(ctx)
 	if err != nil {
-		return Decision{}, err
+		return Decision{}, false, err
 	}
 	defer tx.Rollback(ctx)
 
-	var enrollmentID, body string
+	var body string
 	var createdAt time.Time
-	if err := tx.QueryRow(ctx, `select enrollment_id, body, created_at from credential_requests where id=$1`, recordID).
-		Scan(&enrollmentID, &body, &createdAt); err != nil {
-		return Decision{}, err
+	if err := tx.QueryRow(ctx, `select body, created_at from credential_requests where id=$1`, recordID).
+		Scan(&body, &createdAt); err != nil {
+		return Decision{}, false, err
 	}
-	var live bool
-	enr := enrollmentRow{ID: enrollmentID}
-	if err := tx.QueryRow(ctx, `select e.revoked_at is null and enrollment_lease_live(e.lease_expires_at), e.kind, e.operator, e.subject, c.service, c.host from enrollments e
-		left join launcher_credentials c on c.id = e.launcher_credential_id where e.id=$1 for share of e`, enrollmentID).
-		Scan(&live, &enr.Kind, &enr.Operator, &enr.Subject, &enr.Service, &enr.Host); err != nil {
-		return Decision{}, err
+	// mayGrant is which of the enrollment's states a grant may be hung off, and there are three.
+	// Live — not revoked and its lease not lapsed — is the ordinary one. Dormant — revoked_at set
+	// and dormant_since not null: ended by an end of its box while it still held a grant or this
+	// pending request, and kept for the session's next box (enroll.endEnrollment) — is the one
+	// this carry is for, and a grant may land on it: an approval given while the box is gone is
+	// the order dispatch://INFRA-1167 reports, the next enrollment of that session name adopts
+	// the grant with the request (enroll.adopt), the carry sweep revokes it if nobody comes back
+	// (enroll.Service.EndCarried), and a person's revoke of the machine login or the sign-in
+	// reaches it as it reaches any grant (endCredential). The third is a row whose lease has
+	// lapsed and against which no end is written yet, the window between the lapse and the sweep
+	// that ends it, which is up to BROKER_SWEEP_SECONDS long: a grant lands on it when the end
+	// the sweep is about to write would leave the row dormant (enrollmentWouldGoDormant, which
+	// is enroll.endEnrollment's own probe). Denying there while granting a second later, on the
+	// same row holding the same rows, would make the sweep's timing the person's answer.
+	//
+	// Ended for good is what is left: a row revoked with nothing to carry, and a lapsed row no
+	// end of its box could leave dormant — one that names no session, or names one and records
+	// no principal to enrol under it again, so nothing could ever adopt what it holds. An
+	// approval of a request on such a row is recorded and then denied below, as it always was.
+	var mayGrant bool
+	var enr enrollmentRow
+	if err := tx.QueryRow(ctx, `select e.id,
+			e.dormant_since is not null or (e.revoked_at is null
+				and (enrollment_lease_live(e.lease_expires_at) or (`+enrollmentWouldGoDormant+`))),
+			e.kind, e.operator, e.subject, c.service, c.host
+		from requests req join enrollments e on e.id = req.enrollment_id
+		left join launcher_credentials c on c.id = e.launcher_credential_id where req.record_id=$1 for share of e`, recordID).
+		Scan(&enr.ID, &mayGrant, &enr.Kind, &enr.Operator, &enr.Subject, &enr.Service, &enr.Host); err != nil {
+		return Decision{}, false, err
 	}
-	var requestID, state string
+	if m.testAdoptionHook != nil {
+		m.testAdoptionHook()
+	}
+	var requestID, holder, state string
 	var expired bool
-	if err := tx.QueryRow(ctx, `select id, state, pending_expires_at <= now() from requests where record_id=$1 for update`, recordID).
-		Scan(&requestID, &state, &expired); err != nil {
-		return Decision{}, err
+	if err := tx.QueryRow(ctx, `select id, enrollment_id, state, pending_expires_at <= now() from requests where record_id=$1 for update`, recordID).
+		Scan(&requestID, &holder, &state, &expired); err != nil {
+		return Decision{}, false, err
+	}
+	if holder != enr.ID {
+		return Decision{}, true, nil
 	}
 	parsed, err := verifyRecordBody(recordID, body)
 	if err != nil {
-		return Decision{}, err
+		return Decision{}, false, err
 	}
 	login, err = parsed.ApproverLogin(record.KindAgentSecret, "", login)
 	if err != nil {
-		return Decision{}, err
+		return Decision{}, false, err
 	}
 	// A record that names no lifetime gets the default the current policy gives its names: a
 	// request pending from before the 12-hour default, or one whose names were all
@@ -695,7 +817,7 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 	if approve && lifetime == nil {
 		requested, err := requestedSecrets(ctx, tx, requestID)
 		if err != nil {
-			return Decision{}, err
+			return Decision{}, false, err
 		}
 		names := make([]string, len(requested))
 		for i, g := range requested {
@@ -706,31 +828,31 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 	if approve {
 		requester, err := m.requester(ctx, tx, enr)
 		if err != nil {
-			return Decision{}, err
+			return Decision{}, false, err
 		}
 		if err := m.currentPolicyAdmits(ctx, tx, requestID, requester, login, lifetime); err != nil {
-			return Decision{}, err
+			return Decision{}, false, err
 		}
 	}
 	switch {
 	case state == "expired" || state == "pending" && expired:
-		return Decision{}, ErrExpired
+		return Decision{}, false, ErrExpired
 	case state != "pending":
-		return Decision{}, ErrTerminal
+		return Decision{}, false, ErrTerminal
 	}
 	// now is reset to the record's own creation time: the request object's own iat/exp bound only
 	// how fresh it had to be when the broker first accepted it (up to 10 minutes), never how long
 	// the resulting decision window may stay open (PendingTTL, hours) — re-verifying it with the
 	// real current time would fail every decision made more than a few minutes after creation.
 	if _, err := record.VerifyRequestObject(parsed.Request, m.Audience, m.Skew, createdAt); err != nil {
-		return Decision{}, fmt.Errorf("%w: request object no longer verifies: %s", ErrGrantChainInvalid, err)
+		return Decision{}, false, fmt.Errorf("%w: request object no longer verifies: %s", ErrGrantChainInvalid, err)
 	}
 
 	event, by := "denied", record.HumanActor(login)
 	next, detail := "denied", ""
 	if approve {
 		event = "approved"
-		if live {
+		if mayGrant {
 			next = "granted"
 		} else {
 			detail = "the requesting enrollment is no longer live"
@@ -739,23 +861,23 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 	if _, err := tx.Exec(ctx, `update requests set state=$2, decided_at=now(), decided_by=$3, decision_detail=$4,
 		lifetime_seconds = case when $2 = 'granted' then $5::int else lifetime_seconds end where id=$1 and state='pending'`,
 		requestID, next, login, nullable(detail), lifetime); err != nil {
-		return Decision{}, err
+		return Decision{}, false, err
 	}
 	if _, err := tx.Exec(ctx, `insert into credential_request_events (record_id, event, login, actor, detail) values ($1,$2,$3,$4,$5)`,
 		recordID, event, login, by, nullable(detail)); err != nil {
-		return Decision{}, err
+		return Decision{}, false, err
 	}
 	var grantID string
 	if next == "granted" {
 		// The grant lasts the lifetime the approved record names, or the default above.
-		if grantID, err = insertGrant(ctx, tx, requestID, enrollmentID, login, lifetime); err != nil {
-			return Decision{}, err
+		if grantID, err = insertGrant(ctx, tx, requestID, enr.ID, login, lifetime); err != nil {
+			return Decision{}, false, err
 		}
 	}
-	if err := audit(ctx, tx, "request."+next, enrollmentID, requestID, nullable(grantID), by, auditDetail{"detail": detail, "record_id": recordID}); err != nil {
-		return Decision{}, err
+	if err := audit(ctx, tx, "request."+next, enr.ID, requestID, nullable(grantID), by, auditDetail{"detail": detail, "record_id": recordID}); err != nil {
+		return Decision{}, false, err
 	}
-	return Decision{RequestID: requestID, State: next, GrantID: grantID}, tx.Commit(ctx)
+	return Decision{RequestID: requestID, State: next, GrantID: grantID}, false, tx.Commit(ctx)
 }
 
 // currentPolicyAdmits refuses login an approval of request requestID when the current policy wants
@@ -852,6 +974,8 @@ func (m *Machine) VerifyChain(ctx context.Context, grantID string) error {
 // RevokeGrant ends a grant a session holds — a session may end only its own grant. Revoking an
 // already-revoked grant succeeds and changes nothing: it writes no second grant.revoked audit row,
 // so the trail never names a revoker who ended nothing. Human revocation is RevokeByApprover.
+// The owner check reads the grants row's own enrollment_id, which an adoption rewrites, so the
+// moved session ends the grant that moved with it and every other enrollment is ErrNotYours.
 func (m *Machine) RevokeGrant(ctx context.Context, grantID, enrollmentID string) error {
 	tx, err := m.Store.Pool.Begin(ctx)
 	if err != nil {
@@ -896,6 +1020,9 @@ func (m *Machine) RevokeGrant(ctx context.Context, grantID, enrollmentID string)
 // request deciding on the session as this runs either is written first, and then ended here if it
 // got a withheld name, or decides with the name withheld. A revoke that ends nothing and withholds
 // nothing new succeeds and changes nothing.
+// The enrollment it reads the operator off, and the one withhold writes against, is the enrollment
+// the grants row names now, so an approver's revoke reaches a grant that moved and an operator's
+// withholds from the box the session runs on.
 func (m *Machine) RevokeByApprover(ctx context.Context, grantID, login, actor string) error {
 	tx, err := m.Store.Pool.Begin(ctx)
 	if err != nil {
@@ -949,6 +1076,8 @@ func (m *Machine) RevokeByApprover(ctx context.Context, grantID, login, actor st
 // grant whose request got it automatically since then was approved by someone the withheld name
 // let approve it (currentPolicyAdmits), which stands. It answers the names it had not withheld
 // before.
+// Everything it writes and everything it ends is keyed by enrollmentID, the enrollment the grant
+// hangs off now, which after a move is the box the session runs on and not the one that asked.
 func withhold(ctx context.Context, tx pgx.Tx, enrollmentID, requestID, actor string) ([]string, error) {
 	rows, err := tx.Query(ctx, `with names as (
 			select name from request_secrets where request_id=$2 and decision=$4
