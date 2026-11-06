@@ -38,11 +38,13 @@ const noWatch: WatchPicture = (_route, onPicture) => {
 };
 
 /** What the editor lends the fallback link, with the paths its own click asked for. No
- *  reference these tests draw needs a read to know its path, so the client answers nothing. */
+ *  reference these tests draw needs a read to know its path, so the client answers nothing.
+ *  The real opener answers `view.editable` on every draw, since a mounted editor is turned
+ *  read-only and back in place (`editor.test.ts` drives that toggle). */
 function fakeOpener(editable = false) {
   const opened: string[] = [];
   const opener: PictureLinkOpener = {
-    editable,
+    editable: () => editable,
     navigate: (path) => opened.push(path),
     queryClient: new QueryClient(),
   };

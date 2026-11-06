@@ -16,17 +16,48 @@ import {
 } from "../refs/routes";
 import { type NavigateToReference, openReference, opensReference } from "./reference-click";
 
-/** What the editor a picture is drawn in lends its fallback link: whether its view takes edits,
- * and the pair the link opens its artifact inside the app with. The node view is plain DOM, so
- * it is handed these at the editor's mount (`installTypedBlocks`) rather than reading a hook. */
+/** What the editor a picture is drawn in lends its fallback link: whether its view takes edits
+ * right now, and the pair the link opens its artifact inside the app with. The node view is
+ * plain DOM, so it is handed these at the editor's mount (`installTypedBlocks`) rather than
+ * reading a hook. */
 export interface PictureLinkOpener {
-  /** Whether the view is editable. The editor library's own `Open link` card shows in an
-   *  editable view alone, and Dispatch's card triggers on `data-dispatch-href`
-   *  (`refs/RefPreview.tsx`), so the attribute is written in a read-only view alone: the live
-   *  editor then shows the editor's card and a past version Dispatch's, one card each. */
-  readonly editable: boolean;
+  /** Whether the view takes edits at the moment it is asked. The editor library's own
+   *  `Open link` card shows in an editable view alone, and Dispatch's card triggers on
+   *  `data-dispatch-href` (`refs/RefPreview.tsx`), so the attribute is written in a read-only
+   *  view alone: the live editor then shows the editor's card and a past version Dispatch's,
+   *  one card each. It is read on every draw rather than taken once, because a mounted editor
+   *  is turned read-only and back in place (`ProofDocument.tsx` on a closed issue or a change
+   *  of admission) and its node views are not rebuilt. */
+  readonly editable: () => boolean;
   readonly navigate: NavigateToReference;
   readonly queryClient: QueryClient;
+}
+
+/** Writes Dispatch's hover card onto a picture's fallback link, or takes it off: the card
+ *  triggers on `data-dispatch-href`, the editor library's own shows in an editable view, and
+ *  one element carries one card. The reference the attribute holds is the wrapper's own
+ *  (`data-dispatch-doc-picture`), so a link drawn before a toggle and one drawn after it are
+ *  written from the same string. */
+function showCard(link: HTMLAnchorElement, reference: string, editable: boolean): void {
+  if (editable) delete link.dataset.dispatchHref;
+  else link.dataset.dispatchHref = reference;
+}
+
+/**
+ * Writes each fallback link under `view` the card its editable state calls for, for links drawn
+ * before the state changed: `editor.ts` runs this pass from `setReadOnly`, since a mounted
+ * editor's read-only state is changed in place and ProseMirror rebuilds no node view for it.
+ * The pass reads `view.editable` itself, the same live value `PictureLinkOpener.editable` reads
+ * on every draw, so the two cannot disagree about what the editor is.
+ */
+export function syncFallbackLinkCards(view: EditorView): void {
+  const editable = view.editable;
+  for (const wrapper of view.dom.querySelectorAll<HTMLElement>("[data-dispatch-doc-picture]")) {
+    const reference = wrapper.dataset.dispatchDocPicture;
+    const link = wrapper.firstElementChild;
+    if (reference === undefined || !(link instanceof HTMLAnchorElement)) continue;
+    showCard(link, reference, editable);
+  }
 }
 
 /** The link a picture falls back to: the reference's short form, with the real SPA path as its
@@ -46,7 +77,7 @@ function fallbackLink(
 ): HTMLAnchorElement {
   const link = document.createElement("a");
   link.setAttribute("href", buildReferencePath(route));
-  if (!opener.editable) link.dataset.dispatchHref = buildDispatchReference(route);
+  showCard(link, buildDispatchReference(route), opener.editable());
   link.textContent = shortForm(route);
   link.addEventListener("click", (event) => {
     if (!opensReference(event)) return;

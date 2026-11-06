@@ -9497,6 +9497,81 @@ describe("executeDispatchTool", () => {
     );
   });
 
+  // An upload a browser draws where it is read is written as the markdown line that draws it,
+  // pinned to the version just made, under a first line whose shape never moves: the skill
+  // scenarios' scorer reads `Uploaded <name> as version <n>` off it.
+  test.each([
+    [
+      "an issue's picture",
+      { issue: "DSP-42", name: "shot.png", path: "shot.png" },
+      { id: "artifact-42", issue_key: "DSP-42", name: "shot.png", slug: "shot-png" },
+      { number: 3, mime: "image/png" },
+      "Uploaded shot.png as version 3 (artifact slug shot-png; dispatch://DSP-42/artifact/shot-png)",
+      "![shot.png](dispatch://DSP-42/artifact/shot-png@v3)",
+    ],
+    [
+      "a project's video, its stored type read without its parameters",
+      { project: "CORE", name: "demo.mp4", path: "shot.png" },
+      { id: "artifact-43", issue_key: null, project: "CORE", name: "demo.mp4", slug: "demo-mp4" },
+      { number: 1, mime: 'video/mp4; codecs="avc1.42E01E"' },
+      "Uploaded demo.mp4 as version 1 (artifact slug demo-mp4; dispatch://CORE/artifact/demo-mp4)",
+      "![demo.mp4](dispatch://CORE/artifact/demo-mp4@v1)",
+    ],
+  ])("writes the line that draws %s under the upload's first line, and in its details", async (_name, args, artifact, version, first, drawn) => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "dispatch-execute-"));
+    writeFileSync(path.join(cwd, "shot.png"), "not really a picture");
+    try {
+      const result = await executeDispatchTool({
+        tool: "dispatch_artifact",
+        args,
+        cwd,
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: (async () => response({ artifact, version })) as unknown as typeof fetch,
+      });
+
+      expect(result.text).toBe(`${first}\n${drawn}`);
+      expect(result.details).toMatchObject({ picture: drawn, version: version.number });
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("writes no drawing line for an upload a browser does not draw where it is read", async () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "dispatch-execute-"));
+    writeFileSync(path.join(cwd, "report.pdf"), "%PDF-1.7\n");
+    try {
+      const result = await executeDispatchTool({
+        tool: "dispatch_artifact",
+        args: { issue: "DSP-42", name: "report.pdf", path: "report.pdf" },
+        cwd,
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: (async () =>
+          response({
+            artifact: {
+              id: "artifact-44",
+              issue_key: "DSP-42",
+              name: "report.pdf",
+              slug: "report-pdf",
+            },
+            version: { number: 1, mime: "application/pdf" },
+          })) as unknown as typeof fetch,
+      });
+
+      expect(result.text).toBe(
+        "Uploaded report.pdf as version 1 (artifact slug report-pdf; dispatch://DSP-42/artifact/report-pdf)"
+      );
+      expect(result.details).not.toHaveProperty("picture");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   test.each([
     ["neither path nor content", { issue: "DSP-42", name: "spec.md" }],
     [

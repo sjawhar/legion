@@ -17,6 +17,7 @@ import {
   type StoredMark,
 } from "../features/doc/editor";
 import type { PendingState } from "../features/doc/pending-sync";
+import { syncFallbackLinkCards } from "../features/doc/picture-view";
 import type { DocumentRuntimeValue } from "../features/doc/runtime";
 
 export interface FakeEditor {
@@ -159,6 +160,7 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       },
       setReadOnly(readOnly: boolean) {
         editor.readOnly = readOnly;
+        syncFallbackLinkCards(handle.view);
       },
       view: {
         dispatch() {},
@@ -182,15 +184,16 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       },
     } as unknown as EditorHandle;
     // The real `createEditor` installs Dispatch's node views once the editor library has
-    // loaded (`features/doc/editor.ts`); the fake stands in for that call too, so a test reads
-    // the same `viewProps.nodeViews` the host would.
+    // loaded (`features/doc/editor.ts`) and writes the fallback links' cards from the view's
+    // live editable state on every `setReadOnly`; the fake stands in for both, so a test reads
+    // the same `viewProps.nodeViews` and the same cards the host would.
     installTypedBlocks(
       handle.view,
       options.blockSchema,
       options.onAskBlockHosts,
       options.watchPicture,
       {
-        editable: options.readOnly !== true,
+        editable: () => handle.view.editable,
         navigate: options.navigate,
         queryClient: options.queryClient,
       }

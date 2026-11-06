@@ -60,6 +60,7 @@ import {
   dispatchToolSchema,
   dispatchToolSpecs,
   encodeBlockId,
+  isInlineContentType,
   itemFromSearch,
   overCapMessage,
   PROJECT_KEY_PATTERN,
@@ -126,6 +127,7 @@ import {
   type DatedText,
   oversizePictureText,
   PICTURE_SHOWN_MAX_BYTES,
+  pictureLine,
   picturesNewestFirst,
   sniffPictureType,
   type ToolImage,
@@ -5081,24 +5083,30 @@ export async function executeDispatchTool(
       const adviceLines = renderAdvice(input.tool, uploadOwner.label, result.advice, {
         isPrimarySpec: result.artifact.primary || result.artifact.name === "spec.md",
       });
+      // An upload a browser draws where it is read (a picture or a video) is written as the
+      // markdown line that draws it, pinned to the version just made, so the caller pastes the
+      // upload into a body instead of building the address by hand. The type is the stored one,
+      // parameters stripped, never the file's name. The first line keeps its shape: the skill
+      // scenarios' scorer reads `Uploaded <name> as version <n>` off it.
+      const storedType = result.version.mime?.split(";")[0]?.trim();
+      const shownLine =
+        storedType !== undefined && isInlineContentType(storedType)
+          ? pictureLine(result.artifact.name, `${artifactRef}@v${result.version.number}`)
+          : undefined;
       return {
         text: [
           `Uploaded ${result.artifact.name} as version ${result.version.number} (artifact slug ${result.artifact.slug}; ${artifactRef})${await notSubscribed(uploadOwner, input.subscriptions)}`,
+          ...(shownLine === undefined ? [] : [shownLine]),
           ...adviceLines,
         ].join("\n"),
-        details:
-          artifactOwner.kind === "project"
-            ? {
-                ...documentResultDetails(result.artifact),
-                version: result.version.number,
-                ...(result.advice === undefined ? {} : { advice: result.advice }),
-              }
-            : {
-                issue: issue(),
-                artifact: result.artifact.id,
-                version: result.version.number,
-                ...(result.advice === undefined ? {} : { advice: result.advice }),
-              },
+        details: {
+          ...(artifactOwner.kind === "project"
+            ? documentResultDetails(result.artifact)
+            : { issue: issue(), artifact: result.artifact.id }),
+          version: result.version.number,
+          ...(shownLine === undefined ? {} : { picture: shownLine }),
+          ...(result.advice === undefined ? {} : { advice: result.advice }),
+        },
       };
     }
     case "dispatch_follow": {

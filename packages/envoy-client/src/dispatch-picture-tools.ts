@@ -13,7 +13,7 @@ import type {
   CreateArtifactInput,
   Event,
 } from "@legion/contracts";
-import { overCapMessage, SESSION_ID_PATTERN } from "@legion/contracts";
+import { isVideoContentType, overCapMessage, SESSION_ID_PATTERN } from "@legion/contracts";
 import { type DispatchClient, DispatchGatewayError, DispatchServiceError } from "./dispatch-http";
 import { parseDispatchRef } from "./dispatch-owner";
 import {
@@ -278,7 +278,8 @@ export function eventTexts(event: Event): DatedText[] {
 /** Each picture a read shows, `PICTURES_SHOWN_MAX` and `PICTURES_SHOWN_MAX_BYTES` at most. */
 export interface PicturesRead {
   /** `Pictures:`, then one line per address: the image it is shown as, or why it is not shown.
-   *  Empty when there were no addresses. */
+   *  Empty when there were no addresses, and when no address earned a line of its own - every
+   *  one of them a video, which is passed over in silence. */
   readonly lines: readonly string[];
   /** The pictures shown, in the order `lines` numbers them. */
   readonly images: readonly ToolImage[];
@@ -395,12 +396,14 @@ export function forgetShownPictures(sessionId: string): void {
  * The pictures at `addresses` (newest first, each once) as a model is shown them: up to
  * `PICTURES_SHOWN_MAX` of them and `PICTURES_SHOWN_MAX_BYTES` together, each an image upload whose
  * bytes are a picture type a model takes, of at most `PICTURE_SHOWN_MAX_BYTES`. Every other address
- * is named with why it is not shown, so the reader opens it with dispatch_doc_read. A picture
- * Dispatch cannot serve is named with the failure; it never fails the read or the delivery around
- * it. Dispatch's stated size and type rule a picture out before its bytes are fetched. An address
- * in `shown`, the pictures this session was already shown, is named as shown earlier, read
- * nothing and counts toward neither limit. `shown` is only read: the result's `shown` names the
- * pictures shown here, which the caller adds once the model has them.
+ * is named with why it is not shown, so the reader opens it with dispatch_doc_read, except a
+ * video, which is passed over in silence: no model takes one, and a line about it would stand in
+ * every read of that body for ever. A picture Dispatch cannot serve is named with the failure; it
+ * never fails the read or the delivery around it. Dispatch's stated size and type rule a picture
+ * out before its bytes are fetched. An address in `shown`, the pictures this session was already
+ * shown, is named as shown earlier, read nothing and counts toward neither limit. `shown` is only
+ * read: the result's `shown` names the pictures shown here, which the caller adds once the model
+ * has them.
  */
 export async function readPictures(
   client: DispatchClient,
@@ -411,7 +414,9 @@ export async function readPictures(
   const artifacts = new Map<string, Promise<Artifact>>();
   const images: ToolImage[] = [];
   const showing: string[] = [];
-  const lines = ["Pictures:"];
+  // The `Pictures:` header is put on at the end, so a read whose every address was passed over
+  // in silence prints no header with nothing under it.
+  const lines: string[] = [];
   let shownBytes = 0;
   const overBudget = `past this read's ${PICTURES_SHOWN_MAX_BYTES / 1024 / 1024} MiB of pictures; dispatch doc-read shows it`;
   for (const address of addresses) {
@@ -441,11 +446,15 @@ export async function readPictures(
         skip(`${artifact.name} has no version ${target.version}`);
         continue;
       }
+      const mime = version.mime?.split(";")[0]?.trim();
+      // A video is passed over before either refusal: Dispatch stores it as a file rather than
+      // an image, so both the kind and the type would turn it down, and the line either wrote
+      // would stand in every agent's read of that body though no reading of it could change.
+      if (mime !== undefined && isVideoContentType(mime)) continue;
       if (artifact.kind !== "image") {
         skip(`${artifact.name} is a ${artifact.kind}, not a picture`);
         continue;
       }
-      const mime = version.mime?.split(";")[0]?.trim();
       if (mime !== undefined && !isPictureType(mime)) {
         skip(`${artifact.name} is ${mime}, not ${PICTURE_TYPE_NAMES} a model is shown`);
         continue;
@@ -482,5 +491,5 @@ export async function readPictures(
       skip(`unavailable: ${messageFor(error)}`);
     }
   }
-  return { lines, images, shown: showing };
+  return { lines: lines.length === 0 ? [] : ["Pictures:", ...lines], images, shown: showing };
 }

@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { QueryClient } from "@tanstack/react-query";
+import type { Window as HappyDOMWindow } from "happy-dom";
 import * as Y from "yjs";
 
 import { bindRemoteMarks, createEditor, editorAttributes, type StoredMark } from "./editor";
@@ -89,5 +90,63 @@ test("bindRemoteMarks keeps an accepted suggestion's text when its projection ar
     unbind();
     handle.destroy();
     root.remove();
+  }
+});
+
+// R8: one card on a picture's fallback link at any moment - the editor library's own in an
+// editable view, Dispatch's (`data-dispatch-href`) in a read-only one. A mounted editor is
+// turned read-only and back in place (`ProofDocument.tsx`, on a closed issue or a change of
+// admission) and ProseMirror rebuilds no node view for it, so the attribute must follow the
+// live state for a link drawn before the toggle as well as one drawn after it.
+test("a picture's fallback link carries Dispatch's card only while the mounted editor is read-only", async () => {
+  const pageBefore = window.location.href;
+  (window as unknown as HappyDOMWindow).happyDOM.setURL("https://dispatch.test/issues/CORE-1/spec");
+  const root = document.body.appendChild(document.createElement("div"));
+  const blockSchema = await blockSchemaCache.load(() => Promise.reject(new Error("no schema")));
+  const handle = await createEditor(root, {
+    awareness: null,
+    blockSchema,
+    onAskBlockHosts: () => {},
+    navigate: () => {},
+    queryClient: new QueryClient(),
+    // Both sources pin a version, so neither waits on a read to draw.
+    watchPicture: () => () => {},
+    user: { color: "#f59e0b", name: "alice" },
+    ydoc: new Y.Doc(),
+  });
+  /** Every picture's fallback link, in document order: a picture the browser drew is no link. */
+  const links = () => [...root.querySelectorAll<HTMLElement>("[data-dispatch-doc-picture] > a")];
+  /** The picture still drawn, turned into its fallback link by a load the browser refused. */
+  const failToDraw = () => root.querySelector("img")?.dispatchEvent(new Event("error"));
+  try {
+    handle.setMarkdown(
+      "![first.md](dispatch://CORE-1/artifact/first-md@v1) " +
+        "![second.md](dispatch://CORE-1/artifact/second-md@v2)"
+    );
+    // The first link is drawn while the editor takes edits: the library's card is the one there.
+    failToDraw();
+    expect(links()).toHaveLength(1);
+    expect(links()[0]?.hasAttribute("data-dispatch-href")).toBe(false);
+
+    // Closing the issue turns the mounted editor read-only: the link already drawn takes
+    // Dispatch's card, and the one drawn after the toggle is drawn with it.
+    handle.setReadOnly(true);
+    expect(links()[0]?.getAttribute("data-dispatch-href")).toBe(
+      "dispatch://CORE-1/artifact/first-md@v1"
+    );
+    failToDraw();
+    expect(links().map((link) => link.getAttribute("data-dispatch-href"))).toEqual([
+      "dispatch://CORE-1/artifact/first-md@v1",
+      "dispatch://CORE-1/artifact/second-md@v2",
+    ]);
+
+    // Reopened: both links give the card back, so neither shows two.
+    handle.setReadOnly(false);
+    expect(links()).toHaveLength(2);
+    expect(links().map((link) => link.hasAttribute("data-dispatch-href"))).toEqual([false, false]);
+  } finally {
+    handle.destroy();
+    root.remove();
+    (window as unknown as HappyDOMWindow).happyDOM.setURL(pageBefore);
   }
 });
