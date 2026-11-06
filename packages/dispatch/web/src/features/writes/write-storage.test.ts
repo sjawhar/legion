@@ -140,7 +140,7 @@ test("a write kept without a verdict comes back expired once its key has run out
     const spent = refusalFrom(kept, KEY, PRESSED_AT + IDEMPOTENCY_KEY_TTL_MS);
     expect(spent).toBeInstanceOf(SendExpiredError);
     expect(spent.message).toBe(
-      "Dispatch has not confirmed this message. Its key is more than 24 hours old, so Dispatch no longer holds it: a Retry is a new write, which can be delivered a second time if the first one was."
+      "Dispatch has not confirmed this message. Its key is 24 hours old or more, so Dispatch no longer holds it: a Retry is a new write, which can be delivered a second time if the first one was."
     );
     expect(refusalFrom(kept, KEY, PRESSED_AT + IDEMPOTENCY_KEY_TTL_MS - 1)).not.toBeInstanceOf(
       SendExpiredError

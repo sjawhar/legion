@@ -203,6 +203,12 @@ test("psql names both variables when neither its lane nor the plain name has a d
   );
 });
 
+// This row is the file's one expensive case: it starts `playwright test --list` twice, each of
+// which loads the Playwright config and resolves every spec. Measured in an issue pod with the
+// pod to itself it takes 3.9 s of bun's 5 s default, and with the browser suite running beside
+// it the row has ended at 5003 ms - the default to the millisecond - which reads as a defect of
+// this change rather than as the machine being busy. The timeout is its own, far above what the
+// work costs, so a slow machine makes this row slow and never red.
 test("the Playwright config refuses a --workers that is not the lane count", async () => {
   const listed = ["bunx", "playwright", "test", "--config", config, "--list", "--reporter=line"];
   const mismatched = await run([...listed, "--workers", "3"], {});
@@ -215,4 +221,4 @@ test("the Playwright config refuses a --workers that is not the lane count", asy
   expect(`${shorthand.stderr}${shorthand.stdout}`).toContain(
     "This run has 3 lanes, each a harness of its own, so --workers 2 would not match"
   );
-});
+}, 30_000);

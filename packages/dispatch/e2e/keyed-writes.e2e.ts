@@ -253,7 +253,7 @@ test("a write whose key has expired stops and offers a new write", async ({ brow
     // before it goes out, so this count is the last.
     const spent = attempts.length;
     const expired =
-      "Its key is more than 24 hours old, so Dispatch no longer holds it: a Retry is a new write,";
+      "Its key is 24 hours old or more, so Dispatch no longer holds it: a Retry is a new write,";
     await runClockUntil(
       page,
       expect(indicator).toContainText(`Not saved: ${issue.key} set to todo`)

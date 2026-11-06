@@ -50,14 +50,16 @@ export function sameKeyRetryNote(made: string): string {
 }
 
 /**
- * What a Retry promises once Dispatch has forgotten the write's key: the key is older than the
+ * What a Retry promises once Dispatch has forgotten the write's key: the key has reached the
  * `IDEMPOTENCY_KEY_TTL_MS` Dispatch keeps one for, so Dispatch holds nothing under it and a Retry
  * is a new write, done a second time if the first one landed. `made` is what the write does once
- * it lands (`delivered`, `saved`).
+ * it lands (`delivered`, `saved`). The words say "or more" because `keyExpired` turns true at the
+ * lifetime itself, not past it: at exactly that hour the key is spent and "more than" would say
+ * something the code does not.
  */
 export function expiredRetryNote(made: string): string {
   const hours = IDEMPOTENCY_KEY_TTL_MS / 3_600_000;
-  return `Its key is more than ${hours} hours old, so Dispatch no longer holds it: a Retry is a new write, which can be ${made} a second time if the first one was.`;
+  return `Its key is ${hours} hours old or more, so Dispatch no longer holds it: a Retry is a new write, which can be ${made} a second time if the first one was.`;
 }
 
 /**
