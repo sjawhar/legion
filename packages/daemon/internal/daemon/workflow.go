@@ -285,7 +285,7 @@ func mintAtBoot(ctx context.Context, tokens appauth.Tokens, repo ghrepo.Reposito
 // openWorkflow opens the workflow in the order a refusal names its cause: the configuration, the
 // Dispatch bearer prepare read, the project's repository mapping from Dispatch (each repository
 // checked for both GitHub Apps) into repos, the mapping every role's gh bundle reads its owners
-// from, the Apps' logins, the App tokens minted for every served owner, then the fill of any record
+// from, the Apps' logins, the App tokens minted for every served repository, then the fill of any record
 // written before the record carried its repository. build is the daemon's own build (Build), which
 // the engine and the boot fact compare against the open production checks.
 func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, projectID, dispatchToken string, repos *repositories, log *slog.Logger, suppliedTokens appauth.Tokens, githubAPI string, build Build) (opened *workflowRuntime, _ error) {
@@ -332,9 +332,11 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	if err != nil {
 		return nil, err
 	}
-	// INFRA-513 t4: a token now names the repository it acts on, so the boot proves each App's
-	// key on every repository the mapping serves rather than once per owner; the next commit of
-	// this pull request decides what the boot proof is narrowed to.
+	// A token names the repository it acts on, so the boot proves each App's key on every
+	// repository the mapping serves rather than once per owner: an installation that does not
+	// reach one of them, or that holds none of the permissions a role's write token asks for,
+	// stops the boot naming the repository and the set, where it would otherwise leave a role
+	// with no gh files at its launch.
 	for _, repo := range w.repositories.Accepted() {
 		if err := mintAtBoot(ctx, tokens, repo, log); err != nil {
 			return nil, err
