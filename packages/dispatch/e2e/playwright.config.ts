@@ -344,6 +344,11 @@ export default defineConfig({
   // `test.describe.configure({ mode: "serial" })` and the reason.
   fullyParallel: true,
   workers: lanes,
+  // One retry on CI, none locally. A row that fails once and passes on the retry is reported
+  // `flaky` rather than failed, which is what the merged report of the dispatch-browser lane
+  // publishes its flake rate from. Locally a retry would hide a failure the developer is looking
+  // at, and `bun run e2e` is read as pass or fail.
+  retries: process.env.CI ? 1 : 0,
   // With E2E_MEASURE_FILE set, the timing fixture's reporter writes one row per test beside the
   // list reporter's own output (e2e/measure-reporter.ts); without it the run is untouched.
   reporter: measuring
@@ -354,7 +359,12 @@ export default defineConfig({
     ...devices["Desktop Chrome"],
     baseURL: baseUrl,
     headless: true,
-    trace: "retain-on-failure",
+    // Two values, because one value cannot serve both runs. On CI, where `retries` above is 1,
+    // `on-first-retry` records the trace of the retry alone, which is the one run a flaky row
+    // explains itself by, and costs nothing on the rows that pass. Locally `retries` is 0, so
+    // `on-first-retry` would record no trace at all and a failed row would lose the trace this
+    // suite has today; `retain-on-failure` keeps it.
+    trace: process.env.CI ? "on-first-retry" : "retain-on-failure",
   },
   // Runs before any row, against the servers the checks above require: it refuses a target that
   // does not read this run's fake Envoy, and in two-process mode a pair whose processes do not
