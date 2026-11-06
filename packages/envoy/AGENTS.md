@@ -3300,6 +3300,15 @@ that is the rule and not a transitional measure, and it is what lets Dispatch de
   A read kvwatch's own idle wait ended is read again 5 s later (`rereadDelay`), so a timed-out warm-up cannot leave the view refusing for good.
   Within one read epoch every update is fenced by revision (`setOwnRoleHolder` and `forgetRoleHolder`, `internal/store/roles.go`, the two writers of that view), the registry's own claim writes included, so none undoes a later one, and a read of a recreated bucket starts a new epoch rather than emptying the view under the old one.
 
+- A deregistration (`store.Registry.Remove` with no topics, which `DELETE /v1/interests/<session_id>` and `POST /v1/interests/unsubscribe` with an empty topic list reach) releases the session's role claims from two sources, in this order:
+  the role topics of its own interest record (`releaseRoleClaims`), then the roles the role claim view names it the holder of (`releaseAllRoleClaims`).
+  The view is read rather than the bucket because `RolesHeldBy` makes no bucket call, so a deregistration costs the roles its session holds and not the bucket's size:
+  listing every key and reading each claim is one pass over the whole bucket per deregistration, which at the fleet's role count ran out the route's own budget and answered 503 (`read role <role>'s claim: context deadline exceeded`, dispatch://INFRA-1383).
+  Every release the record pass makes leaves the view (`forgetRoleHolder`), so the sweep behind it reads no claim twice.
+  A view that cannot be served falls back to that scan (`scanAllRoleClaims`), whose listing is bounded by the request (`bus.Bounded(ctx, r.roleKeys)`, which `kvwatch.ScanExistingKeys` is not of itself), which logs one INFO line per deregistration naming the view's reason, goes past a claim it cannot read, and fails only on a delete of a claim the session holds.
+  A claim in neither source — one another listener wrote that this listener's watch has not delivered, or a copy within the stale bound behind — is left to the role claim reaper (`ReapRoleClaims`), which releases it once its holder is gone;
+  that reaper logs and skips a role whose read, delete or release failed rather than ending the pass, and its `role claim reaper cycle` line carries `skipped` beside `reaped`.
+
 - Each listener collects the interest bucket's delete markers, because nothing else does:
   every delete path leaves one (the reaper for each dead session, an unsubscribe-all, the admin delete), the bucket has no `MaxAge` and keeps one message per subject, and each marker is replayed by every restart's cache warm-up before that listener serves, so uncollected markers grow every restart's time with no deliveries (LEGION-374).
   A pass reads the stream (read 1), runs one MetaOnly scan of the bucket, takes the **floor** = the lowest revision that scan delivered as a PUT, reads the stream again (read 2), and sends one unfiltered `STREAM.PURGE` of everything below the floor.
