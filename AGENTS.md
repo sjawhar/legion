@@ -543,9 +543,9 @@ Each item below names a task and where its code is, then notes on it.
 - **Tests** — co-located `__tests__/` dirs, Bun test runner (`bun:test`)
 
 - **Release jobs keep credentials away from dependency code**
-  — in `release.yaml`, `release-envoy-listener.yaml`, `release-envoy-infra.yaml` and `changelog-fold.yaml`, and in `claude-envoy-rebuild.yaml` (no release, but it pushes to main with the deploy key, so the same build/push split binds it), a job that holds `contents: write`, `id-token: write`, `attestations: write`, `actions: write` or the deploy key runs no dependency code (no `bun`, `go`, `node`, no built binary, no `scripts/` program) and restores no cache (`cache-mode: none`);
+  — in `release.yaml`, `release-envoy-listener.yaml` and `release-envoy-infra.yaml`, a job that holds `contents: write`, `id-token: write`, `attestations: write`, `actions: write` or the deploy key runs no dependency code (no `bun`, `go`, `node`, no built binary, no `scripts/` program) and restores no cache (`cache-mode: none`);
   every checkout sets `persist-credentials: false`;
-  the deploy key reaches only the `env:` of the steps that run `release-push.sh push-tag` or `push-main` in the three release workflows, `push-fold` in `changelog-fold.yaml` (the fold's push, which needs no `version` call) and `push-built` in `claude-envoy-rebuild.yaml`'s push job;
+  the deploy key reaches only the `env:` of the steps that run `release-push.sh push-tag`;
   every version of the three release workflows is decided by `release-push.sh version` in the build job;
   each build job ends with the tripwire `release-push.sh no-credential` (`release.yaml` keeps each package's version arguments once, in its `env:`, and its `legion_build` also decides from those lists the plugin pair it links);
   a job whose `if:` calls `always()` tests `needs.<job>.result` for every job whose outputs it reads, and a job whose `if:` calls no `always()` has no upstream job that carries an `if:` of its own (GitHub's implicit `success()` would skip it with that job, whatever its condition says).
@@ -559,9 +559,10 @@ Each item below names a task and where its code is, then notes on it.
 
 - **Changelog entries are fragment files**
   — a change that earns a changelog line adds a fragment to each package it changes that has a `.changie.yaml`:
-  the six packages `.github/changelog-packages` lists (`pi-legion`, `pi-envoy`, `envoy`, `claude-envoy`, `contracts`, `envoy-client`), the one list the fold and the check below both read.
-  A package without one, such as `packages/daemon`, has no fold.
-  `ci.yaml`'s lint job (`release-push.sh fold-orphans`) fails a pull request that adds a file under the `.changes/` of a package that list does not name, and the fold on main warns about such a file and folds the rest.
+  the six packages `.github/changelog-packages` lists (`pi-legion`, `pi-envoy`, `envoy`, `claude-envoy`, `contracts`, `envoy-client`), the one list the check below reads.
+  A package without one, such as `packages/daemon`, takes no fragment.
+  `ci.yaml`'s lint job (`release-push.sh fold-orphans`) fails a pull request that adds a file under the `.changes/` of a package that list does not name.
+  `ci.yaml`'s test job (`release-push.sh fold-check`) renders every fragment of every listed package with changie and fails a pull request that holds one changie refuses, since the release that first ships such a fragment would fail its own build job on every run until a fix merges.
   Write it with `go run github.com/miniscruff/changie@v1.26.0 new --kind <kind> --body '<text>' --custom Issue=pr<number>` from the package directory, `<number>` being this pull request's own number.
   Every `.changie.yaml` sets `fragmentFileFormat: '{{.Custom.Issue}}-{{.Kind}}-{{.Time.Format "20060102-150405"}}'`, so the file lands at `packages/<pkg>/.changes/unreleased/pr<number>-<Kind>-<YYYYMMDD-HHMMSS>.yaml`.
   The number exists only once the pull request is open, so open the pull request first and add the fragment in a later commit on the same branch.
@@ -570,15 +571,18 @@ Each item below names a task and where its code is, then notes on it.
   So run them at least a second apart and count the files against the entries you meant, or write the fragment by hand as `pr<number>-<slug>.yaml`.
   The file holds `kind:` (`Added`, `Changed`, `Removed` or `Fixed`) and `body:`, the entry's markdown as plain text.
   For an entry of more than one line, write `body:` as a `|-` block.
-  The fold indents the continuation lines under the bullet.
-  Never edit a `CHANGELOG.md`: `.github/workflows/changelog-fold.yaml` writes it.
-  The fold puts a released package's entry under the release that first shipped it.
-  It puts an entry of `claude-envoy`, `contracts` or `envoy-client`, which have no release, under `main@<commit>` at its next run.
+  The rendered entry indents its continuation lines under the bullet (`changeFormat` in each `.changie.yaml`).
+  A fragment is written once and stays where it is: nothing moves it and nothing deletes it.
+  Each release of `pi-legion`, `pi-envoy`, `envoy` or `claude-envoy` publishes its own entries, and that is the only thing that renders a fragment:
+  the release's build job renders the fragments its own tag first shipped (`release-push.sh fold-notes <version> <notes-file> <package-dir> <tag-prefix>`), and its publish job writes them into that GitHub release's body under one `## Changelog` heading (`release-push.sh release-section`).
+  `contracts` and `envoy-client` have no release of their own, so nothing renders their entries and they stay readable as the files under `packages/<pkg>/.changes/unreleased/`.
+  Never edit a `CHANGELOG.md`: each one is frozen history, and its first line says where the entries after it are.
   Never run `changie init`, `batch` or `merge`, which rewrite `CHANGELOG.md`.
   An open pull request that added an entry under the old `## [Unreleased]` heading (now `## Before changelog fragments`) moves the entry into a fragment the next time it merges main
 
 - **Deploys come only from main** — everything a deployment runs is built from a commit on `main`:
-  a release made by a release workflow running on `refs/heads/main` (the `legion` binary from `release.yaml`, the worker image from `worker-image.yaml`, the Envoy image and its listener release from `release-envoy-listener.yaml`, the `envoy-infra` Pulumi plugin from `release-envoy-infra.yaml`, the npm plugins from `release.yaml`'s `*_build` jobs and its one `publish` job, which run only on main), and `packages/claude-envoy`, whose built files main carries, committed by the rebuild workflow (`claude-envoy-rebuild.yaml`), so a deployment uses a checkout of `main`.
+  a release made by a release workflow running on `refs/heads/main` (the `legion` binary from `release.yaml`, the worker image from `worker-image.yaml`, the Envoy image and its listener release from `release-envoy-listener.yaml`, the `envoy-infra` Pulumi plugin from `release-envoy-infra.yaml`, and the three npm plugins — `@sjawhar/pi-envoy`, `@sjawhar/pi-legion` and `@sjawhar/claude-envoy` — from `release.yaml`'s `*_build` jobs and its one `publish` job, which run only on main).
+  Nothing commits a built artifact anywhere: every release is recorded by its tag, and `packages/claude-envoy`'s built `dist/` and `legion/` are built in its release's build job and packed into the npm tarball, so a deployment takes the plugin from the published package rather than from any checkout or branch.
   Keep no long-lived integration or deployment branch:
   a fix a deployment needs merges to `main` through a pull request and ships in the next release, never from the branch it was written on, and a change meant for one deployment is a pull request against `main` like any other.
   A branch build (a pull request's, or a `workflow_dispatch` from another ref, publishes `ghcr.io/cybermonklabs/legion-worker:sha-<first 12 hex of the commit>` or `ghcr.io/cybermonklabs/legion/envoy:<full commit>`) proves a change before it merges and is never what a deployment pins.
@@ -621,7 +625,7 @@ Each item below names a task and where its code is, then notes on it.
 
 - **A skill, a role prompt and an `AGENTS.md` name no person**
   — write the role instead: "a person" for whoever sends a message or makes a request, "the operator" for whoever runs this deployment, "the human" for whoever an agent asks for a decision.
-  The rule covers `skills/`, `packages/daemon/internal/prompts/`, the generated copies under `packages/claude-envoy/legion/` and every `AGENTS.md`:
+  The rule covers `skills/`, `packages/daemon/internal/prompts/` and every `AGENTS.md`, and so the generated copies the Claude Code plugin builds from `skills/`:
   those are the files an agent loads and follows.
   A name inside an identifier is not a name in this sense, so a repository path, a dependency version, a login and a machine name all stay.
   The rule is about these files' own prose and says nothing about what an agent writes into Dispatch, where `skills/dispatch/SKILL.md` has a decision carry the name of the person who made it when the agent was given one, and "the person" when it was not.
