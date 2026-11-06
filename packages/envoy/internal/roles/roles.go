@@ -114,6 +114,17 @@ type Resolution struct {
 	// copy names a holder and no revision; a caller that reports the revision reads the claim
 	// store.
 	ClaimRevision uint64
+	// HolderClientInstanceID is the client instance of the process the claim this resolution
+	// read names as its holder (store.RoleClaim.ClientInstanceID), which GET /v1/roles/<role>
+	// reports as client_instance_id beside the holder's session id: it is how a client sees
+	// that a role is held under its own session id by another process. It is the claim's own
+	// field on Live and Lapsed alike, since no resolution here releases a claim, and empty
+	// where the claim names no process - a claim an earlier build wrote, or one whose claimant
+	// stated none - and for Unclaimed, where there is no claim at all. A resolution whose
+	// claim came from a firstHolder (ResolveHolderFrom) read no record and carries none
+	// whatever the store holds, since the copy names a holder and nothing else; a caller that
+	// reports the holder's process reads the claim store.
+	HolderClientInstanceID string
 }
 
 // Step names the read a resolution failed at.
@@ -230,8 +241,17 @@ func ResolveHolderFrom(ctx context.Context, claims ClaimStore, firstHolder func(
 	}
 	// The claim record stands whatever the holder's state: nothing here releases one. So the
 	// revision read is the revision a conditional claim can be made against, on Lapsed as on
-	// Live, which is how a scheduler takes a role from a holder that never came back.
-	resolved := Resolution{State: Lapsed, Holder: holder, HolderState: state, Entry: entry, LastSeen: lastSeen, ClaimRevision: claim.Revision}
+	// Live, which is how a scheduler takes a role from a holder that never came back, and the
+	// process the claim names is the process holding the role on either state.
+	resolved := Resolution{
+		State:                  Lapsed,
+		Holder:                 holder,
+		HolderState:            state,
+		Entry:                  entry,
+		LastSeen:               lastSeen,
+		ClaimRevision:          claim.Revision,
+		HolderClientInstanceID: claim.ClientInstanceID,
+	}
 	if state == session.Live {
 		resolved.State = Live
 	}

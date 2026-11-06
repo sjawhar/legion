@@ -397,14 +397,26 @@ func (r *Registry) releaseRoleClaim(ctx context.Context, sessionID, role string)
 	return nil
 }
 
-// renewedWithin reports whether claim's holder answered for it less than liveWindow ago
-// (RoleClaim.LastAnsweredAt), against this registry's clock. It is the one test of a claim's
-// renewal, which ReleaseExpiredRoleClaim and the role claim reaper both read it through, so the
-// sweep and the release can never disagree over which claims a holder still renews. A liveWindow
-// of zero is a caller that configured no live window, and keeps nothing; so is a claim that
-// carries neither a renewal nor a claim time, whose renewal is older than any window.
+// RoleClaimRenewedWithin reports whether claim's holder answered for it less than liveWindow ago
+// (RoleClaim.LastAnsweredAt), as of now. It is the one test of a claim's renewal, and every
+// decision that turns on one reads it through this function - this registry's own release and
+// role claim reaper (renewedWithin), and POST /v1/roles/set weighing a claim held under the
+// claimant's own session id - so the sweep, the release and the route can never disagree over
+// which claims a holder still renews.
+//
+// A liveWindow of zero is a caller that configured no live window, and keeps nothing; so is a
+// claim that carries neither a renewal nor a claim time, whose renewal is older than any window.
+// A claim an earlier build wrote carries no renewal and is weighed at the moment it was claimed,
+// which LastAnsweredAt says: it is renewed while that moment is inside the window, and stale
+// once it is older.
+func RoleClaimRenewedWithin(claim RoleClaim, now time.Time, liveWindow time.Duration) bool {
+	return liveWindow > 0 && now.Sub(time.UnixMilli(claim.LastAnsweredAt())) < liveWindow
+}
+
+// renewedWithin is RoleClaimRenewedWithin against this registry's clock, which
+// ReleaseExpiredRoleClaim and the role claim reaper both read a claim's renewal through.
 func (r *Registry) renewedWithin(claim RoleClaim, liveWindow time.Duration) bool {
-	return liveWindow > 0 && r.now().Sub(time.UnixMilli(claim.LastAnsweredAt())) < liveWindow
+	return RoleClaimRenewedWithin(claim, r.now(), liveWindow)
 }
 
 // ReleaseExpiredRoleClaim drops role only when sessionID remains its holder, the holder has not
@@ -517,16 +529,23 @@ func (e *ErrRoleClaimRevisionMismatch) Error() string {
 
 // SetRole makes sessionID the holder of role. A hard claim (soft=false) is
 // last-claim-wins: it takes the role from whoever holds it. A soft claim
-// succeeds only if the role is unheld, already held by sessionID, or held by
-// a session listed in supersedable; any other holder returns *ErrRoleHeld
-// and leaves the claim untouched. Callers decide what "supersedable" means —
-// the listener passes the ids it has established may lose the role: a holder
-// that is not live, and the claimant's own declared predecessor when that
-// predecessor is not live either, when its record carries the claimant's own
-// client instance id, or when either it or the claimant carries no client
-// instance id. So a resumed session can recover a role its own earlier
-// session held without ever taking one from a live peer, or from a live
-// session of another client instance.
+// succeeds only if the role is unheld or held by a session listed in
+// supersedable; any other holder returns *ErrRoleHeld and leaves the claim
+// untouched, and a holder that is sessionID itself is no exception. A session
+// id names no process - a second process can resume a live session's id - so
+// a claim whose holder is the claimant's own session id is weighed by the
+// caller like any other holder's, and reaches here listed in supersedable or
+// refused. Callers decide what "supersedable" means — the listener passes the
+// ids it has established may lose the role: a holder that is not live; the
+// claimant's own declared predecessor when that predecessor is not live
+// either, when its record carries the claimant's own client instance id, or
+// when either it or the claimant carries no client instance id; and the
+// claimant's own session id when the standing claim names the claimant's own
+// process, or when nobody has renewed that claim inside the live window
+// (RoleClaimRenewedWithin). So a resumed session can recover a role its own
+// earlier session held without ever taking one from a live peer, from a live
+// session of another client instance, or from another process holding the
+// role under the very session id it is claiming as its own.
 //
 // The claim it writes names no client instance (RoleClaim.ClientInstanceID): its callers hold
 // none to give, so each passes an empty one to SetRoleWithPrevious, and the claim says which
@@ -541,6 +560,14 @@ func (r *Registry) SetRole(sessionID, machineID, role string, soft bool, superse
 // not lose the role reaches this call as provenance with no place in
 // supersedable, so this call answers *ErrRoleHeld naming the holder exactly as
 // it does for any other live holder.
+//
+// A soft claim is refused the role whenever its holder is not listed in supersedable, and a
+// holder equal to sessionID is weighed like any other: the claimant's own session id buys it
+// nothing here, because a session id names no process and a second process that resumed that id
+// would otherwise take the role from the first by claiming under the id it shares. The one
+// caller that can tell the two apart lists that holder itself (POST /v1/roles/set, which reads
+// the standing claim's own process and renewal), so a claim arriving with its own session id as
+// the holder and nothing in supersedable is *ErrRoleHeld naming that holder.
 //
 // clientInstanceID is the client instance of the claimant's own process, which the claim records
 // as the process that holds the role (RoleClaim.ClientInstanceID), and the claim is stamped
@@ -596,7 +623,7 @@ func (r *Registry) SetRoleWithPrevious(ctx context.Context, sessionID, machineID
 	}
 
 	oldSessionID := oldClaim.HolderSessionID
-	if soft && oldSessionID != "" && oldSessionID != sessionID && !slices.Contains(supersedable, oldSessionID) {
+	if soft && oldSessionID != "" && !slices.Contains(supersedable, oldSessionID) {
 		return Interest{}, &ErrRoleHeld{Role: role, Holder: oldSessionID}
 	}
 

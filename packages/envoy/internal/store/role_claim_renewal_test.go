@@ -215,3 +215,35 @@ func TestAClaimWhoseRenewalIsOlderThanTheLiveWindowIsFreed(t *testing.T) {
 		assertRoleHolder(t, reg, role, "")
 	})
 }
+
+// RoleClaimRenewedWithin is the one test of a claim's renewal, and the release, the sweep and
+// POST /v1/roles/set weighing a claim held under the claimant's own session id all read a claim
+// through it, so it is asked here as a caller outside this package asks it: against a clock the
+// caller names. A claim an earlier build wrote carries no renewal and is weighed at the moment
+// it was claimed, so it is renewed while that moment is inside the window and stale once it is
+// older; a window of zero holds nothing renewed, and neither does a record carrying no time at
+// all.
+func TestRoleClaimRenewedWithinWeighsEveryClaimAgainstTheWindowItIsGiven(t *testing.T) {
+	now := time.Date(2026, 11, 6, 9, 30, 0, 0, time.UTC)
+	const liveWindow = time.Minute
+	at := func(age time.Duration) int64 { return now.Add(-age).UnixMilli() }
+	for name, tc := range map[string]struct {
+		claim      RoleClaim
+		liveWindow time.Duration
+		want       bool
+	}{
+		"a claim renewed inside the window":               {claim: RoleClaim{ClaimedAt: at(time.Hour), RenewedAt: at(time.Second)}, liveWindow: liveWindow, want: true},
+		"a claim renewed one window ago":                  {claim: RoleClaim{ClaimedAt: at(time.Hour), RenewedAt: at(liveWindow)}, liveWindow: liveWindow},
+		"a claim with no renewal, claimed inside it":      {claim: RoleClaim{ClaimedAt: at(time.Second)}, liveWindow: liveWindow, want: true},
+		"a claim with no renewal, claimed one window ago": {claim: RoleClaim{ClaimedAt: at(liveWindow)}, liveWindow: liveWindow},
+		"a record carrying no time at all":                {claim: RoleClaim{}, liveWindow: liveWindow},
+		"a caller that configured no window":              {claim: RoleClaim{ClaimedAt: at(time.Second), RenewedAt: at(time.Second)}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := RoleClaimRenewedWithin(tc.claim, now, tc.liveWindow); got != tc.want {
+				t.Fatalf("a claim claimed at %d and renewed at %d reads renewed=%t within %s, want %t",
+					tc.claim.ClaimedAt, tc.claim.RenewedAt, got, tc.liveWindow, tc.want)
+			}
+		})
+	}
+}

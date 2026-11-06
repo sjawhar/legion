@@ -2614,7 +2614,12 @@ func TestSetRoleConcurrentHardClaimsOfOneRoleAllLand(t *testing.T) {
 	assertInterestTopicsForSession(t, reg, holder, roleTopic)
 }
 
-func TestSetRoleSoft_TakesUnheldAndOwnAndSupersedableRoles(t *testing.T) {
+// A soft claim takes an unheld role and a role whose holder the caller listed as supersedable,
+// and nothing else - its own holder's session id included. A session id names no process, so a
+// claim arriving under the id that already holds the role is weighed by its caller like any
+// other (POST /v1/roles/set, which reads the standing claim's own process and renewal) and
+// reaches this call listed or refused.
+func TestSetRoleSoft_TakesUnheldAndSupersedableRolesAndRefusesItsOwnHolderUnlessListed(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -2627,9 +2632,18 @@ func TestSetRoleSoft_TakesUnheldAndOwnAndSupersedableRoles(t *testing.T) {
 	}
 	assertRoleHolder(t, reg, role, "ses_first")
 
-	// Own: a soft re-assert is a no-op success.
-	if _, err := reg.SetRole("ses_first", "m1", role, true); err != nil {
-		t.Fatalf("soft re-assert of own role: %v", err)
+	// The holder's own session id, unlisted: refused, since this call cannot tell the process
+	// that made the standing claim from a second one that resumed its session id.
+	_, err := reg.SetRole("ses_first", "m1", role, true)
+	var held *ErrRoleHeld
+	if !errors.As(err, &held) || held.Role != role || held.Holder != "ses_first" {
+		t.Fatalf("soft re-assert under the holder's own session id = %+v, %v; want *ErrRoleHeld naming ses_first", held, err)
+	}
+	assertRoleHolder(t, reg, role, "ses_first")
+
+	// The same claim with that holder listed: the caller vouched for it, and the claim lands.
+	if _, err := reg.SetRole("ses_first", "m1", role, true, "ses_first"); err != nil {
+		t.Fatalf("soft re-assert of own role the caller listed: %v", err)
 	}
 	assertRoleHolder(t, reg, role, "ses_first")
 

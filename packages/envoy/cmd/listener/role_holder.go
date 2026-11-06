@@ -58,6 +58,12 @@ type roleHolderError struct {
 	Reason      roles.State   `json:"reason"`
 	Holder      string        `json:"holder,omitempty"`
 	HolderState session.State `json:"holder_state,omitempty"`
+	// ClientInstanceID is the process the lapsed holder's claim names
+	// (store.RoleClaim.ClientInstanceID), as the 200 reports it beside the live holder: it is
+	// how a client reading this answer sees that the role is held under its own session id by
+	// another process. Absent for a role no claim stands for, and for a claim that names no
+	// process - one an earlier build wrote, or one whose claimant stated none.
+	ClientInstanceID string `json:"client_instance_id,omitempty"`
 	// ClaimRevision is the role's claim revision, as the 200 reports it: the revision of the
 	// claim a lapsed holder still holds, and zero for an unclaimed role, so a scheduler
 	// reading this 404 can claim the role with if_claim_revision and have that claim refused
@@ -78,6 +84,7 @@ func writeRoleHolderError(w http.ResponseWriter, role string, result roles.Resol
 	case roles.Lapsed:
 		response.Holder = result.Holder
 		response.HolderState = result.HolderState
+		response.ClientInstanceID = result.HolderClientInstanceID
 		lastSeen := " (last seen unavailable)"
 		if result.LastSeen != 0 {
 			response.LastSeen = &result.LastSeen
@@ -212,8 +219,10 @@ const (
 // roleSupersessionVerdict decides whether a soft claim takes the role from the holder it found,
 // for the one route that asks (roleSetHandler). holder is the session the role's claim names,
 // neither empty nor the claimant itself; previous is the predecessor the claimant declared,
-// already trimmed; claimantInstanceID is the client instance the claimant's own registration
-// carries.
+// already trimmed; claimantInstanceID is the client instance the claimant's request stated, and
+// where it stated none the one its own registration carries - the route's single fallback to
+// that record, which keeps a client that sends no instance deciding here exactly as it did
+// before requests carried one.
 //
 // A holder the claimant did not name as its predecessor is weighed on its state alone
 // (liveSessionEntry with sessionIsLive): anything but live - unresponsive past the live window,

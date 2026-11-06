@@ -41,6 +41,16 @@ type listenerDeps struct {
 	client   *bus.Client
 	registry *store.Registry
 	sessions *session.SessionRegistry
+	// sessionLiveWindow is the live window the session registry above runs with (the first of
+	// its Windows: the value this listener was configured with, never the compiled
+	// session.LiveWindow). POST /v1/roles/set weighs a standing claim's own renewal against it
+	// when that claim is held under the claimant's own session id
+	// (store.RoleClaimRenewedWithin), so the route, the release and the role claim reaper all
+	// hold a holder's claim for exactly as long. It is carried rather than compiled in because
+	// a smoke run and a deployed probe shorten the window to wait past it in seconds. Zero in
+	// a test that builds the deps without it, and a window of zero holds no claim renewed:
+	// every claim then reads stale.
+	sessionLiveWindow time.Duration
 	// ciStore is nil on a listener that mounts no GitHub webhook route, the one route that uses it.
 	ciStore *cistore.Store
 	// roleLane is the role lane's own client (bus.ConnectRoleLane), nil in a test that builds the
@@ -1252,19 +1262,24 @@ func main() {
 	stopping, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
+	// The live window the session registry runs with: what the role routes weigh a standing
+	// claim's renewal against, and what the role claim reaper weighs it against too, read from
+	// the registry itself so the two can never be configured apart.
+	sessionLive, _ := sessions.Windows()
 	ready := &listenerDeps{
-		client:     client,
-		roleLane:   roleLaneClient,
-		consumers:  delivery,
-		registry:   registry,
-		sessions:   sessions,
-		ciStore:    ciStore,
-		caches:     caches,
-		consumer:   consumer,
-		streamName: bus.Stream,
-		wakes:      wakes,
-		delivery:   &deliveryConfig,
-		confirmed:  dedupe.New(10 * time.Minute),
+		client:            client,
+		roleLane:          roleLaneClient,
+		consumers:         delivery,
+		registry:          registry,
+		sessions:          sessions,
+		sessionLiveWindow: sessionLive,
+		ciStore:           ciStore,
+		caches:            caches,
+		consumer:          consumer,
+		streamName:        bus.Stream,
+		wakes:             wakes,
+		delivery:          &deliveryConfig,
+		confirmed:         dedupe.New(10 * time.Minute),
 
 		sendsToUnresponsive: sendsToUnresponsive,
 	}
@@ -1331,7 +1346,6 @@ func main() {
 	// to settle the bucket's maximum age sooner is not asking for that (the two defaults say
 	// why). Each pass is judged against this listener's own live window, not counted, so the
 	// period moves when a gone holder's role is freed and nothing else.
-	sessionLive, _ := sessions.Windows()
 	kvLoopsCtx, kvLoopsCancel := context.WithCancel(context.Background())
 	kvLoopsDone := []<-chan struct{}{
 		registry.StartReaper(kvLoopsCtx, func(sessionID string) (bool, error) { return sessionMayBeLive(sessions, sessionID) }, 5*time.Minute, store.InterestReapGrace),

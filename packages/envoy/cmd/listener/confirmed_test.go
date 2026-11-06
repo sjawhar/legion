@@ -46,12 +46,19 @@ func newConfirmedRecord(t *testing.T) *dedupe.Cache {
 	return confirmed
 }
 
-// withRoleClaimDrain gives d the delivery configuration a route runs a kept-lane drain on, as main
-// wires it: a config over d's stores with the dedupe cache and the attempt cache the drain judges
-// a forward against (beforeForward), startRoleForward(client) as the forward, a logger, a
-// delivered counter, the drain's kept-expired counter and the guards two drains of one role take
-// (roleKeepGuards). POST /v1/roles/set hands a claim's handover this config (runKeptRoleDrain),
-// so a test that claims a role through that route needs it.
+// withRoleClaimDrain gives d what POST /v1/roles/set needs beyond its stores, as main wires it.
+//
+// The delivery configuration a route runs a kept-lane drain on: a config over d's stores with
+// the dedupe cache and the attempt cache the drain judges a forward against (beforeForward),
+// startRoleForward(client) as the forward, a logger, a delivered counter, the drain's
+// kept-expired counter and the guards two drains of one role take (roleKeepGuards). POST
+// /v1/roles/set hands a claim's handover this config (runKeptRoleDrain), so a test that claims
+// a role through that route needs it.
+//
+// And the live window of d's own session registry, which that route weighs a standing claim's
+// renewal against when the claim is held under the claimant's own session id
+// (listenerDeps.sessionLiveWindow): read from the registry here exactly as main reads it from
+// its own, so a test's route and its registry can never be held to different windows.
 func withRoleClaimDrain(t *testing.T, d *listenerDeps) *listenerDeps {
 	t.Helper()
 	cache := dedupe.New(10 * time.Minute)
@@ -75,6 +82,9 @@ func withRoleClaimDrain(t *testing.T, d *listenerDeps) *listenerDeps {
 		messagesDelivered: metrics.New().NewCounter("test_messages_delivered", "test"),
 		roleKeptExpired:   metrics.New().NewCounter("test_role_kept_expired", "test"),
 		roleKeepDrains:    newRoleKeepGuards(),
+	}
+	if d.sessions != nil {
+		d.sessionLiveWindow, _ = d.sessions.Windows()
 	}
 	return d
 }

@@ -1681,19 +1681,43 @@ func TestRoleSetHandlerSoftClaimPredecessorInstance(t *testing.T) {
 		}
 	})
 
-	t.Run("a claim under the holder's own session id keeps the role", func(t *testing.T) {
-		// The holder re-claims its own role and names a predecessor of another instance. The
-		// predecessor rule is never reached: the role is already this session's.
+	t.Run("a claim from the process that holds the role keeps it", func(t *testing.T) {
+		// The holder's own process re-claims its role and names a predecessor of another
+		// instance. The predecessor rule is never reached: the role is held under this
+		// claimant's own session id, by the very process making the claim, so the route
+		// decides on that claim alone.
 		registry, sessions, _, post := setup(t)
 		registerInstance(t, sessions, "ses_holder", claimantInstance)
-		claim(t, post, `{"session_id":"ses_holder","role":"sre"}`)
+		claim(t, post, fmt.Sprintf(`{"session_id":"ses_holder","role":"sre","client_instance_id":%q}`, claimantInstance))
 		registerInstance(t, sessions, "ses_other", otherInstance)
-		rec := post(`{"session_id":"ses_holder","role":"sre","soft":true,"previous_session_id":"ses_other"}`)
+		rec := post(fmt.Sprintf(`{"session_id":"ses_holder","role":"sre","soft":true,"previous_session_id":"ses_other","client_instance_id":%q}`, claimantInstance))
 		if rec.Code != http.StatusOK {
 			t.Fatalf("the holder's own soft claim: status %d %s, want 200", rec.Code, rec.Body.String())
 		}
 		if holder := holderOf(t, registry, "sre"); holder != "ses_holder" {
 			t.Fatalf("holder after its own claim = %q, want ses_holder", holder)
+		}
+	})
+
+	t.Run("a live predecessor gives the role up to the process the request states", func(t *testing.T) {
+		// The claimant states its own process rather than leaving the route to read it from
+		// its registration, and the predecessor belongs to that same process: the role
+		// follows it, and the takeover is not the logged one, since neither side is
+		// unidentified. The claimant's registration carries no instance at all, so this is
+		// the stated id deciding and not the stored one.
+		registry, sessions, logs, post := setup(t)
+		registerInstance(t, sessions, "ses_pred", claimantInstance)
+		claim(t, post, `{"session_id":"ses_pred","role":"sre"}`)
+		registerInstance(t, sessions, "ses_claimant", "")
+		rec := post(fmt.Sprintf(`{"session_id":"ses_claimant","role":"sre","soft":true,"previous_session_id":"ses_pred","client_instance_id":%q}`, claimantInstance))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("soft claim stating the predecessor's own client instance: status %d %s, want 200", rec.Code, rec.Body.String())
+		}
+		if holder := holderOf(t, registry, "sre"); holder != "ses_claimant" {
+			t.Fatalf("holder after the claim = %q, want ses_claimant", holder)
+		}
+		if logged := logs.String(); strings.Contains(logged, "carries no client instance id") {
+			t.Fatalf("takeover log = %q, want none: the request named the instance both sides share", logged)
 		}
 	})
 
@@ -1727,12 +1751,15 @@ func TestRoleSetHandlerSoftClaimPredecessorInstance(t *testing.T) {
 		})
 	}
 
-	t.Run("a claim keeps the claimant's stored client instance id", func(t *testing.T) {
+	t.Run("a claim leaves the claimant's stored client instance id as it found it", func(t *testing.T) {
 		// The claim refreshes the claimant's registration, and that refresh must leave the id the
-		// next soft claim reads: a claim that cleared it would demote every later claim.
+		// next soft claim's predecessor rule reads: a claim that cleared it would demote every
+		// later claim. The instance the request states is not written there either, whatever it
+		// names: one registration per session id is a non-goal, and a second process claiming
+		// under this id must leave the registration of the process that registered it alone.
 		_, sessions, _, post := setup(t)
 		registerInstance(t, sessions, "ses_claimant", claimantInstance)
-		claim(t, post, `{"session_id":"ses_claimant","role":"sre","soft":true}`)
+		claim(t, post, fmt.Sprintf(`{"session_id":"ses_claimant","role":"sre","soft":true,"client_instance_id":%q}`, otherInstance))
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		stored, err := sessions.Refresh(ctx, "ses_claimant")
