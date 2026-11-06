@@ -21,8 +21,8 @@ const operatorTitles = [
   "Brass sextant",
 ];
 
-/** Opens the bar on its hits alone (`/`), so every row the list holds is a hit and no action of
- *  the page is counted with them. */
+/** Opens the bar with `/`. The queries below name no action and no project, so every row the
+ *  list holds for them is a hit. */
 async function openSearch(page: Page): Promise<void> {
   await page.locator("body").focus();
   await page.keyboard.press("/");

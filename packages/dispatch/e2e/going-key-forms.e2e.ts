@@ -27,8 +27,8 @@ async function seedProject(project: string): Promise<string> {
   return target.key;
 }
 
-/** Opens the bar on its hits alone (`/`), so every row the list holds is a hit and no action of
- *  the page is counted with them. */
+/** Opens the bar with `/`. Its rows are this page's actions and the person's recent items as
+ *  well as the hits, so the checks below count the hits by their own ids. */
 async function openSearch(page: Page): Promise<void> {
   await page.locator("body").focus();
   await page.keyboard.press("/");
@@ -64,10 +64,10 @@ test("every form of an issue key puts that issue first on a page of its project"
     // Each form is its own reported check (`expect.soft`), so a run where one form leads and
     // another does not says which.
     for (const form of [key, key.toLowerCase(), key.replace("-", " "), number]) {
-      // Emptied between forms: the bar holds no hits for a query under two characters, so the
+      // Emptied between forms: the bar holds no hit for a query under two characters, so the
       // row this form finds is this form's own and never the last one's.
       await search.fill("");
-      await expect(dialog.getByRole("option")).toHaveCount(0);
+      await expect(dialog.locator('[role="option"][id^="search-option-issue-"]')).toHaveCount(0);
       await search.fill(form);
       await expect
         .soft(dialog.getByRole("option").first(), `the form "${form}" heads the list`)

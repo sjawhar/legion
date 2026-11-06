@@ -16,7 +16,7 @@ import type { SearchResponse, SearchResult, SearchResultsPage } from "../../api/
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { appKeymap } from "../shell/keymap";
 import { ANSWER_PREVIEW_CHARS } from "./AskHitStatus";
-import { type PaletteMode, SearchPalette } from "./SearchPalette";
+import { SearchPalette } from "./SearchPalette";
 import { optionId } from "./search-model";
 
 const results: SearchResult[] = [
@@ -83,7 +83,7 @@ function renderPalette(
       <QueryClientProvider client={queryClient}>
         <KeymapProvider>
           <CurrentRoute />
-          <SearchPalette mode="all" onClose={onClose} />
+          <SearchPalette onClose={onClose} open />
         </KeymapProvider>
       </QueryClientProvider>
     </MemoryRouter>
@@ -494,8 +494,8 @@ test("a background refresh that fails keeps the hits the query has, and the high
 
 // The shell's part in a chosen action: the palette closes, and the row runs once it has.
 function PaletteHost(): ReactNode {
-  const [mode, setMode] = useState<PaletteMode | null>("all");
-  return <SearchPalette mode={mode} onClose={() => setMode(null)} />;
+  const [open, setOpen] = useState(true);
+  return <SearchPalette onClose={() => setOpen(false)} open={open} />;
 }
 
 function renderPaletteHost(): { queryClient: QueryClient; unmount: () => void } {
@@ -879,10 +879,10 @@ test("closes the palette when navigation changes", async () => {
       <QueryClientProvider client={queryClient}>
         <RouteChanger />
         <SearchPalette
-          mode="all"
           onClose={() => {
             closed += 1;
           }}
+          open
         />
       </QueryClientProvider>
     </MemoryRouter>

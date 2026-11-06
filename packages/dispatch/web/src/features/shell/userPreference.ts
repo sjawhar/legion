@@ -3,17 +3,20 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { whoAmIQuery } from "../../api/queries";
 
+/** A name a browser keeps something under for one signed-in person: a preference they set, and
+ *  the bar's recent items (`features/search/recents.ts`), which are theirs the same way. */
 export type UserPreference =
   | "agents.pinned"
   | "project.board-edges"
   | "project.board-lanes"
   | "project.issue-filters"
   | "project.issue-view"
+  | "search.recents"
   | "shell.margin"
   | "shell.margin-width"
   | "shell.sidebar";
 
-/** Browser-only preferences are private to the signed-in Dispatch identity. */
+/** Browser-only values are private to the signed-in Dispatch identity. */
 export function userPreferenceStorageKey(login: string, preference: UserPreference): string {
   return `dispatch.${preference}:${login}`;
 }

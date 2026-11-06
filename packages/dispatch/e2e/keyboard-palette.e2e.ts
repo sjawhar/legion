@@ -62,16 +62,17 @@ test("the palette lists the issue page's actions, guarded like their buttons, an
     await expect(actions.getByRole("option", { name: "Reopen issue" })).toHaveCount(0);
     // An issue page names its project in its key, so `g d` has a row here.
     await expect(actions.getByRole("option", { name: "Go to Documents" })).toHaveCount(1);
-    // `$mod+k` fires inside an input, as the palette's own close, so it is no row, and `/` would
-    // only reopen this palette with its actions taken away. A binding that opens anything else is
-    // a row: it runs once this palette has closed (the rows below).
-    for (const absent of ["Search and actions", "Search only"]) {
+    // `$mod+k` fires inside an input, as the bar's own close, so it is no row, and `/` would
+    // only reopen the bar the reader is in. A binding that opens anything else is a row: it
+    // runs once this bar has closed (the rows below).
+    for (const absent of ["Search and actions", "Search"]) {
       await expect(actions.getByRole("option", { exact: true, name: absent })).toHaveCount(0);
     }
 
-    // Arrows move over action rows exactly as they move over hits, from the first row. Which row
-    // that is belongs to `actions()`'s sort, so this names none.
-    const rows = actions.getByRole("option");
+    // Arrows move over every row of the list, from its first: the recent items this reader has
+    // (the issue they are on) come before the actions. Which action row is where belongs to
+    // `actions()`'s sort, so this names none.
+    const rows = dialog.getByRole("option");
     const firstId = await rows.first().getAttribute("id");
     expect(firstId).not.toBeNull();
     await expect(input).toHaveAttribute("aria-activedescendant", firstId as string);
@@ -214,7 +215,7 @@ test("a failed palette search keeps its Retry action", async ({ browser }) => {
   }
 });
 
-test("/ searches only, and a query that is no action's start lists the hits above the actions", async ({
+test("/ opens the same bar, and a query that is no action's start lists the hits above the actions", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -231,23 +232,21 @@ test("/ searches only, and a query that is no action's start lists the hits abov
 
     await page.keyboard.press("/");
     await expect(dialog).toBeVisible();
-    await expect(actions).toHaveCount(0);
+    // The bar `⌘K` opens: `/` is another key to it, not a list of its own, so this page's
+    // actions are here too.
+    await expect(actions.getByRole("option", { name: "Close issue" })).toHaveCount(1);
     await input.fill("astrolabe");
+    // No action's label and no project's name holds `astrolabe`, so the issue's own hit is the
+    // whole list.
     await expect(dialog.getByRole("option")).toHaveCount(1);
-    await expect(actions).toHaveCount(0);
     await page.keyboard.press("Escape");
     await expect(dialog).toHaveCount(0);
 
-    // `/` reopens on its last search, selected so that typing replaces it; the hits come back
-    // with it. `⌘K` still opens empty, since a query left there would filter this page's actions.
+    // Every open starts on an empty box, whichever key opened it: a query left in it would
+    // filter the next page's actions, and its recent items, down to nothing.
     await page.keyboard.press("/");
-    await expect(input).toHaveValue("astrolabe");
-    await expect
-      .poll(() =>
-        input.evaluate((field: HTMLInputElement) => [field.selectionStart, field.selectionEnd])
-      )
-      .toEqual([0, "astrolabe".length]);
-    await expect(dialog.getByRole("option")).toHaveCount(1);
+    await expect(input).toHaveValue("");
+    await expect(actions.getByRole("option", { name: "Close issue" })).toHaveCount(1);
     await page.keyboard.press("Escape");
     await expect(dialog).toHaveCount(0);
 
@@ -308,9 +307,10 @@ test("g d opens the route's project Documents, from an issue key or a project pa
     await page.keyboard.press("g");
     await page.keyboard.press("p");
     const dialog = page.getByRole("dialog", { name: "Search" });
-    await expect(dialog.getByRole("group", { name: "Projects" })).toBeVisible();
     const input = page.getByRole("combobox", { name: "Search" });
+    // `g p` opens the one bar, where a project is a row the reader types their way to.
     await input.fill("operations");
+    await expect(dialog.getByRole("group", { name: "Projects" })).toBeVisible();
     await expect(dialog.getByRole("option")).toHaveCount(1);
     await input.press("Enter");
     await expect(page).toHaveURL(/\/projects\/OPS\/issues/);
@@ -1135,7 +1135,7 @@ test("the Architecture tab offers its focused component's Open row, and not its 
   }
 });
 
-test("Go to project… and Keyboard shortcuts are rows, and each opens its own dialog", async ({
+test("Keyboard shortcuts is a row that opens its own dialog, and a project is a row of the bar itself", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -1149,17 +1149,16 @@ test("Go to project… and Keyboard shortcuts are rows, and each opens its own d
     const dialog = page.getByRole("dialog", { name: "Search" });
     const actions = dialog.getByRole("group", { name: "Actions" });
 
-    // A row runs once the palette has closed, so a row that opens the projects list opens it.
+    // `Go to project…` is no row of its own: its key opens this same bar, where the projects
+    // are rows the reader types their way to, and Enter opens the one they chose.
     await page.keyboard.press("Control+k");
-    await actions.getByRole("option", { name: "Go to project…" }).click();
-    await expect(dialog.getByRole("group", { name: "Projects" })).toBeVisible();
-    await expect(page.getByRole("combobox", { name: "Search" })).toHaveAttribute(
-      "placeholder",
-      "Go to project"
-    );
-    await page.keyboard.press("Escape");
+    await expect(actions.getByRole("option", { name: "Go to project…" })).toHaveCount(0);
+    await page.getByRole("combobox", { name: "Search" }).fill("operations");
+    await dialog.getByRole("group", { name: "Projects" }).getByRole("option").click();
     await expect(dialog).toHaveCount(0);
+    await expect(page).toHaveURL(/\/projects\/OPS\/issues/);
 
+    // A row runs once the bar has closed, so a row that opens another dialog opens it.
     await page.locator("body").focus();
     await page.keyboard.press("Control+k");
     await actions.getByRole("option", { name: "Keyboard shortcuts" }).click();

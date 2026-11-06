@@ -1,0 +1,7 @@
+kind: Changed
+body: |-
+  Dispatch has one bar, opened from anywhere by `Ctrl/Cmd+K`, `/` or `g p`, in place of three lists that each held part of what a person was after.
+  `Ctrl/Cmd+K` opens it while the writing focus is in a document's editor; `/` still types a slash into a document, and the Agents page keeps its own `/`.
+  A chip above the box says what the bar will act on, seeded from the page: the issue of an issue page, the document of a document page, the issues selected on the issue list, or the project; `Tab` narrows it to the block the cursor is in and `Backspace` widens it to the project.
+  The issue list takes a selection: `x` or a row's checkbox selects it, and what is selected is what the chip names.
+  With an empty box the bar lists the person's recent items - the last eight issues and documents they opened, kept in their own browser - above the actions of the page they are on, and a project is now a row of that same list rather than a list of its own.
