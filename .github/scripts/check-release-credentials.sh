@@ -15,9 +15,9 @@
 #    `secrets['DEPLOY_KEY']`, in any casing (GitHub resolves `secrets.deploy_key` too) —
 #    (a) runs no dependency code, (b) uses only the actions on CREDENTIALED_USES below, (c) sets
 #    `cache-mode: none`, and (d) names the deploy key only as `DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}`
-#    (the dot form) in the step-level `env:` of a step whose `run:` calls one of its workflow's push
-#    commands (PUSH_COMMANDS): `release-push.sh push-tag`, and nothing else; the workflow's
-#    `env:` reaches every job, so the key there is never allowed.
+#    (the dot form) in the step-level `env:` of a step whose `run:` calls the one push command
+#    (PUSH_COMMAND), `release-push.sh push-tag`, and nothing else; the workflow's `env:` reaches
+#    every job, so the key there is never allowed.
 # 2. A build job — one that runs dependency code — holds none of those four write scopes and no
 #    `secrets` reference but `secrets.GITHUB_TOKEN`, in its own text or the workflow's `env:` (so
 #    no deploy key, by dot or by index, no other secret and no `toJSON(secrets)`), declares
@@ -52,6 +52,12 @@
 #    38822866387, the first on the build/publish split: its `if:` read legion_build's outputs
 #    behind an implicit `success()` that envoy_plugin_publish, four jobs upstream, had already
 #    made false.
+# 6. A job with a step whose `run:` calls `.github/scripts/release-push.sh` has an
+#    `actions/checkout` before that step. The script is in the checkout and nowhere else, so
+#    without one the step exits 127 and the job carries on: that is what left every legion
+#    release's "## Worker image" section unwritten until release.yaml's worker_image_release,
+#    a job that checked nothing out, got its checkout. Only the first such step of a job is
+#    named, since a checkout before it is a checkout before every later one.
 #
 # "Runs dependency code" is a tripwire over named patterns, not a proof that no other code runs: a
 # step runs dependency code when its `uses:` starts with one of DEPENDENCY_USES, when the shell its
@@ -96,9 +102,9 @@
 # the boundary; this check is a tripwire on that boundary, and the pass-through class above (a
 # variable in command position, `xargs`, `nohup`, an unlisted program, a `bun` behind `docker -Dl
 # debug run`) is accepted on that ground.
-# Scope: exactly the three workflows WORKFLOWS lists, the keys of PUSH_COMMANDS: release.yaml,
-# release-envoy-listener.yaml and release-envoy-infra.yaml. Rules 1-3 read every job that has
-# `steps:`; a job that calls a reusable workflow (`uses:` and no steps, release.yaml's
+# Scope: exactly the three workflows WORKFLOWS lists: release.yaml,
+# release-envoy-listener.yaml and release-envoy-infra.yaml. Rules 1-3 and 6 read every job that
+# has `steps:`; a job that calls a reusable workflow (`uses:` and no steps, release.yaml's
 # worker_image) is out of their
 # scope, since what it runs is that workflow's own jobs. Rule 4 reads the job it names. Rule 5
 # reads every job's `if:`, steps or not.
@@ -153,16 +159,11 @@ DEPLOY_KEY_REF = re.compile(
 DEPLOY_KEY_VALUE = re.compile(r"\$\{\{\s*secrets\.DEPLOY_KEY\s*\}\}", re.IGNORECASE)
 RELEASE_PUSH = ".github/scripts/release-push.sh"
 TRIPWIRE = f"{RELEASE_PUSH} no-credential"
-# The release-push.sh commands a step holding the deploy key may run, by workflow: a release
-# pushes its tag, and nothing else pushes. Its keys are the workflows this check reads, in this
-# order: a workflow joins the check here.
-RELEASE_PUSHES = ("release-push.sh push-tag",)
-PUSH_COMMANDS = {
-    RELEASE: RELEASE_PUSHES,
-    LISTENER: RELEASE_PUSHES,
-    INFRA: RELEASE_PUSHES,
-}
-WORKFLOWS = list(PUSH_COMMANDS)
+# The one release-push.sh command a step holding the deploy key may run: a release pushes its
+# tag, and nothing else pushes.
+PUSH_COMMAND = "release-push.sh push-tag"
+# The workflows this check reads, in this order: a workflow joins the check here.
+WORKFLOWS = [RELEASE, LISTENER, INFRA]
 # A secret other than GITHUB_TOKEN, which a build job must not hold: `secrets.X` or `secrets['X']`
 # for any X but GITHUB_TOKEN, `toJSON(secrets)` (the context and functions are case-insensitive,
 # as are secret names), or a bare `secrets` inside a `${{ … }}` expression (`${{ secrets }}`,
@@ -498,16 +499,15 @@ def texts_of(node, path=(), line=0) -> list[tuple[tuple, int, str]]:
     return texts
 
 
-def deploy_key_allowed(steps: list, path: tuple, text: str, pushes: tuple[str, ...]) -> bool:
-    """`DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}` in the env of a step that runs one of pushes, the
-    workflow's push commands, and nothing else: the dot form, exactly, as the one value of that
-    key."""
+def deploy_key_allowed(steps: list, path: tuple, text: str) -> bool:
+    """`DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}` in the env of a step that runs PUSH_COMMAND, and
+    nothing else: the dot form, exactly, as the one value of that key."""
     if len(path) != 4 or path[0] != "steps" or path[2:] != ("env", "DEPLOY_KEY"):
         return False
     if not DEPLOY_KEY_VALUE.fullmatch(text.strip()):
         return False
     run = steps[path[1]].get("run")
-    return isinstance(run, str) and any(push in run for push in pushes)
+    return isinstance(run, str) and PUSH_COMMAND in run
 
 
 def describe(step: Mapping, index: int) -> str:
@@ -585,6 +585,29 @@ def check_job(
             f"boolean, so no token is left in the checkout ({found})",
         )
 
+    # 6. release-push.sh is in the checkout, so a checkout comes before the step that runs it.
+    # Only steps the tokeniser reads are looked at: another shell's body is not its to parse.
+    checkouts = [
+        index
+        for index, step in enumerate(steps)
+        if isinstance(step.get("uses"), str)
+        and step["uses"].lower().startswith("actions/checkout@")
+    ]
+    for index, step in enumerate(steps):
+        run = step.get("run")
+        if not isinstance(run, str) or shell_of(step, job, workflow)[0] not in SHELLS:
+            continue
+        if not any(PATH_PREFIX.sub("", words[0]) == RELEASE_PUSH for words in commands_of(run)):
+            continue
+        if not any(checkout < index for checkout in checkouts):
+            problem(
+                path, line_of(step, job_line),
+                f"job '{name}' {describe(step, index)} runs {RELEASE_PUSH}, but no "
+                f"actions/checkout before it puts the script in the workspace, so the step would "
+                f"exit 127 and the job would carry on",
+            )
+        break
+
     if scopes or key_sites:
         credentialed_jobs += 1
         # 1a. No dependency code.
@@ -614,16 +637,14 @@ def check_job(
                 f"job '{name}' holds a credential, so it must set 'cache-mode: none' to restore "
                 f"no cache ({found})",
             )
-        # 1d. The deploy key reaches only the steps that run this workflow's push commands.
-        pushes = PUSH_COMMANDS[path]
+        # 1d. The deploy key reaches only the steps that run the push command.
         for key_path, line, text in key_sites:
-            if not deploy_key_allowed(steps, key_path, text, pushes):
+            if not deploy_key_allowed(steps, key_path, text):
                 problem(
                     path, line,
                     f"job '{name}' names secrets.DEPLOY_KEY at {describe_site(steps, key_path)}; "
                     f"the deploy key may appear only as 'DEPLOY_KEY: ${{{{ secrets.DEPLOY_KEY }}}}' "
-                    f"in the env of a step whose run calls {' or '.join(pushes)}, which "
-                    f"{path.name} allows",
+                    f"in the env of a step whose run calls {PUSH_COMMAND}",
                 )
 
     if dependency:

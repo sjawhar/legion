@@ -560,6 +560,7 @@ Each item below names a task and where its code is, then notes on it.
   the six packages `.github/changelog-packages` lists (`pi-legion`, `pi-envoy`, `envoy`, `claude-envoy`, `contracts`, `envoy-client`), the one list the check below reads.
   A package without one, such as `packages/daemon`, takes no fragment.
   `ci.yaml`'s lint job (`release-push.sh fold-orphans`) fails a pull request that adds a file under the `.changes/` of a package that list does not name.
+  `ci.yaml`'s test job (`release-push.sh fold-check`) renders every fragment of every listed package with changie and fails a pull request that holds one changie refuses, since the release that first ships such a fragment would fail its own build job on every run until a fix merges.
   Write it with `go run github.com/miniscruff/changie@v1.26.0 new --kind <kind> --body '<text>' --custom Issue=pr<number>` from the package directory, `<number>` being this pull request's own number.
   Every `.changie.yaml` sets `fragmentFileFormat: '{{.Custom.Issue}}-{{.Kind}}-{{.Time.Format "20060102-150405"}}'`, so the file lands at `packages/<pkg>/.changes/unreleased/pr<number>-<Kind>-<YYYYMMDD-HHMMSS>.yaml`.
   The number exists only once the pull request is open, so open the pull request first and add the fragment in a later commit on the same branch.
@@ -571,7 +572,7 @@ Each item below names a task and where its code is, then notes on it.
   The rendered entry indents its continuation lines under the bullet (`changeFormat` in each `.changie.yaml`).
   A fragment is written once and stays where it is: nothing moves it and nothing deletes it.
   Each release of `pi-legion`, `pi-envoy`, `envoy` or `claude-envoy` publishes its own entries, and that is the only thing that renders a fragment:
-  the release's build job renders the fragments its own tag first shipped (`release-push.sh fold-notes --label <version>`), and its publish job writes them into that GitHub release's body under one `## Changelog` heading (`release-push.sh release-section`).
+  the release's build job renders the fragments its own tag first shipped (`release-push.sh fold-notes <version> <notes-file> <package-dir> <tag-prefix>`), and its publish job writes them into that GitHub release's body under one `## Changelog` heading (`release-push.sh release-section`).
   `contracts` and `envoy-client` have no release of their own, so nothing renders their entries and they stay readable as the files under `packages/<pkg>/.changes/unreleased/`.
   Never edit a `CHANGELOG.md`: each one is frozen history, and its first line says where the entries after it are.
   Never run `changie init`, `batch` or `merge`, which rewrite `CHANGELOG.md`.

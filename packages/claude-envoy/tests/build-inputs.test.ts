@@ -124,3 +124,55 @@ test("scripts/build-inputs.txt matches every file the build reads", async () => 
     await rm(scratch, { recursive: true, force: true })
   }
 }, 120_000)
+
+/** The entries of scripts/build-inputs.txt that are not release inputs, so
+ *  $CLAUDE_ENVOY_VERSION_ARGS does not carry them: the toolchain block the list's own header
+ *  names — the Bun pin, the lockfile and root manifest and bunfig a `bun install` reads, the two
+ *  .gitattributes files, and the three .github paths the build jobs run the build through. No
+ *  plugin's version arguments carry theirs, because a lockfile or runner change alone releases
+ *  nothing and the next source commit publishes whatever it built. */
+const NON_RELEASE_INPUTS = [
+  ".bun-version",
+  "bun.lock",
+  "package.json",
+  "bunfig.toml",
+  ".gitattributes",
+  "packages/.gitattributes",
+  ".github/scripts/check-private-names.sh",
+  ".github/scripts/release-push.sh",
+  ".github/actions/setup-bun",
+]
+
+// release.yaml's claude_envoy_build bumps the version from the commits since the newest
+// claude-envoy-v tag that touch the paths $CLAUDE_ENVOY_VERSION_ARGS names, and
+// scripts/build-inputs.txt is the statement of what can change the build. A path on the list and
+// not in the args ships in a release with no version bumped for it; one in the args and not on
+// the list releases for a file the build never reads. Both files say the two must agree
+// (build-inputs.txt's header, packages/claude-envoy/AGENTS.md), so this holds them equal.
+test(".github/workflows/release.yaml's $CLAUDE_ENVOY_VERSION_ARGS carries the build inputs", async () => {
+  const workflow = ".github/workflows/release.yaml"
+  const parsed = Bun.YAML.parse(await readFile(join(repoRoot, workflow), "utf8")) as {
+    env?: Record<string, string>
+  }
+  const args = parsed.env?.["CLAUDE_ENVOY_VERSION_ARGS"]
+  expect(typeof args).toBe("string")
+  // release-bump.sh reads the paths after `--`; everything before it is an option and its value.
+  const words = (args as string).split(/\s+/).filter((word) => word !== "")
+  const separator = words.indexOf("--")
+  expect(separator).toBeGreaterThan(-1)
+  // A path is written with a trailing slash in the args and without one on the list.
+  const argPaths = words.slice(separator + 1).map((path) => path.replace(/\/$/, ""))
+  expect(argPaths.length).toBeGreaterThan(0)
+
+  const pathspecs = await buildInputPathspecs()
+  // Every entry of NON_RELEASE_INPUTS is on the list, so a renamed one is reported here rather
+  // than quietly widening what the args must carry.
+  expect(NON_RELEASE_INPUTS.filter((path) => !pathspecs.includes(path))).toEqual([])
+  // An `:(exclude…)` pathspec narrows a directory already on the list rather than naming a
+  // source of its own, so it is no path for the args either.
+  const listed = pathspecs
+    .filter((pathspec) => !pathspec.startsWith(":"))
+    .filter((pathspec) => !NON_RELEASE_INPUTS.includes(pathspec))
+
+  expect([...argPaths].sort()).toEqual([...listed].sort())
+})

@@ -273,7 +273,7 @@ export function assertPinnedBun(running: string, pinned: string): void {
  *  against. Bun writes each inlined module's path into the bundle relative to the working
  *  directory (`// ../envoy-client/bin/dispatch.ts` from the package, `// packages/envoy-client/...`
  *  from the repository root), so the build runs from the package root whatever the caller's
- *  directory: the committed bytes and every check of them then agree. */
+ *  directory: the published bytes and every check of them then agree. */
 export async function buildBundles(outdir: string): Promise<string[]> {
   assertPinnedBun(Bun.version, pinnedBunVersion)
   const target = resolve(outdir)

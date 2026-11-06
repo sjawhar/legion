@@ -2,9 +2,10 @@
 # Tests for `check-release-credentials.sh`: a job of the three release workflows it reads that
 # holds a credential runs no dependency
 # code, uses only allow-listed actions, restores no cache and holds the deploy key only in the env
-# of a step that runs one of its workflow's push commands (a release's push-tag);
+# of a step that runs the one push command (a release's push-tag);
 # a job that runs dependency code holds no credential and ends in the no-credential
-# tripwire; every checkout persists no credential;
+# tripwire; every checkout persists no credential, and a checkout comes before the step that runs
+# release-push.sh;
 # release_publish stays in its concurrency group; and a job condition downstream of a skippable job
 # calls `always()` and tests the result of every job whose outputs it reads. The check is a tripwire
 # over named patterns (the commands, actions and paths its lists hold), not a proof that no other
@@ -84,8 +85,8 @@ INFRA=.github/workflows/release-envoy-infra.yaml
 # install-changie, `release-push.sh fold-notes`, upload, tripwire) with an `if:` of its own, two
 # credentialed publish jobs (setup-node, `npm publish` of the handed tarball, the tag push and a
 # GitHub release) whose `if:` calls `always()` and tests the result of the build whose outputs it
-# reads, a plain job that runs no dependency code and a reusable-workflow call with no steps and
-# no `if:`. pi_legion_publish needing pi_envoy_publish and testing its result is a generic rule-5
+# reads, a plain job that checks out and runs no dependency code, and a reusable-workflow call
+# with no steps and no `if:`. pi_legion_publish needing pi_envoy_publish and testing its result is a generic rule-5
 # shape, a chain of skippable jobs, which the if-two-needs-one-result and if-steps-less-job cases
 # below mutate; the real release.yaml publishes every package from one job. The listener: a docker
 # build job (`packages: write`, a build-push) and release_publish in its concurrency group, with
@@ -117,7 +118,7 @@ jobs:
         run: cd packages/daemon && go build ./cmd/legion
       - uses: ./.github/actions/install-changie
       - name: Render the changelog entries
-        run: .github/scripts/release-push.sh fold-notes --label 1.2.3 "$RUNNER_TEMP/notes" packages/pi-envoy=pi-envoy-v
+        run: .github/scripts/release-push.sh fold-notes 1.2.3 "$RUNNER_TEMP/notes" packages/pi-envoy pi-envoy-v
       - uses: actions/upload-artifact@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           name: pi-envoy-tarball
@@ -219,6 +220,9 @@ jobs:
     permissions:
       contents: read
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
       - run: echo hello
   worker_image:
     needs: [pi_legion_publish]
@@ -367,21 +371,6 @@ run_check "$root"
 check "exits 0" "$(is "$status" 0)"
 check "says what it covered" \
   "$(contains "$out" 'check-release-credentials: 4 credentialed job(s) and 3 build job(s) across 3 workflows keep credentials out of jobs that run dependency code')"
-green_release=$(cat "$root/$RELEASE")
-green_listener=$(cat "$root/$LISTENER")
-check "a credentialed job runs release-push.sh handed" "$(contains "$green_release" 'release-push.sh handed pi-envoy-v')"
-check "a build job installs changie and renders its release's entries with release-push.sh fold-notes" \
-  "$(is "$(contains "$green_release" '^      - uses: ./.github/actions/install-changie$')|$(contains "$green_release" 'run: .github/scripts/release-push.sh fold-notes --label ')" 'true|true')"
-check "a credentialed job runs npm publish" "$(contains "$green_release" 'run: npm publish')"
-check "a credentialed job runs docker buildx imagetools create" "$(contains "$green_listener" 'run: docker buildx imagetools create')"
-check "a build job holds packages: write" "$(contains "$green_listener" 'packages: write')"
-check "a build job carries an if: of its own, so the publish jobs downstream have a skippable ancestor" \
-  "$(contains "$green_release" "^    if: github.ref == 'refs/heads/main'$")"
-check "a publish job's if: calls always() and tests the result of the build whose outputs it reads" \
-  "$(contains "$green_release" "^    if: always() && needs.pi_envoy_build.result == 'success' && needs.pi_envoy_build.outputs.skip != 'true'$")"
-check "the green fixture needs a job it does not define, pi_legion_build (a dangling needs name is ignored on purpose)" \
-  "$(contains "$green_release" '^    needs: \[pi_legion_build, ')"
-check "no job pi_legion_build" "$(is "$(contains "$green_release" '^  pi_legion_build:$')" false)"
 
 echo "case: a credentialed job runs bun install"
 root=$(fixture bun-install)
@@ -521,13 +510,31 @@ run_check "$root"
 check "exits 1" "$(is "$status" 1)"
 check "names the value" "$(contains "$out" "must set 'persist-credentials: false', the boolean.*(found true)")"
 
+# Rule 6, on each side of its line: the same step before and after its job's checkout. The script
+# it runs is in the checkout, so before it the step exits 127, which is what left every legion
+# release's "## Worker image" section unwritten.
+echo "case: a step runs release-push.sh before its job's checkout"
+root=$(fixture release-push-before-checkout)
+mutate "$root/$RELEASE" "      - uses: actions/checkout@$SHA"$'\n' $'      - name: Read the tag\n        run: .github/scripts/release-push.sh tagged pi-envoy-v\n'"      - uses: actions/checkout@$SHA"$'\n' 2
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the job and the step at its line" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^      - name: Read the tag$'): job 'pi_envoy_publish' step 'Read the tag' runs .github/scripts/release-push.sh, but no actions/checkout before it puts the script in the workspace, so the step would exit 127 and the job would carry on\$")"
+check "reports that one problem only" "$(contains "$out" '^1 release credential problem(s)$')"
+
+echo "case: the same step after its job's checkout"
+root=$(fixture release-push-after-checkout)
+add_publish_step "$root" $'      - name: Read the tag\n        run: .github/scripts/release-push.sh tagged pi-envoy-v\n'
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+
 echo "case: the deploy key as a checkout's ssh-key"
 root=$(fixture ssh-key)
 mutate "$root/$RELEASE" $'          persist-credentials: false\n' $'          persist-credentials: false\n          ssh-key: ${{ secrets.DEPLOY_KEY }}\n' 2
 run_check "$root"
 check "exits 1" "$(is "$status" 1)"
 check "names the site at its line" \
-  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" 'ssh-key:'): job 'pi_envoy_publish' names secrets.DEPLOY_KEY at step 'actions/checkout@$SHA' with.ssh-key; the deploy key may appear only as 'DEPLOY_KEY: \${{ secrets.DEPLOY_KEY }}' in the env of a step whose run calls release-push.sh push-tag, which release.yaml allows$")"
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" 'ssh-key:'): job 'pi_envoy_publish' names secrets.DEPLOY_KEY at step 'actions/checkout@$SHA' with.ssh-key; the deploy key may appear only as 'DEPLOY_KEY: \${{ secrets.DEPLOY_KEY }}' in the env of a step whose run calls release-push.sh push-tag\$")"
 
 echo "case: the deploy key in a job-level env"
 root=$(fixture job-env-key)
@@ -872,7 +879,7 @@ check "exits 1" "$(is "$status" 1)"
 check "names the workflow's env for the build job at its line" \
   "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^  DEPLOY_KEY:'): job 'pi_envoy_build' runs dependency code (.*), but its text names secrets.DEPLOY_KEY; a build job holds no secret but GITHUB_TOKEN")"
 check "names the workflow's env for a credentialed job at its line" \
-  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^  DEPLOY_KEY:'): job 'pi_envoy_publish' names secrets.DEPLOY_KEY at the workflow's env.DEPLOY_KEY; the deploy key may appear only as 'DEPLOY_KEY: \${{ secrets.DEPLOY_KEY }}' in the env of a step whose run calls release-push.sh push-tag, which release.yaml allows$")"
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^  DEPLOY_KEY:'): job 'pi_envoy_publish' names secrets.DEPLOY_KEY at the workflow's env.DEPLOY_KEY; the deploy key may appear only as 'DEPLOY_KEY: \${{ secrets.DEPLOY_KEY }}' in the env of a step whose run calls release-push.sh push-tag\$")"
 check "names the workflow's env for the other credentialed job too" \
   "$(contains "$out" "job 'pi_legion_publish' names secrets.DEPLOY_KEY at the workflow's env.DEPLOY_KEY;")"
 check "the plain job, credentialed through the workflow's env, must set cache-mode: none" \
@@ -910,7 +917,7 @@ mutate "$root/$RELEASE" $'          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}\n     
 run_check "$root"
 check "exits 1" "$(is "$status" 1)"
 check "the plain job is credentialed: names the site at its line" \
-  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" 'secrets.deploy_key }}$'): job 'changes' names secrets.DEPLOY_KEY at step 1 env.KEY; the deploy key may appear only as")"
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" 'secrets.deploy_key }}$'): job 'changes' names secrets.DEPLOY_KEY at step 2 env.KEY; the deploy key may appear only as")"
 check "the plain job is credentialed: wants cache-mode: none" \
   "$(contains "$out" "job 'changes' holds a credential, so it must set 'cache-mode: none' to restore no cache (it is not set)")"
 check "the value form in another casing, under DEPLOY_KEY of a push step, is allowed" \
@@ -1116,7 +1123,7 @@ check "exits 0" "$(is "$status" 0)"
 
 echo "case: release-push.sh fold-notes in a credentialed job"
 root=$(fixture publish-fold-notes)
-add_publish_step "$root" $'      - name: Render notes\n        run: .github/scripts/release-push.sh fold-notes --label 1.2.3 "$RUNNER_TEMP/n" packages/pi-envoy=pi-envoy-v\n'
+add_publish_step "$root" $'      - name: Render notes\n        run: .github/scripts/release-push.sh fold-notes 1.2.3 "$RUNNER_TEMP/n" packages/pi-envoy pi-envoy-v\n'
 run_check "$root"
 check "exits 1" "$(is "$status" 1)"
 check "names the job, the step and release-push.sh fold-notes at the step's line" \
@@ -1131,11 +1138,11 @@ check "names release-push.sh fold-notes" "$(contains "$out" "job 'pi_envoy_publi
 
 echo "case: release-push.sh fold-notes alone makes a job a build job"
 root=$(fixture plain-fold-notes)
-mutate "$root/$RELEASE" $'      - run: echo hello\n' $'      - run: .github/scripts/release-push.sh fold-notes "$RUNNER_TEMP/n" packages/pi-envoy=pi-envoy-v\n'
+mutate "$root/$RELEASE" $'      - run: echo hello\n' $'      - run: .github/scripts/release-push.sh fold-notes 1.2.3 "$RUNNER_TEMP/n" packages/pi-envoy pi-envoy-v\n'
 run_check "$root"
 check "exits 1" "$(is "$status" 1)"
 check "the plain job, running changie through fold-notes alone, must end in the tripwire" \
-  "$(contains "$out" "job 'changes' runs dependency code (step 1 runs '.github/scripts/release-push.sh fold-notes' (it runs changie)), so its last step must be the tripwire 'run: .github/scripts/release-push.sh no-credential'$")"
+  "$(contains "$out" "job 'changes' runs dependency code (step 2 runs '.github/scripts/release-push.sh fold-notes' (it runs changie)), so its last step must be the tripwire 'run: .github/scripts/release-push.sh no-credential'$")"
 
 echo "case: release-push.sh push-tag through ./ in a credentialed job"
 root=$(fixture publish-push-tag-dot-slash)

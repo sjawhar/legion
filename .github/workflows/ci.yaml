@@ -624,9 +624,13 @@ jobs:
               - '.github/actions/install-uv/**'
               - '.github/actions/install-changie/**'
               - '.github/actions/pull-test-images/**'
-              # release-push.test.sh's shipped-config fold-notes case copies pi-legion's changie
-              # configuration and renders it (its line 2549).
-              - 'packages/pi-legion/.changie.yaml'
+              # The fold-check step renders every fragment of every package
+              # .github/changelog-packages lists, each with its own changie configuration;
+              # release-push.test.sh's shipped-config fold-notes case copies pi-legion's
+              # configuration and renders it (its line 1883).
+              - '.github/changelog-packages'
+              - 'packages/*/.changie.yaml'
+              - 'packages/*/.changes/unreleased/**'
             # docs/site's lint, typecheck, screenshots and build, with the sources its reference
             # generators and its screenshot harness read. docs-site.yaml holds those steps, and
             # both the docs job here and docs-pages.yaml's build job call it. docs-pages.yaml
@@ -1524,7 +1528,7 @@ jobs:
       # would report it, so it is refused here, on every pull request.
       - name: Check every changelog fragment belongs to a listed package
         run: |
-          # shellcheck disable=SC2046 # the file is the spec list, split on purpose
+          # shellcheck disable=SC2046 # the file is the package list, split on purpose
           .github/scripts/release-push.sh fold-orphans $(<.github/changelog-packages)
 
       # No setup-go cache: gofmt needs none, and the notices step below keeps its own (go-notices),
@@ -1806,9 +1810,20 @@ jobs:
         run: bun test tests/build-inputs.test.ts
         working-directory: packages/claude-envoy
 
-      # release-push.test.sh renders its fold-notes cases with the real changie; where changie is
-      # absent, as on a developer's machine, those cases print a SKIP line and count nothing.
+      # release-push.test.sh renders its fold-notes cases with the real changie, and the step
+      # below renders this checkout's own fragments with it; where changie is absent, as on a
+      # developer's machine, those cases print a SKIP line and count nothing.
       - uses: ./.github/actions/install-changie
+
+      # Nothing renders a changelog fragment between the merge and the release that first ships
+      # it, so a fragment changie refuses would fail that release's build job, and every run
+      # after it, until a fix merges. This renders every fragment of every listed package here
+      # instead, inside a required check. It runs in this job rather than beside fold-orphans in
+      # lint because this is the job that installs changie.
+      - name: Check every changelog fragment renders
+        run: |
+          # shellcheck disable=SC2046 # the file is the package list, split on purpose
+          .github/scripts/release-push.sh fold-check $(<.github/changelog-packages)
 
       - name: Test release scripts
         run: .github/scripts/release-push.test.sh

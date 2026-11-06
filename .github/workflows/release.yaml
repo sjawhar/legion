@@ -379,9 +379,9 @@ jobs:
       # This release's own changelog entries, which publish writes into the GitHub release's body.
       # A fragment stays under packages/pi-envoy/.changes/unreleased/ after the release that ships
       # it, so fold-notes renders the ones this release's own commits first added, which are the
-      # ones its tag will hold. A release no fragment belongs to renders no file, and `notes` says
-      # which of the two it was, since publish cannot look into the artifact before it downloads
-      # it.
+      # ones its tag will hold. A release no fragment belongs to renders no file, and the `notes`
+      # line fold-notes prints says which of the two it was, since publish cannot look into the
+      # artifact before it downloads it.
       - name: Render this release's changelog entries
         id: notes
         if: steps.version.outputs.skip != 'true'
@@ -389,12 +389,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           .github/scripts/release-push.sh fold-notes "$VERSION" \
-            "$RUNNER_TEMP/release-notes.md" packages/pi-envoy=pi-envoy-v
-          if [ -s "$RUNNER_TEMP/release-notes.md" ]; then
-            echo "notes=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "notes=false" >> "$GITHUB_OUTPUT"
-          fi
+            "$RUNNER_TEMP/release-notes.md" packages/pi-envoy pi-envoy-v >> "$GITHUB_OUTPUT"
 
       # The entries, exactly as rendered, for publish; a release with none uploads nothing at all.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -512,8 +507,8 @@ jobs:
         if: steps.version.outputs.skip != 'true'
 
       # This release's own changelog entries, as in pi_envoy_build and for the reasons given
-      # there: the fragments this release's own commits first added, and `notes` says whether
-      # there were any.
+      # there: the fragments this release's own commits first added, and the `notes` line
+      # fold-notes prints says whether there were any.
       - name: Render this release's changelog entries
         id: notes
         if: steps.version.outputs.skip != 'true'
@@ -521,12 +516,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           .github/scripts/release-push.sh fold-notes "$VERSION" \
-            "$RUNNER_TEMP/release-notes.md" packages/pi-legion=pi-legion-v
-          if [ -s "$RUNNER_TEMP/release-notes.md" ]; then
-            echo "notes=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "notes=false" >> "$GITHUB_OUTPUT"
-          fi
+            "$RUNNER_TEMP/release-notes.md" packages/pi-legion pi-legion-v >> "$GITHUB_OUTPUT"
 
       # The entries, exactly as rendered, for publish; a release with none uploads nothing at all.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -644,8 +634,8 @@ jobs:
         if: steps.version.outputs.skip != 'true'
 
       # This release's own changelog entries, as in pi_envoy_build and for the reasons given
-      # there: the fragments this release's own commits first added, and `notes` says whether
-      # there were any.
+      # there: the fragments this release's own commits first added, and the `notes` line
+      # fold-notes prints says whether there were any.
       - name: Render this release's changelog entries
         id: notes
         if: steps.version.outputs.skip != 'true'
@@ -653,12 +643,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           .github/scripts/release-push.sh fold-notes "$VERSION" \
-            "$RUNNER_TEMP/release-notes.md" packages/claude-envoy=claude-envoy-v
-          if [ -s "$RUNNER_TEMP/release-notes.md" ]; then
-            echo "notes=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "notes=false" >> "$GITHUB_OUTPUT"
-          fi
+            "$RUNNER_TEMP/release-notes.md" packages/claude-envoy claude-envoy-v >> "$GITHUB_OUTPUT"
 
       # The entries, exactly as rendered, for publish; a release with none uploads nothing at all.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -680,15 +665,20 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          # Both manifests, and for different readers. package.json's version is what npm
+          # All three manifests, and for different readers. package.json's version is what npm
           # publishes and what the MCP server reports. .claude-plugin/plugin.json's is what Claude
           # Code calls the installed plugin's version: it reads the manifest, never the registry,
           # and an install whose manifest declares none lands in a plugin-cache directory named
           # `unknown` and never updates, since one `unknown` is indistinguishable from the next
-          # (measured on Claude Code 2.1.311). The committed manifest declares none, which is what
-          # keeps a checkout from pinning every install at one string, and this job's tree is
-          # discarded, as with the rewrites below.
-          for manifest in packages/claude-envoy/package.json packages/claude-envoy/.claude-plugin/plugin.json; do
+          # (measured on Claude Code 2.1.311). .omp-plugin/plugin.json's is what Oh My Pi reports,
+          # and tests/envoy-channel-server.test.ts holds it equal to package.json's, so a release
+          # that rewrote the first two alone would publish a plugin naming two versions. The
+          # committed .claude-plugin manifest declares none, which is what keeps a checkout from
+          # pinning every install at one string, and this job's tree is discarded, as with the
+          # rewrites below.
+          for manifest in packages/claude-envoy/package.json \
+            packages/claude-envoy/.claude-plugin/plugin.json \
+            packages/claude-envoy/.omp-plugin/plugin.json; do
             jq --arg v "$VERSION" '.version = $v' "$manifest" > tmp.json && mv tmp.json "$manifest"
           done
 
@@ -732,17 +722,22 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          # pi_envoy_build's check, over this package's tarball, and two more: the version Claude
-          # Code reads off .claude-plugin/plugin.json, without which every install is `unknown`
-          # and no update is ever seen; and the two generated directories, which the plugin runs
-          # from and .gitignore names, so a packer that started honouring git would publish a
-          # plugin that cannot start. All three are read out of the tarball the publish job will
-          # hand npm, never out of the working tree.
+          # pi_envoy_build's check, over this package's tarball, and three more: the version
+          # Claude Code reads off .claude-plugin/plugin.json, without which every install is
+          # `unknown` and no update is ever seen; the version Oh My Pi reads off
+          # .omp-plugin/plugin.json, which tests/envoy-channel-server.test.ts holds equal to
+          # package.json's; and the two generated directories, which the plugin runs from and
+          # .gitignore names, so a packer that started honouring git would publish a plugin that
+          # cannot start. All of them are read out of the tarball the publish job will hand npm,
+          # never out of the working tree.
           url=$(.github/scripts/repo-paths.sh repository_url)
           tar -xzOf packages/claude-envoy/*.tgz package/package.json \
             | jq -e --arg u "$url" '.repository.url == $u'
-          tar -xzOf packages/claude-envoy/*.tgz package/.claude-plugin/plugin.json \
-            | jq -e --arg v "$VERSION" '.version == $v'
+          for manifest in package/package.json package/.claude-plugin/plugin.json \
+            package/.omp-plugin/plugin.json; do
+            tar -xzOf packages/claude-envoy/*.tgz "$manifest" \
+              | jq -e --arg v "$VERSION" '.version == $v'
+          done
           members=$(tar -tzf packages/claude-envoy/*.tgz)
           for member in package/dist/envoy-channel.js package/legion/.claude-plugin/plugin.json; do
             if ! printf '%s\n' "$members" | grep -qxF "$member"; then
@@ -1004,9 +999,10 @@ jobs:
       # claude-envoy: what claude_envoy_build packed, published as the two Oh My Pi plugins above
       # are. It is not part of the plugin pair below: that pair is the two Oh My Pi plugins the
       # Go `legion` links and the worker image installs, and neither the binary nor the image
-      # reads this one, which Claude Code installs for itself from the marketplace. So a run that
-      # fails to publish this plugin still releases legion, and a legion release never waits on
-      # it.
+      # reads this one, which Claude Code installs for itself from the marketplace. So a run whose
+      # steps for this plugin fail still releases legion, in the steps after them. This job does
+      # need claude_envoy_build, as it needs every build job, so a legion release waits for that
+      # build to finish, whatever it decided.
       - name: "claude-envoy: Download the tarball"
         id: claude_envoy_download
         if: ${{ !cancelled() && needs.claude_envoy_build.result == 'success' && needs.claude_envoy_build.outputs.skip != 'true' }}
