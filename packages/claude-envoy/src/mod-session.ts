@@ -105,8 +105,10 @@ const COMMAND_ECHO_MS = 1_000
  * times the longest of those, so a machine under load loses no card, and it is short enough
  * that a session which cannot take the card - stopped, or wedged - leaves the frame unanswered
  * while the listener is still waiting to send it again. A submit that enters a turn started
- * meanwhile has its row only when that turn ends, past any bound: that card's frame goes
- * unanswered and the listener sends it again, which is the trade this bound is here to make.
+ * meanwhile has its row only when that turn ends — 8.5 s to 12.4 s in the submits recorded,
+ * past any bound a frame can wait out — so that card's frame goes unanswered too; what keeps
+ * the listener's resend from showing it a second time is `entered` on the rejection
+ * (`CardNotShown`), not this bound.
  */
 const PROMPT_ROW_MS = 10_000
 
@@ -191,6 +193,41 @@ export function isUnreadRowPrompt(text: string): boolean {
 /** The session's model, as a `/config` row names it. */
 const MODEL_CONFIG_KEY = "model"
 
+/**
+ * Why a card was not shown, and the one thing its caller cannot work out for itself: whether
+ * the submit that carried it entered the session.
+ *
+ * The prompt's row cannot answer that. A card handed to an idle session is proven shown by the
+ * row Claude Code writes for the prompt (`PROMPT_ROW_MS`), but a turn that starts in the window
+ * between the idle check and the submit landing takes the prompt into itself and writes its row
+ * only when that turn ends — 8.5 s to 12.4 s in the submits recorded for INFRA-1026, past any
+ * bound a frame can wait out. So a row that never came means either "the session took the card
+ * and will write the row late" or "nothing took it at all", and only the link knows which: it
+ * hands each request to a polling mod and tells the caller when it has (`./mod-link`,
+ * `ModLink.request`'s `taken`).
+ *
+ * `entered` separates them. A card that entered is in front of the model already, so Envoy's
+ * resend of it must be answered rather than submitted again (R12, one time); a card that
+ * entered nothing — a stopped or dead Claude Code, a mod that never polled — must be submitted
+ * again when Envoy sends it (INFRA-1026 check k7's second clause).
+ */
+export class CardNotShown extends Error {
+  /** Whether a mod took the submit that carried the card. */
+  readonly entered: boolean
+
+  constructor(message: string, entered: boolean, options?: ErrorOptions) {
+    super(message, options)
+    this.name = "CardNotShown"
+    this.entered = entered
+  }
+}
+
+/** Whether `error`, a rejection of `ModSession.show`, says the card entered the session: the
+ *  one rejection its caller answers Envoy's frame on rather than showing the card again. */
+export function cardEnteredSession(error: unknown): boolean {
+  return error instanceof CardNotShown && error.entered
+}
+
 /** What the router does to this session. */
 export interface ModSession {
   /** Whether the mod is polling the link now; nothing below reaches the session without one. */
@@ -231,6 +268,11 @@ export interface ModSession {
    * process writes no row at all, so a card a session cannot take rejects here, its frame goes
    * unanswered, and the listener sends it again (INFRA-1026, check k7's SIGSTOP, message,
    * SIGKILL and `claude --resume <id>` clause).
+   *
+   * Every rejection is a `CardNotShown` saying whether the submit entered the session all the
+   * same, which the row cannot say and the caller cannot work out: a card the session took
+   * into a turn whose row comes late is in front of the model already, so its caller answers
+   * Envoy's resend instead of submitting it a second time.
    */
   show(card: { readonly text: string; readonly content: readonly ModContentBlock[] }): Promise<void>
   /**
@@ -451,17 +493,19 @@ export function modSession(options: ModSessionOptions): ModSession {
   }
 
   /** Hand the mod one prompt, behind every prompt handed before it. Never awaited by a caller:
-   *  the call lasts the turn it starts. */
+   *  the call lasts the turn it starts. `taken` is told whether a mod has the submit, which is
+   *  the one proof a card's caller gets that the prompt entered the session (`CardNotShown`). */
   const submit = (
     text: string,
     asUser: boolean,
     failed?: (error: unknown) => void,
+    taken?: (taken: boolean) => void,
   ): Promise<void> => {
     const sent = submitting.then(async () => {
       const result = await link.request(
         "prompt.submit",
         { text, ...(asUser ? { asUser: true as const } : {}) },
-        { timeoutMs: SUBMIT_TIMEOUT_MS },
+        { timeoutMs: SUBMIT_TIMEOUT_MS, ...(taken === undefined ? {} : { taken }) },
       )
       if (result.drop !== undefined) {
         throw new Error(`the session dropped the prompt: ${result.drop}`)
@@ -488,24 +532,39 @@ export function modSession(options: ModSessionOptions): ModSession {
    * The row Claude Code writes for the prompt just submitted, waited for up to `PROMPT_ROW_MS`,
    * and its id.
    *
-   * It is the one proof this process has that the session took the prompt: `sent` resolves only
-   * at the end of the turn the prompt starts, and a Claude Code that is stopped, or gone, takes
-   * the submit and writes nothing. The row reaches this session as an `append` event of the
-   * `prompt` door (`observe`) carrying the submitted text, framed by Claude Code's own line in
-   * front of it ("The claude-envoy plugin sent a message:", measured on 2.1.310). A submit the
-   * session refuses outright rejects through `sent` rather than waiting the bound out.
+   * It is the one proof this process has that the session wrote the card out: `sent` resolves
+   * only at the end of the turn the prompt starts, and a Claude Code that is stopped, or gone,
+   * takes the submit and writes nothing. The row reaches this session as an `append` event of
+   * the `prompt` door (`observe`) carrying the submitted text, framed by Claude Code's own line
+   * in front of it ("The claude-envoy plugin sent a message:", measured on 2.1.310). A submit
+   * the session refuses outright rejects through `sent` rather than waiting the bound out.
+   *
+   * What the row cannot say is whether a prompt it never came for entered the session all the
+   * same: a turn that starts in the window between the idle check and the submit landing takes
+   * the prompt into itself and writes its row only at that turn's end, past the bound. So the
+   * rejection carries `entered`, which only the link can report (`CardNotShown`).
    */
-  const promptRow = async (text: string, sent: Promise<void>): Promise<string> => {
+  const promptRow = async (
+    text: string,
+    sent: Promise<void>,
+    entered: () => boolean,
+  ): Promise<string> => {
     const settle = Promise.withResolvers<string>()
     const waiting: SubmittedPrompt = { text, seen: settle.resolve }
     submittedPrompts.push(waiting)
     // A submit that resolves says the turn it started has ended, which is no answer about the
-    // row: only its failure ends this wait early.
-    void sent.catch((error: unknown) => settle.reject(error))
+    // row: only its failure ends this wait early. A failure carried the card nowhere — the mod
+    // refused it, or none ever took it — so nothing of it entered the session.
+    void sent.catch((error: unknown) =>
+      settle.reject(new CardNotShown(messageFor(error), false, { cause: error })),
+    )
     const timer = setTimeout(
       () =>
         settle.reject(
-          new Error(`the session wrote no row for the prompt within ${promptRowMs} ms`),
+          new CardNotShown(
+            `the session wrote no row for the prompt within ${promptRowMs} ms`,
+            entered(),
+          ),
         ),
       promptRowMs,
     )
@@ -556,9 +615,23 @@ export function modSession(options: ModSessionOptions): ModSession {
       // handoff v6). The turn this starts runs for as long as the model works, so the submit is
       // never awaited; what is awaited is the row Claude Code writes for the prompt, which is
       // the proof the session took it.
-      const sent = submit(message.prompt.text, message.prompt.asUser, message.failed)
+      //
+      // Whether a mod took that submit is the one fact that separates a card the session has
+      // from one no Claude Code ever saw: both leave the submit pending — it answers at the
+      // turn's end — and both can leave the row unwritten inside the bound. A link that
+      // reports nothing cannot show that the submit never left this process, so it counts as
+      // taken; the link this runs on always reports (`./mod-link`, `ModLink.request`).
+      let taken = true
+      const sent = submit(
+        message.prompt.text,
+        message.prompt.asUser,
+        message.failed,
+        (reported) => {
+          taken = reported
+        },
+      )
       if (message.awaitPromptRow !== true) return undefined
-      return await promptRow(message.prompt.text, sent)
+      return await promptRow(message.prompt.text, sent, () => taken)
     }
     const uuid = await append(message.content)
     // The turn may have ended while the row was being stored: then no request will read it, and

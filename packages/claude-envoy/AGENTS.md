@@ -32,9 +32,9 @@ notifier resolved its write and the ledger recorded it (`deliverRelayed`), at on
 skipped, already shown or a late BTW, which is passed over. In a Legion pane the notifier
 resolves when `legion claude-bridge` answers its inbox, which it does once Claude Code re-emits
 the delivery as the user message it took (`--replay-user-messages`); in a terminal session it
-resolves once the mod has stored the row; while the session is idle the card is a prompt
-instead, and the write resolves as that prompt goes out, since a prompt lasts its whole turn.
-A write that fails
+resolves once the mod has stored the row, and while the session is idle the card is a prompt
+instead and the write resolves on the row Claude Code writes for that prompt (`show`). A write
+that fails
 answers `nak`, and from the frame's third delivery `done` with a notice naming it; a frame that
 arrives after a `/clear` moved the session to another id is answered `nak`. The core copies of
 those subjects answer only a lane's receipt (`relaysCoreTopic`), and the replay engine makes no
@@ -315,6 +315,19 @@ above says how to run it).
   <id>`), a branch that answered on the submit held that message zero times in the resumed
   conversation. A person's message answers at once instead: the router answers them on
   Dispatch, and a prompt that never entered reaches them through `failed`.
+- Submit a card whose submit entered the session no second time. The row proves the card is in
+  the conversation; nothing proves it is not, because a turn that starts in the window between
+  the idle check and the submit landing takes the prompt and writes its row only when that turn
+  ends (8.5–12.4 s in the recorded submits, past `PROMPT_ROW_MS`). So the two are told apart by
+  whether a mod took the submit, which only the link knows (`ModLink.request`'s `taken`,
+  `src/mod-link.ts`): `show` rejects with a `CardNotShown` carrying `entered`, and
+  `createChannelDelivery` keeps the Envoy event ids whose card the session has — pending or
+  written — bounded by `ENTERED_CARDS_MAX`, answering a frame it holds and writing nothing for
+  it. A card that entered nothing leaves no record, so its resend goes to the session as the
+  first copy should have (k7's second clause: a stopped Claude Code polls for nothing, so the
+  submit waits in the link's queue). Only this process ending between the submit and the row
+  can still show a card twice, the crash case `docs/site/src/content/docs/dispatch/envoy.md`
+  states.
 - Report from the mod every row the mod itself appends: Claude Code does not re-enter a mod's
   own `session.append` hook for such a row (measured in the issue's spike —
   `logs/mod3-q1q3q5.jsonl:36,64`, two calls whose uuids no hook ever carried), so a card

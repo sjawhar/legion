@@ -60,11 +60,18 @@ export interface ModLink {
   readonly events: AsyncIterableIterator<ModEvent>
   /** Ask the mod to make one call, and resolve with its answer. Rejects with the mod's own error
    *  when the call failed, when `timeoutMs` passes with no answer, and when the link closes
-   *  first. */
+   *  first. `taken` is told whether a mod has the request: `false` while it waits in this
+   *  link's queue with none polling, `true` the moment a polling mod is handed it. A request a
+   *  mod is handed at once reports `true` alone; one that waits reports `false` and then
+   *  `true`; one dropped from the queue unpolled — `timeoutMs` passing, or the link closing —
+   *  reports `false` and nothing after it. It is the one fact that separates a
+   *  `$.prompt.submit` which entered the session from one which never did, since a submit
+   *  resolves only at the end of the turn it starts and a Claude Code that is stopped, or
+   *  gone, writes no row either (`./mod-session`, `show`). */
   readonly request: <N extends ModCallName>(
     call: N,
     args: ModCallArguments[N],
-    options?: { readonly timeoutMs?: number },
+    options?: { readonly timeoutMs?: number; readonly taken?: (taken: boolean) => void },
   ) => Promise<ModCallResults[N]>
   /** The session id the mod last reported: its boot id, then whatever a `/clear` moved it to.
    *  Undefined until the mod says hello. */
@@ -107,6 +114,8 @@ interface PendingRequest {
   readonly call: ModCallName
   readonly settle: PromiseWithResolvers<ModResultValue>
   readonly timer: ReturnType<typeof setTimeout>
+  /** Told when a polling mod is handed this request (`ModLink.request`). */
+  readonly taken?: (taken: boolean) => void
 }
 
 /** A one-consumer stream of what the mod sent. */
@@ -355,13 +364,21 @@ export async function startModLink(options: ModLinkOptions): Promise<ModLink> {
     for (const listener of sessionIdListeners) listener(sessionId)
   }
 
+  /** The requests a polling mod is being handed, each caller told that a mod has its request
+   *  now (`ModLink.request`). This is the moment the work leaves this process: a request still
+   *  in the queue has reached no Claude Code at all. */
+  const handOut = (requests: readonly ModRequest[]): readonly ModRequest[] => {
+    for (const handed of requests) pending.get(handed.id)?.taken?.(true)
+    return requests
+  }
+
   /** Hand the work waiting to the poll that is held, if one is. */
   const wake = (): void => {
     const [poll] = held
     if (poll === undefined || queued.length === 0) return
     held.delete(poll)
     clearTimeout(poll.timer)
-    poll.answer(queued.splice(0, queued.length))
+    poll.answer(handOut(queued.splice(0, queued.length)))
   }
 
   const answerJson = (response: ServerResponse, status: number, body: unknown): void => {
@@ -454,7 +471,7 @@ export async function startModLink(options: ModLinkOptions): Promise<ModLink> {
     heard()
     if (queued.length > 0 || closed) {
       answerJson(response, 200, {
-        requests: queued.splice(0, queued.length),
+        requests: handOut(queued.splice(0, queued.length)),
       } satisfies ModRequestsBody)
       return
     }
@@ -509,7 +526,7 @@ export async function startModLink(options: ModLinkOptions): Promise<ModLink> {
     request<N extends ModCallName>(
       call: N,
       args: ModCallArguments[N],
-      requestOptions?: { readonly timeoutMs?: number },
+      requestOptions?: { readonly timeoutMs?: number; readonly taken?: (taken: boolean) => void },
     ): Promise<ModCallResults[N]> {
       if (closed) return Promise.reject(new Error("the mod link is closed"))
       const timeoutMs = requestOptions?.timeoutMs ?? MOD_REQUEST_TIMEOUT_MS
@@ -529,9 +546,14 @@ export async function startModLink(options: ModLinkOptions): Promise<ModLink> {
         settle.reject(new Error(`the mod did not answer ${call} within ${timeoutMs} ms`))
       }, timeoutMs)
       timer.unref()
-      pending.set(id, { call, settle, timer })
+      const taken = requestOptions?.taken
+      pending.set(id, { call, settle, timer, ...(taken === undefined ? {} : { taken }) })
       queued.push(request)
       wake()
+      // Still queued: no mod polled for it, so nothing of this request has left this process
+      // yet, and the caller is told so. A `$.prompt.submit` waiting here has entered no
+      // session, which is what a card's frame turns on (`./mod-session`, `show`).
+      if (queued.includes(request)) taken?.(false)
       // The mod answers the call it was asked for, so the value is that call's own.
       return settle.promise as Promise<ModCallResults[N]>
     },

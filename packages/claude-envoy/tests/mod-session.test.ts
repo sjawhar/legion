@@ -9,7 +9,7 @@
  */
 import { expect, test } from "bun:test"
 import type { ModCallArguments, ModCallName, ModCallResults, ModEvent } from "../hooks/mod-protocol"
-import { type ModSession, modSession, unreadRowPrompt } from "../src/mod-session"
+import { CardNotShown, type ModSession, modSession, unreadRowPrompt } from "../src/mod-session"
 import { settled, waitFor } from "./channel-session-harness"
 
 /** A card as the server hands one over: the rendered delivery's text, and the blocks it is. */
@@ -145,6 +145,72 @@ test("a card an idle session writes no row for rejects, so its frame goes unansw
   await expect(gone.session.show({ content: BLOCKS, text: CARD })).rejects.toThrow(
     "no answer for prompt.submit",
   )
+})
+
+/** A session whose mod holds every `$.prompt.submit` open, as one a running turn took does
+ *  (it answers at that turn's end), and which reports the submit taken or left waiting in the
+ *  link's queue as `taken` says; a link reporting neither is one that does not report at all.
+ *  Its bound for the prompt's row is a tenth of a second, as `driven`'s is. */
+function holdingSubmits(taken?: boolean): ModSession {
+  return modSession({
+    link: {
+      connected: () => true,
+      request<N extends ModCallName>(
+        call: N,
+        _args: ModCallArguments[N],
+        options?: { readonly taken?: (reported: boolean) => void },
+      ): Promise<ModCallResults[N]> {
+        if (call !== "prompt.submit") {
+          return Promise.reject(new Error(`the card path made an unexpected mod call: ${call}`))
+        }
+        if (taken !== undefined) options?.taken?.(taken)
+        return new Promise<ModCallResults[N]>(() => undefined)
+      },
+    },
+    promptRowMs: 100,
+    warn: () => undefined,
+  })
+}
+
+/** How `show` refused the card. */
+async function refusal(showing: Promise<void>): Promise<CardNotShown> {
+  const error = await showing.then(
+    () => undefined,
+    (reason: unknown) => reason,
+  )
+  if (!(error instanceof CardNotShown)) {
+    throw new Error(`show did not refuse the card: ${String(error)}`)
+  }
+  return error
+}
+
+// R12 (INFRA-1026): the row says only that the card is in the conversation, never that it is
+// not. A turn that starts in the window between the idle check and the submit landing takes the
+// prompt into itself and writes its row at that turn's end - 8.5 s to 12.4 s in the recorded
+// submits - so the rejection has to carry what the link reported, or the caller cannot tell
+// that race from a Claude Code which took nothing at all (k7's second clause).
+test("show's rejection says whether the submit that carried the card entered the session", async () => {
+  // A mod took the submit: the card is in the session, whatever the row says.
+  const raced = await refusal(holdingSubmits(true).show({ content: BLOCKS, text: CARD }))
+  expect(raced.message).toBe("the session wrote no row for the prompt within 100 ms")
+  expect(raced.entered).toBe(true)
+
+  // Nothing took it: it is still waiting in the link's queue, and no session has it.
+  const stopped = await refusal(holdingSubmits(false).show({ content: BLOCKS, text: CARD }))
+  expect(stopped.message).toBe("the session wrote no row for the prompt within 100 ms")
+  expect(stopped.entered).toBe(false)
+
+  // A submit that failed carried the card nowhere either, whoever refused it.
+  const refused = driven({ "prompt.submit": () => ({ drop: "the conversation is compacting" }) })
+  const dropped = await refusal(refused.session.show({ content: BLOCKS, text: CARD }))
+  expect(dropped.message).toBe("the session dropped the prompt: the conversation is compacting")
+  expect(dropped.entered).toBe(false)
+
+  // A link that reports neither cannot show that the submit never left this process, so the
+  // card counts as having entered: showing one card twice is the harm R12 forbids, and the
+  // link this runs on always reports (`../src/mod-link`).
+  const quiet = await refusal(holdingSubmits().show({ content: BLOCKS, text: CARD }))
+  expect(quiet.entered).toBe(true)
 })
 
 test("the card's frame is answered once the prompt's own row is seen, and not before", async () => {

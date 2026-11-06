@@ -319,6 +319,94 @@ test("a card whose submit entered the session is not submitted again when Envoy 
   }
 })
 
+// The other half of the resend rule: a card whose row was seen is in the conversation as surely
+// as a pending one, so the event Envoy sends again is answered and written nowhere. The write
+// here resolves as the mod's does once Claude Code has written the prompt's row (`show`).
+test("a card the session already has is answered without a second write", async () => {
+  const notifier = new FakeNotifier()
+  const delivery = createChannelDelivery({
+    identity: new SessionIdentity("ses_claude", "/tmp"),
+    notifier,
+    configFile: sessionConfigFile("claude", process.env),
+  })
+
+  expect(await delivery.enqueue({ subject: directSubject, raw: deliveryRaw })).toBe(true)
+  expect(await delivery.enqueue({ subject: directSubject, raw: deliveryRaw })).toBe(true)
+
+  expect(notifier.notifications).toHaveLength(1)
+  expect(notifier.notifications[0]?.eventId).toBe("evt-42")
+  // One message, named once: the inbox lists the card that entered, not every frame carrying it.
+  expect(delivery.inbox().map(({ event_id }) => event_id)).toEqual(["evt-42"])
+})
+
+// k7's second clause (INFRA-1026: Claude Code SIGSTOPped, the message sent, then SIGKILL and
+// `claude --resume <id>`): a stopped process polls for nothing, so the submit sits in the link's
+// queue and no session has the card. That card leaves no record, and the frame Envoy sends again
+// goes to the session as the first copy should have — the message is never lost to keep it from
+// arriving twice. Its fake mod reports every submit left waiting, as the link does for a request
+// no mod took (`../src/mod-link`).
+test("a card no mod took is submitted again when Envoy resends it", async () => {
+  const nats = new FakeNats()
+  const submitted: string[] = []
+  const holdingSubmits: Array<() => void> = []
+  const claude = modSession({
+    link: {
+      connected: () => true,
+      request: <N extends ModCallName>(
+        call: N,
+        args: ModCallArguments[N],
+        options?: { readonly taken?: (taken: boolean) => void },
+      ): Promise<ModCallResults[N]> => {
+        if (call !== "prompt.submit") {
+          return Promise.reject(new Error(`the card path made an unexpected mod call: ${call}`))
+        }
+        const { text } = args as ModCallArguments["prompt.submit"]
+        submitted.push(text)
+        options?.taken?.(false)
+        const held = Promise.withResolvers<ModCallResults[N]>()
+        holdingSubmits.push(() => held.resolve({ text } as ModCallResults[N]))
+        return held.promise
+      },
+    },
+    warn: () => undefined,
+    promptRowMs: 40,
+  })
+  const notifier: ChannelNotifier = {
+    notification: async ({ content, blocks }) => {
+      await claude.show({ content: blocks ?? [{ text: content, type: "text" }], text: content })
+    },
+  }
+  const stateDirectory = await scratchState()
+  const session = await startChannelSession(
+    sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
+      connection: nats,
+      notifier,
+    }),
+  )
+
+  try {
+    nats.emit(directSubject, deliveryRaw)
+    await waitFor(async () => submitted.length === 1, "the card's first submit")
+    // Past the bound for the prompt's row, which this session writes none of: `show` rejects
+    // saying the card entered nothing, so the frame's claim is released and nothing is kept.
+    // A real wait, as the sibling test above says: the channel server's own startup and
+    // heartbeat waits need real time, so no fake clock reaches this bound through the live
+    // pipeline.
+    await Bun.sleep(80)
+    nats.emit(directSubject, deliveryRaw)
+    await settled()
+    // The first submit settles, so the second leaves the queue it waited in behind it.
+    for (const resolve of holdingSubmits.splice(0)) resolve()
+    await waitFor(async () => submitted.length === 2, "the resent card's own submit")
+
+    expect(submitted).toHaveLength(2)
+  } finally {
+    for (const resolve of holdingSubmits) resolve()
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
 test("retains only the latest fifty inbound envelope summaries", async () => {
   const notifier = new FakeNotifier()
   const delivery = createChannelDelivery({

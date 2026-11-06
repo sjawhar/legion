@@ -447,3 +447,69 @@ test("the link reports the first poll of a mod that never said hello, and only t
   expect(await answeredAgain).toBe("claude-opus-5")
   expect(rises).toBe(1)
 })
+
+// Whether a mod took the request is the one thing that separates a `$.prompt.submit` which
+// entered the session from one which never did: both leave the call pending, since a submit
+// answers only at the end of the turn it starts, and a stopped Claude Code writes no row either
+// (INFRA-1026, R12; `../src/mod-session`, `CardNotShown`).
+test("the link reports a request waiting in its queue, and reports it taken when a mod polls", async () => {
+  const dir = await directory()
+  const link = await start(dir, "s17")
+  const reports: boolean[] = []
+  const answered = link.request("session.model", undefined, {
+    taken: (taken) => reports.push(taken),
+  })
+  // Nothing is polling, so the request is still in this process.
+  expect(reports).toEqual([false])
+
+  const [request] = polled(await call(link.socketPath, "POST", MOD_ROUTE_REQUESTS, {}))
+  expect(reports).toEqual([false, true])
+  await call(link.socketPath, "POST", MOD_ROUTE_RESULTS, {
+    results: [{ id: request?.id ?? "", ok: true, value: "claude-opus-5" }],
+  })
+  expect(await answered).toBe("claude-opus-5")
+  expect(reports).toEqual([false, true])
+})
+
+test("a request handed straight to a held poll is reported taken and never reported waiting", async () => {
+  const dir = await directory()
+  const link = await start(dir, "s18")
+  const poll = call(link.socketPath, "POST", MOD_ROUTE_REQUESTS, {})
+  await untilPolled(link)
+
+  const reports: boolean[] = []
+  const answered = link.request("session.model", undefined, {
+    taken: (taken) => reports.push(taken),
+  })
+  expect(reports).toEqual([true])
+  const [request] = polled(await poll)
+  await call(link.socketPath, "POST", MOD_ROUTE_RESULTS, {
+    results: [{ id: request?.id ?? "", ok: true, value: "claude-opus-5" }],
+  })
+  expect(await answered).toBe("claude-opus-5")
+})
+
+// A request dropped from the queue unpolled reached no Claude Code at all, and the caller is
+// never told otherwise: that is what has the listener's resend of a card go to the session
+// (INFRA-1026, check k7's second clause).
+test("a request that timed out unpolled is never reported taken", async () => {
+  const dir = await directory()
+  const link = await start(dir, "s19")
+  const reports: boolean[] = []
+  const gone = link.request("session.model", undefined, {
+    timeoutMs: 20,
+    taken: (taken) => reports.push(taken),
+  })
+  expect(await rejection(gone)).toBe("the mod did not answer session.model within 20 ms")
+  expect(reports).toEqual([false])
+
+  // Nor by the poll that comes afterwards, which is handed nothing.
+  const answered = link.request("session.model", undefined)
+  const requests = polled(await call(link.socketPath, "POST", MOD_ROUTE_REQUESTS, {}))
+  expect(requests).toHaveLength(1)
+  await call(link.socketPath, "POST", MOD_ROUTE_RESULTS, {
+    results: [{ id: requests[0]?.id ?? "", ok: true, value: "claude-opus-5" }],
+  })
+  expect(await answered).toBe("claude-opus-5")
+  expect(reports).toEqual([false])
+})

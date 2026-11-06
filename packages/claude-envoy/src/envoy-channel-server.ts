@@ -124,7 +124,7 @@ import {
   legionToolDefinition,
 } from "./legion-tool"
 import { type ModLink, startModLink } from "./mod-link"
-import { type ModSession, modSession } from "./mod-session"
+import { cardEnteredSession, type ModSession, modSession } from "./mod-session"
 import {
   type ReplayStateFile,
   type ReplayStateWriter,
@@ -166,6 +166,13 @@ import {
 const CHANNEL_INSTRUCTIONS =
   "Envoy delivers trusted, internal session and Dispatch events into this conversation. Use the Envoy tools for Envoy actions, and reach Dispatch through the `dispatch` command in Bash (`dispatch --help` lists its commands; the `dispatch` skill teaches them). Dispatch asks stay on Dispatch."
 const CHANNEL_INBOX_LIMIT = 50
+/**
+ * The most Envoy events one session remembers having a card of in the conversation
+ * (`createChannelDelivery`). A resend follows its frame within the listener's own retry, so a
+ * handful would answer every one; this is the bound that keeps the record from growing for the
+ * session's life, as `AGENT_STREAM_SEEN_ROWS_MAX` bounds the one in `./agent-stream-runner`.
+ */
+const ENTERED_CARDS_MAX = 64
 const EMPTY_RECEIPT = new Uint8Array()
 const encoder = new TextEncoder()
 /** How often the handoff file is checked for a `/clear`. */
@@ -254,7 +261,8 @@ export interface ChannelDelivery {
    * Queue one rendered envelope onto the notifier, behind every frame queued before it. Resolves
    * whether it went to Claude Code, once the notifier resolved its write: `false` for a frame
    * skipped, dropped, suppressed, or answered on Dispatch with an error instead (once that reply
-   * is posted). `late` is a relay frame delivered before or stored before the current epoch
+   * is posted), and `true` without a write for an event whose card the session already has.
+   * `late` is a relay frame delivered before or stored before the current epoch
    * (`ConsumerFrame.late`): a late BTW is suppressed, as a replayed one is.
    */
   enqueue(input: {
@@ -486,7 +494,8 @@ export async function postDispatchReply(
  * step; in a terminal session, once the mod stored the row.
  *
  * Routing runs in the same queue as the writes, so a person's message and the cards around it
- * reach the session in the order they arrived.
+ * reach the session in the order they arrived. A frame whose event this session already has a
+ * card of is answered and written nowhere, however the first copy's write ended (`entered`).
  */
 export function createChannelDelivery(input: {
   readonly identity: SessionIdentity
@@ -498,6 +507,31 @@ export function createChannelDelivery(input: {
 }): ChannelDeliveryPath {
   const inbox: ChannelInboxEntry[] = []
   let tail = Promise.resolve()
+
+  /**
+   * The Envoy events whose card this session has: submitted and pending, or written. Newest
+   * last and bounded by `ENTERED_CARDS_MAX`.
+   *
+   * Envoy sends a frame again when its last delivery went unanswered, and a card whose submit
+   * entered the session is in front of the model already even where the write failed — the row
+   * proving it comes only at the end of the turn that took it, past the bound `show` waits
+   * (`./mod-session`, `CardNotShown`). Submitting it again would be the one card twice, which
+   * is what R12 forbids (INFRA-1026), so a resend this record knows is answered and nothing
+   * goes to the session for it. A card that entered nothing leaves no record, so its resend is
+   * shown as the first copy would have been (check k7's second clause: a stopped Claude Code
+   * takes no request at all). Only this process ending between the submit and the row can
+   * still show a card twice, the crash case `docs/site/src/content/docs/dispatch/envoy.md`
+   * states.
+   */
+  const entered = new Set<string>()
+  const remember = (eventId: string | undefined): void => {
+    if (eventId === undefined) return
+    entered.add(eventId)
+    if (entered.size > ENTERED_CARDS_MAX) {
+      const oldest = entered.values().next().value
+      if (oldest !== undefined) entered.delete(oldest)
+    }
+  }
 
   /** Runs `work` behind everything queued before it, keeping the frames in order. */
   const queued = <T>(work: () => Promise<T>): Promise<T> => {
@@ -583,6 +617,17 @@ export function createChannelDelivery(input: {
       }
       if (late === true && passOverBtw(rendered, "late")) return tail.then(() => false)
       return queued(async () => {
+        const eventId = rendered.envelope?.event_id
+        // A card this session already has is answered and nothing is submitted for it: the
+        // frame Envoy sent again is the same event, and the inbox named it when it entered
+        // (`entered`).
+        if (eventId !== undefined && entered.has(eventId)) return true
+        /** This session has the card now: the event is remembered, so a frame Envoy sends
+         *  again is answered above, and the inbox names it. */
+        const kept = (): void => {
+          remember(eventId)
+          list(rendered)
+        }
         // A message Dispatch accepted as this session's own turn is never also a card. A failure
         // after that acceptance throws, so the frame is not answered and the listener sends it
         // again, rather than a person's message vanishing into a delivery nobody kept.
@@ -593,8 +638,17 @@ export function createChannelDelivery(input: {
         }
         // Written here rather than through `write`: this already runs inside the queue, and
         // `write` would wait on a tail this call is itself the end of.
-        await input.notifier.notification(notification(rendered, rendered.content))
-        list(rendered)
+        try {
+          await input.notifier.notification(notification(rendered, rendered.content))
+        } catch (error) {
+          // The write failed, and the card can be in the session all the same: a turn that
+          // started under the submit writes its row only when it ends, so `show` gives up on a
+          // card the model will read (`./mod-session`). The frame stays unanswered, as a write
+          // that failed outright does, and the resend it earns is answered above.
+          if (cardEnteredSession(error)) kept()
+          throw error
+        }
+        kept()
         return true
       })
     },
