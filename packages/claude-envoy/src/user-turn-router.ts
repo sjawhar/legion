@@ -5,31 +5,27 @@
 // `/` message runs as the command it is, a pick sets what it names, and a BTW is answered off to
 // the side. Everything else still arrives as the card, which is the delivery.
 //
-// The accept step is the security of all of it, and it follows `acceptedUserTurn` in
-// `packages/pi-envoy/extensions/envoy.ts` step for step. The listener takes an envelope's source
-// from whoever publishes it and every session on the bus holds that token, so a frame saying a
-// person wrote it proves nothing. The session's own checks can only keep a card
-// (`isUserTurnCandidate`, and an attempt it has already handled); what makes a turn is Dispatch
-// recording that this session accepted that very attempt, and what it injects is the body
-// Dispatch answers with, never the frame's own text.
-//
-// The attempt is recorded as handled before Dispatch is asked, so whatever the frame becomes - a
-// turn, or the card every refusal, error and timeout keeps - no later frame naming that attempt
-// is accepted: a replay, or one forged inside the accept's minute for a message that arrived as a
-// card. The record is not skipped when the accept answers 404: that route answers 404 for a
-// transient database error too, and forgetting the attempt would let a later forged frame spend
-// it.
-import { pictureSyntax } from "@legion/contracts"
+// The accept step is the security of all of it, and it is one step both Envoy plugins take:
+// `acceptUserTurn` in `@legion/pi-shared/accept-user-turn`, which the Oh My Pi plugin
+// (`acceptedUserTurn`, `packages/pi-envoy/extensions/envoy.ts`) calls too, so a fix to the rule
+// lands in both. The order of its steps - and why the attempt is recorded before Dispatch is
+// asked, a 404 included - is stated there. What this host puts into it: its own record of
+// handled attempts (`./user-turn-state`, a file that outlives the process), the session's
+// Dispatch bounded by `ACCEPT_TIMEOUT_MS`, the session id a `/clear` moves, and these warnings.
+// The listener takes an envelope's source from whoever publishes it and every session on the
+// bus holds that token, so a frame saying a person wrote it proves nothing: what makes a turn
+// is Dispatch recording that this session accepted that very attempt, and what it injects is
+// the body Dispatch answers with, never the frame's own text.
+import { comparableLines } from "@legion/contracts"
 import type { DispatchDelivery, RenderInboundResult } from "@legion/envoy-client/delivery"
 import type { DispatchClient } from "@legion/envoy-client/dispatch-http"
 import { pictureAddresses } from "@legion/envoy-client/dispatch-pictures"
 import { messageFor } from "@legion/envoy-client/errors"
+import { acceptUserTurn } from "@legion/pi-shared/accept-user-turn"
 import { withDeliveredPictures } from "@legion/pi-shared/delivery-pictures"
 import {
   type AcceptedUserTurn,
   handledAttemptKey,
-  isUserTurnCandidate,
-  turnFromAccept,
   typedInputReply,
 } from "@legion/pi-shared/dispatch-user-turn"
 import type { ContentBlock } from "@legion/pi-shared/pi-types"
@@ -172,29 +168,6 @@ function rowText(content: readonly ModContentBlock[]): string {
   return pieces.join("\n")
 }
 
-/**
- * A row's text and a person's body as they are compared, so a row is recognised as the message it
- * carries: the pictures the body embeds taken out, each line trimmed and the empty lines dropped.
- *
- * A message carrying a picture reaches the session as its text and one image block per picture
- * (`claudeContentBlocks`), and the row it becomes holds the text alone - either as the person
- * wrote it, markdown and all (measured on 2.1.310:
- * `/legion/scratch/tmp/i3-k5-pane/config/projects/-legion-scratch-tmp-i3-k5-pane-cwd/f376a3a9-6e75-461b-806b-22dea4e83ddf.jsonl:121`),
- * or with the markdown gone, as the live view measured it, since the picture is a block of its
- * own and no longer a word of the text. Taking the markdown off both sides recognises the row
- * either way, so the message is tagged with its Dispatch id and the page shows it once
- * (`turnSaysBody`, `packages/dispatch/web/src/features/agent-view/conversation.ts`, reads the
- * same rule).
- */
-function comparableText(text: string): string {
-  return text
-    .replace(pictureSyntax(), "")
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line !== "")
-    .join("\n")
-}
-
 /** A delivery's content as Claude Code's own blocks: the text, and one image block per picture,
  *  as the Messages API shapes them (`@legion/pi-shared/delivery-pictures` answers an Oh My Pi
  *  host's blocks, whose images carry their bytes and type under other names). */
@@ -249,45 +222,42 @@ export function createUserTurnRouter(options: UserTurnRouterOptions): UserTurnRo
   }
 
   /**
-   * The turn Dispatch says this frame is, or undefined for every frame that keeps its card. The
-   * order of the steps is the rule itself; the comment at the top of this file says why.
+   * The turn Dispatch says this frame is, or undefined for every frame that keeps its card: the
+   * shared accept step (`@legion/pi-shared/accept-user-turn`), which both Envoy plugins take,
+   * with this session's record of handled attempts, its Dispatch and its stderr. The order of
+   * the steps is the rule itself, and it is stated where the step is written; the comment at
+   * the top of this file says what this host puts into it.
    */
-  const accepted = async (
+  const accepted = (
     rendered: RenderInboundResult,
   ): Promise<
     { readonly delivery: DispatchDelivery; readonly turn: AcceptedUserTurn } | undefined
-  > => {
-    if (!isUserTurnCandidate(rendered)) return undefined
-    const { delivery } = rendered
-    const key = handledAttemptKey(delivery.id, delivery.attempt)
-    if (state.handled(key)) {
-      warn(
-        `a frame names the Dispatch attempt ${delivery.attempt} of message ${delivery.id}, which this session has already delivered; it arrives as a card`,
-      )
-      return undefined
-    }
-    await state.handle(key)
-    try {
-      const dispatch = options.dispatch(ACCEPT_TIMEOUT_MS)
-      if (dispatch === undefined) return undefined
-      const answer = await dispatch.acceptMessageDelivery(delivery.id, delivery.attempt, {
-        actor: { id: options.sessionId(), kind: "session" },
-      })
-      const turn = turnFromAccept(answer)
-      if (turn === undefined) {
+  > =>
+    acceptUserTurn({
+      actorId: options.sessionId(),
+      dispatch: () => options.dispatch(ACCEPT_TIMEOUT_MS),
+      handle: state.handle,
+      handled: state.handled,
+      rendered,
+      warn: (refusal) => {
+        const { delivery } = refusal
+        if (refusal.reason === "handled") {
+          warn(
+            `a frame names the Dispatch attempt ${delivery.attempt} of message ${delivery.id}, which this session has already delivered; it arrives as a card`,
+          )
+          return
+        }
+        if (refusal.reason === "no-body") {
+          warn(
+            `Dispatch accepted message ${delivery.id} without the stored body to inject; it arrives as a card`,
+          )
+          return
+        }
         warn(
-          `Dispatch accepted message ${delivery.id} without the stored body to inject; it arrives as a card`,
+          `Dispatch did not accept message ${delivery.id} as this session's turn (${messageFor(refusal.error)}); it arrives as a card`,
         )
-        return undefined
-      }
-      return { delivery, turn }
-    } catch (error) {
-      warn(
-        `Dispatch did not accept message ${delivery.id} as this session's turn (${messageFor(error)}); it arrives as a card`,
-      )
-      return undefined
-    }
-  }
+      },
+    })
 
   /** The person's message, as the session's own: a row of the turn running, or the prompt of a
    *  new one. Throws when the session could not take it, so the frame is sent again. */
@@ -496,8 +466,23 @@ export function createUserTurnRouter(options: UserTurnRouterOptions): UserTurnRo
       // is theirs - Claude Code echoes the command it ran, in a row the live view draws
       // nothing of (`./agent-stream-claude`, `runsCommandRow`) - so nothing here waits for one
       // and nothing tags one.
-      const text = comparableText(rowText(message.content))
-      const index = awaited.findIndex((row) => comparableText(row.body) === text)
+      //
+      // A row and a body are compared by the shared line rule (`comparableLines`,
+      // `@legion/contracts`), each side joined back into one string to match on. A message
+      // carrying a picture reaches the session as its text and one image block per picture
+      // (`claudeContentBlocks`), and the row it becomes holds the text alone - either as the
+      // person wrote it, markdown and all (measured on 2.1.310:
+      // `/legion/scratch/tmp/i3-k5-pane/config/projects/-legion-scratch-tmp-i3-k5-pane-cwd/f376a3a9-6e75-461b-806b-22dea4e83ddf.jsonl:121`),
+      // or with the markdown gone, as the live view measured it, since the picture is a block
+      // of its own and no longer a word of the text. Taking the markdown off both sides
+      // recognises the row either way, so the message is tagged with its Dispatch id and the
+      // page shows it once. Both sides here are this session's own, which is why both are read
+      // by the rule alone: the page reads a stored body by this same rule and so must not
+      // drift from it, but it reads the streamed row - a frame any client of the bus can
+      // publish - by a check of its own first (`turnSaysBody` and `rowLines`,
+      // `packages/dispatch/web/src/features/agent-view/conversation.ts`).
+      const said = comparableLines(rowText(message.content)).join("\n")
+      const index = awaited.findIndex((row) => comparableLines(row.body).join("\n") === said)
       const row = awaited[index]
       if (row === undefined) return
       awaited.splice(index, 1)

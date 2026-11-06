@@ -37,6 +37,7 @@ import {
   isCommandBookkeeping,
   isPictureAttachmentRow,
 } from "./claude-rows"
+import { isUnreadRowPrompt } from "./mod-session"
 
 /** The provider every model of Claude Code's is named under, so a frame carries the same
  *  `provider/id` reference an Oh My Pi session's does (`anthropic/claude-sonnet-5`). */
@@ -310,6 +311,18 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
     publisher.record(subject, message, streaming, dispatchMessageId)
   }
 
+  /** One row of the conversation as the viewer draws it: never streaming, since a row arrives
+   *  whole, keyed into its own slot by the row's id, and tagged with the Dispatch message it
+   *  delivered where it is one. */
+  const recordRow = (
+    subject: string,
+    uuid: string,
+    role: "assistant" | "user",
+    content: readonly ClaudeStreamPart[],
+  ): void => {
+    record(subject, { content, role, tag: uuid, timestamp: now() }, false, deps.tagFor?.(uuid))
+  }
+
   /** One `turn.step` snapshot as the assistant message of that step. */
   const recordStep = (subject: string, event: Extract<ModEvent, { kind: "step" }>): void => {
     // The step reports the effort its own request carried, which is the truth about that
@@ -379,11 +392,21 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
     if (isPictureAttachmentRow(message.content)) return
     if (door === "prompt") {
       // A prompt this plugin submitted without `asUser` is not a person's message: Claude Code
-      // frames it as "The claude-envoy plugin sent a message:" and the only one the server sends
-      // is the nudge at a row a turn never read (`./mod-session`, `unreadRowPrompt`).
+      // frames it as "The claude-envoy plugin sent a message:", and the server sends two of
+      // them (`./mod-session`). The prompt at rows a turn never read is drawn nothing for,
+      // since it quotes rows this view has already drawn and a viewer would read each of those
+      // messages twice; a card's prompt is drawn, because a card delivered to an idle session
+      // is that prompt and reaches the conversation nowhere else.
       // Measured on 2.1.310: a submit with `asUser` carries `asUser: true` on the row's origin
-      // and one without it carries no such field, which is what tells the two apart.
-      if (origin.kind === "plugin" && origin.asUser !== true) return
+      // and one without it carries no such field, which is what tells a person's own words
+      // from the plugin's.
+      if (
+        origin.kind === "plugin" &&
+        origin.asUser !== true &&
+        isUnreadRowPrompt(claudeRowText(message.content))
+      ) {
+        return
+      }
       // The command a pane is seeded with arrives by this door, written to the session's input
       // by the daemon's bridge before anything else happens in the pane: it names the pane, and
       // no person sent it.
@@ -395,17 +418,7 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
       // page shows the person's message twice (INFRA-1026).
       const content = message.content.map(partOf)
       if (!content.some(shows)) return
-      record(
-        subject,
-        {
-          content,
-          role: "user",
-          tag: uuid,
-          timestamp: now(),
-        },
-        false,
-        deps.tagFor?.(uuid),
-      )
+      recordRow(subject, uuid, "user", content)
       return
     }
     if (door === "tool-result") {
@@ -444,17 +457,7 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
         // this stream. Drawn, a `/cost` the person sent put `/cost` and `/usage` in front of
         // them as two messages of theirs, measured live on 2.1.310 (INFRA-1026).
         if (deps.runsCommandRow?.(uuid) === true) return
-        record(
-          subject,
-          {
-            content: [{ text: line, type: "text" }],
-            role: "user",
-            tag: uuid,
-            timestamp: now(),
-          },
-          false,
-          deps.tagFor?.(uuid),
-        )
+        recordRow(subject, uuid, "user", [{ text: line, type: "text" }])
         return
       }
       if (isCommandBookkeeping(message.content)) return
@@ -468,17 +471,7 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
     // output is a result rather than a message and left alone: it went out above, by its call's
     // id.
     if (!content.some(shows)) return
-    record(
-      subject,
-      {
-        content,
-        role: roleOf(message),
-        tag: uuid,
-        timestamp: now(),
-      },
-      false,
-      deps.tagFor?.(uuid),
-    )
+    recordRow(subject, uuid, roleOf(message), content)
   }
 
   return {

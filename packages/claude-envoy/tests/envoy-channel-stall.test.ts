@@ -15,8 +15,9 @@ import { startFakeMod } from "./fake-mod"
 
 const channelEntry = resolve(import.meta.dir, "..", "bin", "envoy-channel.ts")
 
-/** What one `$.session.append` the server made carries, which is how a delivery reaches the model
- *  now that there is no channel (INFRA-1026). */
+/** What one `$.session.append` the server made carries: the row a delivery is while a turn runs,
+ *  now that there is no channel (INFRA-1026). A delivery to an idle session is a
+ *  `$.prompt.submit` instead, whose text the mod below records as it stands. */
 function appendedText(args: ModCallArguments["session.append"]): string {
   return args.message.content
     .map((block) => (typeof block["text"] === "string" ? block["text"] : ""))
@@ -68,7 +69,7 @@ async function startChannelServer(
       CLAUDE_CODE_SESSION_ID: sessionID,
       CLAUDE_PLUGIN_DATA: home,
       // The base the server and the mod below both resolve the link's socket from.
-      TMPDIR: home,
+      XDG_RUNTIME_DIR: home,
       // No heartbeat registration runs in the test's window: the reconnect's registration, on a
       // new epoch, is the only one that restarts the relay.
       ENVOY_HEARTBEAT_MS: "240000",
@@ -77,14 +78,19 @@ async function startChannelServer(
     stdout: "pipe",
     stderr: "pipe",
   })
-  // Every delivery reaches the model as a row the mod stores, so the mod is this test's view of
-  // what the session was shown.
-  const socketPath = modSocketPath(sessionID, { TMPDIR: home })
+  const socketPath = modSocketPath(sessionID, { XDG_RUNTIME_DIR: home })
   if (socketPath === undefined) throw new Error("the session names no mod socket")
+  // Every delivery reaches the model as the mod's own write - the row of a turn running, or the
+  // prompt of a new turn while the session is idle, which this one is throughout (`show` in
+  // `../src/mod-session`) - so the mod is this test's view of what the session was shown.
   const channel: string[] = []
   const mod = await startFakeMod(socketPath, {
     sessionId: sessionID,
     answers: {
+      "prompt.submit": (args) => {
+        channel.push(args.text)
+        return { text: args.text }
+      },
       "session.append": (args) => {
         channel.push(appendedText(args))
         return { uuid: `row-${channel.length}` }

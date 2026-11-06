@@ -249,9 +249,37 @@ describe("a streamed row read against the body it says it delivered", () => {
     expect(turnSaysBody(row("[ack]\n[image]"), `[ack] ${picture("blue")}`)).toBe(true);
   });
 
-  test("a row carrying the picture's markdown says its body, both sides read the same way", () => {
+  test("a row carrying the body's own picture markdown says its body", () => {
     const body = `Look at this ${picture("blue")}`;
     expect(turnSaysBody(row(body), body)).toBe(true);
+  });
+
+  // The row is rendered as markdown under the person's name, so a picture in it that the body
+  // never held is a picture the person never sent: it must not hide their stored copy behind a
+  // row that shows it (INFRA-1026).
+  test("a picture the body never wrote is the row's own, and hides nothing", () => {
+    expect(turnSaysBody(row(`Ship it? ${picture("red")}`), "Ship it?")).toBe(false);
+    const body = `Look at this ${picture("blue")}`;
+    expect(turnSaysBody(row(`Look at this ${picture("red")}`), body)).toBe(false);
+  });
+
+  // A caption shows under the picture, so one the person did not write is words of the row's
+  // own, address or no address.
+  test("a caption the body never wrote is the row's own", () => {
+    const body = `Look at this ${picture("blue")}`;
+    const recaptioned = "![ship it](dispatch://agent/s1/artifact/i3-blue96-png@v1)";
+    expect(turnSaysBody(row(`Look at this ${recaptioned}`), body)).toBe(false);
+  });
+
+  test("the row spends each of the body's pictures at most as often as the body wrote it", () => {
+    const body = `Look at this ${picture("blue")}`;
+    expect(turnSaysBody(row(`Look at this ${picture("blue")} ${picture("blue")}`), body)).toBe(
+      false
+    );
+    const twice = `Look at these ${picture("blue")} ${picture("blue")}`;
+    expect(turnSaysBody(row(`Look at these ${picture("blue")} ${picture("blue")}`), twice)).toBe(
+      true
+    );
   });
 });
 

@@ -25,7 +25,7 @@ import type {
   TurnStepResult,
 } from "claude-code"
 import { register } from "../hooks/mod"
-import { MOD_MIN_CLAUDE_VERSION, type ModEvent } from "../hooks/mod-protocol"
+import { MOD_INSTANCE_HEADER, MOD_MIN_CLAUDE_VERSION, type ModEvent } from "../hooks/mod-protocol"
 import { type ModLink, startModLink } from "../src/mod-link"
 
 /** The hook `on("session.start", ...)` takes, as `On` declares it. */
@@ -49,8 +49,8 @@ interface Session {
   readonly step: StepHook
 }
 
-/** Short on purpose: the socket is `<TMPDIR>/claude-envoy-<id>.sock` and that whole path has 100
- *  bytes to fit in (`MOD_SOCKET_PATH_MAX_BYTES`). */
+/** Short on purpose: the socket is `<base>/claude-envoy/ce-<hash>.sock` and that whole path has
+ *  100 bytes to fit in (`MOD_SOCKET_PATH_MAX_BYTES`). */
 const SESSION_ID = "mod-step"
 
 /** A model Claude Code names an effort for: measured on 2.1.310, a request of it before any pick
@@ -100,6 +100,9 @@ function fetchOverSocket(url: string, init: HttpInit = {}): Promise<HttpResponse
   return promise
 }
 
+/** Every request the mod made on the socket, as its `$.http.fetch` was given it. */
+const requested: { readonly method: string; readonly instance: string | undefined }[] = []
+
 /** The `$` the hooks are given: what the mod calls on it over a step, and nothing else. A call no
  *  test makes rejects rather than answering something made up. */
 function engineOn(directory: string): EngineInterface {
@@ -116,8 +119,16 @@ function engineOn(directory: string): EngineInterface {
     command: { list: () => unused("command.list"), run: () => unused("command.run") },
     config: { list: () => unused("config.list"), set: () => unused("config.set") },
     model: { fork: () => unused("model.fork") },
-    http: { fetch: (url, init) => fetchOverSocket(url, init) },
-    env: { get: async (name) => (name === "TMPDIR" ? directory : undefined) },
+    http: {
+      fetch: (url, init) => {
+        requested.push({
+          method: init?.method ?? "GET",
+          instance: init?.headers?.[MOD_INSTANCE_HEADER],
+        })
+        return fetchOverSocket(url, init)
+      },
+    },
+    env: { get: async (name) => (name === "XDG_RUNTIME_DIR" ? directory : undefined) },
     clock: {
       sleep: async (ms) => {
         if (!over) await Bun.sleep(ms)
@@ -174,7 +185,10 @@ async function finishedStep(): Promise<Extract<ModEvent, { kind: "step" }>> {
 beforeAll(async () => {
   const directory = await mkdtemp(join(tmpdir(), "mod-"))
   scratch = directory
-  const server = await startModLink({ sessionId: SESSION_ID, env: { TMPDIR: directory } })
+  const server = await startModLink({
+    sessionId: SESSION_ID,
+    env: { XDG_RUNTIME_DIR: directory },
+  })
   const hooks = new Map<string, unknown>()
   const collect: On = (pattern: string, ...rest: unknown[]): void => {
     hooks.set(pattern, rest[rest.length - 1])
@@ -194,6 +208,21 @@ afterAll(async () => {
   await session?.server.close()
   session = undefined
   if (scratch !== undefined) await rm(scratch, { recursive: true, force: true })
+})
+
+// One server serves one mod: it keeps the first instance that names itself in a post and refuses
+// every other, so two Claude Code processes booted on one session id do not share a live view or
+// a person's Send (INFRA-1026 review).
+test("every post the mod makes names the one instance this process's mod is", () => {
+  const posts = requested.filter(({ method }) => method === "POST")
+  expect(posts.length).toBeGreaterThan(0)
+  const instances = new Set(posts.map(({ instance }) => instance))
+  expect(instances.size).toBe(1)
+  expect([...instances][0]).toMatch(/^[0-9a-z]+-[0-9a-z]+$/)
+  // The liveness probe claims nothing: it is how a mod finds a server, not how it holds one.
+  const probes = requested.filter(({ method }) => method === "GET")
+  expect(probes.length).toBeGreaterThan(0)
+  expect(probes.every(({ instance }) => instance === undefined)).toBe(true)
 })
 
 // Measured live on 2.1.310: after a pick of `low` the requests of `claude-haiku-4-5` carried

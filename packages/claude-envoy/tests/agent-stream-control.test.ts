@@ -85,6 +85,7 @@ function fakeLink(): LinkHarness {
     connected: () => !ended,
     events,
     onSessionId: (listener) => void listeners.push(listener),
+    onConnected: () => undefined,
     request: <N extends ModCallName>(
       call: N,
       _args: ModCallArguments[N],

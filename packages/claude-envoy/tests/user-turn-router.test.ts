@@ -500,7 +500,7 @@ test("a Send delivered after a turn's last request went out is pointed at, thoug
     expect(submits).toHaveLength(1)
     expect(submits[0]?.asUser).toBeUndefined()
     expect(submits[0]?.text).toBe(
-      unreadRowPrompt([{ messageId: MESSAGE, text: "Also say harbour." }]),
+      unreadRowPrompt([{ kind: "person", messageId: MESSAGE, text: "Also say harbour." }]),
     )
   } finally {
     await rm(session.directory, { recursive: true, force: true })

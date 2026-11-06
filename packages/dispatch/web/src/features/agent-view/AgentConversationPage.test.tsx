@@ -566,6 +566,31 @@ test("a streamed turn that adds a bracketed word of its own hides nothing", asyn
   ).toEqual(["Should I deploy?", "Should I deploy?[yes]"]);
 });
 
+// The same hole as the bracketed word, in the one syntax that draws rather than reads: a row
+// tagged with a person's message and carrying a picture the body never embedded would hide the
+// stored copy and show that picture, with a caption of its own, under the person's name. Any
+// client of the bus can publish the row, so a picture in it counts only where the body wrote
+// that very markdown (`rowLines`, `features/agent-view/conversation.ts`); otherwise the row
+// says something the person did not, and the stored copy keeps showing beside it (INFRA-1026).
+test("a streamed turn that adds a picture of its own hides nothing", async () => {
+  const at = Date.parse("2026-09-27T21:16:16Z");
+  const forged = "dispatch://agent/f376a3a9-6e75-461b-806b-22dea4e83ddf/artifact/i3-red96-png@v1";
+  renderLiveView({
+    agentState: {},
+    messages: [{ message: message("m1", "Should I deploy?"), replies: [] }],
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
+    replay: [userFrame(1, at, `Should I deploy?\n![ship it](${forged})`, "m1")],
+  });
+
+  const thread = await screen.findByTestId("agent-thread");
+  await waitFor(() => expect(within(thread).getAllByTestId("agent-message-user")).toHaveLength(2));
+  const rows = within(thread).getAllByTestId("agent-message-user");
+  // Dispatch's stored copy, the person's words and nothing else, and beside it the streamed row
+  // that drew the forged picture: the stored copy is what a reader can trust.
+  expect(rows[0]?.textContent).toBe("Should I deploy?");
+  expect(rows[1]?.textContent).toContain("i3-red96-png");
+});
+
 // A person writes a bracketed word of their own - `[ack]`, `[done]`, `[LGTM]` - and the session
 // streams it back as the one text part it is. The placeholder rule reads that part as the stream
 // naming a block it did not render, drops it, and leaves the turn saying nothing, so Dispatch's

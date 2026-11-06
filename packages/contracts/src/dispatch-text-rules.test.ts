@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  comparableLines,
   isSessionId,
   MAX_REFERENCE_TARGET_BYTES,
   pictureCaption,
@@ -128,5 +129,28 @@ describe("pictureSyntax", () => {
   test("reads no caption across a line break", () => {
     const text = `![shot\n.png](${address})\n![two.png](${address})`;
     expect([...text.matchAll(pictureSyntax())].map((match) => match[1])).toEqual([address]);
+  });
+});
+
+// The one rule the Claude Code plugin tags a streamed row by and the Agents page reads a stored
+// body by, so a person's message shows once (INFRA-1026).
+describe("comparableLines", () => {
+  const address = "dispatch://agent/s1/artifact/i3-blue96-png@v1";
+
+  test("takes out the pictures, trims each line and drops the empty ones", () => {
+    expect(comparableLines(`  Look at this ![blue](${address})  \n\n  and this  \n`)).toEqual([
+      "Look at this",
+      "and this",
+    ]);
+  });
+
+  test("leaves a line that is a bracketed word of the person's own", () => {
+    expect(comparableLines(`[ack]\n\n![blue](${address})`)).toEqual(["[ack]"]);
+  });
+
+  test("leaves text that only looks like a picture, which is no picture at all", () => {
+    expect(comparableLines("![shot.png](https://example.test/shot.png)")).toEqual([
+      "![shot.png](https://example.test/shot.png)",
+    ]);
   });
 });

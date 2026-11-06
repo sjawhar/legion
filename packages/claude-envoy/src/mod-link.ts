@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto"
-import { chmod, mkdir, stat, unlink } from "node:fs/promises"
+import { chmod, lstat, mkdir, stat, unlink } from "node:fs/promises"
 import {
   createServer,
   request as httpRequest,
@@ -10,11 +10,13 @@ import {
 import { dirname } from "node:path"
 import {
   MOD_HEALTH_MARKER,
+  MOD_INSTANCE_HEADER,
   MOD_POLL_HOLD_MS,
   MOD_ROUTE_EVENTS,
   MOD_ROUTE_HEALTH,
   MOD_ROUTE_REQUESTS,
   MOD_ROUTE_RESULTS,
+  MOD_STATUS_TAKEN,
   MOD_URL_BASE,
   type ModAckBody,
   type ModCallArguments,
@@ -74,6 +76,13 @@ export interface ModLink {
    *  seconds. A session's delivery modes are read off this (`sessionCapabilities`), and the
    *  mod's first event - its hello - is as good a proof that it is there as its first poll. */
   readonly connected: () => boolean
+  /** Called when a poll or an event arrives while this link did not count as connected: the
+   *  rising edge of `connected()`. The mod sends its hello once per Claude Code process, so a
+   *  server Claude Code starts again inside that process hears nothing else from a mod that is
+   *  already there, and neither does a listener added after the hello landed (INFRA-1026
+   *  review). There is no falling edge: `connected()` goes false on its own, about ten seconds
+   *  after the mod's last poll. */
+  readonly onConnected: (listener: () => void) => void
   /** Stop serving, unlink the socket, end `events` and reject every unanswered request. */
   readonly close: () => Promise<void>
 }
@@ -83,6 +92,8 @@ export interface ModLink {
 export interface ModLinkOptions {
   readonly sessionId: string
   readonly env: Readonly<Record<string, string | undefined>>
+  /** Where a refused second mod is reported; this process's stderr when the caller names none. */
+  readonly warn?: (text: string) => void
 }
 
 /** One poll of the mod's, held open until there is work for it or the hold is up. */
@@ -237,10 +248,36 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-/** Serve `socketPath`, with the directory above it made `0700` when it is missing and a stale
- *  socket unlinked; refuses a path a live link already answers. */
+/** The directory the socket sits in, made when it is missing and checked when it is not: a
+ *  directory of this user's own, `0700`, and no symbolic link to one elsewhere. Anyone who can
+ *  write this directory can bind the socket before this server does and then read the
+ *  conversation and submit prompts as the person, so a directory that is open to anyone else is
+ *  refused rather than tightened: whatever left it open may have left something in it too
+ *  (INFRA-1026 review). `mkdir` can only drop bits of the `0700` it is given, so a directory
+ *  this server made is never the one that is refused. */
+async function privateDirectory(path: string): Promise<void> {
+  await mkdir(path, { recursive: true, mode: 0o700 })
+  const directory = await lstat(path)
+  if (!directory.isDirectory()) {
+    throw new Error(`${path} is not a directory of its own, so the socket has no private home`)
+  }
+  // Windows has no `getuid`, and no Unix socket for the mod either; a host without one has no
+  // owner to compare and the mode below is the whole check.
+  const user = process.getuid?.()
+  if (user !== undefined && directory.uid !== user) {
+    throw new Error(`${path} belongs to uid ${directory.uid}, not to this user (uid ${user})`)
+  }
+  if ((directory.mode & 0o077) !== 0) {
+    throw new Error(
+      `${path} is mode ${(directory.mode & 0o777).toString(8)}, which lets another user into this session's socket; chmod 700 it`,
+    )
+  }
+}
+
+/** Serve `socketPath`, inside a directory only this user can use, with a stale socket unlinked;
+ *  refuses a path a live link already answers. */
 async function bind(server: Server, socketPath: string): Promise<void> {
-  await mkdir(dirname(socketPath), { recursive: true, mode: 0o700 })
+  await privateDirectory(dirname(socketPath))
   if (await exists(socketPath)) {
     if (await probeHealth(socketPath, MOD_PROBE_TIMEOUT_MS)) {
       throw new Error(`another claude-envoy server already serves this session at ${socketPath}`)
@@ -262,14 +299,19 @@ async function bind(server: Server, socketPath: string): Promise<void> {
  * `../hooks/mod-protocol`): its events in, its poll for work and its answers, and the liveness
  * probe both the mod and the next server use.
  *
- * The path is the one the mod computes from the same rule, so neither side guesses. A socket that
- * is already there is probed: a live link answering the marker owns this session and the bind is
- * refused; anything else is a socket a dead server left, unlinked and bound over. The bound socket
- * is the user's alone (`0600`).
+ * The path is the one the mod computes from the same rule, so neither side guesses, and it sits
+ * in a directory of this user's own (`privateDirectory`). A socket that is already there is
+ * probed: a live link answering the marker owns this session and the bind is refused; anything
+ * else is a socket a dead server left, unlinked and bound over. The bound socket is the user's
+ * alone (`0600`).
  *
- * Rejects when the session names no socket path, when another server owns it, and when the bind
- * itself fails. Nothing here stops the MCP server: the caller says on stderr what it could not do
- * and carries on.
+ * One link serves one mod: the first mod instance to name itself in a post holds it, and every
+ * other is refused (`MOD_STATUS_TAKEN`), so two Claude Code processes that booted on one session
+ * id do not share a live view or a person's Send (INFRA-1026 review).
+ *
+ * Rejects when the session names no socket path or no private directory for it, when another
+ * server owns it, and when the bind itself fails. Nothing here stops the MCP server: the caller
+ * says on stderr what it could not do and carries on.
  */
 export async function startModLink(options: ModLinkOptions): Promise<ModLink> {
   const resolved = resolveModSocketPath(options.sessionId, options.env)
@@ -283,9 +325,29 @@ export async function startModLink(options: ModLinkOptions): Promise<ModLink> {
   const held = new Set<HeldPoll>()
   const pending = new Map<string, PendingRequest>()
   const sessionIdListeners: ((sessionId: string) => void)[] = []
+  const connectedListeners: (() => void)[] = []
+  const warn =
+    options.warn ??
+    ((text: string): void => {
+      process.stderr.write(`claude-envoy: ${text}\n`)
+    })
+  /** The mod instance this link serves: the first one to name itself in a post. */
+  let instance: string | undefined
   let reportedSessionId: string | undefined
   let lastPollAt = 0
   let closed = false
+
+  const isConnected = (): boolean =>
+    !closed && (held.size > 0 || Date.now() - lastPollAt < MOD_POLL_HOLD_MS * 2)
+
+  /** One post of the mod's arrived. A post that lands while the link counts as disconnected is
+   *  the rising edge `onConnected` reports, and the only word a server hears from a mod that
+   *  said its hello to an earlier server in the same Claude Code process. */
+  const heard = (): void => {
+    const before = isConnected()
+    lastPollAt = Date.now()
+    if (!before) for (const listener of connectedListeners) listener()
+  }
 
   const reportSessionId = (sessionId: string): void => {
     if (sessionId === reportedSessionId) return
@@ -336,6 +398,20 @@ export async function startModLink(options: ModLinkOptions): Promise<ModLink> {
       answerJson(response, 404, { error: `no route ${incoming.method ?? ""} ${route ?? ""}` })
       return
     }
+    const named = incoming.headers[MOD_INSTANCE_HEADER]
+    const mod = typeof named === "string" ? named : undefined
+    if (mod !== undefined) {
+      instance ??= mod
+      if (instance !== mod) {
+        warn(
+          `a second Claude Code mod (${mod}) posted to a link mod ${instance} holds, so two processes booted on one session id; it is refused and stops (${socketPath})`,
+        )
+        answerJson(response, MOD_STATUS_TAKEN, {
+          error: `this session's link belongs to mod ${instance}`,
+        })
+        return
+      }
+    }
     const text = await readBody(incoming)
     let body: unknown
     try {
@@ -345,7 +421,7 @@ export async function startModLink(options: ModLinkOptions): Promise<ModLink> {
       return
     }
     if (route === MOD_ROUTE_EVENTS) {
-      lastPollAt = Date.now()
+      heard()
       const events = readEvents(body)
       if (events === undefined) {
         answerJson(response, 400, { error: "the body carries no events" })
@@ -375,7 +451,7 @@ export async function startModLink(options: ModLinkOptions): Promise<ModLink> {
       answerJson(response, 200, { ok: true } satisfies ModAckBody)
       return
     }
-    lastPollAt = Date.now()
+    heard()
     if (queued.length > 0 || closed) {
       answerJson(response, 200, {
         requests: queued.splice(0, queued.length),
@@ -439,14 +515,21 @@ export async function startModLink(options: ModLinkOptions): Promise<ModLink> {
       const timeoutMs = requestOptions?.timeoutMs ?? MOD_REQUEST_TIMEOUT_MS
       const id = randomUUID()
       const settle = Promise.withResolvers<ModResultValue>()
+      // One arm of ModRequest per call name, a correlation the compiler cannot follow through `N`.
+      const request = { id, call, args } as ModRequest
       const timer = setTimeout(() => {
         pending.delete(id)
+        // Out of the queue as well as out of `pending`: queued is where a request waits when no
+        // mod is polling, and a mod that connects later would run this one - a `session.append`
+        // or a `prompt.submit` the listener has long since sent again, so the agent would get
+        // the message twice (R12 says one time). In a session whose mod never connects the queue
+        // would instead grow for the life of the process (INFRA-1026 review).
+        const waiting = queued.indexOf(request)
+        if (waiting !== -1) queued.splice(waiting, 1)
         settle.reject(new Error(`the mod did not answer ${call} within ${timeoutMs} ms`))
       }, timeoutMs)
       timer.unref()
       pending.set(id, { call, settle, timer })
-      // One arm of ModRequest per call name, a correlation the compiler cannot follow through `N`.
-      const request = { id, call, args } as ModRequest
       queued.push(request)
       wake()
       // The mod answers the call it was asked for, so the value is that call's own.
@@ -456,7 +539,10 @@ export async function startModLink(options: ModLinkOptions): Promise<ModLink> {
     onSessionId(listener: (sessionId: string) => void): void {
       sessionIdListeners.push(listener)
     },
-    connected: () => !closed && (held.size > 0 || Date.now() - lastPollAt < MOD_POLL_HOLD_MS * 2),
+    connected: isConnected,
+    onConnected(listener: () => void): void {
+      connectedListeners.push(listener)
+    },
     close,
   }
 }

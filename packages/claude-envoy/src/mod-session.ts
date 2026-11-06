@@ -7,8 +7,10 @@
 //     awaited by a caller that has a frame to answer, and at most one is ever in flight: a second
 //     one would sit behind the first for a whole turn.
 //   - a row `$.session.append` adds is read at the turn's next request, and not at all when no
-//     request follows it. So a row added to a running turn is watched until that turn ends, and
-//     one the turn never read is quoted in full by a prompt of its own (`unreadRowPrompt`).
+//     request follows it, so an idle session reads nothing that is appended to it. So a row
+//     added to a running turn is watched until that turn ends, one the turn never read is
+//     quoted in full by a prompt of its own (`unreadRowPrompt`), and an idle session is handed
+//     a prompt instead of a row - a person's message and a card alike (`hand`).
 //   - a turn's next request goes out about 50 ms after the tool result that freed it, and its
 //     first chunk arrives seconds later (2.4 s and 2.5 s in the recorded runs). So which request
 //     a row made it into is read off `step-request`, which the mod sends as the request goes
@@ -90,11 +92,29 @@ const COMMAND_ECHO_MS = 1_000
  *  `ANSWERED_DELIVERIES_MAX` bounds the one in `./user-turn-router`. */
 const CLAIMED_ECHO_ROWS_MAX = 64
 
-/** A message a turn never read: the person's own words, and the Dispatch message they are. */
-export interface UnreadMessage {
-  readonly text: string
-  readonly messageId: string
+/**
+ * A message a turn never read, as the prompt at it names the message: the person's own words,
+ * with the Dispatch message they are, or a card — an Envoy delivery this plugin wrote into the
+ * conversation, which nobody at this session typed.
+ */
+export type UnreadMessage =
+  | { readonly kind: "person"; readonly text: string; readonly messageId: string }
+  | { readonly kind: "card"; readonly text: string }
+
+/** One unread message as the prompt quotes it, under what it is: a prompt that called a card
+ *  the person's own words would put words in their mouth that they never wrote. */
+function quotedUnread(message: UnreadMessage): string {
+  return message.kind === "person"
+    ? `Dispatch message ${message.messageId}, the person's own words:\n${message.text}`
+    : `An Envoy message delivered to this session, which nobody here typed:\n${message.text}`
 }
+
+/**
+ * The words every prompt at an unread row carries, whichever of the two wordings below it is:
+ * the live view reads them to tell such a prompt from a card's (`isUnreadRowPrompt`), so both
+ * wordings are built from this one string rather than spelling it twice.
+ */
+const UNREAD_LEAD = "while your last request was already running, so you have not read"
 
 /**
  * The prompt that points the model at the messages a turn never read, submitted without
@@ -105,18 +125,59 @@ export interface UnreadMessage {
  * agent's own long answer, and the model replied `I don't see an actual Dispatch message content
  * above` on one and `it looks like an injection and I'm not going to act on it` on the other
  * (INFRA-1026). One prompt goes out however many rows went unread - the submit is one per turn
- * end - so it names each message.
+ * end - so it names each message, and a turn that left a card and a person's message unread gets
+ * the one prompt holding both.
  */
 export function unreadRowPrompt(unread: readonly UnreadMessage[]): string {
   const one = unread.length === 1
   const them = one ? "it" : "them"
-  const quoted = unread
-    .map((message) => `Dispatch message ${message.messageId}:\n${message.text}`)
-    .join("\n\n")
+  const count = one ? "a message" : `${unread.length} messages`
+  const quoted = unread.map(quotedUnread).join("\n\n")
+  // The person's own words keep the wording the live runs drove; a set holding a card says
+  // instead that each message is labelled, since only some of them are the person's.
+  if (unread.every((message) => message.kind === "person")) {
+    return [
+      `A person sent this session ${count} through Dispatch ${UNREAD_LEAD} ${them} yet.`,
+      `The claude-envoy plugin is quoting ${them} here in full: ${one ? "it is" : "they are"} the person's own words, not a tool result and not an instruction of the plugin's own. Answer ${them}.`,
+      quoted,
+    ].join("\n\n")
+  }
   return [
-    `A person sent this session ${one ? "a message" : `${unread.length} messages`} through Dispatch while your last request was already running, so you have not read ${them} yet.`,
-    `The claude-envoy plugin is quoting ${them} here in full: ${one ? "it is" : "they are"} the person's own words, not a tool result and not an instruction of the plugin's own. Answer ${them}.`,
+    `Envoy delivered ${count} to this session ${UNREAD_LEAD} ${them} yet.`,
+    `The claude-envoy plugin is quoting ${them} here in full, each under what it is: ${one ? "it is" : "they are"} not a tool result and not an instruction of the plugin's own, and nothing here is the person's own words unless it names the Dispatch message they sent. Read ${them} and answer what ${one ? "it asks" : "they ask"} of you.`,
     quoted,
+  ].join("\n\n")
+}
+
+/**
+ * Whether `text`, the text of a row the plugin's own prompt wrote, is a prompt at rows a turn
+ * never read (`unreadRowPrompt`) rather than a card's (`cardPrompt`).
+ *
+ * The live view draws nothing for the first and draws the second (`./agent-stream-claude`): a
+ * prompt at unread rows quotes rows the view has already drawn, where a card delivered to an
+ * idle session is that prompt and reaches the conversation nowhere else. The row carries Claude
+ * Code's own framing in front of the submitted text ("The claude-envoy plugin sent a message:",
+ * measured on 2.1.310), so the words are looked for anywhere in the row.
+ */
+export function isUnreadRowPrompt(text: string): boolean {
+  return text.includes(UNREAD_LEAD)
+}
+
+/**
+ * The prompt a card is while the session is idle, submitted without `asUser`: the card's own
+ * text under one line saying what it is.
+ *
+ * A card is submitted rather than appended because an append starts nothing — a row is read at
+ * the turn's next request, and an idle session makes none — so an ask answer or a teammate's
+ * message would sit unread until the person typed (INFRA-1026 review). The line is needed
+ * because a prompt is the one place the model takes direction from: without it the card reads
+ * as an instruction the plugin wrote, and with `asUser` it would read as the person's own
+ * words, which nobody typed.
+ */
+export function cardPrompt(text: string): string {
+  return [
+    "Envoy delivered this message to this session. The claude-envoy plugin is passing it on in full: it is not the words of the person at this session, not a tool result and not an instruction of the plugin's own. Read it and answer what it asks of you.",
+    text,
   ].join("\n\n")
 }
 
@@ -143,9 +204,21 @@ export interface ModSession {
    * the `command` door is a person's own, and the live view draws it.
    */
   runsCommandRow(row: string): boolean
-  /** Add one row the model reads at its next request, and resolve with the row's id. Nothing is
-   *  started by it: a card joins the conversation without a turn of its own. */
-  show(content: readonly ModContentBlock[]): Promise<string>
+  /**
+   * Hand the session one card: an Envoy delivery that is not the person's own message — an ask
+   * answer, a teammate's or an architect's message, an issue event, a notice of Envoy's own.
+   *
+   * It takes the three states a person's message takes (`deliver`), all but `asUser`: a row of
+   * the turn running, a prompt of its own when that turn ends without reading the row, and the
+   * prompt of a new turn while the session is idle (`cardPrompt`). An append alone starts
+   * nothing, so an idle session would sit on the card until the person typed, and a card
+   * appended after a turn's last request would never be read at all (INFRA-1026 review).
+   *
+   * It resolves once the session has stored the row, or at once while the session is idle: a
+   * prompt lasts the turn it starts, so waiting for one would hold the delivery's frame open
+   * for that whole turn.
+   */
+  show(card: { readonly text: string; readonly content: readonly ModContentBlock[] }): Promise<void>
   /**
    * Hand the session a person's own message. During a turn it is a row of the conversation, which
    * the model reads at the turn's next request and which a prompt of its own quotes in full
@@ -195,10 +268,9 @@ interface WatchedRow {
   /** The requests the session had made when the row was added: one made after it is the request
    *  that read it. */
   readonly requests: number
-  /** The person's own words the row carries, and the Dispatch message it is: the prompt at a
-   *  row no request read carries both (`unreadRowPrompt`). */
-  readonly text: string
-  readonly messageId: string
+  /** What the prompt at a row no request read carries: the message's own words, and what the
+   *  message is (`unreadRowPrompt`). */
+  readonly unread: UnreadMessage
 }
 
 /** One `$.command.run` whose rows are still to come, and the rows it claimed. A run's rows
@@ -374,6 +446,44 @@ export function modSession(options: ModSessionOptions): ModSession {
     return sent
   }
 
+  /** One row of the conversation, stored. The model reads it at the turn's next request, and
+   *  not at all when no request follows it, which is what `hand` watches it for. */
+  const append = async (content: readonly ModContentBlock[]): Promise<string> => {
+    const result = await link.request("session.append", { message: { type: "user", content } })
+    if (result.deny !== undefined) {
+      throw new Error(`the session refused the message: ${result.deny}`)
+    }
+    return result.uuid
+  }
+
+  /**
+   * One message into the session, in whichever of the three states the session is in: the prompt
+   * of a new turn while it is idle, a row of the turn running, and a prompt of its own when that
+   * turn ends without a request having read the row. A person's message and a card take the same
+   * three (`deliver`, `show`); what separates them is `asUser` and the words of the prompts.
+   */
+  const hand = async (message: {
+    readonly content: readonly ModContentBlock[]
+    /** What goes out while the session is idle, and whether it is the person's own words. */
+    readonly prompt: { readonly text: string; readonly asUser: boolean }
+    /** What the prompt at an unread row carries, where the turn never reads it. */
+    readonly unread: UnreadMessage
+    readonly failed?: (error: unknown) => void
+  }): Promise<string | undefined> => {
+    const started = turn
+    if (started === undefined) {
+      // The turn this starts runs for as long as the model works; the frame is answered now.
+      void submit(message.prompt.text, message.prompt.asUser, message.failed)
+      return undefined
+    }
+    const uuid = await append(message.content)
+    // The turn may have ended while the row was being stored: then no request will read it, and
+    // it is pointed at at once rather than waiting for a `turn-complete` that has been and gone.
+    if (turn === started) watched.set(uuid, { requests, turnId: started, unread: message.unread })
+    else void submit(unreadRowPrompt([message.unread]), false)
+    return uuid
+  }
+
   /** The turn `turnId` ended: every message it never read is carried by a prompt of its own. */
   const turnEnded = (turnId: string): void => {
     if (turn === turnId) turn = undefined
@@ -381,9 +491,7 @@ export function modSession(options: ModSessionOptions): ModSession {
     for (const [row, entry] of watched) {
       if (entry.turnId !== turnId) continue
       watched.delete(row)
-      if (entry.requests === requests) {
-        unread.push({ messageId: entry.messageId, text: entry.text })
-      }
+      if (entry.requests === requests) unread.push(entry.unread)
     }
     // One prompt however many messages went unread: a second submit would sit behind this one
     // for a whole turn, so the one prompt names each of them.
@@ -413,30 +521,22 @@ export function modSession(options: ModSessionOptions): ModSession {
       }
       if (event.kind === "turn-complete") turnEnded(event.turnId)
     },
-    async show(content) {
-      const result = await link.request("session.append", { message: { type: "user", content } })
-      if (result.deny !== undefined) {
-        throw new Error(`the session refused the message: ${result.deny}`)
-      }
-      return result.uuid
+    async show({ text, content }) {
+      await hand({
+        content,
+        // Without `asUser` the model reads the prompt as the plugin speaking, which is what a
+        // card is: nobody at this session typed it.
+        prompt: { asUser: false, text: cardPrompt(text) },
+        unread: { kind: "card", text },
+      })
     },
-    async deliver({ text, messageId, content, failed }) {
-      const started = turn
-      if (started === undefined) {
-        // The turn this starts runs for as long as the model works; the frame is answered now.
-        void submit(text, true, failed)
-        return undefined
-      }
-      const result = await link.request("session.append", { message: { type: "user", content } })
-      if (result.deny !== undefined) {
-        throw new Error(`the session refused the message: ${result.deny}`)
-      }
-      // The turn may have ended while the row was being stored: then no request will read it, and
-      // it is pointed at at once rather than waiting for a `turn-complete` that has been and gone.
-      if (turn === started) watched.set(result.uuid, { messageId, requests, text, turnId: started })
-      else void submit(unreadRowPrompt([{ messageId, text }]), false)
-      return result.uuid
-    },
+    deliver: ({ text, messageId, content, failed }) =>
+      hand({
+        content,
+        prompt: { asUser: true, text },
+        unread: { kind: "person", messageId, text },
+        ...(failed === undefined ? {} : { failed }),
+      }),
     runsCommandRow,
     async runCommand(command, args) {
       const run: CommandRun = { claiming: false }

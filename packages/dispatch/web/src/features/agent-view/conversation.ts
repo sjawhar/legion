@@ -8,6 +8,7 @@ import {
   type AgentStreamSettings,
   type AgentStreamSettingsReported,
   type AgentStreamToolResult,
+  comparableLines,
   isTypableCommandName,
   pictureSyntax,
 } from "@legion/contracts";
@@ -403,46 +404,75 @@ export interface DispatchTurn {
 }
 
 /**
- * A body and a streamed turn's text as they are compared, line by line: the pictures the body
- * embeds taken out, each line trimmed and the empty lines dropped.
- *
- * A picture reaches the session as an image block beside the person's text, which the stream
- * names in a part of its own (`[image]`), so the markdown it stood as is no line of what the
- * session says: measured on Claude Code 2.1.310, a Legion pane answering
- * `What colour is this picture? ![blue](dispatch://agent/<id>/artifact/i3-blue96-png@v1)` drew
- * the person's text and that `[image]` and the stored copy beside them, the markdown having
- * nothing in the row to match (INFRA-1026). Both sides are read the same way, so a row that does
- * carry the markdown says its body too.
+ * The pictures a body embeds, each by the markdown that wrote it and how many times it wrote
+ * it: what a streamed row may carry of a person's own pictures and no more (`rowLines`).
  */
-function comparedLines(text: string): string[] {
-  return text
-    .replace(pictureSyntax(), "")
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line !== "");
+function bodyPictures(body: string): Map<string, number> {
+  const written = new Map<string, number>();
+  for (const [markdown] of body.matchAll(pictureSyntax())) {
+    written.set(markdown, (written.get(markdown) ?? 0) + 1);
+  }
+  return written;
+}
+
+/**
+ * A streamed row's lines as they are compared with the body's, the pictures it carries spent
+ * against `spare` (the body's own, by `bodyPictures`); undefined for a row carrying a picture
+ * the body does not hold, or holding one more time than the body wrote it.
+ *
+ * This is the page's own claim-checking, not the shared rule (INFRA-1026). The bus is open to
+ * any client, and the row is rendered as markdown under the person's name, so a row stripped of
+ * picture markdown the way the body is would let a frame add `![any caption](dispatch://…@v1)`
+ * to the words the person wrote, still "say" the body, hide the stored copy, and show a picture
+ * and a caption the person never sent. Each picture the row carries must therefore be one the
+ * body wrote, verbatim and address and caption alike, and may be spent only as many times as
+ * the body wrote it. A row that carries the markdown as the person wrote it - which is how a
+ * terminal session's row records it - spends exactly the body's own and says its body still.
+ */
+function rowLines(text: string, spare: Map<string, number>): string[] | undefined {
+  let ownPictures = true;
+  const written = text.replace(pictureSyntax(), (markdown) => {
+    const left = spare.get(markdown) ?? 0;
+    if (left === 0) {
+      ownPictures = false;
+      return markdown;
+    }
+    spare.set(markdown, left - 1);
+    return "";
+  });
+  // Every picture left in `written` is one the body wrote, so what `comparableLines` takes out
+  // of this side is nothing: the body's side and this one end as the same shared rule.
+  return ownPictures ? comparableLines(written) : undefined;
 }
 
 /**
  * Whether a streamed turn says exactly what the person wrote, so Dispatch's stored copy of that
  * message gives way to the streamed row (INFRA-1026). The turn's lines are read against the
- * body's own lines in order (`comparedLines`): each must be the body line that comes next, and
- * only once every one of them is matched may a line be a placeholder part instead, at most as
- * many of those as the body embeds pictures. The bus is open to any client, so a streamed row is
- * a claim: the only placeholder parts the publisher writes for a person's own message are the
- * ones naming the blocks the message carried, one per picture and after the person's text
- * (`conversationParts` in `@legion/pi-shared/agent-stream`), so a row that puts a bracketed word
- * of its own before the person's lines, or more of them than the body has pictures, says words
- * the person never wrote and hides nothing. A message carrying a picture, which reaches the
- * session as the person's text and the picture beside it, says its body still: the `[image]` is
- * the stream's, the markdown the body held is no line of either side, and the picture it stood
- * as is what accounts for that line. A body that is the bracketed word `[ack]` says itself,
- * picture or no picture, because the body has that line of its own.
+ * body's own lines in order: the body's side is the shared rule (`comparableLines` in
+ * `@legion/contracts`, which the Claude Code plugin tags its rows by), the row's side that rule
+ * after the page's own check of the pictures it claims (`rowLines`). Each line must be the body
+ * line that comes next, and only once every one of them is matched may a line be a placeholder
+ * part instead, at most as many of those as the body embeds pictures. The bus is open to any
+ * client, so a streamed row is a claim: the only placeholder parts the publisher writes for a
+ * person's own message are the ones naming the blocks the message carried, one per picture and
+ * after the person's text (`conversationParts` in `@legion/pi-shared/agent-stream`), so a row
+ * that puts a bracketed word of its own before the person's lines, or more of them than the
+ * body has pictures, says words the person never wrote and hides nothing. A message carrying a
+ * picture, which reaches the session as the person's text and the picture beside it, says its
+ * body still: the `[image]` is the stream's, the markdown the body held is no line of the
+ * body's side, and the picture it stood as is what accounts for that line. A body that is the
+ * bracketed word `[ack]` says itself, picture or no picture, because the body has that line of
+ * its own.
  */
 export function turnSaysBody(turn: DispatchTurn, body: string): boolean {
-  const lines = comparedLines(body);
-  let pictures = [...body.matchAll(pictureSyntax())].length;
+  const lines = comparableLines(body);
+  const spare = bodyPictures(body);
+  let pictures = 0;
+  for (const count of spare.values()) pictures += count;
+  const said = rowLines(turn.text, spare);
+  if (said === undefined) return false;
   let next = 0;
-  for (const line of comparedLines(turn.text)) {
+  for (const line of said) {
     if (line === lines[next]) {
       next += 1;
       continue;

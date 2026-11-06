@@ -48,12 +48,49 @@ export const MOD_ROUTE_REQUESTS = "/requests"
  *  the one that has to hold, since a path the host refuses is no use however well it binds. */
 export const MOD_SOCKET_PATH_MAX_BYTES = 100
 
-/** The variables that may name the base the socket sits in, in the order they are tried. The mod
- *  spells each one as a literal of its own, since `$.env.get` takes no computed name. */
-const MOD_SOCKET_BASE_VARIABLES = ["XDG_RUNTIME_DIR", "TMPDIR"] as const
+/** The status a post gets when another mod instance already holds this link: one server serves
+ *  one mod. Two Claude Code processes can boot on one session id (`claude -c`, and
+ *  `claude --resume <id>` in a second terminal), and sharing one server would put both
+ *  conversations in one live view and hand a person's Send to whichever mod polled first
+ *  (INFRA-1026 review). The refused mod stops rather than retrying. */
+export const MOD_STATUS_TAKEN = 409
 
-/** The base used when no variable names one that fits. */
-const MOD_SOCKET_FALLBACK_BASE = "/tmp"
+/** The header every post of the mod's carries: the mod instance that sent it, minted once per
+ *  loaded module. The first instance to name itself holds the link and every other is refused
+ *  with `MOD_STATUS_TAKEN`. A post naming no instance claims nothing and is served, since the
+ *  socket's directory is the user's own and this header decides between two mods, not between
+ *  a mod and a stranger. */
+export const MOD_INSTANCE_HEADER = "x-claude-envoy-mod"
+
+/** The variables the socket's base is taken from, each spelled as a literal of its own since the
+ *  mod reads them with `$.env.get`, which takes no computed name. The base is the user's run
+ *  directory, and failing that Claude Code's own configuration directory: `CLAUDE_CONFIG_DIR`,
+ *  else `<HOME>/.claude`. Nothing else is a base, `TMPDIR` and `/tmp` included: in a directory
+ *  other local users can write, another of them binds the path first - a session id is not
+ *  secret - and then reads the conversation and submits prompts as the person, or parks a plain
+ *  file there and silences the session for good (INFRA-1026 review). A session none of the three
+ *  variables names a base for gets no mod link at all. */
+const MOD_SOCKET_RUNTIME_VARIABLE = "XDG_RUNTIME_DIR"
+const MOD_SOCKET_CONFIG_VARIABLE = "CLAUDE_CONFIG_DIR"
+const MOD_SOCKET_HOME_VARIABLE = "HOME"
+
+/** Claude Code's configuration directory inside a home, which is where it keeps its own state
+ *  when `CLAUDE_CONFIG_DIR` names no other (`../src/envoy-channel-server.ts` reads the same
+ *  pair for this plugin's envoy.json). */
+const MOD_SOCKET_HOME_CONFIG = "/.claude"
+
+/** The directory under the base that holds this user's sockets. No other local user can create
+ *  anything inside a home or a run directory, which is where ssh's `ControlPath` and gpg-agent
+ *  put theirs and is why no co-user can plant this directory and get the socket; the server
+ *  checks the directory it finds is its own and `0700` all the same before it binds
+ *  (`../src/mod-link.ts`). The mod makes no such check, and could not: `$.fs.stat` answers
+ *  `{kind, size, mtimeMs, isLink, realPath?}` (`FsStat` in Claude Code 2.1.310's declarations)
+ *  and carries neither owner nor mode. */
+const MOD_SOCKET_DIRECTORY = "claude-envoy"
+
+/** FNV-1a's prime, 16777619, in the two halves `fnv1a32` multiplies by. */
+const MOD_HASH_PRIME_HIGH = 0x0100
+const MOD_HASH_PRIME_LOW = 0x0193
 
 /** Where the socket for `sessionId` is, or why there is none. One of the two, never both. */
 export type ModSocketResolution =
@@ -72,9 +109,38 @@ function utf8Length(value: string): number {
   return bytes
 }
 
-/** Whether `value` is one plain path segment: something that names a file inside a directory and
- *  cannot leave it. Claude Code's session ids are UUIDs, so anything else is a mistake worth
- *  refusing rather than encoding: an encoded id would still have to round-trip through the mod. */
+/** FNV-1a over `value`'s UTF-16 code units, from `basis`, as 32 bits. The two sides name the
+ *  socket with this one function, so the units it walks need not be the UTF-8 bytes the
+ *  original is defined over. */
+function fnv1a32(value: string, basis: number): number {
+  let hash = basis
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash ^ value.charCodeAt(index)) >>> 0
+    // FNV's multiply, kept exact: a 32-bit product passes the 53 bits a double holds and loses
+    // the low bits the hash is made of, so it is taken in halves whose own products do not, the
+    // way `Math.imul` is written for an engine without it (this module reads no global, `Math`
+    // included).
+    const low = hash & 0xffff
+    const high = hash >>> 16
+    const carried = (high * MOD_HASH_PRIME_LOW + low * MOD_HASH_PRIME_HIGH) & 0xffff
+    hash = (low * MOD_HASH_PRIME_LOW + (carried << 16)) >>> 0
+  }
+  return hash
+}
+
+/** The socket's name for `sessionId`: sixteen hex of two FNV-1a passes from different offsets,
+ *  which is two 32-bit hashes rather than one repeated. A collision would hand two of one
+ *  user's live sessions a single socket; at 64 bits over the sockets a machine holds at once,
+ *  that is not a case worth designing for. */
+function hashedSessionId(sessionId: string): string {
+  const first = fnv1a32(sessionId, 0x811c9dc5)
+  const second = fnv1a32(sessionId, 0xcbf29ce4)
+  return `${first.toString(16).padStart(8, "0")}${second.toString(16).padStart(8, "0")}`
+}
+
+/** Whether `value` is one plain path segment. Claude Code's session ids are UUIDs, so anything
+ *  else is a bug upstream of here: the hash below would make a usable name of it all the same,
+ *  which is why it is refused rather than quietly named. */
 function isPathSegment(value: string): boolean {
   return (
     value.length > 0 &&
@@ -93,13 +159,45 @@ function withoutTrailingSlash(base: string): string {
   return end === 1 ? "" : base.slice(0, end)
 }
 
+/** `value` as a base to join onto, or undefined when it names none: a variable that is unset,
+ *  empty or relative names no directory this resolution can be sure of. */
+function absoluteBase(value: string | undefined): string | undefined {
+  if (value === undefined || value.length === 0 || !value.startsWith("/")) return undefined
+  return withoutTrailingSlash(value)
+}
+
+/** The bases this session's socket may sit in, in the order they are tried: the run directory,
+ *  then Claude Code's configuration directory, which is `CLAUDE_CONFIG_DIR` when that names one
+ *  and `<HOME>/.claude` otherwise. A home is read only for the configuration directory inside
+ *  it, never as a base of its own. */
+function socketBases(env: Readonly<Record<string, string | undefined>>): readonly string[] {
+  const bases: string[] = []
+  const runtime = absoluteBase(env[MOD_SOCKET_RUNTIME_VARIABLE])
+  if (runtime !== undefined) bases.push(runtime)
+  const configured = absoluteBase(env[MOD_SOCKET_CONFIG_VARIABLE])
+  const home = absoluteBase(env[MOD_SOCKET_HOME_VARIABLE])
+  if (configured !== undefined) bases.push(configured)
+  else if (home !== undefined) bases.push(`${home}${MOD_SOCKET_HOME_CONFIG}`)
+  return bases
+}
+
 /**
  * Where the mod and the server meet for `sessionId`, or why they cannot.
  *
- * The path is `<base>/claude-envoy-<sessionId>.sock`. `<base>` is the first of `XDG_RUNTIME_DIR`,
- * `TMPDIR` and `/tmp` that is set to a non-empty absolute path whose whole resulting path fits in
- * `MOD_SOCKET_PATH_MAX_BYTES`: a run directory that is too deep is passed over rather than
- * truncated, since a truncated path is another session's socket.
+ * The path is `<base>/claude-envoy/ce-<hash of sessionId>.sock`, and `<base>` is
+ * `XDG_RUNTIME_DIR`, else Claude Code's configuration directory (`CLAUDE_CONFIG_DIR`, else
+ * `<HOME>/.claude`). Both are directories only their own user can create anything in, the way
+ * ssh's `ControlPath` and gpg-agent place theirs, so no co-user can get to the path first.
+ *
+ * A base whose whole path would pass `MOD_SOCKET_PATH_MAX_BYTES` is passed over rather than
+ * truncated, since a truncated path is another session's socket; a session left with no base is
+ * refused with that reason, never served out of a shared one.
+ *
+ * The name is the id's hash rather than the id itself because a uuid spelled out costs 36 bytes
+ * more and passed the bound on a macOS temp directory (INFRA-1026 review). With the 38 bytes the
+ * hashed name costs (`/claude-envoy/ce-` + 16 hex + `.sock`), the two real bases measured for
+ * this rule are far inside the 100: a macOS `/Users/alexandra/.claude` (24) makes 62, and a
+ * Legion pane's `CLAUDE_CONFIG_DIR` of `/legion/scratch/state/implementer/claude` (40) makes 78.
  */
 export function resolveModSocketPath(
   sessionId: string,
@@ -110,18 +208,18 @@ export function resolveModSocketPath(
       refusal: `${JSON.stringify(sessionId)} is not a plain path segment, so it names no socket of its own`,
     }
   }
-  const file = `/claude-envoy-${sessionId}.sock`
-  const bases = [...MOD_SOCKET_BASE_VARIABLES.map((name) => env[name]), MOD_SOCKET_FALLBACK_BASE]
+  const file = `/${MOD_SOCKET_DIRECTORY}/ce-${hashedSessionId(sessionId)}.sock`
   const tried: string[] = []
-  for (const base of bases) {
-    if (base === undefined || base.length === 0 || !base.startsWith("/")) continue
-    const path = `${withoutTrailingSlash(base)}${file}`
+  for (const base of socketBases(env)) {
+    const path = `${base}${file}`
     if (utf8Length(path) <= MOD_SOCKET_PATH_MAX_BYTES) return { path }
-    tried.push(base)
+    tried.push(path)
   }
-  // `/tmp` is absolute, so at least it was tried: there is no case where nothing was.
   return {
-    refusal: `every base (${tried.join(", ")}) makes a socket path longer than ${MOD_SOCKET_PATH_MAX_BYTES} bytes`,
+    refusal:
+      tried.length === 0
+        ? `none of ${MOD_SOCKET_RUNTIME_VARIABLE}, ${MOD_SOCKET_CONFIG_VARIABLE} and ${MOD_SOCKET_HOME_VARIABLE} names an absolute directory only this user can create in, and a session's socket never goes in a base other users share`
+        : `every private base makes a socket path longer than ${MOD_SOCKET_PATH_MAX_BYTES} bytes (${tried.join(", ")})`,
   }
 }
 

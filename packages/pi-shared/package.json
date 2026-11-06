@@ -45,6 +45,10 @@
       "types": "./src/dispatch-user-turn.ts",
       "bun": "./src/dispatch-user-turn.ts"
     },
+    "./accept-user-turn": {
+      "types": "./src/accept-user-turn.ts",
+      "bun": "./src/accept-user-turn.ts"
+    },
     "./shell-command": {
       "types": "./src/shell-command.ts",
       "bun": "./src/shell-command.ts"

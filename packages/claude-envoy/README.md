@@ -117,7 +117,8 @@ message from Dispatch's Agents page as that person's own turn.
   terminal session reaches the model only through its mod (`hooks/mod.ts`, `src/mod-session.ts`),
   so it advertises nothing until the mod connects and `aside`, `btw` and `steer` once it has; a
   Legion pane, whose deliveries go to the bridge's inbox (below), advertises `aside` and `steer`
-  from the start and gains `btw` with the mod. It registers again the moment the mod says hello,
+  from the start and gains `btw` with the mod. It registers again as soon as the link hears from
+  the mod - its hello, or its first poll, since a mod says hello once per Claude Code process -
   so Dispatch learns what the session takes without waiting for a heartbeat. With no capability
   the listener refuses every targeted delivery (`session … does not advertise aside`) and
   Dispatch shows the session as taking no messages, which is the right answer for a session
@@ -343,6 +344,22 @@ loaded by the `modules` key of `hooks/hooks.json`), and the mod and this server 
 socket of the session's own (`hooks/mod-protocol.ts`, `src/mod-link.ts`). Claude Code 2.1.310 or
 newer runs the mod; below that it never connects, and a terminal session advertises no delivery
 mode, so Dispatch refuses a message to it rather than reporting it delivered.
+
+That socket is `claude-envoy/ce-<hash of the session id>.sock` under `XDG_RUNTIME_DIR`, and
+under Claude Code's own configuration directory — `CLAUDE_CONFIG_DIR`, else `$HOME/.claude` —
+where that variable is unset. Both are directories only their own user can create anything in,
+which is where ssh's `ControlPath` and gpg-agent put theirs; `TMPDIR` and `/tmp` are no bases,
+since whoever else can write a directory can bind the path first and then read the conversation
+and submit prompts as the person. The server also refuses a directory that is anyone else's or
+open to anyone else, rather than binding in it, and a session whose environment names no base of
+its own gets no link at all, with the reason on stderr. The name is the session id's hash
+because the whole path has 100 bytes to fit in (Claude Code's bound on `HttpInit.socketPath`):
+a macOS `/Users/<name>/.claude` comes to 62 bytes and a Legion pane's `CLAUDE_CONFIG_DIR` to 78,
+where the id spelled out passed 100 on a macOS temp directory. A resolved path past that bound
+is refused with the reason too, never moved to a base other users share. One link serves one
+mod: the first mod instance to name itself holds it, and a second Claude Code process booted on
+the same session id is refused and stops, so one conversation is in the live view and a person's
+Send has one place to go.
 
 A person's own message from Dispatch's Agents page becomes the session's own user turn
 (`src/user-turn-router.ts`): the frame is only a candidate, and what makes a turn is Dispatch

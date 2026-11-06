@@ -1,19 +1,22 @@
 import { afterEach, expect, test } from "bun:test"
-import { mkdtemp, rename, rm, stat } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, rename, rm, stat } from "node:fs/promises"
 import { request as httpRequest } from "node:http"
 import { createServer, type Server } from "node:net"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import {
   MOD_HEALTH_MARKER,
+  MOD_INSTANCE_HEADER,
   MOD_POLL_HOLD_MS,
   MOD_ROUTE_EVENTS,
   MOD_ROUTE_HEALTH,
   MOD_ROUTE_REQUESTS,
   MOD_ROUTE_RESULTS,
+  MOD_STATUS_TAKEN,
   type ModEvent,
   type ModRequest,
   type ModResult,
+  modSocketPath,
 } from "../hooks/mod-protocol"
 import { type ModLink, startModLink } from "../src/mod-link"
 
@@ -31,9 +34,17 @@ async function directory(): Promise<string> {
   return dir
 }
 
-/** A link on `sessionId`, closed after the test. */
-async function start(dir: string, sessionId: string): Promise<ModLink> {
-  const link = await startModLink({ sessionId, env: { TMPDIR: dir } })
+/** A link on `sessionId`, closed after the test; `warn` takes what it says about a second mod. */
+async function start(
+  dir: string,
+  sessionId: string,
+  warn?: (text: string) => void,
+): Promise<ModLink> {
+  const link = await startModLink({
+    sessionId,
+    env: { XDG_RUNTIME_DIR: dir },
+    ...(warn === undefined ? {} : { warn }),
+  })
   links.push(link)
   return link
 }
@@ -44,8 +55,15 @@ interface Answer {
 }
 
 /** One request over the socket, as the mod's `$.http.fetch({ socketPath })` makes it: a fresh
- *  connection each time, as the host's own client does while another request is in flight. */
-function call(socketPath: string, method: string, path: string, body?: unknown): Promise<Answer> {
+ *  connection each time, as the host's own client does while another request is in flight.
+ *  `instance` is the mod instance it is sent as; a call that names none claims nothing. */
+function call(
+  socketPath: string,
+  method: string,
+  path: string,
+  body?: unknown,
+  instance?: string,
+): Promise<Answer> {
   const { promise, resolve, reject } = Promise.withResolvers<Answer>()
   const text = body === undefined ? undefined : JSON.stringify(body)
   const sent = httpRequest(
@@ -53,10 +71,11 @@ function call(socketPath: string, method: string, path: string, body?: unknown):
       socketPath,
       path,
       method,
-      headers:
-        text === undefined
-          ? { host: "claude-envoy" }
-          : { host: "claude-envoy", "content-type": "application/json" },
+      headers: {
+        host: "claude-envoy",
+        ...(text === undefined ? {} : { "content-type": "application/json" }),
+        ...(instance === undefined ? {} : { [MOD_INSTANCE_HEADER]: instance }),
+      },
     },
     (response) => {
       let answer = ""
@@ -130,17 +149,35 @@ function rejection(answered: Promise<unknown>): Promise<string> {
 test("binds the path the mod computes, answers the liveness marker, and keeps the socket private", async () => {
   const dir = await directory()
   const link = await start(dir, "s1")
-  expect(link.socketPath).toBe(join(dir, "claude-envoy-s1.sock"))
+  expect(link.socketPath.startsWith(join(dir, "claude-envoy/"))).toBe(true)
+  expect(modSocketPath("s1", { XDG_RUNTIME_DIR: dir })).toBe(link.socketPath)
   expect(await call(link.socketPath, "GET", MOD_ROUTE_HEALTH)).toEqual({
     status: 200,
     body: { link: MOD_HEALTH_MARKER },
   })
   expect((await stat(link.socketPath)).mode & 0o777).toBe(0o600)
+  // The socket is only as private as the directory it sits in: another user who can write that
+  // directory binds the path first and reads the conversation (INFRA-1026 review).
+  expect((await stat(dirname(link.socketPath))).mode & 0o777).toBe(0o700)
+})
+
+test("refuses a socket directory another user could use, rather than binding in it", async () => {
+  const dir = await directory()
+  const path = modSocketPath("open", { XDG_RUNTIME_DIR: dir })
+  if (path === undefined) throw new Error("the session names no mod socket")
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 })
+  await chmod(dirname(path), 0o755)
+  await expect(startModLink({ sessionId: "open", env: { XDG_RUNTIME_DIR: dir } })).rejects.toThrow(
+    `${dirname(path)} is mode 755`,
+  )
+  expect(await stat(path).catch(() => undefined)).toBeUndefined()
 })
 
 test("takes over a socket a dead server left behind", async () => {
   const dir = await directory()
-  const path = join(dir, "claude-envoy-s2.sock")
+  const path = modSocketPath("s2", { XDG_RUNTIME_DIR: dir })
+  if (path === undefined) throw new Error("the session names no mod socket")
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 })
   await staleSocket(path)
   expect((await stat(path)).isSocket()).toBe(true)
   const link = await start(dir, "s2")
@@ -154,7 +191,7 @@ test("takes over a socket a dead server left behind", async () => {
 test("refuses a socket a live link already answers, and leaves that link serving", async () => {
   const dir = await directory()
   const first = await start(dir, "s3")
-  await expect(startModLink({ sessionId: "s3", env: { TMPDIR: dir } })).rejects.toThrow(
+  await expect(startModLink({ sessionId: "s3", env: { XDG_RUNTIME_DIR: dir } })).rejects.toThrow(
     `another claude-envoy server already serves this session at ${first.socketPath}`,
   )
   expect(await call(first.socketPath, "GET", MOD_ROUTE_HEALTH)).toEqual({
@@ -309,4 +346,104 @@ test("a body that is not JSON is refused, and a route the mod does not speak is 
   expect(empty.status).toBe(400)
   expect((await call(link.socketPath, "GET", "/elsewhere")).status).toBe(404)
   expect((await call(link.socketPath, "POST", "/elsewhere", {})).status).toBe(404)
+})
+
+// Two Claude Code processes can boot on one session id - `claude -c`, and `claude --resume <id>`
+// in a second terminal - and one server serving both would put two conversations in one live
+// view and hand a person's Send to whichever mod polled first (INFRA-1026 review).
+test("one link serves one mod: a second instance is refused and said so, and the first goes on", async () => {
+  const dir = await directory()
+  const refusals: string[] = []
+  const link = await start(dir, "s14", (text) => refusals.push(text))
+  const hello = await call(
+    link.socketPath,
+    "POST",
+    MOD_ROUTE_EVENTS,
+    { events: [{ kind: "hello", sessionId: "s14", claudeVersion: "2.1.310", interactive: true }] },
+    "mod-one",
+  )
+  expect(hello.status).toBe(200)
+
+  const second = await call(
+    link.socketPath,
+    "POST",
+    MOD_ROUTE_EVENTS,
+    {
+      events: [
+        { kind: "hello", sessionId: "s14-older", claudeVersion: "2.1.310", interactive: true },
+      ],
+    },
+    "mod-two",
+  )
+  expect(second.status).toBe(MOD_STATUS_TAKEN)
+  const refusedPoll = await call(link.socketPath, "POST", MOD_ROUTE_REQUESTS, {}, "mod-two")
+  expect(refusedPoll.status).toBe(MOD_STATUS_TAKEN)
+  // The live view stays with the process that got here first, and the refusal is on the record.
+  expect(link.sessionId()).toBe("s14")
+  expect(refusals.join("\n")).toContain("mod-two")
+
+  const answered = link.request("session.model", undefined)
+  const [request] = polled(await call(link.socketPath, "POST", MOD_ROUTE_REQUESTS, {}, "mod-one"))
+  await call(
+    link.socketPath,
+    "POST",
+    MOD_ROUTE_RESULTS,
+    { results: [{ id: request?.id ?? "", ok: true, value: "claude-opus-5" }] },
+    "mod-one",
+  )
+  expect(await answered).toBe("claude-opus-5")
+})
+
+// A request waits in the queue while no mod polls, which is exactly where one that timed out was
+// left: a mod that connected later ran it, so an old `session.append` or `prompt.submit` the
+// listener had already sent again reached the agent twice (INFRA-1026 review).
+test("a request that timed out is not handed to a mod that polls afterwards", async () => {
+  const dir = await directory()
+  const link = await start(dir, "s15")
+  const gone = link.request(
+    "session.append",
+    { message: { type: "user", content: [{ type: "text", text: "a message from Dispatch" }] } },
+    { timeoutMs: 20 },
+  )
+  expect(await rejection(gone)).toBe("the mod did not answer session.append within 20 ms")
+
+  const answered = link.request("session.model", undefined)
+  const requests = polled(await call(link.socketPath, "POST", MOD_ROUTE_REQUESTS, {}))
+  expect(requests.map(({ call: name }) => name)).toEqual(["session.model"])
+  await call(link.socketPath, "POST", MOD_ROUTE_RESULTS, {
+    results: [{ id: requests[0]?.id ?? "", ok: true, value: "claude-opus-5" }],
+  })
+  expect(await answered).toBe("claude-opus-5")
+})
+
+// The mod says hello once per Claude Code process, so a server started again inside that process
+// hears only the poll, and a session that waited for a hello advertised nothing for up to a
+// heartbeat (INFRA-1026 review).
+test("the link reports the first poll of a mod that never said hello, and only the first", async () => {
+  const dir = await directory()
+  const link = await start(dir, "s16")
+  let rises = 0
+  link.onConnected(() => {
+    rises += 1
+  })
+  expect(link.connected()).toBe(false)
+
+  const poll = call(link.socketPath, "POST", MOD_ROUTE_REQUESTS, {})
+  await untilPolled(link)
+  expect(rises).toBe(1)
+  const answered = link.request("session.model", undefined)
+  const [request] = polled(await poll)
+  await call(link.socketPath, "POST", MOD_ROUTE_RESULTS, {
+    results: [{ id: request?.id ?? "", ok: true, value: "claude-opus-5" }],
+  })
+  expect(await answered).toBe("claude-opus-5")
+
+  // A poll that arrives while the link already counts as connected is no rising edge of its own.
+  const answeredAgain = link.request("session.model", undefined)
+  const [again] = polled(await call(link.socketPath, "POST", MOD_ROUTE_REQUESTS, {}))
+  await call(link.socketPath, "POST", MOD_ROUTE_RESULTS, {
+    results: [{ id: again?.id ?? "", ok: true, value: "claude-opus-5" }],
+  })
+  expect(await answeredAgain).toBe("claude-opus-5")
+  expect(rises).toBe(1)
 })

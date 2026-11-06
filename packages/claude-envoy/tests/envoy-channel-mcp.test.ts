@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, rm, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract"
@@ -64,7 +64,7 @@ test("over MCP the server offers only the Envoy tools, refuses dispatch_ask, poi
       CLAUDE_PLUGIN_DATA: stateDirectory,
       // The socket the server binds for its mod, and the one the fake mod below connects to,
       // are both resolved from this base (`resolveModSocketPath`).
-      TMPDIR: stateDirectory,
+      XDG_RUNTIME_DIR: stateDirectory,
       DISPATCH_URL: `http://127.0.0.1:${dispatch.port}`,
       DISPATCH_TOKEN: "test-token",
     },
@@ -92,7 +92,7 @@ test("over MCP the server offers only the Envoy tools, refuses dispatch_ask, poi
     expect(advertised.length).toBeGreaterThan(0)
     for (const modes of advertised) expect(modes).toEqual([])
 
-    const socketPath = modSocketPath("ses_mcp", { TMPDIR: stateDirectory })
+    const socketPath = modSocketPath("ses_mcp", { XDG_RUNTIME_DIR: stateDirectory })
     if (socketPath === undefined) throw new Error("the session names no mod socket")
     const mod = await startFakeMod(socketPath, { sessionId: "ses_mcp" })
     try {
@@ -117,6 +117,97 @@ test("over MCP the server offers only the Envoy tools, refuses dispatch_ask, poi
   } finally {
     await client.close().catch(() => undefined)
     dispatch.stop(true)
+    listener.stop(true)
+    await broker.stop()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+}, 20_000)
+
+// A mod says hello once per Claude Code process, so a server Claude Code starts again inside
+// that process hears none, and neither does a listener added after the hello landed: the session
+// then advertised nothing until the next heartbeat, up to 90 s later, and Dispatch showed it as
+// taking no messages (INFRA-1026 review). A poll says a mod is there just as well.
+test("the session advertises its delivery modes for a mod that polls and never says hello", async () => {
+  const broker = new FakeNatsServer()
+  const advertised: unknown[] = []
+  const listener = Bun.serve({
+    port: 0,
+    fetch: async (request) => {
+      const url = new URL(request.url)
+      if (request.method === "POST" && url.pathname === "/v1/interests/subscribe") {
+        const body = (await request.json()) as {
+          session_id: string
+          topics: string[]
+          capabilities?: unknown
+        }
+        advertised.push(body.capabilities)
+        return Response.json({
+          session_id: body.session_id,
+          machine_id: "test",
+          dir: "/tmp",
+          topics: body.topics,
+        })
+      }
+      if (request.method === "DELETE") return new Response(null, { status: 200 })
+      return Response.json({ error: "not found" }, { status: 404 })
+    },
+  })
+  const stateDirectory = await mkdtemp(join(tmpdir(), "claude-envoy-quiet-"))
+  const client = new Client({ name: "test", version: "0" })
+  const transport = new StdioClientTransport({
+    command: "bun",
+    args: [entry],
+    cwd: stateDirectory,
+    env: {
+      PATH: process.env["PATH"] ?? "",
+      HOME: stateDirectory,
+      ENVOY_NATS_URL: broker.url,
+      ENVOY_URL: `http://127.0.0.1:${listener.port}`,
+      CLAUDE_CODE_SESSION_ID: "ses_quiet",
+      CLAUDE_PLUGIN_DATA: stateDirectory,
+      XDG_RUNTIME_DIR: stateDirectory,
+    },
+    stderr: "pipe",
+  })
+
+  try {
+    await client.connect(transport)
+    await waitFor(
+      () =>
+        client.callTool({ name: "envoy_whoami", arguments: {} }).then(
+          () => true,
+          (error: unknown) => {
+            if (String(error).includes("still starting")) return false
+            throw error
+          },
+        ),
+      "the channel session to start",
+    )
+    expect(advertised.at(-1)).toEqual([])
+
+    const socketPath = modSocketPath("ses_quiet", { XDG_RUNTIME_DIR: stateDirectory })
+    if (socketPath === undefined) throw new Error("the session names no mod socket")
+    await waitFor(
+      () =>
+        stat(socketPath).then(
+          () => true,
+          () => false,
+        ),
+      "the server to bind its mod socket",
+    )
+    const mod = await startFakeMod(socketPath, { sessionId: "ses_quiet", hello: false })
+    try {
+      await waitFor(
+        async () => (advertised.at(-1) as string[] | undefined)?.length === 3,
+        "the session to advertise its delivery modes",
+        () => JSON.stringify(advertised),
+      )
+      expect(advertised.at(-1)).toEqual(["aside", "btw", "steer"])
+    } finally {
+      await mod.stop()
+    }
+  } finally {
+    await client.close().catch(() => undefined)
     listener.stop(true)
     await broker.stop()
     await rm(stateDirectory, { recursive: true, force: true })

@@ -2129,13 +2129,15 @@ export async function runEnvoyChannelServer(): Promise<void> {
     warn: (text) => process.stderr.write(`envoy-channel: ${text}\n`),
   })
   // Every line this server writes into the session: the bridge's inbox in a Legion pane, and the
-  // mod's own `session.append` in a terminal session, where the model reads the row at its next
-  // request. The endpoint is told every line written for a delivery: the `UserPromptSubmit` that
-  // carries one back is that delivery's turn, not a fresh assignment, and this server, which
-  // writes them all, is the only place that knows.
+  // mod's own write in a terminal session, which is a row of the turn running and the prompt of
+  // a new turn while the session is idle (`ModSession.show`), since an appended row an idle
+  // session never reads would wait for the person to type. The endpoint is told every line
+  // written for a delivery: the `UserPromptSubmit` that carries one back is that delivery's
+  // turn, not a fresh assignment, and this server, which writes them all, is the only place
+  // that knows.
   const writer: ChannelNotifier = inbox ?? {
     notification: async ({ content, blocks }) => {
-      await claude.show(blocks ?? [{ type: "text", text: content }])
+      await claude.show({ content: blocks ?? [{ type: "text", text: content }], text: content })
     },
   }
   const notifier: ChannelNotifier =
@@ -2185,6 +2187,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
     // the ENVOY_SESSION_ID override names an Envoy identity, never a Claude Code session.
     sessionId: claudeSessionId({ CLAUDE_CODE_SESSION_ID: process.env["CLAUDE_CODE_SESSION_ID"] }),
     env: process.env,
+    warn: (text) => process.stderr.write(`envoy-channel: ${text}\n`),
   }).then(
     (link) => {
       modLink = link
@@ -2297,8 +2300,14 @@ export async function runEnvoyChannelServer(): Promise<void> {
           tagFor: (row) => live.messageOf(row),
         })
         // The session takes messages once the mod is there, and says so: a terminal session
-        // advertises nothing until then, and a pane gains the side turn a BTW is.
+        // advertises nothing until then, and a pane gains the side turn a BTW is. A hello is
+        // not enough to hear it by: the mod sends one per Claude Code process, so a server
+        // Claude Code starts again inside that process gets none, and a hello that landed
+        // before this listener existed is gone. So the link's own word that a mod is talking to
+        // it says so too - now, if one already is (INFRA-1026 review).
         link.onSessionId(() => live.capabilitiesChanged())
+        link.onConnected(() => live.capabilitiesChanged())
+        if (link.connected()) live.capabilitiesChanged()
       })
     }
     runtime = { identity, client, session }

@@ -51,11 +51,13 @@ import type {
 import {
   MOD_APPEND_DOORS,
   MOD_HEALTH_MARKER,
+  MOD_INSTANCE_HEADER,
   MOD_MIN_CLAUDE_VERSION,
   MOD_ROUTE_EVENTS,
   MOD_ROUTE_HEALTH,
   MOD_ROUTE_REQUESTS,
   MOD_ROUTE_RESULTS,
+  MOD_STATUS_TAKEN,
   MOD_URL_BASE,
   type ModAppendDoor,
   type ModEffort,
@@ -116,8 +118,10 @@ interface ModHost {
   readonly model: () => Promise<string>
   /** `XDG_RUNTIME_DIR`, the first base the socket path is looked for in. */
   readonly runtimeDirectory: () => Promise<string | undefined>
-  /** `TMPDIR`, the second. */
-  readonly tmpDirectory: () => Promise<string | undefined>
+  /** `CLAUDE_CONFIG_DIR`, Claude Code's own configuration directory, the second base. */
+  readonly configDirectory: () => Promise<string | undefined>
+  /** `HOME`, whose `.claude` is that configuration directory when the variable names none. */
+  readonly homeDirectory: () => Promise<string | undefined>
   readonly append: (args: SessionAppendArgs) => Promise<SessionAppendResult>
   readonly submit: (args: PromptSubmitArgs) => Promise<PromptSubmitResult>
   readonly runCommand: (args: CommandRunArgs) => Promise<CommandRunResult>
@@ -169,6 +173,13 @@ function readRequests(text: string): readonly ModRequest[] {
 
 /** The link to the server, all of it closure state: one mod instance drives one session. */
 function createLink(): SessionLink {
+  /** This Claude Code process's mod, minted here: the link serves the first instance that names
+   *  itself and refuses every other, so two processes that booted on one session id (`claude
+   *  -c`, and `claude --resume <id>` in a second terminal) no longer share one server, one live
+   *  view and one person's Send (INFRA-1026 review). The time and the random part together are
+   *  as distinct as two processes of one session need: they rule out the one other instance this
+   *  socket can see. */
+  const instance = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
   let host: ModHost | undefined
   let socketPath: string | undefined
   /** True while the last probe or post succeeded. */
@@ -196,7 +207,9 @@ function createLink(): SessionLink {
   }
 
   /** The response body of a request that succeeded, or undefined for any failure at all: a socket
-   *  that has gone, a refused request, a body that never arrived. */
+   *  that has gone, a refused request, a body that never arrived. A post the server refuses
+   *  because another mod holds the link ends this one for good: that server belongs to the
+   *  process that got there first, and there is no second socket to try. */
   const fetch = async (route: string, body: string | undefined): Promise<string | undefined> => {
     if (host === undefined || socketPath === undefined) return undefined
     try {
@@ -206,11 +219,19 @@ function createLink(): SessionLink {
           ? { socketPath }
           : {
               method: "POST",
-              headers: { "content-type": "application/json" },
+              headers: { "content-type": "application/json", [MOD_INSTANCE_HEADER]: instance },
               body,
               socketPath,
             },
       )
+      if (response.status === MOD_STATUS_TAKEN) {
+        finished = true
+        connected = false
+        // Nothing will read these again: `send` refuses every later event and `flush` posts only
+        // while connected.
+        queued.length = 0
+        return undefined
+      }
       return response.ok ? response.text : undefined
     } catch {
       return undefined
@@ -393,7 +414,8 @@ function createLink(): SessionLink {
       currentSessionId = sessionId
       const resolved = resolveModSocketPath(sessionId, {
         XDG_RUNTIME_DIR: await engine.runtimeDirectory(),
-        TMPDIR: await engine.tmpDirectory(),
+        CLAUDE_CONFIG_DIR: await engine.configDirectory(),
+        HOME: await engine.homeDirectory(),
       })
       if (resolved.path === undefined) {
         finished = true
@@ -485,7 +507,8 @@ export function register(on: On): void {
         version: () => $.session.version(),
         model: () => $.session.model(),
         runtimeDirectory: () => $.env.get("XDG_RUNTIME_DIR"),
-        tmpDirectory: () => $.env.get("TMPDIR"),
+        configDirectory: () => $.env.get("CLAUDE_CONFIG_DIR"),
+        homeDirectory: () => $.env.get("HOME"),
         append: (args) => $.session.append(args),
         submit: (args) => $.prompt.submit(args),
         runCommand: (args) => $.command.run(args),

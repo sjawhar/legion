@@ -35,7 +35,7 @@ import {
   claudeAgentStreamCommands,
   createClaudeAgentStream,
 } from "../src/agent-stream-claude"
-import { modSession } from "../src/mod-session"
+import { cardPrompt, modSession, unreadRowPrompt } from "../src/mod-session"
 
 const SESSION = "0c3b6f6e-0000-4000-8000-000000000001"
 const SUBJECT = agentStreamFramesSubject(SESSION)
@@ -290,6 +290,11 @@ test("two prompts stamped in one millisecond keep separate slots", () => {
 
 test("a person's message shows as their own, and the prompt pointing at a row it left shows nothing", () => {
   const live = harness(1_000, (row) => (row === "row-sent" ? "msg-7" : undefined))
+  // What Claude Code puts in front of the text a plugin submitted without `asUser`, measured on
+  // 2.1.310: the prompt's own words follow it, which is why the reader looks for them anywhere
+  // in the row (`isUnreadRowPrompt`, `../src/mod-session`).
+  const framed = (text: string): string => `The claude-envoy plugin sent a message:\n${text}`
+  const nudge = unreadRowPrompt([{ kind: "person", messageId: "msg-7", text: "ship it" }])
   live.feed(
     // Measured on 2.1.310: a submit with `asUser` carries it on the row's origin, and the
     // plugin's own prompt is framed as the plugin speaking.
@@ -297,11 +302,10 @@ test("a person's message shows as their own, and the prompt pointing at a row it
       origin: { asUser: true, kind: "plugin", name: "claude-envoy" },
       uuid: "row-sent",
     }),
-    appendRow(
-      "prompt",
-      [{ text: "The claude-envoy plugin sent a message:\nRead the message above.", type: "text" }],
-      { origin: { kind: "plugin", name: "claude-envoy" }, uuid: "row-nudge" },
-    ),
+    appendRow("prompt", [{ text: framed(nudge), type: "text" }], {
+      origin: { kind: "plugin", name: "claude-envoy" },
+      uuid: "row-nudge",
+    }),
   )
 
   const kept = messages(live.replay())
@@ -309,6 +313,27 @@ test("a person's message shows as their own, and the prompt pointing at a row it
   // Tagged with the Dispatch message it is, so the page shows it once rather than beside the
   // copy Dispatch stored.
   expect(kept[0]?.dispatchMessageId).toBe("msg-7")
+})
+
+// A card delivered to an idle session is the prompt of the turn it starts and reaches the
+// conversation nowhere else (`cardPrompt`, `../src/mod-session`), so a view that drew nothing
+// for every prompt of the plugin's showed the model answering a message the viewer never saw
+// (INFRA-1026 review).
+test("a card's prompt shows, though the plugin submitted it and not the person", () => {
+  const live = harness()
+  const card = "Dispatch message from alice: the migration is approved."
+  live.feed(
+    appendRow(
+      "prompt",
+      [{ text: `The claude-envoy plugin sent a message:\n${cardPrompt(card)}`, type: "text" }],
+      { origin: { kind: "plugin", name: "claude-envoy" }, uuid: "row-card" },
+    ),
+  )
+
+  const kept = messages(live.replay())
+  expect(kept).toHaveLength(1)
+  expect(kept[0]?.role).toBe("user")
+  expect(kept.map(textOf).join("")).toContain(card)
 })
 
 test("a command row keeps the row's own role and a note row an assistant one", () => {

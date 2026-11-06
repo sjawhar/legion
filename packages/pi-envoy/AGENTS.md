@@ -304,7 +304,9 @@ Send is a card and never a turn, and under Dispatch's key it is not shown at all
 not written yet spends each later retry of the message the same way. A forged frame's own text is
 never a turn, so this is the class of the accept route's self-claimed actor, which already lets
 any bearer spend a session's acceptance. Why the record is kept even when the accept answers 404
-is `acceptedUserTurn`'s comment (`extensions/envoy.ts`).
+is stated where the accept step is written, `acceptUserTurn` in
+`@legion/pi-shared/accept-user-turn`, which this extension and the Claude Code plugin both call
+(`acceptedUserTurn`, `extensions/envoy.ts`, supplies this host's record, Dispatch and logging).
 
 Role claims are routed by the listener: this extension receives a receipt-backed request on its
 direct agent subject instead of subscribing to a role subject itself. The agent pump replies the
