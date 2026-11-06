@@ -18,17 +18,20 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
-// implementTokens is the harness's ProvisionTokens: the implement App's installation token, from
-// the token command the script hands the harness (resolveApp), so the harness holds no App key.
-// repos are the run's repositories, the first the run's own; a token names the one it is minted
-// for, as every mint of the daemon's does.
+// implementTokens is the harness's ProvisionTokens: the implement App's installation token
+// narrowed to reading the one repository it is minted for, from the token command the script
+// hands the harness (resolveApp), so the harness holds no App key. repos are the run's
+// repositories, the first the run's own; a token names the one it is minted for, as every mint
+// of the daemon's does.
 type implementTokens struct {
 	apps  *appauth.Manager
 	repos []ghrepo.Repository
 }
 
 func (t implementTokens) Token(ctx context.Context, repo ghrepo.Repository) (string, error) {
-	lease, err := t.apps.Token(ctx, appauth.Implement, repo)
+	// No fallback to the owner's own write token, which the daemon's adapter has: the App is
+	// this run's own, so a refusal here is a misconfigured proof and must fail the run loudly.
+	lease, err := t.apps.ReadToken(ctx, appauth.Implement, repo.Owner(), []string{repo.Name()})
 	return lease.Token, err
 }
 

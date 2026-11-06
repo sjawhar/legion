@@ -804,7 +804,7 @@ func TestARateLimited422IsGitHubsTroubleAndNotAGrant(t *testing.T) {
 			if lease.Token != "" || !errors.As(err, &trouble) {
 				t.Fatalf("read token under a rate limit = %q, %v; want no lease and a TransientError", lease.Token, err)
 			}
-			if errors.Is(err, errNarrowingRefused) {
+			if errors.Is(err, ErrNarrowingRefused) {
 				t.Errorf("a rate limit = %v, want it never read as the permissions the installation holds", err)
 			}
 			mu.Lock()
@@ -1253,7 +1253,7 @@ func TestA422ForARepositoryTheInstallationCannotReachIsTheNarrowingRefusal(t *te
 
 	lease, err := tokens.Token(context.Background(), Implement, ghrepo.MustParse("sjawhar/elsewhere"))
 	var trouble *TransientError
-	if lease.Token != "" || !errors.Is(err, errNarrowingRefused) || errors.As(err, &trouble) {
+	if lease.Token != "" || !errors.Is(err, ErrNarrowingRefused) || errors.As(err, &trouble) {
 		t.Fatalf("a 422 to a narrowed write mint = %q, %v; want no lease and the narrowing refusal", lease.Token, err)
 	}
 	if !strings.Contains(err.Error(), "elsewhere") {

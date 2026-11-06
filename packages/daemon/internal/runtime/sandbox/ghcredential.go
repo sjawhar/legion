@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -60,10 +61,41 @@ func (r *Runtime) refreshGitHubCredentialsEvery(ctx context.Context, interval ti
 // of the Secret but the rewritten directories' gh keys changes: the launcher token, whose hash
 // binds the launcher (credentialFromSecret), the default, the annotations, and the keys of a
 // directory the render no longer holds, which the pod's projection may still name, stay as they
-// are. An issue
-// pod whose workspace-fetch has yet to finish has its provisioning Secret refreshed too
-// (refreshProvisioningToken).
+// are. Every live issue pod's provisioning Secret is brought to the implement App's current
+// lease for the pod's own repository too (refreshProvisioningToken), whatever its
+// workspace-fetch has already done: the kubelet runs a pod's init containers afresh whenever it
+// rebuilds the pod's sandbox, at any point in the pod's life (a relaunch that replaces the pod
+// provisions it anew instead), and the fetch re-reads the token's file before every transfer, so
+// a pod left on its boot token, aged past the hour GitHub gives an installation token, could not
+// fetch its repository again. The lease is minted once per repository a tick, however many of
+// that repository's pods the walk holds, and a repository whose mint fails is logged once and
+// left to the next tick, where its pods are tried again.
 func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
+	// mints memoizes this tick's provisioning leases by lower-cased repository — nothing here
+	// knows of a configured repository rename, which the daemon's adapter maps, so Acme/legion
+	// and acme/legion are one call — and records a mint that failed as well as one that worked,
+	// so a repository is asked at most once a tick whatever the answer. A lease names the one
+	// repository its pod clones, so two repositories of one owner are two mints. The walk is one
+	// goroutine, so the map needs no lock.
+	type mint struct {
+		token string
+		ok    bool
+	}
+	mints := map[string]mint{}
+	provisioning := func(repo ghrepo.Repository) (string, bool) {
+		key := strings.ToLower(repo.String())
+		if m, asked := mints[key]; asked {
+			return m.token, m.ok
+		}
+		minting, cancel := call(ctx)
+		token, err := r.tokens.Token(minting, repo)
+		cancel()
+		if err != nil {
+			r.log.Warn("sandbox runtime: provisioning token mint failed", "repo", repo.String(), "err", err)
+		}
+		mints[key] = mint{token: token, ok: err == nil}
+		return token, err == nil
+	}
 	for _, obj := range r.pods.GetStore().List() {
 		pod := obj.(*corev1.Pod)
 		kind, err := podKindOf(pod.Labels)
@@ -77,52 +109,38 @@ func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
 		if owner == nil {
 			continue
 		}
-		// The pod's own repository is read once here, for every role of it: it is the pod's, not
-		// the role's, and a bundle is rendered for it (refreshGitHubCredential).
-		repo, _ := fetchRepository(pod)
+		// The pod's own repository is read once here, for every role of it and for its
+		// provisioning token: it is the pod's, not the role's, and a bundle is rendered for it
+		// (refreshGitHubCredential).
+		repo, named := fetchRepository(pod)
 		for _, role := range kind.roles() {
 			r.refreshGitHubCredential(ctx, pod, owner.UID, role, repo)
 		}
-		if _, issue := kind.(issuePod); issue && fetchUnfinished(pod) {
-			r.refreshProvisioningToken(ctx, pod, owner.UID)
+		if _, issue := kind.(issuePod); !issue || !named {
+			continue
 		}
+		token, ok := provisioning(repo)
+		if !ok {
+			continue
+		}
+		r.refreshProvisioningToken(ctx, pod, owner.UID, repo, token)
 	}
 }
 
-// fetchUnfinished is whether pod's workspace-fetch has yet to finish: the pod is Pending, since a
-// Running pod's init containers have all finished, and its fetch container has not exited
-// successfully — it is waiting to start, running, or about to run again after a failed attempt.
-func fetchUnfinished(pod *corev1.Pod) bool {
-	if pod.Status.Phase != corev1.PodPending {
-		return false
-	}
-	status := initContainerStatus(pod, fetchContainer)
-	return status == nil || status.State.Terminated == nil || status.State.Terminated.ExitCode != 0
-}
-
-// refreshProvisioningToken brings the provisioning Secret of pod, owned by the Sandbox with uid, to
-// the implement App's current lease for the owner of the repository its fetch names
-// (fetchRepository): the fetch reads the token's file anew before every transfer from GitHub
-// (workspace.Fetch), and the kubelet rewrites the projected file within its sync period, so a fetch
-// that waits long on its repository's cache never presents an expired token. Only the token is
-// written; the cache's token beside it stays. A Secret another Sandbox owns, or one that already
-// holds the lease, is left; a mint or write that fails is logged and tried at the next tick, and a
-// write that conflicts is retried once on a fresh read.
-func (r *Runtime) refreshProvisioningToken(ctx context.Context, pod *corev1.Pod, uid types.UID) {
-	repo, ok := fetchRepository(pod)
-	if !ok {
-		return
-	}
+// refreshProvisioningToken writes token — the implement App's current lease for repo, the
+// repository the fetch of pod names (fetchRepository), which the walk minted once for that
+// repository this tick — into the provisioning Secret of pod, owned by the Sandbox with uid.
+// The fetch reads the token's file anew before every transfer from GitHub (workspace.Fetch),
+// and the kubelet rewrites the projected file within its sync period, so a fetch that starts
+// long after the pod did, one the kubelet runs again after it rebuilds the pod's sandbox
+// included, never presents an expired token. Only the token is written; the cache's token
+// beside it stays. A Secret another Sandbox owns, or one that already holds the lease, is left;
+// a write that fails is logged and tried at the next tick, and a write that conflicts is
+// retried once on a fresh read.
+func (r *Runtime) refreshProvisioningToken(ctx context.Context, pod *corev1.Pod, uid types.UID, repo ghrepo.Repository, token string) {
 	name := secretName(pod.Name)
 	failed := func(err error) {
 		r.log.Warn("sandbox runtime: provisioning token refresh failed", "sandbox", pod.Name, "repo", repo.String(), "err", err)
-	}
-	minting, cancel := call(ctx)
-	token, err := r.tokens.Token(minting, repo)
-	cancel()
-	if err != nil {
-		failed(err)
-		return
 	}
 	secrets := r.kube.CoreV1().Secrets(r.namespace)
 	for retried := false; ; retried = true {

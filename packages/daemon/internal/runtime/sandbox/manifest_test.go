@@ -1016,24 +1016,38 @@ func TestTheManifestCarriesADNSNamedStreamAndDaemonURL(t *testing.T) {
 }
 
 // The provisioning token never shares a process with anything a tree agent can write (Stage 4b
-// Task 4b.6b): the claim's Secret projects it into the pod's token-holding init containers alone —
-// workspace-fetch, and skills-fetch where the deployment names a skills repository — which are the
-// only containers told where it is, and no other container can write a volume one of them mounts.
-// The feed workspace-fetch fills is read-only in workspace-init; the skills volume skills-fetch
-// clones into is read-only in the roles container; and each holder's TMPDIR, where its one-shot
-// credential goes, is an in-memory volume of its own that no other container mounts, the sibling
-// holder included. So neither holder mounts the tree volume or the config home, and neither
-// carries an operator's mount (runtime.kubernetes.pod), which reaches the launcher containers and
-// the image probe's and no init container. Every pod's manifest holds to it, by every route
-// Kubernetes offers into a Secret, the worker's container included; the controller's pod has no
-// workspace-fetch and no skills-fetch, so none of its containers reaches the token at all.
+// Task 4b.6b), and it reaches the containers that hold it as a file, never as an environment
+// value (INFRA-1254). Two rules, counted apart:
+//
+//   - The volume route — the claim's Secret as a Secret volume, or projected — belongs to the
+//     pod's token-holding init containers alone: workspace-fetch, and skills-fetch where the
+//     deployment names a skills repository. It is required for each of them, the only containers
+//     told where the token is, and forbidden for every other container, the worker's included.
+//     Each holder's mount of that volume carries an empty subPath, because the daemon rewrites
+//     the claim's Secret as the lease is renewed and the kubelet rewrites a whole-volume Secret
+//     projection in place, never a subPath copy, which is taken once when the container starts.
+//   - The environment route — an env entry whose secretKeyRef names the claim Secret's
+//     provisioning-token key, or an envFrom of that Secret — is forbidden everywhere, the
+//     holders included: an environment value is fixed for the container's life, so a container
+//     holding one serves the token the pod started with however often the Secret is rewritten.
+//
+// Beside them, no other container can write a volume a holder mounts. The feed workspace-fetch
+// fills is read-only in workspace-init; the skills volume skills-fetch clones into is read-only
+// in the roles container; and each holder's TMPDIR, where its one-shot credential goes, is an
+// in-memory volume of its own that no other container mounts, the sibling holder included. So
+// neither holder mounts the tree volume or the config home, and neither carries an operator's
+// mount (runtime.kubernetes.pod), which reaches the launcher containers and the image probe's
+// and no init container. Every pod's manifest holds to it, by every route Kubernetes offers into
+// a Secret, the worker's container included; the controller's pod has no workspace-fetch and no
+// skills-fetch, so none of its containers reaches the token at all.
 //
 // What the boundary protects is identity, not a repository-write token kept off the tree volume:
-// an implement role now holds the implement App's token — the same lease as the
-// provisioning token — read-only in its own gh directory (GHConfigDir), and a review role the
-// review App's. What the fetch container's boundary still keeps is that no review role ever holds
-// the implement App's token, which is what lets the daemon's fix-attempt counting read a push's App
-// from the App that made it.
+// an implement role now holds the implement App's token — for the issue's owner the App's own
+// installation token, which writes, where the provisioning token is that same App narrowed to
+// reading, so the two are no longer one lease (INFRA-1254) — read-only in its own gh directory
+// (GHConfigDir), and a review role the review App's. What the fetch container's boundary still
+// keeps is that no review role ever holds the implement App's token, which is what lets the
+// daemon's fix-attempt counting read a push's App from the App that made it.
 func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testing.T) {
 	for options, skills := range map[string]bool{"no skills repository": false, "a skills repository": true} {
 		t.Run(options, func(t *testing.T) {
@@ -1066,21 +1080,35 @@ func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testin
 					maps := func(items []corev1.KeyToPath) bool {
 						return len(items) == 0 || slices.ContainsFunc(items, func(item corev1.KeyToPath) bool { return item.Key == provisionTokenKey })
 					}
-					reaches := func(c corev1.Container) []string {
-						var routes []string
+					// The volume route is the token as a file the kubelet rewrites in place when
+					// the Secret changes. Each one carries the mount it came by, since a mount
+					// with a subPath is a copy taken when the container starts that no rewrite
+					// reaches.
+					type route struct {
+						mount corev1.VolumeMount
+						named string
+					}
+					volumeRoutes := func(c corev1.Container) []route {
+						var routes []route
 						for _, mount := range c.VolumeMounts {
 							volume := volumes[mount.Name]
 							if secret := volume.Secret; secret != nil && secret.SecretName == claimSecret && maps(secret.Items) {
-								routes = append(routes, "secret volume "+mount.Name)
+								routes = append(routes, route{mount, "secret volume " + mount.Name})
 							}
 							if projected := volume.Projected; projected != nil {
 								for _, source := range projected.Sources {
 									if secret := source.Secret; secret != nil && secret.Name == claimSecret && maps(secret.Items) {
-										routes = append(routes, "projected volume "+mount.Name)
+										routes = append(routes, route{mount, "projected volume " + mount.Name})
 									}
 								}
 							}
 						}
+						return routes
+					}
+					// The environment route is a copy fixed for the container's life, which no
+					// container may hold, the token holders included.
+					envRoutes := func(c corev1.Container) []string {
+						var routes []string
 						for _, v := range c.Env {
 							if from := v.ValueFrom; from != nil && from.SecretKeyRef != nil && from.SecretKeyRef.Name == claimSecret && from.SecretKeyRef.Key == provisionTokenKey {
 								routes = append(routes, "env "+v.Name)
@@ -1088,7 +1116,7 @@ func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testin
 						}
 						for _, from := range c.EnvFrom {
 							if from.SecretRef != nil && from.SecretRef.Name == claimSecret {
-								routes = append(routes, "envFrom")
+								routes = append(routes, "envFrom "+from.SecretRef.Name)
 							}
 						}
 						return routes
@@ -1097,9 +1125,24 @@ func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testin
 					holderNames := []string{fetchContainer, skillsContainer}
 					for _, c := range containers {
 						_, pointed := envOf(c)["LEGION_PROVISION_TOKEN_FILE"]
-						routes := reaches(c)
-						if holds := slices.Contains(holderNames, c.Name); (len(routes) > 0) != holds || pointed != holds {
-							t.Errorf("%s reaches the provisioning token by %v, pointed at %t; want %t for both", c.Name, routes, pointed, holds)
+						holds := slices.Contains(holderNames, c.Name)
+						mounted := volumeRoutes(c)
+						var named []string
+						for _, r := range mounted {
+							named = append(named, r.named)
+						}
+						if (len(mounted) > 0) != holds || pointed != holds {
+							t.Errorf("%s reaches the provisioning token's file by %v, pointed at %t; want %t for both", c.Name, named, pointed, holds)
+						}
+						for _, r := range mounted {
+							if r.mount.SubPath != "" {
+								t.Errorf("%s takes the provisioning token from %s with subPath %q, want the whole volume: the kubelet rewrites a whole-volume Secret projection in place when the Secret changes and never a subPath copy, so a renewed token would not reach the file",
+									c.Name, r.named, r.mount.SubPath)
+							}
+						}
+						if routes := envRoutes(c); len(routes) > 0 {
+							t.Errorf("%s reaches the provisioning token through the environment by %v, which no container may, %v included: an environment value is fixed for the container's life, so a renewed token never reaches it",
+								c.Name, routes, holderNames)
 						}
 					}
 					kind, err := podKindOf(template.Metadata.Labels)

@@ -33,14 +33,13 @@ for the case where main splits a job out of a broad filter.
 ## Evidence
 
 - Merge `6b29d18f` of main `e018f1d3` in sjawhar/legion#2394 brought main's split of the race job.
-  `envoy_go_race` keeps `'packages/envoy/**'`, and the new `envoy_go_race_pmdoc` lists packages
-  (`.github/workflows/ci.yaml`).
+  `envoy_go_race` keeps `'packages/envoy/**'`, and the new pmdoc race job, which INFRA-1408 later
+  removed, lists packages in a filter of its own (`.github/workflows/ci.yaml`).
 - This pull request makes pmdoc import `internal/dispatch/text` (`pmdoc/pointers.go`,
   `pmdoc/schema.go`) and `internal/dispatch/model` (`pmdoc/schema.go`). Main's pmdoc imports
   neither, so `check-ci-filters.sh` passes at main's head.
-- On the merged tree it reported `envoy-go-race-pmdoc: 431 files, 14 uncovered`, all under
-  `model/` and `text/`. The fix added `model/*`, `text/*` and `text/testdata/**` to
-  `envoy_go_race_pmdoc`, and moved this pull request's `packages/contracts/src/**` line there.
-  The check then exits 0.
+- On the merged tree it reported 431 files and 14 uncovered for that pmdoc race job, all under
+  `model/` and `text/`. The fix added `model/*`, `text/*` and `text/testdata/**` to its filter,
+  and moved this pull request's `packages/contracts/src/**` line there. The check then exits 0.
 - For contrast, `envoy_go_race_docs` already named `model/*` and `text/*`, because main's `docs`
   package imports both.

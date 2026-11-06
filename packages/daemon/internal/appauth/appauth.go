@@ -126,21 +126,27 @@ type Tokens interface {
 	// alone, as GitHub takes them inside one installation — and to reading: contents, pull
 	// requests, Actions and metadata read. A pane holds one for every owner of the project but
 	// the one its issue's repository is under (a configured rename's two owners count as that
-	// one, GitHubCredential), and a controller holds one for every owner it has. An App on
-	// token_command gets what its command's read-only release holds instead, which the command
-	// decides: the secrets broker's is the same four (its readOnlyPermissions). With a key of
-	// its own the mint asks for what the installation is granted of those four and leaves the
-	// rest out (exchangeGranted), so an installation whose account has not granted the App
-	// Actions gets the other three rather than nothing. A call naming no repository is refused
-	// before anything is minted, as Token's is.
+	// one, GitHubCredential), a controller holds one for every owner it has, and the Kubernetes
+	// runtime's provisioning token is one of the implement App for the issue's own owner over
+	// the one repository its pod clones, which every issue pod's workspace-fetch and every
+	// repository cache clones with (implementTokens, internal/daemon); there alone an
+	// installation that refuses the narrowing is served the owner's own token instead
+	// (ErrNarrowingRefused). An App on token_command gets what its command's read-only release
+	// holds instead, which the command decides: the secrets broker's is the same four (its
+	// readOnlyPermissions). With a key of its own the mint asks for what the installation is
+	// granted of those four and leaves the rest out (exchangeGranted), so an installation whose
+	// account has not granted the App Actions gets the other three rather than nothing. A call
+	// naming no repository is refused before anything is minted, as Token's is.
 	ReadToken(ctx context.Context, role AppRole, owner string, repos []string) (Lease, error)
 }
 
 // readPermissions narrows an installation token to reading a repository's contents, its pull
 // requests, its Actions runs and its metadata: what a role needs of every repository of the
-// project but its own issue's, and what a controller needs of every one of them. A mint asks for
-// what the installation is granted of this set, at the access it is granted (exchangeGranted),
-// and GitHub mints a token with the permissions the request names.
+// project but its own issue's, what a controller needs of every one of them, and what the
+// provisioning token takes of the issue's own repository, which a clone, a fetch and a
+// repository cache only read (implementTokens, internal/daemon). A mint asks for what the
+// installation is granted of this set, at the access it is granted (exchangeGranted), and
+// GitHub mints a token with the permissions the request names.
 //
 // actions:read is here because reading a repository includes reading what its merges did: a
 // deployment check of a merge reads the push run that carries it, that run's jobs and a job's
@@ -585,7 +591,7 @@ func (m *Manager) mint(ctx context.Context, request mintRequest) (Lease, error) 
 // owner, the repositories and the set asked for (askedFor), and carries no token.
 //
 // A 422 from the exchange after this cut is a repository the installation does not reach, or a
-// grant that changed between the two calls (errNarrowingRefused): it stays the hard refusal it
+// grant that changed between the two calls (ErrNarrowingRefused): it stays the hard refusal it
 // is.
 func (m *Manager) exchangeGranted(ctx context.Context, jwt, installation string, request mintRequest) (Lease, error) {
 	granted, err := m.grantedPermissions(ctx, jwt, installation)
@@ -727,12 +733,17 @@ func (m *Manager) forgetInstallation(role AppRole, owner string) {
 // installation is no longer there.
 var errInstallationGone = errors.New("the installation is gone")
 
-// errNarrowingRefused is a token exchange GitHub answers 422 to a request that named
+// ErrNarrowingRefused is a token exchange GitHub answers 422 to a request that named
 // repositories or permissions: a repository the installation does not reach, or a permission it
 // is not granted — GitHub answers both the same way, and mints nothing rather than leaving one
 // out. A mint asks only for what the installation was granted a moment before (exchangeGranted),
-// so the permissions half of it is a grant that changed between the two calls.
-var errNarrowingRefused = errors.New("the installation does not reach the repositories or hold the permissions asked for")
+// so a refusal here is the repositories, and the permissions half of it a grant that changed
+// between the two calls.
+//
+// It is exported because the daemon's provisioning adapter falls back on it (implementTokens in
+// internal/daemon): an installation that refuses a read token's narrowing is served the owner's
+// own token instead, and no other refusal is.
+var ErrNarrowingRefused = errors.New("the installation does not reach the repositories or hold the permissions asked for")
 
 // ErrNotInstalled is a mint refused because the App has no installation on the owner: an answer
 // about the owner, not GitHub's trouble, which a retry would only repeat.
@@ -914,7 +925,7 @@ func (m *Manager) exchange(ctx context.Context, jwt, installation string, repos 
 			// which it was. One to a request that narrowed nothing says nothing about either and
 			// stays the refusal it is.
 			if requestBody != nil {
-				return Lease{}, fmt.Errorf("%w (%s): %w", errNarrowingRefused, askedFor(repos, permissions), refused)
+				return Lease{}, fmt.Errorf("%w (%s): %w", ErrNarrowingRefused, askedFor(repos, permissions), refused)
 			}
 		}
 		return Lease{}, refused
