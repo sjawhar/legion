@@ -3970,10 +3970,13 @@ routes above with the listener's `/v1` credential; Dispatch reads it through
 - **Reads come from the bucket, never a cache.** A session read is a key read; a listing is one
   watch filtered to `issue.<KEY>.*` or `role.<token>.*` (`kvwatch.ScanExistingKeys`, with
   `jetstream.IgnoreDeletes`), ended at the watcher's end-of-existing-keys marker, and a watch that
-  ends any other way (kvwatch's scan idle timer, its subscription) is a 503, never a short list: an
-  absence is the bucket's, the lesson of `/v1/sessions`'s cache answers (INFRA-249). A route's
-  whole read, a session key and its role token's listing, waits at most 2 s
-  (`legionagents.ReadTimeout`), and so does every call on the bucket. `live` and `replaced_by` /
+  ends any other way (the read's context, kvwatch's scan idle timer, its subscription) is a 503,
+  never a short list: an absence is the bucket's, the lesson of `/v1/sessions`'s cache answers
+  (INFRA-249). A route's whole read, a session key and its role token's listing, waits at most 2 s
+  (`legionagents.ReadTimeout`): the scan takes the route's context, its consumer create included,
+  and holds itself to the same 2 s as its idle bound, and so does every other call on the bucket,
+  so a stalled bucket is answered well inside the listener's 10 s write timeout rather than
+  dropping the connection. `live` and `replaced_by` /
   `replaced_at` are derived at each read and never stored; `live` is the session's own registration
   state (`session.StateOf`), true only while that state reads `live`, so an `unresponsive` session
   reads false and has not ended. A session read derives them with the

@@ -18,10 +18,12 @@ import (
 	"github.com/sjawhar/envoy/internal/kvwatch"
 )
 
-// ReadTimeout bounds each call the store makes on the bucket, and the listener bounds a route's
-// whole read with it too (legionAgentReadContext in cmd/listener), as roleHolderReadTimeout bounds
-// the session bucket's, so a route answers inside the listener's 10 s HTTP write timeout while NATS
-// does not.
+// ReadTimeout bounds each call the store makes on the bucket: the JetStream MaxWait its handle
+// carries, which every get and put waits at most (openHandle), and the idle bound of a listing's
+// scan (list). The listener bounds a route's whole read with it too (legionAgentReadContext in
+// cmd/listener), as roleHolderReadTimeout bounds the session bucket's, and a listing's scan takes
+// that context, so a route answers inside the listener's 10 s HTTP write timeout while NATS does
+// not.
 const ReadTimeout = 2 * time.Second
 
 // openTimeout bounds the bucket's open, which creates it on a first start, as store.Open's.
@@ -90,8 +92,11 @@ func Open(conn *nats.Conn, opts ...Option) (*Store, error) {
 	return &Store{kv: kv, now: o.now, log: o.log}, nil
 }
 
-// openHandle opens the bucket on conn under ReadTimeout, which every call through the handle waits
-// at most: a get, a put, a listing's consumer create and its idle wait for the next key.
+// openHandle opens the bucket on conn under ReadTimeout, the JetStream MaxWait every call through
+// the legacy handle waits at most: a get, a put, a delete. A listing watches through the bucket's
+// jetstream handle instead, which this MaxWait does not reach, so what bounds its consumer create
+// and its wait for the next key is the read's own context, and ReadTimeout as the scan's idle
+// bound (list).
 func openHandle(conn *nats.Conn) (bus.KeyValue, error) {
 	js, err := conn.JetStream(nats.MaxWait(ReadTimeout))
 	if err != nil {
@@ -201,14 +206,15 @@ func (s *Store) read(ctx context.Context, sessionID string) (Entry, uint64, erro
 
 // list reads every key under prefix, an issue's or a role token's, from one watch filtered to it
 // (kvwatch.ScanExistingKeys, which fails a watch that did not deliver every key the filter held).
-// The scan holds no context of its own, so ctx is read before it starts and the scan is bounded by
-// kvwatch.ScanIdleTimeout, which gives up on a bucket that stops delivering.
+// The scan takes ctx, so the whole of it -- the watch's consumer create and every wait for the
+// next key -- ends with the caller's read, and its idle bound is ReadTimeout, so a scan under a
+// context that cannot end gives up no later than one of the store's other calls would.
 func (s *Store) list(ctx context.Context, prefix string) ([]Entry, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	var entries []Entry
-	_, err := kvwatch.ScanExistingKeys(s.bucket(), prefix+"*", "list legion agents under "+prefix, kvwatch.ScanIdleTimeout, s.log, func(found kvwatch.Entry) error {
+	_, err := kvwatch.ScanExistingKeys(ctx, s.bucket(), prefix+"*", "list legion agents under "+prefix, ReadTimeout, s.log, func(found kvwatch.Entry) error {
 		var entry Entry
 		if err := json.Unmarshal(found.Value, &entry); err != nil {
 			return fmt.Errorf("decode legion agent key %s: %w", found.Key, err)

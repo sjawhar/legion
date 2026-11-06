@@ -1,6 +1,7 @@
 package redeliver
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -133,7 +134,7 @@ func sortOpenRecords(open []openRecord) {
 // with nothing more in it, which would under-report the open deliveries and say nothing.
 func (s *Sweeper) scanOpenRecords(listed map[string][]githubapp.Delivery) ([]openRecord, error) {
 	var open []openRecord
-	if _, err := kvwatch.ScanExistingKeys(s.state, recordPrefix+"*", "webhook redelivery records", kvwatch.ScanIdleTimeout, s.Logger, func(entry kvwatch.Entry) error {
+	if _, err := kvwatch.ScanExistingKeys(context.Background(), s.state, recordPrefix+"*", "webhook redelivery records", kvwatch.ScanIdleTimeout, s.Logger, func(entry kvwatch.Entry) error {
 		guid := strings.TrimPrefix(entry.Key, recordPrefix)
 		if _, seen := listed[guid]; seen {
 			return nil

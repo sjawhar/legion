@@ -13,6 +13,7 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/legionagents"
@@ -827,6 +828,76 @@ func TestGetAnswersTheSessionKeyWithItsReplacementAfterAnEndedWrite(t *testing.T
 			}
 			if *got.ReplacedBy != "ses-later" || *got.ReplacedAt != later.StartedAt {
 				t.Fatalf("get answered replaced by %s at %s, want ses-later at %s", *got.ReplacedBy, *got.ReplacedAt, later.StartedAt)
+			}
+		})
+	}
+}
+
+// stalledWatchKV hands out a watch over the real bucket that delivers nothing at all: no key and
+// no end-of-existing-keys marker, as a bucket whose consumer has stopped answering (the store
+// package's earlyEndKV stalls a scan the same way). Only the read's own bounds end a listing
+// through it. Its stop closes what it handed out, so the drain the scan leaves behind ends with
+// it.
+type stalledWatchKV struct{ jetstream.KeyValue }
+
+func (k stalledWatchKV) Watch(ctx context.Context, keys string, opts ...jetstream.WatchOpt) (jetstream.KeyWatcher, error) {
+	watcher, err := k.KeyValue.Watch(ctx, keys, opts...)
+	if err != nil {
+		return nil, err
+	}
+	go func() {
+		for range watcher.Updates() {
+		}
+	}()
+	return &stalledWatcher{KeyWatcher: watcher, updates: make(chan jetstream.KeyValueEntry)}, nil
+}
+
+type stalledWatcher struct {
+	jetstream.KeyWatcher
+
+	updates chan jetstream.KeyValueEntry
+	stopped sync.Once
+}
+
+func (w *stalledWatcher) Updates() <-chan jetstream.KeyValueEntry { return w.updates }
+
+func (w *stalledWatcher) Stop() error {
+	w.stopped.Do(func() { close(w.updates) })
+	return w.KeyWatcher.Stop()
+}
+
+// stallMargin is what a read of a stalled bucket may take beyond its own bound before the test
+// calls it unbounded: the scheduling of one goroutine, not another wait.
+const stallMargin = 500 * time.Millisecond
+
+// A listing of a bucket that stops delivering fails within the caller's context, not at some
+// longer bound of the scan's own: the route that reads under legionagents.ReadTimeout answers its
+// 503 inside the listener's HTTP write timeout rather than dropping the connection
+// (dispatch://INFRA-448). Get fails there too, since its session key is answered and only its role
+// token's listing stalls.
+func TestAStalledListingFailsWithinTheReadTimeout(t *testing.T) {
+	uri := testnats.URL(t)
+	r := openRegistryAt(t, uri)
+	if _, err := r.store.Put(ctx(t), agent("infra", "INFRA-448", "tester", "ses-stalled", "2026-10-26T03:15:00Z")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	stalled := openRegistryAt(t, uri)
+	stalled.store.WrapWatch(func(kv jetstream.KeyValue) jetstream.KeyValue { return stalledWatchKV{KeyValue: kv} })
+	for name, read := range map[string]func(context.Context) error{
+		"Get":     func(c context.Context) error { _, err := stalled.store.Get(c, "ses-stalled"); return err },
+		"ByIssue": func(c context.Context) error { _, err := stalled.store.ByIssue(c, "INFRA-448"); return err },
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, cancel := context.WithTimeout(context.Background(), legionagents.ReadTimeout)
+			defer cancel()
+			start := time.Now()
+			err := read(c)
+			elapsed := time.Since(start)
+			if err == nil {
+				t.Fatalf("%s on a stalled watch answered no error, after %s", name, elapsed)
+			}
+			if bound := legionagents.ReadTimeout + stallMargin; elapsed > bound {
+				t.Fatalf("%s on a stalled watch failed after %s (%v), want its failure within %s", name, elapsed, err, bound)
 			}
 		})
 	}

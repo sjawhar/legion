@@ -59,7 +59,7 @@ const (
 // fails the caller, and only a complete one logs. A scan that delivers nothing for idle is one.
 func roleRevisions(kv bus.KeyValue, idle time.Duration, log *slog.Logger) (map[string]uint64, error) {
 	revisions := map[string]uint64{}
-	scan, err := kvwatch.ScanExistingKeys(kv, jetstream.AllKeys, "role revisions", idle, log, func(entry kvwatch.Entry) error {
+	scan, err := kvwatch.ScanExistingKeys(context.Background(), kv, jetstream.AllKeys, "role revisions", idle, log, func(entry kvwatch.Entry) error {
 		revisions[entry.Key] = entry.Revision
 		return nil
 	}, jetstream.MetaOnly())
@@ -78,7 +78,7 @@ func roleRevisions(kv bus.KeyValue, idle time.Duration, log *slog.Logger) (map[s
 // never takes a partial list for every claim.
 func (r *Registry) roleKeys() ([]string, error) {
 	var keys []string
-	_, err := kvwatch.ScanExistingKeys(r.roles(), jetstream.AllKeys, "role claims", kvwatch.ScanIdleTimeout, r.logger(), func(entry kvwatch.Entry) error {
+	_, err := kvwatch.ScanExistingKeys(context.Background(), r.roles(), jetstream.AllKeys, "role claims", kvwatch.ScanIdleTimeout, r.logger(), func(entry kvwatch.Entry) error {
 		keys = append(keys, entry.Key)
 		return nil
 	}, jetstream.MetaOnly(), jetstream.IgnoreDeletes())

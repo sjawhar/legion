@@ -211,7 +211,7 @@ func (h *harness) toTheLongestBackoff() {
 func (h *harness) keys() []string {
 	h.t.Helper()
 	var held []string
-	if _, err := kvwatch.ScanExistingKeys(h.state, jetstream.AllKeys, "redelivery state", kvwatch.ScanIdleTimeout, slog.Default(), func(entry kvwatch.Entry) error {
+	if _, err := kvwatch.ScanExistingKeys(context.Background(), h.state, jetstream.AllKeys, "redelivery state", kvwatch.ScanIdleTimeout, slog.Default(), func(entry kvwatch.Entry) error {
 		held = append(held, entry.Key)
 		return nil
 	}, jetstream.MetaOnly(), jetstream.IgnoreDeletes()); err != nil {
@@ -1290,7 +1290,7 @@ func TestDryRunReportsWithoutActing(t *testing.T) {
 		t.Fatalf("a dry run requested %v", got)
 	}
 	var written []string
-	if _, err := kvwatch.ScanExistingKeys(h.state, jetstream.AllKeys, "redelivery state", kvwatch.ScanIdleTimeout, slog.New(slog.DiscardHandler), func(entry kvwatch.Entry) error {
+	if _, err := kvwatch.ScanExistingKeys(context.Background(), h.state, jetstream.AllKeys, "redelivery state", kvwatch.ScanIdleTimeout, slog.New(slog.DiscardHandler), func(entry kvwatch.Entry) error {
 		written = append(written, entry.Key)
 		return nil
 	}, jetstream.MetaOnly(), jetstream.IgnoreDeletes()); err != nil || len(written) != 0 {

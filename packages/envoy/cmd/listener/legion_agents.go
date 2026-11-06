@@ -204,10 +204,10 @@ const legionAgentBodyLimit = 1 << 20
 //
 // Live is the session's own registration state, as every reader of the session registry judges it
 // (session.StateOf through SessionRegistry.Lookup, sessionIsLive): true only while that
-// registration is within the live window. It is never the row's membership of the session cache.
-// So live false does not say the agent has ended: a session past the live window is unresponsive
-// and keeps everything of its own (dispatch://INFRA-392), and only a session the registry calls
-// gone has stopped.
+// registration is within the live window, never membership alone, of the session cache or of the
+// registry. So live false does not say the agent has ended: a session past the live window is
+// unresponsive and keeps everything of its own (dispatch://INFRA-392), and only a session the
+// registry calls gone has stopped.
 type legionAgentAnswer struct {
 	legionagents.Agent
 	Live bool `json:"live"`
@@ -240,8 +240,9 @@ func answerLegionAgents(sessions *session.SessionRegistry, agents []legionagents
 }
 
 // legionAgentReadContext bounds a whole registry read, a session key and its role token's listing
-// among them, to legionagents.ReadTimeout, so a read the bucket does not answer is a 503 inside the
-// listener's 10 s HTTP write timeout.
+// among them, to legionagents.ReadTimeout: every call the store makes on the bucket takes this
+// context, a listing's watch included, so a read the bucket does not answer is a 503 inside the
+// listener's 10 s HTTP write timeout rather than a dropped connection.
 func legionAgentReadContext(r *http.Request) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(r.Context(), legionagents.ReadTimeout)
 }
