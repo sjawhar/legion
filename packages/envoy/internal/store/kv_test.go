@@ -769,7 +769,7 @@ func TestReadsWhoseContextHasEndedAnswerOnlyFromTheCache(t *testing.T) {
 	if _, err := reg.RoleClaim(ended, role); !errors.Is(err, context.Canceled) || err.Error() != "read role reviewer's claim: context canceled" {
 		t.Fatalf("RoleClaim under an ended context = %v, want it to name the read and wrap context.Canceled", err)
 	}
-	release, err := reg.releaseReadExpiredRoleClaim(ended, role, "ses_lapsed", claim, 0)
+	release, err := reg.releaseReadExpiredRoleClaim(ended, role, claim, 0)
 	if release != ExpiredRoleClaimRetained || !errors.Is(err, context.Canceled) || !strings.HasPrefix(err.Error(), "release role reviewer's expired claim held by ses_lapsed: ") {
 		t.Fatalf("release under an ended context = %v, %v; want retained, naming the release and wrapping context.Canceled", release, err)
 	}
@@ -1694,7 +1694,7 @@ func TestReleaseReadExpiredRoleClaimDoesNotReportReleaseAfterConcurrentChange(t 
 	if err != nil {
 		t.Fatalf("read the lapsed role claim to release: %v", err)
 	}
-	release, err := registry.releaseReadExpiredRoleClaim(context.Background(), role, "ses_lapsed", claim, 0)
+	release, err := registry.releaseReadExpiredRoleClaim(context.Background(), role, claim, 0)
 	if err != nil {
 		t.Fatalf("release lapsed role claim: %v", err)
 	}
@@ -1732,7 +1732,7 @@ func TestReleaseReadExpiredRoleClaimDoesNotReportReleaseAfterConcurrentRemoval(t
 	if err != nil {
 		t.Fatalf("read the lapsed role claim to release: %v", err)
 	}
-	release, err := registry.releaseReadExpiredRoleClaim(context.Background(), role, "ses_lapsed", claim, 0)
+	release, err := registry.releaseReadExpiredRoleClaim(context.Background(), role, claim, 0)
 	if err != nil {
 		t.Fatalf("release lapsed role claim: %v", err)
 	}
@@ -1763,7 +1763,7 @@ func TestReleaseReadExpiredRoleClaimReturnsErrorWithoutRelease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read the lapsed role claim to release: %v", err)
 	}
-	release, err := registry.releaseReadExpiredRoleClaim(context.Background(), role, "ses_lapsed", claim, 0)
+	release, err := registry.releaseReadExpiredRoleClaim(context.Background(), role, claim, 0)
 	if !errors.Is(err, releaseErr) {
 		t.Fatalf("release error = %v, want %v", err, releaseErr)
 	}
@@ -3159,18 +3159,18 @@ func TestOpeningTheRegistryReadsEveryRoleRevisionWithoutAGetPerKey(t *testing.T)
 	// for one session TTL after the restart, and a key the bucket no longer holds has none to keep.
 	// The release is handed the claim its caller read, as the reaper's pass hands it the claim it
 	// read to find the holder gone (ReapRoleClaims).
-	release := func(role, holder string) (ExpiredRoleClaimRelease, error) {
+	release := func(role string) (ExpiredRoleClaimRelease, error) {
 		t.Helper()
 		claim, _, err := registry.roleClaim(context.Background(), role)
 		if err != nil {
 			return ExpiredRoleClaimRetained, err
 		}
-		return registry.releaseReadExpiredRoleClaim(context.Background(), role, holder, claim, time.Minute)
+		return registry.releaseReadExpiredRoleClaim(context.Background(), role, claim, time.Minute)
 	}
-	if got, err := release("role-000", "ses_000"); err != nil || got != ExpiredRoleClaimRetained {
+	if got, err := release("role-000"); err != nil || got != ExpiredRoleClaimRetained {
 		t.Fatalf("restored claim within its grace = %v, %v; want it retained", got, err)
 	}
-	if got, err := release(deleted, fmt.Sprintf("ses_%03d", claims)); err != nil || got != ExpiredRoleClaimMissing {
+	if got, err := release(deleted); err != nil || got != ExpiredRoleClaimMissing {
 		t.Fatalf("deleted claim = %v, %v; want it missing", got, err)
 	}
 }

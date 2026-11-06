@@ -385,10 +385,14 @@ func (r *Registry) releaseReadRoleClaim(ctx context.Context, sessionID, role str
 	return nil
 }
 
-// releaseReadExpiredRoleClaim drops role, over a claim the caller has read already, only when
-// sessionID remains its holder and a restored claim has exhausted the session registry's TTL. A
-// listener restart therefore gives an existing holder one TTL to register again, while an
-// already-expired holder cannot block a new claimant forever.
+// releaseReadExpiredRoleClaim drops role, over a claim the caller has read already and found
+// expired, once a restored claim has exhausted the session registry's TTL. A listener restart
+// therefore gives an existing holder one TTL to register again, while an already-expired holder
+// cannot block a new claimant forever.
+//
+// The holder it releases from is the one the claim names: the caller found that holder gone by
+// reading this very claim (ReapRoleClaims), so a holder named beside the claim could only be
+// that same session, or one the caller never found gone.
 //
 // Its result distinguishes a confirmed deletion from a concurrent removal or replacement, so
 // callers never report that a lost conditional delete released a claim. A failure is reported
@@ -403,15 +407,12 @@ func (r *Registry) releaseReadRoleClaim(ctx context.Context, sessionID, role str
 // the role again between that read and this delete keeps the role and is reported
 // ExpiredRoleClaimSuperseded. A delete ctx abandoned may still land after this answer. That is
 // safe to leave running: it deletes the claim only if the bucket still holds the very revision
-// that read returned, naming sessionID, whom the caller has just found gone from the session
+// that read returned, naming the holder the caller has just found gone from the session
 // bucket, so at worst a lapsed holder's claim is released a moment after the caller was told the
 // bus did not answer, and a fresh claim that landed meanwhile is never touched.
-func (r *Registry) releaseReadExpiredRoleClaim(ctx context.Context, role, sessionID string, claim RoleClaim, sessionTTL time.Duration) (ExpiredRoleClaimRelease, error) {
+func (r *Registry) releaseReadExpiredRoleClaim(ctx context.Context, role string, claim RoleClaim, sessionTTL time.Duration) (ExpiredRoleClaimRelease, error) {
 	if claim.Revision == 0 {
 		return ExpiredRoleClaimMissing, nil
-	}
-	if claim.HolderSessionID != sessionID {
-		return ExpiredRoleClaimSuperseded, nil
 	}
 	r.mu.RLock()
 	restoredRevision, restored := r.restoredRoleRevisions[role]
@@ -433,7 +434,7 @@ func (r *Registry) releaseReadExpiredRoleClaim(ctx context.Context, role, sessio
 	case errors.Is(err, nats.ErrKeyExists):
 		return ExpiredRoleClaimSuperseded, nil
 	default:
-		return ExpiredRoleClaimRetained, fmt.Errorf("release role %s's expired claim held by %s: %w", role, sessionID, err)
+		return ExpiredRoleClaimRetained, fmt.Errorf("release role %s's expired claim held by %s: %w", role, claim.HolderSessionID, err)
 	}
 }
 

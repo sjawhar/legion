@@ -148,8 +148,9 @@ type RoleClaimSweep struct {
 // alphabet) is skipped, and the sweep goes on.
 //
 // The listing (roleKeysUntil), every claim read and every release wait no longer than ctx, which
-// is the reaper loop's own context (StartRoleClaimReaper): the listener ends that context and
-// then drains the bus, so every call a pass has left to make after that fails at once.
+// is the reaper loop's own context (StartRoleClaimReaper): the listener's shutdown ends that
+// context and then waits for this loop to return before it drains the bus, so every call a pass
+// has left to make fails on the ended context alone, against a bus that is still answering.
 //
 // One role's failed read, failed delete or failed release costs that one role: it is logged in a
 // line of its own, counted in Skipped, and the pass goes on. This reaper is the backstop for the
@@ -202,7 +203,7 @@ func (r *Registry) ReapRoleClaims(ctx context.Context, isAlive func(string) bool
 		if claim.HolderSessionID == "" || isAlive(claim.HolderSessionID) {
 			continue
 		}
-		release, err := r.releaseReadExpiredRoleClaim(ctx, role, claim.HolderSessionID, claim, sessionTTL)
+		release, err := r.releaseReadExpiredRoleClaim(ctx, role, claim, sessionTTL)
 		if err != nil {
 			if ended := ctx.Err(); ended != nil {
 				return sweep, ended
@@ -252,10 +253,30 @@ func (r *Registry) StartReaper(ctx context.Context, live func(sessionID string) 
 // failure line carries reaped and skipped beside the error, because a pass cut short that way
 // has already done work, and a line that named only the error would read as a pass that did
 // nothing.
+//
+// A pass that ends on an error logs at ERROR, except where this loop's own ctx has ended under
+// it: the listener ends that ctx to shut down, and the pass that fails because the listener is
+// stopping is part of an ordered shutdown rather than a failure of the reaper's, so it is logged
+// at INFO with the same reaped and skipped. The level turns on this loop's ctx rather than on
+// the error's identity because neither direction of that identity holds. A listing the shutdown
+// cut short answers the scan's own idle bound when the bucket delivered it nothing
+// (kvwatch.ScanIdleTimeout, roleKeysUntil), which is no context error; and the per-call deadline
+// inside that scan answers context.DeadlineExceeded against a bus too slow to serve it
+// (bus.KeyValue.ReadStreamState) while this loop runs on, which is the outage an operator must
+// see. What makes a failed pass an ordered shutdown is that this loop's ctx has ended, so that
+// is what the level reads.
 func (r *Registry) StartRoleClaimReaper(ctx context.Context, isAlive func(string) bool, interval, sessionTTL time.Duration) <-chan struct{} {
 	return everyInterval(ctx, interval, func() {
 		sweep, err := r.ReapRoleClaims(ctx, isAlive, sessionTTL)
 		if err != nil {
+			if ctx.Err() != nil {
+				r.logger().Info("role claim reaper cycle ended with its loop",
+					slog.String("error", err.Error()),
+					slog.Int("reaped", sweep.Reaped),
+					slog.Int("skipped", sweep.Skipped),
+				)
+				return
+			}
 			r.logger().Error("role claim reaper cycle failed",
 				slog.String("error", err.Error()),
 				slog.Int("reaped", sweep.Reaped),
