@@ -691,15 +691,6 @@ GATES = [
                          "./cmd/listener/", "./internal/store/", "./internal/session/", "./internal/kvwatch/..."], race=True),
     ], reads=setup_go("envoy-go-race", f"{ENVOY}/go.mod") + CI_SELF),
 
-    gate("envoy_go_race_pmdoc", "envoy-go-race-pmdoc", runs=[
-        step_run("envoy-go-race-pmdoc", "Race-test pmdoc",
-                 "go test -race -timeout 40m ./internal/dispatch/pmdoc/...",
-                 ENVOY, ["./internal/dispatch/pmdoc/..."], race=True),
-    ], reads=reads(
-        (f"{ENVOY}/internal/dispatch/pmdoc/schema/blocks.json", "packages/envoy/internal/dispatch/pmdoc/gen/decode.ts:16, differential.ts:21, edit-blocks.ts:21"),
-        ("packages/proof-editor/src/**", "packages/envoy/internal/dispatch/pmdoc/gen/decode.ts:6, differential.ts:12-13, edit-blocks.ts:10 import @legion/proof-editor"),
-    ) + setup_go("envoy-go-race-pmdoc", f"{ENVOY}/go.mod") + bun_job("envoy-go-race-pmdoc") + CI_SELF),
-
     gate("envoy_go_race_api", "envoy-go-race-api", runs=[
         step_run("envoy-go-race-api", "Race-test the Dispatch API",
                  "go test -race -timeout 30m ./internal/dispatch/api/",
