@@ -1,5 +1,6 @@
 kind: Fixed
-body: Two Dispatch processes started inside one another's consumer reconciliation can no longer
-  both bind one delivery durable and each take every GitHub delivery: the subscribe runs under
-  that durable's consumer lease, a process that finds the lease held stands by for its next poll
+body: |-
+  Two Dispatch processes started inside one another's consumer reconciliation can no longer both
+  bind one delivery durable and each take every GitHub delivery. The subscribe runs under that
+  durable's consumer lease, a process that finds the lease held stands by for its next poll
   instead, and the process that binds holds the lease until the server reports the durable bound.
