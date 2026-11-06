@@ -968,11 +968,11 @@ func holdSessionReply(t *testing.T, database *store.Store, parent string) gateHo
 
 // The reply first, which is the half of the window the test above cannot reach: a session reply
 // written and not committed when the dismiss reaches the Agent thread's root. The reply holds that
-// root - the clearing trigger of 20261105093507 takes it `for share` before its delete - so the
-// dismiss waits there (inboxDismissLockAgentRoots, step 2 of the lock order), and the insert that
-// follows, a statement of its own and so a snapshot of its own, holds the committed reply and
-// writes no mark for its thread. The thread ends where a reply nobody has read leaves it: in the
-// Inbox, unread.
+// root - its clearing trigger takes it before the delete (migration 20261105093507) - and the
+// dismiss waits there, at the level that conflicts with the trigger's (inboxDismissLockAgentRoots,
+// step 2 of the lock order), and the insert that follows, a statement of its own and so a
+// snapshot of its own, holds the committed reply and writes no mark for its thread. The thread
+// ends where a reply nobody has read leaves it: in the Inbox, unread.
 //
 // Without that lock the dismiss waits nowhere, its insert reads a snapshot the reply is not in and
 // writes the mark, and the reply's trigger has already run and found nothing to delete - a thread

@@ -66,12 +66,17 @@ var (
 // PUT /api/v1/me/threads/{id}/read does. That is also what makes it one statement for both
 // directions, where the state-matched read above is two: a restore checks no version, so the
 // array it binds is one null per row and the column it answers is read by nobody.
+//
+// The ids are matched against the row's own columns and the versions joined beside them, rather
+// than the join doing both: with the ids reachable only through the join the planner reads them
+// off user_threads_thread and filters the login afterwards, where this way it stays on the
+// caller's own key (user_threads_pkey, which the plan test pins).
 const inboxDismissNamedThreads = `
 	select t.thread_id::text, t.issue_key, t.artifact_id::text, seen.last_reply_id::text
 	from user_threads t
-	join unnest($2::uuid[], $3::uuid[]) as seen(thread_id, last_reply_id)
+	left join unnest($2::uuid[], $3::uuid[]) as seen(thread_id, last_reply_id)
 	  on seen.thread_id = t.thread_id
-	where t.login = $1
+	where t.login = $1 and t.thread_id = any($2::uuid[])
 	order by t.thread_id`
 
 // What this route's four Agent reads add to the mark-all's own (inboxAgentRootsQuery,
@@ -106,16 +111,20 @@ var (
 
 // inboxDismissLockAgentRoots takes the root message of every Agent thread a dismissal is about to
 // write a mark for, step 2 of the lock order (markInboxReadThreads, api/inbox_read.go), in
-// ascending id order so two dismisses over overlapping sets take them in one order. `for update`
-// rather than `for share`, because it is two dismisses that must not interleave, while two session
-// replies, which take the root `for key share` in the trigger of 20261105093507, need not wait on each
-// other at all.
+// ascending id order so two dismisses over overlapping sets take them in one order.
 //
-// It is what orders this route against that trigger, and neither order then loses a reply: a
-// dismiss that takes the root first makes the reply wait, and the reply's trigger then finds the
-// committed mark and deletes it; a reply that holds the root first makes this transaction wait,
-// and the check below then reads a thread whose replies are not the ones the request named, so no
-// mark is written for it.
+// This comment is where `for update` is accounted for, and the route's own steps, the race tests
+// below and packages/envoy/AGENTS.md point here rather than saying it again. It is the one level
+// that conflicts with the `for key share` the clearing trigger of 20261105093507 takes on this
+// same row before its delete - that migration's header says why the trigger takes that level -
+// and that conflict is the whole of what orders this route against the trigger. Two dismisses
+// need nothing from it: they are ordered by the caller's own rows, steps 3 and 4, whatever level
+// this one is taken at.
+//
+// Neither order then loses a reply: a dismiss that takes the root first makes the reply wait, and
+// the reply's trigger then finds the committed mark and deletes it; a reply that holds the root
+// first makes this transaction wait, and the check below then reads a thread whose replies are
+// not the ones the request named, so no mark is written for it.
 //
 // It must stay a statement of its own, and so must that check. Under read committed each
 // statement takes a fresh snapshot when it begins, which is exactly what lets the check see the
@@ -595,8 +604,15 @@ func (s *server) dismissInboxThreads(
 		return 0, nil, err
 	}
 	if !plan.restore && len(read.agentRoots) > 0 {
-		if err := lockInboxDismissAgentRoots(ctx, tx, read.agentRoots); err != nil {
-			return 0, nil, err
+		// Step 2 of the lock order, after the owners and before the caller's rows and every
+		// write, so the check that follows reads each thread in a snapshot taken once the root is
+		// this transaction's (inboxDismissLockAgentRoots). A restore takes no root: it deletes
+		// marks, and a session reply that commits beside it deletes the same mark through the
+		// trigger of 20261105093507, so whichever of the two runs first the thread ends in the
+		// Inbox, and a `for update` held over the rest of the transaction would stop that
+		// thread's replies for nothing.
+		if _, err := tx.Exec(ctx, inboxDismissLockAgentRoots, read.agentRoots); err != nil {
+			return 0, nil, fmt.Errorf("lock the agent threads' roots: %w", err)
 		}
 		// Which of those roots the dismissal may still write, read once the lock has been given
 		// and before the first write (inboxDismissCheckAgentRoots). The roots it does not answer
@@ -637,11 +653,12 @@ func (s *server) dismissInboxThreads(
 	return s.commitInboxMarks(ctx, tx, changed, events)
 }
 
-// readInboxDismissThreads reads both kinds of row this request changes, through the mark-all's own
-// reads (readInboxReplyRows and readInboxAgentRows, api/inbox_read.go), each list sorted so the
+// readInboxDismissThreads reads both kinds of row this request changes, each list sorted so the
 // locks and writes that follow are taken in one order. A request that named its rows is read by
-// those ids and a request that named the filters by the state they match, which is the list route's
-// own read of that state.
+// those ids, through the reads both write routes over these rows share (readInboxReplyRows and
+// readInboxAgentRows, api/inbox_read.go); a filtered request is the mark-all's own read of the
+// state it writes over (readInboxReadThreads), given this plan's two statements and its mark, so
+// that read lives once.
 //
 // Each read answers the version of every row it chose, which is what the writes check the row
 // against: for a request that named its rows the version is the one the page carried, bound
@@ -651,52 +668,24 @@ func readInboxDismissThreads(
 	ctx context.Context, tx pgx.Tx, actor model.Actor, login string,
 	plan inboxDismissPlan, rows inboxDismissRows, scope inboxReadScope,
 ) (inboxReadThreads, error) {
-	read := newInboxReadThreads()
-	if rows.named() {
-		if len(rows.threads) > 0 {
-			if err := readInboxReplyRows(ctx, tx, &read, inboxDismissNamedThreads,
-				login, rows.threads, rows.seenThreads); err != nil {
-				return read, err
-			}
-		}
-		if len(rows.roots) > 0 {
-			args := append(unreadDirectRepliesArgs(actor.ID, nil), rows.roots, rows.seenRoots)
-			if err := readInboxAgentRows(ctx, tx, &read, plan.agentByID, args); err != nil {
-				return read, err
-			}
-		}
-		return read, nil
+	if !rows.named() {
+		return readInboxReadThreads(ctx, tx, actor, login,
+			plan.replyThreads, plan.agentThreads, plan.through, scope)
 	}
-	if scope.wantsReplyThreads() {
-		if err := readInboxReplyRows(ctx, tx, &read, plan.replyThreads,
-			login, scope.issue, scope.artifact, plan.through,
-			scope.priorities, scope.priorityNone, scope.projects); err != nil {
+	read := newInboxReadThreads()
+	if len(rows.threads) > 0 {
+		if err := readInboxReplyRows(ctx, tx, &read, inboxDismissNamedThreads,
+			login, rows.threads, rows.seenThreads); err != nil {
 			return read, err
 		}
 	}
-	if scope.wantsAgentThreads() {
-		args := append(unreadDirectRepliesArgs(actor.ID, nil), plan.through)
-		if err := readInboxAgentRows(ctx, tx, &read, plan.agentThreads, args); err != nil {
+	if len(rows.roots) > 0 {
+		args := append(unreadDirectRepliesArgs(actor.ID, nil), rows.roots, rows.seenRoots)
+		if err := readInboxAgentRows(ctx, tx, &read, plan.agentByID, args); err != nil {
 			return read, err
 		}
 	}
 	return read, nil
-}
-
-// lockInboxDismissAgentRoots takes the root of every Agent thread this request is about to write a
-// mark for, step 2 of the lock order (markInboxReadThreads, api/inbox_read.go): after the owners
-// and before the caller's rows and every write, so the check that follows reads each thread in a
-// snapshot taken once the root is this transaction's (inboxDismissLockAgentRoots).
-//
-// A restore takes no root. It deletes marks, and a session reply that commits beside it deletes
-// the same mark through the trigger of 20261105093507, so whichever of the two runs first the
-// thread ends in the Inbox, and a `for update` held over the rest of the transaction would stop
-// that thread's replies for nothing.
-func lockInboxDismissAgentRoots(ctx context.Context, tx pgx.Tx, roots []string) error {
-	if _, err := tx.Exec(ctx, inboxDismissLockAgentRoots, roots); err != nil {
-		return fmt.Errorf("lock the agent threads' roots: %w", err)
-	}
-	return nil
 }
 
 // checkInboxDismissAgentRoots asks which of the Agent threads this dismissal read it may still
@@ -790,11 +779,11 @@ func (s *server) dismissInboxAgentThreads(
 	for root := range changed {
 		sessions[read.rootSessions[root]] = struct{}{}
 	}
-	if len(read.replies) > 0 && !plan.restore {
+	if len(read.replies) > 0 {
 		// Dismissing marks the thread read, so its unread replies are written by id exactly as the
 		// mark-all writes them, and the dead rows the sessions' own marks cover are pruned with
-		// them. A restore moves no read mark: a thread comes back as it was read, and a new write
-		// by somebody else is what brings it back unread.
+		// them. A restore arrives here with no reply at all: it moves no read mark, so the reads
+		// that chose its roots select no reply ids (inboxDismissNoReplies).
 		marked, _, err := s.markInboxReadAgentReplies(ctx, tx, login, read)
 		if err != nil {
 			return nil, 0, err

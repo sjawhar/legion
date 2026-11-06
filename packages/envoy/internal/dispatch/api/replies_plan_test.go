@@ -106,13 +106,14 @@ func TestMyRepliesQueriesReadTheirStatesIndex(t *testing.T) {
 		// deletes by the root alone - the reply does not name whoever dismissed the thread - so
 		// the key's leading column is the whole reason it is (message_id, login): under the other
 		// order this delete scans a table holding a row per person per thread they have ever
-		// dismissed. The statement is the trigger's own (20261105093505's up-file), with the
-		// casts this file's other reads bind their text through.
+		// dismissed. The statement is the trigger's own (20261105093507's up-file), which names
+		// the root and nothing else, with the casts this file's other reads bind their text
+		// through.
 		{
 			"the clear trigger's delete",
 			`delete from user_agent_thread_dismissed
-				where message_id = $1::text::uuid and dismissed_at < $2::text::timestamptz`,
-			[]any{cursorThread, cursorAt},
+				where message_id = $1::text::uuid`,
+			[]any{cursorThread},
 			"user_agent_thread_dismissed_pkey", "user_agent_thread_dismissed", "",
 		},
 	} {

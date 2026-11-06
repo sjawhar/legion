@@ -417,12 +417,14 @@ func (s *server) markInboxRead(w http.ResponseWriter, r *http.Request) {
 //     before the first append.
 //
 // Step 2 comes before the caller's rows because that is the order a session's reply takes those
-// two in. Postgres fires a table's row triggers in name order, and on messages
-// user_agent_thread_dismissed_clear (migration 20261105093507) comes before user_threads_message
-// (0097), so a reply takes the thread's root first - the row the clear trigger locks before its
-// delete - and the user_threads rows that other trigger moves after it. A dismiss that took the
-// caller's rows first and the root second would be the opposite order, and the two would meet
-// each holding what the other waits for.
+// two in. Postgres fires a table's row triggers in name order, so on messages
+// user_agent_thread_dismissed_clear (migration 20261105093507) runs before user_threads_message
+// (0095, attached by 0097) on an issue message, and on an Agent thread's reply it is the only
+// one of the two that runs at all: that other trigger returns at once for a message with no
+// issue key, and an Agent thread's messages carry none. So a session's reply takes the thread's
+// root - the row the clear trigger locks before its delete - before any row of this caller's it
+// reaches. A dismiss that took the caller's rows first and the root second would be the opposite
+// order, and the two would meet each holding what the other waits for.
 //
 // PUT /api/v1/me/threads/{id}/read takes that same order over its one thread, and the two need
 // the same one: both take the owner `for share`, two share locks do not conflict, so the owner
@@ -468,7 +470,8 @@ func (s *server) markInboxReadThreads(
 	if _, err := tx.Exec(ctx, "set local statement_timeout = '"+inboxReadStatementTimeout+"'"); err != nil {
 		return 0, nil, fmt.Errorf("bound the mark-all's statements: %w", err)
 	}
-	read, err := readInboxReadThreads(ctx, tx, actor, login, readThrough, scope)
+	read, err := readInboxReadThreads(ctx, tx, actor, login,
+		inboxReadReplyThreads, inboxReadAgentThreads, readThrough, scope)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -535,22 +538,28 @@ func (s *server) commitInboxMarks(
 	return changed, appended, nil
 }
 
-// readInboxReadThreads reads both kinds of thread this request marks, and the owners to lock for
-// them, each list sorted so the locks that follow are taken in one order.
+// readInboxReadThreads reads both kinds of thread one filtered request matches, and the owners
+// to lock for them, each list sorted so the locks that follow are taken in one order. Both write
+// routes over these rows read through it - the mark-all with its own two statements and
+// read_through, the dismiss route with its plan's two and dismiss_through
+// (readInboxDismissThreads, api/inbox_dismiss.go) - which is why the two statements and the mark
+// are given to it rather than named in it. The mark is bound rather than read here, so it is
+// whatever the caller binds its own text as: the mark-all's string, the dismissal's *string.
 func readInboxReadThreads(
-	ctx context.Context, tx pgx.Tx, actor model.Actor, login, readThrough string, scope inboxReadScope,
+	ctx context.Context, tx pgx.Tx, actor model.Actor, login string,
+	replyThreads, agentThreads string, mark any, scope inboxReadScope,
 ) (inboxReadThreads, error) {
 	read := newInboxReadThreads()
 	if scope.wantsReplyThreads() {
-		if err := readInboxReplyRows(ctx, tx, &read, inboxReadReplyThreads,
-			login, scope.issue, scope.artifact, readThrough,
+		if err := readInboxReplyRows(ctx, tx, &read, replyThreads,
+			login, scope.issue, scope.artifact, mark,
 			scope.priorities, scope.priorityNone, scope.projects); err != nil {
 			return read, err
 		}
 	}
 	if scope.wantsAgentThreads() {
-		args := append(unreadDirectRepliesArgs(actor.ID, nil), readThrough)
-		if err := readInboxAgentRows(ctx, tx, &read, inboxReadAgentThreads, args); err != nil {
+		args := append(unreadDirectRepliesArgs(actor.ID, nil), mark)
+		if err := readInboxAgentRows(ctx, tx, &read, agentThreads, args); err != nil {
 			return read, err
 		}
 	}
