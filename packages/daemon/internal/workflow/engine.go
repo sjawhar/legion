@@ -643,7 +643,7 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 // suspended every claim it held, and a lingering tree holds its members where they stood, so
 // neither tells anyone.
 //
-// The implementer of a closed issue failing inside a look of its production check ends that look
+// The checking role of a closed issue failing inside a look of its production check ends that look
 // as a report of pending would (endLook): a done issue has no phase to hold, and the look's next
 // wake starts the claim again.
 func (e *Engine) claimFailed(ctx context.Context, tx pgx.Tx, fact intake.ClaimFailed) (intake.Result, error) {
@@ -657,27 +657,30 @@ func (e *Engine) claimFailed(ctx context.Context, tx pgx.Tx, fact intake.ClaimFa
 	if fact.Role == claim.RoleArchitect {
 		return intake.Result{}, nil
 	}
-	// The implementer's failure ends the look of its closed issue's production check, as its
-	// bound would. Unlike an ordinary pending report, nobody remains to report the look or wait for
+	// The failure of the role an open check records ends the look of its closed issue's production
+	// check, as its bound would. Which role that is the check's own row says (record.ProductionCheck.Role,
+	// the role it opened under), never the setting as it stands now, so a check opened before the
+	// project changed its `production_check` still ends its look on its own role's failure. Unlike
+	// an ordinary pending report, nobody remains to report the look or wait for
 	// the next wake, so the architect is told now with the persisted launch failure. An issue in the
 	// workflow (one reopened inside its linger with a look still open at the reopen) takes the
 	// live-phase path below instead, where the failure holds the phase and is told; its stale look
 	// ends at the look's own bound (check_look), which endLookPending keeps for the run.
-	if fact.Role == claim.RoleImplementer && !InWorkflow(*issue) {
+	if !InWorkflow(*issue) {
 		check, err := e.store.ProductionCheck(ctx, tx, issue.Key)
 		if err != nil {
 			return intake.Result{}, err
 		}
-		if check != nil && check.Open() && check.LookOpen {
+		if check != nil && check.Open() && check.LookOpen && fact.Role == check.Role {
 			if err := e.endLook(ctx, tx, check, "claim failed"); err != nil {
 				return intake.Result{}, err
 			}
 			reason := fact.Reason
 			if reason == "" {
-				reason = "the implementer's claim failed before it reported the look"
+				reason = fmt.Sprintf("the %s's claim failed before it reported the look", check.Role)
 			}
 			return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{
-				Kind: "worker-died", Role: fact.Role, Reason: fmt.Sprintf("production check look %d lost its implementer: %s", check.Looks, reason),
+				Kind: "worker-died", Role: fact.Role, Reason: fmt.Sprintf("production check look %d lost its %s: %s", check.Looks, check.Role, reason),
 			})
 		}
 	}
@@ -1125,8 +1128,8 @@ func (e *Engine) gateOpened(ctx context.Context, tx pgx.Tx, issue record.Issue) 
 // admission or the tree's architect started, and each phase worker, whether or not it ever
 // reported a handoff. The phase rows record only handoffs, so they cannot list the claims; the
 // executor treats a request for a claim that does not exist as done. except is the one role left
-// out, "" for none: a merged child's close leaves its implementer out, whose claim its production
-// check closes (closeCheck).
+// out, "" for none: a merged child's close leaves out the role that works its production check
+// (Engine.checkRole), whose claim the check's own close retires (closeCheck).
 func (e *Engine) everyClaim(ctx context.Context, tx pgx.Tx, issue record.Issue, op record.SuperviseOp, reason string, except claim.Role) error {
 	for _, role := range claim.Roles {
 		if role == except {

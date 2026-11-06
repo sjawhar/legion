@@ -46,14 +46,14 @@ func newCheckRig(t *testing.T) checkRig {
 	pool := migratedPool(t)
 	clock := &checkClock{now: checkOpened}
 	logged := &bytes.Buffer{}
-	engine := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, ProductionCheckBound: checkBound, Clock: clock.Now},
+	engine := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, ProductionCheckBound: checkBound, ProductionCheckRole: claim.RoleTester, Clock: clock.Now},
 		slog.New(slog.NewTextHandler(logged, nil)))
 	return checkRig{pool: pool, engine: engine, clock: clock, logged: logged, apply: applyFacts(t, pool, engine)}
 }
 
 // childCheckRig is a running root (LEGION-208, implementing) whose child LEGION-209 merged
 // sjawhar/legion#43 at merge-43: the child is done with its check open at look 1 in the
-// implementer's live session.
+// tester's live session.
 func childCheckRig(t *testing.T) checkRig {
 	t.Helper()
 	rig := newCheckRig(t)
@@ -84,7 +84,7 @@ func rootCheckRig(t *testing.T) checkRig {
 // closed tree, and the check after the close is the one thing a member still does there.
 func TestACheckReportWhileTheRootLingersIsRecorded(t *testing.T) {
 	rig := rootCheckRig(t)
-	if result := rig.apply("pass", intake.CheckReport{Issue: "LEGION-208", Claim: "implementer", Look: 1, Verdict: "pass", Summary: "driven in production"}); result.Refusal != nil {
+	if result := rig.apply("pass", intake.CheckReport{Issue: "LEGION-208", Claim: "tester", Look: 1, Verdict: "pass", Summary: "driven in production"}); result.Refusal != nil {
 		t.Fatalf("the report = %+v, want it recorded", result.Refusal)
 	}
 	if check := productionCheck(t, rig.pool, "LEGION-208"); check == nil || check.Open() || check.Outcome != record.CheckRecorded || check.LookOpen {
@@ -92,12 +92,12 @@ func TestACheckReportWhileTheRootLingersIsRecorded(t *testing.T) {
 	}
 }
 
-// A pending report ends the look with nothing to show and takes the pod: the implementer's claim
+// A pending report ends the look with nothing to show and takes the pod: the tester's claim
 // is suspended, session kept, and the issue suspended (issue_suspend), whose Sandbox goes with its
 // pod and disk, both rows written after the look's
 // start row so the suspension's fences find no later start. The check stays open at look 1 with
 // its look closed.
-func TestAPendingReportSuspendsTheImplementerAfterTheLooksStart(t *testing.T) {
+func TestAPendingReportSuspendsTheTesterAfterTheLooksStart(t *testing.T) {
 	rig := childCheckRig(t)
 	starts := issueOutboxOf(t, rig.pool, "LEGION-209", "supervise")
 	start := starts[len(starts)-1]
@@ -110,8 +110,8 @@ func TestAPendingReportSuspendsTheImplementerAfterTheLooksStart(t *testing.T) {
 		t.Fatalf("the check after pending = %+v, want it open at look 1 with the look closed", check)
 	}
 	suspends := superviseRowsOf(t, rig.pool, "LEGION-209", "suspend")
-	if len(suspends) != 1 || suspends[0].Role != claim.RoleImplementer || suspends[0].Generation != 7 {
-		t.Fatalf("suspend rows = %+v, want the implementer's alone", suspends)
+	if len(suspends) != 1 || suspends[0].Role != claim.RoleTester || suspends[0].Generation != 7 {
+		t.Fatalf("suspend rows = %+v, want the tester's alone", suspends)
 	}
 	suspensions := issueSuspensions(t, rig.pool, "LEGION-209")
 	if len(suspensions) != 1 || suspensions[0].Generation != 7 || suspensions[0].TreeGeneration != 7 {
@@ -125,7 +125,7 @@ func TestAPendingReportSuspendsTheImplementerAfterTheLooksStart(t *testing.T) {
 	}
 }
 
-// A pass closes a child's check as recorded and ends the implementer's part in it: its claim is
+// A pass closes a child's check as recorded and ends the tester's part in it: its claim is
 // closed (issue_close) and the child's Sandbox deleted with the pod it ran in (an IssueSuspend),
 // since its five other claims retired at the close. A fail closes it as a defect the same way.
 func TestAPassOrFailOfAChildsCheckClosesItAndDeletesItsSandbox(t *testing.T) {
@@ -143,7 +143,7 @@ func TestAPassOrFailOfAChildsCheckClosesItAndDeletesItsSandbox(t *testing.T) {
 			closed := superviseRequests(t, rig.pool, "issue_close")
 			for _, role := range claim.Roles {
 				if closed["LEGION-209/"+string(role)] != 1 {
-					t.Fatalf("issue_close rows = %v, want every role's once, the implementer's by the check's close", closed)
+					t.Fatalf("issue_close rows = %v, want every role's once, the tester's by the check's close", closed)
 				}
 			}
 			if got := issueSuspensions(t, rig.pool, "LEGION-209"); len(got) != 1 || got[0].Generation != 7 || got[0].TreeGeneration != 7 {
@@ -154,13 +154,13 @@ func TestAPassOrFailOfAChildsCheckClosesItAndDeletesItsSandbox(t *testing.T) {
 	}
 }
 
-// A pass of a root's check closes the implementer's claim and writes the suspension that deletes
+// A pass of a root's check closes the tester's claim and writes the suspension that deletes
 // its Sandbox, as the linger's own row did: the tree's close then finds nothing of it left.
-func TestAPassOfARootsCheckClosesItsImplementerAndSuspendsTheIssue(t *testing.T) {
+func TestAPassOfARootsCheckClosesItsTesterAndSuspendsTheIssue(t *testing.T) {
 	rig := rootCheckRig(t)
 	rig.apply("pass", intake.CheckReport{Issue: "LEGION-208", Look: 1, Verdict: "pass", Summary: "seen"})
-	if got := superviseRequests(t, rig.pool, "issue_close"); got["LEGION-208/implementer"] != 1 || len(got) != 1 {
-		t.Fatalf("issue_close rows = %v, want the implementer's alone", got)
+	if got := superviseRequests(t, rig.pool, "issue_close"); got["LEGION-208/tester"] != 1 || len(got) != 1 {
+		t.Fatalf("issue_close rows = %v, want the tester's alone", got)
 	}
 	got := issueSuspensions(t, rig.pool, "LEGION-208")
 	if len(got) != 2 {
@@ -199,7 +199,7 @@ func TestACheckReportIsRefusedWhereNoLookIsOpenToIt(t *testing.T) {
 	}
 }
 
-// A look nobody reports ends at its bound as a pending report would: the implementer is suspended
+// A look nobody reports ends at its bound as a pending report would: the tester is suspended
 // and the Sandbox with it. A row naming a look already ended, or an earlier look, changes nothing.
 func TestCheckLookEndedEndsASilentLook(t *testing.T) {
 	rig := childCheckRig(t)
@@ -213,14 +213,14 @@ func TestCheckLookEndedEndsASilentLook(t *testing.T) {
 	if !check.Open() || check.Looks != 1 || check.LookOpen {
 		t.Fatalf("the check after its look's bound = %+v, want it open at look 1 with the look ended", check)
 	}
-	if got := superviseRequests(t, rig.pool, "suspend"); got["LEGION-209/implementer"] != 1 || len(got) != 1 {
-		t.Fatalf("suspend rows = %v, want the implementer's", got)
+	if got := superviseRequests(t, rig.pool, "suspend"); got["LEGION-209/tester"] != 1 || len(got) != 1 {
+		t.Fatalf("suspend rows = %v, want the tester's", got)
 	}
 	if got := issueSuspensions(t, rig.pool, "LEGION-209"); len(got) != 1 {
 		t.Fatalf("issue suspensions = %+v, want one row", got)
 	}
 	rig.apply("look-bound-again", intake.CheckLookEnded{Issue: "LEGION-209", Look: 1, Cause: "look bound"})
-	if got := superviseRequests(t, rig.pool, "suspend"); got["LEGION-209/implementer"] != 1 {
+	if got := superviseRequests(t, rig.pool, "suspend"); got["LEGION-209/tester"] != 1 {
 		t.Fatalf("suspend rows after a second row of the ended look = %v, want the one", got)
 	}
 }
@@ -259,24 +259,26 @@ func TestAFactOfAReplacedCheckChangesNothingOfItsSuccessor(t *testing.T) {
 	if check := productionCheck(t, rig.pool, "LEGION-209"); check.LookOpen || check.Looks != 1 || !check.Open() {
 		t.Fatalf("the second check after its own look bound = %+v, want it open at look 1 with the look ended", check)
 	}
-	if got := superviseRequests(t, rig.pool, "suspend"); got["LEGION-209/implementer"] != 1 {
-		t.Fatalf("suspend rows after the second check's look bound = %v, want the implementer's", got)
+	if got := superviseRequests(t, rig.pool, "suspend"); got["LEGION-209/tester"] != 1 {
+		t.Fatalf("suspend rows after the second check's look bound = %v, want the tester's", got)
 	}
 }
 
-// The implementer's claim failing inside a look ends the look as a pending report would and tells
-// the architect immediately. It holds nothing: a done issue has no phase to hold, and the next wake
-// starts the claim again. Another role's claim failing on the done issue changes nothing, as before.
-func TestTheImplementersFailedClaimEndsItsLook(t *testing.T) {
+// The claim of the role a check records failing inside a look ends the look as a pending report
+// would and tells the architect immediately. It holds nothing: a done issue has no phase to hold,
+// and the next wake starts the claim again. Another role's claim failing on the done issue
+// changes nothing, as before: the implementer's, which worked the issue's phases but not its
+// check.
+func TestTheTestersFailedClaimEndsItsLook(t *testing.T) {
 	rig := childCheckRig(t)
-	rig.apply("tester-failed", intake.ClaimFailed{Issue: "LEGION-209", Role: claim.RoleTester})
-	if check := productionCheck(t, rig.pool, "LEGION-209"); !check.LookOpen {
-		t.Fatalf("the check after the tester's claim failed = %+v, want look 1 still open", check)
-	}
 	rig.apply("implementer-failed", intake.ClaimFailed{Issue: "LEGION-209", Role: claim.RoleImplementer})
+	if check := productionCheck(t, rig.pool, "LEGION-209"); !check.LookOpen {
+		t.Fatalf("the check after the implementer's claim failed = %+v, want look 1 still open", check)
+	}
+	rig.apply("tester-failed", intake.ClaimFailed{Issue: "LEGION-209", Role: claim.RoleTester})
 	check := productionCheck(t, rig.pool, "LEGION-209")
 	if !check.Open() || check.Looks != 1 || check.LookOpen {
-		t.Fatalf("the check after the implementer's claim failed = %+v, want it open at look 1 with the look ended", check)
+		t.Fatalf("the check after the tester's claim failed = %+v, want it open at look 1 with the look ended", check)
 	}
 	if got := issueSuspensions(t, rig.pool, "LEGION-209"); len(got) != 1 {
 		t.Fatalf("issue suspensions = %+v, want one row", got)
@@ -288,6 +290,72 @@ func TestTheImplementersFailedClaimEndsItsLook(t *testing.T) {
 	notices := noticeKinds(t, rig.pool, "LEGION-209")
 	if containsNotice(notices, "held") || !containsNotice(notices, "worker-died") {
 		t.Fatalf("notices %v, want one worker-died and no held notice for a check look", notices)
+	}
+}
+
+// A check recorded with the implementer — the shape every check open before the upgrade has, when
+// the implementer worked each of them — stays the implementer's for as long as it is open, under
+// an engine whose own checks are the tester's: the look its bound starts is handed to the
+// implementer, and that implementer's report of the look is taken and retires its claim.
+func TestACheckRecordingTheImplementerStartsTheImplementerAndTakesItsReport(t *testing.T) {
+	rig := newCheckRig(t)
+	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 7, Status: "in_progress", Rank: "U", LastDispatchSeq: 1})
+	parent := "LEGION-208"
+	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-209", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.Done, Generation: 7, Status: "done", Rank: "V", LastDispatchSeq: 2})
+	seedPR(t, rig.pool, record.PullRequest{State: record.PullRequestMerged, Issue: "LEGION-209", Repo: "sjawhar/legion", Number: 43, Branch: "legion/LEGION-209", HeadSHA: "head-43", MergeSHA: "merge-43", Failing: []string{}})
+	opened := checkOpened
+	seedRecord(t, rig.pool, func(tx pgx.Tx) error {
+		return record.NewStore().PutProductionCheck(t.Context(), tx, record.ProductionCheck{
+			Issue: "LEGION-209", Project: "LEGION", Tree: "LEGION-208", Repo: "sjawhar/legion", Number: 43, MergeSHA: "merge-43",
+			OpenedAt: opened, BoundAt: opened.Add(checkBound), Role: claim.RoleImplementer, Looks: 1,
+			LastWakeKind: wakeMerge, LastWakeDetail: "merge-43", LastWakeAt: &opened,
+		})
+	})
+
+	rig.clock.now = checkOpened.Add(checkBound)
+	rig.apply("bound", intake.CheckBound{Issue: "LEGION-209"})
+	starts := superviseRowsOf(t, rig.pool, "LEGION-209", "start")
+	if len(starts) != 1 || starts[0].Role != claim.RoleImplementer || starts[0].CheckLook != 2 || !starts[0].CheckOpenedAt.Equal(checkOpened) {
+		t.Fatalf("start rows = %+v, want look 2 handed to the implementer the check records", starts)
+	}
+	if check := productionCheck(t, rig.pool, "LEGION-209"); check.Role != claim.RoleImplementer || !check.LookOpen || check.Looks != 2 {
+		t.Fatalf("the check at its bound = %+v, want the implementer's, at look 2 open", check)
+	}
+
+	rig.apply("pass", intake.CheckReport{Issue: "LEGION-209", Look: 2, Verdict: "pass", Summary: "seen in production"})
+	check := productionCheck(t, rig.pool, "LEGION-209")
+	if check.Open() || check.Outcome != record.CheckRecorded {
+		t.Fatalf("the check after the implementer's pass = %+v, want it closed as recorded", check)
+	}
+	if got := superviseRequests(t, rig.pool, "issue_close"); got["LEGION-209/implementer"] != 1 || len(got) != 1 {
+		t.Fatalf("issue_close rows = %v, want the implementer's alone: the check's own role is the implementer", got)
+	}
+}
+
+// A check keeps the role it opened with when the project's `production_check` changes under it:
+// the setting decides the checks a close opens, never one already open, which is why the role is
+// a column of the record. A check opened under `tester` is still the tester's for the rest of its
+// looks once the daemon is rebuilt with the setting off, where that same daemon opens no check of
+// its own.
+func TestACheckOpenedUnderTheTesterKeepsItWhenTheSettingGoesOff(t *testing.T) {
+	rig := childCheckRig(t)
+	off := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, ProductionCheckBound: checkBound, Clock: rig.clock.Now}, nil)
+	apply := applyFacts(t, rig.pool, off)
+
+	apply("pending", intake.CheckReport{Issue: "LEGION-209", Look: 1, Verdict: "pending", Summary: "not deployed yet"})
+	suspends := superviseRowsOf(t, rig.pool, "LEGION-209", "suspend")
+	if len(suspends) != 1 || suspends[0].Role != claim.RoleTester {
+		t.Fatalf("suspend rows = %+v, want the tester's alone: the check is the tester's", suspends)
+	}
+	rig.clock.now = checkOpened.Add(checkBound)
+	apply("bound", intake.CheckBound{Issue: "LEGION-209"})
+	check := productionCheck(t, rig.pool, "LEGION-209")
+	if check.Role != claim.RoleTester || check.Looks != 2 || !check.LookOpen || !check.Last {
+		t.Fatalf("the check at its bound = %+v, want the tester's last look 2 open", check)
+	}
+	starts := superviseRowsOf(t, rig.pool, "LEGION-209", "start")
+	if len(starts) != 2 || starts[1].Role != claim.RoleTester {
+		t.Fatalf("start rows = %+v, want the bound's look handed to the tester the check records", starts)
 	}
 }
 
@@ -414,8 +482,8 @@ func TestTheBoundStartsTheLastLookWhoseNothingClosesTheCheckAsNotRun(t *testing.
 			if check.Open() || check.Outcome != record.CheckNotRun || check.LookOpen {
 				t.Fatalf("the check after its last look's %s = %+v, want it closed as not run", tc.name, check)
 			}
-			if got := superviseRequests(t, rig.pool, "issue_close"); got["LEGION-209/implementer"] != 1 {
-				t.Fatalf("issue_close rows = %v, want the implementer's once at the close", got)
+			if got := superviseRequests(t, rig.pool, "issue_close"); got["LEGION-209/tester"] != 1 {
+				t.Fatalf("issue_close rows = %v, want the tester's once at the close", got)
 			}
 			if got := issueSuspensions(t, rig.pool, "LEGION-209"); len(got) != 2 {
 				t.Fatalf("issue suspensions = %+v, want look 1's row and the close's", got)
@@ -471,7 +539,7 @@ func TestTheTreesCloseWaitsForAnOpenCheckAndRunsOnceItCloses(t *testing.T) {
 }
 
 // A done child set back to todo closes its open check as not run before its new run starts. The
-// implementer's live claim stays live: the closed check rejects its old look's report.
+// tester's live claim stays live: the closed check rejects its old look's report.
 func TestReenterChildClosesItsOpenCheckAsNotRun(t *testing.T) {
 	rig := childCheckRig(t)
 	seedSlot(t, rig.pool, record.Slot{Issue: "LEGION-208", Index: 0})
@@ -485,8 +553,8 @@ func TestReenterChildClosesItsOpenCheckAsNotRun(t *testing.T) {
 	if err := rig.pool.QueryRow(context.Background(), "select generation, phase from issues where key = 'LEGION-209'").Scan(&generation, &childPhase); err != nil || generation != 8 || childPhase != phase.Admitted {
 		t.Fatalf("the re-entered child = generation %d in %s, %v; want generation 8 admitted", generation, childPhase, err)
 	}
-	if got := superviseRequests(t, rig.pool, "issue_close"); got["LEGION-209/implementer"] != 0 {
-		t.Fatalf("issue_close rows = %v, want none for the implementer the rerun reuses", got)
+	if got := superviseRequests(t, rig.pool, "issue_close"); got["LEGION-209/tester"] != 0 {
+		t.Fatalf("issue_close rows = %v, want none for the tester the rerun reuses", got)
 	}
 	suspends := superviseRowsOf(t, rig.pool, "LEGION-209", "suspend")
 	if len(suspends) != 0 {
