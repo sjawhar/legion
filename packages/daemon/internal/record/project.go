@@ -188,10 +188,11 @@ func AcceptedAncestor(issue Issue, byKey map[string]Issue) string {
 // nothing of it has started, and the line will offer it no slot until that ancestor closes
 // (Waiting). It is one rule with two readers that must agree exactly: OpenBeneath leaves such an
 // issue out too, so the ancestor's own acceptance and close are not deadlocked by the issue its
-// hold stopped. The hold never outlives the ancestor that caused it — the close of that ancestor
-// starts the issue, and the expiry of a closed root's linger hands it to Legion as a root of its
-// own (workflow's unfinishedHandOvers) — but neither of those reads this rule: the expiry hands
-// over every member that is in the workflow and never started, whatever held it.
+// hold stopped. The hold never outlives the ancestor that caused it: once that ancestor closes,
+// the line reads this rule again and finds no hold, so the issue starts in its running tree; and
+// the expiry of a closed root's linger hands it to Legion as a root of its own without reading
+// this rule (workflow's unfinishedHandOvers), since the expiry hands over every member that is in
+// the workflow and never started, whatever held it.
 func HeldUnderAccepted(issue Issue, byKey map[string]Issue) bool {
 	return issue.Phase == phase.Admitted && AcceptedAncestor(issue, byKey) != ""
 }

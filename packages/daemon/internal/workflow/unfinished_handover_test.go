@@ -141,9 +141,8 @@ func TestALingerHandsOverTheParentStillWaitingForItsChildren(t *testing.T) {
 }
 
 // What a closed tree keeps is what a person took out of the workflow, and nothing else. This
-// root is closed by hand at admitted, before any phase of it ran, which is the shape round 3
-// read as a tree that hands nobody over: the root's own acceptance decided the hand-over then,
-// and no phase of this root was ever accepted. The member's own state decides it now, so the
+// root is closed by hand at admitted, before any phase of it ran, so no phase of it was ever
+// accepted. The member's own state decides the hand-over, not the root's acceptance, so the
 // member standing todo at admitted is handed over — its tree has closed and nothing would start
 // it where it stands — while the sibling a person parked and the child its architect never
 // released stay with the tree, their Dispatch status saying they wait on nobody

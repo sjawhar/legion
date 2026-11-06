@@ -9,11 +9,11 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-// The one shape the new rule reads differently from the rule it replaces, driven rather than
-// reasoned about: a member whose work finished — its phase is done — while Dispatch shows it at
-// a status the workflow runs in, which is what a person's move of a finished child back to
-// in_progress during the linger leaves. record.InWorkflow answers false for it, because it asks
-// the phase as well, and the expiry's new test asks the Dispatch status alone.
+// The expiry reads the member's record status (record.Issue.Status) and not its phase, pinned
+// here: a member whose work finished — its phase is done — while its status is one the workflow
+// runs in, which is what a person's move of a finished child back to in_progress during the
+// linger leaves. record.InWorkflow answers false for it, because it asks the phase as well, and
+// the expiry asks the status alone.
 //
 // What the rule means for it: the tree has closed, so nothing of that tree will ever run it, and
 // the status a person set says it is meant to be worked. It is handed to Legion as a root of its

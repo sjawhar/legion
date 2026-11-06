@@ -338,9 +338,8 @@ func TestTheGateOpeningStartsAnAdmittedRootWhateverItsLinksSay(t *testing.T) {
 // admitted but waiting on nothing, goes with it: the expiry decides by the member's own state —
 // in the workflow and never started — and not by what held it there (unfinishedHandOvers),
 // because nothing would start either of them where they stand. The sibling was waiting for a
-// slot its tree will never offer again, which the cap leaves an ordinary member doing now that
-// it counts issues rather than trees; left behind it would stand todo at admitted in a closed
-// tree for good.
+// slot its tree will never offer again, which the cap leaves an ordinary member doing because
+// it counts issues; left behind it would stand todo at admitted in a closed tree for good.
 func TestALingerHandsOverTheAdmittedChildThatStillWaits(t *testing.T) {
 	pool := migratedPool(t)
 	until := time.Date(2026, 9, 23, 1, 0, 0, 0, time.UTC)

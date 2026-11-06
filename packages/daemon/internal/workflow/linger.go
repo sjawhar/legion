@@ -288,18 +288,17 @@ func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) 
 // started. A member standing at admitted is handed over whatever held it there — an unfinished
 // Dispatch blocker, an ancestor the daemon had accepted (record.HeldUnderAccepted), such an
 // ancestor that left the workflow during the linger, the children-first wait of a parent whose
-// own children are still open, or the admission cap alone, which counts issues now and so leaves
-// a released child standing at admitted for a slot. The last two are ordinary rather than rare
+// own children are still open, or the admission cap alone, which counts issues and so leaves a
+// released child standing at admitted for a slot. The last two are ordinary rather than rare
 // under that cap, which is why the state and not the hold is read. Nothing would start such a
 // member where it stands: its tree has closed, the line offers a slot to nothing of a closed
 // tree, and a status it already carries moves nobody, so a member left todo at admitted in a
-// closed tree is left there for good — which is the whole of what the hand-over prevents.
-// Reading the hold instead stranded every member the hold could not see: one held under an
-// ancestor that merged, or that a person moved to done or to backlog, during the linger read as
-// held by nothing by the time the expiry ran.
+// closed tree is left there for good — which is the whole of what the hand-over prevents. The
+// hold is not read because it can be gone by the expiry while the member still stands there: an
+// ancestor that held it can merge, or be moved to done or to backlog, during the linger.
 //
-// It is the Dispatch status that says a member is in the workflow here, and the phase is not
-// read: a member a person took out of the workflow is left with the tree (record.OutOfWorkflow),
+// It is the record's status (record.Issue.Status) that says a member is in the workflow here,
+// and the phase is not read: a member a person took out of the workflow is left with the tree (record.OutOfWorkflow),
 // an unreleased child among them, while a member whose phase is done that a person set back to
 // todo during the linger is handed over, and is admitted fresh because its phase carries no run.
 func unfinishedHandOvers(root record.Issue, members []record.Issue) []record.Issue {
