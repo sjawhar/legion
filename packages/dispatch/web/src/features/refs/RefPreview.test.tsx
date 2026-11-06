@@ -1,10 +1,12 @@
 import { afterEach, expect, jest, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+// biome-ignore lint/style/noRestrictedImports: the hover-intent sites below need a pointer event user-event cannot send (a pointerType, a held button, a relatedTarget), and `scroll` has no user-event form at all.
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { type ReactNode, useEffect, useRef } from "react";
 import { Link, MemoryRouter } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
+import { userOnFakeClock } from "../../__tests__/user";
 import { ApiError, api } from "../../api/client";
 import type {
   AskRead,
@@ -114,11 +116,12 @@ test("the card opens only after the hover delay, loads populated, and closes whe
   const view = render(<Harness />);
   try {
     const first = screen.getByRole("link", { name: "first" });
+    // A hover-intent pointer: user-event's hover names no pointerType, which this site needs.
     fireEvent.pointerOver(first, { pointerType: "mouse" });
     act(() => {
       jest.advanceTimersByTime(REF_PREVIEW_OPEN_DELAY_MS - 1);
     });
-    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
     // The hover itself already asked for the target, so the card opens populated.
     expect(getIssue).toHaveBeenCalledWith("CORE-1");
 
@@ -126,32 +129,35 @@ test("the card opens only after the hover delay, loads populated, and closes whe
       jest.advanceTimersByTime(1);
     });
     const card = screen.getByRole("tooltip");
-    expect(first.getAttribute("aria-describedby")).toBe(card.id);
+    expect(first).toHaveAttribute("aria-describedby", card.id);
     // The mocked fetch settles on microtasks alone, which the async act flushes.
     await act(async () => {});
-    expect(card.textContent).toContain("Design decision");
-    expect(card.textContent).toContain("In progress");
-    expect(card.textContent).toContain("P1");
-    expect(card.textContent).toContain("ui");
-    expect(card.querySelector("a")?.getAttribute("href")).toBe("/issues/CORE-1");
+    expect(card).toHaveTextContent("Design decision");
+    expect(card).toHaveTextContent("In progress");
+    expect(card).toHaveTextContent("P1");
+    expect(card).toHaveTextContent("ui");
+    expect(card.querySelector("a")).toHaveAttribute("href", "/issues/CORE-1");
 
+    // Leaving the anchor: user-event's unhover names no pointerType either.
     fireEvent.pointerOut(first, { pointerType: "mouse" });
     // The hover bridge: the pointer reaching the card keeps it open…
     act(() => {
       jest.advanceTimersByTime(50);
     });
+    // The hover bridge reads relatedTarget; user-event's pointer API cannot set it.
     fireEvent.pointerOver(card, { pointerType: "mouse", relatedTarget: document.body });
     act(() => {
       jest.advanceTimersByTime(1000);
     });
     expect(screen.getByRole("tooltip")).toBe(card);
     // …and leaving the card closes it.
+    // The same bridge, leaving the card: relatedTarget again.
     fireEvent.pointerOut(card, { pointerType: "mouse", relatedTarget: document.body });
     act(() => {
       jest.advanceTimersByTime(1000);
     });
-    expect(screen.queryByRole("tooltip")).toBeNull();
-    expect(first.hasAttribute("aria-describedby")).toBe(false);
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+    expect(first).not.toHaveAttribute("aria-describedby");
   } finally {
     view.unmount();
     getIssue.mockRestore();
@@ -164,6 +170,7 @@ test("a pointer moved straight from a reference onto its card keeps it open, and
   const view = render(<Harness />);
   try {
     const first = screen.getByRole("link", { name: "first" });
+    // A hover-intent pointer: user-event's hover names no pointerType, which this site needs.
     fireEvent.pointerOver(first, { pointerType: "mouse" });
     act(() => {
       jest.advanceTimersByTime(REF_PREVIEW_OPEN_DELAY_MS);
@@ -174,7 +181,9 @@ test("a pointer moved straight from a reference onto its card keeps it open, and
     // A fast pointer crosses no gap: the reference's `pointerout` names the card as its
     // destination. Both are the hover zone, so the document listener arms no close, and the
     // `pointerover` that follows has nothing to cancel.
+    // The hover bridge reads relatedTarget; user-event's pointer API cannot set it.
     fireEvent.pointerOut(first, { pointerType: "mouse", relatedTarget: card });
+    // The arrival's relatedTarget too: user-event cannot name where the pointer came from.
     fireEvent.pointerOver(card, { pointerType: "mouse", relatedTarget: first });
     act(() => {
       jest.advanceTimersByTime(1000);
@@ -182,17 +191,20 @@ test("a pointer moved straight from a reference onto its card keeps it open, and
     expect(screen.getByRole("tooltip")).toBe(card);
 
     // Back onto the reference, then away to somewhere that is not the card.
+    // The hover bridge reads relatedTarget; user-event's pointer API cannot set it.
     fireEvent.pointerOut(card, { pointerType: "mouse", relatedTarget: first });
+    // The arrival's relatedTarget too: user-event cannot name where the pointer came from.
     fireEvent.pointerOver(first, { pointerType: "mouse", relatedTarget: card });
     act(() => {
       jest.advanceTimersByTime(1000);
     });
     expect(screen.getByRole("tooltip")).toBe(card);
+    // Leaving for somewhere that is not the card: relatedTarget again.
     fireEvent.pointerOut(first, { pointerType: "mouse", relatedTarget: document.body });
     act(() => {
       jest.advanceTimersByTime(1000);
     });
-    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
   } finally {
     view.unmount();
     getIssue.mockRestore();
@@ -205,15 +217,19 @@ test("a card the pointer moved straight onto still closes when the pointer leave
   const view = render(<Harness />);
   try {
     const first = screen.getByRole("link", { name: "first" });
+    // A hover-intent pointer: user-event's hover names no pointerType, which this site needs.
     fireEvent.pointerOver(first, { pointerType: "mouse" });
     act(() => {
       jest.advanceTimersByTime(REF_PREVIEW_OPEN_DELAY_MS);
     });
     const card = screen.getByRole("tooltip");
     await act(async () => {});
+    // The hover bridge reads relatedTarget; user-event's pointer API cannot set it.
     fireEvent.pointerOut(first, { pointerType: "mouse", relatedTarget: card });
+    // The arrival's relatedTarget too: user-event cannot name where the pointer came from.
     fireEvent.pointerOver(card, { pointerType: "mouse", relatedTarget: first });
 
+    // Leaving the card for the page: relatedTarget again.
     fireEvent.pointerOut(card, { pointerType: "mouse", relatedTarget: document.body });
     act(() => {
       jest.advanceTimersByTime(REF_PREVIEW_CLOSE_DELAY_MS - 1);
@@ -222,8 +238,8 @@ test("a card the pointer moved straight onto still closes when the pointer leave
     act(() => {
       jest.advanceTimersByTime(1);
     });
-    expect(screen.queryByRole("tooltip")).toBeNull();
-    expect(first.hasAttribute("aria-describedby")).toBe(false);
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+    expect(first).not.toHaveAttribute("aria-describedby");
   } finally {
     view.unmount();
     getIssue.mockRestore();
@@ -236,47 +252,53 @@ test("a hover that ends before the delay, a touch pointer, or a held button neve
   const view = render(<Harness />);
   try {
     const first = screen.getByRole("link", { name: "first" });
+    // A hover-intent pointer: user-event's hover names no pointerType, which this site needs.
     fireEvent.pointerOver(first, { pointerType: "mouse" });
     act(() => {
       jest.advanceTimersByTime(100);
     });
+    // Leaving the anchor: user-event's unhover names no pointerType either.
     fireEvent.pointerOut(first, { pointerType: "mouse" });
     act(() => {
       jest.advanceTimersByTime(1000);
     });
-    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
 
+    // A touch pointer: user-event's hover is a mouse, with no pointerType to make it a touch.
     fireEvent.pointerOver(first, { pointerType: "touch" });
     act(() => {
       jest.advanceTimersByTime(REF_PREVIEW_OPEN_DELAY_MS + 100);
     });
-    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
 
     // A drag-selection sweeping across the link: primary button held.
+    // A held button: user-event's hover carries no `buttons`, which a drag-sweep needs.
     fireEvent.pointerOver(first, { buttons: 1, pointerType: "mouse" });
     act(() => {
       jest.advanceTimersByTime(REF_PREVIEW_OPEN_DELAY_MS + 100);
     });
-    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
   } finally {
     view.unmount();
     getIssue.mockRestore();
   }
 });
 
-test("Escape closes the open card", () => {
+test("Escape closes the open card", async () => {
   const getIssue = mockIssues();
   jest.useFakeTimers();
+  const user = userOnFakeClock();
   const view = render(<Harness />);
   try {
     const first = screen.getByRole("link", { name: "first" });
+    // A hover-intent pointer: user-event's hover names no pointerType, which this site needs.
     fireEvent.pointerOver(first, { pointerType: "mouse" });
     act(() => {
       jest.advanceTimersByTime(REF_PREVIEW_OPEN_DELAY_MS);
     });
     expect(screen.getByRole("tooltip")).toBeTruthy();
-    fireEvent.keyDown(document.body, { key: "Escape" });
-    expect(screen.queryByRole("tooltip")).toBeNull();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
   } finally {
     view.unmount();
     getIssue.mockRestore();
@@ -290,23 +312,26 @@ test("only one card is open at a time: hovering a second reference replaces the 
   try {
     const first = screen.getByRole("link", { name: "first" });
     const second = screen.getByRole("link", { name: "second" });
+    // A hover-intent pointer: user-event's hover names no pointerType, which this site needs.
     fireEvent.pointerOver(first, { pointerType: "mouse" });
     act(() => {
       jest.advanceTimersByTime(REF_PREVIEW_OPEN_DELAY_MS);
     });
-    expect(screen.getByRole("tooltip").textContent).toContain("CORE-1");
+    expect(screen.getByRole("tooltip")).toHaveTextContent("CORE-1");
 
+    // Leaving the first anchor: user-event's unhover names no pointerType either.
     fireEvent.pointerOut(first, { pointerType: "mouse" });
+    // Arriving at the second: user-event's hover names no pointerType either.
     fireEvent.pointerOver(second, { pointerType: "mouse" });
     act(() => {
       jest.advanceTimersByTime(REF_PREVIEW_OPEN_DELAY_MS);
     });
     const cards = screen.getAllByRole("tooltip");
     expect(cards).toHaveLength(1);
-    expect(cards[0].textContent).toContain("CORE-2");
-    expect(cards[0].textContent).not.toContain("CORE-1");
+    expect(cards[0]).toHaveTextContent("CORE-2");
+    expect(cards[0]).not.toHaveTextContent("CORE-1");
     await act(async () => {});
-    expect(cards[0].textContent).toContain("Second target");
+    expect(cards[0]).toHaveTextContent("Second target");
   } finally {
     view.unmount();
     getIssue.mockRestore();
@@ -322,18 +347,19 @@ test("keyboard focus opens the card at once, scrolling under it repositions rath
       first.focus();
     });
     const card = screen.getByRole("tooltip");
-    expect(card.textContent).toContain("CORE-1");
-    expect(first.getAttribute("aria-describedby")).toBe(card.id);
+    expect(card).toHaveTextContent("CORE-1");
+    expect(first).toHaveAttribute("aria-describedby", card.id);
 
     // Focus that scrolls the anchor into view fires a scroll: the anchor still has focus, so
     // the card stays and follows it.
+    // user-event has no scroll form.
     fireEvent.scroll(document);
     expect(screen.getByRole("tooltip")).toBe(card);
 
     act(() => {
       first.blur();
     });
-    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
   } finally {
     view.unmount();
     getIssue.mockRestore();
@@ -347,26 +373,28 @@ test("keyboard focus on another reference outruns the close the pointer armed", 
   try {
     const first = screen.getByRole("link", { name: "first" });
     const second = screen.getByRole("link", { name: "second" });
+    // A hover-intent pointer: user-event's hover names no pointerType, which this site needs.
     fireEvent.pointerOver(first, { pointerType: "mouse" });
     act(() => {
       jest.advanceTimersByTime(REF_PREVIEW_OPEN_DELAY_MS);
     });
-    expect(screen.getByRole("tooltip").textContent).toContain("CORE-1");
+    expect(screen.getByRole("tooltip")).toHaveTextContent("CORE-1");
 
     // The pointer leaves, arming the close, and the keyboard reaches another reference inside
     // the bridge delay: the new card is the current target, so the close the old one armed must
     // not fire under it.
+    // The hover bridge reads relatedTarget; user-event's pointer API cannot set it.
     fireEvent.pointerOut(first, { pointerType: "mouse", relatedTarget: document.body });
     act(() => {
       jest.advanceTimersByTime(REF_PREVIEW_CLOSE_DELAY_MS - 50);
       second.focus();
     });
-    expect(screen.getByRole("tooltip").textContent).toContain("CORE-2");
+    expect(screen.getByRole("tooltip")).toHaveTextContent("CORE-2");
     act(() => {
       jest.advanceTimersByTime(1000);
     });
-    expect(screen.getByRole("tooltip").textContent).toContain("CORE-2");
-    expect(second.getAttribute("aria-describedby")).toBe(screen.getByRole("tooltip").id);
+    expect(screen.getByRole("tooltip")).toHaveTextContent("CORE-2");
+    expect(second).toHaveAttribute("aria-describedby", screen.getByRole("tooltip").id);
   } finally {
     view.unmount();
     getIssue.mockRestore();
@@ -379,14 +407,16 @@ test("keyboard focus on the anchor the pointer just left outruns its close", () 
   const view = render(<Harness />);
   try {
     const first = screen.getByRole("link", { name: "first" });
+    // A hover-intent pointer: user-event's hover names no pointerType, which this site needs.
     fireEvent.pointerOver(first, { pointerType: "mouse" });
     act(() => {
       jest.advanceTimersByTime(REF_PREVIEW_OPEN_DELAY_MS);
     });
-    expect(screen.getByRole("tooltip").textContent).toContain("CORE-1");
+    expect(screen.getByRole("tooltip")).toHaveTextContent("CORE-1");
 
     // The same anchor, not another one: the cancel is by target identity, and `focus` mints a
     // fresh target for the anchor already shown, so the close the pointer armed is cancelled.
+    // The hover bridge reads relatedTarget; user-event's pointer API cannot set it.
     fireEvent.pointerOut(first, { pointerType: "mouse", relatedTarget: document.body });
     act(() => {
       jest.advanceTimersByTime(REF_PREVIEW_CLOSE_DELAY_MS - 50);
@@ -395,7 +425,7 @@ test("keyboard focus on the anchor the pointer just left outruns its close", () 
     act(() => {
       jest.advanceTimersByTime(1000);
     });
-    expect(screen.getByRole("tooltip").textContent).toContain("CORE-1");
+    expect(screen.getByRole("tooltip")).toHaveTextContent("CORE-1");
   } finally {
     view.unmount();
     getIssue.mockRestore();
@@ -408,6 +438,7 @@ test("two pointers leaving the zone within the delay leave one close timer", () 
   const view = render(<Harness />);
   try {
     const first = screen.getByRole("link", { name: "first" });
+    // A hover-intent pointer: user-event's hover names no pointerType, which this site needs.
     fireEvent.pointerOver(first, { pointerType: "mouse" });
     act(() => {
       jest.advanceTimersByTime(REF_PREVIEW_OPEN_DELAY_MS);
@@ -417,15 +448,19 @@ test("two pointers leaving the zone within the delay leave one close timer", () 
     // A second pointer visits the card and leaves it, arming a close; 50 ms later the mouse
     // leaves the anchor, which re-arms on the same target, and 50 ms after that the mouse comes
     // back. One timer may be outstanding, or the first pointer's close fires under the second.
+    // A second pointer, a pen: user-event's hover is a mouse and names no relatedTarget.
     fireEvent.pointerOver(card, { pointerType: "pen", relatedTarget: document.body });
+    // The pen leaving, by relatedTarget: user-event's pointer API cannot set it.
     fireEvent.pointerOut(card, { pointerType: "pen", relatedTarget: document.body });
     act(() => {
       jest.advanceTimersByTime(50);
     });
+    // The mouse leaving the anchor: relatedTarget again.
     fireEvent.pointerOut(first, { pointerType: "mouse", relatedTarget: document.body });
     act(() => {
       jest.advanceTimersByTime(50);
     });
+    // The mouse coming back: user-event names neither pointerType nor relatedTarget.
     fireEvent.pointerOver(first, { pointerType: "mouse", relatedTarget: document.body });
     act(() => {
       jest.advanceTimersByTime(1000);
@@ -446,32 +481,37 @@ test("a scroll that repositions a keyboard-opened card keeps the close the point
     act(() => {
       first.focus();
     });
-    expect(screen.getByRole("tooltip").textContent).toContain("CORE-1");
+    expect(screen.getByRole("tooltip")).toHaveTextContent("CORE-1");
 
     // The pointer visits the card and leaves it, arming the close; the page then scrolls under
     // the focused anchor, which measures the card again. `reposition` keeps the target, so it
     // keeps the armed close too, and the card still closes when the delay runs out.
     const card = screen.getByRole("tooltip");
+    // The pointer visiting the card: user-event's hover names no relatedTarget.
     fireEvent.pointerOver(card, { pointerType: "mouse", relatedTarget: document.body });
+    // And leaving it: relatedTarget again.
     fireEvent.pointerOut(card, { pointerType: "mouse", relatedTarget: document.body });
+    // user-event has no scroll form.
     fireEvent.scroll(document);
     expect(screen.getByRole("tooltip")).toBe(card);
     act(() => {
       jest.advanceTimersByTime(REF_PREVIEW_CLOSE_DELAY_MS);
     });
-    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
   } finally {
     view.unmount();
     getIssue.mockRestore();
   }
 });
 
-test("a click anywhere closes the card", () => {
+test("a click anywhere closes the card", async () => {
   const getIssue = mockIssues();
   jest.useFakeTimers();
+  const user = userOnFakeClock();
   const view = render(<Harness />);
   try {
     const first = screen.getByRole("link", { name: "first" });
+    // A hover-intent pointer: user-event's hover names no pointerType, which this site needs.
     fireEvent.pointerOver(first, { pointerType: "mouse" });
     act(() => {
       jest.advanceTimersByTime(REF_PREVIEW_OPEN_DELAY_MS);
@@ -480,10 +520,8 @@ test("a click anywhere closes the card", () => {
 
     // The card is not interactive and a click means the reader is doing something else, so the
     // window's own listener closes it - wherever the click landed.
-    act(() => {
-      fireEvent.click(document.body);
-    });
-    expect(screen.queryByRole("tooltip")).toBeNull();
+    await user.click(document.body);
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
   } finally {
     view.unmount();
     getIssue.mockRestore();
@@ -496,13 +534,15 @@ test("scrolling under a hover-opened card closes it", () => {
   const view = render(<Harness />);
   try {
     const first = screen.getByRole("link", { name: "first" });
+    // A hover-intent pointer: user-event's hover names no pointerType, which this site needs.
     fireEvent.pointerOver(first, { pointerType: "mouse" });
     act(() => {
       jest.advanceTimersByTime(REF_PREVIEW_OPEN_DELAY_MS);
     });
     expect(screen.getByRole("tooltip")).toBeTruthy();
+    // user-event has no scroll form.
     fireEvent.scroll(document);
-    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
   } finally {
     view.unmount();
     getIssue.mockRestore();
@@ -519,32 +559,35 @@ test("anchors React did not render are triggers too, and a card closes when its 
   );
   try {
     const markdownAnchor = screen.getByRole("link", { name: "CORE-2" });
+    // A hover-intent pointer: user-event's hover names no pointerType, which this site needs.
     fireEvent.pointerOver(markdownAnchor, { pointerType: "mouse" });
     act(() => {
       jest.advanceTimersByTime(REF_PREVIEW_OPEN_DELAY_MS);
     });
-    expect(screen.getByRole("tooltip").textContent).toContain("CORE-2");
-    expect(markdownAnchor.getAttribute("aria-describedby")).toBe(screen.getByRole("tooltip").id);
+    expect(screen.getByRole("tooltip")).toHaveTextContent("CORE-2");
+    expect(markdownAnchor).toHaveAttribute("aria-describedby", screen.getByRole("tooltip").id);
+    // Leaving the anchor: user-event's unhover names no pointerType either.
     fireEvent.pointerOut(markdownAnchor, { pointerType: "mouse" });
     act(() => {
       jest.advanceTimersByTime(1000);
     });
-    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
 
     // A Proof link mark carries its target in data-dispatch-href, its href sanitized to "".
     const proofAnchor = screen.getByText("the proof mark");
+    // A hover-intent pointer: user-event's hover names no pointerType, which this site needs.
     fireEvent.pointerOver(proofAnchor, { pointerType: "mouse" });
     act(() => {
       jest.advanceTimersByTime(REF_PREVIEW_OPEN_DELAY_MS);
     });
-    expect(screen.getByRole("tooltip").textContent).toContain("CORE-1");
+    expect(screen.getByRole("tooltip")).toHaveTextContent("CORE-1");
 
     // The body re-renders and drops the anchor: no pointerout ever fires, the card still goes.
     // (The removal is observed on a microtask, which the async act flushes.)
     await act(async () => {
       proofAnchor.remove();
     });
-    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
   } finally {
     view.unmount();
     getIssue.mockRestore();
@@ -595,6 +638,7 @@ test("an ask's card heads with its question formatted, not its source", async ()
     </Harness>
   );
   try {
+    // A hover-intent pointer: user-event's hover names no pointerType, which this site needs.
     fireEvent.pointerOver(screen.getByRole("link", { name: "the ask" }), { pointerType: "mouse" });
     act(() => {
       jest.advanceTimersByTime(REF_PREVIEW_OPEN_DELAY_MS);
@@ -603,10 +647,10 @@ test("an ask's card heads with its question formatted, not its source", async ()
     jest.useRealTimers();
     await waitFor(() => expect(card.querySelector("strong")?.textContent).toBe("Ship"));
     expect(card.querySelector("code")?.textContent).toBe("main");
-    expect(card.textContent).toContain("Ship on Friday?");
-    expect(card.textContent).toContain("review is in");
-    expect(card.textContent).not.toContain("**");
-    expect(card.textContent).not.toContain("- review");
+    expect(card).toHaveTextContent("Ship on Friday?");
+    expect(card).toHaveTextContent("review is in");
+    expect(card).not.toHaveTextContent("**");
+    expect(card).not.toHaveTextContent("- review");
     expect(card.querySelector("ul, li")).toBeNull();
   } finally {
     view.unmount();
@@ -643,6 +687,7 @@ test("a document's card shows its owner, name, latest version and text from its 
     </Harness>
   );
   try {
+    // A hover-intent pointer: user-event's hover names no pointerType, which this site needs.
     fireEvent.pointerOver(screen.getByRole("link", { name: "the runbook" }), {
       pointerType: "mouse",
     });
@@ -652,8 +697,8 @@ test("a document's card shows its owner, name, latest version and text from its 
     const card = screen.getByRole("tooltip");
     jest.useRealTimers();
     await waitFor(() => expect(card.querySelector("strong")?.textContent).toBe("pod"));
-    expect(card.textContent).toContain("CORE · Runbook.md");
-    expect(card.textContent).toContain("v4");
+    expect(card).toHaveTextContent("CORE · Runbook.md");
+    expect(card).toHaveTextContent("v4");
     expect(getArtifactText).toHaveBeenCalledWith("doc-9");
     expect(getProjectArtifact).not.toHaveBeenCalled();
   } finally {
@@ -733,18 +778,19 @@ test.each([
       screen.getByRole("link", { name: "the block" }).focus();
     });
     const card = screen.getByRole("tooltip");
-    await waitFor(() => expect(card.textContent).toContain("Design.md"));
+    await waitFor(() => expect(card).toHaveTextContent("Design.md"));
     expect(getReferences).toHaveBeenCalledWith("dispatch://CORE-1/spec#b-p1@v2");
-    expect(card.textContent).toContain("CORE-1 · Design.md");
-    expect(card.textContent).toContain("Version 2");
-    expect(card.textContent).toContain(standing);
-    await waitFor(() => expect(card.textContent).toContain("Ship it on Friday."));
-    expect(card.textContent).not.toContain("Monday");
+    expect(card).toHaveTextContent("CORE-1 · Design.md");
+    expect(card).toHaveTextContent("Version 2");
+    expect(card).toHaveTextContent(standing);
+    await waitFor(() => expect(card).toHaveTextContent("Ship it on Friday."));
+    expect(card).not.toHaveTextContent("Monday");
     // The card names the document from the issue's summary, never the full issue read.
     expect(getIssueSummary).toHaveBeenCalledWith("CORE-1");
     expect(getIssue).not.toHaveBeenCalled();
     // The card opens the version it pins, under the spec's own slug.
-    expect(card.querySelector("a")?.getAttribute("href")).toBe(
+    expect(card.querySelector("a")).toHaveAttribute(
+      "href",
       "/issues/CORE-1/artifacts/design-md?v=2"
     );
   } finally {
@@ -781,10 +827,10 @@ test("an unpinned block's card shows its current text, and a block that cannot b
       screen.getByRole("link", { name: "the block" }).focus();
     });
     const card = screen.getByRole("tooltip");
-    await waitFor(() => expect(card.textContent).toContain("Ship it on Monday."));
-    expect(card.textContent).toContain("CORE-1 · Design.md");
-    expect(card.textContent).not.toContain("Version");
-    expect(card.querySelector("a")?.getAttribute("href")).toBe("/issues/CORE-1/spec#b-p1");
+    await waitFor(() => expect(card).toHaveTextContent("Ship it on Monday."));
+    expect(card).toHaveTextContent("CORE-1 · Design.md");
+    expect(card).not.toHaveTextContent("Version");
+    expect(card.querySelector("a")).toHaveAttribute("href", "/issues/CORE-1/spec#b-p1");
 
     act(() => {
       screen.getByRole("link", { name: "the deleted block" }).focus();
@@ -868,7 +914,7 @@ test.each([
       screen.getByRole("link", { name: "the block" }).focus();
     });
     const card = screen.getByRole("tooltip");
-    await waitFor(() => expect(card.textContent).toContain("Ship it on Friday."));
+    await waitFor(() => expect(card).toHaveTextContent("Ship it on Friday."));
 
     await act(() => queryClient.refetchQueries({ queryKey: ["references", "to"] }));
     expect(getReferences).toHaveBeenCalledTimes(2);
@@ -877,7 +923,7 @@ test.each([
       await waitFor(() => expect(after.textContent).toBe(shortForm(route)));
     } else {
       for (const text of kept) {
-        expect(after.textContent).toContain(text);
+        expect(after).toHaveTextContent(text);
       }
     }
   } finally {
@@ -983,14 +1029,15 @@ test("a comment or message block's card names its item and author, a comment's p
       screen.getByRole("link", { name: "the comment block" }).focus();
     });
     const card = screen.getByRole("tooltip");
-    await waitFor(() => expect(card.textContent).toContain("Beta, as first written."));
+    await waitFor(() => expect(card).toHaveTextContent("Beta, as first written."));
     expect(getReferences).toHaveBeenCalledWith(`dispatch://CORE-1/comment/${comment}#b-b2@v1`);
-    expect(card.textContent).toContain("CORE-1 · Comment · alice");
-    expect(card.textContent).toContain("Revision 1");
-    expect(card.textContent).toContain("Changed in revision 2");
-    expect(card.textContent).not.toContain("as edited");
+    expect(card).toHaveTextContent("CORE-1 · Comment · alice");
+    expect(card).toHaveTextContent("Revision 1");
+    expect(card).toHaveTextContent("Changed in revision 2");
+    expect(card).not.toHaveTextContent("as edited");
     // A comment's revisions have no page: the card opens the live comment at the block.
-    expect(card.querySelector("a")?.getAttribute("href")).toBe(
+    expect(card.querySelector("a")).toHaveAttribute(
+      "href",
       `/issues/CORE-1/comments/${comment}#b-b2`
     );
 
@@ -998,21 +1045,20 @@ test("a comment or message block's card names its item and author, a comment's p
       screen.getByRole("link", { name: "the message block" }).focus();
     });
     await waitFor(() =>
-      expect(screen.getByRole("tooltip").textContent).toContain("The message's first paragraph.")
+      expect(screen.getByRole("tooltip")).toHaveTextContent("The message's first paragraph.")
     );
     const messageCard = screen.getByRole("tooltip");
-    expect(messageCard.textContent).toContain("CORE-1 · Message · bob");
-    expect(messageCard.textContent).not.toContain("Revision");
-    expect(messageCard.querySelector("a")?.getAttribute("href")).toBe(
+    expect(messageCard).toHaveTextContent("CORE-1 · Message · bob");
+    expect(messageCard).not.toHaveTextContent("Revision");
+    expect(messageCard.querySelector("a")).toHaveAttribute(
+      "href",
       `/issues/CORE-1/messages/${message}#b-b1`
     );
 
     act(() => {
       screen.getByRole("link", { name: "the document comment block" }).focus();
     });
-    await waitFor(() =>
-      expect(screen.getByRole("tooltip").textContent).toContain("Comment · alice")
-    );
+    await waitFor(() => expect(screen.getByRole("tooltip")).toHaveTextContent("Comment · alice"));
     expect(getReferences).toHaveBeenCalledWith(
       `dispatch://CORE/artifact/plan-md/comment/${comment}#b-b2`
     );
@@ -1081,15 +1127,13 @@ test("an ask part's card names the ask and its author, its pin a revision, and t
       screen.getByRole("link", { name: "the ask part" }).focus();
     });
     const card = screen.getByRole("tooltip");
-    await waitFor(() =>
-      expect(card.textContent).toContain("Tuesday — Ship once the review lands.")
-    );
+    await waitFor(() => expect(card).toHaveTextContent("Tuesday — Ship once the review lands."));
     expect(getReferences).toHaveBeenCalledWith(`dispatch://CORE-1/ask/${ask}#b-b3@v1`);
-    expect(card.textContent).toContain("CORE-1 · Ask · alice");
-    expect(card.textContent).toContain("Revision 1");
-    expect(card.textContent).toContain("Changed in revision 2");
+    expect(card).toHaveTextContent("CORE-1 · Ask · alice");
+    expect(card).toHaveTextContent("Revision 1");
+    expect(card).toHaveTextContent("Changed in revision 2");
     // An ask's revisions have no page: the card opens the live ask at the part.
-    expect(card.querySelector("a")?.getAttribute("href")).toBe(`/issues/CORE-1/asks/${ask}#b-b3`);
+    expect(card.querySelector("a")).toHaveAttribute("href", `/issues/CORE-1/asks/${ask}#b-b3`);
     expect(getAsk).not.toHaveBeenCalled();
     expect(getIssue).not.toHaveBeenCalled();
     expect(getIssueSummary).not.toHaveBeenCalled();
@@ -1154,6 +1198,7 @@ test("a comment card names its agent by its current title and state, without a s
     </Harness>
   );
   try {
+    // A hover-intent pointer: user-event's hover names no pointerType, which this site needs.
     fireEvent.pointerOver(screen.getByRole("link", { name: "the comment" }), {
       pointerType: "mouse",
     });
@@ -1166,8 +1211,8 @@ test("a comment card names its agent by its current title and state, without a s
       expect(card.querySelector('[data-agent-name="ses-hover"]')?.textContent).toBe("Current title")
     );
     const agent = card.querySelector('[data-agent-name="ses-hover"]');
-    expect(agent?.getAttribute("data-agent-state")).toBe("running");
-    expect(agent?.querySelector('[role="img"]')?.getAttribute("aria-label")).toBe("Running");
+    expect(agent).toHaveAttribute("data-agent-state", "running");
+    expect(agent?.querySelector('[role="img"]')).toHaveAttribute("aria-label", "Running");
     expect(card.querySelectorAll("a")).toHaveLength(1);
   } finally {
     view.unmount();
