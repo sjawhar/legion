@@ -65,7 +65,7 @@ other change to the head voids it.
   cancelled results again and stays red. GitHub refuses a re-run while an attempt of that run is
   still in progress: wait for it. When no
   run at the head holds the job, or nothing will run it (a check only a commit status reports, a
-  workflow another repository defines), tell the architect and do not approve.
+  workflow another repository defines), tell the architect; withholding approval is `REQUEST_CHANGES`.
   Approval is refused while any `before_merge` check of the issue's own Verification document has no passing result that is current at the head being reviewed: `REQUEST_CHANGES` naming each such check by its block id, and `dispatch results --issue <issue>` is the read that decides it.
   An issue with no Verification document, or whose Verification document holds no `before_merge` check, is a gap you name in the review body, never a review that asks for changes: say which of the two it is, and tell the architect, who writes the checks. Your own findings and the checks that do exist still decide the review, and on an issue that has none the architect's acceptance is the gate.
   A result is current at that head while the head is the head of an open pull request, or the final head of a merged one, attributed to the check's own issue. A child's pull request never makes a root check's result current, and a child never records the result that proves a root's check. A child that carries part of a root's requirement proves it with a check on the child's own Verification document whose `serves` names that requirement, and that result is current at the child's head. A root's own checks are proven at the root's own head, or on the default branch for an `after_merge` check, in the root's last round.

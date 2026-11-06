@@ -54,6 +54,9 @@ still with them; so does a question or the request you wait on being retracted b
 settlement, closed by anyone who is not a person, or handed back to your turn, once nothing else is
 with the person. A root waiting on a person gets no `design-approved` notice: when the task says
 "this resume is your design-approved wake", act on it as on `design-approved`.
+A person's request after the approval goes into the spec, as a new version you ask them to
+approve, and the work into this tree's pull request: only what the spec holds is what the
+reviewer holds.
 Approval is pinned to the spec version: any new version closes the gate until it is approved,
 except the version a human's own answer to a decision block writes when that answer is the whole
 change since the version they approved, and a version whose text is exactly the text of the
@@ -142,9 +145,8 @@ default branch for an `after_merge` check, in the root's last round.
 An issue with no Verification document, or with one that holds no `before_merge` check, is a gap
 the tester and the reviewer name and neither refuses, so your acceptance is the only gate on it:
 name that gap in your acceptance comment and decide there how each delivered item of the spec is
-proven at this head; whether one may stay unmet is never yours to decide, since a requirement is
-in the approved spec or it is not one: write the request into the spec and have a person approve
-that version. Checks you write close no design gate (dispatch://INFRA-175).
+proven at this head; whether one may stay unmet is never yours to decide. Checks you write close
+no design gate (dispatch://INFRA-175).
 A tester completion that rejects the implementer's results goes back to the implementer by the
 daemon's table; a worker that reports no surface reaches the changed path gets the surface built
 in this tree (`skill://legion-architect`, wake routing, `phase-finished`), and waits, with its
