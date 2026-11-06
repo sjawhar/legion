@@ -52,6 +52,13 @@ function flowchart(lead: string, from: string, to: string): string {
   return `${lead}\n\n\`\`\`mermaid\ngraph TD\n  ${from} --> ${to}\n\`\`\`\n`;
 }
 
+/** The agent whose comment the past-version row anchors, so the comment is a session's rather
+ *  than the reader's own. */
+const session = {
+  actor: { id: "e2e-mermaid-agent", kind: "session" as const },
+  as: "agent" as const,
+};
+
 /** A document of `lead`, a vertical flowchart of 21 nodes in a chain (drawn taller than any
  *  project's viewport), 30 filler paragraphs and then the paragraph `target`, so `target` sits
  *  below the viewport when the page opens and the drawn diagram pushes it further down. */
@@ -663,6 +670,52 @@ test("a reader who scrolls after a block link lands is not pulled back once the 
     await sleep(PULL_BACK_MARGIN_MS);
     expect(await page.evaluate(() => document.scrollingElement?.scrollTop)).toBe(scrolled);
     await expect(paragraph).not.toBeInViewport();
+  } finally {
+    await alice.close();
+  }
+});
+
+// The other call site of `refocusAfterDiagrams`: `VersionView.tsx:127` refocuses a highlighted
+// mark once a diagram above it has drawn, where the row above drives `ProofDocument`'s call. No
+// unit test holds a diagram's draw pending against a version view, and the deep-links row that
+// lands a past version's comment link opens a document with no diagram, so this row is the only
+// test of that refocus.
+// SLOW(>=2s): one real draw of the 21-node chain, which must be taller than the viewport for the
+// mark's landing to be worth proving; the worker draws it for real and no timer is waited on.
+test("a past version's highlighted mark lands on its block once a diagram above it draws", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: tallDocument("Versioned document:", "Target paragraph holds the quoted words."),
+    title: "Highlighted mark below a diagram",
+  });
+  const comment = await createComment(
+    issue.key,
+    { anchor: { artifact: "spec", quote: "quoted words" }, body: "Read this." },
+    session
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await holdMermaidWorkers(page);
+    await page.goto(
+      `/issues/${issue.key}/artifact/spec?v=1&comment=${encodeURIComponent(comment.id)}`
+    );
+    const versionView = page.getByRole("region", { name: "Document version 1" });
+    const highlight = versionView.locator(`[data-id="${comment.id}"]`);
+    const diagram = diagramIn(versionView);
+    await expect(highlight).toHaveText("quoted words");
+    // The first landing holds before any diagram draws: the version's editor mounts once, so its
+    // one scroll runs after its content has laid out.
+    await expect(highlight).toBeInViewport();
+    await expect(diagram).toHaveCount(0);
+    await withoutScrollAnchoring(page);
+    await page.evaluate(() => window.__releaseMermaid?.());
+    await expect(diagram).toBeVisible();
+    await expect(highlight).toBeInViewport();
   } finally {
     await alice.close();
   }
