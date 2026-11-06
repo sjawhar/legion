@@ -16,9 +16,11 @@ import (
 // concurrent start or an operator lowered stays below the deployment's settings.
 const defaultKeepInterval = 30 * time.Second
 
-// withKeepInterval sets the keeper's period in place of defaultKeepInterval, so a test sees a
-// period pass without waiting one.
-func withKeepInterval(interval time.Duration) ConnectOption {
+// WithKeepInterval sets the keeper's period in place of defaultKeepInterval, so a test sees a
+// period pass without waiting one. It is exported for the tests of the programs that connect
+// through this package, as WithReconnectErrClock is: no deployment sets it, and no caller outside
+// a test may.
+func WithKeepInterval(interval time.Duration) ConnectOption {
 	return clientOption(func(o *connectOpts) { o.keepInterval = interval })
 }
 

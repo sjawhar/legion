@@ -1,5 +1,11 @@
 # Changelog
 
+## [29.16.0] - 2026-11-06
+
+### Changed
+
+- The comment delivery audit's two psql runs open one read-only transaction on the command line (`--single-transaction -q -c 'SET TRANSACTION READ ONLY'`) in place of a read-only setting made for the whole session, which a server that pools in transaction mode keeps on the backend after the connection goes back to the pool. The SQL files and the Go code that embeds them are unchanged.
+
 ## [29.15.1] - 2026-11-05
 
 ### Added
