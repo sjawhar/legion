@@ -11,6 +11,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	legionclaim "github.com/sjawhar/legion/daemon/internal/claim" // main_test.go's `claim` helper holds the bare name
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
@@ -174,7 +175,7 @@ func TestGitCredentialAnswersFromTheOwnersDirectory(t *testing.T) {
 				if value, ok := tc.env[name]; ok {
 					t.Setenv(name, value)
 				} else {
-					unsetenv(t, name)
+					fixtureenv.Unset(t, name)
 				}
 			}
 			code, stdout, stderr := runGitCredentialHere(t, tc.stdin, tc.args...)

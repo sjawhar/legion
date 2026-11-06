@@ -640,7 +640,7 @@ func TestHandoffCompleteHoldsTheCompletionToTheRecordItNames(t *testing.T) {
 			says: []string{"written by session ses_someone_else, not by this claim's session ses_planner_LEGION-208", "dispatch handoff-write --issue LEGION-208 --phase plan"},
 		},
 		{
-			name: "a record the import wrote under the daemon's session", status: http.StatusForbidden, code: "HANDOFF_SESSION_MISMATCH",
+			name: "a record carried from before handoffs moved to Dispatch, under the daemon's session", status: http.StatusForbidden, code: "HANDOFF_SESSION_MISMATCH",
 			request: func(h *harness, _ string) HandoffCompleteRequest {
 				return HandoffCompleteRequest{HandoffID: h.writeHandoffAs("LEGION-208", "plan", 1, "legion-daemon:LEGION"), HandoffVersion: 1}
 			},

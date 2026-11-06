@@ -24,9 +24,7 @@ bookmark. Make only path-scoped logical commits with
 `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`. Each red test you write goes in the
 repository's own test suite as its own commit, and the `evidence` of its `failures` entry names
 the test and the command that shows it failing. Push your red tests before you complete, as the
-daemon part below says; your handoff is never a commit. A push refused because the handoff
-import's commit moved `legion/<issue>@origin` is cured by a fetch and a forward merge with
-`legion/<issue>@origin`, then the push, as the daemon part below says, and never a rewrite.
+daemon part below says; your handoff is never a commit.
 
 ## GitHub attribution
 

@@ -12,6 +12,7 @@ import (
 	"github.com/nats-io/nkeys"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/fixtureenv"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -28,10 +29,7 @@ func seedFile(t *testing.T, contents string) string {
 // unsetNkeyEnvironment clears both seed variables for the test, whatever the shell running it set.
 func unsetNkeyEnvironment(t *testing.T) {
 	t.Helper()
-	for _, name := range []string{"NATS_NKEY_SEED_FILE", "NATS_NKEY_SEED"} {
-		t.Setenv(name, "")
-		os.Unsetenv(name)
-	}
+	fixtureenv.Unset(t, "NATS_NKEY_SEED_FILE", "NATS_NKEY_SEED")
 }
 
 func publishOnce(t *testing.T, client *bus.Client, name string) {

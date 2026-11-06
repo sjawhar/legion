@@ -556,8 +556,10 @@ func (kv KeyValue) Status() (nats.KeyValueStatus, error) {
 // first, and err is then ctx's error; the abandoned call runs on to its own end and its answer is
 // dropped, so a write or a delete it sent may still land after the caller has answered (each
 // caller says why that is safe). A ctx that has already ended starts no call, and a ctx that can
-// never end (context.Background, as every caller that answers no request passes) is simply call,
-// in this goroutine.
+// never end (context.Background, which a caller with no request behind it passes) is simply
+// call, in this goroutine. A background loop is not such a caller: the role claim reaper passes
+// its own loop's ctx, which the listener's shutdown ends under a pass in flight
+// (store.StartRoleClaimReaper).
 func Bounded[T any](ctx context.Context, call func() (T, error)) (value T, answered bool, err error) {
 	if ctx.Done() == nil {
 		value, err = call()
