@@ -43,7 +43,14 @@ commands:
                    a cgroup.jsonl, the file cgroup-merge reads
   cloudsql-cpu     a Cloud SQL instance's CPU over a step's window, from Cloud Monitoring; writes
                    the step's cloudsql-cpu.json
+  pg-statements    reset pg_stat_statements at a step's start, sample the lock waits of pg_locks
+                   over it, and write the step's pg-statements.json when the step ends (SIGTERM)
+  pg-size          the database's size into the step's pg-size.json: -phase start, then -phase end
   curves           CURVES.md, curves.csv, KNEES.md, refine.txt and TREND.md from cluster step directories
+  step-check       one step directory judged against acceptance A3 of dispatch://INFRA-988: every
+                   offered rate of R5 and the unit sessions within 5% of the step's own targets,
+                   no proposal past 30 unit sessions at once, every measurement of R6 present and
+                   a pass or a fail for each criterion of R8; exit 1 on a failed clause
   codepaths        CODEPATHS.md and codepaths.json: a replay step's CPU and memory by code path beside the outage
   backlog          publish envelopes to the sessions' agent subjects (restart-step.sh); writes a JSON summary
   restart-report   the backlog and duplicate report of one restart run (restart-step.sh)
@@ -110,8 +117,14 @@ func main() {
 		err = runVMSample(os.Args[2:])
 	case "cloudsql-cpu":
 		err = runCloudSQLCPU(os.Args[2:])
+	case "pg-statements":
+		err = runPGStatements(os.Args[2:])
+	case "pg-size":
+		err = runPGSize(os.Args[2:])
 	case "curves":
 		err = runCurves(os.Args[2:])
+	case "step-check":
+		err = runStepCheck(os.Args[2:])
 	case "codepaths":
 		err = runCodepaths(os.Args[2:])
 	case "backlog":

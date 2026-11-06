@@ -3,11 +3,14 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -34,20 +37,40 @@ func cloudsqlTokenServer(t *testing.T) *httptest.Server {
 	return srv
 }
 
-// cloudsqlAnswer is Cloud Monitoring's answer to projects.timeSeries.list in its recorded shape:
-// one cloudsql_database series, its points newest first, with the alignment's unit.
+// cloudsqlAnswer is Cloud Monitoring's answer to projects.timeSeries.list for the CPU in its
+// recorded shape: one cloudsql_database series, its points newest first, with the alignment's
+// unit. The CPU is a DOUBLE series, so each point carries doubleValue.
 func cloudsqlAnswer(nextPageToken string, points ...cloudsqlCPUPoint) string {
+	values := make([]cloudsqlPoint, 0, len(points))
+	for _, p := range points {
+		values = append(values, cloudsqlPoint{At: p.At, Value: p.Utilization})
+	}
+	return cloudsqlSeriesAnswer(cloudsqlCPUMetric, false, nextPageToken, values...)
+}
+
+// cloudsqlSeriesAnswer is that answer for any of the three series the command reads. An INT64
+// series -- the memory's bytes and the instance's RAM -- carries int64Value, which protobuf's
+// JSON writes as a string, and a DOUBLE series carries doubleValue.
+func cloudsqlSeriesAnswer(metric string, int64Value bool, nextPageToken string, points ...cloudsqlPoint) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, `{"timeSeries":[{"metric":{"type":%q,"labels":{}},`, cloudsqlCPUMetric)
+	fmt.Fprintf(&b, `{"timeSeries":[{"metric":{"type":%q,"labels":{}},`, metric)
 	fmt.Fprintf(&b, `"resource":{"type":"cloudsql_database","labels":{"database_id":%q,"project_id":%q,"region":"us-central1"}},`,
 		cloudsqlDatabaseID(cloudsqlTestProject, cloudsqlTestInstance), cloudsqlTestProject)
-	b.WriteString(`"metricKind":"GAUGE","valueType":"DOUBLE","points":[`)
+	kind := `"metricKind":"GAUGE","valueType":"DOUBLE","points":[`
+	if int64Value {
+		kind = `"metricKind":"GAUGE","valueType":"INT64","points":[`
+	}
+	b.WriteString(kind)
 	for i, p := range points {
 		if i > 0 {
 			b.WriteString(",")
 		}
-		fmt.Fprintf(&b, `{"interval":{"startTime":%q,"endTime":%q},"value":{"doubleValue":%g}}`,
-			p.At.Add(-cloudsqlAlignment).Format(time.RFC3339), p.At.Format(time.RFC3339), p.Utilization)
+		value := fmt.Sprintf(`{"doubleValue":%g}`, p.Value)
+		if int64Value {
+			value = fmt.Sprintf(`{"int64Value":"%d"}`, int64(p.Value))
+		}
+		fmt.Fprintf(&b, `{"interval":{"startTime":%q,"endTime":%q},"value":%s}`,
+			p.At.Add(-cloudsqlAlignment).Format(time.RFC3339), p.At.Format(time.RFC3339), value)
 	}
 	b.WriteString(`]}],"unit":"10^2.%"`)
 	if nextPageToken != "" {
@@ -55,6 +78,37 @@ func cloudsqlAnswer(nextPageToken string, points ...cloudsqlCPUPoint) string {
 	}
 	b.WriteString("}")
 	return b.String()
+}
+
+// The memory the test instance reports: two points of its total usage, and its RAM.
+var (
+	cloudsqlTestMemory = []cloudsqlPoint{
+		{At: cgWinStart.Add(time.Minute), Value: 20 << 30},
+		{At: cgWinStart.Add(2 * time.Minute), Value: 24 << 30},
+	}
+	cloudsqlTestQuota = []cloudsqlPoint{{At: cgWinStart.Add(time.Minute), Value: 60 << 30}}
+)
+
+// cloudsqlMetricOf is the metric a read's filter names.
+func cloudsqlMetricOf(r *http.Request) string {
+	_, rest, ok := strings.Cut(r.URL.Query().Get("filter"), `metric.type="`)
+	if !ok {
+		return ""
+	}
+	metric, _, _ := strings.Cut(rest, `"`)
+	return metric
+}
+
+// cloudsqlMemoryAnswer answers the two memory reads of a test whose subject is the CPU, so each
+// such test serves the whole command and not only the series it is about.
+func cloudsqlMemoryAnswer(r *http.Request) (string, bool) {
+	switch cloudsqlMetricOf(r) {
+	case cloudsqlMemoryMetric:
+		return cloudsqlSeriesAnswer(cloudsqlMemoryMetric, true, "", cloudsqlTestMemory...), true
+	case cloudsqlMemoryQuotaMetric:
+		return cloudsqlSeriesAnswer(cloudsqlMemoryQuotaMetric, true, "", cloudsqlTestQuota...), true
+	}
+	return "", false
 }
 
 // cloudsqlStepDir is a step directory whose meta.json holds the test window (cgroup_test.go).
@@ -102,6 +156,10 @@ func TestCloudSQLCPUReadsTheWindow(t *testing.T) {
 	}
 	var got *http.Request
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if body, ok := cloudsqlMemoryAnswer(r); ok {
+			fmt.Fprint(w, body)
+			return
+		}
 		got = r
 		fmt.Fprint(w, cloudsqlAnswer("", points...))
 	}))
@@ -173,6 +231,10 @@ func TestCloudSQLCPUReadsTheWindow(t *testing.T) {
 func TestCloudSQLCPUFollowsThePages(t *testing.T) {
 	pages := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if body, ok := cloudsqlMemoryAnswer(r); ok {
+			fmt.Fprint(w, body)
+			return
+		}
 		pages++
 		if token := r.URL.Query().Get("pageToken"); token == "" {
 			fmt.Fprint(w, cloudsqlAnswer("page-2", cloudsqlCPUPoint{At: cgWinStart.Add(2 * time.Minute), Utilization: 0.50}))
@@ -189,6 +251,117 @@ func TestCloudSQLCPUFollowsThePages(t *testing.T) {
 	}
 	if pages != 2 || f.Samples != 2 || math.Abs(f.UtilizationMean-0.375) > 1e-9 {
 		t.Fatalf("read %d pages and %d samples, mean %g; want both pages' points once", pages, f.Samples, f.UtilizationMean)
+	}
+}
+
+// TestCloudSQLCPUReadsMemoryBesideCPU: R6 asks for Postgres's memory beside its CPU, and the
+// instance's memory is a series of its own. The file holds its mean and peak in bytes, from the
+// INT64 points Cloud Monitoring answers with, and the share of the instance's RAM the quota
+// series gives.
+func TestCloudSQLCPUReadsMemoryBesideCPU(t *testing.T) {
+	asked := map[string]url.Values{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked[cloudsqlMetricOf(r)] = r.URL.Query()
+		if body, ok := cloudsqlMemoryAnswer(r); ok {
+			fmt.Fprint(w, body)
+			return
+		}
+		fmt.Fprint(w, cloudsqlAnswer("", cloudsqlCPUPoint{At: cgWinStart.Add(time.Minute), Utilization: 0.25}))
+	}))
+	t.Cleanup(srv.Close)
+	out, f, err := runCloudSQLCPUAgainst(t, srv.URL)
+	if err != nil {
+		t.Fatalf("cloudsql-cpu: %v", err)
+	}
+	for _, metric := range []string{cloudsqlCPUMetric, cloudsqlMemoryMetric, cloudsqlMemoryQuotaMetric} {
+		q, ok := asked[metric]
+		if !ok {
+			t.Fatalf("the command read %v, not %s", slices.Sorted(maps.Keys(asked)), metric)
+		}
+		if want := cloudsqlFilter(metric, cloudsqlDatabaseID(cloudsqlTestProject, cloudsqlTestInstance)); q.Get("filter") != want {
+			t.Errorf("the read of %s carries the filter %q, want %q", metric, q.Get("filter"), want)
+		}
+		if q.Get("interval.startTime") != cgWinStart.Format(time.RFC3339) || q.Get("aggregation.alignmentPeriod") != "60s" {
+			t.Errorf("the read of %s asks for %s to %s at %s, want the step's window at the 60 s alignment",
+				metric, q.Get("interval.startTime"), q.Get("interval.endTime"), q.Get("aggregation.alignmentPeriod"))
+		}
+	}
+	if f.MemoryMetric != cloudsqlMemoryMetric || f.MemorySamples != 2 {
+		t.Fatalf("%s names %s with %d samples, want the memory series' two points", out, f.MemoryMetric, f.MemorySamples)
+	}
+	if want := float64(22 << 30); f.MemoryBytesMean != want {
+		t.Errorf("memory_bytes_mean is %g, want %g: the mean of the window's points", f.MemoryBytesMean, want)
+	}
+	if want := float64(24 << 30); f.MemoryBytesMax != want {
+		t.Errorf("memory_bytes_max is %g, want %g", f.MemoryBytesMax, want)
+	}
+	if f.MemoryLimitBytes == nil || *f.MemoryLimitBytes != float64(60<<30) {
+		t.Fatalf("memory_limit_bytes is %v, want the instance's RAM from the quota series", f.MemoryLimitBytes)
+	}
+	if f.MemoryUtilizationMean == nil || math.Abs(*f.MemoryUtilizationMean-22.0/60.0) > 1e-9 {
+		t.Errorf("memory_utilization_mean is %v, want the mean memory as a share of the quota", f.MemoryUtilizationMean)
+	}
+	if len(f.MemoryPoints) != 2 || f.MemoryPoints[0].Bytes != float64(20<<30) || f.MemoryPoints[0].At.IsZero() {
+		t.Errorf("the memory points are %+v, want the window's own, oldest first", f.MemoryPoints)
+	}
+	// The CPU is still what it was: the memory is read beside it, not instead of it.
+	if f.Samples != 1 || f.CoresMean != 4 {
+		t.Errorf("the file holds %d CPU samples and %g cores mean, want the CPU this read answered", f.Samples, f.CoresMean)
+	}
+}
+
+// TestCloudSQLCPURefusesAWindowWithNoMemory: a window Cloud Monitoring holds no memory point for
+// is refused by the memory series' name, and writes no file. Postgres at 0 bytes would pass a
+// step that measured no memory at all.
+func TestCloudSQLCPURefusesAWindowWithNoMemory(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if cloudsqlMetricOf(r) == cloudsqlMemoryMetric {
+			fmt.Fprint(w, `{"unit":"By"}`)
+			return
+		}
+		if body, ok := cloudsqlMemoryAnswer(r); ok {
+			fmt.Fprint(w, body)
+			return
+		}
+		fmt.Fprint(w, cloudsqlAnswer("", cloudsqlCPUPoint{At: cgWinStart.Add(time.Minute), Utilization: 0.25}))
+	}))
+	t.Cleanup(srv.Close)
+	out, _, err := runCloudSQLCPUAgainst(t, srv.URL)
+	if err == nil {
+		t.Fatal("a window with no memory sample was not refused")
+	}
+	if !strings.Contains(err.Error(), cloudsqlMemoryMetric) || !strings.Contains(err.Error(), "holds no sample") {
+		t.Errorf("the refusal %q does not name the memory series it found nothing of", err)
+	}
+	if _, statErr := os.Stat(out); statErr == nil {
+		t.Errorf("a refused read wrote %s", out)
+	}
+}
+
+// TestCloudSQLCPUWritesTheMemoryWithNoQuota: an instance whose quota series answered nothing
+// still records its memory; the share of a quota nobody reported is null, never 0.
+func TestCloudSQLCPUWritesTheMemoryWithNoQuota(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch cloudsqlMetricOf(r) {
+		case cloudsqlMemoryQuotaMetric:
+			fmt.Fprint(w, `{"unit":"By"}`)
+		case cloudsqlMemoryMetric:
+			fmt.Fprint(w, cloudsqlSeriesAnswer(cloudsqlMemoryMetric, true, "", cloudsqlTestMemory...))
+		default:
+			fmt.Fprint(w, cloudsqlAnswer("", cloudsqlCPUPoint{At: cgWinStart.Add(time.Minute), Utilization: 0.25}))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	_, f, err := runCloudSQLCPUAgainst(t, srv.URL)
+	if err != nil {
+		t.Fatalf("cloudsql-cpu: %v", err)
+	}
+	if f.MemoryBytesMean != float64(22<<30) {
+		t.Errorf("memory_bytes_mean is %g without a quota, want the memory the instance reported", f.MemoryBytesMean)
+	}
+	if f.MemoryLimitBytes != nil || f.MemoryUtilizationMean != nil {
+		t.Errorf("the file holds a limit of %v and a share of %v for a quota series that answered nothing",
+			f.MemoryLimitBytes, f.MemoryUtilizationMean)
 	}
 }
 

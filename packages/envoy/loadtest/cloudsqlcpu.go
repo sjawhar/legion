@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -20,6 +21,21 @@ import (
 // the instance's vCPUs in use, a gauge Cloud SQL writes every 60 s. The database of the load-test
 // deployment is a Cloud SQL instance, not a container, so this is where its CPU comes from.
 const cloudsqlCPUMetric = "cloudsql.googleapis.com/database/cpu/utilization"
+
+// cloudsqlMemoryMetric is Cloud Monitoring's metric for the memory the instance's database uses:
+// "Total RAM usage in bytes. This metric reports the RAM usage of the database process, including
+// the buffer/cache", a gauge written every 60 s like the CPU
+// (https://cloud.google.com/monitoring/api/metrics_gcp_c, cloudsql). It is the one R6's "memory
+// of … Postgres" means beside the containers' memory, which is each container's own working set,
+// page cache included; database/memory/usage, the other candidate, leaves the buffer cache out
+// and so reads far below what the instance is actually holding.
+const cloudsqlMemoryMetric = "cloudsql.googleapis.com/database/memory/total_usage"
+
+// cloudsqlMemoryQuotaMetric is the instance's RAM: "Maximum RAM size in bytes", the limit the
+// memory above is a share of, as limit_cores is for the CPU. A window with no quota point is not
+// a failure of the read: the memory is the reading R6 asks for, and the share of the quota is
+// what the file can add when the instance reports one.
+const cloudsqlMemoryQuotaMetric = "cloudsql.googleapis.com/database/memory/quota"
 
 // cloudsqlAlignment is the alignment period the read asks for: 60 s, the period Cloud SQL writes
 // this metric at, so one aligned point stands for one written sample and no point is invented.
@@ -41,10 +57,11 @@ const cloudsqlDefaultVCPUs = 16.0
 // step's window is at most a few hundred points, so a longer walk is a paging loop, not a window.
 const cloudsqlPageMax = 32
 
-// cloudsqlCPUFile is a step's cloudsql-cpu.json: the Cloud SQL instance's CPU over the step's
-// window, from Cloud Monitoring. The instance is not a container, so the file carries the two
-// figures the pass rule judges a container by (cores_mean against limit_cores, as cgroup.json's
-// roles do) beside the fraction Cloud Monitoring reports, and every sample behind them.
+// cloudsqlCPUFile is a step's cloudsql-cpu.json: the Cloud SQL instance's CPU and memory over the
+// step's window, from Cloud Monitoring. The instance is not a container, so the file carries the
+// two figures the pass rule judges a container by (cores_mean against limit_cores, as
+// cgroup.json's roles do) beside the fraction Cloud Monitoring reports, and every sample behind
+// them; R6 asks for Postgres's memory beside its CPU, and memory_bytes_mean is that reading.
 type cloudsqlCPUFile struct {
 	Project     string    `json:"project"`
 	Instance    string    `json:"instance"`
@@ -67,6 +84,20 @@ type cloudsqlCPUFile struct {
 	CoresMean    float64            `json:"cores_mean"`
 	CoresPeak60s float64            `json:"cores_peak_60s"`
 	Points       []cloudsqlCPUPoint `json:"points"`
+	// The memory of the same instance over the same window: which series it is, how many points
+	// it had, and the mean and peak of them. A window Cloud Monitoring holds no memory point for
+	// is refused, never written as 0 bytes.
+	MemoryMetric    string  `json:"memory_metric"`
+	MemorySamples   int     `json:"memory_samples"`
+	MemoryBytesMean float64 `json:"memory_bytes_mean"`
+	MemoryBytesMax  float64 `json:"memory_bytes_max"`
+	// MemoryLimitBytes is the instance's RAM, from the quota series, and
+	// MemoryUtilizationMean the mean memory as a share of it. Both are null on a window the
+	// quota series holds no point for: the memory above is the reading, and its share of a
+	// quota nobody reported is not 0.
+	MemoryLimitBytes      *float64              `json:"memory_limit_bytes"`
+	MemoryUtilizationMean *float64              `json:"memory_utilization_mean"`
+	MemoryPoints          []cloudsqlMemoryPoint `json:"memory_points"`
 }
 
 // cloudsqlCPUPoint is one aligned sample: the end of its alignment period, the fraction, and the
@@ -77,7 +108,22 @@ type cloudsqlCPUPoint struct {
 	Cores       float64   `json:"cores"`
 }
 
-// cloudsqlTimeSeriesAnswer is the part of projects.timeSeries.list's answer this read needs.
+// cloudsqlMemoryPoint is one aligned memory sample.
+type cloudsqlMemoryPoint struct {
+	At    time.Time `json:"at"`
+	Bytes float64   `json:"bytes"`
+}
+
+// cloudsqlPoint is one aligned point of any of these series, as the read gives it: the end of its
+// alignment period and its value, whichever of the API's value fields carried it.
+type cloudsqlPoint struct {
+	At    time.Time
+	Value float64
+}
+
+// cloudsqlTimeSeriesAnswer is the part of projects.timeSeries.list's answer this read needs. A
+// DOUBLE series (the CPU's fraction) carries doubleValue and an INT64 series (the memory's bytes)
+// int64Value, which protobuf's JSON writes as a string, so both are read.
 type cloudsqlTimeSeriesAnswer struct {
 	TimeSeries []struct {
 		Points []struct {
@@ -85,21 +131,38 @@ type cloudsqlTimeSeriesAnswer struct {
 				StartTime time.Time `json:"startTime"`
 				EndTime   time.Time `json:"endTime"`
 			} `json:"interval"`
-			Value struct {
-				DoubleValue *float64 `json:"doubleValue"`
-			} `json:"value"`
+			Value cloudsqlValue `json:"value"`
 		} `json:"points"`
 	} `json:"timeSeries"`
 	NextPageToken string `json:"nextPageToken"`
+}
+
+// cloudsqlValue is one point's value in either of the two forms these series use.
+type cloudsqlValue struct {
+	DoubleValue *float64 `json:"doubleValue"`
+	Int64Value  *string  `json:"int64Value"`
+}
+
+// number is the value as a float, and false when the point carries neither form or an int64Value
+// that is not a number.
+func (v cloudsqlValue) number() (float64, bool) {
+	if v.DoubleValue != nil {
+		return *v.DoubleValue, true
+	}
+	if v.Int64Value != nil {
+		n, err := strconv.ParseFloat(*v.Int64Value, 64)
+		return n, err == nil
+	}
+	return 0, false
 }
 
 // cloudsqlDatabaseID is the database_id label of a Cloud SQL instance's monitored resource,
 // <project>:<instance>.
 func cloudsqlDatabaseID(project, instance string) string { return project + ":" + instance }
 
-// cloudsqlFilter selects one instance's CPU utilization series.
-func cloudsqlFilter(databaseID string) string {
-	return fmt.Sprintf("metric.type=%q AND resource.labels.database_id=%q", cloudsqlCPUMetric, databaseID)
+// cloudsqlFilter selects one instance's series of one metric.
+func cloudsqlFilter(metric, databaseID string) string {
+	return fmt.Sprintf("metric.type=%q AND resource.labels.database_id=%q", metric, databaseID)
 }
 
 // cloudsqlMetadataToken is the access token of this pod's Google identity, from the metadata
@@ -135,20 +198,23 @@ func cloudsqlMetadataToken(ctx context.Context, client *http.Client, tokenURL st
 	return answer.AccessToken, nil
 }
 
-// readCloudSQLCPU is the instance's aligned CPU utilization points from ws to we, oldest first.
+// readCloudSQLSeries is the instance's aligned points of one metric from ws to we, oldest first.
 // It calls projects.timeSeries.list, the API's GET of a project's time series with the filter,
 // the interval and the aggregation as query parameters, following its pages.
 //
 // The read is refused by name, never written as a zero: a 403 (an identity that may not read the
 // project's time series), a 404 (no such project or route), any other status, an answer that does
-// not decode, a filter that matched more than one instance, and a window with no point at all.
-func readCloudSQLCPU(ctx context.Context, client *http.Client, base, token, project, databaseID string, ws, we time.Time) ([]cloudsqlCPUPoint, error) {
+// not decode, a filter that matched more than one instance, and a point with no value. A window
+// with no point at all is the empty slice, which each caller judges: a window with no CPU and no
+// memory is a failed reading (errNoCloudSQLSample), and one with no quota point is a file
+// without the share of the quota.
+func readCloudSQLSeries(ctx context.Context, client *http.Client, base, token, project, metric, databaseID string, ws, we time.Time) ([]cloudsqlPoint, error) {
 	endpoint := strings.TrimSuffix(base, "/") + "/v3/projects/" + url.PathEscape(project) + "/timeSeries"
-	var points []cloudsqlCPUPoint
+	var points []cloudsqlPoint
 	pageToken := ""
 	for page := 1; ; page++ {
 		q := url.Values{}
-		q.Set("filter", cloudsqlFilter(databaseID))
+		q.Set("filter", cloudsqlFilter(metric, databaseID))
 		q.Set("interval.startTime", ws.UTC().Format(time.RFC3339))
 		q.Set("interval.endTime", we.UTC().Format(time.RFC3339))
 		q.Set("aggregation.alignmentPeriod", fmt.Sprintf("%ds", int(cloudsqlAlignment.Seconds())))
@@ -163,38 +229,39 @@ func readCloudSQLCPU(ctx context.Context, client *http.Client, base, token, proj
 		req.Header.Set("Authorization", "Bearer "+token)
 		resp, err := client.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("the read of %s for %s failed: %w", cloudsqlCPUMetric, databaseID, err)
+			return nil, fmt.Errorf("the read of %s for %s failed: %w", metric, databaseID, err)
 		}
 		b, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<22))
 		resp.Body.Close()
 		if readErr != nil {
-			return nil, fmt.Errorf("the read of %s for %s failed: %w", cloudsqlCPUMetric, databaseID, readErr)
+			return nil, fmt.Errorf("the read of %s for %s failed: %w", metric, databaseID, readErr)
 		}
 		switch resp.StatusCode {
 		case http.StatusOK:
 		case http.StatusForbidden:
 			return nil, fmt.Errorf("Cloud Monitoring answered 403 to the read of %s for %s: this pod's Google identity may not read project %s's time series: %s",
-				cloudsqlCPUMetric, databaseID, project, trunc(b))
+				metric, databaseID, project, trunc(b))
 		case http.StatusNotFound:
 			return nil, fmt.Errorf("Cloud Monitoring answered 404 to the read of %s for %s: project %s or the timeSeries route is not there: %s",
-				cloudsqlCPUMetric, databaseID, project, trunc(b))
+				metric, databaseID, project, trunc(b))
 		default:
 			return nil, fmt.Errorf("Cloud Monitoring answered %d to the read of %s for %s: %s",
-				resp.StatusCode, cloudsqlCPUMetric, databaseID, trunc(b))
+				resp.StatusCode, metric, databaseID, trunc(b))
 		}
 		var answer cloudsqlTimeSeriesAnswer
 		if err := json.Unmarshal(b, &answer); err != nil {
 			return nil, fmt.Errorf("Cloud Monitoring's answer for %s did not decode as a timeSeries list: %w: %s", databaseID, err, trunc(b))
 		}
 		if len(answer.TimeSeries) > 1 {
-			return nil, fmt.Errorf("the filter for %s matched %d series, not one; name one instance", databaseID, len(answer.TimeSeries))
+			return nil, fmt.Errorf("the filter for %s matched %d series of %s, not one; name one instance", databaseID, len(answer.TimeSeries), metric)
 		}
 		for _, series := range answer.TimeSeries {
 			for i, p := range series.Points {
-				if p.Value.DoubleValue == nil {
-					return nil, fmt.Errorf("point %d of Cloud Monitoring's series for %s carries no doubleValue", i, databaseID)
+				v, ok := p.Value.number()
+				if !ok {
+					return nil, fmt.Errorf("point %d of Cloud Monitoring's %s series for %s carries no doubleValue and no int64Value", i, metric, databaseID)
 				}
-				points = append(points, cloudsqlCPUPoint{At: p.Interval.EndTime, Utilization: *p.Value.DoubleValue})
+				points = append(points, cloudsqlPoint{At: p.Interval.EndTime, Value: v})
 			}
 		}
 		if answer.NextPageToken == "" {
@@ -205,17 +272,21 @@ func readCloudSQLCPU(ctx context.Context, client *http.Client, base, token, proj
 		}
 		pageToken = answer.NextPageToken
 	}
-	if len(points) == 0 {
-		return nil, fmt.Errorf("Cloud Monitoring holds no sample of %s for %s from %s to %s: a window with no sample is not 0 cores",
-			cloudsqlCPUMetric, databaseID, ws.UTC().Format(time.RFC3339), we.UTC().Format(time.RFC3339))
-	}
-	slices.SortFunc(points, func(a, b cloudsqlCPUPoint) int { return a.At.Compare(b.At) })
+	slices.SortFunc(points, func(a, b cloudsqlPoint) int { return a.At.Compare(b.At) })
 	return points, nil
 }
 
+// errNoCloudSQLSample refuses a window Cloud Monitoring holds no point of a reading for. The
+// step's file must not carry a 0 for it: an instance nobody measured is not an idle instance.
+func errNoCloudSQLSample(metric, databaseID string, ws, we time.Time) error {
+	return fmt.Errorf("Cloud Monitoring holds no sample of %s for %s from %s to %s: a window with no sample is not 0",
+		metric, databaseID, ws.UTC().Format(time.RFC3339), we.UTC().Format(time.RFC3339))
+}
+
 // summarizeCloudSQLCPU is the file the step directory keeps: the window, the mean and peak of the
-// aligned fractions, and each of them as cores of the stated vCPU count.
-func summarizeCloudSQLCPU(project, instance string, ws, we time.Time, vcpus float64, points []cloudsqlCPUPoint) cloudsqlCPUFile {
+// aligned fractions, each of them as cores of the stated vCPU count, and the same window's memory
+// in bytes, as a share of the instance's RAM where the quota series answered.
+func summarizeCloudSQLCPU(project, instance string, ws, we time.Time, vcpus float64, points, memory, quota []cloudsqlPoint) cloudsqlCPUFile {
 	f := cloudsqlCPUFile{
 		Project:          project,
 		Instance:         instance,
@@ -228,16 +299,32 @@ func summarizeCloudSQLCPU(project, instance string, ws, we time.Time, vcpus floa
 		Samples:          len(points),
 		LimitCores:       vcpus,
 		Points:           make([]cloudsqlCPUPoint, 0, len(points)),
+		MemoryMetric:     cloudsqlMemoryMetric,
+		MemorySamples:    len(memory),
+		MemoryPoints:     make([]cloudsqlMemoryPoint, 0, len(memory)),
 	}
 	sum := 0.0
 	for _, p := range points {
-		p.Cores = p.Utilization * vcpus
-		sum += p.Utilization
-		f.UtilizationMax = max(f.UtilizationMax, p.Utilization)
-		f.Points = append(f.Points, p)
+		sum += p.Value
+		f.UtilizationMax = max(f.UtilizationMax, p.Value)
+		f.Points = append(f.Points, cloudsqlCPUPoint{At: p.At, Utilization: p.Value, Cores: p.Value * vcpus})
 	}
 	f.UtilizationMean = sum / float64(len(points))
 	f.CoresMean, f.CoresPeak60s = f.UtilizationMean*vcpus, f.UtilizationMax*vcpus
+	bytes := 0.0
+	for _, p := range memory {
+		bytes += p.Value
+		f.MemoryBytesMax = max(f.MemoryBytesMax, p.Value)
+		f.MemoryPoints = append(f.MemoryPoints, cloudsqlMemoryPoint{At: p.At, Bytes: p.Value})
+	}
+	f.MemoryBytesMean = bytes / float64(len(memory))
+	if len(quota) > 0 {
+		limit := 0.0
+		for _, p := range quota {
+			limit = max(limit, p.Value)
+		}
+		f.MemoryLimitBytes, f.MemoryUtilizationMean = new(limit), new(f.MemoryBytesMean/limit)
+	}
 	return f
 }
 
@@ -252,8 +339,9 @@ func runCloudSQLCPU(args []string) error {
 	tokenURL := fs.String("token-url", cloudsqlTokenURL, "where the access token is read, for a test server")
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "usage: loadgen cloudsql-cpu -step <step dir> -project <project> -instance <name> [-out <file>] [-vcpus 16]")
-		fmt.Fprintln(fs.Output(), "Reads "+cloudsqlCPUMetric+" over the step's window, aligned to 60 s, with the")
-		fmt.Fprintln(fs.Output(), "metadata server's access token, and writes the mean and every sample as cloudsql-cpu.json.")
+		fmt.Fprintln(fs.Output(), "Reads "+cloudsqlCPUMetric+" and "+cloudsqlMemoryMetric+" over the step's")
+		fmt.Fprintln(fs.Output(), "window, aligned to 60 s, with the metadata server's access token, and writes their means")
+		fmt.Fprintln(fs.Output(), "and every sample as cloudsql-cpu.json.")
 		fs.PrintDefaults()
 	}
 	_ = fs.Parse(args)
@@ -286,11 +374,25 @@ func runCloudSQLCPU(args []string) error {
 		return err
 	}
 	databaseID := cloudsqlDatabaseID(*project, *instance)
-	points, err := readCloudSQLCPU(ctx, shortClient, *api, token, *project, databaseID, ws, we)
+	points, err := readCloudSQLSeries(ctx, shortClient, *api, token, *project, cloudsqlCPUMetric, databaseID, ws, we)
 	if err != nil {
 		return err
 	}
-	f := summarizeCloudSQLCPU(*project, *instance, ws, we, *vcpus, points)
+	if len(points) == 0 {
+		return errNoCloudSQLSample(cloudsqlCPUMetric, databaseID, ws, we)
+	}
+	memory, err := readCloudSQLSeries(ctx, shortClient, *api, token, *project, cloudsqlMemoryMetric, databaseID, ws, we)
+	if err != nil {
+		return err
+	}
+	if len(memory) == 0 {
+		return errNoCloudSQLSample(cloudsqlMemoryMetric, databaseID, ws, we)
+	}
+	quota, err := readCloudSQLSeries(ctx, shortClient, *api, token, *project, cloudsqlMemoryQuotaMetric, databaseID, ws, we)
+	if err != nil {
+		return err
+	}
+	f := summarizeCloudSQLCPU(*project, *instance, ws, we, *vcpus, points, memory, quota)
 	b, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		return err
@@ -298,7 +400,7 @@ func runCloudSQLCPU(args []string) error {
 	if err := os.WriteFile(*out, append(b, '\n'), 0o644); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "loadgen cloudsql-cpu: wrote %s: %d samples of %s, mean %.3f of %g vCPUs (%.2f cores), peak %.2f cores\n",
-		*out, f.Samples, databaseID, f.UtilizationMean, f.LimitCores, f.CoresMean, f.CoresPeak60s)
+	fmt.Fprintf(os.Stderr, "loadgen cloudsql-cpu: wrote %s: %d samples of %s, mean %.3f of %g vCPUs (%.2f cores), peak %.2f cores; memory mean %.0f MiB over %d samples\n",
+		*out, f.Samples, databaseID, f.UtilizationMean, f.LimitCores, f.CoresMean, f.CoresPeak60s, mib(f.MemoryBytesMean), f.MemorySamples)
 	return nil
 }
