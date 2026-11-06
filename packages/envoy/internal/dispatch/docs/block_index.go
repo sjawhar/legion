@@ -444,20 +444,22 @@ func (s *Service) windowDocument(ctx context.Context, artifactID string) (bool, 
 }
 
 // wholeTextOwner is one kind of whole-text embeddings row the windows replace, with the kind of
-// window that stands for it and the owner key a row's own id makes: a document's windows are
-// under its artifact id, an item's under "<kind>/<uuid>" (refs.ItemKind.WindowOwnerKey).
-type wholeTextOwner struct{ kind, windowKind, ownerKey string }
+// window that stands for it and the prefix every owner key of that window kind carries before
+// the owner's own id: a document's windows are under its artifact id, so its prefix is empty,
+// and an item's are under "<kind>/<uuid>" (refs.ItemKind.WindowOwnerKey), so its prefix is
+// "comment/", "message/" or "ask/".
+type wholeTextOwner struct{ kind, windowKind, ownerPrefix string }
 
 // wholeTextOwners is every kind of row the release before this one's meaning search reads,
 // which this one replaces with windows. The issue rows are not among them: an issue's whole text
 // is its title and the head of its spec, which no block indexer writes, and its trigger stands.
 var wholeTextOwners = func() []wholeTextOwner {
-	owners := []wholeTextOwner{{kind: "document", windowKind: refs.DocumentWindowKind, ownerKey: "e.id"}}
+	owners := []wholeTextOwner{{kind: "document", windowKind: refs.DocumentWindowKind}}
 	for _, kind := range windowItemKinds {
 		owners = append(owners, wholeTextOwner{
-			kind:       string(kind),
-			windowKind: kind.WindowKind(),
-			ownerKey:   "'" + kind.WindowOwnerKey("") + "' || e.id",
+			kind:        string(kind),
+			windowKind:  kind.WindowKind(),
+			ownerPrefix: kind.WindowOwnerKey(""),
 		})
 	}
 	return owners
@@ -470,23 +472,39 @@ var wholeTextOwners = func() []wholeTextOwner {
 // hash: the queue settles a window whose text has nothing to embed with no vector and its
 // embedded_hash set (embedqueue's settledNothingToEmbed), and such a window stands for nothing
 // in a meaning search, so a row behind it would be deleted with no vector left for the item at
-// all. The kinds are written as literals, not parameters, so the planner can prove
-// embeddings_window_owner's partial predicate and find the owner's windows through that index.
+// all.
+//
+// It is driven from the window rows, with the owner key's prefix stripped there, so the
+// whole-text row behind a window is a point lookup on embeddings_pkey (kind, id). The other
+// direction cannot be: comparing the window index's key against a prefix glued onto the
+// whole-text row's id - split_part(w.id, '#', 1) = 'comment/' || e.id - computes an expression
+// on both sides, so neither embeddings_window_owner, keyed on (kind, split_part(id, '#', 1)),
+// nor embeddings_pkey could drive the join, and the planner read every whole-text row of the
+// kind and filtered it against the windows: one pass took 25 minutes against the 482,073
+// comments still unwindowed (INFRA-988). The kinds are written as literals, not parameters, so
+// the planner can prove embeddings_window_owner's partial predicate and read the owner's
+// windows - the inner side alone - through that index. The owner key is stripped outside the
+// distinct rather than inside it, so the distinct is over split_part(w.id, '#', 1) itself, the
+// index's own key: the owners can be read off embeddings_window_owner in that order and the
+// statement stop at $1 of them.
 func (owner wholeTextOwner) retire() string {
 	return fmt.Sprintf(`
 		with picked as (
-			select e.kind, e.id from embeddings e
-			where e.kind = '%s' and exists (
-				select 1 from embeddings w
-				where w.kind = '%s' and split_part(w.id, '#', 1) = %s
+			select e.kind, e.id
+			from (
+				select distinct split_part(w.id, '#', 1) as owner_key from embeddings w
+				where w.kind = '%[2]s'
 				  and w.embedding is not null
 				  and w.embedded_hash is not null and w.embedded_hash = w.content_hash
-			)
+			) o
+			join embeddings e
+			  on e.kind = '%[1]s' and e.id = substring(o.owner_key from length('%[3]s') + 1)
 			limit $1
-			for update skip locked
+			for update of e skip locked
 		)
-		delete from embeddings e using picked where e.kind = picked.kind and e.id = picked.id`,
-		owner.kind, owner.windowKind, owner.ownerKey)
+		delete from embeddings using picked
+		where embeddings.kind = picked.kind and embeddings.id = picked.id`,
+		owner.kind, owner.windowKind, owner.ownerPrefix)
 }
 
 // retireWholeText deletes at most blockIndexRetireBatch whole-text rows, shared by the kinds in
