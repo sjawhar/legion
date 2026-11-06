@@ -3,6 +3,9 @@ import {
   type Envelope,
   EnvelopeSchema,
   ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS,
+  LISTENER_CALL_ATTEMPTS,
+  LISTENER_CALL_RETRY_DELAY_MS,
+  LISTENER_CALL_TIMEOUT_MS,
   MINTED_DEDUPE_KEY_PATTERN,
 } from "@legion/contracts";
 import { z } from "zod";
@@ -11,9 +14,6 @@ import { normalizeEnvoyUrl } from "./envoy-settings";
 import { messageFor } from "./errors";
 import { machineID } from "./machine";
 import { streamDeliversNothing } from "./stream-topics";
-
-const DEFAULT_TIMEOUT_MS = 5_000;
-const RETRY_DELAY_MS = 250;
 
 /**
  * A session's state, which the listener computes from that session's last registration and from
@@ -674,10 +674,28 @@ type AttemptOutcome =
   | { readonly response: Response; readonly body: string }
   | { readonly unanswered: unknown };
 
+/**
+ * The one place the client's call timing resolves: a configuration names a per-attempt timeout
+ * and whether a failed call is retried, and whatever it leaves unset comes from the declarations
+ * in `@legion/contracts`, which weigh a whole call's cost against the live window a refresh must
+ * renew a session's registration inside. A per-request override (`RequestOptions.timeoutMs` and
+ * `RequestOptions.retry`) still overrides what this returns, for the one call it is given on.
+ */
+export function resolveCallTiming(config: Pick<EnvoyClientConfig, "timeoutMs" | "retry">): {
+  timeoutMs: number;
+  attempts: number;
+  retryDelayMs: number;
+} {
+  return {
+    timeoutMs: config.timeoutMs ?? LISTENER_CALL_TIMEOUT_MS,
+    attempts: config.retry === false ? 1 : LISTENER_CALL_ATTEMPTS,
+    retryDelayMs: LISTENER_CALL_RETRY_DELAY_MS,
+  };
+}
+
 export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
   const baseUrl = normalizeEnvoyUrl(config.baseUrl);
-  const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const attempts = config.retry === false ? 1 : 2;
+  const { timeoutMs, attempts, retryDelayMs } = resolveCallTiming(config);
 
   const credential = config.credential;
 
@@ -755,7 +773,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
       if ("unanswered" in outcome) {
         options.onUnanswered?.();
         if (attempt + 1 < tries) {
-          await waitForRetry();
+          await waitForRetry(retryDelayMs);
           continue;
         }
         throw outcome.unanswered;
@@ -772,7 +790,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
       if (response.status >= 500) {
         options.onUnanswered?.();
         if (attempt + 1 < tries) {
-          await waitForRetry();
+          await waitForRetry(retryDelayMs);
           continue;
         }
       }
@@ -986,9 +1004,9 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
   };
 }
 
-function waitForRetry(): Promise<void> {
+function waitForRetry(delayMs: number): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>();
-  setTimeout(resolve, RETRY_DELAY_MS);
+  setTimeout(resolve, delayMs);
   return promise;
 }
 

@@ -1255,8 +1255,8 @@ printf 'no-cursor window: %s was offered event %s twice, once before the clean s
 printf 'stopping NATS for the bus-down answers\n'
 stop_nats
 
-# --max-time 5 is the sending client's own per-attempt deadline (DEFAULT_TIMEOUT_MS in
-# packages/envoy-client/src/transport.ts): an answer that arrives after it is, to that caller, no
+# --max-time 5 is the sending client's own per-attempt deadline (LISTENER_CALL_TIMEOUT_MS in
+# packages/contracts/src/envoy-session.ts): an answer that arrives after it is, to that caller, no
 # answer at all. The listener's own budget (sendRequestBudget, 3.5 s) is what keeps it inside.
 printf 'posting a direct message with the bus down\n'
 curl --max-time 5 -sS -o "$bus_down_response_file" -D "$bus_down_headers_file" \

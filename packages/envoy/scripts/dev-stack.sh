@@ -55,6 +55,7 @@
 #   AGENT_SECRETS_HELPER_SOCK             agent-secrets-helper's socket, in the work directory
 #   AGENT_SECRETS_OPERATOR_FILE           the helper's operator file
 #   AGENT_SECRETS_MACHINE_FILE            the machine credential agent-secrets writes
+#   AGENT_SECRETS_STATE_FILE              this run's own session records, in the work directory
 #   AGENT_SECRETS_KEY_DIR                 a session key directory of this run's own
 #   DISPATCH_URL, DISPATCH_TOKEN          Dispatch and its shared agent token
 #   ENVOY_URL                             the listener
@@ -67,6 +68,22 @@
 #   DEV_STACK_LISTENER_TOKEN_FILE         the caller "listener", which may introspect alone: the
 #                                         listener of this run presents it to check an access
 #                                         token a session sends /v1 under
+#
+# One stack, two boxes. The exports above are the first box, this machine: a helper and a
+# metadata stand-in started from them act for it. Beside it the script lays out a second box, for
+# the one thing a single box cannot show — a session that moves from one box to another, whose
+# grant, pending request and withheld names the broker carries from one enrolment of that session
+# name to the next. A box at the broker is a key: launcher_credentials_live_key allows one
+# live launcher credential per key, so a second box that shared any state with the first would be
+# the first. It therefore has a HOME, an XDG_RUNTIME_DIR, an XDG_STATE_HOME, a key directory, a
+# machine file, a sign-in directory, an operator file, a helper socket and a metadata stand-in
+# port file of its own, all under one directory of its own, and the banner prints each as
+# DEV_STACK_BOX2_<the variable it stands for>. The two boxes differ in their state and in nothing
+# else: both reach this run's one broker, one Dispatch and one listener, as two boxes of one
+# deployment do. A caller starts that box's stand-in and its helper from the two lines the banner
+# prints for them, as it starts the first box's from the lines printed there, and then runs
+# agent-secrets under the second box's variables; each box trades its machine identity for a
+# launcher credential of its own, bound to the identity key its own HOME holds.
 #
 # It then stays in the foreground until it is interrupted or any process it started stops. One
 # trap stops every process by the pid this script started it as, drops the two databases it
@@ -225,6 +242,35 @@ FLEET_ACCOUNT="example-fleet@example-project.iam.gserviceaccount.com"
 PERSON_FLEET_SERVICE="example-controller"
 PERSON_FLEET_ACCOUNT="example-controller@example-project.iam.gserviceaccount.com"
 METADATA_SCRIPT="$WORK_DIR/dev-metadata.py"
+
+# The second box, whose whole state is under one directory of its own: a key directory, a machine
+# file, a sign-in store, an operator file, a helper socket and a metadata stand-in port file that
+# the first box's shell never reads, since a box at the broker is a key and two live launcher
+# credentials never sit on one key (launcher_credentials_live_key). HOME is its own because the
+# identity key a machine trades with lives at $HOME/.config/agent-secrets/identity-key.pem
+# (helper.LoadOrMakeIdentityKey) and that key is what the broker names this box's credential by;
+# XDG_RUNTIME_DIR and XDG_STATE_HOME are its own because the client and the helper fall back to
+# both for the key directory, the socket and the sign-in store. BOX2_SESSION is the session name
+# this box's own machine trade writes under, which BROKER_VM_EXCHANGE_ACCOUNTS leaves to the
+# process; it is not the session a walk moves from one box to the other, which each agent-secrets
+# call names for itself. Its records file is its own for a reason of the shell rather than of the
+# broker: the start line below is `env`, not `env -i`, so a caller with the first box's
+# AGENT_SECRETS_STATE_FILE exported would have this box's helper write the first box's records,
+# which hold the first box's named sessions' signing keys (dispatch://INFRA-1167).
+BOX2_DIR="$WORK_DIR/box-two"
+BOX2_HOME="$BOX2_DIR/home"
+BOX2_RUNTIME_DIR="$BOX2_DIR/run"
+BOX2_STATE_DIR="$BOX2_DIR/state"
+BOX2_KEY_DIR="$BOX2_DIR/keys"
+BOX2_SIGNIN_DIR="$BOX2_DIR/signins"
+BOX2_MACHINE_FILE="$BOX2_DIR/machine.json"
+BOX2_STATE_FILE="$BOX2_DIR/sessions.json"
+BOX2_OPERATOR_FILE="$BOX2_DIR/operator"
+BOX2_HELPER_SOCK="$BOX2_DIR/helper.sock"
+BOX2_METADATA_PORT_FILE="$BOX2_DIR/metadata-port"
+BOX2_METADATA_LOG="$LOG_DIR/dev-metadata-box-two.log"
+BOX2_HELPER_LOG="$LOG_DIR/agent-secrets-helper-box-two.log"
+BOX2_SESSION="dev-stack-box-two"
 
 BROKER_DB="dev_stack_broker_${RUN_SUFFIX}"
 DISPATCH_DB="dev_stack_dispatch_${RUN_SUFFIX}"
@@ -600,10 +646,13 @@ import http.server, json, os, socket, sys, threading, time, urllib.parse, urllib
 ISSUER = "$ISSUER_URL"
 CLIENT_ID = "$MACHINE_CLIENT_ID"
 SECRET_FILE = "$MACHINE_SECRET_FILE"
-# Which machine this stand-in is: the service-only fleet by default, or the one that acts for a
-# person when the caller names it. Two of these on two ports is how one stack serves both.
+# Which machine this stand-in is, and where it writes the port it listens on: the service-only
+# fleet and the first box's port file by default, and whatever the caller names otherwise. Two of
+# these, on two ports and two port files, is how one stack serves two boxes, so neither variable
+# may be baked in: with one port file for both, the second stand-in to start would overwrite the
+# first box's port with its own.
 ACCOUNT = os.environ.get("DEV_STACK_METADATA_ACCOUNT") or "$FLEET_ACCOUNT"
-PORT_FILE = "$WORK_DIR/metadata-port"
+PORT_FILE = os.environ.get("DEV_STACK_METADATA_PORT_FILE") or "$WORK_DIR/metadata-port"
 IDENTITY_PATH = "/computeMetadata/v1/instance/service-accounts/default/identity"
 CACHE_SECONDS = 600
 
@@ -685,6 +734,14 @@ server.serve_forever()
 PY
 chmod 700 "$METADATA_SCRIPT"
 
+# --- The second box's state: the directories its helper and its client write into, and the
+# operator file a machine login of its own names an approver by, which is the first box's person.
+# The script creates them and starts nothing with them; the banner prints the two lines that
+# start this box's metadata stand-in and its helper, as it prints the first box's. ---
+mkdir -p "$BOX2_HOME" "$BOX2_RUNTIME_DIR" "$BOX2_STATE_DIR" "$BOX2_KEY_DIR" "$BOX2_SIGNIN_DIR"
+chmod 700 "$BOX2_DIR" "$BOX2_HOME" "$BOX2_RUNTIME_DIR" "$BOX2_STATE_DIR" "$BOX2_KEY_DIR" "$BOX2_SIGNIN_DIR"
+echo "$APPROVER_LOGIN" >"$BOX2_OPERATOR_FILE"
+
 cat <<EOF
 
 dev-stack: ready.
@@ -697,6 +754,7 @@ dev-stack: ready.
   export AGENT_SECRETS_HELPER_SOCK=$WORK_DIR/helper.sock
   export AGENT_SECRETS_OPERATOR_FILE=$OPERATOR_FILE
   export AGENT_SECRETS_MACHINE_FILE=$WORK_DIR/machine.json
+  export AGENT_SECRETS_STATE_FILE=$WORK_DIR/sessions.json
   export AGENT_SECRETS_KEY_DIR=$WORK_DIR/keys
   export DISPATCH_URL=$DISPATCH_URL
   export DISPATCH_TOKEN=$DISPATCH_TOKEN_VALUE
@@ -751,6 +809,58 @@ dev-stack: ready.
   \`agent-secrets login\` signs a person in, printing the code to approve with
   POST $ISSUER_URL/_dev/approve-device-code and {"user_code": "..."}, after which that person's
   session reads DEMO_READ_TOKEN as them.
+
+  A second box, for a session that moves from one box to another. A box at the broker is a key —
+  launcher_credentials_live_key allows one live launcher credential per key — so this box shares
+  nothing with the box above: its own HOME, its own XDG directories, its own key directory,
+  machine file, records file, sign-in store, operator file and helper socket, and a metadata
+  stand-in of its own on a port of its own. Each is the variable it stands for under
+  DEV_STACK_BOX2_:
+
+  export DEV_STACK_BOX2_DIR=$BOX2_DIR
+  export DEV_STACK_BOX2_HOME=$BOX2_HOME
+  export DEV_STACK_BOX2_XDG_RUNTIME_DIR=$BOX2_RUNTIME_DIR
+  export DEV_STACK_BOX2_XDG_STATE_HOME=$BOX2_STATE_DIR
+  export DEV_STACK_BOX2_AGENT_SECRETS_KEY_DIR=$BOX2_KEY_DIR
+  export DEV_STACK_BOX2_AGENT_SECRETS_MACHINE_FILE=$BOX2_MACHINE_FILE
+  export DEV_STACK_BOX2_AGENT_SECRETS_STATE_FILE=$BOX2_STATE_FILE
+  export DEV_STACK_BOX2_AGENT_SECRETS_SIGNIN_DIR=$BOX2_SIGNIN_DIR
+  export DEV_STACK_BOX2_AGENT_SECRETS_OPERATOR_FILE=$BOX2_OPERATOR_FILE
+  export DEV_STACK_BOX2_AGENT_SECRETS_HELPER_SOCK=$BOX2_HELPER_SOCK
+  export DEV_STACK_BOX2_METADATA_PORT_FILE=$BOX2_METADATA_PORT_FILE
+  export DEV_STACK_BOX2_SESSION=$BOX2_SESSION
+
+  Its metadata stand-in is the one script above on a port of its own, which it takes from
+  DEV_STACK_METADATA_PORT_FILE; with that variable unset a stand-in writes $WORK_DIR/metadata-port,
+  the first box's, as it always has. With the block above exported, these start this box's stand-in
+  and then its helper:
+
+    DEV_STACK_METADATA_PORT_FILE=\$DEV_STACK_BOX2_METADATA_PORT_FILE \\
+      DEV_STACK_METADATA_ACCOUNT=$PERSON_FLEET_ACCOUNT \\
+      python3 $METADATA_SCRIPT >$BOX2_METADATA_LOG 2>&1 &
+    until [ -s \$DEV_STACK_BOX2_METADATA_PORT_FILE ]; do sleep 0.1; done
+
+    env HOME=\$DEV_STACK_BOX2_HOME \\
+      XDG_RUNTIME_DIR=\$DEV_STACK_BOX2_XDG_RUNTIME_DIR \\
+      XDG_STATE_HOME=\$DEV_STACK_BOX2_XDG_STATE_HOME \\
+      AGENT_SECRETS_KEY_DIR=\$DEV_STACK_BOX2_AGENT_SECRETS_KEY_DIR \\
+      AGENT_SECRETS_MACHINE_FILE=\$DEV_STACK_BOX2_AGENT_SECRETS_MACHINE_FILE \\
+      AGENT_SECRETS_STATE_FILE=\$DEV_STACK_BOX2_AGENT_SECRETS_STATE_FILE \\
+      AGENT_SECRETS_SIGNIN_DIR=\$DEV_STACK_BOX2_AGENT_SECRETS_SIGNIN_DIR \\
+      AGENT_SECRETS_OPERATOR_FILE=\$DEV_STACK_BOX2_AGENT_SECRETS_OPERATOR_FILE \\
+      AGENT_SECRETS_HELPER_SOCK=\$DEV_STACK_BOX2_AGENT_SECRETS_HELPER_SOCK \\
+      AGENT_SECRETS_URL=$BROKER_URL \\
+      AGENT_SECRETS_MACHINE_IDENTITY=metadata \\
+      AGENT_SECRETS_MACHINE_AUDIENCE=$MACHINE_CLIENT_ID \\
+      AGENT_SECRETS_SESSION=\$DEV_STACK_BOX2_SESSION \\
+      GCE_METADATA_HOST=127.0.0.1:\$(cat \$DEV_STACK_BOX2_METADATA_PORT_FILE) \\
+      $BIN_DIR/agent-secrets-helper serve >$BOX2_HELPER_LOG 2>&1 &
+
+  That helper trades this box's identity for a launcher credential of its own, bound to the key it
+  keeps under its own HOME, so the broker holds one live credential for each of the two boxes and a
+  session can enrol on this one after it enrolled on the first. The same env prefix is how the
+  client runs on this box: under it every agent-secrets call reads this box's key directory, its
+  helper socket and its sign-in store, and none of the first box's.
 
   Sign in to Dispatch at $DISPATCH_URL/auth/_dev/signin?login=$APPROVER_LOGIN, and approve a
   secret request on the broker's own page, $BROKER_URL/approve/<record>, which signs the same

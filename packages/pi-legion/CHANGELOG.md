@@ -3,6 +3,12 @@
 `@sjawhar/pi-legion` was split from `@sjawhar/pi-legion-envoy` 7.x (LEGION-247). Every release
 before the split, and the Envoy plugin's releases after it, are in `packages/pi-envoy/CHANGELOG.md`.
 
+## [18.14.0] - 2026-11-06
+
+### Changed
+
+- The Legion worker skill tells a role to read a shared database through the deployment's read-only login, the URL in the file `SESSION_READER_DSN_FILE` names, never through the session URL the file `OMP_SESSION_SQL_DSN_FILE` names, and to keep the read-only setting inside one transaction rather than on the connection, where a pooled server leaves it for the pool's next client. The claim that the session login can create and drop databases is gone with it, and the reference is now reached by a trigger a role about to read a transcript matches.
+
 ## [18.13.1] - 2026-11-06
 
 ### Changed

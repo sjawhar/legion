@@ -2890,6 +2890,25 @@ func TestStartListenerSubscriptionMigratesLegacyDurableConsumer(t *testing.T) {
 		t.Fatalf("boot migrated listener bus: %v", err)
 	}
 	t.Cleanup(client.Close)
+	// nats-server releases a push binding on the consumer's own goroutine, after the client's
+	// Close is answered, so only the consumer's own report tells this row that the legacy
+	// durable may be bound again: startListenerSubscription binds once and does not retry a
+	// "consumer is already bound" refusal, which is what took pull request #2817 out of the
+	// merge queue (run 42117898395). Production never binds through that primitive; its boot
+	// calls bindListenerDurable, which retries the bind every durableBindInterval up to
+	// durableBindDeadline. internal/bus/stream_config_test.go waits the same way.
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
+		if err != nil {
+			t.Fatalf("read the legacy durable consumer: %v", err)
+		}
+		if !info.PushBound {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the server still reports the legacy durable consumer push-bound 30s after the legacy connection closed")
+		}
+	}
 	durableReceived := make(chan struct{}, 1)
 	durableSub, err := startListenerSubscription(client, consumer, func(msg *natsgo.Msg) {
 		durableReceived <- struct{}{}

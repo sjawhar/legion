@@ -70,10 +70,11 @@ const (
 	serverChangeHeartbeat = 30 * time.Second
 
 	// serverChangeAttemptTimeout and serverChangeRetryDelay are envoy-client's publish attempt and
-	// the wait before its one retry (DEFAULT_TIMEOUT_MS and RETRY_DELAY_MS in
-	// packages/envoy-client/src/transport.ts).
-	serverChangeAttemptTimeout = 5 * time.Second
-	serverChangeRetryDelay     = 250 * time.Millisecond
+	// the wait before its one retry (contracts.ListenerCallTimeout and
+	// contracts.ListenerCallRetryDelay, generated from LISTENER_CALL_TIMEOUT_MS and
+	// LISTENER_CALL_RETRY_DELAY_MS in packages/contracts).
+	serverChangeAttemptTimeout = contracts.ListenerCallTimeout
+	serverChangeRetryDelay     = contracts.ListenerCallRetryDelay
 
 	// serverChangeRecovery bounds each wait of the run for the cluster, the stand-in or a listener:
 	// a member restarting and catching up its streams, a reconnect, a relay sending again after a

@@ -117,6 +117,15 @@ func (r *recordingRunner) Run(ctx context.Context, command Command) (Result, err
 	if isClone(actual.Argv) && !slices.Contains(command.Env, "GIT_ALLOW_PROTOCOL=file") {
 		actual.Argv[3] = r.remote
 	}
+	// The skills clone names GitHub in its argv too: `git clone --depth 1 --single-branch
+	// --quiet <url> <dir>` (CloneSkills).
+	if commandWith(actual.Argv, "git", "clone", "--depth", "1", "--single-branch") {
+		for i, arg := range actual.Argv {
+			if arg == "https://github.com/acme/widgets" {
+				actual.Argv[i] = r.remote
+			}
+		}
+	}
 	if commandWith(actual.Argv, "git", "clone", "--bare", "--quiet", "https://github.com/acme/widgets") {
 		for i, arg := range actual.Argv {
 			if arg == "https://github.com/acme/widgets" {
