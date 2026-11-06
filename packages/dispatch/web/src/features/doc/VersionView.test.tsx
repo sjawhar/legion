@@ -55,6 +55,9 @@ function renderVersionView({
   if (blockSchema === undefined) {
     throw new Error("VersionView test runtime must provide a block schema.");
   }
+  // Inside a router, as the document page renders it: a click on a reference in the version
+  // opens what it names (`document-references.tsx` draws its title, `reference-click.ts`
+  // opens it).
   const tree = (shown: { by: string; id: string; quote: string } | undefined) => (
     <MemoryRouter initialEntries={["/issues/CORE-1/artifacts/spec-md?v=1"]}>
       <QueryClientProvider client={queryClient}>

@@ -1,3 +1,4 @@
+import { decodeBlockId, isIdPrefix } from "@legion/contracts";
 import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
@@ -8,8 +9,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Link, useNavigate } from "react-router-dom";
-
+import { Link, useLocation } from "react-router-dom";
 import {
   api,
   isArtifactNotFound,
@@ -47,6 +47,7 @@ import {
   buildProjectPath,
   documentRoute,
 } from "../refs/routes";
+import { textSourceOf, uniquePrefixMatch } from "../refs/text-references";
 import { importWhenOnline } from "../shell/DeploymentResilience";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
@@ -55,6 +56,7 @@ import { AskBlockCard } from "./AskBlockCard";
 import { ChangeView } from "./ChangeView";
 import type { ConnectionState, DocumentConnection } from "./connection";
 import { colorForLogin } from "./connection";
+import { DocumentReferences } from "./document-references";
 import type { EditorHandle } from "./editor";
 import { bindRemoteMarks } from "./editor";
 import type { Highlight } from "./highlight";
@@ -69,13 +71,25 @@ import { NameVersionDialog } from "./NameVersionDialog";
 import type { PendingState } from "./pending-sync";
 import { createPendingWaiter } from "./pending-waiter";
 import { handleReferenceClick, useStableNavigate } from "./reference-click";
-import { refocusAfterDiagrams } from "./refocus-after-diagrams";
+import { refocusWhenSettled } from "./refocus-when-settled";
 import { FRAGMENT_NAME } from "./roots";
 import { DocumentRuntime } from "./runtime";
 import { loadBlockSchema } from "./schema";
 import { readLineText, useSpecMarks } from "./spec-marks";
 import type { AskBlockHost } from "./typed-block-drawing";
 import { VersionView } from "./VersionView";
+
+/** The one block of `root` whose id starts with `prefix`, or undefined where none does or two
+ *  or more do (`uniquePrefixMatch`). The editor's own rendered blocks are the answer, the same
+ *  `[data-block-id]` elements `focusBlock` looks a whole id up in, so a block link written short
+ *  costs no read; a block the editor draws twice carries its id twice, which is that one block. */
+function wholeBlockId(root: HTMLElement, prefix: string): string | undefined {
+  const ids: string[] = [];
+  for (const element of root.querySelectorAll<HTMLElement>("[data-block-id]")) {
+    ids.push(element.getAttribute("data-block-id") ?? "");
+  }
+  return uniquePrefixMatch(ids, prefix);
+}
 
 const CONTROL_CHARACTERS = /\p{Cc}/gu;
 
@@ -201,6 +215,10 @@ export function ProofDocument({
 }: ProofDocumentProps): ReactNode {
   const root = useRef<HTMLDivElement>(null);
   const editorRef = useRef<EditorHandle | undefined>(undefined);
+  // The handle this document's references are drawn through, beside the ref the callbacks reach
+  // it by: the titles are a render of their own, so the surface that draws them re-renders with
+  // the editor it draws into.
+  const [editorHandle, setEditorHandle] = useState<EditorHandle | undefined>(undefined);
   // The dispose of the latest focus's re-run after the diagrams draw (`focusInEditor`).
   const disposeRefocusRef = useRef<(() => void) | undefined>(undefined);
   const isClosedRef = useRef(isClosed);
@@ -231,18 +249,25 @@ export function ProofDocument({
     createEditor,
     loadTransport,
   } = useContext(DocumentRuntime);
-  const navigate = useNavigate();
   const margin = useMargin();
   const { blockPlacements } = margin;
   // The editor effect and its callbacks reach the margin's latest functions through this ref
   // rather than listing them as dependencies, so a margin re-render never rebuilds the editor.
   const marginRef = useRef(margin);
   marginRef.current = margin;
-  // What the editor's picture links navigate with, which never changes as the page's own
-  // `navigate` does (`useStableNavigate`).
-  const navigateFromEditor = useStableNavigate();
+  // What this page navigates with, the article's links and the editor's picture links alike:
+  // one that never changes as React Router's own does on every location change
+  // (`useStableNavigate`), since the editor is built in an effect that must rebuild for no
+  // navigation.
+  const navigate = useStableNavigate();
   highlightTermRef.current = highlightTerm;
   const queryClient = useQueryClient();
+  // Where a `#id` in this document's text resolves: this document, whose question blocks
+  // declare the asks it names (`refs.ScopeOf` of a document version is the document).
+  const textSource = useMemo(() => textSourceOf("artifact", artifact.id), [artifact.id]);
+  // The address's fragment as the dashboard's own navigation leaves it: a click on a link to a
+  // block of this document changes it in place, firing no event of the browser's own.
+  const { hash: routedHash } = useLocation();
   const documentRef = buildDispatchReference(documentRoute(artifact));
   const blockSchemaQuery = useQuery({
     queryFn: loadBlockSchema,
@@ -412,15 +437,85 @@ export function ProofDocument({
     [artifact.id, pendingWaiter]
   );
   // Every focus in the live editor - a block link, the margin's mark and block focus, a reader's
-  // click to a block - runs `focus` now and `refocus` once more after the page's mermaid diagrams
-  // have drawn (`refocusAfterDiagrams`), since a diagram that draws above the target pushes it
-  // down. One re-run waits at a time: a newer focus drops an older one's, and so does the editor
-  // unbinding.
+  // click to a block - runs `focus` now and `refocus` once more after the drawing around its
+  // target has settled (`refocusWhenSettled`): the page's mermaid diagrams, and this editor's own
+  // blocks, whose hosted cards and pictures draw after it opened and push a target below them
+  // down. The editor's drawn root is what grows, so it is what is watched. One re-run waits at a
+  // time: a newer focus drops an older one's, and so does the editor unbinding.
   const focusInEditor = useCallback((focus: () => void, refocus: () => void = focus) => {
     disposeRefocusRef.current?.();
     focus();
-    disposeRefocusRef.current = refocusAfterDiagrams(refocus);
+    disposeRefocusRef.current = refocusWhenSettled(refocus, editorRef.current?.view.dom);
   }, []);
+  // The fragment the block focus last followed, which the focus of a short id rewrites to the
+  // whole block's: an address this document wrote itself is no change for it to follow again.
+  const followedHashRef = useRef<string | undefined>(undefined);
+  // The block the address names, focused in `handle`: a `#b-` hash names a block of the
+  // document the reader is on, written whole or short, and an id written short names the one
+  // block of this document it starts. A hash naming no block of it focuses nothing.
+  const followBlockHash = useCallback(
+    (handle: EditorHandle) => {
+      const blockLink = window.location.hash;
+      if (!blockLink.startsWith("#b-") || blockLink === followedHashRef.current) {
+        return;
+      }
+      followedHashRef.current = blockLink;
+      const linkedBlockId = decodeBlockId(blockLink.slice(3));
+      if (linkedBlockId === undefined) {
+        return;
+      }
+      // The hash the address holds: the one the reader followed until a short id resolves, the
+      // whole block's from then on.
+      let linkHash = blockLink;
+      const focusLinked = () => {
+        // An id written short names the one block of this document it starts; a whole id is
+        // the block's own, with nothing to resolve and no read to make.
+        const whole = isIdPrefix(linkedBlockId)
+          ? wholeBlockId(handle.view.dom, linkedBlockId)
+          : linkedBlockId;
+        if (whole === undefined) {
+          return;
+        }
+        if (whole !== linkedBlockId) {
+          // The address carries the whole id from here on, so one copied off the page names
+          // the block outright; replacing it leaves no history entry behind, as the rewrite
+          // of an item address does.
+          linkHash = blockFragment(whole);
+          followedHashRef.current = linkHash;
+          window.history.replaceState(null, "", linkHash);
+        }
+        handle.focusBlock(whole);
+      };
+      // The re-run lands only while the hash still names this block.
+      focusInEditor(focusLinked, () => {
+        if (window.location.hash === linkHash) focusLinked();
+      });
+    },
+    [focusInEditor]
+  );
+  // A `#id` names a question of the text's own document, so a reader who follows one from the
+  // margin, or any other `#b-` link of the document already open, stays on this page: the
+  // editor is bound already and binds no second time. The focus follows the address instead -
+  // the dashboard's own navigation, which changes the hash with no event of its own
+  // (`routedHash`), and an assignment to `location.hash`, which fires one.
+  useEffect(() => {
+    if (!page) {
+      return;
+    }
+    const follow = () => {
+      const handle = editorRef.current;
+      if (handle !== undefined) {
+        followBlockHash(handle);
+      }
+    };
+    // A fragment the dashboard navigated to is a change with no event of its own; the address
+    // the browser holds is what `follow` then reads.
+    if (routedHash !== "") {
+      follow();
+    }
+    window.addEventListener("hashchange", follow);
+    return () => window.removeEventListener("hashchange", follow);
+  }, [followBlockHash, page, routedHash]);
   // Google Docs' chord for the selection bar's Comment button, on the button's own path. It is
   // offered while this editor has focus, holds a selection and takes edits, which is when the bar
   // offers Comment; anywhere else - a comment composer, an ask card's field, a read-only or
@@ -532,6 +627,7 @@ export function ProofDocument({
       if (editorRef.current === editor) {
         editorRef.current = undefined;
       }
+      setEditorHandle((current) => (current === editor ? undefined : current));
       disposeEditorBindings = undefined;
       editor = undefined;
       document = undefined;
@@ -544,18 +640,12 @@ export function ProofDocument({
       // False once this editor unbinds, so a focus a frame late never reaches a destroyed editor
       // or leaves a re-run behind for it.
       let bound = true;
-      const blockLink = window.location.hash;
       // The hash names a block of the page the reader is on, never one of a document beside its
-      // list, so a pane never follows it.
-      if (page && blockLink.startsWith("#b-")) {
-        const linkedBlockId = decodeURIComponent(blockLink.slice(3));
-        // The re-run lands only while the hash still names this block.
-        focusInEditor(
-          () => handle.focusBlock(linkedBlockId),
-          () => {
-            if (window.location.hash === blockLink) handle.focusBlock(linkedBlockId);
-          }
-        );
+      // list, so a pane never follows it. A newly bound editor follows the address whatever the
+      // editor before it followed: its blocks are drawn again, and the reader is at the link.
+      if (page) {
+        followedHashRef.current = undefined;
+        followBlockHash(handle);
       }
       // `CSS.highlights["dispatch-search"]` and the margin's open document are one apiece for the
       // whole page; a pane writes neither.
@@ -765,7 +855,7 @@ export function ProofDocument({
                 blockSchema,
                 // What a picture's fallback link opens its artifact with, since the node view is
                 // plain DOM: the page's own navigation and its query client.
-                navigate: navigateFromEditor,
+                navigate,
                 queryClient,
                 watchPicture: (route, onPicture) => watchPicturePath(queryClient, route, onPicture),
                 // The open document's own reference, never a version's: a pointer names a block
@@ -783,6 +873,7 @@ export function ProofDocument({
                   }
                   editor = handle;
                   editorRef.current = handle;
+                  setEditorHandle(handle);
                   disposeEditorBindings = bindEditor(handle, connection);
                 })
                 .catch(reportLoadFailure);
@@ -806,8 +897,9 @@ export function ProofDocument({
     createEditor,
     documentRef,
     focusInEditor,
+    followBlockHash,
     loadTransport,
-    navigateFromEditor,
+    navigate,
     page,
     pendingWaiter,
     queryClient,
@@ -967,6 +1059,7 @@ export function ProofDocument({
         onClick={(event) => handleReferenceClick(event, queryClient, navigate)}
       >
         <div ref={root} />
+        <DocumentReferences editor={editorHandle} source={textSource} />
         {askBlockHosts.map((host) => {
           const blockId = String(host.node.attrs.blockId);
           return (

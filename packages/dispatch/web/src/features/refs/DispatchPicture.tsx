@@ -84,8 +84,9 @@ export function DispatchPicture({
   // reference opens, which is the one the serializer already wrote onto the placeholder.
   const path = useReferencePath(route);
   // The placeholder is the link the serializer wrote, so the fallback hands the reader back
-  // exactly that link, its address the one `RefLink` keeps on it.
-  const link = <RefLink anchor={anchor} route={route} />;
+  // exactly that link, its address the one `RefLink` keeps on it and its words the caption the
+  // picture line gave, which is what the author wrote for this reference.
+  const link = <RefLink anchor={anchor} route={route} text={caption} />;
   if (media === undefined || (variant === "inline" && media.kind === "video")) {
     return link;
   }

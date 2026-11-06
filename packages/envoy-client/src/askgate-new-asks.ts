@@ -780,7 +780,7 @@ function nameChar(char: string): boolean {
 }
 
 /**
- * directive.go's `parseTypedDirectiveOpen`: three colons or more, a name, then `{` at once, and
+ * directive.go's `ParseTypedDirectiveOpen`: three colons or more, a name, then `{` at once, and
  * the line ends with `}`, the attributes between them read as the server reads them.
  */
 function typedOpener(

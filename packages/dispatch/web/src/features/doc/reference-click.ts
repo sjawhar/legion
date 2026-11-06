@@ -45,7 +45,8 @@ export interface ReferenceClick {
  * serializer sanitizes a `dispatch://` href to `""` (Milkdown's link sanitizer only allows
  * http/https/mailto/tel/ftp — a document strangers can edit should never render an
  * attacker-chosen non-http scheme as a clickable href) and tags the anchor with
- * `data-dispatch-href` carrying the original target instead. */
+ * `data-dispatch-href` carrying the original target instead; a title the editor draws over a
+ * reference its text holds carries the same attribute (`document-references.tsx`). */
 function dispatchHrefOf(anchor: Element): string | null {
   const href = anchor.getAttribute("data-dispatch-href") ?? anchor.getAttribute("href");
   return href?.startsWith("dispatch://") ? href : null;
@@ -123,13 +124,14 @@ function openReferenceInNewTab(route: DispatchReferenceRoute, queryClient: Query
 
 /** The `click` and `auxclick` handler of a document's article, the live editor's
  * (`ProofDocument.tsx`) and a past version's (`VersionView.tsx`) alike: it answers the clicks
- * the browser splits between those two events. A plain click on a `dispatch://` link opens its
- * target inside the app, instead of falling to the editor library's own link plugin, whose href
- * the serializer emptied, and reloading the page. A middle click - which raises `auxclick`
- * alone - and a modified click open that same target in a new tab, because the emptied href
- * would otherwise open the page the reader is already on; a link that carries a real address,
- * the picture's fallback link, is left to the browser, whose own meaning for those clicks is
- * already the right one.
+ * the browser splits between those two events, on the editor's own link marks and on the
+ * titles it draws over the references its text holds. A plain click on a `dispatch://` link
+ * opens its target inside the app, instead of falling to the editor library's own link plugin,
+ * whose href the serializer emptied, and reloading the page. A middle click - which raises
+ * `auxclick` alone - and a modified click open that same target in a new tab, because the
+ * emptied href would otherwise open the page the reader is already on; a link that carries a
+ * real address, the picture's fallback link, is left to the browser, whose own meaning for
+ * those clicks is already the right one.
  *
  * It takes what it needs - the event, the query client, `navigate` - as arguments, because the
  * picture's fallback link opens a reference through `openReference` from plain DOM, where no
