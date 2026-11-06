@@ -46,6 +46,9 @@ const (
 	headCommit    = "1111111111111111111111111111111111111111"
 	newHeadCommit = "2222222222222222222222222222222222222222"
 	mergeCommit   = "3333333333333333333333333333333333333333"
+	// nearHeadCommit shares its first twelve characters with headCommit and differs after
+	// them: the pair an abbreviated commit cannot tell apart.
+	nearHeadCommit = "111111111111aaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 )
 
 type recordedResult struct {
@@ -186,6 +189,49 @@ func TestResultRecordsAgainstAChecksOfTheIssueAndOfAnAncestor(t *testing.T) {
 	}
 	if against := decodeBody[recordedResult](t, named).Result.CheckIssueKey; against != child.Key {
 		t.Fatalf("the named result was recorded against %s, want the child's own document", against)
+	}
+}
+
+// The shape the incident had: one check with three results, the first recorded at a commit
+// whose first twelve characters are the pull request head's and whose remainder is not, then
+// two at the head itself. The read answers a check's results newest first, so a reader that
+// takes one result per check — `dispatch results` prints results[0] — takes the last recorded
+// rather than the first, and every commit comes back whole, so the two commits that share
+// twelve characters are told apart in the answer that reader reads.
+func TestCheckResultsComeBackNewestFirstWithEveryCommitWhole(t *testing.T) {
+	handler, _, _ := newTestServer(t, testServerOptions{})
+	issue := createInteractionIssue(t, handler, "RESN", "Newest first", "A spec\n")
+	uploadDocument(t, handler, "/api/v1/issues/"+issue.Key, "verification.md", twoChecks)
+
+	near := decodeBody[recordedResult](t, recordResult(t, handler, issue.Key,
+		resultBody("k1", "fail", nearHeadCommit, map[string]any{"failed": 1})))
+	earlier := decodeBody[recordedResult](t, recordResult(t, handler, issue.Key,
+		resultBody("k1", "fail", headCommit, map[string]any{"failed": 1})))
+	last := decodeBody[recordedResult](t, recordResult(t, handler, issue.Key,
+		resultBody("k1", "pass", headCommit, nil)))
+
+	results := checkOf(t, readResults(t, handler, issue.Key), "k1").Results
+	if len(results) != 3 {
+		t.Fatalf("k1's results = %+v, want the three recorded", results)
+	}
+	for position, want := range []model.CheckResult{last.Result, earlier.Result, near.Result} {
+		if results[position].ID != want.ID {
+			t.Fatalf("results[%d] = %s recorded at %s, want %s recorded at %s: the read answers newest first",
+				position, results[position].ID, results[position].CreatedAt, want.ID, want.CreatedAt)
+		}
+	}
+	if results[0].Verdict != "pass" {
+		t.Fatalf("results[0].verdict = %q, want the last recorded result's pass", results[0].Verdict)
+	}
+	for position, result := range results {
+		if len(result.CommitSHA) != 40 {
+			t.Fatalf("results[%d].commit_sha = %q, %d characters, want the whole 40",
+				position, result.CommitSHA, len(result.CommitSHA))
+		}
+	}
+	if results[0].CommitSHA != headCommit || results[2].CommitSHA != nearHeadCommit {
+		t.Fatalf("the newest result stands at %q and the oldest at %q, want %q and %q told apart",
+			results[0].CommitSHA, results[2].CommitSHA, headCommit, nearHeadCommit)
 	}
 }
 

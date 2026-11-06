@@ -2771,7 +2771,8 @@ export interface CheckResult {
 export type CheckWhen = "before_merge" | "after_merge" | "default_branch";
 
 /** One `check` block of a Verification document with every result recorded against it, newest
- *  first. */
+ *  first: `created_at` descending, with `id` descending breaking a tie, so `results[0]` is the
+ *  last result recorded against the check. */
 export interface CheckBlock {
   readonly block_id: string;
   readonly ref: string;
@@ -2788,7 +2789,10 @@ export interface CheckBlock {
 }
 
 /** `GET /api/v1/issues/{key}/results`: the issue's Verification document and its checks in
- *  document order. An issue with no Verification document answers no checks. */
+ *  document order, each check's results newest first, by `created_at` descending with `id`
+ *  descending breaking a tie, so a client that reads one result per check (`dispatch results`
+ *  prints `results[0]`) reads the last recorded. An issue with no Verification document answers
+ *  no checks. */
 export interface IssueCheckResults {
   readonly issue: string;
   /** The issue's Verification document, `""` for an issue that has none. */
