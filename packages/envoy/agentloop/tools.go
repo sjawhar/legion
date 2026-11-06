@@ -77,9 +77,10 @@ func (r *run) index(id string) int {
 	if i, taken := r.indexes[id]; taken {
 		return i
 	}
-	r.indexes[id] = r.next
+	i := r.next
+	r.indexes[id] = i
 	r.next++
-	return r.indexes[id]
+	return i
 }
 
 // modelOutput is what the model is told of one tool call: the tool's own output, as a result or,

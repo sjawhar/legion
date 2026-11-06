@@ -16,7 +16,6 @@ import (
 // standIn is a provider endpoint that records every request it gets and answers each with the next
 // of its replies.
 type standIn struct {
-	t       *testing.T
 	server  *httptest.Server
 	mu      sync.Mutex
 	replies []reply
@@ -44,7 +43,7 @@ type recorded struct {
 
 func newStandIn(t *testing.T, replies ...reply) *standIn {
 	t.Helper()
-	s := &standIn{t: t, replies: replies}
+	s := &standIn{replies: replies}
 	s.server = httptest.NewServer(http.HandlerFunc(s.serve))
 	t.Cleanup(s.server.Close)
 	return s

@@ -47,10 +47,7 @@ func Run(ctx context.Context, req Request) (Result, error) {
 	}
 	messages := append(history, input...)
 
-	transport := &modelTransport{
-		base: http.DefaultTransport, kind: kind,
-		token: req.Model.Endpoint.Token, query: req.Model.Endpoint.Query,
-	}
+	transport := newModelTransport(req.Model.Endpoint)
 	model, options, err := languageModel(req, &http.Client{Transport: transport})
 	if err != nil {
 		return Result{}, err

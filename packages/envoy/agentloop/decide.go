@@ -145,10 +145,7 @@ func Decide(ctx context.Context, req DecideRequest) (DecideResult, error) {
 		return DecideResult{}, fmt.Errorf("agentloop: the %s endpoint: %w", SystemOne, err)
 	}
 	post.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Transport: &modelTransport{
-		base: http.DefaultTransport, kind: SystemOne,
-		token: req.Model.Endpoint.Token, query: req.Model.Endpoint.Query,
-	}}
+	client := &http.Client{Transport: newModelTransport(req.Model.Endpoint)}
 
 	resp, err := client.Do(post)
 	var raw []byte

@@ -50,7 +50,7 @@ func toProvider(messages []Message, kind Kind) ([]provider.Message, error) {
 // userParts is a user turn's blocks: its text and its images. Every protocol takes them the same
 // way.
 func userParts(blocks []Block) ([]provider.ContentPart, error) {
-	var parts []provider.ContentPart
+	parts := make([]provider.ContentPart, 0, len(blocks))
 	for _, b := range blocks {
 		switch b.Kind {
 		case TextBlock:
@@ -67,7 +67,7 @@ func userParts(blocks []Block) ([]provider.ContentPart, error) {
 // toolParts is a turn of tool results, one part per result. Every protocol takes them the same
 // way, and a block of any other kind is refused.
 func toolParts(blocks []Block) ([]provider.ContentPart, error) {
-	var parts []provider.ContentPart
+	parts := make([]provider.ContentPart, 0, len(blocks))
 	for _, b := range blocks {
 		if b.Kind != ToolResultBlock {
 			return nil, fmt.Errorf("a %s block in a tool message", b.Kind)
@@ -141,7 +141,7 @@ func assistantParts(blocks []Block, kind Kind) ([]provider.ContentPart, error) {
 // reasoning item cannot go to Anthropic and is left out. The SDK's Anthropic converter reads a
 // signature and redacted data only from a raw "anthropic" provider option.
 func anthropicParts(blocks []Block) ([]provider.ContentPart, error) {
-	var parts []provider.ContentPart
+	parts := make([]provider.ContentPart, 0, len(blocks))
 	for _, b := range blocks {
 		switch b.Kind {
 		case ThinkingBlock:
@@ -173,7 +173,7 @@ func anthropicParts(blocks []Block) ([]provider.ContentPart, error) {
 // object.
 func anthropicRaw(key, value string) provider.ProviderOptions {
 	raw, _ := json.Marshal(map[string]string{key: value})
-	return provider.ProviderOptions{"anthropic": provider.RawProviderOption{Key: "anthropic", Raw: raw}}
+	return provider.BuildProviderOptions(provider.RawProviderOption{Key: "anthropic", Raw: raw})
 }
 
 // openaiResponsesParts is an OpenAI Responses turn's blocks: a reasoning item with its id and
@@ -181,7 +181,7 @@ func anthropicRaw(key, value string) provider.ProviderOptions {
 // Reasoning that holds neither an item id nor encrypted content cannot go back to a stateless
 // call and is left out, as is Anthropic thinking.
 func openaiResponsesParts(blocks []Block) ([]provider.ContentPart, error) {
-	var parts []provider.ContentPart
+	parts := make([]provider.ContentPart, 0, len(blocks))
 	for _, b := range blocks {
 		switch b.Kind {
 		case ReasoningBlock:
@@ -190,12 +190,12 @@ func openaiResponsesParts(blocks []Block) ([]provider.ContentPart, error) {
 			}
 			encrypted := b.Encrypted
 			part := provider.ReasoningPart(b.Text)
-			part.ProviderOptions = provider.ProviderOptions{"openai": openai.OpenAIPartOptions{ItemID: b.ItemID, ReasoningEncryptedContent: &encrypted}}
+			part.ProviderOptions = provider.BuildProviderOptions(openai.OpenAIPartOptions{ItemID: b.ItemID, ReasoningEncryptedContent: &encrypted})
 			parts = append(parts, part)
 		case TextBlock:
 			part := provider.TextPart(b.Text)
 			if b.Phase != "" {
-				part.ProviderOptions = provider.ProviderOptions{"openai": openai.OpenAIPartOptions{Phase: b.Phase}}
+				part.ProviderOptions = provider.BuildProviderOptions(openai.OpenAIPartOptions{Phase: b.Phase})
 			}
 			parts = append(parts, part)
 		case ToolCallBlock:
@@ -212,7 +212,7 @@ func openaiResponsesParts(blocks []Block) ([]provider.ContentPart, error) {
 // for, and tool calls. Neither Anthropic thinking nor an OpenAI reasoning item can go back to
 // Chat Completions, and both are left out.
 func openaiChatParts(blocks []Block) ([]provider.ContentPart, error) {
-	var parts []provider.ContentPart
+	parts := make([]provider.ContentPart, 0, len(blocks))
 	for _, b := range blocks {
 		switch b.Kind {
 		case TextBlock:
@@ -230,10 +230,8 @@ func openaiChatParts(blocks []Block) ([]provider.ContentPart, error) {
 // withCacheMark is options with Anthropic's ephemeral cache mark added. The caller asks for the
 // run's cache marks with Request.CacheHistory.
 func withCacheMark(options provider.ProviderOptions) provider.ProviderOptions {
-	marked := maps.Clone(options)
-	if marked == nil {
-		marked = provider.ProviderOptions{}
-	}
+	marked := make(provider.ProviderOptions, len(options)+1)
+	maps.Copy(marked, options)
 	marked["anthropic"] = anthropic.CacheControl("ephemeral")
 	return marked
 }
@@ -253,7 +251,7 @@ func markAnthropicHistory(messages []provider.Message, history int) {
 // without it a later run would not read the conversation from the cache. The caller asks for it
 // with Request.CacheHistory.
 func markOpenAIHistory(messages []provider.Message, history int) {
-	breakpoint := provider.ProviderOptions{"openai": openai.OpenAIPartOptions{PromptCacheBreakpoint: &openai.PromptCacheBreakpoint{Mode: "explicit"}}}
+	breakpoint := provider.BuildProviderOptions(openai.OpenAIPartOptions{PromptCacheBreakpoint: &openai.PromptCacheBreakpoint{Mode: "explicit"}})
 	for i := history - 1; i >= 0; i-- {
 		m := messages[i]
 		if m.Role != provider.RoleUser && m.Role != provider.RoleTool || len(m.Content) == 0 {

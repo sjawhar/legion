@@ -33,6 +33,12 @@ type modelTransport struct {
 	responses []*bytes.Buffer
 }
 
+// newModelTransport is the transport one Run or one Decide makes its model calls through, over
+// the default transport, for the endpoint whose protocol, token and query parameters it carries.
+func newModelTransport(endpoint Endpoint) *modelTransport {
+	return &modelTransport{base: http.DefaultTransport, kind: endpoint.Kind, token: endpoint.Token, query: endpoint.Query}
+}
+
 // defaultRetryWait is how long the retry waits when the response names no Retry-After.
 const defaultRetryWait = time.Second
 
@@ -77,19 +83,16 @@ func (t *modelTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			r.URL.RawQuery = q.Encode()
 		}
 		resp, err := t.base.RoundTrip(r)
-		wait, retry := retryable(resp, err)
-		if retry && attempt == 0 && ctx.Err() == nil {
-			if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > wait {
-				if resp != nil {
-					_, _ = io.Copy(io.Discard, resp.Body)
-					_ = resp.Body.Close()
-				}
-				select {
-				case <-time.After(wait):
-					continue
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				}
+		if wait, retry := retryable(resp, err); retry && attempt == 0 && waitable(ctx, wait) {
+			if resp != nil {
+				_, _ = io.Copy(io.Discard, resp.Body)
+				_ = resp.Body.Close()
+			}
+			select {
+			case <-time.After(wait):
+				continue
+			case <-ctx.Done():
+				return nil, ctx.Err()
 			}
 		}
 		if err != nil {
@@ -119,6 +122,16 @@ func retryable(resp *http.Response, err error) (time.Duration, bool) {
 		return time.Duration(seconds) * time.Second, true
 	}
 	return defaultRetryWait, true
+}
+
+// waitable is whether the context has the time to wait out a retry: it is not already done, and
+// it either carries no deadline or has more than wait left.
+func waitable(ctx context.Context, wait time.Duration) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	deadline, ok := ctx.Deadline()
+	return !ok || time.Until(deadline) > wait
 }
 
 // keptBody is a response body that keeps what is read of it.
