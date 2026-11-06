@@ -80,6 +80,7 @@ const read: AskRead = {
   route: null,
   route_holder: null,
   route_status: null,
+  route_status_reason: null,
 };
 
 test("an Inbox reply's `#q2` names the question of the document its comment is anchored to", async () => {

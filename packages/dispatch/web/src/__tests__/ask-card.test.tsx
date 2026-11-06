@@ -95,6 +95,7 @@ function emptyThread(input: Ask): () => Promise<AskRead> {
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
   });
 }
 
@@ -522,6 +523,7 @@ test("AskCard shows every previous version of an edited question, oldest first",
         route: null,
         route_status: null,
         route_holder: null,
+        route_status_reason: null,
       })}
     />
   );
@@ -1334,6 +1336,7 @@ test("AskCard restores its inbox entry if an optimistic answer fails", async () 
       route: null,
       route_status: null,
       route_holder: null,
+      route_status_reason: null,
     },
   };
   queryClient.setQueryData<InboxRow[]>(["inbox"], [inboxInput]);
@@ -1379,6 +1382,7 @@ test("AskCard reloads a changed question, requires the human to reconfirm, and a
         route: null,
         route_status: null,
         route_holder: null,
+        route_status_reason: null,
         replies: [],
       })}
     />
@@ -1551,6 +1555,7 @@ test("AskCard renders replies under the question without an open-ask thread comp
         route: null,
         route_status: null,
         route_holder: null,
+        route_status_reason: null,
         replies: [reply({ id: "comment-1", body: "Any update?" })],
       })}
     />
@@ -1733,6 +1738,7 @@ test("AskCard shows the newest two replies, expands older replies, and puts a fr
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
   });
   const { view } = renderCard(
     <AskCard
@@ -1807,6 +1813,7 @@ test("a compact answered ask's Write a reply reveals its composer as the next ke
         route: null,
         route_status: null,
         route_holder: null,
+        route_status_reason: null,
         replies: [reply({ body: "Earlier reply" })],
       })}
       thread="collapsed"
@@ -1853,6 +1860,7 @@ test("a reply arriving while the older replies are shown lands first and keeps t
         route: null,
         route_status: null,
         route_holder: null,
+        route_status_reason: null,
       })}
       thread="collapsed"
     />
@@ -1914,6 +1922,7 @@ test("a link to a folded reply opens the fold and still lets the reader collapse
         route: null,
         route_status: null,
         route_holder: null,
+        route_status_reason: null,
       })}
       thread="collapsed"
     />
@@ -1978,6 +1987,7 @@ test("AskCard with no replies offers Write a reply only after an answer, and ret
           route: null,
           route_status: null,
           route_holder: null,
+          route_status_reason: null,
         };
       }}
       thread="collapsed"
@@ -2149,6 +2159,7 @@ test("a document ask links its project and document page", async () => {
         route: null,
         route_status: null,
         route_holder: null,
+        route_status_reason: null,
       },
     },
   ]);

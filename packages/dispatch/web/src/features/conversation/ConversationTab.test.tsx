@@ -151,6 +151,7 @@ function askRow(overrides: Partial<Ask> = {}, replies: Comment[] = []): IssueAsk
       route: null,
       route_status: null,
       route_holder: null,
+      route_status_reason: null,
     },
   };
 }
@@ -2301,6 +2302,7 @@ test("a Conversation turn links the `#q2` the question map of its message names"
     route: null,
     route_holder: null,
     route_status: null,
+    route_status_reason: null,
   });
   const stub = stubLists({
     messages: [thread(message("message-1", { body: "See #q2 for the rollout." }))],

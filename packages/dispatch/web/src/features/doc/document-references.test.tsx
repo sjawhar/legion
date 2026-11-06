@@ -55,6 +55,7 @@ const askRead: AskRead = {
   route: null,
   route_holder: null,
   route_status: null,
+  route_status_reason: null,
 };
 
 const summary: IssueReferenceSummary = {

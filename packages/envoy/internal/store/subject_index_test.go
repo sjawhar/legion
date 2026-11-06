@@ -10,18 +10,6 @@ import (
 	"github.com/sjawhar/envoy/internal/routing"
 )
 
-// cachedRegistry is a registry whose cache holds items, each written through the cache as a watcher
-// update is, so its subject index holds them too.
-func cachedRegistry(items map[string]Interest) *Registry {
-	r := &Registry{}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for key, item := range items {
-		r.cacheInterestLocked(key, item, 1)
-	}
-	return r
-}
-
 // indexMatches is the sorted keys of machineID that index matches subject with, each once.
 func indexMatches(x *subjectIndex, machineID, subject string) []string {
 	var keys []string
@@ -184,7 +172,7 @@ func TestSubjectIndexFollowsTheInterestBucket(t *testing.T) {
 	if got[0].SessionID != "ses_idx" {
 		t.Fatalf("matched %v, want ses_idx", got)
 	}
-	twice := cachedRegistry(map[string]Interest{"ses_twice": {SessionID: "ses_twice", MachineID: "m1", Topics: []string{"notifications.dispatch.issue.IDX-1.>", "notifications.dispatch.issue.*.comment"}}})
+	twice := holding(t, map[string]Interest{"ses_twice": {SessionID: "ses_twice", MachineID: "m1", Topics: []string{"notifications.dispatch.issue.IDX-1.>", "notifications.dispatch.issue.*.comment"}}})
 	if got := twice.Match("m1", topic); len(got) != 1 || got[0].SessionID != "ses_twice" {
 		t.Fatalf("an interest two of whose topics match was matched as %v, want once", got)
 	}
