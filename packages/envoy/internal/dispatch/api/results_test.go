@@ -528,6 +528,50 @@ func TestResultAtAnUnreadableRepositoryIsStoredAndReadsUnknown(t *testing.T) {
 	}
 }
 
+// The same refusal for an issue recorded under the name its repository was renamed away from.
+// GitHub answers 404 for the old name's installation and knows only the canonical one, so the
+// commit is asked about under the name the repository is called today, as the currency reader
+// asks (refs.CanonicalRepo): the commit the repository holds is stored, and the one it does
+// not is refused, naming the canonical repository. Asked under the old name, every such result
+// would be stored instead, since an unreadable repository refuses nothing.
+func TestResultOfAnIssueUnderARepositorysOldNameIsRefusedAtTheCanonicalName(t *testing.T) {
+	handler, _ := resultsGitHubHolding(t, map[string]bool{"acme/gadgets": true},
+		map[string]bool{headCommit: true}, func(string, string) string { return "diverged" })
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects",
+		map[string]string{"key": "RESN", "name": "Renamed"}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create RESN: status=%d body=%s", response.Code, response.Body.String())
+	}
+	for _, mapping := range []struct {
+		repo string
+		body map[string]any
+	}{
+		{"acme/gadgets", map[string]any{"project": "RESN", "default": true}},
+		{"oldco/gadgets", map[string]any{"project": "RESN", "renamed_to": "acme/gadgets"}},
+	} {
+		if response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/"+mapping.repo,
+			mapping.body, "alice"); response.Code != http.StatusOK {
+			t.Fatalf("map %s: status=%d body=%s", mapping.repo, response.Code, response.Body.String())
+		}
+	}
+	issue := decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues",
+		map[string]any{"project": "RESN", "title": "Recorded under the old name", "spec": "A spec\n",
+			"repo": "oldco/gadgets"}, "alice"))
+	uploadDocument(t, handler, "/api/v1/issues/"+issue.Key, "verification.md", twoChecks)
+
+	refused := recordResult(t, handler, issue.Key, resultBody("k1", "pass", nearHeadCommit, nil))
+	code, text := refusalOf(t, refused)
+	if refused.Code != http.StatusBadRequest || code != "RESULT_COMMIT_UNKNOWN" {
+		t.Fatalf("a result of an issue under oldco/gadgets at a commit acme/gadgets does not hold: status=%d body=%s",
+			refused.Code, refused.Body.String())
+	}
+	if !strings.Contains(text, "acme/gadgets") {
+		t.Fatalf("the refusal reads %q, want the canonical repository acme/gadgets named", text)
+	}
+	if recorded := recordResult(t, handler, issue.Key, resultBody("k1", "pass", headCommit, nil)); recorded.Code != http.StatusCreated {
+		t.Fatalf("a result at a commit acme/gadgets holds: status=%d body=%s", recorded.Code, recorded.Body.String())
+	}
+}
+
 // An after-merge result is current at a commit on the repository's default branch, older at a
 // commit of an unmerged branch, and unknown where Dispatch's App cannot read the repository.
 func TestAfterMergeResultCurrencyFollowsTheDefaultBranch(t *testing.T) {

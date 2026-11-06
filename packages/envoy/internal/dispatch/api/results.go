@@ -136,7 +136,11 @@ func (s *server) recordCheckResult(w http.ResponseWriter, r *http.Request) {
 	// It is the check's issue's repository, not the recording issue's: readThroughPullRequests
 	// and the currency reader both resolve check_issue_key, and a refusal keyed on the
 	// recording issue would disagree with the currency mark about which repository the commit
-	// belongs to.
+	// belongs to. It is that repository's canonical name, for the same reason: the currency
+	// reader asks GitHub about the name a repository is called today (results_currency.go,
+	// currencyReader.repositoryOf), and a refusal asking under a name the repository was
+	// renamed away from reads the 404 GitHub answers for that name's installation, where the
+	// mark reads the commit — so it would store every result of such an issue.
 	var checkRepo *string
 	if s.deps.GitHub != nil {
 		checkRepo, err = refs.IssueRepository(r.Context(), pool, check.IssueKey)
@@ -144,6 +148,16 @@ func (s *server) recordCheckResult(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("dispatch: resolve the repository of a recorded result's check",
 				"issue", check.IssueKey, "error", err)
 			checkRepo = nil
+		}
+		if checkRepo != nil {
+			canonical, err := refs.CanonicalRepo(r.Context(), pool, *checkRepo)
+			if err != nil {
+				slog.Warn("dispatch: canonical name of a recorded result's repository",
+					"issue", check.IssueKey, "repo", *checkRepo, "error", err)
+				checkRepo = nil
+			} else {
+				checkRepo = &canonical
+			}
 		}
 	}
 
