@@ -1,0 +1,7 @@
+kind: Fixed
+body: |-
+  Dispatch's block index retires an item's old whole-text embedding by its primary key rather than by reading every whole-text row of its kind.
+  The delete compared a window's owner key with a prefix glued onto the whole-text row's own id, which binds nothing, so each pass read the whole backlog and tested it against the windows: on a database holding 480,000 unwindowed comments one pass took about 25 minutes, and the pass that replaces it took 26.9 ms. It deletes the same rows as before and still locks only the rows it deletes.
+time: 2026-11-06T22:24:51.637124719Z
+custom:
+    Issue: pr2886
