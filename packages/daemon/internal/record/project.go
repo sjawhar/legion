@@ -67,8 +67,37 @@ func InWorkflow(issue Issue) bool {
 // workflow beneath an issue in one of them would let that issue merge first, which is the one
 // thing a parent must not do (dispatch://INFRA-980, "Children first"), so the daemon refuses to
 // let it in (api's CHILD_UNDER_ACCEPTED_PARENT) and holds at admitted an issue a person moves to
-// todo there (AcceptedAncestor, read by Waiting).
+// todo there (AcceptedAncestor, read by Waiting). Nothing reads the list directly: Accepted is
+// the predicate every one of those rules asks, so a held issue is read alike by all of them.
 var AcceptedPhases = []phase.Phase{phase.Retro, phase.Merging, phase.AwaitingMerge}
+
+// StandsIn says whether issue stands in one of phases, counting a hold from one of them as
+// standing there: a worker that dies leaves its issue at phase.Held with Hold.From naming the
+// phase it was working (workflow's workerDied), and the work has reached exactly where it had
+// before. It is the one shape every question about where an issue stands is written over —
+// Accepted here, and the workflow's own awaitsMerge, which asks it of one phase — so no two of
+// those questions read a held issue differently.
+func StandsIn(issue Issue, phases ...phase.Phase) bool {
+	at := issue.Phase
+	if at == phase.Held && issue.Hold != nil {
+		at = issue.Hold.From
+	}
+	return slices.Contains(phases, at)
+}
+
+// Accepted says whether the daemon has already accepted issue's own reviewed head and the issue
+// has not closed: it stands in one of AcceptedPhases, or is held from one of them (StandsIn).
+// The reviewed head of a root whose worker died in retro, merging or awaiting_merge is accepted
+// still, so the hold must not let work in beneath it: the line held no issue under such a root,
+// the two doors let one in, and the close of a root held from retro handed over nobody.
+//
+// It is the one predicate the three rules of the acceptance order call — the waiting line's hold
+// (HeldUnderAccepted), the doors' refusal (AcceptedAncestorIn) and the hand-over a closing root
+// makes of what that hold stopped (workflow's beginLinger) — so none of them can count a root as
+// accepted that another counts as still at work.
+func Accepted(issue Issue) bool {
+	return StandsIn(issue, AcceptedPhases...)
+}
 
 // Ancestors is every issue above issue inside its own tree, nearest first and the tree's own
 // root last: the one parent-chain walk every rule that reads "above" is written over, so that
@@ -137,7 +166,8 @@ func chainOf(byKey, above map[string]Issue) map[string]Issue {
 }
 
 // AcceptedAncestor is the nearest issue above issue (Ancestors) that the daemon has already
-// accepted (AcceptedPhases), and "" when no ancestor has been.
+// accepted (Accepted, which counts an ancestor held from one of those phases), and "" when no
+// ancestor has been.
 //
 // A parent already done does not end the walk: the spec's grandchild under a done parent is held
 // by whichever issue above that parent is still merging, which is what the walk goes on to find.
@@ -148,7 +178,7 @@ func chainOf(byKey, above map[string]Issue) map[string]Issue {
 // held it hands it over as a root of its own (workflow's unfinishedHandOvers).
 func AcceptedAncestor(issue Issue, byKey map[string]Issue) string {
 	for _, above := range Ancestors(issue, byKey) {
-		if slices.Contains(AcceptedPhases, above.Phase) {
+		if Accepted(above) {
 			return above.Key
 		}
 	}
@@ -636,9 +666,9 @@ func Waiting(issues []Issue, slots []Slot, facts LineFacts) []LineEntry {
 		}
 		// A parent whose own Dispatch children are still open does its work after theirs
 		// (LineFacts.ChildWaits): offered a slot here it would build beside the children whose
-		// merges its own head is meant to carry. Its tree's architect is told once per
-		// generation when the wait begins (admit's tellChildrenFirst), and the state names it
-		// under admission.blocked meanwhile.
+		// merges its own head is meant to carry. Its tree's architect is told once per issue and
+		// run of its tree when the wait begins (admit's tellChildrenFirst), and the state names
+		// it under admission.blocked meanwhile.
 		if _, waits := facts.ChildWaits[issue.Key]; waits {
 			continue
 		}

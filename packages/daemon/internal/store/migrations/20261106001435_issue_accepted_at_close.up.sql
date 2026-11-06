@@ -1,0 +1,18 @@
+-- 20261106001435_issue_accepted_at_close.up.sql — was this root accepted when its tree's linger
+-- began?
+--
+-- A root's close writes its phase as done before its linger is armed, so by the time the linger
+-- expires nothing of the record says whether the root's own reviewed head had been accepted
+-- (record.Accepted). The expiry needs that answer: it hands to Legion, as a root of its own, every
+-- member the daemon was holding at admitted under an accepted ancestor, and the root is the one
+-- ancestor whose phase that read has lost (workflow's unfinishedHandOvers). An ancestor below the
+-- root keeps its phase through the linger, so it needs no mark.
+--
+-- workflow's beginLinger is the only writer, and it writes the mark with the done phase that hides
+-- what it records: true for a root in retro, merging or awaiting_merge, held from one of them, or
+-- closed on a merged pull request, false for any other. Every close writes it again, so a root
+-- re-admitted inside its linger and closed again at admitted carries false from that second close.
+--
+-- No backfill: a tree already lingering at this release closes as a root that was not accepted,
+-- which is what every such tree was read as before the mark existed.
+alter table issues add column accepted_at_close boolean not null default false;

@@ -48,10 +48,11 @@ const (
 // has already accepted, so the child at admitted beneath it is one the daemon itself holds
 // (record.AcceptedAncestor), and its architect was told it starts once this root closes: the
 // linger hands it over too, whether the close followed the merge or a person made it by hand
-// (the workflow's fenceHeldUnderAccepted). The hand-over remains pending during the linger, so a
-// root that comes back in it resumes its children where they stood and hands none over. The close
-// here is a person's — parked, then closed — where a merged root's close waits for the rest of
-// its tree instead (the workflow's closeMerged) and leaves no child mid-run to hand over.
+// (the workflow's unfinishedHandOvers, which reads the acceptance the close marked on the root).
+// The close itself hands nothing over, so a root that comes back inside its linger resumes its
+// children where they stood and hands none over. The close here is a person's — parked, then
+// closed — where a merged root's close waits for the rest of its tree instead (the workflow's
+// closeMerged) and leaves no child mid-run to hand over.
 func TestAFinishedRootSettlesItsUnfinishedChildrenWhenItsLingerEnds(t *testing.T) {
 	pool, admission, engine := seedFinishingTree(t)
 	apply(t, pool, admission, "root-parked", intake.DispatchIssue{Key: finishedRoot, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "backlog", Title: finishedRoot, Rank: "A", HandedOver: true}, engine)

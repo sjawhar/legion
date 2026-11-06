@@ -1099,6 +1099,7 @@ func (a *Admission) logSlot(ctx context.Context, change, issue string, inUse int
 // a first phase started, an architect resumed — in the line's own order, until the cap is full
 // or the line empties, and reports how many candidates it promoted and the slots it released.
 // Before it promotes any, every admitted root that now waits only on a person enters that wait
+// (workflow's ReconcileAwaiting), every issue that no longer needs its slot gives it back
 // (releaseSlots), and every root left in the workflow that nothing will ever start leaves it
 // (releaseUnslotted), so each pass of admission — a live fact, the boot read, a release, a tick
 // — repairs that state rather than keeping it. The pass stops at the first candidate either hold

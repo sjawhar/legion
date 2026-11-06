@@ -189,7 +189,16 @@ func TestASecondBootOnTheSameStoreLeavesEverySlotStartAndPlaceAsItWas(t *testing
 // issueSlotsMigration is the migration that gives an issue its own slot, the first schema change
 // of this release (dispatch://INFRA-980). A store migrated to the version below it carries the
 // schema of a dump taken before the release.
-const issueSlotsMigration = 20261103183833
+//
+// acceptedAtCloseMigration is the one later migration of this release the fixture applies with
+// them. It only widens the issues row — the mark workflow's beginLinger writes, which no test
+// here reads and which backfills nothing — and today's record code writes that column on every
+// issue, so a fixture without it cannot seed a pre-release record at all. Every migration whose
+// backfill these tests watch is still left for Store.Migrate.
+const (
+	issueSlotsMigration      = 20261103183833
+	acceptedAtCloseMigration = 20261106001435
+)
 
 // preReleaseStore is a database of this test's own migrated to the release before this one:
 // every embedded migration below issueSlotsMigration, applied as Store.Migrate applies them —
@@ -215,10 +224,8 @@ func preReleaseStore(t *testing.T) *store.Store {
 		t.Fatalf("read the embedded migrations: %v", err)
 	}
 	widened := false
-	for _, migration := range all {
-		if migration.Version >= issueSlotsMigration {
-			break
-		}
+	apply := func(migration migrations.Migration) {
+		t.Helper()
 		if err := pgx.BeginFunc(ctx, st.Pool(), func(tx pgx.Tx) error {
 			if _, err := tx.Exec(ctx, migration.SQL); err != nil {
 				return err
@@ -233,6 +240,11 @@ func preReleaseStore(t *testing.T) *store.Store {
 			return err
 		}); err != nil {
 			t.Fatalf("apply %s: %v", migration.Name, err)
+		}
+	}
+	for _, migration := range all {
+		if migration.Version < issueSlotsMigration || migration.Version == acceptedAtCloseMigration {
+			apply(migration)
 		}
 	}
 	return st
