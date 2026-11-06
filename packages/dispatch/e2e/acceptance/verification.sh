@@ -569,7 +569,7 @@ grep -qF "Pull request body line:" "$work/out" ||
 pass result "the record prints the pull-request body line"
 
 run result "read the results of $root" results --issue "$root"
-grep -qE "^- c1 \(before_merge\): pass at ${commit_one:0:12} by tester, " "$work/out" ||
+grep -qE "^- c1 \(before_merge\): pass at ${commit_one} by tester, " "$work/out" ||
   fail result "the results read shows the result under c1" "$(<"$work/out")"
 pass result "the results read shows the pass under c1"
 grep -qF -- "- cnone (before_merge): no result yet." "$work/out" ||
@@ -768,7 +768,7 @@ else
     record currency "record a pass at the pull request's head" "$root" --check c1 --role tester \
       --verdict pass --commit "$commit_two" --surface cli --run "bash e2e/acceptance/verification.sh"
     run currency "read the results of $root" results --issue "$root"
-    grep -qE "^- c1 \(before_merge\): pass at ${commit_two:0:12} by tester, current\." "$work/out" ||
+    grep -qE "^- c1 \(before_merge\): pass at ${commit_two} by tester, current\." "$work/out" ||
       fail currency "the newest result reads current" "$(<"$work/out")"
     pass currency "the result at the pull request's head reads current"
   fi

@@ -634,7 +634,7 @@ func blockWords(node *pmdoc.Node) string {
 // and no Dispatch host.
 func checkResultLine(check resolvedCheck, result model.CheckResult) string {
 	line := fmt.Sprintf("- Check %s (%s): %s at %s, recorded by %s.",
-		check.BlockID, check.When, result.Verdict, result.CommitSHA[:12], result.Role)
+		check.BlockID, check.When, result.Verdict, result.CommitSHA, result.Role)
 	if summary := text.HeadRunes(check.Text, checkResultSummaryRunes); summary != "" {
 		line += " " + summary
 	}

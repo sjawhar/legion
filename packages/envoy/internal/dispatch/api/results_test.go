@@ -133,7 +133,8 @@ func TestResultRecordsAgainstAChecksOfTheIssueAndOfAnAncestor(t *testing.T) {
 	if recorded.Result.CheckIssueKey != parent.Key || recorded.Result.IssueKey != parent.Key {
 		t.Fatalf("result = recorded on %s against %s, want both %s", recorded.Result.IssueKey, recorded.Result.CheckIssueKey, parent.Key)
 	}
-	wantLine := "- Check k1 (before_merge): pass at 111111111111, recorded by implementer. The server records a result against a check."
+	wantLine := "- Check k1 (before_merge): pass at " + headCommit +
+		", recorded by implementer. The server records a result against a check."
 	if recorded.Line != wantLine {
 		t.Fatalf("line = %q, want %q", recorded.Line, wantLine)
 	}
