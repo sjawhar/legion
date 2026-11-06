@@ -425,3 +425,76 @@ func TestAWarmGzipReadOfAListIsCompressedOnce(t *testing.T) {
 		})
 	}
 }
+
+// emptyIssuesAsAScenarioResetDoes leaves the database as the browser harness leaves it between
+// scenarios (packages/dispatch/e2e/seed.ts): every issue and everything keyed to one is gone, and
+// each project numbers from 1 again, so the issues of what follows take the keys of what came
+// before. comment_watermarks is not emptied here for the same reason the reset does not empty it:
+// it carries no foreign key into anything the reset names, so nothing reaches it (migration
+// 20261106020619).
+func emptyIssuesAsAScenarioResetDoes(t *testing.T, database *store.Store) {
+	t.Helper()
+	for _, statement := range []string{
+		`truncate table issues cascade`,
+		`update projects set next_number = 1`,
+	} {
+		if _, err := database.Pool.Exec(context.Background(), statement); err != nil {
+			t.Fatalf("empty the issues (%s): %v", statement, err)
+		}
+	}
+}
+
+// A key a new issue takes from an old one is never answered the old issue's activity feed. The
+// feed's validator stands on issues.last_seq, a counter of the issue row, so two issues of one
+// key stand at one sequence and would otherwise be given one ETag: the second issue's reader
+// would be answered 304, or written the bytes this server kept for the first. The issue's
+// created_at is hashed in beside the column so neither can happen, which is what the browser
+// harness needs of it - it empties `issues` and restarts each project's numbering between
+// scenarios, under a server process that keeps running.
+func TestANewIssueUnderARecycledKeyIsNeverAnsweredTheOldIssuesFeed(t *testing.T) {
+	// A settlement of the first issue's spec writes to the tables the reset below empties, and a
+	// delay no test run reaches keeps the two apart, as it does in the harness (quiesceDocuments).
+	handler, database, _, _ := newRegisteredTestServer(t, testServerOptions{settle: time.Hour})
+	first := createInteractionIssue(t, handler, "RECYCL", "The first issue of this key", "")
+	feed := "/api/v1/issues/" + first.Key + "/events"
+	before := listRead(t, handler, feed, listReadOptions{trees: true})
+	beforeETag := listETagOf(t, before, "the first issue's feed")
+	beforeSeq := issueLastSeq(t, database, first.Key)
+
+	emptyIssuesAsAScenarioResetDoes(t, database)
+
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "RECYCL", "title": "The second issue of this key", "spec": "",
+	}, "alice")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create the second issue: status=%d body=%s", created.Code, created.Body.String())
+	}
+	second := decodeBody[struct {
+		Key string `json:"key"`
+	}](t, created)
+	if second.Key != first.Key {
+		t.Fatalf("the second issue is %s, want the %s the first had: this case needs the key back", second.Key, first.Key)
+	}
+	if seq := issueLastSeq(t, database, second.Key); seq != beforeSeq {
+		t.Fatalf("the two issues of %s stand at sequences %d and %d: this case needs the one sequence",
+			first.Key, beforeSeq, seq)
+	}
+
+	after := listRead(t, handler, feed, listReadOptions{trees: true})
+	afterETag := listETagOf(t, after, "the second issue's feed")
+	if afterETag == beforeETag {
+		t.Errorf("both issues of %s answer the feed ETag %s", first.Key, beforeETag)
+	}
+	if !strings.Contains(after.Body.String(), "The second issue of this key") {
+		t.Fatalf("the feed of %s answers %s, want the issue that holds the key now", first.Key, after.Body.String())
+	}
+
+	holding := listRead(t, handler, feed, listReadOptions{trees: true, etag: beforeETag})
+	if got := listETagOf(t, holding, "the feed read holding the first issue's ETag"); got != afterETag {
+		t.Fatalf("a reader holding the first issue's validator is answered %s, want the %s the feed stands at", got, afterETag)
+	}
+	if !bytes.Equal(holding.Body.Bytes(), after.Body.Bytes()) {
+		t.Errorf("a reader holding the first issue's validator is answered %d bytes, want the %d the feed carries",
+			holding.Body.Len(), after.Body.Len())
+	}
+}
