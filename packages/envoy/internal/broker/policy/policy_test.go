@@ -140,3 +140,77 @@ func TestEvaluateTreatsAWithheldNameAsHumanTier(t *testing.T) {
 		t.Errorf("Evaluate(NOT_A_SECRET) = %v, want ErrUnknownSecret", err)
 	}
 }
+
+// TestRequesters is the requesters tag's table: a secret that lists who may ask for it is denied,
+// with the reason requester-not-listed, to every session and pod the list does not name, and
+// decided by owner and tier as before for the ones it does. A session signed in as nobody and a
+// pod proving no service are on no list, so both are denied every listed secret, and a secret
+// carrying no list answers exactly as it did before the tag existed.
+func TestRequesters(t *testing.T) {
+	const (
+		sami   = "sami@theorem.dev"
+		jason  = "jason@theorem.dev"
+		aditya = "aditya@theorem.dev"
+		daemon = "legion-daemon"
+	)
+	listed := func(name, owner, tier, requesters string) secrets.LocalSecret {
+		s := policytest.Secret(name, owner, tier, "v")
+		s.Tags[policy.TagRequesters] = requesters
+		s.Tags[policy.TagMaxGrant] = "1h"
+		return s
+	}
+	store := secrets.NewLocal(
+		listed("GCLOUD_SAMI", sami, policy.TierHuman, daemon+" "+sami),
+		listed("AZURE_ADMIN", sami, policy.TierHuman, jason+" "+daemon+" "+sami),
+		listed("DEV_ADITYA", aditya, policy.TierAgent, aditya),
+		policytest.Secret("SHARED_AGENT", policy.OwnerShared, policy.TierAgent, "v"),
+	)
+	set, err := policytest.Loader(store, daemon).Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	automatic := policy.Decision{Outcome: policy.Automatic}
+	notListed := policy.Decision{Outcome: policy.Deny, Reason: policy.ReasonRequesterNotListed}
+	approval := func(approver string) policy.Decision {
+		return policy.Decision{Outcome: policy.Approval, Approver: approver}
+	}
+	requesters := map[string]policy.Requester{
+		"sami's session":                      {Operator: sami},
+		"jason's session":                     {Operator: jason},
+		"aditya's session":                    {Operator: aditya},
+		"the daemon's pod":                    {Service: daemon},
+		"another service's pod":               {Service: "other-service"},
+		"a pod with no person and no service": {},
+	}
+	table := map[string]map[string]policy.Decision{
+		"GCLOUD_SAMI": {
+			"sami's session": approval(sami), "jason's session": notListed,
+			"aditya's session": notListed, "the daemon's pod": approval(sami),
+			"another service's pod": notListed, "a pod with no person and no service": notListed,
+		},
+		"AZURE_ADMIN": {
+			"sami's session": approval(sami), "jason's session": approval(sami),
+			"aditya's session": notListed, "the daemon's pod": approval(sami),
+			"another service's pod": notListed, "a pod with no person and no service": notListed,
+		},
+		"DEV_ADITYA": {
+			"sami's session": notListed, "jason's session": notListed,
+			"aditya's session": automatic, "the daemon's pod": notListed,
+			"another service's pod": notListed, "a pod with no person and no service": notListed,
+		},
+		"SHARED_AGENT": {
+			"sami's session": automatic, "jason's session": automatic,
+			"aditya's session": automatic, "the daemon's pod": automatic,
+			"another service's pod": automatic, "a pod with no person and no service": automatic,
+		},
+	}
+	for name, row := range table {
+		for who, want := range row {
+			got, err := set.Evaluate(name, requesters[who])
+			want.Source = secrets.LocalARN(policytest.ID(name))
+			if err != nil || got != want {
+				t.Errorf("Evaluate(%s, %s) = %+v, %v; want %+v", name, who, got, err, want)
+			}
+		}
+	}
+}

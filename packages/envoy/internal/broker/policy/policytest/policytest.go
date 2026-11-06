@@ -41,15 +41,25 @@ func Secret(name, owner, tier, value string) secrets.LocalSecret {
 // canonical form ParseGitHubOwners answers.
 const FixtureGitHubOwners = "acme ada"
 
+// FixtureMaxGrant is the max-grant tag KindSecret gives a kind whose requesters bound it
+// (policy.RequesterRules refuses a listed secret without one, and one longer than an hour).
+const FixtureMaxGrant = "1h"
+
 // KindSecret is Secret with a kind tag: a secret whose release the broker mints from value. A
 // kind that needs github-owners (policy.KindNeedsGitHubOwners) also carries them
 // (FixtureGitHubOwners), without which the policy refuses it; a test of that refusal deletes the
-// tag.
+// tag. A google-service-account secret carries the requesters its own rules demand — its owner
+// alone — and the max-grant every listed secret must set (FixtureMaxGrant), so the fixture loads
+// for an owner who is a person; a test of those refusals edits the tags.
 func KindSecret(name, owner, tier, kind, value string) secrets.LocalSecret {
 	secret := Secret(name, owner, tier, value)
 	secret.Tags[policy.TagKind] = kind
 	if policy.KindNeedsGitHubOwners(kind) {
 		secret.Tags[policy.TagGitHubOwners] = FixtureGitHubOwners
+	}
+	if kind == policy.KindGoogleServiceAccount {
+		secret.Tags[policy.TagRequesters] = owner
+		secret.Tags[policy.TagMaxGrant] = FixtureMaxGrant
 	}
 	return secret
 }

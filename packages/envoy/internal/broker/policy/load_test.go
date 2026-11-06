@@ -567,3 +567,132 @@ func TestLoadOneMakesNoCallForAnIDPastSecretsManagersNameLimit(t *testing.T) {
 		t.Fatalf("LoadOne(a name whose id is 513 characters) = %+v, %v after %d DescribeSecret calls; want ErrNameInvalid with no further call", lk, err, count.Calls.Load())
 	}
 }
+
+// TestRequestersLoad pins what the loader makes of a requesters tag, each refusal logged as the
+// one line the deployment's alarm filters on, with its own reason: a list it cannot read at all
+// is requesters-malformed; a listed secret whose grants are unbounded, or bounded past an hour,
+// is requesters-max-grant; and a google-service-account secret whose requesters are not exactly
+// its owner is requesters-not-owner, a missing list included. The well-tagged secret beside them
+// is served, so the rules refuse these secrets and not every secret.
+func TestRequestersLoad(t *testing.T) {
+	const (
+		sami   = "sami@theorem.dev"
+		jason  = "jason@theorem.dev"
+		daemon = "legion-daemon"
+	)
+	type refusal struct {
+		secret secrets.LocalSecret
+		reason string
+	}
+	refusals := map[string]refusal{}
+	refuse := func(name, reason string, edit func(*secrets.LocalSecret)) {
+		s := policytest.Secret(name, sami, policy.TierAgent, "v")
+		s.Tags[policy.TagRequesters] = sami
+		s.Tags[policy.TagMaxGrant] = "1h"
+		edit(&s)
+		refusals[name] = refusal{s, reason}
+	}
+	refuseKind := func(name, reason string, edit func(*secrets.LocalSecret)) {
+		s := policytest.KindSecret(name, sami, policy.TierAgent, policy.KindGoogleServiceAccount,
+			`{"service_account": "releases@example-project.iam.gserviceaccount.com"}`)
+		edit(&s)
+		refusals[name] = refusal{s, reason}
+	}
+	refuse("COMMA_LIST", policy.ReasonRequestersMalformed, func(s *secrets.LocalSecret) {
+		s.Tags[policy.TagRequesters] = sami + "," + daemon
+	})
+	refuse("EMPTY_LIST", policy.ReasonRequestersMalformed, func(s *secrets.LocalSecret) {
+		s.Tags[policy.TagRequesters] = "  "
+	})
+	refuse("CASED_EMAIL", policy.ReasonRequestersMalformed, func(s *secrets.LocalSecret) {
+		s.Tags[policy.TagRequesters] = "Sami@Theorem.dev"
+	})
+	refuse("UNKNOWN_SERVICE", policy.ReasonRequestersMalformed, func(s *secrets.LocalSecret) {
+		s.Tags[policy.TagRequesters] = "dispatch"
+	})
+	refuse("NO_MAX_GRANT", policy.ReasonRequestersMaxGrant, func(s *secrets.LocalSecret) {
+		delete(s.Tags, policy.TagMaxGrant)
+	})
+	refuse("LONG_MAX_GRANT", policy.ReasonRequestersMaxGrant, func(s *secrets.LocalSecret) {
+		s.Tags[policy.TagMaxGrant] = "2h"
+	})
+	refuseKind("ACCOUNT_NO_LIST", policy.ReasonRequestersNotOwner, func(s *secrets.LocalSecret) {
+		delete(s.Tags, policy.TagRequesters)
+	})
+	refuseKind("ACCOUNT_TWO_PEOPLE", policy.ReasonRequestersNotOwner, func(s *secrets.LocalSecret) {
+		s.Tags[policy.TagRequesters] = sami + " " + jason
+	})
+	refuseKind("ACCOUNT_ANOTHER_PERSON", policy.ReasonRequestersNotOwner, func(s *secrets.LocalSecret) {
+		s.Tags[policy.TagRequesters] = jason
+	})
+
+	served := policytest.Secret("SERVED_KEY", sami, policy.TierAgent, "v")
+	served.Tags[policy.TagRequesters] = sami
+	served.Tags[policy.TagMaxGrant] = "1h"
+	store := secrets.NewLocal(served)
+	for _, r := range refusals {
+		store.Put(r.secret)
+	}
+
+	logged := policytest.CaptureLog(t)
+	set, err := policytest.Loader(store, daemon).Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(set.Secrets) != 1 || set.Secrets["SERVED_KEY"].Requesters != sami {
+		t.Fatalf("served %+v, want only SERVED_KEY, listing %s", set.Secrets, sami)
+	}
+	lines := logged.String()
+	for name, r := range refusals {
+		if want := refusedLine(name, r.reason); strings.Count(lines, want) != 1 {
+			t.Errorf("log has %d of %q, want exactly one:\n%s", strings.Count(lines, want), want, lines)
+		}
+	}
+	if got := strings.Count(lines, "\n"); got != len(refusals) {
+		t.Errorf("logged %d lines, want one per refused secret (%d):\n%s", got, len(refusals), lines)
+	}
+}
+
+// TestNewSetDigest pins what a requesters tag does to the digest: two spellings of one list — the
+// entries in another order, separated by more space — are one policy and one version, a changed
+// list is another, and a namespace that carries no requesters digests to the bytes it digested
+// before the tag existed, written out here, so a change that moved them fails. The expected value
+// is the SHA-256 of the lines printed by hand:
+// printf 'LIMITED_KEY\tada@example.com\thuman\t<arn>/limited-key\t1h0m0s\t\n
+// PLAIN_KEY\tada@example.com\tagent\t<arn>/plain-key\n' | sha256sum, with <arn>
+// arn:aws:secretsmanager:local:000000000000:secret:example/agent-secrets.
+func TestNewSetDigest(t *testing.T) {
+	const (
+		sami   = "sami@theorem.dev"
+		daemon = "legion-daemon"
+	)
+	version := func(requesters string) string {
+		t.Helper()
+		s := policytest.Secret("LISTED_KEY", sami, policy.TierAgent, "v1")
+		s.Tags[policy.TagRequesters] = requesters
+		s.Tags[policy.TagMaxGrant] = "1h"
+		set, err := policytest.Loader(secrets.NewLocal(s), daemon).Load(context.Background())
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		return set.Version
+	}
+	if first, again := version(daemon+" "+sami), version("  "+sami+"   "+daemon+" "); first != again {
+		t.Errorf("two spellings of one list gave %s and %s, want one version", first, again)
+	}
+	if listed, narrowed := version(daemon+" "+sami), version(sami); listed == narrowed {
+		t.Error("dropping a requester from the list left the version unchanged")
+	}
+
+	const want = "4b1e0cfefd5df408721f6fa65119a8991fadc3f4e91b46bba981f7a22de6c9c3"
+	limited := policytest.Secret("LIMITED_KEY", "ada@example.com", policy.TierHuman, "v1")
+	limited.Tags[policy.TagMaxGrant] = "1h"
+	plain := policytest.Secret("PLAIN_KEY", "ada@example.com", policy.TierAgent, "v1")
+	set, err := policytest.Loader(secrets.NewLocal(limited, plain)).Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if set.Version != want {
+		t.Fatalf("Version = %s, want %s: a namespace with no requesters digests the bytes it always did", set.Version, want)
+	}
+}
