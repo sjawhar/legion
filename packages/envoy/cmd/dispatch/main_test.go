@@ -999,6 +999,23 @@ func TestHealthzAnswersWhilePostgresAndTheBucketBothStopAnswering(t *testing.T) 
 // client waiting on a reply waits for as long as its own deadline allows.
 func blackholePostgres(t *testing.T, upstream string, blackholed *atomic.Bool) string {
 	t.Helper()
+	return proxyPostgres(t, upstream, blackholed, 0)
+}
+
+// slowPostgres puts a proxy in front of upstream and returns its address. Every connection
+// through it reaches upstream dialDelay late and is then forwarded whole, and nothing is ever
+// black-holed: the only thing the proxy adds is that wait. It is how a test makes a process pay
+// for a cold dial what a loaded database charges for one, which a caller already holding a
+// connection pays nothing of.
+func slowPostgres(t *testing.T, upstream string, dialDelay time.Duration) string {
+	t.Helper()
+	return proxyPostgres(t, upstream, &atomic.Bool{}, dialDelay)
+}
+
+// proxyPostgres is the listener both proxies above are: it accepts for as long as the test runs
+// and hands each connection to proxyPostgresConnection on their terms.
+func proxyPostgres(t *testing.T, upstream string, blackholed *atomic.Bool, dialDelay time.Duration) string {
+	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen for the Postgres proxy: %v", err)
@@ -1010,20 +1027,23 @@ func blackholePostgres(t *testing.T, upstream string, blackholed *atomic.Bool) s
 			if err != nil {
 				return
 			}
-			go proxyPostgresConnection(client, upstream, blackholed)
+			go proxyPostgresConnection(client, upstream, blackholed, dialDelay)
 		}
 	}()
 	return listener.Addr().String()
 }
 
-// proxyPostgresConnection completes the client's handshake even while the link is black-holed
-// and only then dials upstream, which is what a dropped SYN-ACK path leaves a client holding: a
-// connected socket nobody is answering on.
-func proxyPostgresConnection(client net.Conn, upstream string, blackholed *atomic.Bool) {
+// proxyPostgresConnection completes the client's handshake even while the link is black-holed,
+// and waits dialDelay out, before it dials upstream, which is what a dropped SYN-ACK path and a
+// slow database both leave a client holding: a connected socket nobody is answering on. The
+// kernel completes that handshake on the listening socket, so neither wait is a connection the
+// client sees refused; each is the answer taking its time.
+func proxyPostgresConnection(client net.Conn, upstream string, blackholed *atomic.Bool, dialDelay time.Duration) {
 	defer client.Close()
 	for blackholed.Load() {
 		time.Sleep(20 * time.Millisecond)
 	}
+	time.Sleep(dialDelay)
 	server, err := net.Dial("tcp", upstream)
 	if err != nil {
 		return
