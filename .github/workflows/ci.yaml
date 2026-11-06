@@ -2538,32 +2538,35 @@ jobs:
           key: playwright-${{ runner.os }}-${{ hashFiles('bun.lock') }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('playwright-{0}-', runner.os) || '' }}
       # This step installs the system packages itself instead of through `playwright install
-      # --with-deps`, which installs Playwright's whole ubuntu24.04-x64 list. The pinned list
-      # below is that list less four media packages - gstreamer1.0-libav,
-      # gstreamer1.0-plugins-bad, gstreamer1.0-plugins-good and libavcodec60 - which is what
-      # makes this step small enough to bound. Measured on this
-      # image: Playwright's whole list resolves to 181 packages and 114 MB; without those four it
-      # is 60 packages and 51.4 MB. The four carry 121 of the 181 packages and 62.8 of the
-      # 114.2 MB, through the ffmpeg stack and the GStreamer plugin trees.
+      # --with-deps`, which runs its apt calls with no bound, no retry and no second origin. The
+      # pinned list below is Playwright's ubuntu24.04-x64 list exactly: the union of the `tools`,
+      # `chromium`, `firefox` and `webkit` entries of that table in playwright-core's
+      # lib/coreBundle.js. Measured on this image: Playwright's whole list resolves to 181
+      # packages and 114 MB; without the four that carry playback - gstreamer1.0-libav,
+      # gstreamer1.0-plugins-bad, gstreamer1.0-plugins-good and libavcodec60 - it is 60 packages
+      # and 51.4 MB. Those four carry 121 of the 181 packages and 62.8 of the 114.2 MB, through
+      # the ffmpeg stack and the GStreamer plugin trees.
       #
-      # Each is safe to drop because they are plugins and codecs loaded at playback, not
-      # libraries the browsers link: Playwright's own source says of gstreamer1.0-libav that its
-      # one library libgstlibav.so is the library required for playing h.264. No spec or source
-      # file under packages/dispatch holds `<video`, `.mp4`, `.webm`, `new Audio` or
-      # `playsinline`, so no row plays media. The libraries WebKit links stay in the list:
-      # libgstreamer-plugins-bad1.0-0, libgstreamer-plugins-base1.0-0, libgstreamer1.0-0,
-      # libgstreamer-gl1.0-0, libflite1 and libgtk-4-1 among them. A row that later needs media
-      # reinstalls that package by name. That the browsers still launch is what the suite's six
-      # WebKit and Firefox projects prove - webkit, webkit-iphone, webkit-alone, firefox,
-      # firefox-download-navigation and firefox-alone (e2e/playwright.config.ts) - which the
-      # "Browser-test dispatch dashboard" step below runs.
+      # `step_tools` below is the one package this step installs that Playwright's list does not
+      # name: gstreamer1.0-tools, for the `gst-inspect-1.0` the decoder guard runs. It is a
+      # variable of its own because `packages` is what the check at the end of the step holds
+      # against Playwright's own list, name for name.
       #
-      # On a Playwright upgrade, re-derive the list as the union of the `tools`, `chromium`,
-      # `firefox` and `webkit` entries of the ubuntu24.04-x64 table in playwright-core's
-      # lib/coreBundle.js, less those four. Deriving it at run time by subtracting one apt
-      # closure from the other does not work and must not be written: the two closures share 35
-      # packages Playwright's own list names or needs, and the subtraction leaves WebKit unable
-      # to launch.
+      # WebKit plays video and audio through GStreamer, so without those four it loads a page and
+      # plays nothing: the plugins that demux Matroska and decode VP8 and h.264 are in them.
+      # Playwright's own source says of gstreamer1.0-libav that its one library libgstlibav.so is
+      # the library required for playing h.264. The decoder guard after the install asks the
+      # GStreamer registry for one element out of each, so a package dropped from the list fails
+      # this step by its own name rather than a browser row three steps later. That the browsers
+      # launch at all is what the suite's six WebKit and Firefox projects prove - webkit,
+      # webkit-iphone, webkit-alone, firefox, firefox-download-navigation and firefox-alone
+      # (e2e/playwright.config.ts) - which the "Browser-test dispatch dashboard" step below runs.
+      #
+      # On a Playwright upgrade, re-derive the list as that union again, with nothing taken out
+      # of it. Deriving it at run time by subtracting one apt closure from another does not work
+      # and must not be written: the closure of the four that carry playback and the closure of
+      # the rest share 35 packages Playwright's own list names or needs, and the subtraction
+      # leaves WebKit unable to launch.
       #
       # The 22-minute budget is the step's own retry arithmetic, not its measured maximum, which
       # the bounds make unreachable: two bounded attempts of `apt-get update` at 90 s, two of the
@@ -2646,17 +2649,23 @@ jobs:
         run: |
           grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
           packages="fonts-freefont-ttf fonts-ipafont-gothic fonts-liberation fonts-noto-color-emoji
-          fonts-tlwg-loma-otf fonts-unifont fonts-wqy-zenhei gstreamer1.0-plugins-base libasound2t64
-          libatk-bridge2.0-0t64 libatk1.0-0t64 libatomic1 libatspi2.0-0t64 libavif16 libcairo-gobject2
-          libcairo2 libcups2t64 libdbus-1-3 libdrm2 libenchant-2-2 libepoxy0 libevent-2.1-7t64
-          libflite1 libfontconfig1 libfreetype6 libgbm1 libgdk-pixbuf-2.0-0 libgles2 libglib2.0-0t64
-          libgstreamer-gl1.0-0 libgstreamer-plugins-bad1.0-0 libgstreamer-plugins-base1.0-0
-          libgstreamer1.0-0 libgtk-3-0t64 libgtk-4-1 libharfbuzz-icu0 libharfbuzz0b libhyphen0
-          libicu74 libjpeg-turbo8 liblcms2-2 libmanette-0.2-0 libnspr4 libnss3 libopus0 libpango-1.0-0
-          libpangocairo-1.0-0 libpng16-16t64 libsecret-1-0 libvpx9 libwayland-client0 libwayland-egl1
-          libwayland-server0 libwebp7 libwebpdemux2 libwoff1 libx11-6 libx11-xcb1 libx264-164
-          libxcb-shm0 libxcb1 libxcomposite1 libxcursor1 libxdamage1 libxext6 libxfixes3 libxi6
-          libxkbcommon0 libxml2 libxrandr2 libxrender1 libxslt1.1 xfonts-cyrillic xfonts-scalable xvfb"
+          fonts-tlwg-loma-otf fonts-unifont fonts-wqy-zenhei gstreamer1.0-libav
+          gstreamer1.0-plugins-bad gstreamer1.0-plugins-base gstreamer1.0-plugins-good libasound2t64
+          libatk-bridge2.0-0t64 libatk1.0-0t64 libatomic1 libatspi2.0-0t64 libavcodec60 libavif16
+          libcairo-gobject2 libcairo2 libcups2t64 libdbus-1-3 libdrm2 libenchant-2-2 libepoxy0
+          libevent-2.1-7t64 libflite1 libfontconfig1 libfreetype6 libgbm1 libgdk-pixbuf-2.0-0
+          libgles2 libglib2.0-0t64 libgstreamer-gl1.0-0 libgstreamer-plugins-bad1.0-0
+          libgstreamer-plugins-base1.0-0 libgstreamer1.0-0 libgtk-3-0t64 libgtk-4-1 libharfbuzz-icu0
+          libharfbuzz0b libhyphen0 libicu74 libjpeg-turbo8 liblcms2-2 libmanette-0.2-0 libnspr4
+          libnss3 libopus0 libpango-1.0-0 libpangocairo-1.0-0 libpng16-16t64 libsecret-1-0 libvpx9
+          libwayland-client0 libwayland-egl1 libwayland-server0 libwebp7 libwebpdemux2 libwoff1
+          libx11-6 libx11-xcb1 libx264-164 libxcb-shm0 libxcb1 libxcomposite1 libxcursor1
+          libxdamage1 libxext6 libxfixes3 libxi6 libxkbcommon0 libxml2 libxrandr2 libxrender1
+          libxslt1.1 xfonts-cyrillic xfonts-scalable xvfb"
+          # gstreamer1.0-tools holds the gst-inspect-1.0 the decoder guard below runs, and is no
+          # name of Playwright's list. It is out of `packages` because `packages` is the list the
+          # check at the end of the step holds against Playwright's own.
+          step_tools="gstreamer1.0-tools"
           # A bounded attempt, retried: the attempt count, then what the log calls the phase,
           # then the command. Each failed attempt prints the phase, that attempt's exit status
           # and how many attempts are left; `timeout` exits 124 when it killed the command, so
@@ -2684,15 +2693,23 @@ jobs:
           # Download only (`-d`): a killed apt releases its fcntl locks either way, but with
           # nothing unpacked in this phase no dpkg run is ever stopped part way, so the attempts
           # after it and the unbounded install below start from a clean package state. It prints
-          # what it fetched, which is this step's own byte record. $packages is left unquoted on
-          # purpose, to split into words.
-          if ! attempts 2 "the package download" sudo timeout 300 apt-get install -y --no-install-recommends -d $packages; then
+          # what it fetched, which is this step's own byte record. $packages and $step_tools are
+          # left unquoted on purpose, to split into words.
+          if ! attempts 2 "the package download" sudo timeout 300 \
+            apt-get install -y --no-install-recommends -d $packages $step_tools; then
             # The last attempt fetches from another origin, which is the one thing more attempts
             # on the configured pool cannot do. That pool is a mirrorlist, which `apt-get update`
             # reads as `Get:1 file:/etc/apt/apt-mirrors.txt Mirrorlist`, so the switch is an edit
             # of that file. The copy beside it is what was there; nothing puts it back, and
             # nothing has to, the runner being ephemeral and going with the job.
             mirrorlist=/etc/apt/apt-mirrors.txt
+            # Where the image stops shipping it, the copy below ends on `cp: cannot stat` and the
+            # log names no cause, so the file is tested here and the error is the step's own.
+            [ -f "$mirrorlist" ] || {
+              echo "::error::there is no $mirrorlist, so the fallback origin cannot be set;" \
+                "the package download ends here"
+              exit 1
+            }
             sudo cp "$mirrorlist" "$mirrorlist.orig"
             sudo sed -i 's,^\(https\?://\)[^/]*,\1archive.ubuntu.com,' "$mirrorlist"
             cat "$mirrorlist"
@@ -2702,24 +2719,42 @@ jobs:
             # than a tidy exit.
             attempts 1 "apt-get update for the fallback origin" sudo timeout 90 apt-get update ||
               echo "::warning::the fallback origin's lists were not read; the attempt below uses what is on disk"
-            attempts 1 "the package download from the fallback origin" sudo timeout 300 apt-get install -y --no-install-recommends -d $packages || {
+            attempts 1 "the package download from the fallback origin" sudo timeout 300 \
+              apt-get install -y --no-install-recommends -d $packages $step_tools || {
               echo "::error::the package download failed three times, the last of them on another origin;" \
                 "the step ends here rather than leaving the job's budget to cancel the browser step after it"
               exit 1
             }
           fi
           # Unbounded and unretried: the archive is on disk now, so this takes no network.
-          sudo apt-get install -y --no-install-recommends $packages
+          sudo apt-get install -y --no-install-recommends $packages $step_tools
+          # Is each decoder WebKit plays through in the GStreamer registry? One call per element:
+          # `gst-inspect-1.0 --exists` reads one element argument and discards the rest, so a
+          # single call with five names would report on the first alone. Each element is written
+          # with the package that carries it, and this is what fails the step by its own name
+          # where one of those packages has gone missing from the list above.
+          for probe in matroskademux:gstreamer1.0-plugins-good vp8dec:gstreamer1.0-plugins-good \
+            h264parse:gstreamer1.0-plugins-bad avdec_h264:gstreamer1.0-libav \
+            vorbisdec:gstreamer1.0-plugins-base; do
+            element=${probe%%:*}
+            gst-inspect-1.0 --exists "$element" || {
+              echo "::error::GStreamer has no $element, which WebKit plays media through;" \
+                "${probe#*:} carries it and packages= above must hold it"
+              exit 1
+            }
+          done
+          echo "the decoders WebKit plays through are in the registry:" \
+            "matroskademux vp8dec h264parse avdec_h264 vorbisdec"
           # The browsers alone. Named, because with no argument Playwright resolves its own
           # default set rather than this job's three.
           bunx playwright install chromium webkit firefox
           # Has the pinned list fallen behind Playwright? The check is the repository's
           # .github/scripts/playwright-deps-current.sh, and it runs here, against the list it is
           # given on this line: $packages, unquoted so it splits into words, as apt takes it
-          # above. It holds every package Playwright asks for against that list and the four
-          # media packages this step drops. It runs after the install, so Playwright's list, its
-          # missing set and the apt closure they are held against are read from the same state.
-          # The step's working-directory is packages/dispatch, so the script is reached through
+          # above. It holds the two lists against each other both ways: every name Playwright
+          # asks for is one the pinned list holds, and every pinned name is one Playwright asks
+          # for. It runs after the install, so it expects nothing left missing. The step's
+          # working-directory is packages/dispatch, so the script is reached through
           # $GITHUB_WORKSPACE, the checkout root GitHub sets, and the bunx it runs resolves
           # this suite's Playwright.
           "$GITHUB_WORKSPACE/.github/scripts/playwright-deps-current.sh" $packages
