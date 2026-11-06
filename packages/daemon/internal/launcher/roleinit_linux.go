@@ -600,9 +600,9 @@ func makeLike(cfg RoleInitConfig, source, root, target string) error {
 // keeps as its own. A link in the way is the role's own entry, and is removed and replaced by the
 // directory or file the mount needs, with replaced told its path; any other entry in the way that
 // is not a directory is refused. Each component is decided from a handle the walk opened and read:
-// the kind comes from fstat of the handle, never from a flag of the open and never from a second
-// reading of the name. Nothing of the role runs while role-init does, and no other role reaches
-// the role's layers, so the path the walk made is the path the bind that follows lands on.
+// the kind comes from fstat of the handle, never from a flag of the open and never by comparing
+// two readings of the name. Nothing of the role runs while role-init does, and no other role
+// reaches the role's layers, so the path the walk made is the path the bind that follows lands on.
 func mountPointBeneath(root, target string, dir bool, replaced func(link string)) error {
 	rel, err := filepath.Rel(root, target)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
@@ -677,8 +677,8 @@ func mountPointBeneath(root, target string, dir bool, replaced func(link string)
 			return nil
 		}
 		// Whether the walk found this component or made it, it descends only from a directory.
-		// No link reaches here: the branch above took the one the first read saw, and the one a
-		// link that appeared under the walk would leave is refused where that read decides it.
+		// No link reaches here: the one the first read saw was removed above, and one that appeared
+		// at the name after Mkdirat was refused where the second read decided it.
 		if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
 			_ = unix.Close(entry)
 			return fmt.Errorf("%s is neither a directory nor a link, where a mount point's directory goes (kind %#o)", path, stat.Mode&unix.S_IFMT)
