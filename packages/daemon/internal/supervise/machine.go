@@ -750,6 +750,17 @@ type Machine struct {
 	// has a lock of its own, held only to set, clear or read it, so a reader never waits on mu.
 	decidingMu sync.Mutex
 	deciding   Event
+	// gaveBack is the id of the delivery giveBackOwedTask just queued, and "" when the claim
+	// holds no such task: the one pending task a provider error counted against that no wait of
+	// the claim's own names, which a newer task replaces all the same (replaceable). It is
+	// cleared when that delivery ends (dropPending), and a delivery taken back under a new id
+	// leaves it naming an id the claim no longer holds, which answers for no task.
+	//
+	// It is memory only, as the ladder's wait is: the given-back task goes at the first send the
+	// claim's state allows, so the window a mark covers is one send, and a daemon restarted
+	// inside it reads a task like any other — a newer task is refused until that one's turn
+	// retires it, which costs a wait and loses nothing.
+	gaveBack string
 }
 
 type sending struct {
@@ -1555,8 +1566,9 @@ func (m *Machine) retire(ctx context.Context) error {
 }
 
 // letGo ends what the machine had with the claim's process: no timer watches it — the ladder's
-// wait after a provider error among them (providererror.go) — no relaunch waits on one
-// (relaunchLater), no send talks to it, no suspension is held for its turn, no stale-plugin
+// wait after a provider error among them (providererror.go), and with it the mark that stands
+// for that wait on a task an update round's hold gave back (replaceable) — no relaunch waits on
+// one (relaunchLater), no send talks to it, no suspension is held for its turn, no stale-plugin
 // relaunch waits for that turn either (refreshPlugin) — the process it was to replace is gone —
 // and the process the claim records, when it records one, moves into previous — the claim no
 // longer runs it (it was stopped, found dead, or left behind), and the next launch of the same
@@ -1568,6 +1580,7 @@ func (m *Machine) letGo() {
 	m.held = nil
 	m.staleRelaunch = nil
 	m.unseenTurn = false
+	m.gaveBack = ""
 	if enrollment := ClearEnrollment(&m.claim); enrollment != nil {
 		m.revoke(*enrollment)
 	}

@@ -1,6 +1,7 @@
 package supervise
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -397,6 +398,37 @@ func TestANewerTaskReplacesTheTaskTheQuestionGaveBack(t *testing.T) {
 
 	if sent := h.wantPrompts(3)[2]; sent.Message != "test the change" {
 		t.Errorf("the prompt after the round = %+v, want the newer task", sent)
+	}
+}
+
+// R3: the operator stops a claim whose provider keeps refusing its session and retries it with
+// a fresh one, and the task the ladder kept is the task that fresh session is sent. The stop
+// takes the claim's timers with it (letGo), so no wait names that task any more — and the task
+// is still the claim's work, not one the claim owes with nothing left to send it, so the phase
+// restart's own task waits behind it (ErrDeliveryPending) until the turn on the kept task
+// retires it. Only the two tasks R2 names are replaced (replaceable);
+// scripts/e2e/provider-error-retry.sh step 5 is this case live.
+func TestThePhaseRestartsTaskWaitsBehindTheTaskTheLadderKept(t *testing.T) {
+	h := workingClaim(t)
+	h.errorTurn(StreamPromptResult{Error: "overloaded_error", HTTPStatus: 529})
+	kept := h.pending()
+
+	h.must(RequestStop{Claim: testToken})
+	h.wantState(StateRetired)
+	h.must(RequestOperatorRetry{Claim: testToken})
+
+	err := h.handle(RequestDeliver{Claim: testToken, Task: "Continue the issue whose provider is overloaded.",
+		Phase: phase.Implementing, Generation: 8, Assignment: "A2"})
+
+	if !errors.Is(err, ErrDeliveryPending) {
+		t.Fatalf("the phase restart's task was answered %v, want it to wait behind the task the ladder kept", err)
+	}
+	p := h.pending()
+	if p.ID != kept.ID || p.Task != kept.Task {
+		t.Fatalf("pending %+v, want the task the ladder kept, %s: the retried session is sent that task", p, kept.ID)
+	}
+	if p.ProviderErrorRetries != kept.ProviderErrorRetries {
+		t.Errorf("the kept task counts %d sends, want the %d its ladder had", p.ProviderErrorRetries, kept.ProviderErrorRetries)
 	}
 }
 

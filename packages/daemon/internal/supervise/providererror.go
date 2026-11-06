@@ -165,11 +165,20 @@ func (m *Machine) waitsForProviderError(delivery string) bool {
 }
 
 // replaceable is whether a newer task takes this pending task's place rather than waiting behind
-// it (queue): a task a provider error took back, while nothing works it. It is the task the
-// ladder's wait stands for and the task an update round's question went before and gave back
-// alike — that one arms no wait of its own (giveBackOwedTask), and R2 has the newer of the two
-// go whether a wait names it or not. A task whose turn is running, or whose prompt is in flight,
-// is work in flight and is never replaced.
+// it (queue). Exactly two tasks answer true, and both are tasks the claim owes with nothing
+// working them and no wait of the claim's own that will ever end: the task the ladder's wait
+// stands for (waitsForProviderError), and the task an update round's question went before and
+// gave back, which arms no wait at all (gaveBack). R2 has a newer task replace either.
+//
+// Every other pending task waits for its turn, the task a provider error took back on a claim
+// the operator stopped among them: the ladder's wait went with the claim's timers (letGo), and
+// the claim still owes that task, so the phase's restart task waits behind it until the turn
+// the retry's fresh session takes on it retires it (R3, scripts/e2e/provider-error-retry.sh
+// step 5). A task whose turn is running, or whose prompt is in flight, is work in flight and is
+// never replaced either.
 func (m *Machine) replaceable(p *Delivery) bool {
-	return p.ProviderErrorRetries > 0 && p.ConfirmedAt.IsZero() && m.send == nil
+	if !p.ConfirmedAt.IsZero() || m.send != nil {
+		return false
+	}
+	return m.waitsForProviderError(p.ID) || m.gaveBack == p.ID
 }

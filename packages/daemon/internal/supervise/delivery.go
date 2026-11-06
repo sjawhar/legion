@@ -574,8 +574,10 @@ func (m *Machine) retirePending(ctx context.Context) error {
 // through one of the two.
 func (m *Machine) dropPending(ctx context.Context) error {
 	p := m.claim.Pending
-	// The ladder's wait is this task's, so it ends with it (providererror.go).
+	// The ladder's wait is this task's, so it ends with it (providererror.go), and so does the
+	// mark that stands for that wait on a task the hold gave back (replaceable).
 	m.disarm(TimerPromptRetry)
+	m.gaveBack = ""
 	retired := m.stored()
 	if !p.ConfirmedAt.IsZero() {
 		retired.ServingGeneration = serving(p, deliveredRun, retired.ServingGeneration)
@@ -650,7 +652,7 @@ func (m *Machine) giveBackOwedTask(ctx context.Context) error {
 	if owed == nil {
 		return nil
 	}
-	m.claim.OwedTask, m.claim.Pending = nil, owed
+	m.claim.OwedTask, m.claim.Pending, m.gaveBack = nil, owed, owed.ID
 	m.log.Info("supervise: the update round's question is over; the task it went before is the claim's again",
 		"delivery", owed.ID, "attempt", owed.ProviderErrorRetries, "round", m.claim.UpdateRound)
 	return m.saved(m.deps.Store.PutClaimAndDelivery(ctx, m.stored(), *owed))
