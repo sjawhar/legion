@@ -11,17 +11,19 @@ Write each kept point as a rule a worker on another issue could follow, and give
 
 - **The rule**, in a few imperative lines. State it in the present tense, about the work, never
   about this pull request.
-- **The evidence** below the rule: the file, line or commit of this pull request that shows it,
-  and what went wrong before the rule. A reader takes a story as an instruction, so the story
-  never stands in the rule's place.
+- **The evidence** below the rule: the file and symbol, or text quoted from the file, read at
+  the head you commit, and what went wrong before the rule. Never a line number: the next edit
+  above it moves it. Where the head no longer shows what your sentence says, quote the text and
+  name the commit you read it at. A reader takes a story as an instruction, so the story never
+  stands in the rule's place.
 - **Where it belongs**: the skill, role prompt or guide a reader would look in — for example
   `skills/legion-worker/references/tools.md` or `packages/daemon/internal/prompts/roles/tester.md`.
   Name the file; the librarian decides whether to write it there.
 - **What it replaces**, when an instruction the repository already carries is wrong: quote that
   instruction and its path, so the librarian can find both.
 
-Drop a point that cites no file, line or commit of this pull request, and a point that only
-restates what a skill already says.
+Drop a point that cites no file, symbol, quoted text or commit of this pull request, and a
+point that only restates what a skill already says.
 
 ## Find what already covers the topic
 
@@ -46,7 +48,7 @@ dispatch comment --issue '<KEY>' --body-file - <<'EOF'
 
 <the rule, a few imperative lines>
 
-Evidence: <file, line or commit of this pull request, and what went wrong>.
+Evidence: <file and symbol, or text quoted from it, of this pull request, and what went wrong>.
 Belongs in: <the skill, prompt or guide>.
 Replaces: <the instruction and its path>, or nothing.
 
