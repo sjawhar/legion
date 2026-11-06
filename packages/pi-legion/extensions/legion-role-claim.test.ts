@@ -8,6 +8,7 @@ import {
   HEARTBEAT_RETRY_MIN_MS,
 } from "@legion/envoy-client/envoy-settings";
 import type { ZodNumberProperty } from "@legion/pi-shared/pi-types";
+import { captureEnvironment } from "@legion/test-fixtures/environment";
 
 /** The daemon's golden registration answer (`packages/daemon/internal/api`), so a field the daemon
  * adds to it reaches the stub below. */
@@ -47,11 +48,23 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
 const envoyConfigDirectory = mkdtempSync(join(tmpdir(), "legion-role-claim-envoy-config-"));
 const envoyConfigFile = join(envoyConfigDirectory, "envoy.json");
 writeFileSync(envoyConfigFile, "{}\n");
-const originalConfigEnvironment = {
-  ENVOY_CONFIG_FILE: process.env.ENVOY_CONFIG_FILE,
-  OMP_PROFILE: process.env.OMP_PROFILE,
-  PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
-} as const;
+// Every name a pane this file starts writes, captured above the import that loads the Envoy
+// entry, so the restore puts back what the caller had rather than what the entry wrote: the three
+// the entry's module scope writes as it loads — `PATH`, which it puts its own `bin/` first on,
+// `DISPATCH_HOST`, and the `ENVOY_CONFIG_FILE` it settles on — the two deleted below so no
+// profile of the caller's picks another envoy.json, and `DISPATCH_SESSION_ID`, which the entry
+// writes for the session a pane here binds. They go back when this file ends: `bun test` runs
+// every file of a package in one process, and the next file reads the environment this one
+// leaves. They go back rather than being deleted, since the baseline is "not a Legion pane" and
+// a process with no `PATH` finds none of the programs these tests run.
+const restoreEntryEnvironment = captureEnvironment([
+  "ENVOY_CONFIG_FILE",
+  "OMP_PROFILE",
+  "PI_CODING_AGENT_DIR",
+  "PATH",
+  "DISPATCH_HOST",
+  "DISPATCH_SESSION_ID",
+]);
 process.env.ENVOY_CONFIG_FILE = envoyConfigFile;
 delete process.env.OMP_PROFILE;
 delete process.env.PI_CODING_AGENT_DIR;
@@ -65,10 +78,7 @@ const { default: envoyExtension, setNatsConnectForTests } = await import(
 );
 setNatsConnectForTests(natsStandInConnect);
 afterAll(() => {
-  for (const [key, value] of Object.entries(originalConfigEnvironment)) {
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  }
+  restoreEntryEnvironment();
   rmSync(envoyConfigDirectory, { recursive: true, force: true });
 });
 const { default: legionExtension, setLegionCapabilityHostForTests } = await import(

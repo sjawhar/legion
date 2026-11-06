@@ -24,6 +24,8 @@ These rules are how a file leaves nothing behind.
 - Put a variable back with `restoreEnvironment` or `captureEnvironment` (`@legion/test-fixtures/environment`), which set and delete the names themselves.
   A name that held no value is captured as unset and the restore deletes it again;
   setting it to the empty string instead would leave the next reader a value its caller never had.
+  A file that loads a plugin entry captures the names that entry writes above the import that loads it:
+  `packages/pi-envoy/extensions/envoy.ts` puts its own `bin/` first on `PATH`, sets `DISPATCH_HOST` and picks `ENVOY_CONFIG_FILE` when its module loads, and a capture below that import would put back what the entry wrote rather than what the caller had.
   Never restore by replacing the whole object (`process.env = { ...saved }`):
   that swaps the runtime's environment for a plain one, and after it `process.env !== Bun.env`, a write reaches neither `Bun.env` nor a child process the test spawns, and the names the test deleted stay deleted in the real environment.
   Under `--parallel`, which implies `--isolate`, the next file gets a fresh `process` and never sees the swap, so the damage shows only where it is hardest to read.
