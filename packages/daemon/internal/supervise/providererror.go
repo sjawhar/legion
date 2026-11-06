@@ -116,7 +116,8 @@ func (m *Machine) providerErrorClears(ctx context.Context, cause string) error {
 
 // promptRetryDue is the ladder's wait over: the task goes to the same session again. A claim
 // still working the turn whose error armed this is handed nothing here, and the end of that turn
-// sends it (turnEnded).
+// sends it (turnEnded). One task is dropped rather than sent: an ask of an update round that
+// another round has replaced, which no session of this claim can answer (sendPending).
 func promptRetryDue(m *Machine, ctx context.Context, _ Event) error {
 	m.log.Info("supervise: the wait after a provider error is over; the task goes again",
 		"delivery", pendingID(m.claim.Pending))
@@ -181,9 +182,9 @@ func (m *Machine) waitsForProviderError(delivery string) bool {
 // the operator stopped among them: the ladder's wait went with the claim's timers (letGo), and
 // the claim still owes that task, so the phase's restart task waits behind it until the turn
 // the retry's fresh session takes on it retires it (R3, scripts/e2e/provider-error-retry.sh
-// step 5). An update round's question waits behind it too, and the round asks again at the
-// next tick (askForUpdate). A task whose turn is running, or whose prompt is in flight, is work
-// in flight and is never replaced either.
+// step 5). An update round's question is never the newer task here: askForUpdate holds it back
+// while the claim holds a task at all (table.go). A task whose turn is running, or whose
+// prompt is in flight, is work in flight and is never replaced either.
 //
 // The mark ends at the send it allows, so it does not outlive it: the timer that fires the
 // ladder's wait is deleted before its action runs (machine.go's Handle). Without that, the

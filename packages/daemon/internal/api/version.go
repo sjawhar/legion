@@ -563,12 +563,9 @@ package api
 // fails (`internal/supervise/providererror.go`). It ships this number's one store migration.
 // `20261105004846_provider_error_retry.up.sql` adds the two columns a task a provider error
 // took back is kept by (`pending_task_deliveries.provider_error_retries` and
-// `provider_error_note`) and the claim's run of such turns (`claims.provider_error_run`). A
-// newer task for that claim replaces the one the error took back and is sent at once; an
-// update round's question waits behind it, as every other task does, and the round asks again
-// at the next tick. The removal ships none;
-// `fix_attempts`, `blocked_attempts` and `head_counted` stay as stopped columns that nothing
-// reads, each given its zero on an insert (`record`'s PutPullRequest).
+// `provider_error_note`) and the claim's run of such turns (`claims.provider_error_run`). The
+// removal ships none; `fix_attempts`, `blocked_attempts` and `head_counted` stay as stopped
+// columns that nothing reads, each given its zero on an insert (`record`'s PutPullRequest).
 // (This branch took 47 and then 48 for the removal; main merged the idle-pod release at 48
 // while this branch was open, then landed INFRA-1101's memory group at 49 and released
 // pi-legion v18.9.0 declaring it without these shapes, so this branch takes the number above

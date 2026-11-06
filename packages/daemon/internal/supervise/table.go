@@ -2066,6 +2066,17 @@ func rotateTaskID(id string) string {
 	return rand.Text()
 }
 
+// dropsUpdateTask is whether the claim's pending delivery is the ask of the round the claim
+// records now that no turn has confirmed: the one delivery a round leaving the claim takes
+// back. It is a question of its own, apart from the drop, for the claim that ends in the same
+// step: the retirement reads it, clears the round's fields and then writes the claim and the
+// delete together, where a drop made first would store a retired claim that still records its
+// round (machine.go's retire).
+func (m *Machine) dropsUpdateTask() bool {
+	p := m.claim.Pending
+	return updatesRound(p, m.claim.UpdateRound) && p.ConfirmedAt.IsZero()
+}
+
 // dropUpdateTask takes back an ask of this claim's round that no turn has confirmed, which is
 // what a round leaving the claim means for the task it sent: the words name a round that is over
 // — a pod this daemon has already replaced — and until some turn reads them, every task of the
@@ -2074,8 +2085,9 @@ func rotateTaskID(id string) string {
 // the ladder, and no session of this claim will ever answer the round it names. A task a turn
 // confirmed is left where it is: that turn is the worker's, and its end retires the delivery
 // (settle). Every end of a round for this claim runs it — the sweep's (endPodUpdate,
-// leaveRound), the round a new one replaces (openPodUpdate), the registration's
-// (endCurrentPluginRound), and the claim's own retirement (machine.go's retire).
+// leaveRound), the round a new one replaces (openPodUpdate), and the registration's
+// (endCurrentPluginRound). The claim's own retirement makes the same drop in its one write
+// instead (machine.go's retire).
 //
 // The mark a restart armed for that ask goes in the same step, here rather than in each caller
 // (answerAskFirstAfterDrop): a drop that left it armed would make the claim's next task the
@@ -2084,9 +2096,9 @@ func rotateTaskID(id string) string {
 // caller before: the question is the pending delivery's, and a claim that still holds one is
 // answered nothing there.
 func (m *Machine) dropUpdateTask(ctx context.Context) error {
-	if p := m.claim.Pending; updatesRound(p, m.claim.UpdateRound) && p.ConfirmedAt.IsZero() {
+	if m.dropsUpdateTask() {
 		m.log.Info("supervise: the update round is over for this claim; the task it sent and nothing read is taken back",
-			"round", m.claim.UpdateRound, "delivery", p.ID)
+			"round", m.claim.UpdateRound, "delivery", m.claim.Pending.ID)
 		if err := m.retirePending(ctx); err != nil {
 			return err
 		}
@@ -2105,14 +2117,17 @@ func (m *Machine) dropUpdateTask(ctx context.Context) error {
 // so the ask would cost one turn and teach the round nothing. It is asked nothing however often
 // it is started again, and a suspension does not bring it back into the round.
 //
-// A claim whose task a provider error took back is asked nothing yet: that task is still the
-// claim's pending delivery, and queue refuses the ask behind it (ErrDeliveryPending) as it
-// refuses one behind any other task. So the round waits for the ladder — the pod is replaced
-// once a turn of the owed task ends with no provider error, which is the turn that frees the
-// slot (afterTurn's takeSlotForUpdate) — and the refusal below leaves UpdateTaskedAt as it
-// was, so the next tick asks again. Going first would buy the round nothing: the question
-// needs a model turn of its own, and the provider that is failing this claim's turns would
-// fail that one the same way (dispatch://INFRA-956, the round-7 review).
+// A claim that holds a task of its own is asked nothing yet: the question waits behind that
+// task, as every task of the claim waits behind the task it holds. Nothing here records an ask
+// then (UpdateTaskedAt), so the next tick asks again. This is the one place that waiting is
+// decided and the one place it is explained: the question never reaches queue's own refusal,
+// which is about the task the claim holds rather than the task being queued (replaceable).
+//
+// The task a provider error took back is such a task, and what it costs the round is the
+// ladder's wait: the pod is replaced once a turn of the owed task ends with no provider error,
+// which is the turn that frees the slot (afterTurn's takeSlotForUpdate). Going first would buy
+// the round nothing there: the question needs a model turn of its own, and the provider that is
+// failing this claim's turns would fail that one the same way (dispatch://INFRA-956 R2).
 func (m *Machine) askForUpdate(ctx context.Context, open PodUpdateOpen, now time.Time) error {
 	if m.claim.UpdateSignalledAt != nil || m.claim.LeftPodRound(m.claim.UpdateRound) {
 		return nil
@@ -2131,20 +2146,19 @@ func (m *Machine) askForUpdate(ctx context.Context, open PodUpdateOpen, now time
 	if !m.updateReaskDue(now) {
 		return nil
 	}
+	if p := m.claim.Pending; p != nil {
+		// The held task is sent here rather than left: a round that replaced another cleared
+		// the answer that was holding it back (clearUpdate), and nothing else would send it
+		// until the next periodic observation, with the new round's own ask waiting behind it.
+		// sendPending hands nothing to a claim in a turn, and nothing to a task the ladder's
+		// wait stands for, so neither the ordinary case nor a task a provider error took back
+		// costs anything here.
+		m.log.Info("supervise: the claim holds a task of its own, so the update task waits for that task's turn to end",
+			"round", open.Round, "delivery", p.ID)
+		return m.sendPending(ctx)
+	}
 	task := RequestDeliver{Claim: m.claim.Token, ID: updateTaskID(open.Round), Task: open.Task}
 	if err := m.queue(ctx, task); err != nil {
-		if errors.Is(err, ErrDeliveryPending) {
-			// The claim holds a task of its own, so the update task waits for that task's turn
-			// to end. The held one is sent here rather than left: a round that replaced another
-			// cleared the answer that was holding it back (clearUpdate), and nothing else would
-			// send it until the next periodic observation, with the new round's own ask waiting
-			// behind it. sendPending hands nothing to a claim in a turn, and nothing to a task
-			// the ladder's wait stands for, so neither the ordinary case nor a task a provider
-			// error took back costs anything here.
-			m.log.Info("supervise: the claim holds a task of its own, so the update task waits for that task's turn to end",
-				"round", open.Round, "delivery", pendingID(m.claim.Pending))
-			return m.sendPending(ctx)
-		}
 		return err
 	}
 	tasked := now

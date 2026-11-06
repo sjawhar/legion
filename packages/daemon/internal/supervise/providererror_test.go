@@ -244,21 +244,30 @@ func TestARefusalThenAMalformedRequestHoldsTheIssue(t *testing.T) {
 // ladder counted is the owed delivery's own and goes with it, so the task that replaces it starts
 // its own ladder at the first step; the claim's run of provider-error turns is the claim's and
 // stays.
+//
+// The owed row is retired before the newer task's row is written, and nothing is written under
+// its id afterwards. A root architect's task names what a person decided while nobody in its
+// tree could hear it, and the store holds those rows under the delivery that names them: the
+// delete is what leaves them KEPT for whichever tree is owed them (the claim store's
+// RetireDelivery and releaseKeptDecisions). A row overwritten in place would leave them held
+// by a delivery id that is gone, or move them to the task that replaced it, whose text never
+// named them, to be told at that task's confirmation.
 func TestANewerTaskQueuedWhileTheLadderWaitsReplacesTheTaskItKept(t *testing.T) {
 	h := workingClaim(t)
 	h.errorTurn(StreamPromptResult{Error: "overloaded_error", HTTPStatus: 529})
-	kept := h.pending()
-	if kept.ProviderErrorRetries != 1 || kept.ProviderErrorNote == "" {
-		t.Fatalf("the owed task is %+v, want one send counted against it and the sentence it would go behind", kept)
+	owed := h.pending()
+	if owed.ProviderErrorRetries != 1 || owed.ProviderErrorNote == "" {
+		t.Fatalf("the owed task is %+v, want one send counted against it and the sentence it would go behind", owed)
 	}
 
 	h.must(RequestDeliver{Claim: testToken, Task: "test the change", Phase: phase.Testing, Generation: 8, Assignment: "A2"})
 
 	sent := h.wantPrompts(2)[1]
-	if sent.Message != "test the change" || sent.DeliveryID == kept.ID {
+	if sent.Message != "test the change" || sent.DeliveryID == owed.ID {
 		t.Fatalf("sent %+v, want the newer task at once under an id of its own", sent)
 	}
-	if p := h.pending(); p.ProviderErrorRetries != 0 || p.ProviderErrorNote != "" {
+	p := h.pending()
+	if p.ProviderErrorRetries != 0 || p.ProviderErrorNote != "" {
 		t.Errorf("the task that replaced the owed one is %+v, want a ladder of its own from the first step", p)
 	}
 	if _, armed := h.m.timers[TimerPromptRetry]; armed {
@@ -267,40 +276,13 @@ func TestANewerTaskQueuedWhileTheLadderWaitsReplacesTheTaskItKept(t *testing.T) 
 	if run := h.claim().ProviderErrorRun; run != 1 {
 		t.Errorf("the claim's run of provider-error turns is %d, want 1: the run is the claim's, not the task's", run)
 	}
-}
-
-// The row the newer task replaces is retired, and nothing is written under its id afterwards.
-// A root architect's task names what a person decided while nobody in its tree could hear it,
-// and the store holds those rows under the delivery that names them: the delete is what leaves
-// them KEPT for whichever tree is owed them (the claim store's RetireDelivery and
-// releaseKeptDecisions). A row overwritten in place would leave them held by a delivery id that
-// is gone, or move them to the task that replaced it, whose text never named them, to be told
-// at that task's confirmation (dispatch://INFRA-956, the round-7 review's minor).
-//
-// The round's question is queued first and refused, so what the newer task replaces is the
-// ladder's own task rather than anything the round put in its place.
-func TestANewerTaskReplacesTheTaskTheLadderKeptAndRetiresItsRow(t *testing.T) {
-	h := workingClaim(t)
-	h.errorTurn(StreamPromptResult{Error: "overloaded_error", HTTPStatus: 529})
-	kept := h.pending()
-	h.openUpdate(testRound, testReasons)
-	if p := h.pending(); p.ID != kept.ID {
-		t.Fatalf("pending %+v, want the task the ladder kept, %s: the round's question waits behind it", p, kept.ID)
-	}
-
-	h.must(RequestDeliver{Claim: testToken, Task: "test the change", Phase: phase.Testing, Generation: 8, Assignment: "A2"})
-
-	p := h.pending()
-	if p.Task != "test the change" || p.ID == kept.ID {
-		t.Fatalf("pending %+v, want the newer task in the place of the task the ladder kept, %s", p, kept.ID)
-	}
 	log := h.store.deliveryLog()
-	retired := slices.Index(log, "retire "+kept.ID)
+	retired := slices.Index(log, "retire "+owed.ID)
 	if retired < 0 {
-		t.Fatalf("the store saw %q, want the replaced delivery %s retired: nothing else releases what it holds", log, kept.ID)
+		t.Fatalf("the store saw %q, want the replaced delivery %s retired: nothing else releases what it holds", log, owed.ID)
 	}
-	if again := slices.Index(log[retired:], "put "+kept.ID); again >= 0 {
-		t.Errorf("the store saw %q, want nothing written under %s after its retirement", log, kept.ID)
+	if again := slices.Index(log[retired:], "put "+owed.ID); again >= 0 {
+		t.Errorf("the store saw %q, want nothing written under %s after its retirement", log, owed.ID)
 	}
 	if last := log[len(log)-1]; last != "put "+p.ID {
 		t.Errorf("the store's last delivery write is %q, want the newer task %s", last, p.ID)
@@ -312,20 +294,20 @@ func TestANewerTaskReplacesTheTaskTheLadderKeptAndRetiresItsRow(t *testing.T) {
 // turn of the owed task ends with no provider error, and the question goes then. Going first
 // would buy the round nothing in the outage that holds it up — the question needs a model turn
 // of its own, and the provider failing this claim's turns would fail that one the same way
-// (dispatch://INFRA-956, the round-7 review).
+// (dispatch://INFRA-956 R2, askForUpdate).
 func TestAnUpdateRoundsQuestionWaitsBehindTheTaskTheLadderKept(t *testing.T) {
 	h := workingClaim(t)
 	h.errorTurn(StreamPromptResult{Error: "overloaded_error", HTTPStatus: 529})
-	kept := h.pending()
+	owed := h.pending()
 
 	h.openUpdate(testRound, testReasons)
 
 	p := h.pending()
-	if p.ID != kept.ID || p.Task != kept.Task {
-		t.Fatalf("pending %+v, want the task the ladder kept, %s: the question is refused behind it", p, kept.ID)
+	if p.ID != owed.ID || p.Task != owed.Task {
+		t.Fatalf("pending %+v, want the task the ladder kept, %s: the question is refused behind it", p, owed.ID)
 	}
-	if p.ProviderErrorRetries != kept.ProviderErrorRetries {
-		t.Errorf("the kept task counts %d sends, want the %d its ladder had", p.ProviderErrorRetries, kept.ProviderErrorRetries)
+	if p.ProviderErrorRetries != owed.ProviderErrorRetries {
+		t.Errorf("the owed task counts %d sends, want the %d its ladder had", p.ProviderErrorRetries, owed.ProviderErrorRetries)
 	}
 	// The refusal leaves the ask's own clock unset, so the round asks again at the next tick.
 	if tasked := h.claim().UpdateTaskedAt; tasked != nil {
@@ -347,17 +329,62 @@ func TestAnUpdateRoundsQuestionWaitsBehindTheTaskTheLadderKept(t *testing.T) {
 	}
 }
 
+// A question of a round another round has replaced is dropped rather than sent again. The ask
+// carries the round it asked in its delivery id and keeps it across the take-back
+// (rotateTaskID), so the question whose turn ended in a provider error comes back naming a
+// round whose pod this daemon has already replaced: no session of this claim can answer it,
+// and the ladder's own send is where the claim reads that (sendPending). Sending it would cost
+// a model turn and leave the question of the round the claim is in now behind it; the drop
+// frees the slot, and the next tick asks that round.
+func TestAQuestionOfARoundAnotherReplacedIsDroppedRatherThanSentAgain(t *testing.T) {
+	h := newBareHarness(t)
+	c := queuedClaim()
+	if err := h.store.PutClaim(h.ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	h.start(c)
+	h.reach(StateReady)
+	h.openUpdate(testRound, testReasons)
+	h.must(StreamTurnStart{Claim: testToken})
+	later := PodRound(testOtherPod)
+	h.openUpdate(later, testReasons)
+
+	h.errorTurn(StreamPromptResult{Error: "overloaded_error", HTTPStatus: 529})
+
+	owed := h.pending()
+	if !asksRound(owed.ID, testRound) || !owed.ConfirmedAt.IsZero() {
+		t.Fatalf("pending %+v, want the question of the replaced round %s unconfirmed on the ladder", owed, testRound)
+	}
+
+	h.advance(30 * time.Second)
+
+	if p := h.claim().Pending; p != nil {
+		t.Fatalf("the ladder left %+v pending, want the replaced round's question dropped", *p)
+	}
+	h.wantPrompts(1)
+	if d, ok := h.store.delivery(testToken); ok {
+		t.Errorf("the store holds %+v, want the dropped question's row gone", d)
+	}
+
+	h.openUpdate(later, testReasons)
+
+	question := h.wantPrompts(2)[1]
+	if !asksRound(question.DeliveryID, later) {
+		t.Errorf("the prompt after the drop = %+v, want the question of the round the claim is in, %s", question, later)
+	}
+}
+
 // R3: the operator stops a claim whose provider keeps refusing its session and retries it with
 // a fresh one, and the task the ladder kept is the task that fresh session is sent. The stop
 // takes the claim's timers with it (letGo), so no wait names that task any more — and the task
 // is still the claim's work, not one the claim owes with nothing left to send it, so the phase
 // restart's own task waits behind it (ErrDeliveryPending) until the turn on the kept task
-// retires it. Only the two tasks R2 names are replaced (replaceable);
+// retires it. Only the task R2 names is replaced (replaceable);
 // scripts/e2e/provider-error-retry.sh step 5 is this case live.
 func TestThePhaseRestartsTaskWaitsBehindTheTaskTheLadderKept(t *testing.T) {
 	h := workingClaim(t)
 	h.errorTurn(StreamPromptResult{Error: "overloaded_error", HTTPStatus: 529})
-	kept := h.pending()
+	owed := h.pending()
 
 	h.must(RequestStop{Claim: testToken})
 	h.wantState(StateRetired)
@@ -370,11 +397,11 @@ func TestThePhaseRestartsTaskWaitsBehindTheTaskTheLadderKept(t *testing.T) {
 		t.Fatalf("the phase restart's task was answered %v, want it to wait behind the task the ladder kept", err)
 	}
 	p := h.pending()
-	if p.ID != kept.ID || p.Task != kept.Task {
-		t.Fatalf("pending %+v, want the task the ladder kept, %s: the retried session is sent that task", p, kept.ID)
+	if p.ID != owed.ID || p.Task != owed.Task {
+		t.Fatalf("pending %+v, want the task the ladder kept, %s: the retried session is sent that task", p, owed.ID)
 	}
-	if p.ProviderErrorRetries != kept.ProviderErrorRetries {
-		t.Errorf("the kept task counts %d sends, want the %d its ladder had", p.ProviderErrorRetries, kept.ProviderErrorRetries)
+	if p.ProviderErrorRetries != owed.ProviderErrorRetries {
+		t.Errorf("the owed task counts %d sends, want the %d its ladder had", p.ProviderErrorRetries, owed.ProviderErrorRetries)
 	}
 }
 
@@ -514,20 +541,20 @@ func TestTheSixthProviderErrorTurnInARowTellsTheControllerOnce(t *testing.T) {
 func TestAnArchitectsStopKeepsTheTaskTheLadderKeptAndTheRetrySendsIt(t *testing.T) {
 	h := workingClaimOf(t, subArchitectClaim())
 	h.errorTurn(StreamPromptResult{Error: "overloaded_error", HTTPStatus: 529})
-	kept := h.pending()
+	owed := h.pending()
 
 	h.must(RequestStop{Claim: h.token})
 
 	h.wantState(StateRetired)
 	p := h.pending()
-	if p.ID != kept.ID || p.Task != kept.Task {
-		t.Fatalf("the stopped architect holds %+v, want the task %s it owes: no retry of its outbox row gives it again", p, kept.ID)
+	if p.ID != owed.ID || p.Task != owed.Task {
+		t.Fatalf("the stopped architect holds %+v, want the task %s it owes: no retry of its outbox row gives it again", p, owed.ID)
 	}
-	if p.ProviderErrorRetries != kept.ProviderErrorRetries || !p.DeliveredAt.Equal(kept.DeliveredAt) {
-		t.Errorf("the task is %+v, want the step of the ladder and the read mark it stood with: %+v", p, kept)
+	if p.ProviderErrorRetries != owed.ProviderErrorRetries || !p.DeliveredAt.Equal(owed.DeliveredAt) {
+		t.Errorf("the task is %+v, want the step of the ladder and the read mark it stood with: %+v", p, owed)
 	}
-	if d, ok := h.store.delivery(h.token); !ok || d.ID != kept.ID {
-		t.Fatalf("the store holds %+v (%t) for the stopped claim, want the kept task %s", d, ok, kept.ID)
+	if d, ok := h.store.delivery(h.token); !ok || d.ID != owed.ID {
+		t.Fatalf("the store holds %+v (%t) for the stopped claim, want the owed task %s", d, ok, owed.ID)
 	}
 	h.wantPrompts(1)
 
@@ -535,8 +562,8 @@ func TestAnArchitectsStopKeepsTheTaskTheLadderKeptAndTheRetrySendsIt(t *testing.
 	h.relaunched()
 
 	again := h.wantPrompts(2)[1]
-	if again.DeliveryID != kept.ID || !strings.HasSuffix(again.Message, providerErrorTaskText) {
-		t.Errorf("the prompt after the retry = %+v, want the kept task %s", again, kept.ID)
+	if again.DeliveryID != owed.ID || !strings.HasSuffix(again.Message, providerErrorTaskText) {
+		t.Errorf("the prompt after the retry = %+v, want the owed task %s", again, owed.ID)
 	}
 }
 
@@ -545,7 +572,11 @@ func TestAnArchitectsStopKeepsTheTaskTheLadderKeptAndTheRetrySendsIt(t *testing.
 // retires the claim and the round goes with it (clearUpdate), so nothing of this claim will
 // ever answer that question, and the retry's session would be handed it first — a worker asked
 // to push its work for a pod replacement that has already happened. It is retired with the
-// round (dropUpdateTask).
+// round (dropsUpdateTask).
+//
+// The stop is one write of the retired claim, carrying the delete of that question: the round
+// goes before the write rather than after it, so no store ever holds a retired claim that
+// still records a round, which is the state a crash between two writes would leave behind.
 func TestAStopRetiresTheRoundsQuestionTheLadderKept(t *testing.T) {
 	h := newBareHarness(t)
 	c := queuedClaim()
@@ -573,6 +604,18 @@ func TestAStopRetiresTheRoundsQuestionTheLadderKept(t *testing.T) {
 	if d, ok := h.store.delivery(testToken); ok {
 		t.Errorf("the store holds %+v for the stopped claim, want no delivery", d)
 	}
+	var stopped []Claim
+	for _, written := range h.store.history() {
+		if written.State == StateRetired {
+			stopped = append(stopped, written)
+		}
+	}
+	if len(stopped) != 1 {
+		t.Fatalf("the store saw %d writes of the retired claim, want one", len(stopped))
+	}
+	if round := stopped[0].UpdateRound; round != "" {
+		t.Errorf("the one write of the retired claim records round %q, want none", round)
+	}
 }
 
 // The same task at the other end of a claim's life. A failure keeps the pending delivery for
@@ -582,7 +625,7 @@ func TestAStopRetiresTheRoundsQuestionTheLadderKept(t *testing.T) {
 func TestAFailureKeepsTheTaskTheLadderKept(t *testing.T) {
 	h := workingClaim(t)
 	h.errorTurn(StreamPromptResult{Error: "overloaded_error", HTTPStatus: 529})
-	kept := h.pending()
+	owed := h.pending()
 	h.climbs(1, 30*time.Second)
 
 	h.errorTurn(StreamPromptResult{Error: "invalid_request_error", HTTPStatus: 400})
@@ -592,11 +635,11 @@ func TestAFailureKeepsTheTaskTheLadderKept(t *testing.T) {
 		t.Errorf("the failure is %q, want the status the provider answered", failure)
 	}
 	p := h.pending()
-	if p.Task != kept.Task {
-		t.Fatalf("the failed claim holds %+v, want the task %s it owes", p, kept.ID)
+	if p.Task != owed.Task {
+		t.Fatalf("the failed claim holds %+v, want the task %s it owes", p, owed.ID)
 	}
-	if d, ok := h.store.delivery(testToken); !ok || d.Task != kept.Task {
-		t.Errorf("the store holds %+v (%t) for the failed claim, want the kept task", d, ok)
+	if d, ok := h.store.delivery(testToken); !ok || d.Task != owed.Task {
+		t.Errorf("the store holds %+v (%t) for the failed claim, want the owed task", d, ok)
 	}
 }
 
@@ -610,14 +653,14 @@ func TestAFailureKeepsTheTaskTheLadderKept(t *testing.T) {
 func TestANewerTaskDoesNotReplaceTheLaddersTaskWhosePromptIsInFlight(t *testing.T) {
 	h := workingClaim(t)
 	h.errorTurn(StreamPromptResult{Error: "overloaded_error", HTTPStatus: 529})
-	kept := h.pending()
+	owed := h.pending()
 	h.advance(30 * time.Second)
 	sent := h.wantPrompts(2)[1]
-	if sent.DeliveryID != kept.ID {
-		t.Fatalf("the prompt the ladder sent = %+v, want the kept task %s", sent, kept.ID)
+	if sent.DeliveryID != owed.ID {
+		t.Fatalf("the prompt the ladder sent = %+v, want the owed task %s", sent, owed.ID)
 	}
 	if p := h.pending(); !p.ConfirmedAt.IsZero() {
-		t.Fatalf("the kept task is %+v, want it acknowledged and not yet confirmed", p)
+		t.Fatalf("the owed task is %+v, want it acknowledged and not yet confirmed", p)
 	}
 
 	err := h.handle(RequestDeliver{Claim: testToken, Task: "test the change", Phase: phase.Testing, Generation: 8, Assignment: "A2"})
@@ -625,14 +668,14 @@ func TestANewerTaskDoesNotReplaceTheLaddersTaskWhosePromptIsInFlight(t *testing.
 	if !errors.Is(err, ErrDeliveryPending) {
 		t.Fatalf("the newer task was answered %v, want it refused: the task it would replace is in the agent's hands", err)
 	}
-	if p := h.pending(); p.ID != kept.ID {
-		t.Fatalf("pending %+v, want the kept task %s, whose prompt the agent has", p, kept.ID)
+	if p := h.pending(); p.ID != owed.ID {
+		t.Fatalf("pending %+v, want the owed task %s, whose prompt the agent has", p, owed.ID)
 	}
 	h.wantPrompts(2)
 
 	h.must(StreamTurnStart{Claim: testToken})
 
-	if p := h.pending(); p.ID != kept.ID || p.ConfirmedAt.IsZero() {
-		t.Errorf("the turn confirmed %+v, want the kept task %s it was started for", p, kept.ID)
+	if p := h.pending(); p.ID != owed.ID || p.ConfirmedAt.IsZero() {
+		t.Errorf("the turn confirmed %+v, want the owed task %s it was started for", p, owed.ID)
 	}
 }

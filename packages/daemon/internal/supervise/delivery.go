@@ -175,12 +175,9 @@ func pendingID(p *Delivery) string {
 // (dispatch://INFRA-956 R2: a newer task replaces the owed one). The newer task takes its
 // place: it is work for this claim, queued since, and R2 has the newer of the two go.
 //
-// An update round's question is refused behind that task like any other, and the round asks
-// again at the next tick (askForUpdate). It costs the round the wait: the pod is replaced only
-// once a turn of the owed task ends with no provider error, which is the turn that frees the
-// slot. The question needs a model turn of its own, which the provider that is failing this
-// claim's turns would fail in the same way, so going first would buy the round nothing in the
-// outage that holds it up (dispatch://INFRA-956, the round-7 review).
+// An update round's question reaches none of that: askForUpdate holds it back while the claim
+// holds a task at all, whichever task that is, and the reason it does is written there
+// (table.go).
 //
 // The replaced task's row ends as any other retirement ends it (retirePending), before the
 // newer task's row is written: the delete releases what that task held of a person's decisions
@@ -203,12 +200,7 @@ func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
 		if (id != "" && pending.ID == id && pending.Task == task) || delivered {
 			return nil
 		}
-		// An update round's question is no newer task of the claim's: it asks this worker to
-		// push its work for a pod replacement, and the turn it needs is one the provider
-		// failing this claim's turns would fail the same way. So it waits behind the owed task
-		// as it waits behind any other, whichever round asked it.
-		_, asksUpdateRound := updateRoundOf(id)
-		if asksUpdateRound || !m.replaceable(pending) {
+		if !m.replaceable(pending) {
 			if err := m.sendPending(ctx); err != nil {
 				return err
 			}
@@ -280,12 +272,17 @@ func (c Claim) openRoundHoldsTask() bool {
 // task it is about to lose would waste both the turn and the work. PodUpdateEnded releases that
 // task once the round is over (endPodUpdate).
 //
-// An ask of a round whose pod the claim's process no longer runs in is dropped here rather than
-// sent (Claim.LeftPodRound), the way the round's own end drops one (dropUpdateTask): the worker
-// that reads it would be asked to push work that died with the pod the round was opened over,
-// and it would refuse the answer the ask asks for. That drop and the phase check's are one shape
-// below, and both leave through the answer every drop of a delivery gives the mark armed for it
-// (answerAskFirstAfterDrop, which dropUpdateTask makes of its own).
+// An ask the claim can no longer answer is dropped here rather than sent, and there are two of
+// them: an ask of a round another round has replaced, and an ask of a round whose pod the
+// claim's process no longer runs in (Claim.LeftPodRound). The worker that read either would be
+// asked to push its work for a pod replacement this daemon has already made, and it would
+// refuse the answer the ask asks for. An ask names the round it asked in its own delivery id,
+// and keeps it across every take-back (rotateTaskID), so the ask of a round a turn had
+// confirmed comes back under that round when the turn ends in a death or a provider error,
+// with the claim already in the round that replaced it. Sending it again would cost a model
+// turn and make the current round's question wait behind a question nobody wants. That drop
+// and the phase check's are one shape below, and both leave through the answer every drop of a
+// delivery gives the mark armed for it (answerAskFirstAfterDrop).
 func (m *Machine) sendPending(ctx context.Context) error {
 	// A claim holding a suspension is handed nothing (holdSuspension).
 	if state := m.claim.State; (state != StateReady && state != StateIdle) || m.held != nil {
@@ -315,8 +312,8 @@ func (m *Machine) sendPending(ctx context.Context) error {
 		return nil
 	}
 	// Every reason to drop the delivery rather than send it is decided here and leaves through
-	// one of the two exits below, because a dropped delivery leaves no mark armed for it, here
-	// or at any other drop (answerAskFirstAfterDrop): a drop that returned of its own would
+	// the one exit below, because a dropped delivery leaves no mark armed for it, here or at
+	// any other drop (answerAskFirstAfterDrop): a drop that returned of its own would
 	// leave the question a restart armed for that delivery standing (askFirst), and the next
 	// task would be confirmed by whatever turn is running and retired unsent. Nothing here
 	// sends, so the ask of a round this claim's process has left is still dropped before the
@@ -325,23 +322,26 @@ func (m *Machine) sendPending(ctx context.Context) error {
 	// below, currentRootTask): that branch clears askFirst before anything else, so it leaves no
 	// question armed and asks none.
 	//
-	// holds is whether the delivery is still the claim's to send; the ask of a left round never
-	// is, and its issue's phase is not asked about, since the round's words are what it is.
-	left := m.claim.LeftPodRound(m.claim.UpdateRound) && updatesRound(p, m.claim.UpdateRound)
-	holds := !left
+	// holds is whether the delivery is still the claim's to send; the ask of a round the claim
+	// is not in now never is, and its issue's phase is not asked about, since the round's words
+	// are what it is.
+	round, asks := updateRoundOf(p.ID)
+	stale := asks && (round != m.claim.UpdateRound || m.claim.LeftPodRound(round))
+	holds := !stale
 	if holds {
 		var err error
 		if holds, err = m.phaseHolds(ctx, *p); err != nil {
 			return err
 		}
 	}
-	switch {
-	case left:
-		// dropUpdateTask answers the mark for the ask it takes back.
-		return m.dropUpdateTask(ctx)
-	case !holds:
-		m.log.Info("supervise: the issue has left the phase this task was queued for; it is dropped rather than sent",
-			"delivery", p.ID, "issue", m.claim.Issue, "queuedFor", p.Phase)
+	if !holds {
+		if stale {
+			m.log.Info("supervise: this task asks for a round the claim is not in now; it is dropped rather than sent",
+				"delivery", p.ID, "asked", round, "round", m.claim.UpdateRound, "left", m.claim.UpdateLeftRound)
+		} else {
+			m.log.Info("supervise: the issue has left the phase this task was queued for; it is dropped rather than sent",
+				"delivery", p.ID, "issue", m.claim.Issue, "queuedFor", p.Phase)
+		}
 		if err := m.retirePending(ctx); err != nil {
 			return err
 		}
@@ -472,9 +472,10 @@ func (m *Machine) currentRootTask(ctx context.Context) (bool, error) {
 
 // answerAskFirstAfterDrop answers the question a restart armed for a delivery that is now gone
 // (askFirst), and every drop of a delivery runs it in the same step as the drop: sendPending's
-// phase drop, and dropUpdateTask, which makes it of its own for the three drops a round that is
-// over makes through it (leaveRound, endPodUpdate, openPodUpdate's round switch) and for
-// sendPending's drop of a left round's ask. The one drop that does not run it is
+// two — the task its issue's phase has left behind, and the ask of a round the claim is not in
+// now — the retirement's (machine.go's retire), and dropUpdateTask, which makes it of its own
+// for the three drops a round that is over makes through it (leaveRound, endPodUpdate,
+// openPodUpdate's round switch). The one drop that does not run it is
 // currentRootTask's retirement of a root architect's held task that names nothing any more:
 // sendPending's asksRoot branch clears askFirst before it, without asking, so no question is left
 // to answer. Left armed over nothing pending, the question would make the claim's next task the

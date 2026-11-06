@@ -1534,22 +1534,37 @@ func (m *Machine) endProcess(ctx context.Context) error {
 // so a round left recorded on it would be read against whatever pod the replacement makes — the
 // daemon's sweep would find a round nothing can answer, and tell the issue its work was lost at
 // every tick for the rest of the tree's life. The ask that round left owed goes with the round
-// (dropUpdateTask): nothing of this claim will ever answer it, and an ask left pending is the
+// (dropsUpdateTask): nothing of this claim will ever answer it, and an ask left pending is the
 // first thing the retry's session reads — a worker asked to push its work for a pod replacement
 // that has already happened. An ask a turn confirmed is left where it is, as it is at every
 // other end of a round: that turn is the worker's, and settle retires the delivery once the
 // claim is no longer working.
 //
-// The drop runs with the claim already retired, so what it writes carries the state the claim
-// is ending in rather than the one it is leaving.
+// The stop is one write. The drop is decided before the round's fields go, so the write that
+// follows carries the claim exactly as it is ending — retired, in no round — together with the
+// delete of the ask it is ending with (retirePending's RetireDelivery, one transaction).
+// Dropping first and clearing afterwards stores the retired claim twice, and the first of the
+// two is the claim the paragraph above forbids: retired, and still recording its round. A
+// crash or a failed write between them would leave exactly that behind.
 func (m *Machine) retire(ctx context.Context) error {
 	m.letGo()
 	m.claim.State = StateRetired
-	if err := m.dropUpdateTask(ctx); err != nil {
-		return err
+	drops := m.dropsUpdateTask()
+	if drops {
+		m.log.Info("supervise: the claim retires holding its round's ask, which nothing of it will answer; the ask goes with the round",
+			"round", m.claim.UpdateRound, "delivery", m.claim.Pending.ID)
 	}
 	m.clearUpdate()
-	return m.persist(ctx)
+	if drops {
+		if err := m.retirePending(ctx); err != nil {
+			return err
+		}
+	} else if err := m.persist(ctx); err != nil {
+		return err
+	}
+	// Every drop of a delivery answers the question a restart armed for it; a retired claim is
+	// answered nothing there (answerAskFirstAfterDrop).
+	return m.answerAskFirstAfterDrop(ctx)
 }
 
 // letGo ends what the machine had with the claim's process: no timer watches it — the ladder's
