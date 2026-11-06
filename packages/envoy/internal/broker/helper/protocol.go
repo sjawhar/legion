@@ -34,7 +34,7 @@ type Request struct {
 	WaitSeconds     int      `json:"wait_seconds,omitempty"`     // register: wait up to this long for the enrollment, unless the helper holds no launcher credential
 	RuntimeID       string   `json:"runtime_id,omitempty"`       // enroll-session-key: the session's runtime id on this machine
 	Thumbprint      string   `json:"thumbprint,omitempty"`       // enroll-session-key: the session key's thumbprint
-	SessionID       *string  `json:"session_id,omitempty"`       // enroll-session-key: optional registry session id
+	SessionID       *string  `json:"session_id,omitempty"`       // enroll-session-key: optional registry session id; register: the omp session id this session is to be known by
 	EnrollmentID    string   `json:"enrollment_id,omitempty"`    // unenroll-session-key: which enrollment to end
 }
 
@@ -189,6 +189,102 @@ func UnitPath(getenv func(string) string) string {
 		dir = filepath.Join(getenv("HOME"), ".config")
 	}
 	return filepath.Join(dir, "systemd", "user", UnitName)
+}
+
+// LegacyStatePath is where the helper's session records used to live: beside socket, the socket
+// THIS helper is configured to listen on, which is the one `install` wrote into its unit where
+// a machine names one (AGENT_SECRETS_HELPER_SOCK) and DefaultSocket otherwise. That directory
+// is the user's runtime dir, which is tmpfs and goes at a reboot — exactly the event a named
+// session's records must survive (dispatch://INFRA-1167) — so StatePath replaces it and
+// MigrateStateFile moves what it finds there. Reading the configured socket rather than the
+// default is what makes a helper installed with a socket of its own migrate its OWN old
+// records, and no other helper's.
+func LegacyStatePath(socket string) string {
+	return filepath.Join(filepath.Dir(socket), "sessions.json")
+}
+
+// StatePath is where the helper keeps its session records when AGENT_SECRETS_STATE_FILE names
+// no file: sessions.json beside machineFile, the machine login this helper's sessions enrol
+// under (AGENT_SECRETS_MACHINE_FILE, default $HOME/.config/agent-secrets/machine.json), so a
+// helper with nothing set keeps its records at $HOME/.config/agent-secrets/sessions.json,
+// where one upgraded in place on its default socket finds them.
+//
+// Durable, and not in the runtime directory the socket is in: a named session's record holds
+// that session's signing key, and the identity that key stands for must outlive a reboot, while
+// the runtime directory is tmpfs and goes with one.
+//
+// Beside the machine login, and not at one path every helper on the machine shares: the records
+// now hold named sessions' signing keys, so one helper writing another's records would cost
+// that helper every session it holds. The machine file is what keeps them apart, because a
+// helper refuses to start while another holds that file (claimMachineFile in
+// cmd/agent-secrets-helper), so two helpers that can run at once have machine files of their
+// own and, through this, records of their own. A second helper started with a socket of its own
+// and no machine file of its own does not reach the records at all: the claim refuses it first.
+func StatePath(machineFile string) string {
+	return filepath.Join(filepath.Dir(machineFile), "sessions.json")
+}
+
+// writeFileOwnerOnly writes data to path so that nothing but this user can read it, and
+// atomically: it makes path's directory 0700, writes the bytes to path+".tmp" 0600, and renames
+// that over path, so a reader finds either the whole old file or the whole new one. Both the
+// session records and the file MigrateStateFile leaves hold session signing keys, and both are
+// written through here.
+//
+// Both chmods are needed, though the call above each already names the same mode. MkdirAll
+// leaves an EXISTING directory's mode alone, so a directory that was there already — the one the
+// machine login lives in, made by an older release or by hand — could stay group- or
+// world-readable while holding a session's signing key; it is corrected on every write, so no
+// write lands in a directory anyone else can list. And WriteFile applies its mode only when it
+// CREATES the file, so a .tmp left behind by an interrupted write with a wider mode is corrected
+// before these bytes go into it.
+//
+// O_EXCL through CreateTemp-like semantics is not needed here: the name is this writer's own and
+// the directory is 0700.
+func writeFileOwnerOnly(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// MigrateStateFile moves a records file left at the old runtime-directory path to the durable
+// one, once, when the durable path has none: a helper upgraded in place keeps the sessions it
+// had rather than revoking them all at its first start. A rename across filesystems (tmpfs to
+// the home disk) is expected to fail, so it copies and removes instead, writing the copy through
+// writeFileOwnerOnly, the owner-only atomic write the records file is saved with. Anything that
+// goes wrong is returned and only logged: a lost record costs the sessions it names their
+// continuity, never the helper its start.
+func MigrateStateFile(from, to string) error {
+	if from == "" || to == "" || from == to {
+		return nil
+	}
+	if _, err := os.Stat(to); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	data, err := os.ReadFile(from)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := writeFileOwnerOnly(to, data); err != nil {
+		return err
+	}
+	return os.Remove(from)
 }
 
 // Call sends one request and reads one reply, all within timeout, the dial included (the dial

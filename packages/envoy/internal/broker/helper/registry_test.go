@@ -13,7 +13,7 @@ import (
 func TestRootFindsSelfAndDescendantOnly(t *testing.T) {
 	reg := NewRegistry(filepath.Join(t.TempDir(), "sessions.json"))
 	self := os.Getpid()
-	sess, err := newSession(self, 1, "h:1:1", nil)
+	sess, err := newSession(self, 1, "h:1:1", "", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func TestRootFindsSelfAndDescendantOnly(t *testing.T) {
 	if reg.Remove(sess) {
 		t.Fatal("a second Remove of the same session is a no-op")
 	}
-	other, _ := newSession(self, 2, "h:1:2", nil)
+	other, _ := newSession(self, 2, "h:1:2", "", nil, nil)
 	reg.Add(other)
 	if reg.Remove(sess) || reg.Get(self) != other {
 		t.Fatal("Remove takes only the very session it is given, never a later one with the same pid")
@@ -52,11 +52,11 @@ func TestRootFindsSelfAndDescendantOnly(t *testing.T) {
 func TestSaveAndLoadRecordsCarryNoKey(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sessions.json")
 	reg := NewRegistry(path)
-	sess, err := newSession(4242, 99, "h:4242:99", nil)
+	sess, err := newSession(4242, 99, "h:4242:99", "", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess.setEnrolled("enr-1")
+	sess.setEnrolledAt("enr-1", sess.identity().Generation)
 	reg.Add(sess)
 	if err := reg.Save(); err != nil {
 		t.Fatal(err)
@@ -71,8 +71,11 @@ func TestSaveAndLoadRecordsCarryNoKey(t *testing.T) {
 		t.Fatalf("the record must not carry key material: %s", data)
 	}
 	recs, err := LoadRecords(path)
-	if err != nil || len(recs) != 1 || recs[0] != (Record{PID: 4242, StartTicks: 99, RuntimeID: "h:4242:99", EnrollmentID: "enr-1"}) {
-		t.Fatalf("records: %+v %v", recs, err)
+	// The boot id is on every saved record: it is what makes the pid and the start ticks name
+	// one process incarnation across a reboot (Registry.SameBoot).
+	want := Record{PID: 4242, StartTicks: 99, BootID: reg.bootID, RuntimeID: "h:4242:99", EnrollmentID: "enr-1"}
+	if err != nil || len(recs) != 1 || recs[0] != want {
+		t.Fatalf("records: %+v %v, want %+v", recs, err, want)
 	}
 	if recs, err := LoadRecords(filepath.Join(t.TempDir(), "none.json")); err != nil || recs != nil {
 		t.Fatalf("a missing file is no records: %+v %v", recs, err)
@@ -86,7 +89,7 @@ func TestASaveAfterCloseWritesNothing(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sessions.json")
 	reg := NewRegistry(path)
-	sess, err := newSession(4242, 99, "h:4242:99", nil)
+	sess, err := newSession(4242, 99, "h:4242:99", "", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +110,7 @@ func TestASaveAfterCloseWritesNothing(t *testing.T) {
 }
 
 func TestStateFollowsEnrollment(t *testing.T) {
-	sess, err := newSession(1, 1, "h:1:1", nil)
+	sess, err := newSession(1, 1, "h:1:1", "", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +121,7 @@ func TestStateFollowsEnrollment(t *testing.T) {
 	if sess.snapshot().LastError == "" {
 		t.Fatal("the last broker error is kept for NOT_ENROLLED replies")
 	}
-	sess.setEnrolled("enr-2")
+	sess.setEnrolledAt("enr-2", sess.identity().Generation)
 	if st := sess.snapshot(); st.State != "enrolled" || st.LastError != "" {
 		t.Fatalf("enrolled: %s %q", st.State, st.LastError)
 	}
@@ -141,14 +144,25 @@ func TestStateFollowsEnrollment(t *testing.T) {
 		t.Fatal("a lapse must reopen ready, so a register --wait waits for the re-enrollment")
 	default:
 	}
-	if got := sess.recordedEnrollmentID(); got != "enr-2" {
+	// The record keeps the lapsed id in its own field until the revoke lands, separately
+	// from the live one, so a restart can tell an enrollment the key holds from one it only
+	// has to end.
+	if got := sess.identity().LapsedID; got != "enr-2" {
 		t.Fatalf("the record keeps the lapsed id until its revoke: %q", got)
 	}
-	sess.clearLapsed()
-	if got := sess.recordedEnrollmentID(); got != "" {
+	if sess.clearLapsedIf("enr-other") {
+		t.Fatal("a revoke's clear must leave a lapsed id that is no longer the one it revoked")
+	}
+	if got := sess.identity().LapsedID; got != "enr-2" {
+		t.Fatalf("a clear for another id took the lapsed slot: %q", got)
+	}
+	if !sess.clearLapsedIf("enr-2") {
+		t.Fatal("the revoked lapsed id must clear")
+	}
+	if got := sess.identity().LapsedID; got != "" {
 		t.Fatalf("a revoked lapsed id leaves the record: %q", got)
 	}
-	sess.setEnrolled("enr-3")
+	sess.setEnrolledAt("enr-3", sess.identity().Generation)
 	select {
 	case <-sess.readyCh():
 	default:
