@@ -29,8 +29,10 @@ export interface TreeKeyboard {
   readonly container: RefObject<HTMLElement | null>;
   /** Steps the cycle that says how much of the whole tree is drawn. */
   readonly onCycle: () => void;
-  /** Puts the caret in one node's own text. */
-  readonly onEdit: (node: TreeNode) => void;
+  /** Puts the caret in one node's own text, in the row the key was pressed on. */
+  readonly onEdit: (row: string, node: TreeNode) => void;
+  /** Says the caret has left a node's text, so the row gives the document back. */
+  readonly onEditEnd: () => void;
   /** Opens or closes one branch. */
   readonly onFold: (id: string, open: boolean) => void;
   /** Draws a branch that sits below the drawn levels where it stands. */
@@ -309,7 +311,8 @@ export function useTreeKeymap(tree: TreeKeyboard): void {
     },
     {
       // The caret goes into the node's own text where it lives, which is its document's block
-      // (`IssueBody`'s `onEdit`); Escape below brings the reader back to this row.
+      // drawn in this row (`IssueTree`'s `onEdit`); Escape below brings the reader back to
+      // this row and gives the document back to whatever was drawing it.
       id: "tree-edit",
       keys: "Enter",
       label: "Put the caret in the focused node",
@@ -321,7 +324,7 @@ export function useTreeKeymap(tree: TreeKeyboard): void {
         if (row === undefined) return;
         tree.onReport("");
         caretFrom.current = elements[on] ?? null;
-        tree.onEdit(row.node);
+        tree.onEdit(rowKeyOf(row), row.node);
       },
       when: () => at(drawn().elements) !== -1,
     },
@@ -338,6 +341,7 @@ export function useTreeKeymap(tree: TreeKeyboard): void {
         const row = caretFrom.current;
         caretFrom.current = null;
         (document.activeElement as HTMLElement | null)?.blur();
+        tree.onEditEnd();
         row?.focus();
       },
       when: () =>

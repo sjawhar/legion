@@ -9,10 +9,12 @@ import {
   referenceTargetsQuery,
 } from "../../api/queries";
 import type { IssueDetails } from "../../api/types";
+import { liveTextQueryOptions } from "../doc/ProofDocument";
 import { issueDecisionsQuery } from "../doc/spec-marks";
 import {
   buildIssueTree,
   type DocumentBlocks,
+  type DocumentText,
   type IssueTreeReads,
   type TreeNode,
   treeReferences,
@@ -73,6 +75,19 @@ export function useIssueTree(issue: IssueDetails): TreeNode {
       })),
     queries: documentIds.map((id) => artifactBlocksQuery(id)),
   });
+  // A document of the issue is a node of this tree, and a node's body opens its own text
+  // (`NodeArtifact.tsx`), as well as holding the citations that place the documents it names
+  // (`tree-drafts.ts`'s `citations`): the page holds the text of each one under the key the
+  // editor's own admission read already uses, one read per document and never one per node.
+  const texts = useQueries({
+    combine: (answers): DocumentText[] =>
+      answers.flatMap((answer, index) => {
+        const markdown = answer.data?.markdown;
+        const artifactId = documentIds[index];
+        return markdown === undefined || artifactId === undefined ? [] : [{ artifactId, markdown }];
+      }),
+    queries: documentIds.map((id) => liveTextQueryOptions(id)),
+  });
   // One value, so the model is given the reads and nothing else.
   const reads = useMemo<IssueTreeReads>(
     () => ({
@@ -85,6 +100,7 @@ export function useIssueTree(issue: IssueDetails): TreeNode {
       messages: messages.data,
       references: references.data,
       results: results.data,
+      texts,
     }),
     [
       asks.data,
@@ -96,6 +112,7 @@ export function useIssueTree(issue: IssueDetails): TreeNode {
       messages.data,
       references.data,
       results.data,
+      texts,
     ]
   );
   const unnamed = useMemo(() => buildIssueTree(reads), [reads]);

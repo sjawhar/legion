@@ -9,6 +9,7 @@ import { IssueThreeThings, nodesOfType, specSummary } from "./IssueThreeThings";
 import { IssueTree } from "./IssueTree";
 import type { AddressTarget, IssueAddress } from "./issue-address";
 import { pathToTarget } from "./issue-address";
+import { artifactsBySlug, uncitedArtifacts } from "./issue-artifacts";
 import { EMPTY_STATE_LINES, PRESET_ORDER } from "./page-words";
 import { presetCounts, presetView } from "./presets";
 import { useIssueTree } from "./useIssueTree";
@@ -25,13 +26,20 @@ import { useIssueTree } from "./useIssueTree";
  */
 export function IssueBody({
   address,
+  isClosed,
   issue,
+  onEditing,
   onLeave,
   plan,
   toolbar,
 }: {
   address: IssueAddress;
+  /** Whether the issue is closed, which the node menu's upload reads. */
+  isClosed: boolean;
   issue: IssueDetails;
+  /** The document a row of the tree is being edited in, so the page draws that document's one
+   *  editor for the row to take; `undefined` while the reader is editing nothing. */
+  onEditing: (artifactId: string | undefined) => void;
   /** Called before a preset's own control leaves this address, so the page can record where
    *  the reader was before the move. */
   onLeave: () => void;
@@ -72,6 +80,8 @@ export function IssueBody({
     () => presetView(root, address.preset, address.filter, named),
     [address.filter, address.preset, named, root]
   );
+  const artifacts = useMemo(() => artifactsBySlug(issue), [issue]);
+  const uncited = useMemo(() => uncitedArtifacts(root, issue.artifacts), [issue.artifacts, root]);
   const specSlug = primarySpec(issue)?.slug ?? "";
 
   return (
@@ -88,6 +98,7 @@ export function IssueBody({
         active={address.preset}
         counts={counts}
         filter={address.filter}
+        isClosed={isClosed}
         issueKey={issue.key}
         nodeMenu={address.nodeMenu}
         onLeave={onLeave}
@@ -99,12 +110,15 @@ export function IssueBody({
           navigate(`${pathname}${rest === "" ? "" : `?${rest}`}${hash}`, { replace: true });
         }}
         toolbar={toolbar}
+        uncited={uncited}
       />
       <IssueChildren issue={issue} />
       <IssueTree
+        artifacts={artifacts}
         context={view.context}
         emptyLine={EMPTY_STATE_LINES[address.preset]}
         focusReveal={address.preset !== "spec" && targetKind !== "node"}
+        onEditing={onEditing}
         reveal={reveal}
         root={view.root}
       />

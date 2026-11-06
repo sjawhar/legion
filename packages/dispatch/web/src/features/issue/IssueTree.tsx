@@ -1,11 +1,14 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
+import type { Artifact } from "../../api/types";
 import { borderDefault, borderTransparent, textMutedOnCanvas } from "../../theme/classes";
 import { useMargin } from "../margin/margin-context";
 import { useMediaQuery } from "../shell/useDialog";
 import { useSetFocusedNode } from "./focused-node";
+import { documentOfNode } from "./issue-artifacts";
 import { firstLineOf, type TreeNode } from "./issue-tree";
 import { NodeRow } from "./NodeRow";
+import { caretInBlock } from "./node-caret";
 import { authorText, KEY_REPORTS, pageChrome } from "./page-structure";
 import { CONTROL_LABELS, nodeStateWord } from "./page-words";
 import {
@@ -40,12 +43,17 @@ import { useTreeKeymap } from "./useTreeKeymap";
  * reader is on, that node, and its children as one-line rows, with no second indent level.
  */
 export function IssueTree({
+  artifacts,
   context,
   emptyLine,
   focusReveal,
+  onEditing,
   reveal,
   root,
 }: {
+  /** Each artifact of the issue by its slug, which is how a node names the document it is or
+   *  belongs to (`issue-artifacts.ts`). */
+  artifacts: ReadonlyMap<string, Artifact>;
   /** The ids of the rows this preset draws only as the ancestor of a match. */
   context: ReadonlySet<string>;
   /** What the page says where the preset's query matched nothing under the issue. */
@@ -55,6 +63,10 @@ export function IssueTree({
    *  one of its blocks, a block named by a fragment - because the document lands on it there,
    *  and two surfaces scrolling for the same node would each undo the other. */
   focusReveal: boolean;
+  /** The document the reader is editing a node of here, so the page draws that document's one
+   *  editor rather than leaving the row with nothing to put a caret in; `undefined` whenever
+   *  the reader is editing nothing. */
+  onEditing: (artifactId: string | undefined) => void;
   /** The chain down to the node the address names, the issue first: the tree unfolds it and
    *  puts the focus on its last node, once per address (R19). */
   reveal: readonly TreeNode[] | undefined;
@@ -75,10 +87,15 @@ export function IssueTree({
   const [report, setReport] = useState("");
   // The node a key is taking the reader to, once the row it asked for is on the page.
   const [wanted, setWanted] = useState<string | undefined>(undefined);
+  // The row the reader is editing in, with the document its node's text lives in: that
+  // document's one editor is drawn in this row's body while it stands (R9).
+  const [editing, setEditing] = useState<EditedRow | undefined>(undefined);
   const zoomed = useMediaQuery(ZOOMED_TREE_QUERY);
   const setFocusedNode = useSetFocusedNode();
-  const { focusBlock } = useMargin();
+  const { documentBridge } = useMargin();
   const body = useRef<HTMLDivElement | null>(null);
+  // The node the reader has just left the caret in, so the row takes the focus back.
+  const leaving = useRef<string | undefined>(undefined);
 
   const target = reveal?.at(-1);
   // The address's own node is unfolded to whatever the reader has opened by hand, at every
@@ -122,15 +139,18 @@ export function IssueTree({
     [setFocusedNode]
   );
   // The focus leaving the tree closes the body it opened: nothing is open while the reader is
-  // somewhere else, and the panel goes back to the issue's own facts (R2, R12).
+  // somewhere else, and the panel goes back to the issue's own facts (R2, R12). A row the
+  // reader is editing in keeps its body: the document's editor moves into it, which drops the
+  // focus for a frame as it leaves the page, and that is no reader leaving the tree.
   const releaseFocus = useCallback(
     (event: { currentTarget: HTMLElement; relatedTarget: EventTarget | null }) => {
       const to = event.relatedTarget;
+      if (editing !== undefined) return;
       if (to instanceof Node && event.currentTarget.contains(to)) return;
       setFocused(undefined);
       setFocusedNode(undefined);
     },
-    [setFocusedNode]
+    [editing, setFocusedNode]
   );
   const unfold = useCallback((id: string, open: boolean) => {
     setOpened((held) => {
@@ -174,20 +194,32 @@ export function IssueTree({
   );
   // The caret goes into the node's own text where that text lives, which is its document's
   // block, with the collaborative cursors and the comment chord it has there (R9, the Design
-  // section's "Editing"). The margin is the page's one way to the open document
-  // (`margin-context.tsx`), and a node that is no block of a document has no text to put a
-  // caret in.
+  // section's "Editing"). The document's one editor is moved onto this row
+  // (`document-stage.tsx`) and the caret is placed in the node's own block of it
+  // (`node-caret.ts`); a node whose text no document of this issue holds has none to put a
+  // caret in, and the key says so.
   const edit = useCallback(
-    (node: TreeNode) => {
-      const block = node.id.split("#b-")[1];
-      if (block === undefined) {
+    (row: string, node: TreeNode) => {
+      const place = documentOfNode(node.id, artifacts);
+      if (place === undefined) {
         setReport(KEY_REPORTS.no_text);
         return;
       }
-      focusBlock(block);
+      setEditing({
+        artifactId: place.artifact.id,
+        ...(place.blockId === undefined ? {} : { blockId: place.blockId }),
+        node: node.id,
+        row,
+      });
     },
-    [focusBlock]
+    [artifacts]
   );
+  const stopEditing = useCallback(() => {
+    setEditing((held) => {
+      if (held !== undefined) leaving.current = held.node;
+      return undefined;
+    });
+  }, []);
 
   useEffect(() => {
     if (wanted === undefined) return;
@@ -197,10 +229,80 @@ export function IssueTree({
       ?.focus();
   }, [wanted]);
 
+  // The page is told which document a row is editing, so it draws that document's one editor,
+  // and the caret goes in once the stage has moved into the row - one frame later, because the
+  // page mounts the editor in the commit this effect runs after.
+  const editingArtifact = editing?.artifactId;
+  const editingBlock = editing?.blockId;
+  const editingNode = editing?.node;
+  useEffect(() => {
+    onEditing(editingArtifact);
+  }, [editingArtifact, onEditing]);
+  useEffect(() => {
+    if (editingNode === undefined) return;
+    const frame = requestAnimationFrame(() => {
+      const host = body.current?.querySelector<HTMLElement>(
+        `[data-node-row][data-node-id="${CSS.escape(editingNode)}"] [data-node-body]`
+      );
+      if (host === null || host === undefined) return;
+      caretInBlock(host, editingBlock);
+      // The block is scrolled into view and pulsed by the document's own editor, where that
+      // editor is the one the margin holds; the caret above is the row's doing either way.
+      const bridge = documentBridge;
+      if (
+        editingBlock !== undefined &&
+        bridge !== undefined &&
+        bridge.artifactId === editingArtifact
+      ) {
+        bridge.focusBlock(editingBlock);
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [documentBridge, editingArtifact, editingBlock, editingNode]);
+
+  // Escape leaves the caret for the row it came from. The editor the row holds calls
+  // `preventDefault` on the key before it reaches the page's keyboard registry, which drops
+  // every binding of the press (`features/shell/keymap.ts`'s `handleKeyDown`), so the row
+  // listens for it in the capture phase while it is being edited in - before the editor sees
+  // it - and the registry's own binding stands for every other surface
+  // (`useTreeKeymap`'s `tree-leave-caret`).
+  useEffect(() => {
+    const container = body.current;
+    if (editingNode === undefined || container === null) return;
+    const leave = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      event.preventDefault();
+      (document.activeElement as HTMLElement | null)?.blur();
+      container
+        .querySelector<HTMLElement>(`[data-node-row][data-node-id="${CSS.escape(editingNode)}"]`)
+        ?.focus();
+      stopEditing();
+    };
+    container.addEventListener("keydown", leave, true);
+    return () => container.removeEventListener("keydown", leave, true);
+  }, [editingNode, stopEditing]);
+
+  // Leaving the caret leaves the row with the focus. The editor asserts its own selection
+  // again a moment after a blur (`prosemirror-view`'s focus handler), and its stage moves off
+  // this row in the same commit, so the row takes the focus once more on the next frame as
+  // well as the moment Escape was pressed (`useTreeKeymap`'s `tree-leave-caret`).
+  useEffect(() => {
+    const left = leaving.current;
+    if (editingNode !== undefined || left === undefined) return;
+    leaving.current = undefined;
+    const frame = requestAnimationFrame(() => {
+      body.current
+        ?.querySelector<HTMLElement>(`[data-node-row][data-node-id="${CSS.escape(left)}"]`)
+        ?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [editingNode]);
+
   useTreeKeymap({
     container: body,
     onCycle: () => setCycle((held) => (held + 1) % CYCLE_STATES),
     onEdit: edit,
+    onEditEnd: stopEditing,
     onFold: unfold,
     onOpenDeeper: openDeeper,
     onPin: pin,
@@ -290,10 +392,20 @@ export function IssueTree({
               />
             );
           }
+          const place = documentOfNode(row.node.id, artifacts);
           return (
             <NodeRow
-              body={focused === key || pinned.has(key) || drawsBody(cycle, row.level)}
+              {...(place?.blockId === undefined && place !== undefined
+                ? { artifact: place.artifact }
+                : {})}
+              body={
+                focused === key ||
+                pinned.has(key) ||
+                editing?.row === key ||
+                drawsBody(cycle, row.level)
+              }
               context={context.has(row.node.id)}
+              {...(editing?.row === key ? { editing: editing.artifactId } : {})}
               expanded={row.expanded}
               focused={focused === key}
               folded={row.folded}
@@ -320,6 +432,15 @@ export function IssueTree({
       ) : null}
     </div>
   );
+}
+
+/** One row the reader is editing in: the document its node's text lives in, the block of that
+ *  document the node is, and which row of which node is holding the editor. */
+interface EditedRow {
+  readonly artifactId: string;
+  readonly blockId?: string;
+  readonly node: string;
+  readonly row: string;
 }
 
 /** The width the tree is read one node at a time at, where five levels of indent and a row's own

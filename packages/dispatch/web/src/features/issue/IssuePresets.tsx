@@ -1,21 +1,20 @@
 import { type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-
+import type { Artifact } from "../../api/types";
 import {
   activeTabIndicatorBorder,
   activeTabIndicatorText,
   borderDefault,
-  card,
   focusVisibleRing,
   inputClasses,
   secondaryButtonBorder,
   secondaryButtonHoverBorder,
   secondaryButtonText,
   textSecondaryOnCanvas,
-  textSecondaryOnSurface,
 } from "../../theme/classes";
 import { useMediaQuery } from "../shell/useDialog";
 import { presetPath } from "./issue-address";
+import { MENU_CLASS, MENU_ITEM_CLASS, NodeMenu } from "./NodeMenu";
 import { authorText, pageChrome } from "./page-structure";
 import { CONTROL_LABELS, PRESET_NAMES, PRESET_ORDER, type Preset } from "./page-words";
 
@@ -34,24 +33,28 @@ import { CONTROL_LABELS, PRESET_NAMES, PRESET_ORDER, type Preset } from "./page-
  * the five. Between the two the row wraps rather than scrolling, so nothing is ever cut.
  *
  * The node menu sits beside the row and outside it, so the one control below 1025 px is
- * unambiguous. What it holds is `dispatch://INFRA-1196/artifact/plan-md#b-t18`'s; what it is -
- * a control named for the issue's files and documents, opening a menu - is here.
+ * unambiguous. What it holds is `NodeMenu.tsx`'s: what no block of the tree cites, and the
+ * upload.
  */
 export function IssuePresets({
   active,
   counts,
   filter,
+  isClosed,
   issueKey,
   nodeMenu,
   onFilterChange,
   onLeave,
   toolbar,
+  uncited,
 }: {
   active: Preset;
   /** How many nodes each preset's query holds, by `presets.ts`. */
   counts: Readonly<Record<string, number>>;
   /** What the filter holds, which is `?q=`. */
   filter: string;
+  /** Whether the issue is closed, which refuses the node menu's upload. */
+  isClosed: boolean;
   issueKey: string;
   /** Whether the address opens the node menu, which `/artifacts` does. */
   nodeMenu: boolean;
@@ -60,6 +63,9 @@ export function IssuePresets({
   onLeave: () => void;
   /** The open document's toolbar, where the preset has one. */
   toolbar?: ReactNode;
+  /** Every artifact of the issue no block of the tree cites, which is what the node menu
+   *  holds beside the upload (R16). */
+  uncited: readonly Artifact[];
 }): ReactNode {
   const navigate = useNavigate();
   const row = useMediaQuery(PRESET_ROW_QUERY);
@@ -193,22 +199,14 @@ export function IssuePresets({
           </>
         )}
       </div>
-      <div className="relative shrink-0">
-        <button
-          aria-expanded={open === "nodes"}
-          aria-haspopup="menu"
-          className={`inline-flex min-h-11 items-center rounded-lg px-2 text-sm font-medium md:min-h-9 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${focusVisibleRing}`}
-          onClick={() => setOpen((shown) => (shown === "nodes" ? undefined : "nodes"))}
-          type="button"
-          {...pageChrome}
-        >
-          {CONTROL_LABELS.other_nodes}
-        </button>
-        {/* The menu itself takes the focus while it holds no item of its own, so the chord
-            that opens it (`t a`) leaves the reader in it rather than behind it; once it holds
-            items the first one takes it (`useIssueKeymap.ts`). */}
-        {open === "nodes" ? <div className={MENU_CLASS} role="menu" tabIndex={-1} /> : null}
-      </div>
+      <NodeMenu
+        artifacts={uncited}
+        isClosed={isClosed}
+        issueKey={issueKey}
+        onClose={() => setOpen(undefined)}
+        onToggle={() => setOpen((shown) => (shown === "nodes" ? undefined : "nodes"))}
+        open={open === "nodes"}
+      />
       <input
         aria-label={CONTROL_LABELS.filter}
         className={`min-h-11 w-32 min-w-0 flex-1 rounded border px-2 py-1 text-sm md:min-h-9 ${inputClasses(false)}`}
@@ -228,7 +226,3 @@ type OpenMenu = "nodes" | "presets" | undefined;
 /** The width the row of five is drawn at. Below it the row is one control, which is also the
  *  width the tree itself is read one node at a time at (R3, R17). */
 const PRESET_ROW_QUERY = "(min-width: 1025px)";
-
-const MENU_CLASS = `absolute left-0 top-full z-30 mt-1 flex w-56 flex-col gap-1 rounded-lg border p-2 shadow-lg ${borderDefault} ${card}`;
-
-const MENU_ITEM_CLASS = `min-h-11 rounded-lg px-2 py-2 text-left text-sm font-medium ${textSecondaryOnSurface}`;

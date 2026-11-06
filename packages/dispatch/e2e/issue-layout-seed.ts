@@ -27,7 +27,9 @@ import {
   WHOLE_REPO,
 } from "./issue-layout-seed-support";
 import {
+  CITATION_BLOCK_ID,
   checkBlockId,
+  citationRequirement,
   OPEN_QUESTION_BLOCK_ID,
   planTaskBlockId,
   requirementBlockId,
@@ -173,9 +175,14 @@ export async function seedWholeIssue(): Promise<WholeIssueSeed> {
     contentType: "image/png",
     name: "shot.png",
   });
-  const citation = `The measurements are in dispatch://${seeded.key}/artifact/${cited.artifact.slug}.`;
   await editArtifact(seeded.specArtifactId, {
-    ops: [{ after: `block:${requirementBlockId(1)}`, markdown: citation, op: "insert" }],
+    ops: [
+      {
+        after: `block:${requirementBlockId(1)}`,
+        markdown: citationRequirement(seeded.key, cited.artifact.slug),
+        op: "insert",
+      },
+    ],
   });
 
   const anchored = await createComment(seeded.key, {
@@ -229,7 +236,7 @@ export async function seedWholeIssue(): Promise<WholeIssueSeed> {
     decisionsArtifactId: seeded.decisionsArtifactId,
     documents: {
       cited: cited.artifact.slug,
-      citingBlock: await blockId(seeded.specArtifactId, citation),
+      citingBlock: CITATION_BLOCK_ID,
       image: image.artifact.slug,
       uncited: uncited.artifact.slug,
     },

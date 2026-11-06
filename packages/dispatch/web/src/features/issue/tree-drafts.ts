@@ -115,7 +115,8 @@ export function treeContext(reads: IssueTreeReads): TreeContext {
 /** Every draft the reads hold, by its node id. */
 export function treeDrafts(reads: IssueTreeReads, context: TreeContext): Map<string, Draft> {
   const drafts = new Map<string, Draft>();
-  addDocuments(drafts, reads, context);
+  const cited = citations(reads, context);
+  addDocuments(drafts, reads, context, cited);
   addDocumentBlocks(drafts, reads, context);
   addChildren(drafts, reads);
   addAsks(drafts, reads, context);
@@ -123,8 +124,89 @@ export function treeDrafts(reads: IssueTreeReads, context: TreeContext): Map<str
   addDecisions(drafts, reads, context);
   addRequirements(drafts, reads, context);
   addChecks(drafts, reads, context);
+  settleCitations(drafts, cited);
   servePlacements(drafts, context);
   return drafts;
+}
+
+/** Where one artifact of the issue is cited: the block whose own words hold its address, and
+ *  the document that block belongs to. */
+interface Citation {
+  /** The slug of the document the citing block belongs to, which is where the cited document
+   *  sits when the citation stands in prose that is no node of its own. */
+  readonly document: string;
+  /** The node id of the citing block, `<slug>#b-<block id>`. */
+  readonly id: string;
+}
+
+/**
+ * Which block of which document cites each artifact of the issue, by the cited artifact's slug:
+ * the first block, in document order, whose own text holds that artifact's `dispatch://`
+ * address and not an address of one of its blocks, which names the block and not the document.
+ *
+ * The citation is read from the documents' own text rather than from `via_blocks`, because
+ * `GET /issues/{key}/references` answers the closure of artifacts *outside* the issue
+ * (`packages/envoy/internal/dispatch/refs/closure.go`'s
+ * `where a.issue_key is distinct from $1`, read 2026-11-06), so it never names a document of
+ * this issue that this issue's own spec cites - which is the citation the page draws. Both
+ * reads this needs, each document's blocks and each document's text, the page already makes.
+ *
+ * A block's `from` and `to` are byte offsets into the stored markdown, as the server slices it,
+ * so the cut is made over the encoded bytes: a document holding anything outside ASCII puts
+ * every later block's byte offset past its JavaScript string index.
+ */
+function citations(reads: IssueTreeReads, context: TreeContext): Map<string, Citation> {
+  const found = new Map<string, Citation>();
+  const texts = new Map((reads.texts ?? []).map((text) => [text.artifactId, text.markdown]));
+  if (texts.size === 0) return found;
+  const addresses = reads.issue.artifacts.map((artifact) => ({
+    slug: artifact.slug,
+    written: [
+      buildDispatchReference({ key: context.key, kind: "artifact", slug: artifact.slug }),
+      ...(artifact.primary ? [buildDispatchReference({ key: context.key, kind: "spec" })] : []),
+    ],
+  }));
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  for (const document of reads.documents ?? []) {
+    const slug = context.slugOf(document.artifactId);
+    const markdown = texts.get(document.artifactId);
+    if (slug === undefined || markdown === undefined) continue;
+    const bytes = encoder.encode(markdown);
+    for (const block of document.blocks) {
+      const text = decoder.decode(bytes.slice(block.from, block.to));
+      for (const address of addresses) {
+        if (address.slug === slug || found.has(address.slug)) continue;
+        if (!address.written.some((written) => namesTheDocument(text, written))) continue;
+        found.set(address.slug, { document: slug, id: blockNodeId(slug, block.id) });
+      }
+    }
+  }
+  return found;
+}
+
+/** Whether `text` names the document `written` addresses rather than one of its blocks: a
+ *  `#` after the address names a block of that document, which cites the block and not the
+ *  document it stands in. */
+function namesTheDocument(text: string, written: string): boolean {
+  for (let at = text.indexOf(written); at !== -1; at = text.indexOf(written, at + 1)) {
+    if (text[at + written.length] !== "#") return true;
+  }
+  return false;
+}
+
+/**
+ * Where each cited document finally sits. A document a block cites is a node under that block
+ * (R16), which is what `addDocuments` wrote; where the citation stands in prose that is no node
+ * of its own - a paragraph is a document's own text and no node (`addDocumentBlocks`) - the
+ * document is a node under the document that cites it instead, never under an invented parent.
+ */
+function settleCitations(drafts: Map<string, Draft>, cited: ReadonlyMap<string, Citation>): void {
+  for (const [slug, citation] of cited) {
+    const draft = drafts.get(slug);
+    if (draft === undefined || drafts.has(citation.id)) continue;
+    draft.parents = [citation.document];
+  }
 }
 
 /** Puts `draft` in, over whatever draft held its id. */
@@ -151,13 +233,15 @@ function blank(id: string, type: NodeType, order: number): Draft {
 
 /**
  * The documents and images the issue carries. A document a block cites sits under that block
- * (R16), from the citing block the references read names; one nothing cites sits under the
- * issue, which is where a node whose spine parent is absent goes.
+ * (R16) - the block `citations` found, and the one the references read names for a document of
+ * another issue; one nothing cites sits under the issue, which is where a node whose spine
+ * parent is absent goes.
  */
 function addDocuments(
   drafts: Map<string, Draft>,
   reads: IssueTreeReads,
-  context: TreeContext
+  context: TreeContext,
+  cited: ReadonlyMap<string, Citation>
 ): void {
   const citedBy = new Map<string, string>();
   for (const member of reads.references?.members ?? []) {
@@ -166,6 +250,7 @@ function addDocuments(
     if (block === undefined || document === undefined || member.via.kind !== "artifact") continue;
     citedBy.set(member.artifact.slug, blockNodeId(document, block));
   }
+  for (const [slug, citation] of cited) citedBy.set(slug, citation.id);
   reads.issue.artifacts.forEach((artifact, index) => {
     if (artifact.kind !== "doc" && artifact.kind !== "image") return;
     const cites = citedBy.get(artifact.slug);

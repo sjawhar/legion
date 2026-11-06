@@ -124,6 +124,17 @@ export interface DocumentBlocks {
   readonly blocks: readonly ArtifactBlock[];
 }
 
+/** One document's stored text, as `GET /api/v1/artifacts/{id}/text` answers it. It is what a
+ *  document's own node opens (`NodeArtifact.tsx`), and where the citations its blocks hold are
+ *  read from: `GET /issues/{key}/references` leaves every artifact of the issue itself out of
+ *  its closure (`packages/envoy/internal/dispatch/refs/closure.go`,
+ *  `where a.issue_key is distinct from $1`, read 2026-11-06), so `via_blocks` never names the
+ *  block of this issue's spec that cites this issue's own document. */
+export interface DocumentText {
+  readonly artifactId: string;
+  readonly markdown: string;
+}
+
 /** The page's reads, as one value. Every field but the issue is optional, because the tree draws
  *  from the reads that have answered rather than waiting for the last of them. */
 export interface IssueTreeReads {
@@ -144,6 +155,8 @@ export interface IssueTreeReads {
   readonly results?: IssueCheckResults;
   /** What every `dispatch://` address the tree holds points at, in one read. */
   readonly targets?: readonly ReferenceTarget[];
+  /** One entry per document of the issue whose stored text the page has read. */
+  readonly texts?: readonly DocumentText[];
 }
 
 /** How many characters a row's first line may hold (R1). */

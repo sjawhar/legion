@@ -1,5 +1,5 @@
 import { type ReactNode, useLayoutEffect, useRef } from "react";
-
+import type { Artifact } from "../../api/types";
 import {
   borderDefault,
   borderTransparent,
@@ -8,8 +8,10 @@ import {
   textMutedOnCanvas,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
+import { STAGE_IN_ROW, useDocumentStage } from "./document-stage";
 import { bringOnScreen } from "./identity-block";
 import { firstLineOf, type NodeChip, type TreeNode } from "./issue-tree";
+import { NodeArtifact } from "./NodeArtifact";
 import { NodeGlyph } from "./NodeGlyph";
 import { authorText, pageChrome } from "./page-structure";
 import {
@@ -39,8 +41,10 @@ import {
  * walking its rows. The key bindings are `dispatch://INFRA-1196/artifact/plan-md#b-t15`'s.
  */
 export function NodeRow({
+  artifact,
   body,
   context,
+  editing,
   expanded,
   focused,
   folded,
@@ -54,11 +58,17 @@ export function NodeRow({
   pinned,
   tabStop,
 }: {
+  /** The artifact this row's node is, for a document or an image: its body opens that
+   *  artifact itself (R16). Undefined for every other kind of node. */
+  artifact?: Artifact;
   /** Whether this row draws its body: it has the focus, or the reader pinned it open. */
   body: boolean;
   /** Whether the preset draws this row only as the ancestor of a match: the row is faint and
    *  marked, and the arrow keys reach it as they reach any other row (R3). */
   context: boolean;
+  /** The document this row's own text lives in, while the reader is editing it here: its
+   *  editor is drawn in this row's body and the caret is in this node's block (R9). */
+  editing?: string;
   /** `true` when its children are drawn, `false` when it holds children and they are not, and
    *  undefined for a node that holds none. */
   expanded?: boolean;
@@ -170,7 +180,9 @@ export function NodeRow({
           </span>
         )}
       </div>
-      {body ? <NodeBody node={node} onPin={onPin} pinned={pinned} /> : null}
+      {body ? (
+        <NodeBody artifact={artifact} editing={editing} node={node} onPin={onPin} pinned={pinned} />
+      ) : null}
     </div>
   );
 }
@@ -237,16 +249,28 @@ const BODY_MEASURE = 660;
  * The node's whole text, with what the model holds about it that a row has no line for: the
  * gaps said in full, the two counts the coverage read carries for a requirement, and the control
  * that keeps the body open once the focus leaves it.
+ *
+ * What stands for "the node's whole text" depends on what the node is. A block of a document
+ * the reader is editing draws that document's own editor, moved here from wherever the page
+ * was drawing it (`document-stage.tsx`), so the caret goes into the node's text where it
+ * lives, with the collaborative cursors and the comment chord it has there. An artifact's node
+ * draws the artifact itself (`NodeArtifact.tsx`). Every other node draws the text the model
+ * holds for it.
  */
 function NodeBody({
+  artifact,
+  editing,
   node,
   onPin,
   pinned,
 }: {
+  artifact?: Artifact;
+  editing?: string;
   node: TreeNode;
   onPin: () => void;
   pinned: boolean;
 }): ReactNode {
+  const stage = useDocumentStage(editing, STAGE_IN_ROW);
   return (
     <div
       className="mt-1 ml-6 flex min-w-0 flex-col gap-1 text-sm"
@@ -254,9 +278,17 @@ function NodeBody({
       data-pinned={pinned ? "" : undefined}
       style={{ maxWidth: BODY_MEASURE }}
     >
-      <p className={`whitespace-pre-wrap break-words ${textSecondaryOnCanvas}`} {...authorText}>
-        {node.text}
-      </p>
+      {editing === undefined ? (
+        artifact === undefined ? (
+          <p className={`whitespace-pre-wrap break-words ${textSecondaryOnCanvas}`} {...authorText}>
+            {node.text}
+          </p>
+        ) : (
+          <NodeArtifact artifact={artifact} />
+        )
+      ) : (
+        <div className="flex min-w-0 flex-col" ref={stage} {...authorText} />
+      )}
       {node.gaps.map((gap) => (
         <p className={`text-xs ${textMutedOnCanvas}`} key={gap} {...pageChrome}>
           {GAP_LINES[gap]}

@@ -216,6 +216,10 @@ export const EMPTY_STATE_LINES = freeze({
   checks: "This issue has no checks yet.",
   children: "This issue has no child issues.",
   decisions: "This issue has no decisions yet.",
+  /** A document node whose own text has not arrived yet (R16). */
+  document_reading: "This document has not arrived yet.",
+  /** A document node whose own text could not be read. */
+  document_unread: "This document could not be read.",
   folded_branch: "This branch holds nothing.",
   plan: "This issue has no plan tasks yet.",
   spec: "This issue has no requirements yet.",
@@ -388,6 +392,9 @@ export const CONTROL_LABELS = freeze({
   unfold: "Unfold",
   /** Adds an artifact from the node menu (R16). */
   upload: "Upload",
+  /** The file chooser that control opens, named apart from the Artifacts tab's own so a page
+   *  drawing both offers two controls a reader can tell apart. */
+  upload_file: "Upload a file",
   /** Which version of the open document the preset draws (R16). */
   version: "Version",
   /** Every version an artifact has (R16). */

@@ -60,6 +60,24 @@ export function planTaskBlockId(index: number): string {
   return `t${index}`;
 }
 
+/** The block id of the requirement whose own words cite a document of the issue (R16). The
+ *  citation sits inside a typed block, because a document a block cites is a node under that
+ *  block and a paragraph of a document is the document's own text and no block of the tree at
+ *  all. A requirement is the typed block that carries it: a requirement whose `from` is absent
+ *  sits under the issue, so the document it cites is drawn one level under that, inside the
+ *  three levels the fold draws. */
+export const CITATION_BLOCK_ID = "r-cites";
+
+/** The words of that requirement, which name one document of `issueKey` by its address. */
+export function citationText(issueKey: string, slug: string): string {
+  return `The measurements behind the first requirement are in dispatch://${issueKey}/artifact/${slug}.`;
+}
+
+/** That requirement as markdown, for a seed to insert once the document it cites exists. */
+export function citationRequirement(issueKey: string, slug: string): string {
+  return `:::requirement{#${CITATION_BLOCK_ID}}\n${citationText(issueKey, slug)}\n:::`;
+}
+
 /** The `dispatch://` address of one block of an issue's spec. */
 export function specBlockRef(issueKey: string, blockId: string): string {
   return `dispatch://${issueKey}/spec#b-${blockId}`;
