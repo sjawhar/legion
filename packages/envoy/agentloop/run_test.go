@@ -738,22 +738,23 @@ func TestAServerErrorIsRetriedOnceAndARequestErrorIsNot(t *testing.T) {
 // A redirect is never followed, in a run and in a decision alike: the transport puts the
 // endpoint's credential on every request it carries, and Go's own client strips Authorization
 // on a cross-domain redirect before a transport runs, so following one would hand the token to
-// whatever server the Location names. The 3xx comes back as the provider's error instead, and
-// the server the redirect points at hears nothing at all.
+// whatever server the Location names. The client's redirect check fails the call instead, with
+// a detail naming the host the redirect points at, and the server the redirect points at hears
+// nothing at all.
 func TestARedirectIsNotFollowedAndItsTargetIsNeverCalled(t *testing.T) {
 	t.Parallel()
 	for _, c := range []struct {
 		name string
 		// answer is what the redirect's target would reply with, were it ever called,
 		// and call makes the request through the stand-in that redirects, returning the
-		// fault it ended on.
+		// fault it ended on and what that fault says.
 		answer reply
-		call   func(*testing.T, *standIn) Fault
+		call   func(*testing.T, *standIn) (Fault, string)
 	}{
 		{
 			name:   "a run",
 			answer: anthropicStream("end_turn", anthropicUsage{Input: 1, Output: 1}, anthropicText("The target answered.")),
-			call: func(t *testing.T, s *standIn) Fault {
+			call: func(t *testing.T, s *standIn) (Fault, string) {
 				result, err := Run(context.Background(), newFixture(t, s, AnthropicMessages, 1).req)
 				if err != nil {
 					t.Fatal(err)
@@ -761,13 +762,13 @@ func TestARedirectIsNotFollowedAndItsTargetIsNeverCalled(t *testing.T) {
 				if result.Text != "" {
 					t.Errorf("the run answered %q, want no answer from the redirect's target", result.Text)
 				}
-				return result.Fault
+				return result.Fault, result.Detail
 			},
 		},
 		{
 			name:   "a decision",
 			answer: reply{body: []byte(decideAnswer)},
-			call: func(t *testing.T, s *standIn) Fault {
+			call: func(t *testing.T, s *standIn) (Fault, string) {
 				result, err := Decide(context.Background(), newDecideFixture(t, s))
 				if err != nil {
 					t.Fatal(err)
@@ -775,7 +776,7 @@ func TestARedirectIsNotFollowedAndItsTargetIsNeverCalled(t *testing.T) {
 				if len(result.Answers) != 0 {
 					t.Errorf("the decision answered %+v, want no answer from the redirect's target", result.Answers)
 				}
-				return result.Fault
+				return result.Fault, result.Detail
 			},
 		},
 	} {
@@ -786,8 +787,14 @@ func TestARedirectIsNotFollowedAndItsTargetIsNeverCalled(t *testing.T) {
 				status:  http.StatusTemporaryRedirect,
 				headers: map[string]string{"Location": target.server.URL + "/elsewhere"},
 			})
-			if fault := c.call(t, redirecting); fault != FaultProviderError {
-				t.Errorf("fault %q, want %q: a 3xx is the provider's answer", fault, FaultProviderError)
+			fault, detail := c.call(t, redirecting)
+			if fault != FaultProviderError {
+				t.Errorf("fault %q, want %q: a redirect is the provider failing the call: %s", fault, FaultProviderError, detail)
+			}
+			// The host the redirect names, so a caller reading the detail can see
+			// where the call was sent and why it went no further.
+			if host := target.server.Listener.Addr().String(); !strings.Contains(detail, host) {
+				t.Errorf("the detail is %q, want the redirect's target host, %s, named in it", detail, host)
 			}
 			got := target.requests()
 			if len(got) != 0 {

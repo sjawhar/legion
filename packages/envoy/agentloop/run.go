@@ -30,10 +30,10 @@ import (
 const placeholderKey = "read-per-call"
 
 // Run makes one run of the loop. Every outcome of the request is a Result: the model's reply,
-// or a Fault saying why the run ended short of one, each with every step that finished and
-// everything the run spent. The error is for a request the loop cannot run at all, for the
-// caller's context ending, and for a callback that returned an error; the Result then still
-// carries what the calls made so far produced and cost.
+// or a Fault saying why the run ended short of one, each with every step that finished and what
+// those steps spent. The error is for a request the loop cannot run at all, for the caller's
+// context ending, and for a callback that returned an error; the Result then still carries what
+// the calls made so far produced and cost.
 func Run(ctx context.Context, req Request) (Result, error) {
 	if err := req.validate(); err != nil {
 		return Result{}, err
@@ -558,6 +558,17 @@ func toolText(output json.RawMessage) string {
 	return string(output)
 }
 
+// openaiMeta is the part options the OpenAI provider put in a part's own metadata, and the zero
+// options where it put none. The SDK's own type names every field, so a key is never spelled
+// out here.
+func openaiMeta(metadata provider.ProviderMetadata) openai.OpenAIPartOptions {
+	var meta openai.OpenAIPartOptions
+	if raw, ok := metadata["openai"]; ok {
+		_ = json.Unmarshal(raw, &meta)
+	}
+	return meta
+}
+
 // textPhase is the phase an openai-responses text part was produced in, which the provider puts
 // in its own metadata and Block.Phase keeps so the part goes back as it came. No other protocol
 // gives its text one.
@@ -565,11 +576,7 @@ func textPhase(part aisdk.TextContent, kind Kind) string {
 	if kind != OpenAIResponses {
 		return ""
 	}
-	var meta openai.OpenAIPartOptions
-	if raw, ok := part.ProviderMetadata["openai"]; ok {
-		_ = json.Unmarshal(raw, &meta)
-	}
-	return meta.Phase
+	return openaiMeta(part.ProviderMetadata).Phase
 }
 
 // reasoningBlock is one reasoning part as the protocol's own block: an OpenAI reasoning item
@@ -577,16 +584,10 @@ func textPhase(part aisdk.TextContent, kind Kind) string {
 // with its signature, or redacted thinking's payload. Step.Native stays the authoritative copy.
 func reasoningBlock(part aisdk.ReasoningContent, kind Kind) Block {
 	if kind == OpenAIResponses {
-		var meta struct {
-			ItemID    string  `json:"itemId"`
-			Encrypted *string `json:"reasoningEncryptedContent"`
-		}
-		if raw, ok := part.ProviderMetadata["openai"]; ok {
-			_ = json.Unmarshal(raw, &meta)
-		}
+		meta := openaiMeta(part.ProviderMetadata)
 		block := Block{Kind: ReasoningBlock, Text: part.Text, ItemID: meta.ItemID}
-		if meta.Encrypted != nil {
-			block.Encrypted = *meta.Encrypted
+		if meta.ReasoningEncryptedContent != nil {
+			block.Encrypted = *meta.ReasoningEncryptedContent
 		}
 		return block
 	}
@@ -623,12 +624,13 @@ func priced(usage provider.Usage, price Price) Usage {
 		usage.InputTokens.Total, usage.InputTokens.NoCache, usage.InputTokens.CacheRead, usage.InputTokens.CacheWrite,
 		usage.OutputTokens.Total, usage.OutputTokens.Text, usage.OutputTokens.Reasoning,
 	}
-	return Usage{
+	counts := Usage{
 		Input: input, Output: output, CacheWrite: write, CacheRead: read,
 		Reasoning: value(usage.OutputTokens.Reasoning),
-		CostUSD:   price.cost(input, output, write, read),
 		Metered:   slices.ContainsFunc(counted, func(n *int) bool { return n != nil }),
 	}
+	counts.CostUSD = price.cost(counts)
+	return counts
 }
 
 // sum is two usages added, their costs included; the sum is metered where either side is.

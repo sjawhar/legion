@@ -437,8 +437,8 @@ Each item below names a task and where its code is, then notes on it.
   The caller supplies the endpoint, the credential, the prices, the tools and the reply's JSON schema, and the package reads nothing from the environment.
   Its live proof is `go test -tags modellive ./agentloop/ -run TestLive`, run from `packages/envoy`, which makes a real model call and skips unless the operator names its gateway's base URL, its key file and its model (`AGENTLOOP_LIVE_*`).
   No `cmd` of the module imports it yet, so `packages/envoy/docker/Dockerfile` copies no new directory.
-  The image's notices do change all the same, and so do the listener and Dispatch binaries:
-  the SDK's own requires raise modules those commands compile in, among them `google.golang.org/grpc` 1.83.2 to 1.84.0, `google.golang.org/api` 0.290.0 to 0.301.0, `github.com/aws/aws-sdk-go-v2` 1.47.1 to 1.47.4, `go.opentelemetry.io/otel` 1.44.0 to 1.47.0, `golang.org/x/net` 0.59.0 to 0.61.0 and `golang.org/x/crypto` 0.57.0 to 0.58.0, and `scripts/go-third-party-notices.sh` prints each module's version.
+  The merge raises modules the listener and Dispatch compile in all the same, so those two binaries change and so do their third-party notices.
+  `packages/envoy/.changes/unreleased/pr2841-agentloop.yaml` is where each raise is named.
 
 - Shared event contracts — `packages/contracts/`
 

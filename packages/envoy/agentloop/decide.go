@@ -18,7 +18,8 @@ const decidePath = "/v1/systemone"
 
 // answerLimit is the most of a decision's answer that is read. An answer is a handful of small
 // objects, so a body this long is an endpoint misbehaving rather than an answer, and the caller
-// is told the answer is malformed rather than made to hold whatever the endpoint sends.
+// is told the answer is malformed — or, where the status failed, what that status was — rather
+// than made to hold whatever the endpoint sends.
 const answerLimit = 8 << 20
 
 // Question is one question put to System One. Type is the question's shape and decides what
@@ -154,16 +155,12 @@ func Decide(ctx context.Context, req DecideRequest) (DecideResult, error) {
 
 	resp, err := client.Do(post)
 	var raw []byte
-	oversized := false
 	if err == nil {
 		// One byte past the cap, so a body that reaches it is told from one that fits.
 		raw, err = io.ReadAll(io.LimitReader(resp.Body, answerLimit+1))
 		_ = resp.Body.Close()
-		switch {
-		case err != nil:
+		if err != nil {
 			err = fmt.Errorf("reading the answer: %w", err)
-		case len(raw) > answerLimit:
-			raw, oversized = nil, true
 		}
 	}
 	var result DecideResult
@@ -174,10 +171,10 @@ func Decide(ctx context.Context, req DecideRequest) (DecideResult, error) {
 		result.Fault, result.Detail = FaultTime, fmt.Sprintf("the decision went past %s", req.Bounds.Time)
 	case err != nil:
 		result.Fault, result.Detail = FaultProviderError, err.Error()
-	case oversized:
-		result.Fault, result.Detail = FaultMalformed, fmt.Sprintf("the answer went past the %d MiB a decision reads", answerLimit>>20)
 	case resp.StatusCode/100 != 2:
 		result.Fault, result.Detail = FaultProviderError, fmt.Sprintf("%s: %.500q", resp.Status, raw)
+	case len(raw) > answerLimit:
+		result.Fault, result.Detail = FaultMalformed, fmt.Sprintf("the answer went past the %d MiB a decision reads", answerLimit>>20)
 	default:
 		var answer systemOneResponse
 		switch err := json.Unmarshal(raw, &answer); {
@@ -222,10 +219,11 @@ func (req DecideRequest) validate() error {
 // no cache and no reasoning counts, so neither is counted, and its usage is part of every answer,
 // so the usage is always metered.
 func (u systemOneUsage) priced(price Price) Usage {
-	return Usage{
+	counts := Usage{
 		Input:   u.InputTokens,
 		Output:  u.OutputTokens,
-		CostUSD: price.cost(u.InputTokens, u.OutputTokens, 0, 0),
 		Metered: true,
 	}
+	counts.CostUSD = price.cost(counts)
+	return counts
 }

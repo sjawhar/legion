@@ -63,10 +63,12 @@ type Endpoint struct {
 type Price struct{ Input, Output, CacheWrite, CacheRead float64 }
 
 // cost is what a call's token counts cost at the price, and is the one place this package
-// prices anything: every Usage.CostUSD, a run's and a decision's alike, comes from here.
-func (p Price) cost(input, output, cacheWrite, cacheRead int) float64 {
-	return perMillion(input, p.Input) + perMillion(output, p.Output) +
-		perMillion(cacheWrite, p.CacheWrite) + perMillion(cacheRead, p.CacheRead)
+// prices anything: every Usage.CostUSD, a run's and a decision's alike, comes from here. It
+// reads the counts by name off the usage they belong to, so no caller can hand them over in
+// the wrong order.
+func (p Price) cost(u Usage) float64 {
+	return perMillion(u.Input, p.Input) + perMillion(u.Output, p.Output) +
+		perMillion(u.CacheWrite, p.CacheWrite) + perMillion(u.CacheRead, p.CacheRead)
 }
 
 // perMillion is what a token count costs at a price in USD per million tokens.

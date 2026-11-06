@@ -240,7 +240,8 @@ func TestDecideReportsAMalformedBody(t *testing.T) {
 // A decision reads a bounded answer: an endpoint that answers with more than the cap is
 // malformed, the detail names the cap, and the caller is not made to hold the body. The same
 // answer within the cap is read as the answer it is, so it is the length and nothing else that
-// the fault reports.
+// the fault reports. An oversized body that came with a failing status is that status, since
+// what the caller must be told of an error page is the error.
 func TestDecideRefusesAnAnswerPastTheCap(t *testing.T) {
 	t.Parallel()
 	// A whole, valid answer with a padding field, so a body that is refused is refused for
@@ -278,5 +279,21 @@ func TestDecideRefusesAnAnswerPastTheCap(t *testing.T) {
 	}
 	if result.Fault != "" || len(result.Answers) != 1 {
 		t.Errorf("the answer within the cap: %+v, want the one answer it holds: %s", result, result.Detail)
+	}
+
+	// The status is read before the length, so an error page past the cap is the
+	// provider's error rather than a malformed answer. A 5xx is retried once, which
+	// Retry-After keeps to no wait, so the stand-in answers twice.
+	page := []byte("<html><body>" + strings.Repeat("a", answerLimit) + "</body></html>")
+	failing := make([]reply, 2)
+	for i := range failing {
+		failing[i] = reply{status: http.StatusBadGateway, body: page, headers: map[string]string{"Retry-After": "0"}}
+	}
+	result, err = Decide(context.Background(), newDecideFixture(t, newStandIn(t, failing...)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Fault != FaultProviderError || !strings.Contains(result.Detail, "502") {
+		t.Errorf("the oversized error page: %+v, want %q naming the status: %s", result, FaultProviderError, result.Detail)
 	}
 }

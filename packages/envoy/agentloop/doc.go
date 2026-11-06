@@ -26,8 +26,9 @@
 // the header above this package's HTTP client, so the token is read once per model call and the
 // retry below the middleware resends the first attempt's token. A redirect is never followed, in
 // a run or in a decision, so the token reaches the endpoint the caller named and no other
-// server: a 3xx comes back as the response, which the retry leaves alone and the provider
-// reports, so the run ends in FaultProviderError.
+// server: the client's redirect check fails the call, above the transport and its retry, with
+// an error naming the redirecting status and the host the Location points at, so the run ends
+// in FaultProviderError.
 //
 // # The retry
 //

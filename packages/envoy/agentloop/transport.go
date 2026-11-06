@@ -32,11 +32,16 @@ func newModelTransport(endpoint Endpoint) *modelTransport {
 // and no redirect ever followed. The transport puts the endpoint's credential on every request
 // it carries, which would include the one the client makes for a 3xx, and Go strips
 // Authorization on a cross-domain redirect before a transport runs, so following one would hand
-// the token to whatever server the Location names. A 3xx comes back as the response instead,
-// which the retry leaves alone and the provider reports as its own error.
+// the token to whatever server the Location names. A redirect fails the call instead, with an
+// error client.Do returns above this transport, so the retry never sees it and the caller is
+// told the endpoint redirected rather than left to read an empty stream.
 func (t *modelTransport) client() *http.Client {
-	return &http.Client{Transport: t, CheckRedirect: func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
+	return &http.Client{Transport: t, CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+		// The host alone, since a Location can carry a query: this message names no
+		// more of it than the server a credential would have gone to. (Go's own
+		// client wraps the error in a *url.Error that names the Location in full.)
+		return fmt.Errorf("the %s endpoint answered %s, a redirect to %s, which is never followed",
+			t.kind, req.Response.Status, req.URL.Host)
 	}}
 }
 
