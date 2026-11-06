@@ -48,6 +48,13 @@ func TestSESSIONTESTTheRegistryResolvesTheDeclaredWindows(t *testing.T) {
 			millisText(ClaimStaleAfter), millisText(contracts.SessionClaimStale))
 	}
 
+	// The windows this run read, logged only where both checks above held, so no line here can
+	// read as the declared value under an error saying it is not that value. They appear under
+	// `go test -v` alone.
+	if t.Failed() {
+		return
+	}
+
 	t.Logf("the registry resolved a live window of %s (contracts.SessionLiveWindow)", millisText(live))
 	t.Logf("ClaimStaleAfter is %s (contracts.SessionClaimStale)", millisText(ClaimStaleAfter))
 }

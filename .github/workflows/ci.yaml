@@ -284,7 +284,7 @@ jobs:
               - 'packages/envoy/internal/testnats/*'
               - 'packages/envoy/listenfd/*'
               - 'packages/envoy/migrationid/*'
-              # The daemon reads the Envoy session timings (heartbeat, record lifetime, claim
+              # The daemon reads the Envoy session timings (heartbeat, live window, claim
               # staleness and the listener call's attempts) through this one public package: it
               # is a module of its own, so Go's internal rule bars it from internal/contracts,
               # where the generated values are.

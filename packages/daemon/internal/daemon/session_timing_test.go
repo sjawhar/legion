@@ -146,23 +146,35 @@ func TestDAEMONTESTTheSessionTimingRuleHoldsAtTheValuesTheBuildUses(t *testing.T
 		t.Logf("%s is %s, the same as %s", copied.name, millis(copied.value), copied.wantName)
 	}
 
-	// The failing answer, proved in the same green run: a tree whose refresh interval has been
-	// moved past what the live window can hold must be named by the rule, with both sides of the
-	// comparison in the line it returns.
-	broken := build
-	broken.interval = 290_000 * time.Millisecond
-	brokenSum, brokenWindow := millis(broken.renewalWindow()), millis(broken.liveWindow)
-	problems := sessionTimingProblems(broken)
-	named := false
-	for _, problem := range problems {
-		if strings.Contains(problem, brokenSum) && strings.Contains(problem, brokenWindow) {
-			named = true
-			t.Logf("an interval of %s is rejected: %s", millis(broken.interval), problem)
+	// The failing answer, proved in the same green run: a set the rule must reject has to be
+	// named by it, with both sides of the comparison in the line it returns. The second set is
+	// the boundary the doc comment above turns on — a renewal window exactly equal to the live
+	// window — which a rule weakened from `>=` to `>` would pass in silence while the first set,
+	// far past the window, still failed.
+	pastTheWindow := build
+	pastTheWindow.interval = 290_000 * time.Millisecond
+	atTheWindow := build
+	atTheWindow.liveWindow = build.renewalWindow()
+	for _, rejected := range []struct {
+		what string
+		set  sessionTiming
+	}{
+		{"an interval of " + millis(pastTheWindow.interval), pastTheWindow},
+		{"a live window of " + millis(atTheWindow.liveWindow) + ", the renewal window exactly", atTheWindow},
+	} {
+		sum, window := millis(rejected.set.renewalWindow()), millis(rejected.set.liveWindow)
+		problems := sessionTimingProblems(rejected.set)
+		named := false
+		for _, problem := range problems {
+			if strings.Contains(problem, sum) && strings.Contains(problem, window) {
+				named = true
+				t.Logf("%s is rejected: %s", rejected.what, problem)
+			}
 		}
-	}
-	if !named {
-		t.Errorf("an interval of %s at a live window of %s was not rejected naming both %s and %s; the rule returned %v",
-			millis(broken.interval), brokenWindow, brokenSum, brokenWindow, problems)
+		if !named {
+			t.Errorf("%s was not rejected naming both %s and %s; the rule returned %v",
+				rejected.what, sum, window, problems)
+		}
 	}
 
 	// The numbers this build weighed, logged only where every check above held, so no line here
