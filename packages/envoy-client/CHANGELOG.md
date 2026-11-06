@@ -1,5 +1,21 @@
 # Changelog
 
+This file is history: every entry after the last section below stays as a fragment file under
+`.changes/unreleased/`, since this package has no release of its own to carry it.
+
+## [main@0abb1e50da7d] - 2026-11-06
+
+### Changed
+
+- The client's call timing comes from `@legion/contracts` through one function.
+  `resolveCallTiming(config)` returns the per-attempt timeout, the attempt count and the retry
+  delay for a configuration, reading `LISTENER_CALL_TIMEOUT_MS`, `LISTENER_CALL_ATTEMPTS` and
+  `LISTENER_CALL_RETRY_DELAY_MS` for each value the configuration leaves unset, and the request
+  loop takes its defaults from it alone; `DEFAULT_TIMEOUT_MS` and `RETRY_DELAY_MS` are gone.
+  `DEFAULT_HEARTBEAT_MS` is `SESSION_HEARTBEAT_MS` and stays exported. A caller's own
+  `timeoutMs` and `retry`, and the replay path's 10000 ms deadline, are unchanged, and no value
+  changed.
+
 ## [main@c5c94dbd542d] - 2026-11-05
 
 ### Added

@@ -3023,7 +3023,7 @@ Its pod runs one container, `cache`, the image's `legion workspace-init cache --
 10m0s` (`refresh_minutes`, as a duration), on the Legion pool under gVisor with the operator's ServiceAccount, and nothing of an agent's:
 no model route, provider key or Dispatch variable.
 It owns one volume, `cache-<sandbox>`, of `runtime.kubernetes.repository_cache.volume` (20Gi by default), holding a bare clone of the repository at `/legion/cache/<owner>/<repo>.git`, and a headless Service of its own name, whose DNS name resolves to the pod only while it is Ready.
-Its Secret, `<sandbox>-token`, holds the implement App's installation token for the repository's owner, read again as every transfer from GitHub starts and brought to the current lease on the gh refresher's minute, and the cache's own bearer token, 32 random bytes made with the Secret and kept while it stands;
+Its Secret, `<sandbox>-token`, holds the implement App's installation token for the repository's owner narrowed to reading, the same lease an issue pod's `workspace-fetch` clones with ("Trust model: the provisioning token"), read again as every transfer from GitHub starts and brought to the current lease on the gh refresher's minute, and the cache's own bearer token, 32 random bytes made with the Secret and kept while it stands;
 the issue pods of that repository are given the same bearer token in their provisioning Secret, and no other pod has it.
 
 The process clones the repository once, through the same one-shot credential as an issue pod's fetch but, the first time, within `workspace.CacheFetchTimeout` (2 hours) rather than an issue pod's 30 minutes
@@ -4408,12 +4408,23 @@ launch failure 1/3; relaunching the same agent with --resume and its catch-up`, 
 
 ### Trust model: the provisioning token
 
-The provisioning token, the implement App's installation token, is a credential for the whole repository, and every agent of an issue can write the issue's volume
+The provisioning token is the implement App's installation token narrowed to reading — contents, pull requests, Actions and metadata at read (`ReadToken`, `internal/appauth/appauth.go`), which is all a clone, a fetch and a repository cache do.
+It is still one credential for every repository that installation holds on the owner, not for the one being cloned alone, so a plant that reaches it reads them all; what it cannot do is push, open or merge a pull request, or change a repository or its settings.
+The narrowing makes that risk smaller and does not end it, and every agent of an issue can write the issue's volume
 — its own issue's alone, since no other issue's pod mounts it:
 the clone's hooks, its git and jj configuration (a legacy `.jj/workspace-config.toml`, which jj would migrate into what it reads, included), its remote URL, its `http.proxy`.
 git and jj obey all of it — they run hooks, the git jj is told to run, working-copy filters and `ext::` transports, and send credentials through the proxy the configuration names
 — so the provisioning clone, which runs with that token before any role of the issue exists, happens in no process whose git or jj an agent's plant can reach.
-The Go coordinator's pods (`packages/daemon`) keep to that with two init containers, and with a third where the deployment names a `skills_repository`:
+
+The daemon mints it with `ReadToken` (`implementTokens`, `internal/daemon/kubernetes.go`), and the three places that mint one — an issue pod's provisioning as the daemon makes the pod (`issuePod.provision`), the gh refresher's minute and the repository cache's Secret — share that one source.
+An installation that refuses the narrowing — GitHub answers 422 to a token request naming permissions the installation does not all hold, and mints nothing rather than leaving one out — is served the owner's own full installation token instead, the one fallback there is.
+The daemon says so once for that owner: `daemon: this owner's installation refuses a read-only provisioning token, so its pods clone with the owner's own installation token rather than a reading lease`.
+An installation that holds the other three but has not been granted Actions is a case of its own: the read is asked again without `actions` and gets those three (`exchangeRead`, `internal/appauth/appauth.go`).
+A deployment whose Apps are configured by `token_command` (docs/deployment.md, "The `legion-implementer` and `legion-reviewer` Apps") never reaches that 422:
+`ReadToken` asks the command for its read-only release (`LEGION_GITHUB_READ_ONLY=1`) and takes what that release holds, be it narrower or wider than the four reads, and there is no fallback at all.
+Such a command must therefore release a read-only token for every owner it serves: an owner it releases none for fails every launch that makes an issue pod on that owner, at the provisioning mint (`mint the provisioning token for <owner>`), and the refresher logs `sandbox runtime: provisioning token mint failed` for that owner each minute.
+
+The Go coordinator's pods (`packages/daemon`) keep to that rule with two init containers, and with a third where the deployment names a `skills_repository`:
 
 - **`workspace-fetch`** mounts the provisioning Secret, an in-memory `TMPDIR` of its own, and the issue volume's `feed` directory alone (a `subPath`, at `/legion/feed`), which every other container of the pod mounts read-only, and runs `legion workspace-init fetch --repo
   <owner>/<repo> --feed /legion/feed`: a fresh feed is the repository cache's tar unpacked into a feed of its own making (`git init --bare`) and a `git fetch` of the delta from `https://github.com/<owner>/<repo>`;
@@ -4444,9 +4455,10 @@ The Go coordinator's pods (`packages/daemon`) keep to that with two init contain
   Any other failure — a token refused, a repository not found or not granted, a certificate that does not verify, a curl error the list does not name
   — fails the fetch at once (`transientCloneFailure`, `internal/workspace/fetch.go`).
   The launch waits for the pod's launchers while either init container runs, up to `sandbox.Runtime.ProvisionBound` (220 minutes) plus its boot timeout from when it first sees one running (above, "Liveness rules"), so the fetch, its wait and retries included, spends no launch failure, and `workspace-init` has its shared clone's 30 minutes and at least the boot timeout after a fetch that ran its whole budget.
-  The fetch reads the token from its file anew as every transfer attempt from GitHub starts, taking the file as it stands then, and while the pod's `workspace-fetch` has yet to finish, the gh refresher's minute brings its provisioning Secret to the implement App's current lease (`refreshProvisioningToken`, `internal/runtime/sandbox/ghcredential.go`), the cache's token beside it kept, logging `sandbox
+  The fetch reads the token from its file anew as every transfer attempt from GitHub starts, taking the file as it stands then, and the gh refresher's minute brings every live issue pod's provisioning Secret to the implement App's current lease (`refreshProvisioningToken`, `internal/runtime/sandbox/ghcredential.go`), Pending or Running, whatever its fetch has already done, the cache's token beside it kept, logging `sandbox
   runtime: provisioning token refreshed`; the daemon re-mints a lease once less than 20 minutes of it remain (`internal/appauth/appauth.go`) and the kubelet rewrites the projected file within its sync period, so a delta after a long wait on the repository cache, or a retry late in a long fetch, presents a token that is still good.
-  A pod past its fetch keeps its Secret as it is.
+  A pod whose fetch has finished is refreshed for the same reason: a pod's init containers can run again at any point in its life — the kubelet runs them afresh whenever it rebuilds the pod's sandbox, after a node event or a kill of another container, while a relaunch that replaces the pod provisions it anew (`relaunch`) — and that fetch reads the token's file as it stands then, so a Secret left at the pod's boot token would hand it one GitHub expired an hour after the pod started.
+  The lease is minted once for each repository owner a tick, however many of that owner's pods the walk holds, and an owner whose mint fails is logged once (`sandbox runtime: provisioning token mint failed`) and left to the next tick, where its pods are tried again.
 
 - **`skills-fetch`**, where the deployment names a `skills_repository`, mounts the provisioning Secret, an in-memory `TMPDIR` of its own — not `workspace-fetch`'s, since a `TMPDIR` two token holders shared would be one each could read the other's one-shot credential in — and the pod's skills volume alone, at `/var/run/legion/skills`, which the `roles` container mounts read-only, and runs `legion workspace-init skills --repo <owner>/<repo> --dir /var/run/legion/skills`:
   a `git clone --depth 1 --single-branch` of the repository's default branch under the same one-shot credential and the same pinned, isolated git configuration as the fetch above, then `git rev-parse HEAD` and a read of the clone's marketplace catalog, with no credential.
@@ -4475,7 +4487,7 @@ The worker image's jj is 0.45; on the tmux runtime, which runs the host's jj thr
 The boundary above protects the provisioning token alone.
 Since LEGION-631 each role holds its own App's tokens, read-only, in the gh bundle its `LEGION_GH_OWNERS_DIR` names, which only its own namespaces bind ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)):
 an implement role (the implementer, the merger) holds the implement App's tokens
-— for the issue's owner the same App, from the same lease, as the provisioning token
+— for the issue's owner the App's own installation token, which writes, where the provisioning token is that same App narrowed to reading, so the two are no longer one lease
 — and a review role (the architect, planner, tester, reviewer) the review App's, every owner but the issue's narrowed to reading.
 No review role holds the implement App's token, and no implement role the review App's (the review App cannot resolve a review thread on the implementer's pull request, so the reviewer names the bot threads it accepted to the implementer, which resolves them with its own `gh`; the daemon serves no thread route).
 That split keeps each role's tokens out of a sibling's own reads.

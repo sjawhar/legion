@@ -263,9 +263,8 @@ func TestTheResumeTaskNamesEveryItemStillWithThePerson(t *testing.T) {
 // take the resume task that says the gate is open as that wake: the skill's release rule, the
 // design gate reference, the wake routing table and the root architect's prompt each name the
 // resume's phrase. The claude-envoy plugin's copies under packages/claude-envoy/legion/ are
-// generated from these three skill files on main by the Rebuild Claude Envoy plugin workflow, so a
-// pull request's tree holds main's copies and they are not read here. (Round 2, adversarial P2-1
-// and outside-whole P2-1.)
+// generated from these three skill files, and nothing commits that tree, so a pull request has no
+// copies to read here. (Round 2, adversarial P2-1 and outside-whole P2-1.)
 func TestTheArchitectsInstructionsTakeTheResumeAsTheDesignApprovedWake(t *testing.T) {
 	root := filepath.Join("..", "..", "..", "..")
 	for _, file := range []string{
