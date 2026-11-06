@@ -2651,9 +2651,8 @@ jobs:
         run: |
           grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
           packages="fonts-freefont-ttf fonts-ipafont-gothic fonts-liberation fonts-noto-color-emoji
-          fonts-tlwg-loma-otf fonts-unifont fonts-wqy-zenhei gstreamer1.0-libav
-          gstreamer1.0-plugins-bad gstreamer1.0-plugins-base gstreamer1.0-plugins-good libasound2t64
-          libatk-bridge2.0-0t64 libatk1.0-0t64 libatomic1 libatspi2.0-0t64 libavcodec60 libavif16
+          fonts-tlwg-loma-otf fonts-unifont fonts-wqy-zenhei gstreamer1.0-plugins-base
+          libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatomic1 libatspi2.0-0t64 libavif16
           libcairo-gobject2 libcairo2 libcups2t64 libdbus-1-3 libdrm2 libenchant-2-2 libepoxy0
           libevent-2.1-7t64 libflite1 libfontconfig1 libfreetype6 libgbm1 libgdk-pixbuf-2.0-0
           libgles2 libglib2.0-0t64 libgstreamer-gl1.0-0 libgstreamer-plugins-bad1.0-0
