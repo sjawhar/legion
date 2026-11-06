@@ -52,8 +52,10 @@ func TestListenerPermissionsRaiseABucketOnACluster(t *testing.T) {
 		return &natsgo.KeyValueConfig{Bucket: bus.InterestBucket, Replicas: replicas}
 	}
 	listener, listenerJS, listenerErrs := connectGranted(t, cluster.URL(), listenerSeed, 10*time.Second)
-	_, err = bus.EnsureKeyValue(listener, listenerJS, bucket(1))
-	require.NoError(t, err, "create the bucket at one copy")
+	// The listener's own grant creates the bucket, the request bus.EnsureKeyValue's create path
+	// sends; through the cluster, so the member each client below is on answers for the bucket
+	// before that client looks it up.
+	cluster.CreateKeyValue(t, listener, bucket(1))
 	testnats.AwaitStreamCopies(t, adminJS, bucketStream, 1)
 
 	refused, refusedJS, refusedErrs := connectGranted(t, cluster.URL(), refusedSeed, 2*time.Second)
