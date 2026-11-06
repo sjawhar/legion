@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { connect } from "nats"
-import { createChannelForwarder } from "../src/channel-forwarder"
+import { type ChannelForwarder, createChannelForwarder } from "../src/channel-forwarder"
 import { FakeNatsServer } from "./fake-nats-server"
 
 const THREAD = "notifications.github.acme-org.example-repo.issue.3.>"
@@ -16,26 +16,33 @@ function envelope(eventId: string): string {
   })
 }
 
+// Every test below builds its broker and its connection inside its try: the broker binds in its
+// constructor and `connect` opens a real connection, so a throw past either must still reach the
+// finally that closes them, rather than leave a bound port and a nats.js reconnect loop that keeps
+// `bun test` from exiting.
 test("delivers each event id once even when concrete and wildcard subscriptions overlap", async () => {
-  const broker = new FakeNatsServer()
-  const connection = await connect({ servers: broker.url })
-  const received: string[] = []
-  const subjects: string[] = []
-  const envelopeTopics: Array<string | undefined> = []
-  const second = Promise.withResolvers<void>()
-  const forwarder = createChannelForwarder(connection, {
-    deliver: async (message) => {
-      if (message.duplicate) return false
-      // Real nats.js messages: subject, data, and the envelope topic must all survive.
-      subjects.push(message.subject)
-      envelopeTopics.push(message.envelopeTopic)
-      received.push(new TextDecoder().decode(message.data))
-      if (received.length === 2) second.resolve()
-      return true
-    },
-  })
-
+  let stopBroker: (() => Promise<void>) | undefined
+  let forwarder: ChannelForwarder | undefined
   try {
+    const broker = new FakeNatsServer()
+    stopBroker = () => broker.stop()
+    const connection = await connect({ servers: broker.url })
+    const received: string[] = []
+    const subjects: string[] = []
+    const envelopeTopics: Array<string | undefined> = []
+    const second = Promise.withResolvers<void>()
+    forwarder = createChannelForwarder(connection, {
+      deliver: async (message) => {
+        if (message.duplicate) return false
+        // Real nats.js messages: subject, data, and the envelope topic must all survive.
+        subjects.push(message.subject)
+        envelopeTopics.push(message.envelopeTopic)
+        received.push(new TextDecoder().decode(message.data))
+        if (received.length === 2) second.resolve()
+        return true
+      },
+    })
+
     forwarder.follow(THREAD)
     await broker.until(() => broker.subscribed.includes(THREAD))
     broker.deliver(COMMENT, envelope("evt-1"))
@@ -47,33 +54,36 @@ test("delivers each event id once even when concrete and wildcard subscriptions 
     expect(subjects).toEqual([COMMENT, COMMENT])
     expect(envelopeTopics).toEqual([THREAD, THREAD])
   } finally {
-    await forwarder.close()
-    await broker.stop()
+    await forwarder?.close()
+    await stopBroker?.()
   }
 })
 
 test("keeps each valid dedupe identity when a sibling identity field is empty", async () => {
-  const broker = new FakeNatsServer()
-  const connection = await connect({ servers: broker.url })
-  const accepted: string[] = []
-  const sentinel = Promise.withResolvers<void>()
-  const forwarder = createChannelForwarder(connection, {
-    deliver: async (message) => {
-      if (message.duplicate !== true) accepted.push(message.raw)
-      if (message.raw.includes("identity sentinel")) sentinel.resolve()
-      return message.duplicate !== true
-    },
-  })
-  const frame = (summary: string, identity: Record<string, string>) =>
-    JSON.stringify({
-      source: "github",
-      topic: COMMENT,
-      issued_at: 1,
-      payload_summary: summary,
-      ...identity,
-    })
-
+  let stopBroker: (() => Promise<void>) | undefined
+  let forwarder: ChannelForwarder | undefined
   try {
+    const broker = new FakeNatsServer()
+    stopBroker = () => broker.stop()
+    const connection = await connect({ servers: broker.url })
+    const accepted: string[] = []
+    const sentinel = Promise.withResolvers<void>()
+    forwarder = createChannelForwarder(connection, {
+      deliver: async (message) => {
+        if (message.duplicate !== true) accepted.push(message.raw)
+        if (message.raw.includes("identity sentinel")) sentinel.resolve()
+        return message.duplicate !== true
+      },
+    })
+    const frame = (summary: string, identity: Record<string, string>) =>
+      JSON.stringify({
+        source: "github",
+        topic: COMMENT,
+        issued_at: 1,
+        payload_summary: summary,
+        ...identity,
+      })
+
     forwarder.follow(COMMENT)
     await broker.until(() => broker.subscribed.includes(COMMENT))
     for (const [summary, identity] of [
@@ -115,8 +125,8 @@ test("keeps each valid dedupe identity when a sibling identity field is empty", 
       absentFields: 2,
     })
   } finally {
-    await forwarder.close()
-    await broker.stop()
+    await forwarder?.close()
+    await stopBroker?.()
   }
 })
 
@@ -135,21 +145,24 @@ test("one publish reaches Claude once through two overlapping subscriptions, wha
       topic: CHECKS,
       payload_summary: `checks ${eventId}`,
     })
-  const broker = new FakeNatsServer()
-  const connection = await connect({ servers: broker.url })
-  const handed: string[] = []
-  let duplicates = 0
-  const all = Promise.withResolvers<void>()
-  const forwarder = createChannelForwarder(connection, {
-    deliver: async (message) => {
-      if (message.duplicate) duplicates++
-      else handed.push(message.raw)
-      if (handed.length + duplicates === 4) all.resolve()
-      return !message.duplicate
-    },
-  })
-
+  let stopBroker: (() => Promise<void>) | undefined
+  let forwarder: ChannelForwarder | undefined
   try {
+    const broker = new FakeNatsServer()
+    stopBroker = () => broker.stop()
+    const connection = await connect({ servers: broker.url })
+    const handed: string[] = []
+    let duplicates = 0
+    const all = Promise.withResolvers<void>()
+    forwarder = createChannelForwarder(connection, {
+      deliver: async (message) => {
+        if (message.duplicate) duplicates++
+        else handed.push(message.raw)
+        if (handed.length + duplicates === 4) all.resolve()
+        return !message.duplicate
+      },
+    })
+
     forwarder.follow(PR)
     forwarder.follow(CHECKS)
     await broker.until(() => broker.subscribed.includes(PR) && broker.subscribed.includes(CHECKS))
@@ -160,8 +173,8 @@ test("one publish reaches Claude once through two overlapping subscriptions, wha
     expect(handed).toEqual([settlement("evt-1", 1), settlement("evt-2", 2)])
     expect(duplicates).toBe(2)
   } finally {
-    await forwarder.close()
-    await broker.stop()
+    await forwarder?.close()
+    await stopBroker?.()
   }
 })
 
@@ -172,20 +185,23 @@ test("a frame the channel did not hand on releases nothing another frame claimed
   const key = "agent.ses_a.m1:aside"
   const frame = (eventId: string, source: string) =>
     JSON.stringify({ event_id: eventId, source, dedupe_key: key, topic: COMMENT })
-  const broker = new FakeNatsServer()
-  const connection = await connect({ servers: broker.url })
-  const seen: Array<{ event: string; duplicate: boolean }> = []
-  const settled = Promise.withResolvers<void>()
-  const forwarder = createChannelForwarder(connection, {
-    deliver: async (message) => {
-      const { event_id, source } = JSON.parse(message.raw) as { event_id: string; source: string }
-      seen.push({ event: event_id, duplicate: message.duplicate === true })
-      if (seen.length === 3) settled.resolve()
-      return source === "dispatch" && message.duplicate !== true
-    },
-  })
-
+  let stopBroker: (() => Promise<void>) | undefined
+  let forwarder: ChannelForwarder | undefined
   try {
+    const broker = new FakeNatsServer()
+    stopBroker = () => broker.stop()
+    const connection = await connect({ servers: broker.url })
+    const seen: Array<{ event: string; duplicate: boolean }> = []
+    const settled = Promise.withResolvers<void>()
+    forwarder = createChannelForwarder(connection, {
+      deliver: async (message) => {
+        const { event_id, source } = JSON.parse(message.raw) as { event_id: string; source: string }
+        seen.push({ event: event_id, duplicate: message.duplicate === true })
+        if (seen.length === 3) settled.resolve()
+        return source === "dispatch" && message.duplicate !== true
+      },
+    })
+
     forwarder.follow(COMMENT)
     await broker.until(() => broker.subscribed.includes(COMMENT))
     broker.deliver(COMMENT, frame("evt-attempt", "dispatch"))
@@ -199,17 +215,20 @@ test("a frame the channel did not hand on releases nothing another frame claimed
       { event: "evt-retry", duplicate: true },
     ])
   } finally {
-    await forwarder.close()
-    await broker.stop()
+    await forwarder?.close()
+    await stopBroker?.()
   }
 })
 
 test("closes all NATS subscriptions and the connection during channel shutdown", async () => {
-  const broker = new FakeNatsServer()
-  const connection = await connect({ servers: broker.url })
-  const forwarder = createChannelForwarder(connection, { deliver: async () => true })
-
+  let stopBroker: (() => Promise<void>) | undefined
+  let forwarder: ChannelForwarder | undefined
   try {
+    const broker = new FakeNatsServer()
+    stopBroker = () => broker.stop()
+    const connection = await connect({ servers: broker.url })
+    forwarder = createChannelForwarder(connection, { deliver: async () => true })
+
     forwarder.follow(THREAD)
     await broker.until(() => broker.subscribed.includes(THREAD))
     await forwarder.close()
@@ -220,22 +239,26 @@ test("closes all NATS subscriptions and the connection during channel shutdown",
     ])
     expect(connection.isClosed()).toBe(true)
   } finally {
-    await broker.stop()
+    await forwarder?.close()
+    await stopBroker?.()
   }
 })
 
 test("unfollow drops a topic from topics() before it waits for the drain", async () => {
-  const broker = new FakeNatsServer()
-  const connection = await connect({ servers: broker.url })
-  const forwarder = createChannelForwarder(connection, { deliver: async () => true })
-
+  let stopBroker: (() => Promise<void>) | undefined
+  let forwarder: ChannelForwarder | undefined
   try {
+    const broker = new FakeNatsServer()
+    stopBroker = () => broker.stop()
+    const connection = await connect({ servers: broker.url })
+    forwarder = createChannelForwarder(connection, { deliver: async () => true })
+
     forwarder.follow(COMMENT)
     const dropping = forwarder.unfollow([COMMENT])
     expect(forwarder.topics()).toEqual([])
     await dropping
   } finally {
-    await forwarder.close()
-    await broker.stop()
+    await forwarder?.close()
+    await stopBroker?.()
   }
 })

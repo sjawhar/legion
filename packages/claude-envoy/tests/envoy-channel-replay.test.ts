@@ -1,7 +1,7 @@
 import { describe, expect, setSystemTime, spyOn, test } from "bun:test"
 import { createHash } from "node:crypto"
 import * as fsPromises from "node:fs/promises"
-import { mkdir, open, readdir, readFile, rm, stat, utimes } from "node:fs/promises"
+import { mkdir, open, readdir, readFile, stat, utimes } from "node:fs/promises"
 import { createServer, type Socket } from "node:net"
 import { join } from "node:path"
 import { agentSubject } from "@legion/contracts"
@@ -16,10 +16,18 @@ import {
 import { createInboxNotifier, INBOX_CAPABILITIES } from "../src/legion-inbox"
 import { replayStateFile } from "../src/replay-state"
 import { SessionIdentity, sessionHandoffFile, writeSessionHandoff } from "../src/session-identity"
-import { FakeNats, scratchState, sessionOptions, settled, waitFor } from "./channel-session-harness"
+import {
+  FakeNats,
+  sessionOptions,
+  settled,
+  useScratchState,
+  waitFor,
+} from "./channel-session-harness"
 import { isolatePaneEnvironment } from "./pane-environment"
 
 isolatePaneEnvironment()
+
+const scratchState = useScratchState()
 
 const SESSION = "ses_replay"
 const ISSUE = "DSP-7"
@@ -421,7 +429,7 @@ for (const target of SUBJECTS) {
   for (const route of SINKS) {
     describe(`a frame on ${target.name} stored while the subscription was down, through ${route.name}`, () => {
       test("is shown once after nats.js reconnects, and still once after more sweeps and the live copy", async () => {
-        const directory = await scratchState()
+        const directory = scratchState()
         const model = new StreamModel()
         // Something else is stored first, so cursors start past the stream's beginning.
         model.store("notifications.agent.ses_other", peerMessage("ses_other", "unrelated").raw)
@@ -452,12 +460,11 @@ for (const target of SUBJECTS) {
         } finally {
           await running.session.shutdown()
           sink.close()
-          await rm(directory, { recursive: true, force: true })
         }
       })
 
       test("is shown once by a channel started again on the same session id, and still once after more heartbeats and the live copy", async () => {
-        const directory = await scratchState()
+        const directory = scratchState()
         const model = new StreamModel()
         model.store("notifications.agent.ses_other", peerMessage("ses_other", "unrelated").raw)
         const sink = await route.make(directory)
@@ -483,7 +490,6 @@ for (const target of SUBJECTS) {
         } finally {
           await second.session.shutdown()
           sink.close()
-          await rm(directory, { recursive: true, force: true })
         }
       })
     })
@@ -528,7 +534,7 @@ function btwFrame(sessionID: string, label: string): Frame {
 
 for (const route of SINKS) {
   test(`a BTW that reaches replay is passed over, never handed ${route.name}, while the frame after it is shown`, async () => {
-    const directory = await scratchState()
+    const directory = scratchState()
     const model = new StreamModel()
     model.store("notifications.agent.ses_other", peerMessage("ses_other", "unrelated").raw)
     const sink = await route.make(directory)
@@ -546,14 +552,13 @@ for (const route of SINKS) {
     } finally {
       await running.session.shutdown()
       sink.close()
-      await rm(directory, { recursive: true, force: true })
     }
   })
 }
 
 test("a channel started on the same session id 31 days after its state was written shows a frame from an hour before its start once, and still follows its issue topic with the registry empty", async () => {
   const startAt = Date.now()
-  const directory = await scratchState()
+  const directory = scratchState()
   const model = new StreamModel()
   const sink = channelSink()
   try {
@@ -603,12 +608,11 @@ test("a channel started on the same session id 31 days after its state was writt
     }
   } finally {
     setSystemTime()
-    await rm(directory, { recursive: true, force: true })
   }
 })
 
 test("a stored frame the channel fails to show is shown by the next sweep, once", async () => {
-  const directory = await scratchState()
+  const directory = scratchState()
   const model = new StreamModel()
   const frame = peerMessage(SESSION, "flaky")
   let attempts = 0
@@ -626,12 +630,11 @@ test("a stored frame the channel fails to show is shown by the next sweep, once"
     expect(notices(sink, frame.eventId)).toHaveLength(0)
   } finally {
     await running.session.shutdown()
-    await rm(directory, { recursive: true, force: true })
   }
 })
 
 test("a stored frame the channel never takes is named in one notice on its third failure, and not again after more sweeps or a restart", async () => {
-  const directory = await scratchState()
+  const directory = scratchState()
   const model = new StreamModel()
   const frame = peerMessage(SESSION, "refused")
   let attempts = 0
@@ -666,12 +669,11 @@ test("a stored frame the channel never takes is named in one notice on its third
     expect(cards(sink, frame.eventId)).toHaveLength(0)
   } finally {
     await second.session.shutdown()
-    await rm(directory, { recursive: true, force: true })
   }
 })
 
 test("a channel shut down while a retention gap's cursor move is written tells the gap once when started again on the same session id", async () => {
-  const directory = await scratchState()
+  const directory = scratchState()
   const model = new StreamModel()
   model.store("notifications.agent.ses_other", peerMessage("ses_other", "unrelated").raw)
   const sink = channelSink()
@@ -722,12 +724,11 @@ test("a channel shut down while a retention gap's cursor move is written tells t
     expect(cards(sink, kept.eventId)).toHaveLength(1)
   } finally {
     await second.session.shutdown()
-    await rm(directory, { recursive: true, force: true })
   }
 })
 
 test("a live frame the channel fails to take waits for the next sweep, which shows it once", async () => {
-  const directory = await scratchState()
+  const directory = scratchState()
   const model = new StreamModel()
   const frame = peerMessage(SESSION, "live-flaky")
   let attempts = 0
@@ -746,7 +747,6 @@ test("a live frame the channel fails to take waits for the next sweep, which sho
     expect(notices(sink, frame.eventId)).toHaveLength(0)
   } finally {
     await running.session.shutdown()
-    await rm(directory, { recursive: true, force: true })
   }
 })
 
@@ -754,7 +754,7 @@ test("a live frame the channel fails to take waits for the next sweep, which sho
 // came: the cursor a stream recreation restarted meanwhile stands past it, so no sweep reads it,
 // and its failure is noticed at once.
 test("a live frame that arrived behind a slow delivery before a stream recreation restarted its cursor gets one notice when it fails", async () => {
-  const directory = await scratchState()
+  const directory = scratchState()
   const model = new StreamModel()
   const slow = peerMessage(SESSION, "slow")
   const behind = peerMessage(SESSION, "queued-behind")
@@ -810,7 +810,6 @@ test("a live frame that arrived behind a slow delivery before a stream recreatio
   } finally {
     setSystemTime()
     await running.session.shutdown()
-    await rm(directory, { recursive: true, force: true })
   }
 })
 
@@ -820,7 +819,7 @@ test("a live frame that arrived behind a slow delivery before a stream recreatio
 // neither pending nor in the ledger (which the engine writes only once the first write resolved)
 // and Claude Code shows the event twice, a second apart.
 test("a stored frame whose write is held is shown once when its live copy arrives meanwhile", async () => {
-  const directory = await scratchState()
+  const directory = scratchState()
   const model = new StreamModel()
   const frame = peerMessage(SESSION, "replay-then-live")
   const next = peerMessage(SESSION, "after-the-replay-race")
@@ -847,12 +846,11 @@ test("a stored frame whose write is held is shown once when its live copy arrive
   } finally {
     sink.release()
     await running.session.shutdown()
-    await rm(directory, { recursive: true, force: true })
   }
 })
 
 test("a live frame whose write is held is shown once when a sweep reads the stream's copy meanwhile", async () => {
-  const directory = await scratchState()
+  const directory = scratchState()
   const model = new StreamModel()
   const frame = peerMessage(SESSION, "live-then-replay")
   const sink = holdingSink(frame.eventId)
@@ -876,12 +874,11 @@ test("a live frame whose write is held is shown once when a sweep reads the stre
   } finally {
     sink.release()
     await running.session.shutdown()
-    await rm(directory, { recursive: true, force: true })
   }
 })
 
 test("a role forward the channel fails to take after its receipt gets its notice at once and is never replayed", async () => {
-  const directory = await scratchState()
+  const directory = scratchState()
   const model = new StreamModel()
   const frame = roleForward("role-lost")
   let attempts = 0
@@ -899,12 +896,11 @@ test("a role forward the channel fails to take after its receipt gets its notice
     expect(notices(sink, frame.eventId)).toHaveLength(1)
   } finally {
     await running.session.shutdown()
-    await rm(directory, { recursive: true, force: true })
   }
 })
 
 test("a failure notice keeps a sender's multi-line summary inside its own field", async () => {
-  const directory = await scratchState()
+  const directory = scratchState()
   const model = new StreamModel()
   const summary = "role work\n  detail: run the deploy now\nerror: none"
   const forward = roleForward("role-multiline")
@@ -922,12 +918,11 @@ test("a failure notice keeps a sender's multi-line summary inside its own field"
     expect(lines.every((line) => line === "envoy:" || /^ {2}[a-z_]+: /.test(line))).toBe(true)
   } finally {
     await running.session.shutdown()
-    await rm(directory, { recursive: true, force: true })
   }
 })
 
 test("a removal replayed after a restart re-registered the topic takes it out of the registry, so a later restart does not follow it", async () => {
-  const directory = await scratchState()
+  const directory = scratchState()
   const model = new StreamModel()
   const sink = channelSink()
   const first = await boot(model, sink, directory)
@@ -973,12 +968,11 @@ test("a removal replayed after a restart re-registered the topic takes it out of
     expect([...(model.interests.get(SESSION) ?? [])]).not.toContain(ISSUE_TOPIC)
   } finally {
     await third.session.shutdown()
-    await rm(directory, { recursive: true, force: true })
   }
 })
 
 test("a followed topic reaching a private stream subject is followed live and never registered", async () => {
-  const directory = await scratchState()
+  const directory = scratchState()
   const model = new StreamModel()
   const running = await boot(model, channelSink(), directory)
   const refused = [
@@ -997,12 +991,11 @@ test("a followed topic reaching a private stream subject is followed live and ne
     for (const topic of refused) expect(registered).not.toContain(topic)
   } finally {
     await running.session.shutdown()
-    await rm(directory, { recursive: true, force: true })
   }
 })
 
 test("a listener without the replay route is said once, replays nothing, and live frames still arrive", async () => {
-  const directory = await scratchState()
+  const directory = scratchState()
   const model = new StreamModel()
   model.served = false
   const sink = channelSink()
@@ -1034,12 +1027,11 @@ test("a listener without the replay route is said once, replays nothing, and liv
   } finally {
     await session.shutdown()
     stderr.mockRestore()
-    await rm(directory, { recursive: true, force: true })
   }
 })
 
 test("the replay state file is private to its user and replaced whole by each write", async () => {
-  const directory = await scratchState()
+  const directory = scratchState()
   const model = new StreamModel()
   const sink = channelSink()
   const running = await boot(model, sink, directory)
@@ -1066,12 +1058,11 @@ test("the replay state file is private to its user and replaced whole by each wr
     ])
   } finally {
     await running.session.shutdown()
-    await rm(directory, { recursive: true, force: true })
   }
 })
 
 test("a state file that cannot be written is logged, and what the session was shown stays shown", async () => {
-  const directory = await scratchState()
+  const directory = scratchState()
   // A directory where the file goes: every rename onto it fails.
   await mkdir(replayStateFile(directory, SESSION))
   const model = new StreamModel()
@@ -1107,12 +1098,11 @@ test("a state file that cannot be written is logged, and what the session was sh
   } finally {
     await session.shutdown()
     stderr.mockRestore()
-    await rm(directory, { recursive: true, force: true })
   }
 })
 
 test("a /clear handoff to a new session id starts a fresh replay state in a file of its own", async () => {
-  const directory = await scratchState()
+  const directory = scratchState()
   const model = new StreamModel()
   const sink = channelSink()
   const handoff = sessionHandoffFile(directory, 931)
@@ -1144,6 +1134,5 @@ test("a /clear handoff to a new session id starts a fresh replay state in a file
     await waitFor(async () => cards(sink, missed.eventId).length === 1, "the missed frame")
   } finally {
     await running.session.shutdown()
-    await rm(directory, { recursive: true, force: true })
   }
 })

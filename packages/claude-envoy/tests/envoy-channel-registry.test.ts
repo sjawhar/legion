@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test"
-import { rm } from "node:fs/promises"
 import { EnvoyApiError } from "@legion/envoy-client/transport"
 import { startChannelSession } from "../src/envoy-channel-server"
 import { SessionIdentity, sessionHandoffFile, writeSessionHandoff } from "../src/session-identity"
@@ -8,18 +7,20 @@ import {
   FakeNats,
   noInterest,
   recordingClient,
-  scratchState,
   sessionOptions,
   settled,
+  useScratchState,
   waitFor,
 } from "./channel-session-harness"
 import { isolatePaneEnvironment } from "./pane-environment"
 
 isolatePaneEnvironment()
 
+const scratchState = useScratchState()
+
 test("drops local topics named by a human Dispatch subscription removal", async () => {
   const nats = new FakeNats()
-  const stateDirectory = await scratchState()
+  const stateDirectory = scratchState()
   const session = await startChannelSession(
     sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
       connection: nats,
@@ -54,12 +55,11 @@ test("drops local topics named by a human Dispatch subscription removal", async 
     ])
   } finally {
     await session.shutdown()
-    await rm(stateDirectory, { recursive: true, force: true })
   }
 })
 
 test("a resumed server rebuilds the interests its session id already registered and follow reports them as not fresh", async () => {
-  const stateDirectory = await scratchState()
+  const stateDirectory = scratchState()
   const nats = new FakeNats()
   const subscribes: Array<readonly string[]> = []
   const issueTopic = "notifications.dispatch.issue.DSP-3.>"
@@ -97,12 +97,11 @@ test("a resumed server rebuilds the interests its session id already registered 
     expect(await session.follow([issueTopic])).toEqual([])
   } finally {
     await session.shutdown()
-    await rm(stateDirectory, { recursive: true, force: true })
   }
 })
 
 test("a registration in flight when a topic is unsubscribed cannot write it back into the entry", async () => {
-  const stateDirectory = await scratchState()
+  const stateDirectory = scratchState()
   // The listener merges registered topics into the entry and only an unsubscribe removes one.
   const entry = new Set<string>()
   let held: PromiseWithResolvers<void> | undefined
@@ -144,12 +143,11 @@ test("a registration in flight when a topic is unsubscribed cannot write it back
     expect([...entry].sort()).toEqual([directSubject, kept])
   } finally {
     await session.shutdown()
-    await rm(stateDirectory, { recursive: true, force: true })
   }
 })
 
 test("a registration in flight when Dispatch removes a subscription cannot write the topic back", async () => {
-  const stateDirectory = await scratchState()
+  const stateDirectory = scratchState()
   const nats = new FakeNats()
   const entry = new Set<string>()
   let held: PromiseWithResolvers<void> | undefined
@@ -210,12 +208,11 @@ test("a registration in flight when Dispatch removes a subscription cannot write
     expect([...entry].sort()).toEqual([directSubject, kept])
   } finally {
     await session.shutdown()
-    await rm(stateDirectory, { recursive: true, force: true })
   }
 })
 
 test("a registry removal that fails is reconciled by the next heartbeat, without stripping a topic re-followed since", async () => {
-  const stateDirectory = await scratchState()
+  const stateDirectory = scratchState()
   const nats = new FakeNats()
   const entry = new Set<string>([directSubject])
   let failNextUnsubscribe = false
@@ -279,12 +276,11 @@ test("a registry removal that fails is reconciled by the next heartbeat, without
     expect([...entry].sort()).toEqual([directSubject, reFollowed])
   } finally {
     await session.shutdown()
-    await rm(stateDirectory, { recursive: true, force: true })
   }
 })
 
 test("a persistent reconciliation failure retries once after a delay of its own, then waits for the next heartbeat, rather than hot-looping", async () => {
-  const stateDirectory = await scratchState()
+  const stateDirectory = scratchState()
   const nats = new FakeNats()
   let getInterestAttempts = 0
   const client = recordingClient([], {
@@ -336,12 +332,11 @@ test("a persistent reconciliation failure retries once after a delay of its own,
     expect(scheduled).toHaveLength(1)
   } finally {
     await session.shutdown()
-    await rm(stateDirectory, { recursive: true, force: true })
   }
 })
 
 test("a registration that times out is retried once inside forty seconds, and a success returns the cadence to the heartbeat", async () => {
-  const stateDirectory = await scratchState()
+  const stateDirectory = scratchState()
   const nats = new FakeNats()
   const claudePid = 993
   let registryDown = false
@@ -421,12 +416,11 @@ test("a registration that times out is retried once inside forty seconds, and a 
     expect(scheduled[1]?.delayMs).toBeLessThanOrEqual(40_000)
   } finally {
     await session.shutdown()
-    await rm(stateDirectory, { recursive: true, force: true })
   }
 })
 
 test("a registry read that fails at startup does not let the heartbeat delete the registered interests", async () => {
-  const stateDirectory = await scratchState()
+  const stateDirectory = scratchState()
   const nats = new FakeNats()
   const alreadyRegistered = "notifications.dispatch.issue.DSP-5"
   const entry = new Set<string>([directSubject, alreadyRegistered])
@@ -465,12 +459,11 @@ test("a registry read that fails at startup does not let the heartbeat delete th
     expect(session.topics()).toContain(alreadyRegistered)
   } finally {
     await session.shutdown()
-    await rm(stateDirectory, { recursive: true, force: true })
   }
 })
 
 test("a listener error that is not a 404 is not an absence, so the heartbeat still adopts", async () => {
-  const stateDirectory = await scratchState()
+  const stateDirectory = scratchState()
   const nats = new FakeNats()
   const alreadyRegistered = "notifications.dispatch.issue.DSP-7"
   const entry = new Set<string>([directSubject, alreadyRegistered])
@@ -523,12 +516,11 @@ test("a listener error that is not a 404 is not an absence, so the heartbeat sti
     expect([...entry].sort()).toEqual([directSubject, alreadyRegistered])
   } finally {
     await session.shutdown()
-    await rm(stateDirectory, { recursive: true, force: true })
   }
 })
 
 test("a shutdown landing before the heartbeat's registry read leaves the registry entry alone", async () => {
-  const stateDirectory = await scratchState()
+  const stateDirectory = scratchState()
   const nats = new FakeNats()
   const alreadyRegistered = "notifications.dispatch.issue.DSP-1"
   const entry = new Set<string>([directSubject, alreadyRegistered])
@@ -578,12 +570,11 @@ test("a shutdown landing before the heartbeat's registry read leaves the registr
   } finally {
     release.resolve()
     await session.shutdown()
-    await rm(stateDirectory, { recursive: true, force: true })
   }
 })
 
 test("a shutdown landing inside the heartbeat's registry read leaves the registry entry alone", async () => {
-  const stateDirectory = await scratchState()
+  const stateDirectory = scratchState()
   const nats = new FakeNats()
   const alreadyRegistered = "notifications.dispatch.issue.DSP-2"
   const entry = new Set<string>([directSubject, alreadyRegistered])
@@ -644,12 +635,11 @@ test("a shutdown landing inside the heartbeat's registry read leaves the registr
   } finally {
     release.resolve()
     await session.shutdown()
-    await rm(stateDirectory, { recursive: true, force: true })
   }
 })
 
 test("a Dispatch subscription removal that names no topics removes nothing", async () => {
-  const stateDirectory = await scratchState()
+  const stateDirectory = scratchState()
   const calls: string[] = []
   const nats = new FakeNats(calls)
   const session = await startChannelSession(
@@ -681,7 +671,6 @@ test("a Dispatch subscription removal that names no topics removes nothing", asy
     expect(session.topics()).toEqual([directSubject, topic])
   } finally {
     await session.shutdown()
-    await rm(stateDirectory, { recursive: true, force: true })
   }
 })
 
@@ -689,7 +678,7 @@ test("a Dispatch subscription removal that names no topics removes nothing", asy
 // deregistration is what ends the session for its peers: a registry write this listener has
 // stalled on must delay it, never swallow it (dispatch://INFRA-392).
 test("the shutdown deregistration waits for a stalled registration, then goes out anyway", async () => {
-  const stateDirectory = await scratchState()
+  const stateDirectory = scratchState()
   const calls: string[] = []
   const wedged = Promise.withResolvers<void>()
   let registrations = 0
@@ -718,7 +707,6 @@ test("the shutdown deregistration waits for a stalled registration, then goes ou
     expect(calls).toContain("unregister ses_claude")
   } finally {
     wedged.resolve()
-    await rm(stateDirectory, { recursive: true, force: true })
   }
 })
 
@@ -726,7 +714,7 @@ test("the shutdown deregistration waits for a stalled registration, then goes ou
 // a row left ten seconds before the DELETE was sent, and the process group is killed five
 // seconds after SIGTERM, so the record survived for the gone horizon (dispatch://INFRA-392).
 test("the shutdown deregistration spends a quarter second settling, not the whole of both waits", async () => {
-  const stateDirectory = await scratchState()
+  const stateDirectory = scratchState()
   const calls: string[] = []
   const wedged = Promise.withResolvers<void>()
   let registrations = 0
@@ -760,6 +748,5 @@ test("the shutdown deregistration spends a quarter second settling, not the whol
     expect(elapsed).toBeLessThan(2_000)
   } finally {
     wedged.resolve()
-    await rm(stateDirectory, { recursive: true, force: true })
   }
 })

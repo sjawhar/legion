@@ -69,6 +69,7 @@
       },
       "devDependencies": {
         "@biomejs/biome": "^2.3.14",
+        "@legion/test-fixtures": "workspace:*",
         "bun-types": "latest",
         "typescript": "^5.3.0",
       },
