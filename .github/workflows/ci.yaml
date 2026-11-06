@@ -300,6 +300,8 @@ jobs:
             # the outbox's role forward resolves a role's holder with roles.ResolveHolder (#2395).
             dispatch_server: &dispatch_server
               - 'packages/envoy/cmd/dispatch/*'
+              - 'packages/envoy/going/*'
+              - 'packages/envoy/going/goingtest/*'
               - 'packages/envoy/internal/broker/oauthwire/*'
               - 'packages/envoy/internal/brokertoken/*'
               - 'packages/envoy/internal/bus/*'
@@ -357,6 +359,7 @@ jobs:
               - 'packages/envoy/internal/pgmigrate/*'
               - 'packages/envoy/internal/ratelimit/*'
               - 'packages/envoy/internal/redact/*'
+              - 'packages/envoy/internal/redirects/*'
               - 'packages/envoy/internal/roles/*'
               - 'packages/envoy/internal/routing/*'
               - 'packages/envoy/internal/session/*'
@@ -453,6 +456,10 @@ jobs:
             # The listener's packages, `go list -deps ./cmd/listener` in packages/envoy.
             listener_command: &listener_command
               - 'packages/envoy/cmd/listener/*'
+              - 'packages/envoy/going/*'
+              - 'packages/envoy/going/goingtest/*'
+              # going's own golden, which a test run of that package reads.
+              - 'packages/envoy/going/testdata/**'
               - 'packages/envoy/internal/broker/oauthwire/*'
               - 'packages/envoy/internal/brokertoken/*'
               - 'packages/envoy/internal/bus/*'
@@ -469,6 +476,7 @@ jobs:
               - 'packages/envoy/internal/metrics/*'
               - 'packages/envoy/internal/oidc/*'
               - 'packages/envoy/internal/ratelimit/*'
+              - 'packages/envoy/internal/redirects/*'
               - 'packages/envoy/internal/roles/*'
               - 'packages/envoy/internal/routing/*'
               - 'packages/envoy/internal/session/*'
@@ -484,6 +492,10 @@ jobs:
             # the outbox's role forward resolves a role's holder with roles.ResolveHolder (#2395).
             dispatch_command_tests: &dispatch_command_tests
               - 'packages/envoy/cmd/dispatch/**'
+              - 'packages/envoy/going/*'
+              - 'packages/envoy/going/goingtest/*'
+              # going's own golden, which a test run of that package reads.
+              - 'packages/envoy/going/testdata/**'
               - 'packages/envoy/internal/broker/oauthwire/*'
               - 'packages/envoy/internal/brokertoken/*'
               - 'packages/envoy/internal/dispatch/**'
@@ -507,6 +519,7 @@ jobs:
               - 'packages/envoy/internal/pgmigrate/*'
               - 'packages/envoy/internal/ratelimit/*'
               - 'packages/envoy/internal/redact/*'
+              - 'packages/envoy/internal/redirects/*'
               - 'packages/envoy/internal/roles/*'
               - 'packages/envoy/internal/routing/*'
               - 'packages/envoy/internal/session/*'
@@ -869,6 +882,11 @@ jobs:
               # web/src/features/doc/decision-blocks.test.ts:10.
               - 'packages/contracts/fixtures/live/**'
               - 'packages/contracts/fixtures/decision-blocks/**'
+              # The answers packages/envoy/going's filter emitted for every probe of its own
+              # suite, which packages/proof-editor/tests/going-answer-no-link.test.ts:111-112
+              # reads and parses with the app's own remark pipeline: a filter change that moves
+              # them must run this job.
+              - 'packages/envoy/going/testdata/**'
               # e2e/cli-body-cap.e2e.ts:27 runs envoy-client's dispatch CLI.
               - 'packages/envoy-client/src/**'
               - 'packages/envoy-client/bin/dispatch.ts'
@@ -1221,6 +1239,7 @@ jobs:
               - 'packages/envoy/go.mod'
               - 'packages/envoy/go.sum'
               - 'packages/envoy/cmd/**'
+              - 'packages/envoy/going/**'
               - 'packages/envoy/internal/**'
               - 'packages/envoy/listenfd/**'
               - 'packages/envoy/migrationid/**'
@@ -1329,6 +1348,7 @@ jobs:
               - 'packages/envoy/dispatchbody/**'
               - 'packages/envoy/docker/**'
               - 'packages/envoy/docs/**'
+              - 'packages/envoy/going/**'
               - 'packages/envoy/internal/**'
               - 'packages/envoy/listenfd/**'
               - 'packages/envoy/loadtest/**'
