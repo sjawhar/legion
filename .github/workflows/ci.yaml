@@ -577,9 +577,10 @@ jobs:
               - *go_workspace
               - 'packages/daemon/**'
               - *daemon_envoy_deps
-            # The claude-envoy job, and the test job's verify-build step, which runs the same
-            # command (packages/claude-envoy/scripts/verify-build.sh), as release.yaml's
-            # claude_envoy_build does.
+            # The claude-envoy job, and two steps of the test job: its verify-build step, which
+            # runs the same command (packages/claude-envoy/scripts/verify-build.sh), as
+            # release.yaml's claude_envoy_build does, and its build-input-list step, which runs
+            # packages/claude-envoy/tests/build-inputs.test.ts.
             claude_envoy: &claude_envoy
               - '.github/workflows/ci.yaml'
               # .bun-version is also read by scripts/build.ts:23: the build depends on the Bun it
@@ -619,7 +620,9 @@ jobs:
               - *bun_install
               - *biome
               - *daemon_go_tests
-              # Its verify-build step builds and checks the Claude Code plugin as the release does.
+              # Two of its steps read this list: verify-build builds and checks the Claude Code
+              # plugin as the release does, and the build-input-list step runs
+              # packages/claude-envoy/tests/build-inputs.test.ts.
               - *claude_envoy
               # scripts/e2e/lib/held-port.test.ts:45 builds the real envoy-listener.
               - *listener_command
