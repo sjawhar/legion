@@ -1,7 +1,7 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { beforeAll, describe, expect, test } from "bun:test";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 
 // merge_when_clean and await_ready_merge (lib/workflow.sh) against a fake gh first on PATH.
 // merge_when_clean is the proof human's merge of a pull request no accepted READY covers: it reads
@@ -20,13 +20,13 @@ import { join } from "node:path";
 // delete is refused 422 when FAKE_GH_BRANCH_GONE is set, as GitHub refuses a branch its own
 // auto-delete already removed.
 const lib = join(import.meta.dir, "workflow.sh");
-const dir = mkdtempSync(join(tmpdir(), "merge-when-clean-test."));
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+const dir = temporaryDirectory("merge-when-clean-test");
 const bin = join(dir, "bin");
-mkdirSync(bin);
-writeFileSync(
-  join(bin, "gh"),
-  `#!/usr/bin/env bash
+beforeAll(() => {
+  mkdirSync(bin);
+  writeFileSync(
+    join(bin, "gh"),
+    `#!/usr/bin/env bash
 set -euo pipefail
 state=$FAKE_GH_DIR
 printf '%s\\n' "\${*//$'\\n'/ }" >>"$state/calls"
@@ -49,8 +49,9 @@ case " $* " in
   *) echo "fake gh: no answer for $*" >&2; exit 1 ;;
 esac
 `,
-  { mode: 0o755 }
-);
+    { mode: 0o755 }
+  );
+});
 
 // The stage scripts' shell options, ERR trap and check helpers, then the lib, then the call and
 // its record.

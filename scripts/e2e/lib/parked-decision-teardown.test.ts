@@ -1,8 +1,8 @@
 import { afterAll, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { skipWithout } from "@legion/test-fixtures/host-tools";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import { scriptFunctions } from "./script-functions";
 
 // stop_agent_daemons (parked-decision-devbox.sh), the teardown of what the run's Oh My Pi sessions
@@ -29,7 +29,7 @@ if (set === undefined) throw new Error(`${scriptPath} has no top-level set line`
 // Read once, at module scope: a call inside the test body would print the warning per row.
 const skip = skipWithout("tmux");
 
-const dir = mkdtempSync(join(tmpdir(), "parked-decision-teardown-test."));
+const dir = temporaryDirectory("parked-decision-teardown-test");
 const started: number[] = [];
 // What the test started that no pid of its own names: a tmux server to kill, a session a process
 // writes its own pid file for. Each is registered the moment the test starts it, before the waits
@@ -46,7 +46,6 @@ afterAll(() => {
       process.kill(pid, "SIGKILL");
     } catch {}
   }
-  rmSync(dir, { recursive: true, force: true });
 });
 
 const alive = (pid: number) => {

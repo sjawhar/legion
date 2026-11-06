@@ -1,22 +1,23 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { beforeAll, describe, expect, test } from "bun:test";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import { operatorNatsSeed } from "./operator-nats-seed";
 
-const dir = mkdtempSync(join(tmpdir(), "operator-nats-seed-test."));
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+const dir = temporaryDirectory("operator-nats-seed-test");
 
 const production = "nats://envoy-nats.internal.example:4222";
 const file = join(dir, "envoy.json");
-mkdirSync(join(dir, "cwd"));
 const cwd = join(dir, "cwd");
-writeFileSync(
-  file,
-  JSON.stringify({ envoy: { enabled: true, natsUrls: [production], natsSeed: "SUFILESEED" } })
-);
 const off = join(dir, "off.json");
-writeFileSync(off, JSON.stringify({ envoy: { enabled: false } }));
+beforeAll(() => {
+  mkdirSync(cwd);
+  writeFileSync(
+    file,
+    JSON.stringify({ envoy: { enabled: true, natsUrls: [production], natsSeed: "SUFILESEED" } })
+  );
+  writeFileSync(off, JSON.stringify({ envoy: { enabled: false } }));
+});
 
 describe("operatorNatsSeed", () => {
   test("the file's seed goes to the servers written beside it", () => {

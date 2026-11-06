@@ -1,12 +1,12 @@
-import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { afterEach, beforeAll, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import http2 from "node:http2";
 import https from "node:https";
 import net, { type AddressInfo } from "node:net";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import tls from "node:tls";
 import { skipWithout } from "@legion/test-fixtures/host-tools";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 
 // The probe runs as an operator runs it, a process of its own, against a local TLS server that
 // does or does not advertise SETTINGS_ENABLE_CONNECT_PROTOCOL. The certificate is made per run by
@@ -15,7 +15,7 @@ import { skipWithout } from "@legion/test-fixtures/host-tools";
 // skipped there; the usage row needs neither and runs.
 
 const probe = join(import.meta.dir, "h2-settings.ts");
-const scratch = mkdtempSync(join(tmpdir(), "h2-settings-"));
+const scratch = temporaryDirectory("h2-settings");
 const certFile = join(scratch, "cert.pem");
 const keyFile = join(scratch, "key.pem");
 const closers: (() => void)[] = [];
@@ -52,8 +52,6 @@ beforeAll(() => {
 afterEach(() => {
   for (const close of closers.splice(0)) close();
 });
-
-afterAll(() => rmSync(scratch, { force: true, recursive: true }));
 
 /** Listens `server` on a loopback port and returns it; the row's end closes it. */
 async function listen(server: net.Server): Promise<number> {

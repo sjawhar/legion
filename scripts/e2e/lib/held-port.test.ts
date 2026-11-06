@@ -1,17 +1,9 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import {
-  existsSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  readlinkSync,
-  realpathSync,
-  rmSync,
-} from "node:fs";
+import { existsSync, readdirSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { type AddressInfo, connect, createServer, type Server, type Socket } from "node:net";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { skipWithout } from "@legion/test-fixtures/host-tools";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 
 // held-port.py's real-process tests: the helper hands its socket to the real envoy-listener of
 // this branch, which serves on it through ENVOY_LISTEN_FD. They read /proc, so they run on Linux,
@@ -20,7 +12,7 @@ import { skipWithout } from "@legion/test-fixtures/host-tools";
 const helper = join(import.meta.dir, "held-port.py");
 const envoy = join(import.meta.dir, "..", "..", "..", "packages", "envoy");
 // A short directory of its own: the keeper's unix socket lives here (docs/testing.md).
-const work = mkdtempSync(join(tmpdir(), "held-port."));
+const work = temporaryDirectory("held-port");
 const listener = join(work, "envoy-listener");
 const O_CLOEXEC = 0o2000000;
 
@@ -85,7 +77,6 @@ afterAll(async () => {
   if (nats) nats.close(() => closed.resolve());
   else closed.resolve();
   await closed.promise;
-  rmSync(work, { recursive: true, force: true });
 });
 
 // start runs argv with the environment the listener needs and collects its output; afterEach

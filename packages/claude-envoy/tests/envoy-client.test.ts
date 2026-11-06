@@ -1,7 +1,7 @@
 import { afterAll, expect, test } from "bun:test"
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories"
 import { sendEnvoyMessage } from "../src/envoy-client"
 
 const requests: { path: string; authorization: string | null; body: string }[] = []
@@ -16,10 +16,9 @@ const server = Bun.serve({
     return new Response(null, { status: 202 })
   },
 })
-const scratch = mkdtempSync(join(tmpdir(), "claude-envoy-send-"))
+const scratch = temporaryDirectory("claude-envoy-send")
 afterAll(() => {
   server.stop(true)
-  rmSync(scratch, { recursive: true, force: true })
 })
 
 test("sends a direct message through Envoy's HTTP API, with no bearer for a listener that asks for none", async () => {

@@ -1,17 +1,15 @@
-import { afterAll, expect, test } from "bun:test";
+import { beforeAll, expect, test } from "bun:test";
 import {
   chmodSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
-  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { hostTool, skipWithout } from "@legion/test-fixtures/host-tools";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 
 // claude-backend-tmux.sh's prerequisites on a box whose own `secrets` store holds no App credential
 // (the devbox once its local copies of another deployment's keys were removed): the run must reach
@@ -20,8 +18,7 @@ import { hostTool, skipWithout } from "@legion/test-fixtures/host-tools";
 // prerequisites ask for is a stand-in, so the run stops at the first step that needs a real one
 // and touches nothing outside this test's directory.
 const script = join(import.meta.dir, "..", "claude-backend-tmux.sh");
-const dir = mkdtempSync(join(tmpdir(), "claude-backend-key-runner-test."));
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+const dir = temporaryDirectory("claude-backend-key-runner-test");
 
 const bin = join(dir, "bin");
 const scratch = join(dir, "tmp");
@@ -86,8 +83,11 @@ const tools = [
 const found = new Map(tools.map((name) => [name, hostTool(name)] as const));
 const skip = skipWithout(...tools);
 
-// Nothing below is read by a run that will not happen, so a host that skips builds none of it.
-if (!skip) {
+// Nothing below is read by a run that will not happen, so a host that skips builds none of it;
+// and it is built in a hook, below the one the reservation registered, so a run that selects no
+// row of this file builds none of it either.
+beforeAll(() => {
+  if (skip) return;
   mkdirSync(bin);
   mkdirSync(scratch);
   for (const name of ["go", "docker", "ss", "tmux", "bun", "mise", "gh", "jj", "pgrep", "claude"]) {
@@ -104,7 +104,7 @@ if (!skip) {
     if (path !== null) symlinkSync(path, join(bin, name));
   }
   writeFileSync(keyFile, "sk-test\n", { mode: 0o600 });
-}
+});
 
 test.skipIf(skip)(
   "the prerequisites never ask the box's own secrets store for an App credential",

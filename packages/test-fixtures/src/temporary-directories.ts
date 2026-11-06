@@ -1,5 +1,6 @@
-import { afterAll, afterEach } from "bun:test";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { afterAll, afterEach, beforeAll } from "bun:test";
+import { randomBytes } from "node:crypto";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -30,13 +31,20 @@ export type TemporaryDirectoryMaker = (suffix?: string) => string;
 /**
  * Registers the removal of every directory the returned maker makes, and returns the maker.
  *
- * Call it at the test file's module scope, or in the body of a `describe` that is never skipped;
- * never from inside a test body. It registers an `afterEach` or `afterAll` hook where it is
- * called, and `bun:test` takes the scope of a hook from the point of the call. Bun runs the body
- * of a `describe.skipIf(true)` and none of the hooks that body registered, so a directory made
- * there is left behind — the maker makes it at the call, before any row is skipped. A `describe`
- * whose rows are all skipped, and a file whose rows are all skipped, each still run their
- * `afterAll`: it is the skipped `describe` alone that keeps what it made.
+ * Call it at the test file's module scope, or in the body of a `describe`: it registers an
+ * `afterEach` or an `afterAll` hook where it is called, and `bun:test` takes the scope of a hook
+ * from the point of the call. The call itself makes nothing, so a scope whose hooks never run
+ * leaves nothing behind.
+ *
+ * **Call the maker itself from a test body or from a hook, never at module scope or in a
+ * `describe` body.** The maker makes its directory at the call, and Bun runs a module body and a
+ * `describe` body in three cases where it then runs no hook of that scope: a `bun test -t
+ * <pattern>` that selects no row of the file, one that selects no row of the `describe`, and
+ * `describe.skipIf(true)`. In each of them a maker called there makes its directory and nothing
+ * removes it again, and nothing runs at the end of a `bun test` process to catch it.
+ * {@link temporaryDirectory} is the form for one directory a whole file or `describe` shares: it
+ * reserves the path at the call and makes the directory in a `beforeAll`, so the making and the
+ * removal run together or not at all.
  *
  * The fixture's own module body registers nothing, because Bun evaluates an imported module once
  * per process: a hook there would land in the scope of the first file that imported it, and every
@@ -62,20 +70,45 @@ export function temporaryDirectories(
 }
 
 /**
- * Makes one directory for the whole suite, registers its removal in `afterAll`, and returns its
- * path: the one-shot form of {@link temporaryDirectories}, for a test file or a `describe` body
- * that needs a single scratch directory every one of its tests reads.
+ * Reserves one directory for the whole suite and returns its path: the one-shot form of
+ * {@link temporaryDirectories}, for a test file or a `describe` body that needs a single scratch
+ * directory every one of its tests reads.
  *
- * Call it where {@link temporaryDirectories} is called — at module scope, or in the body of a
- * `describe` that is never skipped, never inside a test body — for the same reason: it registers
- * the hook where it is called, and a `describe.skipIf(true)` runs its body without ever running
- * that hook, so the directory this made would be left behind.
+ * Call it at the test file's module scope, or in the body of a `describe`, never inside a test
+ * body: it registers the `beforeAll` that makes the directory and the `afterAll` that removes it
+ * where it is called, and `bun:test` takes the scope of a hook from the point of the call. The
+ * path is reserved at the call and nothing is made there, so a scope Bun evaluates and then runs
+ * no hook of — a `-t` filter that selects no row of the file or of the `describe`, and
+ * `describe.skipIf(true)` — makes nothing and leaves nothing behind.
+ *
+ * Nothing exists at the path until that `beforeAll` has run. A caller writes into the directory
+ * from a test body, or from a hook of its own registered below this call: Bun runs the hooks of a
+ * scope in the order they were registered.
+ *
+ * `real` resolves `tmpdir()` once, at the call, and joins the reserved name onto the resolved
+ * parent: `realpathSync` needs a path that exists, and the directory itself does not yet.
+ *
+ * The name is the prefix, a dash and eight random hexadecimal characters, two more than
+ * `mkdtemp` adds. The directory is made with `recursive`, so the hook is safe to run twice: Bun
+ * runs a file's root `beforeAll` again in some shapes (a file of many `describe`s, one of them
+ * `describe.skipIf(true)`, was measured doing so), and an `EEXIST` there would fail the file.
  */
 export function temporaryDirectory(
   prefix: string,
   options: Omit<TemporaryDirectoryOptions, "scope"> = {}
 ): string {
-  return temporaryDirectories(prefix, { ...options, scope: "suite" })();
+  const parent = options.real === true ? realpathSync(tmpdir()) : tmpdir();
+  const directory = join(
+    parent,
+    `${nameTemplate(prefix, undefined)}${randomBytes(4).toString("hex")}`
+  );
+  beforeAll(() => {
+    mkdirSync(directory, { mode: 0o700, recursive: true });
+  });
+  afterAll(() => {
+    rmSync(directory, { recursive: true, force: true });
+  });
+  return directory;
 }
 
 /**

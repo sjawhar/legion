@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync, rmSync } from "node:fs";
 import * as path from "node:path";
 import { stageSkills } from "@legion/pi-shared/test/skills-guard";
@@ -35,9 +35,14 @@ describe("omp.skills / prepack manifest contract", () => {
   });
 
   describe("the staged skills", () => {
-    const staged = stageSkills(manifest.name);
+    // Staged in a hook: Bun runs this body where the rows do not run, and a staging here would
+    // outlive the run.
+    let staged = "";
+    beforeAll(() => {
+      staged = stageSkills(manifest.name);
+    });
     afterAll(() => {
-      rmSync(path.dirname(staged), { recursive: true, force: true });
+      if (staged !== "") rmSync(path.dirname(staged), { recursive: true, force: true });
     });
 
     test("are exactly this plugin's partition: the skills a Legion pane's prompts load", () => {

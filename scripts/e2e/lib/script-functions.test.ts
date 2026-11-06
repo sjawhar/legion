@@ -1,15 +1,17 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { beforeAll, describe, expect, test } from "bun:test";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import { expectNoMissingHelpers, nameMissingHelpers, scriptFunctions } from "./script-functions";
 
-const dir = mkdtempSync(join(tmpdir(), "script-functions-test."));
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+const dir = temporaryDirectory("script-functions-test");
 const path = join(dir, "fixture.sh");
-writeFileSync(
-  path,
-  `#!/usr/bin/env bash
+/** The fixture's functions, read once the hook below has written it. */
+let fn: (name: string) => string;
+beforeAll(() => {
+  writeFileSync(
+    path,
+    `#!/usr/bin/env bash
 one_line() { echo "one line"; }
 # A multi-line function follows a one-line one: the one-line definition ends at its own line.
 several() {
@@ -17,8 +19,9 @@ several() {
   echo "$x"
 }
 `
-);
-const fn = scriptFunctions(path);
+  );
+  fn = scriptFunctions(path);
+});
 
 describe("scriptFunctions", () => {
   test("a one-line function is that line alone, not the functions after it", () => {

@@ -1,29 +1,28 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import {
   existsSync,
   lstatSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   readlinkSync,
-  rmSync,
   statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 
 // The box-login route's own installer, against a fake operator home in a temp directory: never the
 // real ~/.omp. Its one outside call is `mise ls --global --json`, faked here by a `mise` first on
 // PATH that prints the listing the test names and records the HOME and directory it ran under.
 const lib = import.meta.dir;
-const dir = mkdtempSync(join(tmpdir(), "install-box-login-test."));
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+const dir = temporaryDirectory("install-box-login-test");
 // The caller's HOME, which the installer refuses as --home; distinct from the fake operator home.
 const callerHome = join(dir, "caller-home");
-mkdirSync(callerHome);
+beforeAll(() => {
+  mkdirSync(callerHome);
+});
 const fixed = "18.12.2-sami.20261026-004924";
 // Stand-in bytes for the operator's database: the installer must link to it and never change it.
 const dbBytes = "not a database: a stand-in the installer must link to and never touch\n";

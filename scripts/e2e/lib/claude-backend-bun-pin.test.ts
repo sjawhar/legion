@@ -1,16 +1,14 @@
-import { afterAll, expect, test } from "bun:test";
+import { beforeAll, expect, test } from "bun:test";
 import {
   chmodSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
-  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 
 // claude-backend-tmux.sh builds claude-envoy with packages/claude-envoy/scripts/build.ts, which
 // refuses any Bun but the one the repository's .bun-version pins. A devbox whose `bun` is another
@@ -20,36 +18,24 @@ import { join } from "node:path";
 const root = join(import.meta.dir, "..", "..", "..");
 const script = join(root, "scripts", "e2e", "claude-backend-tmux.sh");
 const pinned = readFileSync(join(root, ".bun-version"), "utf8").trim();
-const dir = mkdtempSync(join(tmpdir(), "claude-backend-bun-pin-test."));
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+const dir = temporaryDirectory("claude-backend-bun-pin-test");
 
 const bin = join(dir, "bin");
-mkdirSync(bin);
 const scratch = join(dir, "tmp");
-mkdirSync(scratch);
 function stub(name: string, body: string) {
   writeFileSync(join(bin, name), `#!/bin/sh\n${body}\n`);
   chmodSync(join(bin, name), 0o755);
 }
-for (const name of [
-  "go",
-  "docker",
-  "ss",
-  "tmux",
-  "mise",
-  "gh",
-  "jj",
-  "pgrep",
-  "claude",
-  "python3",
-]) {
-  stub(name, "exit 0");
-}
-// A Bun that is not the pinned release: it answers --version with another one.
-const wrong = pinned === "1.0.0" ? "1.0.1" : "1.0.0";
-stub("bun", `case "$1" in --version) echo ${wrong};; esac\nexit 0`);
-stub("curl", "printf 200");
-stub("agent-secrets", 'name=$1; shift; [ "$1" = -- ] && shift; export "$name={}"; exec "$@"');
+/** Every stand-in the run's bin holds, each a name and the shell its stub runs. */
+const stubs: Array<[string, string]> = [
+  ...["go", "docker", "ss", "tmux", "mise", "gh", "jj", "pgrep", "claude", "python3"].map(
+    (name) => [name, "exit 0"] as [string, string]
+  ),
+  // A Bun that is not the pinned release: it answers --version with another one.
+  ["bun", `case "$1" in --version) echo ${pinned === "1.0.0" ? "1.0.1" : "1.0.0"};; esac\nexit 0`],
+  ["curl", "printf 200"],
+  ["agent-secrets", 'name=$1; shift; [ "$1" = -- ] && shift; export "$name={}"; exec "$@"'],
+];
 // hostTool gives the real NAME binary to put on the run's PATH. Bun.which takes the first match on
 // this process's PATH, which on a machine with a version manager is a shim: a wrapper that resolves
 // the tool it stands for out of the caller's environment — the manager's configuration under HOME,
@@ -151,11 +137,20 @@ const skip = reasons.length > 0;
 if (skip) {
   console.warn(`Skipped the test in ${import.meta.path} that runs the rig: ${reasons.join("; ")}.`);
 }
-for (const [name, path] of found) {
-  if (path !== null) symlinkSync(path, join(bin, name));
-}
 const keyFile = join(dir, "model-key");
-writeFileSync(keyFile, "sk-test\n", { mode: 0o600 });
+
+// The run's own bin, home and scratch, built before the row runs: `dir` is reserved at module
+// scope and made by the hook that reservation registered, and a run that selects no row of this
+// file runs neither hook and builds nothing.
+beforeAll(() => {
+  mkdirSync(bin);
+  mkdirSync(scratch);
+  for (const [name, body] of stubs) stub(name, body);
+  for (const [name, path] of found) {
+    if (path !== null) symlinkSync(path, join(bin, name));
+  }
+  writeFileSync(keyFile, "sk-test\n", { mode: 0o600 });
+});
 
 test.skipIf(skip)(
   "a bun other than the pinned release is refused in prerequisites, naming the pin",

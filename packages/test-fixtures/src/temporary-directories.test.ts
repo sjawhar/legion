@@ -1,5 +1,5 @@
-import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { beforeAll, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, realpathSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { temporaryDirectories, temporaryDirectory } from "./temporary-directories";
@@ -66,22 +66,15 @@ describe("a maker whose scope is the suite", () => {
 
 describe("a one-shot directory whose scope is the suite", () => {
   const one = temporaryDirectory("test-fixtures-one-shot");
-  // The same tmpdir() symlink the maker's `real` is read under, pointed at while the two
-  // directories below are made and put back before anything else runs.
-  const root = temporaryDirectory("test-fixtures-one-shot-root");
-  const target = join(root, "target");
-  mkdirSync(target);
-  const link = join(root, "link");
-  symlinkSync(target, link);
-  const previousTmpdir = process.env["TMPDIR"];
-  process.env["TMPDIR"] = link;
+  // Read in the describe's body, where the call was: the path is reserved there and the directory
+  // is made in the `beforeAll` the call registered, so a run that evaluates this body and runs no
+  // hook of it makes nothing.
+  const existedAtTheCall = existsSync(one);
   const resolved = temporaryDirectory("test-fixtures-one-shot-real", { real: true });
-  const throughTheLink = temporaryDirectory("test-fixtures-one-shot-link");
-  if (previousTmpdir === undefined) delete process.env["TMPDIR"];
-  else process.env["TMPDIR"] = previousTmpdir;
 
   test("makes one directory under tmpdir(), named after the prefix", () => {
     fromTheOneShot = one;
+    expect(existedAtTheCall).toBe(false);
     expect(existsSync(one)).toBe(true);
     expect(dirname(one)).toBe(tmpdir());
     expect(basename(one)).toStartWith("test-fixtures-one-shot-");
@@ -91,9 +84,13 @@ describe("a one-shot directory whose scope is the suite", () => {
     expect(existsSync(one)).toBe(true);
   });
 
-  test("real returns the resolved path, where tmpdir() is a symlink", () => {
-    expect(dirname(resolved)).toBe(realpathSync(target));
-    expect(dirname(throughTheLink)).toBe(link);
+  // `realpathSync` needs a path that exists and the reserved directory does not, so `real`
+  // resolves the parent — `tmpdir()`, which always exists — and joins the reserved name onto it.
+  // The maker's row above reads the same resolution under a `tmpdir()` that is a symlink, which a
+  // reserved path cannot: a symlink made in this body would itself outlive a run that skips it.
+  test("real joins the reserved name onto the resolved tmpdir()", () => {
+    expect(dirname(resolved)).toBe(realpathSync(tmpdir()));
+    expect(existsSync(resolved)).toBe(true);
   });
 });
 
@@ -107,15 +104,17 @@ test("removed the suite's directory when that suite ended", () => {
   expect(existsSync(fromTheDescribe)).toBe(false);
 });
 
-/** The path the skipped describe below made, which no hook of that describe removes. */
+/** The path the skipped describe below reserved, which no hook of that describe ever makes. */
 let fromTheSkippedDescribe = "";
-/** The path the describe whose rows are all skipped made, which its own `afterAll` removes. */
+/** The path the describe whose rows are all skipped reserved, which its own hooks make and
+ *  remove. */
 let fromTheSkippedRows = "";
+/** Whether the directory of that describe existed once its `beforeAll` had run. */
+let madeForTheSkippedRows = false;
 
-// Bun runs the body of a skipped describe, and never a hook that body registered: the fixture
-// makes its directory at the call, so the directory outlives the suite. The row below reads that
-// path and removes it, since nothing else will — which is what the fixture's doc comment tells a
-// caller to avoid by calling it where it is never skipped.
+// Bun runs the body of a skipped describe and then no hook that body registered, so the fixture
+// reserves its path there and makes nothing: the two rows below read both halves of that, and the
+// `-t` filter that selects no row has the same shape (filtered-run.test.ts measures it).
 describe.skipIf(true)("a describe that is skipped whole", () => {
   fromTheSkippedDescribe = temporaryDirectory("test-fixtures-skipped-describe");
   test("never runs", () => {
@@ -125,16 +124,19 @@ describe.skipIf(true)("a describe that is skipped whole", () => {
 
 describe("a describe whose rows are all skipped", () => {
   fromTheSkippedRows = temporaryDirectory("test-fixtures-skipped-rows");
+  beforeAll(() => {
+    madeForTheSkippedRows = existsSync(fromTheSkippedRows);
+  });
   test.skip("does not run", () => undefined);
 });
 
-test("kept the directory a skipped describe made, because its afterAll never ran", () => {
+test("made nothing for a describe that is skipped whole", () => {
   expect(fromTheSkippedDescribe).not.toBe("");
-  expect(existsSync(fromTheSkippedDescribe)).toBe(true);
-  rmSync(fromTheSkippedDescribe, { recursive: true, force: true });
+  expect(existsSync(fromTheSkippedDescribe)).toBe(false);
 });
 
-test("removed the directory of a describe whose rows were all skipped", () => {
+test("made and removed the directory of a describe whose rows were all skipped", () => {
   expect(fromTheSkippedRows).not.toBe("");
+  expect(madeForTheSkippedRows).toBe(true);
   expect(existsSync(fromTheSkippedRows)).toBe(false);
 });

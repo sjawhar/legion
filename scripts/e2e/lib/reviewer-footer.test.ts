@@ -1,7 +1,7 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { beforeAll, describe, expect, test } from "bun:test";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import { scriptFunctions } from "./script-functions";
 
 // request_changes_as_reviewer and reviewer_requested_changes_from, taken from lib/workflow.sh by
@@ -13,21 +13,22 @@ const fn = scriptFunctions(join(import.meta.dir, "workflow.sh"));
 const reviewApp = "example-review[bot]";
 const session = "01a151b4-1122-7147-a350-9e54db101525";
 
-const dir = mkdtempSync(join(tmpdir(), "reviewer-footer-test."));
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+const dir = temporaryDirectory("reviewer-footer-test");
 const bin = join(dir, "bin");
-mkdirSync(bin);
-writeFileSync(
-  join(bin, "gh"),
-  `#!/usr/bin/env bash
+beforeAll(() => {
+  mkdirSync(bin);
+  writeFileSync(
+    join(bin, "gh"),
+    `#!/usr/bin/env bash
 jq=
 while [ $# -gt 0 ]; do
   case $1 in --jq) jq=$2; shift 2 ;; *) shift ;; esac
 done
 jq -c "$jq" "$GH_REVIEWS_FIXTURE"
 `,
-  { mode: 0o755 }
-);
+    { mode: 0o755 }
+  );
+});
 
 const footer = (s: string) => `<!-- legion: {"session":"${s}","phase":"review"} -->`;
 type Review = { login?: string; state?: string; body: string };

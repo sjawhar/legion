@@ -1,7 +1,7 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { describe, expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import { scriptFunctions } from "./script-functions";
 
 // pod_runs POD ROLE COMMAND (stage4b-sandbox-tree.sh): whether a process whose command line
@@ -15,8 +15,7 @@ import { scriptFunctions } from "./script-functions";
 // match with a process list after it; the stub writes from a subprocess, as kubectl does, so a
 // consumer that stops reading early gives it SIGPIPE.
 const fn = scriptFunctions(join(import.meta.dir, "..", "stage4b-sandbox-tree.sh"));
-const dir = mkdtempSync(join(tmpdir(), "pod-runs-test."));
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+const dir = temporaryDirectory("pod-runs-test");
 
 function podRuns(listing: string, command: string): { ok: boolean; status: number } {
   const file = join(dir, "listing");

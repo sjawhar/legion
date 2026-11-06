@@ -1,7 +1,7 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { describe, expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import { scriptFunctions } from "./script-functions";
 
 // Stage 4b's repository-tools checkpoint reads which role shim of tree 2's pod built the CodeGraph
@@ -12,8 +12,7 @@ import { scriptFunctions } from "./script-functions";
 // skipped, and the implementer's agent echoed a success line of its own through its bash tool
 // before the reviewer's shim had built.
 const fn = scriptFunctions(join(import.meta.dir, "..", "stage4b-sandbox-tree.sh"));
-const dir = mkdtempSync(join(tmpdir(), "stage4b-codegraph-warm-up-test."));
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+const dir = temporaryDirectory("stage4b-codegraph-warm-up-test");
 
 const workspace = "/legion/workspaces/sjawhar/legion-smoke/legsmoke-564";
 const warmUp = `[legion] codegraph warm-up for ${workspace}`;

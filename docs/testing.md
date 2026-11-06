@@ -15,14 +15,20 @@ These rules are how a file leaves nothing behind.
 `@legion/test-fixtures` holds the shared pieces, and eight packages depend on it: broker-client, claude-envoy, contracts, dispatch, envoy-client, pi-envoy, pi-legion and pi-shared.
 The two Bun packages that do not are the fixture package itself, whose tests import its sources by relative path, and `packages/proof-editor`, whose tests make no directory, bind no port and write no environment variable.
 
-- Take a temporary directory from `temporaryDirectories` (`@legion/test-fixtures/temporary-directories`), never from an `mkdtemp` with a cleanup of your own.
-  Call it at the test file's module scope, or in the body of a `describe` that is never skipped, never inside a test body:
-  it registers its `afterEach` — or, with `scope: "suite"`, its `afterAll` — where it is called, and `bun:test` takes a hook's scope from the point of the call.
-  Bun 1.4.4 runs the body of a `describe.skipIf(true)` and then none of the hooks that body registered, so a maker called there makes its directory and nothing removes it again.
-  A `describe` whose rows are each skipped, and a hook registered at module scope, still run their `afterAll`, so the whole-`describe` skip is the one shape that keeps what its body made (`packages/test-fixtures/src/temporary-directories.test.ts` holds both halves).
+- Take a temporary directory from `@legion/test-fixtures/temporary-directories`, never from an `mkdtemp` with a cleanup of your own.
+  One directory for a whole file or `describe` is `temporaryDirectory(prefix)`: call it at the test file's module scope, or in the body of a `describe`, never inside a test body.
+  It reserves the path at the call and returns it, and registers the `beforeAll` that makes the directory and the `afterAll` that removes it where it is called.
+  A directory per test is `temporaryDirectories(prefix)`, registered in those same two places, which returns a maker that makes a directory at each call and removes them in its `afterEach` — or, with `scope: "suite"`, its `afterAll`.
+  Call that maker from a test body or a hook only: it makes its directory at the call, where the one-shot form makes nothing until its hook runs.
+  `bun:test` takes a hook's scope from the point of the call, and Bun 1.4.4 evaluates a module body and a `describe` body in three cases where it then runs no hook that body registered: a `bun test -t <pattern>` that selects no row of the file, one that selects no row of the `describe`, and `describe.skipIf(true)`.
+  Nothing catches what such a run leaves: under `bun test` neither `process.once("exit")` nor `"beforeExit"` runs.
+  So anything a file creates, sets or writes at module scope or in a `describe` body survives a filtered run, and a directory must be made where the hooks run.
+  Write into a reserved directory from a test body, or from a hook registered below the reservation, since nothing is at the path until that `beforeAll` has run and Bun runs a scope's hooks in the order they were registered.
+  A `describe` whose rows are each `.skip` runs both its `beforeAll` and its `afterAll`, so a directory reserved in its body is made and removed as usual; `describe.skipIf(true)` runs neither, so that directory is never made (`packages/test-fixtures/src/temporary-directories.test.ts` holds both, and `filtered-run.test.ts` runs a file under a filter that selects nothing and reads its `TMPDIR` afterwards).
   The fixture's own module body registers no hook, and cannot:
   Bun evaluates an imported module once per process, so a hook there would take the scope of whichever test file imported the fixture first, and every other file's directories would outlive their tests.
-  One directory for a whole file or `describe` is `temporaryDirectory(prefix)` of the same module: the suite-scoped maker, called once, so a caller that needs a single scratch root writes no maker it calls nowhere else.
+  `temporaryTmpdir(prefix)` (`@legion/test-fixtures/temporary-tmpdir`) is the same shape for a whole file's `TMPDIR`: it reserves one root, and makes it and points `TMPDIR` at it in a `beforeAll` whose `afterAll` puts the name back and removes the root.
+  Anything staged under that root is staged in a hook too, since the name holds the caller's value until that `beforeAll` has run.
 
 - Put a variable back with `restoreEnvironment` or `captureEnvironment` (`@legion/test-fixtures/environment`), which set and delete the names themselves.
   A name that held no value is captured as unset and the restore deletes it again;

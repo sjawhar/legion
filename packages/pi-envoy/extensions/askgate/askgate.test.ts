@@ -1,4 +1,4 @@
-import { afterAll, afterEach, describe, expect, jest, mock, test } from "bun:test";
+import { afterEach, beforeAll, describe, expect, jest, mock, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
@@ -25,6 +25,7 @@ import {
   temporaryDirectories,
   temporaryDirectory,
 } from "@legion/test-fixtures/temporary-directories";
+import { temporaryTmpdir } from "@legion/test-fixtures/temporary-tmpdir";
 import type { DispatchSession } from "../../src/dispatch-session";
 import * as core from "./askgate-core";
 import {
@@ -62,17 +63,12 @@ const NO_DOCUMENT = new DispatchServiceError(
 );
 
 /**
- * The suite's own TMPDIR, set before any test runs: every scratch directory a test makes through
- * `tmpdir()` lands here, and the suite removes it at the end.
+ * The suite's own TMPDIR, pointed at this directory before the file's first test and put back
+ * when it ends: every scratch directory a test makes through `tmpdir()` lands here, and the
+ * fixture's `afterAll` removes it. The fixture makes the directory and writes `TMPDIR` in a
+ * `beforeAll`, so a run that selects no row of this file does neither.
  */
-const CALLER_TMPDIR = process.env.TMPDIR;
-const SUITE_TMP = fs.realpathSync(fs.mkdtempSync(path.join(tmpdir(), "gate-suite-")));
-process.env.TMPDIR = SUITE_TMP;
-afterAll(() => {
-  fs.rmSync(SUITE_TMP, { recursive: true, force: true });
-  if (CALLER_TMPDIR === undefined) delete process.env.TMPDIR;
-  else process.env.TMPDIR = CALLER_TMPDIR;
-});
+const SUITE_TMP = temporaryTmpdir("gate-suite");
 /**
  * Directories named as the gate's old snapshots were (`askgate-` and six characters): the gate
  * reads each file in place now and writes no copy of one, which the suite's last test holds.
@@ -1755,12 +1751,13 @@ describe("dispatch CLI calls", () => {
   // A stand-in for the plugin's `dispatch`: under --dry-run it prints the arguments its flags name as
   // JSON (a `-file` flag reads its path, `-` reads stdin). A real call can record the arguments it
   // would post under ASKGATE_POSTED, so the gate tests compare reviewed content with sent content.
-  const work = fs.mkdtempSync(path.join(tmpdir(), "askgate-cli-"));
+  const work = temporaryDirectory("askgate-cli");
   const bin = path.join(work, "bin");
-  fs.mkdirSync(bin);
-  fs.writeFileSync(
-    path.join(bin, "dispatch"),
-    `#!${process.execPath}
+  beforeAll(() => {
+    fs.mkdirSync(bin);
+    fs.writeFileSync(
+      path.join(bin, "dispatch"),
+      `#!${process.execPath}
 const [command, ...rest] = process.argv.slice(2);
 const dryRun = rest.includes("--dry-run");
 const args = {};
@@ -1782,9 +1779,9 @@ if (!dryRun) {
 }
 console.log(JSON.stringify(args, null, 2));
 `,
-    { mode: 0o755 }
-  );
-  afterAll(() => fs.rmSync(work, { recursive: true, force: true }));
+      { mode: 0o755 }
+    );
+  });
   const STUB = { PATH: `${bin}:${process.env.PATH}` };
   const QUESTION = "Should the release wait for the staging soak? Recommendation: wait one day.\n";
   const ASK = `dispatch ask --issue X-1 --question-file - <<'EOF'\n${QUESTION}EOF`;
@@ -2660,10 +2657,13 @@ console.log(JSON.stringify(args, null, 2));
   // the call lost its marker. Every row below is run through real bash with a stand-in
   // `dispatch` that prints the argv it got and its standard input.
   describe("the override comment, wherever the command's line ends", () => {
-    const argvBin = fs.mkdtempSync(path.join(SUITE_TMP, "argv-dispatch-"));
-    fs.writeFileSync(
-      path.join(argvBin, "dispatch"),
-      `#!${process.execPath}
+    const argvBin = temporaryDirectory("argv-dispatch");
+    /** Where a rebuttal that ran would leave its mark; no row may create one. */
+    const sentinels = temporaryDirectory("sentinel");
+    beforeAll(() => {
+      fs.writeFileSync(
+        path.join(argvBin, "dispatch"),
+        `#!${process.execPath}
 import { readFileSync } from "node:fs";
 let stdin = "";
 try {
@@ -2671,10 +2671,9 @@ try {
 } catch {}
 console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
 `,
-      { mode: 0o755 }
-    );
-    /** Where a rebuttal that ran would leave its mark; no row may create one. */
-    const sentinels = fs.mkdtempSync(path.join(SUITE_TMP, "sentinel-"));
+        { mode: 0o755 }
+      );
+    });
     const BODY = "First.\nSecond.\n";
     /** Each command shape the grammar takes, written with and without the override flag. */
     const SHAPES: Array<[string, (flag: string) => string, string]> = [
@@ -3735,10 +3734,11 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
      * the CLI does: it parses its own flags into the arguments the marker binds, reads `-` from
      * standard input, and prints both the argv it got and what `consumeMarker` answered.
      */
-    const consumingBin = fs.mkdtempSync(path.join(SUITE_TMP, "consuming-dispatch-"));
-    fs.writeFileSync(
-      path.join(consumingBin, "dispatch"),
-      `#!${process.execPath}
+    const consumingBin = temporaryDirectory("consuming-dispatch");
+    beforeAll(() => {
+      fs.writeFileSync(
+        path.join(consumingBin, "dispatch"),
+        `#!${process.execPath}
 import { consumeMarker } from ${JSON.stringify(path.join(import.meta.dir, "..", "..", "..", "envoy-client", "src", "askgate-marker.ts"))};
 const argv = process.argv.slice(2);
 const args = {};
@@ -3752,8 +3752,9 @@ for (let i = 1; i < argv.length; i++) {
 }
 console.log(JSON.stringify({ argv, consumed: consumeMarker([process.env.ASKGATE_STORE], argv, args, [], Date.now()) }));
 `,
-      { mode: 0o755 }
-    );
+        { mode: 0o755 }
+      );
+    });
 
     // Design 2: the mint reads the command the handler finally returns, the override comment put
     // back, and a comment token is never a word. So the marker's argv is the one bash passes.
@@ -3899,9 +3900,11 @@ console.log(JSON.stringify({ argv, consumed: consumeMarker([process.env.ASKGATE_
   describe("dispatch artifact uploads of markdown (Task 4.3)", () => {
     const BRIEF = "# Brief\n\nThe person said: ship it on Friday.\n";
     const docs = path.join(work, "docs");
-    fs.mkdirSync(docs, { recursive: true });
-    fs.writeFileSync(path.join(work, "brief.md"), BRIEF);
-    fs.writeFileSync(path.join(docs, "brief.md"), `${BRIEF}(the copy in docs)\n`);
+    beforeAll(() => {
+      fs.mkdirSync(docs, { recursive: true });
+      fs.writeFileSync(path.join(work, "brief.md"), BRIEF);
+      fs.writeFileSync(path.join(docs, "brief.md"), `${BRIEF}(the copy in docs)\n`);
+    });
     /** The upload request applies failure 10 alone: its own instruction, and no other rule's. */
     const uploadRule = "Judge this upload against content failure 10 alone.";
 
@@ -4042,9 +4045,14 @@ console.log(JSON.stringify({ argv, consumed: consumeMarker([process.env.ASKGATE_
     // The CLI resolves --path against its process.cwd(), the physical directory, so `..` from a
     // symlinked directory leaves the link's target, not the link.
     const real = path.join(work, "real");
-    fs.mkdirSync(path.join(real, "inner"), { recursive: true });
-    fs.writeFileSync(path.join(real, "brief.md"), `${BRIEF}(the copy beside the link's target)\n`);
-    fs.symlinkSync(path.join(real, "inner"), path.join(work, "link"));
+    beforeAll(() => {
+      fs.mkdirSync(path.join(real, "inner"), { recursive: true });
+      fs.writeFileSync(
+        path.join(real, "brief.md"),
+        `${BRIEF}(the copy beside the link's target)\n`
+      );
+      fs.symlinkSync(path.join(real, "inner"), path.join(work, "link"));
+    });
     test("(f) after a cd into a symlinked directory, ../ is read from the link target's parent, as the CLI reads it", async () => {
       const g = bind({ env: STUB, cwd: work });
       await g.bash(
@@ -4389,9 +4397,11 @@ console.log(JSON.stringify({ argv, consumed: consumeMarker([process.env.ASKGATE_
     // `--content-file`), which the CLI takes only under a name ending in .md or .markdown or with
     // no extension, or a `--path` file the CLI sends as text/markdown (its name ends in .md or
     // .markdown); and the gate also reviews any upload whose name ends in .md.
-    fs.writeFileSync(path.join(work, "notes.txt"), "The person said: ship it on Friday.\n");
-    fs.writeFileSync(path.join(work, "name-md.txt"), "brief.md\n");
-    fs.writeFileSync(path.join(work, "name-png.txt"), "shot.png\n");
+    beforeAll(() => {
+      fs.writeFileSync(path.join(work, "notes.txt"), "The person said: ship it on Friday.\n");
+      fs.writeFileSync(path.join(work, "name-md.txt"), "brief.md\n");
+      fs.writeFileSync(path.join(work, "name-png.txt"), "shot.png\n");
+    });
     test("(i) a --name-file whose name ends in .md is reviewed, decided from the name its dry run prints", async () => {
       const g = bind({ env: STUB, cwd: work });
       await g.bash(
@@ -4495,18 +4505,22 @@ console.log(JSON.stringify({ argv, consumed: consumeMarker([process.env.ASKGATE_
 // passes as written, with no expansion, and a call outside it gets a note that names its cause.
 describe("the literal grammar, widened to forms with no expansion", () => {
   // A stand-in `dispatch` that prints the argv it gets as one JSON line, so real bash shows what
-  // the CLI would receive for each form.
+  // the CLI would receive for each form. The directory's path is reserved here and the fixture is
+  // staged in the `beforeAll` below, which Bun runs after the one the reservation registered: a
+  // run that selects no row of this describe makes none of it.
   const root = temporaryDirectory("askgate-argv");
   const bin = path.join(root, "bin");
   // A home of the test's own: no child here reads the caller's.
   const home = path.join(root, "home");
-  fs.mkdirSync(bin);
-  fs.mkdirSync(home);
-  fs.writeFileSync(
-    path.join(bin, "dispatch"),
-    `#!${process.execPath}\nconsole.log(JSON.stringify(process.argv.slice(2)));\n`,
-    { mode: 0o755 }
-  );
+  beforeAll(() => {
+    fs.mkdirSync(bin);
+    fs.mkdirSync(home);
+    fs.writeFileSync(
+      path.join(bin, "dispatch"),
+      `#!${process.execPath}\nconsole.log(JSON.stringify(process.argv.slice(2)));\n`,
+      { mode: 0o755 }
+    );
+  });
   /** The argv real bash gives the stand-in for `command`. */
   const bashArgv = (command: string): unknown => {
     const run = Bun.spawnSync(["bash", "-c", command], {
@@ -5697,16 +5711,17 @@ describe("askgate.ts, the entry", () => {
 // refused there. Here the gate runs its dry run on the real CLI, mints through its real code
 // path, and the real CLI (`runDispatchCli`, with a fake Dispatch) checks the marker and posts.
 describe("a marker the gate mints, checked by the real dispatch CLI", () => {
-  const work = fs.realpathSync(fs.mkdtempSync(path.join(tmpdir(), "askgate-real-cli-")));
-  afterAll(() => fs.rmSync(work, { recursive: true, force: true }));
+  const work = temporaryDirectory("askgate-real-cli", { real: true });
   const bin = path.join(work, "bin");
-  fs.mkdirSync(bin);
   const entry = path.join(import.meta.dir, "..", "..", "..", "envoy-client", "bin", "dispatch.ts");
-  fs.writeFileSync(
-    path.join(bin, "dispatch"),
-    `#!/bin/sh\nexec "${process.execPath}" "${entry}" "$@"\n`,
-    { mode: 0o755 }
-  );
+  beforeAll(() => {
+    fs.mkdirSync(bin);
+    fs.writeFileSync(
+      path.join(bin, "dispatch"),
+      `#!/bin/sh\nexec "${process.execPath}" "${entry}" "$@"\n`,
+      { mode: 0o755 }
+    );
+  });
   const env = {
     PATH: `${bin}:${process.env.PATH}`,
     HOME: work,

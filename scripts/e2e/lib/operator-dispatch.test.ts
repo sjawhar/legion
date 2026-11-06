@@ -1,42 +1,46 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
-  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import { operatorDispatch } from "./operator-dispatch";
 
-const dir = mkdtempSync(join(tmpdir(), "operator-dispatch-test."));
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+const dir = temporaryDirectory("operator-dispatch-test");
 
 const home = join(dir, "home");
 const profile = join(dir, "profile");
 const cwd = join(dir, "cwd");
-for (const directory of [join(home, ".config", "legion"), profile, cwd]) {
-  mkdirSync(directory, { recursive: true });
-}
-writeFileSync(
-  join(home, ".config", "legion", "envoy.json"),
-  JSON.stringify({
-    dispatch: {
-      enabled: true,
-      serverUrl: "https://dispatch.internal.example/",
-      token: "neutral-1",
-    },
-  })
-);
-writeFileSync(
-  join(profile, "envoy.json"),
-  JSON.stringify({
-    dispatch: { enabled: true, serverUrl: "https://profile.internal.example", token: "profile-2" },
-  })
-);
+beforeAll(() => {
+  for (const directory of [join(home, ".config", "legion"), profile, cwd]) {
+    mkdirSync(directory, { recursive: true });
+  }
+  writeFileSync(
+    join(home, ".config", "legion", "envoy.json"),
+    JSON.stringify({
+      dispatch: {
+        enabled: true,
+        serverUrl: "https://dispatch.internal.example/",
+        token: "neutral-1",
+      },
+    })
+  );
+  writeFileSync(
+    join(profile, "envoy.json"),
+    JSON.stringify({
+      dispatch: {
+        enabled: true,
+        serverUrl: "https://profile.internal.example",
+        token: "profile-2",
+      },
+    })
+  );
+});
 
 // A session whose Dispatch credential is the secrets broker's: DISPATCH_TOKEN_BROKER says this
 // machine's own identity is the credential, so no bearer is read from any file or variable and
@@ -163,23 +167,30 @@ printf '%s|%s|%s|%s\\n' "$operator_dispatch_file" "$operator_dispatch_url" "$ope
       cwd: directory,
       env: { HOME: home, PATH: process.env.PATH ?? "", ...extra },
     });
-  const on = run(cwd);
-  const refused = run(cwd, { DISPATCH_URL: "https://other.internal.example" });
-  // A checkout holding only the OpenCode-era file, which names another server and bearer.
+  // The three runs and the old checkout they read are made in a hook, not in this body: the
+  // directories they run in are made by the file's own `beforeAll`, which Bun runs first.
+  let on: Bun.SyncSubprocess | undefined;
+  let refused: Bun.SyncSubprocess | undefined;
+  let inOldCheckout: Bun.SyncSubprocess | undefined;
   const oldCheckout = join(dir, "old-checkout");
   const old = join(oldCheckout, ".opencode", "envoy.json");
-  mkdirSync(join(oldCheckout, ".opencode"), { recursive: true });
-  writeFileSync(
-    old,
-    JSON.stringify({
-      dispatch: {
-        enabled: true,
-        serverUrl: "https://checkout.internal.example",
-        token: "checkout-3",
-      },
-    })
-  );
-  const inOldCheckout = run(oldCheckout);
+  beforeAll(() => {
+    on = run(cwd);
+    refused = run(cwd, { DISPATCH_URL: "https://other.internal.example" });
+    // A checkout holding only the OpenCode-era file, which names another server and bearer.
+    mkdirSync(join(oldCheckout, ".opencode"), { recursive: true });
+    writeFileSync(
+      old,
+      JSON.stringify({
+        dispatch: {
+          enabled: true,
+          serverUrl: "https://checkout.internal.example",
+          token: "checkout-3",
+        },
+      })
+    );
+    inOldCheckout = run(oldCheckout);
+  });
 
   test("sets the file, URL and bearer the client resolves", () => {
     expect(on?.exitCode).toBe(0);

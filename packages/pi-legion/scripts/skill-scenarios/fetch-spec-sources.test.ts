@@ -1,20 +1,10 @@
-import { afterAll, expect, test } from "bun:test";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { expect, test } from "bun:test";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import { main } from "./fetch-spec-sources";
 
-const scratch = realpathSync(mkdtempSync(path.join(tmpdir(), "fetch-spec-sources-")));
-afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+const scratch = temporaryDirectory("fetch-spec-sources", { real: true });
 
 function dir(name: string): string {
   const made = path.join(scratch, name);

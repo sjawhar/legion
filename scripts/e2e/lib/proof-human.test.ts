@@ -1,24 +1,25 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { beforeAll, describe, expect, test } from "bun:test";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 
 // require_proof_human (lib/workflow.sh) against a fake gh first on PATH: it prints FAKE_GH_LOGIN
 // for the viewer query, writes FAKE_GH_STDERR to stderr, exits FAKE_GH_EXIT, and logs each call
 // with the GH_REPO it was given.
 const lib = join(import.meta.dir, "workflow.sh");
-const dir = mkdtempSync(join(tmpdir(), "proof-human-test."));
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
-writeFileSync(
-  join(dir, "gh"),
-  `#!/usr/bin/env bash
+const dir = temporaryDirectory("proof-human-test");
+beforeAll(() => {
+  writeFileSync(
+    join(dir, "gh"),
+    `#!/usr/bin/env bash
 printf 'GH_REPO=%s %s\\n' "\${GH_REPO:-}" "$*" >>"$FAKE_GH_LOG"
 [ -z "\${FAKE_GH_STDERR:-}" ] || printf '%s\\n' "$FAKE_GH_STDERR" >&2
 case "$*" in *viewer*) printf '%s\\n' "$FAKE_GH_LOGIN" ;; esac
 exit "\${FAKE_GH_EXIT:-0}"
 `,
-  { mode: 0o755 }
-);
+    { mode: 0o755 }
+  );
+});
 
 // The stage scripts' shell options, ERR trap, and check helpers, then the lib.
 const prelude = `set -Eeuo pipefail

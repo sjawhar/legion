@@ -1,7 +1,7 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { describe, expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import { jsonl } from "./omp-session-fixtures";
 import { scriptFunctions } from "./script-functions";
 
@@ -15,8 +15,7 @@ import { scriptFunctions } from "./script-functions";
 // message that starts the next turn, so the last message entry being a stopped answer does not
 // mean the session is idle.
 const fn = scriptFunctions(join(import.meta.dir, "..", "dispatch-user-turns.sh"));
-const dir = mkdtempSync(join(tmpdir(), "user-turns-settled-test."));
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+const dir = temporaryDirectory("user-turns-settled-test");
 
 const userTurn = {
   type: "message",

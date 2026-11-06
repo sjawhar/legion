@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   copyFileSync,
   existsSync,
@@ -10,19 +10,18 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import { appTokenSources } from "./app-logins";
 
 // lib/app-logins.ts run as the stage proofs run it, against a stand-in GitHub that answers
 // GraphQL's viewer and GET /apps/<slug> under an installation token of one of its Apps, and
 // refuses every other request, the JWT routes (GET /app, the installation routes) among them. The
 // implement App holds checks: read alone, as the real one does.
-const dir = mkdtempSync(join(tmpdir(), "app-logins-test."));
+const dir = temporaryDirectory("app-logins-test");
 const script = join(import.meta.dir, "app-logins.ts");
 // The home every child of this file runs under, so none of them reads the caller's.
 const home = join(dir, "home");
-mkdirSync(home);
 
 interface StandInApp {
   id: number;
@@ -94,7 +93,6 @@ const unreachable = `http://127.0.0.1:${closed.port}/`;
 await closed.stop(true);
 afterAll(() => {
   github.stop(true);
-  rmSync(dir, { recursive: true, force: true });
 });
 
 /** A release as the secrets broker gives one: one entry per installation, keyed by login. */
@@ -108,9 +106,7 @@ function release(installations: Record<string, string>, expires = "2099-01-01T00
     ),
   });
 }
-for (const id of [101, 202, 303, 404]) {
-  writeFileSync(join(dir, `release-${id}.json`), release({ sjawhar: tokenOf(id) }));
-}
+const releaseIDs = [101, 202, 303, 404];
 
 let configs = 0;
 function config(implement: string, review: string): string {
@@ -465,14 +461,22 @@ describe("read_app_logins", () => {
 // FAIL_MINT, releases nothing when EMPTY_MINT is set, and streams stdout when OVERSIZED_MINT is set.
 const store = join(dir, "store");
 const fakeBin = join(dir, "bin");
-mkdirSync(store);
-mkdirSync(fakeBin);
-writeFileSync(join(store, "IMPLEMENT_APP"), release({ sjawhar: tokenOf(101) }));
-writeFileSync(join(store, "REVIEW_APP"), release({ sjawhar: tokenOf(202) }));
-writeFileSync(join(store, "OTHER_APP"), release({ sjawhar: tokenOf(404) }));
-writeFileSync(
-  join(fakeBin, "agent-secrets"),
-  `#!/bin/sh
+// Every directory and stand-in this file's children read, staged before the first row: `dir` is
+// reserved at module scope and made by the hook that reservation registered, so a run that
+// selects no row of this file stages nothing and leaves nothing behind.
+beforeAll(() => {
+  mkdirSync(home);
+  for (const id of releaseIDs) {
+    writeFileSync(join(dir, `release-${id}.json`), release({ sjawhar: tokenOf(id) }));
+  }
+  mkdirSync(store);
+  mkdirSync(fakeBin);
+  writeFileSync(join(store, "IMPLEMENT_APP"), release({ sjawhar: tokenOf(101) }));
+  writeFileSync(join(store, "REVIEW_APP"), release({ sjawhar: tokenOf(202) }));
+  writeFileSync(join(store, "OTHER_APP"), release({ sjawhar: tokenOf(404) }));
+  writeFileSync(
+    join(fakeBin, "agent-secrets"),
+    `#!/bin/sh
 printf '%s\\n' "$*" >>"\${ARGV_LOG:-/dev/null}"
 name=$1
 shift
@@ -492,8 +496,9 @@ value=$(cat "\${STORE:-${store}}/$name") || exit 9
 export "$name=$value"
 exec "$@"
 `,
-  { mode: 0o755 }
-);
+    { mode: 0o755 }
+  );
+});
 const appInputs = {
   LEGION_E2E_IMPLEMENT_APP_ID: "101",
   LEGION_E2E_IMPLEMENT_APP_SECRET: "IMPLEMENT_APP",

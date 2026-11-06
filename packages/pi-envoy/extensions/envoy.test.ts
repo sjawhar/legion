@@ -67,7 +67,7 @@ import {
   subscribeLegionNotice,
 } from "@legion/pi-shared/role-claim-bridge";
 import { hostAgentRegistryMock, testAgentRoster } from "@legion/pi-shared/test/host-registry";
-import { restoreEnvironment } from "@legion/test-fixtures/environment";
+import { captureEnvironment, restoreEnvironment } from "@legion/test-fixtures/environment";
 import type { UserInputBuiltinCommand } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/send-user-input-handler";
 import { logger, procmgr } from "@oh-my-pi/pi-utils";
 import { decode } from "@toon-format/toon";
@@ -395,13 +395,20 @@ let configDirectory = "";
 // stand-ins for it; it carries a query of its own so no row's instance is this one; and it sits
 // below the `original*` captures because loading the entry sets `PATH`, `DISPATCH_HOST` and
 // `ENVOY_CONFIG_FILE` as every row's own load does, which `afterEach` puts back to what was
-// captured.
+// captured. Loading it here writes those three names whether or not a row of this file runs, so
+// the capture below puts them back as soon as the entry is loaded; every row's own load writes
+// them again.
+const restoreEntryLoad = captureEnvironment(["PATH", "DISPATCH_HOST", "ENVOY_CONFIG_FILE"]);
 const { resetNatsConnectForTests, setNatsConnectForTests } = await import(
   "./envoy.ts?nats-stand-in"
 );
-setNatsConnectForTests(natsStandInConnect);
-// The slot the setter writes is the process's, not this file's: without this the next file of
-// the same `bun test` run would dial the stand-in above, with this file's state.
+restoreEntryLoad();
+// The slot the setter writes is the process's, not this file's, so the set and the reset are one
+// pair of hooks: a `bun test -t <pattern>` that selects no row of this file runs neither, where a
+// set at module scope would run and leave the next file of the same run dialling this stand-in.
+// No pane starts before this `beforeAll`: every row of this file builds its own instance in its
+// own body.
+beforeAll(() => setNatsConnectForTests(natsStandInConnect));
 afterAll(() => resetNatsConnectForTests());
 
 beforeEach(() => {

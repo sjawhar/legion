@@ -1,8 +1,8 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { describe, expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import { runJq } from "./run-jq.ts";
 
 // Stage 4b's verdict on a deployment's worker pod block (deployment-pod-block): the issue pod the
@@ -11,8 +11,7 @@ import { runJq } from "./run-jq.ts";
 // holds it, under /var/run/legion/home), and every env name and value on a role's process.
 
 const program = fileURLToPath(new URL("./deployment-pod-block-verdict.jq", import.meta.url));
-const dir = mkdtempSync(join(tmpdir(), "deployment-pod-block-verdict-test."));
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+const dir = temporaryDirectory("deployment-pod-block-verdict-test");
 
 interface Verdict {
   process: { pid: number; comm: string } | null;

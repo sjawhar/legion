@@ -1,5 +1,5 @@
-import { describe, expect, test } from "bun:test";
-import { chmodSync, writeFileSync } from "node:fs";
+import { beforeAll, describe, expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import { scriptFunctions } from "./script-functions";
@@ -111,17 +111,19 @@ describe("node_released, over a stub kubectl", () => {
   // The stub answers `get node` with what NODE_EXISTS says and `get pods` with LISTING; `timeout`
   // runs it from PATH, so it is a script, not a function.
   const bin = temporaryDirectory("node-released");
-  writeFileSync(
-    join(bin, "kubectl"),
-    `#!/usr/bin/env bash
+  beforeAll(() => {
+    writeFileSync(
+      join(bin, "kubectl"),
+      `#!/usr/bin/env bash
 case " $* " in
   *" get node "*) if [ "$NODE_EXISTS" = yes ]; then echo "node/$NODE"; fi ;;
   *" get pods "*) printf '%s' "$LISTING" ;;
   *) echo "unexpected kubectl $*" >&2; exit 2 ;;
 esac
-`
-  );
-  chmodSync(join(bin, "kubectl"), 0o755);
+`,
+      { mode: 0o755 }
+    );
+  });
 
   function released(node: string, exists: boolean, pods: readonly Pod[]) {
     const result = Bun.spawnSync(

@@ -1,15 +1,7 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { beforeAll, describe, expect, test } from "bun:test";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 
 // The key command install-model-gateway.sh writes, against a fake hawk-token first on PATH. The
 // fake appends its pid to FAKE_MINT_LOG (one line per mint), sleeps FAKE_MINT_SLEEP seconds, then
@@ -17,13 +9,15 @@ import { join } from "node:path";
 // does when its 9000 ms budget runs out (budget), fails at once on the login (refused), or is
 // killed by a signal (killed).
 const lib = import.meta.dir;
-const dir = mkdtempSync(join(tmpdir(), "install-model-gateway-test."));
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+const dir = temporaryDirectory("install-model-gateway-test");
 const bin = join(dir, "bin");
-mkdirSync(bin);
-writeFileSync(
-  join(bin, "hawk-token"),
-  `#!/usr/bin/env bash
+const operatorHome = join(dir, "operator-home");
+beforeAll(() => {
+  mkdirSync(bin);
+  mkdirSync(operatorHome);
+  writeFileSync(
+    join(bin, "hawk-token"),
+    `#!/usr/bin/env bash
 printf '%s\\n' "$$" >>"$FAKE_MINT_LOG"
 sleep "\${FAKE_MINT_SLEEP:-0}"
 case "\${FAKE_MINT_MODE:-ok}" in
@@ -43,10 +37,9 @@ refused)
 killed) kill -KILL $$ ;;
 esac
 `,
-  { mode: 0o755 }
-);
-const operatorHome = join(dir, "operator-home");
-mkdirSync(operatorHome);
+    { mode: 0o755 }
+  );
+});
 
 interface Fake {
   mode?: "ok" | "budget" | "refused" | "killed";

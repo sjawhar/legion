@@ -1,24 +1,21 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import {
   copyFileSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   realpathSync,
-  rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 
 // Which Oh My Pi install-plugin-profile.sh runs against the profile, and how. The script runs from a
 // fake checkout (it finds the checkout from its own path), with a fake pack-plugin.sh that packs a
 // manifest alone, and a `mise` first on PATH that records every call, names a fake install for
 // `mise where`, and answers `omp plugin list`. An `omp` wrapper sits on PATH beside it, as an
 // operator's does: the installer must run the install's own bin/omp by its absolute path instead.
-const dir = mkdtempSync(join(tmpdir(), "install-plugin-profile-test."));
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+const dir = temporaryDirectory("install-plugin-profile-test");
 const repoPin = "github:sjawhar/oh-my-pi@18.12.2-sami.20261025-144204";
 
 let runs = 0;

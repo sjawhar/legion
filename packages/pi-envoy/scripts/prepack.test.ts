@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import * as path from "node:path";
@@ -38,9 +39,14 @@ describe("omp.skills / prepack manifest contract", () => {
   });
 
   describe("the staged skills", () => {
-    const staged = stageSkills(manifest.name);
+    // Staged in a hook: Bun runs this body where the rows do not run, and a staging here would
+    // outlive the run.
+    let staged = "";
+    beforeAll(() => {
+      staged = stageSkills(manifest.name);
+    });
     afterAll(() => {
-      rmSync(path.dirname(staged), { recursive: true, force: true });
+      if (staged !== "") rmSync(path.dirname(staged), { recursive: true, force: true });
     });
 
     test("are exactly this plugin's partition: the Dispatch and Envoy skills every session uses", () => {

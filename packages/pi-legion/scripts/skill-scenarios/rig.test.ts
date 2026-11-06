@@ -1,16 +1,8 @@
-import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import {
-  cpSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { skipWithout } from "@legion/test-fixtures/host-tools";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import { scriptFunctions } from "../../../../scripts/e2e/lib/script-functions";
 
 // Every test here runs rig.sh and its stand-ins as real processes. On a loaded machine one test
@@ -26,13 +18,15 @@ const withoutDocker = skipWithout("docker");
 // profile reaches Anthropic by, picked by LEGION_E2E_MODEL_ROUTE.
 const root = path.resolve(import.meta.dir, "../../../..");
 const fn = scriptFunctions(path.join(import.meta.dir, "rig.sh"));
-const work = mkdtempSync(path.join(tmpdir(), "skill-scenarios-rig-"));
-afterAll(() => rmSync(work, { recursive: true, force: true }));
+const work = temporaryDirectory("skill-scenarios-rig");
 const operatorHome = path.join(work, "operator-home");
 // The home the probes must not reach, with the one thing they look for in it: a judge that could
-// read it would list this directory.
-mkdirSync(path.join(operatorHome, ".ssh"), { recursive: true });
-writeFileSync(path.join(operatorHome, ".ssh", "id_ed25519"), "not a key\n", { mode: 0o600 });
+// read it would list this directory. It is staged in a hook, below the one the reservation
+// registered: a run that selects no row of this file makes neither.
+beforeAll(() => {
+  mkdirSync(path.join(operatorHome, ".ssh"), { recursive: true });
+  writeFileSync(path.join(operatorHome, ".ssh", "id_ed25519"), "not a key\n", { mode: 0o600 });
+});
 /** The variables every child process of this file gets: the caller's PATH, a HOME of the test's
  * own, and the caller's mise data and config directories when the caller names them. A tool on
  * PATH can be a mise shim (jq and jj are, on a devbox). Under a fresh HOME such a shim finds
@@ -815,16 +809,22 @@ echo done
 // mounted, so no test needs a model. The checkout's own skills/asd-ste100 is the ste skill. A host
 // with no docker runs the container nowhere, so these rows are skipped there.
 describe.skipIf(withoutDocker)("judge-omp", () => {
-  const work = freshDir("judge-work");
-  const outside = path.join(work, "outside.txt");
-  writeFileSync(outside, "a file beside the judge's directory\n");
-  mkdirSync(path.join(work, "runs"), { recursive: true });
-  const omp = path.join(freshDir("judge-omp-bin"), "omp");
-  // The stand-in writes everything through the one file the judge may write, answer.json: argv
-  // (one word a line), then `env` lines, then one line per probe (`<name> allowed|denied`).
-  writeFileSync(
-    omp,
-    `#!/bin/bash
+  // Staged in a hook: Bun runs this body even where the rows do not run, and a write here would
+  // make the suite's work directory and leave it behind.
+  let work = "";
+  let outside = "";
+  let omp = "";
+  beforeAll(() => {
+    work = freshDir("judge-work");
+    outside = path.join(work, "outside.txt");
+    writeFileSync(outside, "a file beside the judge's directory\n");
+    mkdirSync(path.join(work, "runs"), { recursive: true });
+    omp = path.join(freshDir("judge-omp-bin"), "omp");
+    // The stand-in writes everything through the one file the judge may write, answer.json: argv
+    // (one word a line), then `env` lines, then one line per probe (`<name> allowed|denied`).
+    writeFileSync(
+      omp,
+      `#!/bin/bash
 probe() { if "\${@:2}" >/dev/null 2>&1; then echo "probe $1 allowed"; else echo "probe $1 denied"; fi; }
 # DROP: write a marker into every directory this judge can write outside its own directory.
 # SEEK: report any marker another judge left anywhere this judge can read.
@@ -855,8 +855,9 @@ sleep "\${SLEEP:-0}"
 echo judged
 exit "$(cat "$PWD/exit-status" 2>/dev/null || echo 0)"
 `,
-    { mode: 0o755 }
-  );
+      { mode: 0o755 }
+    );
+  });
   const judge = (
     kind: string,
     dir: string,
@@ -1005,19 +1006,25 @@ exit "$(cat "$PWD/exit-status" 2>/dev/null || echo 0)"
   // PATH that mints a JWT and counts each mint. The key command needs the operator's home and
   // session bus, so it runs on the host; the container gets only the token it printed.
   describe("on the gateway route", () => {
-    const gatewayWork = freshDir("judge-gateway-work");
-    mkdirSync(path.join(gatewayWork, "runs"), { recursive: true });
-    const fakeBin = freshDir("judge-gateway-bin");
-    const mints = path.join(gatewayWork, "mints.log");
-    writeFileSync(
-      path.join(fakeBin, "hawk-token"),
-      `#!/usr/bin/env bash
+    // Staged in a hook, for the reason the describe above gives.
+    let gatewayWork = "";
+    let fakeBin = "";
+    let mints = "";
+    beforeAll(() => {
+      gatewayWork = freshDir("judge-gateway-work");
+      mkdirSync(path.join(gatewayWork, "runs"), { recursive: true });
+      fakeBin = freshDir("judge-gateway-bin");
+      mints = path.join(gatewayWork, "mints.log");
+      writeFileSync(
+        path.join(fakeBin, "hawk-token"),
+        `#!/usr/bin/env bash
 printf '%s\\n' "$$" >>"$FAKE_MINT_LOG"
 payload=$(printf '{"exp":%s}' "$(($(date +%s) + 3600))" | base64 -w0 | tr '+/' '-_' | tr -d '=')
 printf 'eyJhbGciOiJub25lIn0.%s.c2ln\\n' "$payload"
 `,
-      { mode: 0o755 }
-    );
+        { mode: 0o755 }
+      );
+    });
     const gatewayJudge = (kind: string, dir: string, env: Record<string, string> = {}) =>
       judge(kind, dir, "answer.json", {
         PATH: `${fakeBin}:${childEnv.PATH}`,

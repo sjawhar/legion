@@ -1,8 +1,8 @@
-import { afterAll, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { beforeAll, expect, test } from "bun:test";
+import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { skipWithout } from "@legion/test-fixtures/host-tools";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import { DAEMON_MODULE, RIG_GH_TOKEN, workerPane } from "./daemon-pane";
 
 // Every row below asks the daemon's own functions for a pane environment, which `go run` compiles
@@ -11,10 +11,7 @@ const skip = skipWithout("go");
 
 // The run directory: the daemon's pane environment makes the pane's home and the claim's gh
 // directory under its state directory.
-const rig = mkdtempSync(path.join(tmpdir(), "skill-scenarios-pane-"));
-afterAll(() => {
-  rmSync(rig, { recursive: true, force: true });
-});
+const rig = temporaryDirectory("skill-scenarios-pane");
 
 // The caller's home, where the profile's agent directory and its envoy.json live: a scratch one, so
 // no envoy.json of the person running the test is read.
@@ -24,12 +21,16 @@ const home = path.join(rig, "caller-home");
 // wrapper over the real gh the daemon resolves on its PATH at boot: the inherited PATH holds a
 // stand-in gh, the one tool the daemon needs on it for the pane to be built. It reads as a
 // compiled program (no `#!` line), since the daemon refuses a script as the first gh on PATH.
+// Both bins are staged in a hook, below the one the reservation above registered: a run that
+// selects no row of this file makes neither, and the run directory itself is never made.
 const outerBin = path.join(rig, "outer-bin");
-mkdirSync(outerBin);
-writeFileSync(path.join(outerBin, "gh"), "\x7fELF\x02\x01\x01\x00", { mode: 0o700 });
 const scriptBin = path.join(rig, "script-bin");
-mkdirSync(scriptBin);
-writeFileSync(path.join(scriptBin, "gh"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+beforeAll(() => {
+  mkdirSync(outerBin);
+  writeFileSync(path.join(outerBin, "gh"), "\x7fELF\x02\x01\x01\x00", { mode: 0o700 });
+  mkdirSync(scriptBin);
+  writeFileSync(path.join(scriptBin, "gh"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+});
 const inherited = {
   HOME: home,
   ANTHROPIC_API_KEY: "personal-key-must-not-reach-worker",

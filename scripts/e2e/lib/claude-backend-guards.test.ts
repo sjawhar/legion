@@ -1,8 +1,8 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { beforeAll, describe, expect, test } from "bun:test";
+import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { hostTool, skipWithout } from "@legion/test-fixtures/host-tools";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import { scriptFunctions } from "./script-functions";
 
 // The Claude Code backend proof's process guards (claude-backend-tmux.sh), taken from the script by
@@ -22,8 +22,7 @@ const guards = [
   .map(fn)
   .join("\n");
 
-const dir = mkdtempSync(join(tmpdir(), "claude-backend-guards-test."));
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+const dir = temporaryDirectory("claude-backend-guards-test");
 // The stand-in processes are copies of two real programs, so a host without them has nothing to
 // start and every row here is skipped.
 // The gate is given both names: it walks each one and names the missing ones in its warning.
@@ -44,7 +43,8 @@ const work = join(dir, "work");
 const claudeDir = join(dir, "bin with space");
 const claude = join(claudeDir, "claude");
 const cwd = join(dir, "cwd");
-if (!skip) {
+beforeAll(() => {
+  if (skip) return;
   mkdirSync(work);
   copyFileSync(tool("bash"), join(work, "legion"));
   mkdirSync(claudeDir);
@@ -53,7 +53,7 @@ if (!skip) {
   for (const script of ["claude-bridge", "worker-shim"]) {
     writeFileSync(join(cwd, script), '"$2" 600\n:\n');
   }
-}
+});
 
 // run runs BODY after the guards, with the rig's globals set, a scratch directory of its own in
 // $scratch, and two helpers. spawn ARGS… starts ARGS in the background, its output away from the

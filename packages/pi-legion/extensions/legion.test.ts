@@ -53,9 +53,16 @@ import {
 import { versionControlEnvironment } from "@legion/test-fixtures/version-control-environment";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ConnectionOptions, NatsConnection } from "nats";
+import type envoyEntryDefault from "../../pi-envoy/extensions/envoy";
+import type { resetNatsConnectForTests as ResetNatsConnectForTests } from "../../pi-envoy/extensions/envoy";
 import pkg from "../package.json";
 import { type CapabilityHost, ENVOY_TOOL_NAMES } from "../src/capability-report";
 import { classifySession } from "../src/classify";
+import type legionEntryDefault from "./legion";
+import type {
+  setLegionBootstrapExitForTests as SetLegionBootstrapExitForTests,
+  setLegionCapabilityHostForTests as SetLegionCapabilityHostForTests,
+} from "./legion";
 
 const natsConnections: {
   readonly name: string;
@@ -228,28 +235,53 @@ function readStartingEnvironment(): Map<string, string> | undefined {
 // The Envoy entry picks its envoy.json when its module loads: a file that holds no section, so
 // these panes take Dispatch and Envoy from the variables each test sets, never from the caller's
 // own envoy.json or Oh My Pi profile. `beforeEach` hands the same file on again.
-const envoyConfigDirectory = await mkdtemp(path.join(os.tmpdir(), "legion-envoy-config-"));
+//
+// The path is reserved here; the directory is made, the file written, the environment put into
+// its baseline and both entries loaded in the `beforeAll` below. Everything that hook does is
+// undone by a hook — the directory by the fixture's own `afterAll`, the environment by the
+// `restoreEnvironment` above and the `resetNatsConnectForTests` below — and a `bun test -t
+// <pattern>` that selects no row of this file runs none of them: a module body that made the
+// directory, deleted the names or handed over the NATS dial would leave all three to the next
+// file of the same process.
+const envoyConfigDirectory = temporaryDirectory("legion-envoy-config");
 const envoyConfigFile = path.join(envoyConfigDirectory, "envoy.json");
-await writeFile(envoyConfigFile, "{}\n");
-process.env.ENVOY_CONFIG_FILE = envoyConfigFile;
-delete process.env.OMP_PROFILE;
-delete process.env.PI_CODING_AGENT_DIR;
 
-// The extension modules must load after their OMP host dependencies are mocked. The Envoy entry
-// is the sibling plugin's, reached by path: these panes run both, as a Legion pane does. Its NATS
-// dial is the stand-in above, handed over as soon as the entry is loaded and before any pane here
-// starts a session.
-const {
-  default: envoyExtension,
-  resetNatsConnectForTests,
-  setNatsConnectForTests,
-} = await import("../../pi-envoy/extensions/envoy");
-setNatsConnectForTests(natsStandInConnect);
-const {
-  default: legionExtension,
-  setLegionBootstrapExitForTests,
-  setLegionCapabilityHostForTests,
-} = await import("./legion");
+/** The two entries, loaded by the `beforeAll` below once the environment is in place. Every row
+ *  reads them from its own body: no pane starts before that hook. */
+let envoyExtension: typeof envoyEntryDefault;
+let legionExtension: typeof legionEntryDefault;
+let resetNatsConnectForTests: typeof ResetNatsConnectForTests | undefined;
+let setLegionBootstrapExitForTests: typeof SetLegionBootstrapExitForTests;
+let setLegionCapabilityHostForTests: typeof SetLegionCapabilityHostForTests;
+
+beforeAll(async () => {
+  await writeFile(envoyConfigFile, "{}\n");
+  process.env.ENVOY_CONFIG_FILE = envoyConfigFile;
+  delete process.env.OMP_PROFILE;
+  delete process.env.PI_CODING_AGENT_DIR;
+  // The extension modules must load after their OMP host dependencies are mocked. The Envoy entry
+  // is the sibling plugin's, reached by path: these panes run both, as a Legion pane does. Its
+  // NATS dial is the stand-in above, handed over as soon as the entry is loaded and before any
+  // pane here starts a session; the slot it goes in is the process's, so the `afterAll` below
+  // puts it back and the two run together or not at all.
+  const envoyEntry = await import("../../pi-envoy/extensions/envoy");
+  envoyExtension = envoyEntry.default;
+  resetNatsConnectForTests = envoyEntry.resetNatsConnectForTests;
+  envoyEntry.setNatsConnectForTests(natsStandInConnect);
+  const legionEntry = await import("./legion");
+  legionExtension = legionEntry.default;
+  setLegionBootstrapExitForTests = legionEntry.setLegionBootstrapExitForTests;
+  setLegionCapabilityHostForTests = legionEntry.setLegionCapabilityHostForTests;
+  // The suite's baseline is "not a Legion pane": every key above except HOME starts unset, and
+  // `beforeEach` deletes them again before each test and hands on the Envoy entry's file as
+  // ENVOY_CONFIG_FILE. Run from inside a worker pane — whose LEGION_BOOT_TOKEN_FILE,
+  // DISPATCH_URL, and friends are live — the suite would otherwise boot fixtures with the pane's
+  // own boot token and see a different environment from CI. The `restoreEnvironment` above puts
+  // the pane's own values back. It runs below the two entry loads, which read ENVOY_CONFIG_FILE.
+  for (const key of environmentKeys) {
+    if (key !== "HOME") delete process.env[key];
+  }
+});
 
 type RegisteredCommand = {
   readonly name: string;
@@ -282,14 +314,6 @@ type TestPi = {
 type Handler = (event: unknown, context: SessionContext) => Promise<unknown> | unknown;
 
 const originalFetch = globalThis.fetch;
-// The suite's baseline is "not a Legion pane": every key above except HOME starts unset, and
-// `beforeEach` deletes them again before each test and hands on the Envoy entry's file as
-// ENVOY_CONFIG_FILE. Run from inside a worker pane — whose LEGION_BOOT_TOKEN_FILE, DISPATCH_URL,
-// and friends are live — the suite would otherwise boot fixtures with the pane's own boot token
-// and see a different environment from CI. The fixture above puts the pane's own values back.
-for (const key of environmentKeys) {
-  if (key !== "HOME") delete process.env[key];
-}
 
 const temporaryPaths: string[] = [];
 const paneStateDirectory = temporaryDirectories("legion-pane-state");
@@ -334,10 +358,9 @@ beforeAll(async () => {
 afterAll(async () => {
   // The template was never built when the file skipped, and there is nothing to remove.
   if (jjTemplate !== "") await rm(jjTemplate, { force: true, recursive: true });
-  await rm(envoyConfigDirectory, { force: true, recursive: true });
   // The stand-in dial is the process's, not this file's: the next file of this `bun test` run
-  // gets nats.js's own `connect` back.
-  resetNatsConnectForTests();
+  // gets nats.js's own `connect` back. It is undefined when the `beforeAll` above never ran.
+  resetNatsConnectForTests?.();
 });
 
 // The environment probe's hook; what it compares is read at the top of this file, where the

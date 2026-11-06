@@ -1,16 +1,7 @@
-import { afterAll, expect, test } from "bun:test";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { beforeAll, expect, test } from "bun:test";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import { answerTurn, judgeRun } from "./judge";
 import { FAULT_ROWS } from "./judge-prompts";
 import { sharedRuns } from "./score";
@@ -20,10 +11,11 @@ import { sharedRuns } from "./score";
 // judge-omp in production), and copies the judge's validated answer into the run directory. The
 // fake runner below records what each judge saw and writes a fixed answer. Every text is invented.
 
-const work = mkdtempSync(path.join(tmpdir(), "skill-scenarios-judge-"));
-afterAll(() => rmSync(work, { recursive: true, force: true }));
-mkdirSync(path.join(work, "profiles", "head"), { recursive: true });
-writeFileSync(path.join(work, "profiles", "head", "checkout"), "/checkouts/head\n");
+const work = temporaryDirectory("skill-scenarios-judge");
+beforeAll(() => {
+  mkdirSync(path.join(work, "profiles", "head"), { recursive: true });
+  writeFileSync(path.join(work, "profiles", "head", "checkout"), "/checkouts/head\n");
+});
 
 const sessionId = "01a16640-8259-71ed-bb68-1e4927b77a01";
 const spec = (problem: string) =>
@@ -356,9 +348,14 @@ function fakeRunner(seen: Seen[], answer: (dir: string) => [string, unknown] = a
   };
 }
 
-const judged = runDir("spec-writing-head-1");
+/** The run the judges below read, staged and judged in a hook: the module body writes nothing,
+ *  so a run that selects no row of this file leaves nothing behind. */
+let judged = "";
 const seen: Seen[] = [];
-await judgeRun(judged, { runner: fakeRunner(seen) });
+beforeAll(async () => {
+  judged = runDir("spec-writing-head-1");
+  await judgeRun(judged, { runner: fakeRunner(seen) });
+});
 // The judges of one run start in parallel, so their order is their directories' order.
 const byPrompt = (name: string) =>
   seen
