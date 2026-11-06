@@ -286,7 +286,7 @@ func (s *server) gateRegister(w http.ResponseWriter, r *http.Request) {
 	// and it takes whatever the architect registers, as it always has under `gates.design: off`.
 	if len(s.steps) > 0 && !stepDocument(step, approval) {
 		writeFailure(w, http.StatusConflict, "GATE_STEP_DOCUMENT_MISMATCH", fmt.Sprintf(
-			"%s is not the %s step's document of %s; that step records %s", artifactID, step, req.Issue, stepBinding(step)))
+			"%s is not the %s step's document of %s; that step records the issue's %s", artifactID, step, req.Issue, step.Document()))
 		return
 	}
 	// The version registered is the caller's; only Dispatch's read says the document has it. A
@@ -352,11 +352,7 @@ func (s *server) registeredStep(w http.ResponseWriter, named record.DesignStep) 
 
 // stepNames is steps as a refusal names them, in the order the deployment gates them.
 func stepNames(steps []record.DesignStep) string {
-	names := make([]string, len(steps))
-	for i, step := range steps {
-		names[i] = string(step)
-	}
-	return strings.Join(names, ", ")
+	return strings.Join(record.StepNames(steps), ", ")
 }
 
 // stepDocument says whether document is the one the step records of its issue: the issue's
@@ -375,17 +371,6 @@ func stepDocument(step record.DesignStep, document dispatch.Approval) bool {
 		return document.Role == dispatch.ArtifactRoleDecisions || document.Slug == dispatch.DecisionsSlug
 	}
 	return false
-}
-
-// stepBinding is the document a step records, as its refusal says it.
-func stepBinding(step record.DesignStep) string {
-	switch step {
-	case record.DesignStepCriteria:
-		return "the issue's Verification document"
-	case record.DesignStepDecisions:
-		return "the issue's decisions document"
-	}
-	return "the issue's primary document"
 }
 
 // issueSequence reads the issue's latest Dispatch event sequence. A failed read records nothing,

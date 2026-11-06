@@ -337,11 +337,7 @@ func designGateSteps(steps []record.DesignStep) string {
 	if len(steps) == 0 {
 		return "none"
 	}
-	names := make([]string, len(steps))
-	for i, step := range steps {
-		names[i] = string(step)
-	}
-	return strings.Join(names, ",")
+	return strings.Join(record.StepNames(steps), ",")
 }
 
 // reservedUnder is a cpu or memory reservation as --check-config names it: the one quantity when

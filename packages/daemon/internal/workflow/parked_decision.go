@@ -241,10 +241,6 @@ func ArchitectHears(ctx context.Context, tx pgx.Tx, store record.Store, root rec
 	return !waits, err
 }
 
-// DesignGateOff says whether the engine runs with a design gate that gates no step, which asks
-// no person to approve anything.
-func (e *Engine) DesignGateOff() bool { return len(e.cfg.Steps) == 0 }
-
 // GatedSteps is the design-gate steps the deployment gates, in the order it names them, which
 // admission reads to decide a re-admitted root's kept approval (Admission.keepStaleApproval).
 func (e *Engine) GatedSteps() []record.DesignStep { return e.cfg.Steps }

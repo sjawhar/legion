@@ -777,9 +777,12 @@ func StrandedByMove(stranded []StrandedClaim, suspended Suspenders) map[Stranded
 
 // StateSource maps the daemon's durable and live facts through the transaction the state route
 // owns. It does not commit it: the route can refuse one failed projection without publishing a
-// partial snapshot.
+// partial snapshot. It answers the project's claims beside the state, the ones it read through
+// that transaction to build the claim views, so the route decides what the caller's plugin reads
+// (server's stateFor) from the claims of the snapshot it serves, rather than reading the table a
+// second time at another moment.
 type StateSource interface {
-	State(ctx context.Context, tx pgx.Tx) (State, error)
+	State(ctx context.Context, tx pgx.Tx) (State, []supervise.Claim, error)
 }
 
 // StateTransactions begins the one snapshot transaction every state response reads through.

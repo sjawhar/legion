@@ -1370,18 +1370,14 @@ func RequiredSteps(configured []record.DesignStep) []record.DesignStep {
 }
 
 // DesignGatesOpen reports whether gates, every design gate an issue holds by its step, lets the
-// tree's work run: each required step (RequiredSteps) holds a row a human approved at its current
-// version. A required step with no row holds the work, as an unregistered gate always has, and
-// since a root always requires at least one step, an issue holding no row at all is held too. A
-// row of a step the deployment does not require is read by nothing here: it is kept as the record
-// of a step gated before, and holds nothing.
+// tree's work run: no required step (RequiredSteps) holds the work, which is FirstClosedStep
+// finding none. A required step with no row holds the work, as an unregistered gate always has,
+// and since a root always requires at least one step, an issue holding no row at all is held too.
+// A row of a step the deployment does not require is read by nothing here: it is kept as the
+// record of a step gated before, and holds nothing.
 func DesignGatesOpen(configured []record.DesignStep, gates map[record.DesignStep]record.DesignGate) bool {
-	for _, step := range RequiredSteps(configured) {
-		if gate, ok := gates[step]; !ok || !DesignGateOpen(gate) {
-			return false
-		}
-	}
-	return true
+	_, _, closed := FirstClosedStep(configured, gates)
+	return !closed
 }
 
 // FirstClosedStep is the first required step (RequiredSteps) whose gate is not open, in the

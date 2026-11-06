@@ -1890,33 +1890,36 @@ func (s projectRecords) wakeOnCommit(ctx context.Context, row record.OutboxRow) 
 	s.wake(row.Issue, row.Kind)
 }
 
-func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
+// State is the project's state through tx, and the project's claims it read through tx to build
+// it (api.StateSource): the route reads the caller's plugin contract from those claims, so the
+// body and the contract it is cut to come from one snapshot.
+func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, []supervise.Claim, error) {
 	version, err := s.store.SchemaVersionTx(ctx, tx)
 	if err != nil {
-		return api.State{}, err
+		return api.State{}, nil, err
 	}
 	boots, firstBootAt, err := s.store.BootsTx(ctx, tx, s.project)
 	if err != nil {
-		return api.State{}, err
+		return api.State{}, nil, err
 	}
 	claims, err := s.store.ClaimsTx(ctx, tx)
 	if err != nil {
-		return api.State{}, err
+		return api.State{}, nil, err
 	}
 	claims = ofProject(claims, s.projectToken)
 	records := projectRecords{Store: s.records, project: s.project}
 	state, err := projection.Project(ctx, tx, records, s.project, s.gatedSteps, claims, s.reports(), time.Now().UTC())
 	if err != nil {
-		return api.State{}, err
+		return api.State{}, nil, err
 	}
 	now := time.Now().UTC()
 	resumes, err := strandedReleaseWakes(ctx, s.store, s.projectToken, claims, now)
 	if err != nil {
-		return api.State{}, err
+		return api.State{}, nil, err
 	}
 	stranded, err := workflow.Stranded(ctx, tx, records, claims, resumes, now)
 	if err != nil {
-		return api.State{}, err
+		return api.State{}, nil, err
 	}
 	state.StrandedClaims = api.StrandedClaimsOf(stranded)
 	state.Daemon = api.DaemonInfo{
@@ -1930,7 +1933,7 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	state.Admission.Cap = s.admissionCap
 	controller, _, err := s.store.ControllerTx(ctx, tx, s.projectToken)
 	if err != nil {
-		return api.State{}, err
+		return api.State{}, nil, err
 	}
 	state.ControllerLocator = api.ControllerLocatorOf(s.runtime, controller)
 	if s.secretsLogin != nil {
@@ -1944,7 +1947,7 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 		}
 		state.Repositories = s.repositories.view(caches)
 	}
-	return state, nil
+	return state, claims, nil
 }
 
 // adoptIdentity is the supervisor's identity for a working copy's adoption (supervise.Deps.Identity)

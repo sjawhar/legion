@@ -851,11 +851,18 @@ func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.Desig
 		return err
 	}
 	// What the tree does next is the whole issue's question, not this row's: every step the
-	// deployment gates must be open before a member starts or a refused READY is released. The
-	// write above is in this transaction, so the read answers this row as it now stands.
-	gates, err := e.store.GatesOf(ctx, tx, key)
-	if err != nil {
-		return err
+	// deployment gates must be open before a member starts or a refused READY is released
+	// (classify.DesignGatesOpen, advanceAdmittedTree and advancePendingReady). A row this event
+	// leaves closed is one the deployment gates - an ungated row returned above - so it holds the
+	// work whatever the other rows say, and the read would buy nothing: the nil map answers
+	// DesignGatesOpen false, as the closed row itself does. So the issue is read only when this
+	// row is open; the write above is in this transaction, so the read answers this row as it now
+	// stands.
+	var gates map[record.DesignStep]record.DesignGate
+	if isOpen {
+		if gates, err = e.store.GatesOf(ctx, tx, key); err != nil {
+			return err
+		}
 	}
 	if tell {
 		if err := e.tellChangesOnce(ctx, tx, fact, true); err != nil {

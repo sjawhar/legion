@@ -173,8 +173,8 @@ turn. While the root waits on a question instead, the human's approval or change
 spec answers that wait too, and the task says how the spec stands. Release no wave until every
 gated step is open: a delivered wake shows `design-approved` on the root, or a task says its
 design gate is open, and under more than one step `gatedSteps` in your record shows each one
-`approved`. The daemon sends a root waiting on a person no `design-approved` notice, and "this
-resume is your design-approved wake" is that wake. On `design-changes-requested`: revise the
+`approved`. The daemon sends a root waiting on a person no `design-approved` notice, and
+"this resume is your design-approved wake" is that wake. On `design-changes-requested`: revise the
 document that step records as the human's reason asks, run step 3's two reviews on the new
 version, resolve every finding, request approval again and end your turn. A
 `design-changes-requested` may name a version below the latest, or arrive after another for the

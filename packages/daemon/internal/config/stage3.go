@@ -383,9 +383,6 @@ func readGates(value *yaml.Node, key string) (*Gates, error) {
 	return &gates, nil
 }
 
-// designStepNames names the three steps, for every refusal of a value that is not one of them.
-const designStepNames = "'decisions', 'criteria' or 'spec'"
-
 // readDesignSteps is `gates.design`: the steps the deployment gates, in the order it names them.
 // A list of step names is that list, and the empty list gates no step. The two words the key
 // took before it took a list are read as the lists they mean: `root-issues` is the single step
@@ -395,7 +392,8 @@ const designStepNames = "'decisions', 'criteria' or 'spec'"
 // (readPathPatterns): one gate record is kept for each step, so the second name is either a
 // mistake or an order the daemon cannot keep.
 func readDesignSteps(value *yaml.Node, key string) ([]record.DesignStep, error) {
-	refusal := fmt.Errorf("%s must be a list of %s, or 'root-issues' for the single step 'spec', or 'off' for no step", key, designStepNames)
+	names := record.StepWords()
+	refusal := fmt.Errorf("%s must be a list of %s, or 'root-issues' for the single step 'spec', or 'off' for no step", key, names)
 	switch {
 	case value.Kind == yaml.ScalarNode && value.Tag == "!!str":
 		word := DesignGate(value.Value)
@@ -409,11 +407,11 @@ func readDesignSteps(value *yaml.Node, key string) ([]record.DesignStep, error) 
 	steps := make([]record.DesignStep, 0, len(value.Content))
 	for index, entry := range value.Content {
 		if entry.Kind != yaml.ScalarNode || entry.Tag != "!!str" {
-			return nil, fmt.Errorf("%s[%d] must be %s", key, index, designStepNames)
+			return nil, fmt.Errorf("%s[%d] must be %s", key, index, names)
 		}
 		step := record.DesignStep(entry.Value)
 		if !step.Valid() {
-			return nil, fmt.Errorf("%s[%d] must be %s", key, index, designStepNames)
+			return nil, fmt.Errorf("%s[%d] must be %s", key, index, names)
 		}
 		if slices.Contains(steps, step) {
 			return nil, fmt.Errorf("%s names '%s' twice", key, step)

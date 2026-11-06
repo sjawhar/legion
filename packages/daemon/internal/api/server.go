@@ -340,7 +340,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		decisions:          opts.Decisions,
 	}
 	if s.steps == nil {
-		s.steps = []record.DesignStep{record.DesignStepSpec}
+		s.steps = config.DesignGateRootIssues.Steps()
 	}
 	if opts.OperatorToken != "" {
 		s.operatorSet, s.operatorHash = true, sha256.Sum256([]byte(opts.OperatorToken))
@@ -538,7 +538,7 @@ func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = tx.Rollback(r.Context()) }()
 
-	state, err := s.state.State(r.Context(), tx)
+	state, claims, err := s.state.State(r.Context(), tx)
 	if err != nil {
 		s.log.Error("api: state source failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "state unavailable"})
@@ -554,35 +554,40 @@ func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {
 	if s.consumerLag != nil {
 		state.Consumers = ConsumerLagViewsOf(s.consumerLag(r.Context()))
 	}
-	writeJSON(w, http.StatusOK, s.stateFor(r, state))
+	writeJSON(w, http.StatusOK, s.stateFor(r, state, claims))
 }
 
-// stateFor is state as the plugin that asked for it reads it. The route authenticates nobody, so
-// the caller is known by its address alone: a pod of the project (Options.CallerPod), whose claims
-// record the plugin contract each registration declared. A plugin older than INFRA-1048 — which is
-// who this function is kept for — reads the state with a strict schema and refuses the whole body
-// for one key it does not know, where today's plugin strips one; and an update round serves a
-// claim of the contract before it until its pod is replaced (version.go's 46). So a caller in a pod
-// whose claims record a contract below supervise.PodUpdateContract, the contract that added
+// stateFor is state as the plugin that asked for it reads it, decided from claims, the project's
+// claims the state's own snapshot holds. The route authenticates nobody, so the caller is known
+// by its address alone: a pod of the project (Options.CallerPod), whose claims record the plugin
+// contract each registration declared. A plugin older than INFRA-1048 — which is who this
+// function is kept for — reads the state with a strict schema and refuses the whole body for one
+// key it does not know, where today's plugin strips one; and an update round serves a claim of
+// the contract before it until its pod is replaced (version.go's 46). So a caller in a pod whose
+// claims record a contract below supervise.PodUpdateContract, the contract that added
 // `updateRound` and `updateHead` to the claim views, is served the state without them
 // (withoutUpdateRounds), which is the body that contract's schema describes; a caller below
 // memoryContract, the contract that added the issues' memory group, is served it without those
 // three fields (withoutMemory); and a caller below gatedStepsContract, the contract that added
 // the issues' gated steps, is served it without that field (withoutGatedSteps). The three
 // compose: each is applied when the state carries something of its own, so a caller below all
-// three — a pod below supervise.PodUpdateContract — is served a body without any of them. Every
-// later reader takes all six as optional, so the body this serves when the claims cannot be read
-// is the one every reader from 45 on takes. Any other caller — a pod at this contract, the
-// operator's `legion state`, a tmux pane — is served the state as this contract writes it.
-func (s *server) stateFor(r *http.Request, state State) State {
+// three — a pod below supervise.PodUpdateContract — is served a body without any of them. Any
+// other caller — a pod at this contract, the operator's `legion state`, a tmux pane — is served
+// the state as this contract writes it.
+//
+// The claims are the snapshot's own because the body is: a claim and the state it was projected
+// into cannot come from two moments (store.ClaimsTx). A state whose claims the source could not
+// read is no state at all - its claim views are built from them - so the route refuses it before
+// this runs, and no readable state is left whose caller's contract is unknown.
+func (s *server) stateFor(r *http.Request, state State, claims []supervise.Claim) State {
 	// A daemon that does not know its callers' pods serves every caller the state as it is, and
 	// scans nothing for it: under runtime tmux that is every request of every pane and of
 	// `legion state`.
-	if s.callerPod == nil || s.supervisor == nil {
+	if s.callerPod == nil {
 		return state
 	}
 	// A state with no update round on any claim view, no memory group on any issue and no gated
-	// step on any root is the body every contract reads, so it is served as it is with no read of
+	// step on any root is the body every contract reads, so it is served as it is with no scan of
 	// the claims: that is every request of a deployment whose design gate is off and whose
 	// project draws no memory.
 	rounds, memory, steps := carriesUpdateRounds(state), carriesMemory(state), carriesGatedSteps(state)
@@ -596,12 +601,6 @@ func (s *server) stateFor(r *http.Request, state State) State {
 	pod, inPod := s.callerPod(caller.Addr().Unmap())
 	if !inPod {
 		return state
-	}
-	claims, err := s.supervisor.Claims(r.Context())
-	if err != nil {
-		s.log.Warn("api: the claims of the pod that asked for the state could not be read; it is served the state without the update round, memory and gated step fields, which every plugin contract since 45 reads",
-			"pod", pod, "error", err)
-		return withoutGatedSteps(withoutMemory(withoutUpdateRounds(state)))
 	}
 	contract := podContract(claims, pod)
 	if contract == 0 {

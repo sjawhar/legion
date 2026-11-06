@@ -16,7 +16,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/blockers"
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
@@ -1054,7 +1053,8 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 // re-admission cleared it and nothing has registered since) keeps the earlier pair, which no
 // start has delivered yet.
 func (a *Admission) keepStaleApproval(ctx context.Context, tx pgx.Tx, key string) error {
-	if a.engine.DesignGateOff() {
+	steps := a.engine.GatedSteps()
+	if len(steps) == 0 {
 		return a.store.DropReadmittedApproval(ctx, tx, key)
 	}
 	gates, err := a.store.GatesOf(ctx, tx, key)
@@ -1062,7 +1062,7 @@ func (a *Admission) keepStaleApproval(ctx context.Context, tx pgx.Tx, key string
 		return fmt.Errorf("read the gate of re-admitted %s: %w", key, err)
 	}
 	unregistered := false
-	for _, step := range classify.RequiredSteps(a.engine.GatedSteps()) {
+	for _, step := range steps {
 		gate, ok := gates[step]
 		switch {
 		case !ok:

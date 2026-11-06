@@ -17,18 +17,20 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 type fakeSource struct {
-	state State
-	err   error
+	state  State
+	claims []supervise.Claim
+	err    error
 }
 
-func (f fakeSource) State(_ context.Context, _ pgx.Tx) (State, error) {
+func (f fakeSource) State(_ context.Context, _ pgx.Tx) (State, []supervise.Claim, error) {
 	if f.err != nil {
-		return State{}, f.err
+		return State{}, nil, f.err
 	}
-	return f.state, nil
+	return f.state, f.claims, nil
 }
 
 func serve(t *testing.T, src StateSource, method, target string) *httptest.ResponseRecorder {

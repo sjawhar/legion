@@ -532,7 +532,7 @@ func fetchControllerSecret(ctx context.Context, daemonURL, operatorToken string,
 	}
 	for _, step := range answer.DesignGateSteps {
 		if !step.Valid() {
-			return "", nil, fmt.Errorf("%s%s answered design gate step %q, not 'decisions', 'criteria' or 'spec'; upgrade the daemon to this legion's release", daemonURL, route, step)
+			return "", nil, fmt.Errorf("%s%s answered design gate step %q, not %s; upgrade the daemon to this legion's release", daemonURL, route, step, record.StepWords())
 		}
 	}
 	return answer.Secret, answer.DesignGateSteps, nil

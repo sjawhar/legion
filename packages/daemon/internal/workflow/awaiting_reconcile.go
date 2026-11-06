@@ -373,15 +373,20 @@ func waitGateOpen(steps []record.DesignStep, gates map[record.DesignStep]record.
 }
 
 // waitSubject is the wait a root starts from since on what is still with the person: the gate the
-// work stands on (gateRequestArtifact) at its latest version, on its own document, when its
-// request is; otherwise the oldest question of its tree; false when nothing is.
+// work stands on (classify.FirstClosedStep, the step gateRequestArtifact answers for) at its
+// latest version, on its own document, when its request is; otherwise the oldest question of its
+// tree; false when nothing is.
 func waitSubject(asks []record.RootAsk, steps []record.DesignStep, gates map[record.DesignStep]record.DesignGate, since record.EventMark) (record.Awaiting, bool) {
-	requestOf := gateRequestArtifact(steps, gates)
-	questions, request := withHuman(asks, requestOf)
+	var standsOn record.DesignGate
+	if len(steps) > 0 {
+		if _, closedGate, closed := classify.FirstClosedStep(steps, gates); closed {
+			standsOn = closedGate
+		}
+	}
+	questions, request := withHuman(asks, standsOn.ArtifactID)
 	switch {
 	case request:
-		gate := gateOfDocument(gates, requestOf)
-		return record.Awaiting{GateVersion: gate.LatestVersion, Artifact: gate.ArtifactID, Since: since}, true
+		return record.Awaiting{GateVersion: standsOn.LatestVersion, Artifact: standsOn.ArtifactID, Since: since}, true
 	case len(questions) > 0:
 		return record.Awaiting{Ask: questions[0].Ask, Since: since}, true
 	}
@@ -459,16 +464,17 @@ func (e *Engine) tellInPlace(ctx context.Context, tx pgx.Tx, root record.Issue, 
 }
 
 // ResumeAwaitedRoot gives the architect's live claim a task telling it what answered its wait,
-// how its spec stands now, and what of the root is still with the person or waits on it. It is a
-// handout (Store.StartHandout): what the architect handed back before it is answered or listed
-// here, and only a hand-back after it starts the next wait. When the gate is open it advances the
-// now-admitted tree only after the root has its slot again.
+// how the document of the step in question stands now (gateInQuestion), and what of the root is
+// still with the person or waits on it. It is a handout (Store.StartHandout): what the architect
+// handed back before it is answered or listed here, and only a hand-back after it starts the next
+// wait. When the gate is open it advances the now-admitted tree only after the root has its slot
+// again.
 func (e *Engine) ResumeAwaitedRoot(ctx context.Context, tx pgx.Tx, root record.Issue, waiting record.Awaiting) error {
 	gates, err := e.store.GatesOf(ctx, tx, root.Key)
 	if err != nil {
 		return err
 	}
-	gate := gateInQuestion(e.cfg.Steps, gates)
+	step, gate := gateInQuestion(e.cfg.Steps, gates)
 	asks, err := e.store.RootAsks(ctx, tx, []string{root.Key})
 	if err != nil {
 		return err
@@ -476,7 +482,7 @@ func (e *Engine) ResumeAwaitedRoot(ctx context.Context, tx pgx.Tx, root record.I
 	if err := e.store.StartHandout(ctx, tx, root.Key); err != nil {
 		return err
 	}
-	task := resumeTask(root.Key, waiting, gate, asks[root.Key], e.armed())
+	task := resumeTask(root.Key, waiting, step, gate, asks[root.Key], e.armed())
 	if err := e.enqueue(ctx, tx, root.Key, record.SuperviseRequest{
 		Op: "start", Tree: root.Tree, Role: claim.RoleArchitect, Generation: root.Generation, Task: task,
 	}); err != nil {
@@ -485,20 +491,21 @@ func (e *Engine) ResumeAwaitedRoot(ctx context.Context, tx pgx.Tx, root record.I
 	return e.advanceAdmittedTree(ctx, tx, root, gates)
 }
 
-// gateInQuestion is the gate a resume speaks of (resumeTask): the row of the first required step
-// that is not open, the step the architect still has to see through, and when every required
-// step is open the row of the first required step, whose version the resume says the work runs
-// at. Nil when that step holds no row, as a root nobody has registered a gate for holds none.
-func gateInQuestion(steps []record.DesignStep, gates map[record.DesignStep]record.DesignGate) *record.DesignGate {
+// gateInQuestion is the step a resume speaks of and the row that step holds (resumeTask): the
+// first required step that is not open, the step the architect still has to see through, and when
+// every required step is open the first required step, whose version the resume says the work
+// runs at. The row is nil when that step holds none, as a root nobody has registered a gate for
+// holds none.
+func gateInQuestion(steps []record.DesignStep, gates map[record.DesignStep]record.DesignGate) (record.DesignStep, *record.DesignGate) {
 	step, _, closed := classify.FirstClosedStep(steps, gates)
 	if !closed {
 		step = classify.RequiredSteps(steps)[0]
 	}
 	gate, ok := gates[step]
 	if !ok {
-		return nil
+		return step, nil
 	}
-	return &gate
+	return step, &gate
 }
 
 // DesignApprovedWake is the phrase a resume task carries when the root's design gate is open at
@@ -510,20 +517,27 @@ const DesignApprovedWake = "this resume is your design-approved wake"
 
 // resumeTask is the task an answered root's architect resumes with: what answered its wait
 // (Awaiting.AnsweredBy) and that act's own detail (Awaiting.AnsweredDetail, recorded when the wait
-// was answered, so a later act of the same kind does not rename it); how the spec stands at the
-// resume, read from the gate now, so an approval a newer version superseded, or a gate closed
-// again since, is said as it is, and an open gate is said as the design-approved wake
-// (DesignApprovedWake) — a changes request a later approval superseded asks for no revision; a
-// changes request the gate records as told after the wait began that did not answer it, which no
-// notice told (tellChangesOnce); what is still with the person (withHuman) and what waits on the
-// architect (a tree question, or the closed gate's approval request, on the agent's turn). Handing
-// back is advice only while the gate is not open, since an open gate moves the root to planning,
-// where a hand-back starts no wait; the request's own thread is named only while the request is
-// open. armed says whether the design gate is armed: with it off, no approval is asked for,
-// register_gate is never the advice, and an open gate is no person's approval. A wait the
-// gates.design: off rule answered (gateOffAnswer) is never said to be approved: under an armed
-// gate it is said as answered while the gate was off.
-func resumeTask(key string, waiting record.Awaiting, gate *record.DesignGate, asks []record.RootAsk, armed bool) string {
+// was answered, so a later act of the same kind does not rename it); how the document of the step
+// in question stands at the resume, read from that step's gate now, so an approval a newer
+// version superseded, or a gate closed again since, is said as it is, and an open gate is said as
+// the design-approved wake (DesignApprovedWake) — a changes request a later approval superseded
+// asks for no revision; a changes request the gate records as told after the wait began that did
+// not answer it, which no notice told (tellChangesOnce); what is still with the person (withHuman)
+// and what waits on the architect (a tree question, or the closed gate's approval request, on the
+// agent's turn). Handing back is advice only while the gate is not open, since an open gate moves
+// the root to planning, where a hand-back starts no wait; the request's own thread is named only
+// while the request is open. armed says whether the design gate is armed: with it off, no approval
+// is asked for, register_gate is never the advice, and an open gate is no person's approval. A
+// wait the gates.design: off rule answered (gateOffAnswer) is never said to be approved: under an
+// armed gate it is said as answered while the gate was off.
+//
+// Every sentence about the gate names step's own document (record.DesignStep.Document), which is
+// the document gate holds and the one whose version it prints: under a deployment that gates the
+// decisions or the criteria step first, the step in question is not the spec, and a task saying
+// "your spec" would send the architect to the wrong document. The READY refusal names a step's
+// document the same way (Engine.handoff).
+func resumeTask(key string, waiting record.Awaiting, step record.DesignStep, gate *record.DesignGate, asks []record.RootAsk, armed bool) string {
+	document := step.Document()
 	gateOpen := gate != nil && classify.DesignGateOpen(*gate)
 	gateClosed := gate != nil && !gateOpen
 	version, gateOff := strings.CutSuffix(waiting.AnsweredDetail, gateOffAnswer)
@@ -533,24 +547,24 @@ func resumeTask(key string, waiting record.Awaiting, gate *record.DesignGate, as
 	case record.AnsweredByApproval:
 		switch {
 		case armed && gateOff:
-			fmt.Fprintf(&task, "The design gate on %s was off when your wait was answered, so no person approved your spec %s then; the design gate is on again.",
-				key, version)
+			fmt.Fprintf(&task, "The design gate on %s was off when your wait was answered, so no person approved your %s %s then; the design gate is on again.",
+				key, document, version)
 		case armed:
-			fmt.Fprintf(&task, "Your spec %s on %s was approved.", version, key)
+			fmt.Fprintf(&task, "Your %s %s on %s was approved.", document, version, key)
 		case gateOpen:
-			fmt.Fprintf(&task, "Your spec %s on %s is registered, and the design gate is off, so it needs no approval.", version, key)
+			fmt.Fprintf(&task, "Your %s %s on %s is registered, and the design gate is off, so it needs no approval.", document, version, key)
 		default:
-			fmt.Fprintf(&task, "The design gate on %s is off, so no approval of your spec %s is asked for.", key, version)
+			fmt.Fprintf(&task, "The design gate on %s is off, so no approval of your %s %s is asked for.", key, document, version)
 		}
 	case record.AnsweredByChanges:
-		fmt.Fprintf(&task, "A person requested changes to your spec on %s at %s.", key, waiting.AnsweredDetail)
+		fmt.Fprintf(&task, "A person requested changes to your %s on %s at %s.", document, key, waiting.AnsweredDetail)
 		if gateOpen && armed {
-			task.WriteString(" A person approved the spec after that review, so it asks for no revision now; read it.")
+			fmt.Fprintf(&task, " A person approved the %s after that review, so it asks for no revision now; read it.", document)
 		} else {
-			task.WriteString(" Read the review, and revise the spec as they ask.")
+			fmt.Fprintf(&task, " Read the review, and revise the %s as they ask.", document)
 		}
 	case record.AnsweredByVersion:
-		fmt.Fprintf(&task, "A newer version of your spec on %s, %s, handed the approval request back to you. Read it and the request's thread.", key, waiting.AnsweredDetail)
+		fmt.Fprintf(&task, "A newer version of your %s on %s, %s, handed the approval request back to you. Read it and the request's thread.", document, key, waiting.AnsweredDetail)
 	case record.AnsweredByRetraction:
 		fmt.Fprintf(&task, "Your ask %s on %s was retracted when its decision block left the spec, so no person will answer it. "+
 			"Read the spec as it stands; if you still need the decision, ask again.", waiting.Ask, key)
@@ -573,21 +587,21 @@ func resumeTask(key string, waiting record.Awaiting, gate *record.DesignGate, as
 		fmt.Fprintf(&task, " The design gate is open at version %d: %s, so act on it as on design-approved.",
 			gate.LatestVersion, DesignApprovedWake)
 	case gateOpen:
-		fmt.Fprintf(&task, " Your spec is approved at version %d and the design gate is open: %s, so act on it as on design-approved.",
-			gate.LatestVersion, DesignApprovedWake)
+		fmt.Fprintf(&task, " Your %s is approved at version %d and the design gate is open: %s, so act on it as on design-approved.",
+			document, gate.LatestVersion, DesignApprovedWake)
 	case !armed:
-		fmt.Fprintf(&task, " The design gate is closed at version %d, as no registration of that version has opened it: when the spec is ready, "+
-			"register it at its current version, which opens the gate with no approval.", gate.LatestVersion)
+		fmt.Fprintf(&task, " The design gate is closed at version %d, as no registration of that version has opened it: when the %s is ready, "+
+			"register it at its current version, which opens the gate with no approval.", gate.LatestVersion, document)
 	case waiting.AnsweredBy == record.AnsweredByApproval && !gateOff:
-		fmt.Fprintf(&task, " That approval no longer stands: the spec is at version %d and is not approved.", gate.LatestVersion)
+		fmt.Fprintf(&task, " That approval no longer stands: the %s is at version %d and is not approved.", document, gate.LatestVersion)
 	default:
-		fmt.Fprintf(&task, " Your spec is not approved at version %d.", gate.LatestVersion)
+		fmt.Fprintf(&task, " Your %s is not approved at version %d.", document, gate.LatestVersion)
 	}
 	if gate != nil && gate.ToldChangesVersion != nil && !(waiting.Since.Seq > 0 && gate.ToldChangesMark.Seq == 0) &&
 		gate.ToldChangesMark.After(waiting.Since) {
 		detail := changesDetail(*gate.ToldChangesVersion, gate.ToldChangesReason)
 		if waiting.AnsweredBy != record.AnsweredByChanges || waiting.AnsweredDetail != detail {
-			fmt.Fprintf(&task, " A person then requested changes to your spec at %s. Read the review, and revise the spec as they ask.", detail)
+			fmt.Fprintf(&task, " A person then requested changes to your %s at %s. Read the review, and revise the %s as they ask.", document, detail, document)
 		}
 	}
 	requestOf := ""
@@ -597,7 +611,7 @@ func resumeTask(key string, waiting record.Awaiting, gate *record.DesignGate, as
 	questions, request := withHuman(asks, requestOf)
 	var still, yours []string
 	if request {
-		still = append(still, fmt.Sprintf("the approval request for spec version %d", gate.LatestVersion))
+		still = append(still, fmt.Sprintf("the approval request for %s version %d", document, gate.LatestVersion))
 	}
 	for _, ask := range questions {
 		still = append(still, "ask "+ask.Ask)
@@ -626,7 +640,7 @@ func resumeTask(key string, waiting record.Awaiting, gate *record.DesignGate, as
 	case len(still) > 0:
 		fmt.Fprintf(&task, " Still with the person: %s. Continue.", strings.Join(still, ", "))
 	case gateClosed && armed:
-		task.WriteString(" When the spec is ready, hand the request back to the person: request approval again and register that version with register_gate")
+		fmt.Fprintf(&task, " When the %s is ready, hand the request back to the person: request approval again and register that version with register_gate", document)
 		if requestOpen {
 			task.WriteString(", or answer in the request's thread")
 		}

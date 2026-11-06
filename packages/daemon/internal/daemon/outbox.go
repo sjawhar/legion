@@ -613,11 +613,7 @@ func (r *outbox) publishGatedSteps(ctx context.Context, payload record.GatedStep
 	if r.dispatch == nil {
 		return errors.New("gated steps executor has no Dispatch client")
 	}
-	steps := make([]string, 0, len(payload.Steps))
-	for _, step := range payload.Steps {
-		steps = append(steps, string(step))
-	}
-	if err := r.dispatch.PutGatedSteps(ctx, payload.Project, steps); err != nil {
+	if err := r.dispatch.PutGatedSteps(ctx, payload.Project, record.StepNames(payload.Steps)); err != nil {
 		return fmt.Errorf("publish the gated steps of %s: %w", payload.Project, err)
 	}
 	return nil

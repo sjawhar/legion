@@ -157,7 +157,7 @@ func (w *workflowRuntime) catchUpAwaiting(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
-			for _, step := range []record.DesignStep{record.DesignStepDecisions, record.DesignStepCriteria, record.DesignStepSpec} {
+			for _, step := range record.DesignSteps {
 				if gate, ok := gates[step]; ok {
 					root.gates = append(root.gates, gate)
 				}

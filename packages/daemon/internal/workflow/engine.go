@@ -95,7 +95,7 @@ var _ intake.Handler = (*Engine)(nil)
 // New constructs a workflow engine with the shipped review and fix caps when callers omit them.
 func New(store record.Store, cfg Config, log *slog.Logger) *Engine {
 	if cfg.Steps == nil {
-		cfg.Steps = []record.DesignStep{record.DesignStepSpec}
+		cfg.Steps = config.DesignGateRootIssues.Steps()
 	}
 	if cfg.ReviewRoundCap <= 0 {
 		cfg.ReviewRoundCap = 3

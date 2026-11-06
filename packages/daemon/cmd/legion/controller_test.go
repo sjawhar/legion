@@ -32,6 +32,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
@@ -172,10 +173,11 @@ func (fixedStateTransactions) BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, e
 // addressing (controllerRepositories), in the order given, as the daemon serves them sorted. A nil
 // repositories (the zero value, most tests' default) stands in for a normally configured daemon
 // and answers one fixed repository; a non-nil empty slice is the explicit "this daemon's workflow
-// maps nothing" case a test must ask for by name.
+// maps nothing" case a test must ask for by name. It answers no claims: this daemon knows no
+// caller's pod, so the route reads none.
 type fixedStateSource struct{ repositories []string }
 
-func (f fixedStateSource) State(context.Context, pgx.Tx) (api.State, error) {
+func (f fixedStateSource) State(context.Context, pgx.Tx) (api.State, []supervise.Claim, error) {
 	repos := f.repositories
 	if repos == nil {
 		repos = []string{"acme/widgets"}
@@ -184,7 +186,7 @@ func (f fixedStateSource) State(context.Context, pgx.Tx) (api.State, error) {
 	for i, repo := range repos {
 		mapped[i] = api.MappedRepositoryView{Repo: repo}
 	}
-	return api.State{Repositories: api.RepositoriesView{Mapped: mapped}}, nil
+	return api.State{Repositories: api.RepositoriesView{Mapped: mapped}}, nil, nil
 }
 
 // newControllerDaemonWithOptions is the daemon's HTTP surface as `legion controller start` and

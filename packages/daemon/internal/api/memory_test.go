@@ -89,21 +89,21 @@ func TestTheStateRouteServesAPodItsPluginContractsIssues(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		remote string
-		sup    Supervisor
+		claims []supervise.Claim
 		memory bool
 		rounds bool
 		steps  bool
 	}{
-		{name: "a pod whose plugin is a contract behind", remote: statePodAddr + ":41000", sup: podClaims(memoryContract - 1), rounds: true},
-		{name: "a pod below PodUpdateContract, below all three", remote: statePodAddr + ":41000", sup: podClaims(supervise.PodUpdateContract - 1)},
-		{name: "a pod at the memory contract, below the gated steps", remote: statePodAddr + ":41000", sup: podClaims(gatedStepsContract - 1), memory: true, rounds: true},
-		{name: "the same pod asking over IPv6", remote: "[::ffff:" + statePodAddr + "]:41000", sup: podClaims(memoryContract - 1), rounds: true},
-		{name: "a pod at this contract", remote: statePodAddr + ":41000", sup: podClaims(DaemonAPIVersion), memory: true, rounds: true, steps: true},
-		{name: "a pod whose claims record no contract", remote: statePodAddr + ":41000", sup: podClaims(0), memory: true, rounds: true, steps: true},
-		{name: "a caller in no pod", remote: "192.0.2.1:41000", sup: podClaims(memoryContract - 1), memory: true, rounds: true, steps: true},
+		{name: "a pod whose plugin is a contract behind", remote: statePodAddr + ":41000", claims: podClaims(memoryContract - 1), rounds: true},
+		{name: "a pod below PodUpdateContract, below all three", remote: statePodAddr + ":41000", claims: podClaims(supervise.PodUpdateContract - 1)},
+		{name: "a pod at the memory contract, below the gated steps", remote: statePodAddr + ":41000", claims: podClaims(gatedStepsContract - 1), memory: true, rounds: true},
+		{name: "the same pod asking over IPv6", remote: "[::ffff:" + statePodAddr + "]:41000", claims: podClaims(memoryContract - 1), rounds: true},
+		{name: "a pod at this contract", remote: statePodAddr + ":41000", claims: podClaims(DaemonAPIVersion), memory: true, rounds: true, steps: true},
+		{name: "a pod whose claims record no contract", remote: statePodAddr + ":41000", claims: podClaims(0), memory: true, rounds: true, steps: true},
+		{name: "a caller in no pod", remote: "192.0.2.1:41000", claims: podClaims(memoryContract - 1), memory: true, rounds: true, steps: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			body := stateFrom(t, populatedState(t), tc.remote, tc.sup)
+			body := stateFrom(t, populatedState(t), tc.remote, tc.claims)
 
 			// Only LEGION-208's tree was drawn: its root and its child carry the draw when the
 			// caller is served it, and no other issue carries one whoever asks. Every root of the

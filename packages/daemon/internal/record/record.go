@@ -826,10 +826,51 @@ const (
 	DesignStepSpec DesignStep = "spec"
 )
 
+// DesignSteps is every step, in the order a deployment that gates all three takes them: the
+// decisions first, then the criteria they are judged by, then the spec built on both.
+var DesignSteps = []DesignStep{DesignStepDecisions, DesignStepCriteria, DesignStepSpec}
+
 // Valid says whether step is one of the three steps. The stored column admits those three names
 // alone, so a value this refuses is one no record can hold.
 func (step DesignStep) Valid() bool {
-	return step == DesignStepDecisions || step == DesignStepCriteria || step == DesignStepSpec
+	return slices.Contains(DesignSteps, step)
+}
+
+// Document is the document of its issue the step records, as a refusal or a task names it: the
+// words the architect's own guide uses for the three (skill://legion-architect/references/
+// design-gate.md, "The steps"). The caller supplies the possessive it needs - the issue's, or the
+// architect's own.
+func (step DesignStep) Document() string {
+	switch step {
+	case DesignStepCriteria:
+		return "Verification document"
+	case DesignStepDecisions:
+		return "decisions document"
+	}
+	return "primary document"
+}
+
+// StepNames is the names of steps, in their order, for a caller that joins them into a sentence or
+// hands them to Dispatch. It is never nil, so a hand-off that writes JSON writes an empty list
+// rather than null.
+func StepNames(steps []DesignStep) []string {
+	names := make([]string, len(steps))
+	for i, step := range steps {
+		names[i] = string(step)
+	}
+	return names
+}
+
+// StepWords is the three step names as a refusal spells them: each quoted, the last after "or".
+// Every refusal of a value that is not one of them - the `gates.design` list a config file names,
+// the step list a daemon answers the controller with - says this, so no refusal spells the three
+// names of its own.
+func StepWords() string {
+	quoted := StepNames(DesignSteps)
+	for i, name := range quoted {
+		quoted[i] = "'" + name + "'"
+	}
+	return strings.Join(quoted[:len(quoted)-1], ", ") + " or " + quoted[len(quoted)-1]
 }
 
 // DesignGate records the current document version, the version a human approved, if any, with
@@ -929,12 +970,7 @@ func (a RootAsk) GateRequestOf(gateArtifacts ...string) bool {
 	if a.Kind != AskApproval || a.Artifact == "" {
 		return false
 	}
-	for _, artifact := range gateArtifacts {
-		if a.Artifact == artifact {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(gateArtifacts, a.Artifact)
 }
 
 // PersonActSeq is the newest act of a person on the ask that would answer a root waiting on that
