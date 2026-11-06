@@ -176,8 +176,8 @@ func TestARegistryOverKeysOutsideTheNATSKeyAlphabetGoesOn(t *testing.T) {
 
 	t.Run("the role reaper skips a claim it cannot read or delete", func(t *testing.T) {
 		registry, _, rawRoles := open(t, claim("bad:role", "ses_gone"), claim("reviewer", "ses_live"), claim("planner", "ses_gone"))
-		if reaped, err := registry.ReapRoleClaims(isAlive, 0); err != nil || reaped != 1 {
-			t.Fatalf("reap role claims = %d, %v; want planner's, skipping bad:role", reaped, err)
+		if sweep, err := registry.ReapRoleClaims(isAlive, 0); err != nil || sweep.Reaped != 1 {
+			t.Fatalf("reap role claims = %+v, %v; want planner's, skipping bad:role", sweep, err)
 		}
 		if got, want := keys(t, rawRoles), []string{"bad:role", "reviewer"}; !slices.Equal(got, want) {
 			t.Fatalf("claims after the role reaper = %v, want %v", got, want)

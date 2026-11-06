@@ -1640,12 +1640,12 @@ func TestReapRoleClaimsDropsDeadHolderAfterTTL(t *testing.T) {
 	if _, err := reg.SetRole(sessionID, "example-host", role, false); err != nil {
 		t.Fatalf("SetRole: %v", err)
 	}
-	count, err := reg.ReapRoleClaims(func(string) bool { return false }, 0)
+	sweep, err := reg.ReapRoleClaims(func(string) bool { return false }, 0)
 	if err != nil {
 		t.Fatalf("ReapRoleClaims: %v", err)
 	}
-	if count != 1 {
-		t.Fatalf("reaped role claims = %d, want 1", count)
+	if sweep.Reaped != 1 || sweep.Skipped != 0 {
+		t.Fatalf("the pass = %+v, want one claim reaped and none skipped", sweep)
 	}
 	assertRoleHolder(t, reg, role, "")
 }
