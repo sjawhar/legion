@@ -4449,7 +4449,7 @@ The Go coordinator's pods (`packages/daemon`) keep to that rule with two init co
   an issue pod's disk is created with the pod and deleted with it (INFRA-80), and every feed a fetch meets is one this pod's own init container wrote, which that same check
   — run before any git, in an init container no agent runs beside — is what keeps the fetch from running anything an agent of this pod planted.
 
-- Every other provisioning command is bounded by `workspace.CommandTimeout` (5 minutes, fixed) — excepting the shared clone's own size-following steps and the issue's own checkout, which hold bounds of their own, each named where the `workspace-init` bullet below states it — but a transfer's duration follows the repository's size and the network's speed, not a fixed step in provisioning:
+- Every other provisioning command is bounded by `workspace.CommandTimeout` (5 minutes, fixed), the commands that hold a bound of their own excepted — `workspace.CommandTimeout` names them where it is declared (`internal/workspace/config.go`), and the `workspace-init` bullet below states each one that runs there — but a transfer's duration follows the repository's size and the network's speed, not a fixed step in provisioning:
   once the fetch may start — at once, or once the repository cache is ready, after a wait of at most 130 minutes, which covers the cache's own first clone
   — the cache's stream and its verification run under one `workspace.FetchTimeout` (30 minutes), and every attempt of the transfer from GitHub and its reads of GitHub's `HEAD` under another, each given what remains of its own, so the fetch's waits, transfers and checks end within `workspace.FetchBudget` (190 minutes).
   A transfer that fails transiently is run again:

@@ -13,8 +13,8 @@ import (
 // checkoutDelay is how long the jj the cases below start sleeps before a checkout, and
 // checkoutBudget the runner's slow-command budget under them: the delay outlasts that budget by
 // three seconds, so neither case turns on how fast this machine is. Every other provisioning
-// command of the fixture's one-commit repository answers in milliseconds, well inside the budget
-// that also bounds each of them.
+// command of the fixture's one-commit repository answers in milliseconds, well inside whichever
+// bound it carries.
 const (
 	checkoutDelay  = 8 * time.Second
 	checkoutBudget = 5 * time.Second
@@ -41,7 +41,7 @@ func slowCheckoutTools(t *testing.T, delay time.Duration) map[string]string {
 }
 
 // slowCheckoutRunner is newLocalRunner whose jj sleeps delay before a checkout and whose
-// slow-command budget is budget, the bound every provisioning command but the checkout keeps.
+// slow-command budget is budget, what the runner gives a command carrying no bound of its own.
 func slowCheckoutRunner(t *testing.T, delay, budget time.Duration) *recordingRunner {
 	t.Helper()
 	run := newLocalRunner(t)
@@ -50,10 +50,10 @@ func slowCheckoutRunner(t *testing.T, delay, budget time.Duration) *recordingRun
 	return run
 }
 
-// Every provisioning command is given a bound of its own: the checkout, the one that writes the
-// issue's whole working copy, is given CheckoutTimeout, and every command but it and the shared
-// clone's four size-following steps — `jj workspace update-stale`, which only a workspace that
-// already exists runs, among them — the runner's slow-command budget. Those four share one
+// Each provisioning command is given the bound its own class carries: the checkout, the one that
+// writes the issue's whole working copy, is given CheckoutTimeout, and a command carrying no
+// bound of its own — `jj workspace update-stale`, which only a workspace that already exists runs,
+// among them — the runner's slow-command budget. The shared clone's size-following steps share one
 // CloneTimeout and are TestTheSharedClonesCloneIsBoundedByCloneTimeout's, so this case passes
 // over them (isSharedCloneStep). A fresh workspace and one provisioned a second time are read
 // together, so both paths through Provision are covered.
@@ -120,9 +120,9 @@ func TestProvisionChecksOutPastTheRunnersBudget(t *testing.T) {
 	}
 }
 
-// A checkout that outlives its own bound fails the provision, naming the checkout: the bound is
-// the checkout's alone, so a request that gives it one second (CheckoutBound) ends the checkout
-// there while every other command keeps the runner's five.
+// A checkout that outlives its own bound fails the provision, naming the checkout: the checkout
+// is bounded by that bound and by no other, so a request that gives it one second (CheckoutBound)
+// ends the checkout there, inside the five seconds the runner's own budget would have allowed it.
 func TestProvisionFailsWhenTheCheckoutOutlivesItsBound(t *testing.T) {
 	run := slowCheckoutRunner(t, checkoutDelay, checkoutBudget)
 	req := provisionRequest(t)

@@ -22,9 +22,11 @@ const workspaceProvisionUsage = "legion workspace-init provision --issue <KEY> -
 // provisionTokenFileEnv points `workspace-init fetch` at the mounted provisioning token.
 const provisionTokenFileEnv = "LEGION_PROVISION_TOKEN_FILE"
 
-// provisionBudget is the slow-command budget `provision` gives every provisioning command but the
-// issue's checkout, which takes workspace.CheckoutTimeout of its own (workspace.Provision,
-// Request.CheckoutBound); a test shortens it to prove the checkout is not bounded by this one.
+// provisionBudget is the runner's slow-command budget for `provision`, workspace.CommandTimeout:
+// what the runner gives a command carrying no bound of its own, the commands that carry one being
+// the exceptions workspace.CommandTimeout names. A test shortens it to prove the issue's checkout
+// takes no part of it, holding workspace.CheckoutTimeout of its own instead (workspace.Provision,
+// Request.CheckoutBound).
 var provisionBudget = workspace.CommandTimeout
 
 // secretFileFromEnv is the secret file the environment variable name points at, once it reads

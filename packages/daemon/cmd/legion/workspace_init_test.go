@@ -553,13 +553,13 @@ func TestWorkspaceInitProvisionsAtADefaultBranchWithASlash(t *testing.T) {
 	}
 }
 
-// The issue's checkout (`jj sparse reset`) writes every file of the repository's tree, the one
-// provisioning command whose time follows the repository's size, so it runs under
-// workspace.CheckoutTimeout while every other command of the provisioning keeps provisionBudget
-// (workspace.Provision, Request.CheckoutBound): a pod whose checkout outlasts that budget
-// provisions all the same, rather than exiting 1 on a killed checkout and spending one of the
-// claim's launches (INFRA-1265). Here the volume's jj holds the checkout eight seconds and the
-// budget is five, which no other command of the run comes near.
+// The issue's checkout (`jj sparse reset`) writes every file of the repository's tree, so it runs
+// under workspace.CheckoutTimeout rather than provisionBudget (workspace.Provision,
+// Request.CheckoutBound; workspace.CommandTimeout names which commands carry a bound of their
+// own): a pod whose checkout outlasts that budget provisions all the same, rather than exiting 1
+// on a killed checkout and spending one of the claim's launches (INFRA-1265). Here the volume's
+// jj holds the checkout eight seconds and the budget is five, which no other command of the run
+// comes near.
 func TestWorkspaceInitProvisionsThroughACheckoutLongerThanTheBudget(t *testing.T) {
 	const delay = 8 * time.Second
 	v := newIssueVolume(t).withRemote(t, "main")
