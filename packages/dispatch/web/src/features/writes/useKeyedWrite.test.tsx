@@ -3,7 +3,7 @@ import { onlineManager, QueryClient, QueryClientProvider } from "@tanstack/react
 import { act, renderHook } from "@testing-library/react";
 import type { ReactNode } from "react";
 
-import { tick } from "../../__tests__/fake-clock";
+import { realClock, tick } from "../../__tests__/fake-clock";
 import { keptTab } from "../../__tests__/kept-sends-harness";
 import { ApiError, api, NetworkError } from "../../api/client";
 import { SEND_DEADLINE_MS, SendStoppedError } from "./keyed-write";
@@ -72,8 +72,7 @@ test("a surface's Retry keeps the key after Stop trying, and takes a new one aft
     hook.unmount();
     answerAsk.mockRestore();
     tab.close();
-    jest.advanceTimersByTime(1);
-    jest.useRealTimers();
+    realClock();
   }
 });
 
@@ -147,7 +146,6 @@ test("a write pressed offline is attempted and goes late", async () => {
     onlineManager.setOnline(online);
     hook.unmount();
     answerAsk.mockRestore();
-    jest.advanceTimersByTime(1);
-    jest.useRealTimers();
+    realClock();
   }
 });

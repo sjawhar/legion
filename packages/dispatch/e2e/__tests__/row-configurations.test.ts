@@ -65,6 +65,19 @@ async function listing(configPath: string): Promise<Listing> {
   return JSON.parse(stdout) as Listing;
 }
 
+/** Keeps a rejection of `promise` from being reported as unhandled before the test that awaits
+ *  it runs: the handler is attached the moment the promise is made, and the promise itself, which
+ *  still rejects for whoever awaits it, is what this answers. */
+function retained<T>(promise: Promise<T>): Promise<T> {
+  promise.catch(() => {});
+  return promise;
+}
+
+// Both listings are read-only subprocesses, so they start here rather than in their tests: the
+// second collects while the first does, which is most of this file's cost on a two-core runner.
+const realListing = retained(listing("e2e/playwright.config.ts"));
+const doubledListing = retained(listing("e2e/__tests__/fixtures/doubled-project.config.ts"));
+
 /** The configuration each row runs in. A project the map holds no key for gets a configuration of
  *  its own, so its rows are never read as repeats of another project's; the assertion on
  *  `listedProjects` is what names such a project. */
@@ -72,15 +85,15 @@ function keyOfRow(configurations: Map<string, string>): (row: ListedRow) => stri
   return (row) => configurations.get(row.project) ?? `no configuration for project ${row.project}`;
 }
 
-// Two listings on a two-core runner cost about twelve seconds, so each test may take far longer
-// than Bun's five-second default; a minute and a half is the ceiling at which something is wrong
-// rather than slow.
+// The two listings run at once and cost about seven seconds together on a two-core runner, so a
+// test may take far longer than Bun's five-second default; a minute and a half is the ceiling at
+// which something is wrong rather than slow.
 const listingTimeout = 90_000;
 
 test(
   "no row runs twice in one configuration, and every project has one",
   async () => {
-    const report = await listing("e2e/playwright.config.ts");
+    const report = await realListing;
     const rows = rowsOfListing(report);
     expect(rows.length).toBeGreaterThan(0);
     const configurations = projectConfigurations(realConfig, harnessProcessCount);
@@ -102,13 +115,21 @@ test(
 test(
   "a project that repeats another's rows in its configuration is caught",
   async () => {
-    const report = await listing("e2e/__tests__/fixtures/doubled-project.config.ts");
+    const report = await doubledListing;
     const rows = rowsOfListing(report);
     const configurations = projectConfigurations(doubledConfig, harnessProcessCount);
     expect(configurations.get(doubledProject)).toBe(configurations.get("chromium"));
 
     const repeated = rows.filter((row) => row.file === doubledSpec && row.project === "chromium");
-    expect(repeated.length).toBeGreaterThan(0);
+    if (repeated.length === 0) {
+      throw new Error(
+        `The listing holds no \`chromium\` row of ${doubledSpec}, so the added project repeats ` +
+          "nothing and this control shows nothing. DISPATCH_E2E_PROCESSES is " +
+          `${process.env.DISPATCH_E2E_PROCESSES ?? "unset"}: at 2 the config selects the ` +
+          "two-process project list, whose one project runs the multiprocess specs alone, not " +
+          `${doubledSpec}. Unset DISPATCH_E2E_PROCESSES to run this test.`
+      );
+    }
     const duplicates = duplicateRows(rows, keyOfRow(configurations));
     expect(duplicates.map((duplicate) => `${duplicate.file} ${duplicate.title}`).sort()).toEqual(
       repeated.map((row) => `${row.file} ${row.title}`).sort()

@@ -104,9 +104,7 @@ function copyOfCells(view: EditorView, cells: readonly [string, string]): Clipbo
   const Transfer = window.DataTransfer as new () => { getData(type: string): string };
   const Clip = window.ClipboardEvent as new (type: string, init: Record<string, unknown>) => Event;
   const clipboardData = new Transfer();
-  view.dom.dispatchEvent(
-    new Clip("copy", { bubbles: true, cancelable: true, clipboardData }) as unknown as Event
-  );
+  view.dom.dispatchEvent(new Clip("copy", { bubbles: true, cancelable: true, clipboardData }));
   return { html: clipboardData.getData("text/html"), text: clipboardData.getData("text/plain") };
 }
 
@@ -126,7 +124,7 @@ function drawnRows(view: EditorView): string[][] {
 function hardBreakCount(view: EditorView): number {
   let breaks = 0;
   view.state.doc.descendants((node) => {
-    if (/^hard_?break$/.test(node.type.name)) breaks += 1;
+    if (node.type.name === "hardbreak") breaks += 1;
     return true;
   });
   return breaks;
@@ -152,6 +150,18 @@ function rowCells(row: string): string[] {
 }
 
 const TABLE_ROW = /^(\s*)\|(.*\|)\s*$/;
+
+/** A cell of a table's alignment row, as `---`, `:---`, `---:` or `:---:`. */
+const DELIMITER_CELL = /^\s*:?-+:?\s*$/;
+
+/** The escaped space the editor writes, against the engine's `&#32;`. */
+const EDITOR_ESCAPED_SPACE = /&#x20;/gi;
+
+/** The bullet the editor writes, against the engine's `-`. */
+const EDITOR_BULLET = /^(\s*)\* /;
+
+/** A directive's own line, whose attributes the two writers spell differently. */
+const DIRECTIVE_LINE = /^:::.*$/;
 
 /** A directive attribute the writer left without a value, as `title` in `:::callout{#k1 title}`. */
 const BARE_ATTRIBUTE = /(?<=[\s{])([A-Za-z_][\w-]*)(?=[\s}])/g;
@@ -180,13 +190,15 @@ function withoutWriterStyle(markdown: string): string {
   for (const [index, line] of lines.entries()) {
     const row = TABLE_ROW.exec(line);
     if (row === null) {
-      const afterTable = TABLE_ROW.test(lines[index - 1] ?? "") && lines[index + 1] !== undefined;
-      if (line.trim() === "" && afterTable) continue;
+      if (line.trim() === "") {
+        const afterTable = TABLE_ROW.test(lines[index - 1] ?? "") && lines[index + 1] !== undefined;
+        if (afterTable) continue;
+      }
       read.push(
         line
-          .replaceAll(/&#x20;/gi, "&#32;")
-          .replace(/^(\s*)\* /, "$1- ")
-          .replace(/^:::.*$/, (directive) => directive.replaceAll(BARE_ATTRIBUTE, '$1=""'))
+          .replaceAll(EDITOR_ESCAPED_SPACE, "&#32;")
+          .replace(EDITOR_BULLET, "$1- ")
+          .replace(DIRECTIVE_LINE, (directive) => directive.replaceAll(BARE_ATTRIBUTE, '$1=""'))
       );
       continue;
     }
@@ -196,7 +208,7 @@ function withoutWriterStyle(markdown: string): string {
       index > 0 &&
       TABLE_ROW.test(lines[index - 1] ?? "") &&
       !TABLE_ROW.test(lines[index - 2] ?? "") &&
-      cells.every((cell) => /^\s*:?-+:?\s*$/.test(cell));
+      cells.every((cell) => DELIMITER_CELL.test(cell));
     const written = delimiter
       ? cells.map(() => "---")
       : cells.map((cell) => (cell.trim() === "<br />" ? "" : cell.trim()));

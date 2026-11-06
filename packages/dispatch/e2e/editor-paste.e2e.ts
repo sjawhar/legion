@@ -36,6 +36,15 @@ async function openWithCellsSelected(browser: Browser, from: string, to: string)
   return { alice, issue, page };
 }
 
+/** The cells the editor draws, row by row, as the page shows them. */
+function drawnRows(page: Page) {
+  return documentEditor(page)
+    .locator("tr")
+    .evaluateAll((rows) =>
+      rows.map((row) => Array.from(row.querySelectorAll("th, td"), (cell) => cell.textContent))
+    );
+}
+
 // A copy of cells pasted onto a selection of every cell of the table reaches the server and is
 // there on the next visit: the clipboard event, the grid paste, the document socket, the stored
 // artifact and the reload, the one path that is not the editor's serializer alone. The same
@@ -57,15 +66,7 @@ test("cells pasted onto a selection of cells are stored and read back after a re
     await page.reload();
     await expect(documentEditor(page)).toContainText("one");
     await expect
-      .poll(() =>
-        documentEditor(page)
-          .locator("tr")
-          .evaluateAll((rows) =>
-            rows.map((row) =>
-              Array.from(row.querySelectorAll("th, td"), (cell) => cell.textContent)
-            )
-          )
-      )
+      .poll(() => drawnRows(page))
       .toEqual([
         ["one", "two"],
         ["1", "2"],
@@ -167,17 +168,7 @@ test("a pipe after two backslashes ends a table cell in Go as in the editor", as
   const { alice, issue, page } = await openIssue(browser, "Escaped table pipes", written);
   try {
     expect(engineTables(written)).toEqual([[...cells.slice(0, 2), ["a | b"]]]);
-    await expect
-      .poll(() =>
-        documentEditor(page)
-          .locator("tr")
-          .evaluateAll((rows) =>
-            rows.map((row) =>
-              Array.from(row.querySelectorAll("th, td"), (cell) => cell.textContent)
-            )
-          )
-      )
-      .toEqual(cells);
+    await expect.poll(() => drawnRows(page)).toEqual(cells);
     const stored = (await getArtifactText(issue.primary_artifact_id)).markdown;
     expect(engineTables(stored)).toEqual([cells]);
     expect(engineTables(await goReadBack(stored))).toEqual([cells]);

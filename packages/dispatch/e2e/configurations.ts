@@ -117,8 +117,11 @@ function configurationKey(use: ConfigurationUse, processes: number): string | un
 
 /** Every project of `config` by name, with the configuration its rows run in. `processes` is how
  *  many Dispatch server processes the run has (e2e/harness-processes.ts), which is also what
- *  chooses the project list (e2e/playwright.config.ts:364): the two-process run's `chromium` is
- *  not the one-process run's, so its rows are not repeats of them.
+ *  chooses the project list (e2e/playwright.config.ts:364). One listing is one run, so every key
+ *  of it carries the same process count and that segment can never tell two of its rows apart.
+ *  It is in the key because it is the only place the one-against-two-process distinction is
+ *  written down, and a failure prints the key, so the reader sees which run's projects were
+ *  compared.
  *
  * A project whose configuration cannot be read, and one with no `name` at all, is left out rather
  * than given a guessed key: the caller sees a project the map has none for. */

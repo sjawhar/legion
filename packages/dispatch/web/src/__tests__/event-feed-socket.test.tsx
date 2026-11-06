@@ -350,8 +350,7 @@ test("an unknown event type refreshes everything, at most once per window", asyn
   } finally {
     hook.unmount();
     wholeCache.restore();
-    jest.advanceTimersByTime(1);
-    jest.useRealTimers();
+    realClock();
   }
 });
 
@@ -404,8 +403,7 @@ test("repeated gaps cost one refresh plus a trailing one", async () => {
   } finally {
     hook.unmount();
     wholeCache.restore();
-    jest.advanceTimersByTime(1);
-    jest.useRealTimers();
+    realClock();
   }
 });
 
@@ -470,9 +468,7 @@ test("ended frames with no events_start back off and cost one refresh once the f
     act(() => jest.advanceTimersByTime(1_000));
     expect(wholeCache.count()).toBe(1);
   } finally {
-    // A zero-delay timer left on the fake clock would hang the next test's waitFor.
-    act(() => jest.advanceTimersByTime(1));
-    jest.useRealTimers();
+    realClock();
     hook.unmount();
     random.mockRestore();
     wholeCache.restore();

@@ -67,6 +67,12 @@ function targetName(target: PasteTarget): string {
   return from === to ? `onto the cell ${from}` : `onto ${from} to ${to}`;
 }
 
+/** The target a row writes as either the text its caret lands after or the two cells of its
+ *  rectangle, which is how the rows of the loops below name where they paste. */
+function targetAt(target: string | readonly [string, string]): PasteTarget {
+  return typeof target === "string" ? { caretAfter: target } : { cells: target };
+}
+
 const cases: PasteCase[] = [];
 
 const loneAsk = ':::ask{#d2 urgency="med" multiple="false"}\nWhich one?\n\n- A\n- B\n:::\n';
@@ -305,8 +311,7 @@ for (const [name, clipboard, target, stored] of [
     "| b1 b2 | c |\n| :--- | :--- |\n| b1 b2 | c |\n",
   ],
 ] as const) {
-  const where: PasteTarget =
-    typeof target === "string" ? { caretAfter: target } : { cells: target };
+  const where = targetAt(target);
   cases.push({
     clipboard,
     hardBreaks: 0,
@@ -350,8 +355,7 @@ for (const [blocks, cellHtml, joined] of cellBlocks) {
     [["gamma three", "delta four"], `| alpha one | beta two |\n| --- | --- |\n| ${joined} | z |\n`],
     [["alpha one", "delta four"], `| ${joined} | z |\n| :--- | :--- |\n| ${joined} | z |\n`],
   ] as const) {
-    const where: PasteTarget =
-      typeof target === "string" ? { caretAfter: target } : { cells: target };
+    const where = targetAt(target);
     cases.push({
       clipboard,
       name: `cells, one holding ${blocks}, pasted ${targetName(where)} keep all of it`,
@@ -429,8 +433,7 @@ for (const [clipboard, target, stored] of [
   [emptyLastRow, ["alpha one", "delta four"], "| a | b |\n| :--- | :--- |\n| a | b |\n"],
 ] as const) {
   const row = clipboard === emptyFirstRow ? "first" : "last";
-  const where: PasteTarget =
-    typeof target === "string" ? { caretAfter: target } : { cells: target };
+  const where = targetAt(target);
   cases.push({
     clipboard,
     name: `cells whose ${row} row is empty, pasted ${targetName(where)}, paste the other row`,

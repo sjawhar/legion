@@ -21,10 +21,20 @@ const parseFromClipboard = (
   }
 ).__parseFromClipboard;
 
-/** The clipboard event a plain-text paste delivers: no `text/html`, so the markdown is parsed. */
-export function plainTextPasteEvent(text: string): ClipboardEvent {
+/** A clipboard holding both of the types a browser copy writes. Either may be empty: a paste from
+ *  a plain-text editor carries no `text/html`, and one from a spreadsheet carries both. */
+export interface Clipboard {
+  html?: string;
+  text?: string;
+}
+
+/** The clipboard event a paste delivers. A clipboard without `text/html` is what a plain-text
+ *  paste carries, so the markdown is parsed. */
+function clipboardEvent({ html = "", text = "" }: Clipboard): ClipboardEvent {
   return {
-    clipboardData: { getData: (type: string) => (type === "text/plain" ? text : "") },
+    clipboardData: {
+      getData: (type: string) => (type === "text/html" ? html : type === "text/plain" ? text : ""),
+    },
   } as unknown as ClipboardEvent;
 }
 
@@ -33,19 +43,12 @@ export function plainTextPasteEvent(text: string): ClipboardEvent {
  * `doPaste` calls, and happy-dom does not deliver a synthetic paste event to ProseMirror's own
  * listener, so this calls it directly, exercising the real clipboard plugin's `handlePaste`
  * unmodified (see clipboard-paste-recovery.test.ts). A paste whose DOM round trip reaches an
- * `instanceof HTMLElement` check needs `withDomGlobals("HTMLElement")` around it.
+ * `instanceof HTMLElement` check needs `withHTMLElementGlobal` around it.
  */
 export function pastePlainText(view: EditorView, text: string): void {
   view.someProp("handlePaste", (handlePaste) =>
-    handlePaste(view, plainTextPasteEvent(text), undefined as never)
+    handlePaste(view, clipboardEvent({ text }), undefined as never)
   );
-}
-
-/** A clipboard holding both of the types a browser copy writes. Either may be empty: a paste from
- *  a plain-text editor carries no `text/html`, and one from a spreadsheet carries both. */
-export interface Clipboard {
-  html?: string;
-  text?: string;
 }
 
 /**
@@ -64,11 +67,7 @@ export interface Clipboard {
 export function pasteClipboard(view: EditorView, clipboard: Clipboard): void {
   const text = clipboard.text ?? "";
   const html = clipboard.html ?? "";
-  const event = {
-    clipboardData: {
-      getData: (type: string) => (type === "text/html" ? html : type === "text/plain" ? text : ""),
-    },
-  } as unknown as ClipboardEvent;
+  const event = clipboardEvent(clipboard);
   const slice =
     parseFromClipboard(view, text, html === "" ? null : html, false, view.state.selection.$from) ??
     Slice.empty;
@@ -125,13 +124,11 @@ export function selectCells(view: EditorView, anchorCellPos: number, headCellPos
 /** Every cell of the first table of the document, in document order, as `{ pos, text }`: the
  *  position a `CellSelection` takes and the position its text starts at, so a test names a cell
  *  by what is in it rather than by a number it computed itself. */
-export function cellPositions(
-  view: EditorView
-): Array<{ pos: number; text: string; from: number }> {
-  const cells: Array<{ pos: number; text: string; from: number }> = [];
+export function cellPositions(view: EditorView): Array<{ pos: number; text: string }> {
+  const cells: Array<{ pos: number; text: string }> = [];
   view.state.doc.descendants((node, pos) => {
     if (node.type.name === "table_cell" || node.type.name === "table_header") {
-      cells.push({ from: pos + 2, pos, text: node.textContent });
+      cells.push({ pos, text: node.textContent });
       return false;
     }
     return true;

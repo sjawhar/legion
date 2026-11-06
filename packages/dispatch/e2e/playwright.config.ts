@@ -22,19 +22,20 @@ import { plainHttpHost, plainHttpOrigin } from "./plain-http-origin";
 // open the plain-HTTP name, which only that project maps, and the origin rows' first assertion
 // fails on loopback by design.
 const plainHttpSpecs = /plain-http-(origin|proxy)\.e2e\.ts/;
-// The `iphone` project runs only tests tagged `@phone`; which tests take the tag is in
-// `packages/dispatch/AGENTS.md`, "Phone acceptance". An untagged test drops out with no failure.
-// The regex is anchored so `@phone` matches only as a whole whitespace-separated token, never
-// inside a longer one such as `@phones` or `x@phone`.
-const phoneTagged = /(^|\s)@phone(\s|$)/;
-// The `webkit` and `firefox` projects run only the rows tagged `@webkit` and `@firefox`, written
-// at the end of the test's title as `@phone` is. Each tag names a row that exercises one engine
-// behaviour the comment above those projects lists, and a comment above the row names which; a
-// row that only repeats an assertion Chromium already made carries no tag. Both regexes are
-// anchored as `phoneTagged` is, so `@webkit` never matches inside `@webkit-iphone` and `@firefox`
-// never inside `@firefox-alone`.
-const webkitTagged = /(^|\s)@webkit(\s|$)/;
-const firefoxTagged = /(^|\s)@firefox(\s|$)/;
+// The `iphone`, `webkit` and `firefox` projects run only the rows tagged `@phone`, `@webkit` and
+// `@firefox`, written at the end of the test's title. Which tests take `@phone` is in
+// `packages/dispatch/AGENTS.md`, "Phone acceptance"; each engine tag names a row that exercises
+// one engine behaviour the comment above those projects lists, and a comment above the row names
+// which; a row that only repeats an assertion Chromium already made carries no tag. An untagged
+// test drops out with no failure. The pattern is anchored so a tag matches only as a whole
+// whitespace-separated token, never inside a longer one such as `@phones`, `x@phone`,
+// `@webkit-iphone` or `@firefox-alone`.
+function tagged(tag: string): RegExp {
+  return new RegExp(`(^|\\s)@${tag}(\\s|$)`);
+}
+const phoneTagged = tagged("phone");
+const webkitTagged = tagged("webkit");
+const firefoxTagged = tagged("firefox");
 // Specs of two Dispatch processes behind the round-robin proxy (e2e/round-robin-proxy.ts), each
 // named `*.multiprocess.e2e.ts`. The default run ignores them, since they need both processes and
 // the proxy's own routes; two-process mode (DISPATCH_E2E_PROCESSES=2, `bun run e2e:multiprocess`)
