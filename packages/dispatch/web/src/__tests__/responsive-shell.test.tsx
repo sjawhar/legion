@@ -6,6 +6,7 @@ import { MemoryRouter } from "react-router-dom";
 import { api } from "../api/client";
 import type { InboxRow, IssueDetails } from "../api/types";
 import { AuthGate } from "../app";
+import "../features/issue/IssuePage";
 
 const issue: IssueDetails = {
   route_status: null,

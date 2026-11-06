@@ -8,6 +8,9 @@ import { ApiError, api, NetworkError } from "./api/client";
 import { liveSocketFor } from "./api/live-socket";
 import type { AuthenticatedUser } from "./api/types";
 import { AuthGate } from "./app";
+import "./features/answers/AnswersPage";
+import "./features/document/DocumentPage";
+import "./features/project/ProjectPage";
 import { SendStoppedError } from "./features/writes/keyed-write";
 import { plainWrite, writesOf } from "./features/writes/write-store";
 
