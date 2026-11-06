@@ -552,9 +552,10 @@ type PullRequest struct {
 	// yet, either), MergeabilityMergeable once GitHub can merge the head automatically, and
 	// MergeabilityConflicting once it cannot. "" means the read has never run.
 	Mergeability Mergeability
-	// MergeSHA is the merge commit GitHub reported for the pull request (the production check
-	// looks for it in a build): empty until the merge, and for a pull request merged before the
-	// column existed, whose check's first compare fills it from GitHub.
+	// MergeSHA is the merge commit GitHub reported for the pull request, which the production
+	// check's agent looks for in production: empty until the merge, and for a pull request merged
+	// before the column existed. Nothing fills it later — no compare is left to — so the check's
+	// task says the commit is unknown and the agent reads it from GitHub (workflow.checkTask).
 	MergeSHA string
 }
 
@@ -753,8 +754,10 @@ type ProductionCheck struct {
 	Tree    string
 	Repo    string
 	Number  int
-	// MergeSHA is the merge commit the check looks for in a build, empty until the first compare
-	// fills it for a pull request merged before the daemon recorded merge commits.
+	// MergeSHA is the merge commit the check's agent looks for in production, copied from the
+	// pull request's record. It is empty for a pull request merged before the daemon recorded
+	// merge commits, and nothing fills it later: the look's task says the commit is unknown and
+	// the agent reads it from GitHub (workflow.checkTask).
 	MergeSHA string
 	OpenedAt time.Time
 	// BoundAt is when the whole check is bound: the check's last look starts then

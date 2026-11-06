@@ -141,6 +141,12 @@ test("each op refuses its arguments whole before any daemon request, naming ever
       "handoff_complete's wake_at is an RFC 3339 time, as 2026-11-02T09:00:00Z is",
     ],
     [
+      // Minute precision: Go's `time.Time` decode refuses it, so this tool refuses it too, by the
+      // field's name rather than as the daemon's generic invalid-body answer (LegionInstant).
+      { op: "handoff_complete", summary: "x", verdict: "pending", wake_at: "2026-11-06T10:00Z" },
+      "handoff_complete's wake_at is an RFC 3339 time, as 2026-11-02T09:00:00Z is",
+    ],
+    [
       { op: "handoff_complete", summary: "x", phase: "plan", other: 1 },
       'handoff_complete does not accept field "phase"; handoff_complete does not accept field "other"',
     ],

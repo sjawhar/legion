@@ -20,6 +20,19 @@ const issueKey = z.string().regex(DISPATCH_KEY_PATTERN);
 /** Go emits RFC 3339 through `time.Time`; a daemon on a non-UTC clock emits an offset. */
 const timestamp = z.iso.datetime({ offset: true });
 
+/** The RFC 3339 instant a session sends, refused exactly where Go's `time.Time` decode refuses
+ * it: seconds required, the fraction optional, `Z` or an offset required. `timestamp` above takes
+ * `2026-11-06T10:00Z`, which that decode rejects, so a plugin that validated a request field
+ * against it would send a body the daemon answers with its generic invalid-body error rather than
+ * the field's own guidance. The plugin's `wake_at` reads this same schema
+ * (`packages/pi-shared/src/legion-phase-ops.ts`), so both sides refuse the same strings. Only a
+ * field a session sends reads it: every other field here is the daemon's own output, which Go
+ * always writes with seconds. */
+export const LegionInstant = timestamp.regex(
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/,
+  { error: "an RFC 3339 time with seconds, as 2026-11-02T09:00:00Z is" }
+);
+
 /** `api.Phase` — the state an admitted issue sits in, in the transition table's own order. Not
  * the role working it: `workers` is keyed by role (`LEGION_ROLES`). `awaiting_person` is a root
  * that gave its admission slot up while its architect waits on a person's answer (`waitingOn` on
@@ -898,7 +911,8 @@ export const LegionControllerGrantRequest = z.strictObject({
  * on the wire, as the Go field is. `wakeAt` is the check report's alone (contract 50): when the
  * checking agent asks to be woken for its next look, which a pending report on a look that is not
  * the check's last must name (`CHECK_WAKE_REQUIRED`) and which no other verdict and no phase
- * completion may carry (`CHECK_WAKE_UNEXPECTED`). */
+ * completion may carry (`CHECK_WAKE_UNEXPECTED`). It is a `LegionInstant`, not a `timestamp`:
+ * the daemon's decode of it refuses a time with no seconds, and so does this. */
 export const LegionHandoffCompleteRequest = z.strictObject({
   grantId: nonEmptyString,
   summary: nonEmptyString,
@@ -907,7 +921,7 @@ export const LegionHandoffCompleteRequest = z.strictObject({
   commit: nonEmptyString.optional(),
   handoffId: nonEmptyString.optional(),
   handoffVersion: z.number().int().positive().optional(),
-  wakeAt: timestamp.optional(),
+  wakeAt: LegionInstant.optional(),
 });
 
 /** `api.IssueStatusRequest`, the controller's explicit board-status write. */

@@ -143,6 +143,11 @@ type Claim struct {
 	// backs the worker's turn. Empty is a claim that has retired no confirmed task of an
 	// assignment, which every claim of a daemon upgraded in place is until its role's next start.
 	ServingAssignmentID string
+	// ServingCheckLook is the production check look of the last confirmed delivery this claim
+	// retired, the look side of ServingGeneration: what ServingCheck answers with once no delivery
+	// backs the worker's turn. The zero value is a claim that has retired no confirmed task of a
+	// look, which is every claim whose last task was a phase's.
+	ServingCheckLook CheckLook
 	// LastStartRow is the outbox row id of the newest start run against this claim, and 0 for one
 	// no start has run for. A stop from an older row is one the newer start superseded: it was
 	// written to end a run that is over, and acting on it would stop the run that start began.
@@ -951,24 +956,53 @@ func (c Claim) ServingAssignment() string {
 	return serving(c.Pending, deliveredAssignment, c.ServingAssignmentID)
 }
 
-// deliveredRun and deliveredAssignment are what a delivery carries of each: the two values serving
-// picks between, named so the accessors read as one rule applied twice rather than two rules.
-func deliveredRun(d Delivery) uint64        { return d.Generation }
-func deliveredAssignment(d Delivery) string { return d.Assignment }
+// ServingCheck is the production check look of the task this claim's worker took, and the zero
+// CheckLook for a claim that has taken none that carried one. It is what says which kind of
+// completion a turn reports: a worker whose live assignment is a check look reports on that look
+// (api/handoff.go, checkReport), and every other worker reports a phase completion. The look is
+// the one the task was given, not whichever look the check has reached, so a report of a look the
+// check has left is held to it and refused by the engine (CHECK_LOOK_NOT_OPEN).
+//
+// A task of a phase is the one task that takes a look back rather than leaving it: a worker
+// handed phase work again — a root reopened inside its linger, whose check still stands — is back
+// in the workflow, and the completion of that phase is no report on production. Every other task
+// of no look (an operator's own, a resume) leaves the look the claim is serving alone, as it
+// leaves the run and the assignment.
+func (c Claim) ServingCheck() CheckLook {
+	return servedCheck(c.Pending, c.ServingCheckLook)
+}
+
+// servedCheck is that rule in one place, read by ServingCheck for the claim as it stands and by
+// the retire that writes what a confirmed delivery leaves behind (retirePending), so the two can
+// never answer differently for one delivery.
+func servedCheck(pending *Delivery, retired CheckLook) CheckLook {
+	if pending != nil && pending.Phase != "" {
+		retired = CheckLook{}
+	}
+	return serving(pending, deliveredCheckLook, retired)
+}
+
+// deliveredRun, deliveredAssignment and deliveredCheckLook are what a delivery carries of each:
+// the three values serving picks between, named so the accessors read as one rule applied three
+// times rather than three rules.
+func deliveredRun(d Delivery) uint64          { return d.Generation }
+func deliveredAssignment(d Delivery) string   { return d.Assignment }
+func deliveredCheckLook(d Delivery) CheckLook { return d.CheckLook }
 
 // serving picks what a claim's worker is on — the run for ServingRun, the assignment for
-// ServingAssignment — from the three sources both read, in this order. carried is what the pending
-// delivery holds of it, and retired what the claim was left serving (ServingGeneration,
-// ServingAssignmentID); the zero value of either is a task, or a claim, that answers for none of
-// them. The precedence lives here once, so a later fix to it — the DeliveredAt fallback, say —
-// cannot land on one of the two and miss the other.
+// ServingAssignment, the production check look for ServingCheck — from the three sources all
+// three read, in this order. carried is what the pending delivery holds of it, and retired what
+// the claim was left serving (ServingGeneration, ServingAssignmentID, ServingCheckLook); the zero
+// value of any of them is a task, or a claim, that answers for none of them. The precedence lives
+// here once, so a later fix to it — the DeliveredAt fallback, say — cannot land on one of the
+// three and miss the others.
 //
 //  1. The task whose turn is running. A completion is a tool call inside a turn, and one process
 //     runs one turn at a time.
 //  2. Otherwise what this claim is left serving: the turn's end retires its delivery, and the
-//     worker goes on working that run and that assignment — a tester waiting on CI, a merger
-//     waiting on a person — until another delivery carrying one replaces it. A notice's turn has
-//     no delivery behind it.
+//     worker goes on working that run, that assignment and that look — a tester waiting on CI, a
+//     merger waiting on a person, a checking agent between a look's start and its report — until
+//     another delivery carrying one replaces it. A notice's turn has no delivery behind it.
 //  3. Otherwise, for a claim that has served none at all, a task it holds that the agent may
 //     have read. Oh My Pi's own agent_start names no prompt, so a turn that starts after the
 //     daemon's wait for it is indistinguishable from a turn of the agent's own and confirms

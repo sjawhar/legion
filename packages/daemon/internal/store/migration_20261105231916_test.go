@@ -136,3 +136,95 @@ func TestTheProductionCheckTakesItsRoleAndWakeWith20261105231916(t *testing.T) {
 		t.Fatalf("queueing a check_compare row after the migration = %v, want the kind constraint to refuse it", err)
 	}
 }
+
+// The same migration gives the claim and its delivery the production check look the worker took:
+// what says a completion is a report on that look rather than a phase completion
+// (supervise.Claim.ServingCheck, api/handoff.go). The negative control is the daemon's own write
+// before the migration, which names the column and is refused.
+//
+// There is no backfill, as 0067's assignment columns had none: 0 is a claim, or a delivery, that
+// is no look's, which is what every row recorded before the migration was. The columns carry the
+// check instance beside the look, since a later merge of the same issue replaces the check and
+// counts its looks from one again.
+func TestTheServingCheckLookColumnsArriveEmptyWith20261105231916(t *testing.T) {
+	ctx := context.Background()
+	store := emptyStore(t)
+	migrateThrough(t, store, productionCheckRoleAndWakeVersion-1)
+	for _, seed := range []string{
+		`insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
+			values ('LEGION-209', 'LEGION-209', 'LEGION', 'merged child', 'done', 1, 'done', 'A', 1)`,
+		`insert into claims (token, project, tree, issue, role, generation, session, session_file, state,
+			launch_failures, prompt_failures, prompt_retires, uncertain_streak, serving_generation)
+			values ('legion-LEGION-209-tester', 'legion', 'LEGION-209', 'LEGION-209', 'tester', 1, 'ses_t', '', 'working', 0, 0, 0, 0, 1)`,
+		`insert into pending_task_deliveries (claim_token, delivery_id, task, phase, generation, queued_at, marked_by, interrupted)
+			values ('legion-LEGION-209-tester', 'outbox:7', 'Production check of LEGION-209.', '', 1, now(), '', false)`,
+	} {
+		if _, err := store.Pool().Exec(ctx, seed); err != nil {
+			t.Fatalf("record before the migration: %v", err)
+		}
+	}
+	// The write the daemon makes once a look's start carries its look, against the schema before
+	// the migration: the row the columns exist for.
+	_, err := store.Pool().Exec(ctx,
+		"update claims set serving_check_look = 1 where token = 'legion-LEGION-209-tester'")
+	if err == nil || !strings.Contains(err.Error(), "serving_check_look") {
+		t.Fatalf("stamping a claim's served look before the migration = %v, want the column to be unknown", err)
+	}
+	t.Logf("before the migration the served look write is refused: %v", err)
+	if _, err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate through the served look columns: %v", err)
+	}
+
+	for _, read := range []struct {
+		what  string
+		query string
+	}{
+		{"the claim", "select serving_check_look, serving_check_opened_at from claims where token = 'legion-LEGION-209-tester'"},
+		{"the pending delivery", "select check_look, check_opened_at from pending_task_deliveries where delivery_id = 'outbox:7'"},
+	} {
+		var look int
+		var openedAt *time.Time
+		if err := store.Pool().QueryRow(ctx, read.query).Scan(&look, &openedAt); err != nil {
+			t.Fatalf("read %s after the migration: %v", read.what, err)
+		}
+		if look != 0 || openedAt != nil {
+			t.Fatalf("%s carries look %d of the check opened %v after the migration, want no look: no backfill, so a worker live at the release is no look's", read.what, look, openedAt)
+		}
+	}
+
+	named := time.Date(2026, 11, 5, 23, 19, 16, 0, time.UTC)
+	for _, write := range []struct {
+		what  string
+		write string
+		read  string
+	}{
+		{"the claim", "update claims set serving_check_look = 2, serving_check_opened_at = $1 where token = 'legion-LEGION-209-tester'",
+			"select serving_check_look, serving_check_opened_at from claims where token = 'legion-LEGION-209-tester'"},
+		{"the pending delivery", "update pending_task_deliveries set check_look = 2, check_opened_at = $1 where delivery_id = 'outbox:7'",
+			"select check_look, check_opened_at from pending_task_deliveries where delivery_id = 'outbox:7'"},
+	} {
+		if _, err := store.Pool().Exec(ctx, write.write, named); err != nil {
+			t.Fatalf("stamp %s after the migration: %v", write.what, err)
+		}
+		var look int
+		var openedAt *time.Time
+		if err := store.Pool().QueryRow(ctx, write.read).Scan(&look, &openedAt); err != nil {
+			t.Fatalf("read %s back: %v", write.what, err)
+		}
+		if look != 2 || openedAt == nil || !openedAt.Equal(named) {
+			t.Fatalf("%s carries look %d of the check opened %v, want the stamped look 2 of %s", write.what, look, openedAt, named)
+		}
+	}
+	t.Logf("after the migration both rows take and keep the look their worker was given")
+
+	// The look refuses null, so no row can carry one that is neither a look nor the 0 the route
+	// reads as no look at all.
+	for _, statement := range []string{
+		"update claims set serving_check_look = null where token = 'legion-LEGION-209-tester'",
+		"update pending_task_deliveries set check_look = null where delivery_id = 'outbox:7'",
+	} {
+		if _, err := store.Pool().Exec(ctx, statement); err == nil || !strings.Contains(err.Error(), "null value") {
+			t.Fatalf("setting a served look to null = %v, want the not-null constraint to refuse it", err)
+		}
+	}
+}

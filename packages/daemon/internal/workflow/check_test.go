@@ -612,8 +612,8 @@ func TestTheBootSweepClosesMigratedMergedIssuesAndLeavesARootWithARunningChild(t
 		if check := productionCheck(t, rig.pool, key); check == nil || !check.Open() || check.Looks != 1 || check.MergeSHA != "" {
 			t.Fatalf("%s's check after the boot = %+v, want it open at look 1 with no merge commit yet", key, check)
 		}
-		if starts := superviseRowsOf(t, rig.pool, key, "start"); len(starts) != 1 || starts[0].CheckLook != 1 || !strings.Contains(starts[0].Task, "merge commit not yet recorded") {
-			t.Fatalf("%s's starts = %+v, want its check's look 1 saying the merge commit is not yet recorded", key, starts)
+		if starts := superviseRowsOf(t, rig.pool, key, "start"); len(starts) != 1 || starts[0].CheckLook != 1 || !strings.Contains(starts[0].Task, "merge commit unknown, read it from the pull request on GitHub") {
+			t.Fatalf("%s's starts = %+v, want its check's look 1 telling the agent to read the merge commit from GitHub", key, starts)
 		}
 	}
 	var held *string

@@ -2988,8 +2988,8 @@ export type IssueReleasedEventPayload = IssueClaimEventPayload & {
  * shipped it (by intake or by the reconcile), with the system actor `delivery-timeline`, and
  * published on the issue's subject (`notifications.dispatch.issue.<KEY>.issue.deployed`) as every
  * issue event is. `repo` and `number` name the pull request, `run_id` the production run, and
- * `completed_at` when that run's production job completed, in UTC. The Legion daemon wakes the
- * issue's production check on it. Strict: the Go writer
+ * `completed_at` when that run's production job completed, in UTC. The Legion daemon no longer
+ * reads it: nothing a deployment publishes wakes a production check. Strict: the Go writer
  * (`packages/envoy/internal/dispatch/delivery/deployed.go`) emits exactly these four fields.
  */
 export const IssueDeployedEventPayloadSchema = z.strictObject({

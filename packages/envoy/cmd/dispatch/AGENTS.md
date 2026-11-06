@@ -91,7 +91,7 @@ build); `fleet_commit`, the commit of the latest announcement that every live
 server process serves one build (`startup.Announcer.FleetCommit`, the one
 `server.started` carries; `null` when there is none or before this process's
 announcer first read it, and up to one five-second announcer pass behind the
-table), which the Legion daemon reads; and `schema_version`, `max(version)` from `schema_migrations`, read by
+table), which the Legion daemon no longer reads; and `schema_version`, `max(version)` from `schema_migrations`, read by
 the same probe query (`null` whenever `db` is false). The deployment repository's
 dispatch-apply lane compares `commit` and `schema_version` with the image pin it applied and that commit's
 migrations.

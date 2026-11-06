@@ -134,7 +134,7 @@ const checkTaskLead = "Production check of "
 func checkTask(issue record.Issue, check record.ProductionCheck, cause, detail string, last bool) string {
 	merge := check.MergeSHA
 	if merge == "" {
-		merge = "not yet recorded"
+		merge = "unknown, read it from the pull request on GitHub"
 	}
 	var text strings.Builder
 	fmt.Fprintf(&text, "%s%s: %s.\n", checkTaskLead, issue.Key, issue.Title)

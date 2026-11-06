@@ -1,6 +1,7 @@
 import { type LegionRole, zodSchemaApi } from "@legion/contracts";
 import {
   LEGION_PHASE_BACKWARD_TARGETS,
+  LegionInstant,
   type LegionIssue,
   type LegionPhase,
   type LegionState,
@@ -52,16 +53,16 @@ const requiredString = (op: PhaseOp, field: string) => {
   return z.string({ error: message }).refine((value) => value.trim() !== "", { error: message });
 };
 
-/** The RFC 3339 schema `rfc3339String` validates against, built once rather than on every
- * validation. */
-const rfc3339 = z.iso.datetime({ offset: true });
-
 /** A string field `op` requires in the RFC 3339 form the route takes, refused here by the op's
  * own name with message rather than as the request schema's parse failure; a blank one is
- * refused as missing alone (requiredString). */
+ * refused as missing alone (requiredString). The form is the contract's `LegionInstant`, read
+ * here so that this tool refuses exactly the strings the daemon's decode refuses:
+ * `z.iso.datetime({ offset: true })` is not it, since it takes `2026-11-06T10:00Z`, which Go's
+ * `time.Time` refuses, and the agent would then get the daemon's generic invalid-body answer
+ * instead of the message below. */
 const rfc3339String = (op: PhaseOp, field: string, message: string) =>
   requiredString(op, field).refine(
-    (value) => value.trim() === "" || rfc3339.safeParse(value).success,
+    (value) => value.trim() === "" || LegionInstant.safeParse(value).success,
     { error: message }
   );
 
@@ -295,8 +296,9 @@ const ROOT_COMPLETION_REFUSAL =
  * and sentence.
  *
  * A completion is a phase's or a look's report on the closed issue's production check, told
- * apart as the daemon tells them (`api.handoffComplete`): every call on an issue no role works
- * (`done`) is a check report, whatever role the claim holds. A check report names its verdict
+ * apart as the daemon tells them (`api.handoffComplete`): a session working a look of its
+ * issue's production check reports on that look, and every other session's completion is its
+ * phase's. A check report names its verdict
  * (`pass`, `pending` or `fail`), and a `pending` whose look is not the check's last the
  * `wake_at` of its next look; no handoff was written and nothing pushed, so no record or commit
  * is looked up and none is sent. `pending` is a check's verdict alone, refused on a phase
@@ -510,14 +512,15 @@ async function completeHandoff(
   args: Extract<z.infer<typeof PhaseOpArguments>, { op: "handoff_complete" }>
 ): Promise<Readonly<Record<string, unknown>>> {
   const { daemon, claim } = runtime;
-  // The record is read before anything is minted: it says whether this is a phase completion or
-  // a check report, by the daemon's own rule (`api/handoff.go`): every call on an issue no role
-  // works (`done`) is a check report, whatever role the claim holds, whether or not the record
-  // shows a check. A done issue has no handoff for anyone to write, so no record or commit is
-  // looked up; a report on a check that closed or never opened is posted all the same, for the
-  // daemon's own `CHECK_NOT_OPEN`. The report's own refusals apply while the record shows the
-  // check it is of: the state carries that object only while the check is open. A refusal here
-  // posts nothing and mints nothing.
+  // The record is read before anything is minted: it says what this call has to carry. An issue
+  // no role works (`done`) has no handoff for anyone to write, so no record or commit is looked
+  // up, and the call carries what a check report carries; a report on a check that closed or
+  // never opened is posted all the same, for the daemon's own `CHECK_NOT_OPEN`. Which of the two
+  // the call is, is the daemon's to say, and it says it from the caller's own live assignment
+  // (`api/handoff.go`, `supervise.Claim.ServingCheck`): a session working a look of its issue's
+  // production check reports on that look, and every other session's completion is its phase's.
+  // The report's own refusals apply while the record shows the check it is of: the state carries
+  // that object only while the check is open. A refusal here posts nothing and mints nothing.
   const record = recordFrom(await daemon.state(), claim.issue);
   if (record.phase === "done") {
     const check = record.check;
@@ -569,7 +572,8 @@ async function completeHandoff(
       "handoff_complete's verdict is pass or fail on a phase completion; pending is a production check's"
     );
   }
-  // The daemon reads no wake on a phase completion, so one sent here would be dropped unseen.
+  // The daemon refuses a phase completion that carries a wake (CHECK_WAKE_UNEXPECTED); this says
+  // so without the round trip.
   if (args.wake_at !== undefined) {
     throw new Error(
       "handoff_complete's wake_at is a production check's pending report alone; a phase completion carries none"

@@ -504,8 +504,11 @@ there; `pending` is refused on a phase completion), its `summary` and, on a `pen
 the check's last look, `wakeAt` — no handoff and no `commit`. The plugin refuses, posting nothing,
 a session whose role is not the check's `role`, a `pending` with no `wake_at` while `check.last`
 is false, and a `wake_at` on a `pass`, a `fail` or the last look's `pending`; the daemon refuses
-the same three (`CHECK_ROLE_MISMATCH`, `CHECK_WAKE_REQUIRED`, `CHECK_WAKE_UNEXPECTED`) beside
-`CHECK_NOT_OPEN`, `CHECK_LOOK_NOT_OPEN` and `CHECK_VERDICT_REQUIRED`
+the same three (`CHECK_ROLE_MISMATCH`, `CHECK_WAKE_REQUIRED`, `CHECK_WAKE_UNEXPECTED`, which it
+also answers a phase completion carrying a `wake_at`) beside
+`CHECK_NOT_OPEN`, `CHECK_LOOK_NOT_OPEN` and `CHECK_VERDICT_REQUIRED`. Which of the two a call is,
+is the daemon's to say, from the caller's own live assignment: a session working a look reports
+on that look, and every other session's completion is its phase's
 (`packages/daemon/internal/api/handoff.go`). The daemon reads the named record back from Dispatch
 and refuses, recording nothing, a completion that names no record (`HANDOFF_RECORD_REQUIRED`), a
 record Dispatch does not have (`HANDOFF_RECORD_NOT_FOUND`), a read Dispatch did not answer

@@ -553,8 +553,11 @@ package api
 // `openedAt` is on the view and `production_check_hours` is in the settings body.
 // `api.HandoffCompleteRequest` gains `wakeAt`, which a pending check report on a look that is not
 // the check's last must carry and no other report may (`CHECK_WAKE_REQUIRED`,
-// `CHECK_WAKE_UNEXPECTED`), and a report by a role the check does not record is refused
-// (`CHECK_ROLE_MISMATCH`). The settings body loses its `projects.<KEY>.deploys` block, with every
+// `CHECK_WAKE_UNEXPECTED`, which the daemon also answers a phase completion that carries one),
+// and a report by a role the check does not record is refused (`CHECK_ROLE_MISMATCH`). Which of
+// the two a `handoff_complete` is, is the caller's own live assignment: a session whose task is a
+// look of its issue's production check reports on that look, and every other session's completion
+// is its phase's. The settings body loses its `projects.<KEY>.deploys` block, with every
 // path by which the daemon guessed that production carried a merge; a plugin reads the settings
 // loosely, so that loss alone changes no strictly parsed shape. A 49 plugin's strict reader
 // refuses a state whose check views carry `role`, and its `handoff_complete` sends no `wakeAt`,

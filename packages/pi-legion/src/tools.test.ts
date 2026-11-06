@@ -1076,8 +1076,9 @@ test("a report on its closed issue's production check carries a verdict and no c
   }
   expect(completed).toHaveLength(3);
 
-  // Every completion on a done issue is a check report, whatever role sends it: the tester's
-  // report on a check the tester's role works is posted, with the wake its pending named.
+  // A completion on a done issue carries what a check report carries, whatever role sends it, and
+  // the daemon decides which it is: the tester's report on a check the tester's role works is
+  // posted, with the wake its pending named.
   const { calls: testerCalls, daemon: testerDaemon } = recordingDaemon({
     state: {
       issues: {
@@ -1118,9 +1119,9 @@ test("a report on its closed issue's production check carries a verdict and no c
     },
   ]);
 
-  // The implementer's completion on a done issue is a check report whatever the record shows, as
-  // the daemon reads it (api/handoff.go): once the check closed, or when none opened, no commit is
-  // looked up and the report is posted as given, for the daemon's one refusal, CHECK_NOT_OPEN.
+  // The implementer's completion on a done issue carries what a check report carries whatever the
+  // record shows: once the check closed, or when none opened, no commit is looked up and the
+  // report is posted as given, for the daemon's one refusal, CHECK_NOT_OPEN (api/handoff.go).
   const { calls: closedCalls, daemon: closedDaemon } = recordingDaemon({
     state: { issues: { "LEGION-208": { key: "LEGION-208", phase: "done" } } },
   });
