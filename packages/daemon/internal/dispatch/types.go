@@ -230,11 +230,6 @@ type Handoff struct {
 	Author   HandoffAuthor
 }
 
-// HandoffNotFound is the code Dispatch answers a handoff read with when it has no such record
-// (packages/envoy/internal/dispatch/api/handoffs.go, writeHandoff). No mechanism shares a value
-// between this module and Dispatch's, so the two spellings change together.
-const HandoffNotFound = "HANDOFF_NOT_FOUND"
-
 // HandoffAuthor is the actor that wrote a handoff record: Kind is `session` for a record a session
 // wrote with `dispatch handoff-write`, ID that session.
 type HandoffAuthor struct {
