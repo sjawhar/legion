@@ -213,6 +213,27 @@ run("tester-proof-cross-1", { "out.txt": "exit=0\n", "world.json": world }, [
   turn[0],
   bash(`echo ${"x".repeat(220)} && cat /checkouts/base/skills/legion-worker/SKILL.md`),
 ]);
+// Read the rig's own harness under the head label's checkout: rig.sh puts the stand-ins and the
+// panes of the checkout it runs from on every label's PATH, so the `gh` a base run is given is a
+// script naming that checkout's gh-standin.ts, and an agent that reads the gh it was given reads
+// a file under the head label's checkout. The harness is the same for every label, so the run is
+// scored and carries no flag.
+run(
+  "tester-proof-base-1",
+  { "out.txt": "exit=0\n", "world.json": world, "handoffs.json": handoffs() },
+  [
+    ...header,
+    turn[0],
+    bash("cat /checkouts/head/packages/pi-legion/scripts/skill-scenarios/gh-standin.ts"),
+  ]
+);
+// The other label's worker skill, under that same checkout: the text the labels compare, so the
+// read is a rig error as it was.
+run("tester-proof-base-2", { "out.txt": "exit=0\n", "world.json": world }, [
+  ...header,
+  turn[0],
+  bash("cat /checkouts/head/skills/legion-worker/references/review-threads.md"),
+]);
 
 /** A tester-proof run that drove the CLI, wrote its record and edited the PR body, with `files`
  * over those defaults and a refused completion before the one the stand-in accepted. */
@@ -3366,6 +3387,7 @@ const retroNames = [
   "retro-threads-text-fixes-head-8",
   "retro-threads-text-fixes-head-10",
   "retro-threads-text-fixes-head-11",
+  "retro-threads-text-fixes-head-12",
   "retro-threads-text-fixes-base-1",
   "retro-threads-code-defect-head-1",
   "retro-threads-code-defect-head-2",
@@ -3466,6 +3488,23 @@ retroRun("retro-threads-text-fixes-head-11", {
   "calls.jsonl": calls([
     ...closedBoth,
     threadResolve(["PRRT_kwDOrig0001"], "2026-09-30T17:34:20.000Z"),
+  ]),
+  "pushes.log": pushed(retro.fixed),
+});
+// A body that quotes the resolution command and names every thread it closed resolves nothing:
+// the call that resolves a thread is the `gh api graphql` mutation, and a `gh pr edit` is not it.
+retroRun("retro-threads-text-fixes-head-12", {
+  "calls.jsonl": calls([
+    ...closedBoth,
+    {
+      at: "2026-09-30T17:34:40.000Z",
+      as: "gh",
+      argv: ["pr", "edit", "1001", "--body-file", "body.md"],
+      files: {
+        "body.md": `Resolved with gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' for ${retroIds[0]}, ${retroIds[1]} and PRRT_kwDOrig0001.`,
+      },
+      exit: 0,
+    },
   ]),
   "pushes.log": pushed(retro.fixed),
 });
@@ -3682,6 +3721,16 @@ test("retro-threads, text-fixes: a thread of the pull request that is none of th
   );
 });
 
+// Catches: a scorer that reads any call whose text names the mutation as a resolution, so a body
+// or a reply that quotes the command and names the threads it closed is read as a bulk call.
+// Measured on retro-threads-text-fixes-base-1 of 2026-11-06T05:34Z, whose kept body named three
+// thread ids and scored bulk=true.
+test("retro-threads, text-fixes: a body that quotes the mutation resolves nothing", () => {
+  expect(out).toMatch(
+    /retro-threads-text-fixes-head-12\tpass=true\t.*resolved=2 resolveCalls=2 bulk=false /
+  );
+});
+
 // Catches: a negative control that passes a retro which writes the text over a defect, which
 // would measure nothing.
 test("retro-threads, code-defect: the move back passes, the text fix fails, and the counts are per case", () => {
@@ -3689,7 +3738,7 @@ test("retro-threads, code-defect: the move back passes, the text fix fails, and 
     /retro-threads-code-defect-head-1\tpass=true\t.*pushes=0 .*backward=implementing/
   );
   expect(out).toMatch(/retro-threads-code-defect-head-2\tpass=false\t.*backward=none/);
-  expect(out).toContain("retro-threads:text-fixes\thead\t4/10\t0/10\t0\t0\n");
+  expect(out).toContain("retro-threads:text-fixes\thead\t5/11\t0/11\t0\t0\n");
   expect(out).toContain("retro-threads:text-fixes\tbase\t1/1\t0/1\t0\t0\n");
   expect(out).toContain("retro-threads:code-defect\thead\t1/2\t0/2\t1\t0\n");
 });
@@ -3791,6 +3840,21 @@ test("a tool call reading the other label's checkout is a rig error wherever the
   expect(out).toContain(
     "tester-proof-cross-1\trig error: a bash call reads base's checkout: /checkouts/base/skills/legion-worker/SKILL.md"
   );
+});
+
+// Catches: a scorer that reads the rig's own harness as another label's text. The rig runs every
+// label out of one checkout's harness, so a base run that inspects the `gh` on its PATH reads a
+// file under the head label's checkout, and a scorer that refuses it leaves the ablate arm of a
+// comparison unscorable: four of five base runs of the k1 batch of 2026-11-06 were refused that
+// way. The exemption is the harness directory alone, whichever label the run is.
+test("the rig's own harness under another label's checkout is scored, and that label's skills are still a rig error", () => {
+  expect(out).not.toContain("tester-proof-base-1\trig error");
+  expect(out).toContain("tester-proof-base-1\tpass=");
+  expect(rowOf("tester-proof-base-1")).not.toContain(" skills=");
+  expect(out).toContain(
+    "tester-proof-base-2\trig error: a bash call reads head's checkout: /checkouts/head/skills/legion-worker/references/review-threads.md"
+  );
+  expect(out).toContain("tester-proof\tbase\t0/1\t0/1\t1\t0\n");
 });
 
 test("a skill file outside the label's own is a rig error when read, and a flag when only named", () => {

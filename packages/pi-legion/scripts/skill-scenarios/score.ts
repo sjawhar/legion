@@ -910,6 +910,20 @@ function callText(call: z.infer<typeof Call>): string {
   return [call.argv.join(" "), call.stdin ?? "", ...Object.values(call.files ?? {})].join("\n");
 }
 
+/** Whether a recorded gh call resolved a thread: the `gh api graphql` mutation the thread rule
+ * gives, and nothing else. A call that only names the mutation in text it writes — a pull-request
+ * body quoting the rule, a reply saying which threads were resolved — resolves nothing, and
+ * reading it as a resolution scored one run of 2026-11-06 a bulk resolution for a body that named
+ * three thread ids. */
+function resolvesAThread(call: z.infer<typeof Call>): boolean {
+  return (
+    call.as === "gh" &&
+    call.argv[0] === "api" &&
+    call.argv.includes("graphql") &&
+    callText(call).includes("resolveReviewThread")
+  );
+}
+
 /** reviewer-text-findings: the reviewer's verdict rule, which `skill://legion-worker` states and
  * `references/merge-gate.md` defines — `REQUEST_CHANGES` only when a behavioural finding stands,
  * one whose closing changes code that runs, and otherwise the approval of the head it read, named
@@ -942,9 +956,7 @@ function reviewerTextFindings(runDir: string, run: string, label: string, dirCas
       return review === undefined ? [] : [review];
     });
   const review = reviews.at(-1);
-  const resolves = calls.filter(
-    (call) => call.as === "gh" && callText(call).includes("resolveReviewThread")
-  ).length;
+  const resolves = calls.filter(resolvesAThread).length;
   const pushes = lines(path.join(runDir, "pushes.log")).length;
   const paths = review?.comments ?? [];
   const onDoc = paths.includes(FINDING_DOC);
@@ -990,6 +1002,10 @@ const RETRO_RUN = runPattern("retro-threads", RETRO_CASES);
 /** <run>/threads.json, rig.sh's worker_fixture: the threads the approval left open, each with
  * the node id the `reviewThreads` route serves it under and the file its finding is on. */
 const Threads = z.array(z.looseObject({ id: z.string(), path: z.string() }));
+/** A review thread's node id in a call's text: the shape GitHub mints and the rig's worlds carry
+ * (`PRRT_kwDOretro001`, the `reviewThreads` route's nodes). It reads the threads a call names,
+ * the scenario's own and any other thread of the pull request. */
+const THREAD_ID = /PRRT_[A-Za-z0-9_-]+/g;
 /** A reply on a review thread: the GraphQL mutation of
  * `skill://legion-worker/references/review-threads.md`, or the REST reply route under a review
  * comment. A call that only resolves a thread is no reply, whatever it carries. */
@@ -1010,7 +1026,9 @@ const REPLY = /addPullRequestReviewThreadReply|\/replies\b/;
  *                carries one reply of its own and every thread is resolved, with no call
  *                resolving more than one (review-threads.md asks for one thread per call and no
  *                bulk call; a second call on a thread already resolved names that one thread
- *                again, which the reference does not forbid), one push lands on the issue
+ *                again, and a call on a thread of the pull request that is none of the
+ *                scenario's resolves one thread too, neither of which the reference forbids),
+ *                one push lands on the issue
  *                branch, its diff against the head the reviewer approved touches the threads'
  *                own files and nothing else, the kept pull request body's `Threads:` line says
  *                every thread resolved and none open and names each one, and the daemon stand-in
@@ -1029,22 +1047,37 @@ function retroThreads(runDir: string, run: string, label: string, dirCase: strin
   const calls = parsed(path.join(runDir, "calls.jsonl"), Call).filter(
     (call) => call.as === "gh" && call.exit === 0
   );
-  const texts = calls.map(callText);
-  // Each call that resolved a thread, with the threads it named: a call naming none or more than
-  // one, or carrying the mutation twice, is the bulk resolution the reference forbids.
-  const resolves = texts
-    .filter((text) => text.includes("resolveReviewThread"))
-    .map((text) => ({
-      named: threads.filter((thread) => text.includes(thread.id)).map((thread) => thread.id),
-      times: text.split("resolveReviewThread").length - 1,
-    }));
-  const bulk = resolves.some(({ named, times }) => named.length !== 1 || times > 1);
-  const resolved = new Set(resolves.flatMap(({ named }) => (named.length === 1 ? named : [])));
+  // Each call that resolved a thread, with every thread it named and those of the scenario among
+  // them. The reference asks for one thread per call and never a bulk call
+  // (review-threads.md, *Resolve each thread you have answered, one thread per call, never in
+  // bulk*), so a call that names more than one thread, carries the mutation twice, or names no
+  // thread at all, in which case it shows no one thread of its own, breaks that rule. The count
+  // is of the threads the call names, not of the scenario's threads in it: a thread of the pull
+  // request that is in no <run>/threads.json — the bot thread the reviewer adjudicated, which
+  // the implementer's own rule has retro resolve — is still one thread, so a call naming it
+  // resolves one thread and closes none of the scenario's.
+  const resolves = calls
+    .filter(resolvesAThread)
+    .map(callText)
+    .map((text) => {
+      const names = [...new Set(text.match(THREAD_ID) ?? [])];
+      return {
+        names,
+        named: names.filter((id) => threads.some((thread) => thread.id === id)),
+        times: text.split("resolveReviewThread").length - 1,
+      };
+    });
+  const bulk = resolves.some(({ names, times }) => names.length !== 1 || times > 1);
+  const resolved = new Set(
+    resolves.flatMap(({ names, named }) => (names.length === 1 ? named : []))
+  );
   // Every thread resolved, and no call resolving more than one. A second call on a thread the run
   // already resolved resolves that one thread again, which the reference does not forbid.
   const resolvedEach = !bulk && resolved.size === threads.length;
-  const replies = texts
-    .filter((text) => REPLY.test(text) && !text.includes("resolveReviewThread"))
+  const replies = calls
+    .filter((call) => !resolvesAThread(call))
+    .map(callText)
+    .filter((text) => REPLY.test(text))
     .map((text) => threads.filter((thread) => text.includes(thread.id)).map((t) => t.id));
   const replied = new Set(replies.flatMap((named) => (named.length === 1 ? named : [])));
   const repliedEach = replies.length === threads.length && replied.size === threads.length;
@@ -3356,7 +3389,9 @@ function median(values: number[]): number {
  *     of such an absolute path, a command of READERS in a `bash` call or an eval cell that names
  *     one (here-document bodies left out), or a file an eval cell opens in its own language
  *     (OPENED). An agent reads the whole filesystem, and `legion` on its PATH resolves into the
- *     checkout rig.sh runs from.
+ *     checkout rig.sh runs from. A read of the rig's own harness under that checkout is none of
+ *     this (RIG_DIR): the stand-ins and panes on every label's PATH are the one harness, not a
+ *     label's text.
  * A run whose tool calls only name such a file or checkout (in a check's pasted spec, a plan, a
  * command's text) is scored, and flagged (skillReaches), as is one that names a path outside its
  * sandbox (outsideReaches). A record missing or malformed is a rig error too, thrown by the
@@ -3401,6 +3436,8 @@ function unscored(
     for (const target of named) {
       if (!target.startsWith("/")) continue;
       const read = path.posix.normalize(target);
+      // The rig's own harness, which every label's run reaches through its PATH (RIG_DIR).
+      if (RIG_PATH.test(read)) continue;
       for (const [other, checkout] of labels)
         if (other !== label && (read === checkout || read.startsWith(`${checkout}/`)))
           return `a ${call.tool} call reads ${other}'s checkout: ${read}`;
@@ -3552,10 +3589,26 @@ function outsideReaches(calls: RunCall[], allowed: string[]): Reach[] {
 /** A path to one of the Dispatch and worker skills whose versions the labels compare. */
 const SKILL_NAMED =
   /[^\s"'`=:;|&<>()]*skills\/(?:dispatch-first|dispatch-writing-specs|dispatch|legion-worker)\b/g;
+/** The rig's own directory in a checkout: rig.sh, the stand-ins it puts first on every label's
+ * PATH (gh-standin.ts) and the panes it writes (worker-pane.ts, daemon-standin.ts). That
+ * directory, and a file under it, is no reach into another label's text, whichever label the run
+ * is: the rig runs every label out of one checkout's harness, so the `gh` a run is given is a
+ * script naming that checkout's gh-standin.ts, and an agent that reads the `gh` on its own PATH
+ * reads a file under whichever label's checkout the rig was run from. The harness is the same
+ * text for every label and holds no skill and no role prompt, so it is no part of what the
+ * labels compare. It alone is exempt: another label's skills/ and the rest of its source are
+ * read as they were. */
+const RIG_DIR = "/packages/pi-legion/scripts/skill-scenarios";
+/** RIG_DIR, or a path under it, in a path or in a command's text: the name ends there or a `/`
+ * follows, so a directory whose name merely begins with it is no hit. RIG_UNDER_CHECKOUT is the
+ * same from a checkout's own end. */
+const RIG_PATH = new RegExp(`${escaped(RIG_DIR)}(?![\\w.-])`);
+const RIG_UNDER_CHECKOUT = new RegExp(`^${RIG_PATH.source}`);
 /** Every name in the run's tool calls of another label's checkout, or of one of those skills (any
  * path to it, a relative one too) outside `allowed`, the label's own. A spec about the Dispatch
  * skills names them in every check of it, and a plan names the files it changes, so a name is
- * flagged, never unscored; a read of one is a rig error (unscored). */
+ * flagged, never unscored; a read of one is a rig error (unscored). A name of the rig's own
+ * harness under that checkout is neither (RIG_DIR). */
 function skillReaches(
   calls: RunCall[],
   allowed: string[],
@@ -3567,9 +3620,11 @@ function skillReaches(
       ...[...labels]
         .filter(([other]) => other !== label)
         .flatMap(([, checkout]) =>
-          [...text.matchAll(new RegExp(escaped(checkout), "g"))].map((hit) =>
-            reachAt(kind, call.tool, checkout, text, hit.index ?? 0)
-          )
+          [...text.matchAll(new RegExp(escaped(checkout), "g"))]
+            .filter(
+              (hit) => !RIG_UNDER_CHECKOUT.test(text.slice((hit.index ?? 0) + checkout.length))
+            )
+            .map((hit) => reachAt(kind, call.tool, checkout, text, hit.index ?? 0))
         ),
       ...[...text.matchAll(SKILL_NAMED)]
         .filter(([named]) => !allowed.some((dir) => named.startsWith(dir)))

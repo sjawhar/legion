@@ -245,7 +245,12 @@
 #   - `gh` and `bun` stand-ins are first on its PATH (standins): no run reaches GitHub, and a bun
 #     it reaches through PATH is the bun this script runs on, recorded. A bun named by its path or
 #     run through `mise exec` bypasses the stand-in and goes unrecorded. Every container and tmux
-#     session a work directory starts carries the directory's digest in its name.
+#     session a work directory starts carries the directory's digest in its name. The stand-ins
+#     and the panes are this script's own directory's, whichever label the run is, so score.ts
+#     reads none of them as another label's text (score.ts, RIG_DIR).
+#   - A worker run gets a Legion project of its own, built from its scenario, its case, its label,
+#     its number and its batch (run_project), since the Envoy role topics it claims carry that
+#     project and every worker run is booted on one issue key.
 #   - Its agent can still read the whole filesystem, the operator's home included, and write the
 #     machine's /tmp, which nothing here cleans: a namespace sandbox needs user namespaces, which
 #     Ubuntu's AppArmor policy denies unprivileged users. score.ts does not score a run that reads
@@ -1778,6 +1783,28 @@ $checks
     '{key:$key, repo:$repo, pr:$pr, branch:("legion/" + $key), head:$head}' >"$R/world.json"
 }
 
+# run_project SCENARIO CASE LABEL N [BATCH] prints the Legion project token of one worker run.
+# Every run of a batch gets a token of its own, and no two batches share one: the Envoy role
+# topics a worker session claims are built from the project and the issue key
+# (notifications.role.legion-<project>-<issue>-<role>, contracts' roleToken), every worker run is
+# booted on the same issue key, and a role message no holder was there to take is kept in the
+# batch's NATS for the role's next holder, for an hour (packages/envoy/cmd/listener/role_keep.go).
+# So two runs under one project read each other's messages, and a given NATS
+# (SKILL_SCENARIOS_NATS_URL), which the batch leaves running, carries a kept message from one
+# batch to the next: BATCH is what tells one batch from another, the work directory's tag and the
+# batch's start second.
+#
+# A project token is lower-case letters and digits alone (isLegionProjectToken), while a scenario,
+# a case and a label carry hyphens and a scenario that takes no case gives an empty one, so the
+# token is `skills` and the first 16 hex digits of the parts' digest rather than the parts
+# themselves. The run's own name, which carries the scenario, the case, the label and the number
+# in full, is its directory's (cmd_run).
+run_project() {
+  local digest
+  digest=$(printf '%s\0' "$1" "$2" "$3" "$4" "${5:-}" | sha256sum)
+  printf 'skills%.16s\n' "$digest"
+}
+
 # worker_boot NAME N ROLE [PHASE] boots the label's checkout's phase worker for ROLE on the run's
 # issue and waits for it: the part of a worker run that is the same in every phase. PHASE names
 # the phase the daemon stand-in holds the issue in, for a role that works more than one: the
@@ -1787,11 +1814,9 @@ $checks
 worker_boot() {
   local name=$1 n=$2 role=$3 worker_phase=${4:-} state project port
   state=$R/state
-  # Each run its own Legion project, so concurrent runs claim distinct role tokens on one listener.
-  # A project token is lower-case letters and digits only (isLegionProjectToken), so the label's
-  # hyphens go and `r` separates it from the run number.
-  project=skills${P##*/}r$n
-  project=${project//-/}
+  # Each run its own Legion project, so no run claims another's role token or reads a message
+  # addressed to one: the run's scenario, case, label and number, and its batch (run_project).
+  project=$(run_project "$scenario" "$run_case" "${P##*/}" "$n" "$tag-$start")
   mkdir -p "$state/gh" "$state/secrets"
   chmod 0700 "$state/secrets"
   (umask 077 && openssl rand -hex 16 >"$state/secrets/boot")
