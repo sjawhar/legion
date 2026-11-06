@@ -114,7 +114,19 @@ type podUpdateRig struct {
 	logs *syncBuffer
 }
 
+// newPodUpdateRig is newPodUpdateRigOn with the rig's own two bounds settled: the constants
+// below name them, and nothing changes them while the sweep runs.
 func newPodUpdateRig(t *testing.T, roles ...podUpdateRole) *podUpdateRig {
+	t.Helper()
+	return newPodUpdateRigOn(t, nil, roles...)
+}
+
+// newPodUpdateRigOn is the rig over the settings holder live, which a test changes under the
+// running sweep: the sweep reads its notice bound from it at every tick (supervision.live) and
+// each machine its re-task bound at every ask, through the daemon's own liveBudgets, so what
+// this rig proves of a change is what the daemon does with one. nil is the rig's own bounds,
+// which no test moves.
+func newPodUpdateRigOn(t *testing.T, live *config.Live, roles ...podUpdateRole) *podUpdateRig {
 	t.Helper()
 	ctx := context.Background()
 	pool := isolatedOutboxPool(t)
@@ -178,14 +190,19 @@ func newPodUpdateRig(t *testing.T, roles ...podUpdateRole) *podUpdateRig {
 		cfg: config.Config{Project: "LEGION", Runtime: config.Runtime{Name: "kubernetes"},
 			PodUpdateRetask: podUpdateRetask, PodUpdateNotice: podUpdateNotice},
 		log:     slog.New(slog.NewJSONHandler(logs, nil)),
-		plan:    plan{clock: clock, project: podUpdateProject, pluginRelaunchable: true, orphanSweep: orphanSweepInterval},
+		plan:    plan{clock: clock, project: podUpdateProject, pluginRelaunchable: true, orphanSweep: orphanSweepInterval, live: live},
 		runtime: rt, supervisor: sup,
 		enqueue: (&workflowRuntime{pool: pool, records: records, log: quietLogger()}).enqueueOutbox,
+	}
+	var settings supervise.Settings
+	if live != nil {
+		settings = liveBudgets{live: live}
 	}
 	sup.deps = supervise.Deps{
 		Runtime: rt, Conns: conns, Store: st, Specs: outboxSpecs{}, Clock: clock, Log: quietLogger(),
 		Limits:         supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
-		Timeouts:       supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond},
+		Timeouts:       supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond, PodUpdateRetask: podUpdateRetask},
+		Settings:       settings,
 		PluginContract: api.DaemonAPIVersion,
 		// This daemon can relaunch a stale process onto a plugin, as the supervision's own plan
 		// says it can: a registration's relaunch and its refusal are decided by this field alone
@@ -193,7 +210,6 @@ func newPodUpdateRig(t *testing.T, roles ...podUpdateRole) *podUpdateRig {
 		// whatever the rest of the rule says.
 		PluginRelaunchable: true,
 		NoPluginInstall:    func(c supervise.Claim) bool { return noPluginInstall(s.cfg, c) },
-		PodUpdateRetask:    podUpdateRetask,
 	}
 	t.Cleanup(sup.stop)
 	stored, err := sup.Claims(ctx)

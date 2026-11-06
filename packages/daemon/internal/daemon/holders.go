@@ -32,8 +32,8 @@ import (
 // times (supervise.Settings): the daemon's settings holder, read as the decision is made rather
 // than copied into the machine when it was built, so a change of `launch_failure_limit`,
 // `prompt_failure_limit`, `prompt_retire_limit`, `worker_boot_timeout_seconds`,
-// `worker_rpc_timeout_seconds`, `probe_interval_seconds` or `worker_stop_timeout_seconds` reaches
-// the next decision with nothing rebuilt.
+// `worker_rpc_timeout_seconds`, `probe_interval_seconds`, `worker_stop_timeout_seconds` or
+// `pod_update_retask_hours` reaches the next decision with nothing rebuilt.
 type liveBudgets struct{ live *config.Live }
 
 var _ supervise.Settings = liveBudgets{}
@@ -56,6 +56,7 @@ func (b liveBudgets) Timeouts() supervise.Timeouts {
 		Probe:                 cfg.ProbeInterval,
 		Stop:                  cfg.WorkerStopTimeout,
 		LaunchBackoff:         launchBackoffFirst,
+		PodUpdateRetask:       cfg.PodUpdateRetask,
 	}
 }
 

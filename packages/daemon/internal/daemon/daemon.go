@@ -1115,6 +1115,9 @@ func sharedClones(stateDir string) ([]workspace.Workspace, error) {
 // supervision is everything that runs a claim: the worker stream, the runtime, and the machines,
 // with the goroutines that feed them.
 type supervision struct {
+	// cfg is the configuration boot settled, which everything boot settled is read from: the
+	// project, the state directory, the runtime it supervises in. A value a change must reach
+	// at once is read through live instead, never from here.
 	cfg        config.Config
 	log        *slog.Logger
 	plan       plan
@@ -1187,6 +1190,20 @@ type supervision struct {
 	haltOnce  sync.Once
 	wg        sync.WaitGroup
 	stopOnce  sync.Once
+}
+
+// live is the configuration the daemon is running on now (plan.live): where every decision of
+// this supervision reads a value the class table answers `at once` for — the update round's
+// notice bound and the deployment's recorded capability decisions — so an operator's change
+// reaches the next sweep and the next read of the state with nothing rebuilt.
+//
+// A supervision built with no settings holder reads cfg, which never changes under it: a test's
+// own, as supervise.Deps reads its Limits and Timeouts copies when the caller set no holder.
+func (s *supervision) live() *config.Config {
+	if s.plan.live == nil {
+		return &s.cfg
+	}
+	return s.plan.live.Snapshot()
 }
 
 // promptAgents is the sorted names of every task agent the role prompts dispatch
@@ -1326,13 +1343,13 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		Clock:         p.clock,
 		Log:           log,
 		// Every budget and every bound a decision is held to is read as that decision is made
-		// (liveBudgets): `launch_failure_limit`, `worker_rpc_timeout_seconds` and their
-		// neighbours take effect at once, with no machine rebuilt.
+		// (liveBudgets): `launch_failure_limit`, `worker_rpc_timeout_seconds`,
+		// `pod_update_retask_hours` and their neighbours take effect at once, with no machine
+		// rebuilt.
 		Settings:           liveBudgets{live: p.live},
 		PluginContract:     api.DaemonAPIVersion,
 		PluginRelaunchable: p.pluginRelaunchable,
 		NoPluginInstall:    func(c supervise.Claim) bool { return noPluginInstall(*p.live.Snapshot(), c) },
-		PodUpdateRetask:    cfg.PodUpdateRetask,
 	}
 	stopping, beginStop := context.WithCancel(context.Background())
 	return &supervision{

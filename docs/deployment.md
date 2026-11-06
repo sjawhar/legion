@@ -512,8 +512,8 @@ A running daemon applies a settings change without being restarted, from either 
 One arm is `PUT /legion/v1/operator/settings`, which takes the operator bearer or a projected Kubernetes ServiceAccount token the deployment named (`settings_route`; `docs/kubernetes.md`, "The settings route").
 The two credentials may change different keys.
 The operator bearer, and the file itself, may change every key but those fixed for the process.
-A change under a projected ServiceAccount token may set only keys whose value is plain data — the keys the daemon reads at each decision, such as `admission_cap`, `review_round_cap`, `max_fix_attempts`, `linger_hours` and the supervision limits and timeouts — and is refused by name for any key naming a command to run, a credential or the file holding one, an address the daemon connects to or listens on, or the rules of who may call the route.
-It is refused `gates` and every key under it by name as well, `gates.design` included: a gate is the rule that says a person decides a tree's specification, and the token a whole service holds is not the party that may switch that rule off, so that key stays the operator bearer's and the file's.
+A change under a projected ServiceAccount token may set only keys whose value is plain data — the keys the daemon reads at each decision and holds nowhere, such as `admission_cap`, `review_round_cap`, `max_fix_attempts`, `linger_hours`, the supervision limits and the update round's two bounds — and is refused by name for any key naming a command to run, a credential or the file holding one, an address the daemon connects to or listens on, the rules of who may call the route, or a value a holder keeps a copy of.
+`gates` and every key under it, `gates.design` included, is refused by that last rule: the API server and the launch specs each hold the design gate, and a gate is the rule that says a person decides a tree's specification, so the token a whole service holds is not the party that may switch that rule off, and that key stays the operator bearer's and the file's.
 That is why a person changing the admission cap from Dispatch's Legion view can, while the same path cannot reach `github_apps.<app>.private_key_command`, whose value the daemon would run, or `gates.design`, which decides whether a person approves a specification at all.
 The other is the file itself changing under the daemon, which a watcher on the directory holding `legion.yaml`, and on each directory holding a file a setting names, notices within a few seconds.
 A change the route made is kept in Postgres and laid back over the file at every boot, so it outlives a restart, until the file's own value for that key changes and takes the key back.
@@ -662,8 +662,8 @@ The table is the daemon's own (`Classes`, `packages/daemon/internal/config/class
 | `state_dir` | fixed | — |
 | `tree_stop_timeout_seconds` | decision | — |
 | `worker_backends` | launch | `launch-specs` |
-| `worker_boot_registration_deadline_intervals` | decision | — |
-| `worker_boot_timeout_seconds` | decision | — |
+| `worker_boot_registration_deadline_intervals` | rebuild | `runtime` |
+| `worker_boot_timeout_seconds` | rebuild | `runtime` |
 | `worker_rpc_timeout_seconds` | rebuild | `worker-stream` |
 | `worker_stop_timeout_seconds` | rebuild | `runtime` |
 | `worker_stream_port` | fixed | — |

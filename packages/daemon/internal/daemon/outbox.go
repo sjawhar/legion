@@ -89,11 +89,11 @@ type outbox struct {
 	// is shared, and another project's rows are another daemon's.
 	dispatchProject string
 	stateDir        string
-	// designGate is the project's design gate policy (gates.design), which a catch-up this runner
-	// writes states and whose kept approval pair a start task names (workflow.QueueCatchUp). A
-	// test that builds the runner by hand leaves it zero, which reads as the shipped policy.
-	designGate config.DesignGate
-	log        *slog.Logger
+	// live is the daemon's settings holder, where every row that states the project's design
+	// gate policy reads it (designGate). A test that builds the runner by hand leaves it nil
+	// and reads the zero policy, which reads as the shipped one.
+	live *config.Live
+	log  *slog.Logger
 	// backstop is how long after a release its one open phase's worker is woken whatever else
 	// happens (config.IdleReleaseConfig.Backstop, `backstop_minutes`); zero where the deployment
 	// releases no pod, and then a release arms none.
@@ -170,13 +170,13 @@ type outboxTrees interface {
 	ArmPodBackstop(ctx context.Context, backstop store.PodWakeBackstop) error
 }
 
-func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, trees outboxTrees, tokens appauth.Tokens, handlers []intake.Handler, designGate config.DesignGate, project, dispatchProject, stateDir, githubAPI string, repositories *repositories, tools map[string]string, log *slog.Logger) *outbox {
+func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, trees outboxTrees, tokens appauth.Tokens, handlers []intake.Handler, live *config.Live, project, dispatchProject, stateDir, githubAPI string, repositories *repositories, tools map[string]string, log *slog.Logger) *outbox {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &outbox{
 		pool: pool, records: records, dispatch: client, notices: publisher, supervisor: supervisor, trees: trees, tokens: tokens,
-		handlers: handlers, designGate: designGate, project: project, dispatchProject: dispatchProject, stateDir: stateDir, githubAPI: githubAPI, repositories: repositories,
+		handlers: handlers, live: live, project: project, dispatchProject: dispatchProject, stateDir: stateDir, githubAPI: githubAPI, repositories: repositories,
 		log: log, now: time.Now, clock: supervise.RealClock{},
 		// WarmCodegraphIndexInBackground runs here, never in provisionWorkspace: every outbox
 		// test injects its own `provision`, so only this production closure starts codegraph.
@@ -195,6 +195,18 @@ func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client,
 			return workspace.CheckedOut(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), working)
 		},
 	}
+}
+
+// designGate is the project's design gate policy as the daemon is running on it now
+// (`gates.design`): what a catch-up this runner writes states, and the kept approval pair a
+// start task names (workflow.QueueCatchUp). It is read at the write rather than held from the
+// boot, so a change of the gate reaches the next catch-up with nothing rebuilt — a tree whose
+// architect is told the policy after an operator moved it is told the one the daemon decides by.
+func (r *outbox) designGate() config.DesignGate {
+	if r.live == nil {
+		return ""
+	}
+	return r.live.Snapshot().Gates.Design
 }
 
 // RunOnce drains every row of the project due now, in the order the lanes would run them within

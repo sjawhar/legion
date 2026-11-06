@@ -412,3 +412,61 @@ func TestALateReportOfASpentCatchUpNamesWhatItsRowReleased(t *testing.T) {
 		})
 	}
 }
+
+// The design gate a catch-up states is read from the settings holder as that catch-up is
+// written (outbox.designGate), never from the value the daemon booted on: a tree whose
+// architect is caught up after an operator moved the gate is told the policy the daemon is
+// deciding by. Holding the boot's copy, every catch-up and every start task of the daemon's
+// life would state the old policy, and the architect would work the tree under a gate nobody
+// runs any more.
+func TestADesignGateChangedUnderTheRunningOutboxIsStatedByTheNextCatchUp(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	noticeTree(t, pool, records, false)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	architectClaim(t, sup, "LEGION-1", supervise.StateWorking)
+	live := liveSettings(t)
+	now := time.Now()
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records,
+		notices: &hookPublisher{}, supervisor: sup, project: "legion", live: live, now: func() time.Time { return now }}
+
+	keepDecision(t, pool, records, "LEGION-1", "dispatch://LEGION-1/ask/ask-1", time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC))
+	if err := runner.spentKept(ctx, "LEGION-1", 0, "nothing-told-of-the-first"); err != nil {
+		t.Fatalf("name what the tree is owed: %v", err)
+	}
+
+	if got, want := newestCatchUpGate(t, pool, "LEGION-1"), string(config.DesignGateRootIssues); got != want {
+		t.Fatalf("the catch-up states the gate policy %q, want the file's own %q", got, want)
+	}
+
+	apply(t, live, map[string]any{"gates.design": "off"})
+	keepDecision(t, pool, records, "LEGION-1", "dispatch://LEGION-1/ask/ask-2", time.Date(2026, 10, 24, 10, 0, 0, 0, time.UTC))
+	if err := runner.spentKept(ctx, "LEGION-1", 0, "nothing-told-of-the-second"); err != nil {
+		t.Fatalf("name what the tree is owed after the gate moved: %v", err)
+	}
+
+	if got, want := newestCatchUpGate(t, pool, "LEGION-1"), string(config.DesignGateOff); got != want {
+		t.Fatalf("the catch-up written after the operator's change states %q, want the gate the daemon decides by, %q", got, want)
+	}
+}
+
+// newestCatchUpGate is the design gate policy the newest catch-up of root in the outbox states
+// (record.CatchUpGate.Policy), which is the policy its architect is told.
+func newestCatchUpGate(t *testing.T, pool *pgxpool.Pool, root string) string {
+	t.Helper()
+	rows := catchUpRows(t, pool, root)
+	if len(rows) == 0 {
+		t.Fatalf("the outbox holds no catch-up of %s", root)
+	}
+	newest := rows[len(rows)-1]
+	payload, err := record.DecodeOutboxPayload(newest)
+	if err != nil {
+		t.Fatalf("decode the catch-up %d of %s: %v", newest.ID, root, err)
+	}
+	notice, ok := payload.(record.Notice)
+	if !ok || notice.CatchUp == nil {
+		t.Fatalf("outbox row %d is %T, want a catch-up notice", newest.ID, payload)
+	}
+	return notice.CatchUp.Gate.Policy
+}

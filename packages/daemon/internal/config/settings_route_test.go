@@ -1,6 +1,7 @@
 package config
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -53,15 +54,15 @@ func TestAnHTTPSIssuerAndALoopbackIssuerAreTaken(t *testing.T) {
 }
 
 // Which paths each caller of the settings route may set is a property of the class table's rows
-// and no second list (Row.Plain): the keys the daemon reads at each decision, and nothing that
-// names a command it runs, a credential, the file holding one, an address it connects to or
-// listens on, or the rule of who may call the route (INFRA-1077's spec, "Which settings a
-// projected token may change").
+// and no second list (Row.Plain): the keys the daemon reads at each decision and holds nowhere,
+// and nothing that names a command it runs, a credential, the file holding one, an address it
+// connects to or listens on, the rule of who may call the route, or a value a holder keeps a
+// copy of (INFRA-1077's spec, "Which settings a projected token may change").
 func TestAProjectedCallerSetsThePlainDataRowsAndNothingElse(t *testing.T) {
 	for _, path := range []string{
 		"admission_cap", "review_round_cap", "max_fix_attempts", "linger_hours",
 		"launch_failure_limit", "prompt_failure_limit", "prompt_retire_limit",
-		"worker_boot_timeout_seconds", "tree_stop_timeout_seconds",
+		"pod_update_retask_hours", "pod_update_notice_hours", "tree_stop_timeout_seconds",
 	} {
 		if admitted, why := CallerProjected.Admits(path); !admitted {
 			t.Errorf("a projected token may not set %s (%s), and it is plain data", path, why)
@@ -74,7 +75,11 @@ func TestAProjectedCallerSetsThePlainDataRowsAndNothingElse(t *testing.T) {
 		"settings_route.oidc_issuer", "settings_route.audience", "settings_route.service_accounts",
 		"instructions", "omp_invocation", "omp_launch_prefix", "runtime.kubernetes.image",
 		"runtime.kubernetes.pod.env", "controller", "repository_renames",
-		// The design gate is plain data by its row and is refused all the same (below).
+		// The two boot bounds: the machines read both per decision, and the Sandbox runtime
+		// holds them too, so their rows name that holder and this caller is refused them.
+		"worker_boot_timeout_seconds", "worker_boot_registration_deadline_intervals",
+		// The design gate is read per decision and held by the API server and the launch
+		// specs, so its row names a holder and this caller is refused it (below).
 		"gates", "gates.design",
 	} {
 		admitted, why := CallerProjected.Admits(path)
@@ -99,29 +104,34 @@ func TestAProjectedCallerSetsThePlainDataRowsAndNothingElse(t *testing.T) {
 	}
 }
 
-// The design gate is the one plain-data key a projected ServiceAccount token may not set, and it
-// is refused by name: a gate is the rule that says a person decides a tree's specification, and
-// a caller holding a token the whole service shares is not the party that may switch that rule
-// off. Its row is a decision row still — the operator bearer and the daemon's own file change it
-// as they change any other key — so the rule lives in the caller and not in the table.
-func TestAProjectedCallerIsRefusedTheGatesBlockByName(t *testing.T) {
+// The design gate is the one key the daemon reads at each decision that a projected
+// ServiceAccount token may not set: a gate is the rule that says a person decides a tree's
+// specification, and a caller holding a token the whole service shares is not the party that
+// may switch that rule off. Nothing names it in the caller rule — the API server and the launch
+// specs each hold the gate, which is what its row says, and a row something holds a copy of is
+// no plain data. Its row is a decision row still: the operator bearer and the daemon's own file
+// change it as they change any other key, and it takes effect at once where it decides.
+func TestAProjectedCallerIsRefusedTheGatesBlockByItsHolder(t *testing.T) {
 	if admitted, why := CallerProjected.Admits("admission_cap"); !admitted {
 		t.Fatalf("a projected token may not set admission_cap (%s), and it is plain data", why)
 	}
 	for _, path := range []string{"gates", "gates.design"} {
 		admitted, why := CallerProjected.Admits(path)
 		if admitted {
-			t.Errorf("a projected token may set %s, want it refused by name", path)
+			t.Errorf("a projected token may set %s, want it refused", path)
 		}
-		if why == "" {
-			t.Errorf("the refusal of %s says nothing", path)
+		if why != whyNotRead {
+			t.Errorf("the refusal of %s is %q, want the reason the arm gives a key a holder keeps: %q", path, why, whyNotRead)
 		}
 	}
-	// The row keeps its class, its holder and its answer to every other reader: only the
+	// The row keeps its class, its holders and its answer to every other reader: only the
 	// projected caller is refused it.
 	row, known := ClassOf("gates.design")
-	if !known || row.Class != ClassDecision || !row.Plain() {
-		t.Fatalf("gates.design's row = %+v, want the decision row it was", row)
+	if !known || row.Class != ClassDecision || row.Holder != HolderAPIServer || !slices.Contains(row.Also, HolderLaunchSpecs) {
+		t.Fatalf("gates.design's row = %+v, want the decision row the API server and the launch specs hold", row)
+	}
+	if row.Plain() {
+		t.Error("gates.design reads as plain data, and a holder keeps a copy of it")
 	}
 	if admitted, why := CallerOperator.Admits("gates.design"); !admitted {
 		t.Fatalf("the operator bearer may not set gates.design (%s)", why)

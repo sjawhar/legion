@@ -14,9 +14,13 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/sjawhar/legion/daemon/internal/api"
+	"github.com/sjawhar/legion/daemon/internal/capabilities"
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
@@ -445,4 +449,247 @@ func stillOpen(t *testing.T, s *shim) {
 	default:
 		t.Fatalf("the connection the rebuild kept is gone: %v", err)
 	}
+}
+
+// The two bounds of an update round are read where the round is decided, not off the
+// configuration the daemon booted on: the notice bound at every sweep (supervision.live) and
+// the re-task bound at every ask the machine decides (supervise.Timeouts.PodUpdateRetask,
+// through liveBudgets). The rig runs the daemon's own sweep and machines over a settings holder
+// a real legion.yaml backs, so a change here is the change an operator makes.
+//
+// The notice bound: a round pinned by an operator-suspended claim waits. Past the bound the
+// rig's own configuration carries, and under the holder's, nothing is told — the sweep reads
+// the holder — and the controller is told at the next sweep once the holder's bound is under
+// the wait.
+func TestThePodUpdateNoticeChangedUnderTheRunningSweepIsToldAtTheNextTick(t *testing.T) {
+	live := liveSettings(t, "pod_update_notice_hours: 8")
+	rig := newPodUpdateRigOn(t, live,
+		podUpdateRole{role: claim.RoleImplementer, state: supervise.StateSuspended, session: true,
+			contract: api.DaemonAPIVersion, suspendedBy: supervise.SuspendedByOperator},
+		readyWorker(claim.RoleTester),
+	)
+	rig.drifts(podUpdateDrift)
+
+	rig.tick()
+	rig.awaitRound(claim.RoleTester, podUpdateRound)
+	rig.signal(claim.RoleTester, "a1b2c3d")
+	rig.clock.advance(podUpdateNotice)
+	rig.tick()
+
+	if notices := rig.notices(); len(notices) != 0 {
+		t.Fatalf("the controller was told %d times %s after the round opened; the holder's bound is 8 hours",
+			len(notices), podUpdateNotice)
+	}
+
+	apply(t, live, map[string]any{"pod_update_notice_hours": 1})
+	rig.tick()
+
+	notices := rig.notices()
+	if len(notices) != 1 {
+		t.Fatalf("the controller was told %d times under the bound the operator changed to an hour, want once", len(notices))
+	}
+	if notices[0].Update == nil || notices[0].Update.Round != podUpdateRound {
+		t.Fatalf("the notice is %+v, want the stalled round's", notices[0])
+	}
+}
+
+// The re-task bound: a worker that answered nothing is asked again only once the bound has
+// passed since the last ask, and the bound is the holder's at that ask. Past the rig's own and
+// under the holder's, the worker is not asked; once the operator shortens it, the next sweep
+// asks again.
+func TestThePodUpdateRetaskChangedUnderTheRunningSweepIsReadByTheNextAsk(t *testing.T) {
+	live := liveSettings(t, "pod_update_retask_hours: 2", "pod_update_notice_hours: 8")
+	rig := newPodUpdateRigOn(t, live, readyWorker(claim.RoleImplementer))
+	rig.drifts(podUpdateDrift)
+
+	rig.tick()
+	asked := rig.awaitRound(claim.RoleImplementer, podUpdateRound)
+	first := asked.UpdateTaskedAt
+	// The ask ends with a turn of the worker's own, which answers nothing: what leaves a claim
+	// asked and unanswered for the next ask to reach (TestPodUpdateAsksAgainAfterTheRetaskBound).
+	token := rig.tokens[claim.RoleImplementer]
+	rig.handle(claim.RoleImplementer, supervise.StreamTurnStart{Claim: token, DeliveryID: "a-delivery-of-the-worker-s-own"})
+	rig.endTurn(claim.RoleImplementer, asked.Pending.ID)
+	rig.awaitClaim(claim.RoleImplementer, "the unanswered ask to end with its turn", func(c supervise.Claim) bool {
+		return c.Pending == nil
+	})
+
+	rig.clock.advance(podUpdateRetask)
+	rig.tick()
+
+	if at := rig.claimOf(claim.RoleImplementer).UpdateTaskedAt; !at.Equal(*first) {
+		t.Fatalf("the worker was asked again at %s, %s after the first ask; the holder's bound is two hours", at, podUpdateRetask)
+	}
+
+	apply(t, live, map[string]any{"pod_update_retask_hours": 0.25})
+	rig.tick()
+
+	again := rig.awaitSwept(claim.RoleImplementer, "the worker to be asked again under the bound the operator shortened",
+		func(c supervise.Claim) bool { return c.UpdateTaskedAt != nil && c.UpdateTaskedAt.After(*first) })
+	if again.Pending == nil || again.Pending.ID == asked.Pending.ID {
+		t.Errorf("the second ask = %+v, want a delivery of its own", again.Pending)
+	}
+}
+
+// A capability decision an operator records reaches the next read of the state: the deployment's
+// report is built from the settings holder at every read (supervision.deployment), so the row
+// the daemon reported open stands decided with the operator's reason, at once and with nothing
+// rebuilt.
+func TestACapabilityDecisionChangedThroughTheRouteIsInTheNextStateRead(t *testing.T) {
+	live := liveSettings(t)
+	logs := &syncBuffer{}
+	d := startDaemonOn(t, live, fakeRuntime(fake.NewRuntime(), &built{}), slog.New(slog.NewJSONHandler(logs, nil)), 10*time.Second)
+	if row := capabilityRow(t, d, capabilities.Secrets); row.Status != capabilities.StatusOpen {
+		t.Fatalf("the secrets row before the decision = %+v, want it open: this deployment enrolls no process", row)
+	}
+
+	const reason = "dispatch://LEGION-205 enrolls pods later"
+	applied := apply(t, live, map[string]any{"capabilities.decided": map[string]any{"secrets": reason}})
+
+	if len(applied) != 1 || applied[0].Path != "capabilities.decided" {
+		t.Fatalf("the apply reported %+v, want one capabilities.decided change", applied)
+	}
+	if applied[0].Outcome != config.OutcomeAtOnce || applied[0].Holder != "" {
+		t.Fatalf("the change is %+v, want it taking effect at once with no holder", applied[0])
+	}
+	row := capabilityRow(t, d, capabilities.Secrets)
+	if row.Status != capabilities.StatusDecided || row.Decision != reason {
+		t.Fatalf("the secrets row after the decision = %+v, want it decided with the operator's reason", row)
+	}
+	if strings.Contains(logs.String(), "holder rebuilt") {
+		t.Fatalf("a decision-class change rebuilt a holder:\n%s", logs)
+	}
+}
+
+// capabilityRow is one row of the deployment's capability report as the running daemon's state
+// carries it.
+func capabilityRow(t *testing.T, d *daemon, name capabilities.Name) api.CapabilityState {
+	t.Helper()
+	for _, row := range d.state().Capabilities {
+		if row.Name == string(name) {
+			return row
+		}
+	}
+	t.Fatalf("the state carries no %s capability row", name)
+	return api.CapabilityState{}
+}
+
+// The two boot bounds are the runtime's to rebuild: every machine reads them per decision, and
+// the Sandbox runtime holds them too — each wait of a launch and of a pod's observation is
+// bounded by the boot timeout it was built with, and its launch bound is derived from it. The
+// route answers `rebuilt` naming the runtime, and the runtime is built again under the work it
+// is running, so no reader is left bounding a launch by the value the daemon booted on.
+func TestTheWorkerBootBoundsChangedThroughTheRouteRebuildTheRuntime(t *testing.T) {
+	live := liveSettings(t)
+	logs := &syncBuffer{}
+	d := startDaemonOn(t, live, fakeRuntime(fake.NewRuntime(), &built{}), slog.New(slog.NewJSONHandler(logs, nil)), 10*time.Second)
+
+	applied := apply(t, live, map[string]any{
+		"worker_boot_timeout_seconds":                 90,
+		"worker_boot_registration_deadline_intervals": 4,
+	})
+
+	if len(applied) != 2 {
+		t.Fatalf("the apply reported %+v, want both boot bounds changed", applied)
+	}
+	for _, change := range applied {
+		if change.Class != config.ClassRebuild || change.Outcome != config.OutcomeRebuilt || change.Holder != config.HolderRuntime {
+			t.Fatalf("the change of %s is %+v, want a rebuild of the runtime", change.Path, change)
+		}
+	}
+	awaitLog(t, logs, `"holder":"runtime"`, 5*time.Second, "the runtime was not built again for the boot bounds")
+	state := d.state()
+	if state.Settings.WorkerBootTimeoutSeconds != 90 {
+		t.Errorf("the daemon reads worker_boot_timeout_seconds %d, want the applied 90", state.Settings.WorkerBootTimeoutSeconds)
+	}
+}
+
+// The design gate reaches the next launch: the launch specs hold a copy of it for every tree
+// architect's prompt, and the gate's row names them beside the API server (config.Row.Also), so
+// an architect started after an operator moved the gate is told the policy the daemon decides
+// by — and not the one it booted on.
+func TestADesignGateChangedThroughTheRouteReachesTheNextArchitectsLaunch(t *testing.T) {
+	live := liveSettings(t)
+	rt := fake.NewRuntime()
+	logs := &syncBuffer{}
+	d := startDaemonOn(t, live, fakeRuntime(rt, &built{}), slog.New(slog.NewJSONHandler(logs, nil)), 10*time.Second)
+	booted := lastLaunch(t, rt, d.spawn(architect()))
+	if want := DesignGateFragment(config.DesignGateRootIssues); !strings.Contains(booted.Prompt.Addressing, want) {
+		t.Fatalf("the first architect is addressed %q, want it to carry %q", booted.Prompt.Addressing, want)
+	}
+
+	applied := apply(t, live, map[string]any{"gates.design": "off"})
+
+	if len(applied) != 1 || applied[0].Path != "gates.design" || applied[0].New != string(config.DesignGateOff) {
+		t.Fatalf("the apply reported %+v, want one gates.design change to off", applied)
+	}
+	if applied[0].Outcome != config.OutcomeAtOnce || applied[0].Holder != config.HolderAPIServer {
+		t.Fatalf("the change is %+v, want it deciding at once with the API server named", applied[0])
+	}
+	awaitLog(t, logs, `"holder":"launch-specs"`, 5*time.Second, "the launch specs were not built again for the gate")
+	next := lastLaunch(t, rt, d.spawn(api.SpawnRequest{
+		Tree: "LEGION-2", Issue: "LEGION-2", Role: claim.RoleArchitect, Prompt: "Reply ready and wait.",
+	}))
+	if want := DesignGateFragment(config.DesignGateOff); !strings.Contains(next.Prompt.Addressing, want) {
+		t.Fatalf("the architect started after the change is addressed %q, want it to carry %q", next.Prompt.Addressing, want)
+	}
+}
+
+// The project block reaches the next launch too: the launch specs copy the project's merge rules
+// into every merger's prompt and its Slack channels into the controller's, and the runtime hands
+// the daemon-launched controller's pod the same channels, so the row names both beside the API
+// server. The diff names `projects` whatever member moved — the block is compared whole — so one
+// change of a project's merge rules is what proves all three were built again.
+//
+// The change carries `github_apps` beside it because the loader takes a `projects` block in no
+// file without one (config's resolveStage3), and a file holding neither is what this harness
+// boots: the key this test is about is the project's own merge rules. This daemon has no
+// Dispatch and so no App manager to build again, which the rebuilder logs and nothing else.
+func TestTheProjectsBlockChangedThroughTheRouteReachesTheNextMergersLaunch(t *testing.T) {
+	live := liveSettings(t)
+	rt := fake.NewRuntime()
+	logs := &syncBuffer{}
+	d := startDaemonOn(t, live, fakeRuntime(rt, &built{}), slog.New(slog.NewJSONHandler(logs, nil)), 10*time.Second)
+	// A worker binds the work of a tree an architect opened, so the root goes first.
+	d.spawn(architect())
+	merger := func(issue string) runtime.SpawnSpec {
+		return lastLaunch(t, rt, d.spawn(api.SpawnRequest{Tree: "LEGION-1", Issue: issue, Role: claim.RoleMerger, Prompt: "Wait."}))
+	}
+	if want := MergeRulesFragment(config.MergeRules{}); !strings.Contains(merger("LEGION-2").Prompt.Addressing, want) {
+		t.Fatalf("the first merger is addressed without %q, want the file's own rules", want)
+	}
+
+	applied := apply(t, live, map[string]any{
+		"projects": map[string]any{
+			live.Snapshot().Project: map[string]any{"merge": map[string]any{"by_hand": []string{"^docs/"}}},
+		},
+		"github_apps": map[string]any{
+			"implement": map[string]any{"app_id": "1", "private_key": "implement-test-key"},
+			"review":    map[string]any{"app_id": "2", "private_key": "review-test-key"},
+		},
+	})
+
+	projects, held := changeOf(applied, "projects")
+	if !held {
+		t.Fatalf("the apply reported %+v, want the projects block among the changes", applied)
+	}
+	if projects.Outcome != config.OutcomeRebuilt || projects.Holder != config.HolderAPIServer {
+		t.Fatalf("the change is %+v, want a rebuild naming the API server", projects)
+	}
+	for _, holder := range []string{config.HolderLaunchSpecs, config.HolderRuntime} {
+		awaitLog(t, logs, `"holder":"`+holder+`"`, 5*time.Second, "the project's change left "+holder+" holding the boot's block")
+	}
+	if addressing := merger("LEGION-3").Prompt.Addressing; !strings.Contains(addressing, "`^docs/`") {
+		t.Fatalf("the merger started after the change is addressed %q, want the rules the operator set", addressing)
+	}
+}
+
+// changeOf is the applied change of path, and whether the apply reported one.
+func changeOf(applied []config.Change, path string) (config.Change, bool) {
+	for _, change := range applied {
+		if change.Path == path {
+			return change, true
+		}
+	}
+	return config.Change{}, false
 }

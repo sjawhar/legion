@@ -441,13 +441,20 @@ type Timeouts struct {
 	// (relaunchAfterFailure) — one that died, or was retired at its registration deadline. The
 	// daemon sets it to its launchBackoffFirst.
 	LaunchBackoff time.Duration
+	// PodUpdateRetask is how long after an update task was sent an update round asks a claim
+	// that has not answered again (openPodUpdate), from the daemon's pod_update_retask_hours.
+	// The re-task clock runs from each send (Claim.UpdateTaskedAt), so asking again never
+	// postpones the round's own clock. Zero takes defaultPodUpdateRetask, so a caller that
+	// states none still opens rounds that make progress; it is the one wait here that check
+	// does not hold to a positive value.
+	PodUpdateRetask time.Duration
 }
 
 // Settings is where a decision reads the limits it is held to and the waits it times: the
 // daemon's settings holder, asked as the decision is made rather than copied when the machine was
 // built, so a change of `launch_failure_limit`, `prompt_failure_limit`, `prompt_retire_limit`,
-// `worker_boot_timeout_seconds` or `worker_rpc_timeout_seconds` reaches the next decision with no
-// machine rebuilt.
+// `worker_boot_timeout_seconds`, `worker_rpc_timeout_seconds` or `pod_update_retask_hours`
+// reaches the next decision with no machine rebuilt.
 type Settings interface {
 	Limits() Limits
 	Timeouts() Timeouts
@@ -547,11 +554,6 @@ type Deps struct {
 	// held by an untaken task would wait for the next tick. Nil tells no one. It is called inside
 	// the machine's decision, so it returns at once.
 	TaskConfirmed func(c Claim)
-	// PodUpdateRetask is how long after an update task was sent an update round asks a claim that
-	// has not answered again (openPodUpdate), from the daemon's pod_update_retask_hours. The
-	// re-task clock runs from each send (Claim.UpdateTaskedAt), so asking again never postpones
-	// the round's own clock. Zero takes defaultPodUpdateRetask.
-	PodUpdateRetask time.Duration
 }
 
 // limits is the limits this decision is held to, and timeouts the waits it times: the holder's
@@ -609,12 +611,13 @@ func (d Deps) check() error {
 // check, so a Deps built without the key still opens rounds that make progress.
 const defaultPodUpdateRetask = time.Hour
 
-// podUpdateRetask is Deps.PodUpdateRetask, or defaultPodUpdateRetask when it names none.
+// podUpdateRetask is the re-task bound this decision is held to — the holder's when the caller
+// set one (Timeouts.PodUpdateRetask) — or defaultPodUpdateRetask when it names none.
 func (d Deps) podUpdateRetask() time.Duration {
-	if d.PodUpdateRetask <= 0 {
-		return defaultPodUpdateRetask
+	if bound := d.timeouts().PodUpdateRetask; bound > 0 {
+		return bound
 	}
-	return d.PodUpdateRetask
+	return defaultPodUpdateRetask
 }
 
 // RefusedError is a request the claim does not allow — the answer an API route gives its caller

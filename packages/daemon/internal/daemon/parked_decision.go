@@ -136,7 +136,7 @@ func (r *outbox) settleKept(ctx context.Context, row record.OutboxRow, payload r
 // (workflow.HandOverKept). root names the row's own tree in the error the settlement reports.
 func (r *outbox) handOverKept(ctx context.Context, root string, row int64) error {
 	return r.writeSettlement(ctx, root, row, func(ctx context.Context, tx pgx.Tx) error {
-		return workflow.HandOverKept(ctx, tx, r.records, r.designGate, row, r.now().UTC())
+		return workflow.HandOverKept(ctx, tx, r.records, r.designGate(), row, r.now().UTC())
 	})
 }
 
@@ -232,7 +232,7 @@ func (r *outbox) supersededKept(ctx context.Context, root string, row int64, key
 		if err != nil || told {
 			return err
 		}
-		return workflow.HandOverKept(ctx, tx, r.records, r.designGate, row, r.now().UTC())
+		return workflow.HandOverKept(ctx, tx, r.records, r.designGate(), row, r.now().UTC())
 	})
 }
 
@@ -251,7 +251,7 @@ func (r *outbox) spentKept(ctx context.Context, root string, claims int64, key s
 			return err
 		}
 		if claims != 0 {
-			return workflow.HandOverKept(ctx, tx, r.records, r.designGate, claims, r.now().UTC())
+			return workflow.HandOverKept(ctx, tx, r.records, r.designGate(), claims, r.now().UTC())
 		}
 		tree, err := r.treeOfIssue(ctx, tx, root)
 		if err != nil {
@@ -261,6 +261,6 @@ func (r *outbox) spentKept(ctx context.Context, root string, claims int64, key s
 		if err != nil || len(decisions) == 0 && approved == 0 {
 			return err
 		}
-		return workflow.CatchUpTheTreesOwed(ctx, tx, r.records, r.designGate, []string{tree}, r.now().UTC())
+		return workflow.CatchUpTheTreesOwed(ctx, tx, r.records, r.designGate(), []string{tree}, r.now().UTC())
 	})
 }

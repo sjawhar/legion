@@ -133,7 +133,8 @@ const (
 // operator bearer and the daemon's own file may change every key except those fixed for the
 // process, and a projected ServiceAccount token — Dispatch's path, whose caller is any
 // deployment-scoped Dispatch user, a person or an agent — only a key whose value is plain data
-// and is no `gates` key.
+// (Row.Plain), which a `gates` key is not: the API server and the launch specs each hold the
+// design gate.
 type Caller string
 
 const (
@@ -141,8 +142,8 @@ const (
 	// every path the loader takes, which is every row but one fixed for the process.
 	CallerOperator Caller = "operator"
 	// CallerProjected is a caller holding a projected ServiceAccount token: only a row whose
-	// value is plain data (Row.Plain) and that is no `gates` key, which is refused by name
-	// whatever its row says (Caller.Admits). Every other path is refused by name too.
+	// value is plain data (Row.Plain). Every other path is refused by name, with the reason its
+	// row gives it (Caller.Admits).
 	CallerProjected Caller = "projected"
 )
 
@@ -153,27 +154,13 @@ const (
 	whyNotRead = "a projected ServiceAccount token changes only the settings the daemon reads at each decision, and this one is held by a client, a listener, a launch, or the rule of who may call this route"
 )
 
-// gatesKey is `gates`, the one block a projected ServiceAccount token may not set, by name: the
-// block itself and every key under it.
-const gatesKey = "gates"
-
 // Admits is whether this caller may set path, and why not when it may not. A path the class
 // table does not hold is admitted here and refused by Apply as an unknown setting, so no caller
 // learns from this answer alone which paths the daemon has.
-//
-// `gates` is named here rather than read off its row. Its rows are decision rows and stay so —
-// the operator bearer and the daemon's own file change them as they change any other, and the
-// API server and the launch specs hold their copies as before — but a gate is the rule that
-// says a person decides, and a caller holding a projected token is not the party that may
-// switch that rule off. It is refused with the reason the arm already gives for a key it may
-// not set, since the design gate is held by the launch specs and the API server too.
 func (c Caller) Admits(path string) (bool, string) {
 	row, known := ClassOf(path)
 	if !known || c != CallerProjected {
 		return true, ""
-	}
-	if path == gatesKey || strings.HasPrefix(path, gatesKey+".") {
-		return false, whyNotRead
 	}
 	if row.Plain() {
 		return true, ""
@@ -184,24 +171,25 @@ func (c Caller) Admits(path string) (bool, string) {
 	return false, whyNotRead
 }
 
-// Plain is whether this row's value is plain data: a value the daemon reads at each decision and
-// hands to nothing else — no command it runs, no credential, no file holding one, no address it
-// connects to or listens on, and none of the rules of who may call the settings route.
+// Plain is whether this row's value is plain data: a value the daemon reads at each decision,
+// holds nowhere, and hands to nothing else — no command it runs, no credential, no file holding
+// one, no address it connects to or listens on, and none of the rules of who may call the
+// settings route.
 //
 // It is a property of the row and no second list: the class says the daemon reads the value as
 // it decides rather than handing it to a client, a listener, a launch or a command, which leaves
-// out every command, address, listener and `settings_route` key, each of them held; and Secret
-// says the value is a credential, the source of one, the path of a file holding one, or an
-// address that may carry one. Today the rows it admits are `admission_cap`, the supervision
-// limits and timeouts (`launch_failure_limit`, `prompt_failure_limit`, `prompt_retire_limit`,
-// `worker_boot_timeout_seconds`, `worker_boot_registration_deadline_intervals`,
-// `tree_stop_timeout_seconds`), the workflow's own bounds (`linger_hours`,
-// `production_check_hours`, `pod_update_retask_hours`, `pod_update_notice_hours`,
-// `review_round_cap`, `max_fix_attempts`), `capabilities.decided` and `gates.design`.
-//
-// It is no longer the whole of what a projected token may set: `gates.design` is plain data and
-// that caller is refused it by name (Caller.Admits).
-func (r Row) Plain() bool { return r.Class == ClassDecision && !r.Secret }
+// out every command, address, listener and `settings_route` key, each of them held; Holder says
+// something holds a copy of it all the same, which is what a `gates` key does — the API server
+// and the launch specs each hold the design gate, and a gate is the rule that says a person
+// decides a tree's specification, so a caller holding a token the whole service shares is not
+// the party that may switch it off; and Secret says the value is a credential, the source of
+// one, the path of a file holding one, or an address that may carry one. Today the rows it
+// admits are `admission_cap`, the supervision limits (`launch_failure_limit`,
+// `prompt_failure_limit`, `prompt_retire_limit`, `tree_stop_timeout_seconds`), the workflow's
+// own bounds (`linger_hours`, `production_check_hours`, `pod_update_retask_hours`,
+// `pod_update_notice_hours`, `review_round_cap`, `max_fix_attempts`) and `capabilities` with
+// `capabilities.decided`.
+func (r Row) Plain() bool { return r.Class == ClassDecision && !r.Secret && r.Holder == "" }
 
 // Classes is every settable unit of `legion.yaml`, one row per field the loader reads it into.
 //
@@ -231,19 +219,29 @@ var Classes = []Row{
 	{Field: "Runtime.Tmux", Path: "runtime.tmux", Class: ClassFixed, Why: whyTakeOve, Block: true},
 
 	// Read per decision: admission reads the cap at every admission, and the supervisor its
-	// budgets and its boot deadline at every launch it is deciding about.
+	// budgets at every launch it is deciding about (internal/daemon's liveBudgets).
 	{Field: "Config.AdmissionCap", Path: "admission_cap", Class: ClassDecision},
 	{Field: "Config.LaunchFailureLimit", Path: "launch_failure_limit", Class: ClassDecision},
 	{Field: "Config.PromptFailureLimit", Path: "prompt_failure_limit", Class: ClassDecision},
 	{Field: "Config.PromptRetireLimit", Path: "prompt_retire_limit", Class: ClassDecision},
-	{Field: "Config.WorkerBootTimeout", Path: "worker_boot_timeout_seconds", Class: ClassDecision},
-	{Field: "Config.WorkerBootRegistrationDeadlineIntervals", Path: "worker_boot_registration_deadline_intervals", Class: ClassDecision},
+	// The boot deadline and its interval count. Each machine reads both per decision
+	// (supervise.Timeouts), and the Sandbox runtime holds them too: every wait of a launch, of
+	// the pod's own observation and of a Sandbox deletion is bounded by the boot timeout the
+	// runtime was built with, and the launch bound is derived from it when it is built
+	// (runtime/sandbox's launchBound). The stricter class is the runtime's rebuild, as
+	// `worker_stop_timeout_seconds` below is.
+	{Field: "Config.WorkerBootTimeout", Path: "worker_boot_timeout_seconds", Class: ClassRebuild, Holder: HolderRuntime},
+	{Field: "Config.WorkerBootRegistrationDeadlineIntervals", Path: "worker_boot_registration_deadline_intervals", Class: ClassRebuild, Holder: HolderRuntime},
 	// No holder reads it today: the whole of its behaviour is the value the state carries.
 	{Field: "Config.TreeStopTimeout", Path: "tree_stop_timeout_seconds", Class: ClassDecision},
 
 	// The workflow's own decisions, each read as the decision is made.
 	{Field: "Config.Linger", Path: "linger_hours", Class: ClassDecision},
 	{Field: "Config.ProductionCheckBound", Path: "production_check_hours", Class: ClassDecision},
+	// The update round's two bounds, each read at the decision it holds: the re-task bound by
+	// the machine deciding whether to ask a claim again (supervise.Timeouts.PodUpdateRetask,
+	// through the daemon's liveBudgets), and the notice bound by the sweep deciding whether to
+	// tell the operator's side (internal/daemon's supervision.live).
 	{Field: "Config.PodUpdateRetask", Path: "pod_update_retask_hours", Class: ClassDecision},
 	{Field: "Config.PodUpdateNotice", Path: "pod_update_notice_hours", Class: ClassDecision},
 	// The pod-update sweep's two limits, which it reads off the configuration the daemon booted
@@ -252,15 +250,20 @@ var Classes = []Row{
 	{Field: "Config.PodUpdateRoundsPerMinute", Path: "pod_update_rounds_per_minute", Class: ClassFixed, Why: whyPodSweep},
 	{Field: "Config.ReviewRoundCap", Path: "review_round_cap", Class: ClassDecision},
 	{Field: "Config.MaxFixAttempts", Path: "max_fix_attempts", Class: ClassDecision},
-	// The capability report is built from the configuration at every read of the state.
+	// The capability report is built at every read of the state, from the settings holder
+	// (internal/daemon's supervision.deployment), so a decision an operator records reaches the
+	// next read with nothing rebuilt.
 	{Field: "Config.Capabilities", Path: "capabilities", Class: ClassDecision, Block: true},
 	{Field: "Capabilities.Decided", Path: "capabilities.decided", Class: ClassDecision},
-	// The design gate is read per decision; the API server and the launch specs each hold a copy
-	// of it, which their own rebuild refreshes, so the change takes effect at once where it
-	// decides. A row names the one holder an operator is told was rebuilt (Change.Holder), which
-	// is why this one names the API server alone.
-	{Field: "Config.Gates", Path: "gates", Class: ClassDecision, Holder: HolderAPIServer, Block: true},
-	{Field: "Gates.Design", Path: "gates.design", Class: ClassDecision, Holder: HolderAPIServer},
+	// The design gate is read per decision — the workflow engine and the outbox each read it
+	// from the settings holder as they decide — and two things hold a copy of it: the API
+	// server, which a reader asks for the gate, and the launch specs, which write it into every
+	// tree architect's and the controller's prompt. Both are built again here, so the next
+	// launch is told the policy the daemon is deciding by; a row names the one holder an
+	// operator is told was rebuilt (Change.Holder), which is why this one names the API server
+	// and leaves the launch specs to Also.
+	{Field: "Config.Gates", Path: "gates", Class: ClassDecision, Holder: HolderAPIServer, Also: []string{HolderLaunchSpecs}, Block: true},
+	{Field: "Gates.Design", Path: "gates.design", Class: ClassDecision, Holder: HolderAPIServer, Also: []string{HolderLaunchSpecs}},
 
 	// Held by a client, a listener or a connection.
 	{Field: "Config.WorkerRPCTimeout", Path: "worker_rpc_timeout_seconds", Class: ClassRebuild, Holder: HolderWorkerStream},
@@ -297,19 +300,30 @@ var Classes = []Row{
 	// again with it, so no reader is left comparing names by the boot's value.
 	{Field: "Config.RepositoryRenames", Path: "repository_renames", Class: ClassRebuild, Holder: HolderAPIServer,
 		Also: []string{HolderRepositoryMapping, HolderNATS, HolderRuntime}},
-	// The projects block: the API server holds each project's merge rules, and the supervisor's
-	// launch specs copy its merge rules and its Slack channels, which reach a role at its next
-	// launch; the stricter class is the server's rebuild.
-	{Field: "Config.Projects", Path: "projects", Class: ClassRebuild, Holder: HolderAPIServer},
+	// The projects block, which `projects` is the one path of: the block is no Block row, so the
+	// diff compares it whole and names `projects` whatever member moved, and the rows below are
+	// what a caller setting one member by name is answered from. Three things hold it: the API
+	// server, which holds each project's merge rules; the launch specs, which copy the project's
+	// merge rules into every merger's prompt and its Slack channels into the controller's; and
+	// the runtime, which hands the daemon-launched controller's pod the same channels and
+	// relaunches it when they change (sandbox.Options.ControllerSlackChannels). The operator is
+	// told the server was rebuilt, and the other two are built again with it, so the next launch
+	// reads the project the daemon is running on.
+	{Field: "Config.Projects", Path: "projects", Class: ClassRebuild, Holder: HolderAPIServer,
+		Also: []string{HolderLaunchSpecs, HolderRuntime}},
 	{Field: "Project.MergeQueueRole", Path: "projects.<KEY>.merge_queue_role", Class: ClassRebuild, Holder: HolderAPIServer},
-	{Field: "Project.Merge", Path: "projects.<KEY>.merge", Class: ClassRebuild, Holder: HolderAPIServer},
-	{Field: "Project.SlackChannels", Path: "projects.<KEY>.slack_channels", Class: ClassRebuild, Holder: HolderAPIServer},
+	{Field: "Project.Merge", Path: "projects.<KEY>.merge", Class: ClassRebuild, Holder: HolderAPIServer,
+		Also: []string{HolderLaunchSpecs}},
+	{Field: "Project.SlackChannels", Path: "projects.<KEY>.slack_channels", Class: ClassRebuild, Holder: HolderAPIServer,
+		Also: []string{HolderLaunchSpecs, HolderRuntime}},
 	{Field: "Project.Deploys", Path: "projects.<KEY>.deploys", Class: ClassRebuild, Holder: HolderAPIServer},
 	{Field: "Deploy.Repo", Path: "projects.<KEY>.deploys[].repo", Class: ClassRebuild, Holder: HolderAPIServer},
 	{Field: "Deploy.Workflow", Path: "projects.<KEY>.deploys[].workflow", Class: ClassRebuild, Holder: HolderAPIServer},
 	{Field: "Deploy.Step", Path: "projects.<KEY>.deploys[].step", Class: ClassRebuild, Holder: HolderAPIServer},
-	{Field: "MergeRules.ByHand", Path: "projects.<KEY>.merge.by_hand", Class: ClassRebuild, Holder: HolderAPIServer},
-	{Field: "PathPattern.Expression", Path: "projects.<KEY>.merge.by_hand[]", Class: ClassRebuild, Holder: HolderAPIServer},
+	{Field: "MergeRules.ByHand", Path: "projects.<KEY>.merge.by_hand", Class: ClassRebuild, Holder: HolderAPIServer,
+		Also: []string{HolderLaunchSpecs}},
+	{Field: "PathPattern.Expression", Path: "projects.<KEY>.merge.by_hand[]", Class: ClassRebuild, Holder: HolderAPIServer,
+		Also: []string{HolderLaunchSpecs}},
 	// The project's memory block: the overlays a memory-group role's Oh My Pi loads reach that
 	// role at its next launch, through the runtime that builds its pod (sandboxOptions'
 	// MemoryConfigFiles), while the mode and the instructions are settled at boot — admission
