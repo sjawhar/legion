@@ -438,7 +438,7 @@ api() { # api PORT METHOD PATH [BODY]
   [ "$api_status" = 200 ]
 }
 
-# registered SESSION SELF TOPICS… writes one session's registration straight onto the wire: the
+# registered SESSION TOPICS… writes one session's registration straight onto the wire: the
 # same POST /v1/interests/subscribe a plugin's heartbeat makes, for the sessions a check needs to
 # age by the second rather than by a process's own clock. The listener refuses a registration that
 # names a port (sjawhar/legion#2674), and a session receives what its own consumer holds and
@@ -446,15 +446,14 @@ api() { # api PORT METHOD PATH [BODY]
 # It asks for the session consumer, as every plugin's registration does (dispatch://INFRA-771):
 # whatever else a registration says, one that asks for no consumer is refused 409 not_requested
 # and writes nothing (`consumerFor`), so a session registered without it would exist for no check
-# to read. SELF decides nothing here: it sets `self_subscribed`, which records what the session
-# says of itself and which no delivery reads any more, so a check reads it back and nothing else
-# follows from it.
+# to read. It says `self_subscribed` as every plugin's registration does, and that field decides
+# no delivery any more: it records what a session says of itself, which a check reads back, and
+# nothing follows from it, which is why no caller chooses it.
 registered() {
-  local session=$1 self=$2 body
-  shift 2
-  body=$(jq -cn --arg s "$session" --arg d "$work/registered" --arg t "rig $session" \
-    --argjson self "$self" --args \
-    '{session_id:$s,dir:$d,title:$t,self_subscribed:$self,driving:true,topics:$ARGS.positional,
+  local session=$1 body
+  shift
+  body=$(jq -cn --arg s "$session" --arg d "$work/registered" --arg t "rig $session" --args \
+    '{session_id:$s,dir:$d,title:$t,self_subscribed:true,driving:true,topics:$ARGS.positional,
       delivery:{consumer:true}}' "$@")
   api "$port_a" POST /v1/interests/subscribe "$body" ||
     refuse "registering $session answered $api_status: $(head -c 200 "$answer")"
@@ -1118,8 +1117,8 @@ check_bus_outage_keeps_claims() {
   local issue first second role=ess-outage-$$ outage=180 claimed_at record
   first=ses_ess_outage_first_$$
   second=ses_ess_outage_second_$$
-  registered "$first" true "notifications.agent.$first" || return 1
-  registered "$second" true "notifications.agent.$second" || return 1
+  registered "$first" "notifications.agent.$first" || return 1
+  registered "$second" "notifications.agent.$second" || return 1
   api "$port_a" POST /v1/roles/set "$(jq -cn --arg s "$first" --arg r "$role" '{session_id:$s,role:$r}')" ||
     refuse "the role claim was refused: $(head -c 200 "$answer")" || return 1
   issue=$(make_issue "$second" "Bus outage keeps the claims") ||
@@ -1166,7 +1165,7 @@ check_bus_outage_keeps_claims() {
 # ---- 3a. a send to a stalled session is stored, not refused ------------------------------------------------
 check_send_to_stalled_session_is_stored() {
   local target=ses_ess_send_target_$$
-  registered "$target" true "notifications.agent.$target" || return 1
+  registered "$target" "notifications.agent.$target" || return 1
   wait_until 180 "the target to read unresponsive" state_is "$port_a" "$target" unresponsive unresponsive || return 1
   api "$port_a" POST /v1/messages/send \
     "$(jq -cn --arg t "$target" '{source:"agent",source_session:"ess-sender",target_session:$t,message:"A stored message for a stalled session."}')" ||
@@ -1447,7 +1446,7 @@ check_role_route_reaches_its_holder() {
 check_role_claim_survives_lookups() {
   local role=ess-lookup-$$ holder=ses_ess_lookup_holder_$$ heir=ses_ess_lookup_heir_$$
   local second=ses_ess_lookup_second_$$ i before after
-  registered "$holder" true "notifications.agent.$holder" "notifications.role.$role" || return 1
+  registered "$holder" "notifications.agent.$holder" "notifications.role.$role" || return 1
   api "$port_a" POST /v1/roles/set "$(jq -cn --arg s "$holder" --arg r "$role" '{session_id:$s,role:$r}')" ||
     refuse "the role claim was refused: $(head -c 200 "$answer")" || return 1
   before=$(role_record "$role")
@@ -1485,14 +1484,14 @@ check_role_claim_survives_lookups() {
   note "five lookups, a publish, a direct nats publish and a reaper pass left $role with $holder, claimed_at unchanged"
   # A soft claim is the one move that takes the role: a successor saying "this is me again", with
   # and without naming the predecessor it continues.
-  registered "$heir" true "notifications.agent.$heir" || return 1
+  registered "$heir" "notifications.agent.$heir" || return 1
   api "$port_a" POST /v1/roles/set \
     "$(jq -cn --arg s "$heir" --arg r "$role" --arg p "$holder" '{session_id:$s,role:$r,soft:true,previous_session_id:$p}')" ||
     refuse "a soft claim naming the stalled predecessor was refused $api_status: $(head -c 300 "$answer")" || return 1
   [ "$(jq -r '.holder_session_id' <<<"$(role_record "$role")")" = "$heir" ] ||
     refuse "the soft claim naming a predecessor did not take the role" || return 1
   wait_until 180 "the heir to read unresponsive" state_is "$port_a" "$heir" unresponsive unresponsive || return 1
-  registered "$second" true "notifications.agent.$second" || return 1
+  registered "$second" "notifications.agent.$second" || return 1
   api "$port_a" POST /v1/roles/set \
     "$(jq -cn --arg s "$second" --arg r "$role" '{session_id:$s,role:$r,soft:true}')" ||
     refuse "a soft claim with no named predecessor was refused for a holder past the live window: $(head -c 300 "$answer")" || return 1
@@ -1504,7 +1503,7 @@ check_role_claim_survives_lookups() {
 # ---- 5. an issue claim refuses the take while its holder is only unresponsive ------------------------------
 check_issue_claim_refuses_the_stalled_holder() {
   local issue holder=ses_ess_issue_holder_$$ other=ses_ess_issue_other_$$ out=$evidence/answers/$check
-  registered "$holder" true "notifications.agent.$holder" || return 1
+  registered "$holder" "notifications.agent.$holder" || return 1
   issue=$(make_issue "$holder" "An issue claim a stalled holder keeps") ||
     refuse "could not create the proof's issue" || return 1
   dispatch_cli "$holder" claim --issue "$issue" >"$out.claim.txt" 2>&1 ||
@@ -1639,7 +1638,7 @@ check_every_plugin_shows_the_state() {
   # is the behaviour this check reads. An ask that named one would have every host refuse the call
   # on its arguments (parseEnvoyToolArguments) before it reached the listener.
   ask="Call the envoy_sessions tool, then reply with the raw JSON row it gave for the session $peer and nothing else."
-  registered "$peer" true "notifications.agent.$peer" || return 1
+  registered "$peer" "notifications.agent.$peer" || return 1
   wait_until 180 "the peer to read unresponsive" state_is "$port_a" "$peer" unresponsive unresponsive || return 1
   [ -n "$omp_pid" ] || omp_start || return 1
   # omp_turn, not omp_typed: the transcript is read for what the tool answered, and the host takes
@@ -1699,7 +1698,7 @@ check_max_age_change_reaches_both_listeners() {
   wait_until 120 "listener B to read the raised $max_age maximum age" \
     healthz_max_age_is "$port_b" "$max_age_shown" || return 1
   note "the raise to $max_age reached both running listeners' /healthz"
-  registered "$late" true "notifications.agent.$late" || return 1
+  registered "$late" "notifications.agent.$late" || return 1
   note "registered $late after the raise; stalling it ${stall}s, past the shipping maximum age"
   sleep "$stall"
   state_is "$port_a" "$late" unresponsive unresponsive ||
