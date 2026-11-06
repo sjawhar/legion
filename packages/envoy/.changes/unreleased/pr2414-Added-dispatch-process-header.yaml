@@ -1,0 +1,11 @@
+kind: Added
+body: |-
+  Every answer that the document socket's handler sends carries `X-Dispatch-Process: <host name>`,
+  the pod's name in production. That includes the `101` upgrade and the handler's `401`, `404` and
+  `503` answers, so a check that opens sockets through a load balancer can record which
+  `envoy-dispatch` process served each one. A host name the process cannot read, or one that holds
+  bytes a header cannot carry, sends no header. The `400` answers sent before that handler carry no
+  header: they refuse a room id or a query parameter that holds U+0000 or bytes that are not UTF-8.
+time: 2026-10-28T12:12:10Z
+custom:
+  Issue: pr2414
