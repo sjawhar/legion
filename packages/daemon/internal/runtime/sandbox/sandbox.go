@@ -88,6 +88,7 @@ type Runtime struct {
 	tools                          Tools
 	pod                            Pod
 	roleConfigFiles                map[claim.Role][]string
+	memoryConfigFiles              []string
 	providerKeys                   map[string]string
 	providersSecrets               []string
 	natsUser                       string
@@ -96,6 +97,7 @@ type Runtime struct {
 	controllerSlackChannels        []string
 	agent                          []string
 	setup                          []string
+	skills                         ghrepo.Repository
 	testPostgres                   bool
 	bootTimeout                    time.Duration
 	registrationIntervals          int
@@ -340,19 +342,25 @@ func configureProber(opts Options) (*Runtime, error) {
 			}
 		}
 	}
+	for _, file := range opts.MemoryConfigFiles {
+		if !filepath.IsAbs(file) || strings.Contains(file, ":") {
+			return refuse("the memory overlay %q is not an absolute path PI_CONFIG_FILES can name", file)
+		}
+	}
 	r := &Runtime{
 		namespace: opts.Namespace, project: opts.Project, image: opts.Image, storageClass: opts.StorageClass,
 		volumeSize: opts.IssueVolume, scheduling: opts.Scheduling, resources: opts.Resources,
 		streamURL: opts.StreamURL, daemonURL: opts.DaemonURL, envoyURL: opts.EnvoyURL, dispatchURL: opts.DispatchURL,
 		dispatchToken: opts.DispatchToken, natsURLs: opts.NATSURLs, tools: opts.Tools, agentSecrets: opts.AgentSecrets,
-		pod: opts.Pod, roleConfigFiles: opts.RoleConfigFiles, providerKeys: opts.ProviderKeys, providersSecrets: slices.Sorted(slices.Values(opts.ProvidersSecrets)), natsUser: opts.NATSUser,
+		pod: opts.Pod, roleConfigFiles: opts.RoleConfigFiles, memoryConfigFiles: opts.MemoryConfigFiles,
+		providerKeys: opts.ProviderKeys, providersSecrets: slices.Sorted(slices.Values(opts.ProvidersSecrets)), natsUser: opts.NATSUser,
 		sessionStore: opts.SessionStore, controllerSlackChannels: slices.Clone(opts.ControllerSlackChannels),
 		bootTimeout: opts.BootTimeout, registrationIntervals: opts.RegistrationIntervals,
 		busyBackoff: opts.BusyBackoff, provisionBound: provisionBound, terminationGrace: opts.TerminationGrace,
 		launchBound:   launchBound(opts.BootTimeout, provisionBound, opts.TerminationGrace),
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent, setup: slices.Clone(opts.Setup),
-		testPostgres: opts.TestPostgres,
-		tokens:       opts.Tokens, gitHubCredential: opts.GitHubCredential, gitHubOwners: opts.GitHubOwners,
+		testPostgres: opts.TestPostgres, skills: opts.SkillsRepository,
+		tokens: opts.Tokens, gitHubCredential: opts.GitHubCredential, gitHubOwners: opts.GitHubOwners,
 		store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, podTurns: map[string]chan struct{}{}, stranded: map[string]string{},
 		cacheConfig: opts.RepositoryCache, mapped: opts.Mapped,

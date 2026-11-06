@@ -110,6 +110,102 @@ func TestEndToEndCheckRunToChecks(t *testing.T) {
 	}
 }
 
+// A check run GitHub names no pull request for still belongs to one: its check suite's head
+// branch is the ref that pull request's head is fetched by. The listener records it under that
+// number, and the settlement it publishes for the number names the failed check among its
+// failing checks.
+func TestEndToEndACheckRunWithNoPullRequestIsAttributedByItsSuiteHeadBranch(t *testing.T) {
+	ctx := context.Background()
+	_, uri := testnats.Start(t)
+
+	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("bus connect: %v", err)
+	}
+	defer client.Close()
+	store, err := cistore.Open(client.Conn, logging.New("test"), cistore.WithReplicas(1), cistore.WithTTL(time.Hour))
+	if err != nil {
+		t.Fatalf("open cistore: %v", err)
+	}
+	readyCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := store.WaitForCacheReady(readyCtx); err != nil {
+		t.Fatalf("cache ready: %v", err)
+	}
+
+	const (
+		secret = "s"
+		sha    = "abcdef1234567890abcdef1234567890abcdef12"
+	)
+	handler := webhook.GitHubHandler(secret, "@legion", "", client, store)
+	loopCtx, loopCancel := context.WithCancel(ctx)
+	defer loopCancel()
+	cistore.StartSummaryLoop(loopCtx, store, client, 100*time.Millisecond, 20*time.Millisecond, metrics.New().NewGauge("held", ""), logging.New("e2e"))
+
+	sub, err := client.Conn.SubscribeSync("notifications.github.example-org.example-repo.pr.42.checks")
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer sub.Unsubscribe()
+
+	postEvent := func(event, body, delivery string) {
+		t.Helper()
+		req := httptest.NewRequest("POST", "/webhook/github", strings.NewReader(body))
+		req.Header.Set("X-GitHub-Delivery", delivery)
+		req.Header.Set("X-GitHub-Event", event)
+		req.Header.Set("X-Hub-Signature-256", sign(secret, []byte(body)))
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code != 200 {
+			t.Fatalf("handler status = %d, body=%s", rr.Code, rr.Body.String())
+		}
+	}
+	postEvent("pull_request", fmt.Sprintf(`{
+		"action": "opened", "number": 42,
+		"pull_request": {"head": {"sha": %q}, "updated_at": "2026-09-07T03:00:00Z"},
+		"repository": {"name": "example-repo", "owner": {"login": "example-org"}}
+	}`, sha), "d0")
+	postEvent("check_run", fmt.Sprintf(`{
+		"action": "completed",
+		"check_run": {"id": 126934155799, "name": "ci-ok", "status": "completed", "conclusion": "failure",
+			"completed_at": "2026-09-07T03:01:00Z", "head_sha": %q,
+			"check_suite": {"id": 900, "head_branch": "refs/pull/42/head"},
+			"pull_requests": []},
+		"sender": {"login": "ci", "type": "Bot"},
+		"repository": {"name": "example-repo", "owner": {"login": "example-org"}, "default_branch": "main"}
+	}`, sha), "d1")
+
+	msg, err := sub.NextMsg(3 * time.Second)
+	if err != nil {
+		t.Fatalf("expected the settlement of the pull request the head branch names, got: %v", err)
+	}
+	var env contracts.Envelope
+	if err := json.Unmarshal(msg.Data, &env); err != nil {
+		t.Fatalf("checks envelope not JSON: %v", err)
+	}
+	var sum cistore.Summary
+	if err := json.Unmarshal([]byte(env.Payload), &sum); err != nil {
+		t.Fatalf("checks payload not JSON: %v\n%s", err, env.Payload)
+	}
+	if sum.Number != "42" || sum.SHA != sha || sum.Failed.Count != 1 ||
+		len(sum.Failed.Checks) != 1 || sum.Failed.Checks[0] != "ci-ok" ||
+		len(sum.FailingChecks) != 1 || sum.FailingChecks[0].Name != "ci-ok" {
+		t.Fatalf("settlement = %+v, want pull request 42 at %s failing ci-ok", sum, sha)
+	}
+
+	// The settlement is published from the record, so by now the record of 42 at that head holds
+	// the check the webhook named no pull request for.
+	var state cistore.State
+	for _, held := range store.List() {
+		if held.Number == "42" && held.SHA == sha {
+			state = held
+		}
+	}
+	if check, ok := state.Checks["ci-ok"]; !ok || check.Conclusion != "failure" || check.Status != "completed" {
+		t.Fatalf("the record of 42 at %s holds checks %+v, want ci-ok failed", sha, state.Checks)
+	}
+}
+
 // A handoff push can carry GitHub's skip-checks trailer, so the pull request's new head runs no CI,
 // and the code head it replaced settles afterwards. That settlement is published, carrying the
 // code head's SHA, though the code head is no longer the pull request's head.

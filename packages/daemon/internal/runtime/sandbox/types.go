@@ -133,6 +133,14 @@ type Options struct {
 	// operator's mounts', which every pod and the image probe's carry, and the image probe reads
 	// every role's (probeManifest). Nil is none.
 	RoleConfigFiles map[claim.Role][]string
+	// MemoryConfigFiles is the project's `memory.config_files`: absolute paths of Oh My Pi
+	// settings overlays a role whose tree is in the memory group (runtime.SpawnSpec.Memory) names
+	// last in PI_CONFIG_FILES, after the operator's own and the role's own, so they outrank both
+	// (roleOperatorEnv). The files are the operator's mounts', as a role's own are, and the image
+	// probe reads them with every workflow role's (probeManifest). The daemon hands them over
+	// whatever the project's mode is, since a tree already drawn into the memory group names them
+	// under any mode; a project with no block names none. Nil is none.
+	MemoryConfigFiles []string
 	// ProviderKeys maps each variable Oh My Pi reads to the key of the providers Secret
 	// (ProvidersSecretName) that holds its value. With any, every pod mounts exactly those keys at
 	// ProvidersDir and the worker's shim exports them into Oh My Pi's environment alone; with none,
@@ -178,6 +186,12 @@ type Options struct {
 	// working directory and with the environment Oh My Pi gets — through the start wrapper
 	// (startArgv); Oh My Pi starts only once it exits 0. Nil runs none.
 	Setup []string
+	// SkillsRepository is the deployment's skills marketplace (runtime.kubernetes.skills_repository):
+	// the GitHub repository an issue pod's third init container, skills-fetch, clones shallow into
+	// the pod's skills volume at SkillsDir, and which every role's start wrapper then installs from
+	// before Oh My Pi starts. The zero repository runs no such container and installs nothing,
+	// which is every deployment that names no skills repository.
+	SkillsRepository ghrepo.Repository
 	// TestPostgres is runtime.kubernetes.test_postgres: every issue pod serves its own PostgreSQL
 	// for tests, started by the roles container's launcher before it accepts a role start and
 	// started again whenever the postmaster exits (launcher.Config.TestPostgres), and every role
