@@ -1,0 +1,4 @@
+kind: Fixed
+body: A live document write now lets go of its fork at the commit that hands that very document
+  to its room's shadow, so nothing reads or vouches for a rendering of a document the room is
+  already applying a browser's updates to while the write publishes.

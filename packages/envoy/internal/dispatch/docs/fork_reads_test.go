@@ -528,8 +528,8 @@ type forkStep struct {
 }
 
 // runForkSteps runs steps as one committed transaction in mode, asserting each step's fork reads
-// and checkRendering sites, then that the commit's publish checked the rendering once, and that no
-// check found a rendering its fork disagrees with.
+// and checkRendering sites, then that the commit checked the rendering once as it handed the fork
+// to the room's shadow, and that no check found a rendering its fork disagrees with.
 func runForkSteps(t *testing.T, service *Service, artifactID string, checks *renderingChecks, mode forkReadsMode, steps ...forkStep) {
 	t.Helper()
 	mode.prepare(t, service, artifactID)
@@ -557,7 +557,7 @@ func runForkSteps(t *testing.T, service *Service, artifactID string, checks *ren
 	}
 	calls, found := checks.take()
 	failures = append(failures, found...)
-	if want := map[string]int{"publish": 1}; !maps.Equal(calls, want) {
+	if want := map[string]int{"commit": 1}; !maps.Equal(calls, want) {
 		t.Errorf("the commit checked the rendering at %v, want %v", calls, want)
 	}
 	for _, failure := range failures {
@@ -566,7 +566,7 @@ func runForkSteps(t *testing.T, service *Service, artifactID string, checks *ren
 }
 
 // Every rendering a write hands on - to a margin write (applyMargin), to a read joined to its
-// transaction (docTree), to a version (capture), and at each fork read and its publish - is a
+// transaction (docTree), to a version (capture), and at each fork read and at its commit - is a
 // fresh read and render of its fork, in each transaction the API runs: an anchored comment, a
 // suggestion, an edit and its version, an accept, and a transaction a browser commits under,
 // whose fork stands where its one read left it, so every rendering after that commit is still
@@ -726,9 +726,18 @@ func TestForkReadsEveryReuseOfAWritesRenderingDescribesItsFork(t *testing.T) {
 	// describes it and the reads after the commit take it. The version is the write's own state,
 	// which the browser's edit is not in - it is stored after the write and versioned by the
 	// settlement that follows - while the committed document holds both.
+	//
+	// The commit hands the write's fork on: it becomes the document of the shadow the write
+	// leaves its room (newShadow), and the room applies the browser's update to that document as
+	// it stores its class (roomShadow.measure). This holds the commit, after the hand-over and
+	// before the publish, until the room has stored that update, so the last check of the write's
+	// rendering runs on the far side of the hand-over every run rather than on the runs where the
+	// room's worker happened to win the race (dispatch://INFRA-1075).
 	t.Run("warm/a browser commit between operations", func(t *testing.T) {
 		const id = "s-moved"
 		var number int
+		service.afterLiveCommit = onFirst(artifactID, func() { waitForLandedAppends(t, service, artifactID) })
+		defer func() { service.afterLiveCommit = nil }()
 		runForkSteps(t, service, artifactID, checks, forkReadsModes[0],
 			markQuote(MarkSuggestion, id, "Step 44 one is taken first"),
 			forkStep{

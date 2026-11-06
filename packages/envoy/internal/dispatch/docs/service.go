@@ -217,8 +217,10 @@ type Service struct {
 	// describe its fork, at names where: "fork" once forkLive has brought the fork up to date,
 	// "margin", "docTree" and "capture" as a margin write (applyMargin) or a read joined to the
 	// write's transaction takes the rendering in place of reading the fork (reuseRendering), and
-	// "publish" just before publishLiveWrite releases the fork. Nil outside tests; tests use it to
-	// compare the rendering with a fresh read and render of the fork.
+	// "commit" where the transaction's commit hands the fork to the room's shadow and the write
+	// lets go of it (Ledger.commit), the last moment at which the rendering describes the fork.
+	// Nil outside tests; tests use it to compare the rendering with a fresh read and render of
+	// the fork.
 	checkRendering func(at string, write *liveWrite)
 	// afterSettleAuthorsTake runs after a settlement has bounded the in-flight credits it lists
 	// and before it reads the tree it will version. Nil outside tests; tests use it to edit the

@@ -772,13 +772,9 @@ func (s *Service) creditLiveWrite(write *liveWrite, actor model.Actor) {
 func (s *Service) publishLiveWrite(write *liveWrite) {
 	defer s.finishLiveWrite(write)
 	defer s.closeShadow(write)
-	// Committed, the write has no more use for its fork, so the fork goes before the publish,
-	// which loads the room when no room holds the document (coldFork). The room's shadow keeps it
-	// (newShadow).
-	if s.checkRendering != nil {
-		s.checkRendering("publish", write)
-	}
-	write.releaseFork()
+	// The write let go of its fork at its commit, where the room's shadow took it (Ledger.commit),
+	// so the publish below - which loads the room when no room holds the document (coldFork) -
+	// finds nothing of it left to hold.
 	for index, update := range write.updates {
 		var shadow *roomShadow
 		if index == len(write.updates)-1 {

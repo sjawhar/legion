@@ -164,12 +164,27 @@ func (l *Ledger) commit(ctx context.Context) error {
 		captures = append(captures, flushCapture(flush))
 	}
 	// Each write leaves its room a shadow (roomShadow), installed by the commit under its state's
-	// lock, after the flushes' classes are marked stored.
+	// lock, after the flushes' classes are marked stored. The shadow's document is the write's own
+	// fork rather than a copy of it, so the hand-over is where the write lets go of it: from the
+	// install on, whoever stores a provisional class applies that class to the document
+	// (roomShadow.measure, under the shadow's mu), and a fork the write still held would be a
+	// document another goroutine writes, vouched for by a rendering taken before those updates.
+	// So each write's rendering is checked here, the last moment at which it describes its fork,
+	// and the fork goes with it. A write that leaves no shadow lets go here too: no operation of
+	// the transaction follows the commit, and the publish of a cold write then loads the room
+	// with the fork already collected (releaseFork, LEGION-504).
 	for _, artifactID := range l.order {
 		write := l.live[artifactID]
+		if write.finished {
+			continue
+		}
+		if l.service.checkRendering != nil {
+			l.service.checkRendering("commit", write)
+		}
 		if shadow := write.newShadow(); shadow != nil {
 			captures = append(captures, roomCapture{room: artifactID, capture: authorCapture{state: write.state}, shadow: shadow})
 		}
+		write.releaseFork()
 	}
 	// The cursors before the commit, not after it: this transaction holds the document's advisory
 	// lock until the commit drops it, and the writers queued on that lock take it the instant it
