@@ -95,6 +95,29 @@ var (
 		myAgentDismissedRoots, inboxDismissNoReplies, inboxDismissNamedRoots)
 )
 
+// inboxDismissLockAgentRoots takes the root message of every Agent thread a dismissal is about to
+// write a mark for, step 2 of the lock order (markInboxReadThreads, api/inbox_read.go), in
+// ascending id order so two dismisses over overlapping sets take them in one order. `for update`
+// rather than `for share`, because it is two dismisses that must not interleave, while two session
+// replies, which take the root `for key share` in the trigger of 20261105093507, need not wait on each
+// other at all.
+//
+// It is what orders this route against that trigger, and neither order then loses a reply: a
+// dismiss that takes the root first makes the reply wait, and the reply's trigger then finds the
+// committed mark and deletes it; a reply that holds the root first makes this transaction wait,
+// and the insert below then runs on a snapshot holding the committed reply and writes no mark for
+// its thread.
+//
+// It must stay a statement of its own. Under read committed each statement takes a fresh snapshot
+// when it begins, which is exactly what lets that insert see the reply this lock waited for:
+// folding the `for update` into a CTE of the insert would share the insert's one snapshot, taken
+// before the wait, and close nothing.
+const inboxDismissLockAgentRoots = `
+	select 1 from messages
+	where id = any($1::uuid[])
+	order by id
+	for update`
+
 // inboxDismissMarkThreads writes the dismissal on every Reply thread it was given and answers the
 // project of each row it changed. A row already carrying a mark is left alone and not counted: for
 // a Reply thread "dismissed" is exactly `dismissed_at is not null`, since user_threads_record clears
@@ -111,7 +134,7 @@ var (
 // older still. This statement reads replied_at in a snapshot of its own, taken after the last of
 // those waits, so a write by somebody else that committed in between is seen here and the thread
 // stays in the Inbox, unread. A write that commits after it is the trigger's: it waits on the row
-// this transaction holds (step 2 of the lock order) and then clears the mark, as
+// this transaction holds (step 3 of the lock order) and then clears the mark, as
 // user_threads_record clears any mark older than the write. A thread nobody else has ever written
 // in carries no replied_at and so has no write to be older than: it is dismissed as before.
 //
@@ -149,13 +172,14 @@ const (
 // the two agree about a reply written at the mark exactly: the person had seen it, and it leaves
 // the thread dismissed.
 //
-// It closes that window and not the statement's own: a reply whose transaction commits after
-// this snapshot is taken finds no mark to delete, since the row this statement is writing is
-// not committed either, and leaves it behind. The Reply half has no such gap - the trigger's
-// update waits on the row step 2 locked - and here there is no row to wait on until this
-// insert commits. What that leaves is one statement wide, against a wait on every lock the
-// request takes, and closing it would need a lock on the thread's root that the reply route
-// does not take.
+// What the comparison cannot see for itself - a reply whose transaction commits after this
+// snapshot is taken, which finds no mark to delete, the row this statement is writing not being
+// committed either - is closed by the root this transaction holds already
+// (inboxDismissLockAgentRoots, step 2 of the lock order). Such a reply waits at that root until
+// this transaction has committed, and its trigger then finds the mark and deletes it; a reply
+// that waited nowhere committed before the lock was given, so it is in this statement's own
+// snapshot and the comparison above leaves its thread in the Inbox. The Reply half is ordered
+// the same way by the rows step 3 locked, which the trigger's update waits on.
 //
 // The walk is the list route's own (agentThreadCTE, api/replies_agent.go), so this statement and
 // the Inbox read one thread the same way; being built from it is what makes these var rather than
@@ -368,15 +392,15 @@ func (s *server) dismissInbox(w http.ResponseWriter, r *http.Request) {
 // answers how many threads it changed and the events to publish once it has committed.
 //
 // It takes the Inbox's read-mark lock order, every step of it, which is written down once, on
-// markInboxReadThreads (api/inbox_read.go) - step 3 of that list, the caller's own
-// user_agent_thread_dismissed rows, is this route's alone, since the mark-all writes no
-// dismissal. Taking that same order is what keeps a dismiss, a mark-all and a one-thread mark
-// from crossing: all three take the owner `for share`, all three move rows of user_threads under
-// one login, and two of them that took the row and the project in opposite orders would deadlock
-// on the project row every time they met.
+// markInboxReadThreads (api/inbox_read.go) - steps 2 and 4 of that list, the roots of the Agent
+// threads it writes marks for and the caller's own user_agent_thread_dismissed rows, are this
+// route's alone, since the mark-all writes no dismissal. Taking that same order is what keeps a
+// dismiss, a mark-all and a one-thread mark from crossing: all three take the owner `for share`,
+// all three move rows of user_threads under one login, and two of them that took the row and the
+// project in opposite orders would deadlock on the project row every time they met.
 //
 // Every write this route makes falls inside that order: the Reply write is one update over rows
-// step 2 has already locked, as the mark-all's is and through the mark-all's own statement
+// step 3 has already locked, as the mark-all's is and through the mark-all's own statement
 // (writeInboxThreadMarks), and the agent-reply write and its prune are the mark-all's own too
 // (markInboxReadAgentReplies), taken here for the same reason, so a dismissed Agent thread stops
 // counting as unread.
@@ -402,6 +426,11 @@ func (s *server) dismissInboxThreads(
 	}
 	if err := lockInboxReadOwners(ctx, tx, read); err != nil {
 		return 0, nil, err
+	}
+	if !plan.restore && len(read.agentRoots) > 0 {
+		if err := lockInboxDismissAgentRoots(ctx, tx, read.agentRoots); err != nil {
+			return 0, nil, err
+		}
 	}
 
 	events := []model.Event{}
@@ -472,6 +501,22 @@ func readInboxDismissThreads(
 		}
 	}
 	return read, nil
+}
+
+// lockInboxDismissAgentRoots takes the root of every Agent thread this request is about to write a
+// mark for, step 2 of the lock order (markInboxReadThreads, api/inbox_read.go): after the owners
+// and before the caller's rows and every write, so the insert that follows reads each thread in a
+// snapshot taken once the root is this transaction's (inboxDismissLockAgentRoots).
+//
+// A restore takes no root. It deletes marks, and a session reply that commits beside it deletes
+// the same mark through the trigger of 20261105093507, so whichever of the two runs first the
+// thread ends in the Inbox, and a `for update` held over the rest of the transaction would stop
+// that thread's replies for nothing.
+func lockInboxDismissAgentRoots(ctx context.Context, tx pgx.Tx, roots []string) error {
+	if _, err := tx.Exec(ctx, inboxDismissLockAgentRoots, roots); err != nil {
+		return fmt.Errorf("lock the agent threads' roots: %w", err)
+	}
+	return nil
 }
 
 // dismissInboxAgentThreads writes or clears the dismissal row of every Agent thread it was given

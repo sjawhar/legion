@@ -365,23 +365,35 @@ func (s *server) markInboxRead(w http.ResponseWriter, r *http.Request) {
 // (api/replies.go), the dismiss route (api/inbox_dismiss.go), the lock statements above, the
 // race tests and packages/envoy/AGENTS.md point here rather than saying it again.
 //
-// The order is owner, then the caller's rows, then the agent rows it writes, then the project
-// its events name. Step 3 is the dismiss route's alone - this button writes no dismissal - and
-// it is numbered here rather than there because one order written in two places is two orders
-// as soon as one of them is edited:
+// The order is owner, then the root of every Agent thread a dismissal writes a mark for, then
+// the caller's rows, then the agent rows it writes, then the project its events name. Steps 2
+// and 4 are the dismiss route's alone - this button writes no dismissal - and they are numbered
+// here rather than there because one order written in two places is two orders as soon as one
+// of them is edited:
 //
 //  1. the owner row of every thread it marks, `for share`, documents then issues, in ascending
 //     owner-key order (lockInboxReadOwners, inboxReadLockDocuments);
-//  2. the caller's user_threads rows, `for no key update`, in ascending thread_id order
+//  2. the root message of every Agent thread a dismissal writes a mark for, `for update`, in
+//     ascending id order (inboxDismissLockAgentRoots, api/inbox_dismiss.go), which the insert
+//     that follows reads the thread under;
+//  3. the caller's user_threads rows, `for no key update`, in ascending thread_id order
 //     (inboxReadLockThreads), which the update that follows re-locks;
-//  3. the caller's own user_agent_thread_dismissed rows, `for no key update`, in ascending
+//  4. the caller's own user_agent_thread_dismissed rows, `for no key update`, in ascending
 //     message_id order (inboxDismissLockAgentThreads, api/inbox_dismiss.go), which the insert
 //     or the delete that follows re-locks;
-//  4. the caller's dead user_agent_reply_read rows, `for no key update`, in ascending reply_id
+//  5. the caller's dead user_agent_reply_read rows, `for no key update`, in ascending reply_id
 //     order, which the same statement deletes (pruneAgentReplies, api/state.go); the other
 //     writer of that table, putUserAgentState, takes them in that order too;
-//  5. the project of every row that update moved, through LockOwners, in sorted key order and
+//  6. the project of every row that update moved, through LockOwners, in sorted key order and
 //     before the first append.
+//
+// Step 2 comes before the caller's rows because that is the order a session's reply takes those
+// two in. Postgres fires a table's row triggers in name order, and on messages
+// user_agent_thread_dismissed_clear (migration 20261105093507) comes before user_threads_message
+// (0097), so a reply takes the thread's root first - the row the clear trigger locks before its
+// delete - and the user_threads rows that other trigger moves after it. A dismiss that took the
+// caller's rows first and the root second would be the opposite order, and the two would meet
+// each holding what the other waits for.
 //
 // PUT /api/v1/me/threads/{id}/read takes that same order over its one thread, and the two need
 // the same one: both take the owner `for share`, two share locks do not conflict, so the owner
@@ -394,8 +406,8 @@ func (s *server) markInboxRead(w http.ResponseWriter, r *http.Request) {
 // write in that project, for an event it was never going to append.
 //
 // Two presses of this button by one person - two tabs, two devices, a narrowed press against an
-// unfiltered one - are ordered by step 2 and nothing else: they can name the same threads and
-// the same projects, and both take their owners `for share`. Step 2 is a pass of its own rather
+// unfiltered one - are ordered by step 3 and nothing else: they can name the same threads and
+// the same projects, and both take their owners `for share`. Step 3 is a pass of its own rather
 // than the update's own row locks because `thread_id = any($3)` locks what its plan reaches in
 // the order it reaches it, and the plans differ with the size of the array: a press of a
 // thousand threads is planned as a bitmap heap scan, which locks in heap order, where a small
@@ -467,7 +479,7 @@ func (s *server) markInboxReadThreads(
 // commitInboxMarks ends both write routes over these rows. A request that changed nothing
 // announces nothing and has nothing to commit: the Inbox marks itself read on every click, and
 // each event would refetch the list in every tab the viewer has open. A request that changed
-// something takes the project of every event it appends - step 5 of the lock order above, in one
+// something takes the project of every event it appends - step 6 of the lock order above, in one
 // sorted order after the rows it wrote and before the first append, an agent reply's event naming
 // no owner and so taking no lock here - appends them and commits. It answers the count its caller
 // answers, 0 when nothing changed, and the events to publish once the transaction has committed.
@@ -627,7 +639,7 @@ func writeInboxThreadMarks(
 	ctx context.Context, tx pgx.Tx, login string, threads []string, query string, mark []any,
 ) (inboxReadMarked, error) {
 	moved := inboxReadMarked{}
-	// Step 2 of that order: the update below locks what its plan reaches in the order it
+	// Step 3 of that order: the update below locks what its plan reaches in the order it
 	// reaches it, which is not one order across two presses (markInboxReadThreads).
 	if _, err := tx.Exec(ctx, inboxReadLockThreads, login, threads); err != nil {
 		return moved, fmt.Errorf("lock the caller's threads: %w", err)
@@ -684,7 +696,7 @@ func (s *server) markInboxReadAgentReplies(
 	}
 	touched := slices.Sorted(maps.Keys(sessions))
 	if len(touched) > 0 {
-		// Step 3 of the lock order above: the dead rows, taken in one order before the delete
+		// Step 5 of the lock order above: the dead rows, taken in one order before the delete
 		// reaches them, as putUserAgentState takes them. Nothing this request writes is ever
 		// dead (the insert above skips what the mark covers), so this clears only what an older
 		// write left behind; why the statement locks them in that order is written on

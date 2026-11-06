@@ -25,6 +25,27 @@
 -- seven deep at most in production, and the walk stops at 64. A reply whose root is nobody's Agent
 -- row deletes nothing, since no mark names it.
 --
+-- The root is taken `for key share` before the delete, which is what orders this trigger against
+-- the dismiss route: that route takes the same root `for update` before it writes a mark
+-- (inboxDismissLockAgentRoots, api/inbox_dismiss.go, step 2 of the lock order written on
+-- markInboxReadThreads), and `for update` conflicts with `for key share`, so neither order loses
+-- this reply. A dismiss that took the root first makes this transaction wait here, and the delete
+-- below then sees the committed mark and removes it; a reply that holds the root first makes that
+-- route wait, and its insert then runs on a snapshot holding this reply and writes no mark at all.
+--
+-- `for key share` rather than `for share`, which deadlocked: a reply written directly under the
+-- root already holds `for key share` on it, taken by its own foreign key, so asking for the
+-- stronger `for share` is an upgrade, and an upgrade behind a transaction already queued for
+-- `for update` on that row - the accept and claim routes take the message row that way - is a
+-- cycle Postgres breaks by killing one of them (TestAcceptAClaimAndAReplyOfOneAttemptAllLand saw
+-- it as three 500s). Asking for the level the row is already held at waits for nothing, and a
+-- reply deeper in the thread, which holds its own parent rather than the root, takes it afresh
+-- without upgrading anything. Two sessions replying in one thread still do not queue behind each
+-- other, since neither writes the row.
+--
+-- It is taken after the walk because the root is what the walk answers, and the walk reads rows
+-- the delete never touches.
+--
 -- Its own migration, as each trigger of 0095-0097 is. `create function` takes no lock on any
 -- table, and `create trigger ... after insert on messages` takes SHARE ROW EXCLUSIVE on messages:
 -- it blocks that table's writers - every direct message and every issue message, for the moment the
@@ -50,6 +71,7 @@ begin
     select in_reply_to into v_parent from messages where id = v_root;
     v_depth := v_depth + 1;
   end loop;
+  perform 1 from messages where id = v_root for key share;
   delete from user_agent_thread_dismissed
   where message_id = v_root and dismissed_at < new.created_at;
   return null;
