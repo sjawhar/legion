@@ -334,14 +334,19 @@ func runDismissedScaleDeepPage(t *testing.T, shape *dismissedScaleShape) time.Du
 // afterwards, off the clock, so every run of the 20 dismisses the same 120 threads out of the
 // same Inbox. The 120 are threads the seed already marked read, so dismissing them moves no read
 // mark and the unread count the other operations read is the same before and after.
+//
+// The versions it carries are read off the seed before the clock starts (dismissBody,
+// api/inbox_dismiss_test.go), as a page would have carried them: nobody writes in these threads
+// while the measurement runs, so each row still holds the version it was seeded with and every
+// run dismisses all 120.
 func runDismissedScaleDismiss(t *testing.T, shape *dismissedScaleShape) time.Duration {
 	t.Helper()
 	rows := make([]string, 0, len(shape.dismissRows))
 	for _, thread := range shape.dismissRows {
 		rows = append(rows, inboxDismissReplyPrefix+thread)
 	}
-	taken, response := timeDismissedScaleRequest(t, shape, http.MethodPost, "/api/v1/me/inbox/dismiss",
-		map[string]any{"threads": rows})
+	body := dismissBody(t, shape.database, dismissedScaleLogin, rows)
+	taken, response := timeDismissedScaleRequest(t, shape, http.MethodPost, "/api/v1/me/inbox/dismiss", body)
 	if dismissed := decodeDismissedScaleCount(t, response, "dismissed"); dismissed != dismissedScaleDismissRows {
 		t.Fatalf("the dismissal answered %d threads, want the %d it named", dismissed, dismissedScaleDismissRows)
 	}

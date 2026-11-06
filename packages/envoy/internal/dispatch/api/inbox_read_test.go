@@ -569,37 +569,72 @@ func markThreadsRead(t *testing.T, database *store.Store, threads []string) {
 	}
 }
 
-// gateHold is one thread's row held the way a press takes it, on a connection of the test's own.
-// Both presses queue behind its transaction, and the roll back that follows starts one of them
-// inside the other's scan.
+// gateHold is one transaction a test holds open on a connection of its own: a row taken the way
+// a write takes it, so a request that locks that row queues behind this transaction, or a write
+// of the test's own left uncommitted, which is what a reply in flight is (holdSessionReply,
+// api/inbox_dismiss_test.go). Ending the hold starts whatever queued behind it moving.
 type gateHold struct {
 	tx pgx.Tx
-	// release rolls the hold back, and does it once however many callers ask: the round's own
-	// goroutine releases it as soon as both presses have queued, and the cleanup below is the
-	// safety net for a round that fails before that. Rolling one transaction back twice returns
-	// its connection to the pool twice, and the second roll back then reads a connection another
-	// request has taken and written on - a data race `go test -race` reports and fails on.
-	release func()
+	// ended is why release and commit each run once however many callers ask: a round's own
+	// goroutine releases the hold as soon as the presses have queued, and the cleanup
+	// beginGateHold registers is the safety net for a round that fails before that. Rolling one
+	// transaction back twice returns its connection to the pool twice, and the second roll back
+	// then reads a connection another request has taken and written on - a data race
+	// `go test -race` reports and fails on - so a hold that committed is never rolled back
+	// either.
+	ended *sync.Once
 }
 
-func holdGateThread(t *testing.T, database *store.Store, gate string) gateHold {
+// release rolls the hold back, which is how a gate ends: whatever the hold wrote is dropped and
+// the queue behind it moves.
+func (hold gateHold) release() {
+	hold.ended.Do(func() { _ = hold.tx.Rollback(context.Background()) })
+}
+
+// commit lands what the hold wrote instead, which is how a held writer ends: the row it wrote and
+// every trigger that ran over it become visible to everybody at that moment, which is the moment
+// a test of a window picks.
+func (hold gateHold) commit(t *testing.T) {
+	t.Helper()
+	hold.ended.Do(func() {
+		if err := hold.tx.Commit(context.Background()); err != nil {
+			t.Errorf("commit the transaction this test held: %v", err)
+		}
+	})
+}
+
+// beginGateHold opens that transaction and registers its one roll back. what names what is being
+// held, which is what a failure to open or to hold it reports.
+func beginGateHold(t *testing.T, database *store.Store, what string) gateHold {
 	t.Helper()
 	held, err := database.Pool.Begin(context.Background())
 	if err != nil {
-		t.Fatalf("hold the gate row: %v", err)
+		t.Fatalf("begin the transaction holding %s: %v", what, err)
 	}
-	var once sync.Once
-	hold := gateHold{
-		tx:      held,
-		release: func() { once.Do(func() { _ = held.Rollback(context.Background()) }) },
-	}
+	hold := gateHold{tx: held, ended: &sync.Once{}}
 	t.Cleanup(hold.release)
-	if _, err := held.Exec(context.Background(), `
-		select 1 from user_threads where login = 'alice' and thread_id = $1 for no key update
-	`, gate); err != nil {
-		t.Fatalf("hold the gate row: %v", err)
+	return hold
+}
+
+// holdGateRow is that transaction with one row taken by statement, the `for no key update` a
+// write over that row takes: every gate these tests hold is one such row, and which table it
+// stands in is the step of the lock order the gate sits at (markInboxReadThreads).
+func holdGateRow(t *testing.T, database *store.Store, what, statement string, args ...any) gateHold {
+	t.Helper()
+	hold := beginGateHold(t, database, what)
+	if _, err := hold.tx.Exec(context.Background(), statement, args...); err != nil {
+		t.Fatalf("hold %s: %v", what, err)
 	}
 	return hold
+}
+
+// holdGateThread holds the caller's own row for one thread, which is step 3 of that order: a
+// press or a dismiss queued there has taken every lock before it and written nothing.
+func holdGateThread(t *testing.T, database *store.Store, gate string) gateHold {
+	t.Helper()
+	return holdGateRow(t, database, "the gate thread's row", `
+		select 1 from user_threads where login = 'alice' and thread_id = $1 for no key update
+	`, gate)
 }
 
 // Two Mark all read presses by one person over the same threads, at once, with their query

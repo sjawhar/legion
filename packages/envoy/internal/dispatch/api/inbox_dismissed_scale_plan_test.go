@@ -185,9 +185,13 @@ func dismissedScaleStatements(shape *dismissedScaleShape) []dismissedScaleExplai
 			"user_agent_thread_dismissed_login_dismissed_at", "user_agent_thread_dismissed", "dismissed_at", ""},
 		// The two write routes sort the rows they matched by thread id, which is the lock order
 		// markInboxReadThreads writes down and not an order any index owes them, so what each is
-		// held to is that nothing sorts by the state's own order.
+		// held to is that nothing sorts by the state's own order. The dismissal's read binds a
+		// version beside each id ($3), which it answers and joins on nothing: the join is on the
+		// ids alone, so what the versions are changes no row count and no access path, and a
+		// null per row is what a restore binds in production anyway.
 		{"120-thread dismiss", "reply rows", inboxDismissNamedThreads,
-			[]any{dismissedScaleLogin, shape.dismissRows}, "user_threads_pkey", "user_threads", "replied_at", ""},
+			[]any{dismissedScaleLogin, shape.dismissRows, make([]*string, len(shape.dismissRows))},
+			"user_threads_pkey", "user_threads", "replied_at", ""},
 		{"mark all read", "reply rows", inboxReadReplyThreads,
 			[]any{dismissedScaleLogin, "", nil, mark, nil, true, nil}, "user_threads_unread", "user_threads", "replied_at", ""},
 		{"mark all read", "agent rows", inboxReadAgentThreads,
