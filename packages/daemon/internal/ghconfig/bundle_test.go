@@ -152,12 +152,17 @@ func TestWriteBundleWritesAndPrunesRepositoryDirectories(t *testing.T) {
 }
 
 // IsDirName takes the two shapes a bundle directory has and nothing else; IsOwner stays the
-// stricter rule for the callers that mean an owner, the bundle's Default among them.
+// stricter rule for the callers that mean an owner, the bundle's Default among them. A repository
+// named like one of gh's own two files is no directory either: the owner's hosts.yml and
+// config.yml sit where that directory would be made, and WriteBundle would fail every directory
+// of the bundle over the one repository (appauth's bundleDirs leaves it out instead).
 func TestIsDirNameTakesAnOwnerOrOneOfItsRepositories(t *testing.T) {
 	for name, want := range map[string]bool{
 		"acme": true, "acme-labs": true, "acme/widgets": true, "acme/gadgets.io": true, "acme/x_1-2": true,
+		"acme/hosts.yaml": true, "acme/my-hosts.yml": true,
 		"": false, "Acme": false, "acme_labs": false, "-acme": false, "acme/": false, "/widgets": false,
 		"acme/Widgets": false, "acme/.": false, "acme/..": false, "acme/a/b": false, "../x": false,
+		"acme/" + HostsFile: false, "acme/" + ConfigFile: false,
 	} {
 		if got := IsDirName(name); got != want {
 			t.Errorf("IsDirName(%q) = %t, want %t", name, got, want)

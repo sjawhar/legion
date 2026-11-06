@@ -23,7 +23,9 @@ import (
 // [--github-repo R]... [--github-read-only]] -- sh -c 'printf %s "$NAME"'` does: the release of
 // every installation it holds, or of the owner LEGION_GITHUB_OWNER names alone (a non-zero exit,
 // as the broker's refusal, for an owner it holds none on), each token naming the owner and
-// whether it is read-only. Every run appends its owner, repositories and read-only flag to calls.
+// whether it is read-only. A LEGION_GITHUB_REPOS naming a repository the installation does not
+// reach is refused as the broker refuses it, GitHub having answered 422 (reaches). Every run
+// appends its owner, repositories and read-only flag to calls.
 type fakeBroker struct {
 	dir     string
 	command string
@@ -49,6 +51,15 @@ mode=write
 if [ -n "$FAKE_BROKER_NONE" ]; then
   [ -n "$LEGION_GITHUB_OWNER" ] || { printf '{"installations":{}}'; exit 0; }
   echo "agent-secrets: github app has no installation on $LEGION_GITHUB_OWNER" >&2; exit 1
+fi
+if [ -n "$FAKE_BROKER_REPOS" ]; then
+  for want in $LEGION_GITHUB_REPOS; do
+    reached=
+    for held in $FAKE_BROKER_REPOS; do
+      [ "$want" != "$held" ] || reached=1
+    done
+    [ -n "$reached" ] || { echo "agent-secrets: the narrowing cannot be served: github app 12345: GitHub answered HTTP 422 to the narrowed token for $LEGION_GITHUB_OWNER: likely a repository it names ($want) that the installation does not reach, such as a misspelled name; the caller fixes the narrowing" >&2; exit 1; }
+  done
 fi
 owner=$(printf %%s "$LEGION_GITHUB_OWNER" | tr A-Z a-z)
 case "$owner" in
@@ -80,6 +91,14 @@ func (b fakeBroker) runs(t *testing.T) []string {
 func (b fakeBroker) uninstall(t *testing.T) {
 	t.Helper()
 	t.Setenv("FAKE_BROKER_NONE", "1")
+}
+
+// reaches holds the fake broker's installations to repos: a narrowing that names a repository
+// outside them is refused as the broker refuses one GitHub answered 422, where a broker told of
+// no repositories at all serves every narrowing it is asked for.
+func (b fakeBroker) reaches(t *testing.T, repos ...string) {
+	t.Helper()
+	t.Setenv("FAKE_BROKER_REPOS", strings.Join(repos, " "))
 }
 
 // fakeTokenGitHub answers what token mode asks of GitHub under an installation token: GraphQL's
@@ -309,6 +328,41 @@ func TestTokenModeReadTokenForAMissingOwnerReleasesNothingWider(t *testing.T) {
 	}
 	if got := broker.runs(t); len(got) != 1 || got[0] != "stranger|legion|1" {
 		t.Fatalf("command runs = %q, want the one narrowed read-only run", got)
+	}
+}
+
+// A read token narrowed to one repository that the App's installation does not reach is refused
+// by the broker as GitHub refuses it, a 422 the broker reads as the narrowing it cannot serve.
+// The read names that one repository, so the refusal is about it alone: InstalledOn answers not
+// installed, as it did before a read lease named its repositories, rather than an error that
+// would leave the mapping's check recording the repository unread and running the command again
+// on every backoff. The mint itself answers ErrNarrowingRefused, the refusal key mode gives.
+func TestTokenModeARepositoryTheInstallationDoesNotReachIsNotInstalled(t *testing.T) {
+	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	broker := newFakeBroker(t, []string{"acme"}, now.Add(time.Hour))
+	broker.reaches(t, "widgets")
+	github := &fakeTokenGitHub{slug: "legion-implementer", appID: "12345", repos: []string{"acme/widgets"}}
+	var stderr bytes.Buffer
+	tokens := tokenModeManager(github.serve(t), broker, &now, &stderr)
+
+	if got, err := tokens.InstalledOn(context.Background(), Implement, ghrepo.MustParse("acme/widgets")); err != nil || !got {
+		t.Fatalf("InstalledOn(acme/widgets) = %v, %v; want installed", got, err)
+	}
+	got, err := tokens.InstalledOn(context.Background(), Implement, ghrepo.MustParse("acme/gadgets"))
+	if err != nil || got {
+		t.Fatalf("InstalledOn(acme/gadgets) = %v, %v; want not installed and no error", got, err)
+	}
+	want := []string{"acme|widgets|1", "acme|gadgets|1"}
+	if runs := broker.runs(t); !slices.Equal(runs, want) {
+		t.Fatalf("command runs = %q, want %q: the refusal is the answer, not a run made again", runs, want)
+	}
+
+	lease, err := tokens.ReadToken(context.Background(), Implement, "acme", []string{"gadgets"})
+	if !errors.Is(err, ErrNarrowingRefused) || lease.Token != "" {
+		t.Fatalf("ReadToken for a repository the installation does not reach = %q, %v; want the narrowing refusal", lease.Token, err)
+	}
+	if !strings.Contains(err.Error(), "gadgets") {
+		t.Errorf("the refusal does not name the repository asked for: %v", err)
 	}
 }
 

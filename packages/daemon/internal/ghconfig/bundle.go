@@ -43,12 +43,21 @@ func IsOwner(owner string) bool { return ownerLogin.MatchString(owner) }
 // (IsOwner), or that login and one of its repositories as `<owner>/<repo>`, both lowercased. A
 // GitHub login holds no slash and a repository name holds none either, so the one slash of a
 // name splits it exactly.
+//
+// HostsFile and ConfigFile are no repository directory, though both are repository names GitHub
+// allows: an owner's own two gh files sit beside its repositories' directories, so a bundle
+// holding `<owner>/hosts.yml` would have WriteBundle make a directory where that owner's
+// hosts.yml is and fail every directory of the bundle. A repository of either name is left out
+// of the bundle instead (appauth's bundleDirs).
 func IsDirName(name string) bool {
 	owner, repo, nested := strings.Cut(name, "/")
 	if !IsOwner(owner) {
 		return false
 	}
-	return !nested || (repo != "." && repo != ".." && repositoryName.MatchString(repo))
+	if !nested {
+		return true
+	}
+	return repo != "." && repo != ".." && repo != HostsFile && repo != ConfigFile && repositoryName.MatchString(repo)
 }
 
 // Dir is the directory a bundle entry's two gh files live in under a bundle root: <root>/<name>,

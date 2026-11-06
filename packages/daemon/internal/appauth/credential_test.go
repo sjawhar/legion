@@ -1,8 +1,11 @@
 package appauth
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"maps"
 	"slices"
 	"strings"
@@ -17,8 +20,25 @@ import (
 
 // ownerTokens names each lease for the App and what the lease reaches, so a test reads which mint
 // answered for which directory: a write lease names its one repository, a read lease the owner
-// and the repositories it was narrowed to.
-type ownerTokens struct{ refuse string }
+// and the repositories it was narrowed to. refuse is an owner every mint for it fails, with an
+// error that is no narrowing refusal, and unreachable names the repositories, as
+// `<owner>/<repo>`, that the App's installation does not reach: a lease naming any of them is
+// ErrNarrowingRefused, as GitHub answers 422 to a request naming one.
+type ownerTokens struct {
+	refuse      string
+	unreachable map[string]bool
+}
+
+// refusesNarrowing reports that the installation on owner reaches none of repos, as a 422 says
+// it: GitHub refuses the request whole over any one repository it does not reach.
+func (t ownerTokens) refusesNarrowing(owner string, repos ...string) error {
+	for _, repo := range repos {
+		if t.unreachable[strings.ToLower(owner+"/"+repo)] {
+			return fmt.Errorf("%w (repositories %s)", ErrNarrowingRefused, strings.Join(repos, ", "))
+		}
+	}
+	return nil
+}
 
 func (t ownerTokens) Token(_ context.Context, role AppRole, repo ghrepo.Repository) (Lease, error) {
 	if repo.IsZero() {
@@ -26,6 +46,9 @@ func (t ownerTokens) Token(_ context.Context, role AppRole, repo ghrepo.Reposito
 	}
 	if repo.Owner() == t.refuse {
 		return Lease{}, errors.New("no installation on " + repo.Owner())
+	}
+	if err := t.refusesNarrowing(repo.Owner(), repo.Name()); err != nil {
+		return Lease{}, err
 	}
 	return Lease{Token: string(role) + "-token-for-" + strings.ToLower(repo.String()), ExpiresAt: time.Now().Add(time.Hour)}, nil
 }
@@ -37,7 +60,22 @@ func (t ownerTokens) ReadToken(_ context.Context, role AppRole, owner string, re
 	if owner == t.refuse {
 		return Lease{}, errors.New("no installation on " + owner)
 	}
+	if err := t.refusesNarrowing(owner, repos...); err != nil {
+		return Lease{}, err
+	}
 	return Lease{Token: string(role) + "-read-for-" + owner + "/" + strings.Join(repos, "+"), ExpiresAt: time.Now().Add(time.Hour)}, nil
+}
+
+// bundleLog is a logger a test reads what a bundle said on, and the lines it holds.
+func bundleLog() (*slog.Logger, *bytes.Buffer) {
+	said := &bytes.Buffer{}
+	return slog.New(slog.NewTextHandler(said, &slog.HandlerOptions{Level: slog.LevelWarn})), said
+}
+
+// quietBundleLog is the logger of a test that reads no line of its own.
+func quietBundleLog() *slog.Logger {
+	log, _ := bundleLog()
+	return log
 }
 
 // bundleTokens is each directory's token in bundle.
@@ -75,7 +113,7 @@ func projectRepos(names ...string) func() []ghrepo.Repository {
 // repository of its own has no bundle.
 func TestGitHubCredentialBundlesEveryOwnerOfTheProject(t *testing.T) {
 	repos := projectRepos("sjawhar/legion", "Acme/widgets", "acme/gadgets")
-	credential := GitHubCredential(ownerTokens{}, repos, ghrepo.Renames{})
+	credential := GitHubCredential(ownerTokens{}, repos, ghrepo.Renames{}, quietBundleLog())
 	for _, tc := range []struct {
 		name    string
 		role    claim.Role
@@ -132,12 +170,12 @@ func TestGitHubCredentialBundlesEveryOwnerOfTheProject(t *testing.T) {
 		})
 	}
 
-	refused := GitHubCredential(ownerTokens{refuse: "sjawhar"}, repos, ghrepo.Renames{})
+	refused := GitHubCredential(ownerTokens{refuse: "sjawhar"}, repos, ghrepo.Renames{}, quietBundleLog())
 	if _, err := refused(context.Background(), claim.RoleImplementer, ghrepo.MustParse("acme/widgets")); err == nil ||
 		!strings.Contains(err.Error(), "sjawhar") || !strings.Contains(err.Error(), string(claim.RoleImplementer)) {
 		t.Errorf("a refused read mint = %v, want an error naming the owner and the role", err)
 	}
-	none := GitHubCredential(ownerTokens{}, projectRepos(), ghrepo.Renames{})
+	none := GitHubCredential(ownerTokens{}, projectRepos(), ghrepo.Renames{}, quietBundleLog())
 	if _, err := none(context.Background(), claim.RoleController, ghrepo.Repository{}); !errors.Is(err, runtime.ErrNoGitHubOwner) {
 		t.Errorf("a bundle with no owner = %v, want runtime.ErrNoGitHubOwner", err)
 	}
@@ -153,7 +191,7 @@ func TestGitHubCredentialBundlesEveryOwnerOfTheProject(t *testing.T) {
 func TestGitHubCredentialNarrowsEverySiblingRepositoryToItsOwnDirectory(t *testing.T) {
 	var minted []string
 	repos := projectRepos("cybermonklabs/legion", "theorem-labs/agent-infra", "theorem-labs/nats-server")
-	credential := GitHubCredential(countingTokens{minted: &minted}, repos, ghrepo.Renames{})
+	credential := GitHubCredential(countingTokens{minted: &minted}, repos, ghrepo.Renames{}, quietBundleLog())
 	bundle, err := credential(context.Background(), claim.RoleImplementer, ghrepo.MustParse("theorem-labs/agent-infra"))
 	if err != nil {
 		t.Fatalf("credential: %v", err)
@@ -261,7 +299,7 @@ func TestGitHubCredentialBundlesARenamedPairAsOneOwner(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var minted []string
 			renames := ghrepo.MustRenames(legionRename)
-			credential := GitHubCredential(countingTokens{minted: &minted}, repos, renames)
+			credential := GitHubCredential(countingTokens{minted: &minted}, repos, renames, quietBundleLog())
 			bundle, err := credential(context.Background(), tc.role, tc.repo)
 			if err != nil {
 				t.Fatalf("credential: %v", err)
@@ -305,7 +343,7 @@ func TestGitHubCredentialBundlesARenamedPairAsOneOwner(t *testing.T) {
 	t.Run("no pair configured", func(t *testing.T) {
 		var minted []string
 		both := projectRepos("Cybermonklabs/legion", "sjawhar/legion")
-		credential := GitHubCredential(countingTokens{minted: &minted}, both, ghrepo.Renames{})
+		credential := GitHubCredential(countingTokens{minted: &minted}, both, ghrepo.Renames{}, quietBundleLog())
 		bundle, err := credential(context.Background(), claim.RoleImplementer, ghrepo.MustParse("cybermonklabs/legion"))
 		if err != nil {
 			t.Fatalf("credential: %v", err)
@@ -329,7 +367,7 @@ func TestGitHubCredentialBundlesARenamedPairAsOneOwner(t *testing.T) {
 	t.Run("the owner it moved from is an owner of the project", func(t *testing.T) {
 		var minted []string
 		both := projectRepos("Cybermonklabs/legion", "sjawhar/legion")
-		credential := GitHubCredential(countingTokens{minted: &minted}, both, ghrepo.MustRenames(legionRename))
+		credential := GitHubCredential(countingTokens{minted: &minted}, both, ghrepo.MustRenames(legionRename), quietBundleLog())
 		bundle, err := credential(context.Background(), claim.RoleImplementer, ghrepo.MustParse("cybermonklabs/legion"))
 		if err != nil {
 			t.Fatalf("credential: %v", err)
@@ -364,7 +402,7 @@ func TestControllerCredentialIsReadOnlyForEveryOwner(t *testing.T) {
 		"sjawhar":       "review-read-for-cybermonklabs/legion+tools",
 	}
 	for asked, def := range map[string]string{"": "acme", "Cybermonklabs": "cybermonklabs", "Sjawhar": "sjawhar"} {
-		bundle, err := ControllerCredential(ownerTokens{}, repos, renames)(context.Background(), asked)
+		bundle, err := ControllerCredential(ownerTokens{}, repos, renames, quietBundleLog())(context.Background(), asked)
 		if err != nil {
 			t.Fatalf("ControllerCredential(%q): %v", asked, err)
 		}
@@ -380,26 +418,180 @@ func TestControllerCredentialIsReadOnlyForEveryOwner(t *testing.T) {
 	}
 
 	var minted []string
-	outside := ControllerCredential(countingTokens{minted: &minted}, repos, renames)
+	outside := ControllerCredential(countingTokens{minted: &minted}, repos, renames, quietBundleLog())
 	if _, err := outside(context.Background(), "Outside-Project"); !errors.Is(err, ErrOwnerOutsideProject) ||
 		!strings.Contains(err.Error(), `"outside-project"`) || len(minted) != 0 {
 		t.Errorf("the controller asking for an owner outside the project = %v, minted %q; want ErrOwnerOutsideProject naming it and no mint", err, minted)
 	}
-	none := ControllerCredential(ownerTokens{}, projectRepos(), ghrepo.Renames{})
+	none := ControllerCredential(ownerTokens{}, projectRepos(), ghrepo.Renames{}, quietBundleLog())
 	if _, err := none(context.Background(), ""); !errors.Is(err, runtime.ErrNoGitHubOwner) {
 		t.Errorf("a controller bundle with no owner = %v, want runtime.ErrNoGitHubOwner", err)
 	}
 }
 
-// countingTokens records what each mint was asked to reach, in the order the bundle asked.
-type countingTokens struct{ minted *[]string }
+// countingTokens records what each mint was asked to reach, in the order the bundle asked, and
+// answers as the ownerTokens it holds: a test that names unreachable repositories reads both
+// what was asked and what was refused.
+type countingTokens struct {
+	ownerTokens
+	minted *[]string
+}
 
 func (t countingTokens) Token(ctx context.Context, role AppRole, repo ghrepo.Repository) (Lease, error) {
 	*t.minted = append(*t.minted, strings.ToLower(repo.String()))
-	return ownerTokens{}.Token(ctx, role, repo)
+	return t.ownerTokens.Token(ctx, role, repo)
 }
 
 func (t countingTokens) ReadToken(ctx context.Context, role AppRole, owner string, repos []string) (Lease, error) {
 	*t.minted = append(*t.minted, owner+"/"+strings.Join(repos, "+"))
-	return ownerTokens{}.ReadToken(ctx, role, owner, repos)
+	return t.ownerTokens.ReadToken(ctx, role, owner, repos)
+}
+
+// GitHub answers 422 to a token request naming a repository its installation does not reach — one
+// dropped from the App's selected repositories, deleted, or transferred without a configured
+// rename — and mints nothing, so a read lease over several repositories is refused whole over any
+// one of them. The refusal costs that repository alone: the lease is asked for again one
+// repository at a time, the owner's directory holds a lease over the ones that answered, and the
+// bundle is served rather than the role's launch failing for every owner.
+func TestGitHubCredentialKeepsTheReadLeaseTheReachableRepositoriesGive(t *testing.T) {
+	var minted []string
+	log, said := bundleLog()
+	repos := projectRepos("sjawhar/legion", "acme/widgets", "acme/gadgets")
+	tokens := countingTokens{ownerTokens: ownerTokens{unreachable: map[string]bool{"acme/gadgets": true}}, minted: &minted}
+	credential := GitHubCredential(tokens, repos, ghrepo.Renames{}, log)
+
+	bundle, err := credential(context.Background(), claim.RoleImplementer, ghrepo.MustParse("sjawhar/legion"))
+	if err != nil {
+		t.Fatalf("credential: %v", err)
+	}
+	want := map[string]string{
+		"acme":    "implement-read-for-acme/widgets",
+		"sjawhar": "implement-token-for-sjawhar/legion",
+	}
+	if got := bundleTokens(t, bundle); !maps.Equal(got, want) {
+		t.Errorf("tokens = %v, want %v: acme's directory reaches the one repository that answered", got, want)
+	}
+	if err := bundle.Validate(); err != nil {
+		t.Errorf("the bundle does not validate: %v", err)
+	}
+	// The refused lease, then one ask per repository, and the write lease: the lease over the one
+	// repository that answered is the ask already made for it, which the Manager serves from its
+	// cache, so no fourth read ask is made for acme.
+	if asked := []string{"acme/gadgets+widgets", "acme/gadgets", "acme/widgets", "sjawhar/legion"}; !slices.Equal(minted, asked) {
+		t.Errorf("minted for %v, want %v", minted, asked)
+	}
+	if count := strings.Count(said.String(), `repository=gadgets`); count != 1 {
+		t.Errorf("the log holds %d lines naming the refused repository, want one:\n%s", count, said.String())
+	}
+	for _, named := range []string{"app=implement", "owner=acme"} {
+		if !strings.Contains(said.String(), named) {
+			t.Errorf("the log line does not name %q:\n%s", named, said.String())
+		}
+	}
+}
+
+// A sibling repository of the role's own owner holds a directory of its own, over that repository
+// alone, so a refusal of its lease is a refusal of everything that directory could hold: it is
+// left out of the bundle, and every other directory — the write lease among them — is minted and
+// served.
+func TestGitHubCredentialLeavesOutASiblingRepositoryGitHubRefuses(t *testing.T) {
+	log, said := bundleLog()
+	repos := projectRepos("theorem-labs/agent-infra", "theorem-labs/nats-server", "cybermonklabs/legion")
+	tokens := ownerTokens{unreachable: map[string]bool{"theorem-labs/nats-server": true}}
+	credential := GitHubCredential(tokens, repos, ghrepo.Renames{}, log)
+
+	bundle, err := credential(context.Background(), claim.RoleImplementer, ghrepo.MustParse("theorem-labs/agent-infra"))
+	if err != nil {
+		t.Fatalf("credential: %v", err)
+	}
+	want := map[string]string{
+		"cybermonklabs": "implement-read-for-cybermonklabs/legion",
+		"theorem-labs":  "implement-token-for-theorem-labs/agent-infra",
+	}
+	if got := bundleTokens(t, bundle); !maps.Equal(got, want) {
+		t.Errorf("tokens = %v, want %v: the refused repository's directory is left out and the rest whole", got, want)
+	}
+	if _, held := bundle.Dirs["theorem-labs/nats-server"]; held {
+		t.Error("the bundle holds a directory for a repository the installation does not reach")
+	}
+	if err := bundle.Validate(); err != nil {
+		t.Errorf("the bundle does not validate: %v", err)
+	}
+	if count := strings.Count(said.String(), "repository=nats-server"); count != 1 {
+		t.Errorf("the log holds %d lines naming the refused repository, want one:\n%s", count, said.String())
+	}
+}
+
+// The write lease is not softened: a role that cannot act on its own issue's repository has
+// nothing to do, so a refusal of it fails the whole bundle, naming the role, the App and the
+// repository the lease would have reached.
+func TestGitHubCredentialStillFailsOnARefusedWriteLease(t *testing.T) {
+	log, said := bundleLog()
+	repos := projectRepos("acme/widgets", "sjawhar/legion")
+	tokens := ownerTokens{unreachable: map[string]bool{"acme/widgets": true}}
+	credential := GitHubCredential(tokens, repos, ghrepo.Renames{}, log)
+
+	bundle, err := credential(context.Background(), claim.RoleReviewer, ghrepo.MustParse("acme/widgets"))
+	if !errors.Is(err, ErrNarrowingRefused) || len(bundle.Dirs) != 0 {
+		t.Fatalf("a refused write lease = %+v, %v; want no bundle and the refusal", bundle, err)
+	}
+	for _, named := range []string{"review", string(claim.RoleReviewer), "acme/widgets"} {
+		if !strings.Contains(err.Error(), named) {
+			t.Errorf("the refusal does not name %q: %v", named, err)
+		}
+	}
+	if said.Len() != 0 {
+		t.Errorf("the log holds %q, want nothing: a refused write lease is the bundle's failure, not a repository left out", said.String())
+	}
+}
+
+// A repository GitHub refuses is refused at every launch and every refresh of every role, so the
+// line is said once for the life of the process rather than at each of them, as a Manager says a
+// grant shortfall once.
+func TestGitHubCredentialSaysARefusedRepositoryOnceOverTwoBundles(t *testing.T) {
+	log, said := bundleLog()
+	repos := projectRepos("oncelabs/served", "oncelabs/twice")
+	tokens := ownerTokens{unreachable: map[string]bool{"oncelabs/twice": true}}
+	credential := GitHubCredential(tokens, repos, ghrepo.Renames{}, log)
+
+	for i := range 2 {
+		if _, err := credential(context.Background(), claim.RoleImplementer, ghrepo.MustParse("other/thing")); err != nil {
+			t.Fatalf("bundle %d: %v", i+1, err)
+		}
+	}
+	if count := strings.Count(said.String(), "repository=twice"); count != 1 {
+		t.Errorf("the log holds %d lines over two bundles, want one:\n%s", count, said.String())
+	}
+}
+
+// gh keeps an owner's own hosts.yml and config.yml in that owner's directory, so a repository of
+// either name has no directory of its own to hold its lease: writing one would make a directory
+// where a file of the bundle's is (ghconfig.IsDirName). That repository is left out, said once on
+// the log, and every other directory of the bundle is written.
+func TestGitHubCredentialLeavesOutARepositoryNamedLikeGhsOwnFiles(t *testing.T) {
+	for owner, named := range map[string]string{"hostlabs": ghconfig.HostsFile, "conflabs": ghconfig.ConfigFile} {
+		t.Run(named, func(t *testing.T) {
+			log, said := bundleLog()
+			repos := projectRepos(owner+"/legion", owner+"/"+named)
+			credential := GitHubCredential(ownerTokens{}, repos, ghrepo.Renames{}, log)
+
+			bundle, err := credential(context.Background(), claim.RoleImplementer, ghrepo.MustParse(owner+"/legion"))
+			if err != nil {
+				t.Fatalf("credential: %v", err)
+			}
+			want := map[string]string{owner: "implement-token-for-" + owner + "/legion"}
+			if got := bundleTokens(t, bundle); !maps.Equal(got, want) {
+				t.Errorf("tokens = %v, want %v: the owner's own directory alone", got, want)
+			}
+			if err := bundle.Validate(); err != nil {
+				t.Errorf("the bundle does not validate: %v", err)
+			}
+			if dirs := GitHubDirs(repos, ghrepo.Renames{}, ghrepo.MustParse(owner+"/legion")); !slices.Equal(dirs, bundle.DirNames()) {
+				t.Errorf("GitHubDirs = %q, want the bundle's own directories %q", dirs, bundle.DirNames())
+			}
+			if count := strings.Count(said.String(), "repository="+named); count != 1 {
+				t.Errorf("the log holds %d lines naming the repository left out, want one:\n%s", count, said.String())
+			}
+		})
+	}
 }

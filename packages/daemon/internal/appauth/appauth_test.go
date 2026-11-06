@@ -1192,10 +1192,53 @@ func TestTokenRefusesATokenWiderThanTheRepositoriesAsked(t *testing.T) {
 	}
 }
 
+// GitHub names in its answer the permissions it minted the token with, and the mint holds that
+// half of the answer against the request as it does the repositories: a permission the request
+// did not ask for, an access above the one it asked at, or a word this daemon cannot order is a
+// token wider than the one asked for, and is refused rather than served. The refusal names what
+// was asked and the permission the answer named, never the token.
+func TestTokenRefusesATokenWiderThanThePermissionsAsked(t *testing.T) {
+	expires := time.Date(2026, 11, 6, 13, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	for _, tc := range []struct {
+		name        string
+		permissions string
+		named       string
+	}{
+		{"a permission the request did not ask for", `{"issues":"write","contents":"read","metadata":"read","pull_requests":"read","actions":"read"}`, "issues: write"},
+		{"an access above the one asked for", `{"contents":"write","metadata":"read","pull_requests":"read","actions":"read"}`, "contents: write"},
+		{"an access this daemon cannot order", `{"contents":"maintain","metadata":"read","pull_requests":"read","actions":"read"}`, "contents: maintain"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+			var stderr bytes.Buffer
+			github := &keyModeGitHub{owners: []string{"acme"}, slug: "legion-reviewer"}
+			github.answer = func(int, accessTokensBody) (int, string) {
+				return http.StatusOK, `{"token":"ghs_wide","expires_at":"` + expires +
+					`","repository_selection":"selected","repositories":[{"name":"legion"}],"permissions":` + tc.permissions + `}`
+			}
+			tokens := keyModeManager(t, github, &now, &stderr)
+
+			lease, err := tokens.ReadToken(context.Background(), Review, "acme", []string{"legion"})
+			if err == nil || lease.Token != "" {
+				t.Fatalf("a token wider than the permissions asked = %q, %v; want no lease and a refusal", lease.Token, err)
+			}
+			if strings.Contains(err.Error(), "ghs_wide") {
+				t.Errorf("the refusal carries the token it refused: %v", err)
+			}
+			if !strings.Contains(err.Error(), tc.named) {
+				t.Errorf("the refusal does not name %q, what the answer held: %v", tc.named, err)
+			}
+			if !strings.Contains(err.Error(), "contents: read") {
+				t.Errorf("the refusal does not name the permissions asked for: %v", err)
+			}
+		})
+	}
+}
+
 // A request body with no `repositories` is the owner-wide token this change exists to stop:
-// GitHub mints the whole installation for it, and narrowedTo passes an answer no repository was
-// asked for. So every door into a mint refuses a call that names none, and refuses it before any
-// exchange is sent rather than after reading what came back.
+// GitHub mints the whole installation for it, whatever the answer it sends back is held to. So
+// every door into a mint refuses a call that names none, and refuses it before any exchange is
+// sent rather than after reading what came back.
 func TestNoMintWithoutRepositoriesEverReachesGitHub(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1239,9 +1282,10 @@ func TestNoMintWithoutRepositoriesEverReachesGitHub(t *testing.T) {
 
 // GitHub answers 422 both to a repository the installation does not reach and to a permission it
 // does not hold, and says which in no way a caller may read, so a write mint reports the refusal
-// naming both halves of what it asked for and an operator reads which it was. It is not the
-// missing Actions grant a read mint asks again without: a write token minted without actions
-// would take `gh run rerun` from every role in silence.
+// naming both halves of what it asked for and an operator reads which it was. The write lease is
+// never softened: a mint asks for what the installation was granted a moment before
+// (exchangeGranted), and a token minted without a permission of the set would take what it covers
+// — `gh run rerun` for actions — from every role in silence.
 func TestA422ForARepositoryTheInstallationCannotReachIsTheNarrowingRefusal(t *testing.T) {
 	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
 	var stderr bytes.Buffer
@@ -1265,10 +1309,10 @@ func TestA422ForARepositoryTheInstallationCannotReachIsTheNarrowingRefusal(t *te
 		}
 	}
 	if asked := github.exchanges(); len(asked) != 1 {
-		t.Errorf("%d exchanges, want the one: a write mint is never asked again without actions", len(asked))
+		t.Errorf("%d exchanges, want the one: a refused write mint is never asked again", len(asked))
 	}
 	if stderr.Len() != 0 {
-		t.Errorf("stderr = %q, want nothing said of an Actions grant this answer says nothing about", stderr.String())
+		t.Errorf("stderr = %q, want nothing: a 422 says nothing of a grant, which the mint read before it asked", stderr.String())
 	}
 }
 
