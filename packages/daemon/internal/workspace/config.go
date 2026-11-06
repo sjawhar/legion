@@ -112,7 +112,7 @@ type Request struct {
 	// shared clone — its clone, fetch, bookmark reads and writes, the workspace's registration,
 	// git worktree bookkeeping and configuration — and let go before the checkout writes the
 	// issue's own working copy (`jj sparse reset` in the workspace the registration made with no
-	// files), the one step whose time follows the repository's size and which writes nothing of
+	// files): of the steps whose time follows the repository's size, the one that writes nothing of
 	// the clone's. A daemon that provisions several issues of one repository at once hands each the
 	// clone's one lock, so their checkouts run side by side and nothing else of the clone ever does.
 	// Nil holds nothing: a pod provisions its one issue alone.
