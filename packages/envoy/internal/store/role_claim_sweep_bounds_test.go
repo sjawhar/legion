@@ -12,10 +12,11 @@
 // Each is invisible to the other's test, which is why there are two cases here rather than one. A
 // scan that is delivered nothing never runs its visit function, so its own stop cannot fire and
 // only the caller's bound can answer that deregistration; a scan that is being delivered entries
-// reaches its visit function, and the caller is inside the listing itself, so the caller's bound
-// is not what ends that one. Before these two cases nothing in the tree held either bound: the
-// review that asked for them deleted the ctx.Err() check and ran the package green, then called
-// the listing with no bus.Bounded and ran it green again.
+// reaches its visit function, and its caller's bound answers while the listing's goroutine runs
+// on behind the answer, so only the scan's own stop ends the reading of the bucket. Before these
+// two cases nothing in the tree held either bound: the review that asked for them deleted the
+// ctx.Err() check and ran the package green, then called the listing with no bus.Bounded and ran
+// it green again.
 
 package store
 
@@ -51,8 +52,8 @@ const (
 	// told apart from one that stopped by a count rather than by a clock.
 	walkedAwayClaims     = 200
 	walkedAwayEntryDelay = 10 * time.Millisecond
-	// walkedAwayDeadline is the request the listing is given, long enough to be handed a few
-	// claims and far short of the bucket.
+	// walkedAwayDeadline is the request the deregistration is given, long enough for its listing
+	// to be handed a few claims and far short of the bucket.
 	walkedAwayDeadline = 150 * time.Millisecond
 	// walkedAwayCeiling is the most entries a stopped listing may have been handed. The request
 	// above pays for about fifteen, so this leaves an order of magnitude, and it is half the
@@ -235,19 +236,30 @@ func (w *slowWatcher) Stop() error {
 //
 // The watch here hands the scan the bucket one claim at a time, 10 ms apart, so the scan's visit
 // function runs on every one of them and the whole bucket takes 2 s to deliver against a request
-// of 150 ms. That the listing answered proves only that it stopped appending; what proves it
-// stopped reading the bucket is the count of entries the bucket was asked for, read again after
-// long enough that a scan still running would have been handed every claim it holds.
+// of 150 ms.
 //
-// Delete the ctx.Err() check in roleKeysUntil and the scan runs to the end of the bucket: it
-// returns no error at all, two seconds later, having been handed all walkedAwayClaims entries, so
-// both the error and both counts below fail.
+// The two subtests hold the two halves of that, and each is driven the only way that can hold
+// its half. Called directly, roleKeysUntil answers its own caller, so the answer is the half a
+// direct call holds - the request's error and no keys - and the listing is over by the time that
+// call returns: nothing is left reading the bucket, so there is nothing after the answer to
+// check. Through a deregistration, which is the production shape, the listing runs inside
+// bus.Bounded, which answers its caller at the request's end and leaves the listing's goroutine
+// running behind that answer: there the answer says nothing about the bucket, and what the fake
+// is handed after it is the whole question the scan's own stop exists for.
+//
+// Delete the ctx.Err() check in roleKeysUntil and each subtest fails on its own half. The direct
+// call reads the bucket to its end and answers all walkedAwayClaims keys and no error, two
+// seconds late, so its error, its keys and its ceiling all fail. The deregistration still
+// answers at its deadline, because bus.Bounded answers it, and its listing goes on being handed
+// the bucket behind that answer, so what fails there is the check after the answer.
 func TestARoleListingTheRequestWalkedAwayFromStopsReadingTheBucket(t *testing.T) {
+	const session = "ses_walked_away"
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
-	reg, _ := coldRegistry(t, conn)
+	reg, rawInterests := coldRegistry(t, conn)
 	roles, holderOf := otherSessionsClaims("walked-away", walkedAwayClaims)
 	putRoleClaimsInParallel(t, reg.roles().Legacy(), roles, holderOf)
+	putInterest(t, rawInterests, Interest{SessionID: session, MachineID: "m1", Topics: []string{"notifications.chat"}})
 	// Through the bucket's own watch the listing is complete, which is what makes the counts
 	// below a reading of how much of the bucket the stopped listing was handed rather than of
 	// how much of it there is.
@@ -258,38 +270,77 @@ func TestARoleListingTheRequestWalkedAwayFromStopsReadingTheBucket(t *testing.T)
 	if len(seeded) != walkedAwayClaims {
 		t.Fatalf("the fixture's bucket holds %d claims, want %d", len(seeded), walkedAwayClaims)
 	}
-	watch := &slowWatchKV{KeyValue: reg.roles().WatchHandle(), delay: walkedAwayEntryDelay}
-	watchRoleBucketThrough(t, reg, watch)
-
-	ctx, cancel := context.WithTimeout(context.Background(), walkedAwayDeadline)
-	defer cancel()
-	started := time.Now()
-	keys, err := reg.roleKeysUntil(ctx)
-	elapsed := time.Since(started)
-	stopped := watch.count()
-	t.Logf("the listing answered %v after %s, having been handed %d of the bucket's %d claims", err, elapsed, stopped, walkedAwayClaims)
-
-	// A listing short of the bucket is not a reading of it, so it is an error and no keys, and
-	// the error is the request's: a caller cannot tell a partial list from a complete one.
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("a listing whose request ended after %s answered %d keys and %v, want no keys and the request's deadline", elapsed, len(keys), err)
-	}
-	if keys != nil {
-		t.Fatalf("the refused listing returned %d keys, want none", len(keys))
-	}
-	if stopped > walkedAwayCeiling {
-		t.Fatalf("the stopped listing had been handed %d of the bucket's %d claims by the time it answered, want no more than %d: a listing that was handed most of the bucket in a %s request is one that read past its request",
-			stopped, walkedAwayClaims, walkedAwayCeiling, walkedAwayDeadline)
+	if err := reg.RoleViewErr(); err == nil {
+		t.Fatal("the registry's role claim view can be served, so the deregistration below would never reach the listing")
 	}
 
-	// The whole bucket, twice over: a listing still reading it would have been handed every
-	// claim by now, even on a runner several times slower than this delay assumes.
-	settle := 2 * walkedAwayClaims * walkedAwayEntryDelay
-	time.Sleep(settle)
-	after := watch.count()
-	t.Logf("%s after the listing answered, the bucket had been read for %d claims, up from %d", settle, after, stopped)
-	if after > stopped+walkedAwayDrift {
-		t.Fatalf("the bucket was read for %d more claims in the %s after the listing answered (%d, up from %d), want no more than %d: the listing is still scanning the bucket for a caller that has its answer",
-			after-stopped, settle, after, stopped, walkedAwayDrift)
-	}
+	t.Run("the listing answers its caller the request's error and no keys", func(t *testing.T) {
+		watch := &slowWatchKV{KeyValue: reg.roles().WatchHandle(), delay: walkedAwayEntryDelay}
+		watchRoleBucketThrough(t, reg, watch)
+
+		ctx, cancel := context.WithTimeout(context.Background(), walkedAwayDeadline)
+		defer cancel()
+		started := time.Now()
+		keys, err := reg.roleKeysUntil(ctx)
+		elapsed := time.Since(started)
+		handed := watch.count()
+		t.Logf("the listing answered %v after %s, having been handed %d of the bucket's %d claims", err, elapsed, handed, walkedAwayClaims)
+
+		// A listing short of the bucket is not a reading of it, so it is an error and no keys,
+		// and the error is the request's: a caller cannot tell a partial list from a complete
+		// one.
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("a listing whose request ended after %s answered %d keys and %v, want no keys and the request's deadline", elapsed, len(keys), err)
+		}
+		if keys != nil {
+			t.Fatalf("the refused listing returned %d keys, want none", len(keys))
+		}
+		if handed > walkedAwayCeiling {
+			t.Fatalf("the stopped listing had been handed %d of the bucket's %d claims by the time it answered, want no more than %d: a listing that was handed most of the bucket in a %s request is one that read past its request",
+				handed, walkedAwayClaims, walkedAwayCeiling, walkedAwayDeadline)
+		}
+	})
+
+	t.Run("the deregistration's listing stops reading the bucket behind its answer", func(t *testing.T) {
+		watch := &slowWatchKV{KeyValue: reg.roles().WatchHandle(), delay: walkedAwayEntryDelay}
+		watchRoleBucketThrough(t, reg, watch)
+
+		ctx, cancel := context.WithTimeout(context.Background(), walkedAwayDeadline)
+		defer cancel()
+		started := time.Now()
+		err := reg.Remove(ctx, session, nil)
+		elapsed := time.Since(started)
+		answered := watch.count()
+		t.Logf("the deregistration answered %v after %s, its listing having been handed %d of the bucket's %d claims", err, elapsed, answered, walkedAwayClaims)
+
+		// The fallback answers its request rather than the bucket, in the wording the route
+		// reports. That bound is the stalled-listing case's subject, and it is held here only
+		// so far as the rest of this case needs it: a deregistration that answered something
+		// else never reached the listing this one is about.
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Remove(%s) over a listing short of the bucket answered %v, want the request's own deadline", session, err)
+		}
+		want := fmt.Sprintf("list the role bucket's keys to release %s's claims:", session)
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("Remove(%s) answered %q, want it to say %q and carry the deadline", session, err, want)
+		}
+		if answered > walkedAwayCeiling {
+			t.Fatalf("the listing had been handed %d of the bucket's %d claims by the time the deregistration answered, want no more than %d: a listing handed most of the bucket in a %s request is one that read past its request",
+				answered, walkedAwayClaims, walkedAwayCeiling, walkedAwayDeadline)
+		}
+
+		// The check the answer itself cannot make, and the reason this half runs through the
+		// deregistration: the listing's goroutine outlives the answer, so the bucket is read
+		// again after the whole bucket could have been delivered twice over. A listing still
+		// reading it would have been handed every claim by now, even on a runner several times
+		// slower than this delay assumes.
+		settle := 2 * walkedAwayClaims * walkedAwayEntryDelay
+		time.Sleep(settle)
+		after := watch.count()
+		t.Logf("%s after the deregistration answered, the bucket had been read for %d claims, up from %d", settle, after, answered)
+		if after > answered+walkedAwayDrift {
+			t.Fatalf("the bucket was read for %d more claims in the %s after the deregistration answered (%d, up from %d), want no more than %d: the listing is still scanning the bucket for a caller that has its answer",
+				after-answered, settle, after, answered, walkedAwayDrift)
+		}
+	})
 }
