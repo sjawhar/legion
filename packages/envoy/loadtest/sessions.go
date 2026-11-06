@@ -275,11 +275,11 @@ func (st *step) registerSessions(ctx context.Context, ns *natsSessions) *registr
 	return reg
 }
 
-// startHeartbeat re-registers one session at a time, so that each one's 90 s heartbeat is spread
-// evenly (packages/envoy-client/src/envoy-settings.ts), until ctx ends.
+// startHeartbeat re-registers one session at a time, so that each one's heartbeat
+// (contracts.SessionHeartbeat) is spread evenly, until ctx ends.
 func (st *step) startHeartbeat(ctx context.Context, reg *registrar) {
 	go func() {
-		t := time.NewTicker(90 * time.Second / time.Duration(len(st.sessions)))
+		t := time.NewTicker(contracts.SessionHeartbeat / time.Duration(len(st.sessions)))
 		defer t.Stop()
 		for i := 0; ; i++ {
 			select {

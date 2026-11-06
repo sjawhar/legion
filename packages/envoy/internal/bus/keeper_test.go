@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	// testKeepInterval is the keeper's period in these tests (withKeepInterval).
+	// testKeepInterval is the keeper's period in these tests (WithKeepInterval).
 	testKeepInterval = 250 * time.Millisecond
 	// keepWait bounds every wait for the keeper to restore what was taken: a few periods, and the
 	// time a cluster takes to apply a replica change it is asked for.
@@ -154,7 +154,7 @@ func TestTheKeeperEndsTheMixedSettingsRaceAtThreeCopiesTheByteLimitAndTheID(t *t
 
 	defaults := parseConnectOptions([]ConnectOption(nil)).streamConfig()
 	defaultStart := &interleavedJetStream{JetStreamContext: js, beforeUpdate: func() {
-		startOnCluster(t, cluster, WithReplicas(3), WithStreamMaxBytes(keeperByteLimit), withKeepInterval(testKeepInterval))
+		startOnCluster(t, cluster, WithReplicas(3), WithStreamMaxBytes(keeperByteLimit), WithKeepInterval(testKeepInterval))
 		if info, err := js.StreamInfo(Stream); err != nil || !keptAtSettings(id)(info) {
 			t.Fatalf("the setting program's start left the stream at %+v (%v), want three copies, the byte limit and the id", info, err)
 		}
@@ -343,7 +343,7 @@ func TestTwoKeepersWithDifferentSubjectListsNeverSwitchTheStream(t *testing.T) {
 func TestTheKeeperRestoresWhatAnOperatorTookAwayAndKeepsAForeignSubject(t *testing.T) {
 	cluster, js := startClusterJetStream(t)
 	logs := captureLogs(t)
-	startOnCluster(t, cluster, WithReplicas(3), WithStreamMaxBytes(keeperByteLimit), withKeepInterval(testKeepInterval))
+	startOnCluster(t, cluster, WithReplicas(3), WithStreamMaxBytes(keeperByteLimit), WithKeepInterval(testKeepInterval))
 	info := testnats.AwaitSettledStream(t, js, Stream)
 	const removed = "notifications.legion.>"
 
@@ -396,7 +396,7 @@ func TestTheKeeperRestoresWhatAnOperatorTookAwayAndKeepsAForeignSubject(t *testi
 func TestTheKeeperKeepsAnOperatorsRaiseOfTheByteLimitAndRaisesALowerOne(t *testing.T) {
 	cluster, js := startClusterJetStream(t)
 	logs := captureLogs(t)
-	settings := []ConnectOption{WithReplicas(3), WithStreamMaxBytes(keeperByteLimit), withKeepInterval(testKeepInterval)}
+	settings := []ConnectOption{WithReplicas(3), WithStreamMaxBytes(keeperByteLimit), WithKeepInterval(testKeepInterval)}
 	startOnCluster(t, cluster, settings...)
 	info := testnats.AwaitSettledStream(t, js, Stream)
 
@@ -457,7 +457,7 @@ func TestTheKeeperRaisesTheBucketsItsProgramNamesBackToTheirCopies(t *testing.T)
 		t.Fatalf("flush the watch: %v", err)
 	}
 
-	client := startOnCluster(t, cluster, WithReplicas(3), WithKeptBuckets(listed, missing), withKeepInterval(testKeepInterval))
+	client := startOnCluster(t, cluster, WithReplicas(3), WithKeptBuckets(listed, missing), WithKeepInterval(testKeepInterval))
 	before := map[string]nats.StreamConfig{}
 	for _, bucket := range []string{listed, unlisted} {
 		if _, err := EnsureKeyValue(client.Conn, client.JS(), &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 3, History: 5, TTL: time.Hour}); err != nil {
@@ -516,7 +516,7 @@ func TestAKeeperWithTheDefaultSettingsSendsNoUpdate(t *testing.T) {
 		t.Fatalf("flush the watch: %v", err)
 	}
 
-	client := startOnCluster(t, cluster, WithKeptBuckets("envoy_keeper_default"), withKeepInterval(testKeepInterval))
+	client := startOnCluster(t, cluster, WithKeptBuckets("envoy_keeper_default"), WithKeepInterval(testKeepInterval))
 	if _, err := EnsureKeyValue(client.Conn, client.JS(), &nats.KeyValueConfig{Bucket: "envoy_keeper_default", Storage: nats.FileStorage}); err != nil {
 		t.Fatalf("open a bucket at the default copies: %v", err)
 	}
@@ -557,7 +557,7 @@ func TestStoppingTheClientStopsItsKeeper(t *testing.T) {
 		t.Run(stop.name, func(t *testing.T) {
 			cluster, js := startClusterJetStream(t)
 			logs := captureLogs(t)
-			client := startOnCluster(t, cluster, WithReplicas(3), withKeepInterval(testKeepInterval))
+			client := startOnCluster(t, cluster, WithReplicas(3), WithKeepInterval(testKeepInterval))
 			info := testnats.AwaitSettledStream(t, js, Stream)
 
 			entered := make(chan struct{})
@@ -623,7 +623,7 @@ func TestTheKeeperOfABackgroundClientRunsNoPassBeforeItsFirstReconcile(t *testin
 	srv.Stop(t)
 
 	logs := captureLogs(t)
-	client, err := ConnectOwningStream([]string{uri}, WithConnectInBackground(), WithStreamMaxBytes(keeperByteLimit), withKeepInterval(time.Millisecond))
+	client, err := ConnectOwningStream([]string{uri}, WithConnectInBackground(), WithStreamMaxBytes(keeperByteLimit), WithKeepInterval(time.Millisecond))
 	if err != nil {
 		t.Fatalf("connect owning the stream while the server is down: %v", err)
 	}
@@ -677,7 +677,7 @@ func TestStoppingABackgroundClientBeforeItsFirstConnectionStartsNoKeeper(t *test
 		t.Run(stop.name, func(t *testing.T) {
 			srv, uri := testnats.Start(t)
 			srv.Stop(t)
-			client, err := ConnectOwningStream([]string{uri}, WithConnectInBackground(), withKeepInterval(time.Millisecond))
+			client, err := ConnectOwningStream([]string{uri}, WithConnectInBackground(), WithKeepInterval(time.Millisecond))
 			if err != nil {
 				t.Fatalf("connect owning the stream while the server is down: %v", err)
 			}

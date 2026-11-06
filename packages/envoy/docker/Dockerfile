@@ -77,6 +77,9 @@ COPY packages/envoy/internal ./internal
 # listenfd: the inherited listening socket envoy-dispatch and envoy-listener serve on
 # (DISPATCH_LISTEN_FD, ENVOY_LISTEN_FD).
 COPY packages/envoy/listenfd ./listenfd
+# migrationid: the rule a store's migration identifiers follow, which internal/pgmigrate reads to
+# name the remedy a collision takes in the set that refused it.
+COPY packages/envoy/migrationid ./migrationid
 # The Go contracts file is generated from packages/contracts/schemas; never
 # trust the copy checked into the tree over a fresh regeneration.
 COPY --from=web /repo/packages/envoy/internal/contracts/generated.go ./internal/contracts/generated.go

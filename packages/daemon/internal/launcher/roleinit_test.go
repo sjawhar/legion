@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -139,6 +140,7 @@ func TestARoleRunsInNamespacesOfItsOwn(t *testing.T) {
 		{"agent home-mounts-view", "0", "the container's view of the home's volumes is covered: the role sees each at its own path alone"},
 		{"agent tmp-mount", "mounted-a", "a mount /tmp carried is bound back over the role's own /tmp"},
 		{"agent home-carryover", "absent", "the role's first generation starts on a home layer with nothing of its own"},
+		{"agent home-dir-rename", "ok", "the role renames a directory on its own home layer and the sandbox lives; under gVisor without userxattr the rename panics the sandbox instead"},
 		{"stage upper-home", "present", "what the role wrote under its home landed on its own layer"},
 		{"stage upper-tmp", "present", "what the role wrote in /tmp landed in its own temporary directory"},
 		{"stage upper-var-tmp", "present", "what the role wrote in /var/tmp landed in its own temporary directory"},
@@ -605,6 +607,21 @@ func TestRoleInitAgentHelper(t *testing.T) {
 	// What an earlier generation of this role wrote under its home is still the role's own: the
 	// writable layer is the role's across its generations, as a role container's filesystem was.
 	say("home-carryover", presence(filepath.Join(plan.Home, "planted")))
+	// A directory of the role's own, made and then renamed on its home overlay: the live
+	// reading of the userxattr option the home layer is mounted with. On gVisor a home overlay
+	// mounted without that option does not fail this case, it panics the sandbox and ends the
+	// pod, so this case must never be run at a head whose options string lacks the option. The
+	// safe negative control of the option is TestARoleHomeLayerIsMountedWithUserxattr, which
+	// compares the string alone. The name carries the generation's label: the upper layer is
+	// the role's across its generations and every generation of this helper renames here.
+	made := filepath.Join(plan.Home, "renamed-"+plan.Label)
+	if err := os.MkdirAll(made, 0o755); err != nil {
+		say("home-dir-rename", err.Error())
+	} else if err := os.Rename(made, made+"-again"); err != nil {
+		say("home-dir-rename", err.Error())
+	} else {
+		say("home-dir-rename", "ok")
+	}
 	// The role's config home is its own: what workspace-init wrote in the pod's shared one is
 	// there, a mount under the shared one comes back over it, and what this role's earlier
 	// generations wrote there is still the role's, while a sibling's writes never are. A
@@ -995,5 +1012,57 @@ func TestAnOwnConfigHomeWithoutItsMarkerIsMadeAgain(t *testing.T) {
 	}
 	if got := presence(filepath.Join(elsewhere, configHomeMarker)); got != "present" {
 		t.Errorf("what the link named lost its file (%s): the link was followed", got)
+	}
+}
+
+// The role's own layer over its home is mounted with userxattr, over the home as its lower layer
+// and the role's own upper and work directories. Without that option gVisor marks a renamed
+// directory opaque by writing trusted.overlay.opaque, which a task in the role's nested user
+// namespace may not write, and gVisor panics when that write is refused, which ends the pod's
+// whole sandbox. The safe negative control is this case alone: take ,userxattr out of the string
+// homeOverlayOptions returns and the case fails, naming the options the launch would mount with.
+// Never prove the option by running TestARoleRunsInNamespacesOfItsOwn against a head without it:
+// under gVisor that ends the pod's sandbox rather than failing a test.
+func TestARoleHomeLayerIsMountedWithUserxattr(t *testing.T) {
+	homes := filepath.Join("/roles", RoleHomesDir, "a")
+	home, upper, work := Home, filepath.Join(homes, "upper"), filepath.Join(homes, "work", "0000000001")
+	options := homeOverlayOptions(home, upper, work)
+	named := strings.Split(options, ",")
+	for _, want := range []string{"lowerdir=" + home, "upperdir=" + upper, "workdir=" + work, "userxattr"} {
+		if !slices.Contains(named, want) {
+			t.Errorf("the role's home layer would be mounted with %q, which holds no %s", options, want)
+		}
+	}
+}
+
+// A refused home layer names the options the mount was tried with, userxattr among them, so the
+// operator who reads the failure is told what the launch asked the kernel for rather than that
+// the mount failed. The home here is a regular file and the upper layer does not exist, only the
+// work directory beside it: the file carries no mount, so the call reaches the mount itself,
+// which is refused for every caller on every runtime because there is no upper layer to mount.
+// Nothing is mounted and no directory is renamed. The case reads the refusal's text alone, and
+// fails when the error is nil.
+func TestARefusedRoleHomeLayerNamesTheOptionsItTried(t *testing.T) {
+	dir := t.TempDir()
+	homes, home := filepath.Join(dir, "homes"), filepath.Join(dir, "home")
+	upper, work := filepath.Join(homes, "upper"), filepath.Join(homes, "work", "0000000001")
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(home, []byte("no caller mounts over a file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := RoleInitConfig{
+		RolesDir: filepath.Join(dir, "roles"), Role: "a", Generation: 1, Home: home,
+		HomeMounts: filepath.Join(dir, "home-mounts"), FixedRoot: filepath.Join(dir, "fixed"),
+	}
+	err := privateHome(cfg, homes, work)
+	if err == nil {
+		t.Fatalf("the role's home layer over the regular file %s went on, want the mount refused", home)
+	}
+	for _, want := range []string{"lowerdir=" + home, "upperdir=" + upper, "workdir=" + work, "userxattr"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal reads %q, which does not name %s the mount was tried with", err, want)
+		}
 	}
 }

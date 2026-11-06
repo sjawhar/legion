@@ -96,7 +96,7 @@ func TestAStartCapsAnUncappedStreamOnTheHubsServerAndIsRefusedOnTheOlderOne(t *t
 				t.Fatalf("the deployed stream's consumer cap = %d, want the -1 or 0 a server answers for a stream deployed without one", deployed)
 			}
 
-			client, err := ConnectOwningStream([]string{uri}, WithEnvironment(liveServerEnvironment), withKeepInterval(testKeepInterval))
+			client, err := ConnectOwningStream([]string{uri}, WithEnvironment(liveServerEnvironment), WithKeepInterval(testKeepInterval))
 			if image.Ref != testnats.HubImage {
 				if err == nil {
 					client.Close()

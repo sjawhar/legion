@@ -190,10 +190,13 @@ Each item below names a task and where its code is, then notes on it.
 - **Postgres LISTEN loop's shared rules**: `internal/pglisten/`
 
   Dispatch's and the secrets broker's listeners:
-  one LISTEN connection that dials, reports each notification, pings itself when idle, wakes a caller on its own goroutine, and redials on every failure (`Listener`, `Run`, `RedialBackoff`), because a connection waiting for a notification must outlive every failure between it and the server (INFRA-66).
-  Shared the way `internal/pgmigrate` is, since the broker's cross-pod secret-reread fan-out (`internal/broker/reread`) listens on the same kind of connection as Dispatch's delivery hub, event stream relay and, under `DISPATCH_TEST_HOOKS` alone, test-hook fan-out (`internal/dispatch/api`, `test_hooks_fanout.go`) and its stale-room evictor (`internal/dispatch/docs`);
-  each caller sets `Listener.Owner`, the prefix of the one line the loop logs, and an unset `Owner` logs `dispatch`.
-  `Hub` shares one `Listener` among many subscribers and channels: `cmd/dispatch` runs one per process (`dispatch background wakes`) for its woken background loops, and every `Wake` is signalled after each successful LISTEN as well as on each notification, so a subscriber catches up then on what it missed while the listener had no connection (`cmd/dispatch/README.md`, "Background loops")
+  one LISTEN connection that dials, reports each notification on its own goroutine, pings itself when idle, runs a caller's catch-up after every successful LISTEN, and redials on every failure (`Listener`, `Run`, `RedialBackoff`), because a connection waiting for a notification must outlive every failure between it and the server (INFRA-66).
+  `Hub` is one shared LISTEN connection for a process, carrying every channel its subscribers register.
+  Its caller names the connection, so that other processes can read the name in `pg_stat_activity`.
+  In envoy-dispatch the document rooms' room sync (`internal/dispatch/docs/room_sync.go`) and `cmd/dispatch`'s woken background loops both register on it, and every `Wake` is signalled after each successful LISTEN as well as on each notification, so a subscriber catches up then on what it missed while the listener had no connection (`cmd/dispatch/README.md`, "Background loops").
+  The delivery hub, the event stream relay and the events outbox (`internal/dispatch/outbox/lease.go`, its LISTEN on `dispatch_events` and `dispatch_duty_holds`) keep a `Listener` each.
+  Shared the way `internal/pgmigrate` is, since the broker's cross-pod secret-reread fan-out (`internal/broker/reread`) listens on the same kind of connection as Dispatch's delivery hub, event stream relay, events outbox and, under `DISPATCH_TEST_HOOKS` alone, test-hook fan-out (`internal/dispatch/api`, `test_hooks_fanout.go`) and its listener hub;
+  each caller sets `Listener.Owner` (or `Hub.Owner`), the prefix of the one line the loop logs, and an unset `Owner` logs `dispatch`
 
 - **GitHub webhook redelivery**: `internal/dispatch/redeliver/`, `cmd/dispatch/redeliver.go`
 
@@ -337,7 +340,7 @@ A task never reads, consumes, or releases another task's F; every author crosses
 A settlement that wrote into the room commits what it wrote even when the document moved after its read, since the room and its browsers hold it;
 one that wrote nothing leaves a moved document to the settlement the move scheduled.
 A repair is written only into the document the settlement read (`applySuppressed`): one whose room was evicted and reloaded since is refused and retried.
-Every close of a room the service makes - a failed room's eviction, the close of a room behind the durable head (`closeRoomInstance`), `Evict` (tests) and `Quiesce`, an issue's close or reopen, `Shutdown`'s close of a room with an editor - goes through its server's close gate (`roomServer`:
+Every close of a room the service makes - a failed room's eviction, the close of a room whose stored history was replaced (`closeRoomInstance`), `Evict` (tests) and `Quiesce`, an issue's close or reopen, `Shutdown`'s close of a room with an editor - goes through its server's close gate (`roomServer`:
 its `CloseRoom`, which shadows ygo's, so a call written against ygo's API is gated too, its `closeInstance` for the instance-only close, or its `closeOwned` for a failed room's eviction).
 That close waits for a repair committing into the room and refuses new repairs while it closes;
 a repair never waits for a close and gives the write up as for a replaced room (`holdOpen`).
@@ -363,7 +366,8 @@ A copy's previous id stays live in the room's own bookkeeping, since another blo
 A rename whose own update's observer had not yet recorded an author carries none forward, and is named after the settlement's own actor rather than its editor.
 A seeded spec's blocks are its creator's.
 A block in the tree whose update the observer has not rendered yet waits for the settlement that observer arms.
-A block the room held when it loaded, which no write registered and no update the observer saw introduced, is attributed as the settlement's other events are.
+Each author is also stored, in the transaction that makes the block durable (`doc_ask_block_authors`, migration 20261101181501), so a block that another process's write introduced, or that the room held when it loaded, takes the stored author (`askBlockSources.author`).
+A block whose author is neither in the room's memory nor in that table is attributed as the settlement's other events are.
 Those name the room's latest editor when the version credits them, including an approval request's move; ambiguous browser edits name `SettlementActor`.
 A free-text ask block (no bullet list) carries `options: []` on the wire, never JSON null.
 
@@ -372,6 +376,8 @@ every durable document update writes the document's `doc_settlements_pending` ro
 A settlement that did not commit - one a shutdown's budget cut short or a room failure dropped - is armed again from that row two ways:
 a room's load arms one when the row is there (`onLoadDocument`, unless the load is a settlement's own warm-up), and `cmd/dispatch` runs `docs.Service.RunSettlementResumption`, which at start and every minute arms the settlement of each document whose row is a minute old and whose issue is open (`resumeOwedSettlements`), so a document nobody opens settles too.
 It runs on an interval because a rolling deploy stops the old task after the new one has started.
+Each pass runs under the lease `settlement-resumption` (`duty.Exclusive`), so one process per minute arms the owed settlements:
+a settlement reads the store under the document's lock whichever process runs it.
 A closed issue's rooms arm none until it reopens.
 `docs.Service.Shutdown` runs the settlement of each loaded room whose document has that row, and no other, inside its 9 s drain budget (`docs.ShutdownDrainBudget`, within the caller's deadline);
 a settled document's repeat would spend the budget for nothing.
@@ -534,12 +540,14 @@ Settlement's is the answer an ask keeps, written back into a block that returns 
 settlement weighs each such answer and leaves out the ones the document has no room for (`withholdAnswers`).
 A joined operation never writes the room:
 it runs on the transaction's fork of the room's document (`docs/livewrite.go`), appends its update inside the transaction, and reads through the same fork.
-A document no room holds is forked from the store (`coldFork`) and loads no room until the committed write is published, so a cold edit holds one copy of the document rather than a room beside its fork;
+A document no room holds is forked from the store (`coldFork`), and the write loads no room while it runs.
+Its publish loads one only in a race (`publishLiveWrite`, below).
+So a cold edit holds one copy of the document rather than a room beside its fork;
 an upload's version on such a fork takes out the stored updates through the head that read loaded and no in-flight credit.
 A browser's room load takes no lock the write holds, so a room that loads while `coldFork` reads the store is forked from instead and the stored copy is dropped undecoded, and one that loads later is forked from at the write's next operation.
 Every mutate starts from the tree `applyLive` already read (`startTree`, `editTree`) rather than reading its own;
 `applyLive` lets that tree go before the one check that decodes a second copy of the state (`refuseUndecodable`);
-and a write drops its fork and rendering once it commits, before its publish loads the room (`releaseFork`), since a pooled connection's context can keep the write reachable long after it answered (LEGION-504).
+and a write drops its fork and rendering once it commits, before its publish (`releaseFork`), since a pooled connection's context can keep the write reachable long after it answered (LEGION-504).
 A token's encoding (`pmdoc.EncodeTokenJSON`) is held once per call, in one buffer for the document and all its blocks, and dropped when the call returns;
 LEGION-504's concern was more copies per token and their retention, and neither holds.
 The handler ends the transaction with `ledger.Commit`, which records each settlement credit with the document content and takes each version's authors back out of that record, commits, credits the writes' actor to their rooms, releases the authors a version the transaction wrote named, then applies and broadcasts the updates, and last publishes the events its document operations appended, ahead of the handler's own;
@@ -661,11 +669,11 @@ A version's capture, a settlement's read and a live write's fork read instead re
 an author the update observer credits after the capture's bound is numbered past it and stays pending for the next version, and every update through that position is stored before the version (`Ledger.flushThrough`).
 A settlement takes the replica's tree at that position rather than its state encoded (`Service.treePoint`), read under the replica's lock with `pmdoc.ReadUnshared`, since only a holder of that lock reads or writes the replica;
 it holds the lock for the walk rather than for an encode, and decodes nothing afterwards.
-A room whose replica holds no state, or that lists none, has no tree to walk, so its copy is taken from the room itself and decoded (`stateTree`).
+A room that lists no replica has no tree to walk, so its copy is taken from the room itself and decoded (`stateTree`); a room whose replica holds no state has that copy start the replica instead, whose tree the read then walks (`renderedReplica.atPoint`, `startFromRead`).
 A live write's fork takes the replica cloned at that position rather than its state encoded (`Service.forkPoint`, over `crdt.Doc.Clone` in the pinned fork), under the replica's lock;
-the clone is the document a decode of that state builds - byte for byte in its encoding, its state vector and its delete set - and is built with the options that decode uses (`forkOptions`), so the fork a write runs on, versions and publishes is unchanged (`TestTheClonedForkMatchesTheReadPointsForkAcrossTheCorpus`, 710 fork pairs over the 142-document corpus, each compared again after a typed word and an appended paragraph).
+the clone is the document a decode of that state builds - byte for byte in its encoding, its state vector and its delete set - and is built with the options that decode uses (`forkOptions`), so the fork a write runs on, versions and publishes is unchanged (`TestTheClonedForkMatchesTheReadPointsForkAcrossTheCorpus`, 715 fork pairs over the 143-document corpus, each compared again after a typed word and an appended paragraph).
 `BenchmarkWriteFork` prices the trade on a two-core pod, and its doc comment holds the figures: the clone costs about half of what the encode and decode cost and allocates a third, while the whole copy runs under the replica's lock, so the hold the update observer waits for is the clone's whole time rather than an encode's.
-A room whose replica holds no state, or that lists none, has no document to clone, so its copy is taken from the room encoded and decoded outside the lock (`buildFork`).
+A room that lists no replica has no document to clone, so its copy is taken from the room encoded and decoded outside the lock (`buildFork`); a room whose replica holds no state has that copy start the replica instead, which the fork read then clones.
 The cold fork, read from the store, stays a decode (`coldFork`).
 
 Three acquisitions block on the replica's lock (`lockForUpdate`) and classify each update they drain under it, which takes the room's state lock from inside it (`observeAskBlocksForUpdate`, `creditContentChange`, `queueUpdateClass`), nested the other way around:
@@ -679,7 +687,7 @@ A read that may load its room (a version's capture, `docTree`, `VerifyMark`'s su
 a room looked up again with `GetDoc` once that Apply returned can have been evicted in between.
 
 The replica's lock is the one a room's browsers wait on.
-The update observer takes it for every peer update that changes the document (`renderedReplica.observe`; ygo calls no observer for one that changes nothing), and ygo broadcasts the update to the room's other browsers only once the observer has returned (sjawhar/ygo v1.51.3-sami.1, `provider/websocket/peer.go`), so a read holding the replica for its walk holds every other browser's copy of the keystroke.
+The update observer takes it for every peer update that changes the document (`renderedReplica.observe`; ygo calls no observer for one that changes nothing), and ygo broadcasts the update to the room's other browsers only once the observer has returned (sjawhar/ygo v1.55.1-sami.2, `provider/websocket/peer.go`), so a read holding the replica for its walk holds every other browser's copy of the keystroke.
 A read therefore only tries the lock, and reads a copy when another read holds it or an observer waits for it (`lockForUpdate`), so reads never queue behind each other or ahead of a waiting observer.
 `BenchmarkKeystrokeBesideReads` measures the wait:
 a keystroke's transaction and the observer's whole turn with the replica - the drain of the room's update log, the update applied to the replica, and the render the observer runs for it (`renderedReplica.observe`) - 120 keystrokes 20 ms apart on a 524 KiB document, beside no reads, beside reads that take copies, and beside reads that try the replica, which is this design.
@@ -701,7 +709,7 @@ see Critical conventions for what keeps those filters current.
 Writes to one room never meet each other unlocked.
 A browser's update reaches the room as ygo applies it, inside one Yjs transaction under the document's lock (`sync.ApplySyncMessage`, `crdt.ApplyUpdateV1`), so two browsers' updates take turns.
 `Server.Apply` holds no lock across its callback, so the service never walks the room's tree there:
-a write reads and writes its transaction's fork, and builds the fork from the room's replica cloned under the replica's lock, or from an encode taken under the document's lock where no replica holds the room's state (`forkLive`, `warmFork`);
+a write reads and writes its transaction's fork, and builds the fork from the room's replica cloned under the replica's lock, or, where the room lists no replica, from an encode taken under the document's lock; a room whose replica holds no state has that encode start the replica instead, which the fork read then clones (`forkLive`, `warmFork`, `renderedReplica.atPoint`);
 the room has one writer slot (`openLiveWrite`); and a committed write reaches the room in a transaction and is read back through `readLive`.
 A helper that walks the room inside `Server.Apply` outside a transaction, as an unjoined write once did, races every peer's update; no production path does.
 `TestThreeBrowsersAndTheAPIEditOneRoomAtOnce` has three websocket peers type while the API edits the document, until 50 of its edits have overlapped their typing.
@@ -730,7 +738,7 @@ Two such writes, each a diff of the same document, merge into a document neither
 the healthy-room probe met it as a socket closed with `DOC_SCHEMA`.
 The idle sweeper evicts a room only while no Apply holds it, counts its idle minute from its last peer leaving or the last Apply on it returning, and flushes it before it evicts it (`provider/websocket/idle_sweep.go`), so every write a room the sweeper evicts has taken is durable before another instance of it loads, and a peer that returns within the minute rejoins the warm room.
 `TestAHealthyRoomUnderWritesIsNeverRefused` checks every load of a room against the writes its earlier instances took, and `TestARoomOnlyTheAPITouchesLeavesWithinTheIdleTimeout` that a room only the API touches is evicted and reads back what the API wrote.
-ygo's `CloseRoom` refuses a room a caller is inside as well (`ErrRoomInUse`), so no close the service makes - an issue's rooms (`SetIssueClosed`), a room with an editor at `Shutdown`, an eviction (`evictRoom`), a failed room's eviction (`evictFailed`) - retires a room under a write: each waits for the callers inside to leave, and the close of a room behind the durable head runs inside the service's own Apply (`roomServer.closeInstance`, `CloseRoomWithin`).
+ygo's `CloseRoom` refuses a room a caller is inside as well (`ErrRoomInUse`), so no close the service makes - an issue's rooms when the issue closes or reopens (`setRoomIssueOpen`), a room with an editor at `Shutdown`, an eviction (`evictRoom`), a failed room's eviction (`evictFailed`) - retires a room under a write: each waits for the callers inside to leave, and the close of a room whose stored history was replaced under it runs inside the service's own Apply (`roomServer.closeInstance`, `CloseRoomWithin`).
 A committed write's publish (`publishLiveUpdate`) is already durable and suppresses the room's own append of it;
 the room's own update observer finishes its suppression slot before ygo's persistence observer runs (`onLoadDocument`), so the room's worker never waits on it, and a close asked for while the publish is inside the room closes it once the publish, its request and the document's writer slot are released (`TestAPublishSurvivesACloseOfItsRoomAskedForWhileItRuns`, `TestAWriteSurvivesItsIssueClosingAsItPublishes`).
 
@@ -747,23 +755,76 @@ A version reads R under that lock and F from its own room, deletes the R rows it
 A version on another task sees and removes R but never that task's F.
 Thus a room can disappear or the process can restart after every pending author has reached R, without losing or duplicating a later version's authors; a service repair is credited to no one.
 An in-flight credit holds its state until its append lands (`unusedLocked`).
-A close the service forces - a failed room's eviction, `Evict`, `Quiesce`, and the close of a room behind the durable head (`closeReservedRoom`) - settles that state itself rather than leaving it to `OnUnloadDocument`, and ygo takes the closed room out of its map before the close returns, so a browser that opens the document meanwhile (`authorize` registers it before its room is loaded or joined), the room that browser's connect loads, and an edit typed in that room all reach the state the close has yet to settle.
+A close the service forces - a failed room's eviction, `Evict`, `Quiesce`, and the close of a room whose stored history was replaced (`closeReservedRoom`) - settles that state itself rather than leaving it to `OnUnloadDocument`, and ygo takes the closed room out of its map before the close returns, so a browser that opens the document meanwhile (`authorize` registers it before its room is loaded or joined), the room that browser's connect loads, and an edit typed in that room all reach the state the close has yet to settle.
 The close therefore keeps that state while anything holds it and forgets it when nothing does, as every other end of a room does (`releaseIfUnusedLocked`), so the browser, what the new room's load read - its issue's closed flag, its ask blocks, its latest edit source and the settlement it armed - and the new room's own credits and unstored updates stay where they were recorded, and so does what the closed room left for its own late callbacks to come back for (INFRA-352).
 Only a failed room's state has to go, since it carries the failure that its holders still read and no later access may (`handOverFailedRoomLocked`);
 a load refuses a failed room, so only a browser's connect can have reached it, and that browser is handed to the state registered in its place.
 A durable append of the state that went finishes on the state that counted it (`finishUpdateClass` takes the state `consumeUpdateClass` found the class on), so no count of it reaches that successor, where one below zero would hold it for good.
 
-Two `envoy-dispatch` processes do not share a live document session, and durable convergence does not depend on one:
+Two `envoy-dispatch` processes share a live document session through Postgres alone, and durable convergence does not depend on it:
 every edit is appended under the document's advisory lock, Yjs updates commute, and the stored history is their union, so no edit is lost whichever process took it.
-No process writes durable state for a document from a room that is not at the durable head:
-each resident instance carries the version it holds the document through, and an append, a settlement, a fork of the live tree or a rebuild from a room behind the head is refused (`ErrRoomBehindHead`, `docs/pending_authors.go`), the live write taking the cold path instead.
-A settlement refused so closes the room rather than retrying on it (`reloadRoomBehindHead`), since no retry on that room can pass the gate and three would fail the room, refusing every transaction on the document until its eviction ran;
-the settlement re-arms on the reloaded room (INFRA-218).
+Each process holds its own room for a document, and `docs/room_sync.go` with `docs/room_catch_up.go` is how the rooms follow each other.
+Room sync holds two connections of its own beside the pools: the process's shared LISTEN connection (`pglisten.Hub`, which `cmd/dispatch` names `dispatch-listener
+<ProcessID>`), and a NOTIFY sender (`roomSyncSender`), which a request inside a transaction of the shared pool sends through without a second pooled connection (`store.ErrNestedAcquire`).
+The members are the processes whose listener connection carries that name in `pg_stat_activity` (`roomSyncMembers`).
+A process that stops loses its connection and leaves, so membership needs no heartbeat and nothing to collect.
+
+Every durable change notifies `dispatch_doc_head` (`{"r": room, "v": head, "p": process}`) and then `dispatch_doc_changed` (the bare id, which the earlier build reads) from inside the transaction that holds the room's advisory lock (`announceDocumentHead`).
+The follower (`roomCatchUps`) catches the room up from `doc_updates`:
+one statement reads the rows past the room's cursor in one snapshot (`catchUpStatement`), the rows the instance already holds are skipped, and the rest are applied as one batch tagged `remoteUpdateOrigin`, under a suppression slot so the room's persistence does not store them again, and broadcast (`catchUpRoom`).
+The room stays open, and its browsers stay connected.
+Each LISTEN that stands sweeps every resident room, and each room instance that starts schedules one catch-up of its own (`keepInstance`), so a room whose load raced an append is not left behind.
+Rows a catch-up applies are another process's content change:
+they credit no local peer, their ask blocks get no local author, and they re-arm only a settlement already armed here (`rearmSettle`), so editors on two processes get one version per burst.
+
+A browser's keystroke is its own append (`PersistCoalesceWindow = -1`), and storing it costs six round trips, every one of them under the document's advisory lock the room's persistence worker holds on its own connection (`withRoomLock`): the lock, the transaction, the gate read, the one batch of writes the append owes (`appendWrites`), the commit, and the unlock.
+The transaction-level lock is not among them: that session already holds the document's lock on that very connection, so the flush's appends take none of their own, which took a warm keystroke's store from seven round trips to six, counted on a real process.
+Every flush runs on a transaction or a session that already holds the room's lock, so no flush append takes one: the room's persistence worker holds the session-level lock on its connection (`withRoomLock`), and every caller of `Ledger.flushThrough` took the transaction-level lock before it read the head it is gated on - a live write's one read (`readFork`, `lockedHead`), a version capture's, a settlement's (`lockSettlementCursor`) and the block-id backfill's (`lockDocumentRoom`).
+A writer that holds neither still takes `pg_advisory_xact_lock` at each append of its own (`appendUpdateTxClass`), but that is not what serialises two live writes of one document: the second waits on the document's owner row (`lockArtifactOwner`) and then on the room's lock at its one read of the document (`readFork`, `lockedHead`), both before it appends anything.
+`TestALiveWriteAndAKeystrokeQueueOnTheRoomsLockAndNeitherIsLost` is a live write against the room's own persistence worker, not two live writes: it shows the write waiting at that read while the worker's keystroke holds the room's lock, and both edits stored once the lock is free.
+
+The cursor (`roomCursor`) is the version the instance holds every stored update through, plus the versions above it that the instance holds with a gap below them, which fold in as the gap fills.
+The append gate (`appendGateStatement`, one read under the document's lock) has two rules.
+A browser's raw delta (`appendBrowser`) is accepted from a room behind an intact history and lands at the head.
+It is refused when the history was replaced, unless that history still holds every item the delta builds on (`storedHistoryHolds`), as a compaction's fold does.
+Such a delta is stored, and the append that stored it closes the room at once, so its browsers reconnect to a room reloaded at the head (`closeRoomOnReplacedHistory`):
+no catch-up can bring that room to the head, and each later append of its browsers would decode the whole stored document.
+A refused delta is dropped and its browser resends it to the reloaded room, which a browser whose issue closed meanwhile cannot do: it reconnects read-only.
+It is also refused (`ErrIssueClosed`) when the document's issue is closed and the room took the delta more than `closeMargin` (2 s) after the close committed.
+A delta the room took before that is stored, even when its append reaches the gate after the close, and the issue's reopen settles it.
+A derived write (`appendDerived`: settlement's repair, a live write's fork, a version's capture, the block-id backfill) still needs the room at the head (`ErrRoomBehindHead`, `docs/append_gate.go`), the live write taking the cold path instead.
+A settlement whose room is behind catches it up under the document's lock it holds, reading through its own transaction, and proceeds:
+the caught-up rows re-arm it, and the re-armed settlement versions every update.
+Its authors come from `doc_pending_authors` and its actor from `doc_settlements_pending.last_actor`, read under the lock (`settlementAuthors`), so its credit does not depend on which process settles.
+A named or snapshot version whose room is behind the head, read under the document's advisory lock, is rendered from the stored document instead (`storedTree`), and neither it nor a version over a cold fork lists the room's in-flight credits (`withoutInflight`): the store holds none of those changes.
+A read (`heldTree`, `docTree`, `joinRead`) compares the room's cursor with the stored head and, when the room is behind, reads the stored document merged with the updates only that room holds (`storedWithUpdates`, over the instance's unstored updates after a drain of its log, `unstoredShare`), without waiting for the catch-up.
+It is then older than neither the store nor the room: the store holds what another process committed, and the merge holds the keystroke whose append is still in flight, which the stored document at that head is missing — a browser's own append is enough to leave its room judged behind for the moment between that append's commit and the cursor advance inside the same lock (`appendUpdate`), and no read takes back text the room has already sent its browsers.
+That drain is the one thing a read waits on the replica's lock for, for the length of one drain of the room's update log; every other read only tries that lock (`readLive`).
+
+Room sync closes and reloads a room only when its stored history is replaced under it (`historyReplaced`):
+a rebuild deleted every row and seeded head+1, a prune or a delete lowered the head, or a compaction folded rows the room has not taken in yet (`compactKeep` = 1 keeps the head row, so a room at the head is unaffected).
+The follower confirms the verdict under the document's lock (`historyReplacedUnderLock`) and closes the room (`closeRoomBehindHead`, called by `roomCatchUps.closeReplaced`).
+The service closes a room, and its browsers reconnect, in these cases only:
+
+- room sync finds its stored history replaced, as above;
+
+- a browser's append is stored on a history replaced under its room (`closeRoomOnReplacedHistory`, above);
+
+- a settlement finds its stored history replaced (below);
+
+- its issue closes or reopens (`setRoomIssueOpen`, below);
+
+- the room fails (`failRoom`), and its eviction closes it;
+
+- `Shutdown` closes a room that has an editor connected.
+
+A settlement that finds the history replaced rolls back and closes the room rather than retrying on it (`reloadReplacedRoom`), since no retry on that room can pass the gate.
+The settlement re-arms on the reloaded room.
 It leaves the room open while a write of this process is in flight on it (an open live write, which arms the settlement when it finishes, or an update its persistence has not stored, whose settlement is armed a settle delay later) and during a shutdown, which leaves the settlement to the next process.
 A write that opens while a settlement runs, or after its timer has fired, takes the settlement over and arms it when it ends, whether or not it changed anything (`openLiveWrite`).
-The stale-room evictor's close (`closeRoomBehindHead`) and this one both reserve the room under its state lock, in the same hold that found nothing there each must wait for (`reserveRoomCloseLocked`):
-an open live write for the evictor's (`openLiveWriteLocked`;
-its other writers take the document's lock, which already orders them with the evictor's confirmation, INFRA-396), any write of this process for the settlement's.
+The follower's close (`closeRoomBehindHead`) and this one both reserve the room under its state lock, in the same hold that found nothing there each must wait for (`reserveRoomCloseLocked`):
+an open live write for the follower's (`openLiveWriteLocked`;
+its other writers take the document's lock, under which the follower confirmed its verdict), any write of this process for the settlement's.
 Until the close has returned the room's writer slot is refused, `503 DOC_SERVICE_UNAVAILABLE` as on a failed room, rather than handed to a write the close would then retire the instance under: the case that check exists to rule out.
 The refused write's retry lands on the room that replaces the closed one.
 The close reaches only the instance that was checked, never a room that replaced it:
@@ -771,14 +832,66 @@ ygo's `CloseRoom` closes whatever room the name holds, and ygo's idle sweep reti
 another caller inside the room (a browser joining, another Apply) holds that close off, as an open write does, and the evictor tries again a window later;
 a room the sweep or another close retired first is left to the room that holds the document now, the reservation is lifted, and a settlement the reservation ended is armed again on it.
 A reservation outlasts its instance when the room is replaced before the close returns (`reservedFor`);
-the evictor tries the replacement again once that close has returned.
+the follower tries the replacement again once that close has returned.
 That `Server.Apply` is the service's own injection and carries its mark (`withOwnerVerified`), which `allowInject` admits on a closed issue:
-a room loaded while the issue was open and left behind the head by the other process's write is closed whenever its issue closed, rather than kept resident with text the store no longer holds until its idle minute runs out.
-A named or snapshot version whose room is behind the head, read under the document's advisory lock, is rendered from the stored document instead (`storedTree`), and neither it nor a version over a cold fork lists the room's in-flight credits (`withoutInflight`):
-the store holds none of those changes, and an append the gate refuses is credited again when its browser resends it.
-What is per-process is the room: while a room is resident in one process it receives none of the other's updates, so presence and cursors show only the peers on that process.
-Every durable change notifies `dispatch_doc_changed` from inside the transaction holding the room's advisory lock, and the other process's listener (`docs/stale_room.go`, over `internal/pglisten`) closes the room that notification leaves behind the head, so within that round trip the browser reconnects, re-syncs and shows the current text - a brief reconnect, never stale text a reader can act on.
-Cross-process live co-editing of one document, two rooms with updates streaming between them, is a follow-up issue and out of scope here.
+a room loaded while the issue was open, whose stored history another process then replaced, is closed whenever its issue closed, rather than kept resident with text the store no longer holds until its idle minute runs out.
+
+Cursors and presence cross processes too (`docs/awareness_relay.go`).
+The service attaches an `awarenessRelay` to ygo (`Server.AttachRelay`), which drops everything ygo hands `Publish`:
+ygo's outbound lane keeps one awareness blob per room, the latest only, so readers moving in the same instant would reach it as one of them.
+The relay watches each resident room's awareness itself instead (`RoomActivated`, `watchRoomAwareness`), which names every client a change touched, and sends each room's changes, coalesced per room and client over 50 ms - each client at the state the room holds when the window ends - on `dispatch_doc_awareness` through the sender.
+A client another process's notification is being applied for is left to that process rather than relayed back (`inbound`, `received`).
+A process applies another's awareness (`Server.Inject`) only to a room it holds with a reader of its own connected (`holdsRoomForReaders`), so relayed heartbeats never load a document or keep a room resident.
+A room that loads for a reader, and a reader that joins a resident room, query the other processes, which answer with their local clients' states.
+Before the service closes a room itself, it removes its local clients' states, so the removal is relayed (`removeLocalAwareness`).
+`AwarenessExpiry` is 30 s, so a cursor relayed from a process that died without a word expires.
+A document socket may hold at most `maxAwarenessClientsPerSocket` (4) awareness clients at once.
+A tab sends its own client first (`startSync`), and then echoes the room's other readers back on the same socket:
+`@hocuspocus/provider` 2.15.3 sends every client that an awareness change touched, and applying the room's other readers makes such a change (`hocuspocus-provider.cjs` 2522, 2595-2601, 2265, 1582-1586).
+So the other three places hold echoes, which cost the room nothing: an echo carries the state and clock the tab read from the room.
+ygo applies and broadcasts a peer's frame whole and offers no hook on it, so the clients a frame names past the four are taken out of it on the connection the upgrade hijacks, before ygo reads the frame (`docs/awareness_limit.go`, `awarenessLimitConn`).
+Filtering there is what makes the room's own readers and the readers on every other process see the same clients, and it is what keeps a peer's frame of invented ids from growing a room's awareness map and the relay's fan-out.
+ygo removes the clients a peer owned as it disconnects, and a client that leaves gives its entry back as it goes rather than two expiries later - the room's own observer frees it (`watchRoomAwareness`, `reclaimAwarenessSlots`), as does the arrival of another process's awareness.
+A removal is relayed at the clock the relay recorded for that client when it last saw a state of it (`local`, `touched`), never at what the room's awareness would encode by then:
+ygo fires its observers with the awareness unlocked, so a purge racing the encode would leave it naming the client at clock 0, which every other process drops as older than the state it holds.
+A socket whose message names neither a document nor a message type - a three-byte message as much as one that has said nothing by `maxDocumentMessageHeader` (512) bytes - is closed rather than read on, since nothing this service reads looks like that.
+A room also holds at most `maxAwarenessBytesPerRoom` (about 31 MB) of its clients' states and, as a last resort, `maxAwarenessClientsPerRoom` client entries (ygo's `MaxAwarenessClientsPerRoom`, `docs/service.go`).
+That bound is derived from the two caps that bound real readers - `maxRoomConnections` (1,000) sockets per process, each holding `maxAwarenessClientsPerSocket` (4) clients, which is also what another process's relayed clients passed before they crossed - so it stands above every client the sockets of a process can put in a room and refuses no reader, here or on another process;
+it is what bounds a room's memory if any path other than a socket ever reaches its awareness.
+
+An issue's close and reopen reach every process through migration 20261101181500's trigger, which notifies `dispatch_issue_open_changed` with the issue's key when `closed_at` changes, whoever wrote it.
+Each process, the patching one included, reads the issue's state and closes its rooms of the issue's documents (`issueOpenChanged`, `setRoomIssueOpen`), so their browsers reconnect with the scope the issue now allows;
+`patchIssue` calls no document method for it.
+Each LISTEN that stands reads the issue of every resident room again (`recheckResidentIssues`).
+The gate's issue read refuses a browser's append that its room took more than `closeMargin` (2 s) after the close committed, and closes that room when its process has not heard of the close yet (`refuseClosedIssueAppend`).
+An edit the room took before that margin ran out is stored, even when its append reaches the store after the close (`observedBeforeClose`).
+`patchIssue` stamps `closed_at = clock_timestamp()` again as the close transaction's last statement, so the margin counts from the close's commit:
+a keystroke typed while the close runs, its ask withdrawal writing documents under their locks included, is stored.
+The `issue.closed` event, built earlier in that transaction, keeps the stamp of the transaction's start.
+
+Room queries (`docs/room_query.go`) are a process's questions to the other members:
+`dispatch_doc_query` (`holds`, `flush` or `share`) and `dispatch_doc_answer`, both through the sender.
+For each question, the asker waits at most 500 ms (`roomQueryWait`) for every member but itself, then goes on and logs a WARN that names the members that did not answer.
+An agent's live write asks up to three questions, so it can wait up to 1.5 s in all:
+a flush before it forks (`joinLiveWrite`), a share in the lost-edit check (`refuseLostWrite`), and a second flush before its published loss is judged (`recordPublishedLoss`).
+A live write's first join has every member that holds the room store its updates before the write forks (`flushOtherRooms`), the write's fork is read once in its transaction under the document's advisory lock it then holds to the end (`readFork`, `lockedHead`), the lost-edit check judges the write with the other rooms' unstored updates (`share`) and names the connected actors of every member that answers within 500 ms (`lostWriteParticipants`), the published loss is judged at the stored head after a second flush (`recordPublishedLoss`), and a rebuild answers `ErrDocumentLive` when this process holds the room or a member that answers within 500 ms holds it.
+A cold write publishes only into a room this process holds, resident or loading (`publishLiveWrite`).
+A room that retires between that check and the publish's `Apply` is loaded again by that `Apply`, from a store that holds the write, and idles out like any room a write loads.
+An ask block's author is stored in `doc_ask_block_authors` (migration 20261101181501) in the transaction that makes the block durable, and a settlement on any process reads it (`askBlockSources.author`).
+The cap of 32 queued conditional edits counts every member's row of `doc_conditional_edit_queue` (migration 20261101181502).
+Each process first serializes the admissions of one document in memory (`conditionalEditGate`), so the waiting admissions hold no connection.
+The one admission that runs takes a short transaction of its own on the shared pool.
+Under a two-key advisory lock (`conditionalEditQueueLockNamespace`) it sums the other members' rows, deletes the rows of processes that are no members, and writes this process's own count.
+
+While a process's listener redials, live sync to that process pauses and it is not a member, so no query waits for it.
+The wait between attempts doubles from 1 s to a ceiling of 30 s, plus up to half again (`pglisten.RedialBackoff`), so one wait can be 45 s.
+Its reads stay fresh, because they read the stored head, and its appends stay correct, because the gate reads the head and the issue under the document's lock.
+During the roll that releases this, processes of the earlier build still close a room that falls behind, relay no awareness and are not members.
+They do not listen on `dispatch_issue_open_changed`, so they do not act on a close or reopen made through this build:
+their open rooms of the issue's documents keep the scope their browsers connected with, unless the close or reopen writes the document.
+A close writes the resolved state of the issue's open asks into the blocks that show them, and a reopen writes them open again (`WriteIssueAskStates`).
+That write moves the document's head, so an earlier-build room of the document closes as a room that falls behind, and its browsers reconnect with the scope the issue now allows.
+They show no other process's cursors.
 
 The document socket's cap of 1,000 rooms (`maxLiveRooms`, `canOpenRoom`) counts ygo's live rooms, never documents touched since the process started (LEGION-513).
 A room an `Apply` opened with no peer is idle-evicted only by a ygo whose `Apply` stamps the empty room idle (LEGION-484).
@@ -791,7 +904,7 @@ Dispatch writes no document-socket keep-alive frames.
 
 The room's update observer measures each update on a replica of the room, the one its reads walk, not the live tree, since ygo fires it after the transaction has released the document's lock and another write can be integrating meanwhile (`renderedReplica`).
 The replica moves only through the room's commits, one at a time and in commit order:
-ygo appends each committed transaction's update to the room's update log under the document's lock, before any observer of that transaction runs (`crdt.UpdateLog`, sjawhar/ygo v1.51.3-sami.4), and the observer that holds the replica's lock drains the log, applying each update in turn and comparing the rendering it leaves with the one before it (`renderedReplica.changedBy`).
+ygo appends each committed transaction's update to the room's update log under the document's lock, before any observer of that transaction runs (`crdt.UpdateLog`, sjawhar/ygo v1.55.1-sami.2), and the observer that holds the replica's lock drains the log, applying each update in turn and comparing the rendering it leaves with the one before it (`renderedReplica.changedBy`).
 It renders the replica for that only when it cannot know the rendering otherwise, and two cases it knows exactly.
 A margin write's publish into the room instance its fork was warm-built from changes no text (`liveWriteOrigin.marginOnly`, the margin record paragraph above), so it is unchanged.
 A published live write's update carries its operation's rendering, taken when the replica still stands at the epoch and foreign-commit count the operation's fork read found before it encoded the room:
@@ -799,7 +912,9 @@ the replica has then consumed nothing since that read but published writes' comm
 That holds only on the room instance the fork was read from:
 a cold fork, read from the store, holds what the room may not and carries no rendering, and a reloaded room's replica has a fresh epoch;
 for the same reason a margin write forked cold, or published into a replaced room, is not taken as margin-only.
-A published update the room's load already holds is no commit: ygo calls no update observer for it and logs nothing (`reearth/ygo#350`), so a cold write's publish into the room its own publish loaded is never classified.
+A catch-up's batch of another process's rows (`remoteUpdateOrigin`) carries no rendering and counts as a foreign commit, so it is rendered and no write's rendering taken before it is reused after it;
+the room updates a write stores ahead of its own row (`Ledger.flushThrough`) are already in the room and are never published, so none reaches the observer as a write's update.
+A published update the room's load already holds is no commit: ygo calls no update observer for it and logs nothing (`reearth/ygo#350`), so a cold write's publish into a room whose load read the store after the write committed is never classified (a publish loads a room only when one retires between `publishLiveWrite`'s check and its `Apply`, and that load also reads a store that holds the write).
 So every committed update is classified, and its authors credited, exactly once, by whichever observer reaches the log first, against the room as the commit before it left it.
 Catching the replica up to the room instead took in every commit since the last one rendered:
 when a published write's observer ran first, it counted a browser's edit in its own change, which credits no one, and the browser's own observer then found nothing changed, so the browser was on no version and in no pending row.
@@ -926,9 +1041,9 @@ The document outcome is right - the human's deletion wins - but a write that com
 Each write records what its own Yjs update inserted and where (`docs/lostedit.go` `lossCheck`, over `pmdoc.AuthoredTextRuns`):
 per operation, the blocks whose own inline content it wrote (`pmdoc.BlocksGainingText`, the same `simpleDiff` insertion `pmdoc.Update` makes, so a block whose text only shrank, an attribute-only change, a `delete` with or without `find`, `delete_row`, `delete_column` and an unchanged operation all write nothing that a concurrent change could remove and are never reported lost), and the clocks of the text items the update left live in each of them.
 Two windows read it back.
-Before the version is rendered, `captureLiveTextAndAuthors` brings the fork up to date with the room and `refuseLostWrite` refuses the whole batch with `409 EDIT_LOST_TO_CONCURRENT_CHANGE`, naming the lost operations and the room's other connected participants;
+Before the version is rendered, `captureLiveTextAndAuthors` brings the fork up to date with the room and `refuseLostWrite` refuses the whole batch with `409 EDIT_LOST_TO_CONCURRENT_CHANGE`, naming the lost operations and the other participants connected to the document on this process and on every member that answers within 500 ms (each other member's room shares its unstored updates and its connected actors, a `share` room query);
 the transaction rolls back, so no version, durable update, room update or broadcast survives, and the caller re-reads and decides again.
-After the committed write reaches the room, `recordPublishedLoss` reads it again:
+After the committed write reaches the room, `recordPublishedLoss` has every other member that answers within 500 ms store its room's updates, and reads the document at the stored head:
 nothing can be undone there, so the response is `200` with `lost_ops` naming the operations whose text the live document does not carry, `[]` when everything survived, and `null` when no verdict was reached:
 the publish failed and the room is reloading, or the room holds a tree past the schema's depth bound, which a re-read answers with `409 DOC_SCHEMA` and the repair.
 An operation's text counts as surviving while it is live inside an element carrying the block id it was written into - any such element, since a browser move can leave an id on two until `EnsureBlockIDs` repairs it - so a concurrent range delete around the agent's own insertion, or a keystroke in the same paragraph, is an ordinary success, while a deleted paragraph, a deleted ancestor and a browser move that strands the run in another block are all losses.
@@ -1033,9 +1148,17 @@ A document token protects every operation;
 a block guard must name every content block the resolved batch changes, while unrelated sections can change concurrently.
 Insert and move require the document token because their meaning depends on document order.
 Tokens include inline marks, so a fresh anchor makes the relevant document or block guard stale.
-After resolving the artifact, the conditional path takes a bounded in-memory gate keyed by its artifact id before starting the write transaction or warming its room, then takes the document's owner row and writer slot, then `pg_advisory_xact_lock(hashtext(artifact_id))`, and enters its one Yjs transaction;
+After resolving the artifact, the conditional path joins the document's bounded queue before starting the write transaction or warming its room (`AcquireConditionalEdit`).
+The queue is an in-memory queue per process plus a count across processes in `doc_conditional_edit_queue` (migration 20261101181502).
+A process admits one edit of a document at a time, and the others wait in memory before they take a database connection.
+The admission is a short transaction of its own on the shared pool, under the document's queue lock, which refuses the 33rd edit queued across the members with `EDIT_QUEUE_FULL`.
+Admitted edits take turns in admission order.
+The edit whose turn it is then takes the document's owner row and writer slot, then `pg_advisory_xact_lock(hashtext(artifact_id))`, and enters its one Yjs transaction;
 it reads, checks, resolves, and applies the batch inside that transaction.
-Admission waiters hold no database connection; `EDIT_QUEUE_FULL` is a `429` response that means back off, while `PRECONDITION_FAILED` means re-read.
+So a document's retry storm holds at most one shared-pool connection per process while it waits for admission, and none while it waits for its turn.
+At most three of one document's edits hold a connection at once on a process:
+the admission that runs, the edit whose turn it is, and the edit that has just left, which writes this process's count after it hands the turn on (`releaseConditionalEdit`).
+`EDIT_QUEUE_FULL` is a `429` response that means back off, while `PRECONDITION_FAILED` means re-read.
 This protects unrelated document reads, websocket authorisation, room loading, settlement, and browser persistence from a stale-edit flood exhausting the shared pool.
 The advisory → Yjs order matches durable writer and persistence ordering and prevents both live-writer check-to-apply races and a lock inversion.
 `AppendUpdateTx` holds the same transaction-scoped room lock for every durable `doc_updates` append.
@@ -1085,11 +1208,12 @@ The rule enforces itself.
 `store.Pool` keeps the pgx pool private and every way it hands out a connection - `Query`, `QueryRow`, `Exec`, `Acquire`, `AcquireFunc`, `AcquireAllIdle`, `CopyFrom`, `SendBatch`, `Begin`, `BeginTx` - refuses one taken while the caller already holds one, with `store.ErrNestedAcquire`, so a second acquisition fails a test instead of wedging production.
 Every entry point that opens one of this pool's transactions marks its context with `store.WithTransactionTracking`:
 `api.Register` marks every route and the document websocket, and settlement, the architecture importer's `Sync`, the outbox publisher's `Run`, `MaterializeAt`, the two CLI backfills (`BackfillBlockIDs`, `BackfillAnchorBlocks`), `rebuild-refs`, the startup seeds and each migration mark their own.
-There is no exception: `docs.SetIssueClosed` takes its caller's context so the pool sees it even though it runs after that caller has committed.
+There is no exception: the document rooms' room sync runs each of its lanes on a mark of its own (`store.ForConcurrentWorker`, `docs.Service.RegisterRoomSync`), since a lane reads and writes the store outside any request, and the lanes run side by side - on one shared mark the catch-up lane's open transaction would have the issue-open lane's read of the issue refused, and that close or reopen would reach no room.
 A durable append holds its connection directly rather than through a transaction, so `withRoomLock` marks its context with `store.HoldsConnection` for as long as it holds that connection and the room's advisory lock, and `Query` marks the caller for as long as its rows are open, so a cursor counts as the held connection it is.
 A refusal logs its stack once per call site, so a caller that trips it in a loop cannot flood the log; the error itself is returned every time.
 A caller that runs independent reads side by side gives each its own mark with `store.ForConcurrentRead`, which refuses a caller already holding a connection:
 on one shared mark, one read's open cursor would refuse the others, and each read still takes one connection only (the delivery timeline's four reads do this).
+A goroutine that runs on beside the caller that started it takes `store.ForConcurrentWorker` instead, which always installs a fresh mark where `store.WithTransactionTracking` hands back the one the parent already carries (room sync's lanes, a broadcast's detached delivery): the caller must hold no connection when it starts that goroutine, because a mark of its own cannot see one the parent holds.
 `store/pool_test.go` and `api/anchored_write_concurrency_test.go` hold the halves:
 the refusal on every guarded method, concurrent reads each holding one connection, concurrent anchored writes, and two settlements queued behind one held write on a four-connection pool.
 
@@ -1133,7 +1257,7 @@ The watch's last reading is how the failure names the lock and its holders: Post
 Everywhere else a read runs through the transaction it is already inside:
 the issue state an anchored write checks before it stamps its mark (`issueOpen` through `queryFrom`), table anchor checks (`rejectLiveTableAnchors`, `rejectUnindexedTableMarks`), recorded mark refs, and the suggestion kind and browser-mark verification the comment routes ask for while their transaction is open.
 Settlement marks its injections owner-verified (`withOwnerVerified`) because it has already read and locked the owner row in its own transaction, so `allowInject` does not read it again.
-An injection that is not owner-verified does read the issue through the shared pool, and that read is outside the cycle only because ygo runs `OnInject` before `getOrCreateRoom` (`provider/websocket/inject.go:321-330`):
+An injection that is not owner-verified does read the issue through the shared pool, and that read is outside the cycle only because ygo runs `OnInject` before `getOrCreateRoom` (`provider/websocket/inject.go:319-328`):
 an injection refused there has published no room placeholder for a connection-holder to park on.
 A handler that must read outside its transaction commits or rolls back first - `issue_create.go` rolls back at the duplicate-external branch before it opens the advice transaction - and a scan that publishes drains its rows first (`readBatch`, `documentRooms`), because an open cursor holds its connection until it closes.
 
@@ -4254,7 +4378,7 @@ one row in `broadcasts` plus one issue-less message per recipient carrying its `
 Recipients are judged against one listener read:
 a selected session that is not live, or does not advertise the chosen mode, is excluded before anything is written and named in the response's `excluded`, never switched to another mode (the mode is part of what the sender said).
 Exclusions are stored only with a keyed send's recovery point (below); a send with no reachable recipient is `400 BROADCAST_EMPTY` and writes nothing.
-The send answers 201 as soon as the messages are committed and delivers behind the request, `broadcastDeliveryWorkers` (four) recipients at a time, on a context detached from the request's (`context.WithoutCancel`), each worker with a tracking mark of its own (`store.ForConcurrentRead`:
+The send answers 201 as soon as the messages are committed and delivers behind the request, `broadcastDeliveryWorkers` (four) recipients at a time, on a context detached from the request's (`context.WithoutCancel`) under a tracking mark of the delivery's own (`store.ForConcurrentWorker`, hardening rather than a fix for anything reachable: after the hand-off the request goroutine records its answer and releases its key through `Pool.Exec`, which only checks the request's mark and never sets it — only `Pool.Query`, whose cursor holds its connection, and `Pool.Begin` set it — so nothing holds that mark while a delivery runs, but were that bookkeeping to move into a transaction, or a handler to read through `Pool.Query` after the hand-off, the shared mark would refuse a worker's connection and leave that recipient's send to the delivery sweep), each worker with a tracking mark of its own (`store.ForConcurrentRead`:
 the pool's one-connection guard is per context, so workers sharing one would refuse each other a connection):
 a fan-out to many sessions, each bounded by the listener client's receipt timeout, is too long to hold an answer for.
 A single send to one session answers once its own attempt has settled instead (`createStoredMessage`), which keeps a person's sends to one session in the order they pressed them;
@@ -4606,6 +4730,14 @@ A person's own machine ends their machine logins and grants through the operator
 `internal/broker/enroll` turns a launcher credential into a leased enrollment keyed by the caller's own signing key thumbprint (and, for a pod, a projected service-account token).
 An operator credential's enrollment is its operator's, the email of the person who approved its machine login:
 a launcher may leave `operator` out of the enrollment, and one naming anyone else is `403 OPERATOR_MISMATCH`.
+An enrollment that names a session (`session_id`) also records the principal that session belongs to (`enrollments.carry_principal`, migration 0027), read from what the caller has already proved and never from anything it states:
+the service account a pod's own projected token proved, the person a credential carrying an `operator` acts for (a person's box, and that person's sign-in on a machine), or the Google account a machine's own credential names (`exchange.AccountPrincipal`, `PersonPrincipal` and `GooglePrincipal`, the broker's one spelling of each, which `oauth_session_bindings` holds a session name to as well).
+That name under that principal is what a grant binds to, rather than the enrollment row it was approved under:
+the next enrollment of the pair takes every grant, pending request and withheld name a predecessor still holds, in the transaction that creates it, and writes one `enrollment.adopted` audit row naming the predecessor and one `grant.moved` row per grant (`enroll.adopt`).
+A predecessor is an enrollment of that pair that still holds something, live or dormant (`BROKER_SESSION_CARRY_SECONDS`, below):
+a dormant one stops being dormant once it has been adopted from, so the carry sweep has nothing of it left to revoke, and a live one is left live, holding nothing.
+So a session reads the secret a person approved after a helper restart, a rebuilt machine, a second sign-in or a replaced Legion pod, with no second request and no second approval, while an enrollment of the same name under another principal takes none of it.
+An approval that lands after such a move is granted to the enrollment the `requests` row names then, which is why `requests.Machine.ApplyDecision` reads the enrollment from that row rather than from the `credential_requests` record the request was filed under, which is append-only and cannot be re-pointed.
 A live enrollment is unique per launcher credential, runtime id and slot:
 `POST /v1/enrollments` takes an optional pod-only `slot` (`^[a-z][a-z0-9-]{0,62}$`, else `400 INVALID_SLOT`, and a slot on a `session` enrollment is refused the same way) naming one of several independent identities in one pod.
 The launcher whose proof authenticates the enrollment chooses the slot; a session's proof cannot enroll anything (`401 LAUNCHER_INVALID`).
@@ -4992,13 +5124,65 @@ Every other refusal keeps the retry backoff:
 
 The login that installs a credential, a resumed one included, wakes every registered session's enrollment retry, so those sessions reach the broker within about a second of it rather than when a backoff of up to a minute comes round.
 A session whose renew the broker refuses `ENROLLMENT_NOT_LIVE` (its lease lapsed, or an older broker's `PROOF_INVALID` saying `not live`) stops counting as enrolled at once, and its enrollment becomes the session's lapsed id;
-so does a re-pinned session's recorded enrollment after a helper restart.
+so does a re-pinned session's recorded enrollment after a helper restart, unless that session is named (below), in which case it keeps the key and the enrollment its record holds and nothing is lapsed.
 Any other refused renew keeps the lease and retries.
 While it is lapsed and the helper holds a credential, sign answers NOT_ENROLLED naming the refused renew, and `register --wait N` waits for its re-enrollment.
 The helper revokes a lapsed id before the session enrolls again, and while the session lives its record keeps that id until the revoke lands, so a restart meanwhile, even a second one before any login, still revokes it.
 A session that ends first takes its record with it and hands the id to a bounded revoke (three tries);
 before a login those fail, and the broker's sweeper ends the id once its lease lapses.
 A revoke refused 403 `OPERATOR_MISMATCH` (an enrollment made under another operator's launcher credential) counts as done, and the session enrolls afresh.
+
+A machine session is named when its launcher passes `agent-secrets register --session-id <omp session id>`, and the name is what makes its broker identity outlive the process (dispatch://INFRA-1167).
+An unnamed session's `runtime_id` is `<hostname>:<pid>:<start ticks since boot>`: both halves are counted from boot and both repeat after one, so that id names a process only within the boot that made it, and its key lives only in the helper's memory, so after a reboot it can only enrol afresh — and since a credential request and a grant are bound to the enrollment id alone, and ending an enrollment cancels the one and revokes the other (`enroll.endEnrollment`), every request a person had not yet answered and every grant they had given was lost with the reboot.
+A named session's `runtime_id` is `session-<id>`, the same string at any pid after any restart, and the helper's records file keeps its key (PKCS#8 DER, base64, written 0600 in a directory it makes — and `chmod`s, since `MkdirAll` leaves an existing one alone — 0700, the shape `machine.json` uses).
+That file is `sessions.json` beside the machine login (`AGENT_SECRETS_MACHINE_FILE`, default `~/.config/agent-secrets/machine.json`), so with nothing set it is `~/.config/agent-secrets/sessions.json`, and `AGENT_SECRETS_STATE_FILE` names it outright.
+It is durable rather than in the runtime directory the socket is in, because that directory is tmpfs and goes at a reboot, which is the event the key exists to survive; and it follows this helper's own machine file rather than one fixed path, because a helper refuses to start while another holds its machine file (`claimMachineFile`), so two helpers that can run at once never read or write each other's records.
+The records used to sit beside the socket, so the first start of a helper that finds a records file beside the socket it is configured to listen on — `$XDG_RUNTIME_DIR/agent-secrets/sessions.json` by default, and the socket its unit names where `install` wrote one (`helper.LegacyStatePath`) — copies it to the durable path and removes it (`MigrateStateFile`, before `Recover` reads them), and a machine upgraded in place keeps the sessions it had; a second migration, or one with records already at the durable path, does nothing.
+A caller that names `AGENT_SECRETS_STATE_FILE` migrates nothing into it.
+The same key under the same runtime id gets the enrollment the broker already has (`enroll.recoverConflict`), so the identity, its pending requests and its grants come back with the session.
+A named session's enrolment also states that id as its own `session_id`, which is the name the broker's carry is keyed on (`enroll.Service.Create`): a session that comes back where neither its key nor its runtime id is one the broker knows — another box, a container, a machine rebuilt from nothing — is handed the grants and the requests of its last enrolment under the same principal, within `BROKER_SESSION_CARRY_SECONDS`.
+An unnamed session's enrolment states none, so it follows nothing, and ending it is terminal.
+`scripts/agentbox` in the operator's dotfiles builds the same `session-<id>` runtime id for an agent box, so a session keeps one enrollment across a box as well as across a reboot.
+A launcher knows an omp session id before the exec only for a resumed session (omp opens its transcript seconds after it starts), so a fresh one registers unnamed and runs `register --session-id` again from inside;
+the helper then moves it to the session-scoped runtime id, revoking the pid-derived enrollment it held for those seconds, before any grant exists to lose.
+A second process may not take a name a live session holds, nor rename a session that already has one (both `BAD_REQUEST`).
+A named session whose process goes away — watched exiting, or found gone at `Recover`, which is every recorded session after a reboot — is parked rather than revoked, and `SweepDormant` (a minute's tick) revokes its enrollment once `DormantGrace` (3 minutes) passes without the same session id registering again, well inside the broker's own 15-minute lease.
+That revoke is the helper's, and a launcher's revoke is an end of the box rather than of the session (`endMayCarry`), so a named enrolment holding a grant or a pending request goes dormant instead of losing them: the session has `BROKER_SESSION_CARRY_SECONDS` more to enrol under its name somewhere, and `enroll.Service.EndCarried` is what finally ends them.
+An unnamed session's enrollment is still revoked the moment its process ends, since nothing could ever claim it, and its record carries no key.
+Because a pid and a start-ticks pair repeat after a reboot while a record now survives one, every record also carries the boot it was written on (`/proc/sys/kernel/random/boot_id`, `Record.BootID`), and `Recover` re-pins a recorded process only when that boot is the running one (`Registry.SameBoot`).
+A record from any other boot — and one written before records named a boot, and every record when this boot's id cannot be read — takes the gone-process branch instead: parked if it is named, revoked if it is not.
+Without that, an unrelated process of this user that happened to match a recorded pid and start-ticks pair after a reboot would be re-pinned with the recorded private key and enrollment, and so handed the session's grants without ever knowing the session id.
+The threat model changes by exactly one step: the pidfd pin and the `/proc` ancestry walk still decide who may SIGN as a live session, and what a name now decides is who may be handed a session's identity once its process is gone — any process of this user that knows the session id.
+That is no widening: the records file, the helper socket and `machine.json` are all this user's already, and `enroll-session-key` lets any of this user's processes enrol a key of its own (`server.enrollSessionKey`), so a same-user attacker could always obtain a launcher-backed identity.
+The four fields a rename replaces — the session id, the runtime id, the key and its thumbprint — live under the session's own mutex and are read only through one `identity()` snapshot, so no enrollment pairs one generation's runtime id with another's thumbprint and no signature pairs an old enrollment id with a replacement key; the registry mutex still decides membership and who holds a name.
+Each identity has a generation, and an enroll carries the generation it began under: one that returns after a rename is dropped and becomes the lapsed id (`setEnrolledAt`), so a result for a name the session no longer has is never installed on the one it does.
+A rename also wakes the renew wait (`Session.wake`), since `markLapsed` alone does not reach `renewLoop`, which otherwise acts only on a refused renew a third of a lease later.
+Who owns a name is decided in ONE registry step, never in two: `Registry.AdmitRoot` checks draining and ancestry, checks the name, consumes the record kept for it, re-reads the peer's pid and inserts the session under a single lock, and `Registry.ClaimName` does the same for a session being renamed, so two roots cannot both find a name free and both take it.
+The peer re-read is the admission's last word rather than a check after it, so a registration that is refused is never published at all — never found by another request, and never written to the records file by a `Save` running beside it, which a rollback after the fact cannot promise.
+It gates the ancestry-winner answer too, since that walk is as much the kernel's to invalidate: a pid reused between the caller's own walk and the admission's belongs to a stranger, which must not be handed the name the registration asked for.
+The record is consumed only where the session is inserted, so a registration that does not happen — draining, a lost ancestry race, a key that will not generate, a peer the kernel replaced mid-walk — leaves it exactly where it was.
+A registration that loses the ancestry race gets the winning session's reply and still applies its `--session-id` to it, as the existing-session path does; dropping the name there would answer OK to a register whose name nothing took and leave the identity kept for it to the sweep.
+`Registry.Retire` is the live-to-dormant move: a session leaves the live set and its record enters the dormant one under one lock, since in between a process coming back would find neither a live owner nor a record, make itself a fresh identity, and strand the old one where only the sweep could end it.
+A named session is parked whether or not it has enrolled yet, by `retire` and by `Recover` alike: one saved before its first enroll landed still has a key the broker may know, and dropping it for want of an enrollment id would leave an identity nothing could reclaim.
+`Save` snapshots the live sessions and the dormant records under one registry lock, and each session's fields in one `identity()` reading, so a retire or a registration landing mid-save cannot write one identity as both live and dormant — a restart would re-pin it and keep a record whose sweep later revokes the live session's own enrollment — nor as neither.
+A record names its two enrollments in separate fields: `enrollment_id`, the one its recorded key holds, and `lapsed_enrollment_id`, one of the session's runtimes still to be revoked.
+Folded into one, a renamed session's record would name an enrollment its key does not hold, and `Recover` would install it as live and never revoke it.
+A session that reclaims a record takes its enrollment id with the key, so the id is on its record from the moment it registers rather than after its first enroll — but INHERITED, not confirmed: the broker may have revoked it while the session was away.
+It signs with it and records it, and reads `enrolling` (and `NO_CREDENTIAL` where the helper holds no launcher credential, with the launcher told the helper cannot REPLACE that enrollment until a login — confirming it needs none, since the renew that does it is signed by the session's own key) until the broker answers for it.
+Only `setEnrolledAt` makes an id confirmed.
+The same holds for a session `Recover` re-pins with the key its record kept.
+An inherited id is confirmed by RENEWING it, not by enrolling: a renew authenticates with the session's own key alone, so it confirms that very row whatever launcher credential the helper holds now, while an enroll is matched on (launcher credential, runtime id) and a machine that has logged in again would be handed a NEW enrollment, abandoning the pending requests and grants the session came back for.
+Only the broker's terminal verdict that the enrollment has ended — `ENROLLMENT_NOT_LIVE`, or an older broker's `PROOF_INVALID` "not live" (`enrollmentNotLive`, which `renewLoop` shares, so a renewal and a confirmation cannot disagree about what ends an enrollment) — falls through to the enroll.
+A renew that did not reach the broker, or a 503, or a skewed clock's `PROOF_INVALID`, says nothing about the row and is retried with the enroll's own backoff (`confirmInherited`): reading one as the end of an enrollment would cost the session every grant the record exists to keep.
+A refused renew is applied only while the session still holds the very enrollment that renew signed (`markLapsedAt`): a refusal arriving after a rename speaks for the enrollment that is gone, and lapsing the reclaimed one on it would have `enrollLoop` revoke the grants the reclaim exists to keep.
+A rename landing under an enroll retry ends that retry (`errRenamed`) so the loop starts again: the new runtime id cannot enrol at all until the lapsed id the rename made is revoked, and the retry waits only on a login, never on the rename's wake.
+The rename wake is buffered one and sent whether or not anyone waits, so `renewLoop` takes the generation it renews and acts on a wake only while the identity has in fact moved past it.
+A wake left over from a rename that landed before this enrollment was made or confirmed would otherwise enrol again over a live enrollment.
+A lapsed id is cleared only while it is still the one whose revoke finished (`clearLapsedIf`), and a stale enroll's answer takes the slot only while it is free (`adoptLapsed`), going to the bounded revoke otherwise: a rename landing under either puts the id BLOCKING the new runtime in that slot, and dropping it leaves the next enroll refused 409 with nothing left to revoke it.
+A register answers only for a session the registry still holds.
+`ClaimName` makes that check inside its one locked step; the paths with no name to claim — the session already has it, or none was given — make it with `Registry.Holds`, and answer `NOT_A_SESSION` rather than telling a launcher its session has an identity that nothing live holds.
+A session's one lapsed slot holds the id that would BLOCK its next enroll — one under the runtime id it is about to enrol, which the broker refuses a second row for — and takes it even from an id already there; any other dead id belongs to a runtime the session will never enrol again, so it blocks nothing and goes to the bounded revoke.
+Naming a session that has left the registry meanwhile is `NOT_A_SESSION`, not a success: nothing live holds the name, and reporting OK would let a launcher run on believing its session has an identity while the one kept for that name waits for the sweep.
 `agent-secrets machine login-status`, which the helper answers, exits 0 while the helper holds a launcher credential and prints `issued`.
 A re-login that is denied, expires unapproved or is still pending leaves the credential an earlier login installed in place, and the helper keeps enrolling sessions with it, so login-status still exits 0 and prints `issued`, and stderr names the most recent login and its code (`credential_held` beside `login_state`, the most recent login's state, which `machine login`'s own poll reads).
 A helper from before that field reports only the most recent login, so there a denied re-login still reads `denied` and exits 1 until the helper restarts on a release that carries it.
@@ -5149,7 +5333,13 @@ Needs `BROKER_EXCHANGE_GITHUB_ISSUER` and `BROKER_EXCHANGE_GITHUB_AUDIENCE`;
 unset, no workflow exchanges), `BROKER_ACCESS_TOKEN_SECONDS` (default 900, min 1, max 3600
 — how long an access token the OAuth provider issues lasts, a machine login's and an exchanged one's alike:
 it trades how often every caller renews against how long a revoked credential's last token stays spendable), `BROKER_ENVOY_URL` (optional;
-turns on best-effort wake notifications to the requesting session through Envoy's `/v1/messages/send`, sent with `BROKER_ENVOY_TOKEN` — read only when the URL is set, and not itself required at startup), `BROKER_LEASE_SECONDS` (default 900, max 3600), `BROKER_PROOF_SKEW_SECONDS` (default 60, max 300), `BROKER_LAUNCHER_CREDENTIAL_SECONDS` (default and max 2592000, 30 days
+turns on best-effort wake notifications to the requesting session through Envoy's `/v1/messages/send`, sent with `BROKER_ENVOY_TOKEN` — read only when the URL is set, and not itself required at startup), `BROKER_LEASE_SECONDS` (default 900, max 3600), `BROKER_SESSION_CARRY_SECONDS` (default 43200, min 0, max 86400
+— how long what a session holds, its grants and its pending requests, waits on the enrollment of a box the session has left, for the next enrollment of that session name under the same principal to take it:
+an enrollment that ends while it holds a live grant or a pending request, and that names a session, is marked revoked and dormant instead of having them revoked and cancelled (`enroll.endEnrollment`), and the sweep ends it for good once this long has passed since it went dormant, with an `enrollment.carry_expired` audit row (`enroll.Service.EndCarried`).
+A person's own ends stay terminal and take the grants with them: a machine-login revoke, a sign-in revoke, and an operator's or approver's revoke of the grant itself.
+12 hours is `requests.DefaultGrantLifetime`, the life the broker already gives a grant whose request named none, and it is what an overnight approval takes — a request filed in the morning, the box replaced an hour later, the approval granted later that day;
+0 turns the carry off, so the next sweep ends every dormant enrollment it finds, as every end did before the carry;
+and the maximum is one day, because the approval behind a dormant grant was given for one day's work and the person who approved yesterday has not approved today), `BROKER_PROOF_SKEW_SECONDS` (default 60, max 300), `BROKER_LAUNCHER_CREDENTIAL_SECONDS` (default and max 2592000, 30 days
 — how long a machine login lasts without a refresh:
 an approval mints its credential for this long, and each refresh of its device login moves its expiry to this long from then;
 past it the machine logs in again, new key, new code, new human approval), `BROKER_SWEEP_SECONDS` (default 5, max 60
@@ -5477,7 +5667,7 @@ The enrollment lock, taken before any request or grant row, means a request raci
 A pending request leaves `pending` without a human only through `store.EndPendingRequests` (the session's cancel, the sweeper's expiry, an enrollment's end):
 one statement moves the request rows and writes each one's audit row and its record's terminal event.
 `ApplyDecision` decides a pending record on the deciding human's login
-— approve mints the grant while the requesting enrollment is still live, deny denies it
+— approve mints the grant while the requesting enrollment may still take one, which is a live row, a dormant one the carry keeps for the session's next enrollment to adopt, or a lapsed one the sweep has not ended yet whose end would leave it dormant (`mayGrant`), and deny denies it
 — re-deriving the record's id, refusing any login but the record's approver whatever the record's state (`record.ErrNotApprover`, `403 NOT_APPROVER`), and an approval by any login the current policy would not have approve one of the request's names (`currentPolicyAdmits`, the same error:
 once a shared human-tier secret is a person's, a request waiting on `anyone` is that person's alone to approve, and one waiting on a person for a secret another person must now approve is no one's;
 a denial releases nothing, so the record's approver may still deny either), re-verifying its embedded request object, and writing the decision event (which records the deciding login), the request transition and the audit row in one transaction;
@@ -5612,9 +5802,12 @@ a launcher proof's `lid` claim resolves a live, unexpired `launcher_credentials`
 `internal/broker/requests.Sweeper` is the one thing that moves state without a human:
 every `BROKER_SWEEP_SECONDS` tick it first ends every enrollment whose lease has lapsed (`enroll.Service.EndLapsed`:
 a gone pod, a box whose launcher stopped renewing, a machine session whose helper died), as a revoke ends one, so its grants are revoked and its pending requests cancelled and dropped from the approver's list, with an `enrollment.expired` audit row and one log line each;
+the one lapse that revokes nothing is a lapse that names a session and still holds a live grant or a pending request, which is marked dormant instead and waits `BROKER_SESSION_CARRY_SECONDS` for the next enrollment of that session name to take what it holds (`enroll.endEnrollment`), as does the launcher's own revoke of such an enrollment;
+then it ends, for good, every dormant enrollment whose window has passed (`enroll.Service.EndCarried`), revoking its grants and cancelling its pending requests with an `enrollment.carry_expired` audit row and a log line of its own;
 then it expires overdue pending `agent_secret` requests (waking each one's owner through the Envoy wake seam) and overdue pending machine logins.
 It reads fresh from Postgres every time, so a restart resumes exactly where the rows are.
 Lapsed means what proof lookup means by not live (`enrollment_lease_live`, below, is false), so a session that keeps renewing is never ended, and rows a concurrent renew or revoke holds are left to the next tick.
+An approval given between a lapse and the sweep's end of it lands on that row too: `requests.Machine.ApplyDecision` grants on a lapsed enrollment no end has been written against yet when the end the sweep is about to write would leave it dormant — it names a session, records a principal and still holds a live grant or a pending request (`requests.enrollmentWouldGoDormant`, `enroll.endEnrollment`'s own probe character for character) — so the sweep's timing, up to `BROKER_SWEEP_SECONDS`, never decides whether a person's approval grants or is denied.
 Each ended enrollment's live grants are found through `grants_enrollment_live` (migration 0008), so a backlog of lapsed enrollments costs one index lookup each rather than a scan of `grants`.
 
 Time no broker was serving does not count against a lease.
@@ -5665,7 +5858,8 @@ Its key lives in its memory alone, so its tokens stop verifying when it stops.
 Once the broker is healthy it makes one `POST /v1/oauth/exchange/pod-sessions` with the registrar token and `pod-token`, registering that pod for `example-worker-session`, which is the one name its exchange is answered under (an unregistered name is `invalid_grant`);
 it points the broker's `BROKER_K8S_OIDC_ISSUER` at the issuer, and stops it on exit.
 The same issuer process is the broker's sign-in provider: `dev-broker.sh` generates the client secret into its workdir under umask 077, starts the issuer with `--code-flow dev-broker=<that file>` and `--sign-in-as ada@example.com`, and gives the broker `BROKER_SIGNIN_ISSUER`, `BROKER_SIGNIN_CLIENT_ID`, `BROKER_SIGNIN_CLIENT_SECRET_FILE` and `BROKER_SIGNIN_DOMAIN` (the approver's own domain), which it cannot start without, so a browser on that machine approves a secret request at `<broker>/approve/<record>` with no page to fill in.
-It prints the exports a second shell needs (`AGENT_SECRETS_URL`, `AGENT_SECRETS_ACCOUNT_TOKEN_FILE`, `AGENT_SECRETS_APPROVER`, the helper's `AGENT_SECRETS_HELPER_SOCK`, `AGENT_SECRETS_OPERATOR_FILE` and `AGENT_SECRETS_MACHINE_FILE`, all in its workdir, where it writes the operator file, and `DEV_BROKER_DIR`, the workdir itself).
+It prints the exports a second shell needs (`AGENT_SECRETS_URL`, `AGENT_SECRETS_ACCOUNT_TOKEN_FILE`, `AGENT_SECRETS_APPROVER`, the helper's `AGENT_SECRETS_HELPER_SOCK`, `AGENT_SECRETS_OPERATOR_FILE`, `AGENT_SECRETS_MACHINE_FILE` and `AGENT_SECRETS_STATE_FILE`, all in its workdir, where it writes the operator file, and `DEV_BROKER_DIR`, the workdir itself).
+It names the records file outright because the helper keeps its records beside its machine login, and a dev stack that exported only a socket would have its helper overwrite the records of the helper installed under the caller's own HOME, whose named sessions' signing keys are in them; `dev-stack.sh` does the same, for its first box and for its second.
 The docs rig (`docs/site/media/broker/rig.sh`) starts the same issuer the same way, for Dispatch's own token and for the broker's sign-in client `docs-broker`.
 With `--code-flow <client id>=<client secret file>` it also serves the authorization code flow for that one confidential client (the values `DISPATCH_SIGNIN_CLIENT_ID` and `DISPATCH_SIGNIN_CLIENT_SECRET` take, the secret the file's content less surrounding whitespace), so a browser signs in to a local Dispatch with no Google:
 each authorization signs in the next person queued at `POST <issuer URL>/_dev/sign-in-as`, whose body is the JSON object of that person's ID token claims and which answers loopback callers alone (`403` otherwise);
