@@ -38,6 +38,7 @@ import {
   createIssue,
   createMessage,
   createProject,
+  editComment,
   getArtifactText,
 } from "./api";
 import { blockId, documentEditor, markSpan, openSpec, placeCaret } from "./editor";
@@ -104,13 +105,23 @@ async function openCommentThread(
 ): Promise<Locator> {
   const turn = conversationTurns(page).locator(`:scope > li[data-turn="comment:${rootId}"]`);
   await expect(turn).toContainText(lead);
-  await turn.getByRole("button", { exact: true, name: "Expand thread" }).click();
+  const expand = turn.getByRole("button", { exact: true, name: "Expand thread" });
+  const opened =
+    testInfo.project.name === "iphone"
+      ? page.getByRole("dialog", { name: "Thread" })
+      : turn.getByRole("button", { exact: true, name: "Collapse thread" });
+  // Retried for the reason the reader's click on `Mermaid source` is below: the page moves
+  // while the turn's diagrams draw, so a click can land on whatever slid under the pointer and
+  // the thread never opens. Measured here on firefox, where the expand click was lost and the
+  // row waited out its budget for a `Collapse thread` that never appeared. The expand button is
+  // gone once the thread is open, so the retry clicks only while it is still there.
+  await expect(async () => {
+    if (await expand.isVisible()) await expand.click();
+    await expect(opened).toBeVisible({ timeout: 1_000 });
+  }).toPass({ timeout: 5_000 });
   if (testInfo.project.name === "iphone") {
-    const thread = page.getByRole("dialog", { name: "Thread" });
-    await expect(thread).toBeVisible();
-    return thread.locator(`li[data-turn="comment:${rootId}"]`);
+    return opened.locator(`li[data-turn="comment:${rootId}"]`);
   }
-  await expect(turn.getByRole("button", { exact: true, name: "Collapse thread" })).toBeVisible();
   return turn;
 }
 
@@ -126,8 +137,26 @@ async function expectDrawnDiagram(card: Locator, labels: readonly string[]): Pro
   // Mounted, closed inside the disclosure: toBeHidden alone also passes on no match at all.
   await expect(source).toHaveCount(1);
   await expect(source).toBeHidden();
-  await card.getByText("Mermaid source", { exact: true }).click();
-  await expect(source).toBeVisible();
+  const disclosure = card.getByText("Mermaid source", { exact: true });
+  // The reader's click is retried until the disclosure opens, because a click can be lost. An
+  // instrumented run of these rows caught it: a document-level `click` listener recorded
+  // `click ARTICLE connected=true`, so the click landed on the `<article>` behind the summary -
+  // the page moved between Playwright's actionability check on the summary and the click's own
+  // dispatch - and no `toggle` fired and no figure was redrawn. Nothing had opened the
+  // disclosure, so the row waited out its whole expect timeout; it failed that way twice in 100
+  // repeats on firefox in a two-lane run of this pod. A click already taken leaves the source
+  // visible, so the retry clicks only while it is still hidden rather than closing what the
+  // first click opened.
+  //
+  // A retried click is no proof of the product's own rule, that a source the reader opened is
+  // drawn open again after a repaint: this helper only gets the reader's click to land. That
+  // rule is proven by the row `a mermaid source a reader opened is open again when the comment
+  // is edited` and by the module's own test file,
+  // `web/src/features/refs/mermaid-diagrams.test.tsx`.
+  await expect(async () => {
+    if (await source.isHidden()) await disclosure.click();
+    await expect(source).toBeVisible({ timeout: 1_000 });
+  }).toPass({ timeout: 5_000 });
 }
 
 /** Starts recording `page`'s console errors and returns the check both rows whose renderer never
@@ -402,6 +431,75 @@ test("a mermaid source the renderer refuses shows the reason and its source, and
     // quotes the dangling line too, so the source is read from its code block.
     await expect(card.locator("pre code").filter({ hasText: "A -->" })).toBeVisible();
     await expect(diagramIn(card)).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+// SLOW(>=2s): three edits reach the page over the event feed, each waited out at the page's own
+// once-a-second refresh, and two real worker draws - the diagram the reader opens and the one
+// an edit puts in its place. The clock cannot spend any of it, for the reason below.
+// A body is painted whole, so an edit landing under a reader builds its source disclosure anew.
+// What that disclosure shows is the reader's own: a source they opened is open again on every
+// later paint of it, with no second click, and a source they never opened - the one an edit
+// draws in its place - comes back closed. A refusal draws open whatever came before it. Against
+// a build of the commit before the change, the first repaint below draws the opened source
+// closed again and the row fails there. No clock runs here: a fast-forward before a diagram has
+// drawn would spend the 5 s render limit and refuse the source, which is how this file's
+// time-limit rows work on purpose. Every comment the row edits is a person's: an agent session's
+// credential is refused on an edit.
+test("a mermaid source a reader opened is open again when the comment is edited, and an edited diagram draws closed @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Reopened source" });
+  const drawn = await createComment(issue.key, {
+    body: flowchart("Reading this:", "Opened", "Kept"),
+  });
+  const brokenFence = "```mermaid\ngraph TD\n  A -->\n```\n";
+  const refused = await createComment(issue.key, { body: `Broken:\n\n${brokenFence}` });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const card = await openCommentThread(page, testInfo, drawn.id, "Reading this:");
+    // Both halves of the control, ending in the reader's one click: the source is open.
+    await expectDrawnDiagram(card, ["Opened", "Kept"]);
+    const source = card.getByText("graph TD");
+
+    // The edit reaches the page over the event feed, whose refetch the page holds to one a
+    // second (`MIN_REFETCH_INTERVAL_MS`, `web/src/api/query-refresh.ts`), so the new lead in the
+    // card is the repaint. The diagram's source is byte for byte the one the reader opened, and
+    // it is theirs again without another click.
+    await editComment(drawn.id, { body: flowchart("Reading this, reworded:", "Opened", "Kept") });
+    await expect(card).toContainText("Reading this, reworded:");
+    await expect(diagramIn(card)).toBeVisible();
+    await expect(source).toBeVisible();
+
+    // An edit of the source itself draws a diagram the reader never opened, so it draws closed.
+    await editComment(drawn.id, { body: flowchart("Rewired:", "Replaced", "Drawn") });
+    await expect(card).toContainText("Rewired:");
+    await expect(diagramIn(card)).toContainText("Replaced");
+    await expect(source).toHaveCount(1);
+    await expect(source).toBeHidden();
+
+    // On a phone the open thread is a dialog over the Conversation, so the reader goes back to
+    // it before opening the refused comment's thread.
+    if (testInfo.project.name === "iphone") {
+      const phoneThread = page.getByRole("dialog", { name: "Thread" });
+      await phoneThread.getByRole("button", { exact: true, name: "Back" }).click();
+      await expect(phoneThread).toHaveCount(0);
+    }
+
+    // A source the renderer refuses is readable at once on every paint of it, edit or no edit.
+    const broken = await openCommentThread(page, testInfo, refused.id, "Broken:");
+    const brokenSource = broken.locator("pre code").filter({ hasText: "A -->" });
+    await expect(brokenSource).toBeVisible();
+    await editComment(refused.id, { body: `Broken, still:\n\n${brokenFence}` });
+    await expect(broken).toContainText("Broken, still:");
+    await expect(brokenSource).toBeVisible();
+    await expect(diagramIn(broken)).toHaveCount(0);
   } finally {
     await alice.close();
   }
