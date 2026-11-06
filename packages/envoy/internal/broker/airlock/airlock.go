@@ -26,10 +26,10 @@ type Allow struct {
 type SecretRule struct {
 	Name    string   `json:"name"`
 	Hosts   []string `json:"hosts"`
-	Headers []string `json:"headers,omitempty"` // nil: the default ["authorization"]; empty: no header
-	Allow   []Allow  `json:"allow,omitempty"`   // nil: any method and path; empty: nothing allowed
-	Kind    string   `json:"kind,omitempty"`    // "", "aws" or "azure"
-	Judge   *uint32  `json:"judge,omitempty"`   // the judge's longest lifetime, in seconds
+	Headers []string `json:"headers"` // nil: the default ["authorization"]; empty: no header
+	Allow   []Allow  `json:"allow"`   // nil: any method and path; empty: nothing allowed
+	Kind    string   `json:"kind"`    // "", "aws" or "azure"
+	Judge   *uint32  `json:"judge"`   // the judge's longest lifetime, in seconds
 }
 
 // Rules is the whole airlock.json file.
@@ -159,13 +159,11 @@ func check(rules Rules, g Grant, value string, r *Request) (*SecretRule, string)
 		return nil, "not allowed by rule"
 	}
 	// A request that already carries the real value learnt it somewhere other than this
-	// swap, so the airlock refuses it rather than forwarding it. The empty value is
-	// skipped because every string contains it; an entry with a kind is not exempt.
-	if value != "" {
-		for _, h := range r.Headers {
-			if mentions(value, h[1]) {
-				return nil, "request already carries the value"
-			}
+	// swap, so the airlock refuses it rather than forwarding it. The scan reads every
+	// header, not only the ones the entry names, and an entry with a kind is not exempt.
+	for _, h := range r.Headers {
+		if carries(value, h[1]) {
+			return nil, "request already carries the value"
 		}
 	}
 	return sr, ""
@@ -211,6 +209,12 @@ func mentions(value, v string) bool {
 	}
 	payload, ok := basicPayload(v)
 	return ok && strings.Contains(payload, value)
+}
+
+// carries reports whether a request header already carries the real value. The empty
+// value carries nowhere, because every string contains it.
+func carries(value, v string) bool {
+	return value != "" && mentions(value, v)
 }
 
 // substitute swaps placeholder p for value in one header value, including inside a Basic
