@@ -1311,6 +1311,7 @@ jobs:
               - 'go.work'
               - 'go.work.sum'
               - 'packages/envoy/*'
+              - 'packages/envoy/agentloop/**'
               - 'packages/envoy/brokerclient/**'
               - 'packages/envoy/brokertest/**'
               - 'packages/envoy/cmd/**'
