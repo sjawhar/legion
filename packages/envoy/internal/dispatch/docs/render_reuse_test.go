@@ -883,6 +883,9 @@ func TestRenderReuseABrowserEditAfterTheForkReadIsRendered(t *testing.T) {
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			// Each case drives a service, a database and a document of its own, so the cases
+			// run beside one another.
+			t.Parallel()
 			service, artifactID, sh := newWarmRenderReuseRoom(t)
 			edited := false
 			sh.onForkRead = func() {
@@ -940,7 +943,10 @@ func serviceEdit(t *testing.T, service *Service, artifactID string, edit func(*p
 // browser's appended block is rendered whole.
 func TestRenderReuseAServiceCommitAfterTheForkReadIsRendered(t *testing.T) {
 	t.Parallel()
+	// Each case drives a service, a database and a document of its own, so the two run beside
+	// each other.
 	t.Run("service repair", func(t *testing.T) {
+		t.Parallel()
 		service, artifactID, sh := newWarmRenderReuseRoom(t)
 		edited := false
 		sh.onForkRead = func() {
@@ -960,6 +966,7 @@ func TestRenderReuseAServiceCommitAfterTheForkReadIsRendered(t *testing.T) {
 		sh.versions(t, write)
 	})
 	t.Run("identity repair", func(t *testing.T) {
+		t.Parallel()
 		service, artifactID, sh := newWarmRenderReuseRoom(t)
 		first, _ := liveTree(t, service, artifactID).Children[0].Attrs[pmdoc.BlockIDAttr].(string)
 		if first == "" {
@@ -1018,6 +1025,9 @@ func TestRenderReuseAReloadedRoomNeverTakesTheWritesRendering(t *testing.T) {
 			name = "after the commit"
 		}
 		t.Run(name, func(t *testing.T) {
+			// Each case drives a service, a database and a document of its own, so the cases
+			// run beside one another.
+			t.Parallel()
 			service, artifactID, sh := newWarmRenderReuseRoom(t)
 			reload := func() {
 				closeDocumentRoom(t, service, artifactID)
@@ -1140,6 +1150,9 @@ func TestRenderReuseAForeignCommitBetweenOperations(t *testing.T) {
 			name = "F consumed first"
 		}
 		t.Run(name, func(t *testing.T) {
+			// Each case drives a service, a database and a document of its own, so the cases
+			// run beside one another.
+			t.Parallel()
 			service, artifactID, sh := newWarmRenderReuseRoom(t)
 			m := sh.measure()
 			var write *liveWrite
@@ -1195,6 +1208,9 @@ func TestRenderReuseAColdWriteIsAlreadyInTheRoom(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			// Each case drives a service, a database and a document of its own, so the cases
+			// run beside one another.
+			t.Parallel()
 			service, artifactID, sh := newRenderReuseService(t)
 			m := sh.measure()
 			var ops []func(ctx context.Context) error
@@ -1295,7 +1311,10 @@ func TestRenderReuseADocumentOutsideTheSchema(t *testing.T) {
 			return err
 		}
 	}
+	// Each case drives a service, a database and a document of its own - the warnings are read
+	// off that service rather than the default logger - so the three run beside one another.
 	t.Run("warm repair", func(t *testing.T) {
+		t.Parallel()
 		service, artifactID, sh := newWarmRenderReuseRoom(t)
 		logs := captureWarnings(service)
 		writeSchemaInvalidElement(t, service, artifactID)
@@ -1311,6 +1330,7 @@ func TestRenderReuseADocumentOutsideTheSchema(t *testing.T) {
 		}
 	})
 	t.Run("pushed outside after the fork read", func(t *testing.T) {
+		t.Parallel()
 		service, artifactID, sh := newWarmRenderReuseRoom(t)
 		logs := captureWarnings(service)
 		pushed := false
@@ -1334,6 +1354,7 @@ func TestRenderReuseADocumentOutsideTheSchema(t *testing.T) {
 		}
 	})
 	t.Run("cold repair", func(t *testing.T) {
+		t.Parallel()
 		service, artifactID, sh := newWarmRenderReuseRoom(t)
 		writeSchemaInvalidElement(t, service, artifactID)
 		closeDocumentRoom(t, service, artifactID)

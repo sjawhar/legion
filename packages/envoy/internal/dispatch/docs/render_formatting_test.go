@@ -62,6 +62,9 @@ func TestRenderReuseAReplicaReplaysTheRoomsFormattingExactly(t *testing.T) {
 // they leave are the room's own and the replica must keep every one - which is why such a replica
 // is caught at that third write, by the markers it tombstones and the room does not.
 func testAReplicaKeepsARunTheRoomLeftPlain(t *testing.T) {
+	// This case drives a service, a database and a document of its own, so it runs beside the
+	// storm below.
+	t.Parallel()
 	service, artifactID, sh, live, replica := newFormattingRoom(t)
 
 	// The run's tail loses its italics: the marker that ends them stands in the gap the later
@@ -119,12 +122,18 @@ func testAReplicaKeepsARunTheRoomLeftPlain(t *testing.T) {
 // must stand exactly where the room stands: the same state vector and delete set, and the same
 // delta for every text node of the fragment.
 func testAReplicaReplaysInterleavedFormatting(t *testing.T) {
+	t.Parallel()
 	seeds, steps := []uint64{1, 2, 3, 4}, 160
 	if raceEnabled || testing.Short() {
 		seeds, steps = []uint64{1, 2}, 60
 	}
 	for _, seed := range seeds {
-		t.Run(fmt.Sprintf("seed %d", seed), func(t *testing.T) { formattingRound(t, seed, steps) })
+		t.Run(fmt.Sprintf("seed %d", seed), func(t *testing.T) {
+			// Each seed drives a service and a document of its own, so the rounds run beside
+			// one another.
+			t.Parallel()
+			formattingRound(t, seed, steps)
+		})
 	}
 }
 

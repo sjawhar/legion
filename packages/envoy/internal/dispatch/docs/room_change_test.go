@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -204,8 +205,37 @@ func TestARoomChangeAfterAWritesReadCostsItsVersionNoRender(t *testing.T) {
 // The browser's delete here is queued on the document's mutex while the transaction's first
 // encoding of the room runs, so it is granted the lock in that window: the interleave is driven
 // rather than waited for.
+//
+// The 640 rounds are a load this test keeps (dispatch://INFRA-1075): four passes over the 160
+// offsets the delete is walked across below, so each position in the window is sampled four
+// times. Each pass runs beside the others, on a service, a database, a document and a room of
+// its own, and the rounds within a pass stay in order because they share that one room: each
+// round reads it, appends to it and deletes from it. The passes share only the two counters
+// they add their totals to, which nothing reads until every pass has ended.
 func TestACaptureNeverReusesARenderingTheForkHasMovedPast(t *testing.T) {
 	t.Parallel()
+	const passes, offsets = 4, 160
+	var reused, stale atomic.Int64
+	t.Cleanup(func() {
+		t.Logf("captures that reused the cached rendering: %d of %d; stale: %d",
+			reused.Load(), passes*offsets, stale.Load())
+	})
+	for pass := range passes {
+		t.Run(fmt.Sprintf("pass %d", pass), func(t *testing.T) {
+			t.Parallel()
+			passReused, passStale := captureReusePass(t, pass*offsets, offsets)
+			reused.Add(int64(passReused))
+			stale.Add(int64(passStale))
+		})
+	}
+}
+
+// captureReusePass runs rounds rounds of the race from firstRound, on a service and a document
+// of its own, and answers how many captures reused the rendering their transaction had cached
+// and how many of those the fork had moved past. round numbers the paragraph each round edits
+// and the offset it walks the browser's delete to, so a pass takes a span of its own.
+func captureReusePass(t *testing.T, firstRound, rounds int) (reused, stale int) {
+	t.Helper()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	body := make([]string, 0, 1200)
@@ -215,11 +245,7 @@ func TestACaptureNeverReusesARenderingTheForkHasMovedPast(t *testing.T) {
 	seedServiceText(t, service, artifactID, strings.Join(body, "\n\n"))
 
 	alice := model.Actor{Kind: "user", ID: "alice"}
-	reused, stale := 0, 0
-	// Four passes over the 160 offsets the delete is walked across below, so each position in
-	// the window is sampled four times.
-	const rounds = 640
-	for round := range rounds {
+	for round := firstRound; round < firstRound+rounds; round++ {
 		marker := fmt.Sprintf("DOOMED-%d under the browser's cursor", round)
 		// One read of the room does both the browser's append and the precompute of the
 		// delete that undoes it: the tree the room holds before the marker is appended is
@@ -315,6 +341,7 @@ func TestACaptureNeverReusesARenderingTheForkHasMovedPast(t *testing.T) {
 	}
 	t.Logf("captures that reused the cached rendering: %d of %d; stale: %d", reused, rounds, stale)
 	if stale > 0 {
-		t.Fatalf("%d captures reused a rendering the fork had moved past", stale)
+		t.Errorf("%d captures reused a rendering the fork had moved past", stale)
 	}
+	return reused, stale
 }

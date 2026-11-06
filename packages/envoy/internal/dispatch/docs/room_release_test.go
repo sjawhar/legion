@@ -32,6 +32,15 @@ import (
 // The editor opens its documents a batch at a time, each batch idling out before the next, as
 // documents are opened over a day: what fills the cap is how many were touched, not how many are
 // open at once.
+//
+// The loops below touch their documents one at a time, and what holds them to that is the one
+// service they share: a touch is a room load, which is this process's own work rather than a
+// wait on Postgres, and the machine running the package is already busy with the tests beside
+// this one. Measured with a pool of eight over the same counts (dispatch://INFRA-1075): the
+// pair of cap tests took 28.9s and 31.4s against 26.8s and 26.9s one at a time, and this test's
+// hundred writes 6.4s and 7.3s against 4.6s and 5.3s. The cap itself admits them either way -
+// canOpenRoom gates the document socket alone - and at most 167 rooms stood live against the
+// thousand it admits, so it is the contention that refuses, not the cap.
 func TestDocumentsOpenAfterMoreThanTheRoomCapWereTouched(t *testing.T) {
 	t.Parallel()
 	service, database := newRoomReleaseService(t)
@@ -70,6 +79,8 @@ func TestDocumentsOpenAfterMoreThanTheRoomCapWereTouched(t *testing.T) {
 // Rooms the API opens - an agent's write, a read that warms the room - with no peer ever joining
 // are evicted on the idle schedule too, so touching more documents than the cap through the API
 // alone leaves a new document openable and the service's per-document maps empty once they idle.
+// Its thousand and fifty touches run one at a time for the reason the test above says: eight at
+// a time took 22.7s and 25.2s against 20.5s and 21.2s, on the one service they share.
 func TestRoomsTheAPIOpenedReleaseTheCapOnceIdle(t *testing.T) {
 	t.Parallel()
 	service, database := newRoomReleaseService(t)
