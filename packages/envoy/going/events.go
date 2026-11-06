@@ -25,9 +25,11 @@ func (e Event) Terminal() bool {
 }
 
 // TextData carries the next piece of the answer, in the order the model wrote it. It is plain
-// text: every ASCII punctuation byte in it is backslash-escaped, so nothing a renderer is given
-// can become a link, an image, a tag or a code span, by itself or by two frames meeting. The
-// links of an answer are its ItemData frames and nothing else.
+// text: every ASCII punctuation byte in it is backslash-escaped, which closes markdown's own
+// constructs, so nothing a renderer is given can become a link, an image, a tag or a code span,
+// by itself or by two frames meeting; and a word GFM would link on its own, which no escape
+// closes, is dropped rather than sent. The links of an answer are its ItemData frames and
+// nothing else.
 type TextData struct {
 	Text string `json:"text"`
 }
@@ -48,7 +50,7 @@ type CutData struct {
 
 // ChangedData says the server did not pass the model's answer on as the model wrote it, with how
 // many pieces of it that came to: a link or image reduced to the text a reader sees of it, a
-// dropped tag or autolink, and a token GFM would have linked on its own. A link to a hit the
+// dropped tag or autolink, and a word GFM would have linked on its own. A link to a hit the
 // model was given is no such change: the item frame carries it.
 type ChangedData struct {
 	Dropped int `json:"dropped"`
@@ -91,13 +93,13 @@ func Cut(words int) Event {
 }
 
 // Changed says the server did not pass the answer on as the model wrote it: a link or an image
-// stands as the text a reader sees of it, and a tag or a token GFM would have linked is gone.
+// stands as the text a reader sees of it, and a tag or a word GFM would have linked is gone.
 func Changed(dropped int) Event {
 	return Event{Name: contracts.GoingEventChanged, Data: ChangedData{Dropped: dropped}}
 }
 
 // None says the model wrote no answer. An answer that kept no link is not none, and neither is
-// one the server reduced or dropped every token of: each is shown with what it came to, and
+// one the server reduced or dropped every word of: each is shown with what it came to, and
 // end's items of 0 is what tells the reader it rests on no source.
 func None() Event {
 	return Event{Name: contracts.GoingEventNone, Data: NoneData{}}

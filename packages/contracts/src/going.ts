@@ -6,10 +6,14 @@
  */
 
 /** The frame carrying the next piece of the answer's text, in the order the model wrote it.
- *  The text is plain text: every ASCII punctuation byte in it is backslash-escaped, so nothing
- *  a renderer is given can become a link, an image, a tag or a code span - not by itself, and
- *  not by the end of one frame meeting the start of the next. A `text` frame never carries a
- *  link; the `item` frame is where the links of an answer live.
+ *  The text is plain text: every ASCII punctuation byte in it is backslash-escaped, which
+ *  closes markdown's own constructs, so nothing a renderer is given can become a link, an
+ *  image, a tag or a code span - not by itself, and not by the end of one frame meeting the
+ *  start of the next. An escape closes none of GFM's literal autolinks, which a renderer finds
+ *  after it has decoded the escapes, so a word a renderer would link on its own - a `www.`
+ *  host, a scheme's `://`, a `mailto:` or `xmpp:`, an address - is dropped from the answer
+ *  instead, whole and however many pieces of the model's text it was written in. A `text` frame
+ *  therefore never carries a link; the `item` frame is where the links of an answer live.
  *  Generated into Go as `contracts.GoingEventText`. */
 export const GOING_EVENT_TEXT = "text";
 
@@ -25,13 +29,13 @@ export const GOING_EVENT_CUT = "cut";
 
 /** The frame saying the server did not pass the answer on as the model wrote it. `dropped` is
  *  how many pieces of it that came to: a link or image reduced to the text a reader sees of it,
- *  a dropped tag or autolink, and a token GFM would have linked on its own. A link to an item
+ *  a dropped tag or autolink, and a word GFM would have linked on its own. A link to an item
  *  the model was given is no such change: the `item` frame carries it.
  *  Generated into Go as `contracts.GoingEventChanged`. */
 export const GOING_EVENT_CHANGED = "changed";
 
 /** The frame saying the model produced no answer text at all. An answer that kept no link is
- *  not this, and neither is one the server reduced or dropped every token of: each is shown
+ *  not this, and neither is one the server reduced or dropped every word of: each is shown
  *  with what it came to, and its `end` frame's `items` of 0 says it rests on no source.
  *  Generated into Go as `contracts.GoingEventNone`. */
 export const GOING_EVENT_NONE = "none";
@@ -96,7 +100,8 @@ export const GOING_RUN_MS = 30_000;
 export const GOING_REQUEST_TTL_MS = 3_600_000;
 
 /** The next piece of the answer's text, as plain text whose every ASCII punctuation byte is
- *  backslash-escaped, so a renderer makes no link, image, tag or code span of any of it. */
+ *  backslash-escaped, so a renderer makes no link, image, tag or code span of any of it, and
+ *  with every word a renderer would link on its own dropped rather than sent. */
 export interface GoingTextEvent {
   readonly event: typeof GOING_EVENT_TEXT;
   readonly data: { readonly text: string };

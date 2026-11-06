@@ -9,33 +9,56 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 )
 
-// heldByteMax bounds the text the filter holds undecided: a token with no space after it, or a
-// span whose closing bytes never arrive. At the bound the held text is decided as it stands -
-// exactly as Close decides it - and emitted, because no further byte can make it safer: every
-// byte the filter emits is escaped, so a token the bound cut in half can no more become a link
-// than a whole one can. The bound is what keeps one stray [ from stalling the rest of the answer
-// for a reader, and keeps each delta from re-scanning text without end.
+// heldByteMax bounds the span the filter holds undecided: a [ whose ] never arrives, or a < that
+// closes on no >. At the bound the span is decided as it stands - exactly as Close decides it -
+// and the byte that opened it goes out as the ordinary text it turned out to be, because no
+// further byte can make that byte safer: escaped, it opens no link, image, tag or code span
+// whatever follows it. The bound is what keeps one stray [ from stalling the rest of the answer
+// for a reader, and keeps each delta from re-scanning text without end. The word the filter is
+// building waits on a bound of its own, heldWordMax: the two are different waits.
 const heldByteMax = 1024
 
-// linkifyMarks are the marks GFM links a token by with no markdown around it at all: a scheme's
+// heldWordMax bounds the output word the filter builds before it can judge it. At the bound that
+// word is dropped where it stands, and the rest of it - every byte up to the whitespace that
+// completes it - is dropped with it and counted once, because a word is judged whole or not at
+// all: a bound that emitted the half of a word it had would hand a reader a link whenever GFM
+// links that half, the escape being no answer to a literal autolink. The bound is what keeps a
+// model that writes no whitespace from holding an answer, and the word buffer from growing with
+// the answer.
+const heldWordMax = 1024
+
+// linkifyMarks are the marks GFM links a word by with no markdown around it at all: a scheme's
 // ://, a www. host, and the mailto: and xmpp: schemes, which it links without one. They are held
-// as bytes because every token of every answer is read for them.
+// as bytes because every word of every answer is read for them.
 var linkifyMarks = [][]byte{[]byte("://"), []byte("www."), []byte("mailto:"), []byte("xmpp:")}
 
-// answerFilter clears one run's answer, delta by delta, and emits plain text alone: every ASCII
-// punctuation byte it emits is backslash-escaped, so nothing a reader's renderer sees can become
-// a link, an image, a tag or a code span - not by itself, and not by two pieces of the answer
-// meeting where the filter dropped what stood between them. Link and image syntax is reduced to
-// the text a reader sees of it, and the links of an answer live in its item frames alone, each
-// carrying a cited hit's own href. That is why this holds no rule for reference definitions,
-// code spans or bracket precedence: with every byte escaped, none of them can make a link, and
-// CommonMark's precedence no longer decides what the server may emit.
+// answerFilter clears one run's answer, delta by delta, and emits plain text alone. Two rules
+// make that text safe, and they are not the one rule:
 //
-// The answer still streams: a token is held until a space, a newline, the bound or Close
-// completes it, because a token is the smallest piece of text the server can judge whole, and a
-// span that may be a link is held until the bytes that decide it arrive. It is unexported
-// because the run loop is its only driver: everything a reader sees is an Event the filter
-// emitted.
+//   - Every ASCII punctuation byte it emits is backslash-escaped, which closes markdown's own
+//     constructs: a link, an image, a raw HTML tag, a code span and a reference definition are
+//     syntax a renderer reads before it decodes an escape, and an escaped byte is none of that
+//     syntax - not by itself, and not by two pieces of the answer meeting where the filter
+//     dropped what stood between them. Link and image syntax is reduced to the text a reader
+//     sees of it, and the links of an answer live in its item frames alone, each carrying a
+//     cited hit's own href.
+//   - The escape closes nothing of GFM's literal autolinks, which are the links a renderer makes
+//     out of text with no markdown in it. A renderer decodes \. and \: before the autolink
+//     extension reads the text, so www\.evil\.example reaches a reader as a link all the same.
+//     What keeps those out is dropping the word a renderer would link - and the word this judges
+//     is the output word: the run of non-whitespace bytes a reader will see, joined across every
+//     tag the filter dropped and every link it reduced inside it, because what a renderer reads
+//     is the text it was given and not the pieces the server built that text out of.
+//
+// That is why this holds no rule for reference definitions, code spans or bracket precedence:
+// escaped, none of them is syntax any more, and CommonMark's precedence no longer decides what
+// the server may emit.
+//
+// The answer still streams, a word at a time: a word is held until whitespace, the bound or
+// Close completes it, because the output word is the smallest piece of text the server can judge
+// whole, and a span that may be a link is held until the bytes that decide it arrive. It is
+// unexported because the run loop is its only driver: everything a reader sees is an Event the
+// filter emitted.
 type answerFilter struct {
 	citations map[string]Hit
 	// emit hands one event to the stream's writer. Its failure is handed straight back to the
@@ -43,15 +66,23 @@ type answerFilter struct {
 	// a second copy of one state is a second thing to keep true.
 	emit func(Event) error
 
-	// pending is the text no reader has seen: the token the last delta ended in, and the span
-	// whose closing bytes have not arrived. Nothing leaves it before it is cleared.
+	// pending is the raw text of a span no reader has seen: the brackets or the tag whose
+	// closing bytes have not arrived. Nothing leaves it before it is decided.
 	pending []byte
+	// word is the output word being built, unescaped and exactly as a reader will read it once
+	// the escapes are decoded: what each scanner unit contributes - an ordinary byte, a run of
+	// text, the visible text a link or image was reduced to - and nothing for what was dropped.
+	// It is what linkifiable is judged over, which is why it is kept raw.
+	word []byte
+	// wordDropped says the word being built is already dropped - the bound ran out before the
+	// whitespace that completes it - so the rest of it is dropped with it and counted once.
+	wordDropped bool
+	// items are the hits the words not yet flushed cited, held so each item frame follows the
+	// text of the link that cited it.
+	items []Hit
 	// out is the cleared text of the delta being scanned, sent as one text event, so a reader
 	// is told a delta's words in one frame rather than one frame a word.
 	out []byte
-	// escaped is where cleared escapes one piece of text before it is counted and buffered,
-	// kept across pieces so the one escape of every answer allocates once.
-	escaped []byte
 
 	// wrote says the model produced answer text, which is the one thing none denies; words and
 	// inWord count the cleared text's words the way strings.Fields does, carried across deltas;
@@ -67,17 +98,18 @@ type answerFilter struct {
 	cut bool
 }
 
-// newAnswerFilter clears the model's text before a reader sees it: every byte of it is escaped,
-// and every span that may be a link is held until it is resolved, so the answer's links are the
-// item frames and nothing else. citations is keyed by href, the targets the model was given, and
-// is read as it stands at each link, so a hit a later search found is citable too.
+// newAnswerFilter clears the model's text before a reader sees it: every ASCII punctuation byte
+// of it is escaped, every span that may be a link is held until it is resolved, and every word
+// a renderer would link on its own is dropped, so the answer's links are the item frames and
+// nothing else. citations is keyed by href, the targets the model was given, and is read as it
+// stands at each link, so a hit a later search found is citable too.
 func newAnswerFilter(citations map[string]Hit, emit func(Event) error) *answerFilter {
 	return &answerFilter{citations: citations, emit: emit, named: make(map[string]bool)}
 }
 
 // Write takes one content delta, of any size and on any boundary, and emits the text of it that
-// is cleared. The token the delta ends in is held until the next space completes it, which is
-// what lets every token be judged before a reader sees it; the text before it goes out at once,
+// is cleared. The word the delta ends in is held until the next whitespace completes it, which
+// is what lets every word be judged before a reader sees it; the words before it go out at once,
 // so the answer still reaches the reader while the model is writing it.
 func (f *answerFilter) Write(delta string) error {
 	if delta == "" {
@@ -86,7 +118,7 @@ func (f *answerFilter) Write(delta string) error {
 	if !f.wrote && strings.TrimSpace(delta) != "" {
 		// The model wrote answer text. This is what none denies, and it is read from the
 		// model's own delta rather than from the words the filter kept: an answer whose every
-		// token the server dropped is an answer the model wrote, and changed, not none, is what
+		// word the server dropped is an answer the model wrote, and changed, not none, is what
 		// says what became of it.
 		f.wrote = true
 	}
@@ -100,11 +132,16 @@ func (f *answerFilter) Write(delta string) error {
 	return f.flush()
 }
 
-// Close decides what the model's last token and last span left held, then says what the whole
+// Close decides what the model's last span and last word left held, then says what the whole
 // answer came to: what the server changed, the absence of an answer, and the end.
 func (f *answerFilter) Close() error {
 	if !f.cut {
 		if err := f.scan(true); err != nil {
+			return err
+		}
+		// Close completes the last word, as whitespace would: nothing of the answer is held
+		// back once the model has stopped writing.
+		if err := f.complete(); err != nil {
 			return err
 		}
 		if err := f.flush(); err != nil {
@@ -117,7 +154,7 @@ func (f *answerFilter) Close() error {
 		}
 	}
 	// none says the model produced no answer text at all, and says nothing else: an answer the
-	// server reduced or dropped every token of is still an answer the model wrote, changed says
+	// server reduced or dropped every word of is still an answer the model wrote, changed says
 	// so, and end's items of 0 is what tells the reader it rests on no source of Dispatch's.
 	if !f.wrote {
 		if err := f.emit(None()); err != nil {
@@ -140,10 +177,14 @@ func (f *answerFilter) scan(final bool) error {
 }
 
 // decide scans b from its start, deciding every unit it begins with, and answers the index of
-// the first byte it left held. final says no byte is coming after these, so a unit waiting on
-// one is decided as it stands rather than held for ever; a unit still waiting after heldByteMax
-// bytes is decided the same way, which is the filter's one bound. It is the one scanning loop,
-// run over the held text and over the text a link was reduced to alike.
+// the first byte it left held. final says no byte is coming after these, so a span waiting on
+// one is decided as it stands rather than held for ever; a span still waiting after heldByteMax
+// bytes is decided the same way, which is this bound. It is the one scanning loop, run over the
+// held text and over the text a link was reduced to alike.
+//
+// Every unit decided with final set advances past at least the byte at the scanner's hand, so a
+// forced unit cannot leave the loop where it was: that is the invariant this loop rests on, and
+// the one thing unit must keep.
 func (f *answerFilter) decide(b []byte, final bool) (int, error) {
 	at := 0
 	for at < len(b) && !f.cut {
@@ -153,14 +194,11 @@ func (f *answerFilter) decide(b []byte, final bool) (int, error) {
 		}
 		if next == at {
 			if len(b)-at < heldByteMax {
-				// The unit needs a byte that has not arrived: it stays held, whole.
+				// The span needs a byte that has not arrived: it stays held, whole.
 				break
 			}
 			if next, err = f.unit(b, at, true); err != nil {
 				return next, err
-			}
-			if next == at {
-				break
 			}
 		}
 		at = next
@@ -169,19 +207,15 @@ func (f *answerFilter) decide(b []byte, final bool) (int, error) {
 }
 
 // unit decides the one thing b begins at i with - a run of whitespace, a link or image's
-// brackets, a raw HTML tag, or a token - and answers where the next unit begins. Answering i
-// itself says the unit is still held.
+// brackets, a raw HTML tag, or a run of text - and answers where the next unit begins. Answering
+// i itself says the unit is still held, which only a span and the ! that may open an image ever
+// do, and only while final is unset.
 func (f *answerFilter) unit(b []byte, i int, final bool) (int, error) {
 	if size := spaceAt(b, i); size > 0 {
 		return f.spaces(b, i, size)
 	}
-	if b[i] == '!' && i+1 == len(b) && !final {
-		// The ! may yet open an image, which is read as one span, so it is held until the byte
-		// that says whether it does arrives.
-		return i, nil
-	}
 	if !spanStart(b, i) {
-		return f.token(b, i, final)
+		return f.text(b, i, final), nil
 	}
 	if b[i] == '<' {
 		return f.angle(b, i, final)
@@ -190,7 +224,7 @@ func (f *answerFilter) unit(b []byte, i int, final bool) (int, error) {
 }
 
 // spaces emits the run of whitespace at i as it stands - whitespace carries no punctuation, so
-// escaping leaves it alone - and it is also what completes the token before it.
+// escaping leaves it alone - and it is first of all what completes the word before it.
 func (f *answerFilter) spaces(b []byte, i, size int) (int, error) {
 	end := i + size
 	for end < len(b) {
@@ -200,26 +234,102 @@ func (f *answerFilter) spaces(b []byte, i, size int) (int, error) {
 		}
 		end += size
 	}
+	if err := f.complete(); err != nil {
+		return end, err
+	}
 	return end, f.cleared(b[i:end])
 }
 
-// token emits the run of non-space bytes at i, up to the span it may run into, and drops it
-// whole when GFM would link it on its own. The run is judged only once it is whole, because its
-// last byte may be what makes it a link, and it is judged raw, before the escape, because a
-// renderer decodes the escapes before it looks for a link. A dropped token leaves the whitespace
-// on both sides of it standing, so the text around it cannot meet in a new one.
-func (f *answerFilter) token(b []byte, i int, final bool) (int, error) {
+// text adds the run of non-space bytes at i, up to the span it may run into, to the word being
+// built, and answers where that run ends. It judges nothing: the run is a piece of the output
+// word and not a word of its own, and only the whole word a reader will see can be judged.
+//
+// A run ending in the ! that may yet open an image is given back one byte short, because an
+// image is one span and the byte that says whether this is one has not arrived; a run that is
+// the lone ! is held whole, as a span is.
+func (f *answerFilter) text(b []byte, i int, final bool) int {
 	end := i + 1
 	for end < len(b) && spaceAt(b, end) == 0 && !spanStart(b, end) {
 		end++
 	}
-	if end == len(b) && !final {
-		return i, nil
+	if !final && end == len(b) && b[end-1] == '!' {
+		end--
+		if end == i {
+			return i
+		}
 	}
-	if linkifiable(b[i:end]) {
-		return f.drop(end)
+	f.add(b[i:end])
+	return end
+}
+
+// add puts what one scanner unit contributes to the output word: the bytes of it a reader will
+// see. What the filter dropped - a tag, an uncited link's target, an image - contributes nothing
+// at all, which is how the text on the two sides of it meets in the one word a renderer reads.
+// A word that reaches heldWordMax is dropped where it stands and goes on being dropped until the
+// whitespace that completes it, so no bound ever hands a reader half a word.
+func (f *answerFilter) add(text []byte) {
+	if f.wordDropped {
+		return
 	}
-	return end, f.cleared(b[i:end])
+	if len(f.word)+len(text) >= heldWordMax {
+		f.word, f.wordDropped = f.word[:0], true
+		return
+	}
+	f.word = append(f.word, text...)
+}
+
+// complete judges the output word the filter has built - the run of non-whitespace bytes a
+// reader will see, joined across every tag dropped and every link reduced inside it - and emits
+// it or drops it whole. A word GFM would link on its own is dropped and counted once, however
+// many pieces of the model's text it was built from; every other word is escaped, counted and
+// emitted. It is what whitespace, Close and the word's own bound each end a word with.
+func (f *answerFilter) complete() error {
+	if len(f.word) == 0 && !f.wordDropped {
+		return f.release()
+	}
+	drop := f.wordDropped || linkifiable(f.word)
+	var err error
+	if drop {
+		f.change()
+	} else {
+		err = f.cleared(f.word)
+	}
+	f.word, f.wordDropped = f.word[:0], false
+	if err != nil {
+		return err
+	}
+	return f.release()
+}
+
+// release emits the item frames the words just flushed cited. An item follows the text of its
+// own link, as the model wrote it, so it waits for the word carrying that text to be judged and
+// flushed. A word the filter dropped releases its items all the same: the hit was cited, the
+// frame carries that hit's own href, and that frame is the answer's only honest link - the one
+// thing a reader of a dropped word is still owed.
+func (f *answerFilter) release() error {
+	if len(f.items) == 0 || len(f.word) > 0 || f.wordDropped {
+		return nil
+	}
+	items := f.items
+	f.items = f.items[:0]
+	if f.cut {
+		// The cap fell inside the word that carried the link's text, so that text was never
+		// emitted: a link whose text a reader was not shown cites nothing for them, and the
+		// hit is unnamed again so end counts what the reader was actually given.
+		for _, hit := range items {
+			delete(f.named, hit.Href)
+		}
+		return nil
+	}
+	if err := f.flush(); err != nil {
+		return err
+	}
+	for _, hit := range items {
+		if err := f.emit(Item(hit)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // bracket decides the span opening at i with [ or ![: an inline link or image, a reference link
@@ -264,14 +374,12 @@ func (f *answerFilter) bracket(b []byte, i int, final bool) (int, error) {
 // A link to a hit the model was given is no change to count: the item frame carries it, so the
 // answer still links what it used. Every other link, and every image - whose target a page
 // fetches with no click, and which is therefore never a citation - is counted, because what the
-// model wrote as a link reaches the reader as text alone.
+// model wrote as a link reaches the reader as text alone. Either way the text it was reduced to
+// joins the word around it, which is the word a renderer will read.
 func (f *answerFilter) inline(b []byte, i, open, textEnd int, final bool) (int, error) {
-	at := textEnd + 2
-	for at < len(b) && b[at] != ')' {
-		if b[at] == '\n' {
-			return f.ordinary(b, i)
-		}
-		at++
+	at := closerAt(b, textEnd+2, ')', 0)
+	if at < 0 {
+		return f.ordinary(b, i)
 	}
 	if at == len(b) {
 		return f.undecided(b, i, final)
@@ -287,24 +395,19 @@ func (f *answerFilter) inline(b []byte, i, open, textEnd int, final bool) (int, 
 		return at + 1, nil
 	}
 	f.named[hit.Href] = true
-	// The link's own text goes out before the item that names it, so a reader reads the answer
-	// in the order the model wrote it.
-	if err := f.flush(); err != nil {
-		return at + 1, err
-	}
-	return at + 1, f.emit(Item(hit))
+	f.items = append(f.items, hit)
+	// The item waits for the word that carries the link's own text, so a reader reads the
+	// answer in the order the model wrote it.
+	return at + 1, f.release()
 }
 
 // reference reduces a closed [text][ref], ![alt][ref] or [text][] to the text a reader sees of
 // it. Which target the ref names is in a definition the server emits as escaped text and never
 // resolves, so such a span names no hit at all, and its text is all of it a reader is owed.
 func (f *answerFilter) reference(b []byte, i, open, textEnd int, final bool) (int, error) {
-	at := textEnd + 2
-	for at < len(b) && b[at] != ']' {
-		if b[at] == '[' || b[at] == '\n' {
-			return f.ordinary(b, i)
-		}
-		at++
+	at := closerAt(b, textEnd+2, ']', '[')
+	if at < 0 {
+		return f.ordinary(b, i)
 	}
 	if at == len(b) {
 		return f.undecided(b, i, final)
@@ -318,7 +421,8 @@ func (f *answerFilter) reference(b []byte, i, open, textEnd int, final bool) (in
 // angle drops the raw HTML tag or autolink opening at i. Escaped, neither could make a link, but
 // neither is an answer either: <scheme:...> and <name@host> are the model's own links, a tag is
 // whatever HTML it wrote, img and its silent fetch included, and a reader is owed the answer's
-// words rather than its markup. A < that opens none of those is ordinary text.
+// words rather than its markup. A < that opens none of those is ordinary text. What the tag
+// stood between meets in one word, which is judged as the word a renderer reads.
 func (f *answerFilter) angle(b []byte, i int, final bool) (int, error) {
 	if i+1 == len(b) {
 		return f.undecided(b, i, final)
@@ -326,12 +430,9 @@ func (f *answerFilter) angle(b []byte, i int, final bool) (int, error) {
 	if !tagStart(b[i+1]) {
 		return f.ordinary(b, i)
 	}
-	at := i + 2
-	for at < len(b) && b[at] != '>' {
-		if b[at] == '\n' {
-			return f.ordinary(b, i)
-		}
-		at++
+	at := closerAt(b, i+2, '>', 0)
+	if at < 0 {
+		return f.ordinary(b, i)
 	}
 	if at == len(b) {
 		return f.undecided(b, i, final)
@@ -339,9 +440,9 @@ func (f *answerFilter) angle(b []byte, i int, final bool) (int, error) {
 	return f.drop(at + 1)
 }
 
-// inner emits the text a link or image was reduced to, scanned as the answer's own text is: a
-// token GFM would link on its own is dropped and counted there too, and every byte of it is
-// escaped. It is given whole text, so nothing it scans is ever held.
+// inner adds the text a link or image was reduced to, scanned as the answer's own text is: its
+// own words are judged and counted there too, and the word it ends in goes on being built by
+// whatever follows the link. It is given whole text, so nothing it scans is ever held.
 func (f *answerFilter) inner(text []byte) error {
 	_, err := f.decide(text, true)
 	return err
@@ -350,7 +451,7 @@ func (f *answerFilter) inner(text []byte) error {
 // undecided answers what a span does when the byte that decides it has not arrived: it stays
 // held, whole, for the next delta, or - when final says no byte is coming, or the bound in
 // decide has run out of patience - it is the ordinary text it begins with. It is the filter's
-// one hold, so no scanner here invents a second rule for waiting.
+// one hold on a span, so no scanner here invents a second rule for waiting.
 func (f *answerFilter) undecided(b []byte, i int, final bool) (int, error) {
 	if !final {
 		return i, nil
@@ -358,40 +459,47 @@ func (f *answerFilter) undecided(b []byte, i int, final bool) (int, error) {
 	return f.ordinary(b, i)
 }
 
-// ordinary emits the one byte at i as the plain text the span it opened turned out to be, and
-// goes on scanning at the byte after it, so everything that byte held is judged again on its own
-// rather than emitted on the strength of the span that failed.
+// ordinary adds the one byte at i to the word as the plain text the span it opened turned out to
+// be, and goes on scanning at the byte after it, so everything that byte held is judged again on
+// its own rather than emitted on the strength of the span that failed.
 func (f *answerFilter) ordinary(b []byte, i int) (int, error) {
-	return i + 1, f.cleared(b[i : i+1])
+	f.add(b[i : i+1])
+	return i + 1, nil
 }
 
-// drop counts one thing the server did not pass on as the model wrote it - a link or image
-// reduced to its text, a tag, a token GFM would link on its own - and answers where scanning
-// goes on after it. Every count the changed event carries is made here, so the count and the
-// rules that raise it cannot drift apart.
-func (f *answerFilter) drop(next int) (int, error) {
+// change counts one thing the server did not pass on as the model wrote it: a link or image
+// reduced to its text, a tag, or an output word GFM would link on its own. Every count the
+// changed event carries is made here, so the count and the rules that raise it cannot drift
+// apart.
+func (f *answerFilter) change() {
 	f.dropped++
+}
+
+// drop counts the span the scanner has just decided not to pass on and answers where scanning
+// goes on after it.
+func (f *answerFilter) drop(next int) (int, error) {
+	f.change()
 	return next, nil
 }
 
-// cleared escapes text, counts its words and buffers it as the next piece of the answer, cutting
-// the answer where the word past contracts.GoingAnswerWordMax begins. It is the one way a byte
-// of the model's text reaches a reader, which is what makes the escape whole: there is no second
-// path for a piece of text to leave by unescaped.
+// cleared escapes text into the buffer the next text event is sent from, counts its words, and
+// cuts the answer where the word past contracts.GoingAnswerWordMax begins. It is the one way a
+// byte of the model's text reaches a reader, which is what makes the escape whole: there is no
+// second path for a piece of text to leave by unescaped. It is given one completed word or one
+// run of whitespace, never the half of either.
 func (f *answerFilter) cleared(text []byte) error {
-	if len(text) == 0 {
+	if f.cut || len(text) == 0 {
 		return nil
 	}
-	f.escaped = escape(f.escaped[:0], text)
-	words, inWord, at := countWords(f.escaped, f.words, f.inWord)
+	words, inWord, at := countWords(text, f.words, f.inWord)
 	f.words, f.inWord = words, inWord
 	if at < 0 {
-		f.out = append(f.out, f.escaped...)
+		f.out = escape(f.out, text)
 		return nil
 	}
-	// The cut falls where the word past the cap begins, which is never inside an escape: a
-	// backslash and the byte it escapes hold no space between them.
-	f.out = append(f.out, f.escaped[:at]...)
+	// The cut falls where the word past the cap begins, and the escape is written after that
+	// byte is found, so no backslash is ever cut from the byte it escapes.
+	f.out = escape(f.out, text[:at])
 	f.cut = true
 	if err := f.flush(); err != nil {
 		return err
@@ -414,9 +522,9 @@ func (f *answerFilter) flush() error {
 // inside one, and says where the word past contracts.GoingAnswerWordMax begins, or -1 when text
 // stays inside the cap. It is strings.Fields' own rule - a word begins where a non-space follows
 // a space or the start - carried across deltas, because Fields over one delta cannot see the word
-// the delta before it ended in. It counts the escaped text, which is the text a reader is sent,
-// and an escape adds no space and so no word. It is the one place the filter walks text for
-// words.
+// the delta before it ended in. It counts the model's own bytes, which carry the words the
+// escaped text a reader is sent carries: an escape adds no space, and so no word. It is the one
+// place the filter walks text for words.
 func countWords(text []byte, words int, inWord bool) (int, bool, int) {
 	for at, letter := range string(text) {
 		space := unicode.IsSpace(letter)
@@ -435,7 +543,9 @@ func countWords(text []byte, words int, inWord bool) (int, bool, int) {
 // every byte CommonMark allows an escape for - & included, since a character reference such as
 // www&#46;evil.example decodes to its character before GFM looks for a link in the text. Escaped,
 // no byte of the model's text can open a link, an image, a tag, a code span or a definition, and
-// no two pieces of the answer can meet in one.
+// no two pieces of the answer can meet in one. It is no answer to a literal autolink, which a
+// renderer finds after it has decoded the escapes: what keeps those out is linkifiable, judged
+// over the whole output word.
 func escape(dst, text []byte) []byte {
 	for _, letter := range text {
 		if asciiPunctuation(letter) {
@@ -456,21 +566,24 @@ func asciiPunctuation(letter byte) bool {
 		letter >= '{' && letter <= '~'
 }
 
-// linkifiable reports whether GFM links the token on its own, with no markdown around it: a
-// scheme's ://, a www. host, the mailto: or xmpp: scheme, or an email address. Each mark is
-// looked for anywhere in the token, not at its start, because GFM links it anywhere too -
-// (www.evil.example) and a trailing user@host.tld are both links a reader can click.
-func linkifiable(token []byte) bool {
+// linkifiable reports whether GFM links the output word on its own, with no markdown around it:
+// a scheme's ://, a www. host, the mailto: or xmpp: scheme, or an email address. It is judged
+// over the word a reader will see, raw and before the escape, because a renderer decodes the
+// escapes before the autolink extension reads the text - an escaped www\.evil\.example is a link
+// to a reader, which is why such a word is dropped rather than escaped. Each mark is looked for
+// anywhere in the word, not at its start, because GFM links it anywhere too: (www.evil.example)
+// and a trailing user@host.tld are both links a reader can click.
+func linkifiable(word []byte) bool {
 	for _, mark := range linkifyMarks {
-		if containsFold(token, mark) {
+		if containsFold(word, mark) {
 			return true
 		}
 	}
-	return hasEmail(token)
+	return hasEmail(word)
 }
 
 // containsFold reports whether b holds mark anywhere, ignoring the case of ASCII letters, since
-// WWW. and www. are the one link to a renderer and must be the one token to the server.
+// WWW. and www. are the one link to a renderer and must be the one word to the server.
 func containsFold(b, mark []byte) bool {
 	for i := 0; i+len(mark) <= len(b); i++ {
 		if bytes.EqualFold(b[i:i+len(mark)], mark) {
@@ -480,16 +593,16 @@ func containsFold(b, mark []byte) bool {
 	return false
 }
 
-// hasEmail reports whether the token holds an address GFM links on its own: a local part, an @,
+// hasEmail reports whether the word holds an address GFM links on its own: a local part, an @,
 // and a host carrying a dot. GFM also refuses a host whose last two labels hold a _; the filter
-// drops such a token all the same, because a token it drops costs a reader one word and a token
-// it keeps may cost them a link the server never gave the model.
-func hasEmail(token []byte) bool {
-	for at, letter := range token {
-		if letter != '@' || at == 0 || !emailLocal(token[at-1]) {
+// drops such a word all the same, because a word it drops costs a reader one word and a word it
+// keeps may cost them a link the server never gave the model.
+func hasEmail(word []byte) bool {
+	for at, letter := range word {
+		if letter != '@' || at == 0 || !emailLocal(word[at-1]) {
 			continue
 		}
-		if emailHost(token[at+1:]) {
+		if emailHost(word[at+1:]) {
 			return true
 		}
 	}
@@ -502,21 +615,22 @@ func emailLocal(letter byte) bool {
 }
 
 // emailHost reports whether b begins with the host of an address GFM links: labels of letters,
-// digits, - and _, at least one dot between them, and an alphanumeric last byte, because GFM
-// leaves the punctuation an address trails off in out of the link.
+// digits, - and _, with a dot between two of them. The punctuation the host trails off in is
+// none of the host: GFM leaves a sentence's own full stop out of the link rather than refusing
+// the link, so a dot followed by a label makes the address whatever stands after it.
 func emailHost(b []byte) bool {
-	dots, last := 0, byte(0)
-	for _, letter := range b {
+	for at, letter := range b {
 		switch {
 		case letter == '.':
-			dots++
+			if at+1 < len(b) && alphanumeric(b[at+1]) {
+				return true
+			}
 		case letter == '-' || letter == '_' || alphanumeric(letter):
 		default:
-			return dots > 0 && alphanumeric(last)
+			return false
 		}
-		last = letter
 	}
-	return dots > 0 && alphanumeric(last)
+	return false
 }
 
 // alphanumeric reports whether letter is an ASCII letter or digit, which is what a host's labels
@@ -527,7 +641,8 @@ func alphanumeric(letter byte) bool {
 
 // spanStart reports whether b opens at i the one kind of span the filter reads rather than
 // escapes byte by byte: a link or image's brackets, or a raw HTML tag's <. It is the one list of
-// those bytes, read by the scan that dispatches on them and by the token that stops at them.
+// those bytes, read by the scan that dispatches on them and by the run of text that stops at
+// them.
 func spanStart(b []byte, i int) bool {
 	return b[i] == '[' || b[i] == '<' || (b[i] == '!' && i+1 < len(b) && b[i+1] == '[')
 }
@@ -557,6 +672,26 @@ func linkEnd(b []byte, open int) int {
 	return len(b)
 }
 
+// closerAt is the byte that closes a span the filter has already opened: the ) of a link's
+// target, the ] of a reference, the > of a tag. It is the one find-the-closer loop the scanners
+// share, so each of them honours what CommonMark says closes nothing - a byte behind a backslash
+// - rather than keeping a rule of its own. stop is a byte the span may not hold at all, or zero
+// where it may hold any; a newline is such a byte for every span, since none of the model's
+// spans one. It answers -1 when it met one of those and len(b) when the closer has not arrived.
+func closerAt(b []byte, i int, closer, stop byte) int {
+	for at := i; at < len(b); at++ {
+		switch letter := b[at]; {
+		case letter == '\\':
+			at++
+		case letter == closer:
+			return at
+		case letter == '\n' || (stop != 0 && letter == stop):
+			return -1
+		}
+	}
+	return len(b)
+}
+
 // tagStart reports whether letter opens what < may hold: a scheme or an address, both of which
 // begin with a letter, a closing tag's /, or a tag, a comment or a declaration. Anything else
 // after a < is arithmetic or prose, and is emitted as the text it is.
@@ -566,7 +701,7 @@ func tagStart(letter byte) bool {
 }
 
 // spaceAt is the size in bytes of the whitespace rune b holds at i, or zero when b holds none
-// there. It reads runes, not bytes, so the tokens the filter judges are the words strings.Fields
+// there. It reads runes, not bytes, so the words the filter judges are the words strings.Fields
 // counts even where the model writes a space of its own kind.
 func spaceAt(b []byte, i int) int {
 	if letter := b[i]; letter < utf8.RuneSelf {

