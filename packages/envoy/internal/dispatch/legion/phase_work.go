@@ -15,6 +15,16 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
+// PhaseWork is what the one read answers: Keys is every issue that carries Legion phase work,
+// and RoleSessions is the newest title of every session the read found to be a Legion role
+// working an issue, keyed by session id. A reader that keeps the answer and must know which
+// events can move it reads RoleSessions (api/legion_phase_work.go); a reader that only places
+// an issue in a tree reads Keys alone (legion/metrics).
+type PhaseWork struct {
+	Keys         map[string]struct{}
+	RoleSessions map[string]string
+}
+
 // PhaseWorkKeys is every issue that carries Legion phase work, over the whole log: the issues a
 // handoff was recorded for, and the issues an event of a session titled `Legion <role> · <that
 // issue's key>` was written on. It is read project-wide, which is what makes the answer a fact of
@@ -25,25 +35,30 @@ import (
 // (delivery.ResolveSessionTitles). Every reader of the fact comes through here, so a session
 // renamed after it wrote, or an event that carried no title of its own, moves the board and the
 // metrics together.
-func PhaseWorkKeys(ctx context.Context, pool *store.Pool) (map[string]struct{}, error) {
-	keys := map[string]struct{}{}
-	if err := readHandoffIssues(ctx, pool, keys); err != nil {
-		return nil, err
+func PhaseWorkKeys(ctx context.Context, pool *store.Pool) (PhaseWork, error) {
+	work := PhaseWork{Keys: map[string]struct{}{}, RoleSessions: map[string]string{}}
+	if err := readHandoffIssues(ctx, pool, work.Keys); err != nil {
+		return PhaseWork{}, err
 	}
 	written, sessions, err := readSessionIssues(ctx, pool)
 	if err != nil {
-		return nil, err
+		return PhaseWork{}, err
 	}
 	titles, err := delivery.ResolveSessionTitles(ctx, pool, sessions)
 	if err != nil {
-		return nil, fmt.Errorf("resolve the session titles of the Legion phase work: %w", err)
+		return PhaseWork{}, fmt.Errorf("resolve the session titles of the Legion phase work: %w", err)
+	}
+	for _, session := range sessions {
+		if parsed, ok := ParseSessionTitle(titles[session]); ok && !parsed.Controller {
+			work.RoleSessions[session] = titles[session]
+		}
 	}
 	for _, one := range written {
 		if RoleSessionWorks(titles[one.session], one.issue) {
-			keys[one.issue] = struct{}{}
+			work.Keys[one.issue] = struct{}{}
 		}
 	}
-	return keys, nil
+	return work, nil
 }
 
 // readHandoffIssues takes every issue a handoff was recorded for into keys.

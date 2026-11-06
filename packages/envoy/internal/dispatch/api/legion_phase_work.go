@@ -13,9 +13,15 @@
 // The board is recomputed on every event burst of every open page, so this keeps the read's
 // answer rather than making it again each time. It is filled by one read — at the live hub's
 // start, and at the first board read of a process whose hub never started — and the feed the
-// live hub already reacts to marks it stale, never edits it: a handoff, or any event of a
-// session, can move what the read answers (delivery_live_hub_intake.go's applyEventLocked). The
-// next board read fills it again.
+// live hub already reacts to marks it stale, never edits it (delivery_live_hub_intake.go's
+// applyEventLocked). The next board read fills it again.
+//
+// Only an event that can move what the read answers marks it stale, since the read is a scan of
+// every project's whole event log and sessions write events all the time: a recorded handoff,
+// and an event of a session the rule's title half can reach (observe). That is why the read
+// answers the titles of the sessions it found working an issue beside the keys
+// (legion.PhaseWork): a session no read and no event since has found to be a Legion role cannot
+// take phase work from the issue it writes on, and it is the commonest writer of all.
 //
 // The set holds the issues' bare keys, of every project: a board walks only the chain of its own
 // issues, and nothing here is scoped to one.
@@ -46,6 +52,11 @@ type legionPhaseWork struct {
 	// read is the value of dirtied the newest read started at.
 	read uint64
 	keys map[string]struct{}
+	// roleSessions is the per-session index the narrow invalidation stands on: the newest title
+	// of every session the newest read, or an event since, found to be a Legion role working an
+	// issue (legion.PhaseWork.RoleSessions). A session it does not name had no such title then,
+	// so no issue holds phase work by it and none can lose any when it writes again (observe).
+	roleSessions map[string]string
 }
 
 // has is whether the issue carries Legion phase work. A nil set answers false: a population built
@@ -61,10 +72,56 @@ func (w *legionPhaseWork) has(key string) bool {
 }
 
 // invalidate marks the set stale: an event the one read may answer differently for was written,
-// so the next board read makes that read again.
+// so the next board read makes that read again. A recorded handoff is one such event whatever
+// wrote it; an event of a session is one only where observe says so.
 func (w *legionPhaseWork) invalidate() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.dirtied++
+}
+
+// observe takes one event a session wrote — the session's id, that session's newest title as
+// the event carries it, and the issue the event was written on — and marks the set stale only
+// where the one read can answer differently for it. The three cases it marks:
+//
+//   - the session's newest title is a Legion role's and the set's own read did not know it as
+//     one, so every issue the session has written on may carry phase work now;
+//   - the title moved from the one the read knew — to another issue's, or to a title of no
+//     Legion role at all — so the issues it held under the old title may hold none now;
+//   - the title is the one the read knew, it names this very issue, and the set does not hold
+//     that issue yet, which is the session's first event on the issue its title names.
+//
+// Anything else cannot move the read's answer: an ordinary session's event, and a Legion role's
+// event on an issue the set already holds or that its title does not name, which is every event
+// of a running phase worker after its first. The rule's title half is the one reading of a
+// title (legion.ParseSessionTitle), never a second one stated here.
+func (w *legionPhaseWork) observe(session, title, issue string) {
+	if session == "" {
+		return
+	}
+	parsed, isRole := legion.ParseSessionTitle(title)
+	isRole = isRole && !parsed.Controller
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	known, wasRole := w.roleSessions[session]
+	if isRole && wasRole && known == title {
+		if _, held := w.keys[issue]; held || !parsed.Works(issue) {
+			return
+		}
+		w.dirtied++
+		return
+	}
+	if !isRole && !wasRole {
+		return
+	}
+	if isRole {
+		if w.roleSessions == nil {
+			w.roleSessions = map[string]string{}
+		}
+		w.roleSessions[session] = title
+	} else {
+		delete(w.roleSessions, session)
+	}
 	w.dirtied++
 }
 
@@ -98,18 +155,22 @@ func (w *legionPhaseWork) isCurrent() bool {
 	return w.filled && w.read == w.dirtied
 }
 
-// fill reads the whole set and takes it as it stands. It replaces what the set held: an issue
-// whose only phase work was a session since renamed carries none now, and only this read says so.
+// fill reads the whole set and takes it as it stands, the index of the sessions the read found
+// working an issue with it. It replaces what the set held: an issue whose only phase work was a
+// session since renamed carries none now, and only this read says so. An event that marked the
+// set stale while the read ran leaves it stale (read below dirtied), so the index this takes is
+// read again with the set it belongs to; until then it costs that session one mark too many and
+// never one too few.
 func (w *legionPhaseWork) fill(ctx context.Context, pool *store.Pool) error {
 	w.mu.Lock()
 	at := w.dirtied
 	w.mu.Unlock()
-	keys, err := legion.PhaseWorkKeys(ctx, pool)
+	work, err := legion.PhaseWorkKeys(ctx, pool)
 	if err != nil {
 		return err
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.keys, w.filled, w.read = keys, true, at
+	w.keys, w.roleSessions, w.filled, w.read = work.Keys, work.RoleSessions, true, at
 	return nil
 }

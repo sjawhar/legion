@@ -1,4 +1,5 @@
 import type { Actor } from "@legion/contracts";
+import type { LegionSettingsChange } from "@legion/contracts/legion-api";
 
 export type {
   Actor,
@@ -416,3 +417,13 @@ export type {
   LegionSettingsChange as LegionSettingsChangeResponse,
   LegionSettingVerdict,
 } from "@legion/contracts/legion-api";
+
+/** What a relayed settings change ended as, for the one caller of it (`putLegionProjectSettings`):
+ *  the daemon's verdicts, and whether the daemon recorded the change in its own store.
+ *  `recorded` is false for the one answer that says the change took effect and will not outlive
+ *  the daemon's restart — the daemon applied it and could not write it down, which it answers
+ *  with a failing status and the verdicts (`config.NotRecorded`). */
+export interface LegionSettingsChangeResult {
+  readonly settings: LegionSettingsChange["settings"];
+  readonly recorded: boolean;
+}

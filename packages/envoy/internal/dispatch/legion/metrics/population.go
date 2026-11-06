@@ -788,14 +788,15 @@ func (p *Population) isLegionIssue(issue *Issue) bool {
 }
 
 // readPhaseWork reads the issues that carry Legion phase work, over the whole project
-// (legion.PhaseWorkKeys). It places an issue in a tree and nothing else: what a metric counts
-// reads the window's own role events and handoffs (hasPhaseWork).
+// (legion.PhaseWorkKeys, whose Keys are the whole of what this needs). It places an issue in a
+// tree and nothing else: what a metric counts reads the window's own role events and handoffs
+// (hasPhaseWork).
 func (p *Population) readPhaseWork(ctx context.Context, pool *store.Pool) error {
-	keys, err := legion.PhaseWorkKeys(ctx, pool)
+	work, err := legion.PhaseWorkKeys(ctx, pool)
 	if err != nil {
 		return err
 	}
-	p.phaseWork = keys
+	p.phaseWork = work.Keys
 	return nil
 }
 

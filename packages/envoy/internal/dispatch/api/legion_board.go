@@ -71,20 +71,25 @@ var legionBoardColumnOrder = []struct{ id, label string }{
 
 // legionPhaseColumns is the column each phase the daemon reports falls in. A phase this does not
 // name (`done`, and any phase a later daemon adds) puts the issue on no card: the board shows the
-// work in flight, and a phase Dispatch has never heard of is not something it can place.
-var legionPhaseColumns = map[string]string{
-	legion.PhaseAdmitted:       legionColumnDesign,
-	legion.PhasePlanning:       legionColumnPlanning,
-	legion.PhaseImplementing:   legionColumnImplementing,
-	legion.PhaseTesting:        legionColumnTesting,
-	legion.PhaseReviewing:      legionColumnReviewing,
-	legion.PhaseAccepting:      legionColumnAccepting,
-	legion.PhaseRetro:          legionColumnMerging,
-	legion.PhaseMerging:        legionColumnMerging,
-	legion.PhaseAwaitingMerge:  legionColumnMerging,
-	legion.PhaseAwaitingPerson: legionColumnAwaiting,
-	legion.PhaseHeld:           legionColumnHeld,
-}
+// work in flight, and a phase Dispatch has never heard of is not something it can place. The
+// Merging column holds the merger's phases, which are declared once beside the phases themselves
+// (legion.MergerPhases) and read here rather than spelled again.
+var legionPhaseColumns = func() map[string]string {
+	columns := map[string]string{
+		legion.PhaseAdmitted:       legionColumnDesign,
+		legion.PhasePlanning:       legionColumnPlanning,
+		legion.PhaseImplementing:   legionColumnImplementing,
+		legion.PhaseTesting:        legionColumnTesting,
+		legion.PhaseReviewing:      legionColumnReviewing,
+		legion.PhaseAccepting:      legionColumnAccepting,
+		legion.PhaseAwaitingPerson: legionColumnAwaiting,
+		legion.PhaseHeld:           legionColumnHeld,
+	}
+	for _, phase := range legion.MergerPhases {
+		columns[phase] = legionColumnMerging
+	}
+	return columns
+}()
 
 // legionNotConfiguredCode and legionNotConfiguredMessage are the one refusal a project with no
 // Legion daemon gets, whichever route or live view asked (getLegionBoard,

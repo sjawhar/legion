@@ -161,6 +161,18 @@ const (
 	PhaseHeld           = "held"
 )
 
+// MergerPhases are the daemon's three phases the merger works, in the order the workflow runs
+// them. Every reader groups them as one — the board's Merging column (api/legion_board.go), the
+// merger's bar of metric 2, the word a table names a phase by (`merging`) and the send-back out
+// of the merger's phase (legion/metrics/compute.go) — so the grouping is declared here, beside
+// the phases themselves, and not again in each of them.
+var MergerPhases = []string{PhaseRetro, PhaseMerging, PhaseAwaitingMerge}
+
+// IsMergerPhase is whether the daemon's phase is one the merger works (MergerPhases).
+func IsMergerPhase(phase string) bool {
+	return slices.Contains(MergerPhases, phase)
+}
+
 // JSONString is a JSON text's string value, or "" for a null, a number, or anything else: an
 // observation's value is whatever the daemon sent, so a reader of one names what it expects
 // rather than trusting the shape.

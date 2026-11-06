@@ -251,6 +251,28 @@ func TestTheLegionBoardPutsEachIssueInOneColumn(t *testing.T) {
 	}
 }
 
+// TestTheMergingColumnHoldsEveryPhaseTheMergerWorks: the merger's phases are one declaration
+// (legion.MergerPhases), which the board's column map reads rather than spelling them again, so
+// an issue in any of the three is on the Merging column's cards and on no other.
+func TestTheMergingColumnHoldsEveryPhaseTheMergerWorks(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	seedLegionProjects(t, handler, "INFRA")
+	nameLegionDaemon(t, handler, "INFRA", "http://legion-infra.internal:13370")
+	now := time.Now().UTC()
+	var want []string
+	for index, phase := range legion.MergerPhases {
+		key := seedLegionIssue(t, database, "INFRA", index+1, "An issue the merger works", string(rune('a'+index)), nil, "")
+		seedLegionObservation(t, database, "INFRA", key, legion.FieldPhase, `"`+phase+`"`, now.Add(-time.Hour))
+		want = append(want, key)
+	}
+	seedLegionRead(t, database, "INFRA", now.Add(-time.Minute), "")
+
+	board := legionBoardOf(t, handler, "INFRA")
+	if got := legionColumnKeys(t, board, legionColumnMerging); !slices.Equal(got, want) {
+		t.Errorf("the Merging column holds %v, want the issue of each of %v", got, legion.MergerPhases)
+	}
+}
+
 // TestTheLegionBoardQueuesByRankUntilADaemonRecordsItsWaitingLine: before any read recorded an
 // admission block — every read a daemon before this release answered — the Queue column is the
 // roots waiting for a slot in Dispatch's rank order, which is the order the daemon's own line
@@ -513,19 +535,26 @@ func closeLegionIssue(t *testing.T, database *store.Store, key string, at time.T
 }
 
 // seedLegionRoleEvent writes one event of a session titled `Legion <role> · <titled>` on the
-// issue, the way Dispatch learns a session's title: the actor's origin carries it
-// (delivery/agents.go's ResolveSessionTitles reads the newest). It is Legion phase work with no
-// observation behind it where titled is the issue's own key; where it names another issue the
-// event is a Legion role writing on an issue it does not work — a tracking issue it reports
-// under — which is no phase work of this issue at all.
+// issue. It is Legion phase work with no observation behind it where titled is the issue's own
+// key; where it names another issue the event is a Legion role writing on an issue it does not
+// work — a tracking issue it reports under — which is no phase work of this issue at all.
 func seedLegionRoleEvent(t *testing.T, database *store.Store, issue, session, role, titled string, at time.Time) {
+	t.Helper()
+	seedSessionEvent(t, database, issue, session, "Legion "+role+" · "+titled, at)
+}
+
+// seedSessionEvent writes one event of the session on the issue under title, the way Dispatch
+// learns a session's title: the actor's origin carries it, and the newest of them is the
+// session's title (delivery/agents.go's ResolveSessionTitles). A title of no Legion shape is an
+// ordinary session's, which the phase-work rule reads and finds no role in.
+func seedSessionEvent(t *testing.T, database *store.Store, issue, session, title string, at time.Time) {
 	t.Helper()
 	legionExec(t, database, `insert into events (issue_key, seq, type, actor, payload, notify, created_at)
 		select $1, coalesce(max(seq), 0) + 1, 'message.created',
 			jsonb_build_object('kind', 'session', 'id', $2::text,
 				'origin', jsonb_build_object('session_title', $3::text)),
 			'{}', false, $4
-		from events where issue_key = $1`, issue, session, "Legion "+role+" · "+titled, at)
+		from events where issue_key = $1`, issue, session, title, at)
 }
 
 // seedLegionHandoff records one handoff of the issue, the other kind of Legion phase work
@@ -744,6 +773,116 @@ func TestTheLiveBoardReadsPhaseWorkAsTheOneReadDoesAfterARename(t *testing.T) {
 	}
 	requireSameBody(t, "the board the event feed kept", snapshot.Body,
 		getBody(t, rig.handler, windowTarget(t, legionBoardView, snapshot.Body, "")))
+}
+
+// seedPhaseWorkChain seeds three issues of INFRA, top to bottom: a top the daemon reports, a
+// middle it reports nothing of, and a bottom it reports. The walk stops below the middle while
+// the middle is no Legion issue, and climbs to the top the moment it carries phase work, so the
+// bottom's tree is what a board read says of the phase-work set.
+func seedPhaseWorkChain(t *testing.T, rig *hubRig, first int, at time.Time) (top, middle, bottom string) {
+	t.Helper()
+	top = seedLegionIssue(t, rig.database, "INFRA", first, "The top, which the daemon reports", "a", nil, "")
+	middle = seedLegionIssue(t, rig.database, "INFRA", first+1, "The tracking issue in neither half of the rule", "b", nil, top)
+	bottom = seedLegionIssue(t, rig.database, "INFRA", first+2, "The bottom, which the daemon reports", "c", nil, middle)
+	for _, key := range []string{top, bottom} {
+		seedLegionObservation(t, rig.database, "INFRA", key, legion.FieldPhase, `"implementing"`, at)
+	}
+	seedLegionRead(t, rig.database, "INFRA", at, "")
+	return top, middle, bottom
+}
+
+// legionBoardOnTheHub is the board the hub's own server reads, the one whose phase-work set the
+// event feed keeps: the rig builds the hub on a server of its own, so the handler's set is
+// another one, filled by its own reads and marked stale by nothing.
+func legionBoardOnTheHub(t *testing.T, rig *hubRig, project string) legionBoardResponse {
+	t.Helper()
+	population, err := rig.hub.server.readLegionBoard(t.Context(), project)
+	if err != nil {
+		t.Fatalf("read %s's board on the hub's server: %v", project, err)
+	}
+	return legionBoardCompute(population, time.Now().UTC())
+}
+
+// applyEvents wakes the hub and waits until its event cursor has reached the log's head, so
+// every event the test wrote has been applied.
+func (r *hubRig) applyEvents(t *testing.T, what string) {
+	t.Helper()
+	head := eventHead(t, r.database)
+	notifyChannel(t, r.database, EventsChannel, "")
+	r.waitForEventCursor(t, head, what)
+}
+
+// TestAnOrdinarySessionsEventLeavesThePhaseWorkSetCurrent: the issues that carry Legion phase
+// work are one read of every project's whole event log and of every handoff
+// (legion.PhaseWorkKeys), so the live hub marks the set stale only for an event that can move
+// what that read answers (legionPhaseWork.observe). A session that is no Legion role writes
+// most of Dispatch's feed and can neither give an issue phase work nor take it away: the rule
+// reads its newest title and finds no role in it, now and at the read before.
+//
+// The handoff this records behind the event's back is how the test sees that no read was made:
+// it is written into the store with no event of its own, so a board read that made the read
+// again would climb through the issue it names, and one that answered from the set it held
+// would not.
+func TestAnOrdinarySessionsEventLeavesThePhaseWorkSetCurrent(t *testing.T) {
+	rig := newHubRig(t, nil)
+	seedLegionProjects(t, rig.handler, "INFRA")
+	nameLegionDaemon(t, rig.handler, "INFRA", "http://legion-infra.internal:13370")
+	now := time.Now().UTC()
+	_, middle, bottom := seedPhaseWorkChain(t, rig, 880, now.Add(-time.Hour))
+	rig.applyEvents(t, "the issues the test seeded")
+	if tree := legionCard(t, legionBoardOnTheHub(t, rig, "INFRA"), bottom).Tree; tree != bottom {
+		t.Fatalf("the board puts %s in tree %q before the event, want itself: the issue above it carries no phase work", bottom, tree)
+	}
+
+	seedLegionHandoff(t, rig.database, middle, "plan", now.Add(-30*time.Minute))
+	seedSessionEvent(t, rig.database, bottom, "s-880", "A person's own session", now.Add(-time.Minute))
+	rig.applyEvents(t, "the ordinary session's event")
+
+	if !rig.hub.server.legionPhaseWork.isCurrent() {
+		t.Error("an ordinary session's event marked the phase-work set stale, so the next board read scans every project's whole event log again")
+	}
+	if tree := legionCard(t, legionBoardOnTheHub(t, rig, "INFRA"), bottom).Tree; tree != bottom {
+		t.Errorf("the board puts %s in tree %q after an ordinary session's event, want itself: the handoff recorded behind the event says the set was read again", bottom, tree)
+	}
+}
+
+// TestALegionTitleAndARenameMarkThePhaseWorkSetStale: the other half of the narrow rule. An
+// event whose title makes its session a Legion role working the issue it is written on gives
+// that issue phase work, and an event that renames such a session takes it away again
+// (legion.PhaseWorkKeys reads each session's newest title), so both mark the set stale and the
+// board read after each answers the set as it stands.
+func TestALegionTitleAndARenameMarkThePhaseWorkSetStale(t *testing.T) {
+	rig := newHubRig(t, nil)
+	seedLegionProjects(t, rig.handler, "INFRA")
+	nameLegionDaemon(t, rig.handler, "INFRA", "http://legion-infra.internal:13370")
+	now := time.Now().UTC()
+	top, middle, bottom := seedPhaseWorkChain(t, rig, 890, now.Add(-time.Hour))
+	rig.applyEvents(t, "the issues the test seeded")
+	if tree := legionCard(t, legionBoardOnTheHub(t, rig, "INFRA"), bottom).Tree; tree != bottom {
+		t.Fatalf("the board puts %s in tree %q before the event, want itself: the issue above it carries no phase work", bottom, tree)
+	}
+
+	// The session's first event under a Legion role's title, on the very issue that title
+	// names: the middle issue carries phase work from here on, and the walk climbs through it.
+	seedLegionRoleEvent(t, rig.database, middle, "s-890", "implementer", middle, now.Add(-30*time.Minute))
+	rig.applyEvents(t, "the Legion role's event")
+	if rig.hub.server.legionPhaseWork.isCurrent() {
+		t.Error("an event that makes its session a Legion role of the issue it wrote on left the phase-work set current, so the next board read answers without it")
+	}
+	if tree := legionCard(t, legionBoardOnTheHub(t, rig, "INFRA"), bottom).Tree; tree != top {
+		t.Errorf("the board puts %s in tree %q after the Legion role's event, want %s: the issue above it carries phase work now", bottom, tree, top)
+	}
+
+	// The same session renamed to the issue it went on to work: its newest title is the only
+	// title Dispatch resolves, so the middle issue carries no phase work by it any more.
+	seedLegionRoleEvent(t, rig.database, bottom, "s-890", "implementer", bottom, now.Add(-15*time.Minute))
+	rig.applyEvents(t, "the renamed session's event")
+	if rig.hub.server.legionPhaseWork.isCurrent() {
+		t.Error("an event that renamed a Legion role's session left the phase-work set current, so the next board read still holds the issue it wrote on before")
+	}
+	if tree := legionCard(t, legionBoardOnTheHub(t, rig, "INFRA"), bottom).Tree; tree != bottom {
+		t.Errorf("the board puts %s in tree %q after the rename, want itself: no session titled for %s wrote on it", bottom, tree, middle)
+	}
 }
 
 // TestAnUnstartedChildIsCountedOnTheNearestCardAndNeverLosesItsOwn: a card an issue would carry

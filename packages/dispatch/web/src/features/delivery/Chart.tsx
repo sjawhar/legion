@@ -126,17 +126,17 @@ export interface ChartRows {
   readonly header: string;
   readonly over: string;
   /** How the table pairs a compare range's row with the window's, which is what its change
-   *  column is the change between:
+   *  column is the change between. Every chart says which it is:
    *
-   *    - `"position"`, the default: row *i* of each range is the *i*-th of its own run, which is
-   *      what a run of days or of UTC weeks is — two ranges of one length cover the same number
-   *      of them, and the pairs are the two ranges' first days, second days, and so on.
+   *    - `"position"`: row *i* of each range is the *i*-th of its own run, which is what a run
+   *      of days or of UTC weeks is — two ranges of one length cover the same number of them,
+   *      and the pairs are the two ranges' first days, second days, and so on.
    *    - `"name"`: a row pairs with the compare range's row of the same name, and a name only
    *      one range holds is a row with nothing on the other side. A run whose rows are issues or
    *      worker types is this: row *i* of two ranges is two different issues, so a change
    *      between them would be the change between two unrelated numbers.
    */
-  readonly pair?: "position" | "name";
+  readonly pair: "position" | "name";
 }
 
 /** What a run of per-day bars is: the rows every chart has unless it names its own. */
@@ -468,7 +468,7 @@ function NumberTable({
   }
   notes.push(`${NOTHING} is a ${naming.header.toLowerCase()} with nothing measured`);
   const rows = useMemo(
-    () => pairedRows(table, comparing ? (compared ?? emptyTable) : null, naming.pair ?? "position"),
+    () => pairedRows(table, comparing ? (compared ?? emptyTable) : null, naming.pair),
     [comparing, compared, naming.pair, table]
   );
   return (

@@ -319,9 +319,12 @@ test("a daemon no read has recorded the settings of says so rather than showing 
 // The relay answers the daemon's own body, which keys each verdict by path under `settings`
 // (`LegionSettingsChangeResponse` in @legion/contracts/legion-api, the daemon's
 // api.SettingsChangeResponse): a fake answering a flat map of paths is a fake no daemon matches,
-// which is why the shape is a contract type both ends read.
+// which is why the shape is a contract type both ends read. The client hands the panel that
+// body with `recorded`, whether the daemon wrote the change into its own store
+// (`putLegionProjectSettings`).
 test("a change goes to the relay route and shows what the daemon did with the key", async () => {
   const put = spyOn(api, "putLegionProjectSettings").mockResolvedValue({
+    recorded: true,
     settings: { admission_cap: { applied: "at-once" } },
   });
   try {
@@ -349,6 +352,7 @@ test("a change goes to the relay route and shows what the daemon did with the ke
 
 test("a refused key shows the daemon's reason and leaves the value as it was", async () => {
   const put = spyOn(api, "putLegionProjectSettings").mockResolvedValue({
+    recorded: true,
     settings: { admission_cap: { refused: "a running issue holds a slot" } },
   });
   try {
@@ -401,15 +405,17 @@ test("a refusal Dispatch itself made lands on the row it was made from", async (
   }
 });
 
-// The daemon applied the change and could not write it back to its `legion.yaml`: it answers
-// its own verdicts with a 500, which Dispatch relays unchanged (the daemon's
-// internal/api/settings_route.go, its `config.NotRecorded` arm). The change took effect, so the
-// row must not go back to the old value and must not read as a failure; the daemon's file is
-// what is missing, and its next restart is where the old value comes back.
-test("a change the daemon applied and could not store stays applied on the row, and says what is missing", async () => {
-  const put = spyOn(api, "putLegionProjectSettings").mockRejectedValue(
-    new ApiError(500, { settings: { admission_cap: { applied: "at-once" } } })
-  );
+// The daemon applied the change and could not record it in its own store: it answers its own
+// verdicts with a 500, which Dispatch relays unchanged (the daemon's
+// internal/api/settings_route.go, its `config.NotRecorded` arm) and the client hands the panel
+// as `recorded: false`. The change took effect, so the row must not go back to the old value
+// and must not read as a failure; what the panel says is that the daemon is running on the new
+// value and a restart puts back the old one.
+test("a change the daemon applied and could not record stays applied on the row, and says what a restart undoes", async () => {
+  const put = spyOn(api, "putLegionProjectSettings").mockResolvedValue({
+    recorded: false,
+    settings: { admission_cap: { applied: "at-once" } },
+  });
   try {
     await renderView(board({}, SETTINGS));
 
@@ -418,7 +424,7 @@ test("a change the daemon applied and could not store stays applied on the row, 
     });
     fireEvent.click(screen.getByRole("button", { name: "Change admission_cap" }));
 
-    const answer = await screen.findByText(/could not write the change to its legion.yaml/);
+    const answer = await screen.findByText(/running on the new value but could not record it/);
     expect(answer.textContent).toContain("Applied at once");
     expect(screen.queryByText(/Couldn't change admission_cap/)).toBeNull();
     const cap = document.querySelector('[data-legion-setting="admission_cap"]');

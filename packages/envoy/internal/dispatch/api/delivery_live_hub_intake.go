@@ -373,11 +373,12 @@ func (h *deliveryHub) receive(event model.Event) {
 // the issues and sessions its read names are not known until the read lands.
 //
 // It also marks the set of issues that carry Legion phase work stale, which a Legion board's
-// tree walk reads (legion_phase_work.go): a handoff recorded, or any event of a session, can
-// move what that one read answers, since the rule reads each session's newest title. The hub
-// states no rule of its own here — a second reading of a title is how the board and the metrics
-// came to put one issue in two trees — and the next board read makes the read again. The mark
-// is taken under the set's own lock, taken here under the hub's, never the other way round.
+// tree walk reads (legion_phase_work.go): a handoff recorded, and the events of a session the
+// set says can move what its one read answers (its observe, which is where that rule lives).
+// The hub states no rule of its own here — a second reading of a title is how the board and the
+// metrics came to put one issue in two trees — and the next board read makes the read again.
+// The mark is taken under the set's own lock, taken here under the hub's, never the other way
+// round.
 func (h *deliveryHub) applyEventLocked(event liveEvent, now time.Time) {
 	switch event.kind {
 	case "issue.created", "issue.updated", "issue.closed":
@@ -418,8 +419,10 @@ func (h *deliveryHub) applyEventLocked(event liveEvent, now time.Time) {
 		}
 		// An event of a session can move which issues the phase-work read answers: the title it
 		// carries is that session's newest, and the rule reads it against every issue the
-		// session has written on.
-		h.server.legionPhaseWork.invalidate()
+		// session has written on. Which events those are is the set's own (observe): the
+		// ordinary session writing here is most of this feed, and a read of every project's
+		// whole event log is what a mark costs.
+		h.server.legionPhaseWork.observe(event.actor.ID, title, event.issueKey)
 		for _, view := range h.views {
 			if shown, ok := view.sessions[event.actor.ID]; ok && shown != title {
 				h.markDirtyLocked(view, now, deliveryCauseChange)

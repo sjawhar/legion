@@ -40,7 +40,8 @@ func ParseScope(raw string) (Scope, error) {
 // so the seven bars of an issue add up to its work time (phaseTime).
 const barNoRole = "no_role"
 
-// bars are the seven stacked bars in the order the card draws them.
+// bars are the seven stacked bars in the order the card draws them. The merger's three phases
+// are the one declaration of that grouping (legion.MergerPhases).
 var bars = []struct {
 	Role   string
 	Phases []string
@@ -50,7 +51,7 @@ var bars = []struct {
 	{"implementer", []string{legion.PhaseImplementing}},
 	{"tester", []string{legion.PhaseTesting}},
 	{"reviewer", []string{legion.PhaseReviewing}},
-	{"merger", []string{legion.PhaseRetro, legion.PhaseMerging, legion.PhaseAwaitingMerge}},
+	{"merger", legion.MergerPhases},
 	{barNoRole, []string{legion.PhaseAwaitingPerson, legion.PhaseHeld}},
 }
 
@@ -171,11 +172,14 @@ type FiledIssue struct {
 	Title string    `json:"title"`
 	At    time.Time `json:"at"`
 	Class string    `json:"class"`
-	// Filer is the role that filed it and the issue that role was working, or the controller.
+	// Filer is the role that filed it and the issue that role was working, or the controller:
+	// one of Legion's six worker types or `controller`, which the contract declares as
+	// `LegionFiler` (packages/contracts/src/dispatch-api.ts).
 	Filer      string `json:"filer"`
 	FilerIssue string `json:"filer_issue"`
-	// FilerPhase is the phase the filer's issue was in when it filed, which the table names for
-	// every class; it is empty for a filing by the controller, which works no issue.
+	// FilerPhase is the phase the filer's issue was in when it filed, named by the bar it falls
+	// on (tablePhase, whose whole answer the contract declares as `LegionTablePhase`); it is
+	// empty for a filing by the controller, which works no issue.
 	FilerPhase string `json:"filer_phase"`
 }
 
@@ -542,9 +546,9 @@ func reviewRounds(issue *Issue, timeline phaseTimeline) int {
 // history before observations, as the review rounds beside it are, since `needs_review` is the
 // status of both reviewing and accepting, `retro` the status of the merger's phase and
 // `in_progress` the status of implementing. The merger's phase is three of the daemon's
-// (`retro`, `merging` and `awaiting_merge`, the three the merger's bar holds), and a red check
-// sends an issue back to implementing out of any of them, so the observed half counts all three
-// where the fallback half counts the one status that names them.
+// (legion.MergerPhases, the three the merger's bar holds), and a red check sends an issue back
+// to implementing out of any of them, so the observed half counts all three where the fallback
+// half counts the one status that names them.
 func sentBackOnce(issue *Issue, timeline phaseTimeline) bool {
 	if !timeline.observed {
 		return statusMoved(issue, sentBackStatuses, statusImplementing)
@@ -553,9 +557,9 @@ func sentBackOnce(issue *Issue, timeline phaseTimeline) bool {
 		if timeline.spans[index].Phase != legion.PhaseImplementing {
 			continue
 		}
-		switch timeline.spans[index-1].Phase {
-		case legion.PhaseTesting, legion.PhaseReviewing, legion.PhaseAccepting,
-			legion.PhaseRetro, legion.PhaseMerging, legion.PhaseAwaitingMerge:
+		switch previous := timeline.spans[index-1].Phase; {
+		case previous == legion.PhaseTesting, previous == legion.PhaseReviewing,
+			previous == legion.PhaseAccepting, legion.IsMergerPhase(previous):
 			return true
 		}
 	}
@@ -696,12 +700,19 @@ func phaseAt(timeline []PhaseSpan, at time.Time) string {
 }
 
 // tablePhase is the word a table names a phase by: the bar it falls on (the spec's "Phase words
-// in tables"). The merger's bar holds three of the daemon's phases — `retro`, `merging` and
-// `awaiting_merge` — so a filer in any of them is named merging, and every other phase is named
-// as the timeline names it.
+// in tables"). The merger's bar holds three of the daemon's phases (legion.MergerPhases, the one
+// declaration of that grouping), so a filer in any of them is named merging, and every other
+// phase is named as the timeline names it.
+//
+// The whole of what it answers, which packages/contracts/src/dispatch-api.ts declares as
+// `LegionTablePhase`: the seven words of the bars — `design`, `planning`, `implementing`,
+// `testing`, `reviewing`, `accepting` and `merging`; the three words a timeline holds that are
+// on no role's bar — `queued`, which is the waiting line, and `awaiting_person` and `held`,
+// which are the "no role" bar's; `done`, which an issue the daemon has finished and Dispatch
+// has not closed yet holds; and "" for a moment no span of the timeline covers, which is what a
+// filing by the controller carries, since the controller works no issue.
 func tablePhase(phase string) string {
-	switch phase {
-	case legion.PhaseRetro, legion.PhaseMerging, legion.PhaseAwaitingMerge:
+	if legion.IsMergerPhase(phase) {
 		return legion.PhaseMerging
 	}
 	return phase

@@ -4639,20 +4639,45 @@ export interface LegionSplittingWeek {
   readonly finished: number;
 }
 
+/** Who filed an issue of metric 4: one of Legion's six worker types, or the project's
+ *  controller, which works no issue. It is the role the filing session's title names
+ *  (`legion.SessionTitle.Role`, `metrics.FiledIssue.Filer`). */
+export type LegionFiler = LegionRole | "controller";
+
+/** The word a table of the Legion section names a phase by (`metrics.tablePhase`), which is the
+ *  bar the phase falls on. The seven bar words are `design`, `planning`, `implementing`,
+ *  `testing`, `reviewing`, `accepting` and `merging`, the last of which holds the daemon's
+ *  `retro`, `merging` and `awaiting_merge` (`legion.MergerPhases`). Three more words a
+ *  timeline holds are on no role's bar and pass through as they are: `queued`, the waiting
+ *  line, and `awaiting_person` and `held`, the "no role" bar's. `done` is what an issue the
+ *  daemon has finished and Dispatch has not closed yet holds, and `""` is a moment the issue's
+ *  timeline does not cover, which is what every filing by the controller carries. */
+export type LegionTablePhase =
+  | ""
+  | "queued"
+  | "design"
+  | "planning"
+  | "implementing"
+  | "testing"
+  | "reviewing"
+  | "accepting"
+  | "merging"
+  | "awaiting_person"
+  | "held"
+  | "done";
+
 /** One issue a Legion session created in the window: its class, the role that filed it and the
  *  issue that role was working (the controller files under no issue), and the phase that issue
  *  was in then, which the table names for every class and which is empty only for a filing by
- *  the controller. The phase is named by the bar it falls on, as every table of this section
- *  names one: `design`, `planning`, `implementing`, `testing`, `reviewing`, `accepting` and
- *  `merging`, the last of which holds the daemon's `retro`, `merging` and `awaiting_merge`. */
+ *  the controller. */
 export interface LegionFiledIssue {
   readonly key: string;
   readonly title: string;
   readonly at: string;
   readonly class: LegionFilingClass;
-  readonly filer: string;
+  readonly filer: LegionFiler;
   readonly filer_issue: string;
-  readonly filer_phase: string;
+  readonly filer_phase: LegionTablePhase;
 }
 
 /** `GET /api/v1/legion/metrics?project&from&to&scope`: the Delivery page's Legion section — the
