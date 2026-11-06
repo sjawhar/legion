@@ -50,7 +50,7 @@ heavy run goes where your deployment's instructions say.
   The DSN's own database is owned by your login and writable, so what keeps two roles out of it is
   this rule rather than the server. `packages/daemon/internal/daemon` is the third case, whose
   `TestMain` takes one database for the package's run through `internal/testpg`.
-  Empty the served database by dropping your own suite's schemas and the objects in `public`,
+  Empty the served database by dropping your own suite's schemas and your own objects in `public`,
   never `public` itself: `vector` goes with it, your login may not create it again, and
   `ensure` only ever installs it at a database's creation.
 - The server is empty in every new pod and dies with it. Every database made from `template1`
