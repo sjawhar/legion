@@ -89,11 +89,32 @@ login reached its expiry and it logged in again, is refused
 `NOT_ENROLLING_CREDENTIAL`, and that pod's enrollment ends with its lease or with that machine
 login. From the moment the lease lapses, its next renewal is refused
 `ENROLLMENT_NOT_LIVE`; other session calls remain `PROOF_INVALID`. The broker's sweep, which runs
-every `BROKER_SWEEP_SECONDS`, then ends the enrollment on its first run after the lapse. Ending an
-enrollment any of these ways revokes every grant it held and cancels every request it still had
-pending, so those leave the approver's Inbox and an approval can never
-land on a session that is gone
+every `BROKER_SWEEP_SECONDS`, then ends the enrollment on its first run after the lapse.
+What an end does to what the enrollment still holds depends on who ended it.
+An end a person makes, revoking the machine login or their sign-in on a box, revokes every grant
+the enrollment held and cancels every request it still had pending, so those leave the approver's
+Inbox and an approval can never land on a session that is gone.
+An end of the box leaves both where they are: when the enrollment names a session, records the
+principal that session belongs to, and still holds a live grant or a pending request, the
+launcher's own revoke and a lapsed lease mark the row revoked and **dormant**, revoking nothing
 (`packages/envoy/internal/broker/enroll/enroll.go`, `endEnrollment`).
+The row has to record the principal because only the pair, the session name and the principal, is
+ever adopted: a row that records no principal can be taken by no later enrollment, so it ends as
+every end did before the carry, its grants revoked and its pending requests cancelled
+(`enroll.go`, `adopt`).
+Every enrollment made before the broker recorded principals has none, among them every enrollment
+live on the day the carry ships, so each of those ends as it always did and the enrollment that
+replaces it carries.
+A dormant enrollment proves nothing from the moment it goes dormant, as any ended enrollment proves
+nothing, and its next renewal is refused `ENROLLMENT_NOT_LIVE`; what it holds waits for the next
+enrollment of that session name under the same principal to take.
+An approval given while the box is gone still mints a grant: the broker hangs it off the row the
+carry is keeping for that session, and the session's next enrollment takes it with the rest
+(`packages/envoy/internal/broker/requests/machine_state.go`, `ApplyDecision`).
+A box is replaced far more often than the session that runs on it, so an end of the box is no end of
+the session.
+[Requests and grants](#requests-and-grants) says what that next enrollment takes, and what ends a
+grant no enrollment comes back for.
 
 Every `session` enrollment records an **operator**: the person whose machine it runs on. The
 operator is the person who approved the machine login that enrolled it, never a value the launcher
@@ -439,13 +460,93 @@ A granted request yields a **grant**: the session's right to read those values u
 ends. A grant lasts the lifetime its request asks for
 (`agent-secrets NAME --ttl 2m -- command`, or `agent-secrets request NAME --ttl 2m`), counted from
 the moment it is granted. A request that names no lifetime gets 12 hours, or, when every secret it
-names carries the tag `default-grant=session`, a grant that lasts until its session ends. A grant
-also always ends with its session. Any other value of `default-grant` is refused
+names carries the tag `default-grant=session`, a grant that lasts until its session ends.
+A grant also always ends with its session, and its session is a session name under one principal,
+not the box the request came from.
+Any other value of `default-grant` is refused
 (`default-grant-malformed`). A secret with `max-grant` requires that shorter
 lifetime and bounds it. The approver sees the lifetime the request asked for before deciding it.
 While a grant lives, a new request from the same session for exactly the same names and the same
 lifetime gets the same grant back, without asking anyone again, as long as the current policy still
 allows it.
+
+A grant binds to a session name under one principal.
+The box is still there: the grant hangs off one enrollment at a time, and a session reads it only by
+proving that enrollment's key.
+The session name, with the principal beside it, is what decides which enrollment that is.
+The principal is what the enrolling box proved, never anything its launcher states: the person, for
+a box of theirs and for their sign-in on a machine; the fleet's Google account, for a machine's own
+session; the service account its projected token proved, for a pod
+(`packages/envoy/internal/broker/enroll/enroll.go`, `carryPrincipal`).
+The broker records which principal holds a name, on the row the token exchange binds every token's
+name in, so the name is one principal's whichever of the two claimed it first.
+An enrollment that names no session belongs to no principal at all.
+
+Enrolling the same session name again under the same principal takes what every earlier enrollment
+of that pair still holds.
+Its grants move to the new enrollment, with the requests it is still waiting on a person for and the
+names its operator withheld from it, and the move revokes and cancels none of them
+(`enroll.go`, `adopt`).
+An approval given after the move lands on the session as it stands then, because a decision grants to
+the enrollment the request row names
+(`packages/envoy/internal/broker/requests/machine_state.go`, `ApplyDecision`).
+That is how a grant follows a session to the next box it comes up on: a helper restarts, a machine is
+rebuilt, a person signs in on a second machine, a Legion pod is replaced.
+Each move is in the audit record, one `enrollment.adopted` row naming both enrollments and how much
+moved, and one `grant.moved` row per grant, naming the grant, the enrollment holding it now and the
+one it came from.
+
+Three things take nothing.
+A session name another principal holds is refused outright: the enrollment is refused
+`SESSION_HELD`, naming the session and no holder, and writes nothing
+(`enroll.go`, `bindSessionName`).
+A token exchange under that name is refused the same way, on the same row, so the name stays its
+principal's for 90 days past the last lease or token under it
+(`packages/envoy/internal/broker/oauthstore/exchange.go`, `ErrSessionHeld` and `SessionRetention`).
+A box whose key a person revoked trades nothing, so it enrols nothing: a launcher proof signed with a
+revoked credential does not authenticate, and an enrollment already under way finds the credential
+revoked and is refused `LAUNCHER_INVALID`.
+A session enrolling under a name of its own has no earlier enrollment of that pair, so it starts with
+nothing but the grants it asks for.
+
+A grant that moves still ends, three ways.
+It ends when its own lifetime runs out, whichever box holds it by then.
+It ends when the carry window closes: an enrollment the box's end left dormant holds what it holds
+for `BROKER_SESSION_CARRY_SECONDS`, 12 hours by default, and the sweep then revokes those grants and
+cancels those pending requests for good, with an `enrollment.carry_expired` audit row
+(`enroll.go`, `EndCarried`).
+Those 12 hours are the lifetime a request naming none already gets, so the default carry never
+outlives the grant it carries; 0 turns the carry off, and the broker refuses a window longer than a
+day.
+And it ends at once when a person revokes the grant itself, the machine login behind it, or their
+sign-in on a box.
+The two login revokes reach the dormant enrollments that login made as well as its live ones, so a
+grant a person has just taken back never waits on the session's next box
+(`enroll.go`, `endCredential`).
+
+Within one principal the session name is asserted, not proved.
+The name rides in the enrollment request's body, outside the launcher proof, which signs the call's
+method and URL and nothing else
+(`packages/envoy/internal/broker/proof/proof.go`, `Verify`).
+So any holder of a launcher credential of the same person, or of the same Google account, can enrol
+under that session's name and take what the session holds.
+The session it takes from need not have ended: a carry takes from every enrollment of the pair that
+still holds something and has not been ended for good, a live one included
+(`enroll.go`, `adopt`).
+The box it took from keeps its enrollment and loses the grant: the grant hangs off the new
+enrollment now, and the old enrollment's read of it is refused `NOT_YOURS`
+(`packages/envoy/internal/broker/requests/machine_read.go`, `Values`).
+Taking a grant releases its values at once and asks nobody, where a request for the same human-tier
+secret under a name of its own would wait for the person who owns the secret
+(`packages/envoy/internal/broker/policy/policy.go`, `Evaluate`).
+So a holder of that person's or that account's credential who knows a session's name gets what that
+session was approved for, with no approval of its own.
+Within one principal what stands between a caller and a secret is the sign-in on a box, or the
+account, and never the session name.
+Three things bound it.
+Another principal is refused the name outright.
+Every adoption is in the audit record, naming both enrollments.
+And a person's revoke ends the grant at once.
 
 The broker never stores a value. Each time a session reads a grant, the broker checks that the
 session is still enrolled, the grant is live, its approval still verifies, and the current policy
@@ -458,7 +559,10 @@ the value: approve a secret only for a session you would trust with the value it
 
 A grant ends when its lifetime runs out, when its session revokes it (`agent-secrets revoke`), when
 its approver or its enrollment's operator revokes it in Dispatch or from one of their machines
-(`agent-secrets grant revoke`), or when its enrollment ends. A grant the session got without asking
+(`agent-secrets grant revoke`), and when the enrollment holding it ends for good: a person's revoke
+of the machine login or the sign-in behind it, or the carry window closing on an enrollment the
+box's end left dormant.
+A grant the session got without asking
 is revoked like any other, and when its
 operator revokes it the session asks for approval before it gets the same secrets again (the operator
 [withholds](#owner-and-tier-who-may-have-which-secret) them, even when the grant had already
