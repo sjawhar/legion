@@ -11,9 +11,10 @@ export function isPlainClick(event: MouseEvent): boolean {
 }
 
 /** What the caller that opened the view holds: the React picture closes it when it unmounts, the
- *  editors' node view when it is destroyed. `close()` called while the library is still being
- *  imported calls that open off, so a picture that leaves the page in those milliseconds still
- *  ends with nothing open. */
+ *  editors' node view when it is destroyed. `close()` takes the view off the page whenever it is
+ *  called - while the library is still being imported, while the view is animating open, and
+ *  once it is open - so a picture that leaves the page at any of those moments leaves no view
+ *  behind it. */
 export interface PictureViewer {
   close: () => void;
 }
@@ -30,12 +31,15 @@ const READING_SURFACE = "article.dispatch-doc, .dispatch-markdown";
  *  (`features/doc/picture-view.ts`). */
 const PLACEHOLDER_PICTURE = "[data-dispatch-picture] img, [data-dispatch-doc-picture] img";
 
-/** The viewer that is open, or whose library is still being imported: one at a time. */
+/** The viewer that is open, whose library is still being imported, or that is still animating
+ *  itself off the page: one at a time. The slot frees on PhotoSwipe's `destroy` (`release`), so
+ *  a click while one is closing opens nothing rather than a second view beside it. */
 let viewing: ViewerSession | undefined;
 
 interface ViewerSession {
-  /** Whether the caller closed the view, which a `close()` before the import lands records here
-   *  for the import to read. */
+  /** Whether the caller closed the view. A `close()` PhotoSwipe cannot carry out yet - one
+   *  before the import finishes, one during the opening animation - records it here, and
+   *  whichever of those two moments comes next reads it and closes the view (`draw`). */
   closed: boolean;
   viewer: PhotoSwipe | undefined;
 }
@@ -45,10 +49,10 @@ interface ViewerSession {
  * pixels and pannable there, with the pictures of its reading surface behind the step controls
  * and the `2 of 3` counter. Escape, the close control and a click outside the picture close it,
  * and the browser gives the focus back to what held it. Only one viewer is open at a time: a
- * call while one is open, or while one is still importing the library, opens nothing and answers
- * undefined, so only the caller that opened it holds it and closes it when its picture leaves
- * the page. Plain DOM, so the rendered bodies' `DispatchPicture` and the document editors'
- * picture node view open the same viewer.
+ * call while one is open, while one is still importing the library, or while one is animating
+ * itself off the page opens nothing and answers undefined, so only the caller that opened it
+ * holds it and closes it when its picture leaves the page. Plain DOM, so the rendered bodies'
+ * `DispatchPicture` and the document editors' picture node view open the same viewer.
  */
 export function openPictureViewer(clicked: HTMLImageElement): PictureViewer | undefined {
   if (viewing !== undefined) {
@@ -62,8 +66,18 @@ export function openPictureViewer(clicked: HTMLImageElement): PictureViewer | un
   return {
     close: () => {
       session.closed = true;
-      session.viewer?.close();
-      release(session);
+      if (session.viewer === undefined) {
+        // No viewer to close yet: the import is still running, and `draw` reads `closed` when
+        // it lands. Free the slot here, since an import that never answers - the chunk retried
+        // while the browser is offline - would otherwise hold it for the rest of the page.
+        release(session);
+        return;
+      }
+      // The slot stays taken until PhotoSwipe's `destroy`, at the end of the closing animation
+      // the next line starts (or, during the opening animation, of the one `openingAnimationEnd`
+      // starts): until then the view is still on the page, and a second one beside it would be
+      // two dialogs over one reader.
+      session.viewer.close();
     },
   };
 }
@@ -135,6 +149,18 @@ async function draw(session: ViewerSession, dataSource: SlideData[], index: numb
     // `bgClickAction` is left at PhotoSwipe's `close`: a click outside the picture closes.
   });
   session.viewer = viewer;
+  // PhotoSwipe's `close()` returns having done nothing unless `opener.isOpen` is true, and the
+  // opener sets that flag only at the end of the opening animation: `_onAnimationComplete`
+  // assigns `isOpen` and then dispatches `openingAnimationEnd`. Without the handler below, a
+  // close called inside that third of a second - the node view destroyed, the React picture
+  // unmounted - would leave the view on the page for good, over a page whose picture is gone.
+  // The event is the earliest moment such a close can take the view off the page, and it cannot
+  // drift from the flag, because the one method that sets the flag sends the event.
+  viewer.on("openingAnimationEnd", () => {
+    if (session.closed) {
+      viewer.close();
+    }
+  });
   viewer.on("destroy", () => release(session));
   sizeOnStep(viewer);
   viewer.init();

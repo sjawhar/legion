@@ -970,8 +970,10 @@ export interface Version {
   /** The picture's own size in pixels, read from the header of the bytes this version stores
    *  when it was uploaded. Recorded together or not at all, and absent for everything that is
    *  not a decoded picture - a document, a video, any other file - and for a picture stored
-   *  before Dispatch read a size. The artifact page and the Artifacts tab reserve a picture's
-   *  box from this pair, since they draw the version the reader chose. */
+   *  before Dispatch read a size. The artifact page reserves a picture's box from this pair,
+   *  since it draws the version the reader chose; the Artifacts tab does not, because it draws
+   *  only the 40 px thumbnail, whose class fixes its box and which takes no `width` or
+   *  `height`. */
   readonly width?: number;
   readonly height?: number;
 }

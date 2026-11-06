@@ -262,8 +262,9 @@ export function pictureView(
       link !== undefined &&
       event.target instanceof Node &&
       link.contains(event.target),
-    // A view destroyed while the viewer's library is still being imported ends with nothing
-    // open: `close()` before the import lands calls that open off.
+    // A view destroyed at any moment of the full-size view's life leaves nothing open:
+    // `close()` takes the view off the page before the import finishes, during the opening
+    // animation, and after it.
     destroy: () => {
       stopWatching();
       viewer?.close();

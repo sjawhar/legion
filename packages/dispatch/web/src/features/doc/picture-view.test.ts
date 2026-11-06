@@ -111,10 +111,10 @@ function views(): NodeListOf<Element> {
   return document.querySelectorAll('[role="dialog"]');
 }
 
-/** One view, open and showing its picture. PhotoSwipe puts the slide's own `<img>` on the page
- *  at the end of its opening animation, and until that end it answers no close, so this is the
- *  wait every row makes before it closes one. A DOM that fires no `transitionend` reaches that
- *  end by the library's own safety timeout, which is longer than `waitFor`'s own second. */
+/** One view, open and showing its picture. PhotoSwipe appends the slide's own `<img>` to the
+ *  page at the end of its opening animation, so this is the wait a row makes to hold the whole
+ *  view. A DOM that fires no `transitionend` reaches that end by the library's own safety
+ *  timeout, which is longer than `waitFor`'s own second. */
 function openedView(): Promise<void> {
   return waitFor(
     () => {
@@ -123,6 +123,17 @@ function openedView(): Promise<void> {
     },
     { timeout: 3_000 }
   );
+}
+
+/** One view whose opening animation is still running: its root is on the page and the slide's
+ *  `<img>`, which PhotoSwipe appends at that animation's end, is not. This is the window in
+ *  which PhotoSwipe's own `close()` returns having done nothing (`opener.isOpen` is false until
+ *  the end), so it is where a row closes a view to show the view still comes off the page. */
+function openingView(): Promise<void> {
+  return waitFor(() => {
+    expect(views()).toHaveLength(1);
+    expect(views()[0]?.querySelector("img")).toBeNull();
+  });
 }
 
 /** Nothing open. A close runs PhotoSwipe's closing animation and takes the root off the page
@@ -445,6 +456,25 @@ test("destroying the node view closes the full-size view its picture opened", as
   await closedView();
 });
 
+test("destroying the node view during the opening animation closes the full-size view", async () => {
+  const view = pictureView(
+    picture("dispatch://CORE-1/artifact/shot-png@v1", "shot.png"),
+    document,
+    noCaret,
+    noWatch,
+    pastVersion
+  );
+  pictureOf(view.dom as HTMLElement).dispatchEvent(
+    new MouseEvent("click", { bubbles: true, button: 0, cancelable: true })
+  );
+  // No wait for the opening to finish: the picture leaves the page a third of a second after
+  // the click, inside PhotoSwipe's opening animation, and the view must still come off it.
+  await openingView();
+
+  view.destroy?.();
+  await closedView();
+});
+
 test("only the picture that opened the full-size view closes it", async () => {
   const view = (src: string) =>
     pictureView(picture(src, "shot.png"), document, noCaret, noWatch, pastVersion);
@@ -463,6 +493,28 @@ test("only the picture that opened the full-size view closes it", async () => {
   expect(views()).toHaveLength(1);
   first.destroy?.();
   await closedView();
+});
+
+test("a click while the full-size view is closing opens no second view", async () => {
+  const view = (src: string) =>
+    pictureView(picture(src, "shot.png"), document, noCaret, noWatch, pastVersion);
+  const first = view("dispatch://CORE-1/artifact/shot-png@v1");
+  const second = view("dispatch://CORE-1/artifact/shot-png@v2");
+  const click = () => new MouseEvent("click", { bubbles: true, button: 0, cancelable: true });
+  pictureOf(first.dom as HTMLElement).dispatchEvent(click());
+  await openedView();
+
+  // The close runs an animation of its own, so the view is still on the page here.
+  first.destroy?.();
+  expect(views()).toHaveLength(1);
+  pictureOf(second.dom as HTMLElement).dispatchEvent(click());
+  await noViewLands();
+  expect(views()).toHaveLength(1);
+
+  // The closing one goes, and the click it refused left nothing to arrive after it.
+  await closedView();
+  await noViewLands();
+  expect(views()).toHaveLength(0);
 });
 
 test("a replaced version's late load error leaves the newer picture, and a failed load draws again on its next report", () => {
