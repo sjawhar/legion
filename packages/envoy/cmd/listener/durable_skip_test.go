@@ -19,6 +19,16 @@ import (
 // shows as the handler's decode failure.
 func TestSubjectIndexAcksADurableMessageNoSessionNeedsBeforeDecodingIt(t *testing.T) {
 	harness := newListenerDeliveryHarness(t)
+	// Both copies refill from their buckets on a goroutine the harness's registries start
+	// (kvwatch.Watcher.Start), and a write that lands while that first read runs carries no mark
+	// of it, so the sweep ending the read takes it back out of the copy
+	// (kvwatch.Copy.CompleteRead) until the watcher delivers the write's own record. The durable
+	// reads both copies for every subject below - the interests it matches (registry.Match) and
+	// the entry that says the session takes the message itself (sessions.Get) - and a read that
+	// misses one decodes a message this row says it acknowledges undecoded, so both reads are
+	// waited out here, before the writes.
+	waitForRegistry(t, harness.registry)
+	waitForSessions(t, harness.sessions)
 	// An interest whose session entry has lapsed: the durable cannot read a record saying the
 	// session takes the message itself, so it decodes and delivers it (durableNeedsDelivery).
 	if _, err := harness.registry.Upsert(store.Interest{SessionID: "ses_followed", MachineID: "test-machine"}, []string{"notifications.dispatch.issue.FOLLOWED-1.>"}); err != nil {

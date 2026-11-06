@@ -163,12 +163,14 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 				}
 			}
 			// Nothing else of the body differs: it is the full state with the two claim keys gone,
-			// and with the three memory keys gone too, since a pod below this contract's own
-			// reader refuses those as well (memory_test.go holds that half).
+			// and with the three memory keys and contract 51's two tree keys — `admission.trees`
+			// and each issue's `tree` — gone too, since a pod below this contract's own reader
+			// refuses those as well (memory_test.go and tree_test.go hold those halves).
 			var want, got map[string]any
 			if err := json.Unmarshal(full, &want); err != nil {
 				t.Fatal(err)
 			}
+			delete(want["admission"].(map[string]any), "trees")
 			for _, issue := range want["issues"].(map[string]any) {
 				issue := issue.(map[string]any)
 				views := []any{issue["architect"]}
@@ -184,6 +186,7 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 				delete(issue, "memoryGroup")
 				delete(issue, "memoryDrawMode")
 				delete(issue, "memoryDrawnAt")
+				delete(issue, "tree")
 			}
 			if err := json.Unmarshal(body, &got); err != nil {
 				t.Fatal(err)

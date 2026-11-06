@@ -1,5 +1,18 @@
 # Changelog
 
+This file is history: every entry after the last release below is in the package's GitHub
+releases, one per `pi-envoy-v*` tag.
+
+## [16.12.1] - 2026-11-06
+
+### Changed
+
+- `scripts/smoke-registration-stall.sh` reads the refresh interval and the live window its
+  budgets are measured in from `@legion/contracts` (`SESSION_HEARTBEAT_MS` and
+  `SESSION_LIVE_WINDOW_MS`), rather than with `sed` over `envoy-settings.ts` and `registry.go`,
+  so a declaration written another way no longer stops the smoke. `bun` joins the tools it
+  requires, and a run prints both numbers before it does anything else.
+
 ## [16.11.0] - 2026-11-05
 
 ### Added

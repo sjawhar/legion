@@ -284,7 +284,7 @@ session registered through, which every registration sends:
 | Field | Oh My Pi | Claude Code |
 | --- | --- | --- |
 | `plugin` | `@sjawhar/pi-envoy` | `@sjawhar/claude-envoy` |
-| `plugin_version` | the package version (a source checkout reports the version of the last release in its history) | the first 12 characters of the marketplace commit Claude Code installed it from, or `source` when it runs from outside Claude Code's plugin cache (a checkout, `--plugin-dir`) |
+| `plugin_version` | the published package's version (a source checkout reports its committed `package.json`, which names no release: a release commits nothing, and the build job writes the version into the manifest it packs) | the published `@sjawhar/claude-envoy` version Claude Code installed, or `source` when it runs from outside Claude Code's plugin cache (a checkout, `--plugin-dir`) |
 
 A session whose plugin predates the two fields shows neither. The `envoy_sessions` tool of the
 Oh My Pi and Claude Code plugins shows them too.

@@ -102,7 +102,8 @@ type Actor struct {
 
 // Recorded is the actor as a write records it: the request's credential dropped. A stored actor
 // is decoded from JSON, which carries no credential, so the credential never reaches a row.
-// Dispatch decides "the same writer" by kind and id (SameAs); the one == left is the document
+// Dispatch decides "the same writer" by kind and id (SameAs) and "the same credential" by those
+// and the names a credential carries (SameCredential); the one == left is the document
 // rooms' lost-write notice (docs/lostedit.go), so an actor handed to the document service must
 // carry none. actorFrom drops it here, bearerSessionActor builds a session actor without it, and
 // actingPerson answers the person with its Act alone. The handlers that record optionalActor's
@@ -116,11 +117,35 @@ func (a Actor) Recorded() Actor {
 }
 
 // SameAs reports whether two actors are the same writer: one session id, or one human login.
-// Dispatch compares actors in exactly this way wherever it has to decide "is this the same
-// session" — a claim's holder against a caller, and an event's actor against the claimant it
-// names.
+// Dispatch compares actors in this way wherever it has to decide "is this the same session" — a
+// claim's holder against a caller, and an event's actor against the claimant it names. Where
+// the credential itself must be told apart rather than the writer, SameCredential compares the
+// names too.
 func (a Actor) SameAs(other Actor) bool {
 	return a.Kind == other.Kind && a.ID == other.ID
+}
+
+// SameCredential reports whether two actors are the one credential: the kind and the id SameAs
+// compares, and the person and the workload a credential names besides them. It is what a
+// caller compares by when SameAs cannot tell two credentials apart, because three of the
+// credentials Dispatch admits carry no id at all - a personal token is {Kind: "session", ID:
+// "", Owner: &owner} (api/agent_tokens.go), the deployment's shared token is {}, and a pod's
+// service-account token is {Service: &subject}. Under SameAs any two personal tokens are one
+// writer, whoever owns them, and the shared token is every pod's token.
+//
+// Origin, Project and Act are not compared: they say where a write came from and who it acted
+// for, which two requests of one credential differ in, so comparing them would call one
+// credential two.
+func (a Actor) SameCredential(other Actor) bool {
+	return a.SameAs(other) && sameActorName(a.Owner, other.Owner) && sameActorName(a.Service, other.Service)
+}
+
+// sameActorName compares one optional name of two actors: both unset, or both the same name.
+func sameActorName(left, right *string) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return *left == *right
 }
 
 // CanonicalLogin is the stored form of a person's email: trimmed and lowercased, the form the

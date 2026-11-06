@@ -188,6 +188,10 @@ type bootConfig struct {
 	// Embedder is where meaning search embeds text (DISPATCH_EMBEDDER and DISPATCH_AZURE_*),
 	// checked whole; newEmbedder builds its client.
 	Embedder embedderConfig
+	// Answerer is where the server generates text (DISPATCH_ANSWERER, and the DISPATCH_AZURE_CHAT_*
+	// or DISPATCH_CHAT_* settings of the place it names), checked whole; an empty Place is no
+	// model configured, which the server says at boot rather than refusing to start.
+	Answerer answererConfig
 }
 
 func main() {
@@ -433,6 +437,15 @@ func main() {
 		embedder = client
 	}
 
+	// answerer is nil where the deployment configured no model, which newAnswerer logs: the
+	// server boots and says it cannot answer. A shape it could not build from is a refusal to
+	// boot, as the embedder's is, since the deployment asked for a model and got none.
+	answerer, err := newAnswerer(boot.Answerer)
+	if err != nil {
+		slog.Error("dispatch: build the answerer", "error", err)
+		os.Exit(1)
+	}
+
 	built := routes.AppContextOptions{
 		SigningKey:     signingKey,
 		WebDistDir:     webDistDir,
@@ -456,6 +469,11 @@ func main() {
 	// configured verifier, and every JWT-shaped bearer would be sent to it.
 	if serviceTokens != nil {
 		built.OIDC = serviceTokens
+	}
+	// Set only when configured, for the reason above: a nil *going.Answerer in the interface
+	// field would read as a model configured, and the capability route would say so.
+	if answerer != nil {
+		built.Answerer = answerer
 	}
 	brokerTokens, err := brokerTokenVerifier(boot, database, serverURL)
 	if err != nil {
@@ -1113,6 +1131,10 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		}
 	}
 	boot.Embedder, err = resolveEmbedder(env)
+	if err != nil {
+		return bootConfig{}, err
+	}
+	boot.Answerer, err = resolveAnswerer(env, boot.Embedder.Place)
 	if err != nil {
 		return bootConfig{}, err
 	}
