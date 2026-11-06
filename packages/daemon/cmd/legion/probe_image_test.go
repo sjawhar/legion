@@ -569,8 +569,6 @@ func TestProbeImageWithPodSafetyProbesOnThePodsBaseline(t *testing.T) {
 	// doing and not the machine's.
 	operator := filepath.Join(t.TempDir(), "operator.yml")
 	t.Setenv("PI_CONFIG_FILES", operator)
-	t.Setenv("OMP_SESSION_STORAGE", "")
-	os.Unsetenv("OMP_SESSION_STORAGE")
 	for name, tc := range map[string]struct {
 		args     []string
 		overlays *regexp.Regexp
@@ -627,10 +625,6 @@ func TestProbeImageReadsEachRolesOwnOverlaysAsTheRoleStarts(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// Restored by t.Setenv's cleanup; unset so what every probe run below reads as its session
-	// store is the baseline's own `file`, never a store the environment this test runs in names.
-	t.Setenv("OMP_SESSION_STORAGE", "")
-	os.Unsetenv("OMP_SESSION_STORAGE")
 	for name, value := range map[string]string{"the operator's overlay": operator, "with a trailing empty entry": operator + ":"} {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("PI_CONFIG_FILES", value)
