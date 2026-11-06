@@ -23,6 +23,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/sessionproxy"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/testtmp"
 )
 
 const launcherChildEnv = "LEGION_LAUNCHER_TEST_CHILD"
@@ -109,20 +110,15 @@ func newRig(t *testing.T) *rig {
 }
 
 // shortTempDir is a temporary directory of its own for a test that binds a unix socket under it:
-// such a path has barely a hundred bytes, where t.TempDir()'s carries the whole of the test's name
-// (docs/testing.md). It is made under /tmp rather than under TMPDIR, which os.MkdirTemp("") would
-// read and which is itself long on a dev box whose temporary directory is on a data disk; a system
-// with no writable /tmp falls back to TMPDIR, where only the longest of these paths would not fit.
+// such a path has barely a hundred bytes, where t.TempDir()'s carries the whole of the test's
+// name (docs/testing.md). TMPDIR places it, as it places every other temporary directory, and
+// the helper falls back to /tmp for the socket path's length alone, when the longest path below
+// the directory would not fit under TMPDIR. The budget is the session socket of a generation,
+// the longest path the launcher itself builds under this directory (launcher.go's
+// generationDir, and childStart below).
 func shortTempDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "lch")
-	if err != nil {
-		if dir, err = os.MkdirTemp("", "lch"); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	return dir
+	return testtmp.Dir(t, filepath.Join(shimwire.GenerationDir(999), ompsessions.SocketName))
 }
 
 // newSessionRig runs a launcher that carries cfg's session database and dialer, the fake standing

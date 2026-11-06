@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 )
 
 // `workspace-init skills` checks everything before it touches the skills volume or its own TMPDIR:
@@ -42,7 +44,7 @@ func TestWorkspaceInitSkillsRefusesBeforeItTouchesTheVolume(t *testing.T) {
 			if tc.token != "" {
 				t.Setenv("LEGION_PROVISION_TOKEN_FILE", writeFile(t, "LEGION_PROVISION_TOKEN", "test-installation-token"))
 			} else {
-				unsetenv(t, "LEGION_PROVISION_TOKEN_FILE")
+				fixtureenv.Unset(t, "LEGION_PROVISION_TOKEN_FILE")
 			}
 			code, stdout, stderr := runWorkspaceInitHere(tc.args)
 			if code == 0 || !strings.Contains(stderr, tc.says) {

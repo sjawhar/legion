@@ -36,13 +36,25 @@ import (
 // made there would be one per role process and dropped by none.
 func TestMain(m *testing.M) {
 	if os.Getenv(idleRigURLVariable) != "" {
-		os.Exit(testnats.Main(m))
+		os.Exit(runRemovingTheBuiltListener(m))
 	}
 	if err := fixtureenv.Guard("LEGION_KEPT_PROPERTY_SEED"); err != nil {
 		fmt.Fprintln(os.Stderr, "TestMain:", err)
 		os.Exit(1)
 	}
-	os.Exit(testpg.Main("legion_daemon_test", func() int { return testnats.Main(m) }))
+	os.Exit(testpg.Main("legion_daemon_test", func() int {
+		return runRemovingTheBuiltListener(m)
+	}))
+}
+
+// runRemovingTheBuiltListener runs the package's tests and removes the directory the built Envoy
+// listener of the idle rig sits in afterwards (removeIdleRigListenerBuild). The build happens
+// during a test, not here, so the removal reads the directory when it runs rather than taking its
+// name now, when there is none. Being deferred, it also runs when setup here panics. A run
+// killed by a signal still keeps the directory, which nothing here can help.
+func runRemovingTheBuiltListener(m *testing.M) int {
+	defer removeIdleRigListenerBuild()
+	return testnats.Main(m)
 }
 
 func TestTheTestProcessIsGuarded(t *testing.T) {
