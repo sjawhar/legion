@@ -28,11 +28,18 @@ import (
 //
 // ygo closes no room a caller is inside - a Server.Apply, a relay Inject, or a browser's join
 // before its peer registers - and answers websocket.ErrRoomInUse instead (sjawhar/ygo
-// v1.55.1-sami.1, reearth/ygo#342). So a close from outside the room waits for those callers to
+// v1.55.1-sami.2, reearth/ygo#342). So a close from outside the room waits for those callers to
 // leave (closeWhenFree), and the one close the service makes from inside its own Apply on the
 // room (closeInstance) is ygo's CloseRoomWithin.
 type roomServer struct {
 	*websocket.Server
+	// beforeClose runs ahead of every close of a room the service makes, holding the room's close
+	// gate, once the close knows the room is the one it closes (Service.removeLocalAwareness). It
+	// must not block. Nil runs nothing.
+	beforeClose func(room string)
+	// afterClose runs after every close of a room the service makes that closed it, still holding
+	// the room's close gate (the test hooks' close count). It must not block. Nil runs nothing.
+	afterClose func(room string)
 	// gatesMu guards gates and every gate's holders.
 	gatesMu sync.Mutex
 	// gates holds a room's closeGate only while a close or a repair holds it or waits for it: the
@@ -64,7 +71,9 @@ func (r *roomServer) CloseRoom(room string, force bool) error {
 // ygo's CloseRoom starts, ctx cannot interrupt it: loading, peer teardown and persistence drain
 // can keep it blocked, and the room can close after ctx ends.
 func (r *roomServer) closeRoom(ctx context.Context, room string, force bool) error {
-	return r.closeWhenFree(ctx, room, func() error { return r.Server.CloseRoom(room, force) })
+	return r.closeWhenFree(ctx, room, func() error {
+		return r.closeHeld(room, func() error { return r.Server.CloseRoom(room, force) })
+	})
 }
 
 // roomInUseFirstWait and roomInUseLongestWait bound how long a close waits before it tries again
@@ -111,6 +120,23 @@ func (r *roomServer) closeWhenFree(ctx context.Context, room string, try func() 
 	}
 }
 
+// closeHeld runs attempt, one try at closing room by a caller holding room's gate, after
+// beforeClose and, once it has closed the room, before afterClose. An attempt ygo refuses
+// because a caller is inside the room (websocket.ErrRoomInUse) closed nothing, so it runs no
+// afterClose and is tried again (closeWhenFree), beforeClose with it: the one hook there is
+// stands being run again, since it takes the room's awareness states out and finds none the
+// second time (Service.removeLocalAwareness).
+func (r *roomServer) closeHeld(room string, attempt func() error) error {
+	if r.beforeClose != nil {
+		r.beforeClose(room)
+	}
+	err := attempt()
+	if err == nil && r.afterClose != nil {
+		r.afterClose(room)
+	}
+	return err
+}
+
 // closeInstance closes room through ygo's CloseRoomWithin only while room holds doc, answering
 // whether it closed it. Its caller runs it inside its own Server.Apply on room (closeRoomInstance),
 // which ygo's CloseRoom would refuse as a caller inside the room, so it is that Apply's close; it
@@ -127,7 +153,7 @@ func (r *roomServer) closeInstance(room string, doc *crdt.Doc) (bool, error) {
 	if r.GetDoc(room) != doc {
 		return false, nil
 	}
-	if err := r.Server.CloseRoomWithin(room, doc, true); err != nil {
+	if err := r.closeHeld(room, func() error { return r.Server.CloseRoomWithin(room, doc, true) }); err != nil {
 		if errors.Is(err, websocket.ErrRoomNotFound) {
 			return false, nil
 		}
@@ -156,7 +182,7 @@ func (r *roomServer) closeOwned(room string, owns func() bool, after func(error)
 		if !owns() {
 			return nil
 		}
-		err := r.Server.CloseRoom(room, true)
+		err := r.closeHeld(room, func() error { return r.Server.CloseRoom(room, true) })
 		if errors.Is(err, websocket.ErrRoomInUse) {
 			return err // tried again once the caller inside has left
 		}
