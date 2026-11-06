@@ -27,7 +27,13 @@
  * component all read the same list.
  */
 
-import { freeze, HELP_LINES, MARGIN_SECTION_NAMES, PROPERTY_LABELS } from "./page-structure";
+import {
+  freeze,
+  HELP_LINES,
+  KEY_REPORTS,
+  MARGIN_SECTION_NAMES,
+  PROPERTY_LABELS,
+} from "./page-structure";
 
 /** The keys of `value`, as its own key type rather than as plain strings. */
 function keysOf<T extends object>(value: T): readonly (keyof T)[] {
@@ -535,6 +541,7 @@ const WORD_SOURCES: readonly unknown[] = [
   CONVERSATION_STATE_NAMES,
   ISSUE_STATUS_WORDS,
   EMPTY_STATE_LINES,
+  KEY_REPORTS,
   GAP_LINES,
   GAP_WORDS,
   CHECK_WHEN_WORDS,

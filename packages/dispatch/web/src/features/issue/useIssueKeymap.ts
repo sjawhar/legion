@@ -4,6 +4,9 @@ import type { IssuePriority } from "../../api/types";
 import { outsideAskCard } from "../inbox/ask-card";
 import { buildIssuePath, type IssueTab } from "../refs/routes";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
+import { bringOnScreen } from "./identity-block";
+import { presetPath } from "./issue-address";
+import { CONTROL_LABELS } from "./page-words";
 import type { IssuePriorityWrite } from "./useIssuePriority";
 
 /**
@@ -53,21 +56,141 @@ function outsideInputsAndAskCards(): boolean {
   return !(document.activeElement instanceof HTMLInputElement) && outsideAskCard();
 }
 
-/** The address each chord opens, by the tab whose address it was: the presets replaced the
- *  tablist, and every one of those addresses still resolves (R19), so a chord navigates to it
- *  rather than pressing a button that is no longer there. */
-const tabChords: readonly { keys: string; label: string; tab: IssueTab }[] = [
-  { keys: "t s", label: "Spec tab", tab: "spec" },
+/**
+ * The parts of the page a chord brings the reader to, by the mark the page draws each one
+ * with. They are the marks `e2e/issue-page.ts` reads the page by, so the keyboard and the
+ * checks look for the same element and neither has a name of its own for a part of the page.
+ */
+const PARTS = {
+  children: '[data-testid="issue-children"]',
+  filter: `input[aria-label="${CONTROL_LABELS.filter}"]`,
+  margin: '[data-testid="issue-margin"]',
+  menu: '[role="menu"]',
+  tree: '[role="tree"]',
+} as const;
+
+/** What takes the focus inside each part, where the part itself does not: the tree's one tab
+ *  stop, the panel's selected conversation state, the children's own disclosure, and a menu's
+ *  first item once it holds any (`dispatch://INFRA-1196/artifact/plan-md#b-t18`). */
+const TAKES_FOCUS: Readonly<Record<keyof typeof PARTS, string | undefined>> = {
+  children: "button",
+  filter: undefined,
+  margin: '[data-conversation-state][aria-selected="true"]',
+  menu: '[role="menuitem"]',
+  tree: '[data-node-row][tabindex="0"]',
+};
+
+/** How many frames a chord waits for the page to draw what its address opened before it gives
+ *  up on putting the focus there: a navigation renders on the next frame, and a panel that
+ *  mounts its content takes a few more. */
+const DRAWING_FRAMES = 20;
+
+/**
+ * Brings the part of the page `part` names on screen and puts the focus in it, once the page
+ * has drawn it: a chord navigates, and what it opens is on the page a frame or two later (R9,
+ * c-keyboard, which reads both the box and the focus).
+ */
+function reachPart(part: keyof typeof PARTS, left = DRAWING_FRAMES): void {
+  const found = document.querySelector<HTMLElement>(PARTS[part]);
+  if (found === null) {
+    if (left > 0) requestAnimationFrame(() => reachPart(part, left - 1));
+    return;
+  }
+  const inside = TAKES_FOCUS[part];
+  const takes = inside === undefined ? found : (found.querySelector<HTMLElement>(inside) ?? found);
+  // The focus is taken without scrolling to it, and the part is then shown from its own top:
+  // what a chord opens is the part, and a control inside a panel that scrolls of its own would
+  // otherwise leave the panel's head above the screen (R9, c-keyboard reads the part's box).
+  takes.focus({ preventScroll: true });
+  found.scrollIntoView({ block: "start" });
+  bringOnScreen(found);
+}
+
+/**
+ * Every chord the page binds, which is the `t` table of the spec's Design section. Each one
+ * opens an address and puts the focus in what that address draws: the eight the page bound
+ * before the redesign keep the addresses their tabs had, every one of which still resolves
+ * (R19), and `t t` and `t f` are the two the table adds. The labels are the tabs' own, because
+ * `?` names a key by where it goes and those addresses have not moved.
+ */
+const CHORDS: readonly {
+  keys: string;
+  label: string;
+  /** The address the chord opens, or undefined for a chord that opens none. */
+  path?: (key: string) => string;
+  part: keyof typeof PARTS;
+  /** What names the binding, which is the tab the address was that tab's. */
+  tab: IssueTab | "tree" | "filter";
+}[] = [
+  {
+    keys: "t t",
+    label: "Tree preset",
+    part: "tree",
+    path: (key) => presetPath(key, "tree"),
+    tab: "tree",
+  },
+  {
+    keys: "t s",
+    label: "Spec tab",
+    part: "tree",
+    path: (key) => presetPath(key, "spec"),
+    tab: "spec",
+  },
   // `t v` is Activity and `t c` the Conversation, so Verification takes its checks' `k`; `t p`
   // is free (`p` alone focuses the priority, which is a different scope of key).
-  { keys: "t k", label: "Verification tab", tab: "verification" },
-  { keys: "t p", label: "Plan tab", tab: "plan" },
-  { keys: "t c", label: "Conversation tab", tab: "conversation" },
-  { keys: "t h", label: "Children tab", tab: "children" },
-  { keys: "t a", label: "Artifacts tab", tab: "artifacts" },
+  {
+    keys: "t k",
+    label: "Verification tab",
+    part: "tree",
+    path: (key) => presetPath(key, "checks"),
+    tab: "verification",
+  },
+  {
+    keys: "t p",
+    label: "Plan tab",
+    part: "tree",
+    path: (key) => presetPath(key, "plan"),
+    tab: "plan",
+  },
+  {
+    keys: "t d",
+    label: "Decisions tab",
+    part: "tree",
+    path: (key) => presetPath(key, "decisions"),
+    tab: "decisions",
+  },
+  {
+    keys: "t c",
+    label: "Conversation tab",
+    part: "margin",
+    path: (key) => buildIssuePath({ key, kind: "conversation" }),
+    tab: "conversation",
+  },
   // `t a` is Artifacts and `l` is the issue's label editor, so Activity takes `t v`.
-  { keys: "t v", label: "Activity tab", tab: "activity" },
-  { keys: "t d", label: "Decisions tab", tab: "decisions" },
+  {
+    keys: "t v",
+    label: "Activity tab",
+    part: "margin",
+    path: (key) => buildIssuePath({ key, kind: "activity" }),
+    tab: "activity",
+  },
+  {
+    keys: "t h",
+    label: "Children tab",
+    part: "children",
+    path: (key) => buildIssuePath({ key, kind: "children" }),
+    tab: "children",
+  },
+  {
+    keys: "t a",
+    label: "Artifacts tab",
+    part: "menu",
+    path: (key) => buildIssuePath({ key, kind: "artifacts" }),
+    tab: "artifacts",
+  },
+  // The filter narrows the preset the reader is already on, so it opens no address of its own:
+  // what it types is `?q=`, which the box itself writes.
+  { keys: "t f", label: "Filter the preset", part: "filter", tab: "filter" },
 ];
 
 /**
@@ -142,11 +265,14 @@ export function useIssueKeymap(priorityWrite: IssuePriorityWrite, issueKey: stri
         return active === usableControl(STATUS_SELECT) || active === usableControl(PRIORITY_SELECT);
       },
     },
-    ...tabChords.map(({ keys, label, tab }) => ({
+    ...CHORDS.map(({ keys, label, part, path, tab }) => ({
       id: `tab-${tab}`,
       keys,
       label,
-      run: () => navigate(buildIssuePath({ key: issueKey, kind: tab })),
+      run: () => {
+        if (path !== undefined) navigate(path(issueKey));
+        reachPart(part);
+      },
     })),
   ]);
 }

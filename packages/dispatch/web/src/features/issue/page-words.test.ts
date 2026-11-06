@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { issueStatuses, statusText } from "../project/board-model";
 import {
   HELP_LINES,
+  KEY_REPORTS,
   MARGIN_SECTION_NAMES,
   MARGIN_SECTION_ORDER,
   PROPERTY_LABELS,
@@ -88,6 +89,7 @@ const WORD_SOURCES: readonly unknown[] = [
   CONVERSATION_STATE_NAMES,
   ISSUE_STATUS_WORDS,
   EMPTY_STATE_LINES,
+  KEY_REPORTS,
   GAP_LINES,
   GAP_WORDS,
   CHECK_WHEN_WORDS,
@@ -206,6 +208,13 @@ test("every empty-state line is one sentence a person reads", () => {
     expect(line).toMatch(/^[A-Z][^_]*\.$/);
   }
   expect(EMPTY_STATE_LINES.check_result).toBe("No result recorded against this check.");
+});
+
+test("every key report is one sentence saying where the key could not go", () => {
+  for (const line of Object.values(KEY_REPORTS)) {
+    expect(line).toMatch(/^[A-Z][^_]*\.$/);
+  }
+  expect(KEY_REPORTS.no_next_question).toBe("No further open question.");
 });
 
 test("every gap line is one sentence that says what is absent", () => {

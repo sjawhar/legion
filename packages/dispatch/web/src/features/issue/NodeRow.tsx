@@ -8,7 +8,7 @@ import {
   textMutedOnCanvas,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
-import { IDENTITY_HEIGHT_PROPERTY } from "./identity-block";
+import { bringOnScreen } from "./identity-block";
 import { firstLineOf, type NodeChip, type TreeNode } from "./issue-tree";
 import { NodeGlyph } from "./NodeGlyph";
 import { authorText, pageChrome } from "./page-structure";
@@ -87,19 +87,12 @@ export function NodeRow({
     GLYPH_TOKENS.states;
   const stateGlyph = node.state === undefined ? undefined : stateGlyphs[node.type]?.[node.state];
 
-  // The focused row is brought inside the viewport and clear of the sticky identity block after
-  // every move, which is the one number the block publishes rather than a guess at its height
-  // (R9, `identity-block.ts`).
+  // The focused row is brought inside the viewport and clear of the sticky identity block
+  // after every move, by the one rule the whole page places a target with (R9,
+  // `identity-block.ts`).
   useLayoutEffect(() => {
     const element = row.current;
-    if (!focused || element === null) return;
-    const header = Number.parseFloat(
-      getComputedStyle(document.documentElement).getPropertyValue(IDENTITY_HEIGHT_PROPERTY)
-    );
-    const clear = Number.isFinite(header) ? header : 0;
-    const box = element.getBoundingClientRect();
-    if (box.top >= clear && box.bottom <= window.innerHeight) return;
-    window.scrollBy({ top: box.top - clear - 8 });
+    if (focused && element !== null) bringOnScreen(element);
   }, [focused]);
 
   return (
@@ -160,7 +153,10 @@ export function NodeRow({
             {GAP_WORDS[gap]}
           </span>
         ))}
-        {folded === undefined ? null : (
+        {/* A row whose own twisty is closed says how many nodes it holds. A branch below the
+            drawn levels says it on the one line it folds to, under this row, so the count is
+            drawn once however the nodes came to be out of sight. */}
+        {folded === undefined || expanded !== false ? null : (
           <span className={`text-xs ${textMutedOnCanvas}`} {...pageChrome}>
             <span {...authorText}>{folded}</span> {CONTROL_LABELS.folded_nodes}
           </span>

@@ -12,6 +12,27 @@ export const IDENTITY_HEIGHT_PROPERTY = "--issue-identity-height";
  *  layout leaves a sticky element's top a hair below zero without the page having scrolled. */
 const STUCK_SLACK = 1;
 
+/** How far below the identity block a target is placed when it has to be scrolled to: enough
+ *  that it does not sit flush against it. */
+const CLEARANCE = 8;
+
+/**
+ * Brings `element` inside the viewport and clear of the sticky identity block, which is what
+ * "on screen" means on this page (R9): the focused row of the tree after every move, and
+ * whatever a chord opens (`useIssueKeymap.ts`). The block's height is the one number it
+ * publishes rather than a measurement taken here, so nothing guesses at it. An element already
+ * whole and clear is left where it is, so a key never scrolls the page for nothing.
+ */
+export function bringOnScreen(element: HTMLElement): void {
+  const published = Number.parseFloat(
+    getComputedStyle(document.documentElement).getPropertyValue(IDENTITY_HEIGHT_PROPERTY)
+  );
+  const clear = Number.isFinite(published) ? published : 0;
+  const box = element.getBoundingClientRect();
+  if (box.top >= clear && box.bottom <= window.innerHeight) return;
+  window.scrollBy({ top: box.top - clear - CLEARANCE });
+}
+
 /**
  * Publishes `ref`'s height as `IDENTITY_HEIGHT_PROPERTY` and answers whether the block is stuck
  * to the top of the screen, which is when it draws its condensed form: the sticky block gives

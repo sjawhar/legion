@@ -100,3 +100,19 @@ export const HELP_LINES = freeze({
   route:
     "New asks, comments and messages on this issue wake this agent or role; replies inside a thread reach their participants directly. It is where messages go, not who is working the issue — that is the claim.",
 } as const);
+
+/**
+ * What the page says in its own `role="status"` when a key has nowhere to go (R9, R21). A key
+ * that reports is a key that did nothing: the line says where the key could not go, so a
+ * reader on the keyboard is never left wondering whether the page took the press at all.
+ */
+export const KEY_REPORTS = freeze({
+  /** The next-question key, with no open question after the node the reader is on (R6). */
+  no_next_question: "No further open question.",
+  /** The decision key, on a node no decision of this issue names. */
+  no_decision: "No decision is recorded behind this node.",
+  /** The edit key, on a node whose text no document of this issue holds. */
+  no_text: "This node has no text to put the caret in.",
+  /** The key that zooms back out, with the whole issue already drawn. */
+  whole_tree: "The tree is already showing the whole issue.",
+} as const);

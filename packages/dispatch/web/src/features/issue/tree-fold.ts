@@ -48,7 +48,9 @@ export interface TreeRow {
   /** `true` when its children are drawn, `false` when it holds children and they are not, and
    *  undefined for a node that holds none. */
   readonly expanded?: boolean;
-  /** How many nodes the row holds while it is folded; undefined while it is not. */
+  /** How many nodes the row holds that are drawn as no row of their own: the branch it folds
+   *  shut, and the branch below the drawn levels that folds to one line under it. Undefined
+   *  for a row whose children are all drawn. */
   readonly folded?: number;
   readonly level: number;
   readonly node: TreeNode;
@@ -112,18 +114,25 @@ export function treeRows(root: TreeNode, opened: OpenedBranches = NOTHING_OPENED
       level === 1 ||
       (holds &&
         (opened.branches.has(node.id) || (!node.replaced && path.has(node.id)) || !foldsShut));
+    // Past the drawn levels the branch is one row of its own, unless the reader opened it in
+    // place or the frontier runs through it. Either way the node's children are drawn as no
+    // row of theirs, so the row says how many it holds.
+    const toOneLine =
+      unfolded &&
+      holds &&
+      level >= DRAWN_LEVELS &&
+      !opened.deeper.has(node.id) &&
+      !path.has(node.id);
     rows.push({
       ...(holds ? { expanded: unfolded } : {}),
-      ...(holds && !unfolded ? { folded: node.held } : {}),
+      ...(holds && (!unfolded || toOneLine) ? { folded: node.held } : {}),
       kind: "node",
       level,
       node,
       ...(parent === undefined ? {} : { parent }),
     });
     if (!unfolded || !holds) return;
-    // Past the drawn levels the branch is one row, unless the reader opened it in place or the
-    // frontier runs through it.
-    if (level >= DRAWN_LEVELS && !opened.deeper.has(node.id) && !path.has(node.id)) {
+    if (toOneLine) {
       rows.push({ held: node.held, kind: "deeper", level: level + 1, of: node });
       return;
     }

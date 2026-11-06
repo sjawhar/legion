@@ -204,7 +204,10 @@ export function IssuePresets({
         >
           {CONTROL_LABELS.other_nodes}
         </button>
-        {open === "nodes" ? <div className={MENU_CLASS} role="menu" /> : null}
+        {/* The menu itself takes the focus while it holds no item of its own, so the chord
+            that opens it (`t a`) leaves the reader in it rather than behind it; once it holds
+            items the first one takes it (`useIssueKeymap.ts`). */}
+        {open === "nodes" ? <div className={MENU_CLASS} role="menu" tabIndex={-1} /> : null}
       </div>
       <input
         aria-label={CONTROL_LABELS.filter}

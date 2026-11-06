@@ -130,6 +130,12 @@ test("a branch below the drawn levels is one row saying how many nodes it holds"
   const more = rows.at(-1);
   expect(more?.kind === "deeper" ? more.held : 0).toBe(2);
   expect(more?.kind === "deeper" ? more.level : 0).toBe(DRAWN_LEVELS + 1);
+  // The row above it says how many nodes it holds that no row of their own draws, as a row
+  // whose own twisty is closed does: a reader of the tree pattern - c-keyboard's among them -
+  // takes a row carrying `aria-expanded` to hold children, and these are drawn as one line.
+  const branch = rowOf(rows, "verification-md#b-c1");
+  expect(branch?.kind === "node" ? branch.folded : undefined).toBe(2);
+  expect(branch?.kind === "node" ? branch.expanded : undefined).toBe(true);
   // Opened in place, the branch is drawn where it stands.
   const opened = treeRows(deep, {
     branches: new Set(),
