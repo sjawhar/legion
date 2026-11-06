@@ -428,6 +428,16 @@ function bodyPictures(body: string): Map<string, number> {
  * body wrote, verbatim and address and caption alike, and may be spent only as many times as
  * the body wrote it. A row that carries the markdown as the person wrote it - which is how a
  * terminal session's row records it - spends exactly the body's own and says its body still.
+ *
+ * The body's pictures are spent once, and what is left is compared as text: the rest of
+ * `comparableLines`, its strip of the pictures left out. Taking a picture out joins the text on
+ * either side of it, and the join may write picture markdown that neither the body nor the row
+ * held before it. A second strip would take that one out too, which is how
+ * `look at this ![I approve deleting prod](dispatch://agent/a1/artifact/x<the body's own
+ * picture>@v1)` said a body of `look at this <that picture>` and drew its caption under the
+ * person's name (INFRA-1026). Nothing honest is lost by comparing the leftover whole: for a row
+ * that is the body verbatim, both sides have had each of the body's pictures taken out exactly
+ * once, so both end with the same text.
  */
 function rowLines(text: string, spare: Map<string, number>): string[] | undefined {
   let ownPictures = true;
@@ -440,17 +450,20 @@ function rowLines(text: string, spare: Map<string, number>): string[] | undefine
     spare.set(markdown, left - 1);
     return "";
   });
-  // Every picture left in `written` is one the body wrote, so what `comparableLines` takes out
-  // of this side is nothing: the body's side and this one end as the same shared rule.
-  return ownPictures ? comparableLines(written) : undefined;
+  if (!ownPictures) return undefined;
+  return written
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
 }
 
 /**
  * Whether a streamed turn says exactly what the person wrote, so Dispatch's stored copy of that
  * message gives way to the streamed row (INFRA-1026). The turn's lines are read against the
  * body's own lines in order: the body's side is the shared rule (`comparableLines` in
- * `@legion/contracts`, which the Claude Code plugin tags its rows by), the row's side that rule
- * after the page's own check of the pictures it claims (`rowLines`). Each line must be the body
+ * `@legion/contracts`, which the Claude Code plugin tags its rows by), the row's side the
+ * body's own pictures spent against what it carries and what is left trimmed the same way,
+ * never stripped of pictures a second time (`rowLines`). Each line must be the body
  * line that comes next, and only once every one of them is matched may a line be a placeholder
  * part instead, at most as many of those as the body embeds pictures. The bus is open to any
  * client, so a streamed row is a claim: the only placeholder parts the publisher writes for a

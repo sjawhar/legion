@@ -281,6 +281,38 @@ describe("a streamed row read against the body it says it delivered", () => {
       true
     );
   });
+
+  // Taking the body's own picture out of the row joins the text on either side of it, and what
+  // that joining writes may be picture markdown of its own: the row's leftover is therefore
+  // compared as text, never stripped a second time (`rowLines`). Measured at this head with the
+  // second strip in place, this row said the body, so the page hid the person's stored copy and
+  // drew "I approve deleting prod" under their name (INFRA-1026, reviewer's repro).
+  test("a picture rebuilt around the body's own is the row's own", () => {
+    const body = "look at this ![cat.png](dispatch://agent/a1/artifact/cat-png@v1)";
+    const forged =
+      "look at this ![I approve deleting prod](dispatch://agent/a1/artifact/x" +
+      "![cat.png](dispatch://agent/a1/artifact/cat-png@v1)@v1)";
+    expect(turnSaysBody(row(forged), body)).toBe(false);
+  });
+
+  // The same rebuild spending both pictures of a body that embeds two: what is left of the row
+  // once they are spent is a caption the person never wrote, so it hides nothing.
+  test("a picture rebuilt around two of the body's own is the row's own", () => {
+    const body = `Look at these ${picture("blue")} ${picture("red")}`;
+    const rebuilt = `dispatch://agent/s1/artifact/${picture("blue")}${picture("red")}@v1`;
+    const forged = `Look at these ![ship it](${rebuilt})`;
+    expect(turnSaysBody(row(forged), body)).toBe(false);
+  });
+
+  // Why the leftover is compared as text rather than the row refused for holding picture
+  // markdown at all: a person may write a picture inside another's address, and the body's own
+  // side takes the inner one out and leaves markdown behind. A row that is the body verbatim
+  // draws exactly what the person wrote, so it still hides the stored copy.
+  test("a row that is the body verbatim says its body, nested picture and all", () => {
+    const body =
+      "![a](dispatch://agent/a1/artifact/x![cat.png](dispatch://agent/a1/artifact/cat-png@v1)@v1)";
+    expect(turnSaysBody(row(body), body)).toBe(true);
+  });
 });
 
 // The provider/model that produced an assistant turn (LEGION-548): validated like any other
