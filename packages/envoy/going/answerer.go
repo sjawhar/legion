@@ -90,10 +90,6 @@ func NewAnswerer(cfg AnswererConfig) (*Answerer, error) {
 	return &Answerer{model: model}, nil
 }
 
-// Identity is the model's own, for the one line the boot logs. Pacing a call changes nothing
-// about which model answers it.
-func (a *Answerer) Identity() string { return a.model.Identity() }
-
 // Request is one question and the two reads the answerer makes through its caller, which is what
 // lets this package stay outside internal/ while the reads live in the API package. Both reads
 // are required.
@@ -127,7 +123,13 @@ func (a *Answerer) Run(ctx context.Context, request Request, emit func(Event) er
 	// One filter for the whole run, so every content delta of every turn is cleared by the same
 	// state machine and no half of a link the server would drop ever reaches a reader.
 	filter := newAnswerFilter(run.citations, run.send)
-	result, _ := runLoop(ctx, loopRequest{
+	// The loop runs on a context of this run's own, which a failed store read cancels: a search
+	// the store could not serve leaves the run nothing further to give the model, so no call is
+	// made after it (runLoop checks the context before each one).
+	answering, stopLoop := context.WithCancel(ctx)
+	defer stopLoop()
+	run.stop = stopLoop
+	result, runErr := runLoop(answering, loopRequest{
 		Model:  a.model,
 		System: answerRules,
 		Input:  []Message{{Role: "user", Content: run.ask(items)}},
@@ -135,13 +137,29 @@ func (a *Answerer) Run(ctx context.Context, request Request, emit func(Event) er
 		Bounds: loopBounds{Time: contracts.GoingRunWindow, Calls: contracts.GoingModelCallMax},
 		OnText: filter.Write,
 	})
-	// The error runLoop returns says nothing this run has not already kept: a callback's error is
-	// emit's, which run.send holds, and the context ending is the time fault below.
+	// runErr is a callback's error or the context ending. The one callback the loop is given
+	// here is the filter's Write, whose error is emit's own, which run.send kept: that is the
+	// one error this run hands its caller, and it is handed back unwrapped.
 	if run.emitErr != nil {
 		return run.emitErr
 	}
+	// A failed store read ends the run, and it is read before the loop's own fault: the fault
+	// is this run having stopped the loop at that read, and what the reader is owed is the
+	// read's own code. The run ends here and nowhere else - no second model call was made, and
+	// no tool result told the model the search merely found nothing - so a reader is never
+	// written a whole answer this run then disowns with an error. Text the filter had already
+	// cleared and emitted stays emitted: it was cleared, and an error frame is terminal, so no
+	// end follows it.
+	if run.readErr != nil {
+		return run.send(Fault(readFaultCode(ctx, run.readErr)))
+	}
 	switch result.Fault {
 	case loopFaultTime:
+		// The reader is told one code for the whole ending, so runErr - the run's window having
+		// run out, or a call the quota could not pace inside what was left of it
+		// (errQuotaPastDeadline) - is said once here, as the provider's refusal is below. It
+		// carries no credential and none of the question's words.
+		slog.Warn("going: the run ran out of time with no answer", "error", runErr)
 		return run.send(Fault(contracts.GoingErrorAnswerDidNotArrive))
 	case loopFaultProviderError:
 		// The reader is told ANSWER_FAILED and no more than that, so this is the one place the
@@ -151,12 +169,13 @@ func (a *Answerer) Run(ctx context.Context, request Request, emit func(Event) er
 		// named beside it.
 		slog.Warn("going: the model service refused the run", "detail", result.Detail)
 		return run.send(Fault(contracts.GoingErrorAnswerFailed))
+	case loopFaultCalls:
+		// Spending the call budget ends the answer, and ends it as an answer: the budget is the
+		// budget, and what the filter cleared up to here is a whole answer, so the run ends
+		// through the filter's own Close and not with an error frame.
+		return filter.Close()
 	}
-	if run.readErr != nil {
-		return run.send(Fault(readFaultCode(ctx, run.readErr)))
-	}
-	// The model answered, or the call budget ran out. The budget is the budget, and what the
-	// filter cleared is a whole answer either way, so the run ends with the filter's own ending.
+	// The model answered.
 	return filter.Close()
 }
 
@@ -176,9 +195,12 @@ type answerRun struct {
 	runesLeft int
 	spent     bool
 
-	// readErr is a store read that failed, which ends the run; the model is told so in the same
-	// breath, since it may be in the middle of a turn.
+	// readErr is a store read that failed, which ends the run: Run sends its code as the run's
+	// one ending, and stop has already kept the loop from making another call.
 	readErr error
+	// stop ends the loop's model calls. Run holds the cancel of the context it runs the loop
+	// on, so a tool that ends the run stops it there rather than letting one more call be made.
+	stop context.CancelFunc
 	// emitErr is the stream writer's failure, the one failure Run hands back to its caller.
 	emitErr error
 }
@@ -226,7 +248,10 @@ func (r *answerRun) search(ctx context.Context, q string) (string, error) {
 
 // searchTool is the one tool the model may call. Its own Run closure holds the search budget,
 // because a tool's budget is the tool's own logic: a search past contracts.GoingSearchMax is
-// refused back to the model, in words it can act on, and ends no run.
+// refused back to the model, in words it can act on, and ends no run. A search the store could
+// not serve is the one thing that does end it: the alternative is telling the model to answer
+// from what it has and then disowning the answer it writes, which is an answer a reader was
+// given and then told to ignore.
 func (r *answerRun) searchTool() loopTool {
 	return loopTool{
 		Name: contracts.GoingSearchTool,
@@ -248,8 +273,11 @@ func (r *answerRun) searchTool() loopTool {
 			}
 			items, err := r.search(ctx, arguments.Q)
 			if err != nil {
+				// The run ends on this read, so the loop makes no further call and this result
+				// reaches no model (Answerer.Run reads readErr before the loop's own fault).
 				r.readErr = err
-				return "That search could not be served. Answer from the items you have.", true
+				r.stop()
+				return "That search could not be served. This run ends here.", true
 			}
 			if items == "" {
 				return "That search found no item. Answer from the items you have, or say that Dispatch holds no answer.", false
@@ -346,9 +374,6 @@ func (p *pacedClient) Chat(ctx context.Context, request ChatRequest, onText func
 	}
 	return p.inner.Chat(ctx, request, onText)
 }
-
-// Identity is the inner client's own.
-func (p *pacedClient) Identity() string { return p.inner.Identity() }
 
 // estimateTokens is what one call is charged against the quota before it is made: the characters
 // it sends, at charsPerToken. It counts the request alone, which is what a call can be charged

@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/envoy/going"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -32,8 +33,6 @@ type fakeAnswerer struct {
 	hits   []going.Hit
 	bodies map[string]string
 }
-
-func (f *fakeAnswerer) Identity() string { return "fake:model" }
 
 func (f *fakeAnswerer) Run(ctx context.Context, request going.Request, emit func(going.Event) error) error {
 	f.mu.Lock()
@@ -111,13 +110,30 @@ func (rig goingRoutesRig) stream(t *testing.T, id, login, lastEventID string) *h
 	return response
 }
 
+// askUnder asks one question under a bearer token, which is how every credential with no cookie
+// behind it asks one: a person's own dsp_ token, and the deployment's shared token.
+func (rig goingRoutesRig) askUnder(t *testing.T, token string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	return agentRequest(t, rig.handler, http.MethodPost, "/api/v1/going/requests", body, token)
+}
+
+// streamUnder reads one run's stream under a bearer token.
+func (rig goingRoutesRig) streamUnder(t *testing.T, id, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/going/requests/"+id+"/stream", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+	rig.handler.ServeHTTP(response, request)
+	return response
+}
+
 // awaitTerminal waits for the run to have stored its ending and answers every frame it holds,
 // rendered "<sequence> <name> <data>" as going_test.go renders them.
 func (rig goingRoutesRig) awaitTerminal(t *testing.T, id string) []string {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		stored, err := rig.server.readGoingEventsAfter(context.Background(), id, 0)
+		stored, _, err := rig.server.readGoingStream(context.Background(), id, 0)
 		if err != nil {
 			t.Fatalf("read the run's frames: %v", err)
 		}
@@ -567,4 +583,163 @@ func TestGoingRequestWithNoModelConfiguredStreamsThatFault(t *testing.T) {
 	if stream.Code != http.StatusOK || stream.Body.String() != want {
 		t.Fatalf("the stream wrote %q (status %d), want %q", stream.Body.String(), stream.Code, want)
 	}
+}
+
+// A run is served to the credential that asked it and to no other, whole identity against whole
+// identity: two personal tokens of different owners each resolve as {Kind: "session", ID: "",
+// Owner: &owner} (agent_tokens.go), so a comparison of kind and id alone - model.Actor.SameAs -
+// would hand Bob every run Alice asked under her own token.
+func TestGoingStreamRefusesAnotherOwnersPersonalToken(t *testing.T) {
+	rig := newGoingRoutesRig(t, nil)
+	alice := personalTokenOwnedBy(t, rig.database, "alice", model.ScopePerson)
+	bob := personalTokenOwnedBy(t, rig.database, "bob", model.ScopePerson)
+
+	asked := rig.askUnder(t, alice, map[string]any{"words": "who owns the broadcast order?"})
+	if asked.Code != http.StatusCreated {
+		t.Fatalf("ask under alice's token: status=%d body=%s", asked.Code, asked.Body.String())
+	}
+	run := decodeBody[askedRun](t, asked)
+	rig.awaitTerminal(t, run.ID)
+
+	refused := rig.streamUnder(t, run.ID, bob)
+	if refused.Code != http.StatusNotFound {
+		t.Fatalf("bob's token reading alice's run: status=%d body=%s, want 404", refused.Code, refused.Body.String())
+	}
+	if refusal := decodeBody[refusalAnswer](t, refused); refusal.Code != codeGoingRequestNotFound {
+		t.Fatalf("bob's token reading alice's run: code=%q, want %s", refusal.Code, codeGoingRequestNotFound)
+	}
+	own := rig.streamUnder(t, run.ID, alice)
+	if own.Code != http.StatusOK || own.Body.String() == "" {
+		t.Fatalf("alice's own token reading her run: status=%d body=%q, want the run's frames", own.Code, own.Body.String())
+	}
+}
+
+// A run whose recorded author names nobody is nobody's to read. The deployment's shared token
+// resolves as {} (server.go), so the run it asks names no session, no person and no workload,
+// and every holder of that one token would otherwise read every other holder's run - and a
+// pod's service-account token, {Service: &subject}, carries the same empty kind and id, so a
+// comparison of those two alone would serve the pod's run to the shared token as well.
+func TestGoingStreamRefusesARunWhoseAuthorNamesNobody(t *testing.T) {
+	rig := newGoingRoutesRig(t, nil)
+
+	asked := rig.askUnder(t, "agent-token", map[string]any{"words": "whose run is this?"})
+	if asked.Code != http.StatusCreated {
+		t.Fatalf("ask under the shared token: status=%d body=%s", asked.Code, asked.Body.String())
+	}
+	run := decodeBody[askedRun](t, asked)
+	rig.awaitTerminal(t, run.ID)
+	nobodys := rig.streamUnder(t, run.ID, "agent-token")
+	if nobodys.Code != http.StatusNotFound {
+		t.Fatalf("the shared token reading the run it asked: status=%d body=%s, want 404", nobodys.Code, nobodys.Body.String())
+	}
+	if refusal := decodeBody[refusalAnswer](t, nobodys); refusal.Code != codeGoingRequestNotFound {
+		t.Fatalf("the shared token reading the run it asked: code=%q, want %s", refusal.Code, codeGoingRequestNotFound)
+	}
+
+	subject := "system:serviceaccount:dispatch:answerer"
+	pod, err := rig.server.recordGoingRequest(context.Background(), model.Actor{Service: &subject}, "", "what is this pod running?")
+	if err != nil {
+		t.Fatalf("record a pod's run: %v", err)
+	}
+	crossed := rig.streamUnder(t, pod.ID, "agent-token")
+	if crossed.Code != http.StatusNotFound {
+		t.Fatalf("the shared token reading a pod's run: status=%d body=%s, want 404", crossed.Code, crossed.Body.String())
+	}
+}
+
+// A Last-Event-ID past what going_events.sequence can hold is no resumption point, as a
+// negative one is not: the whole stream is answered. Bound as a sequence it could never be, the
+// read that carries the stream would fail against the integer column and the reader would be
+// answered 200 with no frame at all.
+func TestGoingStreamReadsAResumePointPastTheSequenceColumnAsNone(t *testing.T) {
+	rig := newGoingRoutesRig(t, nil)
+	ctx := context.Background()
+	run, err := rig.server.recordGoingRequest(ctx, goingAsker, "", "how far can a reader resume?")
+	if err != nil {
+		t.Fatalf("record the run: %v", err)
+	}
+	if _, err := rig.server.appendGoingEvent(ctx, run.ID, going.Text("Nobody has.")); err != nil {
+		t.Fatalf("append the answer: %v", err)
+	}
+	if _, err := rig.server.endGoingRun(ctx, run.ID, going.End(2, 0)); err != nil {
+		t.Fatalf("end the run: %v", err)
+	}
+
+	want := "id: 1\nevent: text\ndata: {\"text\":\"Nobody has.\"}\n\n" +
+		"id: 2\nevent: end\ndata: {\"items\":0,\"words\":2}\n\n"
+	for _, resume := range []string{"2147483648", "9223372036854775808", "-1"} {
+		response := rig.stream(t, run.ID, "alice", resume)
+		if response.Code != http.StatusOK || response.Body.String() != want {
+			t.Fatalf("resuming from %s wrote %q (status %d), want the whole stream %q",
+				resume, response.Body.String(), response.Code, want)
+		}
+	}
+}
+
+// cursorAnswerer is a run that holds one of the shared pool's connections while it answers, as
+// every real run does the moment it searches: store.Pool.Query holds its connection until the
+// rows close, and marks the context it was given as holding one. It opens that cursor on the
+// context the route detached it with, says so, and holds it until the test lets go.
+type cursorAnswerer struct {
+	pool    *store.Pool
+	opened  chan struct{}
+	release chan struct{}
+	// failed is what opening the cursor answered, read once opened is closed.
+	failed error
+}
+
+func (c *cursorAnswerer) Run(ctx context.Context, _ going.Request, emit func(going.Event) error) error {
+	rows, err := c.pool.Query(ctx, `select 1`)
+	if err == nil {
+		close(c.opened)
+		<-c.release
+		rows.Close()
+	} else {
+		c.failed = err
+		close(c.opened)
+	}
+	return emit(going.Fault(contracts.GoingErrorAnswerFailed))
+}
+
+// The run the POST detaches reads the store on a connection mark of its own and never on the
+// request's. The request's mark is still in use when the run begins: keyedWrites settles the
+// Idempotency-Key with an Exec on it the moment this handler returns, and the pool refuses a
+// second connection under a mark that already holds one (store.ErrNestedAcquire), so a run
+// sharing it would take that settle's connection away for the length of its first search and
+// the key would store no answer - a repeat would then be recorded as a second question instead
+// of being answered this run's id. Here the run's cursor is held open while the settle's own
+// statement runs, which is the collision itself rather than a window it might fall into.
+func TestGoingRequestGivesItsRunAConnectionMarkOfItsOwn(t *testing.T) {
+	answerer := &cursorAnswerer{opened: make(chan struct{}), release: make(chan struct{})}
+	rig := newGoingRoutesRig(t, answerer)
+	answerer.pool = rig.database.Pool
+	// The run's cursor is let go however this test ends: a failure that left it open would hold
+	// a connection of the pool past the test, and the store's own cleanup would wait on it.
+	release := sync.OnceFunc(func() { close(answerer.release) })
+	defer release()
+
+	// The mark every route's handler runs under (server.Register), held here so the test can
+	// run the settle's statement on it.
+	marked := store.WithTransactionTracking(context.Background())
+	request := httptest.NewRequestWithContext(marked, http.MethodPost, "/api/v1/going/requests",
+		strings.NewReader(`{"words":"who holds the connection?"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Dispatch-User", "alice")
+	response := httptest.NewRecorder()
+	rig.server.createGoingRequest(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("ask: status=%d body=%s", response.Code, response.Body.String())
+	}
+	run := decodeBody[askedRun](t, response)
+
+	<-answerer.opened
+	if answerer.failed != nil {
+		t.Fatalf("the detached run could not open a cursor: %v", answerer.failed)
+	}
+	// What settleRequestKey runs on the request's mark once the handler has returned.
+	if _, err := rig.database.Pool.Exec(marked, `select 1`); err != nil {
+		t.Fatalf("the key's settle was refused while the run held a cursor: %v", err)
+	}
+	release()
+	rig.awaitTerminal(t, run.ID)
 }

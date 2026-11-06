@@ -172,9 +172,9 @@ func newAnswerer(cfg answererConfig) (*going.Answerer, error) {
 		Endpoint:   cfg.Endpoint,
 		APIVersion: cfg.APIVersion,
 		Model:      cfg.Model,
-		TokenFile:  cfg.TokenFile,
 	}
-	if cfg.Place == placeAnswererAzure {
+	switch cfg.Place {
+	case placeAnswererAzure:
 		// The chat form of Azure signs in keylessly, at the scope the settings name: an Azure
 		// resource's inference families differ in it, so it is configuration here and not
 		// embed.DefaultEntraScope.
@@ -188,6 +188,11 @@ func newAnswerer(cfg answererConfig) (*going.Answerer, error) {
 			return nil, err
 		}
 		chat.Tokens = tokens
+	case placeAnswererEndpoint:
+		// The endpoint form's bearer is whatever DISPATCH_CHAT_TOKEN_FILE holds at the moment
+		// of the call: the source reads it then, so a token rewritten under this process is
+		// the one the next call presents.
+		chat.Tokens = going.FileTokenSource{Path: cfg.TokenFile}
 	}
 	client, err := going.NewHTTPClient(chat)
 	if err != nil {
@@ -197,6 +202,8 @@ func newAnswerer(cfg answererConfig) (*going.Answerer, error) {
 	if err != nil {
 		return nil, err
 	}
-	slog.Info("dispatch: answers questions with a configured text model", "place", cfg.Place, "identity", answerer.Identity())
+	// The identity is read from the client just built, which is the thing that knows it: the
+	// pacing an answerer wraps a client in says nothing about which model answers.
+	slog.Info("dispatch: answers questions with a configured text model", "place", cfg.Place, "identity", client.Identity())
 	return answerer, nil
 }

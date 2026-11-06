@@ -3,7 +3,6 @@ package going
 import (
 	"context"
 	"errors"
-	"strings"
 	"time"
 )
 
@@ -17,9 +16,11 @@ import (
 // What is mirrored, so the swap is a replacement and not a redesign: loopRequest's System, Input,
 // Tools and Bounds are agentloop.Request's own fields, each tool carries its own Run closure
 // because a tool's budget is that tool's logic, loopBounds.Calls bounds model calls alone,
-// OnText takes each content delta as it arrives, and loopResult carries the text and a loopFault
-// of time, calls or provider_error. runLoop returns an error for a callback's error or the
-// context ending, with the result so far, as agentloop.Run does.
+// OnText takes each content delta as it arrives, and loopResult carries a loopFault of time,
+// calls or provider_error. runLoop returns an error for a callback's error or the context
+// ending, with the result so far, as agentloop.Run does. agentloop.Result's Text is not
+// mirrored: this route reads every delta through OnText, which is what lets it stream, and
+// nothing here reads a whole answer.
 //
 // The swap is: replace runLoop with agentloop.Run, convert this package's Message and ToolCall to
 // agentloop's Message, Block and ToolCall, and give agentloop an Endpoint in place of the Client.
@@ -49,8 +50,10 @@ type loopBounds struct {
 }
 
 // loopTool is one tool the model may call. Run answers the model with the tool's own result and
-// says whether that result is an error, which is how a refused call, a failed one and an unknown
-// tool all reach the model as something it can act on rather than ending the run.
+// says whether that result is an error; an error is sent to the model as its own text behind
+// toolErrorPrefix, since the OpenAI wire has no field for it. That prefix is how a refused call,
+// a failed one and an unknown tool all reach the model as something it can act on rather than
+// ending the run.
 type loopTool struct {
 	Name        string
 	Description string
@@ -59,6 +62,13 @@ type loopTool struct {
 	Schema map[string]any
 	Run    func(ctx context.Context, call ToolCall) (output string, isError bool)
 }
+
+// toolErrorPrefix opens the result of a tool call that failed, was refused or named no tool.
+// agentloop.Tool.Run says a result is an error with a bool, and the chat completions wire this
+// route speaks has no field for one, so the fact is carried where the model actually reads it:
+// in the first word of the result's own text. A model that reads it can call the tool again,
+// call another, or answer from what it has - which is why such a result ends no run.
+const toolErrorPrefix = "Error: "
 
 // loopRequest is one run of the loop: the system message, the input the run opens with, the tools
 // and the bounds, with OnText taking every content delta of every turn so the answer reaches the
@@ -75,11 +85,10 @@ type loopRequest struct {
 	OnText func(delta string) error
 }
 
-// loopResult is what one run came to: the text the model wrote, and the fault that ended the run
-// with no answer (empty when the model answered). The text is here because the agreed Result
-// carries it; this route reads the answer through OnText, which is what lets it stream.
+// loopResult is what one run came to: the fault that ended the run with no answer (empty when
+// the model answered). The answer itself is not here, because every delta of it has already
+// gone to OnText by the time this is returned, and nothing in this route reads it twice.
 type loopResult struct {
-	Text  string
 	Fault loopFault
 	// Detail says what a provider error was, for a log and never for a reader: Answerer.Run
 	// writes it once, where that fault becomes the stream's ANSWER_FAILED.
@@ -106,10 +115,8 @@ func runLoop(ctx context.Context, request loopRequest) (loopResult, error) {
 		tools[i] = Tool{Name: tool.Name, Description: tool.Description, Parameters: tool.Schema}
 	}
 
-	var text strings.Builder
 	var callbackErr error
 	onText := func(delta string) error {
-		text.WriteString(delta)
 		if request.OnText == nil {
 			return nil
 		}
@@ -121,27 +128,37 @@ func runLoop(ctx context.Context, request loopRequest) (loopResult, error) {
 	}
 
 	for range request.Bounds.Calls {
+		// No call is made under a context that has already ended: the run is over - its time
+		// ran out, or a tool ended it (answerer.go: a store read the search could not be
+		// served) - and a call made now would spend the deployment's quota on a turn whose text
+		// no reader is owed.
+		if err := ctx.Err(); err != nil {
+			return loopResult{Fault: loopFaultTime}, err
+		}
 		calls, err := request.Model.Chat(ctx, ChatRequest{Messages: messages, Tools: tools}, onText)
 		switch {
 		case callbackErr != nil:
 			// A callback's error ends the run at that frame: the caller it belongs to is the one
 			// that must hear it, so it is returned rather than named a fault.
-			return loopResult{Text: text.String()}, callbackErr
+			return loopResult{}, callbackErr
 		case err != nil && isDeadline(ctx, err):
-			return loopResult{Text: text.String(), Fault: loopFaultTime}, err
+			return loopResult{Fault: loopFaultTime}, err
 		case err != nil:
-			return loopResult{Text: text.String(), Fault: loopFaultProviderError, Detail: err.Error()}, nil
+			return loopResult{Fault: loopFaultProviderError, Detail: err.Error()}, nil
 		case len(calls) == 0:
 			// The turn carried no tool call, so it was the answer.
-			return loopResult{Text: text.String()}, nil
+			return loopResult{}, nil
 		}
 		messages = append(messages, Message{Role: "assistant", ToolCalls: calls})
 		for _, call := range calls {
-			output, _ := runTool(ctx, request.Tools, call)
+			output, isError := runTool(ctx, request.Tools, call)
+			if isError {
+				output = toolErrorPrefix + output
+			}
 			messages = append(messages, Message{Role: "tool", ToolCallID: call.ID, Content: output})
 		}
 	}
-	return loopResult{Text: text.String(), Fault: loopFaultCalls}, nil
+	return loopResult{Fault: loopFaultCalls}, nil
 }
 
 // runTool hands one call to the tool it names. A name no tool carries is answered to the model

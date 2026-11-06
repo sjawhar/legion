@@ -78,8 +78,8 @@ COPY packages/envoy/internal ./internal
 # (DISPATCH_LISTEN_FD, ENVOY_LISTEN_FD).
 COPY packages/envoy/listenfd ./listenfd
 # going: the chat client, the answer filter and the run the going routes answer with, a package
-# outside internal/ because packages/daemon imports it too. envoy-dispatch compiles it in, so the
-# build needs it here beside cmd and internal.
+# outside internal/ so the daemon can speak the same stream (going/events.go). envoy-dispatch
+# compiles it in, so the build needs it here beside cmd and internal.
 COPY packages/envoy/going ./going
 # The Go contracts file is generated from packages/contracts/schemas; never
 # trust the copy checked into the tree over a fresh regeneration.

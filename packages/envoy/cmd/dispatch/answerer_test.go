@@ -189,10 +189,10 @@ func TestNewAnswererBuildsEachPlaceAndLogsTheOneLine(t *testing.T) {
 			if answerer == nil {
 				t.Fatal("newAnswerer built no answerer, want the client the settings name")
 			}
+			// The identity is read where a reader of a boot reads it: the one logged line. It
+			// is the client's own (going.HTTPClient.Identity), which is why nothing between
+			// here and that client carries it.
 			identity := place + ":chat.example/" + cfg.Model
-			if got := answerer.Identity(); got != identity {
-				t.Errorf("Identity() = %q, want %q", got, identity)
-			}
 			want := `level=INFO msg="dispatch: answers questions with a configured text model" place=` + place + " identity=" + identity + "\n"
 			line := logged.String()
 			if !strings.HasSuffix(line, want) || strings.Count(line, "\n") != 1 {

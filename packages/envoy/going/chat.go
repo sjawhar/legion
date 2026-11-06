@@ -49,9 +49,6 @@ type Client interface {
 	// caller may pass the answer on before the model has finished, and the tool calls the turn
 	// ended with are returned (none when it ended with an answer).
 	Chat(ctx context.Context, request ChatRequest, onText func(string) error) ([]ToolCall, error)
-	// Identity is the place, the endpoint's host and the model, as embed.AzureClient's is, for
-	// the one line the boot logs. It carries no credential.
-	Identity() string
 }
 
 // ChatRequest is one turn's input: the conversation so far, and the tools the model may call
@@ -92,10 +89,38 @@ type TokenSource interface {
 	Token(ctx context.Context) (string, error)
 }
 
-// HTTPConfig configures an HTTPClient. Exactly one of Tokens and TokenFile is set: the keyless
-// Azure sign-in, or the bearer an endpoint's token file holds.
+// FileTokenSource is the bearer a file holds: the file's whole contents, with the whitespace at
+// either end trimmed. It reads the file on every call rather than keeping what it read, because
+// the token rotates under a running process - as the federated token embed.EntraTokenSource
+// presents does, which the kubelet rewrites in place - and a source that read it once at boot
+// would go on presenting a bearer the service has stopped taking.
+type FileTokenSource struct {
+	// Path is the file holding the bearer. It is never read at boot, so a file written after
+	// the process starts refuses no boot.
+	Path string
+}
+
+var _ TokenSource = FileTokenSource{}
+
+// Token is what the file holds now. A file that cannot be read, and one holding nothing but
+// whitespace, are both failures naming the path and never its contents.
+func (s FileTokenSource) Token(context.Context) (string, error) {
+	raw, err := os.ReadFile(s.Path)
+	if err != nil {
+		return "", fmt.Errorf("read the token file: %w", err)
+	}
+	token := strings.TrimSpace(string(raw))
+	if token == "" {
+		return "", fmt.Errorf("the token file %s is empty", s.Path)
+	}
+	return token, nil
+}
+
+// HTTPConfig configures an HTTPClient.
 type HTTPConfig struct {
-	// Place is where the text is generated, as answererConfig.Place names it, for Identity.
+	// Place names what generates the text, as Identity opens with it: "azure" for a chat
+	// deployment of an Azure AI Foundry resource, "endpoint" for any other OpenAI-shaped chat
+	// completions service.
 	Place string
 	// Endpoint is the absolute base URL the route is appended to.
 	Endpoint string
@@ -103,10 +128,10 @@ type HTTPConfig struct {
 	APIVersion string
 	// Model is the model each request names, the deployment's name on Azure.
 	Model string
-	// Tokens is the keyless form of credential, each token sent as a bearer.
+	// Tokens is the credential, each token sent as a bearer; required. It is a FileTokenSource
+	// for a service whose bearer a file holds, and an *embed.EntraTokenSource for the keyless
+	// Azure sign-in.
 	Tokens TokenSource
-	// TokenFile is the file holding the bearer, re-read on every call.
-	TokenFile string
 	// HTTPClient replaces http.DefaultClient; a test injects one.
 	HTTPClient *http.Client
 }
@@ -115,12 +140,11 @@ type HTTPConfig struct {
 // POST per turn does not need a vendor SDK, and reading the stream frame by frame is what lets
 // the answer reach the reader while the model is still writing it.
 type HTTPClient struct {
-	url       string
-	identity  string
-	model     string
-	tokens    TokenSource
-	tokenFile string
-	http      *http.Client
+	url      string
+	identity string
+	model    string
+	tokens   TokenSource
+	http     *http.Client
 }
 
 var _ Client = (*HTTPClient)(nil)
@@ -143,8 +167,8 @@ func NewHTTPClient(cfg HTTPConfig) (*HTTPClient, error) {
 	if cfg.Model == "" {
 		return nil, errors.New("going: chat needs a model")
 	}
-	if (cfg.TokenFile == "") == (cfg.Tokens == nil) {
-		return nil, errors.New("going: chat needs exactly one credential: a token source or a token file")
+	if cfg.Tokens == nil {
+		return nil, errors.New("going: chat needs a credential: a token source")
 	}
 	target := *endpoint
 	target.Path = strings.TrimRight(endpoint.Path, "/") + chatCompletionsRoute
@@ -153,17 +177,17 @@ func NewHTTPClient(cfg HTTPConfig) (*HTTPClient, error) {
 		target.RawQuery = url.Values{"api-version": {cfg.APIVersion}}.Encode()
 	}
 	return &HTTPClient{
-		url:       target.String(),
-		identity:  cfg.Place + ":" + strings.ToLower(endpoint.Host) + "/" + cfg.Model,
-		model:     cfg.Model,
-		tokens:    cfg.Tokens,
-		tokenFile: cfg.TokenFile,
-		http:      cmp.Or(cfg.HTTPClient, http.DefaultClient),
+		url:      target.String(),
+		identity: cfg.Place + ":" + strings.ToLower(endpoint.Host) + "/" + cfg.Model,
+		model:    cfg.Model,
+		tokens:   cfg.Tokens,
+		http:     cmp.Or(cfg.HTTPClient, http.DefaultClient),
 	}, nil
 }
 
-// Identity is "<place>:<endpoint host>/<model>": the place belongs in the identity, so the one
-// line the boot logs says which service of which resource answers questions here.
+// Identity is "<place>:<endpoint host>/<model>", as embed.AzureClient's is, for the one line the
+// boot logs: the place belongs in it, so that line says which service of which resource answers
+// questions here. It carries no credential.
 func (c *HTTPClient) Identity() string { return c.identity }
 
 // chatWireRequest is the body posted: the OpenAI chat completions shape, streamed. Tools and
@@ -299,24 +323,13 @@ func (c *HTTPClient) Chat(ctx context.Context, request ChatRequest, onText func(
 	return readChatStream(response, onText)
 }
 
-// token is the bearer one call presents. The token file is re-read on every call, as
-// embed.EntraTokenSource re-reads the federated token on every exchange, because the file is
-// rewritten under the process whenever the bearer is renewed.
+// token is the bearer one call presents, asked of the source on every call: a source hands back
+// what its credential is now, which is what keeps a bearer that rotates under this process -
+// the Azure sign-in's, a token file's - from going stale here.
 func (c *HTTPClient) token(ctx context.Context) (string, error) {
-	if c.tokens != nil {
-		token, err := c.tokens.Token(ctx)
-		if err != nil {
-			return "", fmt.Errorf("going: chat sign-in: %w", err)
-		}
-		return token, nil
-	}
-	raw, err := os.ReadFile(c.tokenFile)
+	token, err := c.tokens.Token(ctx)
 	if err != nil {
-		return "", fmt.Errorf("going: chat read token file: %w", err)
-	}
-	token := strings.TrimSpace(string(raw))
-	if token == "" {
-		return "", fmt.Errorf("going: chat token file %s is empty", c.tokenFile)
+		return "", fmt.Errorf("going: chat sign-in: %w", err)
 	}
 	return token, nil
 }

@@ -23,7 +23,7 @@ import (
 //
 // The window a run has belongs to the record: going_requests.ends_at, written by the POST. A pod
 // that dies mid-run stores no terminal frame, so a reader on another pod ends the stream itself
-// once the run is past that moment with nothing terminal stored (readGoingRunState), and
+// once the run is past that moment with nothing terminal stored (readGoingStream), and
 // sweepGoingRequests ends the runs nobody reads. At the deadline the running answer, a reader
 // and the sweep may each try to end one run, so which of them ends it is settled by the table
 // (the going_events_terminal index of migration 20261105152945) and never by whichever is first:
@@ -212,9 +212,8 @@ func (s *server) readGoingTerminalEvent(ctx context.Context, requestID string) (
 }
 
 // goingEventsAfter is every frame of one run past a sequence, in stream order: $1 the run, $2
-// that sequence; scanGoingEvent decodes each row. It is named because readGoingStream queues it
-// beside the state read, and the two paths must run the one statement text, which pgx keeps one
-// prepared plan for.
+// that sequence; scanGoingEvent decodes each row. It is named rather than written inline
+// because readGoingStream queues it in a batch beside the state read.
 const goingEventsAfter = `
 	select ` + goingEventColumns + `
 	from going_events
@@ -223,7 +222,7 @@ const goingEventsAfter = `
 
 // goingRunStateOf reads one run's state, $1 the run and $2 the terminal frame names: the
 // sequence of its terminal frame, 0 while it has stored none, and whether now is past its
-// ends_at. Named for the reason goingEventsAfter is.
+// ends_at. Queued beside goingEventsAfter, for the reason it is named.
 const goingRunStateOf = `
 	select coalesce(
 	         (select e.sequence from going_events e where e.request_id = r.id and e.name = any($2::text[])),
@@ -232,29 +231,6 @@ const goingRunStateOf = `
 	       now() >= r.ends_at
 	from going_requests r
 	where r.id = $1::uuid`
-
-// readGoingEventsAfter is every frame of the run past sequence after, in stream order: what a
-// reader resuming from Last-Event-ID asks for, and, with after zero, the whole stream for a
-// reader arriving fresh.
-func (s *server) readGoingEventsAfter(ctx context.Context, requestID string, after int) ([]goingEvent, error) {
-	rows, err := s.deps.Store.Pool.Query(ctx, goingEventsAfter, requestID, after)
-	if err != nil {
-		return nil, err
-	}
-	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (goingEvent, error) {
-		return scanGoingEvent(row)
-	})
-}
-
-// readGoingRunState tells which sequence the run's terminal frame took, 0 while it has stored
-// none, and whether it is past its ends_at, in one read, since a reader deciding whether its
-// stream is over needs both; pgx.ErrNoRows when the record holds no such run.
-func (s *server) readGoingRunState(ctx context.Context, requestID string) (goingRunState, error) {
-	var state goingRunState
-	err := s.deps.Store.Pool.QueryRow(ctx, goingRunStateOf, requestID, goingTerminalNames).
-		Scan(&state.Terminal, &state.PastDeadline)
-	return state, err
-}
 
 // readGoingStream is what one poll of an open stream reads: the frames past after, and the run's
 // state, in one round trip (store.Pool.SendBatch), where a poll of a stream costs two. Either
@@ -316,30 +292,45 @@ func scanGoingEvent(row pgx.Row) (goingEvent, error) {
 
 // sweepGoingRequests ends every run that is past its ends_at with no terminal frame stored, with
 // the deadline's error (contracts.GoingErrorAnswerDidNotArrive), and then deletes every run
-// older than contracts.GoingRequestTTL, its frames going with it (on delete cascade). The first
-// statement is what ends a run nobody reads: the pod that was answering it may have died, and
-// nothing else would ever store its terminal frame. It does nothing on a conflict, as every
-// terminal write does, so a run a reader or the answer itself ended between this statement's
-// read and its insert keeps that frame; running it again stores nothing, since the run it ended
-// now has one. The second is why a reader that reconnects within the hour still finds its
-// answer, and nothing older is kept.
+// older than contracts.GoingRequestTTL, its frames going with it (on delete cascade). Ending
+// those runs is what nothing else does: the pod that was answering one may have died, and
+// nobody may be reading it.
+//
+// Each overdue run is ended by goingEndEvent, the statement every other terminal write uses, so
+// the sweep holds no second copy of how a frame takes its next sequence: the ids are read
+// first, then one queued write each, which is one round trip for the pass. A run a reader or
+// the answer itself ended between the read and the write keeps that frame, since the write does
+// nothing on a conflict; a run whose next sequence went to a frame of its own meanwhile stores
+// nothing here and is ended by the next pass, where endGoingRun, which has a reader waiting on
+// it, tries the sequence after it at once. The delete is why a reader that reconnects within
+// the hour still finds its answer, and nothing older is kept.
 func sweepGoingRequests(ctx context.Context, pool *store.Pool) error {
 	deadline := going.Fault(contracts.GoingErrorAnswerDidNotArrive)
 	data, err := json.Marshal(deadline.Data)
 	if err != nil {
 		return err
 	}
-	if _, err := pool.Exec(ctx, `
-		insert into going_events (request_id, sequence, name, data)
-		select r.id,
-		       coalesce((select max(e.sequence) from going_events e where e.request_id = r.id), 0) + 1,
-		       $1::text, $2::jsonb
+	rows, err := pool.Query(ctx, `
+		select r.id::text
 		from going_requests r
 		where r.ends_at <= now()
-		  and not exists (select 1 from going_events e where e.request_id = r.id and e.name = any($3::text[]))
-		on conflict do nothing
-	`, deadline.Name, data, goingTerminalNames); err != nil {
+		  and not exists (select 1 from going_events e where e.request_id = r.id and e.name = any($1::text[]))
+	`, goingTerminalNames)
+	if err != nil {
 		return err
+	}
+	overdue, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return err
+	}
+	if len(overdue) > 0 {
+		batch := &pgx.Batch{}
+		for _, id := range overdue {
+			batch.Queue(goingEndEvent, id, deadline.Name, data)
+		}
+		if err := pool.SendBatch(ctx, batch).Close(); err != nil {
+			return err
+		}
 	}
 	_, err = pool.Exec(ctx, `
 		delete from going_requests where created_at < now() - make_interval(secs => $1)

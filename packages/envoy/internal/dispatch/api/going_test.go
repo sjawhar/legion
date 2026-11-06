@@ -44,10 +44,11 @@ func (rig goingRig) record(t *testing.T, words string) goingRequest {
 }
 
 // frames is every frame of the run, in stream order, rendered "<sequence> <name> <data>" so one
-// comparison says what the stream holds.
+// comparison says what the stream holds. It reads them as a reader of the stream does, through
+// readGoingStream, so no test here runs a read the server does not.
 func (rig goingRig) frames(t *testing.T, requestID string) []string {
 	t.Helper()
-	stored, err := rig.server.readGoingEventsAfter(context.Background(), requestID, 0)
+	stored, _, err := rig.server.readGoingStream(context.Background(), requestID, 0)
 	if err != nil {
 		t.Fatalf("read the run's frames: %v", err)
 	}
@@ -123,7 +124,7 @@ func TestGoingEventsAppendInSequenceAndReadAfterOne(t *testing.T) {
 		t.Fatalf("the end took sequence %d, want 4", ended.Sequence)
 	}
 
-	after, err := rig.server.readGoingEventsAfter(ctx, run.ID, 2)
+	after, _, err := rig.server.readGoingStream(ctx, run.ID, 2)
 	if err != nil {
 		t.Fatalf("read the frames after 2: %v", err)
 	}
@@ -259,14 +260,14 @@ func TestTheGoingSweepEndsARunPastItsWindowOnce(t *testing.T) {
 		t.Fatalf("a second sweep left %v, want the one ending %v", frames, swept)
 	}
 
-	state, err := rig.server.readGoingRunState(ctx, abandoned.ID)
+	_, state, err := rig.server.readGoingStream(ctx, abandoned.ID, 0)
 	if err != nil {
 		t.Fatalf("read the swept run's state: %v", err)
 	}
 	if state.Terminal != 2 || !state.PastDeadline {
 		t.Fatalf("the swept run reads %+v, want its ending at sequence 2 and past its deadline", state)
 	}
-	if state, err := rig.server.readGoingRunState(ctx, live.ID); err != nil || state.Terminal != 0 || state.PastDeadline {
+	if _, state, err := rig.server.readGoingStream(ctx, live.ID, 0); err != nil || state.Terminal != 0 || state.PastDeadline {
 		t.Fatalf("the live run reads %+v (%v), want no ending stored and not past its deadline", state, err)
 	}
 }
@@ -312,7 +313,7 @@ func TestTheMaintenancePassEndsAGoingRunNobodyReads(t *testing.T) {
 		RunMaintenanceSweep(ctx, rig.database.Pool, maintenanceTestInterval, leases, nil)
 	})
 	waitUntil(t, 30*time.Second, "the abandoned run ended by a maintenance pass", func() bool {
-		state, err := rig.server.readGoingRunState(context.Background(), abandoned.ID)
+		_, state, err := rig.server.readGoingStream(context.Background(), abandoned.ID, 0)
 		return err == nil && state.Terminal > 0
 	})
 	deadline := fmt.Sprintf(`1 %s {"code":%q}`, contracts.GoingEventError, contracts.GoingErrorAnswerDidNotArrive)

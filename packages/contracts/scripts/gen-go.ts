@@ -195,8 +195,8 @@ const SearchDegradedEmbedderUnavailable = ${JSON.stringify(SEARCH_DEGRADED_EMBED
 // The names of the frames one answer's stream carries: text as the answer arrives, item for each
 // thing the answer cites, cut when the answer reached its word cap, changed when the answer
 // linked something the model was never given and the server dropped that link, none when the
-// answer links nothing, and end and error, the two that end a stream. Generated from
-// GOING_EVENT_TEXT, GOING_EVENT_ITEM, GOING_EVENT_CUT,
+// model produced no answer text at all, and end and error, the two that end a stream.
+// Generated from GOING_EVENT_TEXT, GOING_EVENT_ITEM, GOING_EVENT_CUT,
 // GOING_EVENT_CHANGED, GOING_EVENT_NONE, GOING_EVENT_END and GOING_EVENT_ERROR in
 // packages/contracts so the frames the server writes and the frames the page reads cannot drift
 // apart.

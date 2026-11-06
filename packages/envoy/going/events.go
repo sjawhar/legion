@@ -48,8 +48,8 @@ type ChangedData struct {
 	Dropped int `json:"dropped"`
 }
 
-// NoneData says Dispatch holds nothing that answers the question. It carries no field, and is a
-// type of its own so a none frame is written the same way as every other.
+// NoneData says the model produced no answer text at all. It carries no field, and is a type of
+// its own so a none frame is written the same way as every other.
 type NoneData struct{}
 
 // EndData ends a stream that answered, with what the answer came to.
@@ -90,7 +90,8 @@ func Changed(dropped int) Event {
 	return Event{Name: contracts.GoingEventChanged, Data: ChangedData{Dropped: dropped}}
 }
 
-// None says Dispatch holds no answer to the question.
+// None says the model wrote no answer. An answer that kept no link is not none: it is shown,
+// and its end's items of 0 is what tells the reader it rests on no source.
 func None() Event {
 	return Event{Name: contracts.GoingEventNone, Data: NoneData{}}
 }

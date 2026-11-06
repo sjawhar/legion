@@ -142,6 +142,9 @@ type reads struct {
 	bodies  map[string]string
 	queries []string
 	err     error
+	// served is how many searches are answered before err is: zero fails the run's own seeding
+	// search, and one fails the first search the model asks for.
+	served int
 }
 
 // request is one question over these reads.
@@ -150,7 +153,7 @@ func (r *reads) request(words string) going.Request {
 		Words: words,
 		Search: func(_ context.Context, q string) ([]going.Hit, error) {
 			r.queries = append(r.queries, q)
-			if r.err != nil {
+			if r.err != nil && len(r.queries) > r.served {
 				return nil, r.err
 			}
 			return r.hits, nil
@@ -309,20 +312,43 @@ func TestRunNeverEmitsALinkOutsideTheCitationSet(t *testing.T) {
 	}
 }
 
-// TestRunSaysNoneWhenTheAnswerLinksNothing: an answer that links nothing says none, then ends.
-func TestRunSaysNoneWhenTheAnswerLinksNothing(t *testing.T) {
-	model := goingtest.NewModel(t, goingtest.Reply{Text: "Dispatch holds no answer to that question."})
-	answerer := testAnswerer(t, model, going.AnswererConfig{})
-	stream := &answerStream{}
+// TestRunSaysNoneWhenTheModelWroteNothing: none is the model producing no answer text at all,
+// and nothing else. A run whose model answered with no text says none, then ends; a run whose
+// answer linked nothing is still an answer, and its end's items of 0 is what says it rests on
+// no source.
+func TestRunSaysNoneWhenTheModelWroteNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		text string
+		none bool
+	}{
+		{"the model wrote nothing", "", true},
+		{"the answer links nothing", "Dispatch holds no answer to that question.", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			model := goingtest.NewModel(t, goingtest.Reply{Text: tc.text})
+			answerer := testAnswerer(t, model, going.AnswererConfig{})
+			stream := &answerStream{}
 
-	if err := answerer.Run(t.Context(), testReads().request("what did nobody write down"), stream.emit); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
+			if err := answerer.Run(t.Context(), testReads().request("what did nobody write down"), stream.emit); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
 
-	stream.terminal(t)
-	names := stream.names()
-	if got := names[len(names)-2:]; got[0] != contracts.GoingEventNone || got[1] != contracts.GoingEventEnd {
-		t.Errorf("stream ends %v, want %s then %s: %v", got, contracts.GoingEventNone, contracts.GoingEventEnd, names)
+			end, ok := stream.terminal(t).Data.(going.EndData)
+			if !ok || end.Items != 0 {
+				t.Errorf("end = %+v, want an end citing nothing", end)
+			}
+			want := 0
+			if tc.none {
+				want = 1
+			}
+			if got := stream.count(contracts.GoingEventNone); got != want {
+				t.Errorf("stream holds %d none events, want %d: %v", got, want, stream.names())
+			}
+			if tc.none && stream.names()[len(stream.names())-2] != contracts.GoingEventNone {
+				t.Errorf("stream ends %v, want %s before its end", stream.names(), contracts.GoingEventNone)
+			}
+		})
 	}
 }
 
@@ -374,6 +400,46 @@ func toolResult(t *testing.T, messages []going.Message, callID string) string {
 	}
 	t.Fatalf("the turn carried no result for tool call %s", callID)
 	return ""
+}
+
+// TestRunTellsTheModelACallFailedInTheResultsOwnText: a tool result that is an error reaches
+// the model as text, behind the prefix, because the chat completions wire carries no field for
+// one; the model is given the refusal and answers from what it has, so such a result ends no
+// run.
+func TestRunTellsTheModelACallFailedInTheResultsOwnText(t *testing.T) {
+	model := goingtest.NewModel(t,
+		goingtest.Reply{ToolCalls: []going.ToolCall{{
+			ID:        "call_1",
+			Name:      contracts.GoingSearchTool,
+			Arguments: `{"not-the-field":"the broadcast order"}`,
+		}}},
+		goingtest.Reply{Text: fmt.Sprintf("It is on [%s](%s).", routeHit.Title, routeHit.Href)},
+	)
+	answerer := testAnswerer(t, model, going.AnswererConfig{})
+	stream := &answerStream{}
+	search := testReads()
+
+	if err := answerer.Run(t.Context(), search.request("who owns the broadcast order"), stream.emit); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if got := stream.terminal(t).Name; got != contracts.GoingEventEnd {
+		t.Fatalf("stream ended with %s, want %s: the run goes on past a refused call: %v",
+			got, contracts.GoingEventEnd, stream.names())
+	}
+	if got := model.Calls(); got != 2 {
+		t.Fatalf("model served %d calls, want the refused tool turn and the answer", got)
+	}
+	refusal := toolResult(t, model.Requests()[1].Messages, "call_1")
+	if !strings.HasPrefix(refusal, "Error: ") {
+		t.Errorf("the failed call was answered %q, want it to open with the error prefix", refusal)
+	}
+	if !strings.Contains(refusal, "Call it again with q") {
+		t.Errorf("the failed call was answered %q, want the words the model can act on", refusal)
+	}
+	if len(search.queries) != 1 {
+		t.Errorf("searches = %q, want the seeding search alone: the call named no words", search.queries)
+	}
 }
 
 // TestRunEndsWithTheDeadlineWhenTheModelNeverAnswers: a model that holds its response open past
@@ -459,6 +525,36 @@ func TestRunFailsWhenTheStoreCannotBeRead(t *testing.T) {
 	}
 	if got := model.Calls(); got != 0 {
 		t.Errorf("model served %d calls, want none: there was nothing to show it", got)
+	}
+}
+
+// TestRunEndsWhenAToolsSearchCannotBeRead: a search the model asked for that the store could not
+// serve ends the run there, with the failure code and no further model call. The run must not do
+// both: stream the answer a further call would write and then disown it with ANSWER_FAILED.
+func TestRunEndsWhenAToolsSearchCannotBeRead(t *testing.T) {
+	model := goingtest.NewModel(t,
+		searchCall("call_1", "who owns it"),
+		goingtest.Reply{Text: "An answer nobody should ever be written."},
+	)
+	answerer := testAnswerer(t, model, going.AnswererConfig{})
+	stream := &answerStream{}
+	search := testReads()
+	// The run's own seeding search is served; the one the model asks for is not.
+	search.served = 1
+	search.err = errors.New("the store refused this read")
+
+	if err := answerer.Run(t.Context(), search.request("who owns the broadcast order"), stream.emit); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if got := stream.code(t); got != contracts.GoingErrorAnswerFailed {
+		t.Errorf("error code = %s, want %s", got, contracts.GoingErrorAnswerFailed)
+	}
+	if got := model.Calls(); got != 1 {
+		t.Errorf("model served %d calls, want the one turn that called the tool: the run ended on that search", got)
+	}
+	if got := stream.count(contracts.GoingEventText); got != 0 {
+		t.Errorf("stream holds %d text events, want none: the run ended before any answer was written", got)
 	}
 }
 

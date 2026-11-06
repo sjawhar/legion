@@ -22,7 +22,8 @@ export const GOING_EVENT_CUT = "cut";
  *  Generated into Go as `contracts.GoingEventChanged`. */
 export const GOING_EVENT_CHANGED = "changed";
 
-/** The frame saying Dispatch holds nothing that answers the question.
+/** The frame saying the model produced no answer text at all. An answer that kept no link is
+ *  not this: it is shown, and its `end` frame's `items` of 0 says it rests on no source.
  *  Generated into Go as `contracts.GoingEventNone`. */
 export const GOING_EVENT_NONE = "none";
 
@@ -116,7 +117,7 @@ export interface GoingChangedEvent {
   readonly data: { readonly dropped: number };
 }
 
-/** Dispatch holds nothing that answers the question. */
+/** The model produced no answer text at all. */
 export interface GoingNoneEvent {
   readonly event: typeof GOING_EVENT_NONE;
   readonly data: Record<string, never>;

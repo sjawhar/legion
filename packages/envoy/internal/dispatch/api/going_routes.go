@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // The three routes of an answer: the POST that asks a question, the stream that carries the
@@ -46,8 +48,8 @@ const goingStreamPoll = 200 * time.Millisecond
 // which is the time this reader needs to end the run itself.
 const goingStreamGrace = 5 * time.Second
 
-// Answerer generates one answer from what Dispatch holds. It is declared here, with the two
-// methods the server calls, rather than taken as *going.Answerer, so a test injects a fake
+// Answerer generates one answer from what Dispatch holds. It is declared here, with the one
+// method the server calls, rather than taken as *going.Answerer, so a test injects a fake
 // through Deps without an HTTP service behind it; nil is a deployment with no model configured
 // (cmd/dispatch: DISPATCH_ANSWERER unset), where a run is still recorded and its stream carries
 // the error frame contracts.GoingErrorNoModelConfigured.
@@ -55,8 +57,6 @@ type Answerer interface {
 	// Run answers the request, handing emit each frame of the stream in order with exactly one
 	// terminal frame last; the error it answers is emit's own.
 	Run(ctx context.Context, request going.Request, emit func(going.Event) error) error
-	// Identity names the model that answers, for the one line the boot logs.
-	Identity() string
 }
 
 // createGoingRequestInput is one question as a caller asks it: the words, and the project they
@@ -131,8 +131,26 @@ func (s *server) createGoingRequest(w http.ResponseWriter, r *http.Request) {
 	// cancels the server's lifetime before the HTTP drain begins, so a run bound to either the
 	// request or the lifetime would be cut off with frames it had not stored, and a reader would
 	// wait out the deadline for frames nothing was writing.
-	answering := context.WithoutCancel(r.Context())
-	s.detached.goDetached(func() { s.startGoingRun(answering, request) })
+	//
+	// On a connection mark of the run's own (store.ForConcurrentRead) and never the request's,
+	// which context.WithoutCancel keeps: the run outlives this handler, and its first search
+	// holds one of the pool's connections while its cursor is open (store.Pool.Query). This
+	// request's own mark is still in use at that moment - keyedWrites settles the
+	// Idempotency-Key with an Exec on it the moment this handler returns - and the pool refuses
+	// a second connection taken under a held mark (store.ErrNestedAcquire), so a shared mark
+	// would lose that settle to the run's first search and the key would store no answer: a
+	// repeat would then be recorded as a second question instead of being answered this run's
+	// id.
+	answering, err := store.ForConcurrentRead(context.WithoutCancel(r.Context()))
+	if err != nil {
+		// Only a caller still holding a connection is refused a mark of its own, which this
+		// handler is not by now: its record transaction committed above. The question is
+		// recorded all the same, so the caller is answered its run, and the reader of that run
+		// ends it at its deadline (streamGoingAnswer) as it ends a run whose pod died.
+		slog.Error("dispatch going: the run could not be detached", "request", request.ID, "error", err)
+	} else {
+		s.detached.goDetached(func() { s.startGoingRun(answering, request) })
+	}
 	WriteJSON(w, http.StatusCreated, request)
 }
 
@@ -246,7 +264,9 @@ func (s *server) streamGoingAnswer(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if !request.Author.SameAs(actor) {
+	// Every field of the recorded identity, through goingSameActor, and never model.Actor.SameAs:
+	// a run whose author names nobody at all is nobody's to read.
+	if !goingActorNamesSomebody(request.Author) || !goingSameActor(request.Author, actor) {
 		writeGoingRequestNotFound(w)
 		return
 	}
@@ -318,13 +338,48 @@ func (s *server) streamGoingAnswer(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// goingSameActor reports whether a run's recorded author and the caller asking to read it are
+// the one identity. model.Actor.SameAs is what Dispatch compares actors with elsewhere and must
+// not be reached for here: it compares Kind and ID alone, and three of the credentials
+// optionalActor resolves carry no ID at all - a personal token is {Kind: "session", ID: "",
+// Owner: &owner} (agent_tokens.go), the deployment's shared token is {}, and a pod's
+// service-account token is {Service: &subject}. Under SameAs any two personal tokens are one
+// writer, whoever owns them, and the shared token is every pod's token, which would serve one
+// caller's run to another. So every field of the identity the record keeps is compared: the
+// kind, the id, and the person and the workload the credential named.
+func goingSameActor(author, caller model.Actor) bool {
+	return author.Kind == caller.Kind && author.ID == caller.ID &&
+		goingSameName(author.Owner, caller.Owner) && goingSameName(author.Service, caller.Service)
+}
+
+// goingSameName compares one optional name of two actors: both unset, or both the same name.
+func goingSameName(author, caller *string) bool {
+	if author == nil || caller == nil {
+		return author == caller
+	}
+	return *author == *caller
+}
+
+// goingActorNamesSomebody reports whether a recorded author names any caller at all: a session
+// or person id, the person a personal token belongs to, or the workload a service-account token
+// proved. A run recorded under a credential that names none of them - the deployment's shared
+// token, which resolves as {} - is nobody's, and is read by nobody: comparing identities cannot
+// tell two holders of that one token apart, so the run every holder could claim is a run none
+// of them is served. The reader is answered codeGoingRequestNotFound, as an unknown id is.
+func goingActorNamesSomebody(actor model.Actor) bool {
+	return actor.ID != "" || actor.Owner != nil || actor.Service != nil
+}
+
 // goingResumeFrom is the sequence a reader holds, from the Last-Event-ID header the stream's own
 // `id:` lines set: the stream answers the frames past it. Anything that is not a sequence this
 // stream could have written is no resumption point, and the whole stream is answered, which is
 // what a reader with nothing in hand is answered too.
 func goingResumeFrom(r *http.Request) int {
 	resume, err := strconv.Atoi(strings.TrimSpace(r.Header.Get("Last-Event-ID")))
-	if err != nil || resume < 0 {
+	// Past math.MaxInt32 is no sequence this stream could have written either: going_events
+	// holds its sequence as an integer, so a larger value cannot bind against that column and
+	// the read that carries the stream would fail rather than answer the frames past it.
+	if err != nil || resume < 0 || resume > math.MaxInt32 {
 		return 0
 	}
 	return resume

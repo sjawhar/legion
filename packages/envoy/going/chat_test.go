@@ -29,8 +29,8 @@ type staticTokens struct {
 
 func (s staticTokens) Token(context.Context) (string, error) { return s.token, s.err }
 
-// testClient builds an HTTPClient against model's base, with the token source form of credential
-// unless cfg sets the token file form.
+// testClient builds an HTTPClient against model's base, with a static token as its credential
+// unless cfg carries a source of its own.
 func testClient(t *testing.T, model *goingtest.Model, cfg going.HTTPConfig) *going.HTTPClient {
 	t.Helper()
 	if cfg.Endpoint == "" {
@@ -39,7 +39,7 @@ func testClient(t *testing.T, model *goingtest.Model, cfg going.HTTPConfig) *goi
 	if cfg.Model == "" {
 		cfg.Model = "gpt-test"
 	}
-	if cfg.Tokens == nil && cfg.TokenFile == "" {
+	if cfg.Tokens == nil {
 		cfg.Tokens = staticTokens{token: testToken}
 	}
 	client, err := going.NewHTTPClient(cfg)
@@ -106,15 +106,16 @@ func TestChatSignsWithTheTokenSourcesToken(t *testing.T) {
 	}
 }
 
-// TestChatRereadsTheTokenFileOnEveryCall proves the endpoint form takes the bearer the file holds
-// now: the file is rewritten between two calls, and the second call presents the new token.
+// TestChatRereadsTheTokenFileOnEveryCall proves going.FileTokenSource takes the bearer the file
+// holds now: the file is rewritten between two calls, and the second call presents the new
+// token.
 func TestChatRereadsTheTokenFileOnEveryCall(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "chat-token")
 	if err := os.WriteFile(path, []byte("first-token\n"), 0o600); err != nil {
 		t.Fatalf("write token file: %v", err)
 	}
 	model := goingtest.NewModel(t, goingtest.Reply{Text: "an answer"})
-	client := testClient(t, model, going.HTTPConfig{TokenFile: path})
+	client := testClient(t, model, going.HTTPConfig{Tokens: going.FileTokenSource{Path: path}})
 	if _, err := client.Chat(t.Context(), testRequest(), nil); err != nil {
 		t.Fatalf("first Chat: %v", err)
 	}
@@ -249,7 +250,7 @@ func TestChatRefusesAnUnusableTokenFile(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			model := goingtest.NewModel(t, goingtest.Reply{Text: "an answer"})
-			client := testClient(t, model, going.HTTPConfig{TokenFile: tc.path})
+			client := testClient(t, model, going.HTTPConfig{Tokens: going.FileTokenSource{Path: tc.path}})
 			_, err := client.Chat(t.Context(), testRequest(), nil)
 			if err == nil || !strings.Contains(err.Error(), tc.path) {
 				t.Fatalf("Chat error = %v, want it to name %s", err, tc.path)
@@ -281,10 +282,10 @@ func TestChatFailsWithoutACallWhenSignInFails(t *testing.T) {
 // cloud model.
 func TestHTTPClientIdentityIsThePlaceTheHostAndTheModel(t *testing.T) {
 	client, err := going.NewHTTPClient(going.HTTPConfig{
-		Place:     "azure",
-		Endpoint:  "https://Example-Resource.Models.Example/openai/v1/",
-		Model:     "gpt-5-chat",
-		TokenFile: "/run/secrets/chat-token",
+		Place:    "azure",
+		Endpoint: "https://Example-Resource.Models.Example/openai/v1/",
+		Model:    "gpt-5-chat",
+		Tokens:   going.FileTokenSource{Path: "/run/secrets/chat-token"},
 	})
 	if err != nil {
 		t.Fatalf("NewHTTPClient: %v", err)
@@ -296,10 +297,10 @@ func TestHTTPClientIdentityIsThePlaceTheHostAndTheModel(t *testing.T) {
 
 func TestNewHTTPClientRefusesAMisshapenConfig(t *testing.T) {
 	valid := going.HTTPConfig{
-		Place:     "endpoint",
-		Endpoint:  "https://models.example.com/v1",
-		Model:     "gpt-test",
-		TokenFile: "/run/secrets/chat-token",
+		Place:    "endpoint",
+		Endpoint: "https://models.example.com/v1",
+		Model:    "gpt-test",
+		Tokens:   going.FileTokenSource{Path: "/run/secrets/chat-token"},
 	}
 	if _, err := going.NewHTTPClient(valid); err != nil {
 		t.Fatalf("NewHTTPClient(a valid config): %v", err)
@@ -314,8 +315,7 @@ func TestNewHTTPClientRefusesAMisshapenConfig(t *testing.T) {
 		{"endpoint with a query", func(c *going.HTTPConfig) { c.Endpoint += "?api-version=1" }},
 		{"endpoint with a fragment", func(c *going.HTTPConfig) { c.Endpoint += "#models" }},
 		{"no model", func(c *going.HTTPConfig) { c.Model = "" }},
-		{"no credential", func(c *going.HTTPConfig) { c.TokenFile = "" }},
-		{"both credentials", func(c *going.HTTPConfig) { c.Tokens = staticTokens{token: "t"} }},
+		{"no credential", func(c *going.HTTPConfig) { c.Tokens = nil }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := valid
