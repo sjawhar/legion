@@ -13,9 +13,6 @@ import {
   workerCount,
 } from "../harness-ports";
 
-// The preload (web/src/__tests__/setup.ts) puts happy-dom's Response on globalThis, which cannot
-// read a subprocess's pipe; the cases below read one with Bun's own.
-const NativeResponse = (await Bun.fetch("data:,")).constructor as typeof Response;
 const runScript = fileURLToPath(new URL("../run.ts", import.meta.url));
 const psqlModule = fileURLToPath(new URL("../psql.ts", import.meta.url));
 const config = fileURLToPath(new URL("../playwright.config.ts", import.meta.url));
@@ -30,8 +27,8 @@ async function run(argv: string[], env: Record<string, string>) {
   });
   const [code, stderr, stdout] = await Promise.all([
     child.exited,
-    new NativeResponse(child.stderr).text(),
-    new NativeResponse(child.stdout).text(),
+    new Response(child.stderr).text(),
+    new Response(child.stdout).text(),
   ]);
   return { code, stderr, stdout };
 }

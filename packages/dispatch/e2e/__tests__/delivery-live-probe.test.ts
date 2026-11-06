@@ -42,10 +42,6 @@ const view: DeliveryLiveView = {
 /** Each test starts a Bun process and loads the probe's imports; the box these run on is shared. */
 const PROCESS_TEST_MS = 30_000;
 
-// The test preload (web/src/__tests__/setup.ts) puts happy-dom's Response on globalThis, which
-// Bun.serve does not take as an answer; Bun's own fetch still answers with Bun's.
-const NativeResponse = (await Bun.fetch("data:,")).constructor as typeof Response;
-
 interface Script {
   /** Answers the probe's `count`th subscribe (from 1) on `socket`, for its subscription `sub`. */
   readonly onSubscribe: (socket: ServerWebSocket<undefined>, sub: string, count: number) => void;
@@ -112,20 +108,18 @@ function fakeDispatch(script: Script): FakeDispatch {
         const authorization = request.headers.get("authorization");
         upgrades.push(authorization);
         if (authorization !== `Bearer ${TOKEN}`) {
-          return NativeResponse.json(
+          return Response.json(
             { code: "UNAUTHORIZED", error: "invalid bearer token" },
             { status: 401 }
           );
         }
-        return srv.upgrade(request)
-          ? undefined
-          : new NativeResponse("upgrade failed", { status: 400 });
+        return srv.upgrade(request) ? undefined : new Response("upgrade failed", { status: 400 });
       }
       reads.push(url);
       const body = script.routes?.[url.pathname];
       return body === undefined
-        ? NativeResponse.json({ code: "NOT_FOUND", error: url.pathname }, { status: 404 })
-        : NativeResponse.json(body);
+        ? Response.json({ code: "NOT_FOUND", error: url.pathname }, { status: 404 })
+        : Response.json(body);
     },
     hostname: "127.0.0.1",
     port: 0,
