@@ -512,6 +512,20 @@ func (s *server) logFailure(msg string, args ...any) {
 	s.log.Error(msg, args...)
 }
 
+// stateReadFailure logs a failed read of the state route at the level its cause deserves. A
+// request whose own context is done is the caller leaving — an operator who interrupted the
+// read, a poll past its own timeout, a proxy that hung up — and the read it cut short says
+// nothing about the daemon, so it is logged at Debug rather than reported as a failure an
+// operator must act on; every other failure goes through logFailure, which an ongoing stop
+// softens to Info.
+func (s *server) stateReadFailure(r *http.Request, msg string, err error) {
+	if r.Context().Err() != nil {
+		s.log.Debug(msg, "error", err, "cause", r.Context().Err())
+		return
+	}
+	s.logFailure(msg, "error", err)
+}
+
 // stopped answers 503 and reports true once the daemon's stop has begun (Options.Stopping): an
 // operator's request that would change a claim is refused then, rather than decided without the
 // claim's worker stream connection, which the stop closes for every claim no route holds. The
@@ -540,7 +554,7 @@ func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {
 		IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly,
 	})
 	if err != nil {
-		s.log.Error("api: begin state transaction failed", "error", err)
+		s.stateReadFailure(r, "api: begin state transaction failed", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "state unavailable"})
 		return
 	}
@@ -548,12 +562,12 @@ func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {
 
 	state, err := s.state.State(r.Context(), tx)
 	if err != nil {
-		s.log.Error("api: state source failed", "error", err)
+		s.stateReadFailure(r, "api: state source failed", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "state unavailable"})
 		return
 	}
 	if err := tx.Commit(r.Context()); err != nil {
-		s.log.Error("api: commit state transaction failed", "error", err)
+		s.stateReadFailure(r, "api: commit state transaction failed", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "state unavailable"})
 		return
 	}

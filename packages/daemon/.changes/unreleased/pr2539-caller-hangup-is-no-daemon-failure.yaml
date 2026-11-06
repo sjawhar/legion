@@ -1,0 +1,2 @@
+kind: Fixed
+body: A caller that hangs up while the state route reads - an operator who interrupts the read, a poll past its own timeout, a proxy that drops the connection - is no longer reported as a failure of the daemon: the read it cut short is logged at Debug, where a real failure of that read stays an ERROR.
