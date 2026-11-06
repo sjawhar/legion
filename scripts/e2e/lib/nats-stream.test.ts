@@ -23,6 +23,9 @@ const subsecondBudgetSeconds = 0.1;
 let serverUrl = "";
 let expectedSequence = 0;
 let nc: NatsConnection | undefined;
+// The container's removal, set the moment `docker run` returns and run by cleanup; `-v` goes with
+// it, since a plain `docker rm -f` leaves the image's declared volume on the host (docs/testing.md).
+let removeContainer: (() => void) | undefined;
 
 function docker(...args: string[]): string {
   const result = Bun.spawnSync(["docker", ...args], { cwd: root });
@@ -36,6 +39,9 @@ async function startNats(): Promise<void> {
   docker(
     "run",
     "--detach",
+    // --rm, so a container this run stops is reclaimed by docker itself rather than by a later
+    // teardown that a killed test never reaches.
+    "--rm",
     "--name",
     container,
     "--cpus",
@@ -48,16 +54,25 @@ async function startNats(): Promise<void> {
     "ghcr.io/cybermonklabs/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f",
     "-js"
   );
-  const endpoint = docker("port", container, "4222/tcp").trim();
-  serverUrl = `nats://${endpoint}`;
+  removeContainer = () => {
+    Bun.spawnSync(["docker", "rm", "-f", "-v", container], { cwd: root });
+  };
+  try {
+    const endpoint = docker("port", container, "4222/tcp").trim();
+    serverUrl = `nats://${endpoint}`;
 
-  nc = await connect({
-    servers: serverUrl,
-    timeout: 10_000,
-    waitOnFirstConnect: true,
-    reconnectTimeWait: 50,
-    maxReconnectAttempts: -1,
-  });
+    nc = await connect({
+      servers: serverUrl,
+      timeout: 10_000,
+      waitOnFirstConnect: true,
+      reconnectTimeWait: 50,
+      maxReconnectAttempts: -1,
+    });
+  } catch (error) {
+    removeContainer();
+    removeContainer = undefined;
+    throw error;
+  }
 }
 
 function runLast(subject: string, seconds = budgetSeconds) {
@@ -107,7 +122,8 @@ async function cleanup(): Promise<void> {
   try {
     await nc?.close();
   } finally {
-    Bun.spawnSync(["docker", "rm", "-f", "-v", container], { cwd: root });
+    removeContainer?.();
+    removeContainer = undefined;
     rmSync(configDirectory, { recursive: true, force: true });
   }
 }

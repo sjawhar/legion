@@ -1001,10 +1001,14 @@ test("a list read for the Dispatch envoy.json names stands in even when a refres
       },
     }),
   )
-  const since = Date.now()
+  // The refresher the hook below starts runs the gated command, so it outlives its hook: the case
+  // opens the gate and waits for it to end before its directories go, since a refresher that
+  // finishes after them writes its outcome back into a removed directory. The wait is the
+  // refresher's own end, not `refresherFinished`: the outcome planted above is dated a minute
+  // ahead, so that wait would hold at once on a refresher that had not even started.
   cleanup.push(async () => {
     await writeFile(gate, "")
-    await refresherFinished(state, since)
+    await eventually(() => noRefresher(home, state), "the refreshers' end")
   })
   const run = await runHook(env, sessionStart("resume", home))
   const context = contextOf(run, "SessionStart")

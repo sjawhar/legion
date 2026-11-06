@@ -25,16 +25,22 @@ test("names the run's processes by working directory and by command line, withou
   const work = join(dir, "work");
   mkdirSync(work);
   // Three processes: one working inside the run's directory, one naming it in its command line
-  // from a working directory of its own, and one that is no part of the run.
-  const inside = Bun.spawn(["sleep", "60"], { cwd: work, stdout: "ignore", stderr: "ignore" });
-  // The `exit 0` keeps bash from replacing itself with sleep, which would take its argv with it.
-  const named = Bun.spawn(["bash", "-c", "sleep 60; exit 0", work], {
-    cwd: dir,
-    stdout: "ignore",
-    stderr: "ignore",
-  });
-  const other = Bun.spawn(["sleep", "60"], { cwd: dir, stdout: "ignore", stderr: "ignore" });
+  // from a working directory of its own, and one that is no part of the run. Each is started
+  // inside the `try`, and registered as it is started, so a throw between two spawns leaves none
+  // of them running.
+  const children: Bun.Subprocess<"ignore", "ignore", "ignore">[] = [];
   try {
+    const inside = Bun.spawn(["sleep", "60"], { cwd: work, stdout: "ignore", stderr: "ignore" });
+    children.push(inside);
+    // The `exit 0` keeps bash from replacing itself with sleep, which would take its argv with it.
+    const named = Bun.spawn(["bash", "-c", "sleep 60; exit 0", work], {
+      cwd: dir,
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    children.push(named);
+    const other = Bun.spawn(["sleep", "60"], { cwd: dir, stdout: "ignore", stderr: "ignore" });
+    children.push(other);
     const ran = Bun.spawnSync(
       [
         "bash",
@@ -59,6 +65,6 @@ for p in $(run_processes); do echo "$p"; done`,
     expect(pids).not.toContain(String(other.pid));
     expect(existsSync(calls) ? readFileSync(calls, "utf8") : "").toBe("");
   } finally {
-    for (const process of [inside, named, other]) process.kill("SIGKILL");
+    for (const child of children) child.kill("SIGKILL");
   }
 });

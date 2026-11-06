@@ -40,7 +40,9 @@ export async function startNatsServer(nkeyUser?: string): Promise<NatsServer> {
   );
   const name = `legion-nats-test-${crypto.randomUUID()}`;
   const stop = () => {
-    Bun.spawnSync(["docker", "rm", "-f", name], { stdout: "ignore", stderr: "ignore" });
+    // With -v, since the image declares a VOLUME a plain `docker rm -f` leaves on the host
+    // (docs/testing.md).
+    Bun.spawnSync(["docker", "rm", "-f", "-v", name], { stdout: "ignore", stderr: "ignore" });
     rmSync(dir, { recursive: true, force: true });
   };
   try {

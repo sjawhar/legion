@@ -218,12 +218,18 @@ await_start() {
 }
 
 # start_process NAME COMMAND... starts COMMAND in the background, logging to the service's log, and
-# sets <NAME>_pid to its pid.
+# sets <NAME>_pid to its pid. Monitor mode is on for the start alone, so the service leads a process
+# group of its own: stop_tree stops what it kills with SIGSTOP first, and a stopped member of this
+# shell's own process group has the kernel hang up every member of that group — this shell, the
+# command that started it and the `bun test` that started that — as soon as any of them exits and
+# the group is orphaned. In a group of its own the service's stop reaches nothing but itself.
 start_process() {
   local name=$1
   shift
+  set -m
   "$@" >>"$evidence/logs/$name.log" 2>&1 &
   printf -v "${name}_pid" '%s' "$!"
+  set +m
 }
 
 # signalable PID is whether PID can name one process the run started: a number without a leading

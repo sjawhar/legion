@@ -25,7 +25,16 @@ if (set === undefined) throw new Error(`${scriptPath} has no top-level set line`
 
 const dir = mkdtempSync(join(tmpdir(), "parked-decision-teardown-test."));
 const started: number[] = [];
+// What the test started that no pid of its own names: a tmux server to kill, a session a process
+// writes its own pid file for. Each is registered the moment the test starts it, before the waits
+// that can time out, so an unfinished test body still leaves nothing of the run alive.
+const teardowns: (() => void)[] = [];
 afterAll(() => {
+  for (const teardown of teardowns.reverse()) {
+    try {
+      teardown();
+    } catch {}
+  }
   for (const pid of started) {
     try {
       process.kill(pid, "SIGKILL");
@@ -61,6 +70,28 @@ const membersOf = (sid: number) =>
         return false;
       }
     });
+// Every live pid whose command line holds TEXT: how a teardown finds a process the test started
+// in a session of its own before that process has named itself in a file.
+const namingPids = (text: string) =>
+  [...new Bun.Glob("[0-9]*").scanSync({ cwd: "/proc", onlyFiles: false })]
+    .map(Number)
+    .filter((pid) => {
+      try {
+        return readFileSync(`/proc/${pid}/cmdline`, "utf8").includes(text) && alive(pid);
+      } catch {
+        return false;
+      }
+    });
+// killSession ends every member of the session SID leads, the whole of a stand-in broker. This
+// test's own session is never one of them: a teardown that lands on a pid of the runner leaves it.
+const killSession = (sid: number) => {
+  if (sid === sessionOf(process.pid)) return;
+  for (const pid of membersOf(sid)) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {}
+  }
+};
 // until polls real processes, which no fake clock moves, for the condition it names.
 async function until(what: string, ok: () => boolean) {
   for (let i = 0; i < 100; i++) {
@@ -138,6 +169,22 @@ wait
 
   const tmux = Bun.which("tmux");
   const env = { ...process.env, TMUX_TMPDIR: join(work, "tmux") };
+  const pidFile = join(runtime, "broker.pid");
+  // The stand-in broker the pane starts leads a session of its own and names it in broker.pid.
+  // Ending that session is registered before the pane that starts it, so a wait below that times
+  // out before the test has read the pid still leaves no member of the broker's session running.
+  // Before the file is there the broker's command line, which names the run's runtime directory,
+  // is the only hold on it, `setsid -f` having already taken it out of the pane's session.
+  teardowns.push(() => {
+    const leaders = existsSync(pidFile)
+      ? [Number(JSON.parse(readFileSync(pidFile, "utf8")).pid)]
+      : namingPids(runtime);
+    for (const pid of leaders) {
+      try {
+        killSession(sessionOf(pid));
+      } catch {}
+    }
+  });
   let paneSession: number | undefined;
   let panePid: number;
   if (tmux) {
@@ -145,6 +192,11 @@ wait
       [tmux, "-L", "teardown", "-f", "/dev/null", "new-session", "-d", "-c", ws, pane],
       { env }
     );
+    // The server this started holds the pane; it outlives a test body that never reaches its own
+    // kill-server, so the kill is registered here, where the server exists.
+    teardowns.push(() => {
+      Bun.spawnSync([tmux, "-L", "teardown", "kill-server"], { env });
+    });
     expect(made.stderr.toString()).toBe("");
     panePid = Number(
       Bun.spawnSync([tmux, "-L", "teardown", "display-message", "-p", "#{pane_pid}"], {
@@ -157,18 +209,15 @@ wait
       stdout: "ignore",
       stderr: "ignore",
     });
-    started.push(shell.pid);
+    // With no tmux the pane is a session of its own: ending it is what kill-server is above.
+    teardowns.push(() => killSession(shell.pid));
     paneSession = shell.pid;
     panePid = shell.pid;
   }
-  started.push(panePid);
-  const pidFile = join(runtime, "broker.pid");
   await until("the stand-in broker to write broker.pid", () => existsSync(pidFile));
   const leader: number = JSON.parse(readFileSync(pidFile, "utf8")).pid;
-  started.push(leader);
   await until("the broker and its two members", () => membersOf(leader).length === 3);
   const members = membersOf(leader);
-  started.push(...members);
 
   // The pane goes, as cleanup-is-complete's kill-server takes it.
   if (tmux) {
