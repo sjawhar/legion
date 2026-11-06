@@ -315,11 +315,21 @@ type RequestReady struct {
 // running in its old tree, at the old root's linger expiry, where that tree's close would have
 // ended it (the daemon's outbox, stopElsewhere). The operator's suspension sets none: it is bounded
 // at the stop timeout from its arrival.
+//
+// NeverHold is a suspension that may not be held: one a caller posts only because it read the
+// claim in no turn, and whose refusal it reports to its own caller as nothing having happened. A
+// claim whose state moved under it — into a turn (holdSuspension), or into a launch that has not
+// registered (holdSuspendUntilReady) — refuses it with a *RefusedError naming that state, and
+// records nothing: no hold, no timer, no write. Without it the hold would stop the agent at the
+// turn's end, behind an answer that told the caller its request did nothing (api's freshSession).
+// Every other suspension leaves it false and is held as above: the outbox retries its rows until
+// the claim answers nil, and `legion claims suspend` waits the hold out.
 type RequestSuspend struct {
-	Claim    claim.Token
-	Reason   string
-	By       SuspendSource
-	Deadline time.Time
+	Claim     claim.Token
+	Reason    string
+	By        SuspendSource
+	Deadline  time.Time
+	NeverHold bool
 }
 
 // RequestResume is the operator's resume: it relaunches a suspended claim's session, whoever

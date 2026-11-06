@@ -475,3 +475,32 @@ func TestASuspensionAskedAgainAfterARestartRunsWhenTheShimFindsTheTurnOver(t *te
 	h.wantState(StateSuspended)
 	h.wantCalls("Suspend", 1)
 }
+
+// A suspension that may not be held (RequestSuspend.NeverHold) is refused outright when it finds
+// the agent in a turn, and records nothing. The fresh session posts its suspend that way (api's
+// suspendForFreshSession): it reads the claim in no turn, and a turn that starts before the
+// request reaches the lock makes it refuse the caller. Held instead, the claim would be stopped
+// and suspended by the operator when that turn ended, behind an answer that had told the caller
+// nothing happened at all.
+func TestASuspensionThatIsNeverHeldIsRefusedMidTurnAndHoldsNothing(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateWorking)
+
+	err := h.handle(RequestSuspend{Claim: testToken, Reason: "a fresh session was asked for",
+		By: SuspendedByOperator, NeverHold: true})
+
+	var refused *RefusedError
+	if !errors.As(err, &refused) || refused.State != StateWorking {
+		t.Fatalf("the suspension returned %v, want a refusal naming %s", err, StateWorking)
+	}
+	if c := h.claim(); c.SuspensionHeld {
+		t.Fatalf("the claim reports %+v, want nothing held for the turn's end", c)
+	}
+	h.wantState(StateWorking)
+	h.wantCalls("Suspend", 0)
+
+	h.must(StreamTurnEnd{Claim: testToken})
+
+	h.wantState(StateIdle)
+	h.wantCalls("Suspend", 0)
+}

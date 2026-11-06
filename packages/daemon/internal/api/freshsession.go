@@ -187,8 +187,10 @@ func roleList() string {
 //
 // Two states and one claim are refused. A claim in a turn is refused because suspending it would
 // cut that turn off, and the turn may be the one that ends the run; the caller is told to ask
-// again after it. A claim between states — queued, or with a launch in flight — is refused
-// because its suspension would be held for the agent it is still waiting for, and the request
+// again after it, and so is a claim that entered a turn between the read below and the machine's
+// lock, whose suspension the machine refuses rather than holds (suspendForFreshSession). A claim
+// between states — queued, or with a launch in flight — is refused because it has no agent to
+// stop and its suspension would be held for the one it is still waiting for, and the request
 // would answer long after the claim moved on. The project's controller is refused whatever
 // state it is in: its keeper starts it, as that keeper alone is told when it must
 // (supervise's operatorRetry refuses the controller's retry for the same reason), and the
@@ -206,16 +208,8 @@ func (s *server) freshSession(w http.ResponseWriter, r *http.Request, m *supervi
 		return 0, refuseInATurn(w, token, freshSessionOp)
 	case startsAgain(c.State):
 	case agentRunning(c.State):
-		held, ok := s.claimEvent(w, r, m, token, "suspend",
-			supervise.RequestSuspend{Claim: token, Reason: freshSessionReason, By: supervise.SuspendedByOperator})
-		if !ok {
+		if !s.suspendForFreshSession(w, r, m, token) {
 			return 0, false
-		}
-		// A turn that started between the read above and the suspension holds it for its end
-		// (supervise's holdSuspension): the process still runs, so the claim is in a turn after
-		// all and the caller is told what it would have been told a moment earlier.
-		if held {
-			return 0, refuseInATurn(w, token, freshSessionOp)
 		}
 	default:
 		writeFailure(w, http.StatusConflict, claimUnsettled, fmt.Sprintf(
@@ -264,10 +258,11 @@ func startsAgain(state supervise.ClaimState) bool {
 }
 
 // agentRunning is whether a claim runs an agent that is in no turn: one registered, ready or
-// idle. It is the set the fresh session suspends at once, where a claim whose launch has not
-// registered yet holds its suspension instead (supervise's holdSuspendUntilReady) and is
-// refused rather than waited for. A compaction takes a narrower set, the two states the
-// machine takes one in (compactable).
+// idle. It is the set the fresh session suspends at once (suspendForFreshSession), where a claim
+// whose launch has not registered yet is refused rather than waited for, because its suspension
+// is one the machine would hold for the agent it is still waiting for (supervise's
+// holdSuspendUntilReady) and this operation has none held. A compaction takes a narrower set,
+// the two states the machine takes one in (compactable).
 func agentRunning(state supervise.ClaimState) bool {
 	return state == supervise.StateRegistered || state == supervise.StateReady || state == supervise.StateIdle
 }
@@ -292,4 +287,30 @@ func (s *server) claimEvent(w http.ResponseWriter, r *http.Request, m *supervise
 		return false, false
 	}
 	return false, true
+}
+
+// suspendForFreshSession stops the agent of a claim freshSession read in no turn, and is the one
+// request of either recovery the machine may not hold (supervise.RequestSuspend.NeverHold): a
+// claim that entered a turn, or a launch, between that read and the machine's lock refuses it and
+// is left exactly as the read found it. Held instead, it would stop the worker at the turn's end
+// behind an answer that had told the caller nothing happened. A refusal from a turn is the one
+// the read a moment earlier would have given (refuseInATurn), and every other refusal is the
+// machine's own answer, as claimEvent gives it. It reports false when it answered the caller.
+func (s *server) suspendForFreshSession(w http.ResponseWriter, r *http.Request, m *supervise.Machine, token claim.Token) bool {
+	ctx, decided := s.decision(r, token)
+	defer decided()
+	if s.stopped(w, "suspend") {
+		return false
+	}
+	var refused *supervise.RefusedError
+	switch err := m.Handle(ctx, supervise.RequestSuspend{
+		Claim: token, Reason: freshSessionReason, By: supervise.SuspendedByOperator, NeverHold: true,
+	}); {
+	case errors.As(err, &refused) && refused.State == supervise.StateWorking:
+		return refuseInATurn(w, token, freshSessionOp)
+	case err != nil:
+		s.operatorFailure(w, "suspend", token, err)
+		return false
+	}
+	return true
 }

@@ -1,9 +1,12 @@
 package api
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -21,11 +24,20 @@ import (
 // phase known (workflow.RoleFor), which the start of a phase worker whose process is gone reads.
 func freshSessionHarness(t *testing.T, handler intake.Handler) *harness {
 	t.Helper()
+	return freshSessionHarnessStopping(t, handler, context.Background(), NewRouteDecisions())
+}
+
+// freshSessionHarnessStopping is freshSessionHarness with the daemon's stop and the set the
+// routes record their decisions in handed to the test (Options.Stopping, Options.Decisions),
+// which is how the race below is driven.
+func freshSessionHarnessStopping(t *testing.T, handler intake.Handler, stopping context.Context, decisions *RouteDecisions) *harness {
+	t.Helper()
 	h := newHarness(t)
 	h.handler = NewServer("127.0.0.1", 8437, Options{
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken, Controller: h.store,
 		Pool: h.store.Pool(), Record: record.NewStore(), Releaser: h.runtime, Trees: h.store,
 		Handlers: []intake.Handler{handler}, RoleFor: workflow.RoleFor,
+		Stopping: stopping, Decisions: decisions,
 	}).Handler
 	return h
 }
@@ -280,6 +292,80 @@ func TestAFreshSessionIsRefusedForAClaimInATurn(t *testing.T) {
 				string(token)+" is in a turn: a fresh session would cut that turn off, so ask again after the turn ends")
 			if after := h.stored(token); after.Session != "ses_implementer" || after.State != supervise.StateWorking {
 				t.Errorf("the refused claim is %s recording session %q, want it working on the session it had", after.State, after.Session)
+			}
+		})
+	}
+}
+
+// turnStartingStop is a daemon that is not stopping, and the one seam a test has for starting a
+// turn in the instant the fresh session's suspend races: the suspend asks Options.Stopping
+// whether the daemon is stopping (api's stopped) on the statement between freshSession's read of
+// the claim's state and the machine's lock, and nothing else either door runs asks it at all. The
+// first question starts the turn and then answers that the daemon runs on, so the suspension
+// reaches a machine whose claim is working. Production code knows nothing of it, and the check on
+// the route's own decision keeps it honest: a question asked before the suspend began its
+// decision is one from somewhere else, and the test fails rather than proving the wrong gap.
+type turnStartingStop struct {
+	context.Context
+	decisions *RouteDecisions
+	token     claim.Token
+	// startTurn runs once, inside the gap; failed is what it reported, which the test reads
+	// after the request is answered.
+	startTurn func() error
+	once      sync.Once
+	failed    error
+}
+
+func (s *turnStartingStop) Err() error {
+	s.once.Do(func() {
+		if !s.decisions.Holds(s.token) {
+			s.failed = fmt.Errorf("the daemon's stop was read outside the suspend's own decision of %s, so this test no longer rides the gap between the route's read and the machine's lock", s.token)
+			return
+		}
+		s.failed = s.startTurn()
+	})
+	return s.Context.Err()
+}
+
+// A turn that starts after the fresh session read the claim in none is refused through either
+// door, in the words the read a moment earlier would have given, and the claim is left exactly as
+// that read found it: working on the session it had, no phase fact applied, and no suspension
+// held. The suspension the route posts may not be held (supervise.RequestSuspend.NeverHold),
+// because the answer the caller gets says nothing happened: held, it would stop the worker when
+// its turn ended, behind that answer, with the session it was told was kept.
+func TestAFreshSessionRefusedForATurnThatStartedUnderItHoldsNoSuspension(t *testing.T) {
+	for _, door := range freshSessionDoors() {
+		t.Run(door.name, func(t *testing.T) {
+			facts := &phaseRestarter{}
+			decisions := NewRouteDecisions()
+			race := &turnStartingStop{Context: context.Background(), decisions: decisions}
+			h := freshSessionHarnessStopping(t, facts, race, decisions)
+			token := readyImplementer(t, h)
+			m, _ := h.supervisor.Machine(token)
+			race.token = token
+			race.startTurn = func() error { return m.Handle(h.ctx, supervise.StreamTurnStart{Claim: token}) }
+
+			recorder := door.ask(t, h, "LEGION-209", claim.RoleImplementer)
+
+			if race.failed != nil {
+				t.Fatalf("start the turn under the route: %v", race.failed)
+			}
+			wantFreshSessionRefusal(t, recorder, http.StatusConflict, claimInATurn,
+				string(token)+" is in a turn: a fresh session would cut that turn off, so ask again after the turn ends")
+			if c := m.Claim(); c.State != supervise.StateWorking || c.SuspensionHeld || c.Session != "ses_implementer" {
+				t.Fatalf("the refused claim is %s recording session %q, suspension held %t; want it working on the session it had with none held",
+					c.State, c.Session, c.SuspensionHeld)
+			}
+			if applied := facts.recorded(); len(applied) != 0 {
+				t.Errorf("the refused fresh session applied %#v, want no fact", applied)
+			}
+
+			if err := m.Handle(h.ctx, supervise.StreamTurnEnd{Claim: token}); err != nil {
+				t.Fatalf("end the turn: %v", err)
+			}
+
+			if c := m.Claim(); c.State != supervise.StateIdle {
+				t.Fatalf("the claim is %s once its turn ended, want it idle: the refused suspension stopped nothing", c.State)
 			}
 		})
 	}
