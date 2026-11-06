@@ -1,5 +1,126 @@
 # Changelog
 
+## [29.15.0] - 2026-11-05
+
+### Added
+
+- `DELETE /v1/sessions/<session_id>` takes an `if_not_registered_after` query parameter, a unix
+  timestamp in milliseconds naming the moment the delete belongs to: the registration is removed
+  only while it was last written at or before that moment, under the same compare-and-swap the
+  route's `client_instance_id` condition deletes with, and a request may name both. A deletion
+  that happened answers `200 {"deleted":true}` and one the condition refused
+  `200 {"deleted":false,"reason":…}`, as a conditional delete already answered; a value that is
+  not a positive whole number of milliseconds is a `400` naming the parameter, never a delete.
+  The Legion daemon's clean stop of a role whose agent process is gone carries that moment, so a
+  stop that lands after the daemon relaunched the claim under the same session id leaves the new
+  process's live registration alone. Without either parameter the route is exactly as it was: the
+  registration is removed whoever wrote it, answered 200 with no body.
+- Dispatch no longer reads a session's absence from the listener's list as proof that it ended.
+  The route roster keeps every registered session with its state, so a stalled holder's route
+  reads `holder_unresponsive` rather than `no_holder`, a role route whose holder is unresponsive
+  resolves to that holder and the message is stored for it, and a broadcast still counts it a
+  recipient. A claim take or release is refused while the holder is `live`, or `unresponsive`
+  with its last registration no older than `ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS` (twenty minutes);
+  the refusal names the state and since when, and a person still forces it. The issue read
+  carries `holder_state`, `last_seen` and `takeable_at` beside the claim, never inside the claim
+  itself, which is an event payload and must hold no read-time state. An issue read answers
+  `holder_state: unknown` and never fails while the listener is unreachable or refilling, where a
+  claim write still refuses `ENVOY_UNAVAILABLE`.
+- An Envoy session is now `live`, `unresponsive` or `gone`, judged by how long ago its
+  registration record was written rather than by whether the listener's cache holds it. A session
+  that has not registered since the live window (`ENVOY_SESSION_LIVE_WINDOW`, five minutes) is
+  `unresponsive`, and stays so until the gone horizon (`ENVOY_SESSION_GONE_HORIZON`, one hour).
+  An unresponsive session is not a dead one: nothing a lookup, a publish, a role-lane delivery or
+  a reaper pass does releases its role claim, a send to it is accepted and stored with
+  `recipient_state: unresponsive`, topic fan-out skips it with a status of its own rather than a
+  failure, and its interests are kept. The listener's role routes, its role lane and Dispatch's
+  outbox resolve a holder through one package (`internal/roles`) that writes nothing to the role
+  bucket, so a role-routed event whose holder is unresponsive stays pending for that session to
+  answer rather than being published with nothing sent. Only the role-claim reaper releases a
+  claim, and only once the holder is `gone`. Every list, lookup and refusal carries `state` and
+  `last_seen`, a role
+  lookup answers `holder_state` and `claim_released`, a publish answers `holder_state` for the
+  role it reached and lists under `unresponsive` each topic recipient whose copy was stored
+  without waiting for a receipt, and `GET /v1/sessions` and
+  `GET /v1/registry/<id>` take `include=unresponsive`; without it an unresponsive session is not
+  answered for, and the 404 keeps the `no live session <id>` prefix it had, saying in its own
+  text when this listener remembers no registration to name. A session reaper
+  deletes a record past the gone horizon at exactly the revision its pass judged, so a
+  registration that lands between the decision and the delete survives, and counts the messages
+  stored on the session's subject after its last registration — bounded, and not a count of
+  unread messages, since the listener keeps no read receipt. The bucket's maximum age is
+  `ENVOY_SESSION_MAX_AGE`, reported in `/healthz` as `session_max_age` and re-read on each reaper
+  pass, so a change made by another process reaches a running listener with no restart.
+  A publish to a role whose claim has lapsed is refused `404 holder_lapsed` with nothing kept,
+  where 29.4.0 answered `202` with `kept_reason: holder_lapsed`: the claim stands, so a copy kept
+  for it would wait for a claim that never comes, and the sender publishes again once the holder
+  reads `live`. Dispatch's outbox does keep a role-routed event for a holder past the gone
+  horizon, whose claim the role-claim reaper releases, so the session that claims the role next is
+  handed it.
+
+### Changed
+
+- A role-routed event Dispatch's outbox holds because its holder stopped answering is counted
+  and logged as the wait it is. It has a counter of its own,
+  `envoy_dispatch_outbox_role_forwards_held_total`, labelled with the state its holder was in
+  (`unresponsive`, `undated` for a holder nothing dates, `unresolved` for a read that did not
+  answer), where it used to be a `holder` reason of
+  `envoy_dispatch_outbox_publish_failures_total`, and its event's back-off is logged at INFO
+  (`dispatch outbox: event waits for its role's holder`, naming the holder and its state)
+  rather than at ERROR. Nothing was sent and nothing failed: the holder keeps its claim and the
+  event is retried until that session answers, so an operator can alert on publish failures
+  without being paged for an agent that stopped typing. An event that reaches the dead-letter
+  threshold still logs at ERROR, and an event held by one holder while another destination
+  really failed is still a failure.
+
+### Fixed
+
+- Dispatch judges a role route's holder by the session windows its own deployment sets,
+  `ENVOY_SESSION_LIVE_WINDOW` and `ENVOY_SESSION_GONE_HORIZON`, read with the listener's rules:
+  their compiled defaults when unset, a warning and the default for a value no Go duration can
+  be read from, and a refusal to start for one that is not positive. It used to judge every
+  holder by the compiled windows alone, so an operator who raised a listener's gone horizon —
+  the answer to a stall longer than an hour — left Dispatch calling a holder gone whose role
+  that listener still kept: the event was marked published with nothing sent and reached its
+  holder never. Give every listener of a deployment and Dispatch's server the same two values.
+- A listener no longer serves a short agent list while it is reading its bucket again. Each KV
+  cache now follows its bucket by reading the whole bucket and sweeping at the end of the read,
+  so a row stays listed until a complete read gives evidence that the bucket no longer holds it,
+  and a row renewed mid-read is kept. While a copy cannot be stood behind — before its first
+  complete read, or once a re-read has been outstanding longer than its bound —
+  `GET /v1/sessions` and `GET /v1/interests/` answer `503` with `Retry-After` and the code
+  `refilling` instead of a partial list, and `envoy_active_sessions` publishes no sample at all
+  rather than a low one. Dispatch shows that state as refilling in every view that reads the
+  list, and never turns a list it could not read into an absent agent.
+- The role claim reaper runs on a period of its own, `ENVOY_ROLE_CLAIM_REAP_INTERVAL`, instead of
+  a fixed five minutes no operator could move. Its default is those same five minutes, so a
+  deployment keeps the release it had: a session whose record the bucket expires reads `gone` as
+  surely as one past the gone horizon, and the session bucket ships with a five-minute maximum
+  age, so judging claims every minute — the session reaper's period — would have taken a merely
+  stalled holder's role up to five times sooner than before. The session reaper keeps
+  `ENVOY_SESSION_REAP_INTERVAL`, a minute by default, and the startup line that resolves the
+  session windows now reports both periods. A restored claim's grace is measured from the
+  listener's start against the live window, not counted in passes, so no period changes it.
+
+## [29.14.0] - 2026-11-05
+
+### Changed
+
+- Dispatch holds a body block by block rather than as a whole: each block of a comment, comment
+  edit, message, broadcast or delivery reply to `contracts.DispatchBlockUnits` and a body to
+  `contracts.DispatchItemBlocks` blocks, each refusal naming the block that passed the bound,
+  and an ask's question and its options together to `contracts.DispatchEventBodyMax` wherever
+  the ask is written, a document's decision block included. `GET /api/v1/limits` publishes every
+  bound. An event carries at most `contracts.DispatchEventBodyMax` of a body and says
+  `body_truncated` when it carried a part. An envelope NATS refuses as too large goes out as a
+  stand-in on the same topic, under the same event id, carrying the payload's short top-level
+  fields and `payload_omitted: true`, so a reader learns which event it is and reads the item
+  itself where it learnt nothing before. Meaning search embeds windows of
+  neighbouring blocks (`document_block`, `comment_block`, `message_block` and `ask_part`, each
+  row carrying `covers`) rather than one vector per item cut at 32,000 runes, so a passage at
+  the end of a long document is found, and a hit names the block that matched. A local harness
+  embeds with no model service under `DISPATCH_DEV_EMBEDDER=1`, beside dev sign-in alone.
+
 ## [29.12.0] - 2026-11-05
 
 ### Added
