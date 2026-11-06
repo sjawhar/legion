@@ -13,6 +13,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/nats-io/nats.go"
 
+	"github.com/sjawhar/envoy/sessiontiming"
+
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
@@ -28,19 +30,20 @@ import (
 // when it is sent.
 const noticeExceptionSubjects = "notifications.envoy.exceptions." + notify.RoleTopicPrefix + "*"
 
-// The listener's liveness windows for a role holder (packages/envoy/internal/session). A
-// session's last registration keeps it live for listenerSessionTTL, the copy of
-// session.LiveWindow kept here (state.go); past it the holder reads unresponsive, keeps its role
-// claim to the gone horizon, and a delivery to it fails that attempt and releases nothing.
-// listenerClaimStale is the claim's own staleness window (claim.go, ClaimStaleAfter), and the
-// plugin heartbeats every pluginHeartbeat (DEFAULT_HEARTBEAT_MS,
-// packages/envoy-client/src/envoy-settings.ts). A session that stops running can therefore stay a
-// registered holder for up to the longer of the two windows, and until then the listener accepts a
-// publish for it, forwards it, and reports it undelivered.
+// The listener's own liveness windows for a role holder (packages/envoy/internal/session), read
+// through sessiontiming (the one public door onto the generated contracts numbers the listener
+// itself weighs), so they cannot drift from what the listener enforces. A session's last
+// registration keeps it live for listenerSessionTTL, the same declaration session.LiveWindow
+// reads (state.go); past it the holder reads unresponsive, keeps its role claim to the gone
+// horizon, and a delivery to it fails that attempt and releases nothing. listenerClaimStale is
+// the claim's own staleness window (claim.go, ClaimStaleAfter), and the plugin heartbeats every
+// pluginHeartbeat (sessiontiming.Heartbeat). A session that stops running can therefore stay a
+// registered holder for up to the longer of the two windows, and until then the listener accepts
+// a publish for it, forwards it, and reports it undelivered.
 const (
-	listenerSessionTTL = 5 * time.Minute
-	listenerClaimStale = 5 * time.Minute
-	pluginHeartbeat    = 90 * time.Second
+	listenerSessionTTL = sessiontiming.LiveWindow
+	listenerClaimStale = sessiontiming.ClaimStale
+	pluginHeartbeat    = sessiontiming.Heartbeat
 )
 
 // noticeReholdDelays is how long each copy of a notice whose forward failed waits: the nth copy
