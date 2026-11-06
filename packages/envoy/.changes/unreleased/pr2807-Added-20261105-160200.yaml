@@ -1,0 +1,11 @@
+kind: Added
+body: |
+  The `envoy-infra` `gcp:NatsHub` component's `listener` takes the settings its Envoy listener
+  checks broker tokens with: `agentSecretsUrl`, `agentSecretsAudience` and `publicUrl`, rendered
+  into the hub's cloud-config as `ENVOY_AGENT_SECRETS_URL`, `ENVOY_AGENT_SECRETS_GOOGLE_AUDIENCE`
+  and `ENVOY_PUBLIC_URL`. A hub that sets none renders what it rendered before; a hub that sets
+  some but not all is refused at preview, naming the input it is missing, since the listener
+  refuses a partial set when it boots.
+time: 2026-11-05T16:02:00.000000000Z
+custom:
+  Issue: pr2807

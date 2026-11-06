@@ -364,6 +364,7 @@ jobs:
               - 'packages/envoy/internal/session/*'
               - 'packages/envoy/internal/store/*'
               - 'packages/envoy/listenfd/*'
+              - 'packages/envoy/migrationid/*'
             # The daemon's `legion` command, `go list -deps ./cmd/legion` in packages/daemon (its
             # embedded probes, turnscope.yml and role prompts included, and the envoy package it
             # serves its held listener through): what docs/site/scripts/build-binaries.sh:17 builds
@@ -514,6 +515,7 @@ jobs:
               - 'packages/envoy/internal/store/*'
               - 'packages/envoy/internal/testsocks5/*'
               - 'packages/envoy/listenfd/*'
+              - 'packages/envoy/migrationid/*'
               - 'packages/envoy/infra/gcp/testdata/dispatch-pod.golden'
             # Oh My Pi, which .github/actions/install-omp installs at the version .omp-pin names,
             # through the mise .github/actions/install-jj leaves.
@@ -1063,6 +1065,7 @@ jobs:
               - 'packages/envoy/internal/pglisten/*'
               - 'packages/envoy/internal/pgmigrate/*'
               - 'packages/envoy/internal/stacktest/*'
+              - 'packages/envoy/migrationid/*'
               # internal/dispatch/docs/approval_carry_test.go:26.
               - 'packages/contracts/fixtures/decision-blocks/**'
             # `go test -tags memory ./cmd/dispatch`. memory_profile_test.go reads four guides only
@@ -1142,6 +1145,7 @@ jobs:
               - 'packages/envoy/internal/testnats/*'
               - 'packages/envoy/internal/testpg/*'
               - 'packages/envoy/internal/webhook/testdata/**'
+              - 'packages/envoy/migrationid/*'
               # cmd/listener/api_test.go:191,436,480, which the soak's run compiles too.
               - 'packages/contracts/fixtures/dispatch-targeted-delivery.json'
             # `go test -tags multiprocess ./cmd/broker`, and the agent-secrets binary
@@ -1186,6 +1190,7 @@ jobs:
               - 'packages/envoy/internal/pgmigrate/*'
               - 'packages/envoy/internal/ratelimit/*'
               - 'packages/envoy/internal/redact/*'
+              - 'packages/envoy/migrationid/*'
             # Every file packages/envoy/docker/Dockerfile builds from, so envoy-smoke runs whenever
             # the image it smokes changes, every file the held-port image built on top of it reads
             # (packages/envoy/infra/host/heldportwrapper/Dockerfile and its .dockerignore), and what
@@ -1225,6 +1230,7 @@ jobs:
               - 'packages/envoy/cmd/**'
               - 'packages/envoy/internal/**'
               - 'packages/envoy/listenfd/**'
+              - 'packages/envoy/migrationid/**'
               - 'packages/envoy/docker/rds-global-bundle.pem'
               # TestSmoke compiles in the root workspace.
               - 'go.work'

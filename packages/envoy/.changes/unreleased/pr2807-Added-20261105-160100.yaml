@@ -1,0 +1,10 @@
+kind: Added
+body: |
+  `agent-secrets register --session-id <id>` names the session the machine's helper registers. The
+  helper keeps that name across its own restart and a reboot of the box, and states it as the
+  enrollment's `session_id`, so a session a person runs on a machine keeps its grants when it
+  moves box, as a container enrolled with `agent-secrets enroll --helper --session-id` and a
+  Legion role's pod already do.
+time: 2026-11-05T16:01:00.000000000Z
+custom:
+  Issue: pr2807
