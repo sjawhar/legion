@@ -215,8 +215,8 @@ var ErrRequestersEntry = errors.New("requesters names people by their lowercase 
 // since Evaluate compares it against record.CanonicalLogin of the session's operator; any other
 // entry is a service, and must be one of services, ALWAYS, so a nil or empty list refuses every
 // service entry, exactly as the owner tag already refuses a name the deployment does not
-// register (Loader.secret). ParseRequesterShapes is that shape-only check, under a name of its
-// own, for the one caller that holds no registered list. It answers the entries sorted, each
+// register (Loader.secret). ParseRequesterShapes checks a service entry's shape alone, for the
+// one caller that holds no registered list. It answers the entries sorted, each
 // once and joined by single spaces, so a Secret holding them stays comparable, two spellings of
 // one list are one policy, and the value is one an AWS tag and a Secret Manager annotation both
 // hold.

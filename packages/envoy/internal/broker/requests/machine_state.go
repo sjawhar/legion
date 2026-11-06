@@ -1360,7 +1360,9 @@ func anyServiceOwned(set *policy.Set, granted []requestedSecret) bool {
 // anyListed reports whether set serves any of granted as a secret whose requesters tag says who
 // may ask for it, whose grant is re-checked on every use: an entry naming a service names the
 // pods whose account BROKER_SERVICES maps to it (Machine.requester), which the policy's version
-// does not cover, so a pod can fall off a list the tag never changed.
+// does not cover, so a pod can fall off a list the tag never changed. A list naming people alone
+// is re-checked as well: it costs one policy evaluation per name and answers what the version
+// already decided, and one predicate keeps the gate's two callers from telling the sorts apart.
 func anyListed(set *policy.Set, granted []requestedSecret) bool {
 	return slices.ContainsFunc(granted, func(g requestedSecret) bool { return set.Secrets[g.name].Requesters != "" })
 }
