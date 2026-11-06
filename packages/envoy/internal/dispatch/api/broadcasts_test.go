@@ -625,8 +625,12 @@ func TestBroadcastRejectsMalformedInput(t *testing.T) {
 		"unknown mode": {map[string]any{"body": "hi", "delivery": "shout", "session_ids": []string{"planner"}}, "BROADCAST_INPUT"},
 		"no sessions":  {map[string]any{"body": "hi", "delivery": "btw", "session_ids": []string{" "}}, "BROADCAST_INPUT"},
 		"over the cap": {map[string]any{"body": "hi", "delivery": "btw", "session_ids": tooMany}, "BROADCAST_INPUT"},
-		"over the body cap": {
-			map[string]any{"body": strings.Repeat("x", contracts.DispatchBodyMax+1), "delivery": "btw", "session_ids": []string{"planner"}},
+		"over the block bound": {
+			map[string]any{"body": strings.Repeat("x", contracts.DispatchBlockUnits+1), "delivery": "btw", "session_ids": []string{"planner"}},
+			"CAP_EXCEEDED",
+		},
+		"over the block count": {
+			map[string]any{"body": paragraphBody(contracts.DispatchItemBlocks+1, 1), "delivery": "btw", "session_ids": []string{"planner"}},
 			"CAP_EXCEEDED",
 		},
 	} {

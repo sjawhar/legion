@@ -803,9 +803,29 @@ export const LegionOperatorClaimResponse = z.object({
 
 export type LegionOperatorClaim = z.output<typeof LegionOperatorClaimResponse>;
 
-/** `api.OperatorClaims`, the body of `GET /legion/v1/operator/claims`, in token order. */
+/** `api.PodUpdateRounds` — what the daemon's last pod-update sweep decided under the project's
+ * two limits on how fast one pod template change reaches the fleet. `max_open_rounds` and
+ * `rounds_per_minute` are `pod_update_max_open_rounds` and `pod_update_rounds_per_minute` as the
+ * daemon's configuration holds them, each `null` for a key `legion.yaml` does not set, which is
+ * no limit rather than a limit of none. `in_round` is every issue that held one of the project's
+ * open-round slots at that sweep, and the two waiting lists the drifted issues each limit held
+ * back there, an issue both limits held back being under `waiting_on_max_open_rounds` alone.
+ * Every list is in issue-key order and is an array, empty rather than absent. `swept` is false
+ * for a daemon whose first sweep has not run, where the rest states nothing. */
+const legionPodUpdateRounds = z.object({
+  swept: z.boolean(),
+  max_open_rounds: z.number().int().nullable(),
+  rounds_per_minute: z.number().int().nullable(),
+  in_round: z.array(nonEmptyString),
+  waiting_on_max_open_rounds: z.array(nonEmptyString),
+  waiting_on_rounds_per_minute: z.array(nonEmptyString),
+});
+
+/** `api.OperatorClaims`, the body of `GET /legion/v1/operator/claims`, in token order, with what
+ * the daemon's last pod-update sweep decided beside the claims. */
 export const LegionOperatorClaimsResponse = z.object({
   claims: z.array(LegionOperatorClaimResponse),
+  pod_update_rounds: legionPodUpdateRounds,
 });
 
 /** The credential grant body from `internal/api/credentials.go`. */
