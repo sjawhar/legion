@@ -105,9 +105,9 @@ The daemon keeps this order from its fixed table; you start none of its steps:
    a handoff onto the default branch, since no commit carries one.
 4. The merger quotes what sits above the approved head
    (`jj diff --from <approved-sha> --to <tip-sha> --summary`) in READY and sends the READY packet
-   with its completion. The daemon refuses a head carrying anything above the approved head but a
-   commit that changes only `docs/solutions/` and the handoff import's removal of `.legion/` files
-   (`READY_UNREVIEWED_CHANGE`). It
+   with its completion. The daemon checks nothing above that head: it keeps no check of its own
+   on what sits there, and the repository's branch rules decide the merge, which is the owner's
+   ruling (dispatch://INFRA-714/ask/beea7685). It
    posts `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)` on the
    Dispatch issue, publishes it to the project's merge queue role when one is set, and submits the
    merge of that head itself, as the implement App with GitHub's expected-head check. The
@@ -124,9 +124,8 @@ from `accepting` you send an issue back only to `implementing` or `testing`.
 - The merger reports a failed verification: handle it as the `pr-blocked` row of
   `skill://legion-architect/references/wake-routing.md` says. Tell the merger to move the issue
   back with `request_backward_move`, naming what failed; never bypass.
-- `READY_UNREVIEWED_CHANGE`, or a merger task with no approved head (`READY_NOT_APPROVED`): the
-  merger moves it back to `reviewing`, the reason naming the code and what it found, so the
-  reviewer runs a new round.
+- A merger task with no approved head (`READY_NOT_APPROVED`): the merger moves it back to
+  `reviewing`, the reason naming the code, so the reviewer runs a new round.
 
 ## A conflicting head
 

@@ -85,13 +85,6 @@ type handoffGitHub struct {
 	bearers     []string
 	// served is each path the stand-in was asked for, relative to the repository.
 	served []string
-	// compare is GitHub's answer to the compare of approvedSHA with pullHead, the pull request's
-	// head; compareAnswers holds the answer to any other basehead (<base>...<head>), and one in
-	// neither is GitHub's 404 (fail makes the compare fail outright); compareRead is each basehead
-	// READY asked it for.
-	compare        string
-	compareAnswers map[string]string
-	compareRead    []string
 }
 
 func newHandoffGitHub(t *testing.T) *handoffGitHub {
@@ -104,11 +97,6 @@ func newHandoffGitHub(t *testing.T) *handoffGitHub {
 		mainBranch: `{"name":"main","protection":{"required_status_checks":{"contexts":["legacy"],"checks":[{"context":"legacy"}]}}}`,
 		checkRuns:  `[{"id":1,"name":"ci","status":"completed","conclusion":"success"}]`,
 		statuses:   `[{"context":"legacy","state":"success"}]`,
-		compare:    retroCompare,
-	}
-	notFound := func(w http.ResponseWriter, message string) {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = fmt.Fprintf(w, `{"message":%q,"status":"404"}`, message)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		g.mu.Lock()
@@ -152,18 +140,6 @@ func newHandoffGitHub(t *testing.T) *handoffGitHub {
 			_, _ = fmt.Fprintf(w, `{"statuses":%s}`, g.statuses)
 		case path == "pulls/42/files":
 			_, _ = io.WriteString(w, g.pullFiles)
-		case strings.HasPrefix(path, "compare/"):
-			basehead := strings.TrimPrefix(path, "compare/")
-			g.compareRead = append(g.compareRead, basehead)
-			answer, known := g.compareAnswers[basehead]
-			if basehead == approvedSHA+"..."+g.pullHead {
-				answer, known = g.compare, true
-			}
-			if !known {
-				notFound(w, "Not Found")
-				return
-			}
-			_, _ = io.WriteString(w, answer)
 		default:
 			http.NotFound(w, r)
 		}
@@ -187,20 +163,9 @@ func (g *handoffGitHub) serves() []string {
 	return append([]string(nil), g.served...)
 }
 
-// compares is each basehead READY's compare was asked for so far.
-func (g *handoffGitHub) compares() []string {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return append([]string(nil), g.compareRead...)
-}
-
-// approvedSHA is the head LEGION-208's review round approved, below headSHA: what READY compares
-// retro's last push with unless a test names another.
+// approvedSHA is the head LEGION-208's review round approved, below headSHA: the approval a
+// merger's READY is read against unless a test names another.
 const approvedSHA = "a99e0000000000000000000000000000000000ff"
-
-// retroCompare is GitHub's compare of approvedSHA with headSHA as READY reads it: retro's learning
-// added, and its last commit's removal of the issue's handoffs.
-const retroCompare = `{"status":"ahead","files":[{"filename":".legion/LEGION-208/review.json","status":"removed"},{"filename":"docs/solutions/legion/retro-LEGION-208.md","status":"added"}]}`
 
 // newHandoffHarness serves the daemon's routes over a real Postgres, reading GitHub at github as
 // the implement App for READY and for the implementer's completion, with facts recording every
@@ -1728,6 +1693,56 @@ func newReadyHarness(t *testing.T, github *handoffGitHub) (*harness, *factRecord
 	seedApproval(t, h, "LEGION-208", approvedSHA)
 	merger := newLiveClaim(t, h, "LEGION-208", claim.RoleMerger)
 	return h, facts, merger
+}
+
+// The approved head is the review round's recorded decision. A merger's task carries no approved
+// head when the round recorded none (workflow's withApprovedHead) — a re-admission cleared it, or
+// the round's decision was a request for changes — and its prompt says not to complete then; READY
+// is refused READY_NOT_APPROVED all the same, so a merger that skips that step publishes no READY
+// no review approved at all.
+func TestHandoffCompleteReadyRefusesARoundWithNoRecordedApproval(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		decision *record.ReviewDecision
+	}{
+		{"no decision recorded", nil},
+		{"a request for changes", &record.ReviewDecision{State: "changes_requested", Head: approvedSHA}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			github := newHandoffGitHub(t)
+			h, facts := newHandoffHarness(t, github, nil, nil)
+			seedIssueAt(t, h, "LEGION-208", phase.Merging)
+			seedPullRequest(t, h, "LEGION-208", headSHA)
+			seedReviewDecision(t, h, "LEGION-208", tc.decision)
+			merger := newLiveClaim(t, h, "LEGION-208", claim.RoleMerger)
+			code, body := ready(t, h, merger)
+			if code != http.StatusConflict || !strings.HasPrefix(body, "READY_NOT_APPROVED: ") || !strings.Contains(body, "reviewing") {
+				t.Fatalf("READY with no recorded approval = %d %q", code, body)
+			}
+			if got := facts.recorded(); len(got) != 0 {
+				t.Fatalf("handoff facts = %#v, want none", got)
+			}
+		})
+	}
+}
+
+// A pull request a person already merged is published unread, its answer saying so: its head can
+// no longer change, and the workflow takes it on to the production check only on that READY.
+// Nothing but the pull request itself is read.
+func TestHandoffCompleteReadyPublishesAMergedPullRequestUnread(t *testing.T) {
+	const alreadyMerged = `pull request #42 is already merged, so READY was published without reading its head`
+	github := newHandoffGitHub(t)
+	github.set(func(g *handoffGitHub) { g.merged = true })
+	h, facts, merger := newReadyHarness(t, github)
+	if code, body := ready(t, h, merger); code != http.StatusOK || body != alreadyMerged {
+		t.Fatalf("READY of a merged pull request = %d %q; want it published saying %q", code, body, alreadyMerged)
+	}
+	if got := github.serves(); len(got) != 1 || got[0] != "pulls/42" {
+		t.Fatalf("READY of a merged pull request read %v, want the pull request alone", got)
+	}
+	if got := facts.recorded(); len(got) != 1 {
+		t.Fatalf("handoff facts = %#v, want the one READY", got)
+	}
 }
 
 func TestHandoffCompleteReadyRefusesAHeadThatMovedBeforeTheMergerCanArmIt(t *testing.T) {

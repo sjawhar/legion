@@ -446,28 +446,6 @@ test("every shipped prompt and bash-running agent says how to read a piped comma
   );
 });
 
-// R7: `READY_UNREVIEWED_CHANGE` has more causes than retro's own paths, and the merger's own
-// prompt part is the one complete list, so neither file gets a second copy of it
-// (dispatch://INFRA-427, and the spec's decision "A pointer, not a second list"). The pin counts
-// the pointer and refuses the list: a second copy would have to be kept equal to `ready.go`.
-test("retro and the merge gate point at the merger's list of READY_UNREVIEWED_CHANGE's causes", () => {
-  const files = ["skills/legion-worker/references/merge-gate.md", "skills/legion-retro/SKILL.md"];
-  countedOncePerFile(
-    "`READY_UNREVIEWED_CHANGE` has more causes than a path outside retro's own",
-    files
-  );
-  countedOncePerFile(
-    "the complete list, with each remedy, is the merger's own role prompt part",
-    files
-  );
-  for (const file of files) {
-    const text = collapsed(path.join(staged, file.slice("skills/".length)));
-    expect(text, `${file} lists the causes instead of pointing at them`).not.toContain(
-      "300-file limit"
-    );
-  }
-});
-
 // R8: every role of an issue shares one $TMPDIR on the issue's volume, so a glob sweep deletes
 // another role's open directory (dispatch://INFRA-654).
 test("every prompt and agent that may write says to make its own scratch and delete only what it made", () => {

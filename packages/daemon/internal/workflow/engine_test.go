@@ -1113,7 +1113,7 @@ func TestABackwardMovesTaskNamesThePullRequestAndTheReason(t *testing.T) {
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "backward", Phase: phase.Merging, Generation: 1, Status: "in_progress", Rank: "U"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: RoleFor(phase.Merging), Claim: "claim"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42})
-	reason := "READY_UNREVIEWED_CHANGE: src/x.go"
+	reason := "READY_NOT_APPROVED: LEGION-208's review round recorded no approval"
 	if _, err := intake.ApplyFact(context.Background(), pool, "api", "merging-reviewing", intake.BackwardMove{Issue: "LEGION-208", Requester: RoleFor(phase.Merging), To: phase.Reviewing, Reason: reason}, testEngine(config.DesignGateRootIssues, nil), admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact backward: %v", err)
 	}

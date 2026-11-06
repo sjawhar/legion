@@ -512,8 +512,7 @@ func byHandShare(mergeNote string) string {
 // commit is applied:
 //
 //   - READY's refusals (readyChecks): NO_PULL_REQUEST, READY_PULL_REQUEST_CLOSED,
-//     READY_HEAD_MOVED, READY_NOT_APPROVED and READY_UNREVIEWED_CHANGE
-//     (unreviewedChange: the head is not the review round's approved head plus retro's commits),
+//     READY_HEAD_MOVED, READY_NOT_APPROVED (the review round recorded no approval at all),
 //     READY_HEAD_CONFLICTS, READY_FILES_TRUNCATED, READY_DISARM_PENDING.
 //   - GITHUB_READ_FAILED: GitHub failed to answer a read; its failure, not the head's.
 //
@@ -561,7 +560,10 @@ func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credent
 // has none), whether its unfinished disarm keeps an earlier auto-merge arm standing
 // (record.Store.DisarmPending; by-hand READY refuses on that barrier, ordinary READY does not wait
 // for it), and the head its review round approved, "" when it recorded none (record.ApprovedHead),
-// which READY holds the pull request's head to (unreviewedChange).
+// which READY publishes only when the round recorded one (READY_NOT_APPROVED). Nothing holds the
+// head to that approval beyond its existence: the daemon keeps no check of its own on what sits
+// above the approved head, and the repository's branch rules decide the merge (the owner's
+// ruling, dispatch://INFRA-714/ask/beea7685).
 func (s *server) readyRecord(ctx context.Context, issue string) (*record.PullRequest, bool, string, error) {
 	if s.pool == nil {
 		return nil, false, "", errors.New("record dependencies are unavailable")

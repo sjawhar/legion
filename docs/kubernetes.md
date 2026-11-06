@@ -4708,7 +4708,7 @@ The cutover, in this order:
    - in `implementing` on a red head it counts one fix attempt, as any push onto a red head does;
 
    - in `accepting` or `retro` the new head runs its required checks, and a red sends the issue back to `implementing` as any red does;
-     READY lets the removal of `.legion/` above the approved head through without a new review round, and refuses a `.legion/` file added there.
+     READY compares nothing with the approved head, so neither the removal of `.legion/` above it nor any other commit there asks for a new review round.
 
    Everything else reads `unchanged`.
 

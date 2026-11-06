@@ -166,19 +166,14 @@ reviewing until you finish.
 - **Retro commits nothing.** It reads the evidence, writes what the work taught as a
   `dispatch comment` on the issue for the skill librarian, brings the PR body up to date and
   completes (`skill://legion-retro` gives the steps), so the approved head is the head READY
-  names. Anything above the approved
-  head voids the approval, except the handoff import's removal of `.legion/` files and a commit
-  that changes only `docs/solutions/`, which READY still lets through: READY is refused
-  `READY_UNREVIEWED_CHANGE`, naming the paths, and the merger tells the architect, who has it send
-  the head back to review instead of completing, the move's reason naming the refusal's code and
-  what it found. `READY_UNREVIEWED_CHANGE` has more causes than a path outside retro's own; every
-  one of them sends the head back to review and none is an error to retry, and the complete list,
-  with each remedy, is the merger's own role prompt part.
-  A conflict merge pushed above the approved head with no review round after it
-  brings the base's paths above that head, so READY refuses it the same way; one sent back through
-  `implementing` by the conflict procedure gets its confirmation before READY runs. A READY
-  refusal's return reaches the reviewer as a new round, never a fingerprint confirmation. Retro
-  removes nothing.
+  names. A commit above the approved head is refused nowhere: the daemon keeps no check of its
+  own on what sits above it, and the repository's branch rules decide the merge, which is the
+  owner's ruling (dispatch://INFRA-714/ask/beea7685). What READY still refuses is a round with no
+  recorded approval at all (`READY_NOT_APPROVED`): the merger tells the architect, who has it
+  send the head back to review instead of completing, the move's reason naming the refusal's
+  code, and the complete list of READY's refusals, with each remedy, is the merger's own role
+  prompt part. A READY refusal's return reaches the reviewer as a new round, never a fingerprint
+  confirmation. Retro removes nothing.
 - **Retro brings the PR body's path-derived content up to date before it completes.** Whatever the
   repository's instructions derive from the pull request's changed paths (a checklist named for
   each class of path, read by a required check), retro recomputes for the whole diff at its head
@@ -191,10 +186,11 @@ reviewing until you finish.
 - The merger resolves no review thread: the reviewer's approval already judged them, and READY
   requires no thread state beyond it. It quotes what sits above the approved head with
   `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R
-  "$LEGION_WORKSPACE" diff --from <approved-sha> --to <tip-sha> --summary` in READY; the daemon,
-  not the merger, holds those commits to retro's: READY reads GitHub's compare of the round's
-  approved head with READY's head and refuses any other path (`READY_UNREVIEWED_CHANGE`), and a
-  round with no recorded approval (`READY_NOT_APPROVED`).
+  "$LEGION_WORKSPACE" diff --from <approved-sha> --to <tip-sha> --summary` in READY; the daemon
+  holds those commits to nothing, since it keeps no check of its own on what sits above the
+  approved head and the repository's branch rules decide the merge (the owner's ruling,
+  dispatch://INFRA-714/ask/beea7685). The one approval READY reads is the round's own: a round
+  with no recorded approval is refused (`READY_NOT_APPROVED`).
   *The READY packet* is
   `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)`
   (the shape `packages/daemon/internal/prompts/roles/merger.md` defines), then the PR body's

@@ -3171,7 +3171,8 @@ reviewRun("reviewer-text-findings-text-only-head-3", {
     submission({ ...approval(), event: "REQUEST_CHANGES", decision: "changes_requested" }),
   ]),
 });
-// The approval the rule asks for, after a `resolveReviewThread` GitHub refuses the review App.
+// The approval the rule asks for, with the bot thread the round adjudicated resolved: one call,
+// one thread, which review-threads.md has the reviewer make and the score reports.
 reviewRun("reviewer-text-findings-text-only-head-4", {
   "case.txt": "text-only\n",
   "calls.jsonl": calls([
@@ -3769,8 +3770,12 @@ test("reviewer-text-findings, text-only: REQUEST_CHANGES on a text finding fails
 
 // Catches: a scorer blind to a thread resolution GitHub refuses the review App, or to a push a
 // review round must not make, or to an approval that names another head than the one it read.
-test("reviewer-text-findings, text-only: a resolveReviewThread call, a push and another head each fail", () => {
-  expect(out).toMatch(/reviewer-text-findings-text-only-head-4\tpass=false\t.*resolveThread=1 /);
+test("reviewer-text-findings, text-only: a push and another head each fail, and a resolution is reported", () => {
+  // The round's own findings are new inline comments, so it can resolve none of them; the one
+  // thread the world holds open is the bot's, which the reviewer adjudicates and may resolve
+  // (review-threads.md). So the call is reported and scores nothing, and four live runs of
+  // 2026-11-06 that approved the head and resolved exactly that thread are passes.
+  expect(out).toMatch(/reviewer-text-findings-text-only-head-4\tpass=true\t.*resolveThread=1 /);
   expect(out).toMatch(/reviewer-text-findings-text-only-head-7\tpass=false\t.*pushes=1 /);
   expect(out).toMatch(
     /reviewer-text-findings-text-only-head-5\tpass=false\t.*event=APPROVE head=false /
@@ -3778,9 +3783,10 @@ test("reviewer-text-findings, text-only: a resolveReviewThread call, a push and 
 });
 
 // Catches: a scorer that reads the resolution out of the call's arguments alone, so one sent
-// through `--input` or a here-document goes unseen and a reviewer that resolved a thread passes.
-test("reviewer-text-findings, text-only: a resolveReviewThread in the call's body fails", () => {
-  expect(out).toMatch(/reviewer-text-findings-text-only-head-8\tpass=false\t.*resolveThread=1 /);
+// through `--input` or a here-document goes uncounted and the row says a round resolved nothing
+// when it resolved a thread. The count is reported rather than scored, and it must be right.
+test("reviewer-text-findings, text-only: a resolveReviewThread in the call's body is counted", () => {
+  expect(out).toMatch(/reviewer-text-findings-text-only-head-8\tpass=true\t.*resolveThread=1 /);
 });
 
 // Catches: a scorer that reads only `gh api`, so a `gh pr review` verdict goes unseen.
@@ -3796,7 +3802,7 @@ test("reviewer-text-findings: a gh pr review carries its event in a flag, and no
 // Catches: a scorer that passes any verdict, so the negative control measures nothing.
 test("reviewer-text-findings, defect: an approval fails, and the counts are per case and label", () => {
   expect(out).toMatch(/reviewer-text-findings-defect-head-2\tpass=false\t.*event=APPROVE /);
-  expect(out).toContain("reviewer-text-findings:text-only\thead\t1/8\t0/8\t0\t0\n");
+  expect(out).toContain("reviewer-text-findings:text-only\thead\t3/8\t0/8\t0\t0\n");
   expect(out).toContain("reviewer-text-findings:text-only\tbase\t1/1\t0/1\t0\t0\n");
   expect(out).toContain("reviewer-text-findings:defect\thead\t1/2\t0/2\t1\t0\n");
 });

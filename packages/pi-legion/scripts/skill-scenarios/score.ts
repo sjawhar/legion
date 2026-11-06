@@ -983,15 +983,16 @@ function reviewerTextFindings(runDir: string, run: string, label: string, dirCas
   const onWorkflow = paths.some((named) => named.startsWith(FINDING_WORKFLOW));
   const head =
     review !== undefined && review.head.length >= 7 && world.head.startsWith(review.head);
+  // The two text findings this round writes are new inline comments, so no thread of them exists
+  // for the round to resolve, and the one thread the world holds open is the bot's, which the
+  // reviewer adjudicates and may resolve: `review-threads.md` has the reviewer resolve a thread
+  // it judged. So a resolve call is reported, not scored. What the case turns on is the verdict:
+  // the approval of the fixture head with a comment on each finding, and no push, since a review
+  // round pushes nothing at all and the implementer's fix follows the approval.
   const pass =
     reviewCase === "defect"
       ? review?.event === "REQUEST_CHANGES"
-      : review?.event === "APPROVE" &&
-        head &&
-        onDoc &&
-        onWorkflow &&
-        resolves === 0 &&
-        pushes === 0;
+      : review?.event === "APPROVE" && head && onDoc && onWorkflow && pushes === 0;
   const records = json(path.join(runDir, "handoffs.json"), Handoffs).filter(
     (record) => record.phase === "review"
   ).length;
