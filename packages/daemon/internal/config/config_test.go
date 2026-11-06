@@ -392,8 +392,10 @@ max_fix_attempts: 4
 }
 
 // `gates.design` takes the steps a deployment gates, in the order it names them, and the two
-// words it took before the list as the lists they mean. A value it does not take, and a list
-// naming one step twice, are refused by a message naming what the key takes.
+// words it took before the list as the lists they mean. A key that names nothing, written as
+// `design:` or as the empty string, is the unset key the loader read before the list, the single
+// step spec. A value it does not take, and a list naming one step twice, are refused by a
+// message naming what the key takes.
 func TestLoadReadsTheDesignGateSteps(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -406,6 +408,8 @@ func TestLoadReadsTheDesignGateSteps(t *testing.T) {
 		{name: "no gates key", body: gatesAbsentFile, want: []record.DesignStep{record.DesignStepSpec}},
 		{name: "the word root-issues", body: minimalFile, want: []record.DesignStep{record.DesignStepSpec}},
 		{name: "the word off", body: strings.Replace(minimalFile, "design: root-issues", "design: off", 1), want: []record.DesignStep{}},
+		{name: "a key that names nothing", body: strings.Replace(minimalFile, "design: root-issues", "design:", 1), want: []record.DesignStep{record.DesignStepSpec}},
+		{name: "the empty word", body: strings.Replace(minimalFile, "design: root-issues", `design: ""`, 1), want: []record.DesignStep{record.DesignStepSpec}},
 		{
 			name:    "a word the key does not take",
 			body:    gatesUnknownWordFile,

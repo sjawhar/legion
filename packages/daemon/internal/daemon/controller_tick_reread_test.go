@@ -19,6 +19,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/blockers"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -294,7 +295,7 @@ func tickRuntime(t *testing.T, pool *pgxpool.Pool, client dispatch.Client) *work
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	records := tickRecords()
-	engine := workflow.New(records, workflow.Config{Project: "CAPTURE", Repositories: testRepositories}, log)
+	engine := workflow.New(records, workflow.Config{Project: "CAPTURE", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, log)
 	admission := admit.New(records, engine, 1, "CAPTURE", log)
 	return &workflowRuntime{
 		pool: pool, records: records, admission: admission,

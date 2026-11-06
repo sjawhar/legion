@@ -257,8 +257,8 @@ func (r *outbox) spentKept(ctx context.Context, root string, claims int64, key s
 		if err != nil {
 			return err
 		}
-		decisions, approved, _, err := r.records.UnclaimedKept(ctx, tx, tree)
-		if err != nil || len(decisions) == 0 && approved == 0 {
+		decisions, approval, err := r.records.UnclaimedKept(ctx, tx, tree)
+		if err != nil || len(decisions) == 0 && approval.Approved == 0 {
 			return err
 		}
 		return workflow.CatchUpTheTreesOwed(ctx, tx, r.records, r.gatedSteps, []string{tree}, r.now().UTC())

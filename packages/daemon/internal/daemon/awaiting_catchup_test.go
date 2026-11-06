@@ -16,6 +16,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/classify"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -126,7 +127,7 @@ func catchUpRig(t *testing.T, client dispatch.Client, cap int) (*pgxpool.Pool, *
 	t.Helper()
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	engine := workflow.New(records, workflow.Config{Project: "CAPTURE", Repositories: testRepositories, Clock: catchUpClock}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "CAPTURE", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Clock: catchUpClock}, quietLogger())
 	admission := admit.New(records, engine, cap, "CAPTURE", quietLogger())
 	return pool, &workflowRuntime{pool: pool, records: records, dispatch: client, dispatchProject: "CAPTURE", engine: engine, admission: admission,
 		handlers: []intake.Handler{engine, admission}, log: quietLogger(), bootID: "boot-1", catchUpRetryDelay: time.Millisecond}

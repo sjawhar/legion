@@ -20,6 +20,13 @@
 -- holds one row for each issue and that row is the one the older daemon means. Migrations here are
 -- forward-only and this one has no down file: a deployment that has to leave this release leaves it
 -- forward, and an image rolled back runs with its design gate unwritable until it is rolled on.
+--
+-- The refused READY goes the same way, through the shape check this migration adds to issues
+-- below. An earlier daemon's PutIssue names ready_pending_version and never ready_pending_step:
+-- a new refusal writes a version beside a null step, which the check refuses, and a clear nulls
+-- the version while the 'spec' this migration backfilled stays, which the check refuses too.
+-- Either way the whole fact fails, so a rolled-back daemon can neither refuse a READY nor
+-- release one it is already holding, until it is rolled on.
 alter table design_gates add column step text not null default 'spec'
   check (step in ('decisions', 'criteria', 'spec'));
 alter table design_gates drop constraint design_gates_pkey;

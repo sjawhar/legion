@@ -231,7 +231,7 @@ func TestAHoldReleaseLeavesAClaimThatCounts(t *testing.T) {
 // a row naming it and claims it for that row. It returns the refs the row names.
 func (r *keptRig) compose(tx pgx.Tx, tree string) ([]string, error) {
 	store := record.NewStore()
-	decisions, _, _, err := store.UnclaimedKept(r.ctx, tx, tree)
+	decisions, _, err := store.UnclaimedKept(r.ctx, tx, tree)
 	if err != nil || len(decisions) == 0 {
 		return nil, err
 	}

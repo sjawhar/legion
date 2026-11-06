@@ -39,8 +39,6 @@ type Config struct {
 	// Steps are the design-gate steps the deployment gates (config.Gates.Steps), in the order a
 	// root's architect takes them. Every hold the gate puts on a tree's work reads the whole list
 	// (classify.DesignGatesOpen), and the empty list gates no step, which is `gates.design: off`.
-	// A nil list takes the shipped default, the one step spec, as the unset policy word did
-	// (New).
 	Steps          []record.DesignStep
 	ReviewRoundCap int
 	MaxFixAttempts int
@@ -94,9 +92,6 @@ var _ intake.Handler = (*Engine)(nil)
 
 // New constructs a workflow engine with the shipped review and fix caps when callers omit them.
 func New(store record.Store, cfg Config, log *slog.Logger) *Engine {
-	if cfg.Steps == nil {
-		cfg.Steps = config.DesignGateRootIssues.Steps()
-	}
 	if cfg.ReviewRoundCap <= 0 {
 		cfg.ReviewRoundCap = 3
 	}
@@ -625,7 +620,7 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 			version := 0
 			if gate.LatestVersion > 0 {
 				version = gate.LatestVersion
-				issue.ReadyPendingVersion, issue.ReadyPendingStep = &version, &step
+				issue.ReadyPending = &record.ReadyPending{Step: step, Version: version}
 				message = fmt.Sprintf("READY refused: approve design version %d of the tree's %s document before requesting READY.", version, step)
 			}
 			if err := e.store.PutIssue(ctx, tx, *issue); err != nil {
@@ -887,7 +882,7 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	// A READY the gate refused belongs to the merging phase it was sent in: leaving that phase by
 	// any trigger voids it, so a later approval never advances the next merger's phase on it.
 	if from == phase.Merging {
-		issue.ReadyPendingVersion, issue.ReadyPendingStep = nil, nil
+		issue.ReadyPending = nil
 	}
 	if err := e.store.PutIssue(ctx, tx, issue); err != nil {
 		return err
@@ -987,9 +982,12 @@ func (e *Engine) row(from phase.Phase, trigger TriggerKind, target phase.Phase, 
 	return Row{}, false
 }
 
-// advanceAdmittedTree starts every member of root's tree the opening of its design gates
-// releases: gates is every gate the root holds by its step, and every step the deployment
-// requires must be open (classify.DesignGatesOpen) before any member starts.
+// advanceAdmittedTree starts every member of root's tree that an open design gate releases:
+// gates is every gate the root holds by its step, and every step the deployment requires must be
+// open (classify.DesignGatesOpen) before any member starts. What opened the gate is usually a
+// person's review; it can also be a boot that gates one step fewer, which no fact announces and
+// which the admission pass reads instead (AdvanceOpenTrees).
+//
 // A child that waits on an unfinished Dispatch issue is not one of them (blockers.Holds): the
 // gate it was held by is its tree's, the issues it waits on are its own, and only
 // StartUnblockedChildren, when the last of them closes, starts it.
@@ -1128,6 +1126,73 @@ func (e *Engine) treesStartingChildren(ctx context.Context, tx pgx.Tx, issues []
 		starts[tree] = classify.DesignGatesOpen(e.cfg.Steps, gates[tree])
 	}
 	return starts, nil
+}
+
+// AdvanceOpenTrees starts the work a shorter step list released and nothing else can: the root of
+// a live tree still at admitted, and a merger's READY a step the deployment no longer gates
+// refused. Every other path into advanceAdmittedTree and advancePendingReady is a fact about a
+// gate, and a step leaving gates.design is no such fact — the list is read at each boot and
+// nothing of it is stored for a tree, and an approval of a document the deployment no longer
+// gates is ignored (applyArtifact) — so without this pass both wait for a gate fact that may
+// never come. The merger is the plainer case: it was told the daemon releases its READY, and it
+// is never asked for a second one.
+//
+// Its caller is admission's promoteHolds, after StartUnblockedChildren, which releases the held
+// children of the same trees: a child that pass started is no longer at admitted when
+// advanceAdmittedTree reads the tree's members here, so no child starts twice, and a child it
+// held for an unfinished blocker is held here too (blockers.Holds).
+//
+// issues is the caller's snapshot of the project's records, which names every candidate without a
+// read: a tree whose root stands at admitted, and one with a member in merging, which is where a
+// refused READY waits. A refusal by an unregistered step records no version on the issue
+// (Engine.handoff), so the merging member alone is what says a tree may hold one. The slots and
+// the gates of those trees are one read each, as treesStartingChildren takes them, and a project
+// with no such tree takes neither.
+func (e *Engine) AdvanceOpenTrees(ctx context.Context, tx pgx.Tx, issues []record.Issue) error {
+	roots := make(map[string]record.Issue, len(issues))
+	for _, issue := range issues {
+		if claim.IsTreeRoot(issue.Key, issue.Tree) {
+			roots[issue.Key] = issue
+		}
+	}
+	trees := map[string]struct{}{}
+	for _, issue := range issues {
+		root, recorded := roots[issue.Tree]
+		if !recorded || issue.Phase != phase.Merging && !(issue.Phase == phase.Admitted && issue.Key == root.Key) {
+			continue
+		}
+		trees[issue.Tree] = struct{}{}
+	}
+	if len(trees) == 0 {
+		return nil
+	}
+	slots, err := e.store.Slots(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("list admission slots: %w", err)
+	}
+	live := record.LiveRoots(issues, slots)
+	candidates := make([]string, 0, len(trees))
+	for _, tree := range slices.Sorted(maps.Keys(trees)) {
+		if _, running := live[tree]; running {
+			candidates = append(candidates, tree)
+		}
+	}
+	gates, err := e.store.Gates(ctx, tx, candidates)
+	if err != nil {
+		return err
+	}
+	for _, tree := range candidates {
+		if !classify.DesignGatesOpen(e.cfg.Steps, gates[tree]) {
+			continue
+		}
+		if err := e.advanceAdmittedTree(ctx, tx, roots[tree], gates[tree]); err != nil {
+			return err
+		}
+		if err := e.advancePendingReady(ctx, tx, tree, gates[tree]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // gateOpened moves an admitted member of a tree whose gate is open into planning, behind a row

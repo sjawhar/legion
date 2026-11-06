@@ -196,13 +196,15 @@ type Approval struct {
 }
 
 // ArtifactRoleVerification and ArtifactRoleDecisions are two of the parts Dispatch records a
-// document playing on its issue (model.Artifact.Role), and DecisionsSlug the name it files a
-// decisions document under. No mechanism shares a value between this module and Dispatch's, so
-// the spellings change together.
+// document playing on its issue (model.Artifact.Role), and DecisionsSlug and VerificationSlug the
+// names it files those two documents under, which a reference to either names
+// (workflow's stepRef). No mechanism shares a value between this module and Dispatch's, so the
+// spellings change together.
 const (
 	ArtifactRoleVerification = "verification"
 	ArtifactRoleDecisions    = "decisions"
 	DecisionsSlug            = "decisions-md"
+	VerificationSlug         = "verification-md"
 )
 
 // ApprovedLatest is the version Dispatch shows approved when that approval is of its latest

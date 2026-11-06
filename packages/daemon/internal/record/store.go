@@ -179,11 +179,11 @@ func (s *Postgres) PutIssue(ctx context.Context, tx pgx.Tx, issue Issue) error {
 	if issue.Hold != nil {
 		heldFrom, holdReason = string(issue.Hold.From), issue.Hold.Reason
 	}
-	// The refused READY's version and step are one fact, and the stored shape check refuses either
-	// half alone, so the step is written as the text of the step or as NULL beside its version.
-	var readyPendingStep any
-	if issue.ReadyPendingStep != nil {
-		readyPendingStep = string(*issue.ReadyPendingStep)
+	// The refused READY's version and step are one value here and two columns in the row, which
+	// the stored shape check holds to both or neither.
+	var readyPendingStep, readyPendingVersion any
+	if issue.ReadyPending != nil {
+		readyPendingStep, readyPendingVersion = string(issue.ReadyPending.Step), issue.ReadyPending.Version
 	}
 	var awaitingAsk, awaitingGate, awaitingArtifact, answeredAt, sinceSeq, since any
 	var answeredBy Answer
@@ -233,7 +233,7 @@ func (s *Postgres) PutIssue(ctx context.Context, tx pgx.Tx, issue Issue) error {
 		ancestry = excluded.ancestry, handed_over_from = excluded.handed_over_from
 		where issues.repo = excluded.repo and issues.default_branch = excluded.default_branch and issues.github_repo = excluded.github_repo`,
 		issue.Key, issue.Tree, issue.Project, issue.Title, issue.Parent, string(issue.Phase), int64(issue.Generation), issue.Status,
-		issue.Rank, issue.HandedOver, issue.TakenBack, issue.LingerUntil, heldFrom, issue.LastDispatchSeq, issue.ReadyPendingVersion, string(holdReason), issue.DispatchStatus,
+		issue.Rank, issue.HandedOver, issue.TakenBack, issue.LingerUntil, heldFrom, issue.LastDispatchSeq, readyPendingVersion, string(holdReason), issue.DispatchStatus,
 		issue.Repo, issue.DefaultBranch, issue.GitHubRepo, awaitingAsk, awaitingGate, awaitingArtifact, answeredAt, string(answeredBy), answeredDetail,
 		sinceSeq, since, issue.Ancestry, issue.HandedOverFrom, readyPendingStep,
 	)
@@ -395,17 +395,17 @@ func scanIssue(row scanner) (*Issue, error) {
 	var answeredBy, answeredDetail string
 	var sinceSeq *int64
 	var readyPendingStep *string
+	var readyPendingVersion *int
 	var since, declaredAt, memoryDrawnAt *time.Time
 	if err := row.Scan(&issue.Key, &issue.Tree, &issue.Project, &issue.Title, &issue.Parent, &phaseValue, &generation, &issue.Status,
-		&issue.Rank, &issue.HandedOver, &issue.TakenBack, &issue.LingerUntil, &heldFrom, &issue.LastDispatchSeq, &issue.ReadyPendingVersion, &readyPendingStep, &holdReason, &issue.DispatchStatus,
+		&issue.Rank, &issue.HandedOver, &issue.TakenBack, &issue.LingerUntil, &heldFrom, &issue.LastDispatchSeq, &readyPendingVersion, &readyPendingStep, &holdReason, &issue.DispatchStatus,
 		&issue.Repo, &issue.DefaultBranch, &issue.GitHubRepo, &awaitingAsk, &awaitingGate, &awaitingArtifact, &answeredAt, &answeredBy, &answeredDetail,
 		&sinceSeq, &since, &issue.HandoutSeq, &issue.DeclaredSeq, &declaredAt, &issue.Ancestry, &issue.HandedOverFrom,
 		&issue.MemoryGroup, &issue.MemoryDrawMode, &memoryDrawnAt); err != nil {
 		return nil, err
 	}
-	if readyPendingStep != nil {
-		step := DesignStep(*readyPendingStep)
-		issue.ReadyPendingStep = &step
+	if readyPendingStep != nil && readyPendingVersion != nil {
+		issue.ReadyPending = &ReadyPending{Step: DesignStep(*readyPendingStep), Version: *readyPendingVersion}
 	}
 	if declaredAt != nil {
 		issue.DeclaredAt = declaredAt.UTC()
@@ -721,26 +721,26 @@ func (s *Postgres) ParkedDecisions(ctx context.Context, tx pgx.Tx, tree string) 
 // judges each claim against a snapshot that holds every claimer committed before the lock was
 // granted. Without it the second composer would read a claim the first has not committed as no
 // claim, name the decision too, and two tellings would name it.
-func (s *Postgres) UnclaimedKept(ctx context.Context, tx pgx.Tx, tree string) ([]ParkedDecision, int, int, error) {
+func (s *Postgres) UnclaimedKept(ctx context.Context, tx pgx.Tx, tree string) ([]ParkedDecision, KeptApproval, error) {
 	if _, err := tx.Exec(ctx, `select 1 from parked_decisions kept join issues owner on owner.key = kept.issue
 		where owner.tree = $1 order by kept.issue, kept.ref for update of kept`, tree); err != nil {
-		return nil, 0, 0, fmt.Errorf("lock the decisions owed to %s: %w", tree, err)
+		return nil, KeptApproval{}, fmt.Errorf("lock the decisions owed to %s: %w", tree, err)
 	}
 	if _, err := tx.Exec(ctx, `select 1 from readmitted_approvals where issue = $1 for update`, tree); err != nil {
-		return nil, 0, 0, fmt.Errorf("lock the approval kept for %s: %w", tree, err)
+		return nil, KeptApproval{}, fmt.Errorf("lock the approval kept for %s: %w", tree, err)
 	}
 	decisions, err := parkedDecisions(ctx, tx, tree, true)
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, KeptApproval{}, err
 	}
-	var approved, latest int
-	err = tx.QueryRow(ctx, `select approved_version, latest_version from readmitted_approvals
+	var approval KeptApproval
+	err = tx.QueryRow(ctx, `select step, approved_version, latest_version from readmitted_approvals
 		join issues owner on owner.key = readmitted_approvals.issue
-		where readmitted_approvals.issue = $1 and `+approvalNameable, tree).Scan(&approved, &latest)
+		where readmitted_approvals.issue = $1 and `+approvalNameable, tree).Scan(&approval.Step, &approval.Approved, &approval.Latest)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return nil, 0, 0, fmt.Errorf("read the approval kept for %s: %w", tree, err)
+		return nil, KeptApproval{}, fmt.Errorf("read the approval kept for %s: %w", tree, err)
 	}
-	return decisions, approved, latest, nil
+	return decisions, approval, nil
 }
 
 // parkedDecisions is every decision owed to tree — every row whose issue stands in tree now — or
@@ -769,12 +769,13 @@ func parkedDecisions(ctx context.Context, tx pgx.Tx, tree string, nameable bool)
 	return decisions, nil
 }
 
-func (s *Postgres) KeepReadmittedApproval(ctx context.Context, tx pgx.Tx, root string, approved, latest int) error {
-	if _, err := tx.Exec(ctx, `insert into readmitted_approvals (issue, approved_version, latest_version) values ($1, $2, $3)
-		on conflict (issue) do update set approved_version = excluded.approved_version, latest_version = excluded.latest_version,
-		claimed_by = null, held_by_claim = null, held_by_delivery = null`,
-		root, approved, latest); err != nil {
-		return fmt.Errorf("keep the approval of %s at version %d below version %d: %w", root, approved, latest, err)
+func (s *Postgres) KeepReadmittedApproval(ctx context.Context, tx pgx.Tx, root string, approval KeptApproval) error {
+	if _, err := tx.Exec(ctx, `insert into readmitted_approvals (issue, step, approved_version, latest_version) values ($1, $2, $3, $4)
+		on conflict (issue) do update set step = excluded.step, approved_version = excluded.approved_version,
+		latest_version = excluded.latest_version, claimed_by = null, held_by_claim = null, held_by_delivery = null`,
+		root, string(approval.Step), approval.Approved, approval.Latest); err != nil {
+		return fmt.Errorf("keep the approval of %s's %s step at version %d below version %d: %w",
+			root, approval.Step, approval.Approved, approval.Latest, err)
 	}
 	return nil
 }
@@ -798,8 +799,9 @@ func (s *Postgres) ReadmittedApproval(ctx context.Context, tx pgx.Tx, root strin
 }
 
 // keptMarks is kept's decisions as two parallel arrays, the reference and the time of each, which
-// is what identifies the rows it names within one tree, for unnest. The reference spells the issue
-// it was decided on (specRef, itemRef), so no two rows of one tree answer to one reference.
+// is what identifies the rows it names within one tree, for unnest. The reference spells the
+// issue it was decided on and the document of that decision (workflow's stepRef, itemRef), so no
+// two rows of one tree answer to one reference.
 func keptMarks(kept KeptDecisions) ([]string, []time.Time) {
 	refs := make([]string, 0, len(kept.Decisions))
 	at := make([]time.Time, 0, len(kept.Decisions))
@@ -1620,13 +1622,38 @@ func (s *Postgres) PersonHandoverPending(ctx context.Context, tx pgx.Tx, issue s
 	return pending, nil
 }
 
-func (s *Postgres) GatedStepsPending(ctx context.Context, tx pgx.Tx, project string) (bool, error) {
-	var pending bool
-	if err := tx.QueryRow(ctx, "select exists (select 1 from outbox where kind = $1 and issue = $2)",
-		string(OutboxKindGatedStepsPublish), project).Scan(&pending); err != nil {
-		return false, fmt.Errorf("read whether %s has a gated-steps publish pending: %w", project, err)
+// EnqueueGatedSteps writes the one gated_steps_publish row of row's project, whose issue is the
+// bare project key: it replaces the payload of the row the outbox still holds for that project,
+// and inserts row when it holds none. The whole of it is one statement, so a boot never reads a
+// pending row and then queues beside it.
+//
+// A replacement is what keeps the queued list the booting daemon's own. The row waits on its
+// lane until Dispatch takes it, and an operator can change gates.design and restart inside that
+// window; a boot that stood down for the pending row would leave the list of the boot before it
+// to be written. Replacing the payload keeps the row's attempts and its next_at, because the row
+// is the same publish waiting on the same lane and only the list it carries is newer, and a
+// payload that already says this list is left alone.
+func (s *Postgres) EnqueueGatedSteps(ctx context.Context, tx pgx.Tx, row OutboxRow) error {
+	if row.Kind != OutboxKindGatedStepsPublish {
+		return fmt.Errorf("enqueue %s for %s as a gated-steps publish: the kind is not %s", row.Kind, row.Issue, OutboxKindGatedStepsPublish)
 	}
-	return pending, nil
+	if !json.Valid(row.Payload) {
+		return fmt.Errorf("enqueue %s for %s: payload is not JSON", row.Kind, row.Issue)
+	}
+	// Every arm of the statement reads the same snapshot, so `held` answers what stood there
+	// before the update: a project with a row is replaced, one without gets the insert.
+	if _, err := tx.Exec(ctx, `with held as (
+			select id from outbox where kind = $1 and issue = $2
+		), replaced as (
+			update outbox set payload = $3::jsonb
+			where kind = $1 and issue = $2 and payload is distinct from $3::jsonb
+		)
+		insert into outbox (kind, issue, payload, attempts, next_at, last_error, lease_token, lease_until)
+		select $1, $2, $3::jsonb, $4, $5, $6, $7, $8 where not exists (select 1 from held)`,
+		string(row.Kind), row.Issue, string(row.Payload), row.Attempts, row.NextAt, row.LastError, row.LeaseToken, row.LeaseUntil); err != nil {
+		return fmt.Errorf("enqueue %s for %s: %w", row.Kind, row.Issue, err)
+	}
+	return nil
 }
 
 const outboxColumns = `id, kind, issue, payload, attempts, next_at, last_error, created_at, lease_token, lease_until`

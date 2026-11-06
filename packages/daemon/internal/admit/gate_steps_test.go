@@ -152,3 +152,63 @@ func TestGatedStepsCarryEveryStepToAHandedOverChild(t *testing.T) {
 		t.Fatalf("the carried root's merger was started %d times, want once: every carried step is open, so its phase runs", starts)
 	}
 }
+
+// A step nobody has registered holds the tree's work and nothing more: the wait a registered
+// step after it raised still reaches the person, and the root gives its slot back for the next
+// root in line. Reading the unregistered step as the step the person has would leave this root
+// holding the slot while a person holds its approval request, with no wait left to answer.
+func TestUnregisteredStepDoesNotHideTheWaitARegisteredStepRaises(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmissionWithSteps(t, 1, []record.DesignStep{record.DesignStepDecisions, record.DesignStepSpec},
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	runningRoot(t, pool)
+
+	// The spec step is registered, unapproved, and its approval request is with the person; the
+	// decisions step has no row at all.
+	applyFact(t, pool, admission, "register-spec", intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root",
+		Version: 3, RequestAsk: "ask-approval", Since: record.EventMark{Seq: 5}})
+
+	waiting := issue(t, pool, "LEGION-100")
+	if waiting.Phase != phase.AwaitingPerson || waiting.Awaiting == nil || waiting.Awaiting.Artifact != "artifact-root" ||
+		waiting.Awaiting.GateVersion != 3 {
+		t.Fatalf("the root = %#v, want it waiting on its primary document at version 3", waiting.Awaiting)
+	}
+	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-NEXT", Index: 0, AdmittedAt: fixedNow}})
+}
+
+// The approval a re-admission keeps for the next architect's start carries the step it is of, so
+// the start names the document the person reviewed. Under the decisions step and the spec, with
+// the decisions document approved below its latest version, that architect is sent to the
+// decisions document at the decisions document's versions, not to the spec.
+func TestGatedStepsKeepTheStaleApprovalOfItsOwnDocument(t *testing.T) {
+	ctx := context.Background()
+	pool := migratedPool(t)
+	admission := newAdmissionWithSteps(t, 1, []record.DesignStep{record.DesignStepDecisions, record.DesignStepSpec},
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	parkedRoot(t, pool)
+	inTx(t, pool, func(tx pgx.Tx) {
+		records := record.NewStore()
+		for _, put := range []error{
+			records.PutGate(ctx, tx, record.DesignGate{Issue: "LEGION-ROOT", Step: record.DesignStepDecisions,
+				ArtifactID: decisionsDoc, LatestVersion: 3, ApprovedVersion: new(2)}),
+			records.PutGate(ctx, tx, record.DesignGate{Issue: "LEGION-ROOT", Step: record.DesignStepSpec,
+				ArtifactID: "artifact-root", LatestVersion: 5, ApprovedVersion: new(5)}),
+		} {
+			if put != nil {
+				t.Fatalf("seed the gates: %v", put)
+			}
+		}
+	})
+
+	readmitRoot(t, pool, admission)
+
+	want := "The decisions document is approved at version 2 and is now at version 3: request approval of version 3, " +
+		"as skill://legion-architect/references/design-gate.md (\"The armed gate\") says."
+	starts := architectStartRows(t, pool)
+	if len(starts) != 1 || starts[0].Task != want {
+		t.Fatalf("architect starts %#v, want one whose task is %q", starts, want)
+	}
+	if kept := starts[0].Kept; kept == nil || kept.Step != record.DesignStepDecisions || kept.Approved != 2 || kept.Latest != 3 {
+		t.Fatalf("the start's kept record %#v, want the decisions step's own pair", kept)
+	}
+}

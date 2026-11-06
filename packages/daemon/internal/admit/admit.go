@@ -948,7 +948,7 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	stored.Ancestry = nil
 	if !orphan {
 		stored.Phase, stored.Hold, stored.Awaiting = phase.Admitted, nil, nil
-		stored.ReadyPendingVersion, stored.ReadyPendingStep = nil, nil
+		stored.ReadyPending = nil
 		// Another tree's work arriving without its run: the run it had was that tree's.
 		if !claim.IsTreeRoot(stored.Key, oldTree) {
 			stored.TakenBack = false
@@ -1043,8 +1043,9 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 // person's approval a gate of its holds of a version its document has since moved past: the new
 // generation's architect registers each step again on a cleared gate, and its start task
 // (workflow.Engine.ParkedDecisionTask) tells it to request approval of the latest version. One
-// pair is kept, read from the first required step whose approved version sits below its latest,
-// because readmitted_approvals keeps one row for each root.
+// approval is kept, read from the first required step whose approved version sits below its
+// latest, because readmitted_approvals keeps one row for each root; it carries that step, so the
+// task names the document the person reviewed rather than the spec of every deployment.
 //
 // Where the deployment gates no step, which asks no person, nothing is kept and any pair an
 // earlier re-admission kept is dropped: no start names one there, so no delivery would forget
@@ -1068,7 +1069,8 @@ func (a *Admission) keepStaleApproval(ctx context.Context, tx pgx.Tx, key string
 		case !ok:
 			unregistered = true
 		case gate.ApprovedVersion != nil && *gate.ApprovedVersion < gate.LatestVersion:
-			return a.store.KeepReadmittedApproval(ctx, tx, key, *gate.ApprovedVersion, gate.LatestVersion)
+			return a.store.KeepReadmittedApproval(ctx, tx, key, record.KeptApproval{
+				Step: step, Approved: *gate.ApprovedVersion, Latest: gate.LatestVersion})
 		}
 	}
 	if unregistered {
@@ -1161,7 +1163,8 @@ func (a *Admission) promote(ctx context.Context, tx pgx.Tx) (int, []string, erro
 // children of every live tree the engine starts from the same rows once the waiting line is done
 // with (StartUnblockedChildren). Every path that promotes comes through here — a live fact, the
 // controller tick, a hold's release, the boot's Reconcile — so each of them is also a look at every
-// child a blocker holds.
+// child a blocker holds, and at every tree a step that left gates.design released
+// (workflow.AdvanceOpenTrees).
 func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bool) (int, []string, error) {
 	issues, slots, err := a.adoptQueuedRoots(ctx, tx, respectHolds)
 	if err != nil {
@@ -1374,6 +1377,13 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 		maps.Copy(rows, more)
 	}
 	if err := a.engine.StartUnblockedChildren(ctx, tx, issues, rows); err != nil {
+		return admitted, returned, err
+	}
+	// A step leaving gates.design releases work no gate fact will ever reach: the root of a tree
+	// whose remaining steps are all open, and a merger's READY the dropped step refused. This
+	// pass is where both move (workflow.AdvanceOpenTrees), and it runs after the held children so
+	// that no child starts twice.
+	if err := a.engine.AdvanceOpenTrees(ctx, tx, issues); err != nil {
 		return admitted, returned, err
 	}
 	return admitted, returned, nil

@@ -383,21 +383,21 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 //
 // It queues at every boot, because the daemon stores no list it last published: the route writes
 // only a difference (`gated_steps is distinct from`), so a boot on an unchanged list touches no
-// row and appends no event. A row of the kind still in the outbox is the one this boot would
-// write, so a restart loop queues no second.
+// row and appends no event. A row of the kind still in the outbox is replaced rather than left
+// standing (EnqueueGatedSteps), so the queued row always carries this boot's list: the row can
+// have waited there since a boot on a list the operator has changed since, and a restart loop
+// still queues no second row.
 func (w *workflowRuntime) queueGatedStepsPublish(ctx context.Context) error {
-	var pending bool
+	row, err := record.NewOutboxRow(w.dispatchProject, record.GatedStepsPublish{Project: w.dispatchProject, Steps: w.gatedSteps}, time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("queue the gated-steps publish of %s: %w", w.dispatchProject, err)
+	}
 	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
-		var err error
-		pending, err = w.records.GatedStepsPending(ctx, tx, w.dispatchProject)
-		return err
+		return w.records.EnqueueGatedSteps(ctx, tx, row)
 	}); err != nil {
-		return fmt.Errorf("read whether %s has a gated-steps publish pending: %w", w.dispatchProject, err)
+		return fmt.Errorf("queue the gated-steps publish of %s: %w", w.dispatchProject, err)
 	}
-	if pending {
-		return nil
-	}
-	return w.enqueueOutbox(ctx, w.dispatchProject, record.GatedStepsPublish{Project: w.dispatchProject, Steps: w.gatedSteps})
+	return nil
 }
 
 // wakeOutbox is the records' wake (projectRecords.wake): it reaches the outbox attach stored, and
@@ -571,7 +571,7 @@ func (w *workflowRuntime) rootTask(ctx context.Context, c supervise.Claim, d sup
 	if err := json.Unmarshal(d.Kept, &named); err != nil {
 		return "", nil, fmt.Errorf("decode what the task held for %s names: %w", c.Token, err)
 	}
-	stays := record.KeptDecisions{Approved: named.Approved, Latest: named.Latest}
+	stays := record.KeptDecisions{Step: named.Step, Approved: named.Approved, Latest: named.Latest}
 	var left []record.DecisionMark
 	scoped, committed := intake.WithCommitHooks(ctx)
 	if err := pgx.BeginFunc(scoped, w.pool, func(tx pgx.Tx) error {

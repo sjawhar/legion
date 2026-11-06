@@ -1383,8 +1383,11 @@ func DesignGatesOpen(configured []record.DesignStep, gates map[record.DesignStep
 // FirstClosedStep is the first required step (RequiredSteps) whose gate is not open, in the
 // configured order, with the row it holds — the zero row when it holds none, which is the step
 // nobody has registered. ok is false when every required step is open, which is DesignGatesOpen.
-// It names the one step a refusal, a hold or a person's wait is about: the step the work stands
-// on now.
+//
+// It answers which step holds the work now, and so which step a refusal or a hold is about: a
+// step nobody has registered holds it, because nobody has said the document exists. Which step a
+// person is being asked about is another question, since nobody can be asked about a document
+// the record does not know, and the wait reads its own rule for it (workflow's standingGate).
 func FirstClosedStep(configured []record.DesignStep, gates map[record.DesignStep]record.DesignGate) (record.DesignStep, record.DesignGate, bool) {
 	for _, step := range RequiredSteps(configured) {
 		if gate, ok := gates[step]; !ok || !DesignGateOpen(gate) {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -157,7 +158,7 @@ func newHeldTaskRig(t *testing.T) *heldTaskRig {
 	ctx := context.Background()
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	engine := workflow.New(records, workflow.Config{Project: heldTaskProject, Repositories: testRepositories}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: heldTaskProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, quietLogger())
 	trees := outboxTreeStore(t, pool, heldTaskRoot)
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	sup.deps.Store = keptClaimStore{Store: trees}

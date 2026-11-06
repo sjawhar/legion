@@ -315,18 +315,37 @@ func withHuman(asks []record.RootAsk, requestOf string) (questions []record.Root
 	return questions, request
 }
 
+// standingGate is the gate a person is being asked about: the row of the first required step, in
+// the configured order, that is closed and has a row. That is a different question from which
+// step holds the tree's work (classify.FirstClosedStep), which a step nobody has registered also
+// holds (R3): such a step names no document, so nobody can be asked about it, and the wait it
+// raised would be a wait on nothing. So the wait skips it and names the first registered
+// unapproved step after it, while the work stays held. ok is false when no required step holds a
+// closed row, which is every required step open or every closed one unregistered.
+//
+// Everything a root's wait is built from reads this one rule: the document its approval requests
+// are counted on (gateRequestArtifact), the wait it records (waitSubject) and the step its resume
+// speaks of (gateInQuestion).
+func standingGate(steps []record.DesignStep, gates map[record.DesignStep]record.DesignGate) (record.DesignGate, bool) {
+	for _, step := range classify.RequiredSteps(steps) {
+		if gate, ok := gates[step]; ok && !classify.DesignGateOpen(gate) {
+			return gate, true
+		}
+	}
+	return record.DesignGate{}, false
+}
+
 // gateRequestArtifact is the document whose approval requests a root can wait on: the document of
-// the first step the deployment gates whose gate is not open (classify.FirstClosedStep), which is
-// the step the work stands on. A deployment that gates no step waits on no approval, and so does
-// a step nobody has registered, whose document the record does not know: both answer ""
-// (RootAsk.GateRequestOf matches no row against ""). A root waits on one document at a time, and
-// the step after it is asked for once that one is open.
+// the step a person is being asked about (standingGate). A deployment that gates no step waits on
+// no approval, and so does a root no closed required step holds a row for, whose document the
+// record does not know: both answer "" (RootAsk.GateRequestOf matches no row against ""). A root
+// waits on one document at a time, and the step after it is asked for once that one is open.
 func gateRequestArtifact(steps []record.DesignStep, gates map[record.DesignStep]record.DesignGate) string {
 	if len(steps) == 0 {
 		return ""
 	}
-	_, gate, closed := classify.FirstClosedStep(steps, gates)
-	if !closed {
+	gate, standing := standingGate(steps, gates)
+	if !standing {
 		return ""
 	}
 	return gate.ArtifactID
@@ -372,16 +391,16 @@ func waitGateOpen(steps []record.DesignStep, gates map[record.DesignStep]record.
 	return gate != nil && classify.DesignGateOpen(*gate)
 }
 
-// waitSubject is the wait a root starts from since on what is still with the person: the gate the
-// work stands on (classify.FirstClosedStep, the step gateRequestArtifact answers for) at its
+// waitSubject is the wait a root starts from since on what is still with the person: the gate a
+// person is being asked about (standingGate, the step gateRequestArtifact answers for) at its
 // latest version, on its own document, when its request is; otherwise the oldest question of its
-// tree; false when nothing is.
+// tree; false when nothing is. It asks which step the person has, not which step holds the work:
+// a step nobody has registered holds the work and raises no wait of its own, and it does not
+// take the wait away from a registered step after it either.
 func waitSubject(asks []record.RootAsk, steps []record.DesignStep, gates map[record.DesignStep]record.DesignGate, since record.EventMark) (record.Awaiting, bool) {
 	var standsOn record.DesignGate
 	if len(steps) > 0 {
-		if _, closedGate, closed := classify.FirstClosedStep(steps, gates); closed {
-			standsOn = closedGate
-		}
+		standsOn, _ = standingGate(steps, gates)
 	}
 	questions, request := withHuman(asks, standsOn.ArtifactID)
 	switch {
@@ -492,11 +511,15 @@ func (e *Engine) ResumeAwaitedRoot(ctx context.Context, tx pgx.Tx, root record.I
 }
 
 // gateInQuestion is the step a resume speaks of and the row that step holds (resumeTask): the
-// first required step that is not open, the step the architect still has to see through, and when
-// every required step is open the first required step, whose version the resume says the work
-// runs at. The row is nil when that step holds none, as a root nobody has registered a gate for
-// holds none.
+// step the person was asked about (standingGate), which is the one the resume answers for; else
+// the first required step that is not open, which nobody has registered and whose document the
+// architect has still to register; and when every required step is open the first required step,
+// whose version the resume says the work runs at. The row is nil for the unregistered step, as a
+// root nobody has registered a gate for holds none.
 func gateInQuestion(steps []record.DesignStep, gates map[record.DesignStep]record.DesignGate) (record.DesignStep, *record.DesignGate) {
+	if gate, standing := standingGate(steps, gates); standing {
+		return gate.Step, &gate
+	}
 	step, _, closed := classify.FirstClosedStep(steps, gates)
 	if !closed {
 		step = classify.RequiredSteps(steps)[0]

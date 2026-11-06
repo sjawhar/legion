@@ -110,24 +110,22 @@ func must(t *testing.T, err error) {
 
 func issueFixture(key string) Issue {
 	parent := "LEGION-200"
-	ready, step := 9, DesignStepSpec
 	return Issue{
-		Key:                 key,
-		Tree:                key,
-		Project:             "LEGION",
-		Title:               "Persist every workflow fact",
-		Parent:              &parent,
-		Phase:               phase.Implementing,
-		Generation:          3,
-		Status:              "in_progress",
-		Rank:                "00042U",
-		HandedOver:          true,
-		LastDispatchSeq:     41,
-		ReadyPendingVersion: &ready,
-		ReadyPendingStep:    &step,
-		Repo:                "acme/widgets",
-		DefaultBranch:       "release/v7.1",
-		GitHubRepo:          "Acme/Widgets",
+		Key:             key,
+		Tree:            key,
+		Project:         "LEGION",
+		Title:           "Persist every workflow fact",
+		Parent:          &parent,
+		Phase:           phase.Implementing,
+		Generation:      3,
+		Status:          "in_progress",
+		Rank:            "00042U",
+		HandedOver:      true,
+		LastDispatchSeq: 41,
+		ReadyPending:    &ReadyPending{Step: DesignStepSpec, Version: 9},
+		Repo:            "acme/widgets",
+		DefaultBranch:   "release/v7.1",
+		GitHubRepo:      "Acme/Widgets",
 	}
 }
 
@@ -199,8 +197,7 @@ func TestQueuedRootsUnderListsTheLabelledTodoRootsWhoseChainHoldsTheKey(t *testi
 	records := NewStore()
 	issue := func(key, tree, status string, handed bool, ancestry ...string) Issue {
 		issue := issueFixture(key)
-		issue.Tree, issue.Status, issue.HandedOver, issue.ReadyPendingVersion, issue.Ancestry = tree, status, handed, nil, ancestry
-		issue.ReadyPendingStep = nil
+		issue.Tree, issue.Status, issue.HandedOver, issue.ReadyPending, issue.Ancestry = tree, status, handed, nil, ancestry
 		if len(ancestry) != 0 {
 			issue.Parent = ParentOf(ancestry[0])
 		}
@@ -1817,7 +1814,7 @@ func TestDroppingCatchUpsWaitsOnNoRowAFinishIsDeleting(t *testing.T) {
 	txAdopt, err := st.BeginTx(ctx, pgx.TxOptions{})
 	must(t, err)
 	defer func() { _ = txAdopt.Rollback(ctx) }()
-	if _, _, _, err := records.UnclaimedKept(ctx, txAdopt, "LEGION-1"); err != nil {
+	if _, _, err := records.UnclaimedKept(ctx, txAdopt, "LEGION-1"); err != nil {
 		t.Fatalf("lock the decisions owed to LEGION-1: %v", err)
 	}
 	// The lane's finish deletes the row and waits on those decisions.
@@ -2463,8 +2460,8 @@ func TestAReadmittedApprovalIsKeptUntilTheStartThatNamedItIsDelivered(t *testing
 		if approved != 0 || latest != 0 {
 			t.Fatalf("a read with nothing kept = %d, %d, want zeros", approved, latest)
 		}
-		must(t, records.KeepReadmittedApproval(ctx, tx, "LEGION-211", 2, 3))
-		must(t, records.KeepReadmittedApproval(ctx, tx, "LEGION-211", 3, 4))
+		must(t, records.KeepReadmittedApproval(ctx, tx, "LEGION-211", KeptApproval{Step: DesignStepSpec, Approved: 2, Latest: 3}))
+		must(t, records.KeepReadmittedApproval(ctx, tx, "LEGION-211", KeptApproval{Step: DesignStepSpec, Approved: 3, Latest: 4}))
 	})
 	inTx(t, st, func(tx pgx.Tx) {
 		approved, latest, err := records.ReadmittedApproval(ctx, tx, "LEGION-211")
@@ -2480,7 +2477,7 @@ func TestAReadmittedApprovalIsKeptUntilTheStartThatNamedItIsDelivered(t *testing
 	})
 	// A re-admission since the start named the pair kept a newer one, which the forget leaves.
 	inTx(t, st, func(tx pgx.Tx) {
-		must(t, records.KeepReadmittedApproval(ctx, tx, "LEGION-211", 4, 5))
+		must(t, records.KeepReadmittedApproval(ctx, tx, "LEGION-211", KeptApproval{Step: DesignStepSpec, Approved: 4, Latest: 5}))
 		must(t, records.ForgetKeptDecisions(ctx, tx, "LEGION-211", KeptDecisions{Approved: 3, Latest: 4}, 0))
 		approved, latest, err := records.ReadmittedApproval(ctx, tx, "LEGION-211")
 		must(t, err)

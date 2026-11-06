@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -438,7 +439,7 @@ func TestTwoApplyingJobsOfADeployRunStartALookAndKeepTheNext(t *testing.T) {
 		deployJobJSON(21, "deploy-east", deployStepJSON("Apply", "success", 9*time.Minute)),
 		deployJobJSON(22, "deploy-west", deployStepJSON("Apply", "success", 4*time.Minute)),
 	}}
-	engine := workflow.New(records, workflow.Config{Project: "legion", Linger: 24 * time.Hour}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "legion", Steps: config.DesignGateRootIssues.Steps(), Linger: 24 * time.Hour}, quietLogger())
 	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, tokens: outboxTokens{}, githubAPI: github.url, project: "legion",
 		handlers: []intake.Handler{engine}, log: quietLogger(), now: time.Now}
 

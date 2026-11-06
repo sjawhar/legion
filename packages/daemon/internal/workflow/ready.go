@@ -178,9 +178,9 @@ func (e *Engine) voidMovedHeldReady(ctx context.Context, tx pgx.Tx, issue record
 		return err
 	}
 	version := 0
-	if issue.ReadyPendingVersion != nil {
-		version = *issue.ReadyPendingVersion
-		issue.ReadyPendingVersion, issue.ReadyPendingStep = nil, nil
+	if issue.ReadyPending != nil {
+		version = issue.ReadyPending.Version
+		issue.ReadyPending = nil
 		if err := e.store.PutIssue(ctx, tx, issue); err != nil {
 			return err
 		}
@@ -280,6 +280,11 @@ func (e *Engine) tellReadyAudience(ctx context.Context, tx pgx.Tx, issue record.
 // mistake — even though the issue itself records no pending version for it. A held READY whose
 // head a push or a reopen moved was voided then (voidMovedHeldReady), so a packet this advances
 // names the head GitHub showed when the route accepted it.
+//
+// Every caller but one acts on a fact about a gate. The other is the admission pass
+// (AdvanceOpenTrees), which is what releases a READY a step that has since left gates.design
+// refused: no gate fact is coming for that step, since an approval of its document is ignored
+// once the deployment stops gating it.
 func (e *Engine) advancePendingReady(ctx context.Context, tx pgx.Tx, rootKey string, gates map[record.DesignStep]record.DesignGate) error {
 	if !classify.DesignGatesOpen(e.cfg.Steps, gates) {
 		return nil
@@ -295,14 +300,14 @@ func (e *Engine) advancePendingReady(ctx context.Context, tx pgx.Tx, rootKey str
 		if issue.Phase != phase.Merging {
 			continue
 		}
-		// The pair is written and cleared together (migration 20261105201323), so a refusal that
-		// named a version named the step whose document that version is of.
+		// The refusal is one value, so a READY that waits on a version names the step whose
+		// document that version is of.
 		approved := 0
-		if issue.ReadyPendingStep != nil {
-			approved = gates[*issue.ReadyPendingStep].LatestVersion
-		}
-		if issue.ReadyPendingVersion != nil && *issue.ReadyPendingVersion > approved {
-			continue
+		if issue.ReadyPending != nil {
+			approved = gates[issue.ReadyPending.Step].LatestVersion
+			if issue.ReadyPending.Version > approved {
+				continue
+			}
 		}
 		row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleMerger)
 		if err != nil {
@@ -315,10 +320,10 @@ func (e *Engine) advancePendingReady(ctx context.Context, tx pgx.Tx, rootKey str
 		// the two: only the void case names one, since it is set only when the step that refused
 		// the READY was registered.
 		if row.Summary == "" {
-			if issue.ReadyPendingVersion == nil {
+			if issue.ReadyPending == nil {
 				continue
 			}
-			issue.ReadyPendingVersion, issue.ReadyPendingStep = nil, nil
+			issue.ReadyPending = nil
 			if err := e.store.PutIssue(ctx, tx, issue); err != nil {
 				return err
 			}

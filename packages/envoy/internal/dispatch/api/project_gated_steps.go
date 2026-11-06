@@ -35,7 +35,10 @@ type projectGatedSteps struct {
 // out of the project's event log. A body that names no list is refused (400 INVALID_PROJECT)
 // rather than read as the empty list, so a malformed publish cannot clear a gate, and a list
 // naming anything but the three steps is refused there too, before the database's own check
-// would raise.
+// would raise. A step named twice is refused as well, as the deployment's own loader refuses it:
+// the deployment keeps one gate record per step, so a second naming is either a mistake or an
+// order it cannot keep, and the database's check admits it (it holds the shape, not the route's
+// input rules).
 func (s *server) putProjectGatedSteps(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Steps *[]string    `json:"steps"`
@@ -61,10 +64,15 @@ func (s *server) putProjectGatedSteps(w http.ResponseWriter, r *http.Request) {
 	if steps == nil {
 		steps = []string{}
 	}
-	for _, step := range steps {
+	for index, step := range steps {
 		if !slices.Contains(model.GatedStepsKnown, step) {
 			writeError(w, "INVALID_PROJECT", http.StatusBadRequest, fmt.Sprintf(
 				"%q is not a design-gate step: steps names %s", step, strings.Join(model.GatedStepsKnown, ", ")))
+			return
+		}
+		if slices.Contains(steps[:index], step) {
+			writeError(w, "INVALID_PROJECT", http.StatusBadRequest, fmt.Sprintf(
+				"%q is named twice: steps names each design-gate step once, in the order this deployment gates them", step))
 			return
 		}
 	}

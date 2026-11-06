@@ -56,12 +56,11 @@ type Issue struct {
 	LingerUntil     *time.Time
 	Hold            *Hold
 	LastDispatchSeq int64
-	// ReadyPendingVersion is the document version a READY the design gate refused waits to see
-	// approved, and ReadyPendingStep the step whose document that version is. The two are one
-	// fact and the stored row holds both or neither, so everything that writes the refusal writes
-	// the pair, and everything that voids it clears the pair.
-	ReadyPendingVersion *int
-	ReadyPendingStep    *DesignStep
+	// ReadyPending is the READY the design gate refused, nil when no READY waits: one fact, so
+	// everything that writes the refusal writes the value and everything that voids it clears
+	// the value. PutIssue and scanIssue split it into the row's two columns, which hold both or
+	// neither.
+	ReadyPending *ReadyPending
 	// HandedOver is whether the issue carried LegionLabel when Dispatch last showed it: what hands
 	// a root, or an orphan admitted as one, to Legion. A child running under its tree needs none.
 	HandedOver bool
@@ -177,6 +176,14 @@ type RepoNote struct {
 	ResolvedRepo string
 	Note         string
 	PostedAt     time.Time
+}
+
+// ReadyPending is a READY the design gate refused: Step is the step whose document the merger
+// must wait on, and Version that document's version at the refusal, the version a person's
+// approval must reach for the READY to be posted.
+type ReadyPending struct {
+	Step    DesignStep
+	Version int
 }
 
 // Hold is a held issue's hold: the phase it left, and why it is held when the hold has a reason.
@@ -1171,9 +1178,10 @@ type Store interface {
 	// UnclaimedKept is what a start or catch-up of tree may name: every row whose issue stands in
 	// tree now and that no counting claim or hold holds — a claim counts only while the claiming
 	// outbox row's issue stands in the same tree, and a hold only while the holding claim's tree
-	// is that tree — newest first, ties by ref, and tree's own readmitted approval pair on the
-	// same rule, zeros when there is none to name (workflow.Engine.ParkedDecisionTask).
-	UnclaimedKept(ctx context.Context, tx pgx.Tx, tree string) ([]ParkedDecision, int, int, error)
+	// is that tree — newest first, ties by ref, and tree's own readmitted approval on the same
+	// rule, the zero KeptApproval when there is none to name
+	// (workflow.Engine.ParkedDecisionTask).
+	UnclaimedKept(ctx context.Context, tx pgx.Tx, tree string) ([]ParkedDecision, KeptApproval, error)
 	// ClaimKeptDecisions claims for outbox row what kept names of what tree is owed and nothing
 	// counting claims or holds yet, in the transaction that enqueues row: from then on no other
 	// start or catch-up of that tree names it until that row settles what it named. A published
@@ -1206,10 +1214,12 @@ type Store interface {
 	// the trees that have one: what a catch-up queued to another tree's architect is written for
 	// (record.CatchUp.Launch), so a failed forward of an older one is not queued again behind it.
 	ArchitectLaunches(ctx context.Context, tx pgx.Tx, trees []string) (map[string]uint64, error)
-	// KeepReadmittedApproval keeps, for root's next architect start, the spec version a person
-	// approved and the spec's latest version, which its re-admission found above the approved one
-	// before it cleared the old generation's gate; a later keep replaces it, KEPT again.
-	KeepReadmittedApproval(ctx context.Context, tx pgx.Tx, root string, approved, latest int) error
+	// KeepReadmittedApproval keeps, for root's next architect start, the step whose document a
+	// person approved, the version they approved and that document's latest version, which its
+	// re-admission found above the approved one before it cleared the old generation's gate; a
+	// later keep replaces it, KEPT again. The step is what the start task names the document by,
+	// so an architect told to request approval again is sent to the document the person reviewed.
+	KeepReadmittedApproval(ctx context.Context, tx pgx.Tx, root string, approval KeptApproval) error
 	// DropReadmittedApproval deletes the pair root keeps, if any: a re-admission whose gate holds no
 	// stale approval, or under gates.design off, leaves nothing an earlier one kept.
 	DropReadmittedApproval(ctx context.Context, tx pgx.Tx, root string) error
@@ -1335,12 +1345,13 @@ type Store interface {
 	// triage wake, for the issue while one is pending; the issue's other status rows, a hand-over
 	// row among them, are not counted.
 	PersonHandoverPending(ctx context.Context, tx pgx.Tx, issue string) (bool, error)
-	// GatedStepsPending says whether outbox still holds an unfinished gated_steps_publish row of
-	// the Dispatch project key project, whose row carries that bare key as its issue: a finished
-	// row is deleted, so any such row is one still to run or retrying. The boot publishes its
-	// configured list through the outbox and keeps no record of what it last published, so this
-	// is what keeps a restart loop from queueing a second row behind the first.
-	GatedStepsPending(ctx context.Context, tx pgx.Tx, project string) (bool, error)
+	// EnqueueGatedSteps writes the one gated_steps_publish row of the Dispatch project key the
+	// row's issue carries. The boot publishes its configured list through the outbox and keeps
+	// no record of what it last published, so the row the outbox holds is replaced rather than
+	// left standing: a pending row can carry the list of the boot before this one, and that is
+	// the list Dispatch would be shown. A restart queues no second row, and a row that already
+	// says this boot's list is left as it is.
+	EnqueueGatedSteps(ctx context.Context, tx pgx.Tx, row OutboxRow) error
 	Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error
 	// EnqueueID enqueues row as Enqueue does and returns its id, for a row that claims what it names
 	// (ClaimKeptDecisions). It refuses a ready_merge row, whose insert may update another.

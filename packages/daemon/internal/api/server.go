@@ -74,8 +74,7 @@ type Options struct {
 	Controller ControllerStore
 	// Steps are the design-gate steps the deployment gates (config.Gates.Steps), in the order it
 	// named them: what register_gate resolves a registration's step against, and what the
-	// controller secret route answers `legion controller start`. A nil list takes the shipped
-	// default, the one step spec, as workflow.Config.Steps does; the empty list gates no step.
+	// controller secret route answers `legion controller start`. The empty list gates no step.
 	Steps []record.DesignStep
 	// ControllerLaunched is the daemon launching the project's controller itself (`controller:
 	// daemon`): one controller runs per project, so the controller secret route refuses the operator
@@ -346,9 +345,6 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		stopping:           opts.Stopping,
 		drained:            opts.Drained,
 		decisions:          opts.Decisions,
-	}
-	if s.steps == nil {
-		s.steps = config.DesignGateRootIssues.Steps()
 	}
 	if opts.OperatorToken != "" {
 		s.operatorSet, s.operatorHash = true, sha256.Sum256([]byte(opts.OperatorToken))

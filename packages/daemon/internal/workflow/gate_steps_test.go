@@ -192,6 +192,39 @@ func reconcileAwaiting(t *testing.T, pool *pgxpool.Pool, engine *Engine) []strin
 	return entered
 }
 
+// admissionPass runs what admission's pass over a project's live records runs of the engine, in
+// its order (Admission.promoteHolds): the children a blocker or a gate held, then the trees a
+// step that left gates.design released.
+func admissionPass(t *testing.T, pool *pgxpool.Pool, engine *Engine) {
+	t.Helper()
+	startUnblockedChildren(t, pool, engine)
+	store := record.NewStore()
+	seedRecord(t, pool, func(tx pgx.Tx) error {
+		scoped, _ := intake.WithCommitHooks(context.Background())
+		issues, err := store.Issues(scoped, tx)
+		if err != nil {
+			return err
+		}
+		return engine.AdvanceOpenTrees(scoped, tx, issues)
+	})
+}
+
+// readyPackets is the body of every message the outbox holds for issue: what a released READY
+// posts on its Dispatch issue (tellReadyAudience).
+func readyPackets(t *testing.T, pool *pgxpool.Pool, issue string) []string {
+	t.Helper()
+	rows, err := pool.Query(t.Context(), `select payload->>'body' from outbox where kind = $1 and issue = $2 order by id`,
+		string(record.OutboxKindDispatchMessage), issue)
+	if err != nil {
+		t.Fatalf("read the messages posted for %s: %v", issue, err)
+	}
+	posted, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatalf("scan the messages posted for %s: %v", issue, err)
+	}
+	return posted
+}
+
 // Under two gated steps every one of them holds the tree's work. With the Verification document
 // and the primary document both registered and only one approved, the root starts no phase, a
 // child released into its tree is recorded and left where it stands, and its merger's READY is
@@ -428,6 +461,34 @@ func TestGatedStepsCarryEveryStepToAHandedOverChild(t *testing.T) {
 	}
 }
 
+// Every design decision a notice carries names the document the person reviewed, because a
+// decision nobody in its tree hears is kept and relayed under that reference, newest per
+// reference (the outbox's parkDecision, record.Store.AddParkedDecision): two steps of one root
+// that answered to one reference would replace each other's decision. The spec step keeps the
+// reference it has always had, so a one-step deployment's decisions are keyed as before.
+func TestGatedStepsNameEachStepsOwnDocumentOnItsDecision(t *testing.T) {
+	pool := migratedPool(t)
+	engine := stepsEngine([]record.DesignStep{record.DesignStepDecisions, record.DesignStepSpec}, nil)
+	apply := applyFacts(t, pool, engine)
+	seedGatedTree(t, pool)
+	bindStep(t, pool, record.DesignStepDecisions, decisionsDoc)
+
+	apply("register-decisions", intake.GateRegistered{Issue: gatedRoot, Step: record.DesignStepDecisions, ArtifactID: decisionsDoc, Version: 3})
+	apply("register-spec", intake.GateRegistered{Issue: gatedRoot, ArtifactID: gateDoc, Version: 4})
+	apply("approve-decisions", stepApproval(gatedRoot, decisionsDoc, 3, record.EventMark{Seq: 7}))
+	apply("changes-on-the-spec", intake.DispatchArtifact{Key: gatedRoot, ArtifactID: gateDoc, Kind: intake.DispatchArtifactChangesRequested,
+		Version: 4, Reason: "say what it does not do", Actor: dispatch.Actor{Kind: "user", ID: "alice"}, Mark: record.EventMark{Seq: 8}})
+
+	approved := noticesOfKind(t, pool, gatedRoot, "design-approved")
+	if len(approved) != 1 || approved[0].Ref != "dispatch://"+gatedRoot+"/artifact/decisions-md" {
+		t.Fatalf("design-approved notices = %#v, want one naming the decisions document", approved)
+	}
+	changes := noticesOfKind(t, pool, gatedRoot, "design-changes-requested")
+	if len(changes) != 1 || changes[0].Ref != "dispatch://"+gatedRoot+"/spec" {
+		t.Fatalf("design-changes-requested notices = %#v, want one naming the spec, the reference that document has always had", changes)
+	}
+}
+
 // A step the deployment gates that nobody has registered holds the tree's work and asks nobody:
 // the root starts no phase, and no awaiting-person notice is written for it, because the record
 // knows no document to ask a person about. The same root with that step registered and closed
@@ -495,46 +556,83 @@ func TestUnregisteredStepHoldsTheWorkAndRaisesNoWait(t *testing.T) {
 	})
 }
 
+// A step nobody has registered holds the work, and that is all it does: the wait a registered
+// step after it raised still reaches the person. Under the decisions step and the spec, with the
+// decisions step unregistered and the spec registered, unapproved and its approval request with
+// the person, the root enters the wait on its primary document and gives its slot back. Reading
+// the unregistered step as the step the person has would leave the root holding a slot while the
+// person holds its request, with nothing to answer the wait that never began.
+func TestUnregisteredStepDoesNotHideTheWaitARegisteredStepRaises(t *testing.T) {
+	pool := migratedPool(t)
+	engine := stepsEngine([]record.DesignStep{record.DesignStepDecisions, record.DesignStepSpec}, nil)
+	apply := applyFacts(t, pool, engine)
+	seedGatedTree(t, pool)
+
+	apply("register-spec", intake.GateRegistered{Issue: gatedRoot, ArtifactID: gateDoc, Version: 4,
+		RequestAsk: "ask-spec", Since: record.EventMark{Seq: 5}})
+
+	if entered := reconcileAwaiting(t, pool, engine); len(entered) != 1 || entered[0] != gatedRoot {
+		t.Fatalf("the pass returned %v, want the root, whose primary document is with a person", entered)
+	}
+	waiting := recordedRoot(t, pool)
+	if waiting.Phase != phase.AwaitingPerson || waiting.Awaiting == nil || waiting.Awaiting.Artifact != gateDoc ||
+		waiting.Awaiting.GateVersion != 4 {
+		t.Fatalf("the root = %#v, want it waiting on the primary document at version 4", waiting.Awaiting)
+	}
+	if got := awaitingNotices(t, pool, gatedRoot); len(got) != 1 {
+		t.Fatalf("awaiting-person notices = %q, want the one the registered closed step raises", got)
+	}
+}
+
 // The step list is read at every boot and nothing of it is stored for a tree, so a tree admitted
-// and approved under one list is held by the step a longer list adds, and a tree held by a step
-// is released by a boot that gates none. Both are driven from the one stored tree, which the
-// first boot records.
+// under one list is held by a step a longer list adds: the approval that would have started it
+// leaves its root, the child released into it and its merger's READY where they stand. The boot
+// that drops that step releases all three, and nothing else could: no fact about a gate is
+// coming, since an approval of a document the deployment no longer gates is ignored, and the
+// merger is never asked for a second READY. Both directions are driven from the one stored tree.
 func TestChangedStepListTakesHoldAtTheNextBoot(t *testing.T) {
 	pool := migratedPool(t)
 	spec := stepsEngine([]record.DesignStep{record.DesignStepSpec}, nil)
 	seedGatedTree(t, pool)
-	applyFacts(t, pool, spec)("register-spec", intake.GateRegistered{Issue: gatedRoot, ArtifactID: gateDoc, Version: 4, ApprovedVersion: 4,
-		ReviewedBy: dispatch.Actor{Kind: "user", ID: "alice"}})
-	if got := phaseOf(t, pool, gatedRoot); got != phase.Planning {
-		t.Fatalf("the root = %s under the one step it holds approved, want planning", got)
+	applyFacts(t, pool, spec)("register-spec", intake.GateRegistered{Issue: gatedRoot, ArtifactID: gateDoc, Version: 4})
+	if got := phaseOf(t, pool, gatedRoot); got != phase.Admitted {
+		t.Fatalf("the root = %s under the one step it holds unapproved, want it admitted", got)
 	}
 
 	// The next boot gates the decisions step as well, which this tree has never registered.
 	longer := stepsEngine([]record.DesignStep{record.DesignStepDecisions, record.DesignStepSpec}, nil)
 	applyMirrored(t, pool, longer, "child-todo", intake.DispatchIssue{Key: "LEGION-209", ResolvedRepo: "sjawhar/legion", Seq: 2,
 		Type: "issue.updated", Status: "todo", Title: "child", Parent: gatedRoot, Rank: "V"})
-	if got := phaseOf(t, pool, "LEGION-209"); got != phase.Admitted {
-		t.Fatalf("the child released after the boot = %s, want it admitted: the added step holds it", got)
-	}
 	seedGatedMerger(t, pool, "LEGION-210")
 	result := applyFacts(t, pool, longer)("ready-held", readyOf("LEGION-210"))
 	want := "READY refused: no design version of the tree's decisions document is approved; register and approve it before requesting READY."
 	if refusalCode(result) != "DESIGN_GATE_CLOSED" || result.Refusal.Message != want {
 		t.Fatalf("the merger's READY after the boot = %#v, want DESIGN_GATE_CLOSED saying %q", result.Refusal, want)
 	}
-
-	// The boot after it gates no step, and the spec row the tree holds is open, so what the added
-	// step held runs.
-	off := stepsEngine(config.DesignGateOff.Steps(), nil)
-	startUnblockedChildren(t, pool, off)
-	if got := phaseOf(t, pool, "LEGION-209"); got != phase.Planning {
-		t.Fatalf("the held child = %s after a boot that gates no step, want planning", got)
+	applyFacts(t, pool, longer)("approve-spec", stepApproval(gatedRoot, gateDoc, 4, record.EventMark{Seq: 7}))
+	for _, held := range []string{gatedRoot, "LEGION-209"} {
+		if got := phaseOf(t, pool, held); got != phase.Admitted {
+			t.Fatalf("%s after the approval of the spec = %s, want it admitted: the added step holds it", held, got)
+		}
 	}
-	if result := applyFacts(t, pool, off)("ready-released", readyOf("LEGION-210")); result.Refusal != nil {
-		t.Fatalf("the merger's READY after a boot that gates no step = %#v, want it accepted", result.Refusal)
+	if got := phaseOf(t, pool, "LEGION-210"); got != phase.Merging {
+		t.Fatalf("the merger's issue after the approval of the spec = %s, want it merging: the added step refused its READY", got)
+	}
+
+	// The boot after it gates no step, and the spec row the tree holds is open, so its admission
+	// pass starts the root and the child the added step held and posts the READY it refused.
+	off := stepsEngine(config.DesignGateOff.Steps(), nil)
+	admissionPass(t, pool, off)
+	for _, released := range []string{gatedRoot, "LEGION-209"} {
+		if got := phaseOf(t, pool, released); got != phase.Planning {
+			t.Fatalf("%s after a boot that gates no step = %s, want planning", released, got)
+		}
 	}
 	if got := phaseOf(t, pool, "LEGION-210"); got != phase.AwaitingMerge {
-		t.Fatalf("the merger's issue = %s after a boot that gates no step, want awaiting_merge", got)
+		t.Fatalf("the merger's issue after a boot that gates no step = %s, want awaiting_merge", got)
+	}
+	if posted := readyPackets(t, pool, "LEGION-210"); len(posted) != 1 || !strings.Contains(posted[0], "LEGION-210") {
+		t.Fatalf("the READY packets posted for LEGION-210 = %q, want the one the refusal held", posted)
 	}
 }
 

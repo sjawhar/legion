@@ -242,7 +242,8 @@ type Notice struct {
 	// Dispatch actor as `<kind>:<id>`, a person `user:<login>`. Empty where no person decided:
 	// gates.design off opened the gate.
 	Actor string `json:"actor,omitempty"`
-	// Ref is that decision's Dispatch reference: `dispatch://<KEY>/spec` for a spec decision,
+	// Ref is that decision's Dispatch reference: the document of the design-gate step a design
+	// decision is of (workflow's stepRef), `dispatch://<KEY>/spec` for the spec step,
 	// `dispatch://<KEY>/ask/<id>` for an answer or a resolution, `dispatch://<KEY>/comment/<id>`
 	// for a reply.
 	Ref string `json:"ref,omitempty"`

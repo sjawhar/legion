@@ -133,17 +133,33 @@ type DecisionMark struct {
 	Actor    string       `json:"actor,omitempty"`
 }
 
+// KeptApproval is the approval a root's re-admission kept for its next architect start
+// (Store.KeepReadmittedApproval): the design-gate step whose document a person approved, the
+// version they approved, and the version that document has reached since. The zero value is no
+// kept approval. The step is what says which document the task names, since a deployment that
+// gates more than one step can keep a pair of any of them.
+type KeptApproval struct {
+	Step     DesignStep
+	Approved int
+	Latest   int
+}
+
 // KeptDecisions is what one architect start task or catch-up named of what its tree is owed
-// (workflow.Engine.ParkedDecisionTask): each decision, and the pair of approved and latest spec
-// versions when it named one. It travels with the task (SuperviseRequest.Kept, CatchUp.Kept) and
-// is persisted with the delivery a claim queues it as, which is what says which rows that
-// delivery holds. A published catch-up tells exactly what it named (Store.ForgetKeptDecisions),
-// and a queued start's task tells it at its delivery's confirmation. A start whose task reached
-// no claim, and a catch-up a newer one supersedes, hand every row over instead
-// (workflow.HandOverKept): a fresh catch-up names them while the tree each is owed to has an
-// architect to tell, and otherwise they wait, KEPT, for the next start or ready to name them.
+// (workflow.Engine.ParkedDecisionTask): each decision, and the step and the pair of approved and
+// latest versions of the document a person approved when it named one. It travels with the task
+// (SuperviseRequest.Kept, CatchUp.Kept) and is persisted with the delivery a claim queues it as,
+// which is what says which rows that delivery holds. A published catch-up tells exactly what it
+// named (Store.ForgetKeptDecisions), and a queued start's task tells it at its delivery's
+// confirmation. A start whose task reached no claim, and a catch-up a newer one supersedes, hand
+// every row over instead (workflow.HandOverKept): a fresh catch-up names them while the tree each
+// is owed to has an architect to tell, and otherwise they wait, KEPT, for the next start or
+// ready to name them.
+//
+// A record written before a deployment could gate more than one step carries no step, and the
+// task it is written again from reads it as the spec step, the one step that release gated.
 type KeptDecisions struct {
 	Decisions []DecisionMark `json:"decisions,omitempty"`
+	Step      DesignStep     `json:"step,omitempty"`
 	Approved  int            `json:"approved,omitempty"`
 	Latest    int            `json:"latest,omitempty"`
 }

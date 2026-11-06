@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -56,7 +57,7 @@ func renamedCheckRig(t *testing.T, builtFrom string, renames ghrepo.Renames) che
 	pool := migratedPool(t)
 	clock := &checkClock{now: checkOpened}
 	logged := &bytes.Buffer{}
-	engine := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, ProductionCheckBound: checkBound, BuiltFrom: builtFrom, RepositoryRenames: renames, Clock: clock.Now},
+	engine := New(record.NewStore(), Config{Project: "LEGION", Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, ProductionCheckBound: checkBound, BuiltFrom: builtFrom, RepositoryRenames: renames, Clock: clock.Now},
 		slog.New(slog.NewTextHandler(logged, nil)))
 	return checkRig{pool: pool, engine: engine, clock: clock, logged: logged, apply: applyFacts(t, pool, engine)}
 }
@@ -303,7 +304,7 @@ func TestServerStartedComparesOnlyTheBuiltFromRepositorysChecks(t *testing.T) {
 			t.Fatalf("check_compare rows after a start on commit %q = %+v, want the one", commit, got)
 		}
 	}
-	unbuilt := New(record.NewStore(), Config{Project: "LEGION", Clock: rig.clock.Now}, nil)
+	unbuilt := New(record.NewStore(), Config{Project: "LEGION", Steps: config.DesignGateRootIssues.Steps(), Clock: rig.clock.Now}, nil)
 	if _, err := intake.ApplyFact(context.Background(), rig.pool, "dispatch", "started-unbuilt", intake.ServerStarted{Commit: "c0de0000"}, unbuilt, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact: %v", err)
 	}

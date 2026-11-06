@@ -131,7 +131,7 @@ func TestABacklogOfOtherPullRequestsDrainsAndAppliesEveryLegionEvent(t *testing.
 	repository := ghrepo.MustParse(drainRepo)
 	deploys := []config.Deploy{{Repo: repository, Workflow: ".github/workflows/deploy.yaml", Step: "Apply"}}
 	records := record.NewStore()
-	engine := workflow.New(records, workflow.Config{Project: drainProject, Repositories: drainRepositories{}, Deploys: deploys}, log)
+	engine := workflow.New(records, workflow.Config{Project: drainProject, Repositories: drainRepositories{}, Steps: config.DesignGateRootIssues.Steps(), Deploys: deploys}, log)
 	admission := admit.New(records, engine, drainRunning, drainProject, log)
 	// GitHub answers that the approver can write to the repository; the count is every review the
 	// consumer asked GitHub about.

@@ -182,10 +182,19 @@ export type AnchorInput =
       readonly occurrence?: never;
     };
 
-/** A design-gate step a Legion deployment gates: one document of a root issue a person must
- *  approve before the tree's work runs. `decisions` names the issue's decisions document,
- *  `criteria` its Verification document, `spec` its primary document. */
-export type GatedStep = "decisions" | "criteria" | "spec";
+/** The design-gate steps a Legion deployment can gate, each naming one document of a root issue
+ *  a person must approve before the tree's work runs: `decisions` names the issue's decisions
+ *  document, `criteria` its Verification document, `spec` its primary document.
+ *
+ *  One tuple serves two wire contracts. Dispatch stores the list its deployment publishes
+ *  (`Project.gated_steps`) and the Legion daemon answers the same words back on its own API
+ *  (`legionDesignStep` in `legion-api.ts`), so the two services agree on the words by
+ *  construction: a step added here reaches both schemas and every message built from them. Each
+ *  file keeps its own name for the step, since each describes its own service. */
+export const GATED_STEPS = ["decisions", "criteria", "spec"] as const;
+
+/** A design-gate step a Legion deployment gates, as Dispatch stores it. */
+export type GatedStep = (typeof GATED_STEPS)[number];
 
 export interface Project {
   readonly key: string;

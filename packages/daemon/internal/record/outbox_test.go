@@ -446,39 +446,71 @@ func TestSpecDecisionNamesTheThreeKindsAPersonsSpecDecisionWrites(t *testing.T) 
 // The boot's publish of the deployment's design-gate steps is one outbox row addressed to the
 // bare project key rather than to an issue. The record's part is three things: the row is due to
 // the daemon of that project and to no other, which the same split_part scope answers for a key
-// with no hyphen; GatedStepsPending reports it for as long as it is unfinished, which is what
-// keeps a second boot from queueing a second row; and a finished row leaves nothing pending, so
-// the boot after it publishes again.
+// with no hyphen; a boot writes the project's one row of the kind, replacing what a pending row
+// carries, so the list waiting for Dispatch is always the list the booting daemon holds; and a
+// finished row leaves nothing behind, so the boot after it queues its own.
 func TestGatedStepsPublishAtBoot(t *testing.T) {
 	now := time.Date(2026, 11, 6, 4, 0, 0, 0, time.UTC)
 	ctx := context.Background()
 	st := migratedStore(t)
 	records := NewStore()
-	// boot is what openWorkflow does with the list it was configured with: queue the publish
-	// unless one is already pending. It answers whether it queued a row.
-	boot := func(project string, steps []DesignStep) bool {
+	// boot is what openWorkflow does with the list it was configured with: write the project's
+	// one publish.
+	boot := func(project string, steps []DesignStep) {
 		t.Helper()
-		queued := false
 		inTx(t, st, func(tx pgx.Tx) {
-			pending, err := records.GatedStepsPending(ctx, tx, project)
-			must(t, err)
-			if pending {
-				return
-			}
 			row, err := NewOutboxRow(project, GatedStepsPublish{Project: project, Steps: steps}, now)
 			must(t, err)
-			must(t, records.Enqueue(ctx, tx, row))
-			queued = true
+			must(t, records.EnqueueGatedSteps(ctx, tx, row))
 		})
-		return queued
+	}
+	// queued is the one publish the outbox holds for project, by row id and by what it carries.
+	queued := func(project string) (int64, GatedStepsPublish) {
+		t.Helper()
+		var held []OutboxRow
+		inTx(t, st, func(tx pgx.Tx) {
+			var err error
+			held, err = records.DueRows(ctx, tx, project, "", nil, now)
+			must(t, err)
+		})
+		if len(held) != 1 || held[0].Issue != project {
+			t.Fatalf("DueRows of %s = %#v, want the one publish addressed to the project key", project, held)
+		}
+		payload, err := DecodeOutboxPayload(held[0])
+		must(t, err)
+		publish, ok := payload.(GatedStepsPublish)
+		if !ok {
+			t.Fatalf("the row of %s decodes as %#v, want a gated-steps publish", project, payload)
+		}
+		return held[0].ID, publish
 	}
 
-	if !boot("LEGION", []DesignStep{DesignStepCriteria, DesignStepSpec}) {
-		t.Fatal("the first boot queued no publish, and nothing was pending for it to wait on")
+	boot("LEGION", []DesignStep{DesignStepCriteria, DesignStepSpec})
+	first, publish := queued("LEGION")
+	want := GatedStepsPublish{Project: "LEGION", Steps: []DesignStep{DesignStepCriteria, DesignStepSpec}}
+	if !reflect.DeepEqual(publish, want) {
+		t.Fatalf("the publish carries %#v, want %#v, the configured list in the configured order", publish, want)
 	}
-	if boot("LEGION", []DesignStep{DesignStepCriteria, DesignStepSpec}) {
-		t.Fatal("a second boot queued a second publish while the first was still in the outbox")
+
+	// A second boot on the same list leaves the row it finds where it is, so a restart loop
+	// writes no second publish and takes nothing off the backoff the lane has set on this one.
+	boot("LEGION", []DesignStep{DesignStepCriteria, DesignStepSpec})
+	if id, again := queued("LEGION"); id != first || !reflect.DeepEqual(again, publish) {
+		t.Fatalf("a boot on the unchanged list left row %d carrying %#v, want row %d carrying %#v untouched", id, again, first, publish)
 	}
+
+	// A boot on a changed list while that row is still pending replaces what it carries: an
+	// operator who changes gates.design and restarts while Dispatch has yet to take the publish
+	// gets the list this daemon booted on, not the one the boot before it held.
+	boot("LEGION", []DesignStep{DesignStepSpec})
+	changedRow, changed := queued("LEGION")
+	if changedRow != first {
+		t.Fatalf("the boot on the changed list wrote row %d beside %d, want the pending row carrying the new list", changedRow, first)
+	}
+	if want := (GatedStepsPublish{Project: "LEGION", Steps: []DesignStep{DesignStepSpec}}); !reflect.DeepEqual(changed, want) {
+		t.Fatalf("the pending publish carries %#v after the boot on a changed list, want %#v", changed, want)
+	}
+
 	inTx(t, st, func(tx pgx.Tx) {
 		rows, err := records.DueRows(ctx, tx, "INFRA", "", nil, now)
 		must(t, err)
@@ -489,52 +521,26 @@ func TestGatedStepsPublishAtBoot(t *testing.T) {
 
 	var claimed OutboxRow
 	inTx(t, st, func(tx pgx.Tx) {
-		rows, err := records.DueRows(ctx, tx, "LEGION", "", nil, now)
-		must(t, err)
-		if len(rows) != 1 || rows[0].Issue != "LEGION" {
-			t.Fatalf("DueRows of LEGION = %#v, want the one publish addressed to the project key", rows)
-		}
 		var ok bool
-		claimed, ok, err = records.ClaimRow(ctx, tx, rows[0].ID, now, time.Minute)
+		var err error
+		claimed, ok, err = records.ClaimRow(ctx, tx, changedRow, now, time.Minute)
 		must(t, err)
 		if !ok {
 			t.Fatal("ClaimRow of the publish claimed nothing")
-		}
-	})
-	payload, err := DecodeOutboxPayload(claimed)
-	if err != nil {
-		t.Fatalf("DecodeOutboxPayload: %v", err)
-	}
-	want := GatedStepsPublish{Project: "LEGION", Steps: []DesignStep{DesignStepCriteria, DesignStepSpec}}
-	if !reflect.DeepEqual(payload, want) {
-		t.Fatalf("the publish carries %#v, want %#v, the configured list in the configured order", payload, want)
-	}
-	inTx(t, st, func(tx pgx.Tx) {
-		pending, err := records.GatedStepsPending(ctx, tx, "LEGION")
-		must(t, err)
-		if !pending {
-			t.Fatal("GatedStepsPending(LEGION) = false while the claimed row is still running")
 		}
 		must(t, records.FinishOutbox(ctx, tx, claimed.ID, claimed.LeaseToken))
 	})
 
 	// The run deleted the row, so the next boot publishes whatever it is configured with now: a
 	// deployment that gates nothing publishes the empty list rather than nothing at all.
-	if !boot("LEGION", []DesignStep{}) {
-		t.Fatal("the boot after the publish ran queued none of its own")
+	boot("LEGION", []DesignStep{})
+	ran, published := queued("LEGION")
+	if ran == changedRow {
+		t.Fatalf("the boot after the publish ran reused row %d, want a row of its own", ran)
 	}
-	inTx(t, st, func(tx pgx.Tx) {
-		rows, err := records.DueRows(ctx, tx, "LEGION", "", nil, now)
-		must(t, err)
-		if len(rows) != 1 {
-			t.Fatalf("DueRows of LEGION = %#v, want the next boot's publish", rows)
-		}
-		payload, err := DecodeOutboxPayload(rows[0])
-		must(t, err)
-		if !reflect.DeepEqual(payload, GatedStepsPublish{Project: "LEGION", Steps: []DesignStep{}}) {
-			t.Fatalf("the next boot published %#v, want the empty list of a deployment that gates nothing", payload)
-		}
-	})
+	if want := (GatedStepsPublish{Project: "LEGION", Steps: []DesignStep{}}); !reflect.DeepEqual(published, want) {
+		t.Fatalf("the next boot published %#v, want the empty list of a deployment that gates nothing", published)
+	}
 }
 
 // LongestPost is what a caller checks before a message is recorded, and Posted is what the runner

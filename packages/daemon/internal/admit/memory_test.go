@@ -110,7 +110,7 @@ func TestADrawnTreeKeepsItsMemoryGroupThroughEveryLaterPass(t *testing.T) {
 	admission := quiet(t, 1)
 	admission.UseMemory(config.Memory{Mode: config.MemoryOn})
 	admission.coin = refusingCoin(t)
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories,
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(),
 		Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	const root = "LEGION-1"
 	seedWaiting(t, pool, root, "A")
@@ -226,7 +226,7 @@ func TestARootWithNoMemoryBeforeThisReleaseIsNeverDrawnAndItsChildCarriesNone(t 
 	// A project that would draw every new tree `memory`: a draw of this tree would be loud.
 	admission.UseMemory(config.Memory{Mode: config.MemoryOn})
 	admission.coin = refusingCoin(t)
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories,
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(),
 		Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	const root, child = "LEGION-1", "LEGION-2"
 	// The tree as the release found it: a lifecycle row opened before the draw existed, and a root

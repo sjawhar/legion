@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
@@ -86,7 +87,7 @@ func (e *Engine) treeRoot(ctx context.Context, tx pgx.Tx, key string) (*record.I
 // claim queued it as; one that reached no architect hands it over (HandOverKept). Both results are
 // zero when there was nothing.
 func ParkedDecisionTask(ctx context.Context, tx pgx.Tx, store record.Store, steps []record.DesignStep, root record.Issue) (string, *record.KeptDecisions, error) {
-	decisions, approved, latest, err := store.UnclaimedKept(ctx, tx, root.Key)
+	decisions, approval, err := store.UnclaimedKept(ctx, tx, root.Key)
 	if err != nil {
 		return "", nil, err
 	}
@@ -95,8 +96,8 @@ func ParkedDecisionTask(ctx context.Context, tx pgx.Tx, store record.Store, step
 		kept.Decisions = append(kept.Decisions, record.DecisionMark{Ref: d.Ref, At: d.At, Issue: d.Issue,
 			Decision: d.Decision, Actor: d.Actor})
 	}
-	if approved > 0 && len(steps) > 0 {
-		kept.Approved, kept.Latest = approved, latest
+	if approval.Approved > 0 && len(steps) > 0 {
+		kept.Step, kept.Approved, kept.Latest = approval.Step, approval.Approved, approval.Latest
 	}
 	task := KeptDecisionsTask(root.Key, kept)
 	if task == "" {
@@ -109,9 +110,10 @@ func ParkedDecisionTask(ctx context.Context, tx pgx.Tx, store record.Store, step
 // task and a catch-up both use (ParkedDecisionTask) and the one a held task is written back to
 // when an issue it names leaves that tree while the task waits to be sent (supervise's
 // Deps.RootTask, the daemon's rootTask): a task whose decisions have all left is written back to
-// "", which is a task that names nothing and is retired rather than sent. The approval pair is
-// the root's own, so it is named whenever kept carries one — the gate was read where the pair was
-// first kept.
+// "", which is a task that names nothing and is retired rather than sent. The approval is the
+// root's own, so it is named whenever kept carries one — the gate was read where it was first
+// kept — and it is named on the document of its own step (record.DesignStep.Document), which is
+// the document the person reviewed and the one whose approval the architect requests again.
 func KeptDecisionsTask(root string, kept record.KeptDecisions) string {
 	var parts []string
 	if len(kept.Decisions) > 0 {
@@ -123,8 +125,9 @@ func KeptDecisionsTask(root string, kept record.KeptDecisions) string {
 			root, strings.Join(named, "; ")))
 	}
 	if kept.Approved > 0 {
-		parts = append(parts, fmt.Sprintf("The spec is approved at version %d and is now at version %d: request approval of version %d, "+
-			"as skill://legion-architect/references/design-gate.md (\"The armed gate\") says.", kept.Approved, kept.Latest, kept.Latest))
+		parts = append(parts, fmt.Sprintf("The %s is approved at version %d and is now at version %d: request approval of version %d, "+
+			"as skill://legion-architect/references/design-gate.md (\"The armed gate\") says.",
+			kept.Step.Document(), kept.Approved, kept.Latest, kept.Latest))
 	}
 	return strings.Join(parts, " ")
 }
@@ -245,8 +248,22 @@ func ArchitectHears(ctx context.Context, tx pgx.Tx, store record.Store, root rec
 // admission reads to decide a re-admitted root's kept approval (Admission.keepStaleApproval).
 func (e *Engine) GatedSteps() []record.DesignStep { return e.cfg.Steps }
 
-// specRef is the Dispatch reference of an issue's spec, the document its gate reviews.
-func specRef(key string) string { return "dispatch://" + key + "/spec" }
+// stepRef is the Dispatch reference of the document a design-gate step reviews on issue key: the
+// issue's spec for the spec step, which is the reference every design decision carried before a
+// deployment could gate more than one step, and the slug Dispatch files the document under for
+// the other two. A person's decision is kept and relayed under it (record.ParkedDecision.Ref,
+// the outbox's parkDecision), and the newest decision per reference is the one kept, so two
+// steps of one root must answer to two references or each person's decision would replace the
+// other's.
+func stepRef(key string, step record.DesignStep) string {
+	switch step {
+	case record.DesignStepDecisions:
+		return "dispatch://" + key + "/artifact/" + dispatch.DecisionsSlug
+	case record.DesignStepCriteria:
+		return "dispatch://" + key + "/artifact/" + dispatch.VerificationSlug
+	}
+	return "dispatch://" + key + "/spec"
+}
 
 // itemRef is the Dispatch reference of an ask or comment of an issue.
 func itemRef(key, kind, id string) string { return "dispatch://" + key + "/" + kind + "/" + id }

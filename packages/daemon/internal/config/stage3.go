@@ -29,8 +29,9 @@ const (
 	DesignGateOff        DesignGate = "off"
 )
 
-// Valid says whether gate is one of the two words, which `legion controller start` requires the
-// daemon to answer.
+// Valid says whether gate is one of the two words. readDesignSteps is its only reader: the words
+// are an input spelling of a step list, and nothing downstream asks the daemon for a word —
+// `legion controller start` reads the deployment's steps (designGateSteps).
 func (gate DesignGate) Valid() bool {
 	return gate == DesignGateRootIssues || gate == DesignGateOff
 }
@@ -38,10 +39,6 @@ func (gate DesignGate) Valid() bool {
 // Steps is the design-gate steps the word resolves to: no step under `off`, and the single step
 // spec under `root-issues` and under an unset word, which is what the gate held before a
 // deployment could name a list.
-//
-// A deployment that gates nothing answers an empty slice that is not nil, so a caller can tell it
-// from a list nothing has read, whose zero workflow.Config takes the shipped default
-// (workflow.Config.Steps).
 func (gate DesignGate) Steps() []record.DesignStep {
 	if gate == DesignGateOff {
 		return []record.DesignStep{}
@@ -386,7 +383,9 @@ func readGates(value *yaml.Node, key string) (*Gates, error) {
 // readDesignSteps is `gates.design`: the steps the deployment gates, in the order it names them.
 // A list of step names is that list, and the empty list gates no step. The two words the key
 // took before it took a list are read as the lists they mean: `root-issues` is the single step
-// spec, `off` no step. An absent key is the single step spec, which readGates applies.
+// spec, `off` no step. An absent key is the single step spec, which readGates applies, and so
+// are the two spellings of a key that names nothing, `design:` with nothing after it and
+// `design: ""`, which the loader read as the unset key before the key took a list.
 //
 // A step named twice is refused rather than collapsed, as a repeated merge rule is
 // (readPathPatterns): one gate record is kept for each step, so the second name is either a
@@ -395,6 +394,8 @@ func readDesignSteps(value *yaml.Node, key string) ([]record.DesignStep, error) 
 	names := record.StepWords()
 	refusal := fmt.Errorf("%s must be a list of %s, or 'root-issues' for the single step 'spec', or 'off' for no step", key, names)
 	switch {
+	case value.Tag == "!!null", value.Kind == yaml.ScalarNode && value.Tag == "!!str" && value.Value == "":
+		return DesignGateRootIssues.Steps(), nil
 	case value.Kind == yaml.ScalarNode && value.Tag == "!!str":
 		word := DesignGate(value.Value)
 		if !word.Valid() {

@@ -32,7 +32,7 @@ func withDeploys(t *testing.T, rig checkRig, deploys ...config.Deploy) checkRig 
 // (Config.RepositoryRenames): the one line of Config a configured rename changes.
 func withDeploysRenamed(t *testing.T, rig checkRig, renames ghrepo.Renames, deploys ...config.Deploy) checkRig {
 	t.Helper()
-	rig.engine = New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, ProductionCheckBound: checkBound, Deploys: deploys, RepositoryRenames: renames, Clock: rig.clock.Now},
+	rig.engine = New(record.NewStore(), Config{Project: "LEGION", Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, ProductionCheckBound: checkBound, Deploys: deploys, RepositoryRenames: renames, Clock: rig.clock.Now},
 		slog.New(slog.NewTextHandler(rig.logged, nil)))
 	rig.apply = applyFacts(t, rig.pool, rig.engine)
 	return rig

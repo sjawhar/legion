@@ -624,7 +624,7 @@ command or writing a file:
 
 ```sh
 legion start --config legion.yaml --check-config
-# Config OK: project=WIDGETS
+# Config OK: project=WIDGETS design-gate-steps=spec
 ```
 
 Then start it:

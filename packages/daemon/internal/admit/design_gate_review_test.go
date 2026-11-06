@@ -276,24 +276,30 @@ func TestAChangesRequestIsToldOnceWhicheverReadCarriesIt(t *testing.T) {
 // A registration whose read of Dispatch began before a review the daemon has already applied at
 // that version is the older reader: the person acted after it. The gate keeps that review — a
 // told changes request is not told again, an approval is not rolled back — and no wait starts,
-// since only the person's next act could answer one.
+// since only the person's next act could answer one. Where that review is an approval, the
+// registration itself tells the architect nothing, but every required step is open, so the
+// admission pass this fact runs starts the root (workflow.AdvanceOpenTrees): a root whose steps
+// are all open never stays at admitted waiting for a gate fact that has already happened.
 func TestARegistrationDoesNotHideTheReviewTheGateAlreadyHolds(t *testing.T) {
 	reviewed := record.EventMark{Seq: 11, At: reviewedAt.Add(time.Minute)}
 	for _, tc := range []struct {
-		name string
-		gate record.DesignGate
-		open bool
+		name  string
+		gate  record.DesignGate
+		open  bool
+		stops phase.Phase
 	}{
 		{
 			name: "a changes request the architect was told of",
 			gate: record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4,
 				ToldChangesVersion: new(4), ToldChangesReason: "name the rollback path", ToldChangesMark: reviewed},
+			stops: phase.Admitted,
 		},
 		{
 			name: "an approval that opened the gate",
 			gate: record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4,
 				ApprovedVersion: new(4), ApprovedMark: reviewed},
-			open: true,
+			open:  true,
+			stops: phase.Planning,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -311,8 +317,8 @@ func TestARegistrationDoesNotHideTheReviewTheGateAlreadyHolds(t *testing.T) {
 				Since:                record.EventMark{Seq: 10},
 			})
 
-			if got := issue(t, pool, "LEGION-100"); got.Phase != phase.Admitted || got.Awaiting != nil {
-				t.Fatalf("root after a registration older than the review the gate holds = %#v, want it admitted with no wait", got)
+			if got := issue(t, pool, "LEGION-100"); got.Phase != tc.stops || got.Awaiting != nil {
+				t.Fatalf("root after a registration older than the review the gate holds = %#v, want it at %s with no wait", got, tc.stops)
 			}
 			assertSlots(t, pool, []record.Slot{{Issue: "LEGION-100", Index: 0, AdmittedAt: fixedNow}})
 			if told := gateNotices(t, pool, "LEGION-100", "design-changes-requested"); len(told) != 0 {

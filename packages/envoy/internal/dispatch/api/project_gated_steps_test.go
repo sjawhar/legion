@@ -88,14 +88,17 @@ func TestGatedStepsOnTheProjectRow(t *testing.T) {
 	}
 
 	// A publish Dispatch cannot read leaves the stored list where it was: a body naming no list
-	// is not the empty list, so a malformed publish cannot clear a gate, and a step Legion does
-	// not know is refused here rather than stored for a reader to puzzle over.
+	// is not the empty list, so a malformed publish cannot clear a gate, a step Legion does not
+	// know is refused here rather than stored for a reader to puzzle over, and a step named
+	// twice is refused as the deployment's own loader refuses it, since one gate record is kept
+	// per step.
 	for _, refused := range []struct {
 		why  string
 		body map[string]any
 	}{
 		{why: "a body naming no list", body: map[string]any{"actor": sessionActor()}},
 		{why: "a list naming the plan", body: map[string]any{"steps": []string{"spec", "plan"}, "actor": sessionActor()}},
+		{why: "a list naming the spec twice", body: map[string]any{"steps": []string{"spec", "criteria", "spec"}, "actor": sessionActor()}},
 	} {
 		response := agentRequest(t, handler, http.MethodPut, "/api/v1/projects/GATED/gated-steps", refused.body, "agent-token")
 		code, _ := refusalOf(t, response)

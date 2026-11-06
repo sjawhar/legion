@@ -32,7 +32,7 @@ import (
 // tester, the reviewer whether or not its round is completed, the merger, and the implementer
 // itself in retro - keeps its turn, its jobs, its process and its session, and is told its phase
 // ended by a message on its own topic. Leaving merging also voids a READY the design
-// gate refused there (ReadyPendingVersion).
+// gate refused there (ReadyPending).
 //
 // The CI rule reads nothing of the review round: a round whose request for changes is already in
 // is sent back by the red all the same, with the red named rather than the reviewer's body. A
@@ -77,8 +77,7 @@ func TestARedVerdictSendsTheTreeBackToImplementing(t *testing.T) {
 			issue := record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 				Phase: tc.from, Generation: 1, Status: tc.status, Rank: "U"}
 			if tc.readyPending {
-				pending, step := 4, record.DesignStepSpec
-				issue.ReadyPendingVersion, issue.ReadyPendingStep = &pending, &step
+				issue.ReadyPending = &record.ReadyPending{Step: record.DesignStepSpec, Version: 4}
 			}
 			seedIssue(t, pool, issue)
 			pr := record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",

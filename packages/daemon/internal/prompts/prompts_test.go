@@ -484,9 +484,10 @@ func TestTheRootArchitectPartNamesTheGatedSteps(t *testing.T) {
 	if !strings.Contains(text, "`Design gate steps`") {
 		t.Error("the composed root architect prompt never names the `Design gate steps` line its steps come from")
 	}
-	for _, retired := range []string{"gates.design: root-issues", "gates.design: off", "Design gate policy",
-		"either design gate policy", "The gate records one document"} {
-		if strings.Contains(text, retired) {
+	// Folded, because a retired phrase broken across two lines is still a retired phrase a reader
+	// follows, and the line a prompt wraps at is nobody's decision.
+	for _, retired := range retiredGatePhrases {
+		if strings.Contains(foldWhitespace(text), retired) {
 			t.Errorf("the composed root architect prompt still says %q", retired)
 		}
 	}
@@ -514,6 +515,44 @@ func TestTheRootArchitectPartNamesTheGatedSteps(t *testing.T) {
 		for _, want := range []string{"`gatedSteps`", "`read_record`"} {
 			if !strings.Contains(paragraph, want) {
 				t.Errorf("the review-notice rule does not send the architect to %s for the step the notice leaves out: %s", want, paragraph)
+			}
+		}
+	}
+}
+
+// retiredGatePhrases are the words the step list replaced. A prompt that still carries one tells
+// its reader to look on the addressing line for a sentence the daemon no longer writes.
+var retiredGatePhrases = []string{"gates.design: root-issues", "gates.design: off", "Design gate policy",
+	"either design gate policy", "The gate records one document"}
+
+// The controller reads the same addressing line as a root architect, so its own prompt names the
+// steps sentence and carries none of the words that sentence replaced. Its text is read folded:
+// the retired phrase that outlived the first sweep was one broken across two lines.
+func TestTheControllerPartNamesTheGatedSteps(t *testing.T) {
+	composer, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for _, headless := range []bool{true, false} {
+		paths, err := composer.ControllerPromptPaths(headless)
+		if err != nil {
+			t.Fatalf("ControllerPromptPaths(headless %t): %v", headless, err)
+		}
+		var text strings.Builder
+		for _, path := range paths {
+			body, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read %s: %v", path, err)
+			}
+			text.Write(body)
+		}
+		folded := foldWhitespace(text.String())
+		if !strings.Contains(folded, "`Design gate steps:`") {
+			t.Errorf("the composed controller prompt (headless %t) never names the `Design gate steps:` line it reads its steps off", headless)
+		}
+		for _, retired := range retiredGatePhrases {
+			if strings.Contains(folded, retired) {
+				t.Errorf("the composed controller prompt (headless %t) still says %q", headless, retired)
 			}
 		}
 	}

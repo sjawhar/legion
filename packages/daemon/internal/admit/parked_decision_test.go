@@ -334,7 +334,7 @@ func TestAFirstAdmissionStartsItsArchitectWithNoTask(t *testing.T) {
 // start, which leaves it kept until it is delivered. With the gate open at its latest version
 // there is nothing to request, and under gates.design off no person approves anything.
 func TestARootReadmittedOnAnOlderApprovalIsToldBothVersions(t *testing.T) {
-	const versions = " The spec is approved at version 3 and is now at version 4: request approval of version 4, " +
+	const versions = " The primary document is approved at version 3 and is now at version 4: request approval of version 4, " +
 		"as skill://legion-architect/references/design-gate.md (\"The armed gate\") says."
 	const decided = "While nobody in LEGION-ROOT's tree could hear it, a person decided on the tree: dispatch://LEGION-ROOT/spec (design-approved by user:alice). Read each before you continue."
 	for _, tc := range []struct {
@@ -428,7 +428,7 @@ func TestAReadmissionKeepsOrDropsTheApprovalAnEarlierKept(t *testing.T) {
 			parkedRoot(t, pool)
 			inTx(t, pool, func(tx pgx.Tx) {
 				records := record.NewStore()
-				if err := records.KeepReadmittedApproval(ctx, tx, "LEGION-ROOT", 2, 3); err != nil {
+				if err := records.KeepReadmittedApproval(ctx, tx, "LEGION-ROOT", record.KeptApproval{Step: record.DesignStepSpec, Approved: 2, Latest: 3}); err != nil {
 					t.Fatalf("keep the earlier re-admission's pair: %v", err)
 				}
 				if tc.gate != nil {
@@ -456,7 +456,7 @@ func TestAReadmissionKeepsOrDropsTheApprovalAnEarlierKept(t *testing.T) {
 // starts its architect naming both versions: the second re-admission finds no gate and keeps the
 // pair the first kept, which the undelivered start released.
 func TestARootReadmittedTwiceWithNoStartDeliveredIsStillToldBothVersions(t *testing.T) {
-	const versions = "The spec is approved at version 3 and is now at version 4: request approval of version 4, " +
+	const versions = "The primary document is approved at version 3 and is now at version 4: request approval of version 4, " +
 		"as skill://legion-architect/references/design-gate.md (\"The armed gate\") says."
 	ctx := context.Background()
 	pool := migratedPool(t)
