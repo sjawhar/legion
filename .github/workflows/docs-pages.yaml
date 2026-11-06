@@ -58,7 +58,7 @@ on:
       - 'packages/envoy/go.sum'
       # The docs filter's own:
       - 'docs/site/**'
-      # ci.yaml's *legion_command, 74 patterns:
+      # ci.yaml's *legion_command, 75 patterns:
       - 'packages/daemon/cmd/legion/*'
       - 'packages/daemon/internal/admit/*'
       - 'packages/daemon/internal/agentsecrets/*'
@@ -133,7 +133,8 @@ on:
       - 'packages/envoy/listenfd/*'
       - 'packages/envoy/migrationid/*'
       - 'packages/envoy/oidc/*'
-      # ci.yaml's *dispatch_server, 59 patterns:
+      - 'packages/envoy/sessiontiming/*'
+      # ci.yaml's *dispatch_server, 60 patterns:
       - 'packages/envoy/cmd/dispatch/*'
       - 'packages/envoy/internal/bus/*'
       - 'packages/envoy/internal/cistore/*'
