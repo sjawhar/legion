@@ -306,8 +306,10 @@ func startScratchDispatchWithNATS(t *testing.T, natsURL string) (string, string)
 type scratchDispatchOptions struct {
 	// natsURL is the NATS server the server publishes its events on; empty runs it with NATS off.
 	natsURL string
-	// root is the checkout whose packages/envoy the server is built from; empty is this one, four
-	// directories above the package's.
+	// root is the checkout whose packages/envoy the server runs in and whose
+	// packages/dispatch/web/dist it serves; empty is this one, four directories above the
+	// package's. The binary is not built from it: testbuild.EnvoyBinary builds the checkout
+	// testbuild.RootEnv names, else the one holding the working directory.
 	root string
 	// log, when set, receives the server's output as well.
 	log io.Writer
