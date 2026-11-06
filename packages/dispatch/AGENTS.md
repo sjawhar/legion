@@ -2126,63 +2126,82 @@ review panel, and answer an open ask in Waiting on you.
 
 A phone width here is one under 768 px, where `PHONE_VIEWPORT_QUERY`
 (`(max-width: 767px)`, `web/src/features/shell/useDialog.ts`) matches; a desktop
-width is 768 px or wider, the compact layout below 1280 px included. The rules
-below apply only to a test that `iphone` can run at its own viewport. A test
-stays untagged, whatever its title says, when it:
+width is 768 px or wider, the compact layout below 1280 px included.
+
+**The tag follows the assertion, not the branch.** A test takes `@phone` when
+the phone viewport can change what the test asserts. A test that only reaches
+the same control by another route under `iphone` — opening the drawer to click
+a link the desktop layout shows outright — asserts the same thing in both
+projects, so the second run proves nothing and the tag goes. The tag costs a
+whole second execution of the row: 291 of the suite's 1,609 executions were
+`iphone` repeats, 932 of its 5,362 row-seconds, measured in run 42109191535.
+An untagged row that should carry the tag costs the one claim the phone
+viewport would have broken. So where the two readings differ, write the row
+that asserts the phone claim rather than tagging the row that does not.
+
+A test takes the tag when it:
+
+- **R1** asserts a layout, overflow or wrap claim the viewport decides:
+  `assertPageFits`, a `scrollWidth`/`clientWidth` overflow check,
+  `viewportSize()`, `innerWidth`/`innerHeight`, a width or a count of lines it
+  reads off the page — unless it first sets a fixed viewport for every project,
+  where `iphone` would only repeat that same width.
+- **R2** asserts a touch claim: `tap()`, `page.touchscreen`, `e2e/touch.ts`,
+  `hasTouch`, `isMobile`, or a 44 px touch target.
+- **R3** asserts a phone-only surface as the thing it checks — the navigation
+  drawer, the margin's bottom sheet, the phone Thread dialog — rather than
+  passing through it to reach a control.
+- **R4** runs only on the phone (it skips every project but `iphone`), or is in
+  a file named for the phone (`phone*.e2e.ts`).
+
+A test stays untagged, whatever its title says, when it:
 
 - skips every project but `chromium`
   (`test.skip(project.name !== "chromium", …)`) or every project but
   `webkit-iphone`;
-- sets a desktop width for every project before it checks anything and never
-  reaches a phone width, so `iphone` would only repeat the desktop run, and a
-  phone branch (`setSheet`, `openedThreadCard`) would find no phone layout; or
+- sets a desktop width, or any fixed width, for every project before it checks
+  anything, so `iphone` would only repeat that run;
 - starts at the project's own width expecting a desktop one and then narrows
-  the window itself, so under `iphone` it would start from the wrong layout.
+  the window itself, so under `iphone` it would start from the wrong layout; or
+- branches on the project only to reach a control — `setSheet`,
+  `openedThreadCard` (`e2e/editor.ts`), a drawer opened on the way to a link —
+  and then asserts what both layouts assert.
 
 Such a test passes `"chromium"` rather than the project name to a helper that
-branches on it. A test that skips every project but `iphone` is always tagged
-(R5), whatever widths it sets. Any other test takes the tag when, under
-`iphone`, it takes a phone-only path. That is, it:
+branches on it.
 
-- **R1** chooses what to do by which project runs it, and `iphone` takes
-  another branch than `chromium`, directly, in a hook, or in a helper it calls:
-  `=== "iphone"`, `!== "iphone"`, a `"chromium"` test used as a layout switch
-  (an empty desktop-only block included), `PHONE_PROJECTS` or
-  `READING_PROJECTS` membership, a project-dependent value (`1280 : 390`,
-  `44 : 32`), `setSheet` and `openedThreadCard` (`e2e/editor.ts`), or a
-  file-local helper that takes the project or `isPhone`. The project name used
-  only in a file name, attachment name or seed namespace does not count.
-- **R2** branches on what the page shows where the phone layout decides it: the
-  Thread dialog or the margin card, a drawer menu button's visibility.
-- **R3** reads the window's size or checks the page against it
-  (`viewportSize()`, `innerWidth`/`innerHeight`, a `scrollWidth`/`clientWidth`
-  overflow check, `assertPageFits`), unless it first sets a fixed viewport for
-  every project.
-- **R4** uses touch: `tap()`, `page.touchscreen`, `e2e/touch.ts`, `hasTouch`,
-  `isMobile`.
-- **R5** runs only on the phone (it skips `chromium`), or is in a file named for
-  the phone (`phone*.e2e.ts`).
-- **R6** says in its title or its own comments that it covers the phone layout
-  (a phone, the drawer, the bottom sheet, 390 px).
+When a row walks a data table and makes one narrow-screen claim at the end,
+split that claim into a row of its own and tag that row, rather than tagging
+the walk: the walk is the same work in both projects.
 
-Once the exceptions above are ruled out, when unsure, tag it: an extra phone
-test costs CI minutes, and a missing one loses the phone coverage. Write the
-tag at the end of the title,
-`test("a reply opens the Thread dialog @phone", …)`, or at the end of a
+When unsure, do not tag: read what the row asserts, and write the phone claim
+as its own row where the phone can break it. Write the tag at the end of the
+title, `test("a reply opens the Thread dialog @phone", …)`, or at the end of a
 `test.describe` title when every test inside it qualifies. Playwright reads an
 `@word` in a title as a tag; the title form keeps the call at two arguments, so
 Biome does not re-indent the body as it does for a `{ tag }` details argument.
-A user-agent path (the Mac keymap that the iPhone user agent also takes) is not
-a phone-only path. An untagged test needs no
-`test.skip(project.name === "iphone", …)`, since `iphone` no longer runs it:
-drop the skip. A `!== "chromium"` skip stays: it marks a test that one project
-covers (it sets its own viewport, or does not depend on the layout), and it
-keeps that test out of the tag under the first exception above.
+
+A user-agent path is not a phone path. The Mac keymap that the iPhone user
+agent also takes is one: `web/src/features/shell/keymap.ts` reads
+`navigator.userAgent`, so such a row runs in `chromium` with
+`test.use({ userAgent: devices["iPhone 13"].userAgent })` and carries neither
+the tag nor a project skip (`e2e/keyboard-document.e2e.ts`).
+
+An untagged test needs no `test.skip(project.name === "iphone", …)`, since
+`iphone` no longer runs it: drop the skip. Dropping a tag while leaving a
+`test.skip(project.name !== "iphone", …)` leaves a row that runs in no project
+at all — green, and proving nothing — so when a tag goes, every `iphone` branch
+of that row goes with it: the project tests, `PHONE_PROJECTS` and
+`READING_PROJECTS` membership, project-dependent values (`1280 : 390`,
+`44 : 32`), `setSheet` and `openedThreadCard`, and both skips. A `!== "chromium"`
+skip stays: it marks a test that one project covers.
 
 Nothing fails when a phone test lacks the tag: it silently drops out of
 `iphone` and runs only on `chromium`. So after writing or renaming one, run
 `bunx playwright test --config e2e/playwright.config.ts --project=iphone --list`
-and check that it is listed.
+and check that it is listed. `e2e/__tests__/row-configurations.test.ts` is the
+other half: it refuses a row that runs twice in one engine, viewport, origin
+and server-process count.
 
 A retracted ask is withdrawn history: the Inbox and the open-ask badges drop it, and the margin folds it into the `Resolved (N)` toggle beside resolved comment threads. The Conversation lists it like every other conversation, under `All` and under `Closed`; the tab has no `Show retracted` or `Show activity` control of its own. Ask event payloads carry `options` as an array (the server never emits `null`), so the Activity tab and the margin's Pinned tab render `event.payload` as the `Ask` it is.
 
