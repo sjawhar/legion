@@ -918,22 +918,28 @@ func checkSignInClient(ctx context.Context, signIn approval.SignIn, st *store.St
 	}
 }
 
-// endSessionsCommand is the one argument the broker takes in place of serving.
+// endSessionsCommand is one of the two arguments the broker takes in place of serving; the other
+// is airlockCheckCommand (airlockcheck.go).
 const endSessionsCommand = "end-sessions"
 
 // runSubcommand runs the subcommand args name and answers its exit code. It is every argument
-// this binary takes: an unknown one, a missing login or a second argument is refused with 2 and
-// a usage line, never a fall-through to serving.
+// this binary takes: an unknown name, a missing or malformed argument to a name it knows, is
+// refused with 2 and a usage line, never a fall-through to serving. There are two names, so a
+// switch still reads as one thing (cmd/dispatch/subcommands.go keeps a table for its nine).
 func runSubcommand(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	if args[0] != endSessionsCommand {
-		fmt.Fprintf(stderr, "broker: unknown subcommand %q; the only subcommand is %s <login>, and broker with no argument serves\n", args[0], endSessionsCommand)
-		return 2
+	switch args[0] {
+	case endSessionsCommand:
+		if len(args) != 2 || strings.TrimSpace(args[1]) == "" {
+			fmt.Fprintf(stderr, "broker: usage: broker %s <login>, one login and nothing else\n", endSessionsCommand)
+			return 2
+		}
+		return endSessions(ctx, strings.TrimSpace(args[1]), stdout, stderr)
+	case airlockCheckCommand:
+		return airlockCheck(args[1:], stdout, stderr)
 	}
-	if len(args) != 2 || strings.TrimSpace(args[1]) == "" {
-		fmt.Fprintf(stderr, "broker: usage: broker %s <login>, one login and nothing else\n", endSessionsCommand)
-		return 2
-	}
-	return endSessions(ctx, strings.TrimSpace(args[1]), stdout, stderr)
+	fmt.Fprintf(stderr, "broker: unknown subcommand %q; the subcommands are %s <login> and %s <file> [--against <old file>], and broker with no argument serves\n",
+		args[0], endSessionsCommand, airlockCheckCommand)
+	return 2
 }
 
 // endSessions deletes every session login is signed in to the approval page with, wherever and
