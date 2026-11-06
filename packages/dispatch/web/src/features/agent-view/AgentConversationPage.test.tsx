@@ -539,6 +539,33 @@ test("a streamed user message tagged with a person's message but saying somethin
   ).toEqual(["Merge only after review.", "Merge now, skip review."]);
 });
 
+// The placeholder lines a streamed row may carry beyond the person's words are the stream's own
+// naming of what the message carried, one for each picture the body embedded. A body that
+// embedded none accounts for none, so a row tagged with it and carrying extra bracketed words -
+// `[yes]`, `[approved]`, any number of them, before the person's words as readily as after -
+// is a row saying something the person did not write, and it must not take the stored copy with
+// it: a reader would otherwise meet those words as the person's, with the person's own copy
+// hidden. Measured at this head: turnSaysBody answers true for body "Should I deploy?" against
+// the rows "Should I deploy?\n[yes]", "Should I deploy?\n[approved]\n[signed-off]" and
+// "[yes]\nShould I deploy?" (INFRA-1026).
+test("a streamed turn that adds a bracketed word of its own hides nothing", async () => {
+  const at = Date.parse("2026-09-27T21:16:16Z");
+  renderLiveView({
+    agentState: {},
+    messages: [{ message: message("m1", "Should I deploy?"), replies: [] }],
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
+    replay: [userFrame(1, at, "Should I deploy?\n[yes]", "m1")],
+  });
+
+  const thread = await screen.findByTestId("agent-thread");
+  await within(thread).findAllByText(/Should I deploy\?/);
+  expect(
+    within(thread)
+      .getAllByTestId("agent-message-user")
+      .map((node) => node.textContent)
+  ).toEqual(["Should I deploy?", "Should I deploy?[yes]"]);
+});
+
 // A person's message that carries a picture reaches the session as the text the person wrote and
 // the picture beside it, which the stream names `[image]` in a part of its own
 // (`conversationParts` in `@legion/pi-shared/agent-stream`). The person sent one message, so the
