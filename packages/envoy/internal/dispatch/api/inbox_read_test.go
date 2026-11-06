@@ -572,7 +572,7 @@ func markThreadsRead(t *testing.T, database *store.Store, threads []string) {
 // gateHold is one transaction a test holds open on a connection of its own: a row taken the way
 // a write takes it, so a request that locks that row queues behind this transaction, or a write
 // of the test's own left uncommitted, which is what a reply in flight is (holdSessionReply,
-// api/inbox_dismiss_test.go). Ending the hold starts whatever queued behind it moving.
+// api/inbox_dismiss_race_test.go). Ending the hold starts whatever queued behind it moving.
 type gateHold struct {
 	tx pgx.Tx
 	// ended is why release and commit each run once however many callers ask: a round's own

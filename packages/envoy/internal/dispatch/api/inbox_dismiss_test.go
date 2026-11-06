@@ -157,6 +157,30 @@ func threadDismissal(t *testing.T, database *store.Store, login, threadID string
 	return at
 }
 
+// threadRowState is what one Reply row says about the writes in its thread: the version a
+// dismissal of it is held to (inboxDismissMarkThreads), and the two columns a write usually
+// moves beside it. lastReply is empty and repliedAt is -infinity on a row nobody has written in.
+type threadRowState struct {
+	version   int64
+	lastReply string
+	repliedAt time.Time
+}
+
+// threadRowWrites reads that state off the caller's own row, which is where a test holding the
+// version's rule - every write by somebody else moves it, whatever that write's time or id -
+// reads the three of them from.
+func threadRowWrites(t *testing.T, database *store.Store, login, threadID string) threadRowState {
+	t.Helper()
+	row := threadRowState{}
+	if err := database.Pool.QueryRow(context.Background(), `
+		select version, coalesce(last_reply_id::text, ''), coalesce(replied_at, '-infinity'::timestamptz)
+		from user_threads where login = $1 and thread_id = $2
+	`, login, threadID).Scan(&row.version, &row.lastReply, &row.repliedAt); err != nil {
+		t.Fatalf("read %s's row for %s: %v", login, threadID, err)
+	}
+	return row
+}
+
 // One request dismisses exactly the threads it names, of both kinds, and takes them out of the
 // Inbox list while leaving every other thread where it was. A dismissed thread is read as well, so
 // it counts as unread nowhere, and the Dismissed view lists it; restore puts it back.
@@ -363,6 +387,130 @@ func TestDismissEndsWhenSomebodyElseWritesAgain(t *testing.T) {
 	}
 	if unread := unreadThreads(t, handler, "alice"); !slices.Contains(unread, seed.agent) {
 		t.Fatalf("state=unread = %#v, want the agent thread unread again", unread)
+	}
+}
+
+// A changed ask answer is the write that moves no id at all: an answer's write is the ask itself
+// (migration 0096 passes new.id as p_write), so user_threads_record assigns last_reply_id the id
+// the row already held. The version is what says the write landed, and a press carrying the
+// version the page drew before the change writes nothing - the answer that page showed is not
+// the answer the thread holds now, so the thread stays in the Inbox, unread.
+//
+// A dismissal held to last_reply_id dismisses this thread over an answer nobody has read, which
+// is why the row reads both columns off user_threads rather than taking the route's word for it.
+func TestDismissLeavesAnAskThreadWhoseAnswerChanged(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "A changed answer", "A spec")
+	// Alice asks, which is what gives her a row in the ask's own thread (migration 0096's
+	// insert branch), and Bob answers, the write that makes that row unread.
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Should we ship?",
+		"options":  []map[string]string{{"label": "Ship"}, {"label": "Hold"}},
+	}, "alice")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("alice asks: status=%d body=%s", created.Code, created.Body.String())
+	}
+	ask := decodeBody[model.Ask](t, created)
+	first := answerAskForChange(t, handler, ask.ID, "bob", "Ship", nil)
+	if first.Answer == nil {
+		t.Fatal("bob's answer is missing")
+	}
+	row := inboxDismissReplyPrefix + ask.ID
+	body := dismissBody(t, database, "alice", []string{row})
+	drawn := threadRowWrites(t, database, "alice", ask.ID)
+	if drawn.lastReply != ask.ID {
+		t.Fatalf("last_reply_id = %q, want the ask's own id %s, which 0096 passes as the answer's write",
+			drawn.lastReply, ask.ID)
+	}
+
+	// Bob changes his answer, the write this row is about.
+	answeredAt := timestampValue(first.Answer.At)
+	answerAskForChange(t, handler, ask.ID, "bob", "Hold", &answeredAt)
+	changed := threadRowWrites(t, database, "alice", ask.ID)
+	if changed.lastReply != drawn.lastReply {
+		t.Fatalf("last_reply_id %q after the change, want the %q it already held: this row is about the write that moves no id",
+			changed.lastReply, drawn.lastReply)
+	}
+	if changed.version == drawn.version {
+		t.Fatalf("version %d after a changed answer, want it moved off the %d the page drew",
+			changed.version, drawn.version)
+	}
+
+	response := postInboxDismiss(t, handler, "alice", body)
+	if response.Code != http.StatusOK {
+		t.Fatalf("the dismiss answered %d %s", response.Code, response.Body.String())
+	}
+	if dismissed := dismissedBy(t, response); dismissed != 0 {
+		t.Fatalf("dismissed = %d, want none: the answer the page drew is not the answer the thread holds", dismissed)
+	}
+	if at := threadDismissal(t, database, "alice", ask.ID); at != nil {
+		t.Fatalf("the ask's thread was dismissed at %s, over an answer nobody has read", at)
+	}
+	if inbox := threadsInState(t, handler, "alice", myRepliesStateInbox); !slices.Contains(inbox, ask.ID) {
+		t.Fatalf("state=inbox = %#v, want the ask's thread still in it", inbox)
+	}
+	if unread := unreadThreads(t, handler, "alice"); !slices.Contains(unread, ask.ID) {
+		t.Fatalf("state=unread = %#v, want the ask's thread unread", unread)
+	}
+	// A press from a page that drew the changed answer dismisses it, so what turned the press
+	// above away is the version it carried and not the row.
+	if dismissed := dismissRows(t, handler, database, "alice", row); dismissed != 1 {
+		t.Fatalf("a press at the version the row holds now changed %d, want the ask's thread", dismissed)
+	}
+}
+
+// The stale page on the Agent half: a session reply lands after the page drew the row, and the
+// press carries what that page drew. What refuses it is the newest-reply equality alone
+// (inboxDismissCheckAgentRoots): by the time the press arrives nothing in the thread is unread,
+// since the person read the conversation in the Agents page their Inbox tab never redrew, so
+// every unread reply is one the page drew and the drawn-unread clause passes.
+//
+// This is the row the equality is kept for. Every other row of a reply the page never drew is
+// refused by the drawn-unread clause, so without this one a later reader would take the
+// equality for a second spelling of the same test and drop it - and dropping it buries a reply
+// the page never showed. What it costs the Inbox is one more press: the row comes back drawn as
+// read, and a press from that page dismisses it.
+func TestDismissRefusesAnAgentRootWhoseNewestReplyThePageNeverDrew(t *testing.T) {
+	seed := seedInboxRead(t)
+	handler, database := seed.handler, seed.database
+	row := inboxDismissAgentPrefix + seed.agent
+	body := dismissBody(t, database, "alice", []string{row})
+
+	replied := replyTo(t, handler, seed.agent, "And another thing.")
+	if replied.Code != http.StatusCreated {
+		t.Fatalf("reply to the agent thread: status=%d body=%s", replied.Code, replied.Body.String())
+	}
+	read := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/agents/s1/state", map[string]any{
+		"read_through": time.Now().UTC().Format(time.RFC3339Nano),
+	}, "alice")
+	if read.Code != http.StatusOK {
+		t.Fatalf("alice reads the conversation: status=%d body=%s", read.Code, read.Body.String())
+	}
+	drawn, _ := body["seen_replies"].(map[string]any)[row].(map[string]any)
+	landed, _ := seenRepliesOf(t, database, "alice", []string{row})[row].(map[string]any)
+	if unread, _ := landed["unread_replies"].([]string); len(unread) != 0 {
+		t.Fatalf("the thread holds %v unread, want none: this row is about what the drawn-unread clause lets through", unread)
+	}
+	if drawn["newest_reply"] == landed["newest_reply"] {
+		t.Fatalf("the thread's newest reply is still the %v the page drew, so the press carries nothing stale", drawn["newest_reply"])
+	}
+
+	response := postInboxDismiss(t, handler, "alice", body)
+	if response.Code != http.StatusOK {
+		t.Fatalf("the dismiss answered %d %s", response.Code, response.Body.String())
+	}
+	if dismissed := dismissedBy(t, response); dismissed != 0 {
+		t.Fatalf("dismissed = %d, want none: the thread's newest reply is not the one the page drew", dismissed)
+	}
+	if at := agentThreadDismissal(t, database, "alice", seed.agent); at != nil {
+		t.Fatalf("the agent thread was dismissed at %s, over a reply the page never drew", at)
+	}
+	if inbox := threadsInState(t, handler, "alice", myRepliesStateInbox); !slices.Contains(inbox, seed.agent) {
+		t.Fatalf("state=inbox = %#v, want the agent thread still in it", inbox)
+	}
+	// The one more press, from a page that drew the reply that landed.
+	if dismissed := dismissRows(t, handler, database, "alice", row); dismissed != 1 {
+		t.Fatalf("a press from a page that drew the reply changed %d, want the agent thread", dismissed)
 	}
 }
 
@@ -645,651 +793,6 @@ func TestDismissAppendsOneEventPerProjectAndSession(t *testing.T) {
 	if payload.Login != "alice" || payload.ThreadID != "" {
 		t.Fatalf("event payload = %#v, want the login alone, as a mark-all's event carries", payload)
 	}
-}
-
-// agentThreadDismissal is the caller's stored dismissal mark on one Agent thread, nil when the
-// thread is in their Inbox.
-func agentThreadDismissal(t *testing.T, database *store.Store, login, rootID string) *time.Time {
-	t.Helper()
-	var at *time.Time
-	if err := database.Pool.QueryRow(context.Background(), `
-		select max(dismissed_at) from user_agent_thread_dismissed where login = $1 and message_id = $2
-	`, login, rootID).Scan(&at); err != nil {
-		t.Fatalf("read %s's dismissal of the agent thread %s: %v", login, rootID, err)
-	}
-	return at
-}
-
-// writeAgentReplyInsert writes one reply into an Agent thread at a time of the test's choosing,
-// which no route lets a caller name: a write's timestamp is its own transaction's start, so a
-// test of what a dismiss does to a reply stamped before it began has to write both sides of it.
-// $1 is the message it replies to - the root, or a reply under it - $2 the author's kind, as the
-// Inbox reads it, $3 the author and $4 the stamp.
-const writeAgentReplyInsert = `
-		insert into messages (issue_key, author, body, in_reply_to, target, created_at)
-		select null, jsonb_build_object('kind', $2::text, 'id', $3::text), 'Written at ' || $4::text,
-		       parent.id, parent.target, $4::text::timestamptz
-		from messages parent where parent.id = $1
-		returning id::text`
-
-// writeAgentReply makes that write and answers the reply's id. into is the pool, or a
-// transaction the test holds open so the reply is written and not committed (holdSessionReply).
-func writeAgentReply(t *testing.T, into queryer, parent, kind, id string, at time.Time) string {
-	t.Helper()
-	var written string
-	if err := into.QueryRow(context.Background(), writeAgentReplyInsert,
-		parent, kind, id, at.UTC().Format(time.RFC3339Nano)).Scan(&written); err != nil {
-		t.Fatalf("write a %s reply under %s: %v", kind, parent, err)
-	}
-	return written
-}
-
-// writeAgentReplyBehind makes it off the test's own goroutine, for the one write that waits: a
-// reply whose clearing trigger takes a root a dismiss is holding (migration 20261105093507)
-// blocks there until that dismiss commits, and the test has to go on meanwhile. It answers the
-// channel the insert's own error lands on - nil once the row is written - rather than failing
-// from a goroutine the test does not own.
-func writeAgentReplyBehind(into queryer, parent, kind, id string, at time.Time) <-chan error {
-	written := make(chan error, 1)
-	go func() {
-		var reply string
-		written <- into.QueryRow(context.Background(), writeAgentReplyInsert,
-			parent, kind, id, at.UTC().Format(time.RFC3339Nano)).Scan(&reply)
-	}()
-	return written
-}
-
-// writeThreadReply is the Reply half's own: one comment in a thread at a time of the test's
-// choosing, which user_threads_record stamps the other participants' rows with (p_at, migration
-// 20261105093501). into is the pool, or a transaction the test holds open, where the row and the
-// trigger that ran over it are written and not committed.
-func writeThreadReply(t *testing.T, into queryer, issue, thread, kind, id string, at time.Time) string {
-	t.Helper()
-	var written string
-	if err := into.QueryRow(context.Background(), `
-		insert into comments (issue_key, author, body, reply_to, created_at)
-		values ($1, jsonb_build_object('kind', $3::text, 'id', $4::text), 'Written at ' || $5::text,
-		        $2, $5::text::timestamptz)
-		returning id::text
-	`, issue, thread, kind, id, at.UTC().Format(time.RFC3339Nano)).Scan(&written); err != nil {
-		t.Fatalf("write a %s comment in %s: %v", kind, thread, err)
-	}
-	return written
-}
-
-// databaseNow is one transaction's own now(), which is the stamp every write in it carries: a
-// message's created_at and user_threads_record's p_at are both transaction_timestamp(). A test
-// that needs one write stamped before another transaction began reads the two off this clock,
-// the one that stamps them, rather than off the test process's.
-func databaseNow(t *testing.T, into queryer) time.Time {
-	t.Helper()
-	var at time.Time
-	if err := into.QueryRow(context.Background(), `select now()`).Scan(&at); err != nil {
-		t.Fatalf("read the transaction's own now(): %v", err)
-	}
-	return at
-}
-
-// The Agent half's dismissal is cleared by the trigger of migration 20261105093507, in the
-// transaction the reply is written in, which is what makes "dismissed" on this half a mark
-// existing and nothing else: no read compares the mark against the thread's newest reply, and
-// none has to read a dismissed thread at all.
-//
-// What clears it is a session's reply, at any depth and whatever its time. The trigger compares
-// the mark with nothing, because a reply's created_at is its transaction's start, taken before
-// the write became visible to anybody: a reply that commits after a dismiss began can carry the
-// older stamp of the two, so no comparison of the pair can tell a reply the person had seen from
-// one they could not have. A dismiss that had seen the reply is turned away before it writes a
-// mark at all, by the version it carries (inboxDismissCheckAgentRoots).
-//
-// What does not clear it is a reply of the person's own, however new, since a reply they send
-// from the Dismissed view leaves the thread there, exactly as their own reply leaves a Reply
-// thread's mark where it stands.
-func TestADismissedAgentThreadComesBackOnASessionReplyWhateverItsTime(t *testing.T) {
-	seed := seedInboxRead(t)
-	handler, database := seed.handler, seed.database
-	if dismissed := dismissRows(t, handler, database, "alice", inboxDismissAgentPrefix+seed.agent); dismissed != 1 {
-		t.Fatalf("dismissed = %d, want the agent thread", dismissed)
-	}
-	mark := agentThreadDismissal(t, database, "alice", seed.agent)
-	if mark == nil {
-		t.Fatal("the dismissal wrote no mark on the agent thread")
-	}
-
-	// A reply of the caller's own, newer than the mark: the mark stays and the thread stays out
-	// of the Inbox.
-	writeAgentReply(t, database.Pool, seed.agent, "user", "alice", mark.Add(time.Minute))
-	if at := agentThreadDismissal(t, database, "alice", seed.agent); at == nil {
-		t.Fatal("the agent thread's mark is gone after a reply of the caller's own")
-	}
-	if away := threadsInState(t, handler, "alice", myRepliesStateDismissed); !slices.Contains(away, seed.agent) {
-		t.Fatalf("state=dismissed = %#v, want the agent thread still there", away)
-	}
-	if inbox := threadsInState(t, handler, "alice", myRepliesStateInbox); slices.Contains(inbox, seed.agent) {
-		t.Fatalf("state=inbox = %#v, want the agent thread still out of it", inbox)
-	}
-
-	// A session reply stamped a minute before the mark, written two deep - under the reply
-	// already in the thread, which is where a follow-up lands - so the clear is the walk up
-	// in_reply_to and not a match on the root alone: the mark is gone and the thread is back,
-	// unread. A stamp older than the mark is exactly what a reply that commits after a dismiss
-	// began carries, and it comes back all the same.
-	writeAgentReply(t, database.Pool, seed.agentReply, "session", "s1", mark.Add(-time.Minute))
-	if at := agentThreadDismissal(t, database, "alice", seed.agent); at != nil {
-		t.Fatalf("the agent thread still carries the mark %s after a session replied in it", at)
-	}
-	if inbox := threadsInState(t, handler, "alice", myRepliesStateInbox); !slices.Contains(inbox, seed.agent) {
-		t.Fatalf("state=inbox = %#v, want the agent thread back", inbox)
-	}
-	if away := threadsInState(t, handler, "alice", myRepliesStateDismissed); slices.Contains(away, seed.agent) {
-		t.Fatalf("state=dismissed = %#v, want the agent thread gone from it", away)
-	}
-	if unread := unreadThreads(t, handler, "alice"); !slices.Contains(unread, seed.agent) {
-		t.Fatalf("state=unread = %#v, want the agent thread unread again", unread)
-	}
-}
-
-// threadArtifact is the document a Reply thread hangs under, as the caller's own row names it.
-// The seed knows its threads by id and the Inbox never answers an owner, so the owner a request
-// locks is read back from the row the trigger wrote.
-func threadArtifact(t *testing.T, database *store.Store, login, thread string) string {
-	t.Helper()
-	var artifact string
-	if err := database.Pool.QueryRow(context.Background(), `
-		select artifact_id::text from user_threads where login = $1 and thread_id = $2
-	`, login, thread).Scan(&artifact); err != nil {
-		t.Fatalf("read the document %s's thread %s hangs under: %v", login, thread, err)
-	}
-	return artifact
-}
-
-// holdGateDocument holds one document's row the way a write to it takes it, so a dismiss that
-// locks that document queues behind this transaction: step 1 of the lock order, where
-// holdGateThread's row is step 3 (holdGateRow, api/inbox_read_test.go).
-func holdGateDocument(t *testing.T, database *store.Store, document string) gateHold {
-	t.Helper()
-	return holdGateRow(t, database, "the gate document's row", `
-		select 1 from artifacts where id = $1 for no key update
-	`, document)
-}
-
-// threadLeftUnreadInTheInbox is the four checks every window below closes with: the thread
-// carries no dismissal mark, the Inbox lists it, the Dismissed view does not, and the unread
-// count holds it. Together they are where a reply nobody has read leaves a thread, which is
-// what each of those rows is about.
-func threadLeftUnreadInTheInbox(t *testing.T, handler http.Handler, thread string, at *time.Time) {
-	t.Helper()
-	if at != nil {
-		t.Fatalf("thread %s carries the dismissal %s, past a reply nobody has read", thread, at)
-	}
-	if inbox := threadsInState(t, handler, "alice", myRepliesStateInbox); !slices.Contains(inbox, thread) {
-		t.Fatalf("state=inbox = %#v, want the thread replied to while the dismiss ran", inbox)
-	}
-	if away := threadsInState(t, handler, "alice", myRepliesStateDismissed); slices.Contains(away, thread) {
-		t.Fatalf("state=dismissed = %#v, want the thread replied to while the dismiss ran left out of it", away)
-	}
-	if unread := unreadThreads(t, handler, "alice"); !slices.Contains(unread, thread) {
-		t.Fatalf("state=unread = %#v, want the thread replied to while the dismiss ran unread", unread)
-	}
-}
-
-// A dismiss reads the rows it changes before it writes their marks, and between the two it waits
-// for every lock the order takes. A reply by somebody else that commits inside that window leaves
-// its thread in the Inbox, unread: the alternative is a thread dismissed under a mark older than
-// a reply nobody has read, which nothing undoes - user_threads_record and the trigger of
-// 20261105093507 each clear a mark that is already there, and a mark written after they have run
-// is not.
-//
-// The window is made rather than waited for, as TestInboxReadRacingAnotherMarkAll makes its
-// crossing, and it is the real one rather than a thread back-dated into it: every row holds the
-// row of a document the request dismisses a thread of. That document is step 1 of the request's
-// lock order (markInboxReadThreads, api/inbox_read.go), taken after the read and before the
-// issues and every write, so a request queued on it has read its rows and written none, and
-// WaitForStatementBehind watches for that one statement rather than counting whoever waits. The
-// reply each row then writes lands somewhere the gate does not reach - another issue's thread, or
-// an Agent thread, which has no owner row at all - so it commits while the dismiss waits.
-//
-// The Agent row dismisses a Reply thread beside its root for that gate alone: an agent-only
-// request locks no owner, and the one row it would queue on, its own dismissal, is the row it is
-// about to write.
-//
-// What no row here reaches is the reply whose own transaction began before the dismiss did.
-// Every writer here opens its transaction once the dismiss is already queued, so its reply is
-// stamped after the dismiss began and lands on the far side of every comparison of times; the
-// rows whose writer begins first, and so carries the older stamp of the two, are the tests
-// below this one. What orders those: on the Reply half the caller's own rows, which step 3 of
-// that order locks and the trigger's update waits on; on the Agent half the thread's root, which
-// the dismiss takes at step 2 and the clearing trigger takes `for key share` before its delete.
-func TestDismissLeavesAThreadRepliedToWhileItRan(t *testing.T) {
-	// The two Reply rows differ in the form the request takes and in nothing else: the same
-	// session writes in the same thread, and the same row must come out of it unread. So body is
-	// all either of them spells.
-	type window struct {
-		// body is the dismiss under test, and write the reply by somebody else that commits
-		// while it waits. thread is the row that must come out of it still in the Inbox, and
-		// mark its stored dismissal, which must be none.
-		body   func(t *testing.T, seed inboxReadSeed) map[string]any
-		write  func(t *testing.T, seed inboxReadSeed)
-		thread func(seed inboxReadSeed) string
-		mark   func(t *testing.T, seed inboxReadSeed) *time.Time
-	}
-	replyThread := window{
-		write: func(t *testing.T, seed inboxReadSeed) {
-			sessionComment(t, seed.handler, "/api/v1/issues/"+seed.firstIssue+"/comments",
-				map[string]any{"body": "One more thing.", "reply_to": seed.first})
-		},
-		thread: func(seed inboxReadSeed) string { return seed.first },
-		mark: func(t *testing.T, seed inboxReadSeed) *time.Time {
-			return threadDismissal(t, seed.database, "alice", seed.first)
-		},
-	}
-	named, filtered := replyThread, replyThread
-	named.body = func(t *testing.T, seed inboxReadSeed) map[string]any {
-		return dismissBody(t, seed.database, "alice", []string{
-			inboxDismissReplyPrefix + seed.document, inboxDismissReplyPrefix + seed.first,
-		})
-	}
-	filtered.body = func(t *testing.T, seed inboxReadSeed) map[string]any {
-		return map[string]any{
-			"dismiss_through": time.Now().UTC().Format(time.RFC3339Nano),
-			"kind":            []string{myReplyKindReply},
-		}
-	}
-	for name, row := range map[string]window{
-		"a named reply dismiss":    named,
-		"a filtered reply dismiss": filtered,
-		"an agent dismiss": {
-			body: func(t *testing.T, seed inboxReadSeed) map[string]any {
-				return dismissBody(t, seed.database, "alice", []string{
-					inboxDismissReplyPrefix + seed.document, inboxDismissAgentPrefix + seed.agent,
-				})
-			},
-			write: func(t *testing.T, seed inboxReadSeed) {
-				replied := replyTo(t, seed.handler, seed.agent, "And another thing.")
-				if replied.Code != http.StatusCreated {
-					t.Fatalf("reply to the agent thread: status=%d body=%s", replied.Code, replied.Body.String())
-				}
-			},
-			thread: func(seed inboxReadSeed) string { return seed.agent },
-			mark: func(t *testing.T, seed inboxReadSeed) *time.Time {
-				return agentThreadDismissal(t, seed.database, "alice", seed.agent)
-			},
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			seed := seedInboxRead(t)
-			handler, database := seed.handler, seed.database
-			// The body is built here rather than in the goroutine below: it reads the versions
-			// the page saw out of the database, and a helper that fails does it on the test's
-			// own goroutine.
-			body := row.body(t, seed)
-			held := holdGateDocument(t, database, threadArtifact(t, database, "alice", seed.document))
-			answered := make(chan *httptest.ResponseRecorder, 1)
-			go func() { answered <- postInboxDismiss(t, handler, "alice", body) }()
-			if storetest.WaitForStatementBehind(t, database, held.tx, inboxReadLockDocuments, 10*time.Second) == 0 {
-				t.Fatal("the dismiss never queued on the document row it locks before it writes")
-			}
-			row.write(t, seed)
-			held.release()
-			response := <-answered
-			if response.Code != http.StatusOK {
-				t.Fatalf("the dismiss answered %d %s", response.Code, response.Body.String())
-			}
-			// The gate thread, which nobody wrote in, is dismissed: the request ran whole, so
-			// what the thread under test shows is this one comparison and not a request lost.
-			if at := threadDismissal(t, database, "alice", seed.document); at == nil {
-				t.Fatal("the document thread carries no mark, so the dismiss wrote nothing at all")
-			}
-			thread := row.thread(seed)
-			threadLeftUnreadInTheInbox(t, handler, thread, row.mark(t, seed))
-		})
-	}
-}
-
-// holdSessionReply writes one session reply into an Agent thread on a transaction of the test's
-// own and leaves that transaction open: the row is written and the trigger of 20261105093507 has
-// run over it, and neither is committed. That is a reply in flight, which no route can be asked
-// for - every reply route commits before it answers - and it is what the windows below are made
-// of. hold.commit lands it; the roll back beginGateHold registered is the safety net for a round
-// that fails before that, and it never runs after a commit (gateHold, api/inbox_read_test.go).
-//
-// The reply carries the holding transaction's own now(), which is the stamp a write carries in
-// production, so a hold opened before a dismiss is sent writes a reply stamped before that
-// dismiss's mark and one opened while the dismiss waits writes a reply stamped after it - by the
-// clock that stamps them both, not by the test process's.
-func holdSessionReply(t *testing.T, database *store.Store, parent string) gateHold {
-	t.Helper()
-	hold := beginGateHold(t, database, "the reply this test holds")
-	writeAgentReply(t, hold.tx, parent, "session", "s1", databaseNow(t, hold.tx))
-	return hold
-}
-
-// The reply first, which is the half of the window the test above cannot reach: a session reply
-// written and not committed when the dismiss reaches the Agent thread's root. The reply holds that
-// root - its clearing trigger takes it before the delete (migration 20261105093507) - and the
-// dismiss waits there, at the level that conflicts with the trigger's (inboxDismissLockAgentRoots,
-// step 2 of the lock order), and the insert that follows, a statement of its own and so a
-// snapshot of its own, holds the committed reply and writes no mark for its thread. The thread
-// ends where a reply nobody has read leaves it: in the Inbox, unread.
-//
-// Without that lock the dismiss waits nowhere, its insert reads a snapshot the reply is not in and
-// writes the mark, and the reply's trigger has already run and found nothing to delete - a thread
-// dismissed under a reply nobody has read, which is what this row is red for.
-//
-// The interleave is made rather than waited for, as the test above makes its own. The gate is the
-// document of the Reply thread the request names, step 1, taken after the read and before every
-// lock and every write: a dismiss queued there has taken its transaction's own now(), the mark it
-// will store, so the reply this test then writes is newer than that mark and the comparison in the
-// insert is not what leaves the thread alone. The reply goes two deep, under the reply already in
-// the thread, where a follow-up lands: its own foreign key then holds its parent and not the root,
-// so the only lock on the root is the trigger's.
-func TestDismissLeavesAnAgentThreadWhoseReplyCommitsAsItWrites(t *testing.T) {
-	seed := seedInboxRead(t)
-	handler, database := seed.handler, seed.database
-	body := dismissBody(t, database, "alice", []string{
-		inboxDismissReplyPrefix + seed.document, inboxDismissAgentPrefix + seed.agent,
-	})
-	held := holdGateDocument(t, database, threadArtifact(t, database, "alice", seed.document))
-	answered := make(chan *httptest.ResponseRecorder, 1)
-	go func() { answered <- postInboxDismiss(t, handler, "alice", body) }()
-	dismissing := storetest.WaitForStatementBehind(t, database, held.tx, inboxReadLockDocuments, 10*time.Second)
-	if dismissing == 0 {
-		t.Fatal("the dismiss never queued on the document row it locks before it writes")
-	}
-	replying := holdSessionReply(t, database, seed.agentReply)
-	held.release()
-	if answer, early := storetest.WaitForQueuedBehind(t, replying.tx, dismissing, answered, 10*time.Second); early {
-		t.Fatalf("the dismiss answered %d %s without ever waiting at the agent thread's root, so its check read a snapshot the reply is not in",
-			answer.Code, answer.Body.String())
-	}
-	replying.commit(t)
-
-	response := <-answered
-	if response.Code != http.StatusOK {
-		t.Fatalf("the dismiss answered %d %s", response.Code, response.Body.String())
-	}
-	// The gate thread, which nobody wrote in, is dismissed and counted, and the agent thread is
-	// neither: the request ran whole, so what the agent thread shows is this one window.
-	if dismissed := dismissedBy(t, response); dismissed != 1 {
-		t.Fatalf("dismissed = %d, want the gate thread alone", dismissed)
-	}
-	if at := threadDismissal(t, database, "alice", seed.document); at == nil {
-		t.Fatal("the document thread carries no mark, so the dismiss wrote nothing at all")
-	}
-	threadLeftUnreadInTheInbox(t, handler, seed.agent, agentThreadDismissal(t, database, "alice", seed.agent))
-}
-
-// The dismiss first, the same pair the other way round, which is what says the lock did not simply
-// make the dismiss win. The gate here is the caller's own row for the Reply thread the request
-// names, step 3 of the lock order, so the dismiss queued there is holding the Agent root it took
-// at step 2; the reply then arrives, waits at that root, and the dismiss commits its mark first.
-// The reply's trigger is given the root next, finds a mark committed and older than the reply it
-// is writing, and deletes it in the reply's own transaction: the thread comes back, unread, and
-// the count the dismiss answered says the mark it deleted was really written.
-func TestADismissHoldingTheAgentRootGivesTheThreadBackOnTheReply(t *testing.T) {
-	seed := seedInboxRead(t)
-	handler, database := seed.handler, seed.database
-	body := dismissBody(t, database, "alice", []string{
-		inboxDismissReplyPrefix + seed.document, inboxDismissAgentPrefix + seed.agent,
-	})
-	held := holdGateThread(t, database, seed.document)
-	answered := make(chan *httptest.ResponseRecorder, 1)
-	go func() { answered <- postInboxDismiss(t, handler, "alice", body) }()
-	if storetest.WaitForStatementBehind(t, database, held.tx, inboxReadLockThreads, 10*time.Second) == 0 {
-		t.Fatal("the dismiss never queued on the caller's rows, which it locks after the agent thread's root")
-	}
-	replied := make(chan *httptest.ResponseRecorder, 1)
-	go func() { replied <- replyTo(t, handler, seed.agent, "And another thing.") }()
-	// Five seconds, where the dismiss's statement_timeout allows it ten at the gate: a reply that
-	// has not queued by then is this row's red, and waiting the full ten would spend the dismiss's
-	// own allowance on it and answer 500 instead.
-	if waiting := storetest.WaitForLockWaiters(t, held.tx, 2, 5*time.Second); waiting < 2 {
-		t.Fatalf("%d transactions queued behind the gate row, want the dismiss and the reply waiting at the root it holds", waiting)
-	}
-	held.release()
-
-	response := <-answered
-	if response.Code != http.StatusOK {
-		t.Fatalf("the dismiss answered %d %s", response.Code, response.Body.String())
-	}
-	if dismissed := dismissedBy(t, response); dismissed != 2 {
-		t.Fatalf("dismissed = %d, want both threads: the dismiss had the root first and wrote the agent thread's mark", dismissed)
-	}
-	reply := <-replied
-	if reply.Code != http.StatusCreated {
-		t.Fatalf("the reply answered %d %s", reply.Code, reply.Body.String())
-	}
-	if at := threadDismissal(t, database, "alice", seed.document); at == nil {
-		t.Fatal("the document thread carries no mark, so the dismiss wrote nothing at all")
-	}
-	threadLeftUnreadInTheInbox(t, handler, seed.agent, agentThreadDismissal(t, database, "alice", seed.agent))
-}
-
-// The writer first, on the Agent half, with its transaction begun before the dismiss was sent:
-// the window no row above reaches. A write's timestamp is its own transaction's start, so this
-// reply is stamped before the dismiss's mark while committing after the dismiss read its rows -
-// a reply the person cannot have seen, under the older of the two stamps. Every comparison of
-// times says they had seen it; what turns the dismiss away is the version it carries, since the
-// thread's newest session reply is no longer the one the page showed
-// (inboxDismissCheckAgentRoots, read under the root lock in a statement of its own). No mark is
-// written, the thread is not counted and its replies are not marked read.
-//
-// The lock the dismiss waits at when the reply commits is the thread's root, taken `for update`
-// at step 2 of the lock order: the reply's own clearing trigger holds it `for key share` until
-// that transaction ends (migration 20261105093507). The reply goes two deep, under the reply
-// already in the thread, where a follow-up lands, so its foreign key holds its parent and the
-// only lock it has on the root is the trigger's.
-//
-// With the version check gone the dismiss compares times instead, finds the committed reply
-// older than its mark and buries it, and the trigger that ran inside the reply's transaction
-// found no mark to delete: a thread dismissed with a reply nobody has read.
-func TestDismissLeavesAnAgentThreadWhoseOlderReplyCommitsAtItsRoot(t *testing.T) {
-	seed := seedInboxRead(t)
-	handler, database := seed.handler, seed.database
-	body := dismissBody(t, database, "alice", []string{inboxDismissAgentPrefix + seed.agent})
-	// The writer begins and writes before the dismiss is sent, which is what stamps its reply
-	// before the mark that dismiss will store.
-	replying := holdSessionReply(t, database, seed.agentReply)
-	answered := make(chan *httptest.ResponseRecorder, 1)
-	go func() { answered <- postInboxDismiss(t, handler, "alice", body) }()
-	if storetest.WaitForStatementBehind(t, database, replying.tx, inboxDismissLockAgentRoots, 10*time.Second) == 0 {
-		t.Fatal("the dismiss never queued at the agent thread's root, which the reply in flight holds")
-	}
-	replying.commit(t)
-
-	response := <-answered
-	if response.Code != http.StatusOK {
-		t.Fatalf("the dismiss answered %d %s", response.Code, response.Body.String())
-	}
-	if dismissed := dismissedBy(t, response); dismissed != 0 {
-		t.Fatalf("dismissed = %d, want none: the thread's newest reply is no longer the one the page showed", dismissed)
-	}
-	threadLeftUnreadInTheInbox(t, handler, seed.agent, agentThreadDismissal(t, database, "alice", seed.agent))
-}
-
-// The same pair the other way round, with the writer's transaction begun first all the same: the
-// dismiss holds the Agent thread's root and commits its mark, and the reply - stamped before
-// that mark, since its transaction began before the dismiss was sent - waits at the root and
-// commits after. The trigger of 20261105093507 deletes the root's mark whatever its time, so the
-// thread is back in the Inbox, unread, and the count the dismiss answered says the mark the
-// trigger deleted was really written.
-//
-// The lock the dismiss waits at while the reply queues is the caller's own row for the Reply
-// thread it names beside the root, step 3 of the lock order: a dismiss queued there is holding
-// the root it took at step 2, which is what makes the reply wait.
-//
-// With the trigger's old comparison back - delete only a mark older than the reply - the mark
-// outlives a reply nobody has read, and nothing afterwards would remove it.
-func TestADismissHoldingTheAgentRootGivesTheThreadBackOnAnOlderReply(t *testing.T) {
-	seed := seedInboxRead(t)
-	handler, database := seed.handler, seed.database
-	body := dismissBody(t, database, "alice", []string{
-		inboxDismissReplyPrefix + seed.document, inboxDismissAgentPrefix + seed.agent,
-	})
-	// The writer's transaction begins before the dismiss is sent and takes its stamp there; it
-	// writes once the dismiss holds the root, so its insert is what waits.
-	replying := beginGateHold(t, database, "the reply this test holds")
-	stamp := databaseNow(t, replying.tx)
-	held := holdGateThread(t, database, seed.document)
-	answered := make(chan *httptest.ResponseRecorder, 1)
-	go func() { answered <- postInboxDismiss(t, handler, "alice", body) }()
-	if storetest.WaitForStatementBehind(t, database, held.tx, inboxReadLockThreads, 10*time.Second) == 0 {
-		t.Fatal("the dismiss never queued on the caller's rows, which it locks after the agent thread's root")
-	}
-	written := writeAgentReplyBehind(replying.tx, seed.agentReply, "session", "s1", stamp)
-	// Five seconds, where the dismiss's statement_timeout allows it ten at the gate: a reply that
-	// has not queued by then is this row's red, and waiting the full ten would spend the dismiss's
-	// own allowance on it and answer 500 instead.
-	if waiting := storetest.WaitForLockWaiters(t, held.tx, 2, 5*time.Second); waiting < 2 {
-		t.Fatalf("%d transactions queued behind the gate row, want the dismiss and the reply waiting at the root it holds", waiting)
-	}
-	held.release()
-
-	response := <-answered
-	if response.Code != http.StatusOK {
-		t.Fatalf("the dismiss answered %d %s", response.Code, response.Body.String())
-	}
-	if dismissed := dismissedBy(t, response); dismissed != 2 {
-		t.Fatalf("dismissed = %d, want both threads: the dismiss had the root first and wrote the agent thread's mark", dismissed)
-	}
-	if err := <-written; err != nil {
-		t.Fatalf("write the reply this test held behind the root: %v", err)
-	}
-	replying.commit(t)
-	if at := threadDismissal(t, database, "alice", seed.document); at == nil {
-		t.Fatal("the document thread carries no mark, so the dismiss wrote nothing at all")
-	}
-	threadLeftUnreadInTheInbox(t, handler, seed.agent, agentThreadDismissal(t, database, "alice", seed.agent))
-}
-
-// The Reply half's own window with the writer first: a comment whose transaction began before
-// the dismiss was sent, so user_threads_record stamps replied_at before that dismiss's mark, and
-// which commits while the dismiss waits - before its update statement runs, so that statement's
-// own snapshot holds the comment. The update must leave the row alone: its version,
-// last_reply_id, is the one the trigger just moved and no longer the one the page showed.
-//
-// The lock the dismiss waits at when the comment commits is the document of the other Reply
-// thread it names, step 1 of the lock order, taken after the read and before the caller's rows
-// and every write. The comment lands in an issue's thread, which that gate does not reach, so
-// nothing of it waits.
-//
-// With the version check gone the update compares replied_at with its mark, finds the comment
-// older and dismisses the thread under a reply nobody has read.
-func TestDismissLeavesAReplyThreadWhoseOlderCommentCommitsBeforeItWrites(t *testing.T) {
-	seed := seedInboxRead(t)
-	handler, database := seed.handler, seed.database
-	body := dismissBody(t, database, "alice", []string{
-		inboxDismissReplyPrefix + seed.document, inboxDismissReplyPrefix + seed.first,
-	})
-	writing := beginGateHold(t, database, "the comment this test holds")
-	stamp := databaseNow(t, writing.tx)
-	held := holdGateDocument(t, database, threadArtifact(t, database, "alice", seed.document))
-	answered := make(chan *httptest.ResponseRecorder, 1)
-	go func() { answered <- postInboxDismiss(t, handler, "alice", body) }()
-	if storetest.WaitForStatementBehind(t, database, held.tx, inboxReadLockDocuments, 10*time.Second) == 0 {
-		t.Fatal("the dismiss never queued on the document row it locks before it writes")
-	}
-	writeThreadReply(t, writing.tx, seed.firstIssue, seed.first, "session", "s1", stamp)
-	writing.commit(t)
-	held.release()
-
-	response := <-answered
-	if response.Code != http.StatusOK {
-		t.Fatalf("the dismiss answered %d %s", response.Code, response.Body.String())
-	}
-	if dismissed := dismissedBy(t, response); dismissed != 1 {
-		t.Fatalf("dismissed = %d, want the gate thread alone", dismissed)
-	}
-	if at := threadDismissal(t, database, "alice", seed.document); at == nil {
-		t.Fatal("the document thread carries no mark, so the dismiss wrote nothing at all")
-	}
-	threadLeftUnreadInTheInbox(t, handler, seed.first, threadDismissal(t, database, "alice", seed.first))
-}
-
-// The same half with the trigger first, which is the one thing the row above does not reach: the
-// comment's own transaction runs user_threads_record over the caller's row (migration
-// 20261105093501) and holds that row, and the dismiss queues on it. That is the re-check. Read
-// committed gives the dismiss the row version the trigger wrote once the comment commits, and
-// the update's `where` is checked against that version rather than against the one this request
-// read: the version differs, so the row is skipped, where the row above skipped it off a
-// snapshot taken after the comment had already committed.
-//
-// The lock the dismiss waits at is that same user_threads row, step 3 of the lock order
-// (inboxReadLockThreads, which the update behind it re-locks). The comment's transaction began
-// before the dismiss was sent, so replied_at is older than the dismiss's mark and a comparison
-// of the two dismisses the thread under a reply nobody has read.
-func TestDismissSkipsAReplyThreadWhoseTriggerHoldsTheRowItWrites(t *testing.T) {
-	seed := seedInboxRead(t)
-	handler, database := seed.handler, seed.database
-	body := dismissBody(t, database, "alice", []string{
-		inboxDismissReplyPrefix + seed.document, inboxDismissReplyPrefix + seed.first,
-	})
-	writing := beginGateHold(t, database, "the comment this test holds")
-	writeThreadReply(t, writing.tx, seed.firstIssue, seed.first, "session", "s1", databaseNow(t, writing.tx))
-	answered := make(chan *httptest.ResponseRecorder, 1)
-	go func() { answered <- postInboxDismiss(t, handler, "alice", body) }()
-	if storetest.WaitForStatementBehind(t, database, writing.tx, inboxReadLockThreads, 10*time.Second) == 0 {
-		t.Fatal("the dismiss never queued on the caller's row, which the comment's own trigger holds")
-	}
-	writing.commit(t)
-
-	response := <-answered
-	if response.Code != http.StatusOK {
-		t.Fatalf("the dismiss answered %d %s", response.Code, response.Body.String())
-	}
-	if dismissed := dismissedBy(t, response); dismissed != 1 {
-		t.Fatalf("dismissed = %d, want the gate thread alone", dismissed)
-	}
-	if at := threadDismissal(t, database, "alice", seed.document); at == nil {
-		t.Fatal("the document thread carries no mark, so the dismiss wrote nothing at all")
-	}
-	threadLeftUnreadInTheInbox(t, handler, seed.first, threadDismissal(t, database, "alice", seed.first))
-}
-
-// Two replies whose transactions interleave with inverted starts, which is what the newest reply
-// alone cannot see. A begins first and commits last; B begins after A and commits before it, so
-// A lands under the older stamp and the thread's newest session reply by stamp is B both before
-// and after A commits. The dismissal names B, which is what the page showed, so the first test
-// the check makes passes; A is unread and is not among the replies this request is marking read,
-// so the second fails and no mark is written. The thread stays in the Inbox with A unread.
-//
-// The lock the dismiss waits at when A commits is the thread's root, which A's clearing trigger
-// holds `for key share`. B holds nothing by then - it committed before the dismiss was sent -
-// and `for key share` is the level two replies in one thread share without queueing behind each
-// other.
-//
-// With the second test gone the first passes alone and the mark is written over A; with no
-// version check at all the comparison of times buries A as well, its stamp being the older.
-func TestDismissLeavesAnAgentThreadWhoseInterleavedRepliesInvertTheirStamps(t *testing.T) {
-	seed := seedInboxRead(t)
-	handler, database := seed.handler, seed.database
-	// A: begun first, written at its own transaction's stamp, left open.
-	replying := beginGateHold(t, database, "the reply this test holds")
-	writeAgentReply(t, replying.tx, seed.agentReply, "session", "s1", databaseNow(t, replying.tx))
-	// B: begun after A and committed at once, under the newer stamp, which makes it the thread's
-	// newest reply and so the reply the page draws.
-	newest := writeAgentReply(t, database.Pool, seed.agentReply, "session", "s1", databaseNow(t, database.Pool))
-	body := dismissBody(t, database, "alice", []string{inboxDismissAgentPrefix + seed.agent})
-	drawn, _ := body["seen_replies"].(map[string]any)[inboxDismissAgentPrefix+seed.agent].(map[string]any)
-	seen, _ := drawn["newest_reply"].(string)
-	if seen != newest {
-		t.Fatalf("the dismissal names %s as the row's newest reply, want %s, the one committed second", seen, newest)
-	}
-	answered := make(chan *httptest.ResponseRecorder, 1)
-	go func() { answered <- postInboxDismiss(t, handler, "alice", body) }()
-	if storetest.WaitForStatementBehind(t, database, replying.tx, inboxDismissLockAgentRoots, 10*time.Second) == 0 {
-		t.Fatal("the dismiss never queued at the agent thread's root, which the reply in flight holds")
-	}
-	replying.commit(t)
-
-	response := <-answered
-	if response.Code != http.StatusOK {
-		t.Fatalf("the dismiss answered %d %s", response.Code, response.Body.String())
-	}
-	if dismissed := dismissedBy(t, response); dismissed != 0 {
-		t.Fatalf("dismissed = %d, want none: the thread holds a reply nobody has read", dismissed)
-	}
-	threadLeftUnreadInTheInbox(t, handler, seed.agent, agentThreadDismissal(t, database, "alice", seed.agent))
 }
 
 // INFRA-450's a13: a reply the person sends from the Dismissed view leaves the thread there, on
