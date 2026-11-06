@@ -263,7 +263,7 @@ func TestRestartAtFloorNeverDeliversWhatTheStreamHeldBeforeTheConsumer(t *testin
 	if err != nil {
 		t.Fatalf("restart at floor: %v", err)
 	}
-	if start != (SessionConsumerStart{StartSeq: last + 1, StreamID: streamIDOf(t, consumers)}) {
+	if start != (SessionConsumerStart{StartSeq: last + 1, StreamID: streamIDOf(t, consumers), AckFloor: last}) {
 		t.Fatalf("RestartAtFloor of a consumer that delivered nothing = %+v, want it kept at %d with no gap", start, last+1)
 	}
 
@@ -394,7 +394,7 @@ func TestRestartAtFloorWithNothingAwaitingAnAckKeepsTheConsumer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("restart at floor: %v", err)
 	}
-	if start != (SessionConsumerStart{StartSeq: written + 1, StreamID: streamIDOf(t, consumers)}) {
+	if start != (SessionConsumerStart{StartSeq: written + 1, StreamID: streamIDOf(t, consumers), AckFloor: written}) {
 		t.Fatalf("RestartAtFloor with nothing awaiting an ack = %+v, want the consumer kept at %d", start, written+1)
 	}
 	after, err := consumers.Info(ctx, session)
@@ -558,7 +558,7 @@ func TestRestartsAtOnceReportEachGap(t *testing.T) {
 	}
 	wg.Wait()
 	for i := range ids {
-		want := SessionConsumerStart{StartSeq: seqs[i], Gap: i < gone, StreamID: streamID}
+		want := SessionConsumerStart{StartSeq: seqs[i], Gap: i < gone, StreamID: streamID, AckFloor: seqs[i] - 1}
 		if errs[i] != nil || starts[i] != want {
 			t.Errorf("RestartAtFloor of %s = %+v, %v; want %+v", ids[i], starts[i], errs[i], want)
 		}

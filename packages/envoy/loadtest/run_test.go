@@ -243,36 +243,47 @@ func TestStepFailsWhenItsCommitRowsWereNotRead(t *testing.T) {
 	}
 }
 
-// TestTheReportCarriesTheStreamsConsumersAndRefusesAStepAboveTwiceItsSessions: the step's report
-// holds ENVOY_NOTIFICATIONS's own consumer_count at the step's start and at its end, beside the
-// sessions the step registered; a step whose end count is above twice those sessions fails and
-// names both numbers, one at the bound passes, and a step whose read failed is neither failed on
-// a count it does not have nor read as a stream that held none.
-func TestTheReportCarriesTheStreamsConsumersAndRefusesAStepAboveTwiceItsSessions(t *testing.T) {
+// TestTheReportCarriesTheStreamsConsumersAndRefusesAStepThatGrewAboveTwiceItsSessions: the step's
+// report holds ENVOY_NOTIFICATIONS's own consumer_count at the step's start and at its end,
+// beside the sessions the step registered; a step whose end count stands more than twice those
+// sessions above its start count fails and names the difference, the bound and the sessions, one
+// at the bound passes, a step whose start or end read failed is neither judged on a difference
+// the run cannot take nor read as a stream that held none, and the standing consumers a step
+// inherits never refuse it, however few sessions it registered.
+func TestTheReportCarriesTheStreamsConsumersAndRefusesAStepThatGrewAboveTwiceItsSessions(t *testing.T) {
 	count := func(n int) *int { return &n }
-	report := func(name string, c streamConsumers) summary {
-		return summary{Config: summaryConfig{Step: name, Sessions: 1000},
-			Sessions: sessionsSummary{Registered: 1000, StreamConsumers: c}}
+	report := func(name string, registered int, c streamConsumers) summary {
+		return summary{Config: summaryConfig{Step: name, Sessions: registered},
+			Sessions: sessionsSummary{Registered: registered, StreamConsumers: c}}
 	}
-	churn := report("churn", streamConsumers{Start: count(2), End: count(2001)})
+	churn := report("churn", 1000, streamConsumers{Start: count(2), End: count(2003)})
 	err := stepFailure(churn)
 	if err == nil {
-		t.Fatal("a step that ended with 2,001 consumers against the 1,000 sessions it registered does not fail")
+		t.Fatal("a step that gained 2,001 consumers against the 1,000 sessions it registered does not fail")
 	}
-	for _, want := range []string{bus.Stream, "2001", "2000", "1000", "sessions.stream_consumers.end"} {
+	for _, want := range []string{bus.Stream, "2001", "2000", "1000", "sessions.stream_consumers"} {
 		if !strings.Contains(err.Error(), want) {
-			t.Errorf("the failure %q does not name %q: the count, the bound it passed, the sessions and the key that holds it", err, want)
+			t.Errorf("the failure %q does not name %q: the difference, the bound it passed, the sessions and the key that holds the counts", err, want)
 		}
 	}
-	if err := stepFailure(report("fleet", streamConsumers{Start: count(2), End: count(2000)})); err != nil {
-		t.Errorf("a step that ended at twice the sessions it registered fails: %v", err)
+	if err := stepFailure(report("fleet", 1000, streamConsumers{Start: count(2), End: count(2002)})); err != nil {
+		t.Errorf("a step that gained twice the sessions it registered fails: %v", err)
+	}
+	// The listener's durable and Dispatch's consumer stand through every step: the old rule,
+	// which judged the end count alone, refused this healthy one-session step at 3 against 2.
+	if err := stepFailure(report("one", 1, streamConsumers{Start: count(2), End: count(3)})); err != nil {
+		t.Errorf("a step of one session fails on the consumers that stood before it: %v", err)
 	}
 
-	unread := report("unread", streamConsumers{Start: count(2), EndError: "stream info ENVOY_NOTIFICATIONS: nats: timeout"})
+	unread := report("unread", 1000, streamConsumers{Start: count(2), EndError: "stream info ENVOY_NOTIFICATIONS: nats: timeout"})
 	if err := stepFailure(unread); err != nil {
 		t.Errorf("a step whose end read failed fails on a count the run does not have: %v", err)
 	}
-	none := summary{Config: summaryConfig{Step: "none"}, Sessions: sessionsSummary{StreamConsumers: streamConsumers{End: count(3)}}}
+	unstarted := report("unstarted", 1000, streamConsumers{StartError: "stream info ENVOY_NOTIFICATIONS: nats: timeout", End: count(9000)})
+	if err := stepFailure(unstarted); err != nil {
+		t.Errorf("a step whose start read failed is judged on a difference the run cannot take: %v", err)
+	}
+	none := summary{Config: summaryConfig{Step: "none"}, Sessions: sessionsSummary{StreamConsumers: streamConsumers{Start: count(2), End: count(3)}}}
 	if err := stepFailure(none); err != nil {
 		t.Errorf("a step that registered no session, and so gives the rule no denominator, fails: %v", err)
 	}
@@ -280,7 +291,7 @@ func TestTheReportCarriesTheStreamsConsumersAndRefusesAStepAboveTwiceItsSessions
 	text := section(renderTables([]stepData{{name: "churn", sum: churn}, {name: "unread", sum: unread}}), "Session delivery, listener and NATS")
 	// The stream's own consumers, before the server-wide /jsz count in the next column.
 	const streamConsumersCol = 10
-	if cells := rowCells(text, "churn"); cells == nil || cells[streamConsumersCol] != "2 / 2,001 (1,000)" {
+	if cells := rowCells(text, "churn"); cells == nil || cells[streamConsumersCol] != "2 / 2,003 (1,000)" {
 		t.Errorf("the churning step's row holds no start and end count beside its sessions: %q\n%s", cells, text)
 	}
 	if cells := rowCells(text, "unread"); cells == nil || cells[streamConsumersCol] != "2 / ? (1,000)" {

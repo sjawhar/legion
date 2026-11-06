@@ -760,15 +760,17 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 // delivered to. The unconditional delete removes the consumer every time, the conditional one
 // only for the entry it deleted; a registration that stayed keeps its consumer, since its session
 // is still there (deleteSessionConsumer). A session that registers again while this route deletes
-// its consumer keeps one too: the delete holds that session's lock and reads its record again
-// under it, so a record the registration wrote restores the consumer
-// (sessionDelivery.deleteConsumer).
+// its consumer keeps one too: the delete reads that session's record again from the bucket once
+// it has deleted, so a record the registration wrote restores the consumer, and a registration
+// on another listener, which this delete's lock does not reach, reads the consumer again after
+// its own entry write and creates it there (sessionDelivery.deleteConsumer,
+// sessionDelivery.confirmRegistered).
 //
 // A request presenting a broker access token may remove only the registration of the session
 // that token names, and is refused 403 for any other (sessionNotBound): this route acts as the
 // session it names. The Claude Code /clear handoff still deregisters its predecessor, since it
 // does so while it is still that session.
-func deleteSessionHandler(sessions *session.SessionRegistry, consumers *sessionDelivery, logger *logging.Logger) http.HandlerFunc {
+func deleteSessionHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -796,22 +798,22 @@ func deleteSessionHandler(sessions *session.SessionRegistry, consumers *sessionD
 		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 		defer cancel()
 		if conditions == (session.DeleteConditions{}) {
-			if err := sessions.Delete(ctx, sessionID); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
+			if err := d.sessions.Delete(ctx, sessionID); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
 				writeStoreError(ctx, w, err, http.StatusInternalServerError)
 				return
 			}
-			deleteSessionConsumer(ctx, consumers, sessionID, logger)
+			deleteSessionConsumer(ctx, d, sessionID, logger)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		outcome, err := sessions.DeleteIf(ctx, sessionID, conditions)
+		outcome, err := d.sessions.DeleteIf(ctx, sessionID, conditions)
 		if err != nil {
 			writeStoreError(ctx, w, err, http.StatusInternalServerError)
 			return
 		}
 		switch outcome {
 		case session.EntryDeleted:
-			deleteSessionConsumer(ctx, consumers, sessionID, logger)
+			deleteSessionConsumer(ctx, d, sessionID, logger)
 			writeJSON(w, http.StatusOK, deleteSessionResponse{Deleted: true})
 		case session.EntryKeptForAnotherInstance:
 			writeJSON(w, http.StatusOK, deleteSessionResponse{
@@ -850,8 +852,8 @@ func deleteSessionHandler(sessions *session.SessionRegistry, consumers *sessionD
 // the session is deleted and has nothing to retry, and the consumer's own inactive threshold is
 // the backstop that takes what this call left. The failure is logged with the session id and the
 // error, which is what an operator counting the stream's consumers needs.
-func deleteSessionConsumer(ctx context.Context, consumers *sessionDelivery, sessionID string, logger *logging.Logger) {
-	if err := consumers.deleteConsumer(context.WithoutCancel(ctx), sessionID); err != nil {
+func deleteSessionConsumer(ctx context.Context, d *listenerDeps, sessionID string, logger *logging.Logger) {
+	if err := d.consumers.deleteConsumer(context.WithoutCancel(ctx), d, sessionID); err != nil {
 		logger.Warn("the session delete removed the registration and could not delete its session consumer",
 			slog.String("session_id", sessionID),
 			slog.String("error", err.Error()),
@@ -1865,11 +1867,35 @@ func splitUncapturedTopics(requested []string) ([]string, map[string]struct{}) {
 const registrationPlanAttempts = 3
 
 // registeredSession is what a registration left behind: the interest row stored, the plan that
-// decided it — whose Roles the warnings are read against — and the session's consumer.
+// decided it — whose Roles the warnings are read against — the session's consumer, and what the
+// write of the session's entry under the same lock found (listenerDeps.registerPass).
 type registeredSession struct {
 	row      store.Interest
 	plan     store.InterestPlan
 	delivery sessionDeliveryOutcome
+	// epochChanged says the entry this registration replaced recorded no consumer delivery at
+	// the same epoch: the plugin connected anew, so the relay restarts the session's consumer
+	// before it relays again (sessionRelay.registered). It is read under the session's lock,
+	// from the entry the write below replaces.
+	epochChanged bool
+	// entryErr is the session entry's write failing, which the handler answers in the session
+	// registry's own words and not the interest row's (subscribeHandler). The row is stored
+	// whatever it holds: the write that failed is the one after it.
+	entryErr error
+}
+
+// registrationPass is what one pass of a registration did (listenerDeps.registerPass).
+type registrationPass struct {
+	// registered is what the pass left behind, and the registration's own answer on the pass
+	// that answered.
+	registered registeredSession
+	// answered is set on the pass whose stored row holds the topics it filtered the session's
+	// consumer on: that pass wrote the session's entry too, and the registration is answered
+	// from it. Every other pass plans and filters again.
+	answered bool
+	// gap is the gap the passes so far have found, which the answer carries whichever pass
+	// answers.
+	gap bool
 }
 
 // registerSession plans the session's interest row, filters its consumer on that plan and writes
@@ -1885,15 +1911,15 @@ type registeredSession struct {
 //
 // Nothing a pass answers carries into the next, save the gap: a pass that can give no consumer
 // answers none, and that answer stands (sessionDelivery.register). The gap is the one thing this
-// loop keeps of its own, in a flag, because only the pass that creates the consumer is told its
-// start fell below the stream's first sequence (bus.SessionConsumers.Ensure): a pass that is
-// given no consumer answers nothing at all, and a pass that finds the consumer already made
-// answers a gap of false, every answer carrying the flag (sessionDelivery.consumerFor). The flag
-// starts false, turns on at the first pass whose answer reports a gap and never off again, and
-// the answer this registration returns carries it. It holds within this registration's passes
-// alone: the session's next registration finds the consumer there and is told no gap, so this
-// answer is the only one telling the session that messages it would have been delivered are
-// gone.
+// loop keeps of its own, in a flag it hands each pass, because only the pass that creates the
+// consumer is told its start fell below the stream's first sequence
+// (bus.SessionConsumers.Ensure): a pass that is given no consumer answers nothing at all, and a
+// pass that finds the consumer already made answers a gap of false, every answer carrying the
+// flag (sessionDelivery.consumerFor). The flag starts false, turns on at the first pass whose
+// answer reports a gap and never off again, and the answer this registration returns carries it.
+// It holds within this registration's passes alone: the session's next registration finds the
+// consumer there and is told no gap, so this answer is the only one telling the session that
+// messages it would have been delivered are gone.
 //
 // A registration this listener can give no consumer is refused, which the caller answers by
 // name: a session is delivered to through its own consumer alone, so such a registration must
@@ -1904,21 +1930,10 @@ type registeredSession struct {
 // is the consumer's to deliver. That refusal is why the consumer call comes before the row and
 // not after it: a row written first would outlive a registration the consumer call then refuses.
 //
-// Each pass holds the session's consumer lock from the filter it sets to the write of the plan
-// that filter was set from, and the pass that answers holds it on, for the caller to release
-// once the session's entry is written: sessionDelivery.register returns the lock held, as the
-// func that releases it (noUnlock for a registration it refused before taking it), this loop
-// releases that func on each path out of a pass it does not answer from, and the caller releases
-// what it is given either way (subscribeHandler). The lock is no re-entrant one, so each pass
-// takes it once and it is released once. A relay restart rebuilds the filter from the stored row
-// (sessionRelays.restart), so one landing between a pass's filter and its row would set the
-// filter back to a row without the topic this registration is answered 200 for, and every
-// message published on that topic until the session's next heartbeat would be skipped: the row
-// write then matches its plan, so the loop ends content and nothing restores the message. A
-// consumer delete runs under the same lock and re-reads the session's record under it
-// (sessionDelivery.deleteConsumer), so one landing between a pass's consumer and the entry that
-// says the session is registered would leave a session answered 200 with no consumer. Under the
-// lock both run wholly before or wholly after the registration.
+// Each pass runs under the session's consumer lock, and the pass that answers writes the
+// session's entry and confirms its consumer under it too (registerPass). The error returned here
+// is the plan's or the interest row's; the entry's own failure comes back on
+// registeredSession.entryErr.
 //
 // ctx bounds the store work (sendRequestBudget) and registerCtx the consumer calls, which take
 // the request's own context as they always have.
@@ -1928,8 +1943,7 @@ func (d *listenerDeps) registerSession(
 	body subscribeBody,
 	planned []string,
 	logger *logging.Logger,
-) (registeredSession, *deliveryRefusal, func(), error) {
-	var registered registeredSession
+) (registeredSession, *deliveryRefusal, error) {
 	// The gap any pass of this registration found, which the answer below carries whichever pass
 	// answers.
 	gap := false
@@ -1942,36 +1956,16 @@ func (d *listenerDeps) registerSession(
 			plan, err = d.registry.PlanInterestAfterConflict(ctx, body.SessionID, planned)
 		}
 		if err != nil {
-			return registeredSession{}, nil, noUnlock, err
+			return registeredSession{}, nil, err
 		}
-		registered.plan = plan
-		pass, refusal, unlock := d.consumers.register(registerCtx, body, plan.Topics)
+		pass, refusal, err := d.registerPass(ctx, registerCtx, machineID, body, plan, gap)
 		if refusal != nil {
-			unlock()
-			return registeredSession{}, refusal, noUnlock, nil
+			return registeredSession{}, refusal, nil
 		}
-		if pass.answer != nil && *pass.answer.Gap {
-			gap = true
-		}
-		registered.delivery = pass
-		row, err := d.registry.UpsertPlanned(ctx, store.Interest{
-			SessionID: body.SessionID,
-			MachineID: machineID,
-			Dir:       body.Dir,
-		}, plan)
-		if err == nil {
-			registered.row = row
-			if slices.Equal(row.Topics, plan.Topics) {
-				if registered.delivery.answer != nil {
-					registered.delivery.answer.Gap = &gap
-				}
-				// The lock stays held: the caller releases it once it has written the session
-				// entry this pass is answered with.
-				return registered, nil, unlock, nil
-			}
-		}
-		unlock()
+		gap = pass.gap
 		switch {
+		case pass.answered:
+			return pass.registered, nil, nil
 		case err == nil:
 			logger.Warn("listener plans the session's interest again: the row it stored is not the one it filtered on",
 				slog.String("session_id", body.SessionID), slog.Int("plans", attempt))
@@ -1979,11 +1973,96 @@ func (d *listenerDeps) registerSession(
 			logger.Warn("listener plans the session's interest again: another writer stored the row",
 				slog.String("session_id", body.SessionID), slog.Int("plans", attempt))
 		default:
-			return registeredSession{}, nil, noUnlock, err
+			return registeredSession{}, nil, err
 		}
 	}
-	return registeredSession{}, nil, noUnlock, fmt.Errorf("write %s's interest record: %w after %d plans",
+	return registeredSession{}, nil, fmt.Errorf("write %s's interest record: %w after %d plans",
 		body.SessionID, store.ErrInterestPlanConflict, registrationPlanAttempts)
+}
+
+// registerPass is one pass of a registration: it filters the session's consumer on plan, the
+// topics the interest row is about to hold, writes that row, and on the pass that answers - the
+// one whose stored row holds the topics it filtered on - writes the session's entry and confirms
+// the consumer that entry promises.
+//
+// The session's consumer lock is taken by the consumer call that sets the filter
+// (sessionDelivery.register returns it held, as the func that releases it) and released when
+// this function returns, on every path out of it and on a panic with it. It is no re-entrant
+// lock, so the pass takes it once and releases it once. A refusal is decided before it is taken
+// and hands back noUnlock, which releases nothing.
+//
+// What the lock closes is the window from that filter to the row and the entry written under it.
+// A relay restart rebuilds the filter from the stored row (sessionRelays.restart), so one
+// landing between the filter and the row would set the filter back to a row without the topic
+// this registration is answered 200 for, and every message published on that topic until the
+// session's next heartbeat would be skipped: the row write then matches its plan, so the loop
+// above ends content and nothing restores the message. A consumer delete made on this listener
+// runs under the same lock and re-reads the session's record under it
+// (sessionDelivery.deleteConsumer), so one landing between the consumer call and the entry that
+// says the session is registered would leave a session answered 200 with no consumer. Under the
+// lock both run wholly before this pass or wholly after it. A delete made on another listener
+// takes no lock of this process, and the bucket orders that one: it reads the record after its
+// own delete, and this pass reads the consumer after its entry write, so whichever of the two
+// acts last repairs.
+//
+// Nothing the handler does with what comes back - the warnings it reads from the plan, the relay
+// it tells, the answer it writes - is under the lock: a reader of this session's row and
+// consumer waits on none of it (subscribeHandler).
+//
+// gap is the gap the passes before this one found; the answer this pass may become carries it
+// together with its own (registerSession).
+func (d *listenerDeps) registerPass(
+	ctx, registerCtx context.Context,
+	machineID string,
+	body subscribeBody,
+	plan store.InterestPlan,
+	gap bool,
+) (registrationPass, *deliveryRefusal, error) {
+	outcome, refusal, unlock := d.consumers.register(registerCtx, body, plan.Topics)
+	defer unlock()
+	if refusal != nil {
+		return registrationPass{}, refusal, nil
+	}
+	if outcome.answer != nil && *outcome.answer.Gap {
+		gap = true
+	}
+	pass := registrationPass{registered: registeredSession{plan: plan, delivery: outcome}, gap: gap}
+	row, err := d.registry.UpsertPlanned(ctx, store.Interest{
+		SessionID: body.SessionID,
+		MachineID: machineID,
+		Dir:       body.Dir,
+	}, plan)
+	if err != nil {
+		return pass, nil, err
+	}
+	pass.registered.row = row
+	if !slices.Equal(row.Topics, plan.Topics) {
+		return pass, nil, nil
+	}
+	pass.answered = true
+	if outcome.answer != nil {
+		outcome.answer.Gap = &gap
+	}
+	// Every registration answered writes the session's entry: it holds the session's consumer
+	// and is relayed (sessionDelivery.register), which is the only way a message reaches a
+	// session. The entry is what tells every other reader that the session is registered, and
+	// the consumer read after it is this registration's side of the invariant that a session
+	// answered 200 with consumer delivery holds a consumer, whatever delete raced it, on
+	// whatever listener: a delete on another listener whose record read came before this write
+	// found no record to restore from, and this read finds the consumer it took gone and creates
+	// it again (sessionDelivery.confirmRegistered).
+	if outcome.relayed() {
+		previous, err := d.sessions.Get(body.SessionID)
+		pass.registered.epochChanged = err != nil || previous.Delivery != session.DeliveryConsumer || previous.Epoch != outcome.epoch
+	}
+	pass.registered.entryErr = d.sessions.PutWithin(ctx, body.SessionID, sessionEntryFromSubscribe(body, machineID, outcome))
+	if pass.registered.entryErr == nil && outcome.relayed() {
+		// The write stands whatever the client does with the answer, so the consumer this
+		// entry promises is confirmed on a context the client's own cannot cancel, as the
+		// consumer delete of a clean stop is (deleteSessionConsumer).
+		d.consumers.confirmRegistered(context.WithoutCancel(registerCtx), d, body.SessionID, outcome.ackFloor)
+	}
+	return pass, nil, nil
 }
 
 // subscribeHandler answers POST /v1/interests/subscribe. Its store work - the interest record's
@@ -2046,29 +2125,14 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 		// loop below names each in its warning, after the private rule has had its say. The
 		// merge itself drops a private-subject topic from the plan (store.MergedTopics).
 		planned, uncaptured := splitUncapturedTopics(requested)
-		registered, refusal, unlock, err := d.registerSession(ctx, r.Context(), machineID, body, planned, logger)
-		// The session's consumer lock, held from the consumer call through the entry write
-		// below, is released exactly once however this handler ends: a release left undone by a
-		// panic between here and that write would hold the lock for the process's life, and the
-		// session's own registrations and the delete of its consumer both wait on it.
-		released := false
-		release := func() {
-			if released {
-				return
-			}
-			released = true
-			unlock()
-		}
-		defer release()
+		registered, refusal, err := d.registerSession(ctx, r.Context(), machineID, body, planned, logger)
 		if refusal != nil {
-			release()
 			logger.Warn("listener refused a registration it can give no session consumer",
 				slog.String("session_id", body.SessionID), slog.String("reason", refusal.Reason), slog.Int("status", refusal.status))
 			writeJSON(w, refusal.status, refusal)
 			return
 		}
 		if err != nil {
-			release()
 			logger.Warn("listener could not register the session's interest",
 				slog.String("session_id", body.SessionID),
 				slog.Any("topics", body.Topics),
@@ -2124,26 +2188,10 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			logger.Warn("listener subscribe left topics out of the registration",
 				slog.String("session_id", body.SessionID), slog.Any("dropped", warnings))
 		}
-		// Every registration answered writes the session's entry: it holds the session's
-		// consumer and is relayed (sessionDelivery.register), which is the only way a message
-		// reaches a session.
-		//
-		// The session's consumer lock is held from the consumer call that set this
-		// registration's filter through this write, and released the moment the write answers
-		// (registerSession). The entry is what tells every other reader that the session is
-		// registered, and a consumer delete reads the record under that same lock once it has
-		// deleted (sessionDelivery.deleteConsumer): so a delete runs wholly before this
-		// registration, whose consumer call then creates the consumer again, or wholly after it,
-		// and then reads this entry and restores the consumer it took. The session is answered
-		// 200 with consumer delivery only where it holds a consumer, whatever delete raced it.
-		epochChanged := false
-		if delivery.relayed() {
-			previous, err := d.sessions.Get(body.SessionID)
-			epochChanged = err != nil || previous.Delivery != session.DeliveryConsumer || previous.Epoch != delivery.epoch
-		}
-		err = d.sessions.PutWithin(ctx, body.SessionID, sessionEntryFromSubscribe(body, machineID, delivery))
-		release()
-		if err != nil {
+		// The registration wrote the session's entry under the lock it held, and a write the
+		// session registry did not answer is this registration's failure: the interest row is
+		// stored, and nothing tells another reader the session is here (listenerDeps.registerPass).
+		if err := registered.entryErr; err != nil {
 			logger.Error("listener session registry put failed", slog.String("session_id", body.SessionID), slog.String("error", err.Error()))
 			writeStoreError(ctx, w, fmt.Errorf("session registry unavailable: %w", err), http.StatusServiceUnavailable)
 			return
@@ -2151,7 +2199,7 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 		if delivery.relayed() {
 			// The mark tells it which of its runs restarted after this registration: those
 			// need no restart for its epoch (sessionRelays.apply).
-			d.consumers.relay.registered(body.SessionID, epochChanged, delivery.heard)
+			d.consumers.relay.registered(body.SessionID, registered.epochChanged, delivery.heard)
 		}
 		warningCtx, cancelWarnings := context.WithTimeout(ctx, unwiredRepositoryWarningTimeout)
 		defer cancelWarnings()
@@ -2181,10 +2229,6 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 // registerV1Routes builds the /v1 routes over the listener's dependencies, which main hands over
 // only once every store is open, so no handler can see a store that is not.
 func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logger *logging.Logger) {
-	// These routes are what lets a registration race a consumer delete, so they are where the
-	// delete learns the stores it reads the session's record and topics from
-	// (sessionDelivery.deleteConsumer): a delete made before /v1 opens is raced by none.
-	d.consumers.attachStores(d)
 	v1.HandleFunc("/v1/interests/subscribe", subscribeHandler(d, machineID, logger))
 	v1.HandleFunc("/v1/interests/unsubscribe", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -2233,7 +2277,7 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 		d.consumers.refollow(ctx, d, sessionID)
 	}, logger))
 	v1.Handle("/v1/sessions", sessionsHandler(d.registry, d.sessions))
-	v1.Handle("/v1/sessions/", deleteSessionHandler(d.sessions, d.consumers, logger))
+	v1.Handle("/v1/sessions/", deleteSessionHandler(d, logger))
 	v1.HandleFunc("/v1/messages/send", sendHandler(d, logger))
 	v1.HandleFunc("/v1/messages/publish", publishHandler(d, logger))
 	v1.HandleFunc("/v1", func(w http.ResponseWriter, r *http.Request) {

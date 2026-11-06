@@ -487,7 +487,7 @@ func sessionDeliveryTable(md *markdown, steps []stepData) {
 			streamConsumersCell(s.sum.Sessions), consumers, pulls, api)
 	}
 	md.line("\nA relay frame is a session's receipt, and the delivery latency from publish is its receipt time minus the stream's store time of the event (the frame's `Envoy-Stored-At`). Lost is the expected issue-topic receipts minus those got. A step with any session without a consumer measured a path that delivers nothing to it.")
-	md.line("\nThe two consumer columns count different things. `ENVOY_NOTIFICATIONS consumers start / end (sessions registered)` is that stream's own `consumer_count`, read before the sessions register and after the load, beside the sessions the step registered; `?` is a count the run did not get, never a measured 0. The step fails when the end count is above twice those sessions. `JetStream consumers max (server-wide)` is the `/jsz` count of every consumer the server holds, the key-value buckets' watchers among them.")
+	md.line("\nThe two consumer columns count different things. `ENVOY_NOTIFICATIONS consumers start / end (sessions registered)` is that stream's own `consumer_count`, read before the sessions register and after the load, beside the sessions the step registered; `?` is a count the run did not get, never a measured 0. The step fails when the end count stands more than twice those sessions above the start count. `JetStream consumers max (server-wide)` is the `/jsz` count of every consumer the server holds, the key-value buckets' watchers among them.")
 	commitsUnreadNote(md, unread, "the delivery latencies and the receipts lost", "show")
 }
 

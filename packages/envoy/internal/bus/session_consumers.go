@@ -185,6 +185,13 @@ type SessionConsumerStart struct {
 	// StreamID is the stream's identity (StreamIDMetadataKey) as the call read it, when it created
 	// the consumer; "" when the stream carries none.
 	StreamID string
+	// AckFloor is the stream sequence up to which the consumer had every message it delivered
+	// acked when the call read it (ackFloor). For a consumer the call created it is StartSeq-1:
+	// such a consumer has delivered nothing. For one the call found it is the consumer's own
+	// floor, which is at or above StartSeq-1 and says nothing about where the consumer was
+	// created: a session that has acked for days is recreated from AckFloor+1 and not from
+	// StartSeq (the listener restores a consumer a delete took, sessionDelivery.restoreRegistered).
+	AckFloor uint64
 }
 
 // Ensure makes sessionID's consumer carry the session consumer settings and the filters subjects
@@ -253,7 +260,7 @@ func (s *SessionConsumers) Ensure(ctx context.Context, sessionID string, subject
 		// failed never reached the server, or its create did. Its start is the sequence it was
 		// created at, which the caller records for the durable path (SessionConsumerStart).
 		s.setPendingStart(name, 0)
-		return SessionConsumerStart{StartSeq: info.Config.OptStartSeq}, s.update(ctx, name, info.Config, filters)
+		return SessionConsumerStart{StartSeq: info.Config.OptStartSeq, AckFloor: ackFloor(info)}, s.update(ctx, name, info.Config, filters)
 	}
 }
 
@@ -355,7 +362,7 @@ func (s *SessionConsumers) keepAtFloor(ctx context.Context, name string, info *j
 	}
 	s.setPendingStart(name, 0)
 	startSeq := ackFloor(info) + 1
-	return SessionConsumerStart{StartSeq: startSeq, Gap: startSeq < state.firstSeq, StreamID: state.id}, nil
+	return SessionConsumerStart{StartSeq: startSeq, Gap: startSeq < state.firstSeq, StreamID: state.id, AckFloor: startSeq - 1}, nil
 }
 
 // pendingStart is consumer name's pending start (RestartAtFloor), and whether it has one.
@@ -407,6 +414,22 @@ func (s *SessionConsumers) Info(ctx context.Context, sessionID string) (*jetstre
 		return nil, err
 	}
 	return s.info(ctx, name)
+}
+
+// AckFloor is the stream sequence up to which sessionID's consumer has every message it delivered
+// acked (ackFloor), as the server reports the consumer now. It is ErrSessionConsumerNotFound when
+// the stream holds no consumer for the session: a consumer that is gone has no floor to read, and
+// the caller holds whatever position it recorded of its own.
+//
+// The caller reads it under the session's lock and before a delete, since the floor it reads
+// after the delete is no floor at all: it is the sequence a consumer the delete took away must
+// come back at, so that a session is not offered again what it has already acked.
+func (s *SessionConsumers) AckFloor(ctx context.Context, sessionID string) (uint64, error) {
+	info, err := s.Info(ctx, sessionID)
+	if err != nil {
+		return 0, err
+	}
+	return ackFloor(info), nil
 }
 
 // Delete deletes sessionID's consumer, so a session's consumer dies with the session that was
@@ -576,7 +599,7 @@ func (s *SessionConsumers) create(ctx context.Context, name string, filters []st
 	if _, err := s.upsert(ctx, name, config, "create"); err != nil {
 		return SessionConsumerStart{}, err
 	}
-	return SessionConsumerStart{Created: true, StartSeq: startSeq, Gap: startSeq < state.firstSeq, StreamID: state.id}, nil
+	return SessionConsumerStart{Created: true, StartSeq: startSeq, Gap: startSeq < state.firstSeq, StreamID: state.id, AckFloor: startSeq - 1}, nil
 }
 
 // consumerAPI is the JetStream API subject of operation op on consumer name of the stream.

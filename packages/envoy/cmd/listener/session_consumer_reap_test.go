@@ -29,6 +29,7 @@ import (
 type sessionConsumerReapRig struct {
 	sessions  *session.SessionRegistry
 	delivery  *sessionDelivery
+	deps      *listenerDeps
 	consumers *bus.SessionConsumers
 	mux       *http.ServeMux
 	now       *stateClock
@@ -74,8 +75,9 @@ func newSessionConsumerReapRig(t *testing.T) *sessionConsumerReapRig {
 	}
 	t.Cleanup(consumers.Close)
 	mux := http.NewServeMux()
-	registerV1Routes(mux, &listenerDeps{client: client, registry: registry, sessions: sessions, consumers: delivery}, "test-machine", logger)
-	return &sessionConsumerReapRig{sessions: sessions, delivery: delivery, consumers: consumers, mux: mux, now: now}
+	deps := &listenerDeps{client: client, registry: registry, sessions: sessions, consumers: delivery}
+	registerV1Routes(mux, deps, "test-machine", logger)
+	return &sessionConsumerReapRig{sessions: sessions, delivery: delivery, deps: deps, consumers: consumers, mux: mux, now: now}
 }
 
 // register posts sessionID's registration as its plugin's heartbeat does, so the listener creates
@@ -130,13 +132,18 @@ func (rig *sessionConsumerReapRig) requireConsumer(t *testing.T, sessionID, when
 	}
 }
 
-// reap runs one pass of the session reaper wired as main wires it (main.go's session.SessionReaper
-// takes the listener's own session consumers) and returns the records it deleted.
+// reap runs one pass of the session reaper wired as main wires it (main.go hands the pass a
+// delete over the listener's own session consumers and stores) and returns the records it
+// deleted.
 func (rig *sessionConsumerReapRig) reap(t *testing.T) int {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	return rig.sessions.ReapSessions(ctx, session.SessionReaper{DeleteConsumer: rig.delivery.deleteConsumer})
+	return rig.sessions.ReapSessions(ctx, session.SessionReaper{
+		DeleteConsumer: func(ctx context.Context, sessionID string) error {
+			return rig.delivery.deleteConsumer(ctx, rig.deps, sessionID)
+		},
+	})
 }
 
 // A session's consumer dies with its session: the pass that deletes the record of a session past

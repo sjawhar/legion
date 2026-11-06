@@ -7,9 +7,13 @@ body: |-
   deployment has rather than for each it has ever relayed. A session that stays keeps its consumer
   and the position it holds: one inside the gone horizon, live or stalled, and one whose
   conditional stop was refused. A registration that races a delete is answered with a consumer
-  either way, the delete and the registration holding the session's own lock, and a delete that
-  lost the race recreates the consumer at the start that registration was answered with. The
-  consumers' 72-hour inactive threshold stays the backstop for a consumer no delete names, and a
+  either way, whichever listener each of them runs on: the delete and the registration each make
+  their consumer call first and then read what the other wrote, so whichever acts last repairs,
+  the delete recreating the consumer of a session whose record it finds in the bucket and the
+  registration recreating the consumer its own read finds gone. A consumer that comes back starts
+  at the later of the start its registration was answered with and the sequence after the ack
+  floor read of it, so nothing a session has acknowledged is offered again. The consumers'
+  72-hour inactive threshold stays the backstop for a consumer no delete names, and a
   delete that failed is logged and left to it.
 custom:
     Issue: pr2603

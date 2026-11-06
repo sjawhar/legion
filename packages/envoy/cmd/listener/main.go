@@ -1344,7 +1344,13 @@ func main() {
 			Client:              client,
 			Reaped:              sessionsReaped,
 			StoredAfterLastSeen: sessionStoredAfterLastSeen,
-			DeleteConsumer:      delivery.deleteConsumer,
+			// The pass runs in a loop of its own, and the delete reads the session's record
+			// and topics again from the stores /v1 is served from, so a session that
+			// registered between the pass's decision and its delete keeps the consumer that
+			// registration was answered with (sessionDelivery.deleteConsumer).
+			DeleteConsumer: func(ctx context.Context, sessionID string) error {
+				return delivery.deleteConsumer(ctx, ready, sessionID)
+			},
 		}),
 	}
 

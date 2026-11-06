@@ -827,7 +827,7 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 
 // stepFailure is why the step failed, nil when it did not: a stack process exited during it
 // (errStackExits), the run's commit rows were not read (events.commits_error), so its committed,
-// receipt and delivery columns measure nothing, or the stream ended the step with more consumers
+// receipt and delivery columns measure nothing, or the stream gained more consumers over the step
 // than its sessions account for (errStreamConsumers). The other reads of the run's database, the
 // lock probe, the ungranted-lock sampler, the 5 s sampler's pg_stat_activity, the transaction-id
 // probe and the Postgres version, feed none of those columns: a failure of one marks its own
@@ -862,44 +862,49 @@ func errStackExits(exits []stackExit) error {
 	return fmt.Errorf("%s; this row does not measure the load", strings.Join(gone, ", "))
 }
 
-// consumersPerSession is how many consumers ENVOY_NOTIFICATIONS may hold at a step's end for each
+// consumersPerSession is how many consumers ENVOY_NOTIFICATIONS may gain over a step for each
 // session the step registered.
 const consumersPerSession = 2
 
-// errStreamConsumers is the step's failure when ENVOY_NOTIFICATIONS held more than
-// consumersPerSession consumers for each session the step registered at the step's end, nil
-// otherwise.
+// errStreamConsumers is the step's failure when ENVOY_NOTIFICATIONS gained more than
+// consumersPerSession consumers for each session the step registered, nil otherwise.
 //
-// The rule counts the sessions this step registered, over the step itself, and those are the
-// sessions within the gone horizon (session.GoneHorizon, one hour): a step runs for minutes, so
-// every session it registered is inside the horizon when it ends, and a step starts on a stream
-// that holds no consumer of an earlier one, since the reset before it restarts NATS on a fresh
-// JetStream store (stack.sh reset) or removes the stream (cluster.sh). The start count is what
-// shows that: a step run without a reset inherits the earlier consumers, and its start count
-// names them.
+// The judgement is on the difference, the end count minus the start count, and that difference
+// counts the consumers that exist because of this step. It is the number the step owns: the
+// start count is the population the step inherited, the listener's durable and Dispatch's among
+// it, and `stack.sh loadgen run` resets nothing (README.md, "Event kinds"), so an earlier run's
+// consumers stand in it too. The end count holds that population as well as the step's own work,
+// so judging it holds a step to a server it did not make, and refuses a healthy step of one or
+// two sessions, whose standing consumers alone reach the bound.
+//
+// The denominator is the sessions this step registered, and those are the sessions within the
+// gone horizon (session.GoneHorizon, one hour): a step runs for minutes, so every session it
+// registered is inside the horizon when it ends.
 //
 // A session's consumer goes with its record, at a clean stop and at the session reaper's pass, so
 // the stream's population follows the fleet rather than its churn. The step's own sessions stop
-// registering when the step ends while their consumers stand until that pass, so the count at the
-// end holds the step's sessions, the listener's durable and Dispatch's, and the consumers of
-// sessions that stopped inside the step. Twice the sessions leaves room for those and still
-// refuses a step whose consumers follow the churn: before this change production carried 6,100 to
-// 6,450 consumers over 72 hours against about 650 live sessions, at 75 to 80 consumer births an
-// hour (dispatch://INFRA-777), about ten times its fleet.
+// registering when the step ends while their consumers stand until that pass, so the difference
+// holds the step's sessions and the consumers of sessions that stopped inside the step. Twice the
+// sessions leaves room for those and still refuses a step whose consumers follow the churn:
+// before this change production carried 6,100 to 6,450 consumers over 72 hours against about 650
+// live sessions, at 75 to 80 consumer births an hour (dispatch://INFRA-777), about ten times its
+// fleet.
 //
-// A step that registered no session has no denominator, and a step whose end read failed has no
-// count: neither is refused, since the rule refuses nothing on a number it does not have.
+// A step that registered no session has no denominator, and a step whose start or end read failed
+// has no difference: none of them is refused, since the rule refuses nothing on a number it does
+// not have.
 func errStreamConsumers(s sessionsSummary) error {
-	end := s.StreamConsumers.End
-	if end == nil || s.Registered == 0 {
+	start, end := s.StreamConsumers.Start, s.StreamConsumers.End
+	if start == nil || end == nil || s.Registered == 0 {
 		return nil
 	}
+	gained := *end - *start
 	bound := consumersPerSession * s.Registered
-	if *end <= bound {
+	if gained <= bound {
 		return nil
 	}
-	return fmt.Errorf("%s held %d consumers at the step's end (summary.json sessions.stream_consumers.end), above the %d that the %d sessions this step registered allow: the stream's consumers follow the step's churn rather than its sessions",
-		bus.Stream, *end, bound, s.Registered)
+	return fmt.Errorf("%s gained %d consumers over the step, %d at its start and %d at its end (summary.json sessions.stream_consumers), above the %d that the %d sessions this step registered allow: the stream's consumers follow the step's churn rather than its sessions",
+		bus.Stream, gained, *start, *end, bound, s.Registered)
 }
 
 func summarizeRequests(reqs []reqRec, dropped int, target, durationS float64) requestsSummary {
