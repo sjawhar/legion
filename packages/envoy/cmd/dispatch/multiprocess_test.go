@@ -4441,12 +4441,27 @@ func TestClosingAnIssueOnOneProcessWithdrawsItsAskAndFreezesTheOtherProcessesRoo
 	}
 }
 
+// shortSettlementResume is the settlement resumption's period in the rows below that wait for a
+// pass of it (DISPATCH_TEST_SETTLEMENT_RESUME_INTERVAL), in place of
+// docs.SettlementResumeInterval's minute, which no row can afford to wait out twice: a pass takes
+// milliseconds, and the lease still gives each period to one process, since duty.Exclusive judges
+// the period the setting names. Nothing else about the resumption moves: a document's pending row
+// is armed only once it is settlementResumeAge (one minute) old, which the rows below reach by
+// backdating marked_at rather than by waiting.
+const shortSettlementResume = 2 * time.Second
+
+// resumeSettlementsEvery is the environment a pair's processes take to run their settlement
+// resumption at period.
+func resumeSettlementsEvery(period time.Duration) map[string]string {
+	return map[string]string{"DISPATCH_TEST_SETTLEMENT_RESUME_INTERVAL": period.String()}
+}
+
 // Spec item 3: an ask block keeps the author who wrote it, whichever process settles it.
 //
 // Bob writes an ask block in his tab on B, and B is killed (SIGKILL) before it settles - B's
 // settle delay is ten minutes - so the settlement the document owes is left to the resumption on
 // A. The pending row is made older than the resumption age (one minute) by SQL rather than by
-// waiting it out, so A's next pass (one a minute) arms it.
+// waiting it out, so A's next pass (one every shortSettlementResume) arms it.
 //
 // Alice edits the document through B after bob's block and before the kill. Without her, the
 // latest edit source the pending row names is bob's, and at this row's first commit a settlement
@@ -4456,7 +4471,7 @@ func TestClosingAnIssueOnOneProcessWithdrawsItsAskAndFreezesTheOtherProcessesRoo
 // where A can read it names bob.
 func TestAnAskBlockKeepsItsAuthorWhenAnotherProcessSettlesIt(t *testing.T) {
 	pair := newPair(t)
-	pair.startSettling(t, nil, 0, 10*time.Minute)
+	pair.startSettling(t, resumeSettlementsEvery(shortSettlementResume), 0, 10*time.Minute)
 	project := uniqueProjectKey(t, "ASKA")
 	pair.b.createProject(t, project, "Ask authors across processes")
 	// Created through B, whose own settlement is ten minutes away, so A never loads this
@@ -4485,9 +4500,11 @@ func TestAnAskBlockKeepsItsAuthorWhenAnotherProcessSettlesIt(t *testing.T) {
 	if backdated.RowsAffected() != 1 {
 		t.Fatalf("B left no pending settlement for the document, so there is nothing for A to resume")
 	}
-	// A resumption pass runs once a minute; two and a half minutes is two passes and the settle
-	// delay after the second.
-	const within = 150 * time.Second
+	// A resumption pass runs every shortSettlementResume, and a period B's last pass served is
+	// A's to wait out, so A arms the settlement within two of them; A's settle delay (the
+	// server's own two seconds) and the settlement itself follow. Thirty seconds is all of that
+	// with room for a loaded machine.
+	const within = 30 * time.Second
 	deadline := time.Now().Add(within)
 	for {
 		ask, found := pair.a.askOfBlock(t, issueKey, blockID)
@@ -4845,7 +4862,7 @@ func (p *dispatchPair) resumedBetween(t *testing.T, artifactID string, from, to 
 // resumption to find, and no settlement loads a room.
 func TestRebuildResumptionQueueAndColdWritesHoldAcrossProcesses(t *testing.T) {
 	pair := newPair(t)
-	pair.startSettling(t, nil, 10*time.Minute, 10*time.Minute)
+	pair.startSettling(t, resumeSettlementsEvery(shortSettlementResume), 10*time.Minute, 10*time.Minute)
 	project := uniqueProjectKey(t, "MAIN")
 	pair.a.createProject(t, project, "Maintenance across processes")
 
@@ -4902,9 +4919,12 @@ func TestRebuildResumptionQueueAndColdWritesHoldAcrossProcesses(t *testing.T) {
 		}
 		// A period is a bucket of the clock (duty.Exclusive, migration 0115), and the row is owed
 		// through the whole of the first bucket that starts after it aged: no settlement runs
-		// inside the row. Each process's resumption ticks once a minute from its own start, so
+		// inside the row. Each process's resumption ticks once a period from its own start, so
 		// each meets that bucket once; what this counts is how many of those meetings resumed it.
-		period := docs.SettlementResumeInterval
+		// The period is the one both processes were started with, shortSettlementResume, in place
+		// of docs.SettlementResumeInterval's minute, which this row would otherwise sleep out
+		// twice.
+		period := shortSettlementResume
 		start := time.Now().Truncate(period).Add(period)
 		end := start.Add(period)
 		t.Logf("counting the resumptions of the document in the period from %s to %s", start.Format(time.TimeOnly), end.Format(time.TimeOnly))

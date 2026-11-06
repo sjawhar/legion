@@ -163,6 +163,8 @@ var settings = []setting{
 		Description: "How long a test process's sender keeps trying a listener that is being replaced before a send to a session that is gone settles failed; a positive Go duration. Set only with `DISPATCH_TEST_HOOKS=1`."},
 	{Name: "DISPATCH_TEST_EDIT_NOTICE_QUIET", Default: "`30s`", Required: "no",
 		Description: "How long a document stays quiet after a person's last settled version before its `artifact.human_edited` notice goes, for an end-to-end test process; a positive Go duration. Set only with `DISPATCH_TEST_HOOKS=1`."},
+	{Name: "DISPATCH_TEST_SETTLEMENT_RESUME_INTERVAL", Default: "`1m0s`", Required: "no",
+		Description: "How often a test process's settlement resumption arms the settlements documents still owe, in place of the minute a deployment runs it at; a positive Go duration, for an end-to-end test only and never a real deployment. Set only with `DISPATCH_TEST_HOOKS=1`."},
 	{Name: "DISPATCH_TEST_ROSTER_UNCACHED", Required: "no",
 		Description: "Set to `1` so every read of the listener's session list (an issue's `route_status`, `GET /api/v1/agents`) asks the listener rather than Dispatch's five-second copy, for an end-to-end test process whose fake listener changes between reads. Set only with `DISPATCH_TEST_HOOKS=1`."},
 	{Name: "DISPATCH_TEST_EMBEDDER_OFF", Required: "no",

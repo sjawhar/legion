@@ -1817,6 +1817,24 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 			refusedWith(t, map[string]string{"DISPATCH_TEST_EDIT_NOTICE_QUIET": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
 		},
+		"DISPATCH_TEST_SETTLEMENT_RESUME_INTERVAL": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{}); boot.SettlementResumeInterval != 0 {
+				t.Errorf("DISPATCH_TEST_SETTLEMENT_RESUME_INTERVAL unset: SettlementResumeInterval = %v, want 0 (docs.SettlementResumeInterval's minute)", boot.SettlementResumeInterval)
+			}
+			const quick = time.Second
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_TEST_HOOKS":                      "1",
+				"DISPATCH_TEST_SETTLEMENT_RESUME_INTERVAL": quick.String(),
+			})
+			if boot.SettlementResumeInterval != quick {
+				t.Errorf("DISPATCH_TEST_SETTLEMENT_RESUME_INTERVAL: SettlementResumeInterval = %v, want %v", boot.SettlementResumeInterval, quick)
+			}
+			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
+				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_SETTLEMENT_RESUME_INTERVAL": invalid},
+					fmt.Sprintf("DISPATCH_TEST_SETTLEMENT_RESUME_INTERVAL=%q (expected a positive Go duration)", invalid))
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_SETTLEMENT_RESUME_INTERVAL": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
 		"DISPATCH_TEST_RECONCILE_AT_START": func(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_RECONCILE_AT_START": "1"}); !boot.ReconcileAtStart {
 				t.Error("DISPATCH_TEST_RECONCILE_AT_START=1: ReconcileAtStart false")

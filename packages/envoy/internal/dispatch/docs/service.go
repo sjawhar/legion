@@ -77,6 +77,11 @@ type Deps struct {
 	// EditNoticeQuiet is how long a document stays quiet after a person's last settled version
 	// before its edit notice goes (recordEditNotice, RunEditNotices); zero means 30 s.
 	EditNoticeQuiet time.Duration
+	// SettlementResume is how often the settlement resumption arms the settlements documents
+	// still owe (RunSettlementResumption); zero means SettlementResumeInterval's minute, which
+	// is what every deployment runs at. A multiprocess test shortens it so a row that waits for
+	// a resumption pass waits seconds rather than minutes.
+	SettlementResume time.Duration
 	// Requests is the request admission the service's background work yields to - its compaction
 	// and its settlements (RequestLoad, requestYield): cmd/dispatch hands the one limiter the API
 	// admits through. A service with none runs that work without ever waiting.
@@ -138,6 +143,8 @@ type Service struct {
 	unrecordedMarkTTL time.Duration
 	// editNoticeQuiet is Deps.EditNoticeQuiet, with its default applied.
 	editNoticeQuiet time.Duration
+	// settlementResume is Deps.SettlementResume, with its default applied.
+	settlementResume time.Duration
 	// maxPendingItems is the pending queue the service's rooms decode their stored state under
 	// (Server.MaxPendingItems, which New sets from it and ygo reads as each room loads) and the
 	// queue the check a room's load is compared with takes (validateUpdate). New sets it to
@@ -730,6 +737,10 @@ func New(deps Deps) *Service {
 	if editNoticeQuiet <= 0 {
 		editNoticeQuiet = defaultEditNoticeQuiet
 	}
+	settlementResume := deps.SettlementResume
+	if settlementResume <= 0 {
+		settlementResume = SettlementResumeInterval
+	}
 	if deps.Events == nil {
 		deps.Events = events.NewBroker()
 	}
@@ -754,6 +765,7 @@ func New(deps Deps) *Service {
 		timers:            make(map[uint64]*time.Timer),
 		unrecordedMarkTTL: unrecordedMarkTTL,
 		editNoticeQuiet:   editNoticeQuiet,
+		settlementResume:  settlementResume,
 		reads:             newDocumentReads(documentReadBudget),
 		maxPendingItems:   maxUpdateItems,
 		processID:         processID,

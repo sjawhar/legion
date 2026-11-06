@@ -130,6 +130,11 @@ type bootConfig struct {
 	// before its edit notice goes, zero for the document service's own 30 s; only
 	// DISPATCH_TEST_EDIT_NOTICE_QUIET, under the test hooks, sets it.
 	EditNoticeQuiet time.Duration
+	// SettlementResumeInterval is how often the settlement resumption arms the settlements
+	// documents still owe, zero for docs.SettlementResumeInterval's minute; only
+	// DISPATCH_TEST_SETTLEMENT_RESUME_INTERVAL, under the test hooks, sets it, since a row that
+	// waits for another process's resumption pass would otherwise wait minutes.
+	SettlementResumeInterval time.Duration
 	// CIReconcileInterval is how often the CI reconcile pass runs, zero for cireconcile.Interval's
 	// five minutes; only DISPATCH_TEST_CI_RECONCILE_INTERVAL, under the test hooks, sets it, since
 	// no process-level test can wait five minutes for a pass.
@@ -413,6 +418,7 @@ func main() {
 		MarkWait:          boot.MarkWait,
 		UnrecordedMarkTTL: boot.UnrecordedMarkTTL,
 		EditNoticeQuiet:   boot.EditNoticeQuiet,
+		SettlementResume:  boot.SettlementResumeInterval,
 		Requests:          requestLoad{limiter: limiter},
 		TestHooks:         boot.TestHooksEnabled,
 	})
@@ -1080,6 +1086,7 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		{"DISPATCH_TEST_ROUTE_ROSTER_TTL", &boot.RouteRosterTTL},
 		{"DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW", &boot.ListenerTakeoverWindow},
 		{"DISPATCH_TEST_EDIT_NOTICE_QUIET", &boot.EditNoticeQuiet},
+		{"DISPATCH_TEST_SETTLEMENT_RESUME_INTERVAL", &boot.SettlementResumeInterval},
 		{"DISPATCH_TEST_CI_RECONCILE_INTERVAL", &boot.CIReconcileInterval},
 	} {
 		if err := testHookDuration(env, setting.name, boot.TestHooksEnabled, setting.target); err != nil {

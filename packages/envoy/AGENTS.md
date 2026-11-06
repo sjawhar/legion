@@ -371,6 +371,7 @@ a room's load arms one when the row is there (`onLoadDocument`, unless the load 
 It runs on an interval because a rolling deploy stops the old task after the new one has started.
 Each pass runs under the lease `settlement-resumption` (`duty.Exclusive`), so one process per minute arms the owed settlements:
 a settlement reads the store under the document's lock whichever process runs it.
+A multiprocess test process runs that pass at a period of its own (`DISPATCH_TEST_SETTLEMENT_RESUME_INTERVAL`, read only under `DISPATCH_TEST_HOOKS=1`), so a row that waits for the other process's pass waits seconds; no deployment sets it, and the age a row must reach (one minute) is the same whatever the period.
 A closed issue's rooms arm none until it reopens.
 However a settlement starts - a timer, the last browser leaving (`settleLastPeer`), a retry, the resumption or the shutdown drain - it first waits, holding no connection, for one of `settlementWorkers` (4) slots, before it loads a cold room, and its transaction runs on the settlements pool (`store.Pool.Settlements`, one connection per slot);
 the resumption's query runs on the background pool.

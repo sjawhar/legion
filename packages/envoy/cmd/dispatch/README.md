@@ -810,6 +810,7 @@ What the two processes share, and what each keeps to itself:
   The suggestion outcome sweep takes no lease at all:
   each of its pages holds the `suggestion_outcome_cursor` row `for update`, which serialises two processes by itself (Background loops, below).
   The settlement resumption is leased because a settlement reads the store under the document's lock whichever process runs it, so one process per minute arms every owed settlement.
+  `DISPATCH_TEST_SETTLEMENT_RESUME_INTERVAL` replaces that minute for a multiprocess test, and a deployment never sets it.
   The delivery live hub, the event-stream relay, the process's shared listener connection, with the document rooms' room sync and the woken loops' wakes on it, and the document rooms' timers stay per-process by design (below), the embedding queue and the task progress reconciliation claim their own work, and the outbox publishes under its hold (above);
   the embedding queue's coverage pass runs in every process with no lease, each of its steps safe beside another process's, and drops every vector its own embedder did not make, so every process takes the same embedder settings (Search, below);
   `cmd/dispatch/main.go` says at the call site which loop is which and why.
