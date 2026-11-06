@@ -74,27 +74,46 @@ func TestTableSizeExemptionReadsStatementsAsPostgresParsesThem(t *testing.T) {
 // A refusing holder's query text keeps the statement's shape and names and loses every value a
 // row could have put there: literals of every quoting, numbers with what follows them unspaced,
 // and comments. A parameter's number stays, and a text cut off inside a literal loses the rest.
-// The holder session owns standard_conforming_strings, so a literal whose backslash that setting
-// lets escape the quote after it is taken as far as either reading of it runs: with the setting
-// off Postgres read the longer literal, and no part of that value may survive.
+// The holder session owns standard_conforming_strings and its query text does not carry it, so
+// each row names the setting it answers for. A text whose literals hold no backslash reads the
+// same under both, and redactedQuery answers it with the shape intact. A backslash before a
+// closing quote is read as that quote's escape with the setting off and as a plain byte with it
+// on, which moves where every later literal starts, so the two readings disagree over which
+// bytes are a value: the answer covers the literals of both, which can swallow the shape between
+// them - a comma, or a whole literal - and leaves no part of any value behind under either.
 func TestRedactedQueryKeepsTheShapeAndDropsEveryValue(t *testing.T) {
-	for in, want := range map[string]string{
-		"select id from asks where id = $1 for no key update":                   "select id from asks where id = $1 for no key update",
-		"update asks set body = 'ghp_SECRET' where id = 42":                     "update asks set body = ? where id = ?",
-		"select E'it\\'s', $tag$ x $tag$, U&'d\\0061t', \"Quoted Name\" from t": "select ?, ?, ?, \"Quoted Name\" from t",
-		"select 1.5e3, 0x1F, -7 -- ghp_COMMENT\n/* ghp_BLOCK */ from t":         "select ?, ?, -? from t",
-		"insert into asks (body) values ('cut off by track_activity_quer":       "insert into asks (body) values (?",
-		"  select\n\t  1  ": "select ?",
-		// A backslash before the closing quote: with standard_conforming_strings off the literal
-		// runs on to the next quote, and the redaction covers it either way, shape and all. Two
-		// backslashes escape each other under that reading too, so the literal ends where it
-		// reads as ending with the setting on, and the row after it is a value of its own.
-		"update asks set body = 'a\\' , ghp_SECRET , '  where id = 1":      "update asks set body = ? where id = ?",
-		"update asks set body = 'a\\\\', note = 'ghp_SECOND' where id = 7": "update asks set body = ?, note = ? where id = ?",
-		"select n'a\\' , ghp_NCHAR , ' from t":                             "select ? from t",
+	for name, tc := range map[string]struct {
+		// setting is the holder's standard_conforming_strings the row answers for: "on", the
+		// default; "off"; or "on and off" for a text both settings read the same way.
+		setting, in, want string
+	}{
+		"a parameter's number stays":      {"on and off", "select id from asks where id = $1 for no key update", "select id from asks where id = $1 for no key update"},
+		"a literal and a number go":       {"on and off", "update asks set body = 'ghp_SECRET' where id = 42", "update asks set body = ? where id = ?"},
+		"every other quoting goes":        {"on and off", "select E'it\\'s', $tag$ x $tag$, U&'d\\0061t', \"Quoted Name\" from t", "select ?, ?, ?, \"Quoted Name\" from t"},
+		"numbers and comments go":         {"on and off", "select 1.5e3, 0x1F, -7 -- ghp_COMMENT\n/* ghp_BLOCK */ from t", "select ?, ?, -? from t"},
+		"a text cut off inside a literal": {"on and off", "insert into asks (body) values ('cut off by track_activity_quer", "insert into asks (body) values (?"},
+		"a run of space becomes one":      {"on and off", "  select\n\t  1  ", "select ?"},
+		// Two backslashes escape each other with the setting off, so that literal ends where
+		// it ends with the setting on and the literal after it is a value of its own: both
+		// readings agree, and the statement keeps its shape.
+		"two backslashes escape each other":       {"on and off", `update asks set body = 'a\\', note = 'ghp_SECOND' where id = 7`, "update asks set body = ?, note = ? where id = ?"},
+		"a backslash away from the closing quote": {"on and off", `select 'C:\path' , 'ghp_SECRET'`, "select ? , ?"},
+		// With the setting off the first literal runs on to the next quote, which swallows
+		// ghp_SECRET; with it on the first literal ends at the backslash's quote and the one
+		// opened at the next quote is unterminated, which swallows the rest of the text. Every
+		// byte after body = is inside a literal of one reading or the other, so one ? is all
+		// that may be printed.
+		"off: a literal carried on to the next quote":  {"off", `update asks set body = 'a\' , ghp_SECRET , '  where id = 1`, "update asks set body = ?"},
+		"off: a national-character literal carried on": {"off", `select n'a\' , ghp_NCHAR , ' from t`, "select ?"},
+		// The default setting, where the backslash is a plain byte: the holder's own reading
+		// ends the first literal at its quote and opens the next at the next quote, so the
+		// value between them must go, and with it whatever shape the two readings disagree on.
+		"on: a path before another literal":          {"on", `select 'C:\' , 'ghp_SECRET' , 'b'`, "select ??"},
+		"on: a path in an insert's values":           {"on", `insert into t values ('C:\', 'ghp_SECRET')`, "insert into t values (??"},
+		"on: a path in a set, with a where after it": {"on", `update t set a = 'x\', b = 'ghp_SECRET' where c = 'y'`, "update t set a = ??"},
 	} {
-		if got := redactedQuery(in); got != want {
-			t.Errorf("redactedQuery(%q) = %q, want %q", in, got, want)
+		if got := redactedQuery(tc.in); got != tc.want {
+			t.Errorf("%s (standard_conforming_strings %s): redactedQuery(%q) = %q, want %q", name, tc.setting, tc.in, got, tc.want)
 		}
 	}
 }

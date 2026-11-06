@@ -2,13 +2,17 @@ package pgmigrate
 
 import "strings"
 
-// The scanner here reads SQL text as Postgres 18's lexer does (src/backend/parser/scan.l) with
-// standard_conforming_strings on: which kind of token starts at each byte, and where a comment, a
-// string literal, a quoted identifier or a dollar-quoted literal ends. Three readers share it:
-// checkCensus's reading of a census file (censusTokens), the census's reading of a migration
-// (readMigration) and its reading of a migration's lock timeouts (migrationLockTimeouts), all of
-// them reading this repository's own migration files, which are written with the setting on.
-// redactedQuery, which reads another session's query text, asks for the longer reading instead.
+// The scanner here reads SQL text as Postgres 18's lexer does (src/backend/parser/scan.l): which
+// kind of token starts at each byte, and where a comment, a string literal, a quoted identifier
+// or a dollar-quoted literal ends. Inside a literal that does not itself ask for escapes a
+// backslash escapes the byte after it only when the reading session's
+// standard_conforming_strings is off, and the text does not carry that setting, so nextSQLToken
+// takes it as backslashEscapes. Three readers ask for the setting on, the default
+// (backslashEscapes false): checkCensus's reading of a census file (censusTokens), the census's
+// reading of a migration (readMigration) and its reading of a migration's lock timeouts
+// (migrationLockTimeouts), all of them reading this repository's own migration files, which are
+// written with the setting on. redactedQuery, which reads another session's query text and is
+// told neither setting, reads that text whole under both.
 
 // sqlTokenKind is the kind of one token scanSQL reads.
 type sqlTokenKind int
@@ -49,10 +53,12 @@ func scanSQL(text string, visit func(sqlToken) error) error {
 }
 
 // nextSQLToken returns the kind of the token that starts at i, the index after it and, for a
-// quoted identifier, the identifier's decoded name. With longestLiteral, a literal whose
-// backslash is a plain byte with standard_conforming_strings on ends at the later of that
-// reading and the one where a backslash escapes the next byte (endOfPlainLiteral).
-func nextSQLToken(text string, i int, longestLiteral bool) (sqlTokenKind, int, string) {
+// quoted identifier, the identifier's decoded name. backslashEscapes reads a literal that does
+// not itself ask for escapes ('…', B'…', X'…', N'…' and U&'…') as a session with
+// standard_conforming_strings off reads it, where a backslash escapes the quote after it and so
+// carries the literal on to the next quote; with it false such a literal ends where the default
+// setting ends it. An E'…' literal escapes under either setting.
+func nextSQLToken(text string, i int, backslashEscapes bool) (sqlTokenKind, int, string) {
 	c := text[i]
 	var next byte
 	if i+1 < len(text) {
@@ -66,7 +72,7 @@ func nextSQLToken(text string, i int, longestLiteral bool) (sqlTokenKind, int, s
 	case c == '/' && next == '*':
 		return sqlComment, endOfBlockComment(text, i), ""
 	case c == '\'':
-		return sqlString, endOfPlainLiteral(text, i, longestLiteral), ""
+		return sqlString, endOfStringLiteral(text, i, backslashEscapes), ""
 	case c == '"':
 		name, end := quotedIdentifier(text, i)
 		return sqlQuotedIdentifier, end, name
@@ -95,9 +101,9 @@ func nextSQLToken(text string, i int, longestLiteral bool) (sqlTokenKind, int, s
 		case (c == 'e' || c == 'E') && next == '\'':
 			return sqlString, endOfStringLiteral(text, i+1, true), ""
 		case strings.IndexByte("bBxXnN", c) >= 0 && next == '\'':
-			return sqlString, endOfPlainLiteral(text, i+1, longestLiteral), ""
+			return sqlString, endOfStringLiteral(text, i+1, backslashEscapes), ""
 		case (c == 'u' || c == 'U') && next == '&' && after == '\'':
-			return sqlUnicodeEscape, endOfPlainLiteral(text, i+2, longestLiteral), ""
+			return sqlUnicodeEscape, endOfStringLiteral(text, i+2, backslashEscapes), ""
 		case (c == 'u' || c == 'U') && next == '&' && after == '"':
 			_, end := quotedIdentifier(text, i+2)
 			return sqlUnicodeEscape, end, ""
@@ -177,24 +183,6 @@ func endOfStringLiteral(text string, i int, backslashEscapes bool) int {
 	return len(text)
 }
 
-// endOfPlainLiteral returns the index after the literal whose opening quote is at i and which
-// does not itself ask for backslash escapes: '…', B'…', X'…', N'…' and U&'…'. Whether a
-// backslash escapes the quote after it in one of these is the holder session's
-// standard_conforming_strings, which this text does not carry: with it on (the default, and how
-// this repository's migrations are written) the literal ends where endOfStringLiteral reads it
-// without escapes, with it off where it reads it with them. Without longest it is the first
-// reading, as Postgres reads the repository's own files; with longest it is whichever of the two
-// ends later, so that a redaction covers the literal Postgres read either way.
-func endOfPlainLiteral(text string, i int, longest bool) int {
-	end := endOfStringLiteral(text, i, false)
-	if longest {
-		if escaped := endOfStringLiteral(text, i, true); escaped > end {
-			return escaped
-		}
-	}
-	return end
-}
-
 // quoteContinues reports whether a string literal closed just before i continues, and at which
 // quote: scan.l's quotecontinue, whitespace holding at least one newline (with -- comments, each
 // ending at its newline) and then a quote.
@@ -254,6 +242,23 @@ func endOfDollarQuote(text string, i int) (int, bool) {
 	return end + 1 + closing + len(delimiter), true
 }
 
+// backslashReadingLiterals returns, in order, the spans a session with standard_conforming_strings
+// off reads as a string, dollar-quoted or Unicode-escaped literal: the reading in which a
+// backslash inside a plain literal escapes the byte after it, so that a backslash before a quote
+// carries that literal on to the next quote and moves where every literal after it starts.
+func backslashReadingLiterals(text string) []sqlToken {
+	var literals []sqlToken
+	for i := 0; i < len(text); {
+		kind, end, _ := nextSQLToken(text, i, true)
+		switch kind {
+		case sqlString, sqlDollarString, sqlUnicodeEscape:
+			literals = append(literals, sqlToken{kind: kind, start: i, end: end})
+		}
+		i = end
+	}
+	return literals
+}
+
 // redactedQuery is a session's query text with its literals, numbers and comments taken out, for a
 // report read more widely than the database: each string literal, dollar-quoted literal and
 // Unicode-escaped literal or identifier becomes ?, and so does each number with whatever follows
@@ -261,19 +266,46 @@ func endOfDollarQuote(text string, i int) (int, bool) {
 // and each run of space one space. Keywords, identifiers, quoted identifiers, operators and
 // punctuation stay, so the statement's shape and the names it touches can be read. A text cut
 // short mid-literal, as pg_stat_activity cuts one at track_activity_query_size, loses the rest of
-// that literal with it, since an unterminated literal takes the rest of the text. The holder
-// session owns standard_conforming_strings, so a literal it could have read as running further
-// than the default reading does (a backslash before its closing quote) is replaced as far as
-// either reading takes it (endOfPlainLiteral's longest): a query holding such a literal can lose
-// its shape, never a value.
+// that literal with it, since an unterminated literal takes the rest of the text.
+//
+// The holder session owns standard_conforming_strings and its query text does not carry it, so no
+// one reading of that text can be trusted: a backslash before a closing quote ends the literal
+// under the default reading, the setting on, and carries it on to the next quote under the other,
+// which moves where the next literal of the statement starts. A reading chosen literal by literal
+// would therefore resume inside a literal of the reading Postgres used, and print its bytes. So
+// the whole text is read twice instead: the tokens are the default reading's, as they always
+// were, and backslashReadingLiterals reads the text again as a session with the setting off reads
+// it. A byte inside a literal of either reading is a value and is never printed; a byte this loop
+// prints lies outside every literal of both readings, which is structure Postgres read as
+// structure whichever setting the holder had. That is what makes the output safe to report.
+//
+// Two properties follow. A query whose literals hold no backslash is redacted byte for byte as
+// the default reading alone redacts it, because the two readings then agree on where every
+// literal ends. A query whose literal holds one can lose shape - a comma, or a whole literal,
+// swallowed into the single ? that covers the other reading's longer literal - and loses no
+// value.
 func redactedQuery(text string) string {
+	literals := backslashReadingLiterals(text)
 	var out strings.Builder
 	space := false
 	previous := sqlToken{kind: sqlSpace}
+	covered := 0 // the end of the text the ? last written stands for
+	literal := 0 // the first literal of the other reading that can still reach a token
 	for i := 0; i < len(text); {
-		kind, end, _ := nextSQLToken(text, i, true)
-		switch kind {
-		case sqlSpace, sqlComment:
+		kind, end, _ := nextSQLToken(text, i, false)
+		if i < covered {
+			// This token's bytes sit inside a ? already written, so it prints nothing at all.
+			// previous is left as the token last read outside a ?, which no skipped token can
+			// follow unbroken, so a $ swallowed into a ? leaves no number printed after it.
+			i = end
+			continue
+		}
+		for literal < len(literals) && literals[literal].end <= i {
+			literal++
+		}
+		covers := literal < len(literals) && literals[literal].start < end
+		switch {
+		case !covers && (kind == sqlSpace || kind == sqlComment):
 			space = true
 		default:
 			if space && out.Len() > 0 {
@@ -281,6 +313,11 @@ func redactedQuery(text string) string {
 			}
 			space = false
 			switch {
+			case covers:
+				// The other reading holds these bytes inside a literal: one ? stands for all
+				// of that literal, and every token starting before its end prints nothing.
+				out.WriteByte('?')
+				covered = max(literals[literal].end, end)
 			case kind == sqlNumber && previous.kind == sqlOther && previous.end == i && text[i-1] == '$':
 				out.WriteString(text[i:end])
 			case kind == sqlNumber:
