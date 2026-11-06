@@ -454,7 +454,9 @@ production) and returns it to that session alone. `agent-secrets NAME -- command
 in the command's environment under its name and replaces itself with the command. `agent-secrets`
 itself never prints a value, but the command is the agent's choice, and a command can print or send
 what its environment holds (`printenv NAME` prints it). A session holding a grant can therefore read
-the value: approve a secret only for a session you would trust with the value itself.
+the value: approve a secret only for a session you would trust with the value itself. A secret
+behind the airlock is the exception: the broker releases a placeholder for it and never the value
+([The airlock](#the-airlock)).
 
 A grant ends when its lifetime runs out, when its session revokes it (`agent-secrets revoke`), when
 its approver or its enrollment's operator revokes it in Dispatch or from one of their machines
@@ -465,6 +467,62 @@ operator revokes it the session asks for approval before it gets the same secret
 ended); a session revoking its own grant, and anyone but the operator revoking one, withholds
 nothing. To end every session's automatic access to a secret, change its tags
 ([revoke a session or a grant](/legion/broker/guides/revoke-a-session/#end-every-sessions-access-to-a-secret)).
+
+## The airlock
+
+A deployment can keep a secret's value from its sessions altogether. The broker reads a rules
+file when it starts (`BROKER_AIRLOCK_RULES_FILE`, an `airlock.json`), which names, for each
+secret it covers, the hosts that secret's value may reach, the request headers that may carry it
+(`authorization`, unless the entry names others) and, where the entry gives them, the methods and
+path prefixes it may travel on
+(`packages/envoy/internal/broker/airlock`). A secret the file names is **behind the airlock**,
+and the broker never releases its value to anyone: a read of a grant of it leaves the name out of
+`values` and answers an `airlock` object instead, which carries the proxy's URL, the certificate
+authority to trust that proxy by, a proxy password, and, for each name, a placeholder, the
+placeholder of each slot of the value, and the hosts the entry binds. A placeholder is
+`agent-secrets-placeholder-` and 32 letters and digits, minted for that one grant and name. The
+file is the deployment's own, and the broker reads it once at start, so a change to it rolls the
+brokers; `envoy-broker airlock-check <file> [--against <old file>]` says whether a broker would
+serve a file, and what that file adds and removes against the one in force.
+
+What the command gets is the placeholder and the way to spend it. `agent-secrets NAME -- command`
+puts the placeholder in `NAME`, points `HTTPS_PROXY` at the broker's proxy port with that grant's
+proxy password, writes a trust bundle (the trust the command would have had, plus the proxy's own
+certificate) and a wgetrc naming it, and sets `NO_PROXY` so the entry's bound hosts reach the
+proxy while loopback and the private ranges stay direct. The command calls the service as it did
+before. The value reaches no answer of the broker's, no file and no variable: the proxy swaps the
+placeholder for it in the headers the entry names, inside the connection it carries to the bound
+host.
+
+The proxy reads the grant behind the password on every connection, and the entry decides each
+request (`packages/envoy/internal/broker/airlockproxy`). A host no entry of that grant binds is
+tunnelled unread, to a public address alone. A bound host is read with a certificate of the
+proxy's own authority, and the request must name that same host in its TLS name and in its `Host`
+header; then the entry's hosts, headers, methods and paths decide whether the swap happens. A
+refusal is an HTTP error from the proxy naming the rule that refused it, such as `host not bound`
+or `not allowed by rule`, and the broker logs one line for each call to a bound host: the
+enrollment, the grant, the secret, the host, the method, the path, the answer's status and that
+reason, never a value. Each entry's own fingerprint is part of what a grant was decided under, so
+an edit to one secret's entry ends the grants that entry affects and no others.
+
+What the airlock does not stop is as much of the design as what it does:
+
+- A service that sends the credential back in its answer, or that makes a new credential and
+  returns it (a deploy key made with an administrator's token), gives that to the caller. The
+  proxy does not change what a service answers. A rule's methods and paths are how its owner
+  closes such a path.
+
+- The placeholder works as the proxy password for its grant's bound hosts until the grant ends,
+  from wherever the proxy port is reachable.
+
+- Once the grant ends, every call through the proxy gets `407`, to any host.
+
+- A private address that reaches the proxy is refused, because the proxy runs beside the broker,
+  whose own identity reads every secret. A command that needs such a call sets its own `NO_PROXY`
+  entry for that name.
+
+- A value an agent received before its secret went behind the airlock keeps working until its
+  owner rotates it.
 
 ## Approvals
 

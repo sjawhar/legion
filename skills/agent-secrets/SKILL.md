@@ -15,7 +15,8 @@ Your session never holds the value, and nothing of it reaches your transcript.
 agent-secrets NAME... [--reason TEXT] [--wait DURATION] [--ttl DURATION] -- <command> [args...]
 ```
 
-- Each granted secret reaches `<command>`'s environment under its own name. Nothing runs unless
+- Each granted secret reaches `<command>`'s environment under its own name, as the value or, for
+  a secret behind the airlock, as a placeholder standing for it (below). Nothing runs unless
   every name is granted: a denial of one name denies the whole request, so the command never starts
   with some of its secrets missing (`cmdExec`, `packages/envoy/cmd/agent-secrets/main.go`).
 - `--reason` is what a person reads if the request waits for a decision. Write one.
@@ -34,8 +35,9 @@ agent-secrets LEGION_SLACK_BOT_TOKEN -- \
 
 Your own shell expands `$LEGION_SLACK_BOT_TOKEN` before `agent-secrets` runs, and in your shell that
 name is empty. Measured on 2026-11-04 from a Legion issue pod: Slack answered
-`{"ok":false,"error":"not_authed"}`. The value exists only in the environment of the command the
-client starts, so that command must read it itself. Put the command in single quotes, inside
+`{"ok":false,"error":"not_authed"}`. What the client hands over — the value, or the placeholder of
+a secret behind the airlock — exists only in the environment of the command the client starts, so
+that command must read it itself. Put the command in single quotes, inside
 `sh -c`, where the quotes keep the expansion for the child:
 
 ```sh
@@ -50,13 +52,46 @@ The repository uses the same form for a GitHub App token in `docs/deployment.md`
 agent-secrets LEGION_IMPLEMENT_APP --reason=… -- sh -c 'printf %s "$LEGION_IMPLEMENT_APP"'
 ```
 
+## A secret behind the airlock
+
+Your deployment can hold a secret's value back and give your command a stand-in. You see it in the
+command's environment: the name holds `agent-secrets-placeholder-` and 32 letters and digits, not
+the value. A length or a prefix probe there reads the placeholder, and proves nothing about the
+real value.
+
+A call to that secret's service goes through the broker's own proxy, which `agent-secrets` names
+in the run's environment (`HTTPS_PROXY`, a `NO_PROXY` that keeps the secret's hosts on that proxy,
+and a trust bundle). The proxy swaps the placeholder for the real value in the headers the
+secret's rule names. Three things follow for the command you write:
+
+- Make every call inside the `agent-secrets NAME -- command` run, with the environment that run
+  gives it. A tool that keeps a token in a cache file across runs, or that makes its calls outside
+  the run, stops working. Ask for the grant in the run that spends it.
+
+- Pass no value you obtained some other way. The proxy refuses a request whose headers already
+  carry the real value.
+
+- The placeholder is that one grant's, and works only while the grant lives.
+
+A refusal comes from the proxy, not from the service:
+
+- An HTTP error naming the rule that refused it: a host no entry binds, a header the entry does
+  not name, a method or a path outside the entry's `allow`, or a private address.
+
+- `407` once the grant ends, on every call to any host.
+
+A retry fixes neither, and neither does another name. The fix is a change to the rules file in the
+deployment's own repository, which a person reviews. Report the refusal as you report a service
+out of reach: the command you ran and the output you saw.
+
 ## The value never reaches your transcript
 
 Your transcript keeps everything a command prints.
 
 - Never echo or print the value, and never run `curl -v`, `curl --trace` or a shell with `set -x`
   around it: each of those writes the header, and so the value, to your output.
-- Check a value's shape by its length and its prefix alone:
+- Check a value's shape by its length and its prefix alone. For a secret behind the airlock, that
+  reads the placeholder's shape and not the value's:
 
   ```sh
   agent-secrets NAME -- sh -c 'echo "${#NAME}"; case "$NAME" in ghp_*) echo prefix-ok;; *) echo prefix-no;; esac'
