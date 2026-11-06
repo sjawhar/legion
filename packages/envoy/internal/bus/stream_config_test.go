@@ -252,10 +252,7 @@ func TestConnectOwningStreamPurgesLegacyRoleMessagesBeforeDurableConsumerRestart
 		t.Fatalf("open legacy JetStream: %v", err)
 	}
 	// The legacy stream carries this binary's consumer cap (StreamMaxConsumers), as a deployment
-	// this start reconciles does: the create takes the cap on every nats-server, so the start
-	// below writes no cap change the in-process server, older than streamMaxConsumersFloor, would
-	// refuse. The raise of an uncapped deployed stream to the cap is proved on a real server image
-	// instead, by the natslive matrix in this package.
+	// this start reconciles does, for the reason that constant records.
 	if _, err := legacyJS.AddStream(&nats.StreamConfig{
 		Name:         Stream,
 		Subjects:     []string{"notifications.>"},
@@ -935,11 +932,11 @@ func TestEnsureStreamWithConfigRacingStartsWriteOneID(t *testing.T) {
 }
 
 // The stream this binary compiles carries the consumer cap the issue sizes it at, so a stream it
-// creates holds 16000 consumers rather than nats-server's own default of 1000, the default the
+// creates holds 24000 consumers rather than nats-server's own default of 1000, the default the
 // hub's stream filled, after which every new session was refused its own consumer and fell back
 // to core delivery.
 func TestTheCompiledStreamCarriesTheConsumerCap(t *testing.T) {
-	if streamCfg.MaxConsumers != 16000 {
-		t.Fatalf("streamCfg.MaxConsumers = %d, want 16000", streamCfg.MaxConsumers)
+	if streamCfg.MaxConsumers != 24000 {
+		t.Fatalf("streamCfg.MaxConsumers = %d, want 24000", streamCfg.MaxConsumers)
 	}
 }

@@ -19,10 +19,7 @@ var deployedSubjects = []string{"notifications.legion.>", "notifications.publish
 
 // deployStream creates ENVOY_NOTIFICATIONS as a deployment left it: the subjects above, and
 // retention and duplicate windows no binary of this checkout would install. Its consumer cap is
-// this binary's own (bus.StreamMaxConsumers), so a start's reconcile has no cap change to write
-// and the in-process nats-server, which is older than streamMaxConsumersFloor, has none to
-// refuse; the transition from an uncapped deployed stream to the cap is proved on a real server
-// image instead, by the natslive matrix in internal/bus.
+// this binary's own (bus.StreamMaxConsumers), for the reason that constant records.
 func deployStream(t *testing.T, uri string) nats.JetStreamContext {
 	t.Helper()
 	conn := testnats.Connect(t, uri)

@@ -85,7 +85,7 @@ Each item below names a task and where its code is, then notes on it.
 
 - **Stream definition**: `internal/bus/stream.go`
 
-  `ENVOY_NOTIFICATIONS` subjects, age and duplicate window, replicas, byte limit, consumer cap (`bus.StreamMaxConsumers`, 16000) and discard policy, and their reconciliation at start (`ensureStreamWithConfig`);
+  `ENVOY_NOTIFICATIONS` subjects, age and duplicate window, replicas, byte limit, consumer cap (`bus.StreamMaxConsumers`, 24000) and discard policy, and their reconciliation at start (`ensureStreamWithConfig`);
   the names of the stores' KV buckets, listener and Dispatch durables, the Dispatch webhook-redelivery bucket, the listener role-lane queue, and the notification and exception topic prefixes, which envoy-infra's NATS grants are built from (`packages/envoy/infra/core/permissions.go`)
 
 - **Stream and bucket copies, stream byte limit**:
@@ -113,7 +113,7 @@ Each item below names a task and where its code is, then notes on it.
   `internal/bus/stream.go` (`StreamMaxConsumers`, `ownedStream`, `refusedSettings`), `internal/bus/keeper.go`
 
   The `ENVOY_NOTIFICATIONS` stream's consumer cap is compiled in rather than read from a setting:
-  `bus.StreamMaxConsumers`, 16000, which bounds how many sessions can hold a session consumer of their own.
+  `bus.StreamMaxConsumers`, 24000, which bounds how many sessions can hold a session consumer of their own.
   A start and the keeper raise a smaller deployed cap to it and never lower one, as for the copies and the byte limit;
   a deployed `-1` or `0` is raised too, because nats-server reads either as no cap and then applies its own default of 1000.
   Lowering the cap (`nats stream edit ENVOY_NOTIFICATIONS --max-consumers=<n>`) is an operator step that needs every program's binary lowered first.
@@ -3556,7 +3556,7 @@ that is the rule and not a transitional measure, and it is what lets Dispatch de
 
 - Every stream update the reconcile sends starts from the deployed configuration and sets only what Envoy owns (`reconciledStream`, `internal/bus/stream.go`):
   the subjects (above), the age and the duplicate window (72 hours), the replicas (the deployed count or `ENVOY_NATS_REPLICAS`, whichever is more), the byte limit (the deployed one or `ENVOY_STREAM_MAX_BYTES`, whichever is more;
-  the setting on a stream with none, the deployed one when unset), the consumer cap (the deployed cap or `bus.StreamMaxConsumers`, 16000, whichever is more;
+  the setting on a stream with none, the deployed one when unset), the consumer cap (the deployed cap or `bus.StreamMaxConsumers`, 24000, whichever is more;
   the compiled cap on a stream whose cap is a deployed `-1` or `0`, which nats-server reads as no cap and then answers with its own default of 1000) and `DiscardNew`, which switches a stream an earlier build created with `DiscardOld`.
   The metadata and every other deployed field - `MaxMsgsPerSubject`, `MaxMsgSize`, storage, placement, compression and the rest - stay as they are, and a start that finds all of that in place sends no update.
   A start's own write never lowers the stream's copies, its byte limit or its consumer cap, so an operator's raise of any of them stands, and the stream holds the most copies and the largest limit any program of a deployment carries;
@@ -3569,8 +3569,8 @@ that is the rule and not a transitional measure, and it is what lets Dispatch de
   a start with other (or no) settings, or another subject list, that reads the stream before another start's write and writes after it puts the old subjects, copies, byte limit and metadata back.
 
 - The keeper (`internal/bus/keeper.go`) ends that:
-  every program that owns the stream (the listener, Dispatch's server) reads it again every 30 seconds and puts back copies below its `ENVOY_NATS_REPLICAS`, a byte limit below its `ENVOY_STREAM_MAX_BYTES`, or none (when set), a consumer cap below its `bus.StreamMaxConsumers` (16000), a deployed `-1` or `0` included, a missing `envoy_stream_id`, and the 72-hour age and duplicate window and `DiscardNew` (constants every release compiles alike;
-  `discard DiscardOld -> DiscardNew` in its line), and adds back each subject its binary compiles that the stream lacks, unless it overlaps a subject the stream carries or captures a role lane (`keptStream`, `keptSubjects`, `internal/bus/stream.go`), logging `envoy nats keeper restored the stream` at WARN with, for example, `restored="replicas 1 -> 3, max_bytes -1 -> 2000000, max_consumers 1000 -> 16000, envoy_stream_id added as <id>, subjects added notifications.legion.>"`.
+  every program that owns the stream (the listener, Dispatch's server) reads it again every 30 seconds and puts back copies below its `ENVOY_NATS_REPLICAS`, a byte limit below its `ENVOY_STREAM_MAX_BYTES`, or none (when set), a consumer cap below its `bus.StreamMaxConsumers` (24000), a deployed `-1` or `0` included, a missing `envoy_stream_id`, and the 72-hour age and duplicate window and `DiscardNew` (constants every release compiles alike;
+  `discard DiscardOld -> DiscardNew` in its line), and adds back each subject its binary compiles that the stream lacks, unless it overlaps a subject the stream carries or captures a role lane (`keptStream`, `keptSubjects`, `internal/bus/stream.go`), logging `envoy nats keeper restored the stream` at WARN with, for example, `restored="replicas 1 -> 3, max_bytes -1 -> 2000000, max_consumers 1000 -> 24000, envoy_stream_id added as <id>, subjects added notifications.legion.>"`.
   Like a start, it never lowers the copies, the byte limit or the cap (`ownedStream`), so an operator's emergency raise of a full stream's limit stands (`TestTheKeeperKeepsAnOperatorsRaiseOfTheByteLimitAndRaisesALowerOne`), and an operator who lowers the cap by hand has it raised back within one period, with `max_consumers` in that WARN line.
   Its write is the stream as it read it with that put back, so it only adds subjects and removes or replaces none:
   two releases with different subject lists do not switch the stream back and forth, and a concurrent write the keeper's lands over loses its subject only until that release's own keeper adds it back a period later.

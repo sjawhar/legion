@@ -2853,10 +2853,7 @@ func TestStartListenerSubscriptionMigratesLegacyDurableConsumer(t *testing.T) {
 		t.Fatalf("open legacy JetStream: %v", err)
 	}
 	// The legacy stream carries the listener's own consumer cap (bus.StreamMaxConsumers), as a
-	// deployment the start below reconciles does: a create takes the cap on every nats-server, so
-	// that start writes no cap change the in-process server, older than the first that can change
-	// a deployed stream's cap, would refuse. The raise of an uncapped deployed stream to the cap
-	// is proved on a real server image instead, by the natslive matrix in internal/bus.
+	// deployment the start below reconciles does, for the reason that constant records.
 	if _, err := legacyJS.AddStream(&natsgo.StreamConfig{
 		Name:         bus.Stream,
 		Subjects:     []string{"notifications.>"},

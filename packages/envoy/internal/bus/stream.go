@@ -296,23 +296,33 @@ func StreamCaptures(topic string) bool {
 // consumer when the session ends: the only delete is inside SessionConsumers.RestartAtFloor
 // (session_consumers.go), and the server removes a consumer SessionConsumerInactiveThreshold, 72
 // hours, after its last pull. The population is therefore every distinct session that pulled
-// inside those 72 hours. Measured on the hub on 2026-11-06: 238 reads of the listener's session
-// list, one every 20 seconds from 01:53:37Z to 02:33:35Z, gave 42 session ids not seen before,
-// 63.1 an hour, 36 of them stamped inside the window by their UUIDv7, 54.0 an hour; live sessions
-// went from 641 to 663 over that window. The population is 663 + 72 x 54.0 = 4,551 sessions
-// strict and 663 + 72 x 63.1 = 5,206 wide.
+// inside those 72 hours. It was read twice on 2026-11-06, by sampling the listener's session list
+// every 20 seconds and counting each id that appeared in no earlier read, which needs no
+// assumption about how long a session lives: 238 reads from 01:53:37Z to 02:33:35Z gave 42 new
+// ids, 63.1 an hour, 36 of them stamped inside the window by their UUIDv7, 54.0 an hour, against
+// 663 live; 136 reads from 04:23:40Z to 05:09:16Z gave 61 new ids, 80.3 an hour, 57 of them
+// stamped inside it, 75.0 an hour, against 668 live. The population is live + 72 x rate: 4,551 to
+// 5,206 by the first reading and 6,068 to 6,447 by the second.
 //
 // dispatch://INFRA-514's capacity gate asks for at least twice the larger of the stream's consumer
-// count and that population, so the gate's own number is 9,102 to 10,412. 16000 is 1.5 times the
-// gate's number and 3.1 to 3.5 times the population. It costs what its consumers cost, measured on
-// nats-server 2.15.1: 54.7 KiB resident and 0.56 KiB of store per consumer, so 16000 consumers are
-// about 855 MiB of memory and about 8.8 MiB of store, against the hub's 16 GiB machine, where
-// nats-server held 1.10 GiB resident on 2026-10-30.
+// count and that population, so the gate's own number is 9,102 to 12,894 across the two readings.
+// 24000 is 1.9 to 2.6 times the gate's number and 3.7 to 5.3 times the population. The second
+// reading sets it: at the fleet's growth between the two, a cap only 1.2 to 1.3 times the gate's
+// own number would need raising again within a release or two, and the cap costs nothing while it
+// is not reached, since the server allocates per live consumer. It costs what its consumers cost
+// when they do reach it, measured twice on nats-server 2.15.1, 2,000 consumers of the listener's
+// own shape (session_consumers.go) on a file-backed stream: 54.7 and 52.6 KiB resident and 0.56
+// KiB of store per consumer, so 24000 consumers are about 1.20 to 1.25 GiB of memory and about 13
+// MiB of store, against the hub's 16 GiB machine, where nats-server held 1.10 GiB resident on
+// 2026-10-30.
 //
-// It is exported for the fixtures outside this package: a test fixture that deploys the stream for
-// a start or the keeper to reconcile takes this value, so the reconcile writes no cap change a
-// nats-server before streamMaxConsumersFloor would refuse.
-const StreamMaxConsumers = 16000
+// It is exported for the fixtures that deploy the stream: every test fixture a start or the
+// keeper then reconciles carries this value, so the reconcile writes no cap change the module's
+// own in-process nats-server, which is older than streamMaxConsumersFloor, would refuse. That
+// leaves the raise of an uncapped deployed stream to the cap proved nowhere in this process, and
+// it is proved against real server images instead, by the natslive matrix of this package
+// (stream_max_consumers_live_test.go).
+const StreamMaxConsumers = 24000
 
 // streamMaxConsumersFloor is the first nats-server that takes a change of MaxConsumers on a stream
 // that already exists. Every server before it refuses such an update with `nats: stream

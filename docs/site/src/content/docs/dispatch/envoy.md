@@ -463,12 +463,12 @@ the old subjects, copies, limit and metadata back.
 
 So every program that owns the stream, each listener and Dispatch's server, reads it again every
 30 seconds and puts back copies below its `ENVOY_NATS_REPLICAS`, a limit below its
-`ENVOY_STREAM_MAX_BYTES` or none (when set), a consumer cap below the 16000 its binary carries, a
+`ENVOY_STREAM_MAX_BYTES` or none (when set), a consumer cap below the 24000 its binary carries, a
 missing `envoy_stream_id`, and the 72-hour age and duplicate window and the discard policy (the
 same in every release), and adds back each subject its own build carries that the stream lacks,
 unless it overlaps a subject the stream has or is a role lane. It logs a WARN line
 `envoy nats keeper restored the stream` with, for example,
-`restored="replicas 1 -> 3, max_bytes -1 -> 2000000, max_consumers 1000 -> 16000, envoy_stream_id added as <id>, subjects added notifications.legion.>"`.
+`restored="replicas 1 -> 3, max_bytes -1 -> 2000000, max_consumers 1000 -> 24000, envoy_stream_id added as <id>, subjects added notifications.legion.>"`.
 It never lowers the copies, the limit or the cap, so raising the limit of a full stream with
 `nats stream edit ENVOY_NOTIFICATIONS --max-bytes=<n>` takes effect at once and stays. It only
 adds subjects and never removes or replaces one, so two releases with different subject
@@ -480,10 +480,10 @@ with `replicas="1 -> 3"`). A pass that fails logs `envoy nats keeper could not r
 or `envoy nats keeper could not raise a bucket` and is tried again 30 seconds later; it never
 stops the program.
 
-The consumer cap is the one of these the binary carries rather than reads from a setting: 16000
+The consumer cap is the one of these the binary carries rather than reads from a setting: 24000
 session consumers, which is what bounds how many sessions can hold a consumer of their own. A
 stream whose cap reads `-1` or `0` has no cap of its own, and the NATS server then applies its own
-default of 1000, so a start and the keeper raise either to 16000 as they raise a smaller cap.
+default of 1000, so a start and the keeper raise either to 24000 as they raise a smaller cap.
 Setting the cap on a stream the server already holds needs nats-server v2.12.5 or later: every
 server before it refuses an update that changes `MaxConsumers` with
 `nats: stream configuration update can not change MaxConsumers` (measured on v2.10.29, v2.11.0 and

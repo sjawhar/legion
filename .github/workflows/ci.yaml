@@ -2750,7 +2750,8 @@ jobs:
     # prints the dump that names it. A timed-out step fails the job, so the bound is the steps
     # before it at their measured times plus its own limit: about 1 minute of setup, then the unit
     # step's two 20-minute runs, which is 41; after the unit step's measured 35 minutes, natslive's
-    # default 10 is 46, and the shell tests' 7 plus the integration step's 5 is 48.
+    # default 10 and the bus matrix's own 5 are 51, and the shell tests' 7 plus the integration
+    # step's 5 is 53.
     timeout-minutes: 60
     services:
       postgres:
@@ -2837,9 +2838,16 @@ jobs:
       # internal/testnats runs its server in the test process, so the untagged step above starts
       # no container. The two-image matrix, which proves a rendered authorization on nats:2.10 and
       # on the image the hub runs, is the one thing an in-process server cannot reproduce: it sits
-      # behind the natslive tag, and this step is where it runs (INFRA-250).
+      # behind the natslive tag, and this step is where it runs (INFRA-250). internal/bus has one
+      # test of its own on that matrix, named here so the tag pulls in nothing else of that
+      # package: the module links nats-server v2.10.29 in process, which refuses every update that
+      # changes a stream's MaxConsumers, so the raise of the hub's uncapped ENVOY_NOTIFICATIONS to
+      # the consumer cap this binary compiles - and the 2.10 refusal that names the field, the cap
+      # and the first server taking the change - is provable only against a real image (INFRA-1384).
       - name: Test the container-backed NATS matrix (natslive)
-        run: go test -count=1 -tags natslive ./internal/testnats/
+        run: |
+          go test -count=1 -tags natslive ./internal/testnats/
+          go test -count=1 -timeout 5m -tags natslive -run '^TestAStartCapsAnUncappedStreamOnTheHubsServerAndIsRefusedOnTheOlderOne$' -v ./internal/bus/
         working-directory: packages/envoy
       - name: Isolation test for dev-broker.sh (fakes docker/go/curl; no real Postgres or network)
         run: bash scripts/dev-broker.test.sh

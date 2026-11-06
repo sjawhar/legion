@@ -54,13 +54,10 @@ const (
 	redeliveredClientID = "Iv1.redelivered"
 	githubSubjects      = "notifications.github.>"
 	// listenerMaxConsumers is the consumer cap Envoy's listener compiles into
-	// ENVOY_NOTIFICATIONS (bus.StreamMaxConsumers in packages/envoy/internal/bus/stream.go),
-	// written out because Go's internal-package rule refuses this module that import, as it
-	// refuses it bus.Stream, spelled out above. The stream below is created with it, as a
-	// deployment the listener's start reconciles is, so that start writes no cap change the
-	// test's nats-server, which is older than the first that can change a deployed stream's cap,
-	// would refuse.
-	listenerMaxConsumers = 16000
+	// ENVOY_NOTIFICATIONS (bus.StreamMaxConsumers in packages/envoy/internal/bus/stream.go, which
+	// records why a fixture carries it), written out because Go's internal-package rule refuses
+	// this module that import, as it refuses it bus.Stream, spelled out above.
+	listenerMaxConsumers = 24000
 )
 
 // redeliveredRepositories serves acme/widgets at main, as the daemon's mapping would.

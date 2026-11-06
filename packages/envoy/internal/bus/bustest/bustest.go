@@ -33,10 +33,7 @@ const (
 // DeployedThreeCopyStream is the stream as a three-copy deployment with a byte limit
 // (StreamMaxBytes) and an id (DeployedStreamID) holds it, discarding old messages as a stream an
 // earlier build created does, changed by change. Its consumer cap is the binary's own
-// (bus.StreamMaxConsumers), so a start's reconcile has no cap change to write and the in-process
-// nats-server, older than the first that can change a deployed stream's cap, has none to refuse;
-// the raise of an uncapped deployed stream to the cap is proved on a real server image instead,
-// by the natslive matrix in internal/bus.
+// (bus.StreamMaxConsumers), for the reason that constant records.
 func DeployedThreeCopyStream(change func(*natsgo.StreamConfig)) natsgo.StreamConfig {
 	deployed := natsgo.StreamConfig{
 		Name:         bus.Stream,

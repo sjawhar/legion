@@ -57,10 +57,7 @@ func startOnCluster(t *testing.T, cluster *testnats.Cluster, options ...ConnectO
 // deployedClusterStream is the stream as a deployment with three copies and a byte limit holds it,
 // with limits this binary does not own and an id, changed by change. It discards old messages, as
 // a stream an earlier build created does. Its consumer cap is the binary's own, taken from
-// streamCfg with the rest, so a start's reconcile has no cap change to write and the in-process
-// nats-server, older than streamMaxConsumersFloor, has none to refuse; the raise of an uncapped
-// deployed stream to the cap is proved on a real server image instead, by the natslive matrix in
-// this package.
+// streamCfg with the rest, for the reason StreamMaxConsumers records.
 func deployedClusterStream(change func(*nats.StreamConfig)) nats.StreamConfig {
 	deployed := *streamCfg
 	deployed.Replicas = 3

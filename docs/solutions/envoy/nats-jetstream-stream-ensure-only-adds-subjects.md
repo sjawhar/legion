@@ -74,7 +74,7 @@ starts from the deployed configuration too: the replicas become the deployed cou
 `ENVOY_NATS_REPLICAS`, whichever is more; the byte limit becomes the deployed one or
 `ENVOY_STREAM_MAX_BYTES`, whichever is more, the setting on a stream with none, and stays as
 deployed when the setting is unset; the consumer cap becomes the deployed cap or
-`bus.StreamMaxConsumers` (16000, compiled into the binary rather than read from a setting),
+`bus.StreamMaxConsumers` (24000, compiled into the binary rather than read from a setting),
 whichever is more, and the compiled cap on a stream whose cap reads `-1` or `0`, which nats-server
 reads as no cap and then answers with its own default of 1000; discard is `DiscardNew`, so a full
 stream refuses a new publish (`bus.ErrStreamFull`, which its sender retries) and keeps every
@@ -100,12 +100,12 @@ first, keeping its store, and the next start sets the cap.
 So every program that owns the stream runs a keeper (`internal/bus/keeper.go`): every 30 seconds
 it reads the stream again and writes it back (`keepStream`, `keptStream`) with copies below its
 `ENVOY_NATS_REPLICAS` raised, a byte limit below its `ENVOY_STREAM_MAX_BYTES`, or none, raised to
-it (when set), a consumer cap below its compiled 16000, a deployed `-1` or `0` included, raised to
+it (when set), a consumer cap below its compiled 24000, a deployed `-1` or `0` included, raised to
 it, a missing `envoy_stream_id` added, the 72-hour age and duplicate window and `DiscardNew` put
 back (constants every release compiles alike), and each subject its binary compiles that the
 stream lacks added, unless it overlaps a subject the stream carries or captures a role lane
 (`keptSubjects`). It logs `envoy nats keeper restored the stream` at WARN with, for example,
-`restored="replicas 1 -> 3, max_bytes -1 -> 2000000, max_consumers 1000 -> 16000, envoy_stream_id added as <id>, subjects added notifications.legion.>"`.
+`restored="replicas 1 -> 3, max_bytes -1 -> 2000000, max_consumers 1000 -> 24000, envoy_stream_id added as <id>, subjects added notifications.legion.>"`.
 Like a start, the keeper never lowers the copies, the limit or the cap (`ownedStream`): an
 operator who raises a full stream's limit (`nats stream edit ENVOY_NOTIFICATIONS --max-bytes=<n>`)
 is not undone 30 seconds later, and an operator who lowers the cap by hand has it raised back

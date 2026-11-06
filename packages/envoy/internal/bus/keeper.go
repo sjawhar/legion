@@ -160,7 +160,7 @@ func keepStream(js nats.JetStreamContext, cfg *nats.StreamConfig) ([]string, err
 
 // restoredFields names each field kept differs in from deployed, with its old and new value:
 // `replicas 1 -> 3`, `max_bytes -1 -> 2000000` or `max_bytes 1000000 -> 2000000`,
-// `max_consumers -1 -> 16000` or `max_consumers 1000 -> 16000`,
+// `max_consumers -1 -> 24000` or `max_consumers 1000 -> 24000`,
 // `max_age 73h0m0s -> 72h0m0s`, `duplicate_window 1m0s -> 72h0m0s`,
 // `discard DiscardOld -> DiscardNew`, `envoy_stream_id added as <id>`,
 // `subjects added notifications.x.>`. The copies, the byte limit and the consumer cap only ever
