@@ -70,7 +70,7 @@ a {
   html {
     scroll-padding-bottom: 5rem;
   }
-  button,
+  button:not(.dispatch-inline-link),
   a:not(.prose a):not(.dispatch-inline-link),
   input:not([type="checkbox"]):not([type="radio"]),
   select,
@@ -79,15 +79,17 @@ a {
     min-height: 44px;
   }
 
-  button,
+  button:not(.dispatch-inline-link),
   a:not(.prose a):not(.dispatch-inline-link) {
     display: inline-flex;
     align-items: center;
   }
 
-  /* An anchor inside a sentence keeps its line box: a 44px control box there is blank space in
+  /* A control inside a sentence keeps its line box: a 44px control box there is blank space in
      the middle of a line. Vertical padding grows its hit box instead, at no layout cost,
-     because padding on an inline element does not move the line. Dispatch's own inline links
+     because padding on an inline element does not move the line. It is a link most of the
+     time, and a button where the line is a path the reader walks back up (the issue tree's
+     zoom breadcrumb, dispatch://INFRA-1196 R1). Dispatch's own inline links
      (`view`, a components line, a backlink) sit on their own row at 12px, where 6px is what
      reaches the 24px of WCAG 2.5.8. Both 2.5.8 and 2.5.5 exempt a link inside a sentence in
      any case.

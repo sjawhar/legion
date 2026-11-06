@@ -4,6 +4,7 @@ import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { ApiError } from "../../api/client";
 import type { Artifact } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
+import { NoTooltips } from "../../components/tooltips";
 import {
   dangerText,
   linkHoverText,
@@ -12,13 +13,8 @@ import {
   textPrimaryOnCanvas,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
-import { ActivityTab } from "../activity/ActivityTab";
-import { ArtifactDocument } from "../artifacts/ArtifactDocument";
-import { ArtifactRoutePanel } from "../artifacts/ArtifactRoutePanel";
 import { ConversationTab } from "../conversation/ConversationTab";
-import type { DocumentToolbar } from "../doc/ProofDocument";
 import { useFillMarginSlot } from "../margin/margin-slot";
-import { PlanTab } from "../plan/PlanTab";
 import { statusText } from "../project/board-model";
 import {
   buildIssuePath,
@@ -29,31 +25,30 @@ import {
   parseIssuePath,
 } from "../refs/routes";
 import { NotFoundPage } from "../shell/NotFoundPage";
-import { type FrameAttributes, usePageFrame } from "../shell/page-frame";
+import { ISSUE_FRAME, usePageFrame } from "../shell/page-frame";
 import { COMPACT_VIEWPORT_QUERY, useMediaQuery } from "../shell/useDialog";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { narrowConversation } from "./conversation-states";
-import { DocumentStage, DocumentStages, STAGE_IN_PANEL, useDocumentStage } from "./document-stage";
+import { DocumentStages, STAGE_IN_PANEL, useDocumentStage } from "./document-stage";
 import { type FocusedNode, FocusedNodeProvider, useFocusedNode } from "./focused-node";
 import { IssueBody } from "./IssueBody";
 import { IssueHeader } from "./IssueHeader";
 import { IssueMarginPanel } from "./IssueMargin";
+import { IssuePresetPanels } from "./IssuePresetPanels";
 import { issueAddress } from "./issue-address";
 import { artifactsBySlug, documentOfNode } from "./issue-artifacts";
 import { PresetToolbar } from "./PresetToolbar";
 import { type ConversationState, NODE_TYPE_NAMES, sentenceCase } from "./page-words";
 import { stateForIssue } from "./pins";
-import { RoleDocumentPanel } from "./RoleDocumentPanel";
-import { SpecRequirements } from "./SpecRequirements";
+import { useDocumentToolbars } from "./useDocumentToolbars";
 import { useIssueDetail } from "./useIssueDetail";
 import { useIssueKeymap } from "./useIssueKeymap";
 import { useIssuePriority } from "./useIssuePriority";
 import { type ItemLanding, type ItemRoute, isItemRoute, useItemLanding } from "./useItemLanding";
 
-/** The issue page's own root, which every browser check reads the page through
- *  (`e2e/issue-page.ts`): the shell's frame around this page's column and the margin beside it,
- *  so the identity block, the body and the panel's properties are one page. */
-const ISSUE_PAGE_FRAME: FrameAttributes = { "data-issue-page": "" };
+/* The issue page's own root is `ISSUE_FRAME` (`features/shell/page-frame.tsx`), which the
+   shell also marks from the address alone until this page registers it, so a reload lands on
+   the page rather than on a column with no root around it. */
 
 export function IssuePage(): ReactNode {
   const { pathname, search } = useLocation();
@@ -128,43 +123,7 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
   const { hash, pathname, search } = useLocation();
   const navigate = useNavigate();
   const panelScroll = useRef<Partial<Record<IssueTab, number>>>({});
-  // One toolbar and one diff per document, by its artifact id: the page draws the toolbar of
-  // whichever document the preset has open (R16), and every editor on the page reports its own
-  // through a callback of its own, held across renders because the editor publishes it from an
-  // effect.
-  const [toolbars, setToolbars] = useState<ReadonlyMap<string, DocumentToolbar>>(() => new Map());
-  const [diffs, setDiffs] = useState<ReadonlySet<string>>(() => new Set());
-  const sinks = useRef(new Map<string, (next: DocumentToolbar | undefined) => void>());
-  const showDiff = useCallback(
-    (artifactId: string, next: boolean) =>
-      setDiffs((held) => {
-        const made = new Set(held);
-        if (next) made.add(artifactId);
-        else made.delete(artifactId);
-        return made;
-      }),
-    []
-  );
-  const toolbarSink = useCallback(
-    (artifactId: string) => {
-      const held = sinks.current.get(artifactId);
-      if (held !== undefined) return held;
-      const made = (next: DocumentToolbar | undefined) => {
-        setToolbars((toolbars) => {
-          const replaced = new Map(toolbars);
-          if (next === undefined) replaced.delete(artifactId);
-          else replaced.set(artifactId, next);
-          return replaced;
-        });
-        // A document that has closed shows no diff: the control that turned one on has gone
-        // with it.
-        if (next === undefined) showDiff(artifactId, false);
-      };
-      sinks.current.set(artifactId, made);
-      return made;
-    },
-    [showDiff]
-  );
+  const { diffs, showDiff, toolbarSink, toolbars } = useDocumentToolbars();
   // The document a row of the tree is being edited in, so the page draws its one editor for
   // that row to take onto its own stage (`document-stage.tsx`).
   const [editing, setEditing] = useState<string | undefined>(undefined);
@@ -186,7 +145,7 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
   // The issue page's own root is the frame the shell draws around this column and the margin
   // beside it: the identity block, the body and the panel's properties are one page, however the
   // shell mounts them (`features/shell/page-frame.tsx`, `e2e/issue-page.ts`).
-  usePageFrame(ISSUE_PAGE_FRAME);
+  usePageFrame(ISSUE_FRAME);
   // Where the panel goes: the shell's margin at the width that has one, and the page's own
   // column under the identity block below it, where the margin is a sheet and the properties
   // would otherwise be behind it (R11, R12).
@@ -226,24 +185,6 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
     },
     [navigate, recordScroll, route.key]
   );
-  const panel = useCallback(
-    (conversation: ReactNode) =>
-      details === undefined ? (
-        conversation
-      ) : (
-        <IssueMarginPanel
-          conversation={conversation}
-          conversationState={conversationState}
-          focused={focused}
-          isClosed={details.closed_at !== null}
-          issue={details}
-          onConversationState={pickState}
-        />
-      ),
-    [conversationState, details, focused, pickState]
-  );
-  useFillMarginSlot(isCompactViewport ? undefined : panel);
-
   // The Conversation's first placement runs as a child layout effect, before the restore below
   // in the same commit, so a position recorded while the tab showed only its loading text is
   // forgotten here and the reader lands on the newest message. A return to a list the reader was
@@ -251,6 +192,86 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
   const forgetConversationScroll = useCallback(() => {
     delete panelScroll.current.conversation;
   }, []);
+  const issueArtifacts = useMemo(
+    () => new Map((issue.data?.artifacts ?? []).map((artifact) => [artifact.id, artifact])),
+    [issue.data?.artifacts]
+  );
+  // Once a panel's tab has ever been active, keep rendering its content even
+  // while hidden — that is what keeps the Spec document connected and the Conversation's read
+  // observer alive across tab switches (see the `hidden` panels below). A panel the user has
+  // never opened stays unmounted, so a fresh page load doesn't pay for panels it never shows.
+  const [activatedTabs, setActivatedTabs] = useState<Record<IssueTab, boolean>>(() => ({
+    activity: activeTab === "activity",
+    artifacts: activeTab === "artifacts",
+    children: activeTab === "children",
+    conversation: activeTab === "conversation",
+    decisions: activeTab === "decisions",
+    plan: activeTab === "plan",
+    spec: activeTab === "spec",
+    verification: activeTab === "verification",
+  }));
+  if (!activatedTabs[activeTab]) {
+    setActivatedTabs({ ...activatedTabs, [activeTab]: true });
+  }
+  // The conversation's one list, which the panel draws under the four state controls that
+  // drive it (R12): it belongs to the panel and to no column of the page, and it is drawn
+  // wherever the panel is. It is mounted once its own address has been opened and kept
+  // mounted after that, as every other panel of the page is (`activatedTabs`): the margin's
+  // own cards are already on the page, so a second list of the same comments at every address
+  // would double the page's controls and its first load's reads. Whether the reader is *in*
+  // it - what places them at the newest card, what marks a card read, what a deep link
+  // scrolls to - is the address's own answer (`visible`).
+  const conversationList = useMemo(
+    () =>
+      details === undefined || !activatedTabs.conversation ? undefined : (
+        <ConversationTab
+          issueArtifacts={issueArtifacts}
+          focusItemId={conversationFocusItemId}
+          isClosed={details.closed_at !== null}
+          issueKey={details.key}
+          narrow={narrowConversation(
+            conversationState,
+            stateForIssue(state.data, details.key).dismissed
+          )}
+          onFirstPlacement={forgetConversationScroll}
+          state={state.data}
+          visible={activeTab === "conversation"}
+        />
+      ),
+    [
+      activatedTabs.conversation,
+      activeTab,
+      conversationFocusItemId,
+      conversationState,
+      details,
+      forgetConversationScroll,
+      issueArtifacts,
+      state.data,
+    ]
+  );
+  const panel = useCallback(
+    (conversation: ReactNode) =>
+      details === undefined ? (
+        conversation
+      ) : (
+        <IssueMarginPanel
+          conversation={conversation}
+          conversationList={conversationList}
+          conversationState={conversationState}
+          focused={focused}
+          isClosed={details.closed_at !== null}
+          issue={details}
+          onConversationState={pickState}
+        />
+      ),
+    [conversationList, conversationState, details, focused, pickState]
+  );
+  // Below the width the margin keeps a column at, the page's panel is drawn in its own column
+  // and the margin's sheet keeps only its own cards - which are still this page's, so they
+  // still draw no tooltips (`components/tooltips.tsx`).
+  const hush = useCallback((content: ReactNode) => <NoTooltips>{content}</NoTooltips>, []);
+  useFillMarginSlot(isCompactViewport ? hush : panel);
+
   // Every key the issue page binds, in its own scope (`useIssueKeymap.ts`). The priority write
   // is the page's one, shared with the identity block and the palette, so a refusal of any of
   // them is reported once.
@@ -271,28 +292,6 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
     delete panelScroll.current[activeTab];
     window.scrollTo({ top });
   }, [activeTab]);
-
-  // Once a panel's tab has ever been active, keep rendering its content even
-  // while hidden — that is what keeps the Spec document connected and the Conversation's read
-  // observer alive across tab switches (see the `hidden` panels below). A panel the user has
-  // never opened stays unmounted, so a fresh page load doesn't pay for panels it never shows.
-  const [activatedTabs, setActivatedTabs] = useState<Record<IssueTab, boolean>>(() => ({
-    activity: activeTab === "activity",
-    artifacts: activeTab === "artifacts",
-    children: activeTab === "children",
-    conversation: activeTab === "conversation",
-    decisions: activeTab === "decisions",
-    plan: activeTab === "plan",
-    spec: activeTab === "spec",
-    verification: activeTab === "verification",
-  }));
-  if (!activatedTabs[activeTab]) {
-    setActivatedTabs({ ...activatedTabs, [activeTab]: true });
-  }
-  const issueArtifacts = useMemo(
-    () => new Map((issue.data?.artifacts ?? []).map((artifact) => [artifact.id, artifact])),
-    [issue.data?.artifacts]
-  );
 
   useDocumentTitle(
     issue.data === undefined ? "Dispatch" : `${issue.data.key} · ${issue.data.title} · Dispatch`
@@ -398,185 +397,97 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
       : issue.data.artifacts.find((artifact) => artifact.id === editing);
 
   return (
-    <section>
-      <IssueHeader
-        documentArtifact={primaryArtifact}
-        isClosed={isClosed}
-        issue={issue.data}
-        priorityWrite={priorityWrite}
-        restoringTo={restoringTo}
-        state={issueState}
-      />
-      {/* The head of the page, the preset row, the children section and the one folded tree
+    // A flex column, so the identity block's fourth row can be drawn at its end on a phone
+    // (`IssueHeader`'s `order-last`); every other child keeps its document order.
+    //
+    // `NoTooltips`: nothing this page draws keeps meaning for a pointer alone, because a
+    // reader on a phone or on the keyboard never sees a tooltip (R2, R21). What a tooltip
+    // said is drawn instead - the claim's instant beside its age, a link's whole address -
+    // and the panel says the same for the margin's own cards (`IssueMargin.tsx`).
+    <NoTooltips>
+      <section className="flex min-w-0 flex-col">
+        <IssueHeader
+          documentArtifact={primaryArtifact}
+          isClosed={isClosed}
+          issue={issue.data}
+          priorityWrite={priorityWrite}
+          restoringTo={restoringTo}
+          state={issueState}
+        />
+        {/* The head of the page, the preset row, the children section and the one folded tree
           the presets are queries over (R1, R3, R5, R10), on every address. A preset's nodes
           are the tree's; the panels below hold the documents those nodes live in, and a row
           being edited takes its own document onto its stage (`document-stage.tsx`). */}
-      <IssueBody
-        address={address}
-        isClosed={isClosed}
-        issue={issue.data}
-        onEditing={setEditing}
-        onLeave={recordScroll}
-        plan={planArtifact}
-        toolbar={
-          openDocument !== undefined && openToolbar !== undefined ? (
-            <PresetToolbar
-              artifact={openDocument}
-              isClosed={isClosed}
-              onShowDiffChange={(next) => showDiff(openDocument.id, next)}
-              onVersionChange={(version) => {
-                showDiff(openDocument.id, false);
-                selectDocumentVersion(openDocument, version);
-              }}
-              reference={documentRoute(openDocument, openVersion)}
-              showDiff={diffs.has(openDocument.id)}
-              toolbar={openToolbar}
-              version={openVersion}
-            />
-          ) : undefined
-        }
-      />
-      {/* Below the width the shell's margin keeps a column at, the panel is drawn here, under
+        <IssueBody
+          address={address}
+          isClosed={isClosed}
+          issue={issue.data}
+          onEditing={setEditing}
+          onLeave={recordScroll}
+          plan={planArtifact}
+          toolbar={
+            openDocument !== undefined && openToolbar !== undefined ? (
+              <PresetToolbar
+                artifact={openDocument}
+                isClosed={isClosed}
+                onShowDiffChange={(next) => showDiff(openDocument.id, next)}
+                onVersionChange={(version) => {
+                  showDiff(openDocument.id, false);
+                  selectDocumentVersion(openDocument, version);
+                }}
+                reference={documentRoute(openDocument, openVersion)}
+                showDiff={diffs.has(openDocument.id)}
+                toolbar={openToolbar}
+                version={openVersion}
+              />
+            ) : undefined
+          }
+        />
+        {/* Below the width the shell's margin keeps a column at, the panel is drawn here, under
           the identity block, and the margin becomes the phone sheet that holds the
           conversation: the properties are read at every width with nothing opened (R11, R12). */}
-      {isCompactViewport ? (
-        <div className="mb-3">
-          <IssueMarginPanel
-            conversationState={conversationState}
-            focused={focused}
-            isClosed={isClosed}
-            issue={issue.data}
-            onConversationState={pickState}
-          />
-        </div>
-      ) : null}
-      {/* What each preset draws beside the tree. These are plain panels, not tabpanels: the
-          presets are queries over one tree and the page has no tablist of panels any more. */}
-      <div aria-hidden={activeTab !== "spec"} hidden={activeTab !== "spec"} id="issue-spec-panel">
-        {activatedTabs.spec && !(artifactRoute !== undefined && !isPrimaryArtifactRoute) ? (
-          <div className="space-y-4">
-            <div className="flex min-w-0 flex-col" ref={specStage} />
-            <DocumentStage artifactId={primaryArtifact.id}>
-              <ArtifactDocument
-                artifact={primaryArtifact}
-                askId={address.preset === "spec" ? askId : undefined}
-                commentId={address.preset === "spec" ? commentId : undefined}
-                highlightTerm={highlightTerm}
-                isClosed={isClosed}
-                onToolbarChange={toolbarSink(primaryArtifact.id)}
-                owner={{ key: issueKey, kind: "issue" }}
-                onVersionChange={(version) => {
-                  showDiff(primaryArtifact.id, false);
-                  selectDocumentVersion(primaryArtifact, version);
-                }}
-                showDiff={diffs.has(primaryArtifact.id)}
-                version={specVersion}
-              />
-            </DocumentStage>
-            <SpecRequirements issueKey={issueKey} />
+        {isCompactViewport ? (
+          <div className="mb-3">
+            <IssueMarginPanel
+              conversationList={conversationList}
+              conversationState={conversationState}
+              focused={focused}
+              isClosed={isClosed}
+              issue={issue.data}
+              onConversationState={pickState}
+            />
           </div>
         ) : null}
-      </div>
-      <RoleDocumentPanel
-        activated={activatedTabs.verification}
-        active={activeTab === "verification"}
-        artifact={verificationArtifact}
-        isClosed={isClosed}
-        issueKey={issueKey}
-        onToolbarChange={toolbarSink}
-        onVersionChange={selectDocumentVersion}
-        showDiff={diffs}
-        stage={verificationStage}
-        tab="verification"
-      />
-      <RoleDocumentPanel
-        Tab={PlanTab}
-        activated={activatedTabs.plan}
-        active={activeTab === "plan"}
-        artifact={planArtifact}
-        isClosed={isClosed}
-        issueKey={issueKey}
-        onToolbarChange={toolbarSink}
-        onVersionChange={selectDocumentVersion}
-        showDiff={diffs}
-        stage={planStage}
-        tab="plan"
-      />
-      <div
-        aria-hidden={activeTab !== "conversation"}
-        hidden={activeTab !== "conversation"}
-        id="issue-conversation-panel"
-      >
-        {activatedTabs.conversation ? (
-          <ConversationTab
-            issueArtifacts={issueArtifacts}
-            focusItemId={conversationFocusItemId}
-            isClosed={isClosed}
-            issueKey={issueKey}
-            narrow={narrowConversation(conversationState, issueState.dismissed)}
-            onFirstPlacement={forgetConversationScroll}
-            state={state.data}
-            visible={activeTab === "conversation"}
-          />
-        ) : null}
-      </div>
-      <ArtifactRoutePanel
-        active={activeTab === "artifacts"}
-        artifact={selectedArtifact}
-        artifactRoute={artifactRoute}
-        isClosed={isClosed}
-        isPrimaryArtifactRoute={isPrimaryArtifactRoute}
-        mounted={activatedTabs.artifacts}
-        onShowDiffChange={(next) => showDiff(selectedArtifact?.id ?? "", next)}
-        route={route}
-        showDiff={diffs.has(selectedArtifact?.id ?? "")}
-        toolbar={toolbars.get(selectedArtifact?.id ?? "")}
-      >
-        {selectedArtifact?.kind === "doc" ? (
-          <>
-            <div className="flex min-w-0 flex-col" ref={selectedStage} />
-            <DocumentStage artifactId={selectedArtifact.id}>
-              <ArtifactDocument
-                artifact={selectedArtifact}
-                askId={askId}
-                commentId={commentId}
-                highlightTerm={highlightTerm}
-                isClosed={isClosed}
-                onToolbarChange={toolbarSink(selectedArtifact.id)}
-                owner={{ key: issueKey, kind: "issue" }}
-                onVersionChange={(version) => {
-                  showDiff(selectedArtifact.id, false);
-                  selectDocumentVersion(selectedArtifact, version);
-                }}
-                showDiff={diffs.has(selectedArtifact.id)}
-                version={artifactRoute?.version}
-              />
-            </DocumentStage>
-          </>
-        ) : null}
-      </ArtifactRoutePanel>
-      {/* The document a row of the tree is being edited in, where no panel above draws it:
-          one editor per document, so the row takes this one onto its own stage. */}
-      {editedDocument === undefined ? null : (
-        <DocumentStage artifactId={editedDocument.id}>
-          <ArtifactDocument
-            artifact={editedDocument}
-            isClosed={isClosed}
-            onToolbarChange={toolbarSink(editedDocument.id)}
-            owner={{ key: issueKey, kind: "issue" }}
-            onVersionChange={(version) => selectDocumentVersion(editedDocument, version)}
-            showDiff={false}
-            version={undefined}
-          />
-        </DocumentStage>
-      )}
-      <div
-        aria-hidden={activeTab !== "activity"}
-        hidden={activeTab !== "activity"}
-        id="issue-activity-panel"
-      >
-        {activatedTabs.activity ? <ActivityTab issueKey={issueKey} state={state.data} /> : null}
-      </div>
-    </section>
+        <IssuePresetPanels
+          activatedTabs={activatedTabs}
+          activeTab={activeTab}
+          artifactRoute={artifactRoute}
+          askId={askId}
+          commentId={commentId}
+          diffs={diffs}
+          editedDocument={editedDocument}
+          highlightTerm={highlightTerm}
+          isClosed={isClosed}
+          isPrimaryArtifactRoute={isPrimaryArtifactRoute}
+          issueKey={issueKey}
+          onShowDiff={showDiff}
+          onToolbarSink={toolbarSink}
+          onVersionChange={selectDocumentVersion}
+          planArtifact={planArtifact}
+          planStage={planStage}
+          primaryArtifact={primaryArtifact}
+          route={route}
+          selectedArtifact={selectedArtifact}
+          selectedStage={selectedStage}
+          specOpensItem={address.preset === "spec"}
+          specStage={specStage}
+          specVersion={specVersion}
+          state={state.data}
+          toolbars={toolbars}
+          verificationArtifact={verificationArtifact}
+          verificationStage={verificationStage}
+        />
+      </section>
+    </NoTooltips>
   );
 }

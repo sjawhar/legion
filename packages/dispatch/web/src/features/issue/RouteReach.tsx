@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 
 import type { IssueRouteReach } from "../../api/types";
+import { useTooltips } from "../../components/tooltips";
 import {
   calloutWarningBg,
   calloutWarningBorder,
@@ -25,11 +26,19 @@ export function RouteReachUnknownMarker({
   className?: string;
   testId?: string;
 }): ReactNode {
+  // The reason is a tooltip on a surface that offers one, and nowhere on the issue page, which
+  // offers none (`components/tooltips.tsx`): its own marker sits beside the route in the
+  // identity block, where the words are the whole reading (dispatch://INFRA-1196 R21).
+  const tooltips = useTooltips();
   return (
     <span
       className={`${className === undefined ? "" : `${className} `}text-xs ${textMutedOnSurface}`}
       data-testid={testId}
-      title="The Envoy listener did not answer, so Dispatch cannot tell whether anyone receives this route."
+      title={
+        tooltips
+          ? "The Envoy listener did not answer, so Dispatch cannot tell whether anyone receives this route."
+          : undefined
+      }
     >
       Route reach unknown
     </span>
@@ -72,7 +81,7 @@ function UnreachableRoute({ route, showRoute }: { route: string; showRoute: bool
       className={`inline-flex min-w-0 max-w-full items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-semibold ${calloutWarningBorder} ${calloutWarningBg} ${calloutWarningText}`}
       data-testid="issue-route-unreachable"
       style={{ flexShrink: showRoute ? 1 : 0 }}
-      title={explanation}
+      title={useTooltips() ? explanation : undefined}
     >
       <span aria-hidden="true" className="shrink-0">
         ⚠

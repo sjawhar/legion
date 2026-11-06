@@ -89,7 +89,8 @@ export function IssueComponentsLine({
             <span
               className={`inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-xs font-medium ${badgeHigh.bg} ${badgeHigh.text}`}
               key={id}
-              title={`${id} is no longer in the project's architecture model`}
+              // No `title`: the chip reads "retired: <id>", which is the whole of it
+              // (dispatch://INFRA-1196 R21).
             >
               retired: {id}
             </span>

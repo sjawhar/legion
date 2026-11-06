@@ -1,16 +1,13 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
 import type { Artifact } from "../../api/types";
-import { borderDefault, borderTransparent, textMutedOnCanvas } from "../../theme/classes";
-import { useMargin } from "../margin/margin-context";
+import { textMutedOnCanvas } from "../../theme/classes";
 import { useMediaQuery } from "../shell/useDialog";
 import { useSetFocusedNode } from "./focused-node";
-import { documentOfNode } from "./issue-artifacts";
 import { firstLineOf, type TreeNode } from "./issue-tree";
-import { NodeRow } from "./NodeRow";
-import { caretInBlock } from "./node-caret";
-import { authorText, KEY_REPORTS, pageChrome } from "./page-structure";
+import { authorText, pageChrome } from "./page-structure";
 import { CONTROL_LABELS, nodeStateWord } from "./page-words";
+import { CYCLE_STATES, EVERYTHING, TreeRows } from "./TreeRows";
 import {
   NOTHING_OPENED,
   type OpenedBranches,
@@ -21,6 +18,7 @@ import {
   zoomOpensOn,
 } from "./tree-fold";
 import { everythingOpened, rowKeyOf } from "./tree-keys";
+import { useNodeEditing } from "./useNodeEditing";
 import { useTreeKeymap } from "./useTreeKeymap";
 
 /**
@@ -29,7 +27,8 @@ import { useTreeKeymap } from "./useTreeKeymap";
  *
  * The model is `issue-tree.ts`'s, the preset's query over it is `presets.ts`'s and the fold is
  * `tree-fold.ts`'s, all three pure; this holds what only a reader's page can hold - what they
- * opened, what they pinned, and where the focus is - and draws the rows (`NodeRow.tsx`).
+ * opened, what they pinned, and where the focus is. The rows themselves are drawn by
+ * `TreeRows.tsx` and the caret in a node's own text is `useNodeEditing.ts`'s.
  *
  * The tree is the one body every preset draws: the page hands it the tree its preset left, and
  * a row drawn only because a match sits under it is context, faint and marked, and reached by
@@ -49,6 +48,7 @@ export function IssueTree({
   focusReveal,
   isClosed,
   onEditing,
+  onReport,
   openBody,
   reveal,
   root,
@@ -71,6 +71,10 @@ export function IssueTree({
    *  editor rather than leaving the row with nothing to put a caret in; `undefined` whenever
    *  the reader is editing nothing. */
   onEditing: (artifactId: string | undefined) => void;
+  /** What a key reported when it had nowhere to go, which the page draws in its own status
+   *  at the top of the body (R9, R21): the tree raises it rather than drawing it, so the
+   *  page's one report is the first status a reader of the page meets. */
+  onReport: (report: string) => void;
   /** The node this preset draws the body of without being asked: what waits for the reader
    *  there, such as a decision waiting for their review (R7). It opens that body and takes no
    *  focus, which stays the reader's. */
@@ -91,19 +95,19 @@ export function IssueTree({
   // How much of the whole tree the cycle key draws: its first lines, their bodies down to the
   // second level, then everything.
   const [cycle, setCycle] = useState(0);
-  // What a key reported when it had nowhere to go, in the page's own status.
-  const [report, setReport] = useState("");
+  // What a key reports when it has nowhere to go is the page's own status, drawn at the top of
+  // the body (`IssueBody`): the tree raises it and does not draw it.
   // The node a key is taking the reader to, once the row it asked for is on the page.
   const [wanted, setWanted] = useState<string | undefined>(undefined);
-  // The row the reader is editing in, with the document its node's text lives in: that
-  // document's one editor is drawn in this row's body while it stands (R9).
-  const [editing, setEditing] = useState<EditedRow | undefined>(undefined);
   const zoomed = useMediaQuery(ZOOMED_TREE_QUERY);
   const setFocusedNode = useSetFocusedNode();
-  const { documentBridge } = useMargin();
   const body = useRef<HTMLDivElement | null>(null);
-  // The node the reader has just left the caret in, so the row takes the focus back.
-  const leaving = useRef<string | undefined>(undefined);
+  const { edit, editing, stopEditing } = useNodeEditing({
+    artifacts,
+    container: body,
+    onEditing,
+    onReport,
+  });
 
   const target = reveal?.at(-1);
   // The address's own node is unfolded to whatever the reader has opened by hand, at every
@@ -200,34 +204,6 @@ export function IssueTree({
     (id: string | undefined) => setZoom(id === root.id ? undefined : id),
     [root.id]
   );
-  // The caret goes into the node's own text where that text lives, which is its document's
-  // block, with the collaborative cursors and the comment chord it has there (R9, the Design
-  // section's "Editing"). The document's one editor is moved onto this row
-  // (`document-stage.tsx`) and the caret is placed in the node's own block of it
-  // (`node-caret.ts`); a node whose text no document of this issue holds has none to put a
-  // caret in, and the key says so.
-  const edit = useCallback(
-    (row: string, node: TreeNode) => {
-      const place = documentOfNode(node.id, artifacts);
-      if (place === undefined) {
-        setReport(KEY_REPORTS.no_text);
-        return;
-      }
-      setEditing({
-        artifactId: place.artifact.id,
-        ...(place.blockId === undefined ? {} : { blockId: place.blockId }),
-        node: node.id,
-        row,
-      });
-    },
-    [artifacts]
-  );
-  const stopEditing = useCallback(() => {
-    setEditing((held) => {
-      if (held !== undefined) leaving.current = held.node;
-      return undefined;
-    });
-  }, []);
 
   useEffect(() => {
     if (wanted === undefined) return;
@@ -237,75 +213,6 @@ export function IssueTree({
       ?.focus();
   }, [wanted]);
 
-  // The page is told which document a row is editing, so it draws that document's one editor,
-  // and the caret goes in once the stage has moved into the row - one frame later, because the
-  // page mounts the editor in the commit this effect runs after.
-  const editingArtifact = editing?.artifactId;
-  const editingBlock = editing?.blockId;
-  const editingNode = editing?.node;
-  useEffect(() => {
-    onEditing(editingArtifact);
-  }, [editingArtifact, onEditing]);
-  useEffect(() => {
-    if (editingNode === undefined) return;
-    const frame = requestAnimationFrame(() => {
-      const host = body.current?.querySelector<HTMLElement>(
-        `[data-node-row][data-node-id="${CSS.escape(editingNode)}"] [data-node-body]`
-      );
-      if (host === null || host === undefined) return;
-      caretInBlock(host, editingBlock);
-      // The block is scrolled into view and pulsed by the document's own editor, where that
-      // editor is the one the margin holds; the caret above is the row's doing either way.
-      const bridge = documentBridge;
-      if (
-        editingBlock !== undefined &&
-        bridge !== undefined &&
-        bridge.artifactId === editingArtifact
-      ) {
-        bridge.focusBlock(editingBlock);
-      }
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [documentBridge, editingArtifact, editingBlock, editingNode]);
-
-  // Escape leaves the caret for the row it came from. The editor the row holds calls
-  // `preventDefault` on the key before it reaches the page's keyboard registry, which drops
-  // every binding of the press (`features/shell/keymap.ts`'s `handleKeyDown`), so the row
-  // listens for it in the capture phase while it is being edited in - before the editor sees
-  // it - and the registry's own binding stands for every other surface
-  // (`useTreeKeymap`'s `tree-leave-caret`).
-  useEffect(() => {
-    const container = body.current;
-    if (editingNode === undefined || container === null) return;
-    const leave = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.defaultPrevented) return;
-      event.preventDefault();
-      (document.activeElement as HTMLElement | null)?.blur();
-      container
-        .querySelector<HTMLElement>(`[data-node-row][data-node-id="${CSS.escape(editingNode)}"]`)
-        ?.focus();
-      stopEditing();
-    };
-    container.addEventListener("keydown", leave, true);
-    return () => container.removeEventListener("keydown", leave, true);
-  }, [editingNode, stopEditing]);
-
-  // Leaving the caret leaves the row with the focus. The editor asserts its own selection
-  // again a moment after a blur (`prosemirror-view`'s focus handler), and its stage moves off
-  // this row in the same commit, so the row takes the focus once more on the next frame as
-  // well as the moment Escape was pressed (`useTreeKeymap`'s `tree-leave-caret`).
-  useEffect(() => {
-    const left = leaving.current;
-    if (editingNode !== undefined || left === undefined) return;
-    leaving.current = undefined;
-    const frame = requestAnimationFrame(() => {
-      body.current
-        ?.querySelector<HTMLElement>(`[data-node-row][data-node-id="${CSS.escape(left)}"]`)
-        ?.focus();
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [editingNode]);
-
   useTreeKeymap({
     container: body,
     onCycle: () => setCycle((held) => (held + 1) % CYCLE_STATES),
@@ -314,7 +221,7 @@ export function IssueTree({
     onFold: unfold,
     onOpenDeeper: openDeeper,
     onPin: pin,
-    onReport: setReport,
+    onReport,
     onReveal: goToNode,
     onZoom: zoomTo,
     oneNodeAtATime: zoomed,
@@ -357,16 +264,14 @@ export function IssueTree({
         : rowKeyOf(first);
   return (
     <div className="mb-3 flex min-w-0 flex-col">
-      {/* What a key reported when it had nowhere to go: the page's own status, which is empty
-          while every key the reader pressed went somewhere (R9). */}
-      <p className={`text-xs ${textMutedOnCanvas}`} role="status" {...pageChrome}>
-        {report}
-      </p>
       {breadcrumb.length === 0 ? null : (
         <p className={`flex min-w-0 flex-wrap items-baseline gap-1 text-xs ${textMutedOnCanvas}`}>
           {breadcrumb.map((above) => (
             <button
-              className="max-w-full truncate underline"
+              // A crumb is a word in a line of text, not a control box: below 1280 px a plain
+              // button is 44 px tall (`styles.css`), which is a third of the head the first
+              // open question needs on a phone (R6). Its hit box grows by padding instead.
+              className="dispatch-inline-link max-w-full truncate underline"
               key={above.id}
               onClick={() => zoomTo(above.id)}
               tabIndex={-1}
@@ -386,55 +291,25 @@ export function IssueTree({
         ref={body}
         role="tree"
       >
-        {rows.map((row) => {
-          const key = rowKeyOf(row);
-          const indent = (row.level - 1) * INDENT_PER_LEVEL;
-          if (row.kind === "deeper") {
-            return (
-              <BranchMore
-                held={row.held}
-                indent={indent}
-                key={key}
-                level={row.level}
-                onOpen={() => openDeeper(row.of.id)}
-              />
-            );
+        <TreeRows
+          artifacts={artifacts}
+          context={context}
+          cycle={cycle}
+          editing={editing}
+          focused={focused}
+          isClosed={isClosed}
+          onFocus={takeFocus}
+          onOpenDeeper={openDeeper}
+          onPin={pin}
+          onToggle={(node, expanded) =>
+            zoomed ? zoomTo(node.id) : unfold(node.id, expanded !== true)
           }
-          const place = documentOfNode(row.node.id, artifacts);
-          return (
-            <NodeRow
-              {...(place?.blockId === undefined && place !== undefined
-                ? { artifact: place.artifact }
-                : {})}
-              body={
-                focused === key ||
-                pinned.has(key) ||
-                editing?.row === key ||
-                row.node.id === openBody ||
-                drawsBody(cycle, row.level)
-              }
-              context={context.has(row.node.id)}
-              {...(place?.blockId === undefined ? {} : { document: place.artifact })}
-              {...(editing?.row === key ? { editing: editing.artifactId } : {})}
-              expanded={row.expanded}
-              focused={focused === key}
-              folded={row.folded}
-              indent={indent}
-              isClosed={isClosed}
-              key={key}
-              level={row.level}
-              node={row.node}
-              onFocus={() => takeFocus(key, row.node)}
-              onPin={() => pin(key)}
-              onToggle={() =>
-                zoomed ? zoomTo(row.node.id) : unfold(row.node.id, row.expanded !== true)
-              }
-              oneLine={zoomed}
-              pinned={pinned.has(key)}
-              tabStop={tabStop === key}
-            />
-          );
-        })}
+          {...(openBody === undefined ? {} : { openBody })}
+          pinned={pinned}
+          rows={rows}
+          tabStop={tabStop}
+          zoomed={zoomed}
+        />
       </div>
       {root.children.length === 0 ? (
         <p className={`py-1 text-sm ${textMutedOnCanvas}`} {...pageChrome}>
@@ -445,72 +320,6 @@ export function IssueTree({
   );
 }
 
-/** One row the reader is editing in: the document its node's text lives in, the block of that
- *  document the node is, and which row of which node is holding the editor. */
-interface EditedRow {
-  readonly artifactId: string;
-  readonly blockId?: string;
-  readonly node: string;
-  readonly row: string;
-}
-
 /** The width the tree is read one node at a time at, where five levels of indent and a row's own
  *  words do not fit together (R1, R17). */
 const ZOOMED_TREE_QUERY = "(max-width: 1024px)";
-
-/** How far in one level of the tree is drawn, in pixels (R1). */
-const INDENT_PER_LEVEL = 20;
-
-/**
- * How much of the whole tree the cycle key draws, in the three states it steps through: its
- * rows as first lines, those first lines with every body down to the second level open, and
- * everything - every branch unfolded and every body open (R9). The reader's own folds and pins
- * are untouched by it, so the cycle comes back to the tree they had.
- */
-const CYCLE_STATES = 3;
-
-/** The state that unfolds every branch, which is the last of the three. */
-const EVERYTHING = CYCLE_STATES - 1;
-
-/** How deep the second state of the cycle opens the bodies. */
-const BODIES_TO_LEVEL = 2;
-
-/** Whether the cycle draws the body of a row at `level`, whatever the focus and the pins say. */
-function drawsBody(cycle: number, level: number): boolean {
-  return cycle === EVERYTHING || (cycle === 1 && level <= BODIES_TO_LEVEL);
-}
-
-/** The one row a branch below the drawn levels folds to: how many nodes it holds, and the
- *  control that opens them in place. */
-function BranchMore({
-  held,
-  indent,
-  level,
-  onOpen,
-}: {
-  held: number;
-  indent: number;
-  level: number;
-  onOpen: () => void;
-}): ReactNode {
-  return (
-    <div
-      aria-level={level}
-      className={`flex min-w-0 border-l-2 py-1 text-xs ${borderTransparent} ${textMutedOnCanvas}`}
-      data-branch-more=""
-      role="treeitem"
-      style={{ paddingLeft: indent }}
-      tabIndex={-1}
-    >
-      <button
-        className={`rounded border px-1 ${borderDefault}`}
-        onClick={onOpen}
-        tabIndex={-1}
-        type="button"
-        {...pageChrome}
-      >
-        <span {...authorText}>{held}</span> {CONTROL_LABELS.deeper_nodes}
-      </button>
-    </div>
-  );
-}

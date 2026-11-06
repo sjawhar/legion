@@ -2,6 +2,7 @@ import type { MouseEvent, ReactNode } from "react";
 
 import { useCopyFeedback } from "../hooks/useCopyFeedback";
 import { dangerText, linkHoverText, linkText, successText } from "../theme/classes";
+import { useTooltips } from "./tooltips";
 
 /** Copies `value` to the clipboard and confirms inline for 1.5 s ("Copied") or reports the
  *  failure until the next attempt. With `children` the button shows that label before the
@@ -26,6 +27,7 @@ export function CopyButton({
   value: string | ((event: MouseEvent<HTMLButtonElement>) => string);
   what: string;
 }): ReactNode {
+  const tooltips = useTooltips();
   const { copy, status } = useCopyFeedback();
   const name = label ?? (typeof value === "string" ? `Copy ${what} ${value}` : `Copy ${what}`);
   const shape =
@@ -39,7 +41,7 @@ export function CopyButton({
         aria-label={name}
         className={`inline-flex min-h-11 shrink-0 items-center rounded-lg md:min-h-8 ${shape} ${linkText} ${linkHoverText} ${className ?? ""}`}
         onClick={(event) => copy(typeof value === "string" ? value : value(event))}
-        title={name}
+        title={tooltips ? name : undefined}
         type="button"
       >
         {children === undefined ? null : <span>{children}</span>}

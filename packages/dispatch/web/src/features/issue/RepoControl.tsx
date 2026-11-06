@@ -75,12 +75,9 @@ export function RepoControl({
   // Nothing resolved and no list to pick from: the failure is all there is to show.
   const picker =
     resolvedRepo === null && mappings.isError ? null : (
-      <span
-        className={`${badgeSelectRailWrapper} ${disabled ? "opacity-50" : ""}`}
-        title={
-          repo === null && resolvedRepo !== null ? "Inherited or the project's default" : undefined
-        }
-      >
+      // No `title`: `description` below says "inherited or the project's default" in words
+      // (dispatch://INFRA-1196 R21).
+      <span className={`${badgeSelectRailWrapper} ${disabled ? "opacity-50" : ""}`}>
         <span
           aria-hidden="true"
           className={`${badgeSelectBadge} font-mono ${tone.bg} ${tone.text}`}

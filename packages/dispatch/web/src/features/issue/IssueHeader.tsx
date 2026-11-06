@@ -10,6 +10,7 @@ import {
   dangerText,
   textMutedOnSurface,
 } from "../../theme/classes";
+import { PHONE_VIEWPORT_QUERY, useMediaQuery } from "../shell/useDialog";
 import type { IssueAction } from "./IssueActionsMenu";
 import { type IssueField, IssueFieldForms } from "./IssueFieldForms";
 import { IssueIdentityRow } from "./IssueIdentityRow";
@@ -81,6 +82,14 @@ export function IssueHeader({
     priorityWrite,
     saving: updateIssue.isPending,
   });
+  // Where the fourth row goes. From `md` it is the block's own last row, as the design draws
+  // it. Below `md` it is 144 px of a 844 px screen - four lines of 44 px controls - and the
+  // identity block is already 400 px there, so it is drawn at the end of the page's column
+  // instead (`order-last`, with `IssueDetail`'s column a flex column): every property is still
+  // visible with nothing opened (R11), and the head above the tree is four lines shorter, which
+  // is what puts the first open question on a phone's first screen (R6).
+  const isPhoneViewport = useMediaQuery(PHONE_VIEWPORT_QUERY);
+  const workRow = { isClosed, issue, onOpenField: setEditingField, writes };
 
   const actions: IssueAction[] = [
     isClosed
@@ -108,104 +117,104 @@ export function IssueHeader({
   ];
 
   return (
-    <header
-      className={`sticky top-0 z-20 mb-3 flex min-w-0 flex-col rounded-xl border ${
-        condensed ? "gap-1 p-2" : "gap-2 p-3"
-      } ${card}`}
-      data-condensed={condensed ? "true" : "false"}
-      data-issue-header=""
-      data-testid="issue-header"
-      ref={block}
-    >
-      {isClosed ? (
-        <p
-          className={`rounded-lg px-3 py-1 text-sm ${calloutWarningBorder} ${calloutWarningBg} ${calloutWarningText}`}
-          {...pageChrome}
-        >
-          {HELP_LINES.closed}
-        </p>
-      ) : null}
-      <IssueIdentityRow
-        actions={actions}
-        issueKey={issue.key}
-        onPin={() => writes.pinGuard.guard(() => writes.pin.mutate(!state.pinned))}
-        parent={issue.parent}
-        pinSaving={writes.pin.isPending}
-        pinned={state.pinned}
-      />
-      <IssueTitleRow
-        condensed={condensed}
-        drafts={drafts}
-        editing={editingTitle}
-        isClosed={isClosed}
-        onEditingChange={setEditingTitle}
-      />
-      <IssuePropertiesRow
-        documentArtifact={documentArtifact}
-        isClosed={isClosed}
-        issue={issue}
-        onOpenField={setEditingField}
-        priorityWrite={priorityWrite}
-        writes={writes}
-      />
-      <IssueWorkRow
-        isClosed={isClosed}
-        issue={issue}
-        onOpenField={setEditingField}
-        writes={writes}
-      />
-      <IssueFieldForms
-        field={editingField}
-        isClosed={isClosed}
-        issue={issue}
-        onClose={() => setEditingField(null)}
-        writes={writes}
-      />
-      {drafts.titleError === null ? null : (
-        <p className={`text-sm ${dangerText}`} id="issue-title-help">
-          {drafts.titleError}
-        </p>
-      )}
-      {writes.statusSaving ? (
-        <span className={`block text-xs ${textMutedOnSurface}`} role="status" {...pageChrome}>
-          {pendingStatus === "done"
-            ? CONTROL_LABELS.saving_close
-            : pendingStatus === "backlog" && isClosed
-              ? CONTROL_LABELS.saving_reopen
-              : CONTROL_LABELS.saving_field}
-        </span>
-      ) : null}
-      {writes.pin.isError ? (
-        <QueryError
-          message="Could not save pin status."
-          onRetry={() => writes.pinGuard.retryLast(writes.pin)}
-          retrying={writes.pin.isPending}
-        />
-      ) : null}
-      {writes.releaseClaim.isError ? (
-        <QueryError
-          message="Could not release this claim."
-          onRetry={() => writes.releaseClaim.mutate()}
-          retrying={writes.releaseClaim.isPending}
-        />
-      ) : null}
-      {updateIssue.isError && !statusPickOnly(updateIssue.variables) ? (
-        writes.parentSaveFailed ? (
-          <p className={`text-sm ${dangerText}`} id="issue-parent-error">
-            {writes.parentError}
+    <>
+      <header
+        className={`sticky top-0 z-20 mb-0.5 flex min-w-0 flex-col gap-0.5 rounded-xl border p-2 ${card}`}
+        data-condensed={condensed ? "true" : "false"}
+        data-issue-header=""
+        data-testid="issue-header"
+        ref={block}
+      >
+        {isClosed ? (
+          <p
+            className={`rounded-lg px-3 py-1 text-sm ${calloutWarningBorder} ${calloutWarningBg} ${calloutWarningText}`}
+            {...pageChrome}
+          >
+            {HELP_LINES.closed}
           </p>
-        ) : writes.titleRefusal !== null ? (
-          <p className={`text-sm ${dangerText}`} id="issue-title-error" role="alert">
-            {writes.titleRefusal}
+        ) : null}
+        <IssueIdentityRow
+          actions={actions}
+          issueKey={issue.key}
+          onPin={() => writes.pinGuard.guard(() => writes.pin.mutate(!state.pinned))}
+          parent={issue.parent}
+          pinSaving={writes.pin.isPending}
+          pinned={state.pinned}
+        />
+        <IssueTitleRow
+          condensed={condensed}
+          drafts={drafts}
+          editing={editingTitle}
+          isClosed={isClosed}
+          onEditingChange={setEditingTitle}
+        />
+        <IssuePropertiesRow
+          documentArtifact={documentArtifact}
+          isClosed={isClosed}
+          issue={issue}
+          onOpenField={setEditingField}
+          priorityWrite={priorityWrite}
+          writes={writes}
+        />
+        {isPhoneViewport ? null : <IssueWorkRow {...workRow} />}
+        <IssueFieldForms
+          field={editingField}
+          isClosed={isClosed}
+          issue={issue}
+          onClose={() => setEditingField(null)}
+          writes={writes}
+        />
+        {drafts.titleError === null ? null : (
+          <p className={`text-sm ${dangerText}`} id="issue-title-help">
+            {drafts.titleError}
           </p>
-        ) : (
+        )}
+        {writes.statusSaving ? (
+          <span className={`block text-xs ${textMutedOnSurface}`} role="status" {...pageChrome}>
+            {pendingStatus === "done"
+              ? CONTROL_LABELS.saving_close
+              : pendingStatus === "backlog" && isClosed
+                ? CONTROL_LABELS.saving_reopen
+                : CONTROL_LABELS.saving_field}
+          </span>
+        ) : null}
+        {writes.pin.isError ? (
           <QueryError
-            message="Could not update this issue."
-            onRetry={drafts.retry}
-            retrying={updateIssue.isPending}
+            message="Could not save pin status."
+            onRetry={() => writes.pinGuard.retryLast(writes.pin)}
+            retrying={writes.pin.isPending}
           />
-        )
+        ) : null}
+        {writes.releaseClaim.isError ? (
+          <QueryError
+            message="Could not release this claim."
+            onRetry={() => writes.releaseClaim.mutate()}
+            retrying={writes.releaseClaim.isPending}
+          />
+        ) : null}
+        {updateIssue.isError && !statusPickOnly(updateIssue.variables) ? (
+          writes.parentSaveFailed ? (
+            <p className={`text-sm ${dangerText}`} id="issue-parent-error">
+              {writes.parentError}
+            </p>
+          ) : writes.titleRefusal !== null ? (
+            <p className={`text-sm ${dangerText}`} id="issue-title-error" role="alert">
+              {writes.titleRefusal}
+            </p>
+          ) : (
+            <QueryError
+              message="Could not update this issue."
+              onRetry={drafts.retry}
+              retrying={updateIssue.isPending}
+            />
+          )
+        ) : null}
+      </header>
+      {isPhoneViewport ? (
+        <div className="order-last mb-3 min-w-0">
+          <IssueWorkRow {...workRow} />
+        </div>
       ) : null}
-    </header>
+    </>
   );
 }

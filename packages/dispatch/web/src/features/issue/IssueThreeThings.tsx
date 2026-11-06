@@ -21,7 +21,6 @@ import {
   type CheckState,
   CONTROL_LABELS,
   EMPTY_STATE_LINES,
-  GAP_LINES,
   GAP_WORDS,
   GLYPH_TOKENS,
   NODE_STATE_WORDS,
@@ -84,7 +83,7 @@ export function IssueThreeThings({
   const approval = plan?.approval?.state;
   return (
     <section
-      className={`mb-3 flex min-w-0 flex-col gap-2 border-b pb-3 ${borderDefault}`}
+      className={`mb-0.5 flex min-w-0 flex-col gap-1 border-b pb-0.5 ${borderDefault}`}
       data-testid="issue-three-things"
     >
       {sentences.length === 0 ? (
@@ -92,10 +91,10 @@ export function IssueThreeThings({
           {EMPTY_STATE_LINES.spec_summary}
         </p>
       ) : (
-        <ul className="flex min-w-0 flex-col gap-1">
+        <ul className="flex min-w-0 flex-col">
           {sentences.map((sentence) => (
             <li
-              className={`text-sm break-words ${textSecondaryOnCanvas}`}
+              className={`text-sm leading-tight break-words ${textSecondaryOnCanvas}`}
               key={sentence}
               {...authorText}
             >
@@ -104,62 +103,69 @@ export function IssueThreeThings({
           ))}
         </ul>
       )}
-      <p className={`flex min-w-0 flex-wrap items-baseline gap-2 text-xs ${textMutedOnCanvas}`}>
-        {(["no_summary_author", "no_read_back"] as const).map((gap) => (
-          <span
-            className={`rounded border px-1 ${borderDefault}`}
-            data-gap=""
-            data-gap-kind={gap}
-            key={gap}
-            title={undefined}
-            {...pageChrome}
+      {/* The two rows and the two gaps share one wrapping line. Each keeps its own box, because
+          each names one source and no second (R5), but a line apiece cost the head 60 px before
+          the tree and R6 puts the first open question on the first screen. The gap words are
+          what the model does not hold (dispatch://INFRA-1278): the chips name it, and the
+          sentences that spelled it out are gone with the line they cost. */}
+      <div className="flex min-w-0 flex-wrap items-baseline gap-x-4 gap-y-0.5">
+        <p
+          className={`flex min-w-0 flex-wrap items-baseline gap-x-2 text-sm ${textMutedOnCanvas}`}
+          data-testid="issue-plan-row"
+        >
+          <span {...pageChrome}>{CONTROL_LABELS.how_it_gets_done}</span>
+          {/* `dispatch-inline-link`: below 1280 px every other link is a 44 px control box
+              (`styles.css`), and two of them here cost the head two lines the first open
+              question needs (R6). A link inside a line of text keeps its line box and grows
+              its hit area by padding instead. */}
+          <Link
+            className={`dispatch-inline-link underline ${linkText} ${linkHoverText}`}
+            to={presetPath(issueKey, "plan")}
           >
-            {GAP_WORDS[gap]}
-          </span>
-        ))}
-        <span {...pageChrome}>
-          {GAP_LINES.no_summary_author} {GAP_LINES.no_read_back}
-        </span>
-      </p>
-      <p
-        className={`flex min-w-0 flex-wrap items-baseline gap-2 text-sm ${textMutedOnCanvas}`}
-        data-testid="issue-plan-row"
-      >
-        <span {...pageChrome}>{CONTROL_LABELS.how_it_gets_done}</span>
-        <Link
-          className={`underline ${linkText} ${linkHoverText}`}
-          to={presetPath(issueKey, "plan")}
+            <span {...pageChrome}>{PRESET_NAMES.plan}</span>
+          </Link>
+          {planTasks === 0 ? (
+            <span {...pageChrome}>{EMPTY_STATE_LINES.plan}</span>
+          ) : approval === undefined ? null : (
+            <span {...pageChrome}>{APPROVAL_STATE_WORDS[approval]}</span>
+          )}
+        </p>
+        <p
+          className={`flex min-w-0 flex-wrap items-baseline gap-x-2 text-sm ${textMutedOnCanvas}`}
+          data-testid="issue-checks-row"
         >
-          <span {...pageChrome}>{PRESET_NAMES.plan}</span>
-        </Link>
-        {planTasks === 0 ? (
-          <span {...pageChrome}>{EMPTY_STATE_LINES.plan}</span>
-        ) : approval === undefined ? null : (
-          <span {...pageChrome}>{APPROVAL_STATE_WORDS[approval]}</span>
-        )}
-      </p>
-      <p
-        className={`flex min-w-0 flex-wrap items-baseline gap-2 text-sm ${textMutedOnCanvas}`}
-        data-testid="issue-checks-row"
-      >
-        <span {...pageChrome}>{CONTROL_LABELS.what_you_will_be_shown}</span>
-        <Link
-          className={`underline ${linkText} ${linkHoverText}`}
-          to={presetPath(issueKey, "checks")}
-        >
-          <span {...pageChrome}>{PRESET_NAMES.checks}</span>
-        </Link>
-        {states.length === 0 ? (
-          <span {...pageChrome}>{EMPTY_STATE_LINES.checks}</span>
-        ) : (
-          states.map((state) => (
-            <span className="flex items-center gap-1" key={state} {...pageChrome}>
-              <NodeGlyph token={GLYPH_TOKENS.states.check[state]} />
-              <span>{NODE_STATE_WORDS.check[state]}</span>
+          <span {...pageChrome}>{CONTROL_LABELS.what_you_will_be_shown}</span>
+          <Link
+            className={`dispatch-inline-link underline ${linkText} ${linkHoverText}`}
+            to={presetPath(issueKey, "checks")}
+          >
+            <span {...pageChrome}>{PRESET_NAMES.checks}</span>
+          </Link>
+          {states.length === 0 ? (
+            <span {...pageChrome}>{EMPTY_STATE_LINES.checks}</span>
+          ) : (
+            states.map((state) => (
+              <span className="flex items-center gap-1" key={state} {...pageChrome}>
+                <NodeGlyph token={GLYPH_TOKENS.states.check[state]} />
+                <span>{NODE_STATE_WORDS.check[state]}</span>
+              </span>
+            ))
+          )}
+        </p>
+        <span className="flex min-w-0 flex-wrap items-baseline gap-2 text-xs">
+          {(["no_summary_author", "no_read_back"] as const).map((gap) => (
+            <span
+              className={`rounded border px-1 ${borderDefault} ${textMutedOnCanvas}`}
+              data-gap=""
+              data-gap-kind={gap}
+              key={gap}
+              {...pageChrome}
+            >
+              {GAP_WORDS[gap]}
             </span>
-          ))
-        )}
-      </p>
+          ))}
+        </span>
+      </div>
     </section>
   );
 }

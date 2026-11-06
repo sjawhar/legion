@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 
 import type { IssueClaim } from "../../api/types";
 import { pillClassName } from "../../components/Pill";
-import { AgentName, useAgentText } from "../refs/AgentName";
+import { AgentName } from "../refs/AgentName";
 import { type AgentRegistry, useAgentRegistry } from "../refs/agent-registry";
 import { Timestamp } from "../refs/Timestamp";
 
@@ -38,10 +38,10 @@ export function claimHasLapsed(
  * List row, a Board card. The holder is drawn by `AgentName`, as every agent is: its current
  * registry title, else the title stamped on the claim, else `session:<8>…`, with its running
  * state and a link to its live conversation. The age keeps itself current through the shared
- * `Timestamp` tick, and the whole label with the absolute time is in the `title`, which also
- * says what a claim is: the chip sits among status, priority and assignee, and nothing else on
- * the page defines it. An unclaimed issue renders nothing at all, so a board of unclaimed work
- * stays quiet.
+ * `Timestamp` tick and is followed by the instant itself, in words: the chip carries no
+ * tooltip at all, because the time a claim was taken is what decides whether it is stale and a
+ * tooltip saying so reaches no reader on a phone or on the keyboard (dispatch://INFRA-1196
+ * R21). An unclaimed issue renders nothing at all, so a board of unclaimed work stays quiet.
  *
  * A holder the registry no longer lists reads "· not running" in the muted tone, beside its
  * name's own not-running mark, because that claim is free for the taking and a chip that looked
@@ -59,28 +59,26 @@ export function claimHasLapsed(
  */
 export function ClaimChip({ claim }: { claim: IssueClaim | null }): ReactNode {
   const registry = useAgentRegistry(claim?.actor.kind === "session");
-  const text = useAgentText();
+  // No agent text is read here: the holder is drawn by `AgentName` and the instant by `Timestamp`.
   if (claim === null) {
     return null;
   }
   const lapsed = claimHasLapsed(claim, registry);
-  const since = `Claimed by ${text.label(claim.actor)} · since ${new Date(claim.at).toLocaleString()}.`;
-  const explains =
-    "A claim marks who is implementing this issue, so two agents never take the same work.";
-  const lapsedNote = lapsed ? " That session is no longer running, so anyone may claim it." : "";
   return (
     <span
       className={`${pillClassName(lapsed ? "label" : "selected-label")} min-w-0 max-w-full gap-1`}
       data-testid="issue-claim"
       style={{ flexShrink: 1 }}
-      title={`${since} ${explains}${lapsedNote}`}
     >
       <span className="shrink-0">Claimed by</span>
       <AgentName actor={claim.actor} className="min-w-0 truncate" inline />
       <span aria-hidden="true" className="shrink-0">
         ·
       </span>
-      <Timestamp at={claim.at} className="shrink-0" />
+      {/* The instant itself, in words rather than in a tooltip: how long a session has held
+          the issue is what decides whether its claim is stale, and a tooltip saying so reaches
+          no reader on a phone or on the keyboard (dispatch://INFRA-1196 R21). */}
+      <Timestamp at={claim.at} className="shrink-0" exact />
       {lapsed ? (
         <>
           <span aria-hidden="true" className="shrink-0">

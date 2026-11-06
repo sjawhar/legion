@@ -34,7 +34,10 @@ export function IssueTitleRow({
   isClosed: boolean;
   onEditingChange: (editing: boolean) => void;
 }): ReactNode {
-  const size = condensed ? "text-base leading-6" : "text-[22px] leading-7";
+  // Below `md` the title takes the body's own size: a 37-character title costs three lines at
+  // 22 px on a 390 px screen and two at 14 px, and the lines it saves are lines of the head
+  // the first open question needs (dispatch://INFRA-1196 R6).
+  const size = condensed ? "text-base leading-6" : "text-sm leading-5 md:text-[22px] md:leading-7";
   const saveOnEnter = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "Enter") {
       event.currentTarget.blur();
@@ -45,7 +48,7 @@ export function IssueTitleRow({
       <input
         aria-describedby={drafts.titleError === null ? undefined : "issue-title-help"}
         aria-label="Issue title"
-        className={`min-w-0 w-full rounded-lg border px-2 py-1 font-semibold tracking-tight outline-none md:py-0 ${size} ${borderTransparent} ${bgTransparent} ${textPrimaryOnSurface} ${borderStrongHover} ${focusBorder}`}
+        className={`min-w-0 w-full rounded-lg border px-2 py-0.5 font-semibold tracking-tight outline-none md:py-0 ${size} ${borderTransparent} ${bgTransparent} ${textPrimaryOnSurface} ${borderStrongHover} ${focusBorder}`}
         disabled={isClosed}
         maxLength={ISSUE_TITLE_MAX}
         onBlur={() => {
@@ -68,7 +71,7 @@ export function IssueTitleRow({
   }
   return (
     <h1
-      className={`min-w-0 break-words rounded-lg border px-2 py-1 font-semibold tracking-tight md:py-0 ${size} ${borderTransparent} ${textPrimaryOnSurface} ${
+      className={`min-w-0 break-words rounded-lg border px-2 py-0.5 font-semibold tracking-tight md:py-0 ${size} ${borderTransparent} ${textPrimaryOnSurface} ${
         isClosed ? "" : `cursor-text ${borderStrongHover}`
       }`}
       onClick={() => {

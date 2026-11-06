@@ -115,9 +115,12 @@ test("a claimed issue names its holder and releases the claim from the header", 
   const release = spyOn(api, "releaseIssueClaim").mockResolvedValue({ ...base, claim: null });
   const view = header({ ...base, claim });
   try {
-    expect(await screen.findByTitle(/Claimed by Implementer/)).toBeDefined();
-    // The chip is the only place a reader is told what a claim is.
-    expect(await screen.findByTitle(/two agents never take the same work/)).toBeDefined();
+    // The chip says who holds the issue and since when in words, not in a tooltip: the issue
+    // page draws none at all (dispatch://INFRA-1196 R21, `components/tooltips.tsx`).
+    const claimed = await screen.findByTestId("issue-claim");
+    expect(claimed.textContent).toContain("Claimed by");
+    expect(claimed.textContent).toContain("Implementer");
+    expect(claimed.querySelector("time")?.textContent ?? "").toMatch(/\(.+\)/);
     // The holder is drawn by `AgentName`: its name links to its live conversation, and the
     // registry lists it, so it reads as running and the chip adds nothing.
     const chip = screen.getByTestId("issue-claim");
@@ -150,7 +153,8 @@ test("a holder the registry no longer lists reads as not running", async () => {
   const view = header({ ...base, claim });
   try {
     expect(await screen.findByText("not running")).toBeDefined();
-    expect(screen.getByTitle(/no longer running, so anyone may claim it/)).toBeDefined();
+    // "not running" is drawn, not hovered: the chip carries no tooltip.
+    expect(screen.queryByTitle(/no longer running/)).toBeNull();
     const chip = screen.getByTestId("issue-claim");
     expect(
       chip.querySelector('[data-agent-name="session-one"]')?.getAttribute("data-agent-state")

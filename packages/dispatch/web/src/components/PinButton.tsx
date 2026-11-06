@@ -8,6 +8,7 @@ import {
   secondaryButtonText,
   textMutedHoverToSecondary,
 } from "../theme/classes";
+import { useTooltips } from "./tooltips";
 
 /** The one pin glyph: an outline that fills with `currentColor` once pinned. */
 function PinIcon({ pinned }: { pinned: boolean }): ReactNode {
@@ -44,8 +45,11 @@ export function PinButton({
   onClick: () => void;
   pinned: boolean;
   quiet?: boolean;
+  /** A shorter tooltip than `label`, for a host whose label names a long thing. Drawn only on
+   *  a surface that offers tooltips (`components/tooltips.tsx`). */
   title?: string;
 }): ReactNode {
+  const tooltips = useTooltips();
   const resting = quiet
     ? textMutedHoverToSecondary
     : `${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`;
@@ -58,7 +62,7 @@ export function PinButton({
       } ${pinned ? `${primaryButtonBg} ${primaryButtonEnabledHoverBg}` : resting} ${className ?? ""}`}
       disabled={disabled}
       onClick={onClick}
-      title={title ?? label}
+      title={tooltips ? (title ?? label) : undefined}
       type="button"
     >
       <PinIcon pinned={pinned} />

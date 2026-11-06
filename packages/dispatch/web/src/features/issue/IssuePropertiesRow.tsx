@@ -66,11 +66,14 @@ export function IssuePropertiesRow({
 
   return (
     <div
-      className="flex w-full min-w-0 flex-wrap items-center gap-2"
+      className="flex w-full min-w-0 flex-wrap items-center gap-x-2 gap-y-1"
       data-testid="issue-state-actions"
     >
+      {/* The status pill may shrink: at 390 px its widest option ("Needs review") would
+          otherwise hold a line of its own and push the priority and the assignee onto a third,
+          which is 44 px of the head the first open question needs (dispatch://INFRA-1196 R6). */}
       <label
-        className={`flex min-h-11 shrink-0 items-center gap-2 rounded-full border px-2 text-sm font-semibold uppercase tracking-wide sm:px-3 md:min-h-8 xl:px-2 ${borderDefault} ${statusPill.bg} ${statusPill.text}`}
+        className={`flex min-h-11 min-w-0 items-center gap-2 rounded-full border px-2 text-sm font-semibold uppercase tracking-wide sm:px-3 md:min-h-8 xl:px-2 ${borderDefault} ${statusPill.bg} ${statusPill.text}`}
       >
         <span
           aria-hidden="true"

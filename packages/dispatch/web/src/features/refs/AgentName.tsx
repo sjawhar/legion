@@ -9,6 +9,7 @@ import { Fragment, type ReactNode, useMemo } from "react";
 import { generatePath, Link } from "react-router-dom";
 
 import type { Actor, AskResolution } from "../../api/types";
+import { useTooltips } from "../../components/tooltips";
 import {
   focusVisibleRing,
   linkHoverText,
@@ -119,16 +120,22 @@ function AgentStateMark({
   lastSeen: number | undefined;
   state: AgentState;
 }): ReactNode {
+  const tooltips = useTooltips();
   const seen =
     state === "running" && lastSeen !== undefined
       ? relativeTimeLabel(new Date(lastSeen), Date.now())
       : undefined;
+  const reading = seen === undefined ? STATE_LABEL[state] : `${STATE_LABEL[state]} · seen ${seen}`;
+  // On a surface with no tooltips (`components/tooltips.tsx`) the whole reading - the state
+  // and, while it is running, how long ago it was seen - is the mark's accessible name
+  // instead, so nothing is kept for a pointer alone; the shape says the state to everyone
+  // either way.
   return (
     <span
-      aria-label={STATE_LABEL[state]}
+      aria-label={tooltips ? STATE_LABEL[state] : reading}
       className={STATE_MARK_CLASS[state]}
       role="img"
-      title={seen === undefined ? STATE_LABEL[state] : `${STATE_LABEL[state]} · seen ${seen}`}
+      title={tooltips ? reading : undefined}
     />
   );
 }
@@ -179,6 +186,7 @@ function SessionAgentName({
   subject: SessionRef;
   variant: AgentVariant;
 }): ReactNode {
+  const tooltips = useTooltips();
   const registry = useAgentRegistry(true);
   const { attribution, name, sessionId } = resolveAgent(subject, registry);
   const state = registry.state(sessionId);
@@ -190,7 +198,12 @@ function SessionAgentName({
     named = variant.control(name);
     const openLabel = `Open live conversation with ${name}${attribution}`;
     liveLink = (
-      <Link aria-label={openLabel} className={`ml-1 px-1 ${LINK_CLASS}`} title={openLabel} to={to}>
+      <Link
+        aria-label={openLabel}
+        className={`ml-1 px-1 ${LINK_CLASS}`}
+        title={tooltips ? openLabel : undefined}
+        to={to}
+      >
         <span aria-hidden="true">↗</span>
       </Link>
     );
@@ -215,7 +228,7 @@ function SessionAgentName({
       className={className === undefined ? AGENT_SPAN_CLASS : `${AGENT_SPAN_CLASS} ${className}`}
       data-agent-name={sessionId}
       data-agent-state={state}
-      title={name === shortSessionId(sessionId) ? sessionId : undefined}
+      title={tooltips && name === shortSessionId(sessionId) ? sessionId : undefined}
     >
       <AgentStateMark lastSeen={registry.lastSeen(sessionId)} state={state} />
       {named}

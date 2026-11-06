@@ -3,7 +3,6 @@ import type { ReactNode } from "react";
 
 import { ApiError, api } from "../../api/client";
 import type { ExternalLink } from "../../api/types";
-import { TruncatedText } from "../../components/TruncatedText";
 import { safeExternalHref } from "../../lib/external-href";
 import { badgeLow, linkHoverText, linkText, textMutedOnSurface } from "../../theme/classes";
 
@@ -144,24 +143,25 @@ export function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
     retry: false,
   });
 
+  // No link on this page carries a `title`: a tooltip is meaning a reader on a phone or on the
+  // keyboard never sees (dispatch://INFRA-1196 R21), so what the tooltip said is drawn instead -
+  // an unsafe link says so in words, and a link with no GitHub reading shows its whole address
+  // rather than a cut one with the rest on hover.
   if (href === null) {
     return (
-      <span
-        className={`inline-block max-w-[18ch] truncate text-sm sm:max-w-[32ch] ${textMutedOnSurface}`}
-        title="Unsafe external link"
-      >
-        {link.url}
+      <span className={`inline-block text-sm ${textMutedOnSurface}`}>
+        <span className="break-all">{link.url}</span>
+        <span className="ml-1">(unsafe external link)</span>
       </span>
     );
   }
   if (match === null) {
     return (
       <a
-        className={`inline-block max-w-[18ch] truncate text-sm underline sm:max-w-[32ch] ${linkText} ${linkHoverText}`}
+        className={`inline-block max-w-full break-all text-sm underline ${linkText} ${linkHoverText}`}
         href={href}
-        title={link.url}
       >
-        <TruncatedText>{link.url}</TruncatedText>
+        {link.url}
       </a>
     );
   }
@@ -182,20 +182,16 @@ export function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
         : reference.state;
   return (
     <a
-      className={`inline-flex max-w-full items-center gap-2 text-sm underline ${linkText} ${linkHoverText}`}
+      className={`inline-flex max-w-full flex-wrap items-center gap-2 text-sm underline ${linkText} ${linkHoverText}`}
       href={href}
-      title={
-        unavailable
-          ? "GitHub details are unavailable for this repository."
-          : reference === undefined
-            ? link.url
-            : `${repository}${number}: ${reference.title}`
-      }
     >
       <span className="shrink-0 font-medium">{number}</span>
-      <TruncatedText className="max-w-[18ch] sm:max-w-[32ch]">
+      <span className="min-w-0 break-all">
         {reference === undefined ? repository : reference.title}
-      </TruncatedText>
+      </span>
+      {unavailable ? (
+        <span className="shrink-0">(GitHub details are unavailable for this repository)</span>
+      ) : null}
       {state === undefined ? null : (
         <span
           className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${badgeLow.bg} ${badgeLow.text}`}

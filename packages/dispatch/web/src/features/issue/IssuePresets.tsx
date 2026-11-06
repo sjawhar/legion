@@ -117,7 +117,7 @@ export function IssuePresets({
 
   return (
     <div
-      className={`mb-3 flex min-w-0 flex-wrap items-center gap-2 border-b pb-1 ${borderDefault}`}
+      className={`mb-0.5 flex min-w-0 flex-wrap items-center gap-2 border-b pb-1 ${borderDefault}`}
       ref={wrapper}
     >
       <div className="relative flex min-w-0 flex-wrap items-center" data-testid="issue-presets">

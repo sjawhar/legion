@@ -1,5 +1,7 @@
 import type { ReactNode } from "react";
 
+import { useTooltips } from "../../components/tooltips";
+
 import {
   connectionDotConnected,
   connectionDotConnecting,
@@ -30,13 +32,17 @@ export function ConnectionDot({
   const label = connectionLabel(connection, notice);
   return (
     <span
+      // The dot is named by `aria-label`, not by the `title` it used to lean on: a surface may
+      // draw no tooltip at all (`components/tooltips.tsx`, the issue page) and the indicator
+      // still has to say which state it is in.
+      aria-label={label}
       className={
         notice === undefined
           ? "inline-flex shrink-0 items-center"
           : "inline-flex items-center gap-1"
       }
       role="status"
-      title={label}
+      title={useTooltips() ? label : undefined}
     >
       <span aria-hidden className={`h-2.5 w-2.5 rounded-full ${DOT_CLASS_BY_STATE[connection]}`} />
       {notice === undefined ? null : (

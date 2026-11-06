@@ -4,7 +4,6 @@ import { Link } from "react-router-dom";
 import type { IssueChild, IssueDetails } from "../../api/types";
 import {
   borderDefault,
-  card,
   linkHoverText,
   linkText,
   progressBarFill,
@@ -55,10 +54,13 @@ export function IssueChildren({ issue }: { issue: IssueDetails }): ReactNode {
   );
   return (
     <section
-      className={`mb-3 flex min-w-0 flex-col gap-2 border-b pb-2 ${borderDefault}`}
+      className={`mb-0.5 flex min-w-0 flex-col gap-1 border-b pb-1 ${borderDefault}`}
       data-testid="issue-children"
     >
-      <div className="flex min-w-0 flex-wrap items-center gap-3">
+      {/* One line, bar and both counts beside the control: a second line here is a line of the
+          head the first open question needs on a phone (R6), so the bar gives up its width
+          rather than the labels their words. */}
+      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0">
         <h2 className="min-w-0">
           <button
             aria-expanded={section.isOpen}
@@ -76,7 +78,7 @@ export function IssueChildren({ issue }: { issue: IssueDetails }): ReactNode {
           aria-valuemax={direct.total}
           aria-valuemin={0}
           aria-valuenow={direct.done}
-          className={`h-1.5 w-16 shrink-0 overflow-hidden rounded-full ${surfaceMutedStrongBg}`}
+          className={`h-1.5 w-10 shrink-0 overflow-hidden rounded-full ${surfaceMutedStrongBg}`}
           role="progressbar"
         >
           <span
@@ -93,7 +95,7 @@ export function IssueChildren({ issue }: { issue: IssueDetails }): ReactNode {
         />
       </div>
       {section.isOpen ? (
-        <ul className="flex min-w-0 flex-col gap-2">
+        <ul className="flex min-w-0 flex-col">
           {children.map((child) => (
             <ChildRow child={child} key={child.key} />
           ))}
@@ -123,63 +125,58 @@ function Count({
   );
 }
 
-/** One child: what it is, how it stands, what blocks it and who holds it. */
+/** One child, on one line: what it is, how it stands, what blocks it and who holds it. The row
+ *  is a line and not a card, because seven cards cost the page 600 px before its tree - half a
+ *  laptop screen and the whole of a phone's - and R6 puts the first open question on the first
+ *  screen. Its parts wrap at a narrow width rather than being cut (R17). */
 function ChildRow({ child }: { child: IssueChild }): ReactNode {
   return (
     <li
-      className={`rounded-lg p-3 ${card}`}
+      className={`flex min-w-0 flex-wrap items-baseline gap-x-3 py-0.5 text-sm ${textSecondaryOnSurface}`}
       data-child-row=""
       data-child-status={child.status}
       key={child.key}
     >
-      <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
-        <Link
-          className={`font-medium ${linkText} ${linkHoverText}`}
-          to={buildIssuePath({ key: child.key, kind: "issue" })}
-          {...referenceTriggerProps({ key: child.key, kind: "issue" })}
-          {...authorText}
-        >
-          {child.key} · {child.title}
-        </Link>
-        <span className={`text-sm ${textSecondaryOnSurface}`} {...pageChrome}>
-          {issueStatusWord(child.status)}
-        </span>
-      </div>
-      <div
-        className={`mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-sm ${textSecondaryOnSurface}`}
+      <Link
+        className={`min-w-0 font-medium ${linkText} ${linkHoverText}`}
+        to={buildIssuePath({ key: child.key, kind: "issue" })}
+        {...referenceTriggerProps({ key: child.key, kind: "issue" })}
+        {...authorText}
       >
-        {child.blocked_by.length === 0 ? null : (
-          <span {...pageChrome}>
-            {PROPERTY_LABELS.blocked_by}{" "}
-            {child.blocked_by.map((key) => (
-              <Link
-                className={`dispatch-inline-link underline ${linkText} ${linkHoverText}`}
-                key={key}
-                to={buildIssuePath({ key, kind: "issue" })}
-                {...authorText}
-              >
-                {key}
-              </Link>
-            ))}
-          </span>
-        )}
-        {child.claim === null ? null : (
-          <span {...pageChrome}>
-            {PROPERTY_LABELS.claim}{" "}
-            <span {...authorText}>
-              <AgentName actor={child.claim.actor} inline />
-            </span>
-          </span>
-        )}
-        <span {...authorText}>
-          <Timestamp at={child.active_at} />
+        {child.key} · {child.title}
+      </Link>
+      <span {...pageChrome}>{issueStatusWord(child.status)}</span>
+      {child.blocked_by.length === 0 ? null : (
+        <span {...pageChrome}>
+          {PROPERTY_LABELS.blocked_by}{" "}
+          {child.blocked_by.map((key) => (
+            <Link
+              className={`dispatch-inline-link underline ${linkText} ${linkHoverText}`}
+              key={key}
+              to={buildIssuePath({ key, kind: "issue" })}
+              {...authorText}
+            >
+              {key}
+            </Link>
+          ))}
         </span>
-        {child.external_links.map((link) => (
-          <span className="flex items-center" key={link.url} {...authorText}>
-            <GitHubLink link={link} />
+      )}
+      {child.claim === null ? null : (
+        <span {...pageChrome}>
+          {PROPERTY_LABELS.claim}{" "}
+          <span {...authorText}>
+            <AgentName actor={child.claim.actor} inline />
           </span>
-        ))}
-      </div>
+        </span>
+      )}
+      <span {...authorText}>
+        <Timestamp at={child.active_at} />
+      </span>
+      {child.external_links.map((link) => (
+        <span className="inline-flex min-w-0 items-center" key={link.url} {...authorText}>
+          <GitHubLink link={link} />
+        </span>
+      ))}
     </li>
   );
 }

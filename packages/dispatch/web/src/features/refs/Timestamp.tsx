@@ -1,5 +1,7 @@
 import { type ReactNode, useEffect, useState } from "react";
 
+import { useTooltips } from "../../components/tooltips";
+
 const relativeFormatter = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
 
 const RELATIVE_UNITS: Array<{ ms: number; unit: Intl.RelativeTimeFormatUnit }> = [
@@ -60,11 +62,22 @@ export function relativeTimeLabel(at: Date, now: number): string | undefined {
 export interface TimestampProps {
   at: string;
   className?: string;
+  /** Draws the instant itself after the relative age, for a surface where the clock time is
+   *  what a reader weighs (a claim's age decides whether it is stale). */
+  exact?: boolean;
 }
 
-/** Renders a relative time ("4 minutes ago") that keeps itself current, with the absolute
- * value available on hover (`title`) and to assistive tech (`datetime`). */
-export function Timestamp({ at, className }: TimestampProps): ReactNode {
+/**
+ * A relative time ("4 minutes ago") that keeps itself current, with the instant itself in
+ * `dateTime`, on hover (`title`) and, where a caller asks for it, drawn as text beside it.
+ *
+ * On a surface that offers no tooltips (`components/tooltips.tsx`, the issue page) it carries
+ * no `title`, and a time whose exact instant a reader needs says it in words instead: the
+ * issue's claim is the one that does (`ClaimChip.tsx`), because how long a session has held
+ * the issue is what decides whether its claim is stale.
+ */
+export function Timestamp({ at, className, exact = false }: TimestampProps): ReactNode {
+  const tooltips = useTooltips();
   const [, forceUpdate] = useState(0);
   useEffect(() => subscribe(() => forceUpdate((count) => count + 1)), []);
 
@@ -73,8 +86,11 @@ export function Timestamp({ at, className }: TimestampProps): ReactNode {
     return <time className={className}>{at}</time>;
   }
   return (
-    <time className={className} dateTime={at} title={date.toLocaleString()}>
+    <time className={className} dateTime={at} title={tooltips ? date.toLocaleString() : undefined}>
       {relativeTimeLabel(date, Date.now())}
+      {exact
+        ? ` (${date.toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" })})`
+        : null}
     </time>
   );
 }

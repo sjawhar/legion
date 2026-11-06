@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 
 import type { IssueProgress, ProgressCount } from "../../api/types";
 import { pillClassName } from "../../components/Pill";
+import { useTooltips } from "../../components/tooltips";
 import { progressBarFill, surfaceMutedStrongBg, textSecondaryOnSurface } from "../../theme/classes";
 
 /** The noun a count is written with: `1/1 task`, `3/7 tasks`, `0/1 child`, `2/5 children`. */
@@ -10,7 +11,9 @@ function countNoun(total: number, noun: "tasks" | "children"): string {
   return noun;
 }
 
-/** What a count means, for the chip's `title`: plain text, since a title renders no markdown. */
+/** What a count means, for the chip's `title`: plain text, since a title renders no markdown.
+ *  The issue page draws no tooltips (`components/tooltips.tsx`); its children section spells
+ *  both counts out with their labels instead (`IssueChildren.tsx`). */
 function countTitle(count: ProgressCount, noun: "tasks" | "children"): string {
   const one = count.total === 1;
   const what =
@@ -37,6 +40,7 @@ export function ProgressChips({
   progress?: IssueProgress;
   bar?: boolean;
 }): ReactNode {
+  const tooltips = useTooltips();
   if (progress === undefined) {
     return null;
   }
@@ -46,6 +50,7 @@ export function ProgressChips({
   if (counts.length === 0) {
     return null;
   }
+
   return (
     <>
       {counts.map(({ noun, count }) =>
@@ -54,7 +59,7 @@ export function ProgressChips({
             className={`inline-flex shrink-0 items-center gap-2 text-xs ${textSecondaryOnSurface}`}
             data-testid={`issue-progress-${noun}`}
             key={noun}
-            title={countTitle(count, noun)}
+            title={tooltips ? countTitle(count, noun) : undefined}
           >
             <span
               aria-hidden="true"
@@ -72,7 +77,7 @@ export function ProgressChips({
             className={pillClassName("label")}
             data-testid={`issue-progress-${noun}`}
             key={noun}
-            title={countTitle(count, noun)}
+            title={tooltips ? countTitle(count, noun) : undefined}
           >
             {`${count.done}/${count.total} ${countNoun(count.total, noun)}`}
           </span>

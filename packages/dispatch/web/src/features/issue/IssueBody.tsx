@@ -1,4 +1,4 @@
-import { type ReactNode, useMemo } from "react";
+import { type ReactNode, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { primarySpec } from "../../api/issue-cache";
@@ -94,9 +94,19 @@ export function IssueBody({
   const artifacts = useMemo(() => artifactsBySlug(issue), [issue]);
   const uncited = useMemo(() => uncitedArtifacts(root, issue.artifacts), [issue.artifacts, root]);
   const specSlug = primarySpec(issue)?.slug ?? "";
+  // What a key reported when it had nowhere to go, raised by the tree (`IssueTree`'s
+  // `onReport`) and drawn here as the page's own status.
+  const [report, setReport] = useState("");
 
   return (
     <>
+      {/* What a key reported when it had nowhere to go: the page's one `role="status"`, which
+          is empty while every key the reader pressed went somewhere (R9, R21). It is drawn
+          here, above everything, so the page's own report is the first status a reader meets -
+          ahead of the live-connection status a document's toolbar carries. */}
+      <p className={`text-xs ${textMutedOnCanvas}`} role="status" {...pageChrome}>
+        {report}
+      </p>
       <IssueThreeThings
         checks={nodesOfType(root, "check")}
         issueKey={issue.key}
@@ -139,6 +149,7 @@ export function IssueBody({
         focusReveal={address.preset !== "spec" && targetKind !== "node"}
         isClosed={isClosed}
         onEditing={onEditing}
+        onReport={setReport}
         openBody={opened}
         reveal={reveal}
         root={view.root}

@@ -820,8 +820,11 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
           <PageFrameProvider>
             {(frameAttributes) => (
               <div className="flex min-h-0 min-w-0 flex-1 xl:order-2" {...frameAttributes}>
+                {/* 16 px of padding on a phone, 24 px from `sm`: 48 px of a 390 px screen is an
+                    eighth of its width, and the lines it costs are lines of the issue page's
+                    head that the first open question needs (dispatch://INFRA-1196 R6). */}
                 <main
-                  className={`min-w-0 flex-1 p-6 outline-none ${fillsViewport ? "flex min-h-0 flex-col" : "pb-32 xl:pb-6"} ${mainLayoutClass}`}
+                  className={`min-w-0 flex-1 p-4 outline-none sm:p-6 ${fillsViewport ? "flex min-h-0 flex-col" : "pb-32 xl:pb-6"} ${mainLayoutClass}`}
                   data-shell-layout={fullWidth ? "full-width" : "standard"}
                   data-testid="main-content"
                   id="main-content"

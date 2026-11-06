@@ -102,11 +102,17 @@ export function Margin({
           aria-valuemax={maxWidth}
           aria-valuemin={MIN_MARGIN_WIDTH}
           aria-valuenow={marginWidth}
+          // Fixed to the screen's own edge of the margin, not to the top of a document that
+          // may be ten screens tall: an `absolute top-0 h-full` handle is only grabbable while
+          // the page is scrolled to its top, and the sheet beside it is already viewport-tall
+          // and sticky. Its left edge is the margin's, four pixels of it over the column to
+          // its left, which is what `-left-1` drew before.
           className={
             isCompactViewport
               ? "hidden"
-              : `absolute top-0 -left-1 z-20 h-full w-2 border-0 border-l cursor-col-resize focus-visible:outline-none focus-visible:ring-2 ${borderDefault} ${focusVisibleRing}`
+              : `fixed top-0 z-20 h-dvh w-2 border-0 border-l cursor-col-resize focus-visible:outline-none focus-visible:ring-2 ${borderDefault} ${focusVisibleRing}`
           }
+          style={isCompactViewport ? undefined : { right: `${marginWidth - 4}px` }}
           onDoubleClick={() => setClampedMarginWidth(DEFAULT_MARGIN_WIDTH)}
           onKeyDown={(event) => {
             if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {

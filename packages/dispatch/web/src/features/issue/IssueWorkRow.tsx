@@ -9,7 +9,6 @@ import {
   secondaryButtonHoverBorder,
   secondaryButtonText,
   surfaceMutedStrongBg,
-  textMutedOnSurface,
   textSecondaryHoverToPrimary,
   textSecondaryOnSurface,
 } from "../../theme/classes";
@@ -17,7 +16,7 @@ import { AgentName, useAgentText } from "../refs/AgentName";
 import { sessionOfAddress } from "../refs/routes";
 import { ClaimChip } from "./ClaimChip";
 import type { IssueField } from "./IssueFieldForms";
-import { authorText, HELP_LINES, PROPERTY_LABELS, pageChrome } from "./page-structure";
+import { authorText, PROPERTY_LABELS, pageChrome } from "./page-structure";
 import { CONTROL_LABELS } from "./page-words";
 import { RouteReachUnknownMarker, UnreachableRouteMarker } from "./RouteReach";
 import type { IssueHeaderWrites } from "./useIssueHeaderWrites";
@@ -97,12 +96,8 @@ export function IssueWorkRow({
       ) : null}
       {issue.claim === null ? null : (
         <>
-          <span
-            className={`shrink-0 text-sm font-medium ${textSecondaryOnSurface}`}
-            {...pageChrome}
-          >
-            {PROPERTY_LABELS.claim}
-          </span>
+          {/* No `Claim:` label: the chip itself reads "Claimed by <holder> · <age>", which
+              says which of the two this row's halves it is. */}
           <ClaimChip claim={issue.claim} />
           <button
             aria-label={`Release the claim on ${issue.key}`}
@@ -114,9 +109,8 @@ export function IssueWorkRow({
           >
             {releaseClaim.isPending ? "Releasing…" : CONTROL_LABELS.release_claim}
           </button>
-          <span className={`basis-full text-xs ${textMutedOnSurface}`} {...pageChrome}>
-            {HELP_LINES.release_claim}
-          </span>
+          {/* No help line under the row: the paragraph explaining Release cost the identity
+              block a whole line before the tree (dispatch://INFRA-1196 R6). */}
         </>
       )}
     </div>

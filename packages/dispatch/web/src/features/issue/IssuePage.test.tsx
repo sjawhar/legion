@@ -908,9 +908,9 @@ test("IssuePage keeps a pull request's title and state when only its check-runs 
     expect(within(link).getByText("Keep the title when checks vanish")).toBeDefined();
     expect(within(link).getByText("open")).toBeDefined();
     expect(within(link).queryByText(/^checks:/)).toBeNull();
-    expect(link.getAttribute("title")).toBe(
-      "owner/repository#7: Keep the title when checks vanish"
-    );
+    // The link draws its repository, number, title and state; it carries no tooltip, because
+    // the issue page draws none (dispatch://INFRA-1196 R21, `components/tooltips.tsx`).
+    expect(link.getAttribute("title")).toBeNull();
   } finally {
     view.unmount();
     githubRest.mockRestore();

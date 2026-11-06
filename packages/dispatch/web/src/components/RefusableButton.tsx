@@ -1,6 +1,7 @@
 import { type ReactNode, useId } from "react";
 
 import { primaryButton, secondaryButtonCompact } from "../theme/classes";
+import { useTooltips } from "./tooltips";
 
 /** Each look whole, refused or not: the `refused:` variant (`styles.css`) paints `disabled` and
  *  `aria-disabled` alike, so a look states its cannot-press state once. */
@@ -45,6 +46,7 @@ export function RefusableButton({
   readonly refusalShownBy?: string;
   readonly type?: "button" | "submit";
 }): ReactNode {
+  const tooltips = useTooltips();
   const ownReasonId = useId();
   const reasonId = refusal === null ? undefined : (refusalShownBy ?? ownReasonId);
   const description = [reasonId, describedBy].filter((id) => id !== undefined).join(" ");
@@ -62,7 +64,7 @@ export function RefusableButton({
           }
           onPress?.();
         }}
-        title={refusal ?? undefined}
+        title={tooltips ? (refusal ?? undefined) : undefined}
         type={type}
       >
         {busy ?? children}

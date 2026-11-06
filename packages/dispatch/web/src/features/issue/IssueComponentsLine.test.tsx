@@ -173,10 +173,10 @@ test("IssueComponentsLine lists an explicit set as chips, marks retired ids, and
   try {
     view.q.getByText("dispatch-server");
     view.q.getByText("web");
+    // The chip reads "retired: <id>" and carries no tooltip: the issue page's panel draws none
+    // (dispatch://INFRA-1196 R21, `components/tooltips.tsx`).
     const retired = view.q.getByText("retired: legacy-ui");
-    expect(retired.getAttribute("title")).toBe(
-      "legacy-ui is no longer in the project's architecture model"
-    );
+    expect(retired.getAttribute("title")).toBeNull();
     const ancestor = view.q.getByRole("link", { name: "CORE-1" }) as HTMLAnchorElement;
     expect(ancestor.getAttribute("href")).toBe("/issues/CORE-1");
     expect(view.q.getByTestId("issue-components").textContent).toContain("inherited from CORE-1");

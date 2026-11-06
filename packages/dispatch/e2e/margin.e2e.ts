@@ -579,12 +579,15 @@ test("a document mark opens its thread in the margin and stays on the document @
 
     // The comment is anchored, so its deep link lands on the document it quotes, with the
     // thread open beside it — the same place clicking the mark just opened. On a phone the
-    // margin is a collapsed sheet, so only the desktop run can see the card.
+    // margin is a collapsed sheet, so only the desktop run can see the card. The card is read
+    // inside the margin's own anchored-comments region rather than anywhere in the sheet: the
+    // issue page's panel now draws the Conversation inside that same sheet
+    // (dispatch://INFRA-1196 R12), and it holds a card for this comment too.
     await page.goto(`/issues/${issue.key}/comments/${comment.id}`);
     await expect(page).toHaveURL(`/issues/${issue.key}/spec?comment=${comment.id}`);
     if (testInfo.project.name !== "iphone") {
       const deepLinked = page
-        .getByTestId("margin-sheet")
+        .getByRole("region", { name: "Anchored comments" })
         .getByTestId(`margin-comment-${comment.id}`);
       await expect(deepLinked).toHaveAttribute("aria-current", "true");
       await expect(deepLinked).toContainText("focus this");

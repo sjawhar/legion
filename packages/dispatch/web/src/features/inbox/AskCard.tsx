@@ -14,6 +14,7 @@ import { CopyButton } from "../../components/CopyButton";
 import { ChevronIcon } from "../../components/DisclosureToggle";
 import { QueryError } from "../../components/QueryError";
 import { TruncatedText } from "../../components/TruncatedText";
+import { useTooltips } from "../../components/tooltips";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
 import { compareTimestamps } from "../../lib/timestamps";
 import {
@@ -295,15 +296,19 @@ export function AskCard({
       handOffFocus(form);
     }
   });
+  const tooltips = useTooltips();
   const submitHintId = `${answerFieldId}-hint`;
   const agentText = useAgentText();
-  // The asker as its button's tooltip: a block ask the server indexed with no pending author
-  // has an empty label and reads as "asked". A session's tooltip also carries its full id, since
-  // the innermost title is the one a browser shows, and an untitled session's name is the short
-  // form `session:<8>…` that sessions started in the same minute share.
+  // The asker as its button's tooltip, on a surface that offers one (`components/tooltips.tsx`;
+  // the issue page's panel offers none, so the name alone is drawn there): a block ask the
+  // server indexed with no pending author has an empty label and reads as "asked". A session's
+  // tooltip also carries its full id, since the innermost title is the one a browser shows, and
+  // an untitled session's name is the short form `session:<8>…` that sessions started in the
+  // same minute share; its own name opens the copy handles that hold it either way.
   const sessionAuthor = displayedAsk.author.kind === "session" ? displayedAsk.author : undefined;
-  const askerTitle =
-    displayedAsk.author.id === ""
+  const askerTitle = !tooltips
+    ? undefined
+    : displayedAsk.author.id === ""
       ? "asked"
       : sessionAuthor === undefined
         ? agentText.label(displayedAsk.author)
@@ -420,7 +425,7 @@ export function AskCard({
       aria-describedby={submitHint === undefined ? undefined : submitHintId}
       className={`min-h-11 rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
       disabled={!canAnswer || isSubmitting || uploading}
-      title={submitHint}
+      title={tooltips ? submitHint : undefined}
       type="submit"
     >
       {mutation.isPending
