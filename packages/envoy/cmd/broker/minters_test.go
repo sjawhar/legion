@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/envoy/internal/broker/airlock"
 	"github.com/sjawhar/envoy/internal/broker/config"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
@@ -61,7 +62,7 @@ func TestRequestMachineReleasesAzureLoginFromTheConfiguredFile(t *testing.T) {
 	if err := os.WriteFile(file, []byte(token), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	machine := newRequestMachine(config.Config{AzureTokenFile: file, AzureLoginSecret: "AZURE_LOGIN"}, nil, nil, nil, nil)
+	machine := newRequestMachine(config.Config{AzureTokenFile: file, AzureLoginSecret: "AZURE_LOGIN"}, nil, nil, nil, nil, airlock.Rules{}, "")
 	for _, kind := range policy.Kinds {
 		if machine.Minters[kind] == nil {
 			t.Fatalf("request machine has no minter for %s", kind)

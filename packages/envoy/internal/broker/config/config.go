@@ -175,6 +175,35 @@ type Config struct {
 	// broker swaps the real value into the headers the entry allows. Empty (the default) is a
 	// deployment with no airlock, where every granted secret is released as its value.
 	AirlockRulesFile string
+	// BROKER_AIRLOCK_LISTEN_ADDR: the address the airlock's proxy port binds, default
+	// 127.0.0.1:13381. It is a second port of the same process, so it is bound and drained with
+	// the API's. Read only when BROKER_AIRLOCK_RULES_FILE names a file; a deployment with no
+	// airlock binds no proxy port.
+	AirlockListenAddr string
+	// BROKER_AIRLOCK_PROXY_URL: the URL a command reaches the airlock's proxy port at, which
+	// every release of a name behind the airlock carries, so the command points its HTTPS_PROXY
+	// at it. Required with BROKER_AIRLOCK_RULES_FILE. It is a setting of its own rather than
+	// BROKER_PUBLIC_URL with another port, because the Service port a pod dials need not be the
+	// container port the broker binds.
+	AirlockProxyURL string
+	// BROKER_AIRLOCK_CA_CERT_FILE: the PEM certificate of the airlock proxy's certificate
+	// authority, the one every release hands the command to trust. Required with
+	// BROKER_AIRLOCK_RULES_FILE, read once at start, and refused when it is not a PEM
+	// certificate. Both broker pods mount the same file from one Kubernetes Secret, so a
+	// command's trust does not depend on which pod released its values.
+	AirlockCACertFile string
+	// BROKER_AIRLOCK_CA_KEY_FILE: the PEM private key of BROKER_AIRLOCK_CA_CERT_FILE's
+	// certificate authority, which the proxy port signs each host's certificate with. Required
+	// with BROKER_AIRLOCK_RULES_FILE, and mounted from the same Kubernetes Secret, which no
+	// container but the broker's mounts: it is the key that lets its holder be any host a
+	// command trusts.
+	AirlockCAKeyFile string
+	// BROKER_AIRLOCK_IDLE_SECONDS: how long one proxy connection may go with no byte in either
+	// direction before the proxy closes it, default 300, between 10 and 3600. A connection
+	// carries a grant's placeholders, so an abandoned one is state the broker holds for a
+	// command that is gone; a short bound costs a long-polling client its connection, which it
+	// opens again.
+	AirlockIdleSeconds int
 	// BROKER_AZURE_TOKEN_FILE: the path of the broker pod's projected ServiceAccount token for
 	// azure-login releases, default /var/run/secrets/azure/tokens/azure-identity-token. Read only
 	// on release, not at boot, and read anew each time so the rotated token is used. The token's
@@ -380,6 +409,11 @@ const (
 // SignInSettings are those four settings, every one of them required. Every message that names
 // them names them in this order.
 var SignInSettings = []string{signInIssuerSetting, signInClientIDSetting, signInClientSecretSetting, signInDomainSetting}
+
+// airlockProxySettings are the settings the airlock's proxy port cannot run without, every one of
+// them required with BROKER_AIRLOCK_RULES_FILE. Every message that names them names them in this
+// order.
+var airlockProxySettings = []string{"BROKER_AIRLOCK_PROXY_URL", "BROKER_AIRLOCK_CA_CERT_FILE", "BROKER_AIRLOCK_CA_KEY_FILE"}
 
 // noUIToken is why BROKER_UI_TOKEN and its file are gone: the routes it authenticated take the
 // caller's own Kubernetes ServiceAccount token now.
@@ -895,6 +929,10 @@ func Load(getenv func(string) string) (Config, error) {
 		SecretsStore:       orDefault(getenv("BROKER_SECRETS_STORE"), secrets.StoreAWS),
 		SecretsPrefix:      getenv("BROKER_SECRETS_PREFIX"),
 		AirlockRulesFile:   orDefault(getenv("BROKER_AIRLOCK_RULES_FILE"), ""),
+		AirlockListenAddr:  orDefault(getenv("BROKER_AIRLOCK_LISTEN_ADDR"), "127.0.0.1:13381"),
+		AirlockProxyURL:    strings.TrimSpace(getenv("BROKER_AIRLOCK_PROXY_URL")),
+		AirlockCACertFile:  strings.TrimSpace(getenv("BROKER_AIRLOCK_CA_CERT_FILE")),
+		AirlockCAKeyFile:   strings.TrimSpace(getenv("BROKER_AIRLOCK_CA_KEY_FILE")),
 		AzureTokenFile:     orDefault(getenv("BROKER_AZURE_TOKEN_FILE"), secrets.DefaultAzureTokenFile),
 		AzureLoginSecret:   getenv("BROKER_AZURE_LOGIN_SECRET"),
 		K8sOIDCIssuer:      getenv("BROKER_K8S_OIDC_ISSUER"),
@@ -943,6 +981,26 @@ func Load(getenv func(string) string) (Config, error) {
 	if cfg.MachineLoginURL != "" {
 		if parsed, err := url.Parse(cfg.MachineLoginURL); err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
 			return Config{}, fmt.Errorf("BROKER_MACHINE_LOGIN_URL must be an absolute http(s) URL: %q", redact.URL(cfg.MachineLoginURL))
+		}
+	}
+	// A broker that reads the airlock's rules but cannot proxy would hold back the value of
+	// every name the file names and release nothing in its place, so the three settings the
+	// proxy cannot run without are required with the rules file, and the refusal names the ones
+	// missing. With no rules file there is no proxy and all four are ignored.
+	if cfg.AirlockRulesFile != "" {
+		var missing []string
+		for _, req := range []struct{ name, value string }{
+			{"BROKER_AIRLOCK_PROXY_URL", cfg.AirlockProxyURL},
+			{"BROKER_AIRLOCK_CA_CERT_FILE", cfg.AirlockCACertFile},
+			{"BROKER_AIRLOCK_CA_KEY_FILE", cfg.AirlockCAKeyFile},
+		} {
+			if req.value == "" {
+				missing = append(missing, req.name)
+			}
+		}
+		if len(missing) > 0 {
+			return Config{}, fmt.Errorf("BROKER_AIRLOCK_RULES_FILE names a rules file, so the broker proxies every secret the file names and needs %s; missing %s",
+				strings.Join(airlockProxySettings, ", "), strings.Join(missing, ", "))
 		}
 	}
 	switch cfg.SecretsStore {
@@ -1140,6 +1198,7 @@ func Load(getenv func(string) string) (Config, error) {
 		{"BROKER_LAUNCHER_CREDENTIAL_SECONDS", &cfg.LauncherCredentialSeconds, 2592000, 1, 2592000},
 		{"BROKER_SWEEP_SECONDS", &cfg.SweepSeconds, 5, 1, 60},
 		{"BROKER_DRAIN_SECONDS", &cfg.DrainSeconds, 5, 0, 120},
+		{"BROKER_AIRLOCK_IDLE_SECONDS", &cfg.AirlockIdleSeconds, 300, 10, 3600},
 		{"BROKER_SIGNIN_SESSION_SECONDS", &sessionSeconds, 86400, 1, 86400},
 	}
 	for _, i := range ints {

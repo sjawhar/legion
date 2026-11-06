@@ -118,17 +118,17 @@ func TestAChangedAirlockEntryEndsTheGrantsItAffects(t *testing.T) {
 
 	digests["AUTO_TOKEN"] = "entry-two"
 	reloadAirlock(t, m)
-	if values, _, err := m.Values(t.Context(), *moved.GrantID, enr, nil); err == nil || values != nil {
-		t.Fatalf("Values after the entry changed = %v, %v; want the grant ended", values, err)
+	if release, err := m.Values(t.Context(), *moved.GrantID, enr, nil); err == nil || release.Values != nil {
+		t.Fatalf("Values after the entry changed = %v, %v; want the grant ended", release.Values, err)
 	}
-	if values, _, err := m.Values(t.Context(), kept.GrantID, enr, nil); err != nil || values["SHARED_KEY"] != "shared-v1" {
-		t.Fatalf("Values of the grant whose entry did not change = %v, %v; want the value", values, err)
+	if release, err := m.Values(t.Context(), kept.GrantID, enr, nil); err != nil || release.Values["SHARED_KEY"] != "shared-v1" {
+		t.Fatalf("Values of the grant whose entry did not change = %v, %v; want the value", release.Values, err)
 	}
 
 	digests["AUTO_TOKEN"] = "entry-one"
 	reloadAirlock(t, m)
-	if values, _, err := m.Values(t.Context(), *moved.GrantID, enr, nil); err == nil || values != nil {
-		t.Fatalf("Values once the entry is back = %v, %v; want the grant to stay ended", values, err)
+	if release, err := m.Values(t.Context(), *moved.GrantID, enr, nil); err == nil || release.Values != nil {
+		t.Fatalf("Values once the entry is back = %v, %v; want the grant to stay ended", release.Values, err)
 	}
 	if by, audits := endedForGood(t, m, *moved.GrantID); by != GrantEndedActor || audits != 1 {
 		t.Fatalf("grant revoked_by = %q with %d grant.revoked rows by it; want %s and 1", by, audits, GrantEndedActor)

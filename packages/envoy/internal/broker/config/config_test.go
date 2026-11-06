@@ -347,14 +347,66 @@ func TestLoadReadsTheAirlockRulesFileOptionally(t *testing.T) {
 		t.Fatalf("AirlockRulesFile = %q, want empty when BROKER_AIRLOCK_RULES_FILE is unset", cfg.AirlockRulesFile)
 	}
 
-	e := validEnv()
-	e["BROKER_AIRLOCK_RULES_FILE"] = "/etc/broker/airlock.json"
+	e := airlockEnv()
 	cfg, err = Load(env(e))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.AirlockRulesFile != "/etc/broker/airlock.json" {
 		t.Fatalf("AirlockRulesFile = %q, want /etc/broker/airlock.json", cfg.AirlockRulesFile)
+	}
+}
+
+// airlockEnv is validEnv with the airlock in force: a rules file and the three settings its
+// proxy cannot run without.
+func airlockEnv() map[string]string {
+	e := validEnv()
+	e["BROKER_AIRLOCK_RULES_FILE"] = "/etc/broker/airlock.json"
+	e["BROKER_AIRLOCK_PROXY_URL"] = "http://broker.legion.svc:13381"
+	e["BROKER_AIRLOCK_CA_CERT_FILE"] = "/etc/broker/airlock-ca/tls.crt"
+	e["BROKER_AIRLOCK_CA_KEY_FILE"] = "/etc/broker/airlock-ca/tls.key"
+	return e
+}
+
+// TestTheAirlocksProxySettingsAreRequiredWithItsRulesFile: a broker that reads the rules but
+// cannot proxy would hold back every name the file names and release nothing in their place, so
+// each missing setting refuses the boot by name. With no rules file there is no proxy and the
+// four are ignored, whatever they say.
+func TestTheAirlocksProxySettingsAreRequiredWithItsRulesFile(t *testing.T) {
+	if _, err := Load(env(airlockEnv())); err != nil {
+		t.Fatalf("Load with the airlock fully configured: %v", err)
+	}
+	for _, missing := range []string{"BROKER_AIRLOCK_PROXY_URL", "BROKER_AIRLOCK_CA_CERT_FILE", "BROKER_AIRLOCK_CA_KEY_FILE"} {
+		e := airlockEnv()
+		delete(e, missing)
+		_, err := Load(env(e))
+		if err == nil || !strings.Contains(err.Error(), "BROKER_AIRLOCK_RULES_FILE") || !strings.Contains(err.Error(), "missing "+missing) {
+			t.Errorf("Load without %s = %v; want a refusal naming the rules file and the missing setting", missing, err)
+		}
+	}
+
+	// No rules file: the same configuration minus the file, and minus every proxy setting, is
+	// accepted, and so is one that still names the listen address and the idle bound.
+	e := validEnv()
+	e["BROKER_AIRLOCK_LISTEN_ADDR"] = "127.0.0.1:13999"
+	e["BROKER_AIRLOCK_IDLE_SECONDS"] = "60"
+	cfg, err := Load(env(e))
+	if err != nil {
+		t.Fatalf("Load with no rules file: %v", err)
+	}
+	if cfg.AirlockProxyURL != "" || cfg.AirlockCACertFile != "" || cfg.AirlockCAKeyFile != "" {
+		t.Errorf("with no rules file the proxy settings read %q, %q, %q; want none", cfg.AirlockProxyURL, cfg.AirlockCACertFile, cfg.AirlockCAKeyFile)
+	}
+	if cfg.AirlockListenAddr != "127.0.0.1:13999" || cfg.AirlockIdleSeconds != 60 {
+		t.Errorf("airlock listen addr = %q and idle = %d; want 127.0.0.1:13999 and 60", cfg.AirlockListenAddr, cfg.AirlockIdleSeconds)
+	}
+
+	// And their defaults, which a deployment that configures neither takes.
+	if cfg, err = Load(env(validEnv())); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AirlockListenAddr != "127.0.0.1:13381" || cfg.AirlockIdleSeconds != 300 {
+		t.Errorf("default airlock listen addr = %q and idle = %d; want 127.0.0.1:13381 and 300", cfg.AirlockListenAddr, cfg.AirlockIdleSeconds)
 	}
 }
 

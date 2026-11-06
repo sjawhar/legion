@@ -191,6 +191,40 @@ type grantValuesResponse struct {
 	// client that asked for one and finds none here is answered by a broker from before
 	// narrowing, which released the owner-wide tokens.
 	GitHubApp *githubNarrowing `json:"github_app,omitempty"`
+	// How to reach the values this release did not hand over: the names the airlock holds back
+	// are not in "values" at all, and this says where the proxy that holds them is. Absent when
+	// no granted name is behind the airlock, which is every release of a broker with no rules
+	// file.
+	Airlock *airlockRelease `json:"airlock,omitempty"`
+}
+
+// airlockRelease is how a session reaches the values the airlock holds back: the proxy it sends
+// their requests through, the certificate authority that proxy's certificates are signed by, the
+// password every connection to it opens with, and one entry per name held back.
+type airlockRelease struct {
+	// The URL the command points HTTPS_PROXY at (BROKER_AIRLOCK_PROXY_URL).
+	ProxyURL string `json:"proxy_url"`
+	// The PEM certificate the command must trust to reach the proxy, which signs a certificate
+	// for each host it carries a request to.
+	CACertificate string `json:"ca_certificate"`
+	// The password every proxy connection authenticates with: one of this grant's own
+	// placeholders, the first (name, slot) pair in sorted order.
+	ProxyPassword string `json:"proxy_password"`
+	// Each name the airlock holds back, by the name the command knows it as.
+	Names map[string]airlockName `json:"names"`
+}
+
+// airlockName is one name the airlock holds back.
+type airlockName struct {
+	// What the command's environment variable of that name holds: the released shape of the
+	// secret with a placeholder wherever its value would be.
+	Value string `json:"value"`
+	// Each slot of the secret and the placeholder standing for it, so a command that takes one
+	// value of the secret apart knows which placeholder is which.
+	Slots map[string]string `json:"slots"`
+	// The hosts the secret's airlock entry allows, which the command keeps off its NO_PROXY so
+	// their requests reach the proxy.
+	Hosts []string `json:"hosts"`
 }
 
 func (s *server) readRequest(w http.ResponseWriter, r *http.Request, enrollmentID string) {
@@ -271,7 +305,7 @@ func (s *server) grantValues(w http.ResponseWriter, r *http.Request, enrollmentI
 		narrowing = &n
 		applied = &githubNarrowing{Owner: n.Owner, Repositories: n.Repositories, ReadOnly: n.ReadOnly}
 	}
-	values, expires, err := s.deps.Machine.Values(r.Context(), id, enrollmentID, narrowing)
+	release, err := s.deps.Machine.Values(r.Context(), id, enrollmentID, narrowing)
 	switch {
 	case errors.Is(err, requests.ErrNotYours):
 		writeError(w, http.StatusForbidden, "NOT_YOURS", err.Error())
@@ -309,10 +343,23 @@ func (s *server) grantValues(w http.ResponseWriter, r *http.Request, enrollmentI
 		writeInternal(w, "read grant values", err)
 		return
 	}
+	values := release.Values
 	if values == nil {
 		values = map[string]string{}
 	}
-	writeJSON(w, http.StatusOK, grantValuesResponse{ExpiresAt: expires, Values: values, GitHubApp: applied})
+	answer := grantValuesResponse{ExpiresAt: release.Expires, Values: values, GitHubApp: applied}
+	if release.Airlock != nil {
+		answer.Airlock = &airlockRelease{
+			ProxyURL:      release.Airlock.ProxyURL,
+			CACertificate: release.Airlock.CACertificate,
+			ProxyPassword: release.Airlock.ProxyPassword,
+			Names:         map[string]airlockName{},
+		}
+		for name, held := range release.Airlock.Names {
+			answer.Airlock.Names[name] = airlockName{Value: held.Value, Slots: held.Slots, Hosts: held.Hosts}
+		}
+	}
+	writeJSON(w, http.StatusOK, answer)
 }
 
 // revokeGrant ends a grant for the session that holds it — session proof only, per the shared

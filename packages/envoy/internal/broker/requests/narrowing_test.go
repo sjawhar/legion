@@ -69,9 +69,9 @@ func TestANarrowedReleaseLeavesTheGrantOwnerWide(t *testing.T) {
 		narrowing *secrets.GitHubNarrowing
 		want      string
 	}{{nil, "owner-wide-token"}, {narrowing, "narrowed-token"}, {nil, "owner-wide-token"}} {
-		values, _, err := machine.Values(t.Context(), *request.GrantID, enrollmentID, step.narrowing)
-		if err != nil || values["APP_KEY"] != step.want {
-			t.Fatalf("release %d = %v, %v; want APP_KEY=%s", i, values, err, step.want)
+		release, err := machine.Values(t.Context(), *request.GrantID, enrollmentID, step.narrowing)
+		if err != nil || release.Values["APP_KEY"] != step.want {
+			t.Fatalf("release %d = %v, %v; want APP_KEY=%s", i, release.Values, err, step.want)
 		}
 	}
 	if want := []*secrets.GitHubNarrowing{nil, narrowing, nil}; !reflect.DeepEqual(got, want) {
@@ -112,8 +112,8 @@ func TestANarrowingOfAGrantWithNoGitHubAppSecretReleasesNothing(t *testing.T) {
 		if err != nil || request.GrantID == nil {
 			t.Fatalf("Create(%v) = %+v, %v; want a grant", names, request, err)
 		}
-		if values, _, err := machine.Values(t.Context(), *request.GrantID, enrollmentID, narrowing); !errors.Is(err, ErrNarrowingNotApplicable) || values != nil {
-			t.Fatalf("narrowed Values(%v) = %v, %v; want ErrNarrowingNotApplicable and no value", names, values, err)
+		if release, err := machine.Values(t.Context(), *request.GrantID, enrollmentID, narrowing); !errors.Is(err, ErrNarrowingNotApplicable) || release.Values != nil {
+			t.Fatalf("narrowed Values(%v) = %v, %v; want ErrNarrowingNotApplicable and no value", names, release.Values, err)
 		}
 	}
 	if len(googleNarrowings) != 0 {
@@ -124,9 +124,9 @@ func TestANarrowingOfAGrantWithNoGitHubAppSecretReleasesNothing(t *testing.T) {
 	if err != nil || request.GrantID == nil {
 		t.Fatalf("Create(APP_KEY, LOGIN_KEY, PLAIN_KEY) = %+v, %v; want a grant", request, err)
 	}
-	values, _, err := machine.Values(t.Context(), *request.GrantID, enrollmentID, narrowing)
-	if err != nil || values["APP_KEY"] != "narrowed-token" || values["LOGIN_KEY"] != "access-token" || values["PLAIN_KEY"] != "plain-v1" {
-		t.Fatalf("narrowed Values(APP_KEY, LOGIN_KEY, PLAIN_KEY) = %v, %v; want each value", values, err)
+	release, err := machine.Values(t.Context(), *request.GrantID, enrollmentID, narrowing)
+	if err != nil || release.Values["APP_KEY"] != "narrowed-token" || release.Values["LOGIN_KEY"] != "access-token" || release.Values["PLAIN_KEY"] != "plain-v1" {
+		t.Fatalf("narrowed Values(APP_KEY, LOGIN_KEY, PLAIN_KEY) = %v, %v; want each value", release.Values, err)
 	}
 	if !reflect.DeepEqual(githubNarrowings, []*secrets.GitHubNarrowing{narrowing}) {
 		t.Fatalf("the github-app minter's narrowings = %v, want %v", githubNarrowings, []*secrets.GitHubNarrowing{narrowing})
@@ -156,9 +156,9 @@ func TestANarrowingToAnUnlistedOwnerReleasesNothing(t *testing.T) {
 	if err != nil || request.GrantID == nil {
 		t.Fatalf("Create = %+v, %v; want a grant", request, err)
 	}
-	values, _, err := machine.Values(t.Context(), *request.GrantID, enrollmentID, &secrets.GitHubNarrowing{Owner: "outsider", ReadOnly: true})
-	if !errors.Is(err, ErrNarrowingOwnerNotListed) || values != nil || !strings.Contains(err.Error(), "APP_KEY") || !strings.Contains(err.Error(), "outsider") {
-		t.Fatalf("Values narrowed to an unlisted owner = %v, %v; want ErrNarrowingOwnerNotListed naming APP_KEY and outsider, no value", values, err)
+	release, err := machine.Values(t.Context(), *request.GrantID, enrollmentID, &secrets.GitHubNarrowing{Owner: "outsider", ReadOnly: true})
+	if !errors.Is(err, ErrNarrowingOwnerNotListed) || release.Values != nil || !strings.Contains(err.Error(), "APP_KEY") || !strings.Contains(err.Error(), "outsider") {
+		t.Fatalf("Values narrowed to an unlisted owner = %v, %v; want ErrNarrowingOwnerNotListed naming APP_KEY and outsider, no value", release.Values, err)
 	}
 	if minted != 0 {
 		t.Fatalf("the github-app minter ran %d times for a refused narrowing, want none", minted)
@@ -167,8 +167,8 @@ func TestANarrowingToAnUnlistedOwnerReleasesNothing(t *testing.T) {
 		t.Fatalf("a refused narrowing wrote grant.used rows %v, want none", audits)
 	}
 	for _, narrowing := range []*secrets.GitHubNarrowing{{Owner: "ada", ReadOnly: true}, nil} {
-		if values, _, err := machine.Values(t.Context(), *request.GrantID, enrollmentID, narrowing); err != nil || values["APP_KEY"] != "token" || values["PLAIN_KEY"] != "plain-v1" {
-			t.Fatalf("Values narrowed to %+v = %v, %v; want both values", narrowing, values, err)
+		if release, err := machine.Values(t.Context(), *request.GrantID, enrollmentID, narrowing); err != nil || release.Values["APP_KEY"] != "token" || release.Values["PLAIN_KEY"] != "plain-v1" {
+			t.Fatalf("Values narrowed to %+v = %v, %v; want both values", narrowing, release.Values, err)
 		}
 	}
 }
@@ -188,8 +188,8 @@ func TestANarrowingTheMinterRefusesIsNotAMintFailure(t *testing.T) {
 	if err != nil || request.GrantID == nil {
 		t.Fatalf("Create = %+v, %v; want a grant", request, err)
 	}
-	values, _, err := machine.Values(t.Context(), *request.GrantID, enrollmentID, &secrets.GitHubNarrowing{Owner: "ada", Repositories: []string{"missing"}})
-	if !errors.Is(err, secrets.ErrMintNarrowingRefused) || errors.Is(err, ErrMintFailed) || values != nil {
-		t.Fatalf("Values = %v, %v; want ErrMintNarrowingRefused, not ErrMintFailed, and no value", values, err)
+	release, err := machine.Values(t.Context(), *request.GrantID, enrollmentID, &secrets.GitHubNarrowing{Owner: "ada", Repositories: []string{"missing"}})
+	if !errors.Is(err, secrets.ErrMintNarrowingRefused) || errors.Is(err, ErrMintFailed) || release.Values != nil {
+		t.Fatalf("Values = %v, %v; want ErrMintNarrowingRefused, not ErrMintFailed, and no value", release.Values, err)
 	}
 }

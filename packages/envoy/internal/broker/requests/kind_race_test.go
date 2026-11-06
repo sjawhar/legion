@@ -83,14 +83,14 @@ func TestAPlainGrantRacingAKindRetagNeverReleasesWhatTheKindStores(t *testing.T)
 				store.Put(policytest.KindSecret("RACED_LOGIN", fixtureOperator, tier, policy.KindGoogleLogin, canary))
 				return nil
 			}}
-			values, _, err := machine.Values(t.Context(), grantID, enrollmentID, nil)
+			release, err := machine.Values(t.Context(), grantID, enrollmentID, nil)
 			if duringErr != nil {
 				t.Fatalf("the retag during the read: %v", duringErr)
 			}
 			if _, served := machine.Policy.Get().Secrets["RACED_LOGIN"]; !served {
 				t.Fatal("the retag during the read left RACED_LOGIN unserved; the race never ran")
 			}
-			for _, value := range values {
+			for _, value := range release.Values {
 				if strings.Contains(value, canary) {
 					t.Fatal("Values released the credential the secret stores once it is a kind")
 				}
@@ -98,8 +98,8 @@ func TestAPlainGrantRacingAKindRetagNeverReleasesWhatTheKindStores(t *testing.T)
 			if err != nil && strings.Contains(err.Error(), canary) {
 				t.Fatal("Values' error holds the credential the secret stores once it is a kind")
 			}
-			if !errors.Is(err, ErrGrantNotLive) || values != nil || minted != 0 {
-				t.Fatalf("Values across a retag to a kind = %d values, %v after %d mints; want ErrGrantNotLive and none", len(values), err, minted)
+			if !errors.Is(err, ErrGrantNotLive) || release.Values != nil || minted != 0 {
+				t.Fatalf("Values across a retag to a kind = %d values, %v after %d mints; want ErrGrantNotLive and none", len(release.Values), err, minted)
 			}
 			if by, audits := endedForGood(t, machine, grantID); by != GrantEndedActor || audits != 1 {
 				t.Fatalf("grant revoked_by %q with %d grant.revoked rows by it; want %s and 1", by, audits, GrantEndedActor)

@@ -32,6 +32,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/broker/airlock"
 	"github.com/sjawhar/envoy/internal/broker/exchange"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/record"
@@ -184,6 +185,17 @@ type Machine struct {
 	// Minters maps each policy kind (policy.Kinds) to its Minter. A release never returns the
 	// stored value of a kind secret.
 	Minters map[string]Minter
+	// Airlock is the airlock's rules as the broker read them at boot
+	// (BROKER_AIRLOCK_RULES_FILE), and the zero value for a deployment with no rules file. A
+	// granted name the rules name is released as placeholders rather than as its value
+	// (Values), and the proxy port puts the real value back into the requests the entry allows.
+	Airlock airlock.Rules
+	// AirlockProxyURL is BROKER_AIRLOCK_PROXY_URL, the URL a command reaches that port at, and
+	// AirlockCACertificate the PEM certificate of its certificate authority
+	// (BROKER_AIRLOCK_CA_CERT_FILE, read at boot). Every release that holds a name back carries
+	// both, since a command that cannot reach the proxy or cannot trust it has nothing.
+	AirlockProxyURL      string
+	AirlockCACertificate string
 	// missRereads is MissRereads' per-enrollment buckets, built on first use (missRereadLimiter).
 	missRereads     *ratelimit.Keyed
 	missRereadsOnce sync.Once

@@ -9,6 +9,8 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
@@ -204,6 +206,13 @@ func main() {
 	// operator believes are in force. The file is read once; a change to it rolls the pods.
 	rules, err := readAirlockRules(cfg.AirlockRulesFile)
 	fatal(err)
+	// And the proxy's certificate authority, read in the same breath and refused the same way:
+	// every release of a name the rules hold back hands this certificate to the command as the
+	// one thing it trusts the proxy by, so a pod whose file is missing or is not a certificate
+	// would release values no command could reach. The key file beside it is the proxy port's,
+	// not this read's.
+	caCertificate, err := readAirlockCACertificate(cfg.AirlockCACertFile)
+	fatal(err)
 	// The whole stop budget, logged as soon as the configuration naming its first half is loaded,
 	// because a deployment's terminationGracePeriodSeconds has to cover it and nothing in this
 	// repository can check that it does: the guard this repository would otherwise write — a test
@@ -358,7 +367,7 @@ func main() {
 		VMServicesByAccount: cfg.VMServicesByAccount,
 	}
 	enr.Chain = enroll.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
-	reqMachine := newRequestMachine(cfg, st, current, secretStore, enr.Replay)
+	reqMachine := newRequestMachine(cfg, st, current, secretStore, enr.Replay, rules, caCertificate)
 	credentialLifetime := time.Duration(cfg.LauncherCredentialSeconds) * time.Second
 	oauthStore := oauthstore.New(st.Pool)
 	oauthStore.Reused = enroll.RevokeReusedCredential
@@ -715,18 +724,49 @@ func readAirlockRules(path string) (airlock.Rules, error) {
 	return rules, nil
 }
 
+// readAirlockCACertificate reads the airlock proxy's certificate authority, the PEM certificate
+// BROKER_AIRLOCK_CA_CERT_FILE names, and answers it as the release hands it to a command. An
+// empty path is a deployment with no airlock and answers "". Anything else refuses the boot: a
+// path that cannot be read, and a file that is not one PEM certificate. The release carries this
+// text as the only thing a command trusts the proxy by, so a file that is not a certificate has
+// to be found out by the pod that mounted it rather than by every command it releases to.
+// Extracted from main for the same reason readAirlockRules is.
+func readAirlockCACertificate(path string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		// os.ReadFile's own error names the path, so this adds the variable alone.
+		return "", fmt.Errorf("BROKER_AIRLOCK_CA_CERT_FILE: %w", err)
+	}
+	block, _ := pem.Decode(data)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return "", fmt.Errorf("BROKER_AIRLOCK_CA_CERT_FILE %s: not a PEM certificate", path)
+	}
+	if _, err := x509.ParseCertificate(block.Bytes); err != nil {
+		return "", fmt.Errorf("BROKER_AIRLOCK_CA_CERT_FILE %s: %w", path, err)
+	}
+	return string(data), nil
+}
+
 // newRequestMachine builds the requests.Machine the broker decides every secret request with, from
 // its configuration: the audience and skew every request object is checked against, and, for each
 // service account, the registered service a pod running as it proves, and for each Google
 // service account, the one a machine of that fleet proves. A grant lasts the lifetime its
-// request signed, or until its session ends.
-func newRequestMachine(cfg config.Config, st *store.Store, current *policy.Current, secretStore secrets.Store, replay func(context.Context, string, time.Time) (bool, error)) *requests.Machine {
+// request signed, or until its session ends. rules and caCertificate are the airlock's, read at
+// boot: a name the rules name is released as placeholders, and every such release carries the
+// proxy's URL and this certificate.
+func newRequestMachine(cfg config.Config, st *store.Store, current *policy.Current, secretStore secrets.Store, replay func(context.Context, string, time.Time) (bool, error), rules airlock.Rules, caCertificate string) *requests.Machine {
 	m := &requests.Machine{
 		Store: st, Policy: current, Secrets: secretStore, PendingTTL: agentSecretPendingTTL,
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Replay: replay,
-		ServicesByAccount:   cfg.ServicesByAccount,
-		VMServicesByAccount: cfg.VMServicesByAccount,
-		Minters:             kindMinters(secrets.GitHubApp{}, secrets.GoogleLogin{}, secrets.AzureLogin{TokenFile: cfg.AzureTokenFile, SecretName: cfg.AzureLoginSecret}),
+		ServicesByAccount:    cfg.ServicesByAccount,
+		VMServicesByAccount:  cfg.VMServicesByAccount,
+		Minters:              kindMinters(secrets.GitHubApp{}, secrets.GoogleLogin{}, secrets.AzureLogin{TokenFile: cfg.AzureTokenFile, SecretName: cfg.AzureLoginSecret}),
+		Airlock:              rules,
+		AirlockProxyURL:      cfg.AirlockProxyURL,
+		AirlockCACertificate: caCertificate,
 	}
 	m.Chain = requests.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	return m

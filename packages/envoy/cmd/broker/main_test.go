@@ -6,8 +6,15 @@
 package main
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"maps"
+	"math/big"
 	"net"
 	"net/http"
 	"net/url"
@@ -21,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/broker/airlock"
 	"github.com/sjawhar/envoy/internal/broker/brokertest"
 	"github.com/sjawhar/envoy/internal/broker/config"
 	"github.com/sjawhar/envoy/internal/broker/policy"
@@ -124,7 +132,7 @@ func TestTheRequestMachineCarriesTheServicesByAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := newRequestMachine(cfg, nil, nil, nil, nil)
+	m := newRequestMachine(cfg, nil, nil, nil, nil, airlock.Rules{}, "")
 	want := map[string]string{
 		"system:serviceaccount:example:example-sa": "example-service",
 		"system:serviceaccount:example:another-sa": "example-service",
@@ -662,6 +670,54 @@ func airlockRulesFile(t *testing.T, rules string) string {
 	return path
 }
 
+// airlockCACertificateFile writes a PEM certificate into a file of t's own and answers its path,
+// the file BROKER_AIRLOCK_CA_CERT_FILE names: a self-signed certificate, since the boot reads it
+// as a certificate and trusts nothing about who signed it.
+func airlockCACertificateFile(t *testing.T) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "broker airlock test CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return writeTempFile(t, "airlock-ca.crt", pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+}
+
+// writeTempFile writes content into a file named name under a directory of t's own.
+func writeTempFile(t *testing.T, name string, content []byte) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// airlockEnv is what a broker with an airlock is started with besides its rules file: the proxy
+// the release names and the certificate authority it hands over, without which config.Load
+// refuses a broker that reads rules it could not proxy.
+func airlockEnv(t *testing.T) []string {
+	t.Helper()
+	ca := airlockCACertificateFile(t)
+	return []string{
+		"BROKER_AIRLOCK_PROXY_URL=http://127.0.0.1:13381",
+		"BROKER_AIRLOCK_CA_CERT_FILE=" + ca,
+		"BROKER_AIRLOCK_CA_KEY_FILE=" + filepath.Join(filepath.Dir(ca), "airlock-ca.key"),
+	}
+}
+
 // TestMainRefusesAnAirlockRulesFileItCannotServe drives the real binary with each kind of rules
 // file it must refuse — one whose entry the airlock will not validate, one that is not JSON, and
 // a path that is not there — and asserts it exits non-zero naming the file and what is wrong
@@ -690,11 +746,11 @@ func TestMainRefusesAnAirlockRulesFileItCannotServe(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			out := runRefusedBroker(t, binary,
+			out := runRefusedBroker(t, binary, append(airlockEnv(t),
 				"BROKER_DATABASE_URL=postgres://nonexistent-host-this-test-must-never-reach/db",
 				"BROKER_PUBLIC_URL=https://secrets.internal.example",
 				"BROKER_AIRLOCK_RULES_FILE="+c.path,
-			)
+			)...)
 			if !strings.Contains(out, "BROKER_AIRLOCK_RULES_FILE") {
 				t.Fatalf("broker refused, but its output does not name BROKER_AIRLOCK_RULES_FILE: %s", out)
 			}
@@ -714,14 +770,55 @@ func TestMainStartsWithAnAirlockRulesFile(t *testing.T) {
 	if err := os.WriteFile(fakeSecretsFile, []byte(`{"secrets": []}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	broker := startBroker(t, brokerOptions{Env: []string{
-		"BROKER_DATABASE_URL=" + storetest.URL(t),
+	broker := startBroker(t, brokerOptions{Env: append(airlockEnv(t),
+		"BROKER_DATABASE_URL="+storetest.URL(t),
 		"BROKER_LISTEN_ADDR=127.0.0.1:0",
 		"BROKER_PUBLIC_URL=http://127.0.0.1:0",
-		"BROKER_FAKE_SECRETS_FILE=" + fakeSecretsFile,
-		"BROKER_AIRLOCK_RULES_FILE=" + airlockRulesFile(t, `{"secrets": [
+		"BROKER_FAKE_SECRETS_FILE="+fakeSecretsFile,
+		"BROKER_AIRLOCK_RULES_FILE="+airlockRulesFile(t, `{"secrets": [
 			{"name": "DEEL_API_KEY", "hosts": ["api.deel.com"], "allow": [{"method": "GET", "pathPrefix": "/rest/"}]}
 		]}`),
-	}})
+	)})
 	requireHealthy(t, broker.Addr)
+}
+
+// TestMainRefusesAnAirlockCertificateItCannotRead drives the real binary with each kind of
+// certificate file it must refuse — a path that is not there, a file that is not PEM, and a PEM
+// block that is not a certificate — and asserts it exits non-zero naming the variable, without
+// ever binding. Every release of a name the rules hold back carries this text as the one thing
+// the command trusts the proxy by, so the pod that mounted the wrong file has to find out, not
+// the commands it releases to.
+func TestMainRefusesAnAirlockCertificateItCannotRead(t *testing.T) {
+	binary := buildBroker(t)
+	missing := filepath.Join(t.TempDir(), "absent.crt")
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range map[string]struct {
+		path string
+		want string
+	}{
+		"a path that cannot be read": {path: missing, want: "no such file"},
+		"a file that is not PEM":     {path: writeTempFile(t, "plain.crt", []byte("not a certificate\n")), want: "not a PEM certificate"},
+		"a PEM block that is a key":  {path: writeTempFile(t, "key.crt", pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})), want: "not a PEM certificate"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			out := runRefusedBroker(t, binary,
+				"BROKER_DATABASE_URL=postgres://nonexistent-host-this-test-must-never-reach/db",
+				"BROKER_PUBLIC_URL=https://secrets.internal.example",
+				"BROKER_AIRLOCK_RULES_FILE="+airlockRulesFile(t, `{"secrets": [{"name": "DEEL_API_KEY", "hosts": ["api.deel.com"]}]}`),
+				"BROKER_AIRLOCK_PROXY_URL=http://127.0.0.1:13381",
+				"BROKER_AIRLOCK_CA_CERT_FILE="+c.path,
+				"BROKER_AIRLOCK_CA_KEY_FILE=/etc/broker/airlock-ca/tls.key",
+			)
+			if !strings.Contains(out, "BROKER_AIRLOCK_CA_CERT_FILE") || !strings.Contains(out, c.want) {
+				t.Fatalf("broker refused, but its output does not name BROKER_AIRLOCK_CA_CERT_FILE and %q: %s", c.want, out)
+			}
+		})
+	}
 }
