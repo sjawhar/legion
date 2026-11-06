@@ -386,8 +386,8 @@ test("a command a person ran shows as the plain command line they typed", () => 
 // the one they did send, which is what the Agents page shows next to this stream. The rows of a
 // run arrive after the call that asked for it has answered
 // (`/legion/scratch/tmp/infra-1026-spike/logs/mod2.jsonl:35-42`: the result at t=…345207, the
-// echo at …345297), so the run is still outstanding when its rows land and they are known by
-// that rather than by the command they name.
+// echo at …345297), so the run claims the first echo row inside a second of its own answer,
+// rather than one by the command it names.
 test("the echo of a command this session ran shows nothing, and one typed at the terminal shows", async () => {
   const ran = Promise.withResolvers<ModCallResults["command.run"]>()
   const session = modSession({
@@ -425,16 +425,17 @@ test("the echo of a command this session ran shows nothing, and one typed at the
   ])
 })
 
-// The rule above tells a person's own terminal command from the echo of a run this session
-// asked for by `origin.kind`, taking `unclassified` for the person's. Driven on a real Claude
-// Code 2.1.310 terminal session, that value never appears: a `/config` the person typed while a
-// Dispatch `/cost` was outstanding carried `{"kind":"engine"}`, the same as the `/usage` echo of
-// the run itself, and so did a `/config` typed at an idle terminal and a plugin-run `/context`
-// echo (read at the mod event, the one place the value exists, with one logging line added to a
-// copy of the built plugin; the view's consequences reproduced on the untouched build). So the
-// person's command is hidden and the run's echo is drawn in its place, which is the defect the
-// rule set out to remove, and the person's `/cost` reply carries the other command's output.
-// Whatever tells the two apart, the person's own command must reach the view (INFRA-1026).
+// The rule before this one told a person's own terminal command from the echo of a run this
+// session asked for by `origin.kind`, taking `unclassified` for the person's. Driven on a real
+// Claude Code 2.1.310 terminal session, that value never appears: a `/config` the person typed
+// while a Dispatch `/cost` was outstanding carried `{"kind":"engine"}`, the same as the `/usage`
+// echo of the run itself, and so did a `/config` typed at an idle terminal and a plugin-run
+// `/context` echo (read at the mod event, the one place the value exists, with one logging line
+// added to a copy of the built plugin; the view's consequences reproduced on the untouched
+// build). So that rule hid the person's command and drew the run's echo in its place, which is
+// the defect it set out to remove, and the person's `/cost` reply carried the other command's
+// output. Whatever tells the two apart, the person's own command must reach the view
+// (INFRA-1026).
 test("a command typed at the terminal shows although its origin is the run's own", async () => {
   const ran = Promise.withResolvers<ModCallResults["command.run"]>()
   const session = modSession({

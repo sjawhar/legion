@@ -40,8 +40,8 @@ const MOD_REQUEST_TIMEOUT_MS = 30_000
 const MOD_PROBE_TIMEOUT_MS = 1_000
 
 /** The most events held for an owner that is not reading them. One session's events are small and
- *  a later task consumes them as they arrive; past this the oldest go, since the newest frame is
- *  the one a live view needs. */
+ *  the live view (`./agent-stream-runner`) consumes them as they arrive; past this the oldest go,
+ *  since the newest frame is the one a live view needs. */
 const MOD_EVENT_BUFFER = 2_048
 
 /** The `Host` of every request on the socket: over a Unix socket the host names nothing, and both

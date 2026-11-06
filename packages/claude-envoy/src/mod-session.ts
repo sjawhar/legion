@@ -8,18 +8,20 @@
 //     one would sit behind the first for a whole turn.
 //   - a row `$.session.append` adds is read at the turn's next request, and not at all when no
 //     request follows it. So a row added to a running turn is watched until that turn ends, and
-//     one the turn never read is pointed at by a prompt of its own.
+//     one the turn never read is quoted in full by a prompt of its own (`unreadRowPrompt`).
 //   - a turn's next request goes out about 50 ms after the tool result that freed it, and its
 //     first chunk arrives seconds later (2.4 s and 2.5 s in the recorded runs). So which request
 //     a row made it into is read off `step-request`, which the mod sends as the request goes
 //     out, and never off the `step` snapshots, which follow the first chunk: a row added in the
 //     seconds between the two would otherwise look read by a request that left without it.
 //   - a `$.command.run` of this session's writes its rows after the call that asked for it has
-//     answered, and those rows carry `origin.kind` `plugin` or `engine`, where a command a
-//     person typed at the session's own terminal carries `unclassified`. So a run stays
-//     outstanding past its own result (`runsCommandRow`, `runCommand`), and a row is tied to a
-//     run by that run being outstanding rather than by the command the row names: Claude Code
-//     runs `/cost` as `/usage` and `/model anthropic/haiku` as `/model haiku`.
+//     answered (19 ms and 90 ms after it, measured), and nothing in a row tells it from a
+//     command a person typed at the session's own terminal: in a terminal session both carry
+//     `origin.kind` `engine`, and the command a row names need not be the one asked for, since
+//     Claude Code runs `/cost` as `/usage` and `/model anthropic/haiku` as `/model haiku`. So a
+//     run claims the first echo row that arrives within `COMMAND_ECHO_MS` of its own answer,
+//     and the output row directly behind that echo (`runsCommandRow`, `runCommand`); every
+//     other command row is a person's.
 //
 // The turn tracking is built from the mod's events alone (`../hooks/mod-protocol`), which have one
 // consumer: the live view reads them and hands each one here (`observe`), so nothing in this file
@@ -146,14 +148,15 @@ export interface ModSession {
   show(content: readonly ModContentBlock[]): Promise<string>
   /**
    * Hand the session a person's own message. During a turn it is a row of the conversation, which
-   * the model reads at the turn's next request and which is pointed at by a prompt of its own
+   * the model reads at the turn's next request and which a prompt of its own quotes in full
    * when the turn ends without reading it; while the session is idle it is the prompt of a turn,
    * submitted as the person's own words.
    *
-   * Resolves once the session has the message: with the row's id where a row carries it, and with
-   * undefined where it entered as a prompt, whose row the caller recognises by its text. It never
-   * waits for the turn a prompt starts, so a prompt that never entered - the session ended while
-   * it waited behind another - reaches the caller as `failed` rather than as a rejection.
+   * During a turn it resolves once the session has stored the row, with the row's id. While the
+   * session is idle it resolves at once with undefined, before the prompt has gone out (the caller
+   * recognises its row by its text): it never waits for the turn a prompt starts, so a prompt that
+   * never entered - the session ended while it waited behind another - reaches the caller as
+   * `failed` rather than as a rejection.
    */
   deliver(input: {
     readonly text: string

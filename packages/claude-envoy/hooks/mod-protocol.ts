@@ -278,10 +278,10 @@ export type ModStepPart =
       readonly args: string
     }
 
-/** Something that happened in the session, sent by the mod. A later task turns these into the
- *  Agents page's live view; nothing here knows about that. */
+/** Something that happened in the session, sent by the mod. The server turns these into the
+ *  Agents page's live view (`../src/agent-stream-runner.ts`); nothing here knows about that. */
 export type ModEvent =
-  /** The mod reached the server: sent once per connect. */
+  /** The mod reached the server: sent once per process, at the mod's first `session.start`. */
   | {
       readonly kind: "hello"
       /** `$.session.id()` as the mod's first `session.start` read it: the id the socket is named

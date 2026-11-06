@@ -57,9 +57,9 @@ export function userTurnStateFile(stateDirectory: string, sessionId: string): st
 
 /**
  * What a session's file holds; nothing when there is no file, which is a session that has taken
- * no direct message yet. A file that cannot be read, or holds something else, starts the session
- * over with nothing handled: the alternative is a session that takes no message at all, and the
- * record it could not read is replaced by the next write.
+ * no direct message yet. A file that cannot be read, or holds something else, rejects, and the
+ * caller then builds no router for the session id (`restoreTurns`): every message arrives as a
+ * card, since a record it could not read may hold an attempt already spent.
  */
 export async function readUserTurnState(file: string): Promise<UserTurnStateFile> {
   return await readStateFile(

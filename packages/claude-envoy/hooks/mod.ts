@@ -3,9 +3,10 @@
  * runs it from source, in an environment of its own, and it sees every hook of the session.
  *
  * It carries the session to this plugin's MCP server over the Unix socket both sides name the
- * same way (`./mod-protocol`): events one way, the server's requests the other. A later task
- * makes the Agents page's live view out of those events and routes a person's message back
- * through those requests; nothing of either is here.
+ * same way (`./mod-protocol`): events one way, the server's requests the other. The server makes
+ * the Agents page's live view out of those events (`../src/agent-stream-runner.ts`) and routes a
+ * person's message back through those requests (`../src/user-turn-router.ts`); nothing of either
+ * is here.
  *
  * Three rules hold everywhere below:
  *
