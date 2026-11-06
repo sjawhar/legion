@@ -99,6 +99,76 @@ func TestOpenAIChatSendsEffortOffAsNone(t *testing.T) {
 	}
 }
 
+// An openai-chat run asking for a Final object sends that schema as the Chat Completions API's
+// json_schema response format, rather than the bare json_object the provider falls back to, and
+// outside OpenAI's strict mode, which refuses schemas this package serves. A run that asks for no
+// object sends no response_format at all.
+func TestOpenAIChatSendsTheFinalSchemaAsAJSONSchemaResponseFormat(t *testing.T) {
+	t.Parallel()
+	s := newStandIn(t, chatStream("stop", chatUsage{Prompt: 2, Completion: 3}, finalAnswer))
+	f := newFixture(t, s, OpenAIChat, 1)
+	f.req.Final = json.RawMessage(finalSchema)
+	result, err := Run(context.Background(), f.req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Fault != "" || !sameJSON(t, result.Value, []byte(finalAnswer)) {
+		t.Fatalf("result %+v, want %s and no fault", result, finalAnswer)
+	}
+	got := s.requests()
+	if len(got) != 1 {
+		t.Fatalf("%d model calls, want 1", len(got))
+	}
+	var body struct {
+		Format *struct {
+			Type   string `json:"type"`
+			Schema *struct {
+				Schema json.RawMessage `json:"schema"`
+				Strict bool            `json:"strict"`
+			} `json:"json_schema"`
+		} `json:"response_format"`
+	}
+	if err := json.Unmarshal(got[0].body, &body); err != nil {
+		t.Fatalf("the request body is no JSON object: %v\n%s", err, got[0].body)
+	}
+	if body.Format == nil || body.Format.Type != "json_schema" || body.Format.Schema == nil {
+		t.Fatalf("the call's response_format is %s, want one of type json_schema carrying the request's schema",
+			responseFormatOf(t, got[0]))
+	}
+	if !sameJSON(t, body.Format.Schema.Schema, []byte(finalSchema)) {
+		t.Errorf("the call's response_format schema is %s, want the request's %s", body.Format.Schema.Schema, finalSchema)
+	}
+	if body.Format.Schema.Strict {
+		t.Errorf("the call's response_format is %s, want strict false: the package checks the reply against the schema itself",
+			responseFormatOf(t, got[0]))
+	}
+
+	// A run that asks for no object leaves the reply free text.
+	plain := newStandIn(t, chatStream("stop", chatUsage{Prompt: 2, Completion: 3}, "The note says plum."))
+	g := newFixture(t, plain, OpenAIChat, 1)
+	if result, err := Run(context.Background(), g.req); err != nil || result.Fault != "" {
+		t.Fatalf("the run with no Final: %+v, %v", result, err)
+	}
+	free := plain.requests()
+	if len(free) != 1 {
+		t.Fatalf("%d model calls with no Final, want 1", len(free))
+	}
+	if format, ok := free[0].decoded(t)["response_format"]; ok {
+		t.Errorf("the call with no Final sends response_format %v, want none", format)
+	}
+}
+
+// responseFormatOf is a recorded request's response_format as it was sent, for a failure to
+// quote.
+func responseFormatOf(t *testing.T, r recorded) []byte {
+	t.Helper()
+	format, err := json.Marshal(r.decoded(t)["response_format"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return format
+}
+
 // An azure-anthropic run reaches the Messages path under the endpoint's /anthropic service root,
 // is authorized with the endpoint's token as a bearer token and with no API key header, and names
 // the deployment as the model it calls, falling back to the model's own id where the endpoint

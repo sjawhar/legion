@@ -36,6 +36,16 @@
 // message, and never more than the four Anthropic allows; openai-responses takes an explicit
 // prompt cache breakpoint at the end of the history; openai-chat takes none.
 //
+// # The structured reply
+//
+// Request.Final is the JSON schema the last reply must be exactly one object of, and the package
+// reads that reply back against the schema itself: a reply that does not fit is FaultMalformed.
+// The schema also rides to the provider, where the protocol says: in output_config.format on
+// anthropic-messages and azure-anthropic, as the Responses API's text format on
+// openai-responses, and on openai-chat as response_format.json_schema without the provider's
+// strict mode, because the package checks the reply against the schema itself and strict mode
+// refuses schemas that are valid JSON Schema.
+//
 // # Bounds
 //
 // Bounds.Calls bounds model calls. A per-tool budget — how much work one tool will do before it

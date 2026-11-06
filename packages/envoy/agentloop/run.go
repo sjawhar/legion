@@ -165,11 +165,14 @@ func languageModel(req Request, client *http.Client) (provider.LanguageModel, pr
 		// The run's own transport puts the token on every request and adds the
 		// endpoint's query parameters, so the client is given neither headers nor query
 		// parameters of its own: one mechanism, in the transport, for every kind.
-		// WithIncludeUsage asks the stream for its token counts.
+		// WithIncludeUsage asks the stream for its token counts, and
+		// WithStructuredOutputs lets a Final reply's schema ride as
+		// response_format.json_schema rather than being downgraded to a bare json_object.
 		model := openaicompatible.New(req.Model.ID,
 			openaicompatible.WithBaseURL(endpoint.BaseURL), openaicompatible.WithAPIKey(placeholderKey),
-			openaicompatible.WithHTTPClient(client), openaicompatible.WithIncludeUsage(true))
-		return model, openaicompatible.OpenAIOptions{ReasoningEffort: openaiEffort(req.Model.Effort)}, nil
+			openaicompatible.WithHTTPClient(client), openaicompatible.WithIncludeUsage(true),
+			openaicompatible.WithStructuredOutputs(true))
+		return model, chatOptions(req.Model.Effort), nil
 	case AzureAnthropic:
 		// The deployment name is given only where it differs from the model id, and the
 		// foundry config owns the base URL, which NewAnthropic applies itself.
@@ -552,5 +555,19 @@ func openaiOptions(effort string) openai.OpenAIResponsesOptions {
 		ReasoningEffort: openaiEffort(effort),
 		Store:           &store,
 		Include:         []string{"reasoning.encrypted_content"},
+	}
+}
+
+// chatOptions is a Chat Completions call at the model's reasoning effort, with a Final reply's
+// schema sent as it is rather than in OpenAI's strict mode: strict mode refuses schemas that are
+// valid JSON Schema, a oneOf at the root or a property left out of required among them, and this
+// package reads the reply back against the schema itself, raising FaultMalformed where it does
+// not fit, so strict mode would turn requests the model can serve into requests it refuses and
+// buy no check the run does not already make.
+func chatOptions(effort string) openaicompatible.OpenAIOptions {
+	strict := false
+	return openaicompatible.OpenAIOptions{
+		ReasoningEffort:  openaiEffort(effort),
+		StrictJSONSchema: &strict,
 	}
 }
