@@ -11,6 +11,8 @@ package main
 import (
 	"context"
 	"errors"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -20,6 +22,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/id"
 	"github.com/sjawhar/envoy/internal/session"
+	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -342,6 +345,63 @@ func TestADeleteRestoresTheConsumerOfASessionItsCacheHasNoRecordOf(t *testing.T)
 	}
 }
 
+// A delete gives the consumer back filtered on the topics the bucket holds, and not on the ones
+// its own listener's interest cache holds. The restore reads the session's record from the bucket
+// because the registration it repairs was made on another listener, and its topics are that same
+// registration's write: a cache this listener's watch has not delivered it to is behind the row
+// it reads the record of, so the filter it would build there leaves out the topic that
+// registration was answered 200 for. The session then receives nothing on that topic, since its
+// consumer is the one path to it, until its next heartbeat sets the filter again.
+//
+// What the case asserts is that delivery and not the consumer's existence: the consumer is there
+// either way, filtered on one topic set or the other, and only a message published on the topic
+// the registration added says which.
+//
+// The window is built rather than waited for: the deleting listener's interest watch is stopped
+// once its cache holds the row as it stood before that registration, which is the same reader as
+// a watch that has not delivered the registration's write yet, held there for certain. A cache
+// holding no row at all is not that reader: it falls through to the bucket on a miss
+// (store.Registry.Get).
+func TestADeleteRestoresTheConsumerWithTheTopicItsCacheHasNotHeardOf(t *testing.T) {
+	registering := newSessionConsumerRig(t)
+	deleting := newSessionConsumerRig(t)
+	const sessionID = "ses_topics_behind"
+	const probe = "notifications.dispatch.issue.PROBE.>"
+	registering.subscribe(t, consumerRegistration(sessionID, "epoch-1"))
+	awaitCachedTopics(t, deleting.deps.registry, sessionID, contracts.AgentSubject(sessionID))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	// The record delete the consumer delete below follows: the first half of a clean stop, or of
+	// a reaper pass, made on the second listener.
+	if err := deleting.deps.sessions.Delete(ctx, sessionID); err != nil {
+		t.Fatalf("the second listener could not delete the record of %s: %v", sessionID, err)
+	}
+	deleting.deps.registry.StopWatch()
+
+	// The registration that lands between that record delete and the consumer delete, made on
+	// the listener the session registers through: it adds the probe topic, writes the row and
+	// the record, and the second listener's cache will not hear of it.
+	answer := registering.subscribe(t, consumerRegistration(sessionID, "epoch-2", probe))
+	if answer.Delivery == nil || answer.Delivery.Mode != deliveryModeConsumer {
+		t.Fatalf("the registration that added %s to %s was answered delivery %+v, want %s",
+			probe, sessionID, answer.Delivery, deliveryModeConsumer)
+	}
+	if interest, ok := deleting.deps.registry.Cached(sessionID); !ok || slices.Contains(interest.Topics, probe) {
+		t.Fatalf("the interest cache of the deleting listener holds %v (held %t) for %s; this case needs it holding the row without %s, which is what the bucket read is for",
+			interest.Topics, ok, sessionID, probe)
+	}
+
+	if err := deleting.deps.consumers.deleteConsumer(ctx, deleting.deps, sessionID); err != nil {
+		t.Fatalf("the delete made on the listener whose cache is behind the row of %s: %v", sessionID, err)
+	}
+
+	// A message on the topic that registration was answered 200 for is the restored consumer's
+	// to deliver.
+	registering.store(t, "notifications.dispatch.issue.PROBE.comment")
+	registering.awaitPending(t, sessionID, 1)
+}
+
 // awaitDeleteWaitingForTheLock holds a registration inside its hook until the delete it started
 // waits for the session's lock, so that delete's first call is made the moment the registration
 // releases it. The wait is short and what it waits for is one goroutine reaching one mutex, so
@@ -394,4 +454,25 @@ func awaitCacheHasNoRecord(t *testing.T, sessions *session.SessionRegistry, sess
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+// awaitCachedTopics waits until registry's interest cache holds sessionID's row with each of
+// topics in it, the state the listener's own watch leaves once it has delivered the write that
+// stored them. A case that freezes a cache to hold it behind a later write waits here first: a
+// cache holding no row reads the bucket on a miss (store.Registry.Get), so freezing it would
+// hold nothing behind anything.
+func awaitCachedTopics(t *testing.T, registry *store.Registry, sessionID string, topics ...string) {
+	t.Helper()
+	waitFor(t, 10*time.Second, "the interest cache to hold "+sessionID+"'s row with "+strings.Join(topics, ", "), func() bool {
+		interest, ok := registry.Cached(sessionID)
+		if !ok {
+			return false
+		}
+		for _, topic := range topics {
+			if !slices.Contains(interest.Topics, topic) {
+				return false
+			}
+		}
+		return true
+	})
 }

@@ -30,6 +30,17 @@ func (r *Registry) Get(ctx context.Context, sessionID string) (Interest, error) 
 	return item, err
 }
 
+// Refresh is Get read from the bucket and never from the cache, for a caller whose answer must
+// hold a write its own cache need not hold yet: the listener's restore of a
+// session's consumer, which filters it on the row of a registration made on another listener
+// (cmd/listener's restoreRegistered, as session.SessionRegistry.Refresh reads that session's
+// record). The record read is cached as Get's own bucket read is, and a record this build cannot
+// decode is ErrMalformedInterest here too.
+func (r *Registry) Refresh(ctx context.Context, sessionID string) (Interest, error) {
+	item, _, err := r.getWithRevision(ctx, sessionID, true)
+	return item, err
+}
+
 // getWithRevision is Get with the bucket revision the record it answers was read at: the revision
 // the copy's fence holds on a cache hit, the entry's own on a bucket read, and 0 for a session the
 // bucket holds no record for. A record this build cannot decode carries its revision too, since
@@ -38,9 +49,11 @@ func (r *Registry) Get(ctx context.Context, sessionID string) (Interest, error) 
 // the record, the bucket refuses it for a record it holds (ErrInterestPlanConflict), and the plan
 // made again over the bucket's own row carries the revision that write needs.
 //
-// fromBucket reads the bucket even when the cache holds the record, for a caller whose
-// compare-and-swap the bucket refused: the cache is then behind the row that refused it, and
-// a plan made from the cache would be refused again (UpsertPlanned).
+// fromBucket reads the bucket even when the cache holds the record, for a caller whose cache may
+// be behind a write its answer must hold: one whose compare-and-swap the bucket refused, since
+// the cache is then behind the row that refused it and a plan made from the cache would be
+// refused again (UpsertPlanned), and one reading the topics a registration on another listener
+// has just stored (Refresh).
 func (r *Registry) getWithRevision(ctx context.Context, sessionID string, fromBucket bool) (Interest, uint64, error) {
 	if !fromBucket {
 		r.mu.RLock()

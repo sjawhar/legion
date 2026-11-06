@@ -344,9 +344,10 @@ func (m *sessionDelivery) confirmRegistered(ctx context.Context, d *listenerDeps
 // stop), so a record that is there once the consumer is gone was written by a registration that
 // landed in between, and that registration was answered 200 with consumer delivery. It is the
 // repair of both sides, the delete's and the registration's (deleteConsumer, confirmRegistered).
-// The read is of the bucket and not of the cache (session.SessionRegistry.Refresh), since the
-// watch that fills the cache may not have delivered that write yet, and a cache that has not is
-// exactly the reader that would leave the session with no consumer.
+// Both reads are of the bucket and not of the cache (session.SessionRegistry.Refresh,
+// store.Registry.Refresh), since the watch that fills the cache may not have delivered that
+// registration's writes yet, and a cache that has not is exactly the reader that would leave the
+// session with no consumer, or with one filtered on topics the registration has replaced.
 //
 // The consumer is created again at the later of the start the record names
 // (session.SessionEntry.ConsumerStart) and the sequence after ackFloor, the floor the caller read
@@ -375,7 +376,11 @@ func (m *sessionDelivery) restoreRegistered(ctx context.Context, d *listenerDeps
 	case entry.Delivery != session.DeliveryConsumer:
 		return
 	}
-	topics, err := storedInterestTopics(ctx, d.registry, sessionID)
+	// The topics are the bucket's and not the cache's: the cache of the listener doing the
+	// restore can be behind the row the registration it repairs has just written on another
+	// listener, and a filter built from it leaves out a topic that registration was answered 200
+	// for, on which the session then receives nothing until its next heartbeat.
+	topics, err := storedInterestTopics(ctx, d.registry, sessionID, true)
 	if err != nil {
 		m.logger.Warn("listener could not read the topics of a session that registered while its consumer was deleted",
 			slog.String("session_id", sessionID), slog.String("error", err.Error()))
@@ -703,7 +708,7 @@ func (m *sessionDelivery) refollow(ctx context.Context, d *listenerDeps, session
 	ctx, cancel := context.WithTimeout(ctx, sessionConsumerCallTimeout)
 	defer cancel()
 	unlock := m.locks.lock(sessionID)
-	topics, err := storedInterestTopics(ctx, d.registry, sessionID)
+	topics, err := storedInterestTopics(ctx, d.registry, sessionID, false)
 	if err != nil {
 		unlock()
 		m.logger.Warn("session consumer filter left unchanged: the session's interests could not be read",
@@ -718,9 +723,20 @@ func (m *sessionDelivery) refollow(ctx context.Context, d *listenerDeps, session
 }
 
 // storedInterestTopics is the topics of sessionID's stored interest row, read within ctx: none when
-// it has no row, or a row this build cannot decode, whose topics nothing routes (store.Registry.Get).
-func storedInterestTopics(ctx context.Context, registry *store.Registry, sessionID string) ([]string, error) {
-	interest, err := registry.Get(ctx, sessionID)
+// it has no row, or a row this build cannot decode, whose topics nothing routes. fromBucket reads
+// the row the bucket holds (store.Registry.Refresh), for a caller whose answer must hold a write
+// this listener's watch need not have delivered yet; every other caller is answered from the
+// watched cache, which a bucket read fills on a miss (store.Registry.Get).
+func storedInterestTopics(ctx context.Context, registry *store.Registry, sessionID string, fromBucket bool) ([]string, error) {
+	var (
+		interest store.Interest
+		err      error
+	)
+	if fromBucket {
+		interest, err = registry.Refresh(ctx, sessionID)
+	} else {
+		interest, err = registry.Get(ctx, sessionID)
+	}
 	if errors.Is(err, nats.ErrKeyNotFound) || errors.Is(err, store.ErrMalformedInterest) {
 		return nil, nil
 	}
