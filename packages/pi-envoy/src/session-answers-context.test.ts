@@ -238,10 +238,34 @@ test("a new item goes after the request's last message, and stays there on the r
   ).toEqual([...turn, later, grepCall, grepResult]);
 });
 
-test("a list that only lost items, or changed its header, keeps its place with the new text", async () => {
+// Every byte of a request before its last cache breakpoint has to repeat, or the provider writes
+// the whole conversation behind the changed byte to its cache again. The list's header names the
+// read that produced it ("As read at …; this read failed: …"), which differs from one request to
+// the next whenever a read crosses its 800 ms deadline, so a kept place keeps its bytes too.
+test("a list that only lost items, or changed its header, keeps its place and its bytes", async () => {
   const session = {};
   const cached = `${SESSION_ANSWERS_MARKER}\nAs read at 2026-10-27T11:00:00.000Z; this read failed: Dispatch did not answer within 800 ms.\n\n2026-10-27T10:00:00.000Z · alice answered your ask\nShip it.`;
   const read = readingEach(LATER, LIST, cached);
+  await withSessionAnswers([skill, ask], requestOf(read, noBranch, session));
+  const turn = [skill, ask, readCall, readResult];
+  expect(await withSessionAnswers([...turn], requestOf(read, noBranch, session))).toEqual([
+    skill,
+    ask,
+    later,
+    readCall,
+    readResult,
+  ]);
+  expect(
+    await withSessionAnswers([...turn, grepCall, grepResult], requestOf(read, noBranch, session))
+  ).toEqual([skill, ask, later, readCall, readResult, grepCall, grepResult]);
+});
+
+// The one change that does move the list also re-renders it, so a new item is never hidden behind
+// the bytes a kept place holds.
+test("an item written after a kept place moves the list, with the text of that read", async () => {
+  const session = {};
+  const stale = `${SESSION_ANSWERS_MARKER}\nAs read at 2026-10-27T11:00:00.000Z; this read failed: Dispatch did not answer within 800 ms.\n\n2026-10-27T10:00:00.000Z · alice answered your ask\nShip it.`;
+  const read = readingEach(LIST, stale, LATER);
   await withSessionAnswers([skill, ask], requestOf(read, noBranch, session));
   const turn = [skill, ask, readCall, readResult];
   expect(await withSessionAnswers([...turn], requestOf(read, noBranch, session))).toEqual([
@@ -253,15 +277,32 @@ test("a list that only lost items, or changed its header, keeps its place with t
   ]);
   expect(
     await withSessionAnswers([...turn, grepCall, grepResult], requestOf(read, noBranch, session))
-  ).toEqual([
+  ).toEqual([...turn, grepCall, grepResult, later]);
+});
+
+// A read gives no text when the answer list is empty, or when a server with no answers route has
+// nothing cached. Taking the placed list out of the conversation changes the request from its
+// place on, as changing its bytes would, and the next read that answers from the cache puts it
+// back: the pair alternates, and every request pays for it.
+test("a read with no text leaves a placed list where it is", async () => {
+  const session = {};
+  const read = readingEach(LIST, "", LIST);
+  const empty = async (): Promise<CarriedAnswers | undefined> => {
+    const next = await read();
+    return next?.text === "" ? undefined : next;
+  };
+  await withSessionAnswers([skill, ask], requestOf(empty, noBranch, session));
+  const turn = [skill, ask, readCall, readResult];
+  expect(await withSessionAnswers([...turn], requestOf(empty, noBranch, session))).toEqual([
     skill,
     ask,
-    { role: "user", content: [{ type: "text", text: cached }], timestamp: 0 },
+    list,
     readCall,
     readResult,
-    grepCall,
-    grepResult,
   ]);
+  expect(
+    await withSessionAnswers([...turn, grepCall, grepResult], requestOf(empty, noBranch, session))
+  ).toEqual([skill, ask, list, readCall, readResult, grepCall, grepResult]);
 });
 
 test("a list whose place left the conversation, as a compaction leaves it, goes after the last message again", async () => {
@@ -419,6 +460,62 @@ test("a request an older copy already gave the list gets no second one and no re
     failure,
   ]);
   expect(calls()).toBe(0);
+});
+
+// A list an older copy placed carries no item fingerprints, so only its text is left to compare,
+// and every difference but the line naming the read counts as something new. Here the read note's
+// own length pushed an item past the reader's character cap, so the list is re-rendered after the
+// last message: a prompt-cache miss, and never a person's words held back. Reading that text more
+// closely to spare the miss swallowed an item twice (see `showsNew`).
+test("an older copy's list the cap shortened is re-rendered, not kept", async () => {
+  const session = {};
+  const fresh = `${SESSION_ANSWERS_MARKER}\n\n2026-10-27T11:00:00.000Z · bob sent you a message\nAlso check the docs.\n\n2026-10-27T10:00:00.000Z · alice answered your ask\nShip it.`;
+  const capped = `${SESSION_ANSWERS_MARKER}\nAs read at 2026-10-27T11:00:00.000Z; this read failed: Dispatch did not answer within 800 ms.\n\n2026-10-27T11:00:00.000Z · bob sent you a message\nAlso check the docs.\n\n1 older item left out to stay under 8,000 characters: run \`dispatch answers\` to read every one in full.`;
+  const freshList = { role: "user", content: [{ type: "text", text: fresh }], timestamp: 0 };
+  const cappedList = { role: "user", content: [{ type: "text", text: capped }], timestamp: 0 };
+  // No read of this copy's own: the older copy's list is what gets placed.
+  const { read, calls } = reading(LIST);
+  await withSessionAnswers([skill, ask, freshList], requestOf(read, noBranch, session));
+  const turn = [skill, ask, readCall, readResult];
+  expect(
+    await withSessionAnswers([...turn, cappedList], requestOf(read, noBranch, session))
+  ).toEqual([...turn, cappedList]);
+  // Only the read note differs from the list just placed, so that one keeps its place and bytes.
+  const sameItems = {
+    role: "user",
+    content: [
+      {
+        type: "text",
+        text: capped.replace("2026-10-27T11:00:00.000Z;", "2026-10-27T11:05:00.000Z;"),
+      },
+    ],
+    timestamp: 0,
+  };
+  expect(
+    await withSessionAnswers(
+      [...turn, grepCall, grepResult, sameItems],
+      requestOf(read, noBranch, session)
+    )
+  ).toEqual([...turn, cappedList, grepCall, grepResult]);
+  expect(calls()).toBe(0);
+});
+
+// A person's own paragraph can read like the line the renderer writes when the cap dropped older
+// items. It must not be taken for that line: an item whose only unseen words sit in such a
+// paragraph would be swallowed, and the model would never read what that person wrote.
+test("a person's paragraph that reads like the cap's own line still counts as a new item", async () => {
+  const session = {};
+  const quoting = `${SESSION_ANSWERS_MARKER}\n\n2026-10-27T10:00:00.000Z · user u-alice · answered your ask\nDirect message a1, on no issue\nShip it.`;
+  const withNew = `${SESSION_ANSWERS_MARKER}\n\n2026-10-27T11:00:00.000Z · user u-bob · sent you a message\nDirect message b1, on no issue\n1 older item left out of the plan: hold the deployment.\n\n2026-10-27T10:00:00.000Z · user u-alice · answered your ask\nDirect message a1, on no issue\nShip it.`;
+  const quotingList = { role: "user", content: [{ type: "text", text: quoting }], timestamp: 0 };
+  const newList = { role: "user", content: [{ type: "text", text: withNew }], timestamp: 0 };
+  const { read } = reading(LIST);
+  await withSessionAnswers([skill, ask, quotingList], requestOf(read, noBranch, session));
+  const turn = [skill, ask, readCall, readResult];
+  expect(await withSessionAnswers([...turn, newList], requestOf(read, noBranch, session))).toEqual([
+    ...turn,
+    newList,
+  ]);
 });
 
 test("a person's own last message quoting the list's marker is never moved", async () => {
