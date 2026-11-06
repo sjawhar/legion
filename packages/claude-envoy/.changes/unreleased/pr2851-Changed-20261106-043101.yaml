@@ -1,0 +1,5 @@
+kind: Changed
+body: A retro learning cites a file and a symbol, or text quoted from the file at the head it commits, instead of a line number, and the claim rule in the shared role-prompt core asks for the same.
+time: 2026-11-06T04:31:01.467530001Z
+custom:
+    Issue: pr2851
