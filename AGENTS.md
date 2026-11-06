@@ -229,16 +229,6 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
   a session the table already holds byte for byte is not copied again, and one it holds with other content is refused and left as it is;
   `scripts/sessions-import-pods.sh` runs the copy in one worker-image pod per tree, finding each tree's volume and root Sandbox by legion-v10.0.0's labels and scheduling the pod as that Sandbox's pods were, and refuses a project on a later release, one with a Sandbox not Suspended, or one with a pod that has not ended (docs/kubernetes.md "Copying file sessions before turning it on")
 
-- `legion handoffs import [--config <legion.yaml>] [--dry-run]`
-
-  the one-time, re-runnable move of the workers' committed handoff files onto their Dispatch issues (sjawhar/legion#2354), from the daemon's own file (project, dispatch_url, dispatch_token_file, the implement App, daemon_url):
-  for every issue the running daemon's `GET /legion/v1/state` holds in a phase other than done, as the implement App, writes each `.legion/<KEY>/{plan,implement,test,review}.json` on `legion/<KEY>` to Dispatch as that phase's handoff record under `legion-daemon:<PROJECT>` when the phase's newest record is absent or is the import's and differs from the file, never above a worker's record, then, once every file is on Dispatch, removes all of `.legion/` in one commit with no trailer, moved there by a non-forced ref update (a branch that moved in between read again and retried, three times at most);
-  one line per issue and phase (`imported v<n>`, `unchanged`, `kept worker record v<n>`, `removed .legion/ at <sha>`, `no branch`, `failed: <why>`), then a count of each;
-  exit 1 on a failure, or on a Dispatch without the handoff routes, which stops the run at its first handoff call naming the route;
-  `--dry-run` reads everything and writes nothing;
-  a second run with nothing changed writes and pushes nothing;
-  run as a one-shot pod of the new release's worker image under the daemon's ServiceAccount with its environment and mounts, before the daemon rolls to the release and again after (docs/kubernetes.md "Moving the handoffs onto their Dispatch issues")
-
 - `legion probe-boot [--config <legion.yaml>]`
 
   runtime: kubernetes only — the part of the daemon's boot its worker pod can refuse, from the file and with no workflow:
@@ -931,7 +921,8 @@ A registration of a newer version keeps the gate's approval of an older one, as 
 with `off` the root architect is told so in its system prompt and adds no approval step, a registration approves the gate whatever it held, and no artifact event moves the gate, so an approval does not open a carried copy that was closed before the switch either;
 a changes request is still told to the architect, once, without closing the gate.
 Whether a human must approve a pull request before it merges is the repository's own branch-protection or CODEOWNERS rule: Legion neither reads nor writes it.
-Only a commit that changes `docs/solutions/` may sit above the reviewer's approved head, beside the removal of `.legion/` files (GitHub's compare lists them `removed`) that `legion handoffs import` commits, and retro commits nothing, so an ordinary head carries neither:
+Only retro's commits, to `docs/solutions/`, and a change whose every path is under `.legion/` may sit above the reviewer's approved head, and retro commits nothing, so an ordinary head carries neither:
+`.legion/` is where Legion's handoffs lived before they moved to the Dispatch issue, and nothing writes or reads a path there now, so it is reviewed by nobody, whatever GitHub's compare says the change did to such a path — added, modified, removed, or renamed from one path under `.legion/` to another — while a rename with one name outside `.legion/` is refused, named by the name outside `docs/solutions/`.
 READY compares the review round's recorded approved head with READY's head on GitHub, as the implement App, and refuses anything else above it (`READY_UNREVIEWED_CHANGE`, naming the paths;
 also a compare GitHub may have cut at its 300 files or that gives no file list, a head not built on the approved one, or an approved head GitHub does not know) and a round with no recorded approval (`READY_NOT_APPROVED`), so the change goes back to review.
 The merger sends its `READY` packet with its completion;
