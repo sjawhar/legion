@@ -122,16 +122,17 @@ says.
 
 Six turns of `<KEY>`'s `role` in a row ended in an error the model's provider returned: a content
 filter, a rate limit, an overload, or any other failure of the provider. `reason` names the model
-and the error's category or status, and carries no text the provider wrote. Nothing is held and
-nothing is stopped: the daemon keeps the task, prompts the same session with it again, and waits
-at most ten minutes between prompts for as long as the errors last. You are told once, and again
-only after a turn of that role ends with no provider error.
+and the HTTP status the provider answered, when it answered one, and carries no text the provider
+wrote. Nothing is held and nothing is stopped: the daemon keeps the task, prompts the same session
+with it again, and waits at most ten minutes between prompts for as long as the errors last. You
+are told once, and again only after a turn of that role ends with no provider error.
 
 Read the role's claim in `read_state`. Name the run and its model in the day's report. When the
-reason names a content filter, the session has already stepped down its model chain, so a run
-that long says the whole chain refuses the same work: `envoy_publish` the key, the role and the
-reason to the issue's architect, which is who can narrow the work. Re-admit nothing and park
-nothing, because the task is not lost and the session still runs.
+reason names no status, the turns ended on nothing but a message, which is what a content filter
+leaves: the session has already stepped down its model chain, so a run that long says the whole
+chain refuses the same work. Either way, `envoy_publish` the key, the role and the reason to the
+issue's architect, which is who can narrow the work. Re-admit nothing and park nothing, because
+the task is not lost and the session still runs.
 
 ## GitHub mentions
 

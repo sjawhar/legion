@@ -128,10 +128,6 @@ const (
 	// TimerPromptRetry is the wait before a task a provider error took back is sent to the same
 	// session again (promptRetryDelay), armed on that task's own delivery id.
 	TimerPromptRetry TimerKind = "prompt_retry"
-	// TimerTurnOutcome is the wait for the turn-outcome report of a turn that ended in a provider
-	// error neither the error's own fields nor a report already settled: turnOutcomeWait, armed by
-	// decideProviderError.
-	TimerTurnOutcome TimerKind = "turn_outcome"
 )
 
 // Timer is a timer the machine armed, firing.
@@ -475,10 +471,9 @@ func (RequestOperatorRetry) isEvent() {}
 func (RequestForgetSession) isEvent() {}
 func (RequestDeliver) isEvent()       {}
 func (RequestExit) isEvent()          {}
-func (RequestTurnOutcome) isEvent()   {}
 
 // eventKind is what the table is keyed on beside the state: an event's type, with a Timer split
-// by its kind, because the six waits mean six different things.
+// by its kind, because each wait means a different thing.
 type eventKind string
 
 const (
@@ -497,9 +492,8 @@ const (
 	onProbeTimer    eventKind = timerPrefix + eventKind(TimerProbe)
 	onSuspendTimer  eventKind = timerPrefix + eventKind(TimerSuspend)
 	onRelaunchTimer eventKind = timerPrefix + eventKind(TimerRelaunch)
-	// The two waits a turn that ended in a provider error arms (promptResulted).
+	// The wait a turn that ended in a provider error arms (promptResulted).
 	onPromptRetryTimer eventKind = timerPrefix + eventKind(TimerPromptRetry)
-	onTurnOutcomeTimer eventKind = timerPrefix + eventKind(TimerTurnOutcome)
 
 	onSpawn         eventKind = "request_spawn"
 	onRegister      eventKind = "request_register"
@@ -516,7 +510,6 @@ const (
 	onForgetSession eventKind = "request_forget_session"
 	onDeliver       eventKind = "request_deliver"
 	onExit          eventKind = "request_exit"
-	onTurnOutcome   eventKind = "request_turn_outcome"
 
 	onStalePlugin eventKind = "stale_plugin"
 
@@ -590,8 +583,6 @@ func kindOf(ev Event) eventKind {
 		return onDeliver
 	case RequestExit:
 		return onExit
-	case RequestTurnOutcome:
-		return onTurnOutcome
 	}
 	return ""
 }
@@ -621,8 +612,6 @@ func requestName(ev Event) (string, bool) {
 		return "deliver", true
 	case RequestExit:
 		return "exit", true
-	case RequestTurnOutcome:
-		return "turn outcome", true
 	case PodUpdateSignalled:
 		return "ready_for_update", true
 	}
@@ -672,12 +661,11 @@ func RunsNothingStates() []ClaimState {
 }
 
 const (
-	noProcess       = "no process of this claim is running"
-	noSend          = "no prompt is sent in this state"
-	failedClaim     = "the claim failed; what happens to it next is not the supervisor's decision"
-	retiredClaim    = "the claim is retired"
-	notRegistered   = "the agent has not registered"
-	noProviderError = "no turn of this claim ended in a provider error this wait is for"
+	noProcess     = "no process of this claim is running"
+	noSend        = "no prompt is sent in this state"
+	failedClaim   = "the claim failed; what happens to it next is not the supervisor's decision"
+	retiredClaim  = "the claim is retired"
+	notRegistered = "the agent has not registered"
 )
 
 // table is the transition table: a row or a named ignore for every event kind in every state.
@@ -759,18 +747,13 @@ func fillTable(t *builder) {
 	t.ignore(onTurnTimer, noSend, unready...)
 	t.ignore(onTurnTimer, noSend, gone...)
 
-	// The two waits a turn that ended in a provider error arms. Each is armed only where such a
-	// turn can end — a claim working its task, or one whose turn already ended — and is dropped
+	// The ladder's wait after a turn that ended in a provider error. It is armed only where such
+	// a turn can end — a claim working its task, or one whose turn already ended — and is dropped
 	// with the task it is for (retirePending) and with the process it was armed under (letGo).
 	t.row(onPromptRetryTimer, "the wait after a provider error is over: the task goes to the same session again", promptRetryDue,
 		[]ClaimState{StateWorking}, StateReady, StateIdle, StateWorking)
 	t.ignore(onPromptRetryTimer, noSend, unready...)
 	t.ignore(onPromptRetryTimer, noSend, gone...)
-
-	t.row(onTurnOutcomeTimer, "no turn-outcome report came: the provider error is taken as one that can clear", turnOutcomeWaitOver,
-		nil, StateReady, StateIdle, StateWorking)
-	t.ignore(onTurnOutcomeTimer, noProviderError, unready...)
-	t.ignore(onTurnOutcomeTimer, noProviderError, gone...)
 
 	t.row(onProbeTimer, "probe the uncertain process again", reprobe, []ClaimState{StateLaunching, StateFailed}, live...)
 	t.ignore(onProbeTimer, noProcess, processless...)
@@ -932,20 +915,6 @@ func fillTable(t *builder) {
 		[]ClaimState{StateRetired, StateSuspended}, StateRegistered, StateReady, StateWorking, StateIdle)
 	t.row(onExit, "the exit of a process the daemon already ended", nothingToDo, nil, gone...)
 	t.ignore(onExit, notRegistered, StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected)
-
-	// How a turn of this claim's agent ended, as the agent's own plugin classified it. Only a
-	// registered claim has a report: the route takes either the registration's secret, whose hash
-	// a claim holds in exactly these four states (HoldsCapability, read in internal/api's
-	// staleClaim), or the launch's own boot token, which the Claude bridge presents because the
-	// registration and its secret are claude-envoy's, inside Claude Code. A report that settles a
-	// provider error the machine is waiting on decides it in this same step (decideProviderError),
-	// which is how such a claim reaches failed here.
-	t.row(onTurnOutcome, "keep the newest turn outcome the claim's plugin has reported", turnOutcome,
-		[]ClaimState{StateFailed}, StateRegistered, StateReady, StateWorking, StateIdle)
-	t.ignore(onTurnOutcome, notRegistered, StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected)
-	t.ignore(onTurnOutcome, "the claim is suspended and the agent that reported is stopped", StateSuspended)
-	t.ignore(onTurnOutcome, failedClaim, StateFailed)
-	t.ignore(onTurnOutcome, retiredClaim, StateRetired)
 }
 
 type builder struct{ rules map[key]rule }
@@ -1292,13 +1261,6 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 	// flight and no turn awaited, the only thing left is askFirst, the turn an earlier daemon's
 	// process was already in. Every other start is one this daemon read (Machine.unseenTurn).
 	m.unseenTurn = own && start.DeliveryID == "" && m.send == nil && !awaiting
-	// What the claim had reported before this turn began. The failed turn's own report is the
-	// first one above it, whichever side of the turn's prompt_result it lands on: pi-legion posts
-	// it from the agent_end handler, which can beat Oh My Pi's own error through the shim by
-	// milliseconds (measured in scripts/e2e/provider-error-retry.sh: the report at 19:54:18.065,
-	// the error at .069) or follow it, and only the turn it began after tells the two apart
-	// (providererror.go's ownReport).
-	m.turnOutcomeBefore = m.lastTurnOutcome
 	m.takeBackSignal(own && !m.unseenTurn)
 	persist := m.persist
 	if own {

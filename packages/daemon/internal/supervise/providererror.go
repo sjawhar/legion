@@ -6,8 +6,6 @@ import (
 	"net/http"
 	"strconv"
 	"time"
-
-	"github.com/sjawhar/legion/daemon/internal/claim"
 )
 
 // A turn that ends in a provider error does not retire its task (dispatch://INFRA-956 R2). The
@@ -16,18 +14,13 @@ import (
 // prompted with it again after a wait that grows to a limit, with no attempt limit and no new
 // session.
 //
-// Three waits and one count make that up, and this file holds all four.
+// Two bounds and one count make that up, and this file holds all three.
 const (
 	// promptRetryFirst and promptRetryMax bound the ladder: 30 seconds before the first re-send,
 	// doubling to at most 10 minutes (promptRetryDelay). internal/backoff is not it — it draws
 	// from [step/2, step] and caps at 32 times its base, which this ladder's exactness forbids.
 	promptRetryFirst = 30 * time.Second
 	promptRetryMax   = 10 * time.Minute
-	// turnOutcomeWait is how long an error neither the error's own fields nor a report settles
-	// waits for that report before it is taken as one that can clear. Silence is not a provider
-	// saying "this cannot clear", and a Claude Code worker, whose bridge sends no Retryable and
-	// often no status, would otherwise hold its issue at every failed turn.
-	turnOutcomeWait = 2 * time.Minute
 	// providerErrorRunTold is the run of provider-error turns at which the project's controller
 	// is told, once (Deps.ProviderErrorRunReached). There is no hold and no attempt limit behind
 	// it: a chain's bottom refusing deterministically costs one request every promptRetryMax.
@@ -47,24 +40,12 @@ func promptRetryDelay(attempt int) time.Duration {
 	return min(promptRetryFirst<<min(max(attempt-1, 0), 5), promptRetryMax)
 }
 
-// providerError is what the machine knows about the failed turn it is still deciding on: the
-// delivery that turn worked, as takeBackPending left it, and the fields Oh My Pi reported with
-// the error (StreamPromptResult). The provider's own message is not among them and never reaches
-// this package.
-//
-// It is memory only, as the turn-outcome report it waits for is (turnoutcome.go): the decision
-// takes at most turnOutcomeWait, and a daemon restarted inside that window reads a task sitting
-// unconfirmed on its claim and sends it again, which is the same answer the wait would have
-// reached.
+// providerError is what the machine knows about the failed turn it is deciding on: the fields
+// Oh My Pi reported with the error (StreamPromptResult). The provider's own message is not
+// among them and never reaches this package.
 type providerError struct {
-	delivery  string
-	retryable bool
-	status    int
-	model     string
-	// after is the newest turn-outcome report the claim held when the failed turn **began**
-	// (Machine.turnOutcomeBefore), nil when it held none. The failed turn's own report is the
-	// first one to come above it (ownReport), whichever side of this error it lands on.
-	after *TurnOutcome
+	status int
+	model  string
 }
 
 // providerErrored is a turn that ran and ended in a provider error. The task is kept whatever the
@@ -73,8 +54,13 @@ type providerError struct {
 // claim past Limits.PromptFailures, which would fail every claim at once in a provider outage,
 // and R2 forbids an attempt limit — so the claim counts its own run of such turns instead, and a
 // turn that ends with no error puts that run back to zero (promptResulted).
+//
+// The decision is made here, from this prompt's own result and nothing else
+// (dispatch://INFRA-956/comment/4fa88c00-3313-4008-8eea-d7f95a04e24d): the status the provider
+// answered either holds the issue (holdsTheIssue) or the task goes to the same session again on
+// the ladder. Oh My Pi's Retryable flag is logged and read by nothing: the status alone decides.
 func (m *Machine) providerErrored(ctx context.Context, r StreamPromptResult) error {
-	e := providerError{retryable: r.Retryable, status: r.HTTPStatus, model: r.Model, after: m.turnOutcomeBefore}
+	e := providerError{status: r.HTTPStatus, model: r.Model}
 	m.claim.ProviderErrorRun++
 	m.log.Warn("supervise: the turn this task's prompt ran ended in a provider error; the task is kept and sent again",
 		"delivery", r.DeliveryID, "retryable", r.Retryable, "httpStatus", r.HTTPStatus,
@@ -83,47 +69,26 @@ func (m *Machine) providerErrored(ctx context.Context, r StreamPromptResult) err
 	if err := m.takeBackPending(ctx, taskRead); err != nil {
 		return err
 	}
-	e.delivery = m.claim.Pending.ID
-	m.providerError = &e
-	return m.decideProviderError(ctx)
+	if holdsTheIssue(e.status) {
+		return m.fail(ctx, "a provider error that cannot clear ended this claim's turn: "+m.providerErrorCause(e))
+	}
+	return m.providerErrorClears(ctx, e)
 }
 
-// decideProviderError says whether the error the machine is holding can clear, in this order:
+// holdsTheIssue is whether an error of this HTTP status fails the claim, so that the workflow
+// holds the issue for its architect: a client error, 400 to 499, that is neither a timeout (408)
+// nor a rate limit (429). A malformed request is the case this exists for. Every other error
+// sends the task again:
 //
-//   - it can when Oh My Pi marked it retryable, or its HTTP status is 429 or any 5xx, or the
-//     failed turn's own report says the turn was refused. A content filter clears because the
-//     plugin has already moved the session down its model chain, so the next prompt goes to
-//     another model.
-//   - it cannot, and the claim fails so the workflow holds the issue for its architect, only when
-//     the error is marked not retryable and that report says provider-error. A malformed request
-//     is the case this exists for.
-//   - neither settles it: the report is waited for, once, for turnOutcomeWait, and the wait's
-//     expiry takes the error as one that can clear (turnOutcomeWaitOver).
-//
-// Only the failed turn's own report is read, and ownReport says which one that is. A report of
-// another turn settles nothing, so the decision falls through to the wait. One that arrives while
-// the wait is armed decides at once, from turnOutcome.
-func (m *Machine) decideProviderError(ctx context.Context) error {
-	e := m.providerError
-	if e == nil || pendingID(m.claim.Pending) != e.delivery {
-		return nil
-	}
-	outcome := m.reportedOutcome(*e)
-	switch {
-	case e.retryable, e.status == http.StatusTooManyRequests, e.status >= 500 && e.status <= 599, outcome == claim.TurnRefused:
-		return m.providerErrorClears(ctx)
-	case outcome == claim.TurnProviderError:
-		cause := m.providerErrorCause(*e)
-		m.providerErrorOver()
-		return m.fail(ctx, "a provider error that cannot clear ended this claim's turn: "+cause)
-	}
-	if _, waiting := m.timers[TimerTurnOutcome]; waiting {
-		return nil
-	}
-	m.log.Info("supervise: neither the error nor a report says whether this provider error can clear; waiting for the report",
-		"delivery", e.delivery, "wait", turnOutcomeWait)
-	m.arm(TimerTurnOutcome, turnOutcomeWait, e.delivery)
-	return m.persist(ctx)
+//   - 5xx, 408 and 429 are the provider saying "not now", which the ladder waits out;
+//   - no status at all is every content-filter refusal, which ends a turn with nothing but a
+//     message. It clears because the plugin has already moved the session down its model chain,
+//     so the next prompt goes to another model. A Claude Code worker's bridge names a status
+//     only for a result Claude Code marked api_error (internal/claudebridge's result), so its
+//     statusless turns go again here too.
+func holdsTheIssue(status int) bool {
+	return status >= 400 && status <= 499 &&
+		status != http.StatusRequestTimeout && status != http.StatusTooManyRequests
 }
 
 // providerErrorClears keeps the task on the claim and arms the next step of the ladder for it:
@@ -131,10 +96,8 @@ func (m *Machine) decideProviderError(ctx context.Context) error {
 // (Delivery.ProviderErrorNote), and is written with the claim's run of provider-error turns in
 // one transaction. Its timer's firing is what sends it (promptRetryDue); until then sendPending
 // holds it, and a newer task queued meanwhile replaces it rather than waiting behind it (queue).
-func (m *Machine) providerErrorClears(ctx context.Context) error {
-	e := *m.providerError
+func (m *Machine) providerErrorClears(ctx context.Context, e providerError) error {
 	cause := m.providerErrorCause(e)
-	m.providerErrorOver()
 	p := m.claim.Pending
 	p.ProviderErrorRetries++
 	p.ProviderErrorNote = providerErrorTask(cause)
@@ -157,62 +120,13 @@ func promptRetryDue(m *Machine, ctx context.Context, _ Event) error {
 	return m.sendPending(ctx)
 }
 
-// turnOutcomeWaitOver is the wait for the turn-outcome report running out: the error is taken as
-// one that can clear, and the task goes again on the ladder.
-func turnOutcomeWaitOver(m *Machine, ctx context.Context, _ Event) error {
-	if m.providerError == nil {
-		return nil
-	}
-	m.log.Info("supervise: no turn-outcome report came within the wait; the provider error is taken as one that can clear",
-		"delivery", m.providerError.delivery, "wait", turnOutcomeWait)
-	return m.providerErrorClears(ctx)
-}
-
-// ownReport is the turn-outcome report of the turn e ended, nil until that report arrives. No key
-// is shared between a prompt's result and a report, so two facts pick it out: the report is of
-// this claim's generation — one of a generation the claim has left is another process's turn —
-// and it came above e.after, the newest report the claim held when the error arrived. The
-// ordering is what stands in for that key: the plugin counts a sequence per launch generation,
-// from 1, and sends one report per turn in the order the turns ended (turnoutcome.go), so the
-// first report above the anchor is the failed turn's own.
-//
-// The claim's newest report alone was the wrong answer, and both ways it was wrong were measured
-// (dispatch://INFRA-956, pull request 2780's first review). A report is posted from an agent_end
-// handler nothing awaits (packages/pi-legion/extensions/legion.ts), so the prompt's result
-// normally reaches the daemon first and the newest report at that moment is the turn before's: a
-// 529 whose own report said provider-error, followed by a refusal, failed the claim and held the
-// issue for its architect; and a refusal reported refused, followed by an HTTP 400 the provider
-// marked final, was sent again for ever behind a prompt that named a content filter. A report at
-// or below the anchor settles nothing, and the decision waits turnOutcomeWait out instead, which
-// is the answer this design already gives for silence.
-func (m *Machine) ownReport(e providerError) *TurnOutcome {
-	r := m.lastTurnOutcome
-	if r == nil || r.Generation != m.claim.Generation || !r.newerThan(e.after) {
-		return nil
-	}
-	return r
-}
-
-// reportedOutcome is the class that report gives, "" when there is no such report.
-func (m *Machine) reportedOutcome(e providerError) claim.TurnOutcome {
-	if r := m.ownReport(e); r != nil {
-		return r.Outcome
-	}
-	return ""
-}
-
 // providerErrorCause names what ended the turn, in words built from structured fields alone: the
-// category of a refusal the turn's own report named, else the HTTP status, else nothing more than
-// that a provider failed. A refusal's own explanation is itself refused when it is sent back
+// HTTP status the provider answered, else nothing more than that a provider failed. A refusal's
+// own explanation is itself refused when it is sent back
 // (dispatch://INFRA-956/artifact/cause-evidence-md), so the provider's text reaches neither the
-// prompt this is written into nor the controller's notice.
-//
-// The cause the controller's notice carries names no category: that notice goes when the error
-// arrives, which is before the turn's own report (ownReport).
+// prompt this is written into nor the controller's notice. A content filter's refusal carries no
+// status, so it is the second of the two.
 func (m *Machine) providerErrorCause(e providerError) string {
-	if r := m.ownReport(e); r != nil && r.Outcome == claim.TurnRefused && r.Category != "" {
-		return "the provider's " + r.Category + " content filter"
-	}
 	if e.status != 0 {
 		return "a provider error (HTTP " + strconv.Itoa(e.status) + ")"
 	}
@@ -247,23 +161,10 @@ func (m *Machine) tellControllerOfProviderErrors(e providerError) {
 	m.deps.ProviderErrorRunReached(m.current(), reason)
 }
 
-// waitsForProviderError is whether either wait a provider error arms is armed for the delivery of
-// this id. sendPending holds such a task, and queue replaces it with a newer one; a task that
-// replaced it is one no wait names, and it goes at once.
+// waitsForProviderError is whether the ladder's wait is armed for the delivery of this id.
+// sendPending holds such a task, and queue replaces it with a newer one; a task that replaced it
+// is one no wait names, and it goes at once.
 func (m *Machine) waitsForProviderError(delivery string) bool {
-	for _, kind := range []TimerKind{TimerPromptRetry, TimerTurnOutcome} {
-		if a, armed := m.timers[kind]; armed && a.deliveryID == delivery {
-			return true
-		}
-	}
-	return false
-}
-
-// providerErrorOver drops both waits and the error they were armed for: the decision is made, or
-// the task they are for is gone (retirePending), or the process whose turn failed is gone
-// (letGo).
-func (m *Machine) providerErrorOver() {
-	m.providerError = nil
-	m.disarm(TimerPromptRetry)
-	m.disarm(TimerTurnOutcome)
+	a, armed := m.timers[TimerPromptRetry]
+	return armed && a.deliveryID == delivery
 }

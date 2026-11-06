@@ -5,6 +5,6 @@ body: |-
   returned. Nothing is held and nothing is stopped by that count: the daemon keeps the task and
   prompts the same session with it again, at most ten minutes apart, so the controller names the run
   and its model in the day's report and sends it to the issue's architect, and re-admits and parks
-  nothing. A Claude Code worker reports no turn outcome of its own, which is the other half of the
-  contract this plugin now declares and an Oh My Pi worker's to send: the daemon reads a failed
-  Claude Code turn from the bridge's own result line, the provider's HTTP status among it.
+  nothing. No worker posts a turn's outcome over a route of its own: the daemon decides a failed
+  turn from that prompt's own result, and for a Claude Code worker the result is the bridge's own
+  result line, the provider's HTTP status among it.

@@ -543,50 +543,31 @@ package api
 // was unmerged; main landed it as 48, so this branch takes the number above it, as the collision
 // note says.)
 //
-// 50: INFRA-956 -- the turn-outcome report, and fix-attempt counting gone.
-// `POST /legion/v1/claims/turn-outcome` is a new claim route (`claim.TurnOutcomeRequest`:
-// `generation`, a `sequence` counted from 1 within that generation, an `outcome` of `clean`,
-// `refused` or `provider-error`, an optional `category`, and the caller's own identity),
-// answering 204. The body names its caller one of two ways, and exactly one: `claimToken`,
-// `sessionId` and `secret`, the shape `claims/ready` takes, which is the agent's own plugin
-// inside the session; or `bootToken`, the launch's own 0600 token its pane is told, which is a
-// producer beside the agent that holds no secret — `legion claude-bridge`, whose pane's
-// registration is claude-envoy's, inside Claude Code. A body naming both, or neither, is refused
-// 400; one naming the agent's identity in part is refused by the field it left out; a boot token
-// of a launch the claim has moved past is refused 403, and a report for any generation but that
-// launch's 409. It is how a worker's own process tells the daemon a provider's content filter
-// refused the turn, which the same session often takes on a weaker model, apart from a 429 or a
-// malformed request, which may not clear that way. The producer classifies the turn and the
-// daemon parses no provider text: `category` is the refusal's own category
-// (`reasoning_extraction`) and no field carries the provider's words. pi-legion reports every
-// settled turn of a claim's session from its `agent_end` hook
-// (`packages/pi-legion/src/turn-outcome.ts`), and the Claude bridge every turn it ends
-// (`internal/claudebridge/turnoutcome.go`); a plugin before 50 reports none, and a daemon before
-// 50 answers the post a 404. The daemon keeps the newest report on the claim's machine, in
-// memory, and nothing else: it is read within two minutes of the turn it is about, so no store
-// write comes with it (`internal/supervise/turnoutcome.go`).
-// The same number carries the end of fix-attempt counting: `legion.yaml` no longer takes
-// `max_fix_attempts`, and a file carrying it loads with a warning naming the removal, which boot
-// logs and `legion start --check-config` prints, rather than a refusal, so the settings block of
-// `GET /legion/v1/state` no longer carries `max_fix_attempts` and `api.Settings` no longer models
-// it.
-// Each issue's pull request in that state loses `fixAttempts` (`api.PullRequestView`), which
-// counted the heads pushed onto a red verdict. A red CI verdict now sends the work back to the
-// implementer every time it stands, however many came before, and the architect decides when to
-// stop; no pull request is marked blocked and no `pr-blocked` notice is published for a count.
-// `packages/contracts/src/legion-api.ts` mirrors both removals, and its reader of the settings
-// block is loose, so a plugin before 50 reads a state without `max_fix_attempts` — but its strict
-// pull-request reader refuses one without `fixAttempts`, which is the second thing this number is
-// for: the boot gate and `legion probe-image` refuse a plugin before 50 against this daemon, and
-// this daemon's own 404 refuses the other order. The removal adds no store migration;
+// 50: INFRA-956 -- fix-attempt counting gone. `legion.yaml` no longer takes `max_fix_attempts`,
+// and a file carrying it loads with a warning naming the removal, which boot logs and
+// `legion start --check-config` prints, rather than a refusal, so the settings block of
+// `GET /legion/v1/state` no longer carries `max_fix_attempts` and `api.Settings` no longer
+// models it. Each issue's pull request in that state loses `fixAttempts`
+// (`api.PullRequestView`), which counted the heads pushed onto a red verdict. A red CI verdict
+// now sends the work back to the implementer every time it stands, however many came before,
+// and the architect decides when to stop; no pull request is marked blocked and no `pr-blocked`
+// notice is published for a count. `packages/contracts/src/legion-api.ts` mirrors both
+// removals, and its reader of the settings block is loose, so a plugin before 50 reads a state
+// without `max_fix_attempts` — but its strict pull-request reader refuses one without
+// `fixAttempts`, and every worker's `read_record` parses the state through it, which is what
+// this number is for: the boot gate and `legion probe-image` hold plugin and daemon equal, so
+// neither order of the two ever runs.
+// The issue's other half, the provider-error retry, adds no route and changes no shape a plugin
+// parses: a turn that ends in a provider error keeps its task, and the daemon reads that
+// prompt's own result to decide whether the task goes to the same session again or the claim
+// fails (`internal/supervise/providererror.go`). It ships this number's one store migration,
+// `20261105004846_provider_error_retry.up.sql`: the two columns a task a provider error took
+// back is kept by (`pending_task_deliveries.provider_error_retries` and `provider_error_note`)
+// and the claim's run of such turns (`claims.provider_error_run`). The removal ships none;
 // `fix_attempts`, `blocked_attempts` and `head_counted` stay as stopped columns that nothing
-// reads, each given its zero on an insert (`record`'s PutPullRequest). The turn-outcome half of
-// this number ships one, `20261105004846_provider_error_retry.up.sql`: the two columns a task a
-// provider error took back is kept by (`pending_task_deliveries.provider_error_retries` and
-// `provider_error_note`) and the claim's run of such turns (`claims.provider_error_run`).
-// (This branch took 47 for
-// the route and 48 for the removal; main then merged the idle-pod release at 48 while this branch
-// was open, so both paragraphs are one paragraph at the number above it; main then landed
-// INFRA-1101's memory group at 49 and released pi-legion v18.9.0 declaring it without these
-// shapes, so this branch takes the number above that, as the collision note says.)
+// reads, each given its zero on an insert (`record`'s PutPullRequest).
+// (This branch took 47 and then 48 for the removal; main merged the idle-pod release at 48
+// while this branch was open, then landed INFRA-1101's memory group at 49 and released
+// pi-legion v18.9.0 declaring it without these shapes, so this branch takes the number above
+// that, as the collision note says.)
 const DaemonAPIVersion = 50

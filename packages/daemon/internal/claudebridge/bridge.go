@@ -100,10 +100,6 @@ type bridge struct {
 	// queue is the Envoy deliveries waiting for the next step or turn; taking is those sent to
 	// Claude Code that it has yet to re-emit, each answered when it does.
 	queue, taking []delivery
-	// outcomes reports how each turn the bridge ends settled (turnoutcome.go), and is nil for a
-	// bridge the environment told nothing to report with.
-	outcomes *turnReporter
-
 	// heldBack is the shim having once fallen framesHighWater frames behind, which is logged once.
 	heldBack bool
 }
@@ -136,7 +132,6 @@ func Run(ctx context.Context, cfg Config) (int, error) {
 	}
 	b := &bridge{cfg: cfg, log: log.New(logOut, "[claude-bridge] ", 0)}
 	b.frames = shimwire.NewWriter(&b.encoded)
-	b.outcomes = newTurnReporter(ctx, cfg, b.log)
 	// stop ends the outputs' writers and every reader's send, once Run returns. It does not
 	// interrupt a readLines blocked in ReadBytes, and Run does not wait for those readers.
 	stop := make(chan struct{})
@@ -477,11 +472,10 @@ func (b *bridge) fromClaude(line []byte) {
 		RequestID string          `json:"request_id"`
 		IsError   bool            `json:"is_error"`
 		Errors    []string        `json:"errors"`
-		// StopReason and TerminalReason are what a result says of how the turn ended: the class
-		// the daemon is told is read from them (turnoutcome.go's classify). Both are members of
-		// the result line itself, measured on the pinned Claude Code
-		// (testdata/refusal-turn.jsonl:5).
-		StopReason     string `json:"stop_reason"`
+		// TerminalReason is what a result says ended the turn: the prompt_result carries an
+		// error only for the one value a provider failure takes, `api_error` (result). It is a
+		// member of the result line itself, measured on the pinned Claude Code
+		// (testdata/api-error-529.jsonl:5, testdata/refusal-turn.jsonl:5).
 		TerminalReason string `json:"terminal_reason"`
 		// APIErrorStatus is the HTTP status of the provider request a result failed on, read raw
 		// because it is `null` on a result that did not fail
@@ -517,23 +511,45 @@ func (b *bridge) fromClaude(line []byte) {
 			isError:        head.IsError,
 			errors:         head.Errors,
 			httpStatus:     httpStatusOf(head.APIErrorStatus),
-			stopReason:     head.StopReason,
 			terminalReason: head.TerminalReason,
 		})
 	}
 }
 
 // resultLine is what the bridge reads of one `result` line: what ended the step or the turn, and
-// how. Its halves are the two answers a turn's end carries — the class the turn-outcome report
-// says (stopReason, isError, terminalReason) and what Claude Code returned, which the
-// prompt_result says (subtype, errors, httpStatus).
+// how. subtype, errors and httpStatus are what Claude Code returned, which the prompt_result
+// says; isError and terminalReason are whether that end was a provider failure, which is the
+// only end the prompt_result carries an error for (result).
 type resultLine struct {
 	subtype        string
 	isError        bool
 	errors         []string
 	httpStatus     int
-	stopReason     string
 	terminalReason string
+}
+
+// terminalAPIError and subtypeMaxTurns are the two members providerFailed reads, as the pinned
+// Claude Code (2.1.310) writes them. Measured, not guessed: every result the provider failed
+// carries `terminal_reason` "api_error" — a 529's, a 429's, and a content filter's refusal,
+// which is the one of the three that names no `api_error_status` (testdata/api-error-529.jsonl:5,
+// testdata/api-error-429.jsonl:5, testdata/refusal-turn.jsonl:5).
+const (
+	terminalAPIError = "api_error"
+	// subtypeMaxTurns is Claude Code's own end of a turn it ran out of turns in, which is no
+	// provider failure: the provider took every request of that turn. No `result` line of the
+	// measurement carries this subtype
+	// (dispatch://INFRA-956/artifact/claude-code-2-1-310-refusal-measurement-tgz), so what
+	// `terminal_reason` it comes with is unmeasured, and it is excluded by name rather than by
+	// trusting a field nothing has measured.
+	subtypeMaxTurns = "error_max_turns"
+)
+
+// providerFailed is whether the provider failed the turn res ended, which is the one end the
+// prompt_result carries an error for (dispatch://INFRA-956/comment/4fa88c00-3313-4008-8eea-d7f95a04e24d).
+// A turn that ended any other way — Claude Code's own turn limit, a tool that failed — is a turn
+// the daemon retires the task on, as a turn that ended well is.
+func providerFailed(res resultLine) bool {
+	return res.isError && res.terminalReason == terminalAPIError && res.subtype != subtypeMaxTurns
 }
 
 // httpStatusOf is the HTTP status a result's api_error_status holds, and zero for one that holds
@@ -628,10 +644,10 @@ func answerAll(deliveries []delivery, err error) {
 // then starts a turn of the bridge's own. A delivery the step sent that Claude Code ended it
 // without taking never will be.
 //
-// The turn's end is where its outcome is reported to the daemon (turnoutcome.go): one report per
-// turn, under the class this result gives. A result that ends a step and not the turn reports
-// nothing — the turn runs on — so a turn of several steps is reported under the class of the
-// result that ended it.
+// The turn's end carries a prompt_result when a prompt of the daemon's started it, and that
+// frame says whether the provider failed the turn (providerFailed). A result that ends a step
+// and not the turn says nothing — the turn runs on — so a turn of several steps is answered by
+// the result that ended it.
 func (b *bridge) result(res resultLine) {
 	if b.seeding {
 		b.seeding = false
@@ -672,27 +688,25 @@ func (b *bridge) result(res resultLine) {
 		return
 	}
 	b.inRun = false
-	if b.outcomes != nil {
-		b.outcomes.report(classify(res))
-	}
 	b.emit(shimwire.AgentEnd{})
 	if prompt := b.promptRun; prompt != "" {
 		// The turn that ran the daemon's prompt is over, and this is what says it was that
 		// prompt's: an agent_end names no prompt, and a turn Claude Code started by itself when a
 		// background task finished ends with one just like it.
 		//
-		// A turn that ended in an error says so here as Oh My Pi does, in the frame's error
-		// object: a prompt_result without one is a turn that ended well, and the daemon would
-		// retire the task on it. The message is Claude Code's own words, the same the
-		// message_end above carries, and the status is the one Claude Code named, zero when it
-		// named none. Retryable stays false: nothing Claude Code reports says the error can
-		// clear, and the daemon reads a failure that claims nothing as one that may, so the task
-		// is sent again rather than the issue held on it. What that failure was — a content
-		// filter's refusal, or a provider failure of another kind — is the turn-outcome report's
-		// to say, and the daemon's rule reads the failed turn's own report beside this frame.
+		// A turn the provider failed says so here as Oh My Pi does, in the frame's error object:
+		// a prompt_result without one is a turn that ended, which the daemon retires the task
+		// on. Only a provider failure carries one (providerFailed), because the daemon keeps the
+		// task and sends it again for every error in this frame: a turn Claude Code's own limit
+		// ended, or one a tool failed in, is work the agent did and no provider's fault, and the
+		// daemon counts neither as a provider-error turn. The message is Claude Code's own
+		// words, the same the message_end above carries, and the status is the one Claude Code
+		// named in api_error_status, zero when it named none — a content filter's refusal names
+		// none (testdata/refusal-turn.jsonl:5). Retryable stays false: the daemon decides from
+		// the status alone (supervise's holdsTheIssue).
 		b.promptRun = ""
 		result := shimwire.PromptResult{ID: prompt, AgentInvoked: true}
-		if failure != "" {
+		if providerFailed(res) {
 			result.Error = &shimwire.PromptError{Message: failure, HTTPStatus: res.httpStatus}
 		}
 		b.emit(result)

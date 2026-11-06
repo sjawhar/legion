@@ -35,26 +35,14 @@ func workingClaim(t *testing.T, set ...func(*Deps)) *harness {
 	return h
 }
 
-// errorTurn ends the turn the claim is working, answers its prompt with the provider error r, and
-// posts the turn-outcome reports its plugin sent for that turn. That is the order the daemon
-// sees: the agent_end, the prompt's result on the worker stream, and the plugin's report behind
-// it, since the report is posted from a handler nothing awaits
-// (packages/pi-legion/extensions/legion.ts).
-func (h *harness) errorTurn(r StreamPromptResult, reports ...RequestTurnOutcome) {
+// errorTurn ends the turn the claim is working and answers its prompt with the provider error r.
+// That is the order the daemon sees: the agent_end, then the prompt's result on the worker
+// stream, which is the whole of what the decision reads.
+func (h *harness) errorTurn(r StreamPromptResult) {
 	h.t.Helper()
 	r.Claim, r.AgentInvoked, r.DeliveryID = h.token, true, h.pending().ID
 	h.mustQuiet(StreamTurnEnd{Claim: h.token})
 	h.must(r)
-	for _, report := range reports {
-		report.Claim, report.Generation = h.token, h.generation()
-		h.must(report)
-	}
-}
-
-// report posts one turn-outcome report of the claim's current generation.
-func (h *harness) report(sequence uint64, outcome claim.TurnOutcome, category string) {
-	h.t.Helper()
-	h.must(RequestTurnOutcome{Claim: h.token, Generation: h.generation(), Sequence: sequence, Outcome: outcome, Category: category})
 }
 
 // climbs walks the ladder's next step: nothing goes before the wait is over, the task goes when
@@ -78,7 +66,7 @@ func TestAProviderErrorTurnKeepsItsTaskAndSendsItAgainOnAGrowingLadder(t *testin
 		30 * time.Second, time.Minute, 2 * time.Minute, 4 * time.Minute,
 		8 * time.Minute, 10 * time.Minute, 10 * time.Minute, 10 * time.Minute,
 	} {
-		h.errorTurn(StreamPromptResult{Error: "overloaded_error", Retryable: true})
+		h.errorTurn(StreamPromptResult{Error: "overloaded_error", HTTPStatus: 529})
 		p := h.pending()
 		if !p.ConfirmedAt.IsZero() || p.ProviderErrorRetries != attempt+1 {
 			t.Fatalf("attempt %d: the task is %+v, want it unconfirmed and counted %d sends", attempt+1, p, attempt+1)
@@ -111,11 +99,11 @@ func TestThePromptRetryLadderStopsGrowingAtTenMinutes(t *testing.T) {
 	}
 }
 
-// A rate limit and an overload clear by their status alone, and neither costs the claim a prompt
-// failure: chargePrompt retires and then fails a claim past Limits.PromptFailures, which would
-// fail every claim of a project at once in a provider outage.
+// A rate limit, a timeout and an overload all send the task again, and none costs the claim a
+// prompt failure: chargePrompt retires and then fails a claim past Limits.PromptFailures, which
+// would fail every claim of a project at once in a provider outage.
 func TestAStatusThatClearsChargesNoPromptBudgetHoweverOftenItHappens(t *testing.T) {
-	for _, status := range []int{429, 529} {
+	for _, status := range []int{408, 429, 529} {
 		t.Run(fmt.Sprintf("HTTP %d", status), func(t *testing.T) {
 			h := workingClaim(t)
 			sent := 1
@@ -137,42 +125,18 @@ func TestAStatusThatClearsChargesNoPromptBudgetHoweverOftenItHappens(t *testing.
 	}
 }
 
-// A content filter clears whatever the error says about retrying: the plugin has already moved
-// the session down its model chain, so the next prompt goes to another model.
-func TestANotRetryableErrorARefusedReportNamesClears(t *testing.T) {
+// A content filter's refusal carries no HTTP status at all, and it is sent to the same session
+// again: the plugin has already moved the session down its model chain, so the next prompt goes
+// to another model. Nothing is waited for first — the prompt's own result is the whole of what
+// the decision reads — so the ladder's first step is armed in the same step the error arrives.
+func TestAStatuslessRefusalIsSentAgainOnTheLadder(t *testing.T) {
 	h := workingClaim(t)
 
-	h.errorTurn(StreamPromptResult{Error: "Refusal (reasoning_extraction): I will not help with that."},
-		RequestTurnOutcome{Sequence: 1, Outcome: claim.TurnRefused, Category: "reasoning_extraction"})
-
-	if p := h.claim().Pending; p == nil || p.ProviderErrorRetries != 1 {
-		t.Fatalf("pending %+v, want the task kept and counted one send", p)
-	}
-	if _, waiting := h.m.timers[TimerTurnOutcome]; waiting {
-		t.Error("the claim still waits for a report; the one it has settled the error")
-	}
-	h.climbs(1, 30*time.Second)
-	if state := h.state(); state != StateWorking {
-		t.Fatalf("the claim is %s, want it working the task it was sent again", state)
-	}
-}
-
-// The plugin's report of a turn can reach the daemon before Oh My Pi's own error does: pi-legion
-// posts it from the `agent_end` handler, and the shim carries the error behind the same settle.
-// Measured in scripts/e2e/provider-error-retry.sh: the report at 19:54:18.065 and the error at
-// .069, four milliseconds later. The turn the report belongs to is what decides, not which of the
-// two arrived first, so this refusal clears and the claim waits for no report it already has.
-func TestARefusalReportedBeforeItsOwnErrorArrivesStillDecidesIt(t *testing.T) {
-	h := workingClaim(t)
-
-	h.report(1, claim.TurnRefused, "reasoning_extraction")
 	h.errorTurn(StreamPromptResult{Error: "Refusal (reasoning_extraction): I will not help with that."})
 
-	if _, waiting := h.m.timers[TimerTurnOutcome]; waiting {
-		t.Error("the claim waits for a report it already holds for this turn")
-	}
-	if p := h.claim().Pending; p == nil || p.ProviderErrorRetries != 1 {
-		t.Fatalf("pending %+v, want the task kept and counted one send", p)
+	p := h.claim().Pending
+	if p == nil || p.ProviderErrorRetries != 1 || p.ProviderErrorNote == "" {
+		t.Fatalf("pending %+v, want the task kept, counted one send, and carrying the sentence it goes behind", p)
 	}
 	h.climbs(1, 30*time.Second)
 	if state := h.state(); state != StateWorking {
@@ -180,13 +144,12 @@ func TestARefusalReportedBeforeItsOwnErrorArrivesStillDecidesIt(t *testing.T) {
 	}
 }
 
-// The one error that holds the issue for its architect: the provider marked it final and the
-// claim's own plugin classed the turn a provider error rather than a refusal.
-func TestANotRetryableErrorAProviderErrorReportNamesFailsTheClaim(t *testing.T) {
+// The one error that holds the issue for its architect: a client error the provider answered
+// that is neither a timeout nor a rate limit. A malformed request is the case this exists for.
+func TestAMalformedRequestFailsTheClaim(t *testing.T) {
 	h := workingClaim(t)
 
-	h.errorTurn(StreamPromptResult{Error: "invalid_request_error", HTTPStatus: 400},
-		RequestTurnOutcome{Sequence: 1, Outcome: claim.TurnProviderError})
+	h.errorTurn(StreamPromptResult{Error: "invalid_request_error", HTTPStatus: 400})
 
 	h.wantState(StateFailed)
 	if failure := h.claim().Failure; !strings.Contains(failure, "HTTP 400") {
@@ -198,152 +161,58 @@ func TestANotRetryableErrorAProviderErrorReportNamesFailsTheClaim(t *testing.T) 
 	if got := h.store.load(testToken).ProviderErrorRun; got != 1 {
 		t.Errorf("the stored claim's run of provider errors is %d, want 1", got)
 	}
+	// One prompt: the task itself. A malformed request is not sent again at all.
+	h.wantPrompts(1)
 }
 
-// Silence is not a provider saying "this cannot clear". A Claude Code worker, whose bridge sends
-// no Retryable and often no status, would otherwise hold its issue at every failed turn.
-func TestAProviderErrorNothingSettlesWaitsTwoMinutesAndThenGoesAgain(t *testing.T) {
+// The whole rule, status by status. A 400 to 499 other than 408 and 429 holds the issue; every
+// other error — 5xx, 408, 429, and the statusless turn every content-filter refusal ends in —
+// keeps the task and sends it again.
+func TestOnlyAClientErrorThatIsNoTimeoutAndNoRateLimitHoldsTheIssue(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		holds  bool
+	}{
+		{0, false}, {400, true}, {401, true}, {403, true}, {404, true}, {408, false},
+		{422, true}, {429, false}, {499, true}, {500, false}, {503, false}, {529, false},
+	} {
+		t.Run(fmt.Sprintf("HTTP %d", tc.status), func(t *testing.T) {
+			h := workingClaim(t)
+
+			h.errorTurn(StreamPromptResult{Error: "the provider answered an error", HTTPStatus: tc.status})
+
+			if held := h.state() == StateFailed; held != tc.holds {
+				t.Fatalf("HTTP %d left the claim %s, want holds=%v", tc.status, h.state(), tc.holds)
+			}
+			if tc.holds {
+				return
+			}
+			if p := h.pending(); p.ProviderErrorRetries != 1 {
+				t.Fatalf("pending %+v, want the task kept and counted one send", p)
+			}
+			h.climbs(1, 30*time.Second)
+		})
+	}
+}
+
+// One turn's error decides that turn and nothing else. A refusal with no status keeps the task
+// and sends it again; the turn that re-sent task runs ends in a malformed request, and that
+// error holds the issue, whatever the turn before it did.
+func TestARefusalThenAMalformedRequestHoldsTheIssue(t *testing.T) {
 	h := workingClaim(t)
 
-	h.errorTurn(StreamPromptResult{Error: "the model provider failed"})
-
-	if p := h.pending(); p.ProviderErrorRetries != 0 || p.ProviderErrorNote != "" {
-		t.Fatalf("pending %+v, want nothing decided while the report is waited for", p)
-	}
-	h.advance(2*time.Minute - time.Second)
-	h.wantPrompts(1)
-	h.advance(time.Second)
-	// The wait ends in "this can clear", which is the ladder's first step and not a send of its
-	// own: the task goes 30 seconds later.
-	h.wantPrompts(1)
-	if p := h.pending(); p.ProviderErrorRetries != 1 {
-		t.Fatalf("pending %+v, want the wait to have taken the error as one that can clear", p)
-	}
-	h.climbs(1, 30*time.Second)
-}
-
-// A report that lands inside the two minutes decides there and then, either way, rather than
-// leaving the claim to wait the rest of it out.
-func TestAReportInsideTheWaitDecidesTheProviderErrorAtOnce(t *testing.T) {
-	t.Run("refused", func(t *testing.T) {
-		h := workingClaim(t)
-		h.errorTurn(StreamPromptResult{Error: "the model provider failed"})
-		h.advance(30 * time.Second)
-
-		h.report(1, claim.TurnRefused, "reasoning_extraction")
-
-		if p := h.pending(); p.ProviderErrorRetries != 1 {
-			t.Fatalf("pending %+v, want the report to have decided the error at once", p)
-		}
-		h.climbs(1, 30*time.Second)
-	})
-	t.Run("provider error", func(t *testing.T) {
-		h := workingClaim(t)
-		h.errorTurn(StreamPromptResult{Error: "the model provider failed", HTTPStatus: 400})
-		h.advance(30 * time.Second)
-
-		h.report(1, claim.TurnProviderError, "")
-
-		h.wantState(StateFailed)
-		if failure := h.claim().Failure; !strings.Contains(failure, "HTTP 400") {
-			t.Errorf("the failure is %q, want it to name the status the provider answered", failure)
-		}
-	})
-}
-
-// The turn before's report decides nothing. An overload's own report says provider-error, and it
-// reaches the daemon behind the prompt result of the turn that followed it, so reading the
-// claim's newest report alone failed this claim and held its issue for an architect over an error
-// that clears.
-func TestARefusalAfterAnOverloadIsDecidedByTheRefusalsOwnReport(t *testing.T) {
-	h := workingClaim(t)
-
-	// The overload clears by its status alone; its own report lands behind that result.
-	h.errorTurn(StreamPromptResult{Error: "overloaded_error", HTTPStatus: 529},
-		RequestTurnOutcome{Sequence: 1, Outcome: claim.TurnProviderError})
-	h.climbs(1, 30*time.Second)
-
-	// The turn the task went again in ends in a content filter, which carries no status and no
-	// retryable mark: only this turn's own report can settle it.
 	h.errorTurn(StreamPromptResult{Error: "Refusal (reasoning_extraction): I will not help with that."})
-
-	if state := h.state(); state == StateFailed {
-		t.Fatalf("the claim failed on the overload's report: %q", h.claim().Failure)
-	}
-	if p := h.pending(); p.ProviderErrorRetries != 1 {
-		t.Fatalf("pending %+v, want nothing decided until the refusal's own report comes", p)
-	}
-
-	h.report(2, claim.TurnRefused, "reasoning_extraction")
-
-	if p := h.pending(); p.ProviderErrorRetries != 2 {
-		t.Fatalf("pending %+v, want the refusal's own report to have decided the error", p)
-	}
-	message := h.climbs(2, time.Minute)
-	if !strings.Contains(message, "the provider's reasoning_extraction content filter") {
-		t.Errorf("the prompt is %q, want it to name the filter this turn's own report gave", message)
-	}
-}
-
-// The same the other way round: a refusal's report is the turn before's when a malformed request
-// follows it. Reading the claim's newest report alone sent that request again for ever, behind a
-// prompt that named a content filter the turn never met.
-func TestAMalformedRequestAfterARefusalFailsTheClaim(t *testing.T) {
-	h := workingClaim(t)
-
-	h.errorTurn(StreamPromptResult{Error: "Refusal (reasoning_extraction): I will not help with that."},
-		RequestTurnOutcome{Sequence: 1, Outcome: claim.TurnRefused, Category: "reasoning_extraction"})
 	h.climbs(1, 30*time.Second)
 
-	h.errorTurn(StreamPromptResult{Error: "invalid_request_error", HTTPStatus: 400},
-		RequestTurnOutcome{Sequence: 2, Outcome: claim.TurnProviderError})
+	h.errorTurn(StreamPromptResult{Error: "invalid_request_error", HTTPStatus: 400})
 
 	h.wantState(StateFailed)
-	failure := h.claim().Failure
-	if !strings.Contains(failure, "HTTP 400") || strings.Contains(failure, "content filter") {
-		t.Errorf("the failure is %q, want the status the provider answered and no content filter", failure)
+	if failure := h.claim().Failure; !strings.Contains(failure, "HTTP 400") {
+		t.Errorf("the failure is %q, want the status the provider answered", failure)
 	}
 	// Two prompts: the task itself and the one send the refusal earned. The malformed request is
 	// not sent again at all.
 	h.wantPrompts(2)
-}
-
-// A report of an earlier turn that arrives while the wait is armed settles nothing: the wait
-// stands, and its expiry decides the error from the failed turn's own facts.
-func TestAnEarlierTurnsReportInsideTheWaitSettlesNothing(t *testing.T) {
-	h := workingClaim(t)
-	h.errorTurn(StreamPromptResult{Error: "Refusal (reasoning_extraction): no."},
-		RequestTurnOutcome{Sequence: 1, Outcome: claim.TurnRefused, Category: "reasoning_extraction"})
-	h.climbs(1, 30*time.Second)
-
-	// The turn the task went again in fails in a way nothing settles, so the daemon waits for the
-	// report of that turn.
-	h.errorTurn(StreamPromptResult{Error: "the model provider failed"})
-	if _, waiting := h.m.timers[TimerTurnOutcome]; !waiting {
-		t.Fatal("no wait for this turn's own report is armed")
-	}
-
-	// The first turn's report again, as a send of it that overlapped the turn after it would
-	// arrive.
-	h.report(1, claim.TurnRefused, "reasoning_extraction")
-
-	if p := h.pending(); p.ProviderErrorRetries != 1 {
-		t.Fatalf("pending %+v, want the earlier turn's report to settle nothing", p)
-	}
-	if _, waiting := h.m.timers[TimerTurnOutcome]; !waiting {
-		t.Fatal("the earlier turn's report ended the wait for this turn's own")
-	}
-
-	// The wait runs out, which takes the error as one that can clear, and the sentence it sends
-	// the task behind names no filter: no report of this turn ever came.
-	h.advance(turnOutcomeWait)
-	if p := h.pending(); p.ProviderErrorRetries != 2 {
-		t.Fatalf("pending %+v, want the wait's expiry to have decided the error", p)
-	}
-	message := h.climbs(2, time.Minute)
-	if strings.Contains(message, "content filter") {
-		t.Errorf("the prompt is %q, want it built from the failed turn's own facts", message)
-	}
 }
 
 // R2: a newer daemon task for the claim replaces the task a provider error took back, and goes at
@@ -354,7 +223,7 @@ func TestAnEarlierTurnsReportInsideTheWaitSettlesNothing(t *testing.T) {
 // stays.
 func TestANewerTaskQueuedWhileTheLadderWaitsReplacesTheOwedTask(t *testing.T) {
 	h := workingClaim(t)
-	h.errorTurn(StreamPromptResult{Error: "overloaded_error", Retryable: true})
+	h.errorTurn(StreamPromptResult{Error: "overloaded_error", HTTPStatus: 529})
 	owed := h.pending()
 	if owed.ProviderErrorRetries != 1 || owed.ProviderErrorNote == "" {
 		t.Fatalf("the owed task is %+v, want one send counted against it and the sentence it would go behind", owed)
@@ -386,7 +255,7 @@ func TestANewerTaskQueuedWhileTheLadderWaitsReplacesTheOwedTask(t *testing.T) {
 // in its new pod with work owed and nothing pending.
 func TestAnUpdateRoundsQuestionGoesBeforeTheOwedTask(t *testing.T) {
 	h := workingClaim(t)
-	h.errorTurn(StreamPromptResult{Error: "overloaded_error", Retryable: true})
+	h.errorTurn(StreamPromptResult{Error: "overloaded_error", HTTPStatus: 529})
 	owed := h.pending()
 
 	h.openUpdate(testRound, testReasons)
@@ -431,7 +300,7 @@ func TestAnUpdateRoundsQuestionGoesBeforeTheOwedTask(t *testing.T) {
 func TestAWaitLeftArmedForAnOlderTaskHoldsNothing(t *testing.T) {
 	h := workingClaim(t)
 
-	h.errorTurn(StreamPromptResult{Error: "overloaded_error", Retryable: true})
+	h.errorTurn(StreamPromptResult{Error: "overloaded_error", HTTPStatus: 529})
 
 	owed := h.pending().ID
 	if !h.m.waitsForProviderError(owed) {
@@ -445,40 +314,32 @@ func TestAWaitLeftArmedForAnOlderTaskHoldsNothing(t *testing.T) {
 // The sentence the re-sent prompt carries is built from structured fields alone. A refusal's own
 // explanation is itself refused when it is sent back
 // (dispatch://INFRA-956/artifact/cause-evidence-md), so none of the provider's words are in it.
-func TestTheResentPromptNamesTheCategoryOrTheStatusAndNoProviderText(t *testing.T) {
+func TestTheResentPromptNamesTheStatusAndNoProviderText(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		result  StreamPromptResult
-		reports []RequestTurnOutcome
+		name   string
+		result StreamPromptResult
 		// contains is what the sentence says, and written is the provider's own text, which no
 		// prompt may carry.
 		contains string
 		written  string
 	}{
 		{
-			name:     "a refusal names its category",
-			result:   StreamPromptResult{Error: "Refusal (reasoning_extraction): I will not help you extract that."},
-			reports:  []RequestTurnOutcome{{Sequence: 1, Outcome: claim.TurnRefused, Category: "reasoning_extraction"}},
-			contains: "the provider's reasoning_extraction content filter",
-			written:  "I will not help you extract that.",
-		},
-		{
-			name:     "an error with no category names its status",
+			name:     "an error with a status names it",
 			result:   StreamPromptResult{Error: "Overloaded: upstream capacity is gone", HTTPStatus: 529},
 			contains: "a provider error (HTTP 529)",
 			written:  "upstream capacity is gone",
 		},
 		{
-			name:     "an error with neither names only that the provider failed",
-			result:   StreamPromptResult{Error: "the upstream connection dropped", Retryable: true},
+			name:     "an error with none names only that the provider failed",
+			result:   StreamPromptResult{Error: "Refusal (reasoning_extraction): I will not help you extract that."},
 			contains: "a provider error.",
-			written:  "the upstream connection dropped",
+			written:  "I will not help you extract that.",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := workingClaim(t)
 
-			h.errorTurn(tc.result, tc.reports...)
+			h.errorTurn(tc.result)
 			message := h.climbs(1, 30*time.Second)
 
 			if !strings.Contains(message, tc.contains) {
@@ -497,9 +358,9 @@ func TestTheResentPromptNamesTheCategoryOrTheStatusAndNoProviderText(t *testing.
 // Only a run of provider errors is counted, and a turn that ends with none ends the run.
 func TestATurnThatEndsWithNoProviderErrorEndsTheRun(t *testing.T) {
 	h := workingClaim(t)
-	h.errorTurn(StreamPromptResult{Error: "overloaded_error", Retryable: true})
+	h.errorTurn(StreamPromptResult{Error: "overloaded_error", HTTPStatus: 529})
 	h.climbs(1, 30*time.Second)
-	h.errorTurn(StreamPromptResult{Error: "overloaded_error", Retryable: true})
+	h.errorTurn(StreamPromptResult{Error: "overloaded_error", HTTPStatus: 529})
 	h.climbs(2, time.Minute)
 	if got := h.claim().ProviderErrorRun; got != 2 {
 		t.Fatalf("the run of provider errors is %d, want 2", got)
@@ -533,8 +394,7 @@ func TestTheSixthProviderErrorTurnInARowTellsTheControllerOnce(t *testing.T) {
 
 	sent := 1
 	for turn := range 7 {
-		h.errorTurn(StreamPromptResult{Error: "Refusal (reasoning_extraction): no.", Model: "claude-opus-4-8"},
-			RequestTurnOutcome{Sequence: uint64(turn + 1), Outcome: claim.TurnRefused, Category: "reasoning_extraction"})
+		h.errorTurn(StreamPromptResult{Error: "Refusal (reasoning_extraction): no.", Model: "claude-opus-4-8"})
 		if turn == 5 && len(notices) != 1 {
 			t.Fatalf("the controller was told %d times at the sixth turn, want once", len(notices))
 		}
@@ -549,17 +409,15 @@ func TestTheSixthProviderErrorTurnInARowTellsTheControllerOnce(t *testing.T) {
 	if notice.claim.Issue != "LEGION-209" || notice.claim.Role != claim.RoleImplementer {
 		t.Errorf("the notice names %s of %s, want the implementer of LEGION-209", notice.claim.Role, notice.claim.Issue)
 	}
-	// The notice goes when the error arrives, which is before the report of the turn it ended
-	// (providererror.go, ownReport), so its cause is what the error's own fields give: a refusal
-	// carries no status, and the category the report names is not there to be read. The turn
-	// before's category is not read for it either.
+	// The cause is what the error's own fields give, and a content filter's refusal carries no
+	// status at all, so the notice names neither a status nor the filter's own words.
 	for _, want := range []string{"6 turns in a row", "claude-opus-4-8", "ended in a provider error"} {
 		if !strings.Contains(notice.reason, want) {
 			t.Errorf("the reason is %q, want it to name %q", notice.reason, want)
 		}
 	}
-	if strings.Contains(notice.reason, "content filter") {
-		t.Errorf("the reason is %q, want no category: no report of the turn it is about had come", notice.reason)
+	if strings.Contains(notice.reason, "reasoning_extraction") {
+		t.Errorf("the reason is %q, want none of the provider's own words", notice.reason)
 	}
 	if got := h.claim().ProviderErrorRun; got != 7 {
 		t.Errorf("the run of provider errors is %d, want 7: the notice bounds nothing", got)

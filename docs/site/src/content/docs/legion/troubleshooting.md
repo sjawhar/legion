@@ -404,21 +404,20 @@ no new session. Each such turn logs the warning `supervise: the turn this task's
 in a provider error; the task is kept and sent again`, which names the model, the HTTP status and
 whether the provider marked the error retryable, and the send that follows it logs `supervise: this
 provider error can clear; the task goes to the same session again after a wait`, with the attempt
-and the wait. The re-sent prompt tells the agent the turn stopped, names the error's category or its
-HTTP status, and carries none of the provider's own words. A content filter is sent again because
-the session has already stepped down to the next model of its fallback chain, so the next prompt
-goes to another model
+and the wait. The re-sent prompt tells the agent the turn stopped, names the HTTP status the
+provider answered when it answered one, and carries none of the provider's own words. A content
+filter is sent again because the session has already stepped down to the next model of its
+fallback chain, so the next prompt goes to another model
 ([Starting fresh when a session is lost or wedged](https://github.com/sjawhar/legion/blob/main/docs/kubernetes.md#starting-fresh-when-a-session-is-lost-or-wedged));
-a 429, a 5xx, and an error that neither the error's own fields nor the agent's report settles
-within two minutes are sent again too. A newer task for that claim replaces the one the error took
-back and is sent at once, and an update round's question goes before it, so neither waits out a
-ladder that reaches ten minutes a step.
+a 429, a 408, a 5xx and an error the provider answered no status for are sent again too. A newer
+task for that claim replaces the one the error took back and is sent at once, and an update
+round's question goes before it, so neither waits out a ladder that reaches ten minutes a step.
 
-**One provider error does hold the issue**, for its architect: one the provider marked not
-retryable *and* that the agent's own report of the turn called a `provider-error`. A malformed
-request is the case it exists for. The claim fails with `why` reading `a provider error that cannot
-clear ended this claim's turn: <cause>`, where the cause is the refusal's category or the HTTP
-status, and the hold is the architect's to retry or escalate as any held phase is.
+**One provider error does hold the issue**, for its architect: one whose HTTP status is a client
+error, 400 to 499, that is neither a timeout (408) nor a rate limit (429). A malformed request is
+the case it exists for. The claim fails with `why` reading `a provider error that cannot clear
+ended this claim's turn: <cause>`, where the cause names that status, and the hold is the
+architect's to retry or escalate as any held phase is.
 
 **After six turns of one claim in a row have ended in a provider error**, the project's controller
 is told once, as `provider-errors on <KEY>`, with the run, the model and the cause

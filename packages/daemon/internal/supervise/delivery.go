@@ -168,8 +168,8 @@ func pendingID(p *Delivery) string {
 // next run, retrying on its backoff, is what releases it, and the refusal that start is answered
 // with is over once the architect's turn on the held task has ended and the delivery retired.
 //
-// One pending task is not refused: the task a provider error took back, while either wait that
-// error armed stands (waitsForProviderError). Nothing is working it, the next step of the
+// One pending task is not refused: the task a provider error took back, while the ladder's wait
+// for it stands (waitsForProviderError). Nothing is working it, the next step of the
 // ladder can be ten minutes away, and a run of errors has no end of its own, so a refusal would
 // keep every newer task of the claim — an update round's question among them — behind a task the
 // claim owes for as long as the provider keeps failing (dispatch://INFRA-956 R2: a newer task
@@ -186,7 +186,7 @@ func pendingID(p *Delivery) string {
 // the claim would stand with work owed and nothing pending once its pod was replaced, which is
 // the failure this issue exists to remove.
 //
-// Either way the slot is emptied as any other drop empties it: both waits end with the task
+// Either way the slot is emptied as any other drop empties it: the wait ends with the task
 // (retirePending, holdOwedTask), and the question a restart armed for that task is answered in
 // the same step (answerAskFirstAfterDrop), so the task queued behind it is never taken for the
 // running turn's.
@@ -305,11 +305,11 @@ func (m *Machine) sendPending(ctx context.Context) error {
 	if _, awaiting := m.timers[TimerTurn]; awaiting {
 		return nil
 	}
-	// The two waits a provider error arms are the delivery's own, so each is fenced on the id the
-	// arming recorded (waitsForProviderError): a newer task replaces the one the wait is for, and
-	// an update round's question goes before it (queue), so each is a task no wait is armed for
-	// and each goes at once — and so is the owed task when it comes back, which is how it goes as
-	// soon as the claim's state allows rather than waiting a ladder step out again.
+	// The ladder's wait a provider error arms is the delivery's own, so it is fenced on the id
+	// the arming recorded (waitsForProviderError): a newer task replaces the one the wait is
+	// for, and an update round's question goes before it (queue), so each is a task no wait is
+	// armed for and each goes at once — and so is the owed task when it comes back, which is how
+	// it goes as soon as the claim's state allows rather than waiting a ladder step out again.
 	if m.waitsForProviderError(p.ID) {
 		return nil
 	}
@@ -563,8 +563,8 @@ func (m *Machine) phaseHolds(ctx context.Context, d Delivery) (bool, error) {
 // completion the worker's next turn reports.
 func (m *Machine) retirePending(ctx context.Context) error {
 	p := m.claim.Pending
-	// Both provider-error waits are this task's, so they end with it (providerErrorOver).
-	m.providerErrorOver()
+	// The ladder's wait is this task's, so it ends with it (providererror.go).
+	m.disarm(TimerPromptRetry)
 	retired := m.stored()
 	if !p.ConfirmedAt.IsZero() {
 		retired.ServingGeneration = serving(p, deliveredRun, retired.ServingGeneration)

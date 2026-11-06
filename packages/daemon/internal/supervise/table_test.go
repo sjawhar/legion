@@ -169,7 +169,6 @@ func samples(t *testing.T) map[string][]Event {
 		"RequestForgetSession": {RequestForgetSession{}},
 		"RequestDeliver":       {RequestDeliver{}},
 		"RequestExit":          {RequestExit{}},
-		"RequestTurnOutcome":   {RequestTurnOutcome{}},
 	}
 	for _, kind := range timers {
 		byType["Timer"] = append(byType["Timer"], Timer{Kind: kind})
@@ -329,8 +328,6 @@ func fenced(ev Event, c Claim) Event {
 		return RequestDeliver{Claim: c.Token, Task: "another task"}
 	case RequestExit:
 		return RequestExit{Claim: c.Token, Generation: c.Generation, Session: session, Reason: "done"}
-	case RequestTurnOutcome:
-		return RequestTurnOutcome{Claim: c.Token, Generation: c.Generation, Sequence: 1, Outcome: claim.TurnClean}
 	}
 	panic("unhandled sample")
 }
@@ -434,7 +431,7 @@ func wantsRefusal(ev Event) bool {
 	switch ev.(type) {
 	case RequestSpawn, RequestRegister, RequestReady, RequestSuspend, RequestResume, RequestStop,
 		RequestRetry, RequestOperatorRetry, RequestForgetSession, RequestDeliver, RequestExit,
-		RequestTurnOutcome, PodUpdateSignalled:
+		PodUpdateSignalled:
 		return true
 	}
 	return false

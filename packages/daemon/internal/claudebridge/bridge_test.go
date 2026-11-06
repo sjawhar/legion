@@ -49,10 +49,13 @@ func TestMain(m *testing.M) {
 //   - "held <name>": the re-emission only once the test releases name (rig.release);
 //   - "wait <name>": an assistant message "done" only once the test releases name;
 //   - "die": exits, never re-emitting it;
-//   - "fail <text>": an assistant message of text, then an error_during_execution result that
-//     names no api_error_status, as a result that failed on nothing the provider gave a status
-//     for does;
-//   - "fail-529 <text>": the same, with the result naming api_error_status 529;
+//   - "fail <text>": an assistant message of text, then an error_during_execution result, as a
+//     turn a tool failed in ends, which is no provider failure;
+//   - "api-error-529 <text>": the same text, then the result a provider failure ends a turn with
+//     — `terminal_reason` "api_error" and `api_error_status` 529 — as the recordings carry it
+//     (testdata/api-error-529.jsonl:5);
+//   - "refusal <text>": the result a content filter's refusal ends a turn with, which is the
+//     same but names no `api_error_status` (testdata/refusal-turn.jsonl:5);
 //   - "max-turns": a result Claude Code's own turn limit ended, which is no provider failure;
 //   - "replay <file>": no init of the fake's own — the lines of testdata/<file>, a recorded Claude
 //     Code stream, written as they were recorded, the last held back until the gate opens;
@@ -82,11 +85,19 @@ func fakeClaude() int {
 	result := func(subtype string, isError bool) {
 		emit(map[string]any{"type": "result", "subtype": subtype, "is_error": isError})
 	}
-	// failed is the result of a step Claude Code could not finish; status is the HTTP status it
-	// names, and zero names none at all.
-	failed := func(status int) {
-		line := map[string]any{"type": "result", "subtype": "error_during_execution", "is_error": true,
-			"errors": []string{"API Error: 529 overloaded"}}
+	// failed is the result of a step Claude Code could not finish on a tool or on itself, which
+	// is no failure of the provider's: it names no terminal_reason.
+	failed := func() {
+		emit(map[string]any{"type": "result", "subtype": "error_during_execution", "is_error": true,
+			"errors": []string{"API Error: 529 overloaded"}})
+	}
+	// providerFailed is the result a provider failure ends a turn with, as the recordings carry
+	// it: subtype "success" with is_error true and terminal_reason "api_error"
+	// (testdata/api-error-529.jsonl:5). status is the api_error_status it names, and zero is the
+	// refusal, which names none (testdata/refusal-turn.jsonl:5).
+	providerFailed := func(status int) {
+		line := map[string]any{"type": "result", "subtype": "success", "is_error": true,
+			"terminal_reason": "api_error", "errors": []string{"API Error: 529 overloaded"}}
 		if status != 0 {
 			line["api_error_status"] = status
 		}
@@ -140,21 +151,25 @@ func fakeClaude() int {
 			assistant(text("completed"))
 		case strings.HasPrefix(body, "say "):
 			assistant(text(strings.TrimPrefix(body, "say ")))
-		case strings.HasPrefix(body, "fail-529 "):
-			assistant(text(strings.TrimPrefix(body, "fail-529 ")))
-			failed(529)
+		case strings.HasPrefix(body, "api-error-529 "):
+			assistant(text(strings.TrimPrefix(body, "api-error-529 ")))
+			providerFailed(529)
+			continue
+		case strings.HasPrefix(body, "refusal "):
+			assistant(text(strings.TrimPrefix(body, "refusal ")))
+			providerFailed(0)
 			continue
 		case strings.HasPrefix(body, "fail "):
 			assistant(text(strings.TrimPrefix(body, "fail ")))
-			failed(0)
+			failed()
 			continue
 		case body == "max-turns":
 			// Claude Code's own end of a turn it ran out of turns in. This line is written here
 			// rather than taken from a recording: no result of the measurement carries this
 			// subtype (dispatch://INFRA-956/artifact/claude-code-2-1-310-refusal-measurement-tgz),
 			// so it names the one terminal_reason that was measured, which is the value that
-			// would make this turn a provider error were the subtype not excluded by name
-			// (turnoutcome.go's classify).
+			// would put an error in the prompt_result were the subtype not excluded by name
+			// (bridge.go's providerFailed).
 			emit(map[string]any{"type": "result", "subtype": "error_max_turns", "is_error": true,
 				"terminal_reason": "api_error", "errors": []string{"Reached max turns (30)"}})
 			continue
@@ -219,24 +234,14 @@ type rig struct {
 	stopped context.CancelFunc
 }
 
+// newRig runs one bridge over the fake Claude Code, with the environment a pane gives it.
 func newRig(t *testing.T, args ...string) *rig {
-	t.Helper()
-	return newRigEnv(t, nil, args...)
-}
-
-// newRigEnv runs one bridge with extra environment beyond the fake Claude's own. The report's
-// three variables are blanked first and then overridden by extra, so a bridge under test reports
-// a turn only to the stand-in a case gave it, never to the daemon whose pane the test itself may
-// be running in (turnoutcome_test.go).
-func newRigEnv(t *testing.T, extra []string, args ...string) *rig {
 	t.Helper()
 	dir := t.TempDir()
 	record, gate := filepath.Join(dir, "record"), filepath.Join(dir, "gate")
 	argv := append([]string{os.Args[0]}, args...)
 	env := append(os.Environ(), fakeClaudeEnv+"=1", "FAKE_CLAUDE_RECORD="+record, fakeClaudeGateEnv+"="+gate,
-		"CLAUDE_CONFIG_DIR="+dir, "LEGION_ROLE=implementer", "LEGION_ISSUE=ACME-7",
-		"LEGION_DAEMON_URL=", "LEGION_BOOT_TOKEN_FILE=", "LEGION_GENERATION=")
-	env = append(env, extra...)
+		"CLAUDE_CONFIG_DIR="+dir, "LEGION_ROLE=implementer", "LEGION_ISSUE=ACME-7")
 	cfg, err := Configure(argv, env)
 	if err != nil {
 		t.Fatal(err)
@@ -537,18 +542,26 @@ func TestAFailedStepIsOhMyPisFailedMessage(t *testing.T) {
 	r.expect("agent_end", nil)
 }
 
-// The prompt_result of a turn that failed carries the failure, as Oh My Pi's does
-// (shimwire.PromptError): a result with no error object is a turn that ended well, and the
-// daemon retires the task on one. The message is Claude Code's own words, and the status is
-// there only when Claude Code named one.
-func TestAFailedTurnsPromptResultCarriesTheError(t *testing.T) {
+// The prompt_result of a turn the provider failed carries the failure, as Oh My Pi's does
+// (shimwire.PromptError), and the prompt_result of a turn that ended any other way carries
+// none: the daemon keeps the task and sends it again for every error in this frame, so a turn
+// Claude Code's own limit ended, or one a tool failed in, must reach it as a turn to retire the
+// task on (dispatch://INFRA-956/comment/4fa88c00-3313-4008-8eea-d7f95a04e24d). The message is
+// Claude Code's own words, and the status is there only when Claude Code named one.
+func TestOnlyAProviderFailureFillsThePromptResultsError(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		script string
-		status any
+		// errored is whether the frame carries an error object, and status the status in it.
+		errored bool
+		status  any
 	}{
-		{"a failure Claude Code gave a status", "fail-529 WAITING on the provider", float64(529)},
-		{"a failure it named no status for", "fail WAITING on the provider", nil},
+		{name: "a provider failure with a status", script: "api-error-529 WAITING on the provider",
+			errored: true, status: float64(529)},
+		{name: "a content filter's refusal, which names none", script: "refusal WAITING on the provider",
+			errored: true, status: nil},
+		{name: "a turn a tool failed in", script: "fail WAITING on the provider"},
+		{name: "a turn Claude Code's own limit ended", script: "max-turns"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newRig(t, "-p", "--resume", sessionID)
@@ -558,14 +571,20 @@ func TestAFailedTurnsPromptResultCarriesTheError(t *testing.T) {
 			r.expect("agent_end", nil)
 			frame := r.expect("prompt_result", map[string]any{"id": "p1", "agentInvoked": true})
 			failure, _ := frame["error"].(map[string]any)
+			if !tc.errored {
+				if failure != nil {
+					t.Fatalf("the turn's prompt_result carries %v, want no error object: the daemon retires the task on it", failure)
+				}
+				return
+			}
 			if failure == nil {
 				t.Fatalf("the failed turn's prompt_result is %v, want an error object", frame)
 			}
-			if got, _ := failure["message"].(string); !strings.Contains(got, "error_during_execution") ||
-				!strings.Contains(got, "API Error: 529 overloaded") {
-				t.Errorf("the error's message %q is not Claude Code's own subtype and error", got)
+			if got, _ := failure["message"].(string); !strings.Contains(got, "API Error: 529 overloaded") {
+				t.Errorf("the error's message %q is not Claude Code's own words", got)
 			}
-			// False for every failure of the bridge's: it knows nothing that says one can clear.
+			// False for every failure of the bridge's: it knows nothing that says one can clear,
+			// and the daemon decides from the status alone (supervise's holdsTheIssue).
 			if failure["retryable"] != false {
 				t.Errorf("retryable = %v, want false", failure["retryable"])
 			}

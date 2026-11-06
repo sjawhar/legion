@@ -12,8 +12,8 @@
 // real `omp --mode rpc` under the real `legion worker-shim`, started by localruntime_live_test.go
 // — this pod carries no tmux, so the pane is a child process group instead of a window — with this
 // checkout's `@sjawhar/pi-envoy` and `@sjawhar/pi-legion` installed into an Oh My Pi profile of the
-// run's own. The agents register, report ready, take their tasks and report their turn outcomes
-// over the daemon's own routes and stream, as they do in production.
+// run's own. The agents register, report ready and take their tasks over the daemon's own routes
+// and stream, as they do in production.
 //
 // What stands in is the model endpoint and nothing else. Three HTTP stand-ins of the test's own
 // answer the panes' provider requests:
@@ -26,11 +26,12 @@
 //     own gaps inside the host's.
 //   - filtered: an OpenAI chat completion that streams text and then ends `finish_reason:
 //     content_filter`, which Oh My Pi reports as the turn error `Provider finish_reason:
-//     content_filter` with no HTTP status and `retryable: false`. The role's chain names one
-//     model, so no fallback is left and the plugin reports the turn `refused`.
+//     content_filter` with no HTTP status at all. The role's chain names one model, so no
+//     fallback is left, and an error that carries no status is one the daemon sends the task
+//     again for.
 //   - malformed: every request 400 with an `invalid_request_error` body, which Oh My Pi reports
-//     `retryable: false` with status 400 — neither retryable nor 429 or 5xx — and the plugin
-//     reports `provider-error`.
+//     with status 400 — a client error that is neither 408 nor 429 — so the claim fails and the
+//     workflow holds the issue for its architect.
 //
 // Each pane's Oh My Pi overlay sets `retry.enabled: false` (PI_CONFIG_FILES, the key an operator's
 // `runtime.tmux.pi_config_files` carries), so the host walks no fallback chain of its own and
@@ -158,14 +159,14 @@ type providerErrorLive struct {
 
 // TestAProviderErrorKeepsTheTaskAndTheOperatorRetriesWhatItLeavesLive drives the five steps in the
 // order each one's state follows from the last: the ladder a 529 walks, the controller's notice at
-// the sixth turn, a refusal the plugin reports, an error that cannot clear, and the operator's
-// commands over the claims the first and the fourth leave.
+// the sixth turn, a content filter's refusal that carries no status, an error that cannot clear,
+// and the operator's commands over the claims the first and the fourth leave.
 func TestAProviderErrorKeepsTheTaskAndTheOperatorRetriesWhatItLeavesLive(t *testing.T) {
 	fixtureenv.Live(t)
 	r := newProviderErrorLive(t)
 	r.step("step1-a-529-keeps-the-task-and-walks-the-30-60-120-ladder", r.ladderWalks)
 	r.step("step2-the-sixth-turn-in-a-row-tells-the-controller", r.controllerIsTold)
-	r.step("step3-a-content-filter-is-reported-refused-and-the-task-goes-again", r.refusalGoesAgain)
+	r.step("step3-a-content-filter-carries-no-status-and-the-task-goes-again", r.refusalGoesAgain)
 	r.step("step4-an-error-that-cannot-clear-fails-the-claim-and-holds-the-issue", r.cannotClearFails)
 	r.step("step5-the-operator-stops-retries-and-reads-the-claims", r.operatorDrivesTheClaims)
 }
@@ -453,8 +454,8 @@ func (r *providerErrorLive) controllerIsTold() {
 		r.ladder, r.issue(r.ladder).Phase)
 }
 
-// refusalGoesAgain drives the second half of R2: a content filter the plugin reports `refused`
-// clears, so the task goes to the same session again after 30 s and nobody is told to hold the
+// refusalGoesAgain drives the second half of R2: a turn a content filter ended carries no HTTP
+// status, so the task goes to the same session again after 30 s and nobody is told to hold the
 // issue.
 func (r *providerErrorLive) refusalGoesAgain() {
 	t := r.t
@@ -476,8 +477,8 @@ func (r *providerErrorLive) refusalGoesAgain() {
 		return record.Message == providerErroredMessage &&
 			record.Attrs["claim"] == string(token)
 	})
-	// A refusal carries no HTTP status at all, which the daemon reads off the pane's report as
-	// zero; nothing of 429 or 5xx is there to settle it, so only the plugin's `refused` can.
+	// A refusal carries no HTTP status at all, and an error with no status is one the daemon
+	// sends the task again for.
 	if errored.Attrs["retryable"] != false || errored.Attrs["httpStatus"] != float64(0) {
 		t.Fatalf("the refused turn was reported retryable=%v httpStatus=%v, want a plain refusal",
 			errored.Attrs["retryable"], errored.Attrs["httpStatus"])
@@ -489,13 +490,13 @@ func (r *providerErrorLive) refusalGoesAgain() {
 	if armed.Attrs["wait"] != ladderDelays[0].String() {
 		t.Fatalf("the refusal armed %v, want %s", armed.Attrs["wait"], ladderDelays[0])
 	}
-	// The cause names no filter category: an OpenAI `finish_reason: content_filter` carries none,
-	// and the daemon builds the cause from structured fields alone, never from a provider's text.
+	// The cause names the status or nothing: the daemon builds it from structured fields alone,
+	// never from a provider's text, and this turn carries no status.
 	cause, _ := armed.Attrs["cause"].(string)
 	if cause != "a provider error" {
-		t.Fatalf("the refusal's cause is %q, want the words a refusal with no category and no status gives", cause)
+		t.Fatalf("the refusal's cause is %q, want the words an error with no status gives", cause)
 	}
-	r.note("the plugin reported the turn refused (retryable=false, no HTTP status) and the daemon armed %v: %q",
+	r.note("the content filter ended the turn with no HTTP status and the daemon armed %v: %q",
 		armed.Attrs["wait"], cause)
 
 	r.awaitLogFrom("the refused task sent again", from, ladderDelays[0]+ladderTolerance+time.Minute, func(record loggedRecord) bool {
@@ -505,10 +506,6 @@ func (r *providerErrorLive) refusalGoesAgain() {
 	gap := time.Since(sent)
 	if gap < ladderDelays[0] {
 		t.Fatalf("the refused task went again %s after it was first sent, want at least %s", gap.Round(time.Second), ladderDelays[0])
-	}
-	outcome := r.turnOutcome(token)
-	if outcome != claim.TurnRefused {
-		t.Fatalf("the newest turn-outcome report of %s says %q, want %q", token, outcome, claim.TurnRefused)
 	}
 	held := r.claim(token)
 	if held.Pending == nil || held.Pending.Task != task {
@@ -525,9 +522,8 @@ func (r *providerErrorLive) refusalGoesAgain() {
 		gap.Round(time.Second), token, r.refused, issue.Phase)
 }
 
-// cannotClearFails drives the last of R2: an error the plugin reports `provider-error` that
-// carries neither a retryable mark nor a 429 or 5xx fails the claim, and the workflow holds the
-// issue for its architect.
+// cannotClearFails drives the last of R2: an HTTP 400, a client error that is neither 408 nor
+// 429, fails the claim, and the workflow holds the issue for its architect.
 func (r *providerErrorLive) cannotClearFails() {
 	t := r.t
 	token := r.token(r.failing, claim.RoleTester)
@@ -553,10 +549,7 @@ func (r *providerErrorLive) cannotClearFails() {
 		failed = r.claim(token)
 		return failed.State == string(supervise.StateFailed)
 	})
-	if outcome := r.turnOutcome(token); outcome != claim.TurnProviderError {
-		t.Fatalf("the newest turn-outcome report of %s says %q, want %q", token, outcome, claim.TurnProviderError)
-	}
-	r.note("the plugin reported provider-error with HTTP 400 and retryable=false, and %s is %s", token, failed.State)
+	r.note("the turn ended in HTTP 400 and %s is %s", token, failed.State)
 	var issue api.Issue
 	r.await(r.failing+" to be held for its architect", 2*time.Minute, func() bool {
 		issue = r.issue(r.failing)
@@ -653,22 +646,6 @@ func (r *providerErrorLive) claim(token claim.Token) api.OperatorClaim {
 	}
 	r.t.Fatalf("the daemon holds no claim %s; it holds %d", token, len(list.Claims))
 	return api.OperatorClaim{}
-}
-
-// turnOutcome is the class of the newest turn-outcome report the claim's plugin sent. A report is
-// the machine's memory and no store row (supervise/turnoutcome.go says why), so the daemon's own
-// log line for the report it kept is where a step reads it.
-func (r *providerErrorLive) turnOutcome(token claim.Token) claim.TurnOutcome {
-	r.t.Helper()
-	kept := r.lastLog(func(record loggedRecord) bool {
-		return record.Message == "supervise: the agent's plugin reported how a turn ended" &&
-			record.Attrs["claim"] == string(token) && record.Attrs["kept"] == true
-	})
-	if kept == nil {
-		r.t.Fatalf("the plugin of %s reported no turn outcome the daemon kept", token)
-	}
-	outcome, _ := kept.Attrs["outcome"].(string)
-	return claim.TurnOutcome(outcome)
 }
 
 // awaitReady waits for the claim's real pane to start Oh My Pi, register and report ready. A claim
@@ -1115,8 +1092,8 @@ func (s *modelStandin) requestsHolding(marker string) int {
 // of them (ladderDriven, read off ladderDelays) fires after ladderDrivenSpan instead, because
 // waiting the fourth and fifth rungs out would add twelve minutes and prove the same doubling the
 // first three do. Every other duration the daemon arms — its probe interval, its registration
-// deadline, its two-minute wait for a turn-outcome report, and the ladder's own waited-out rungs
-// — passes through untouched, so what the proof measures is measured where it is real.
+// deadline, and the ladder's own waited-out rungs — passes through untouched, so what the proof
+// measures is measured where it is real.
 type ladderClock struct {
 	supervise.RealClock
 }

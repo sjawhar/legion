@@ -733,16 +733,6 @@ type Machine struct {
 	// has a lock of its own, held only to set, clear or read it, so a reader never waits on mu.
 	decidingMu sync.Mutex
 	deciding   Event
-	// lastTurnOutcome is the newest turn outcome the claim's plugin has reported, nil until one
-	// arrives (turnoutcome.go, which says why it is never written to the store).
-	lastTurnOutcome *TurnOutcome
-	// turnOutcomeBefore is what lastTurnOutcome held when the turn now running began
-	// (turnStarted), which is how a provider error finds its own turn's report among the claim's
-	// (providererror.go's ownReport). Memory only, as lastTurnOutcome is.
-	turnOutcomeBefore *TurnOutcome
-	// providerError is the turn that ended in a provider error whose decision is not yet made,
-	// nil for none (providererror.go, which says why it is never written to the store).
-	providerError *providerError
 	// owed is the task an update round's question went before, nil for none: the claim holds one
 	// delivery, the question has it, and this task takes it back when the question's delivery
 	// ends (delivery.go's holdOwedTask and giveBackOwedTask, which say why it is a hold and what
@@ -1195,13 +1185,13 @@ func (m *Machine) fence(ctx context.Context, ev Event) (bool, error) {
 }
 
 // timesADelivery is whether a timer of kind waits on one delivery rather than on the claim or
-// its process: the wait for an acknowledged prompt's turn, and the two a provider error arms
-// (providererror.go). Each is fenced on the claim's pending delivery as well as on the id the
-// arming recorded, so one that fires after the task it was armed for was replaced decides
-// nothing about the task that replaced it.
+// its process: the wait for an acknowledged prompt's turn, and the ladder's wait a provider
+// error arms (providererror.go). Each is fenced on the claim's pending delivery as well as on
+// the id the arming recorded, so one that fires after the task it was armed for was replaced
+// decides nothing about the task that replaced it.
 func timesADelivery(kind TimerKind) bool {
 	switch kind {
-	case TimerTurn, TimerPromptRetry, TimerTurnOutcome:
+	case TimerTurn, TimerPromptRetry:
 		return true
 	default:
 		return false
@@ -1527,10 +1517,10 @@ func (m *Machine) retire(ctx context.Context) error {
 	return m.persist(ctx)
 }
 
-// letGo ends what the machine had with the claim's process: no timer watches it, no relaunch waits
-// on one (relaunchLater), no send talks to it, no suspension is held for its turn, no stale-plugin
+// letGo ends what the machine had with the claim's process: no timer watches it — the ladder's
+// wait after a provider error among them (providererror.go) — no relaunch waits on one
+// (relaunchLater), no send talks to it, no suspension is held for its turn, no stale-plugin
 // relaunch waits for that turn either (refreshPlugin) — the process it was to replace is gone —
-// no decision waits on the report of a turn it failed (providerErrorOver) —
 // and the process the claim records, when it records one, moves into previous — the claim no
 // longer runs it (it was stopped, found dead, or left behind), and the next launch of the same
 // session waits it out.
@@ -1541,7 +1531,6 @@ func (m *Machine) letGo() {
 	m.held = nil
 	m.staleRelaunch = nil
 	m.unseenTurn = false
-	m.providerError = nil
 	if enrollment := ClearEnrollment(&m.claim); enrollment != nil {
 		m.revoke(*enrollment)
 	}
@@ -1779,8 +1768,6 @@ func claimOf(ev Event) claim.Token {
 	case RequestDeliver:
 		return ev.Claim
 	case RequestExit:
-		return ev.Claim
-	case RequestTurnOutcome:
 		return ev.Claim
 	}
 	return ""

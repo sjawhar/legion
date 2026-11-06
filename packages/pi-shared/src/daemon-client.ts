@@ -24,7 +24,6 @@ import {
   LegionSignOffRequest,
   type LegionState,
   LegionStateResponse,
-  type LegionTurnOutcomeRequest,
   LegionWaveReleaseRequest,
   LegionWaveReleaseResponse,
 } from "@legion/contracts/legion-api";
@@ -68,11 +67,6 @@ export type ReadyInput = z.input<typeof LegionReadyRequest>;
  * there. */
 export type ReadyForUpdateInput = z.input<typeof LegionReadyForUpdateRequest>;
 
-/** `claim.TurnOutcomeRequest`: how one turn of this claim's session ended, as the agent's own
- * plugin classified it, under the sequence that plugin counts itself. `category` is a refusal's
- * own category; no field carries the provider's own words. */
-export type TurnOutcomeInput = z.input<typeof LegionTurnOutcomeRequest>;
-
 /** `claim.ExitRequest`: the agent reporting its own end, and why. */
 export interface ExitInput {
   readonly claimToken: string;
@@ -97,7 +91,6 @@ export interface LegionDaemonClient {
   readonly registerController: (input: RegisterInput) => Promise<LegionControllerRegistration>;
   readonly ready: (input: ReadyInput) => Promise<void>;
   readonly readyForUpdate: (input: ReadyForUpdateInput) => Promise<void>;
-  readonly turnOutcome: (input: TurnOutcomeInput) => Promise<void>;
   readonly exit: (input: ExitInput) => Promise<void>;
   /** The session's report of what it is doing, after each of its turns and whenever the report's
    * content changes. It is authenticated by the claim, as `ready` is, and answers 204. */
@@ -458,7 +451,6 @@ export function createLegionDaemonClient(
       read("POST", "/legion/v1/claims/register", LegionControllerRegisterResponse, input),
     ready: (input) => acknowledge("/legion/v1/claims/ready", input),
     readyForUpdate: (input) => acknowledge("/legion/v1/claims/ready-for-update", input),
-    turnOutcome: (input) => acknowledge("/legion/v1/claims/turn-outcome", input),
     exit: (input) => acknowledge("/legion/v1/claims/exit", input),
     activity: (input) => acknowledge("/legion/v1/claims/activity", input),
     releaseRecords: (input) =>

@@ -353,7 +353,9 @@ test.skipIf(omp === undefined && !onActions)(
     // issue's record before it was sent, and the handoff_complete read it again, read the newest
     // implement record from the pane's Dispatch and the pushed tip of legion/STALL-2@origin from
     // the pane's jj, minted a grant in-process and posted the completion with them: no grant file,
-    // no `legion` command, and no handoff file.
+    // no `legion` command, and no handoff file. The list is closed: the pane's three model
+    // requests settle one turn, and a settled turn of a claim's session calls no daemon route
+    // of its own beyond the activity report this list leaves out.
     expect(daemonRoutes(pane)).toEqual([
       "/legion/v1/claims/register",
       "/legion/v1/claims/ready",
@@ -361,12 +363,6 @@ test.skipIf(omp === undefined && !onActions)(
       "/legion/v1/state",
       "/legion/v1/grants",
       "/legion/v1/handoff/complete",
-      // The turn-outcome report (`src/turn-outcome.ts`): every turn a claim's session settles is
-      // reported to the daemon, under a sequence the plugin counts itself. The pane's three
-      // model requests are one settled turn — the reminder steered the first turn's end into a
-      // continuation, and the `legion` tool call carried the second on — and a turn the host
-      // carries on reports nothing and takes no number, so this run makes one report.
-      "/legion/v1/claims/turn-outcome",
     ]);
     expect(pane.pushedTip).toMatch(/^[0-9a-f]{40}$/);
     expect(
@@ -500,12 +496,11 @@ test.skipIf(omp === undefined && !onActions)(
     // only once it was over.
     expect(reminderTurn - waitingTurn).toBeGreaterThanOrEqual(waitedAtLeastMs);
     // Nothing arrived from outside in between: in that gap the pane spoke only to the daemon,
-    // for the reminder's own record check, for the outcome of the turn that had just ended and
-    // for the activity report that settle sends, and to the listener for its session
-    // registration. The stand-in also serves as Dispatch, which holds the handoff record, so the
-    // session reads its people's answers before every model request (pi-envoy's answers line),
-    // the reminder's included. That read belongs to the reminder's turn, so it comes only once
-    // the wait is over.
+    // for the reminder's own record check and for the activity report that settle sends, and to
+    // the listener for its session registration. The stand-in also serves as Dispatch, which
+    // holds the handoff record, so the session reads its people's answers before every model
+    // request (pi-envoy's answers line), the reminder's included. That read belongs to the
+    // reminder's turn, so it comes only once the wait is over.
     const between = seen.filter((request) => request.at > waitingTurn && request.at < reminderTurn);
     const answersRead = /^\/api\/v1\/agents\/[^/]+\/answers$/;
     for (const request of between.filter(({ path }) => answersRead.test(path))) {
@@ -517,11 +512,6 @@ test.skipIf(omp === undefined && !onActions)(
         .filter(
           (path) =>
             path !== "/legion/v1/state" &&
-            // The turn-outcome report (`src/turn-outcome.ts`): every settled turn of a session
-            // holding a claim is reported to the daemon, this one included, so one lands as
-            // soon as the WAITING turn ends. It is the pane's own call, not something that
-            // arrived from outside, and it starts no turn.
-            path !== "/legion/v1/claims/turn-outcome" &&
             path !== ACTIVITY_ROUTE &&
             path !== "/v1/interests/subscribe" &&
             !answersRead.test(path)
