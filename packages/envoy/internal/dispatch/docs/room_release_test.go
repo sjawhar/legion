@@ -35,10 +35,7 @@ import (
 func TestDocumentsOpenAfterMoreThanTheRoomCapWereTouched(t *testing.T) {
 	t.Parallel()
 	service, database := newRoomReleaseService(t)
-	// A tenth of the cap written and a tenth read, and the cap itself opened in the editor: more
-	// documents touched than the cap admits live, which is what the test is about, with each
-	// batch and the rooms the API left well inside it, as at production's thousand.
-	written, read, opened := service.maxLiveRooms/10, service.maxLiveRooms/10, service.maxLiveRooms
+	const written, read, opened = 100, 100, maxLiveRooms
 	ids := createDocuments(t, database, written+read+opened+1)
 	writtenIDs, readIDs, openedIDs := ids[:written], ids[written:written+read], ids[written+read:len(ids)-1]
 	untouched := ids[len(ids)-1]
@@ -53,7 +50,7 @@ func TestDocumentsOpenAfterMoreThanTheRoomCapWereTouched(t *testing.T) {
 			t.Fatalf("read document %s: %v", id, err)
 		}
 	}
-	for batch := range slices.Chunk(openedIDs, service.maxLiveRooms/5) {
+	for batch := range slices.Chunk(openedIDs, 200) {
 		openInEditor(t, service, httpServer.URL, batch)
 		waitFor(t, 30*time.Second, "the rooms the editor opened to go idle", func() bool {
 			return len(service.srv.Rooms()) <= written
@@ -76,7 +73,7 @@ func TestDocumentsOpenAfterMoreThanTheRoomCapWereTouched(t *testing.T) {
 func TestRoomsTheAPIOpenedReleaseTheCapOnceIdle(t *testing.T) {
 	t.Parallel()
 	service, database := newRoomReleaseService(t)
-	ids := createDocuments(t, database, service.maxLiveRooms+5)
+	ids := createDocuments(t, database, maxLiveRooms+51)
 	touched, untouched := ids[:len(ids)-1], ids[len(ids)-1]
 	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 	t.Cleanup(httpServer.Close)
@@ -214,10 +211,7 @@ func newRoomReleaseService(t *testing.T) (*Service, *store.Store) {
 	})
 	// ygo's idle sweeper reads it when the first room starts it, so it is set before any room.
 	service.srv.RoomIdleTimeout = time.Second
-	// A cap of fifty rather than production's thousand: the tests here touch more documents than
-	// the cap and watch the rooms go, and what they check is the cap's rule, not its size, so
-	// fifty costs them a twentieth of the rooms to open, write and wait out.
-	service.maxLiveRooms = 50
+	// Production's cap: what these tests touch is more documents than it admits live.
 	t.Cleanup(func() {
 		if err := service.Shutdown(context.Background()); err != nil {
 			t.Errorf("shutdown document service: %v", err)

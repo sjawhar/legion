@@ -137,31 +137,11 @@ type Service struct {
 	// slog.SetDefault is the whole process's and two tests capturing it at once read each
 	// other's.
 	logger *slog.Logger
-	// maxLiveRooms is how many live rooms a document socket may find before it is refused a room
-	// of its own (canOpenRoom). New sets it to the maxLiveRooms constant, whose comment states
-	// the rule; a test that fills the cap sets a small one, so it opens tens of rooms rather
-	// than the thousand production admits.
-	maxLiveRooms int
-	// shutdownDrainBudget is what Shutdown spends waiting on document work (ShutdownDrainBudget,
-	// whose comment states the rule). New sets it to that constant; a test whose work outlasts
-	// the budget on purpose sets a short one rather than waiting out nine seconds of it.
-	shutdownDrainBudget time.Duration
 	// coldReadTimeout bounds a cold read's fold of the stored history (coldReadTimeout, whose
 	// comment states the rule). New sets it to that constant; the test of the timeout sets a
 	// short one, which is why it is a field and not read from the constant: a package variable
 	// one test swaps is a test no other test of the package may run beside.
 	coldReadTimeout time.Duration
-	// editNoticeSweep is the pace of the edit-notice sweep RunEditNotices runs
-	// (editNoticeSweepSchedule, whose comment states the rule), and referenceExcerptSweep the
-	// pace of the reference-excerpt reconciliation RunReferenceExcerptReconciliation runs
-	// (referenceExcerptSchedule). New sets each to its schedule; a test of what a loop does
-	// between its passes sets a short gap.
-	editNoticeSweep       editNoticeSchedule
-	referenceExcerptSweep excerptSchedule
-	// staleRoomEvictInterval is the least time between two evictions of one room
-	// (staleRoomEvictInterval, whose comment states the rule). New sets it to that constant; a
-	// test that drives the evictor on a clock of its own sets a short one.
-	staleRoomEvictInterval time.Duration
 	// taskProgressBootRetryFirst is how long RunTaskProgressReconciliation waits after its boot
 	// pass before the first retry (taskProgressBootRetryFirst, whose comment states the rule),
 	// and taskProgressRetryBackoff the step one pass's own backoff is a multiple of
@@ -710,12 +690,7 @@ func New(deps Deps) *Service {
 		reads:             newDocumentReads(documentReadBudget),
 		maxPendingItems:   maxUpdateItems,
 
-		maxLiveRooms:           maxLiveRooms,
-		shutdownDrainBudget:    ShutdownDrainBudget,
-		coldReadTimeout:        coldReadTimeout,
-		editNoticeSweep:        editNoticeSweepSchedule,
-		referenceExcerptSweep:  referenceExcerptSchedule,
-		staleRoomEvictInterval: staleRoomEvictInterval,
+		coldReadTimeout: coldReadTimeout,
 
 		taskProgressBootRetryFirst: taskProgressBootRetryFirst,
 		taskProgressRetryBackoff:   taskProgressRetryBackoffStep,
@@ -824,7 +799,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		return true
 	})
 	s.stopAllSettleTimers()
-	drainCtx, cancelDrain := context.WithTimeout(ctx, s.shutdownDrainBudget)
+	drainCtx, cancelDrain := context.WithTimeout(ctx, ShutdownDrainBudget)
 	defer cancelDrain()
 	rooms := make([]string, 0, len(loaded))
 	for _, room := range loaded {

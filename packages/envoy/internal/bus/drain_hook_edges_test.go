@@ -136,7 +136,7 @@ func TestADrainHookLosingTheConnectionWarns(t *testing.T) {
 // A delivery that finishes just before the drain's deadline leaves the hooks their share of it:
 // the delivery subscriptions drain within all but the drain's last 3 s, or its last 30% when that
 // is less, so the hooks and the connection's drain always keep it, however long a delivery takes.
-// Of the 300 ms that share is of a 1 s drain, the test asks for half, which leaves the scheduler
+// Of the 600 ms that share is of a 2 s drain, the test asks for half, which leaves the scheduler
 // the other half.
 func TestASlowDeliveryLeavesTheDrainHooksTheirShare(t *testing.T) {
 	_, uri := testnats.Start(t)
@@ -162,11 +162,11 @@ func TestASlowDeliveryLeavesTheDrainHooksTheirShare(t *testing.T) {
 		deadline, _ := ctx.Deadline()
 		left <- time.Until(deadline)
 	})
-	_ = client.Drain(time.Second)
+	_ = client.Drain(2 * time.Second)
 	select {
 	case remaining := <-left:
-		if remaining < 150*time.Millisecond {
-			t.Fatalf("the drain hooks ran with %s of the drain's 1s left, want at least 150ms of the 300ms share they keep", remaining)
+		if remaining < 300*time.Millisecond {
+			t.Fatalf("the drain hooks ran with %s of the drain's 2s left, want at least 300ms of the 600ms share they keep", remaining)
 		}
 	default:
 		t.Fatal("the drain never ran its hooks")
@@ -175,15 +175,10 @@ func TestASlowDeliveryLeavesTheDrainHooksTheirShare(t *testing.T) {
 
 // The listener drains for 13 s, and its deliveries keep the 10 s they had before the drain hooks:
 // a delivery that takes 9.5 s finishes, the drain reports no error, and the hooks still have their
-// 3 s once it has (bus's defaultDrainHookReserve). The same division runs here on a drain of two
-// seconds, which the client's reserve is set a quarter of: the deliveries keep 1.5 s of it, the
-// delivery takes 1 s, and the hooks run with the reserve and the half second the delivery left.
-// The delivery's half-second margin inside its share is the one the 9.5 s delivery had of its
-// 10 s, so a loaded machine is no likelier to miss it here.
+// 3 s once it has (bus's drainHookReserve).
 func TestADeliveryKeepsTenSecondsOfTheListenersDrain(t *testing.T) {
-	const reserve = 500 * time.Millisecond
 	_, uri := testnats.Start(t)
-	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1), bus.WithDrainHookReserve(reserve))
+	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -192,7 +187,7 @@ func TestADeliveryKeepsTenSecondsOfTheListenersDrain(t *testing.T) {
 	var delivered atomic.Bool
 	if _, err := client.SubscribeCore("notifications.role.drain-window", func(*natsgo.Msg) {
 		close(started)
-		time.Sleep(time.Second)
+		time.Sleep(9500 * time.Millisecond)
 		delivered.Store(true)
 	}, "drain-window"); err != nil {
 		t.Fatalf("subscribe the role lane: %v", err)
@@ -214,13 +209,13 @@ func TestADeliveryKeepsTenSecondsOfTheListenersDrain(t *testing.T) {
 		deadline, _ := ctx.Deadline()
 		ran <- observed{delivered: delivered.Load(), left: time.Until(deadline)}
 	})
-	if err := client.Drain(4 * reserve); err != nil {
-		t.Fatalf("a 2 s drain of a 1 s delivery returned %v, want none", err)
+	if err := client.Drain(13 * time.Second); err != nil {
+		t.Fatalf("a 13 s drain of a 9.5 s delivery returned %v, want none", err)
 	}
 	select {
 	case run := <-ran:
-		if !run.delivered || run.left < 400*time.Millisecond {
-			t.Fatalf("the hooks ran with the delivery finished %v and %s of the drain left, want it finished and about a second left", run.delivered, run.left)
+		if !run.delivered || run.left < 2500*time.Millisecond {
+			t.Fatalf("the hooks ran with the delivery finished %v and %s of the drain left, want it finished and about 3.5s left", run.delivered, run.left)
 		}
 	default:
 		t.Fatal("the drain never ran its hooks")
@@ -229,14 +224,12 @@ func TestADeliveryKeepsTenSecondsOfTheListenersDrain(t *testing.T) {
 
 // A delivery that outlasts the drain's share for deliveries still lets the hooks end the KV
 // watchers, within what is left of the deadline, before the connection closes: closing it with
-// the watchers still subscribed would leave their consumers for the server to time out. The
-// client's reserve is a tenth of the deployed one, so the drain divides a second rather than ten.
+// the watchers still subscribed would leave their consumers for the server to time out.
 func TestAStuckDeliveryStillEndsTheKVWatchers(t *testing.T) {
-	const reserve = 300 * time.Millisecond
 	_, uri := testnats.Start(t)
 	logs := captureBusLogs(t)
 	name := t.Name()
-	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1), bus.WithName(name), bus.WithDrainHookReserve(reserve))
+	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1), bus.WithName(name))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -257,12 +250,12 @@ func TestAStuckDeliveryStillEndsTheKVWatchers(t *testing.T) {
 	}
 	watcher.Stop()
 	began := time.Now()
-	err = client.Drain(time.Second)
+	err = client.Drain(3 * time.Second)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("drain error = %v, want deadline exceeded", err)
 	}
-	if elapsed := time.Since(began); elapsed > 3*time.Second {
-		t.Fatalf("Drain returned after %s, want about its 1s deadline", elapsed)
+	if elapsed := time.Since(began); elapsed > 5*time.Second {
+		t.Fatalf("Drain returned after %s, want about its 3s deadline", elapsed)
 	}
 	if got := consumers(); len(got) != 0 {
 		t.Fatalf("consumers right after a drain a stuck delivery held = %v, want none", got)

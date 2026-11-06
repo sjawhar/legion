@@ -1003,10 +1003,9 @@ func holdLock(t *testing.T, store *Store, table, mode string) uint32 {
 	return holder.PgConn().PID()
 }
 
-// longHold is the transaction age the census tests refuse a lock holder at. A bound of its own
-// rather than production's minute (pgmigrate.CensusLongTransaction): the holder is there to be
-// refused, and how long it has held is what the test waits for, not what it checks.
-const longHold = 100 * time.Millisecond
+// longHold is the transaction age the census tests refuse a lock holder at: the second these
+// rows ran on, rather than production's minute (pgmigrate.CensusLongTransaction).
+const longHold = time.Second
 
 // awaitTransactionOlderThan waits until session pid's open transaction reads at least age old on
 // the database's own clock, the state the census refuses a lock holder for. Waiting for that

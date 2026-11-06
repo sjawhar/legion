@@ -192,23 +192,9 @@ func hubOn(t *testing.T, handler http.Handler, database *store.Store, deps Deps,
 // these tests prove a frame is not owed without resting on a span of time.
 func (r *hubRig) nothingMore(t *testing.T, conn *fakeLiveConn, after string) {
 	t.Helper()
-	r.waitNoRecompute(t, 2*r.hub.quiet)
+	r.waitNoRecompute(t, 2*viewQuiet)
 	conn.none(t, 0, after)
 }
-
-// hubQuiet, hubMaxWait and hubRetry are the view timings every rig here runs on, in place of
-// viewQuiet's 250 ms, viewMaxWait's two seconds and deliveryLiveRetry's five. A hub test's cost
-// is one quiet window for every recompute it waits for, and what each of these tests is about is
-// which views a change recomputes and what each one sends, never how long the window is; the
-// test of the coalescing itself runs on a clock that stands still and waits out no window either
-// (TestABurstCoalescesIntoOneRecompute). Their ratio is production's, and hubQuiet still holds
-// together the marks one write leaves, its delivery change and its event, which land a horizon
-// observation apart (dispatch://INFRA-1075).
-const (
-	hubQuiet   = 50 * time.Millisecond
-	hubMaxWait = 400 * time.Millisecond
-	hubRetry   = 100 * time.Millisecond
-)
 
 // idleHubOn is a hub on an existing test server that nothing has started: the first Subscribe
 // starts it, as it does a Dispatch task's.
@@ -217,7 +203,6 @@ func idleHubOn(t *testing.T, handler http.Handler, database *store.Store, deps D
 	rig := &hubRig{handler: handler, database: database, deps: deps, clock: clock}
 	lifetime, cancel := context.WithCancel(context.Background())
 	rig.hub = newDeliveryHub(directServer(deps), lifetime, clock)
-	rig.hub.quiet, rig.hub.maxWait, rig.hub.retry = hubQuiet, hubMaxWait, hubRetry
 	rig.hub.observe = func(note deliveryHubNote) {
 		rig.mu.Lock()
 		rig.notes = append(rig.notes, note)
@@ -842,7 +827,7 @@ func TestAReconnectCatchesUpWhatTheListenerMissed(t *testing.T) {
 	blind.Store(true)
 	terminateListener(t, rig.database)
 	upsertPR(t, rig.database, hubPR(1, rig.clock.Now().Add(-time.Hour)))
-	conn.none(t, rig.hub.maxWait+300*time.Millisecond, "a merge the listener could not hear")
+	conn.none(t, viewMaxWait+300*time.Millisecond, "a merge the listener could not hear")
 	blind.Store(false)
 	rig.waitFor(t, start, eventFeedWait, "the listener's reconnection", func(note deliveryHubNote) bool { return note.what == "connected" })
 	delta := conn.delta(t, eventFeedWait, "t")
@@ -1262,7 +1247,7 @@ func (r *hubRig) settle(t *testing.T) {
 		}
 	}
 	r.waitForEventCursor(t, eventHead(t, r.database), "the log's head before the measurement")
-	r.waitNoRecompute(t, 2*r.hub.quiet)
+	r.waitNoRecompute(t, 2*viewQuiet)
 }
 
 // A delta an event brings waits eventFeedWait rather than a few seconds: the hub reads events only
@@ -1644,8 +1629,8 @@ func TestAPresetViewSendsItsOldestPullRequestLeavingWithoutAReadingTheDatabase(t
 	// the two seconds the oldest pull request has left runs that recompute before the measurement,
 	// and its delta, if any, is applied to the page's copy here.
 	held := snapshot.Body
-	clock.Advance(2 * rig.hub.quiet)
-	rig.waitNoRecompute(t, 2*rig.hub.quiet)
+	clock.Advance(2 * viewQuiet)
+	rig.waitNoRecompute(t, 2*viewQuiet)
 	for drained := false; !drained; {
 		select {
 		case frame := <-conn.frames:
@@ -2175,12 +2160,12 @@ func TestABurstCoalescesIntoOneRecompute(t *testing.T) {
 		upsertPR(t, rig.database, hubPR(n, now.Add(-time.Duration(n)*time.Minute)))
 	}
 	rig.hub.catchUpNow()
-	conn.none(t, 2*rig.hub.quiet, "a burst the clock has not moved past")
+	conn.none(t, 2*viewQuiet, "a burst the clock has not moved past")
 	if n := rig.count(start, recomputeBegin(deliveryCauseChange)); n != 0 {
 		t.Fatalf("recomputes before the burst's quiet passed = %d, want 0", n)
 	}
 
-	clock.Advance(rig.hub.quiet)
+	clock.Advance(viewQuiet)
 	delta := conn.delta(t, eventFeedWait, "p")
 	if got := len(liveUpsertIDs(t, delta, "prs")); got != 50 {
 		t.Fatalf("the burst's delta upserts %d pull requests, want all 50", got)
@@ -2258,7 +2243,7 @@ func TestAChangeOutsideAWindowRecomputesNothing(t *testing.T) {
 	start := rig.mark()
 	upsertPR(t, rig.database, hubPR(1, rig.clock.Now()))
 	rig.hub.catchUpNow()
-	conn.none(t, rig.hub.maxWait, "a merge outside the view's window")
+	conn.none(t, viewMaxWait, "a merge outside the view's window")
 	if n := rig.count(start, recomputeBegin("")); n != 0 {
 		t.Fatalf("recomputes for a merge outside the window = %d, want 0", n)
 	}

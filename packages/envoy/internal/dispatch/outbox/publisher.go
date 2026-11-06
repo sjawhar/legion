@@ -96,19 +96,12 @@ type Deps struct {
 	// registry, so a denied or refused destination shows on /metrics rather than only in the
 	// log.
 	PublishFailures *metrics.Counter
-	// Timings are the waits this outbox makes, each zero field production's (Timings).
-	// cmd/dispatch sets none of them; this package's tests shorten the ones their case would
-	// otherwise wait out.
-	Timings Timings
 	// lanes is what the batches of one scan share: the owners they hold in flight, the outbox
 	// pool's one statement at a time, and the wake a released owner gives the scan (Outbox.scan).
 	// A batch run with none - one by itself, as this package's tests run it - holds no owner,
 	// leaves none out of its read and takes no lock.
 	lanes *lanes
 }
-
-// timings are this Deps's waits with production's value in place of every zero one.
-func (d Deps) timings() Timings { return d.Timings.defaults() }
 
 // countPublishFailure counts one destination of a publish attempt that did not reach it, under
 // reason: "denied" for a send the server refused under this connection's own publish permissions,
@@ -262,7 +255,7 @@ func publishBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID, 
 			if !event.due {
 				continue
 			}
-			event.outcome = settleEvent(deps.timings(), event, releaseUnacknowledged)
+			event.outcome = settleEvent(event, releaseUnacknowledged)
 			outcomes = append(outcomes, event.outcome)
 			switch event.outcome.state {
 			case published:
@@ -285,7 +278,7 @@ func publishBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID, 
 		}
 		// Written even when ctx has ended: a process stopping mid-batch records what NATS already
 		// accepted and releases the rest.
-		record, cancel := context.WithTimeout(context.WithoutCancel(ctx), deps.timings().RecordTimeout)
+		record, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 		defer cancel()
 		holds, err := recordBatch(record, deps, outcomes, holder)
 		done.holds = holds
@@ -358,7 +351,7 @@ func publishBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID, 
 		if connectionReplaced(changed) && deps.Publisher.Connected() {
 			slog.Info("dispatch outbox: the batch's connection was replaced, so the sends it failed are released for the resend on the new one")
 			releaseUnacknowledged = true
-		} else if err := window.Probe(deps.timings().ProbeTimeout); err != nil {
+		} else if err := window.Probe(probeTimeout); err != nil {
 			slog.Error("dispatch outbox: the batch's sends failed and its connection does not answer", "error", err)
 			result.natsLost = true
 			releaseUnacknowledged = true
@@ -484,10 +477,10 @@ type outcome struct {
 // A held-back copy so blocks the event only when no send of it failed or was lost: a denied or
 // failed send backs the event off with its attempt counted, and a lost one releases it, as they
 // would without the mention.
-func settleEvent(timings Timings, event *batchEvent, releaseUnacknowledged bool) outcome {
+func settleEvent(event *batchEvent, releaseUnacknowledged bool) outcome {
 	result := outcome{id: event.event.ID}
 	if event.failure != nil {
-		return backOff(timings, result, event.pendingEvent, event.failureLog, event.failure)
+		return backOff(result, event.pendingEvent, event.failureLog, event.failure)
 	}
 	var failures []error
 	if event.resolveErr != nil {
@@ -517,7 +510,7 @@ func settleEvent(timings Timings, event *batchEvent, releaseUnacknowledged bool)
 		result.state = released
 		return result
 	case len(failures) > 0:
-		return backOff(timings, result, event.pendingEvent, "dispatch outbox: publish event", errors.Join(failures...))
+		return backOff(result, event.pendingEvent, "dispatch outbox: publish event", errors.Join(failures...))
 	case len(blockers) > 0 || event.mentionPending:
 		if len(blockers) > 0 {
 			result = holdBack(result, blockers)
@@ -525,8 +518,8 @@ func settleEvent(timings Timings, event *batchEvent, releaseUnacknowledged bool)
 			slog.Debug("dispatch outbox: event waits on a mention's delivery", "event_id", event.event.ID)
 			result.state = blocked
 		}
-		if event.mentionPending && result.state == blocked && (result.delay == nil || timings.MentionPendingDelay < *result.delay) {
-			result.delay = new(timings.MentionPendingDelay)
+		if event.mentionPending && result.state == blocked && (result.delay == nil || mentionPendingDelay < *result.delay) {
+			result.delay = new(mentionPendingDelay)
 		}
 		return result
 	}
@@ -534,16 +527,16 @@ func settleEvent(timings Timings, event *batchEvent, releaseUnacknowledged bool)
 	return result
 }
 
-// backOff reports item's failure under what and returns result backed off by timings.Backoff of
-// the attempt it now counts, which the record adds to the database's clock.
-func backOff(timings Timings, result outcome, item pendingEvent, what string, cause error) outcome {
+// backOff reports item's failure under what and returns result backed off by retry.Delay of the
+// attempt it now counts, which the record adds to the database's clock.
+func backOff(result outcome, item pendingEvent, what string, cause error) outcome {
 	slog.Error(what, "event_id", item.event.ID, "error", cause)
 	result.state = backedOff
 	result.attempts = item.attempts + 1
 	if result.attempts == retry.DeadLetterAttempts {
 		slog.Error("dispatch outbox: event reached dead-letter threshold", "event_id", item.event.ID, "attempts", result.attempts)
 	}
-	result.delay = new(timings.Backoff(result.attempts))
+	result.delay = new(retry.Delay(result.attempts))
 	result.failure = cause.Error()
 	return result
 }

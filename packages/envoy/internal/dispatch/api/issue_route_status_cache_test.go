@@ -275,52 +275,49 @@ func timedRosterServer(t *testing.T, delay time.Duration, hang bool, lifetime co
 }
 
 // An answer's TTL counts from the moment its call was sent, so a slow listener cannot stretch the
-// age of the answers a read is served past the TTL. A 300 ms fetch with a 450 ms TTL expires
-// 450 ms after it was sent: a read 650 ms in asks again, where a TTL counted from the answer
-// would serve it until 750 ms. The three are the seconds this test used to run on, at a third of
-// their scale; the read can only be late, and a late read asks again under either rule, so what
-// a loaded machine costs this test is the distinction, never a pass it should not have.
+// age of the answers a read is served past the TTL. A 1 s fetch with a 1.5 s TTL expires 1.5 s
+// after it was sent: a read 2.2 s in asks again, where a TTL counted from the answer would serve
+// it until 2.5 s.
 func TestAnAnswersTTLCountsFromWhenItsCallWasSent(t *testing.T) {
 	// No t.Parallel: this test measures the process. It bounds how long the cached answer
-	// outlives the call that fetched it, against a TTL of 450 ms, and another test's work on
+	// outlives the call that fetched it, against a TTL of 1.5 s, and another test's work on
 	// the same core would read as the cache holding it longer.
-	served, calls := timedRosterServer(t, 300*time.Millisecond, false, nil)
-	served.rosters.ttl, served.rosters.silenceTTL, served.rosters.timeout = 450*time.Millisecond, time.Minute, time.Minute
+	served, calls := timedRosterServer(t, time.Second, false, nil)
+	served.rosters.ttl, served.rosters.silenceTTL, served.rosters.timeout = 1500*time.Millisecond, time.Minute, time.Minute
 	started := time.Now()
 	if !readRoster(t, served, context.Background()).answered {
 		t.Fatal("the first read did not answer")
 	}
-	time.Sleep(time.Until(started.Add(650 * time.Millisecond)))
+	time.Sleep(time.Until(started.Add(2200 * time.Millisecond)))
 	_ = readRoster(t, served, context.Background())
 	if got := calls.Load(); got != 2 {
-		t.Fatalf("a read 650 ms after a 300 ms fetch with a 450 ms TTL made %d listener calls in all, want 2: the TTL must count from when the call was sent", got)
+		t.Fatalf("a read 2.2 s after a 1 s fetch with a 1.5 s TTL made %d listener calls in all, want 2: the TTL must count from when the call was sent", got)
 	}
 }
 
 // A failure's window counts from the moment the failure is known, so a listener that hangs is left
-// alone for the whole window after its call times out. A call bound at 400 ms with a 600 ms window
-// leaves the listener alone until 1 s: a read 800 ms in asks nothing, where a window counted from
-// the send would have ended at 600 ms. A read later than 1 s would ask again and fail this test,
-// so the 200 ms on either side of it is the margin a loaded machine has.
+// alone for the whole window after its call times out. A call bound at 1 s with a 1.5 s window
+// leaves the listener alone until 2.5 s: a read 2 s in asks nothing, where a window counted from
+// the send would have ended at 1.5 s.
 func TestAFailuresWindowCountsFromWhenTheFailureIsKnown(t *testing.T) {
 	// No t.Parallel: this test measures the process. It bounds when the failure window starts
-	// from, against a silence TTL of 600 ms, and another test's work on the same core would
+	// from, against a silence TTL of 1.5 s, and another test's work on the same core would
 	// read as the window running long.
 	served, calls := timedRosterServer(t, 0, true, nil)
-	served.rosters.ttl, served.rosters.silenceTTL, served.rosters.timeout = time.Minute, 600*time.Millisecond, 400*time.Millisecond
+	served.rosters.ttl, served.rosters.silenceTTL, served.rosters.timeout = time.Minute, 1500*time.Millisecond, time.Second
 	started := time.Now()
 	if readRoster(t, served, context.Background()).answered {
 		t.Fatal("a listener that hangs answered")
 	}
-	time.Sleep(time.Until(started.Add(800 * time.Millisecond)))
+	time.Sleep(time.Until(started.Add(2000 * time.Millisecond)))
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	// The read may end before its read of the stored answer does; only the calls it made count.
 	_, _ = served.readRouteRoster(ctx)
 	// Long enough for a call a read started to reach the listener.
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(300 * time.Millisecond)
 	if got := calls.Load(); got != 1 {
-		t.Fatalf("a read 400 ms into a 600 ms window that began when a 400 ms call timed out made %d listener calls in all, want 1", got)
+		t.Fatalf("a read 1 s into a 1.5 s window that began when a 1 s call timed out made %d listener calls in all, want 1", got)
 	}
 }
 

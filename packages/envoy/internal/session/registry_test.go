@@ -160,9 +160,7 @@ func TestSessionRegistry_GetNotFound(t *testing.T) {
 }
 
 func TestSessionRegistry_TTLExpiry(t *testing.T) {
-	// A liveness window of its own, short because the test waits one out: the registry enforces
-	// the TTL itself, so nothing here depends on its length.
-	const ttl = 300 * time.Millisecond
+	const ttl = 2 * time.Second
 	client := setupNATS(t)
 	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(ttl))
 	if err != nil {
@@ -180,7 +178,7 @@ func TestSessionRegistry_TTLExpiry(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(500 * time.Millisecond)
 		if _, err := reg.Get("ses_expiry"); err != nil {
 			return
 		}
@@ -189,9 +187,9 @@ func TestSessionRegistry_TTLExpiry(t *testing.T) {
 }
 
 func TestSessionRegistry_PutRefreshesTTL(t *testing.T) {
-	// Each wait below is three quarters of the window, as 1.5 s was of the two seconds this
-	// test used: the refresh lands inside the first window and the entry outlives the second.
-	const ttl = time.Second
+	// Each wait below is three quarters of the window: the refresh lands inside the first
+	// window and the entry outlives the second.
+	const ttl = 2 * time.Second
 	client := setupNATS(t)
 	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(ttl))
 	if err != nil {
@@ -203,12 +201,12 @@ func TestSessionRegistry_PutRefreshesTTL(t *testing.T) {
 		t.Fatalf("put failed: %v", err)
 	}
 
-	time.Sleep(3 * ttl / 4)
+	time.Sleep(1500 * time.Millisecond)
 	if err := reg.Put("ses_refresh", entry); err != nil {
 		t.Fatalf("refresh put failed: %v", err)
 	}
 
-	time.Sleep(3 * ttl / 4)
+	time.Sleep(1500 * time.Millisecond)
 
 	if _, err := reg.Get("ses_refresh"); err != nil {
 		t.Fatalf("expected entry to still exist after TTL refresh, got: %v", err)

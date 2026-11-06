@@ -190,8 +190,7 @@ type excerptSchedule struct {
 
 // referenceExcerptSchedule is the server's pace: two seconds between passes, the step the timer
 // this loop replaced took while a batch was full, so under load the loop runs no more often than
-// that timer did; one minute before a failed document's first retry. It is the default of
-// Service.referenceExcerptSweep, which the loop reads, so a test runs one service's loop faster.
+// that timer did; one minute before a failed document's first retry.
 var referenceExcerptSchedule = excerptSchedule{minGap: 2 * time.Second, retryBase: time.Minute}
 
 // referenceExcerptLease names the lease one reconciliation pass runs under. The excerpts it
@@ -220,7 +219,7 @@ const referenceExcerptLease = "reference-excerpts"
 // marking per process is enough. A mention owed an excerpt is answered with the document's name
 // until this stores one.
 func (s *Service) RunReferenceExcerptReconciliation(ctx context.Context, leases duty.Leases, wake <-chan struct{}) {
-	s.runReferenceExcerptReconciliation(ctx, leases, wake, s.referenceExcerptSweep)
+	s.runReferenceExcerptReconciliation(ctx, leases, wake, referenceExcerptSchedule)
 }
 
 func (s *Service) runReferenceExcerptReconciliation(ctx context.Context, leases duty.Leases, wake <-chan struct{}, schedule excerptSchedule) {
@@ -290,7 +289,7 @@ func (s *Service) reconcileExcerptPass(ctx context.Context, schedule excerptSche
 // ReconcileReferenceExcerpts runs one batch of the reconciliation at the server's pace
 // (reconcileReferenceExcerpts).
 func (s *Service) ReconcileReferenceExcerpts(ctx context.Context) (documents int, full bool, err error) {
-	return s.reconcileReferenceExcerpts(ctx, s.referenceExcerptSweep.retryBase)
+	return s.reconcileReferenceExcerpts(ctx, referenceExcerptSchedule.retryBase)
 }
 
 // reconcileReferenceExcerpts reads each document of one batch of drift as the caller sees it

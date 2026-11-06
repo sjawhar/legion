@@ -49,22 +49,6 @@ func newRelayRigPausing(t *testing.T, first, max time.Duration) *relayRig {
 	return rig
 }
 
-// testRelayReceiptWait is the receipt wait of a rig whose test drives the pause: long enough
-// that a stand-in answering on loopback is never taken for unreachable on a loaded machine,
-// and a tenth of the production wait, which a test that must see the pause would otherwise
-// wait out twice. newRelayRigWaiting sets it before any relay starts.
-const testRelayReceiptWait = 300 * time.Millisecond
-
-// newRelayRigWaiting is newRelayRigPausing with the receipt wait bounded too, for a test of the
-// pause a session that stops answering causes.
-func newRelayRigWaiting(t *testing.T, receipt, first, max time.Duration) *relayRig {
-	t.Helper()
-	rig := newRelayRigUnowned(t, first, max)
-	rig.relays.receiptWait = receipt
-	rig.relays.setOwned(true)
-	return rig
-}
-
 // newRelayRigUnowned is newRelayRigPausing for a task that does not hold its machine's durable
 // binding yet: it relays nothing, and no relay starts, until the test calls
 // rig.relays.setOwned(true). A test that must run the durable path before any relay orders them
@@ -513,10 +497,10 @@ func TestRelayRunRetryWaitEndsOnAWake(t *testing.T) {
 // answering again takes once.
 func TestSessionConsumerUnreachableSessionPausesAndSendsAgainAfterItsBackoff(t *testing.T) {
 	// Shorter than the production bounds, long enough that the silent window below ends before the
-	// first probe: the relay sends again the receipt wait + pauseFirst after the frame it got no
+	// first probe: the relay sends again relayReceiptWait + pauseFirst after the frame it got no
 	// answer for.
-	const pauseFirst, pauseMax = 600 * time.Millisecond, 1200 * time.Millisecond
-	rig := newRelayRigWaiting(t, testRelayReceiptWait, pauseFirst, pauseMax)
+	const pauseFirst, pauseMax = 2 * time.Second, 4 * time.Second
+	rig := newRelayRigPausing(t, pauseFirst, pauseMax)
 	const sessionID = "ses_unreachable"
 	agent := contracts.AgentSubject(sessionID)
 	standIn := startSessionStandIn(t, rig.url, sessionID, answerDone)
@@ -528,14 +512,14 @@ func TestSessionConsumerUnreachableSessionPausesAndSendsAgainAfterItsBackoff(t *
 	e1, _ := rig.storeEvent(t, agent)
 	unanswered := standIn.collect(t, 1, 5*time.Second)[0]
 	requireFrames(t, []relayedFrame{unanswered}, e1)
-	// The relay stops a receipt wait after that frame: a message stored once it has reaches the
+	// The relay stops relayReceiptWait after that frame: a message stored once it has reaches the
 	// session only when the relay sends again, which is pauseFirst later.
-	time.Sleep(time.Until(unanswered.arrived.Add(testRelayReceiptWait + 300*time.Millisecond)))
+	time.Sleep(time.Until(unanswered.arrived.Add(relayReceiptWait + 300*time.Millisecond)))
 	e2, _ := rig.storeEvent(t, agent)
-	standIn.none(t, pauseFirst/2)
+	standIn.none(t, 900*time.Millisecond)
 
 	standIn.silent.Store(false)
-	requireFrames(t, standIn.collect(t, 2, testRelayReceiptWait+2*pauseFirst+2*time.Second), e1, e2)
+	requireFrames(t, standIn.collect(t, 2, relayReceiptWait+2*pauseFirst+2*time.Second), e1, e2)
 	standIn.none(t, time.Second)
 	if lines := strings.Count(rig.harness.logs.String(), "session relay paused: the session answered no frame"); lines != 1 {
 		t.Fatalf("the pause was logged %d times, want once for the episode:\n%s", lines, rig.harness.logs.String())
@@ -545,7 +529,7 @@ func TestSessionConsumerUnreachableSessionPausesAndSendsAgainAfterItsBackoff(t *
 // A registration resumes a paused relay at once, long before its backoff would send again.
 func TestSessionConsumerUnreachableSessionResumesAtOnceWhenItRegisters(t *testing.T) {
 	// A backoff no test waits out: only the registration can make the relay send again here.
-	rig := newRelayRigWaiting(t, testRelayReceiptWait, time.Minute, time.Minute)
+	rig := newRelayRigPausing(t, time.Minute, time.Minute)
 	const sessionID = "ses_unreachable_registers"
 	agent := contracts.AgentSubject(sessionID)
 	standIn := startSessionStandIn(t, rig.url, sessionID, answerDone)
@@ -557,9 +541,9 @@ func TestSessionConsumerUnreachableSessionResumesAtOnceWhenItRegisters(t *testin
 	e1, _ := rig.storeEvent(t, agent)
 	unanswered := standIn.collect(t, 1, 5*time.Second)[0]
 	requireFrames(t, []relayedFrame{unanswered}, e1)
-	time.Sleep(time.Until(unanswered.arrived.Add(testRelayReceiptWait + 300*time.Millisecond)))
+	time.Sleep(time.Until(unanswered.arrived.Add(relayReceiptWait + 500*time.Millisecond)))
 	e2, _ := rig.storeEvent(t, agent)
-	standIn.none(t, time.Second)
+	standIn.none(t, 1500*time.Millisecond)
 	if lines := strings.Count(rig.harness.logs.String(), "session relay paused: the session answered no frame"); lines != 1 {
 		t.Fatalf("the pause was logged %d times, want once for the episode:\n%s", lines, rig.harness.logs.String())
 	}

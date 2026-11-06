@@ -1134,18 +1134,17 @@ func TestHubFramesAreWrittenAheadOfAFullStreamQueue(t *testing.T) {
 	}
 }
 
-// A page that answers each ping keeps its socket, idle, across many heartbeats. The heartbeat is
-// the 200 ms the page that answers no ping runs on below: the pong deadline is two heartbeats, the
-// page's pong is written by its read goroutine, and these tests run one at a time in this
-// package's sequential phase, so nothing of the runner's load stands between a ping and its pong.
-// A page that answers no ping is the next test's.
+// A page that answers each ping keeps its socket, idle, across many heartbeats. The heartbeat is a
+// second, so the page's first pong has a heartbeat to arrive before the pong deadline, two
+// heartbeats after the socket opened, and a loaded runner that delays it most of a heartbeat still
+// meets it. A page that answers no ping, which a short heartbeat ends quickly, is the next test's.
 func TestPingsKeepAnIdleSocketOpen(t *testing.T) {
 	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
 	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
 	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
 	// lock on purpose out of the parallel set left five of these timing out on events_start;
 	// the whole family is out of it (dispatch://INFRA-1075).
-	const heartbeat = 200 * time.Millisecond
+	const heartbeat = time.Second
 	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: heartbeat}, nil)
 	answering := rig.open(t, gws.DefaultDialer, asUser("alice"))
 	pinged := make(chan struct{}, 64)

@@ -113,22 +113,6 @@ func (r *roleRig) deps() Deps {
 		KeptLanes: r.client}
 }
 
-// silentReceipt is the receipt timeout a test gives an outbox whose role holder never answers:
-// production's roleReceiptTimeout is five seconds of waiting such a test sits through, and what
-// those tests prove is what the outbox does once the wait is over, not how long it is. It is far
-// above the round trip a forward to an in-process holder takes - the holder must receive the
-// forward before the request gives up on it - and the test that holds roleReceiptTimeout itself
-// to five seconds is TestTheOutboxTakesProductionsTimings.
-const silentReceipt = 2 * time.Second
-
-// silentHolderDeps is deps with silentReceipt in place of production's receipt timeout, for a
-// test whose holder withholds its receipt.
-func (r *roleRig) silentHolderDeps() Deps {
-	deps := r.deps()
-	deps.Timings.RoleReceiptTimeout = silentReceipt
-	return deps
-}
-
 // claim makes holder role's holder, registered with entry, as a session plugin's registration
 // does (claimUnder), and fails the test when that did not come off.
 func (r *roleRig) claim(t *testing.T, role, holder string, entry session.SessionEntry) {
@@ -309,7 +293,7 @@ func TestARoleRouteIsForwardedToASelfSubscribedHolderAndPublishedOnItsReceipt(t 
 	rig.silent(t, contracts.RoleTopicPrefix+role)
 	recv := rig.receiver(t, holder, false)
 	event := rig.routedEvent(t, "T-1", role, model.Actor{Kind: "user", ID: "alice"})
-	outbox := holding(t, rig.silentHolderDeps())
+	outbox := holding(t, rig.deps())
 
 	t.Run("published only after the receipt", func(t *testing.T) {
 		// The holder takes the first forward and does not answer it.
@@ -633,7 +617,6 @@ func TestAForwardNoHolderAnsweredIsCountedUnanswered(t *testing.T) {
 	rig.silent(t, contracts.RoleTopicPrefix+role)
 	event := rig.routedEvent(t, "T-1", role, model.Actor{Kind: "user", ID: "alice"})
 	deps, registry := rig.countingDeps(t)
-	deps.Timings.RoleReceiptTimeout = silentReceipt
 
 	holding(t, deps).scan(context.Background(), unfenced{})
 

@@ -180,13 +180,6 @@ type deliveryHub struct {
 	dial                    func(ctx context.Context) (*pgx.Conn, error)
 	listenIdle, pingTimeout time.Duration
 	backoff                 func(attempt int) time.Duration
-	// quiet, maxWait and retry are the view timings newDeliveryHub takes from viewQuiet,
-	// viewMaxWait and deliveryLiveRetry. They are fields rather than the constants themselves so
-	// that a test can run its hub at a pace of its own and wait on the frames it drives rather
-	// than on production's: a hub test's cost is otherwise one quiet window per recompute
-	// (dispatch://INFRA-1075). Nothing in production sets them, so a served hub runs on the
-	// constants.
-	quiet, maxWait, retry time.Duration
 	// observe, when set, is told of each recompute and catch-up; tests set it.
 	observe func(deliveryHubNote)
 
@@ -401,7 +394,6 @@ var deliveryReconciledSources = []string{"prs", "runs", "ci"}
 func newDeliveryHub(s *server, lifetime context.Context, clock hubClock) *deliveryHub {
 	return &deliveryHub{
 		server: s, clock: clock, lifetime: lifetime,
-		quiet: viewQuiet, maxWait: viewMaxWait, retry: deliveryLiveRetry,
 		dial: func(ctx context.Context) (*pgx.Conn, error) {
 			return s.deps.Store.Pool.Listener(ctx)
 		},

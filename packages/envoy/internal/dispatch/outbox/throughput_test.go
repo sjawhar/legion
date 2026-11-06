@@ -600,21 +600,13 @@ func runOutbox(t *testing.T, database *store.Store, client *bus.Client, broker *
 // production resolves them on the publisher's own.
 func runOutboxThrough(t *testing.T, database *store.Store, client *bus.Client, publisher Publisher, broker *events.Broker) func() {
 	t.Helper()
-	_, stop := runningOutbox(t, database, client, publisher, broker, Timings{})
-	return stop
-}
-
-// runOutboxTimed is runOutbox with timings in place of production's waits, for a test that would
-// otherwise sit one of them out. Every zero field of timings is still production's (Timings).
-func runOutboxTimed(t *testing.T, database *store.Store, client *bus.Client, broker *events.Broker, timings Timings) func() {
-	t.Helper()
-	_, stop := runningOutbox(t, database, client, client, broker, timings)
+	_, stop := runningOutbox(t, database, client, publisher, broker)
 	return stop
 }
 
 // runningOutbox is runOutboxThrough with the Outbox itself, for a test that reads its state - an
 // outbox that gave the publisher hold up is one that stopped publishing (Publishing).
-func runningOutbox(t *testing.T, database *store.Store, client *bus.Client, publisher Publisher, broker *events.Broker, timings Timings) (*Outbox, func()) {
+func runningOutbox(t *testing.T, database *store.Store, client *bus.Client, publisher Publisher, broker *events.Broker) (*Outbox, func()) {
 	t.Helper()
 	pool, err := database.Pool.Outbox()
 	if err != nil {
@@ -622,7 +614,7 @@ func runningOutbox(t *testing.T, database *store.Store, client *bus.Client, publ
 	}
 	holders := roles.NewBuckets(client)
 	outbox := New(Deps{Store: &store.Store{Pool: pool}, Publisher: publisher, Broker: broker, Listen: database.Pool.Listener,
-		RoleClaims: holders, Sessions: holders, Timings: timings})
+		RoleClaims: holders, Sessions: holders})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { outbox.Run(ctx); close(done) }()

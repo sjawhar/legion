@@ -14,7 +14,6 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
-	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -512,21 +511,11 @@ func TestABatchCutOffInFlightKeepsItsOrder(t *testing.T) {
 // once. The repeat adds nothing to the stream, which drops it inside its duplicate window by each
 // destination's MsgId.
 //
-// The publisher hold is this test's own, three seconds rather than production's six: the dead
-// holder's row lapses that long after it was written and the next holder waits it out, which is
-// time and not behaviour (publisherHoldOptions, held to production's values by
-// TestTheOutboxTakesProductionsTimings). The row below is written with the same TTL the next
-// holder reads, so the bound and the floor under it still hold: published no earlier than its
-// lapse, and inside it plus the backlog's own time.
+// The hold is production's: the dead holder's row lapses its TTL after it was written and the
+// next holder waits that out, which is what the floor below reads.
 func TestAnOutboxThatDiesBetweenAckAndMarkPublishesAgainWithoutDuplicates(t *testing.T) {
 	t.Parallel()
 	const issues, count = 2, 10
-	// The whole hold scales, not the TTL alone: a hold lasts TTL and reports itself lost Margin
-	// before it lapses, so a TTL cut to the margin would leave the next holder's own hold lost
-	// the moment it took it, and it would publish nothing (which is how this test failed with a
-	// 2 s TTL beside production's 2 s renewal and margin). Renewed every 500 ms and lost 1 s
-	// before it lapses, the holder has 2 s of slack for each renewal, as production's has.
-	lapsing := Timings{Hold: duty.HoldOptions{TTL: 3 * time.Second, Renew: 500 * time.Millisecond, Margin: time.Second}}
 	url := testnats.URL(t)
 	client, err := bus.ConnectOwningStream([]string{url})
 	if err != nil {
@@ -573,7 +562,7 @@ func TestAnOutboxThatDiesBetweenAckAndMarkPublishesAgainWithoutDuplicates(t *tes
 	dead := uuid.New()
 	if _, err := database.Pool.Exec(context.Background(), `
 		insert into duty_holds (name, holder, expires_at) values ($1, $2, now() + make_interval(secs => $3))
-	`, publisherHold, dead, lapsing.Hold.TTL.Seconds()); err != nil {
+	`, publisherHold, dead, publisherHoldOptions.TTL.Seconds()); err != nil {
 		t.Fatalf("leave the dead holder's row: %v", err)
 	}
 	died := time.Now()
@@ -581,17 +570,16 @@ func TestAnOutboxThatDiesBetweenAckAndMarkPublishesAgainWithoutDuplicates(t *tes
 	if _, err := database.Pool.Exec(context.Background(), `drop trigger refuse_mark on events`); err != nil {
 		t.Fatalf("let the mark succeed: %v", err)
 	}
-	stop = runOutboxTimed(t, database, client, broker, lapsing)
+	stop = runOutbox(t, database, client, broker)
 	defer stop()
 	// The lapse, and then the backlog's republish: that second part is the stream's work and has
-	// nothing to do with the TTL, so it keeps an allowance of its own. Twelve seconds in all - the
-	// TTL plus ten - was not enough beside eleven other tests on this pod's two cores, where the
-	// republish alone took past it (dispatch://INFRA-1075). The floor below is what proves the
-	// lapse was waited out; this bound only has to outlast the work.
-	waitFor(t, lapsing.Hold.TTL+30*time.Second, "the backlog marked published by the next holder", func() bool {
+	// nothing to do with the TTL, so it keeps an allowance of its own, raised past main's ten
+	// seconds because the republish alone ran past it beside eleven other tests on this pod's two
+	// cores (dispatch://INFRA-1075). The floor below is what proves the lapse was waited out.
+	waitFor(t, publisherHoldOptions.TTL+30*time.Second, "the backlog marked published by the next holder", func() bool {
 		return unpublishedCount(t, database) == 0
 	})
-	if took := time.Since(died); took < lapsing.Hold.TTL-time.Second {
+	if took := time.Since(died); took < publisherHoldOptions.TTL-time.Second {
 		t.Fatalf("the next holder published %s after the death, before the dead holder's hold lapsed", took.Round(time.Millisecond))
 	}
 	assertStreamInOrderPerDestination(t, url, wantOnDestinations)

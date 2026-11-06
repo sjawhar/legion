@@ -216,11 +216,9 @@ func TestACaptureNeverReusesARenderingTheForkHasMovedPast(t *testing.T) {
 
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	reused, stale := 0, 0
-	// One pass over the 160 offsets the delete is walked across below, rather than the four the
-	// round count used to make: every position in the window is still swept, and a position
-	// swept again samples the same interleave at four times the cost of a round, which on this
-	// document is a third of a second (dispatch://INFRA-1075).
-	const rounds = 160
+	// Four passes over the 160 offsets the delete is walked across below, so each position in
+	// the window is sampled four times.
+	const rounds = 640
 	for round := range rounds {
 		marker := fmt.Sprintf("DOOMED-%d under the browser's cursor", round)
 		// One read of the room does both the browser's append and the precompute of the

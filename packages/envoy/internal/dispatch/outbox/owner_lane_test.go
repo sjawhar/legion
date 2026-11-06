@@ -170,7 +170,7 @@ func TestAnEventCommittedWhileItsOwnerIsInFlightIsReadWhenThatOwnerIsBack(t *tes
 	backOffIn(t, rig.database, first.ID, attempts, time.Second)
 	backOffIn(t, rig.database, other.ID, attempts, time.Hour)
 
-	deps := rig.silentHolderDeps()
+	deps := rig.deps()
 	deps.Listen = rig.database.Pool.Listener
 	stop := runDeps(t, deps, 15*time.Second)
 	defer stop()
@@ -188,10 +188,8 @@ func TestAnEventCommittedWhileItsOwnerIsInFlightIsReadWhenThatOwnerIsBack(t *tes
 	second := rig.laterEvent(t, "T-1", alice)
 
 	// That batch waits out its own forward, so the second event's copy follows the later of the
-	// two receipt timeouts, both of which began at or before this commit. The timeout is this
-	// test's own (silentReceipt): its holder never answers, so what production's five seconds
-	// would add here is waiting, not proof.
-	within := silentReceipt + 3*time.Second
+	// two receipt timeouts, both of which began at or before this commit.
+	within := roleReceiptTimeout + 3*time.Second
 	deadline := time.After(within)
 	for {
 		select {

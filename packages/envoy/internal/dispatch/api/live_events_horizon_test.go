@@ -520,12 +520,7 @@ func TestTheRelaysFirstStartDoesNotReadTheWholeEventLogWhileAWriterFromBeforeBoo
 	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
 	// lock on purpose out of the parallel set left five of these timing out on events_start;
 	// the whole family is out of it (dispatch://INFRA-1075).
-	// 20,000, not 200,000: the start's cost must not grow with the log, and what it may read
-	// is a tenth of it, so the count has only to be large enough that a start reading every
-	// id from 0 overruns that tenth. Forcing firstRelayFloor to 0 in a scratch copy - the
-	// regression this guards - made this test read 20,015 rows against the 2,000 bound, so
-	// 20,000 still catches it, at a tenth of the rows to insert.
-	const logSize = 20_000
+	const logSize = 200_000
 	var release func()
 	// persistence runs on the test's database before register takes the boot mark: the writer's
 	// transaction id is older than the mark, as a write open across a restart's boot is.
@@ -711,19 +706,14 @@ func holdEventInsert(t *testing.T, database *store.Store) (id int64, release fun
 // one. Every event at or below the horizon the process before it proved is final, whichever process
 // proved it, so the start reads only above the horizon that process persisted (event_horizon),
 // not the whole log, and is still sent the open event and what committed while it waited, in id
-// order. Here the log holds 20,000 events and the start may read at most a tenth of them.
+// order. Here the log holds 200,000 events and the start may read at most a tenth of them.
 func TestTheRelaysFirstStartReadsAboveThePersistedHorizonWhileAnEventInsertFromBeforeBootIsOpen(t *testing.T) {
 	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
 	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
 	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
 	// lock on purpose out of the parallel set left five of these timing out on events_start;
 	// the whole family is out of it (dispatch://INFRA-1075).
-	// 20,000, not 200,000: the start's cost must not grow with the log, and what it may read
-	// is a tenth of it, so the count has only to be large enough that a start reading every
-	// id from 0 overruns that tenth. Forcing firstRelayFloor to 0 in a scratch copy - the
-	// regression this guards - made this test read 20,044 rows against the 2,000 bound, so
-	// 20,000 still catches it, at a tenth of the rows to insert.
-	const logSize = 20_000
+	const logSize = 200_000
 	first, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, first, "TEST", "Issue", "A spec")
 	if _, err := database.Pool.Exec(t.Context(), `

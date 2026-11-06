@@ -1562,7 +1562,7 @@ func TestRunMakesNoStatementOnceItsBootDrainAndPassAreDone(t *testing.T) {
 	if items != 2 || current != 2 {
 		t.Fatalf("coverage = %d items, %d current; want both items embedded once Run is idle", items, current)
 	}
-	storetest.RequireNoStatements(t, counter, time.Second, "Run with nothing pending and nothing changing")
+	storetest.RequireNoStatements(t, counter, 7*time.Second, "Run with nothing pending and nothing changing")
 }
 
 // A write's notification wakes the idle queue, through a real pglisten.Hub on WakeChannel: the

@@ -273,10 +273,7 @@ func TestAFirstScanTheIdleTimerEndedIsNotComplete(t *testing.T) {
 		}
 	}
 	into := newSeen()
-	// The rescan delay bounds the wait below: a watcher without WithRescan must still not have
-	// scanned again once a WithRescan one would have.
-	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: kvwatchtest.TimingOutFirst(kv, 1)}, into.apply, into.reset,
-		kvwatch.WithRescanDelay(testRescanDelay))
+	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: kvwatchtest.TimingOutFirst(kv, 1)}, into.apply, into.reset)
 	t.Cleanup(w.Stop)
 	w.Start()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -285,7 +282,7 @@ func TestAFirstScanTheIdleTimerEndedIsNotComplete(t *testing.T) {
 		t.Fatalf("WaitReady: %v", err)
 	}
 	// Longer than a WithRescan watcher waits before it scans again.
-	time.Sleep(3 * testRescanDelay)
+	time.Sleep(1500 * time.Millisecond)
 	if _, complete := w.Complete(); complete {
 		t.Fatal("a first scan the idle timer ended reads as complete")
 	}

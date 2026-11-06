@@ -178,7 +178,7 @@ const nextEditNoticeDue = `
 // The window is a row, not a timer, so a notice still pending when a process stops is sent by
 // the next sweep of any process: each process's boot sweep reads the earliest due time.
 func (s *Service) RunEditNotices(ctx context.Context, leases duty.Leases, wake <-chan struct{}) {
-	s.runEditNotices(ctx, leases, wake, s.editNoticeSweep)
+	s.runEditNotices(ctx, leases, wake, editNoticeSweepSchedule)
 }
 
 func (s *Service) runEditNotices(ctx context.Context, leases duty.Leases, wake <-chan struct{}, schedule editNoticeSchedule) {

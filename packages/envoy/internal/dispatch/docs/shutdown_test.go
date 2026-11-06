@@ -111,7 +111,7 @@ func TestShutdownJoinsTheSettlementItsLastBrowserLeavingStarted(t *testing.T) {
 	case err := <-shutdown:
 		t.Errorf("Shutdown returned (%v) while the settlement the browser's leaving started was still committing its stamp", err)
 		shutdown <- err
-	case <-time.After(service.shutdownDrainBudget + 2*time.Second/shutdownTestScale):
+	case <-time.After(ShutdownDrainBudget + 2*time.Second):
 	}
 	pause.let()
 	select {
@@ -167,7 +167,7 @@ func TestShutdownSettlesEveryOtherRoomWhileOneRoomsQueuedAppendIsHeld(t *testing
 	var shutdownErr error
 	select {
 	case shutdownErr = <-shutdown:
-	case <-time.After(service.shutdownDrainBudget + 5*time.Second):
+	case <-time.After(ShutdownDrainBudget + 5*time.Second):
 		t.Fatal("Shutdown did not return once its drain budget ended")
 	}
 	appends.let()
@@ -210,7 +210,6 @@ func TestShutdownSettlesABurstOfAppendsIncludingOneRecordedAfterItsScan(t *testi
 		second.let()
 	})
 	service := newShutdownTestService(t, database, appends)
-	service.shutdownDrainBudget = ShutdownDrainBudget * 2 / 3
 	seedServiceText(t, service, artifactID, "before")
 	settleCurrentGeneration(t, service, artifactID)
 	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
@@ -241,11 +240,9 @@ func TestShutdownSettlesABurstOfAppendsIncludingOneRecordedAfterItsScan(t *testi
 	waitFor(t, 10*time.Second, "both appends to be recorded as outstanding", func() bool {
 		return service.room(artifactID).durableAppends.Load() >= 2
 	})
-	// Both appends stay queued past the five ninths of the drain budget the pre-fix one was, and
-	// land inside the whole one this round widened it to, with the rest of the budget to spare.
-	// What is left of the budget has to cover two appends and the settlement after them, so this
-	// test runs on two thirds of production's budget rather than the third the others do.
-	time.Sleep(service.shutdownDrainBudget*5/9 + 200*time.Millisecond)
+	// Both appends stay queued past the pre-fix 5 s drain budget, and land with time to spare
+	// inside the 9 s per-room budget this round widened it to.
+	time.Sleep(7 * time.Second)
 	first.let()
 	select {
 	case <-second.entered:
@@ -301,15 +298,15 @@ func TestShutdownReturnsNilForARenderStillRunningPastItsDrainBudget(t *testing.T
 			return
 		}
 		once.Do(func() { close(entered) })
-		// Finish the scaled 3.4 s past the per-room drain budget - the measured overrun - with
-		// the rest of the reserve still to spare. A plain sleep, not a context wait: a render or
-		// commit already running does not stop the instant drainCtx's deadline passes.
-		time.Sleep(service.shutdownDrainBudget + 3400*time.Millisecond/shutdownTestScale)
+		// Finish 3.4 s past the per-room drain budget - the measured overrun - with 1.6 s of the
+		// reserve still to spare. A plain sleep, not a context wait: a render or commit already
+		// running does not stop the instant drainCtx's deadline passes either.
+		time.Sleep(ShutdownDrainBudget + 3400*time.Millisecond)
 	}
 
-	// The document service's own production deadline, on the same scaled clock: the drain budget
-	// plus the 5 s reserve cmd/dispatch/shutdown.go's documentShutdownTimeout adds past it.
-	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), service.shutdownDrainBudget+shutdownTestReserve)
+	// The document service's own production deadline: ShutdownDrainBudget plus the 5 s reserve
+	// cmd/dispatch/shutdown.go's documentShutdownTimeout now adds past it.
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), ShutdownDrainBudget+5*time.Second)
 	defer cancelShutdown()
 	shutdown := make(chan error, 1)
 	go func() { shutdown <- service.Shutdown(shutdownCtx) }()
@@ -379,23 +376,6 @@ func TestShutdownLeavesASettlementThatMustWriteIntoItsRoomToResume(t *testing.T)
 // newShutdownTestService is a document service whose settlements wait an hour, so a test's
 // Shutdown is the one that runs them, and whose browsers name their person in X-Dispatch-User.
 // appends, when set, stands in for the store's own document persistence.
-// The tests here run Shutdown's production shape on a third of its clock: the drain budget
-// (ShutdownDrainBudget) and each overrun measured against it shrink by the same factor, so every
-// relation they check holds - a render that overruns the budget by less than the reserve, a pair
-// of appends queued past the five ninths of the budget the pre-fix one was and landing inside the
-// whole of it - and the tests wait three seconds for what production waits nine for. The factor
-// is three rather than larger because the budget has to cover a real settlement of a small
-// document on a loaded machine, which a budget of a second did not (dispatch://INFRA-1075).
-//
-// The 5 s reserve cmd/dispatch's documentShutdownTimeout adds past the budget is not scaled: what
-// the reserve has to outlast is an overrun, which is scaled, and the test returns the moment
-// Shutdown does, so the whole reserve costs nothing it does not spend.
-const (
-	shutdownTestScale   = 3
-	shutdownTestBudget  = ShutdownDrainBudget / shutdownTestScale
-	shutdownTestReserve = 5 * time.Second
-)
-
 func newShutdownTestService(t *testing.T, database *store.Store, appends VersionedStore) *Service {
 	t.Helper()
 	service := New(Deps{
@@ -403,7 +383,6 @@ func newShutdownTestService(t *testing.T, database *store.Store, appends Version
 		Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool, testSigningKey, nil)},
 		Settle:   time.Hour,
 	})
-	service.shutdownDrainBudget = shutdownTestBudget
 	// A test that already called Shutdown runs this one a second time; it logs its own
 	// "left to resume" line but does no second settlement attempt (settleRoomWithin's
 	// s.stopping guard returns it almost instantly), so it is a harmless no-op, not a race.

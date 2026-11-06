@@ -127,10 +127,9 @@ func TestARunningHandlerRenewsItsKeyPastTheLease(t *testing.T) {
 		}
 		answerRun(run, w, r)
 	})
-	// A lease of 400 ms renewed every 40 ms, the deployment's ratio (IdempotencyLease and the
-	// renewal that divides it) at a tenth of its scale, so the wait below is the lease rather
-	// than two seconds of it.
-	rig.server.requestKeyLease, rig.server.requestKeyRenewal = 400*time.Millisecond, 40*time.Millisecond
+	// A lease of 2 s renewed every 200 ms, the deployment's ratio (IdempotencyLease and the
+	// renewal that divides it), so the wait below is the lease itself.
+	rig.server.requestKeyLease, rig.server.requestKeyRenewal = 2*time.Second, 200*time.Millisecond
 	answered := make(chan *httptest.ResponseRecorder, 1)
 	go func() { answered <- rig.send(t, "a", nil, "alice", "long-run") }()
 	<-running
@@ -478,11 +477,9 @@ func TestARunPastItsLimitStopsRenewingItsLease(t *testing.T) {
 		}
 		answerRun(run, w, r)
 	})
-	// The deployment's shape (a run bounded well inside its lease, renewed several times over
-	// it) at a fifth of its scale, so the wait below is a lease past the limit rather than four
-	// seconds of clock.
+	// The deployment's shape: a run bounded well inside its lease, renewed several times over it.
 	rig.server.requestKeyLease, rig.server.requestKeyRenewal, rig.server.requestKeyRunLimit =
-		400*time.Millisecond, 40*time.Millisecond, 200*time.Millisecond
+		2*time.Second, 200*time.Millisecond, time.Second
 	answered := make(chan *httptest.ResponseRecorder, 1)
 	go func() { answered <- rig.send(t, "a", nil, "alice", "overrun") }()
 	<-running
