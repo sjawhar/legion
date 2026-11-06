@@ -36,10 +36,14 @@
 // created the document, so no Node-side round trip is in any of them. `large-documents.e2e.ts`
 // prints all five and asserts two of them against R11's targets - the editor's first visible
 // block and the longest main-thread task - and the line it prints names which two those are.
-import { expect, type Page, test } from "@playwright/test";
+import { type Page, test } from "@playwright/test";
 
 declare global {
   interface Window {
+    /** What the page says the moment it records one of the two numbers the run waits for, so
+     *  the run never has to ask for them (`listenForThePage`). Installed before the page's own
+     *  scripts; `undefined` for a page no measurement is listening to. */
+    __largeDocumentReached?: (reached: Reached) => void;
     /** What the editor's first visible block was timed as: `performance.now()` when a block of
      *  an editor root carrying `data-write-path="live"` was first inside the viewport, which is
      *  the milliseconds from the start of navigation, and what that block itself said about
@@ -67,6 +71,92 @@ declare global {
      *  screen: a block inside the document surface it renders, which is the preview's. Read
      *  against no target, and the number this rig used to read as the editor's. */
     __largeDocumentPageDrawnAt?: number;
+    /** When each step of the document's own opening happened, on the page's own clock: the
+     *  chain that begins once the issue page has rendered and `ProofDocument` admits
+     *  (dispatch://INFRA-341, R11). Every field is `performance.now()` at that step, and each
+     *  is undefined until the step happened. Read against no target, and printed beside the
+     *  numbers that are, so a run says where the editor's half of the load spent its seconds
+     *  rather than only how long it took. */
+    __documentOpening?: {
+      socketCreatedMs?: number;
+      socketOpenedMs?: number;
+      syncStep1Ms?: number;
+      stateFrameMs?: number;
+      editorRootMs?: number;
+    };
+  }
+}
+
+/**
+ * What the page announces as it happens, and why it announces anything at all.
+ *
+ * Every number here is the page's own, and the run used to read each of them with
+ * `page.evaluate`. A `page.evaluate` is a task on the page's main thread, and the editor's
+ * build owns that thread from its first batch to its last: it hands the thread back between
+ * batches through `scheduler.yield()`, whose continuations are served before any task the run
+ * posts (`endOfTask` in `@legion/proof-editor`'s `progressive-build.ts`, which is there so the
+ * build never queues behind the page's own timers). So for the whole of a build the run hears
+ * nothing it asks for. Measured on this pod, `iphone` at 4x CPU throttling, with the socket
+ * held until the reader's own draw of the 406,319-character document was complete: two
+ * readings came back in the three seconds after the sync, and the next one 209 s later, when
+ * the build ended.
+ *
+ * The page's own frame loop is not starved - the browser keeps rendering - so the page has had
+ * both numbers since the build's first batch, and the only thing missing was a way to say so.
+ * This is that way: the page calls `__largeDocumentReached` in the task it writes each number
+ * in, which reaches the run through the binding rather than through the page's task queue, and
+ * the run waits for the call instead of polling for the number. The two measuring rows never
+ * felt the difference - their builds are about 35 s, so a poll read the number as soon as the
+ * build ended, well inside its wait - and the row that holds the socket until the whole draw
+ * is on the page, whose build is minutes long, stopped failing on a number the page had
+ * recorded three seconds into it.
+ */
+interface Reached {
+  /** The editor's first visible block, exactly as the page recorded it. */
+  readonly firstBlock?: NonNullable<Window["__largeDocumentFirstBlock"]>;
+  /** `performance.now()` when the editor was first open. */
+  readonly editorOpenedMs?: number;
+}
+
+/** The two announcements one measurement waits for. Each settles once, with what the page
+ *  recorded; neither is ever rejected, so a wait of its own names what never came. */
+interface Announcements {
+  readonly editorOpened: Promise<number>;
+  readonly firstBlock: Promise<NonNullable<Window["__largeDocumentFirstBlock"]>>;
+}
+
+/** Installs the binding the page announces through, before any script of the page runs. */
+async function listenForThePage(page: Page): Promise<Announcements> {
+  const firstBlock = Promise.withResolvers<NonNullable<Window["__largeDocumentFirstBlock"]>>();
+  const editorOpened = Promise.withResolvers<number>();
+  await page.exposeFunction("__largeDocumentReached", (reached: Reached) => {
+    if (reached.firstBlock !== undefined) {
+      firstBlock.resolve(reached.firstBlock);
+    }
+    if (reached.editorOpenedMs !== undefined) {
+      editorOpened.resolve(reached.editorOpenedMs);
+    }
+  });
+  return { editorOpened: editorOpened.promise, firstBlock: firstBlock.promise };
+}
+
+/** Waits for one of the page's announcements, and fails with `missed` where it never comes.
+ *  The wait is the one the caller named, and what it is waiting for is a message the page
+ *  sends rather than a reading the run takes, so the build cannot starve it. */
+async function theMomentThePageReached<T>(
+  announced: Promise<T>,
+  timeoutMs: number,
+  missed: string
+): Promise<T> {
+  const expired = Promise.withResolvers<never>();
+  const timer = setTimeout(
+    () => expired.reject(new Error(`${missed} (waited ${timeoutMs} ms)`)),
+    timeoutMs
+  );
+  try {
+    return await Promise.race([announced, expired.promise]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -115,6 +205,13 @@ export const scrollStepsMax = 120;
 const liveEditorSelector = '.proof-editor[data-write-path="live"]';
 const firstBlockSelector = `${liveEditorSelector} [data-block-id]`;
 
+/** The editor's root, whether or not its first batch has landed in it: `createProofEditor`
+ *  puts this class on the element it builds into, so the root is in the page from the moment
+ *  the editor is created and before anything of the document is drawn in it
+ *  (`packages/proof-editor/src/lib.ts`). The opening timeline reads it as "the editor was
+ *  created"; `liveEditorSelector` above is the later moment its first batch lands. */
+const editorRootSelector = ".proof-editor";
+
 /** Where a block a reader has before the editor exists stands: the element the server put the
  *  document's opening blocks in (`web/src/features/doc/first-screen.ts`), and the page's own
  *  draw of the document's text, which adopts them and then draws the rest
@@ -154,6 +251,38 @@ const firstPaintedSelector =
  *  a box from the page's first commit. */
 const editorSelector = '[role="textbox"][aria-label="Document editor"]';
 
+/**
+ * The steps of the document's own opening, each `performance.now()` on the page's own clock,
+ * and each `undefined` where the step never happened.
+ *
+ * This is the chain R11 is about: the socket, its SyncStep1 and the sync's apply begin once
+ * the issue page has rendered and `ProofDocument` admits, which on a throttled phone is about
+ * six seconds into the load. The chunks that chain needs are asked for from the address
+ * before any page renders, and the socket is not (`web/src/features/doc/open-document-early.ts`
+ * records what opening it there was measured to cost the reader). Three of the five steps are
+ * read from the page's own WebSocket - the recorder below wraps it before any script of the
+ * page runs - and the other two from the browser's resource timing and the DOM.
+ */
+export interface DocumentOpening {
+  /** When the document's text was asked for: the read the schema admission check is, which
+   *  nothing connects before (`web/index.html`, `open-document-early.ts`). */
+  readonly textAskedMs: number | undefined;
+  /** When that read answered, which is the earliest anything may connect. */
+  readonly textAnsweredMs: number | undefined;
+  /** When the document's first WebSocket was created, which is after the transport chunk
+   *  (hocuspocus and yjs) has downloaded and evaluated. */
+  readonly socketCreatedMs: number | undefined;
+  /** When that socket opened. */
+  readonly socketOpenedMs: number | undefined;
+  /** When the page wrote its first binary frame to it, which is the provider's SyncStep1. */
+  readonly syncStep1Ms: number | undefined;
+  /** When the server's first binary frame arrived on it, which carries the document's state. */
+  readonly stateFrameMs: number | undefined;
+  /** When the editor's root was first in the page, which is `createEditor` answering the
+   *  sync. */
+  readonly editorRootMs: number | undefined;
+}
+
 export interface DocumentMeasurement {
   /** Milliseconds from the start of navigation until the editor's first visible block was in
    *  the viewport: a block of an editor root carrying `data-write-path="live"`, which is the
@@ -192,6 +321,12 @@ export interface DocumentMeasurement {
   /** Milliseconds from the start of navigation until the window closed, which is what the
    *  longest task is the longest of. */
   readonly windowClosedMs: number;
+  /** When each step of the document's own opening happened, on the page's own clock: the text
+   *  read the admission check is, the socket, its first sync frame out and the state frame
+   *  back, and the editor's root in the page. Asserted nowhere; printed, because what a
+   *  measured first block is made of is the chain that drew it. A step that never happened is
+   *  `undefined`. */
+  readonly opening: DocumentOpening;
 }
 
 /**
@@ -229,8 +364,12 @@ export async function throttleTheCpu(page: Page): Promise<void> {
  * layout the page did not ask for, and a frame loop running through the build would both pay
  * that layout sixty times a second and keep the page rendering while the batches want the
  * thread. What it costs is a window that closes up to `editorPollMs` late, which is no target.
+ *
+ * It answers the two announcements the page makes as it writes those numbers, which is how the
+ * run learns them (`listenForThePage`).
  */
-export async function watchTheDocument(page: Page): Promise<void> {
+export async function watchTheDocument(page: Page): Promise<Announcements> {
+  const announcements = await listenForThePage(page);
   await page.addInitScript(
     ({
       drawn: drawnSelector,
@@ -240,6 +379,7 @@ export async function watchTheDocument(page: Page): Promise<void> {
       painted: paintedSelector,
       pollMs,
       preview: previewRoots,
+      root: rootSelector,
     }: {
       drawn: string;
       editor: string;
@@ -248,7 +388,45 @@ export async function watchTheDocument(page: Page): Promise<void> {
       painted: string;
       pollMs: number;
       preview: string;
+      root: string;
     }) => {
+      // The document's own socket, timed from inside the page. The page's transport subclasses
+      // `globalThis.WebSocket` (`web/src/features/doc/connection.ts`) and a row can have put
+      // Playwright's own WebSocket mock there first (`documentTransport` in `e2e/editor.ts`),
+      // so this stands in front of the constructor as a `construct` proxy rather than as a
+      // subclass of its own: `Reflect.construct` builds whatever is already there, with the
+      // caller's `new.target`, so the instance is the one that class or mock would have made
+      // and the transport's own `send` override keeps its place on the prototype chain. The
+      // recorder's `send` sits on the instance in front of both and calls through to them.
+      // Only the first document socket is recorded; a reconnect's is another socket and no
+      // part of the opening this times.
+      const opening: NonNullable<Window["__documentOpening"]> = {};
+      window.__documentOpening = opening;
+      window.WebSocket = new Proxy(window.WebSocket, {
+        construct(made, args: [string | URL, (string | string[])?], asked) {
+          const socket = Reflect.construct(made, args, asked) as WebSocket;
+          if (!String(args[0]).includes("/ws/doc/") || opening.socketCreatedMs !== undefined) {
+            return socket;
+          }
+          opening.socketCreatedMs = performance.now();
+          socket.addEventListener("open", () => {
+            opening.socketOpenedMs ??= performance.now();
+          });
+          socket.addEventListener("message", (event) => {
+            if (typeof event.data !== "string") {
+              opening.stateFrameMs ??= performance.now();
+            }
+          });
+          const sent = Object.getPrototypeOf(socket).send as WebSocket["send"];
+          socket.send = (data) => {
+            if (typeof data !== "string") {
+              opening.syncStep1Ms ??= performance.now();
+            }
+            sent.call(socket, data);
+          };
+          return socket;
+        },
+      });
       window.__largeDocumentLongestTask = 0;
       window.__largeDocumentLongTasks = [];
       new PerformanceObserver((entries) => {
@@ -271,6 +449,12 @@ export async function watchTheDocument(page: Page): Promise<void> {
         return seen ? element : null;
       };
       const look = () => {
+        if (opening.editorRootMs === undefined && document.querySelector(rootSelector) !== null) {
+          // The editor's root is in the page from `createEditor`, before its first batch has
+          // built anything into it, so this is when the editor was created rather than when
+          // the reader could read it.
+          opening.editorRootMs = performance.now();
+        }
         if (
           window.__largeDocumentPaintedAt === undefined &&
           inTheViewport(paintedSelector) !== null
@@ -293,6 +477,9 @@ export async function watchTheDocument(page: Page): Promise<void> {
             inLiveEditor: block.closest(liveSelector) !== null,
             inPreview: block.closest(previewRoots) !== null,
           };
+          // Said in the task it was recorded in, because the build the page is in the middle
+          // of answers nothing the run asks for until it ends.
+          window.__largeDocumentReached?.({ firstBlock: window.__largeDocumentFirstBlock });
           return;
         }
         requestAnimationFrame(look);
@@ -302,6 +489,7 @@ export async function watchTheDocument(page: Page): Promise<void> {
         const box = document.querySelector(editorSelector)?.getBoundingClientRect();
         if (box !== undefined && box.width > 0 && box.height > 0) {
           window.__largeDocumentEditorAt = performance.now();
+          window.__largeDocumentReached?.({ editorOpenedMs: window.__largeDocumentEditorAt });
           return;
         }
         setTimeout(lookForTheEditor, pollMs);
@@ -316,8 +504,36 @@ export async function watchTheDocument(page: Page): Promise<void> {
       painted: firstPaintedSelector,
       pollMs: editorPollMs,
       preview: previewSelector,
+      root: editorRootSelector,
     }
   );
+  return announcements;
+}
+
+/**
+ * Reads the opening timeline off `page`: what the socket recorder above wrote, and the two
+ * numbers the browser's own resource timing holds - when the document's text was asked for and
+ * when it answered, which is the schema admission check nothing connects before
+ * (`packages/dispatch/AGENTS.md`). Both text routes are read, since a Spec tab's address names
+ * no slug and its text is read by the id the issue answers with.
+ */
+export async function readTheOpening(page: Page): Promise<DocumentOpening> {
+  return await page.evaluate(() => {
+    const text = /^\/api\/v1\/(issues\/[^/]+\/artifacts\/[^/]+|artifacts\/[^/]+)\/text$/;
+    const read = (performance.getEntriesByType("resource") as PerformanceResourceTiming[]).find(
+      (resource) => text.test(new URL(resource.name).pathname)
+    );
+    const opening = window.__documentOpening ?? {};
+    return {
+      editorRootMs: opening.editorRootMs,
+      socketCreatedMs: opening.socketCreatedMs,
+      socketOpenedMs: opening.socketOpenedMs,
+      stateFrameMs: opening.stateFrameMs,
+      syncStep1Ms: opening.syncStep1Ms,
+      textAnsweredMs: read?.responseEnd,
+      textAskedMs: read?.startTime,
+    };
+  });
 }
 
 /** What a caller gives the measurement beyond the page and the path: how long each of its two
@@ -341,10 +557,10 @@ export interface MeasurementWaits {
  * The scroll waits for the editor rather than racing it, so the window covers the whole build
  * and then a scroll through the whole document (the module comment above).
  *
- * Each wait is `page.evaluate` polled from here, never `waitForFunction`, whose predicate runs
- * in an isolated world where an init script's `window` property does not exist. What it polls is
- * only when this reads the number; the numbers themselves are the ones the page's own frame loop
- * recorded.
+ * Neither wait reads the page. Both are announcements the page makes in the task it records
+ * the number in, because a reading the run takes is a task the editor's build starves for the
+ * whole of its build (`listenForThePage`). What is read below is read once the editor has
+ * opened, which is when the page has its thread back.
  */
 export async function measureDocument(
   page: Page,
@@ -352,32 +568,24 @@ export async function measureDocument(
   { buildTimeoutMs, firstBlockTimeoutMs }: MeasurementWaits
 ): Promise<DocumentMeasurement> {
   await throttleTheCpu(page);
-  await watchTheDocument(page);
+  const reached = await watchTheDocument(page);
   await page.goto(path, { waitUntil: "commit" });
 
-  await expect
-    .poll(() => page.evaluate(() => window.__largeDocumentFirstBlock), {
-      intervals: [500],
-      message:
-        "the editor's first visible block never came into the viewport: either no editor " +
-        'root ever carried `data-write-path="live"` with a block in it, or a taller page ' +
-        "header has pushed that block under the fold, where no scroll of this measurement " +
-        "reaches it",
-      timeout: firstBlockTimeoutMs,
-    })
-    .not.toBeUndefined();
-  const firstBlock = await page.evaluate(() => window.__largeDocumentFirstBlock);
+  const firstBlock = await theMomentThePageReached(
+    reached.firstBlock,
+    firstBlockTimeoutMs,
+    "the editor's first visible block never came into the viewport: either no editor " +
+      'root ever carried `data-write-path="live"` with a block in it, or a taller page ' +
+      "header has pushed that block under the fold, where no scroll of this measurement " +
+      "reaches it"
+  );
 
-  await expect
-    .poll(() => page.evaluate(() => window.__largeDocumentEditorAt), {
-      intervals: [500],
-      message:
-        "the editor never opened, so there was no build to measure and no document to scroll: " +
-        "the page is still the document's own draw of its first blocks",
-      timeout: buildTimeoutMs,
-    })
-    .not.toBeUndefined();
-  const editorOpenedMs = await page.evaluate(() => window.__largeDocumentEditorAt);
+  const editorOpenedMs = await theMomentThePageReached(
+    reached.editorOpened,
+    buildTimeoutMs,
+    "the editor never opened, so there was no build to measure and no document to scroll: " +
+      "the page is still the document's own draw of its first blocks"
+  );
 
   // The loop runs in the page, so its steps are the page's own 100 ms apart rather than a round
   // trip's, and a step the throttled main thread runs late delays the next step rather than
@@ -411,7 +619,8 @@ export async function measureDocument(
   const windowClosedMs = await page.evaluate(() => performance.now());
   const firstPaintedMs = await page.evaluate(() => window.__largeDocumentPaintedAt);
   const pageDrawnMs = await page.evaluate(() => window.__largeDocumentPageDrawnAt);
-  if (firstBlock === undefined || longestTaskMs === undefined || longTasks === undefined) {
+  const opening = await readTheOpening(page);
+  if (longestTaskMs === undefined || longTasks === undefined) {
     throw new Error("the page lost its recorders: an init script never ran");
   }
   return {
@@ -428,6 +637,7 @@ export async function measureDocument(
     longTasks,
     scrollSteps,
     windowClosedMs,
+    opening,
   };
 }
 
@@ -442,7 +652,27 @@ const measurementLegend =
   "which is the server's own where it drew the document's opening blocks into the page it " +
   "sent. The page's own draw is the first block the app itself put on the screen, in the " +
   "read-only preview inside the document surface it renders: that one is the number this rig " +
-  "read as the editor's before INFRA-341 corrected it. Neither draw takes an edit.";
+  "read as the editor's before INFRA-341 corrected it. Neither draw takes an edit. The " +
+  "opening is the document's own chain on the same clock, step by step: the text read the " +
+  "schema admission check is, the socket, its SyncStep1, the state frame back, and the " +
+  "editor's root in the page.";
+
+/** The opening timeline as one phrase of the line above: each step and when it happened, in
+ *  the order they happen, with the steps that never happened named as such. */
+function openingLine(opening: DocumentOpening): string {
+  const steps: [string, number | undefined][] = [
+    ["text asked", opening.textAskedMs],
+    ["text answered", opening.textAnsweredMs],
+    ["socket created", opening.socketCreatedMs],
+    ["socket opened", opening.socketOpenedMs],
+    ["SyncStep1 out", opening.syncStep1Ms],
+    ["state frame in", opening.stateFrameMs],
+    ["editor created", opening.editorRootMs],
+  ];
+  return steps
+    .map(([step, at]) => `${step} ${at === undefined ? "never" : `${Math.round(at)} ms`}`)
+    .join(" / ");
+}
 
 /**
  * Puts a measurement where the run's reader finds it: on the row's annotations, which the report
@@ -464,6 +694,7 @@ export function printMeasurement(
     `first painted (not asserted) ${measured.firstPaintedMs === undefined ? "never" : `${Math.round(measured.firstPaintedMs)} ms`}, ` +
     `page's own draw (not asserted) ${measured.pageDrawnMs === undefined ? "never" : `${Math.round(measured.pageDrawnMs)} ms`}, ` +
     `editor open (not asserted) ${measured.editorOpenedMs === undefined ? "never" : `${Math.round(measured.editorOpenedMs)} ms`}, ` +
+    `opening (not asserted) ${openingLine(measured.opening)}, ` +
     `${measured.longTasks.length} main-thread task(s) over 50 ms and ${over.length} over ` +
     `${longTaskTargetMs} ms` +
     (over.length === 0

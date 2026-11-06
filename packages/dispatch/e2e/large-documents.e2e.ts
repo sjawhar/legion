@@ -285,6 +285,16 @@ const heldAfterTheDrawMs = 20_000;
 // where that page ends ended four scroll steps in, with most of the build still to come. This
 // row holds the document's socket, so the editor is built only when it says so, and reads
 // whether the measurement closed its window meanwhile.
+//
+// It is also the one row whose build the measurement could not read through, which is what
+// `listenForThePage` in `large-documents-page.ts` is there for: holding the socket this long
+// leaves the reader's own draw of the whole document on the page - every one of its 986 blocks
+// and 140 diagrams - so the editor builds over all of it and takes minutes, where the two rows
+// above pay about 35 s for the same build over a page holding one screenful. From a build's
+// first batch to its last the page answers nothing the run asks it, so a number the run had to
+// read was a number this row could not have until the build was over, and the wait for the
+// editor's first block ran out on a block the page had recorded three seconds into it. The
+// numbers are announcements the page makes now, which the rows above never needed.
 test(`the measurement's window stays open until ${documentNames.large}'s editor opens @phone`, async ({
   browser,
 }, testInfo) => {

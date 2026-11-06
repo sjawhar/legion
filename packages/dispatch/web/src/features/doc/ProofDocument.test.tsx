@@ -18,6 +18,7 @@ import { markdownWorkerThreshold } from "../refs/markdown-worker-threshold";
 import { installFakeParseWorker, restoreParseWorker } from "../refs/parse-worker-fixture";
 import { appKeymap } from "../shell/keymap";
 import { colorForLogin } from "./connection";
+import type { CreateEditor } from "./editor";
 
 answerTextReadsWithTheSeededText();
 
@@ -127,6 +128,62 @@ test("ProofDocument draws a long document's first blocks before the whole of it 
     await act(() => worker.answer(0));
     await waitFor(() => expect(drawn.textContent).toContain(buried));
     expect(within(drawn).getByRole("heading").textContent).toBe("The lease ledger");
+  } finally {
+    restoreParseWorker();
+    view.unmount();
+  }
+});
+
+// Where that second pass stops: the task the editor's build begins in, which is the task the
+// sync lands in and not the one the editor's handle answers in (`DocumentPreview`'s
+// `building`). The build fills the editor a batch at a time and hands the thread back between
+// batches, so a pass painting the whole document into those gaps is work for a draw the editor
+// is about to replace, and it costs the reader the editor they are waiting for
+// (dispatch://INFRA-341, R11). The editor is held here for the whole of its build, which is
+// where a page that is told only at the end would paint it.
+test("the document's own draw stops painting in the task the editor's build begins in", async () => {
+  await warmMarkdownRenderer();
+  const worker = installFakeParseWorker();
+  // A document of this row's own: the engine keeps the parse it answered for a source, so a
+  // row sharing the row above's markdown would be handed the whole document at its first
+  // render and never meet the two passes this is about.
+  const opening = "# The settlement window\n\nThe paragraph a reader meets first.";
+  const buried = "The paragraph the build must never paint.";
+  const between = `A paragraph longer than the first draw takes. ${"Every window closes. ".repeat(markdownWorkerThreshold / 20)}`;
+  const markdown = `${opening}\n\n${between}\n\n${buried}\n`;
+  const fake = fakeDocumentRuntime({ text: markdown });
+  const building = Promise.withResolvers<void>();
+  const createEditor: CreateEditor = async (root, options) => {
+    await building.promise;
+    return fake.runtime.createEditor(root, options);
+  };
+  const { view } = renderProofDocument({
+    fake: { ...fake, runtime: { ...fake.runtime, createEditor } },
+  });
+
+  try {
+    const drawn = await screen.findByRole("document", { name: "Document text" });
+    await waitFor(() => expect(drawn.querySelectorAll("[data-block-id]")).toHaveLength(2));
+    await worker.waitForRequests(1);
+
+    // The sync, and with it the build, in a commit of this task's own: the draw is told in it,
+    // and the parse answers after it. A sync left to React's own schedule would let that parse
+    // answer into a commit that had not run yet, which would prove nothing either way.
+    await waitFor(() => expect(fake.connections).toHaveLength(1));
+    act(() => fake.sync());
+    await act(() => worker.answer(0));
+    expect(drawn.textContent).not.toContain(buried);
+    expect(drawn.querySelectorAll("[data-block-id]")).toHaveLength(2);
+
+    // And the editor that build was for still arrives and replaces the draw.
+    await act(async () => {
+      building.resolve();
+      await building.promise;
+    });
+    await waitFor(() => expect(fake.editors).toHaveLength(1));
+    await waitFor(() =>
+      expect(screen.queryByRole("document", { name: "Document text" })).toBeNull()
+    );
   } finally {
     restoreParseWorker();
     view.unmount();
