@@ -121,7 +121,8 @@ type roomState struct {
 	// lastUsed is when the room this state holds was last used: its load, the return of a
 	// Server.Apply on it, or the last browser leaving it (noteRoomUsed). It is the order the
 	// budget of resident peerless rooms closes them in, least recently used first
-	// (peerlessRoomsOverBudget). weight is the heap that room is taken to hold, from the bytes
+	// (peerlessRoomsOverBudget), and the start of the window the budget leaves a room alone for
+	// (roomBudgetMinIdle). weight is the heap that room is taken to hold, from the bytes
 	// its load decoded (roomWeight); both are read by the budget alone.
 	lastUsed time.Time
 	weight   int64

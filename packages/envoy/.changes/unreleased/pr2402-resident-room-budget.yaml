@@ -5,10 +5,14 @@ body: |-
   leaves or its last write returns, but when those rooms together hold more than the budget - each
   weighed by the bytes its load decoded, since a document's heap is about forty times its stored
   size - the least recently used go first, however recent their minute is, and a room a browser is
-  in is never one of them. The next write or read of such a document reloads it, and the settlement
-  it owed runs on its own timer, as it does for a room the idle timeout evicted, so nothing is lost
-  by the close. Before this, a burst of agent writes left every room it touched resident for its
-  whole minute, each holding its document and a second decoded copy for its update observer: the
+  in is never one of them. The budget also leaves alone a room the service used in the last five
+  seconds and a room owing a settlement, both of which it is about to want again: loading one back
+  reads the store four times where the resident room read it once, so while the rooms over the
+  budget are all that young, or all owe a settlement, the heap stands above the budget and comes
+  back to it as those rooms age. The next write or read of a document whose room the budget did
+  close reloads it, as it does for a room the idle timeout evicted, so nothing is lost by the
+  close. Before this, a burst of agent writes left every room it touched resident for its whole
+  minute, each holding its document and a second decoded copy for its update observer: the
   load test's recovery step held 391 to 447 MB of documents and 327 to 398 MB of those copies at
   its peak, a live heap of 1.7 to 2.0 GiB, and 1.2 to 1.4 GiB a minute after the burst, where each
   garbage collection's marking cost the whole process seconds of latency and requests answered at a

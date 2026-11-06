@@ -68,8 +68,9 @@ func newRoomServer(server *websocket.Server, used func(room string)) *roomServer
 
 // Apply runs ygo's Apply and then notes room used, whether or not the callback changed anything:
 // an Apply is the one way the service reaches a room with no browser in it - an agent's write
-// publishing into the room, a read or a settlement warming it - and a room ygo stamps idle on this
-// return is a room the budget may close from now on, least recently used first.
+// publishing into the room, a read or a settlement warming it - and this return is both where
+// ygo stamps the room idle and where the budget's window on it starts (roomBudgetMinIdle), after
+// which the budget may close it, least recently used first.
 func (r *roomServer) Apply(ctx context.Context, room string, mutate func(*crdt.Doc, func(func(*crdt.Transaction)))) error {
 	err := r.Server.Apply(ctx, room, mutate)
 	if r.used != nil {

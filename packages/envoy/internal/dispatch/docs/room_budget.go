@@ -69,6 +69,34 @@ const roomBudgetCloseWait = 2 * time.Second
 // background work of the service that writes through the store.
 const roomBudgetClosers = 4
 
+// roomBudgetMinIdle is how long a room must have gone unused before the budget closes it. A
+// close frees the room's heap and costs the document's next use a reload, and that reload reads
+// the store four times where the resident room read it once - the head, the stored state, the
+// issue's state and the pending-settlement row (PgVersioned.Head, loadStored, issueOpen,
+// readOwedSettlement), all four on the pool reserved for room loads - so closing a room the
+// service is about to use again costs more than it frees.
+// The budget without this window closed the rooms a burst was writing: at the load test's 10x
+// minute it closed about seven rooms for each of the ~50 resident, and 202 settlements a run
+// reloaded the room it had just closed (warm document for settlement, INFRA-592). Five seconds
+// is longer than the settle delay a write arms its settlement on (2 s, Deps.Settle), so the
+// settlement finds the room the write left; it is tens of roomTrimIntervals, so a room is
+// weighed many times before it can be closed; and it is well inside roomIdleTimeout, so the
+// budget is still the tighter of the two bounds on a room nothing uses.
+//
+// So the peerless rooms can hold more than the budget. A room inside the window and a room
+// owing a settlement (owesSettlementLocked) are weighed and not closed, and while every
+// peerless room is one of those the trim closes nothing: what bounds the heap then is time, not
+// bytes. A room leaves the window roomBudgetMinIdle after its last use, and the settlement a
+// write owes commits a settle delay after it, so a room escapes the budget for the window and
+// not for its residency, and the rooms already past the window are the ones a trim closes,
+// least recently used first, so the heap comes back to the budget as those rooms age rather
+// than at once. The rooms the window holds still count against the budget
+// (peerlessRoomsOverBudget), so a burst of young rooms does not hide the older ones a trim can
+// close. A trim runs only when a room is used (noteRoomUsed), so a room that ages past the
+// window while the server is quiet is weighed again at the next use of any room, and a room
+// nothing uses at all goes to ygo's idle sweeper at roomIdleTimeout whatever the budget does.
+const roomBudgetMinIdle = 5 * time.Second
+
 // noteRoomUsed stamps room as used now, for the budget's order (peerlessRoomsOverBudget), and
 // trims the peerless rooms the budget no longer holds. Its callers are the three moments a room
 // becomes, or stops being, one of the rooms the budget counts: its load (onLoadDocument), the
@@ -131,10 +159,10 @@ func (s *Service) trimPeerlessRooms() {
 // first, through the close every eviction of the service goes through (roomServer.closeRoom, as
 // Evict), which flushes the room's updates to the store before ygo retires it, waits for its
 // persistence worker to exit and fires OnUnloadDocument, so the room's state goes with it
-// (releaseUnloadedRoom) unless something still holds it - the settlement it owes among them, which
-// runs on its own timer and warms the document again, as it does for a room the idle sweeper
-// evicted. The close is unforced, so a room a browser joined between the list and the close keeps
-// its peer and stays.
+// (releaseUnloadedRoom). No room it closes owes this process a settlement (peerlessRooms), so
+// none of them is a room a settlement of ours is about to warm again; the document's next write
+// or read reloads it, as it does one the idle sweeper evicted. The close is unforced, so a room a
+// browser joined between the list and the close keeps its peer and stays.
 func (s *Service) closeRoomsOverBudget() {
 	over := s.peerlessRoomsOverBudget()
 	if len(over) == 0 {
@@ -181,15 +209,20 @@ func (s *Service) closeRoomOverBudget(room string) {
 	}
 }
 
-// peerlessRoom is one resident room with no browser connected: what the budget counts, when it was
-// last used, and the heap its load says it holds (roomState.weight).
+// peerlessRoom is one resident room with no browser connected: what the budget counts, when it
+// was last used, the heap its load says it holds (roomState.weight), and whether this trim may
+// close it (closable). A room it may not close is counted all the same, because its heap is held
+// either way, so a burst of rooms too young to close does not hide the older rooms a trim can
+// close.
 type peerlessRoom struct {
-	room   string
-	used   time.Time
-	weight int64
+	room     string
+	used     time.Time
+	weight   int64
+	closable bool
 }
 
-// peerlessRooms is the resident rooms no browser is connected to, each with its weight.
+// peerlessRooms is the resident rooms no browser is connected to, each with its weight and
+// whether the budget may close it now.
 //
 // A room still loading is not one of them (ygo answers GetDoc nil until its load hook has returned
 // and its document is nobody's to read), and nor is a room with a browser connected, one whose
@@ -199,7 +232,15 @@ type peerlessRoom struct {
 // make it reload and take the cold path for nothing. Those last three are bounded by what can run
 // at once - the admitted writes and the evictions in flight - so they put a handful of rooms past
 // the budget, never a burst's worth.
+//
+// A room used inside roomBudgetMinIdle, and a room owing a settlement, are listed and are not
+// the trim's to close: both are rooms the service is about to want again, and reloading one
+// costs four reads of the store on the pool its loads are reserved to. Neither is bounded by
+// what runs at once, so they can be every room there is, and the heap they hold is then bounded
+// by the window and by the settle delay rather than by the budget's bytes (roomBudgetMinIdle).
 func (s *Service) peerlessRooms() []peerlessRoom {
+	now := s.now()
+	armed := s.armedSettleTimers()
 	var peerless []peerlessRoom
 	for _, room := range s.srv.Rooms() {
 		if s.srv.GetDoc(room) == nil {
@@ -210,16 +251,59 @@ func (s *Service) peerlessRooms() []peerlessRoom {
 			continue
 		}
 		if len(state.connected) == 0 && state.failed == nil && !state.reloading && state.liveWriter == nil {
-			peerless = append(peerless, peerlessRoom{room: room, used: state.lastUsed, weight: state.weight})
+			peerless = append(peerless, peerlessRoom{
+				room:     room,
+				used:     state.lastUsed,
+				weight:   state.weight,
+				closable: now.Sub(state.lastUsed) >= roomBudgetMinIdle && !owesSettlementLocked(state, armed),
+			})
 		}
 		s.unlockState(room, state)
 	}
 	return peerless
 }
 
-// peerlessRoomsOverBudget is the peerless rooms whose weight the budget does not hold, least
-// recently used first: the most recently used are kept until the budget is full, and the rest -
-// the oldest - are the rooms a close brings the heap back inside it.
+// armedSettleTimers is the settlement timers armed now - those isSettleTimerArmed answers for -
+// as one set. A pass weighs every resident room, and asking the register one room at a time
+// would walk the whole register once a room. The set is read before the rooms' own locks are
+// taken, where isSettleTimerArmed would read the register under each: a timer armed while the
+// pass walks the rooms is one the next pass reads, and so is one armed while the pass closes
+// what it listed.
+func (s *Service) armedSettleTimers() map[*time.Timer]struct{} {
+	s.timerMu.Lock()
+	defer s.timerMu.Unlock()
+	armed := make(map[*time.Timer]struct{}, len(s.timers))
+	for _, timer := range s.timers {
+		if timer != nil {
+			armed[timer] = struct{}{}
+		}
+	}
+	return armed
+}
+
+// owesSettlementLocked is whether a settlement of this document is running on this process or is
+// still to run on it: one holding the state from before its wait for a settlement slot
+// (settling), one armed or fired and not yet returned (its timer, in armed), one a live write
+// took over and arms again when it ends (settleDeferred), and a latest edit source no settlement
+// has read (unsettled), which is the pending-settlement row this process still owes. These are
+// the settlement holders unusedLocked names, read off the state the trim already holds the lock
+// for: the row itself is a read of the store, which the trim must not make. A state that never
+// armed a timer has none, and nil is in no set. Its caller holds state.mu.
+func owesSettlementLocked(state *roomState, armed map[*time.Timer]struct{}) bool {
+	if state.settling > 0 || state.settleDeferred || state.unsettled {
+		return true
+	}
+	_, timerArmed := armed[state.settle]
+	return timerArmed
+}
+
+// peerlessRoomsOverBudget is the peerless rooms whose weight the budget does not hold and which
+// it may close, least recently used first: the most recently used are kept until the budget is
+// full, and the rest - the oldest - are the rooms a close brings the heap back inside it. The
+// rooms the budget may not close yet are weighed with the others, so they take the budget's
+// bytes from the rooms behind them rather than hiding them; a pass that finds them all too
+// young, or all owing a settlement, closes nothing and leaves the heap above the budget until
+// they age (roomBudgetMinIdle).
 func (s *Service) peerlessRoomsOverBudget() []string {
 	peerless := s.peerlessRooms()
 	slices.SortFunc(peerless, func(a, b peerlessRoom) int { return b.used.Compare(a.used) })
@@ -231,7 +315,9 @@ func (s *Service) peerlessRoomsOverBudget() []string {
 			// Oldest first, so a pass cut short by a shutdown has closed the rooms least
 			// likely to be wanted again.
 			for _, dropped := range slices.Backward(peerless[i:]) {
-				over = append(over, dropped.room)
+				if dropped.closable {
+					over = append(over, dropped.room)
+				}
 			}
 			return over
 		}
@@ -253,8 +339,10 @@ func (s *Service) ResidentRoomCount() int64 {
 
 // PeerlessRooms is how many of the resident rooms have no browser connected - the rooms the budget
 // counts (dispatch_doc_rooms_peerless) - and PeerlessRoomBytes the heap they are taken to hold,
-// which the budget bounds (dispatch_doc_rooms_peerless_bytes). RoomsClosedToBudget is how many
-// rooms the budget has closed since the process started
+// which the budget bounds (dispatch_doc_rooms_peerless_bytes). Both count every such room, the
+// rooms the budget may not close yet among them, so the bytes are the heap that is there and
+// stand above the budget while the trim is holding those rooms back (roomBudgetMinIdle).
+// RoomsClosedToBudget is how many rooms the budget has closed since the process started
 // (dispatch_doc_rooms_budget_closed_total). Together they say whether the budget is holding and
 // what it costs.
 func (s *Service) PeerlessRooms() int64 {
