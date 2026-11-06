@@ -322,8 +322,8 @@ type server struct {
 	// directly has none unless the test sets it (directServer sets context.Background()).
 	lifetime   context.Context
 	routeIndex []routeIndexEntry
-	// going is the action catalogue GET /api/v1/going/catalogue serves, built from the table
-	// this server mounts (going_catalogue.go).
+	// going is the action catalogue GET /api/v1/going/catalogue serves: the dispatch tools that
+	// write, held to the table this server mounts (going_catalogue.go).
 	going           GoingCatalogue
 	adviceQueryHook func(context.Context, pgx.Tx, string) error
 	// suggestionTimeout overrides the allowance the related-item check runs under; zero, which
@@ -606,9 +606,9 @@ func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
 	}
 	going, err := buildGoingCatalogue(routes)
 	if err != nil {
-		// An action an agent may propose that the catalogue cannot describe is a route added
-		// without a request type of its own, or a relation named in neither edge family, so the
-		// table is refused rather than mounted (going_catalogue.go).
+		// A catalogue entry naming a row this table does not hold or does not class as a write,
+		// a placeholder no argument of the tool fills, or a relation named in neither edge
+		// family, is refused rather than mounted (going_catalogue.go).
 		panic("api.Register: the route table holds a row the going catalogue cannot hold: " + err.Error())
 	}
 	s.going = going

@@ -52,7 +52,6 @@ import {
   SEARCH_QUERY_MAX,
 } from "../src/dispatch-tools";
 import { MINTED_DEDUPE_KEY_PATTERN } from "../src/envelope";
-import { goingRequests } from "../src/going-catalogue";
 import { SUBJECT_MAX_BYTES, SUBJECT_SEGMENT_REPLACED } from "../src/subject";
 import type { SchemaApi, SchemaNode } from "../src/tool-schema";
 
@@ -804,8 +803,8 @@ ${definitions.join("\n\n")}
 }
 
 // The slice of a schema the Go side needs to check a proposed call: what each argument holds,
-// whether it is required, and the names an enum allows. gen-go runs every going-catalogue
-// request through a SchemaApi that records these calls instead of building zod, so the Go the
+// whether it is required, and the names an enum allows. gen-go runs every dispatch tool's
+// arguments through a SchemaApi that records these calls instead of building zod, so the Go the
 // server validates a call with is the TypeScript declaration itself rather than a second copy
 // of it. Bounds (min, max) are left out on purpose: the server's own handler enforces them and
 // names them in its refusal, and a bound carried here would be a number nothing checks.
@@ -845,9 +844,10 @@ function recordedFields(shape: Record<string, RecordedNode>): [string, RecordedF
   return Object.entries(shape).map(([name, node]) => [name, node.field]);
 }
 
-// The facade the going-catalogue specs are written against, recording what each call declares.
-// `refineObject` records the object alone: a cross-field rule is the route handler's to enforce,
-// and the catalogue's check is of the arguments an action names, not of how they agree.
+// The facade the tool specs' arguments are written against, recording what each call declares.
+// `refineObject` records the object alone: a cross-field rule is the tool's and the route
+// handler's to enforce, and the catalogue's check is of the arguments an action names, not of
+// how they agree.
 const recordingApi: SchemaApi<RecordedNode> = {
   string: () => recordedNode({ kind: "string" }),
   number: () => recordedNode({ kind: "number" }),
@@ -859,14 +859,14 @@ const recordingApi: SchemaApi<RecordedNode> = {
   refineObject: (shape) => recordedNode({ kind: "object", fields: recordedFields(shape) }),
 };
 
-const goingFieldKinds = {
-  string: "GoingFieldString",
-  number: "GoingFieldNumber",
-  boolean: "GoingFieldBoolean",
-  enum: "GoingFieldEnum",
-  array: "GoingFieldArray",
-  object: "GoingFieldObject",
-  any: "GoingFieldAny",
+const toolFieldKinds = {
+  string: "ToolFieldString",
+  number: "ToolFieldNumber",
+  boolean: "ToolFieldBoolean",
+  enum: "ToolFieldEnum",
+  array: "ToolFieldArray",
+  object: "ToolFieldObject",
+  any: "ToolFieldAny",
 } satisfies Record<RecordedField["kind"], string>;
 
 // A Go string literal of text: JSON's escapes are Go's for every character JSON escapes.
@@ -875,107 +875,91 @@ function goString(text: string) {
 }
 
 // One field as a composite literal with its type elided, the form gofmt leaves alone inside a
-// []GoingField. An array's element is rendered with no name, since it is the array's shape
+// []ToolField. An array's element is rendered with no name, since it is the array's shape
 // rather than an argument a call names.
-function renderGoingField(name: string, field: RecordedField): string {
+function renderToolField(name: string, field: RecordedField): string {
   const parts = name === "" ? [] : [`Name: ${goString(name)}`];
-  parts.push(`Kind: ${goingFieldKinds[field.kind]}`);
+  parts.push(`Kind: ${toolFieldKinds[field.kind]}`);
   if (!field.optional) parts.push("Required: true");
   if (field.nullable) parts.push("Nullable: true");
   if (field.description !== "") parts.push(`Description: ${goString(field.description)}`);
   if (field.values) parts.push(`Values: []string{${field.values.map(goString).join(", ")}}`);
-  if (field.item) parts.push(`Item: &GoingField${renderGoingField("", field.item)}`);
+  if (field.item) parts.push(`Item: &ToolField${renderToolField("", field.item)}`);
   if (field.fields) {
-    const nested = field.fields
-      .map(([key, value]) => `${renderGoingField(key, value)},`)
-      .join("\n");
-    parts.push(`Fields: []GoingField{\n${nested}\n}`);
+    const nested = field.fields.map(([key, value]) => `${renderToolField(key, value)},`).join("\n");
+    parts.push(`Fields: []ToolField{\n${nested}\n}`);
   }
   return `{${parts.join(", ")}}`;
 }
 
-// The Go the catalogue is built from: one request per catalogue-eligible route, by
-// "<METHOD> <pattern>". Which routes are eligible is the server's to compute from its own route
-// table; this is what the table cannot say, and the server's catalogue test holds the two in
-// exact correspondence.
-function renderGoingCatalogue() {
-  const toolDescriptions = new Map(dispatchToolSpecs.map((spec) => [spec.name, spec.description]));
-  const requests = Object.entries(goingRequests)
-    .sort(([left], [right]) => (left < right ? -1 : 1))
-    .map(([route, spec]) => {
+// The Go the action catalogue is built from: every dispatch tool with its own description, its
+// own arguments and a call those arguments accept. Which of them the catalogue holds is the
+// server's to decide from its own route table, so nothing here says which tool writes: this is
+// what the TypeScript knows and the Go cannot read.
+function renderDispatchTools() {
+  const tools = dispatchToolSpecs
+    .map((spec) => {
       const fields = recordedFields(spec.arguments(recordingApi) as Record<string, RecordedNode>)
-        .map(([name, field]) => `${renderGoingField(name, field)},`)
+        .map(([name, field]) => `${renderToolField(name, field)},`)
         .join("\n");
-      const parts = [`Fields: []GoingField{\n${fields}\n}`];
-      parts.push(`Example: json.RawMessage(${goString(JSON.stringify(spec.example))})`);
-      if ("tool" in spec) {
-        const description = toolDescriptions.get(spec.tool);
-        if (description === undefined) {
-          throw new Error(
-            `going-catalogue names tool ${spec.tool}, which dispatchToolSpecs has not`
-          );
-        }
-        parts.push(`Tool: ${goString(spec.tool)}`, `ToolDescription: ${goString(description)}`);
-      }
-      if ("relations" in spec) {
-        parts.push(`Relations: []string{${spec.relations.map(goString).join(", ")}}`);
-      }
-      return `${goString(route)}: {\n${parts.join(",\n")},\n},`;
+      const parts = [
+        `Name: ${goString(spec.name)}`,
+        `Description: ${goString(spec.description)}`,
+        `Arguments: []ToolField{\n${fields}\n}`,
+        `Example: json.RawMessage(${goString(JSON.stringify(spec.example))})`,
+      ];
+      return `{\n${parts.join(",\n")},\n},`;
     })
     .join("\n");
 
   return `// Code generated by packages/contracts/scripts/gen-go.ts from
-// packages/contracts/src/going-catalogue.ts. DO NOT EDIT.
+// packages/contracts/src/dispatch-tools.ts. DO NOT EDIT.
 
 package contracts
 
 import "encoding/json"
 
-// GoingFieldKind is what one argument of a catalogue action holds.
-type GoingFieldKind string
+// ToolFieldKind is what one argument of a dispatch tool holds.
+type ToolFieldKind string
 
 const (
-	GoingFieldString  GoingFieldKind = "string"
-	GoingFieldNumber  GoingFieldKind = "number"
-	GoingFieldBoolean GoingFieldKind = "boolean"
-	GoingFieldEnum    GoingFieldKind = "enum"
-	GoingFieldArray   GoingFieldKind = "array"
-	GoingFieldObject  GoingFieldKind = "object"
-	// GoingFieldAny is an argument whose shape the route reads for itself, such as a typed
+	ToolFieldString  ToolFieldKind = "string"
+	ToolFieldNumber  ToolFieldKind = "number"
+	ToolFieldBoolean ToolFieldKind = "boolean"
+	ToolFieldEnum    ToolFieldKind = "enum"
+	ToolFieldArray   ToolFieldKind = "array"
+	ToolFieldObject  ToolFieldKind = "object"
+	// ToolFieldAny is an argument whose shape the route reads for itself, such as a typed
 	// block's attributes.
-	GoingFieldAny GoingFieldKind = "any"
+	ToolFieldAny ToolFieldKind = "any"
 )
 
-// GoingField is one argument an action takes: an element of an array carries no name, and an
+// ToolField is one argument a tool takes: an element of an array carries no name, and an
 // object's own arguments hang from Fields.
-type GoingField struct {
-	Name        string         \`json:"name,omitempty"\`
-	Kind        GoingFieldKind \`json:"kind"\`
-	Required    bool           \`json:"required,omitempty"\`
-	Nullable    bool           \`json:"nullable,omitempty"\`
-	Description string         \`json:"description,omitempty"\`
-	Values      []string       \`json:"values,omitempty"\`
-	Item        *GoingField    \`json:"item,omitempty"\`
-	Fields      []GoingField   \`json:"fields,omitempty"\`
+type ToolField struct {
+	Name        string        \`json:"name,omitempty"\`
+	Kind        ToolFieldKind \`json:"kind"\`
+	Required    bool          \`json:"required,omitempty"\`
+	Nullable    bool          \`json:"nullable,omitempty"\`
+	Description string        \`json:"description,omitempty"\`
+	Values      []string      \`json:"values,omitempty"\`
+	Item        *ToolField    \`json:"item,omitempty"\`
+	Fields      []ToolField   \`json:"fields,omitempty"\`
 }
 
-// GoingRequest is one catalogue-eligible route's request: the arguments it takes, a call that
-// satisfies them, the dispatch tool that performs it where one does, and the graph relations its
-// verbs write. ToolDescription is that tool's own description, whose first sentence the
-// catalogue prefers to the route row's; it is left out of the served entry, which carries the
-// one sentence rather than the whole tool reference.
-type GoingRequest struct {
-	Fields          []GoingField    \`json:"fields"\`
-	Example         json.RawMessage \`json:"example"\`
-	Tool            string          \`json:"tool,omitempty"\`
-	ToolDescription string          \`json:"-"\`
-	Relations       []string        \`json:"relations,omitempty"\`
+// DispatchTool is one tool of the \`dispatch\` CLI as its spec states it: the name it is called
+// by, the whole description a model chooses it on, the arguments it takes and a call those
+// arguments accept.
+type DispatchTool struct {
+	Name        string          \`json:"name"\`
+	Description string          \`json:"description"\`
+	Arguments   []ToolField     \`json:"arguments"\`
+	Example     json.RawMessage \`json:"example"\`
 }
 
-// GoingRequests is the request of every catalogue-eligible route, by "<METHOD> <pattern>" as the
-// server's route table names it.
-var GoingRequests = map[string]GoingRequest{
-${requests}
+// DispatchTools is every dispatch tool, in the order dispatch-tools.ts states them.
+var DispatchTools = []DispatchTool{
+${tools}
 }
 `;
 }
@@ -997,8 +981,8 @@ const outputs = [
     language: "go",
   },
   {
-    path: resolve(import.meta.dir, "../../envoy/internal/contracts/going_catalogue_generated.go"),
-    rendered: renderGoingCatalogue(),
+    path: resolve(import.meta.dir, "../../envoy/internal/contracts/dispatch_tools_generated.go"),
+    rendered: renderDispatchTools(),
     language: "go",
   },
   {
