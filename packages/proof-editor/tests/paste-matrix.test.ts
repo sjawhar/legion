@@ -15,7 +15,7 @@ import { type PasteCase, type PasteTarget, pasteCases } from "./paste-matrix-cas
 
 /**
  * The clipboard matrix that used to run in a browser, against a server and Postgres, once per row
- * (LEGION-1415): the same clipboards, the same carets and cell selections, and the same expected
+ * (INFRA-1415): the same clipboards, the same carets and cell selections, and the same expected
  * markdown, verbatim in paste-matrix-cases.ts. Only the rows whose claim is the server's - Go's
  * reading back of what the editor stored, and the reload - stayed in the browser.
  *
@@ -166,20 +166,47 @@ const DIRECTIVE_LINE = /^:::.*$/;
 /** A directive attribute the writer left without a value, as `title` in `:::callout{#k1 title}`. */
 const BARE_ATTRIBUTE = /(?<=[\s{])([A-Za-z_][\w-]*)(?=[\s}])/g;
 
+/** Whether the row the `index`th line holds is a table's delimiter row: the row under the
+ *  table's first row, every cell of it a delimiter. */
+function isDelimiterRow(
+  lines: readonly string[],
+  index: number,
+  cells: readonly string[]
+): boolean {
+  return (
+    index > 0 &&
+    TABLE_ROW.test(lines[index - 1] ?? "") &&
+    !TABLE_ROW.test(lines[index - 2] ?? "") &&
+    cells.every((cell) => DELIMITER_CELL.test(cell))
+  );
+}
+
+/** A delimiter cell without the padding its writer gave it: `:----------` and `:---` are the
+ *  same column, aligned left. The colons stay, because they are the column's alignment. */
+function withoutDelimiterPadding(cell: string): string {
+  const written = cell.trim();
+  return `${written.startsWith(":") ? ":" : ""}---${written.endsWith(":") ? ":" : ""}`;
+}
+
 /**
  * Two writers wrote the markdown this file compares: the editor's own serializer wrote what
  * `getMarkdown` answers, and the engine wrote what the e2e row read back out of the server, from
  * the same document. They spell the same document differently, and only in these ways, each of
  * which this collapses so that nothing else can hide behind it:
  *
- * - a table row's cells are padded to a common width, and every column of a table the editor
- *   holds is marked left-aligned (`| :---------- |` against the engine's `| --- |`);
+ * - a table row's cells are padded to a common width, the delimiter row's cells included, so the
+ *   same left-aligned column is `| :---------- |` to the editor and `| :--- |` to the engine;
  * - an empty cell is `<br />` to the editor and nothing at all to the engine;
  * - a space that has to be escaped is `&#x20;` to the editor and `&#32;` to the engine;
  * - a bullet is `*` to the editor and `-` to the engine;
  * - the paragraph after a table inside a list item is written after a blank line by the engine
  *   and on the next line by the editor (LEGION-290, the e2e row that stayed in the browser);
  * - an attribute with an empty value is `title` to the editor and `title=""` to the engine.
+ *
+ * A delimiter cell keeps its colons, so a column's alignment is compared rather than collapsed:
+ * the padding is the writers' style, the colons are the document. `runCase` compares each
+ * column's alignment against the case's own delimiter row as well (`columnAlignments` against
+ * `storedAlignments`), which names the column a markdown diff only shows.
  *
  * It never touches a cell's own text, the number of cells in a row, the number of rows, or any
  * text outside a table: a wrong cell, a lost cell or a lost row still reports.
@@ -204,30 +231,127 @@ function withoutWriterStyle(markdown: string): string {
     }
     const [, indent, body] = row;
     const cells = rowCells(body ?? "").slice(0, -1);
-    const delimiter =
-      index > 0 &&
-      TABLE_ROW.test(lines[index - 1] ?? "") &&
-      !TABLE_ROW.test(lines[index - 2] ?? "") &&
-      cells.every((cell) => DELIMITER_CELL.test(cell));
-    const written = delimiter
-      ? cells.map(() => "---")
+    const written = isDelimiterRow(lines, index, cells)
+      ? cells.map(withoutDelimiterPadding)
       : cells.map((cell) => (cell.trim() === "<br />" ? "" : cell.trim()));
     read.push(`${indent}| ${written.join(" | ")} |`);
   }
   return read.join("\n");
 }
 
-test("the writer normaliser collapses padding, alignment and an empty cell", () => {
+/** A column's alignment, as a cell of the editor's table holds it and as the document service
+ *  reads it off a delimiter row. `null` is a column aligned nowhere. */
+type ColumnAlignment = "center" | "left" | "right" | null;
+
+/** The alignment a delimiter cell names: `---` none, `:---` left, `---:` right and `:---:`
+ *  centre. The document service reads the same four, and a column goldmark reports as
+ *  `AlignNone` has no alignment at all (`parseTableRow`,
+ *  packages/envoy/internal/dispatch/pmdoc/parse.go), which its writer writes back as `---`
+ *  (`tableAlignment`, render_table.go). */
+function alignmentOf(cell: string): ColumnAlignment {
+  const written = cell.trim();
+  const left = written.startsWith(":");
+  const right = written.endsWith(":");
+  if (left && right) return "center";
+  if (left) return "left";
+  if (right) return "right";
+  return null;
+}
+
+/** Each table's column alignments in `markdown`, table by table, as its delimiter row spells
+ *  them. */
+function storedAlignments(markdown: string): ColumnAlignment[][] {
+  const lines = markdown.split("\n");
+  const tables: ColumnAlignment[][] = [];
+  for (const [index, line] of lines.entries()) {
+    const row = TABLE_ROW.exec(line);
+    if (row === null) continue;
+    const cells = rowCells(row[2] ?? "").slice(0, -1);
+    if (isDelimiterRow(lines, index, cells)) tables.push(cells.map(alignmentOf));
+  }
+  return tables;
+}
+
+/** Each table's column alignments as the editor holds them: the cells of its header row, which
+ *  is the row both writers read a column's alignment from - the editor's serializer from the
+ *  table's first row (@milkdown/preset-gfm's `table.toMarkdown`), the document service's writer
+ *  from the first row of its grid (`table`, render_table.go). */
+function columnAlignments(view: EditorView): ColumnAlignment[][] {
+  const tables: ColumnAlignment[][] = [];
+  view.state.doc.descendants((node) => {
+    if (node.type.name !== "table_header_row") return true;
+    tables.push(node.children.map((cell) => (cell.attrs.alignment as ColumnAlignment) ?? null));
+    return false;
+  });
+  return tables;
+}
+
+/**
+ * Gives every seeded cell the alignment its spec's delimiter row spells, which is the alignment
+ * the document the e2e row pasted into carried.
+ *
+ * Production seeds the room from the stored markdown with the document service's parser, which
+ * leaves a `---` column with no alignment (parse.go) and writes no attribute for it into the
+ * Y.Doc (update.go writes only the attributes a node holds). The editor's own parser reads `---`
+ * as no alignment too, but `withMarksEditor` seeds through `prosemirrorToYXmlFragment`, which
+ * drops a null attribute the same way - and reading the fragment back fills the gap with the
+ * schema's default, `left` (@milkdown/preset-gfm's `cellAttributes`). So without this every
+ * seeded column would arrive left-aligned, where the stored markdown the case compares against
+ * aligns it nowhere, and a paste that reset a column to left would change nothing.
+ */
+function seedColumnAlignments(view: EditorView, spec: string): void {
+  const tables = storedAlignments(spec);
+  const transaction = view.state.tr;
+  let table = -1;
+  view.state.doc.descendants((node, pos) => {
+    if (node.type.name === "table") {
+      table += 1;
+      return true;
+    }
+    if (!node.type.name.endsWith("_row")) return true;
+    const alignments = tables[table];
+    if (alignments === undefined)
+      throw new Error(`the spec spells no delimiter row for table ${table + 1}`);
+    let at = pos + 1;
+    for (const [column, cell] of node.children.entries()) {
+      const alignment = alignments[column] ?? null;
+      if (cell.attrs.alignment !== alignment)
+        transaction.setNodeAttribute(at, "alignment", alignment);
+      at += cell.nodeSize;
+    }
+    return false;
+  });
+  if (transaction.steps.length > 0) view.dispatch(transaction);
+}
+
+test("the writer normaliser collapses the padding of a row and of a delimiter row", () => {
   expect(
     withoutWriterStyle(
       "| alpha one   | beta two               |\n| :---------- | :--------------------- |\n| gamma three | deltaFirst Second four |\n"
     )
   ).toBe(
     withoutWriterStyle(
-      "| alpha one | beta two |\n| --- | --- |\n| gamma three | deltaFirst Second four |\n"
+      "| alpha one | beta two |\n| :--- | :--- |\n| gamma three | deltaFirst Second four |\n"
     )
   );
   expect(withoutWriterStyle("| a | <br /> |\n")).toBe(withoutWriterStyle("| a |  |\n"));
+});
+
+test("the writer normaliser reports a column the two writers align differently", () => {
+  expect(withoutWriterStyle("| a | b |\n| :---------- | --- |\n| c | d |\n")).not.toBe(
+    withoutWriterStyle("| a | b |\n| --- | --- |\n| c | d |\n")
+  );
+  expect(withoutWriterStyle("| a |\n| ---: |\n| c |\n")).not.toBe(
+    withoutWriterStyle("| a |\n| :---: |\n| c |\n")
+  );
+});
+
+test("a delimiter row reads as the alignment the document service gives each column", () => {
+  expect(
+    storedAlignments("| a | b | c | d |\n| --- | :--- | ---: | :---: |\n| 1 | 2 | 3 | 4 |\n")
+  ).toEqual([[null, "left", "right", "center"]]);
+  expect(storedAlignments("| a |\n| --- |\n| --- |\n")).toEqual([[null]]);
+  expect(storedAlignments("Intro end.\n")).toEqual([]);
 });
 
 test("the writer normaliser collapses the escapes, bullets and blank lines of the other writer", () => {
@@ -243,7 +367,7 @@ test("the writer normaliser collapses the escapes, bullets and blank lines of th
 
 test("the writer normaliser still reports a wrong cell", () => {
   expect(withoutWriterStyle("| a  | b |\n| --- | --- |\n| c | d |\n")).not.toBe(
-    withoutWriterStyle("| a | b |\n| :-- | :-- |\n| c | e |\n")
+    withoutWriterStyle("| a | b |\n| --- | --- |\n| c | e |\n")
   );
   expect(withoutWriterStyle("| a b | c |\n")).not.toBe(withoutWriterStyle("| ab | c |\n"));
   expect(withoutWriterStyle("| x <br /> y |\n")).not.toBe(withoutWriterStyle("| x y |\n"));
@@ -264,16 +388,46 @@ test("the writer normaliser leaves a body cell reading --- and a cell's escaped 
   expect(withoutWriterStyle("| a \\| b | c |\n")).not.toBe(withoutWriterStyle("| a | b | c |\n"));
 });
 
+/** The matrix's own first case, whose two-column spec aligns neither column: the seed's proof
+ *  runs on a case rather than on a table of its own. */
+const [firstCase] = pasteCases;
+
+test("a seeded column carries the alignment its spec spells, not the schema's default", async () => {
+  if (firstCase === undefined) throw new Error("the matrix holds no cases");
+  const { spec } = firstCase;
+  expect(storedAlignments(spec)).toEqual([[null, null]]);
+  await withMarksEditor(
+    spec,
+    ({ handle, view }) => {
+      // What the Y.Doc round trip of the seed leaves behind: the schema's default, where the
+      // spec - and the document service's parser - align the column nowhere.
+      expect(columnAlignments(view)).toEqual([["left", "left"]]);
+      expect(withoutWriterStyle(handle.getMarkdown())).not.toBe(withoutWriterStyle(spec));
+
+      seedColumnAlignments(view, spec);
+
+      expect(columnAlignments(view)).toEqual([[null, null]]);
+      expect(withoutWriterStyle(handle.getMarkdown())).toBe(withoutWriterStyle(spec));
+    },
+    { blockSchema }
+  );
+});
+
 function runCase({ clipboard, copyCells, hardBreaks, rows, spec, stored, target }: PasteCase) {
   return withMarksEditor(
     spec,
     ({ handle, view }) => {
+      seedColumnAlignments(view, spec);
       withDomGlobals(DOM_GLOBALS, () => {
         const pasted = copyCells === undefined ? clipboard : copyOfCells(view, copyCells);
         selectTarget(view, target);
         if (pasted !== undefined) withStyleSheetRules(() => pasteClipboard(view, pasted));
       });
 
+      // What the stored markdown's delimiter row spells, column by column: a paste that lost or
+      // reset a column's alignment names the column here, before the markdown comparison reads
+      // the same loss as a changed delimiter row.
+      expect(columnAlignments(view)).toEqual(storedAlignments(stored));
       expect(withoutWriterStyle(handle.getMarkdown())).toBe(withoutWriterStyle(stored));
       if (hardBreaks !== undefined) expect(hardBreakCount(view)).toBe(hardBreaks);
       if (rows !== undefined) expect(drawnRows(view)).toEqual(rows as string[][]);

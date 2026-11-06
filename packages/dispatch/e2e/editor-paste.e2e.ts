@@ -6,8 +6,10 @@ import { engineTables, goReadBack } from "./read-back";
 import { resetDatabase } from "./seed";
 
 // What is left of the clipboard matrix: the rows no headless test can make. Every other row
-// asserted what the editor's own serializer produces, and runs in a fraction of the time in
-// packages/proof-editor/tests/paste-matrix.test.ts, over the same cases (LEGION-1415).
+// asserted the markdown the server stored for the document the paste built, and runs in a
+// fraction of the time in packages/proof-editor/tests/paste-matrix.test.ts, which rebuilds that
+// document headless and compares its own serializer's spelling of it - each column's alignment
+// included - against that same stored markdown (INFRA-1415).
 
 test.beforeEach(async () => {
   await resetDatabase();

@@ -2,16 +2,21 @@ import type { Clipboard } from "./paste";
 
 /**
  * The clipboard matrix of `packages/dispatch/e2e/editor-paste.e2e.ts`, moved here: every row of
- * it whose assertion is what the editor's own serializer produces runs headless, in a fraction of
- * the browser's time. The data tables below are that file's own, verbatim, each with the comment
- * that explains it; only the rows whose claim needs the server - Go's reading back of the stored
- * markdown, and the clipboard-to-server-to-reload path - stayed in the browser (LEGION-1415),
- * and the editor-side half of each of those is here too.
+ * it whose claim is the document the editor builds out of a clipboard runs headless, in a
+ * fraction of the browser's time. The data tables below are that file's own, verbatim, each with
+ * the comment that explains it; only the rows whose claim needs the server - Go's reading back
+ * of the stored markdown, and the clipboard-to-server-to-reload path - stayed in the browser
+ * (INFRA-1415), and the editor-side half of each of those is here too.
  *
  * Each case's `stored` is the markdown the e2e row asserted the *server* had stored, kept
- * verbatim so a reviewer can diff it against the deleted literal. The editor's own serializer
- * pads a table's columns, so paste-matrix.test.ts compares through a normaliser that collapses
- * that padding and nothing else.
+ * verbatim so a reviewer can diff it against the deleted literal. Here the editor's own
+ * serializer writes that same document, and the two writers spell it differently, so
+ * paste-matrix.test.ts compares through a normaliser. That normaliser collapses a row's padding,
+ * the editor's `<br />` for an empty cell, its `&#x20;` against the engine's `&#32;`, its `*`
+ * bullet against the engine's `-`, a directive attribute left bare against the engine's
+ * `title=""`, and the blank line the engine writes after a table in a list item. It keeps each
+ * column's alignment, which the test compares column by column against the delimiter row of
+ * this `stored` string.
  */
 
 /** Where the paste lands, as the e2e row placed it. */
@@ -49,13 +54,25 @@ export interface PasteCase {
   /** The cells the editor must draw, row by row: the editor-side reading of a row that read them
    *  out of the DOM. */
   readonly rows?: readonly (readonly string[])[];
-  /** A per-test timeout in milliseconds, for a case that hangs rather than fails when it
-   *  regresses. */
+  /** A per-test timeout in milliseconds, for a case whose regression is slow rather than wrong.
+   *  Bun reports a case that overruns it only once the case returns; EMPTY_ROW_TIMEOUT_MS says
+   *  what that does and does not buy. */
   readonly timeoutMs?: number;
 }
 
-/** The cases a missing prosemirror-tables patch would hang rather than fail get a timeout of
- *  their own: a full editor boot and one paste is milliseconds here, so five seconds is a hang. */
+/**
+ * The limit the cases a missing prosemirror-tables patch would hang in carry. A full editor boot
+ * and one paste is milliseconds here, so five seconds is a hang - but Bun interrupts nothing. A
+ * case that overruns its limit is reported, by name, only after it returns: a three-second
+ * synchronous spin under a 500 ms limit runs all three seconds and is then failed. The hang
+ * these cases guard against is prosemirror-tables' `fixTables` looping inside
+ * `appendTransaction`, which is synchronous and never returns, so nothing is reported at all and
+ * the whole `proof-editor` test step hangs until the job's own timeout kills it.
+ *
+ * So the limit buys a named failure for a case that merely grew slow, or one that waits on a
+ * promise that never settles. It buys nothing against that loop, and five seconds is Bun's own
+ * default per-test timeout, so it states the intent rather than tightening anything.
+ */
 const EMPTY_ROW_TIMEOUT_MS = 5_000;
 
 /** The same wording the e2e file's own `targetName` gives a row. */
@@ -440,8 +457,9 @@ for (const [clipboard, target, stored] of [
     spec: table,
     stored,
     target: where,
-    // Without the prosemirror-tables patch an empty row sends fixTables round forever, which under
-    // `bun test` is a hung process rather than a failure: the timeout is what reports it.
+    // Without the prosemirror-tables patch an empty row sends fixTables round forever. That loop
+    // is synchronous, so Bun interrupts nothing and names nothing: the step hangs until the job's
+    // own timeout. The limit below reports this case only if it grows slow and returns.
     timeoutMs: EMPTY_ROW_TIMEOUT_MS,
   });
 }
@@ -604,8 +622,10 @@ for (const [row, clipboard, header, body] of [
       stored,
       target: { caretAfter: "Intro" },
       // The hang this row exists for: without the prosemirror-tables patch fixTables runs forever
-      // on a cell-less header row, so the regression is a test that never returns. Under
-      // `bun test` that hangs the whole process; the timeout turns it back into a failure.
+      // on a cell-less header row, inside appendTransaction and synchronously, so the case never
+      // returns. Bun cannot interrupt it, so `bun test` reports nothing and the whole
+      // `proof-editor` step hangs until the job's own timeout; the limit below reports only a
+      // case that grew slow and returned.
       timeoutMs: EMPTY_ROW_TIMEOUT_MS,
     });
   }
