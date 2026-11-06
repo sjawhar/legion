@@ -2174,8 +2174,7 @@ test("a send to one session past its deadline says it keeps trying, and lands on
     expect(field.value).toBe("");
     expect(screen.queryByText(KEYED_SEND_LATE_TEXT)).toBeNull();
   } finally {
-    jest.advanceTimersByTime(1);
-    jest.useRealTimers();
+    realClock();
     view.unmount();
     createAgentMessage.mockRestore();
   }
@@ -2184,9 +2183,9 @@ test("a send to one session past its deadline says it keeps trying, and lands on
 /** A send that keeps failing, from its press to its 30 s deadline: five attempts, at 0, 1, 3, 7
  *  and 15 s. */
 async function failToTheDeadline(): Promise<void> {
-  for (const wait of [1_000, 2_000, 4_000, 8_000]) await tick(wait);
+  for (const wait of [1_000, 2_000, 4_000, 8_000]) await tick(wait, wait);
   expect(screen.queryByRole("button", { name: "Stop trying" })).toBeNull();
-  await tick(15_000);
+  await tick(15_000, 15_000);
 }
 
 const stoppedText = new SendStoppedError().message;
@@ -2221,7 +2220,7 @@ test("a send kept failing shows Stop trying once late, which stops it for Retry 
     expect(field.value).toBe("Status please");
     expect(holdControls().disabled).toBe(false);
     expect(screen.getByRole("button", { name: "Discard draft" })).toBeTruthy();
-    await tick(30 * 60_000);
+    await tick(30 * 60_000, 30 * 60_000);
     expect(createAgentMessage).toHaveBeenCalledTimes(5);
 
     // Retry: the same message, under the same key.
@@ -2243,11 +2242,10 @@ test("a send kept failing shows Stop trying once late, which stops it for Retry 
     expect(field.value).toBe("");
     expect(screen.queryByText(stoppedText)).toBeNull();
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
-    await tick(30 * 60_000);
+    await tick(30 * 60_000, 30 * 60_000);
     expect(createAgentMessage).toHaveBeenCalledTimes(tried);
   } finally {
-    jest.advanceTimersByTime(1);
-    jest.useRealTimers();
+    realClock();
     view.unmount();
     createAgentMessage.mockRestore();
   }

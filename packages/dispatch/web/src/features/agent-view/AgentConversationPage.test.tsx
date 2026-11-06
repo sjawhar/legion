@@ -19,7 +19,7 @@ import {
 import type { ReactNode } from "react";
 import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 
-import { realClock } from "../../__tests__/fake-clock";
+import { tick as clockTick, realClock } from "../../__tests__/fake-clock";
 import {
   errorFrame,
   type FakeLiveSocket,
@@ -616,10 +616,7 @@ async function onFakeClock(body: () => Promise<void>): Promise<void> {
   try {
     await body();
   } finally {
-    act(() => {
-      jest.advanceTimersByTime(1);
-    });
-    jest.useRealTimers();
+    realClock();
   }
 }
 
@@ -701,13 +698,11 @@ test("leaving the live view leaves its send being tried, under its key", async (
   expect(new Set(sentKeys(createAgentMessage)).size).toBe(1);
 });
 
-/** Moves the fake clock `ms` on and lets every promise the move released run. */
-async function tick(ms: number): Promise<void> {
-  await act(async () => {
-    jest.advanceTimersByTime(ms);
-    for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
-  });
-}
+/** Moves the fake clock `ms` on in one jump, letting every promise the move released run: every
+ *  wait here is one product timer this file's tests cross, so no part of the span needs a round
+ *  of its own. A step of zero would never end the shared helper's loop, so a zero wait takes the
+ *  smallest step there is, which is the same single round. */
+const tick = (ms: number) => clockTick(ms, Math.max(ms, 1));
 
 /** The live view for SESSION, its mode settled on Send. */
 async function renderSendingView(): Promise<void> {

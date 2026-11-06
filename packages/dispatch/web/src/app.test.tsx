@@ -9,6 +9,9 @@ import { ApiError, api, NetworkError } from "./api/client";
 import { liveSocketFor } from "./api/live-socket";
 import type { AuthenticatedUser } from "./api/types";
 import { AuthGate } from "./app";
+// The Answers, document and project pages are lazy routes of the app. Importing them here loads
+// their modules with the test file, so a `findByRole` after the click waits for the render alone,
+// not for that first load, which takes longer than the second such a wait allows.
 import "./features/answers/AnswersPage";
 import "./features/document/DocumentPage";
 import "./features/project/ProjectPage";

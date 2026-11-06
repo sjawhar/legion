@@ -490,9 +490,7 @@ function serverAnswering(
 /** Lets the check a focus started run to its end: its request, its body and its state update.
  *  Each round is a task of the fake clock the test installed. */
 async function settleCheck(): Promise<void> {
-  for (let round = 0; round < 5; round++) {
-    await tick(10);
-  }
+  await tick(50, 10);
 }
 
 test("shows a reloadable update notice when one build other than the tab's is live", async () => {

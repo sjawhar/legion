@@ -1,11 +1,9 @@
 import { afterEach, expect, jest, test } from "bun:test";
 import { render, screen } from "@testing-library/react";
 import { type ReactNode, useEffect, useState } from "react";
+import { realClock } from "./fake-clock";
 
-afterEach(() => {
-  jest.advanceTimersByTime(1);
-  jest.useRealTimers();
-});
+afterEach(realClock);
 
 /** A node that arrives only when a timer fires, which is the whole product this test needs. */
 function Later(): ReactNode {
@@ -39,9 +37,6 @@ function Later(): ReactNode {
 // `jest.useFakeTimers()`: `clock` is an own property of `setTimeout` and `_isMockFunction` is
 // `undefined`. That half is the one a later Bun could break with no wait failing anywhere, so a
 // green suite would show nothing of it, and it is asserted rather than left to be noticed.
-//
-// The test carries no deadline of its own: `setup.ts` sets Bun's per-test deadline for the
-// package (dispatch://INFRA-1505).
 test("a Testing Library wait advances the fake clock a test installed", async () => {
   jest.useFakeTimers();
 

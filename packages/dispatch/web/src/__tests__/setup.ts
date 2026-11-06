@@ -31,9 +31,6 @@ GlobalRegistrator.register();
 // asserting the global rather than by timing a wait, and says so.
 (globalThis as unknown as { jest: typeof jest }).jest = jest;
 
-// Bun's per-test deadline, whose default is 5000 ms, and Testing Library's `asyncUtilTimeout`,
-// whose default is 1000 ms, are the two defaults a 2-core Legion issue pod cannot meet. Both are
-// set once here so that no test file carries a budget of its own.
 // Bun's default per-test deadline is 5000 ms. The lane test of
 // `e2e/__tests__/harness-lanes.test.ts` ("the Playwright config refuses a --workers that is not
 // the lane count") fails at it on a 2-core pod, where it reads 4.45 s idle and 6.55 s loaded.

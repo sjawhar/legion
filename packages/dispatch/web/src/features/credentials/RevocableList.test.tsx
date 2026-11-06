@@ -104,12 +104,6 @@ async function renderSection(section: Section): Promise<HTMLElement> {
   return region.findByRole("button", { name: "Revoke" });
 }
 
-/** Lets a mutation reach its function: it calls it a few microtasks after the click, and a timer
- *  runs after them all. The test installs the fake clock this moves. */
-async function afterMicrotasks(): Promise<void> {
-  await tick(0);
-}
-
 for (const section of sections) {
   test(`${section.heading}: Revoke is disabled while a revoke is out, and enabled once it settles`, async () => {
     const out = Promise.withResolvers<void>();
@@ -148,7 +142,9 @@ for (const section of sections) {
         fireEvent.click(button);
         fireEvent.click(button);
       });
-      await afterMicrotasks();
+      // A mutation calls its function a few microtasks after the click; a timer runs after
+      // them all.
+      await tick(0);
       expect(stubs.revokeCalls()).toEqual([[section.rowId, keyedAttempt]]);
       out.resolve();
     } finally {

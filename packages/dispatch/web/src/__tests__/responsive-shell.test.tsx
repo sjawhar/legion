@@ -6,6 +6,9 @@ import { MemoryRouter } from "react-router-dom";
 import { api } from "../api/client";
 import type { InboxRow, IssueDetails } from "../api/types";
 import { AuthGate } from "../app";
+// The issue page is a lazy route of the app. Importing it here loads its module with the test
+// file, so a `findByRole` after the click waits for the render alone, not for that first load,
+// which takes longer than the second such a wait allows.
 import "../features/issue/IssuePage";
 
 const issue: IssueDetails = {

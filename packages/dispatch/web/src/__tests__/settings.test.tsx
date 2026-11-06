@@ -7,6 +7,9 @@ import { MemoryRouter } from "react-router-dom";
 import { ApiError, api } from "../api/client";
 import type { Project, ProjectDefaultAssignee, RepoProject } from "../api/types";
 import { App } from "../app";
+// The Settings page is a lazy route of the app. Importing it here loads its module with the test
+// file, so a `findByRole` after the click waits for the render alone, not for that first load,
+// which takes longer than the second such a wait allows.
 import "../features/settings/SettingsPage";
 import { keyedAttempt } from "./keyed-attempt";
 

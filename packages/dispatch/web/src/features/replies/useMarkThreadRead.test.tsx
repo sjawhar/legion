@@ -3,11 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 
-import { tick } from "../../__tests__/fake-clock";
-import {
-  type IntersectionControl,
-  installIntersectionObserver,
-} from "../../__tests__/intersection-observer";
+import { dwellOn, installIntersectionObserver } from "../../__tests__/intersection-observer";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { answerThreadReads } from "../../__tests__/send-answers";
 import { myRepliesOwnerQuery, whoAmIQuery } from "../../api/queries";
@@ -62,11 +58,6 @@ function renderThread(set: MyRepliesResponse, props: { at: string | undefined; t
   };
 }
 
-async function dwell(screen: IntersectionControl, element: Element) {
-  act(() => screen.show(element));
-  await tick(1_000);
-}
-
 test("a thread outside the viewer's unread set is never watched or marked", async () => {
   jest.useFakeTimers();
   const screen = installIntersectionObserver();
@@ -78,7 +69,7 @@ test("a thread outside the viewer's unread set is never watched or marked", asyn
   try {
     const newest = view.getByTestId("newest");
     expect(screen.observed()).not.toContain(newest);
-    await dwell(screen, newest);
+    await dwellOn(screen, newest);
     expect(mark).not.toHaveBeenCalled();
   } finally {
     view.unmount();
@@ -114,12 +105,12 @@ test("an unread thread is marked through its newest reply once that reply dwells
 
     // The same reply seen again sends nothing more.
     act(() => screen.hide(newest));
-    await dwell(screen, newest);
+    await dwellOn(screen, newest);
     expect(mark).toHaveBeenCalledTimes(1);
 
     // A newer reply is a new mark, through its own timestamp.
     rerender({ at: second, threadId: "thread-1" });
-    await dwell(screen, view.getByTestId("newest"));
+    await dwellOn(screen, view.getByTestId("newest"));
     expect(mark.mock.calls).toEqual([
       ["thread-1", { read_through: first }, keyedAttempt],
       ["thread-1", { read_through: second }, keyedAttempt],
@@ -142,7 +133,7 @@ test("an owner with more unread threads than its set holds watches every thread"
     threadId: "thread-1",
   });
   try {
-    await dwell(screen, view.getByTestId("newest"));
+    await dwellOn(screen, view.getByTestId("newest"));
     expect(mark.mock.calls).toEqual([
       ["thread-1", { read_through: "2026-10-12T00:00:00Z" }, keyedAttempt],
     ]);

@@ -20,6 +20,12 @@ import { Unfurl } from "./Unfurl";
  *  test that writes one puts the page on an origin first. */
 const testWindow = window as unknown as HappyDOMWindow;
 
+/** A wall-clock budget, not one of the machine-sensitive waits this package's defaults cover
+ *  (`web/src/__tests__/setup.ts`): the regression the rows that read it guard, catastrophic
+ *  backtracking, costs minutes rather than milliseconds, so a budget far above what any loaded
+ *  pod spends on a single pass fails a rewrite that backtracks and nothing else. */
+const BACKTRACKING_BUDGET_MS = 2_000;
+
 function renderUnfurl(body: string, source?: Parameters<typeof Unfurl>[0]["source"]) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
@@ -491,12 +497,9 @@ test(`Unfurl reads ${DISPATCH_BLOCK_UNITS}-character bodies of repeated schemes 
     for (const view of views) {
       expect(view.container.querySelector("section")).toBeNull();
     }
-    // A wall-clock budget, not one of the machine-sensitive waits this package's defaults now
-    // cover (`web/src/__tests__/setup.ts`): the regression it guards, catastrophic backtracking,
-    // costs minutes rather than milliseconds. This row reads 0.03 s idle and 0.16 s loaded on a
-    // 2-core pod, and 2000 ms is 12 times that slowest loaded reading, so no loaded pod can fail
-    // it by being slow.
-    expect(performance.now() - start).toBeLessThan(2000);
+    // This row reads 0.03 s idle and 0.16 s loaded on a 2-core pod, and the budget is 12 times
+    // that slowest loaded reading, so no loaded pod can fail it by being slow.
+    expect(performance.now() - start).toBeLessThan(BACKTRACKING_BUDGET_MS);
   } finally {
     for (const view of views) {
       view.unmount();
@@ -537,11 +540,8 @@ test("Unfurl reads a GitHub link trailed by a long closing run in one pass", () 
   );
 
   try {
-    // The same wall-clock budget as the repeated-schemes row above, and for the same reason: it
-    // guards a regression that costs minutes, not a wait a slow machine can lose. This row reads
-    // 0.01 s idle and 0.07 s loaded on a 2-core pod, against the 0.16 s loaded of the slowest
-    // row the 2000 ms is 12 times.
-    expect(performance.now() - start).toBeLessThan(2000);
+    // This row reads 0.01 s idle and 0.07 s loaded on a 2-core pod.
+    expect(performance.now() - start).toBeLessThan(BACKTRACKING_BUDGET_MS);
     expect(view.container.querySelector("section")).toBeNull();
     expect(githubRest).not.toHaveBeenCalled();
   } finally {

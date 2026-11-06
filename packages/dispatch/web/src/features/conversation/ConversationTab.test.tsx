@@ -3,11 +3,11 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
-import { tick } from "../../__tests__/fake-clock";
 import {
   type IntersectionControl,
   installIntersectionObserver,
   type Placement,
+  dwellOn as showAndDwell,
 } from "../../__tests__/intersection-observer";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { answerIssueStates, answerThreadReads } from "../../__tests__/send-answers";
@@ -2012,11 +2012,10 @@ function renderThreads(lists: Lists, unread: readonly string[], focusItemId?: st
   };
 }
 
-/** `element` stays on screen as `placement` says for a second, and every write it starts lands. */
+/** The dwell of the fixture, on the fake clock this file's tests leave to it to install. */
 async function dwellOn(viewport: IntersectionControl, element: Element, placement?: Placement) {
   jest.useFakeTimers();
-  act(() => viewport.show(element, placement));
-  await tick(1_000);
+  await showAndDwell(viewport, element, placement);
 }
 
 /** A session's reply in a message thread. */
