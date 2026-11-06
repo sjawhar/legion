@@ -526,7 +526,23 @@ func TestMessageHandlersRejectInvalidEnums(t *testing.T) {
 			name:  "publish expects reply",
 			path:  "/v1/messages/publish",
 			body:  `{"topic":"notifications.github.example-org.example-repo.pr.1","message":"hello","expects_reply":"soon"}`,
-			want:  "expects_reply must be one of none, optional, required",
+			want:  "expects_reply must be one of false, optional, required",
+			field: "expects_reply",
+		},
+		{
+			name:  "send expects reply",
+			path:  "/v1/messages/send",
+			body:  `{"target_session":"ses_target","message":"hello","expects_reply":"later"}`,
+			want:  "expects_reply must be one of false, optional, required",
+			field: "expects_reply",
+		},
+		{
+			// true is the one JSON literal the new vocabulary leaves out, and reading the
+			// field raw means it is refused by name rather than as unreadable JSON.
+			name:  "send expects reply true",
+			path:  "/v1/messages/send",
+			body:  `{"target_session":"ses_target","message":"hello","expects_reply":true}`,
+			want:  "expects_reply must be one of false, optional, required",
 			field: "expects_reply",
 		},
 	}
@@ -2372,6 +2388,65 @@ func TestPublishHandlerPreservesAllOptionalMessageFields(t *testing.T) {
 		response.Urgency != "blocking" ||
 		response.ExpectsReply != "required" {
 		t.Fatalf("optional fields = %+v", response)
+	}
+}
+
+// expects_reply is false | "optional" | "required" on the wire, so a body carrying the JSON
+// literal false reaches the envelope rather than failing the decode that read the field as a
+// string. A plugin build old enough to write the string "none" means the same thing and is still
+// taken. The envelope's own field is a string until the contract is regenerated, so both forms of
+// no-reply reach it as none.
+func TestMessageHandlersReadExpectsReplyAsFalseOrTheOldNone(t *testing.T) {
+	client := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, nil, []string{"ses_target"})
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
+	for _, tc := range []struct {
+		name, path, body, want string
+	}{
+		{
+			name: "publish false",
+			path: "/v1/messages/publish",
+			body: `{"topic":"notifications.github.example-org.example-repo.pr.1","message":"hello","expects_reply":false}`,
+			want: "none",
+		},
+		{
+			name: "send false",
+			path: "/v1/messages/send",
+			body: `{"target_session":"ses_target","message":"hello","expects_reply":false}`,
+			want: "none",
+		},
+		{
+			name: "publish the old none",
+			path: "/v1/messages/publish",
+			body: `{"topic":"notifications.github.example-org.example-repo.pr.1","message":"hello","expects_reply":"none"}`,
+			want: "none",
+		},
+		{
+			name: "publish optional",
+			path: "/v1/messages/publish",
+			body: `{"topic":"notifications.github.example-org.example-repo.pr.1","message":"hello","expects_reply":"optional"}`,
+			want: "optional",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			if tc.path == "/v1/messages/send" {
+				sendHandler(state, logging.New("test")).ServeHTTP(recorder, request)
+			} else {
+				publishHandler(state, logging.New("test")).ServeHTTP(recorder, request)
+			}
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
+			}
+			var response contracts.Envelope
+			if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if response.ExpectsReply != tc.want {
+				t.Fatalf("expects_reply = %q, want %q; body = %s", response.ExpectsReply, tc.want, recorder.Body.String())
+			}
+		})
 	}
 }
 

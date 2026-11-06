@@ -42,8 +42,11 @@ type messageBody struct {
 	InReplyTo      *string `json:"in_reply_to"`
 	Supersedes     *string `json:"supersedes"`
 	Urgency        *string `json:"urgency"`
-	ExpectsReply   *string `json:"expects_reply"`
-	ExpiresAt      *int64  `json:"expires_at"`
+	// ExpectsReply arrives as the JSON literal false, "optional" or "required" (and, until no
+	// deployment pins a plugin build old enough to write it, the old string "none"), so it is
+	// read raw and parsed by contracts.ParseExpectsReply rather than decoded as one Go type.
+	ExpectsReply json.RawMessage `json:"expects_reply"`
+	ExpiresAt    *int64          `json:"expires_at"`
 }
 
 // sendResponse is the answer to a targeted send. Duplicate reports that JetStream already held
@@ -366,10 +369,8 @@ func validateMessageBody(body messageBody) (string, string) {
 			return "urgency must be one of low, med, high, blocking", "urgency"
 		}
 	}
-	if body.ExpectsReply != nil {
-		if *body.ExpectsReply == "" || (*body.ExpectsReply != "none" && *body.ExpectsReply != "optional" && *body.ExpectsReply != "required") {
-			return "expects_reply must be one of none, optional, required", "expects_reply"
-		}
+	if _, err := contracts.ParseExpectsReply(body.ExpectsReply); err != nil {
+		return "expects_reply must be one of false, optional, required", "expects_reply"
 	}
 	return "", ""
 }
@@ -408,8 +409,19 @@ func messageEnvelope(body messageBody, topic, dedupeKey string) contracts.Envelo
 		InReplyTo:      optionalString(body.InReplyTo),
 		Supersedes:     optionalString(body.Supersedes),
 		Urgency:        optionalString(body.Urgency),
-		ExpectsReply:   optionalString(body.ExpectsReply),
+		ExpectsReply:   string(bodyExpectsReply(body)),
 	}
+}
+
+// bodyExpectsReply is the body's expects_reply as the envelope carries it. validateMessageBody
+// has already refused anything the parser does not read, so a value that does not parse here is
+// the absent one.
+func bodyExpectsReply(body messageBody) contracts.ExpectsReply {
+	expectsReply, err := contracts.ParseExpectsReply(body.ExpectsReply)
+	if err != nil {
+		return contracts.ExpectsReplyUnset
+	}
+	return expectsReply
 }
 
 // senderStamp is the sender a send or a publish carries: the session, the machine and directory it
