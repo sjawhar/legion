@@ -2523,8 +2523,8 @@ jobs:
       #
       # What the three attempts complete, which is the threshold the step carries: three bounds
       # of 300 s are 900 s of download, so the step completes above about 57 kB/s, and under
-      # that it fails by its own name - in about 1080 s where the update was fast, and in at
-      # most 1170 s where the update phase was retried to its bound. Two attempts would have
+      # that it fails by its own name - in about 900 s where both `apt-get update` phases were
+      # fast, and in at most 1170 s where each was retried to its bound. Two attempts would have
       # completed only above about 86 kB/s, which is why there are three: at 62.5 kB/s the
       # head's 51.4 MB need 822 s, which 600 s of download does not reach and 900 s does, and
       # job 127274913129 above met exactly that rate.
