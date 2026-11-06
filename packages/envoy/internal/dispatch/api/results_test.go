@@ -512,10 +512,11 @@ func TestResultAtACommitTheRepositoryHoldsIsStored(t *testing.T) {
 	}
 }
 
-// A check whose issue resolves to a repository the App cannot read refuses nothing: GitHub
-// answers 404 there, which says only that Dispatch cannot tell whether the commit is held. The
-// result is stored although the fixture's GitHub holds no such commit anywhere, and it reads
-// unknown, since nothing can teach Dispatch that repository's heads either.
+// A check whose issue resolves to a repository the App is not installed on refuses nothing:
+// the installation lookup answers 404, so no token is minted and the commit is never asked
+// about, which says only that Dispatch cannot tell whether the commit is held. The result is
+// stored although the fixture's GitHub holds no such commit anywhere, and it reads unknown,
+// since nothing can teach Dispatch that repository's heads either.
 func TestResultAtAnUnreadableRepositoryIsStoredAndReadsUnknown(t *testing.T) {
 	handler, database := resultsGitHubHolding(t, map[string]bool{"acme/widgets": true},
 		map[string]bool{headCommit: true}, func(string, string) string { return "diverged" })
