@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
-import { ASK_QUESTION_MAX, dispatchToolSpecs } from "@legion/contracts";
+import { dispatchToolSpecs } from "@legion/contracts";
 import { bearerCredential } from "../bearer";
 import type { ExecFn } from "../dispatch-cwd";
 import { executeDispatchTool } from "../dispatch-execute";
@@ -375,6 +375,19 @@ function answerFor(method: string, pathname: string): Response {
       return response({ kind: "agent", owner: "person@example.com", session: SESSION });
     case "GET /api/v1/agents":
       return response([]);
+    // The bounds the server's own `GET /api/v1/limits` answers (`api/limits.go`), fixed here so
+    // the recorded lines are the server's numbers rather than this client's.
+    case "GET /api/v1/limits":
+      return response({
+        block_units: 32000,
+        item_blocks: 32768,
+        ask_options: 8,
+        ask_units: 32000,
+        event_body_units: 32000,
+        request_bytes: 1048576,
+        document_bytes: 1048576,
+        handoff_bytes: 262144,
+      });
     case "GET /api/v1/references":
       return response({ node: { kind: "issue", id: ISSUE }, edges: [] });
     // The Inbox's two lists, both empty: every line the summary prints from a row carries the
@@ -601,11 +614,6 @@ const commentRef = `dispatch://${ISSUE}/comment/${UUID}`;
  * Each is written whole, so the call that makes a problem is readable beside the problem it makes.
  */
 const refusals: readonly RefusalCase[] = [
-  {
-    tool: "dispatch_ask",
-    call: "question over the cap once the ref is appended",
-    args: { issue: ISSUE, question: "q".repeat(ASK_QUESTION_MAX), ref: commentRef },
-  },
   {
     tool: "dispatch_ask",
     call: "artifact with no anchor",

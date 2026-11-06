@@ -5,12 +5,14 @@ import {
   AnchorSchema,
   anchorFields,
   anchorPositionFields,
+  type BlockEmbedding,
   type DisplayTree,
   InboundActorSchema,
 } from "./dispatch-api-core";
 import type { GraphNode } from "./dispatch-api-graph";
 import { ASK_TURNS, type AskTurn, DELIVERY_CAPABILITIES } from "./dispatch-api-limits";
 import {
+  carriedBodyFields,
   ReplyBlockSchema,
   type ReplyBlockWithTrees,
   referenceChangesFields,
@@ -82,6 +84,11 @@ export const commentFields = {
   body: z.string(),
   anchor: AnchorSchema.nullable(),
   reply_to: z.string().nullable(),
+  /** The comment this reply answers: the one the write named, where `reply_to` is the head of
+   *  the thread the write climbed to. The two are the same on a reply to a thread's root; a
+   *  reply that names an ask alone carries neither, as no comment that is not a reply does.
+   *  Absent from a Dispatch older than the field. A conversation nests a reply under it. */
+  answers: z.string().nullish(),
   ask_id: z.string().nullable(),
   /** On a reply to an open ask, who holds the turn after it; null under a closed ask (nothing is
    *  waiting) and on every other comment. A human's reply is always `agent`; a session's is
@@ -139,6 +146,9 @@ export interface ItemBlock {
   readonly to: number;
   readonly changed_revision?: number;
   readonly changed_at?: string;
+  /** Where meaning search stands on the block. Absent on a hit from a Dispatch older than block
+   *  windows. */
+  readonly embedding?: BlockEmbedding;
 }
 
 /** What a route that writes a comment answers (`POST /api/v1/issues/{key}/comments`,
@@ -190,6 +200,7 @@ export const commentEventPayloadFields = {
   ask_waiting_on: z.enum(ASK_TURNS).optional(),
   ...referenceChangesFields,
   ...threadLoginsFields,
+  ...carriedBodyFields,
 };
 
 export const WrittenCommentEventPayloadSchema = z
@@ -239,6 +250,8 @@ export const CommentEventPayloadSchema = z
     deliveries: z.array(CommentDeliverySchema).optional(),
     reply_block: ReplyBlockSchema.nullish(),
     thread_logins: threadLoginsFields.thread_logins,
+    body_truncated: carriedBodyFields.body_truncated,
+    payload_omitted: carriedBodyFields.payload_omitted,
   })
   .passthrough();
 

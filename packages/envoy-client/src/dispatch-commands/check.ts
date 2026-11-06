@@ -1,8 +1,6 @@
 import {
-  ASK_QUESTION_MAX,
   dispatchToolSchema,
   dispatchToolSpecs,
-  overCapMessage,
   PROJECT_KEY_PATTERN,
   PROJECT_KEY_RULE,
   zodSchemaApi,
@@ -58,6 +56,7 @@ const issueFreeTools: Readonly<Record<string, true>> = {
   dispatch_open_asks: true,
   dispatch_answers: true,
   dispatch_whoami: true,
+  dispatch_limits: true,
   dispatch_inbox: true,
   dispatch_architecture_sync: true,
 };
@@ -66,20 +65,12 @@ function canonicalExternalIssueRef(value: string): string {
   const match = value.trim().match(externalIssueRefPattern);
   return match ? `${canonicalRepo(match[1] ?? "", match[2] ?? "")}#${match[3]}` : value;
 }
-/** The question text sent to Dispatch: the ref is appended unless the question already cites it. */
-function questionWithRef(question: string, ref: string | undefined): string {
-  return ref === undefined || question.includes(ref) ? question : `${question}\n\nRef: ${ref}`;
-}
-
-/** The validated question plus ref; `argumentProblems` has already refused an over-cap pair. */
+/** The question text sent to Dispatch: the ref appended unless the question already cites it.
+ *  Dispatch holds the pair to its own bound and refuses a longer one. */
 export function askQuestionWithRef(args: ToolArguments): string {
-  return questionWithRef(stringArg(args, "question"), optionalString(args, "ref"));
-}
-
-function askQuestionProblem(withRef: string): string | undefined {
-  return withRef.length > ASK_QUESTION_MAX
-    ? `question plus ref ${overCapMessage(withRef.length, ASK_QUESTION_MAX)}; shorten the question or drop the ref`
-    : undefined;
+  const question = stringArg(args, "question");
+  const ref = optionalString(args, "ref");
+  return ref === undefined || question.includes(ref) ? question : `${question}\n\nRef: ${ref}`;
 }
 
 /** The tools whose `images` argument sends pictures. */
@@ -115,16 +106,6 @@ const ownerRequiredProblem = "issue is required; supply issue or set LEGION_ISSU
 function argumentProblems(tool: string, args: ToolArguments): string[] {
   const problems: string[] = [];
   switch (tool) {
-    case "dispatch_ask": {
-      // The schema already caps the bare question; this covers the ref the tool appends.
-      const question = optionalString(args, "question");
-      const ref = optionalString(args, "ref");
-      if (question !== undefined && ref !== undefined && question.length <= ASK_QUESTION_MAX) {
-        const problem = askQuestionProblem(questionWithRef(question, ref));
-        if (problem !== undefined) problems.push(problem);
-      }
-      break;
-    }
     case "dispatch_edit_ask":
     case "dispatch_resolve_ask":
     case "dispatch_follow": {

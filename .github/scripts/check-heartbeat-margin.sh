@@ -1,27 +1,28 @@
 #!/usr/bin/env bash
-# A live Oh My Pi pane keeps its Envoy registration by refreshing it: the pane's session record in
-# the listener's `envoy_sessions` bucket expires on its own, and every refresh renews it. The two
-# numbers that decide whether a live pane stays registered are set in different languages and
-# different packages — the refresh interval (`DEFAULT_HEARTBEAT_MS`,
-# packages/envoy-client/src/envoy-settings.ts) and the record lifetime (`OpenSessionRegistry`'s
-# default `ttl`, packages/envoy/internal/session/registry.go) — so moving one without the other is
-# the drift this check stops. When it is not stopped, a pane whose process is still running has its
-# record expire, and every other agent asking the listener for it is told there is no live session:
-# messages to it are refused, its role lookups answer gone, and nothing logs an error.
+# A live Oh My Pi pane keeps its Envoy registration fresh by refreshing it: the pane's session
+# record in the listener's `envoy_sessions` bucket carries the time of its last registration, and
+# a session whose last registration is older than the live window is no longer live to the
+# listener - every list, lookup and send that asks for live sessions alone leaves it out. The two
+# numbers that decide whether a working pane keeps reading live are set in different languages and
+# different packages - the refresh interval (`DEFAULT_HEARTBEAT_MS`,
+# packages/envoy-client/src/envoy-settings.ts) and the live window (`LiveWindow`,
+# packages/envoy/internal/session/state.go) - so moving one without the other is the drift this
+# check stops. When it is not stopped, a pane whose process is still running reads unresponsive,
+# and the messages other agents send it are stored rather than delivered, with nothing logged.
 #
-# Four things must hold, and this check fails unless all four do:
+# Three things must hold, and this check fails unless all three do:
 #
-#   1. Three refresh intervals, plus one listener call's budget, fit strictly inside the record
-#      lifetime: a sum equal to the lifetime fails as surely as one past it. A record that expires
-#      unless refreshed is renewed at a third of its lifetime, so two whole refreshes may fail
-#      before a live pane is dropped - but the third must *complete* before the record expires,
-#      not merely be attempted. The record expires that long after the listener accepted a write,
-#      while the third refresh is only posted three intervals after that acceptance and still owes
-#      its round trip, and `setInterval` only ever fires late; at equality the third refresh's
-#      budgeted completion reaches the instant the record expires, leaving no scheduling margin.
-#      With a 40 000 ms interval, a 60 000 ms call budget and a 180 000 ms lifetime, the third
-#      refresh is dispatched at 120 000 ms and its budget runs out at 180 000 ms. The call budget is
-#      that round trip: every attempt's timeout plus the retry delays between them
+#   1. Three refresh intervals, plus one listener call's budget, fit strictly inside the live
+#      window: a sum equal to the window fails as surely as one past it. A registration is renewed
+#      at a third of the window, so two whole refreshes may fail before a working pane stops
+#      reading live - but the third must *complete* inside the window, not merely be attempted.
+#      The window is measured from the registration the listener accepted, while the third refresh
+#      is only posted three intervals after that acceptance and still owes its round trip, and
+#      `setInterval` only ever fires late; at equality the third refresh's budgeted completion
+#      reaches the instant the window closes, leaving no scheduling margin. With a 40 000 ms
+#      interval, a 60 000 ms call budget and a 180 000 ms window, the third refresh is dispatched
+#      at 120 000 ms and its budget runs out at 180 000 ms. The call budget is that round trip:
+#      every attempt's timeout plus the retry delays between them
 #      (packages/envoy-client/src/transport.ts).
 #
 #      The pass deadline is not in that sum, and is not forgotten. A pass that stalls does not hold
@@ -32,41 +33,32 @@
 #      most two intervals and one listener call, which the sum above already covers.
 #      `MIN_PASS_DEADLINE_MS` only floors how long one pass may run, and raising it must not be
 #      refused by this check.
-#   2. The Legion daemon's own copy of the interval (`Heartbeat`,
-#      packages/daemon/internal/controller/liveness.go) equals the TypeScript one, and its
-#      staleness window is at least the record lifetime. The window is
-#      `max(bootTimeout, N*Heartbeat)`; `N` is read out of `liveness.go` rather than assumed, and
-#      only the heartbeat arm is checked, because `bootTimeout` is deployment configuration this
-#      check cannot see. A daemon window narrower than the record lifetime reports a live
-#      controller gone.
-#   3. The daemon's other copy of the interval (`pluginHeartbeat`,
-#      packages/daemon/internal/daemon/notice_exceptions.go) equals the TypeScript one as well.
+#   2. The daemon's copy of the interval (`pluginHeartbeat`,
+#      packages/daemon/internal/daemon/notice_exceptions.go) equals the TypeScript one.
 #      That file is read because the constant is a real delay and not a comment: it is
 #      `noticeReholdDelays[1]`, so the second re-hold of a notice the listener could not forward
 #      goes one pane heartbeat after the first, and the schedule the daemon's own test derives
 #      from those delays moves with it. A copy that drifts re-sends that notice at the wrong
 #      distance - too soon, before a relaunched pane has registered, or too late, holding the
 #      architect's notice past the window it could have been caught in.
-#   4. The daemon's hand-copies of the listener's two liveness windows (`listenerSessionTTL` and
+#   3. The daemon's hand-copies of the listener's two liveness windows (`listenerSessionTTL` and
 #      `listenerClaimStale`, packages/daemon/internal/daemon/notice_exceptions.go) equal the
-#      windows themselves - `OpenSessionRegistry`'s default `ttl`
-#      (packages/envoy/internal/session/registry.go) and `ClaimStaleAfter`
+#      windows themselves - the live window (`LiveWindow`,
+#      packages/envoy/internal/session/state.go) and `ClaimStaleAfter`
 #      (packages/envoy/internal/session/claim.go, read for this rule alone). Those copies are
 #      `noticeReholdDelays`' last delay, which is when the last copy of a notice the listener
 #      could not forward is finally sent and, if still refused, dropped. Rule 1's own remedy says
-#      to "raise the registry's default ttl" - the change that desynchronises them - and a copy
-#      left behind sends that last notice before the stopped session's registration has lapsed,
-#      so it is refused and dropped while the listener still names a holder that is gone.
+#      to "raise the live window" - the change that desynchronises them - and a copy left behind
+#      sends that last notice while the stopped session's registration still reads live, so it is
+#      refused and dropped while the listener still names a holder that has stopped answering.
 #
 # What this check cannot see:
 #
-# - It compares the defaults in the source, not the live deployment. `bus.EnsureKeyValue` creates
-#   the `envoy_sessions` bucket only when it does not exist
-#   (packages/envoy/internal/bus/kv.go:27-37), and `OpenSessionRegistry` then adopts whatever
-#   `MaxAge` the live bucket reports (packages/envoy/internal/session/registry.go), so a bucket
-#   created by an older build keeps its old lifetime however this constant moves. The live value is
-#   in the listener's boot log, which names the record lifetime it resolved; `nats kv info
-#   envoy_sessions` is the other way to read it.
+# - It compares the declarations in the source, not the live deployment: a listener given another
+#   live window through the registry's options (`session.WithSessionLiveWindow`) runs on that one,
+#   and no file here records it. The `envoy_sessions` bucket's own maximum age is a different
+#   number - the backstop that removes a record no reaper deleted, not what makes a session live -
+#   and this check does not read it; `nats kv info envoy_sessions` reports it.
 # - It cannot see a pane started with `ENVOY_HEARTBEAT_MS` set: that overrides the interval for
 #   that pane alone, and no file records it.
 # - It keeps no copy of any of these numbers. Each is read from the one file that defines it, and
@@ -87,8 +79,7 @@ from typing import NamedTuple, NoReturn
 
 SETTINGS_FILE = "packages/envoy-client/src/envoy-settings.ts"
 TRANSPORT_FILE = "packages/envoy-client/src/transport.ts"
-REGISTRY_FILE = "packages/envoy/internal/session/registry.go"
-LIVENESS_FILE = "packages/daemon/internal/controller/liveness.go"
+STATE_FILE = "packages/envoy/internal/session/state.go"
 NOTICE_FILE = "packages/daemon/internal/daemon/notice_exceptions.go"
 CLAIM_FILE = "packages/envoy/internal/session/claim.go"
 
@@ -115,13 +106,10 @@ ATTEMPTS_PATTERN = (
     r"^\s*const\s+attempts\s*=\s*config\.retry\s*===\s*false\s*\?\s*"
     rf"{DECIMAL}\s*:\s*({DECIMAL})\s*;\s*(?://.*)?$"
 )
-# The record lifetime, as `OpenSessionRegistry` defaults it before its options are applied.
-TTL_PATTERN = rf"^\s*opts\s*:=\s*sessionRegistryOpts\{{[^{{}}]*\bttl:\s*{GO_DURATION}\s*[,}}]"
-DAEMON_HEARTBEAT_PATTERN = rf"^\s*const\s+Heartbeat\s*=\s*{GO_DURATION}\s*(?://.*)?$"
-# How many heartbeats the daemon's staleness window is, out of `LivenessWindow`'s own expression.
-WINDOW_FACTOR_PATTERN = (
-    rf"^\s*return\s+max\(\s*bootTimeout\s*,\s*({DECIMAL})\s*\*\s*Heartbeat\s*\)\s*(?://.*)?$"
-)
+# The live window, as session.LiveWindow declares it: the age past which a session's last
+# registration no longer reads live. An option moves it for one listener
+# (session.WithSessionLiveWindow); this is the tree's own number.
+LIVE_WINDOW_PATTERN = rf"^\s*LiveWindow\s*=\s*{GO_DURATION}\s*(?://.*)?$"
 # The daemon's second copy of the refresh interval, one member of the const block it is declared
 # in and the second of `noticeReholdDelays`.
 PLUGIN_HEARTBEAT_PATTERN = rf"^\s*pluginHeartbeat\s*=\s*{GO_DURATION}\s*(?://.*)?$"
@@ -132,9 +120,9 @@ LISTENER_CLAIM_STALE_PATTERN = rf"^\s*listenerClaimStale\s*=\s*{GO_DURATION}\s*(
 CLAIM_STALE_AFTER_PATTERN = rf"^\s*const\s+ClaimStaleAfter\s*=\s*{GO_DURATION}\s*(?://.*)?$"
 
 MILLIS = {"Second": 1_000, "Minute": 60_000}
-# A record that expires unless refreshed is renewed at a third of its lifetime, so two whole
-# refreshes may fail before a live session is dropped. This is the rule the margin is held to, not
-# a copy of any number in the tree.
+# A registration is renewed at a third of the live window, so two whole refreshes may fail before
+# a working session stops reading live. This is the rule the margin is held to, not a copy of any
+# number in the tree.
 RENEWALS = 3
 
 problems: list[tuple[str, int | None, str]] = []
@@ -227,8 +215,7 @@ def duration(path: str, lines: list[str], what: str, pattern: str) -> Declaratio
 
 settings_lines = load(SETTINGS_FILE)
 transport_lines = load(TRANSPORT_FILE)
-registry_lines = load(REGISTRY_FILE)
-liveness_lines = load(LIVENESS_FILE)
+state_lines = load(STATE_FILE)
 notice_lines = load(NOTICE_FILE)
 claim_lines = load(CLAIM_FILE)
 
@@ -236,11 +223,7 @@ heartbeat = millis(SETTINGS_FILE, settings_lines, HEARTBEAT_CONST, HEARTBEAT_PAT
 timeout = millis(TRANSPORT_FILE, transport_lines, TIMEOUT_CONST, TIMEOUT_PATTERN)
 retry_delay = millis(TRANSPORT_FILE, transport_lines, RETRY_DELAY_CONST, RETRY_DELAY_PATTERN)
 attempts = millis(TRANSPORT_FILE, transport_lines, "the retrying attempt count", ATTEMPTS_PATTERN)
-lifetime = duration(REGISTRY_FILE, registry_lines, "OpenSessionRegistry's default ttl", TTL_PATTERN)
-daemon_heartbeat = duration(LIVENESS_FILE, liveness_lines, "Heartbeat", DAEMON_HEARTBEAT_PATTERN)
-window_factor = millis(
-    LIVENESS_FILE, liveness_lines, "LivenessWindow's heartbeat multiple", WINDOW_FACTOR_PATTERN
-)
+live_window = duration(STATE_FILE, state_lines, "LiveWindow", LIVE_WINDOW_PATTERN)
 plugin_heartbeat = duration(NOTICE_FILE, notice_lines, "pluginHeartbeat", PLUGIN_HEARTBEAT_PATTERN)
 listener_ttl = duration(NOTICE_FILE, notice_lines, "listenerSessionTTL", LISTENER_TTL_PATTERN)
 listener_claim_stale = duration(
@@ -251,17 +234,16 @@ claim_stale = duration(CLAIM_FILE, claim_lines, "ClaimStaleAfter", CLAIM_STALE_A
 # One listener call: every attempt's timeout, plus one retry delay between each pair of them.
 call_budget = attempts.value * timeout.value + max(attempts.value - 1, 0) * retry_delay.value
 renewal_window = RENEWALS * heartbeat.value + call_budget
-daemon_window = window_factor.value * daemon_heartbeat.value
 # The remedies are whole seconds, because the numbers they move are Go durations this check reads
-# only as whole seconds or minutes: the daemon's two copies of the interval, and the registry's
-# ttl. The interval is the longest whole second whose renewal window still falls short of the
-# lifetime; the lifetime is the shortest whole second past the renewal window.
+# only as whole seconds or minutes: the daemon's copy of the interval, and the live window. The
+# interval is the longest whole second whose renewal window still falls short of the live window;
+# the window is the shortest whole second past the renewal window.
 SECOND = MILLIS["Second"]
-max_heartbeat = (lifetime.value - call_budget - 1) // RENEWALS // SECOND * SECOND
-min_lifetime = (renewal_window // SECOND + 1) * SECOND
+max_heartbeat = (live_window.value - call_budget - 1) // RENEWALS // SECOND * SECOND
+min_window = (renewal_window // SECOND + 1) * SECOND
 
-if renewal_window >= lifetime.value:
-    relation = "equal to" if renewal_window == lifetime.value else "past"
+if renewal_window >= live_window.value:
+    relation = "equal to" if renewal_window == live_window.value else "past"
     problem(
         SETTINGS_FILE,
         heartbeat.line,
@@ -269,31 +251,19 @@ if renewal_window >= lifetime.value:
         f"listener call's {call_budget} ms ({attempts.value} attempts of {timeout.value} ms, "
         f"{timeout.site}, with {retry_delay.value} ms between them, {retry_delay.site}; the "
         f"attempt count is at {attempts.site}) are {renewal_window} ms, {relation} the session "
-        f"record lifetime of {lifetime.value} ms ({lifetime.site}), and the sum must fall strictly "
-        f"short of it: equal is refused as surely as past, because either way the third refresh "
-        f"does not complete before the record expires. The record expires that long after the "
-        f"listener accepted a write, while the third refresh is only posted {RENEWALS} intervals "
-        f"later and still owes its round trip - and `setInterval` fires late - so even at equality "
-        f"it lands no earlier than the instant of expiry. A pane whose process is still running "
-        f"then has its record expire after two failed refreshes, and from then on every other "
-        f"agent asking the listener for that pane is told there is no live session for it - "
-        f"messages to it are refused and its role lookups answer gone, with nothing logged. Lower "
+        f"live window of {live_window.value} ms ({live_window.site}), and the sum must fall "
+        f"strictly short of it: equal is refused as surely as past, because either way the third "
+        f"refresh does not complete before the window closes. The window is measured from the "
+        f"registration the listener accepted, while the third refresh is only posted {RENEWALS} "
+        f"intervals later and still owes its round trip - and `setInterval` fires late - so even "
+        f"at equality it lands no earlier than the instant the window closes. A pane whose "
+        f"process is still running then reads unresponsive after two failed refreshes, and from "
+        f"then on every list, lookup and send that asks for live sessions alone leaves it out - "
+        f"its messages are stored rather than delivered, with nothing logged. Lower "
         f"{HEARTBEAT_CONST} to at most {max_heartbeat} ms, the longest whole second that leaves "
-        f"the sum short of the lifetime (and the daemon's Heartbeat and pluginHeartbeat with it), "
-        f"or raise the registry's default ttl to at least {min_lifetime} ms, the shortest whole "
-        f"second past the sum (and the daemon's window and its listenerSessionTTL with it)",
-    )
-
-if daemon_heartbeat.value != heartbeat.value:
-    problem(
-        LIVENESS_FILE,
-        daemon_heartbeat.line,
-        f"the daemon's Heartbeat is {daemon_heartbeat.value} ms ({daemon_heartbeat.site}) while "
-        f"the interval panes actually refresh at is {heartbeat.value} ms ({heartbeat.site}): the "
-        f"daemon sizes its staleness window from its own copy, so a copy that is too small makes "
-        f"it report a live controller gone and hand the role elsewhere, and one that is too large "
-        f"makes it hold a dead controller live. Set Heartbeat to {heartbeat.value} ms - it is a "
-        f"copy of {HEARTBEAT_CONST} and has no independent value",
+        f"the sum short of the window (and the daemon's pluginHeartbeat with it), or raise the "
+        f"live window to at least {min_window} ms, the shortest whole second past the sum (and "
+        f"the daemon's listenerSessionTTL with it)",
     )
 
 if plugin_heartbeat.value != heartbeat.value:
@@ -310,20 +280,20 @@ if plugin_heartbeat.value != heartbeat.value:
         f"{heartbeat.value} ms - it is a copy of {HEARTBEAT_CONST} and has no independent value",
     )
 
-if listener_ttl.value != lifetime.value:
+if listener_ttl.value != live_window.value:
     problem(
         NOTICE_FILE,
         listener_ttl.line,
         f"the daemon's listenerSessionTTL is {listener_ttl.value} ms ({listener_ttl.site}) while "
-        f"the listener's own session record lifetime is {lifetime.value} ms ({lifetime.site}): it "
-        f"is a hand-copy of that lifetime, and noticeReholdDelays' last delay is taken from it, "
-        f"so the last copy of a notice the listener could not forward is sent at the wrong "
-        f"distance from the moment a stopped session's registration actually lapses. A copy left "
-        f"behind - which raising the registry's default ttl, the remedy this check names above, "
-        f"is what does - sends that last copy while the listener still names the gone session as "
-        f"the holder, so the forward is refused, nothing is held, and the architect's notice is "
-        f"dropped. Set listenerSessionTTL to {lifetime.value} ms - it is a copy of "
-        f"OpenSessionRegistry's default ttl and has no independent value",
+        f"the listener's own live window is {live_window.value} ms ({live_window.site}): it is a "
+        f"hand-copy of that window, and noticeReholdDelays' last delay is taken from it, so the "
+        f"last copy of a notice the listener could not forward is sent at the wrong distance from "
+        f"the moment a stopped session's registration stops reading live. A copy left behind - "
+        f"which raising the live window, the remedy this check names above, is what does - sends "
+        f"that last copy while the listener still names the stopped session as the holder, so the "
+        f"forward is refused, nothing is held, and the architect's notice is dropped. Set "
+        f"listenerSessionTTL to {live_window.value} ms - it is a copy of session.LiveWindow and "
+        f"has no independent value",
     )
 
 if listener_claim_stale.value != claim_stale.value:
@@ -341,28 +311,13 @@ if listener_claim_stale.value != claim_stale.value:
         f"has no independent value",
     )
 
-if daemon_window < lifetime.value:
-    problem(
-        LIVENESS_FILE,
-        window_factor.line,
-        f"the daemon's staleness window is {window_factor.value} x Heartbeat = {daemon_window} ms "
-        f"({window_factor.site}, over the Heartbeat of {daemon_heartbeat.value} ms at "
-        f"{daemon_heartbeat.site}), short of the session record lifetime of {lifetime.value} ms "
-        f"({lifetime.site}): the daemon calls the controller gone while its record is still live "
-        f"and its pane is still running, takes the controller role away from it and reports a live "
-        f"controller gone. Widen the window to at least {lifetime.value} ms - "
-        f"{-(-lifetime.value // daemon_heartbeat.value)} x Heartbeat at this Heartbeat. Only the "
-        f"heartbeat arm of max(bootTimeout, N*Heartbeat) is checked: bootTimeout is deployment "
-        f"configuration this check cannot see",
-    )
-
 for path, line, message in problems:
     location = f"file={path}" + (f",line={line}" if line is not None else "")
     print(f"::error {location}::{message}", file=sys.stderr)
 if problems:
     print(
         f"::error::{len(problems)} problem(s): the registration refresh interval and the session "
-        f"record lifetime do not demonstrably leave a margin",
+        f"live window do not demonstrably leave a margin",
         file=sys.stderr,
     )
     raise SystemExit(1)
@@ -371,12 +326,10 @@ print(
     f"{RENEWALS} refresh intervals of {heartbeat.value} ms ({heartbeat.site}) plus one listener "
     f"call {call_budget} ms ({attempts.value} attempts of {timeout.value} ms, {timeout.site}, "
     f"{retry_delay.value} ms apart, {retry_delay.site}; attempts at {attempts.site}) are "
-    f"{renewal_window} ms, strictly inside the session record lifetime {lifetime.value} ms "
-    f"({lifetime.site}); the daemon's Heartbeat {daemon_heartbeat.value} ms "
-    f"({daemon_heartbeat.site}) matches and its window {window_factor.value} x Heartbeat = "
-    f"{daemon_window} ms ({window_factor.site}) covers that lifetime; its pluginHeartbeat "
-    f"{plugin_heartbeat.value} ms ({plugin_heartbeat.site}) matches too; its listenerSessionTTL "
-    f"{listener_ttl.value} ms ({listener_ttl.site}) matches that lifetime and its "
+    f"{renewal_window} ms, strictly inside the session live window {live_window.value} ms "
+    f"({live_window.site}); the daemon's pluginHeartbeat {plugin_heartbeat.value} ms "
+    f"({plugin_heartbeat.site}) matches the interval; its listenerSessionTTL "
+    f"{listener_ttl.value} ms ({listener_ttl.site}) matches that window and its "
     f"listenerClaimStale {listener_claim_stale.value} ms ({listener_claim_stale.site}) matches "
     f"ClaimStaleAfter {claim_stale.value} ms ({claim_stale.site})"
 )

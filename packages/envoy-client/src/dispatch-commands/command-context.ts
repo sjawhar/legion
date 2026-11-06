@@ -1,7 +1,7 @@
 import type { Actor, ArtifactUploadResponse, CreateArtifactInput } from "@legion/contracts";
 import { type DispatchOrigin, defaultExec, resolveOrigin } from "../dispatch-cwd";
 import { DispatchWriteLandedError } from "../dispatch-http";
-import { type PictureTextLimit, shownPictures, textWithPictures } from "../dispatch-picture-tools";
+import { shownPictures, textWithPictures } from "../dispatch-picture-tools";
 import { ToolInputError } from "../tool-input-errors";
 import {
   type CommandContext,
@@ -60,15 +60,12 @@ export async function commandContext(session: SessionContext): Promise<CommandCo
   };
   const postWithPictures = (
     text: string,
-    limit: PictureTextLimit,
     owner: string,
     upload: (upload: CreateArtifactInput) => Promise<ArtifactUploadResponse>
   ): Promise<string> =>
     textWithPictures(
-      input.tool,
       text,
       pictures,
-      limit,
       owner,
       (picture) =>
         upload(picture).catch((error: unknown) => {
@@ -80,19 +77,13 @@ export async function commandContext(session: SessionContext): Promise<CommandCo
         }),
       actor
     );
-  const writePictures = (
-    resolved: ResolvedArtifact | undefined,
-    text: string,
-    limit: PictureTextLimit
-  ): Promise<string> => {
+  const writePictures = (resolved: ResolvedArtifact | undefined, text: string): Promise<string> => {
     if (resolved?.owner.kind === "project") {
       const { project } = resolved.owner;
-      return postWithPictures(text, limit, project, (upload) =>
-        client.projectArtifact(project, upload)
-      );
+      return postWithPictures(text, project, (upload) => client.projectArtifact(project, upload));
     }
     const issueKey = issue();
-    return postWithPictures(text, limit, issueKey, (upload) => client.artifact(issueKey, upload));
+    return postWithPictures(text, issueKey, (upload) => client.artifact(issueKey, upload));
   };
   const { hostSession } = session;
   return {

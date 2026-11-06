@@ -12,7 +12,7 @@ import type { ActiveDispatchConfig } from "../dispatch-config";
 import type { DispatchHost, ExecFn } from "../dispatch-cwd";
 import { DispatchClient, type DispatchWriteRetry } from "../dispatch-http";
 import type { Owner, ParsedDispatchRef } from "../dispatch-owner";
-import type { AgentArtifactRef, LocalPicture, PictureTextLimit } from "../dispatch-picture-tools";
+import type { AgentArtifactRef, LocalPicture } from "../dispatch-picture-tools";
 import type { ToolImage } from "../dispatch-pictures";
 
 /**
@@ -248,16 +248,11 @@ export interface CommandContext extends SessionContext {
    */
   postWithPictures(
     text: string,
-    limit: PictureTextLimit,
     owner: string,
     upload: (upload: CreateArtifactInput) => Promise<ArtifactUploadResponse>
   ): Promise<string>;
   /** An ask or comment uploads to the project of the project document it is on, else to its issue. */
-  writePictures(
-    resolved: ResolvedArtifact | undefined,
-    text: string,
-    limit: PictureTextLimit
-  ): Promise<string>;
+  writePictures(resolved: ResolvedArtifact | undefined, text: string): Promise<string>;
   /**
    * The pictures this host session was already shown: `dispatch_read` names them instead of
    * sending them again, and it and `dispatch_doc_read` add the ones their result shows.

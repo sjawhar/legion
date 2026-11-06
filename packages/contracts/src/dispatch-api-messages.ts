@@ -2,6 +2,7 @@ import { z } from "zod";
 import { type Actor, ActorSchema, type DisplayTree, InboundActorSchema } from "./dispatch-api-core";
 import { DELIVERY_CAPABILITIES, type MessageDeliveryMode } from "./dispatch-api-limits";
 import {
+  carriedBodyFields,
   ReplyBlockSchema,
   type ReplyBlockWithTrees,
   referenceChangesFields,
@@ -193,6 +194,7 @@ export const messageEventPayloadFields = {
   thread_target: z.string().optional(),
   ...referenceChangesFields,
   ...threadLoginsFields,
+  ...carriedBodyFields,
 };
 
 export const WrittenMessageEventPayloadSchema = z
@@ -213,6 +215,8 @@ export const MessageEventPayloadSchema = z.object({
   author: InboundActorSchema.optional(),
   reply_block: ReplyBlockSchema.nullish(),
   thread_logins: threadLoginsFields.thread_logins,
+  body_truncated: carriedBodyFields.body_truncated,
+  payload_omitted: carriedBodyFields.payload_omitted,
 });
 
 export const messageDeliveryEventPayloadFields = {

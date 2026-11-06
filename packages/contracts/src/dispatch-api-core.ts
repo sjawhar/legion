@@ -277,6 +277,14 @@ export const BlockPathSchema = z
 
 export type BlockPath = z.output<typeof BlockPathSchema>;
 
+/** Where meaning search stands on one block: every window of blocks covering it is embedded at
+ *  the text it holds now, one of them is still waiting for its vector, or no window covers the
+ *  block at all - a block the indexer leaves out of every window, and every block of an item
+ *  whose windows are not written yet. It is read the same way on a document's block
+ *  (`ArtifactBlock`) and on a comment's or a message's (`ItemBlock`), which is why it sits here
+ *  rather than in either area. */
+export type BlockEmbedding = "embedded" | "pending" | "none";
+
 /** Where a comment's or an ask's anchor's block stands in the live document. Set on the
  *  single-record reads alone (`GET /api/v1/comments/{id}`, `GET /api/v1/asks/{id}`); lists and
  *  events never carry it. */

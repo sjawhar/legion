@@ -6,7 +6,7 @@ import type {
   EditAskInput,
   OpenAsk,
 } from "@legion/contracts";
-import { ASK_QUESTION_MAX, ASK_URGENCIES } from "@legion/contracts";
+import { ASK_URGENCIES } from "@legion/contracts";
 import { textHead } from "../ask-answer";
 import { type DispatchClient, DispatchServiceError } from "../dispatch-http";
 import { issueTopic, type Owner, parseDispatchRef } from "../dispatch-owner";
@@ -230,13 +230,7 @@ export async function askCommand(context: CommandContext): Promise<DispatchToolR
   const multiple = optionalBoolean(args, "multiple");
   const urgency = askUrgency(args);
   const anchored = anchorArgs && resolved ? anchor(resolved.artifact, anchorArgs) : undefined;
-  const withRef = askQuestionWithRef(args);
-  const refAppended = withRef !== stringArg(args, "question");
-  const question = await writePictures(resolved, withRef, {
-    cap: ASK_QUESTION_MAX,
-    text: refAppended ? "question plus ref" : "question",
-    shorten: refAppended ? "shorten the question, drop the ref" : "shorten the question",
-  });
+  const question = await writePictures(resolved, askQuestionWithRef(args));
   const askInput = {
     question,
     ...(Array.isArray(options)

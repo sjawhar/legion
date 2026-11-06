@@ -90,6 +90,31 @@ export async function whoamiCommand(context: SessionContext): Promise<DispatchTo
   };
 }
 
+/**
+ * `dispatch limits`: the bounds the server holds every write to, read from the server itself
+ * (`GET /api/v1/limits`) rather than from a constant this client carries, so a client older or
+ * newer than its Dispatch prints the numbers that Dispatch actually enforces. It names no owner,
+ * so it runs on the session's context alone.
+ */
+export async function limitsCommand(context: SessionContext): Promise<DispatchToolResult> {
+  const limits = await context.newClient().limits();
+  const count = (value: number) => value.toLocaleString("en-US");
+  return {
+    text: [
+      `One block of a body - a paragraph, list, quote, table or code block: ${count(limits.block_units)} characters (UTF-16 units).`,
+      `Blocks in one body: ${count(limits.item_blocks)}.`,
+      `An ask's question and its options together: ${count(limits.ask_units)} characters (UTF-16 units).`,
+      `Options on one ask: ${count(limits.ask_options)}.`,
+      `The body an event carries whole: ${count(limits.event_body_units)} characters (UTF-16 units); a longer body reaches a reader cut, and the item itself holds the rest.`,
+      `One request: ${count(limits.request_bytes)} bytes.`,
+      `One markdown document: ${count(limits.document_bytes)} bytes.`,
+      `One handoff body: ${count(limits.handoff_bytes)} bytes.`,
+      "Dispatch holds every write to these bounds and refuses a longer text, naming the block or the field that passed one.",
+    ].join("\n"),
+    details: { ...limits },
+  };
+}
+
 /** How much of an ask's question the Inbox summary's line carries. The event summaries' head
  *  (`textHead`) is longer: a question is one line among four counted bands here, and the whole of
  *  it is one `dispatch read` away. */

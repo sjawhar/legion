@@ -16,7 +16,7 @@ import path from "node:path";
 
 const SOURCE = import.meta.dir;
 
-/** Every payload one `DispatchEvent` member carries, the two payload mixins, what an
+/** Every payload one `DispatchEvent` member carries, the three payload mixins, what an
  *  `issue.*` write reports it changed, and the one payload published outside the event log.
  *  `DERIVED_TYPES` below reads that same set out of the sources, and the two must agree: a
  *  member added to the union with a payload nobody listed here fails. */
@@ -34,6 +34,7 @@ const PAYLOAD_TYPES = [
   "AskFollowerEventPayload",
   "BlockInvalidEventPayload",
   "BlockRepairedEventPayload",
+  "CarriedBodyPayload",
   "CheckResultEventPayload",
   "ChildEventPayload",
   "ChildStatusEventPayload",
@@ -61,11 +62,13 @@ const PAYLOAD_TYPES = [
   "UserThreadStateUpdatedEventPayload",
 ] as const;
 
-/** The four payloads no `DispatchEvent` member carries: the two mixins every payload spreads
- *  (`ReferenceChangesPayload`, `ThreadLoginsPayload`), what an `issue.*` write reports it
- *  changed (`IssueEventChanges`, carried inside `IssueEventPayload`), and the `server.started`
+/** The five payloads no `DispatchEvent` member carries: the three mixins a payload family
+ *  spreads (`ReferenceChangesPayload` and `ThreadLoginsPayload`, and `CarriedBodyPayload` on the
+ *  comment and message families alone), what an `issue.*` write reports it changed
+ *  (`IssueEventChanges`, carried inside `IssueEventPayload`), and the `server.started`
  *  payload, which is published on its own subject and never appended to the event log. */
 const NON_EVENT_PAYLOAD_TYPES = [
+  "CarriedBodyPayload",
   "DispatchServerStartedPayload",
   "IssueEventChanges",
   "ReferenceChangesPayload",
@@ -92,7 +95,7 @@ const CONSTANT_LIST_TYPES = [
  * they are built from, down to the actor. Stated so a type written by hand beside a schema that
  * already describes it is a failure rather than a slow return to two spellings of one shape.
  */
-const SCHEMA_DERIVATIONS = 85;
+const SCHEMA_DERIVATIONS = 86;
 
 /** Every module of the split, as one text with its whitespace collapsed, so a declaration Biome
  *  wrapped over several lines reads as the one line it is. */
@@ -124,7 +127,7 @@ function dispatchEventUnion(): string {
 }
 
 /** The payload set as the sources state it: every `DispatchEvent` member's payload, plus the
- *  four payloads no member carries. */
+ *  five payloads no member carries. */
 const DERIVED_TYPES = [
   ...new Set([
     ...[...dispatchEventUnion().matchAll(/readonly payload: ([A-Za-z0-9_]+)/g)].map(

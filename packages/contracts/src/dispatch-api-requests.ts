@@ -18,6 +18,7 @@ import type { Event } from "./dispatch-api-events";
 import type {
   Issue,
   IssueChild,
+  IssueClaimLiveness,
   IssueComponentsInput,
   IssuePriority,
   IssueProgress,
@@ -287,7 +288,7 @@ export interface EditArtifactInput {
   readonly actor?: Actor;
 }
 
-export interface IssueDetails extends Issue, IssueRouteReach {
+export interface IssueDetails extends Issue, IssueRouteReach, IssueClaimLiveness {
   readonly progress: IssueProgress;
   readonly artifacts: Artifact[];
   readonly open_asks: Ask[];

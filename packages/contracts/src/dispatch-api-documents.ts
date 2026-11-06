@@ -3,6 +3,7 @@ import type { BlockAttributeKind } from "./block-schema.generated";
 import {
   type Actor,
   ActorSchema,
+  type BlockEmbedding,
   type DisplayTree,
   DisplayTreeSchema,
   type DocEditOp,
@@ -28,6 +29,7 @@ export const versionFields = {
    *  Absent on a document version from a server that predates it. */
   size: z.number().int().optional(),
   mime: z.string().optional(),
+  /** The stored bytes' hash; present on a document version read as well as a file version. */
   sha256: z.string().optional(),
 };
 
@@ -91,6 +93,8 @@ export interface ArtifactReview {
   /** Who gave the review; absent from a Dispatch older than review kinds. */
   readonly kind?: ArtifactReviewKind;
   readonly created_at: string;
+  readonly content_sha256: string | null;
+  readonly content_sha256_source: "insert" | "backfill" | null;
 }
 
 /** The document's approval as of its latest version: `draft` has never been reviewed or
@@ -117,6 +121,8 @@ export const ArtifactApprovalSchema = z
     /** The display tree of `reason`, absent unless the request sent `Dispatch-Trees: 1`. */
     reason_tree: DisplayTreeSchema.optional(),
     ask_id: z.string().nullable().optional(),
+    content_sha256: z.string().optional(),
+    content_sha256_source: z.enum(["insert", "backfill"]).optional(),
     requested_by: ActorSchema.optional(),
     /** Whose move the open request waits on (`Ask.waiting_on`), on `awaiting` alone: `agent` once a
      *  version moved it past the one its agent last handed to the human, or a reply left it with the
@@ -185,6 +191,9 @@ export interface ArtifactBlock {
   /** A table block's rows and cells; absent on every other block, and on a table from a Dispatch
    *  server older than the listing. */
   readonly table?: BlockTable;
+  /** Where meaning search stands on the block (`BlockEmbedding`). Absent from a Dispatch older
+   *  than block windows. */
+  readonly embedding?: BlockEmbedding;
 }
 
 /** One attribute a typed block carries: the name its type declares it under, the value the
@@ -370,6 +379,8 @@ export const artifactReviewEventPayloadFields = {
   ask_id: z.string().nullable(),
   /** Who gave the review; absent from a Dispatch older than review kinds. */
   kind: ArtifactReviewKindSchema.optional(),
+  content_sha256: z.string().optional(),
+  content_sha256_source: z.enum(["insert", "backfill"]).optional(),
 };
 
 export const WrittenArtifactReviewEventPayloadSchema = z
@@ -388,6 +399,8 @@ export const ArtifactReviewEventPayloadSchema = z.object({
   actor: InboundWriterSchema.optional(),
   reason: artifactReviewEventPayloadFields.reason.optional(),
   ask_id: artifactReviewEventPayloadFields.ask_id.optional(),
+  content_sha256: artifactReviewEventPayloadFields.content_sha256,
+  content_sha256_source: artifactReviewEventPayloadFields.content_sha256_source,
 });
 
 /** A server-owned typed-block attribute was restored from its indexed row. */

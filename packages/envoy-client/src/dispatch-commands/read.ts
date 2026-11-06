@@ -9,7 +9,7 @@ import {
 import {
   askTexts,
   datedBodies,
-  eventTexts,
+  eventTextsWhole,
   type PicturesRead,
   readPictures,
 } from "../dispatch-picture-tools";
@@ -40,7 +40,7 @@ import {
   childrenSummary,
   holdsSession,
   issueSummary,
-  liveSessionTitles,
+  liveAgents,
   logSummary,
   repositoryFieldsWarnings,
   routeHeldBySession,
@@ -287,7 +287,7 @@ export async function readCommand(context: CommandContext): Promise<DispatchTool
   };
   if (ownerArguments.ref?.kind === "log") {
     const read = await client.read(issueKey, readEvents);
-    const pictures = await picturesOf(read.events.flatMap(eventTexts));
+    const pictures = await picturesOf(await eventTextsWhole(client, read.events));
     return {
       text: [logSummary(read.issue, read.events), ...pictures.lines].join("\n"),
       details: { issue: read.issue.key },
@@ -309,13 +309,13 @@ export async function readCommand(context: CommandContext): Promise<DispatchTool
   const read = await readPromise;
   // The claim's holder must read the same here as on the issue page, so the label comes
   // from the live registry — asked for only when a session holds this issue.
-  const [references, graph, titles, pictures, coverage] = await Promise.all([
+  const [references, graph, agents, pictures, coverage] = await Promise.all([
     referencesPromise,
     graphSections(client, dispatchIssueRef(read.issue.key)),
-    liveSessionTitles(client, holdsSession(read.issue.claim) || routeHeldBySession(read.issue)),
+    liveAgents(client, holdsSession(read.issue.claim) || routeHeldBySession(read.issue)),
     picturesOf([
       ...read.issue.open_asks.map((ask) => ({ text: ask.question, at: ask.created_at })),
-      ...read.events.flatMap(eventTexts),
+      ...(await eventTextsWhole(client, read.events)),
     ]),
     issueCoverageOrReason(client, read.issue.key),
   ]);
@@ -327,7 +327,7 @@ export async function readCommand(context: CommandContext): Promise<DispatchTool
       [...pictures.lines, ...graph],
       linkBase,
       coverage,
-      titles
+      agents
     ),
     details: { issue: read.issue.key },
     ...showImages(pictures),

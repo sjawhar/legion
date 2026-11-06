@@ -533,6 +533,9 @@ export async function docReadCommand(context: CommandContext): Promise<DispatchT
     ...("token" in document && document.token !== undefined
       ? [`Document token: ${document.token}`]
       : []),
+    ...("sha256" in document && document.sha256 !== undefined
+      ? [`Content: sha256:${document.sha256}`]
+      : []),
     ...(approval === undefined ? [] : [approval]),
   ];
   return {

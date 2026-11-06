@@ -1,5 +1,4 @@
 import type { Artifact, CreateCommentInput } from "@legion/contracts";
-import { DISPATCH_BODY_MAX } from "@legion/contracts";
 import { commandLine } from "../dispatch-command";
 import {
   dispatchChildRef,
@@ -7,7 +6,6 @@ import {
   issueTopic,
   parseDispatchRef,
 } from "../dispatch-owner";
-import type { PictureTextLimit } from "../dispatch-picture-tools";
 import { ToolInputError } from "../tool-input-errors";
 import { renderAdvice } from "./advice";
 import { invalidReplyToAskProblem, movedApprovalLine } from "./asks";
@@ -89,11 +87,7 @@ export async function commentCommand(context: CommandContext): Promise<DispatchT
   // The schema already refused reply_to alongside reply_to_ask, turn without reply_to_ask,
   // and a turn outside agent|human, so the value is the contract's shape.
   const requestedTurn = optionalString(args, "turn") as CreateCommentInput["turn"];
-  const body = await writePictures(resolved, stringArg(args, "body"), {
-    cap: DISPATCH_BODY_MAX,
-    text: "body",
-    shorten: "shorten the body",
-  });
+  const body = await writePictures(resolved, stringArg(args, "body"));
   const commentInput: CreateCommentInput = {
     body,
     ...(anchored === undefined ? {} : { anchor: anchored }),
@@ -185,11 +179,6 @@ export async function messageCommand(context: CommandContext): Promise<DispatchT
   const target = messageInReplyTo(args);
   const inReplyTo = target?.id;
   const written = stringArg(args, "body");
-  const bodyLimit: PictureTextLimit = {
-    cap: DISPATCH_BODY_MAX,
-    text: "body",
-    shorten: "shorten the body",
-  };
   if (owner === null && inReplyTo !== undefined) {
     // A direct message's conversation belongs to no issue, so its pictures belong to this
     // session's own conversation, where the person reads the reply.
@@ -199,7 +188,7 @@ export async function messageCommand(context: CommandContext): Promise<DispatchT
       if (!sessionId) {
         throw new Error("host session id is required to send pictures in a direct-message reply");
       }
-      body = await postWithPictures(written, bodyLimit, `agent/${sessionId}`, (upload) =>
+      body = await postWithPictures(written, `agent/${sessionId}`, (upload) =>
         client.agentArtifact(sessionId, upload)
       );
     }
@@ -262,7 +251,7 @@ export async function messageCommand(context: CommandContext): Promise<DispatchT
     };
   }
   const issueKey = issue();
-  const body = await postWithPictures(written, bodyLimit, issueKey, (upload) =>
+  const body = await postWithPictures(written, issueKey, (upload) =>
     client.artifact(issueKey, upload)
   );
   const message = await client.message(issueKey, {

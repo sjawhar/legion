@@ -1,6 +1,6 @@
 {
-  "commands": 31,
-  "refusals": 30,
+  "commands": 32,
+  "refusals": 29,
   "runs": [
     {
       "tool": "dispatch_answers",
@@ -117,23 +117,6 @@
       "text": [
         "dispatch ask was not called: 1 problem",
         "- dispatch ask opens the ask on the issue unless anchor quotes a document, so artifact spec would be dropped: add --anchor-json '{\"artifact\":\"spec\",\"quote\":\"<exact text>\"}' to ask about a passage of it, or drop --artifact",
-        "- Allowed flags: --issue, --issue-file, --project, --project-file, --artifact, --artifact-file, --ref, --ref-file, --question, --question-file, --option, --options-json, --clear-options, --multiple, --no-multiple, --urgency, --urgency-file, --anchor-json, --anchor-json-file, --image, --clear-images, --help, --dry-run",
-        "- Example: dispatch ask --issue DSP-1 --question 'Release 4.2 ships Friday. Tuesday'\\''s plan change makes its migration drop the sessions.legacy_token column, and nobody has reviewed that change. Shipped unreviewed, a wrong drop signs out the 1,240 users still on legacy tokens. Held for review, 4.2 ships Monday. Ship Friday unreviewed, or hold to Monday? Recommendation: hold to Monday; no user waits on 4.2, and 1,240 forced sign-ins cost more than three days.' --option 'Hold to Monday: 4.2 ships three days late, with the column drop reviewed.' --option 'Ship Friday: On time; a wrong drop signs out 1,240 users.'"
-      ]
-    },
-    {
-      "tool": "dispatch_ask",
-      "call": "refusal: question over the cap once the ref is appended",
-      "args": {
-        "issue": "DSP-1",
-        "question": "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
-        "ref": "dispatch://DSP-1/comment/<id>"
-      },
-      "requests": [],
-      "outcome": "error",
-      "text": [
-        "dispatch ask was not called: 1 problem",
-        "- question plus ref is 68 characters over the 2000-character limit (2068/2000); shorten the question or drop the ref",
         "- Allowed flags: --issue, --issue-file, --project, --project-file, --artifact, --artifact-file, --ref, --ref-file, --question, --question-file, --option, --options-json, --clear-options, --multiple, --no-multiple, --urgency, --urgency-file, --anchor-json, --anchor-json-file, --image, --clear-images, --help, --dry-run",
         "- Example: dispatch ask --issue DSP-1 --question 'Release 4.2 ships Friday. Tuesday'\\''s plan change makes its migration drop the sessions.legacy_token column, and nobody has reviewed that change. Shipped unreviewed, a wrong drop signs out the 1,240 users still on legacy tokens. Held for review, 4.2 ships Monday. Ship Friday unreviewed, or hold to Monday? Recommendation: hold to Monday; no user waits on 4.2, and 1,240 forced sign-ins cost more than three days.' --option 'Hold to Monday: 4.2 ships three days late, with the column drop reviewed.' --option 'Ship Friday: On time; a wrong drop signs out 1,240 users.'"
       ]
@@ -970,6 +953,34 @@
       "text": [
         "1 issue in PROJ (showing 251-251 of 1)",
         "DSP-1 [todo] P1 Native workspace ·  open asks"
+      ]
+    },
+    {
+      "tool": "dispatch_limits",
+      "call": "valid",
+      "args": {},
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/api/v1/limits",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret"
+          },
+          "body": null
+        }
+      ],
+      "outcome": "result",
+      "text": [
+        "One block of a body - a paragraph, list, quote, table or code block: 32,000 characters (UTF-16 units).",
+        "Blocks in one body: 32,768.",
+        "An ask's question and its options together: 32,000 characters (UTF-16 units).",
+        "Options on one ask: 8.",
+        "The body an event carries whole: 32,000 characters (UTF-16 units); a longer body reaches a reader cut, and the item itself holds the rest.",
+        "One request: 1,048,576 bytes.",
+        "One markdown document: 1,048,576 bytes.",
+        "One handoff body: 262,144 bytes.",
+        "Dispatch holds every write to these bounds and refuses a longer text, naming the block or the field that passed one."
       ]
     },
     {

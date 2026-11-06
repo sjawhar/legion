@@ -71,6 +71,30 @@ export const ThreadLoginsPayloadSchema = z.strictObject(threadLoginsFields).read
 
 export type ThreadLoginsPayload = z.output<typeof ThreadLoginsPayloadSchema>;
 
+/** What of an item an event carries, on the `comment.*`, `suggestion.*` and `message.*` payloads.
+ *
+ *  `body_truncated` is that `body` is the first part of the item's body and not all of it. A
+ *  comment, comment edit, message or broadcast body is bounded block by block
+ *  (`DISPATCH_BLOCK_UNITS` on each block, `DISPATCH_ITEM_BLOCKS` on how many it holds), so one
+ *  body can be far longer than the `DISPATCH_EVENT_BODY_MAX` UTF-16 units an event carries, and
+ *  the rest is one read away: `GET /api/v1/comments/{id}` or `GET /api/v1/messages/{id}`. Envoy's
+ *  webhook normalizer writes a field of the same name, a string (`"true"`), on the payload of a
+ *  GitHub review whose body it cut; that is another payload and another field, and a reader must
+ *  not take one for the other.
+ *
+ *  `payload_omitted` is that the message bus refused this event whole, so Dispatch's outbox
+ *  published a stand-in in its place: the payload holds the original's top-level fields that are
+ *  short enough to send and nothing else, so `body` and every other long field is absent. The
+ *  item itself answers the rest. */
+export const carriedBodyFields = {
+  body_truncated: z.boolean().optional(),
+  payload_omitted: z.boolean().optional(),
+};
+
+export const CarriedBodyPayloadSchema = z.strictObject(carriedBodyFields).readonly();
+
+export type CarriedBodyPayload = z.output<typeof CarriedBodyPayloadSchema>;
+
 export const replyBlockFields = {
   node: z.string(),
   ref: z.string().optional(),

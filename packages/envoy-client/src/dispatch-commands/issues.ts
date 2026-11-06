@@ -35,13 +35,7 @@ import {
   stringArg,
 } from "./context";
 import { dispatchAnswered, refusalWithCode, withAccount, writeMayHaveLanded } from "./failures";
-import {
-  claimText,
-  holdsSession,
-  liveSessionTitles,
-  progressText,
-  routeText,
-} from "./render-issue";
+import { claimText, holdsSession, liveAgents, progressText, routeText } from "./render-issue";
 import { notSubscribed } from "./results";
 
 /** The change line after a components write: what the issue's own attachment became. */
@@ -546,10 +540,11 @@ export async function issuesCommand(context: CommandContext): Promise<DispatchTo
     route: row.route ?? null,
     route_status: row.route_status ?? null,
     route_holder: row.route_holder ?? null,
+    route_status_reason: row.route_status_reason ?? null,
     updated_at: row.updated_at,
     progress: row.progress,
   }));
-  const titles = await liveSessionTitles(
+  const agents = await liveAgents(
     client,
     rows.some((row) => holdsSession(row.claim))
   );
@@ -573,7 +568,7 @@ export async function issuesCommand(context: CommandContext): Promise<DispatchTo
                 (row.open_asks === 0
                   ? ""
                   : ` · ${row.open_asks} open ${row.open_asks === 1 ? "ask" : "asks"}`) +
-                (row.claim === null ? "" : ` · claimed by ${claimText(row.claim, titles)}`) +
+                (row.claim === null ? "" : ` · claimed by ${claimText(row.claim, agents)}`) +
                 (progress === "" ? "" : ` · ${progress}`) +
                 // A route that reaches a live session changes nothing about the row; one
                 // that reaches nobody, or cannot be judged, is what the owner audit reads.
