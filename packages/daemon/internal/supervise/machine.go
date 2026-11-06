@@ -169,6 +169,15 @@ type Claim struct {
 	// retry and persisted so a daemon restart can report the same failure to the workflow.
 	Failure string
 	Pending *Delivery
+	// OwedTask is the task an update round's question went before, and nil for none: the claim
+	// holds one pending delivery, the question has it, and this task takes it back when the
+	// question's delivery ends (delivery.go's holdOwedTask and giveBackOwedTask). It is written
+	// with the claim, in the transaction that retires the delivery the hold took it from, because
+	// nothing else ever gives that task again (DeliveredRows) and the daemon's own pod is
+	// replaced while rounds run. It is a column of the claim rather than a second delivery row:
+	// a claim has one pending delivery, and a held task is not pending — nothing sends it until
+	// it is the claim's delivery again.
+	OwedTask *Delivery
 	// BootTokenHash is the hash of the current launch's boot token, which the shim's hello and the
 	// agent's registration are resolved by. CapabilityHash is the hash of the secret the agent's
 	// registration was issued.
@@ -741,11 +750,6 @@ type Machine struct {
 	// has a lock of its own, held only to set, clear or read it, so a reader never waits on mu.
 	decidingMu sync.Mutex
 	deciding   Event
-	// owed is the task an update round's question went before, nil for none: the claim holds one
-	// delivery, the question has it, and this task takes it back when the question's delivery
-	// ends (delivery.go's holdOwedTask and giveBackOwedTask, which say why it is a hold and what
-	// a restart inside the round costs).
-	owed *Delivery
 }
 
 type sending struct {
@@ -1478,9 +1482,12 @@ func (m *Machine) forgetSession() {
 }
 
 // fail puts the claim where nothing relaunches it: its timers stop, its locator goes, and the
-// pending delivery stays for whoever decides what happens next. A process the claim still records
-// — found dead, or never stopped — is suspended first, so nothing of it keeps holding what it ran
-// on until the tree closes; a suspension that fails is logged, and the claim fails all the same.
+// pending delivery stays for whoever decides what happens next. A task held owed behind an
+// update round's question does not stay (dropOwedTask): the claim's retry restarts its phase,
+// which queues the phase's task again, and a hold left standing would queue the task of a life
+// that is over behind it. A process the claim still records — found dead, or never stopped — is
+// suspended first, so nothing of it keeps holding what it ran on until the tree closes; a
+// suspension that fails is logged, and the claim fails all the same.
 func (m *Machine) fail(ctx context.Context, why string) error {
 	if loc := m.claim.Locator; loc != nil {
 		if err := m.endProcess(ctx); err != nil {
@@ -1488,6 +1495,7 @@ func (m *Machine) fail(ctx context.Context, why string) error {
 		}
 	}
 	m.letGo()
+	m.dropOwedTask()
 	m.claim.State, m.claim.Failure = StateFailed, why
 	m.log.Error("supervise: claim failed", "why", why, "launchFailures", m.claim.Budgets.LaunchFailures,
 		"deaths", m.claim.Budgets.Deaths, "promptFailures", m.claim.Budgets.PromptFailures,
@@ -1535,10 +1543,13 @@ func (m *Machine) endProcess(ctx context.Context) error {
 // in goes with it (clearUpdate): a retired claim runs nothing on the pod a round is opened over,
 // so a round left recorded on it would be read against whatever pod the replacement makes — the
 // daemon's sweep would find a round nothing can answer, and tell the issue its work was lost at
-// every tick for the rest of the tree's life.
+// every tick for the rest of the tree's life. A task that round's question went before goes with
+// it too (dropOwedTask): the claim that owed it is over, and the task the operator's retry of
+// this claim is given is its phase's own.
 func (m *Machine) retire(ctx context.Context) error {
 	m.letGo()
 	m.clearUpdate()
+	m.dropOwedTask()
 	m.claim.State = StateRetired
 	return m.persist(ctx)
 }
@@ -1811,6 +1822,10 @@ func copyClaim(c Claim) Claim {
 	if c.Pending != nil {
 		d := *c.Pending
 		c.Pending = &d
+	}
+	if c.OwedTask != nil {
+		d := *c.OwedTask
+		c.OwedTask = &d
 	}
 	c.BootTokenHash = bytes.Clone(c.BootTokenHash)
 	c.CapabilityHash = bytes.Clone(c.CapabilityHash)

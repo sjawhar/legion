@@ -295,6 +295,111 @@ func TestAnUpdateRoundsQuestionGoesBeforeTheOwedTask(t *testing.T) {
 	}
 }
 
+// The hold is written on the claim, not kept in the memory of the daemon that made it: the
+// rollout these rounds exist for replaces the daemon's own pod while they run, the outbox row
+// that gave the task is recorded on the claim, and no retry of that row gives it again
+// (Claim.DeliveredRows). A daemon restarted while the question is pending gives the task back
+// when the question's delivery ends, exactly as the daemon that held it would have: the same
+// id, the read mark the worker's turn earned it, and the step of the ladder it stood on. The
+// worker has answered the round here, so the claim holds the task it gets back until the round
+// ends and nothing re-marks it meanwhile.
+func TestTheTaskAQuestionWentBeforeOutlivesADaemonRestart(t *testing.T) {
+	h := workingClaim(t)
+	h.errorTurn(StreamPromptResult{Error: "overloaded_error", HTTPStatus: 529})
+	owed := h.pending()
+	if owed.DeliveredAt.IsZero() || owed.MarkedBy == "" {
+		t.Fatalf("the owed task is %+v, want the read mark its turn earned it", owed)
+	}
+	h.openUpdate(testRound, testReasons)
+	h.must(StreamTurnStart{Claim: testToken})
+	h.signalUpdate("c0ffee")
+
+	h.restart()
+
+	h.must(StreamTurnEnd{Claim: testToken})
+
+	p := h.pending()
+	if p.ID != owed.ID || p.Task != owed.Task {
+		t.Fatalf("after the restart pending %+v, want the owed task %s back: nothing else ever gives it again", p, owed.ID)
+	}
+	if !p.DeliveredAt.Equal(owed.DeliveredAt) || p.MarkedBy != owed.MarkedBy {
+		t.Errorf("the owed task came back marked %v by %q, want the mark it was held with: %v by %q",
+			p.DeliveredAt, p.MarkedBy, owed.DeliveredAt, owed.MarkedBy)
+	}
+	if p.ProviderErrorRetries != owed.ProviderErrorRetries {
+		t.Errorf("the owed task came back with %d sends counted, want the %d it had: its ladder goes on from where it stood",
+			p.ProviderErrorRetries, owed.ProviderErrorRetries)
+	}
+	if d, ok := h.store.delivery(testToken); !ok || d.ID != owed.ID {
+		t.Errorf("the store holds %+v (%t) for the claim, want the owed task %s pending again", d, ok, owed.ID)
+	}
+	h.wantPrompts(2)
+
+	h.must(PodUpdateEnded{Claim: testToken, Round: testRound})
+
+	again := h.wantPrompts(3)[2]
+	if again.DeliveryID != owed.ID || !strings.HasSuffix(again.Message, providerErrorTaskText) {
+		t.Errorf("the prompt after the round = %+v, want the owed task %s sent again", again, owed.ID)
+	}
+}
+
+// The hold lives as long as the claim it is written on and no longer. An operator's stop retires
+// the claim, and the task an update round's question went before goes with it: the phase's own
+// restart is what gives a retried claim its task, and a hold left standing would queue the work
+// of a life that is over at the next retirement the claim makes.
+func TestAStopDropsTheTaskTheQuestionWentBefore(t *testing.T) {
+	h := workingClaim(t)
+	h.errorTurn(StreamPromptResult{Error: "overloaded_error", HTTPStatus: 529})
+	owed := h.pending()
+	h.openUpdate(testRound, testReasons)
+	h.must(StreamTurnStart{Claim: testToken})
+
+	h.must(RequestStop{Claim: testToken})
+
+	h.wantState(StateRetired)
+	if p := h.claim().Pending; p != nil {
+		t.Errorf("the stopped claim holds %+v, want nothing: the task %s went with the claim", *p, owed.ID)
+	}
+	if d, ok := h.store.delivery(testToken); ok {
+		t.Errorf("the store holds %+v for the stopped claim, want no delivery", d)
+	}
+}
+
+// R2 has a newer task replace the one a provider error took back, and the task an update round's
+// question gave back is still that task: nothing works it, and what holds it is the claim's
+// state rather than a wait of its own, so a refusal here would keep the newer task behind it
+// until the round ended. The task that replaces it starts its own ladder at the first step.
+func TestANewerTaskReplacesTheTaskTheQuestionGaveBack(t *testing.T) {
+	h := workingClaim(t)
+	h.errorTurn(StreamPromptResult{Error: "overloaded_error", HTTPStatus: 529})
+	owed := h.pending()
+	h.openUpdate(testRound, testReasons)
+	h.must(StreamTurnStart{Claim: testToken})
+	h.signalUpdate("c0ffee")
+	h.must(StreamTurnEnd{Claim: testToken})
+	if p := h.pending(); p.ID != owed.ID {
+		t.Fatalf("pending %+v, want the owed task %s back before the newer one is queued", p, owed.ID)
+	}
+
+	h.must(RequestDeliver{Claim: testToken, Task: "test the change", Phase: phase.Testing, Generation: 8, Assignment: "A2"})
+
+	p := h.pending()
+	if p.Task != "test the change" || p.ID == owed.ID {
+		t.Fatalf("pending %+v, want the newer task in the place of the owed task %s", p, owed.ID)
+	}
+	if p.ProviderErrorRetries != 0 || p.ProviderErrorNote != "" {
+		t.Errorf("the task that replaced the owed one is %+v, want a ladder of its own from the first step", p)
+	}
+	// The round is answered, so every task of this claim waits for its end.
+	h.wantPrompts(2)
+
+	h.must(PodUpdateEnded{Claim: testToken, Round: testRound})
+
+	if sent := h.wantPrompts(3)[2]; sent.Message != "test the change" {
+		t.Errorf("the prompt after the round = %+v, want the newer task", sent)
+	}
+}
+
 // A wait left armed names the task it was armed for. The guard reads that id rather than the
 // kind alone, so a task that replaced the one the wait is for is held by nothing.
 func TestAWaitLeftArmedForAnOlderTaskHoldsNothing(t *testing.T) {

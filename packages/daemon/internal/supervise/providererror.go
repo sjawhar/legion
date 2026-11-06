@@ -40,14 +40,6 @@ func promptRetryDelay(attempt int) time.Duration {
 	return min(promptRetryFirst<<min(max(attempt-1, 0), 5), promptRetryMax)
 }
 
-// providerError is what the machine knows about the failed turn it is deciding on: the fields
-// Oh My Pi reported with the error (StreamPromptResult). The provider's own message is not
-// among them and never reaches this package.
-type providerError struct {
-	status int
-	model  string
-}
-
 // providerErrored is a turn that ran and ended in a provider error. The task is kept whatever the
 // decision: it goes back unconfirmed under a new id, keeping its read mark, because the turn ran
 // and the agent read it. No prompt budget is charged — chargePrompt retires and then fails a
@@ -59,20 +51,24 @@ type providerError struct {
 // (dispatch://INFRA-956/comment/4fa88c00-3313-4008-8eea-d7f95a04e24d): the status the provider
 // answered either holds the issue (holdsTheIssue) or the task goes to the same session again on
 // the ladder. Oh My Pi's Retryable flag is logged and read by nothing: the status alone decides.
+//
+// The cause is named once here and handed to whoever writes it down, since one failed turn has
+// one cause and the words are the same in the claim's failure, in the prompt the task goes
+// behind and in the controller's notice.
 func (m *Machine) providerErrored(ctx context.Context, r StreamPromptResult) error {
-	e := providerError{status: r.HTTPStatus, model: r.Model}
+	cause := providerErrorCause(r.HTTPStatus)
 	m.claim.ProviderErrorRun++
 	m.log.Warn("supervise: the turn this task's prompt ran ended in a provider error; the task is kept and sent again",
 		"delivery", r.DeliveryID, "retryable", r.Retryable, "httpStatus", r.HTTPStatus,
 		"provider", r.Provider, "model", r.Model, "providerErrorRun", m.claim.ProviderErrorRun)
-	m.tellControllerOfProviderErrors(e)
+	m.tellControllerOfProviderErrors(r.Model, cause)
 	if err := m.takeBackPending(ctx, taskRead); err != nil {
 		return err
 	}
-	if holdsTheIssue(e.status) {
-		return m.fail(ctx, "a provider error that cannot clear ended this claim's turn: "+m.providerErrorCause(e))
+	if holdsTheIssue(r.HTTPStatus) {
+		return m.fail(ctx, "a provider error that cannot clear ended this claim's turn: "+cause)
 	}
-	return m.providerErrorClears(ctx, e)
+	return m.providerErrorClears(ctx, cause)
 }
 
 // holdsTheIssue is whether an error of this HTTP status fails the claim, so that the workflow
@@ -96,8 +92,7 @@ func holdsTheIssue(status int) bool {
 // (Delivery.ProviderErrorNote), and is written with the claim's run of provider-error turns in
 // one transaction. Its timer's firing is what sends it (promptRetryDue); until then sendPending
 // holds it, and a newer task queued meanwhile replaces it rather than waiting behind it (queue).
-func (m *Machine) providerErrorClears(ctx context.Context, e providerError) error {
-	cause := m.providerErrorCause(e)
+func (m *Machine) providerErrorClears(ctx context.Context, cause string) error {
 	p := m.claim.Pending
 	p.ProviderErrorRetries++
 	p.ProviderErrorNote = providerErrorTask(cause)
@@ -120,15 +115,15 @@ func promptRetryDue(m *Machine, ctx context.Context, _ Event) error {
 	return m.sendPending(ctx)
 }
 
-// providerErrorCause names what ended the turn, in words built from structured fields alone: the
-// HTTP status the provider answered, else nothing more than that a provider failed. A refusal's
+// providerErrorCause names what ended the turn, in words built from the status alone: the HTTP
+// status the provider answered, else nothing more than that a provider failed. A refusal's
 // own explanation is itself refused when it is sent back
 // (dispatch://INFRA-956/artifact/cause-evidence-md), so the provider's text reaches neither the
 // prompt this is written into nor the controller's notice. A content filter's refusal carries no
 // status, so it is the second of the two.
-func (m *Machine) providerErrorCause(e providerError) string {
-	if e.status != 0 {
-		return "a provider error (HTTP " + strconv.Itoa(e.status) + ")"
+func providerErrorCause(status int) string {
+	if status != 0 {
+		return "a provider error (HTTP " + strconv.Itoa(status) + ")"
 	}
 	return "a provider error"
 }
@@ -145,26 +140,36 @@ func providerErrorTask(cause string) string {
 // tellControllerOfProviderErrors tells the project's controller, once, when the claim's run of
 // provider-error turns reaches providerErrorRunTold; a turn with no error puts the run back to
 // zero, and only then can another notice go. It is the one exit from a run of such turns, and it
-// is a notice rather than a hold: R2 forbids an attempt limit.
-func (m *Machine) tellControllerOfProviderErrors(e providerError) {
+// is a notice rather than a hold: R2 forbids an attempt limit. model is the model the failed
+// request went to, and is empty when the error named none.
+func (m *Machine) tellControllerOfProviderErrors(model, cause string) {
 	if m.claim.ProviderErrorRun != providerErrorRunTold || m.deps.ProviderErrorRunReached == nil {
 		return
 	}
 	on := ""
-	if e.model != "" {
-		on = " on " + e.model
+	if model != "" {
+		on = " on " + model
 	}
 	reason := fmt.Sprintf("%d turns in a row%s ended in %s; the daemon keeps the task and sends it again every %s at most",
-		m.claim.ProviderErrorRun, on, m.providerErrorCause(e), promptRetryMax)
+		m.claim.ProviderErrorRun, on, cause, promptRetryMax)
 	m.log.Warn("supervise: a run of turns that ended in a provider error; the controller is told",
-		"providerErrorRun", m.claim.ProviderErrorRun, "model", e.model, "reason", reason)
+		"providerErrorRun", m.claim.ProviderErrorRun, "model", model, "reason", reason)
 	m.deps.ProviderErrorRunReached(m.current(), reason)
 }
 
 // waitsForProviderError is whether the ladder's wait is armed for the delivery of this id.
-// sendPending holds such a task, and queue replaces it with a newer one; a task that replaced it
-// is one no wait names, and it goes at once.
+// sendPending holds such a task until its timer fires; a task no wait names goes at once.
 func (m *Machine) waitsForProviderError(delivery string) bool {
 	a, armed := m.timers[TimerPromptRetry]
 	return armed && a.deliveryID == delivery
+}
+
+// replaceable is whether a newer task takes this pending task's place rather than waiting behind
+// it (queue): a task a provider error took back, while nothing works it. It is the task the
+// ladder's wait stands for and the task an update round's question went before and gave back
+// alike — that one arms no wait of its own (giveBackOwedTask), and R2 has the newer of the two
+// go whether a wait names it or not. A task whose turn is running, or whose prompt is in flight,
+// is work in flight and is never replaced.
+func (m *Machine) replaceable(p *Delivery) bool {
+	return p.ProviderErrorRetries > 0 && p.ConfirmedAt.IsZero() && m.send == nil
 }

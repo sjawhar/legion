@@ -55,8 +55,9 @@ type StreamTurnEnd struct{ Claim claim.Token }
 // rest of its error object: Oh My Pi's own word for a failure that may succeed on a later try,
 // the status of the provider request that failed (zero when it had none, as a content-filter
 // refusal does), and the provider and the model that request went to. The message is prose of
-// the provider's and is never parsed; what a failure means is read from the four structured
-// members and from what the agent itself reports (stream.PromptResult).
+// the provider's and is never parsed, and HTTPStatus alone decides what such a failure means
+// (providerErrored); the other three are logged, and the model is named in the controller's
+// notice.
 type StreamPromptResult struct {
 	Claim        claim.Token
 	DeliveryID   string

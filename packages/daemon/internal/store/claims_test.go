@@ -225,6 +225,69 @@ func TestAProviderErrorsLadderAndItsRunRoundTrip(t *testing.T) {
 	}
 }
 
+// The task an update round's question went before is a column of the claim, not a second
+// pending delivery: a claim has one of those and the question has it. Nothing else ever gives
+// that task again — the outbox row that gave it is recorded on the claim — and the daemon's own
+// pod is replaced while these rounds run (dispatch://INFRA-956 R2), so the task is written whole
+// with the claim and comes back the task that was taken: its id, its read mark, and the step of
+// the ladder it stands on.
+func TestTheTaskAnUpdateRoundsQuestionWentBeforeRoundTrips(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	c := tmuxClaim("legion-LEGION-213-implementer")
+	if err := store.PutClaim(ctx, c); err != nil {
+		t.Fatalf("put claim: %v", err)
+	}
+	if held := onlyClaim(t, store).OwedTask; held != nil {
+		t.Fatalf("a claim in no update round read back owing %+v, want nothing", held)
+	}
+
+	owed := supervise.Delivery{ID: "S4YXQ2F7TDNX", Task: "implement the plan", Phase: phase.Implementing,
+		Generation: 4, Assignment: "A1", QueuedAt: at(1), DeliveredAt: at(2), MarkedBy: "outbox:42",
+		ProviderErrorRetries: 3,
+		ProviderErrorNote:    "Your previous turn on this task stopped because of a provider error (HTTP 529)."}
+	question := supervise.Delivery{ID: "pod-update:9d3f0c7a", Task: "Push your work.", QueuedAt: at(3)}
+	// The hold: the claim carries the task it owes, the question takes the one delivery slot, and
+	// both are one write (supervise's holdOwedTask through RetireDelivery).
+	c.OwedTask = &owed
+	if err := store.PutClaimAndDelivery(ctx, c, question); err != nil {
+		t.Fatalf("hold the owed task and queue the round's question: %v", err)
+	}
+
+	read := onlyClaim(t, store)
+	if read.Pending == nil || read.Pending.ID != question.ID {
+		t.Fatalf("the claim's pending delivery read back = %+v, want the round's question %s", read.Pending, question.ID)
+	}
+	held := read.OwedTask
+	if held == nil {
+		t.Fatal("the claim read back owing nothing: the task the question went before is lost, and nothing gives it again")
+	}
+	if held.ID != owed.ID || held.Task != owed.Task || held.Phase != owed.Phase ||
+		held.Generation != owed.Generation || held.Assignment != owed.Assignment ||
+		held.MarkedBy != owed.MarkedBy || held.ProviderErrorRetries != owed.ProviderErrorRetries ||
+		held.ProviderErrorNote != owed.ProviderErrorNote {
+		t.Errorf("the held task read back = %+v, want %+v", *held, owed)
+	}
+	if !held.QueuedAt.Equal(owed.QueuedAt) || !held.DeliveredAt.Equal(owed.DeliveredAt) {
+		t.Errorf("the held task read back queued %v and marked %v, want %v and %v",
+			held.QueuedAt, held.DeliveredAt, owed.QueuedAt, owed.DeliveredAt)
+	}
+
+	// The give-back: the task is the claim's pending delivery again and the claim owes nothing,
+	// in one write of its own (giveBackOwedTask).
+	c.OwedTask = nil
+	if err := store.PutClaimAndDelivery(ctx, c, owed); err != nil {
+		t.Fatalf("give the owed task back: %v", err)
+	}
+	read = onlyClaim(t, store)
+	if read.OwedTask != nil {
+		t.Errorf("the claim still owes %+v after the task was given back", *read.OwedTask)
+	}
+	if read.Pending == nil || read.Pending.ID != owed.ID {
+		t.Fatalf("the claim's pending delivery read back = %+v, want the task it owed, %s", read.Pending, owed.ID)
+	}
+}
+
 func TestAClaimWithNothingOptionalRoundTripsAsNothing(t *testing.T) {
 	ctx := context.Background()
 	store := migratedStore(t)

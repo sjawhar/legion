@@ -27,7 +27,7 @@ func (s *server) readyForUpdate(w http.ResponseWriter, r *http.Request) {
 	if !s.readBody(w, r, &req, s.claimSecretCheck) || !requireFields(w,
 		field{"claimToken", string(req.ClaimToken)}, field{"sessionId", req.SessionID},
 		field{"secret", req.Secret}, field{"round", req.Round},
-	) || !requireCount(w, "generation", "", req.Generation) {
+	) || !requireGeneration(w, req.Generation) {
 		return
 	}
 	m, ok := s.authenticated(req.ClaimToken, req.Secret)

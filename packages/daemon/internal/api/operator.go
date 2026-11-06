@@ -502,13 +502,16 @@ func forgettable(state supervise.ClaimState) bool {
 // onForgetSession rows) and the machine answers the operator a refusal: the operator reads an
 // error and the phase runs on in the session the provider keeps refusing.
 //
-// What this order costs is the session id of a refused retry. The workflow's own refusal, an
-// issue the retry leaves held because its tree lingers, and a read that failed each relaunch
-// nothing, and the claim they leave behind records no session, so its next accepted retry spawns
-// a fresh agent rather than resuming the one it had. Only the claim's record of the session
-// goes: the session and its file stand, and this route logs the id it dropped, so an operator
-// who wanted that session can read it there. A forget that loses the race to the lane, by
-// contrast, leaves no way at all to drop the session the retry was for.
+// What this order costs is the session id of a refused retry. Three answers come after the
+// forget and relaunch nothing: a fact the store would not apply, the workflow's own refusal of
+// it, and an issue the retry leaves held because its tree lingers. The claim each leaves behind
+// records no session, so its next accepted retry spawns a fresh agent rather than resuming the
+// one it had. Only the claim's record of the session goes: the session and its file stand, and
+// this route logs the id it dropped, so an operator who wanted that session can read it there.
+// The read of the issue after the fact is not one of them — the fact is committed by then, and
+// the start it queued relaunches the claim whatever that read answers — and the read before the
+// fact comes before the forget, so a claim it refuses keeps its session. A forget that loses the
+// race to the lane, by contrast, leaves no way at all to drop the session the retry was for.
 func (s *server) retryClaim(w http.ResponseWriter, r *http.Request) {
 	token := claim.Token(r.PathValue("token"))
 	m, ok := s.supervisor.Machine(token)

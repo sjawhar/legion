@@ -135,7 +135,7 @@ func (s *server) ready(w http.ResponseWriter, r *http.Request) {
 	var req claim.ReadyRequest
 	if !s.readBody(w, r, &req, s.claimSecretCheck) || !requireFields(w,
 		field{"claimToken", string(req.ClaimToken)}, field{"sessionId", req.SessionID}, field{"secret", req.Secret},
-	) || !requireCount(w, "generation", "", req.Generation) {
+	) || !requireGeneration(w, req.Generation) {
 		return
 	}
 	m, ok := s.authenticated(req.ClaimToken, req.Secret)
@@ -199,7 +199,7 @@ func (s *server) exit(w http.ResponseWriter, r *http.Request) {
 	if !s.readBody(w, r, &req, s.claimSecretCheck) || !requireFields(w,
 		field{"claimToken", string(req.ClaimToken)}, field{"sessionId", req.SessionID}, field{"secret", req.Secret},
 		field{"reason", req.Reason},
-	) || !requireCount(w, "generation", "", req.Generation) {
+	) || !requireGeneration(w, req.Generation) {
 		return
 	}
 	m, ok := s.authenticated(req.ClaimToken, req.Secret)
@@ -643,12 +643,11 @@ func requireFields(w http.ResponseWriter, fields ...field) bool {
 	return true
 }
 
-// requireCount refuses a request whose name is zero, where the field is a count from 1: a launch
-// generation, a plugin's turn sequence. hint is what that field's refusal says beyond the name,
-// and is empty for a field whose name is the whole of it.
-func requireCount(w http.ResponseWriter, name, hint string, value uint64) bool {
-	if value == 0 {
-		writeJSON(w, http.StatusBadRequest, errorBody(name+" is required"+hint))
+// requireGeneration refuses a request whose launch generation is zero, the one count from 1 the
+// claim and operator routes read: a request that names no generation is fenced against nothing.
+func requireGeneration(w http.ResponseWriter, generation uint64) bool {
+	if generation == 0 {
+		writeJSON(w, http.StatusBadRequest, errorBody("generation is required"))
 		return false
 	}
 	return true

@@ -17,8 +17,8 @@ alter table pending_task_deliveries add column provider_error_retries integer no
 
 -- pending_task_deliveries.provider_error_note is the sentence the re-sent prompt carries in front
 -- of the task, as interrupted carries supervise's interruptedTask: what ended the previous turn,
--- and that the daemon is sending the task again. It is built from structured fields alone — a
--- refusal's category, else the HTTP status, else nothing but "a provider error" — because a
+-- and that the daemon is sending the task again. It is built from structured fields alone — the
+-- HTTP status the provider answered, else nothing but "a provider error" — because a
 -- refusal's own explanation is itself refused when it is sent back
 -- (dispatch://INFRA-956/artifact/cause-evidence-md), so no provider text ever reaches a prompt.
 -- '' is a task no provider error has taken back.

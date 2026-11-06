@@ -59,9 +59,9 @@ type TurnEnd struct {
 // The other four members of that error object come with it. Retryable is Oh My Pi's own word for
 // a failure that may succeed on a later try, HTTPStatus the status of the provider request that
 // failed (zero when the failure had none, as a content-filter refusal does), and Provider and
-// Model the provider and the model that request went to. Whether such a failure can clear is read
-// from these four and from what the agent itself reports; the message is never parsed, since it
-// is a provider's own prose and changes without notice.
+// Model the provider and the model that request went to. Whether such a failure can clear is
+// read from HTTPStatus alone (supervise's providerErrored); the message is never parsed, since
+// it is a provider's own prose and changes without notice.
 type PromptResult struct {
 	Claim        claim.Token
 	DeliveryID   string
