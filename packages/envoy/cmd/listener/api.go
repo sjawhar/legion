@@ -117,20 +117,17 @@ func lastSeenOf(sessions *session.SessionRegistry, sessionID string, entry sessi
 // message's holder and the state its own record puts it in, as GET /v1/roles/<role> names them
 // and under the same two field names, so a client reads one shape from every role answer; a role
 // message is answered 200 only for a holder a resolution read live, so that is the state it
-// carries. Unresponsive names every recipient of an ad-hoc topic send past the live window, which
-// the message was forwarded to and stored for and no receipt asked of (confirmTopicRecipient).
-// Kept and KeptReason name a role send the listener could not deliver and kept on the role's kept
-// lane instead (roleSend.kept), and are absent from every other answer, a delivered role send's
-// included. A role send has three answers and a sender tells them apart by status: 200, a live
-// holder took the message; 202, nobody holds the role and the message waits for whoever claims
-// it; 404, nothing was kept. Each field is left out when it is empty, so a stored-topic publish
-// answers exactly as it did.
+// carries. Kept and KeptReason name a role send the listener could not deliver and kept on the
+// role's kept lane instead (roleSend.kept), and are absent from every other answer, a delivered
+// role send's included. A role send has three answers and a sender tells them apart by status:
+// 200, a live holder took the message; 202, nobody holds the role and the message waits for
+// whoever claims it; 404, nothing was kept. Each field is left out when it is empty, so a
+// publish to a topic the stream captures is answered with the envelope alone.
 type publishResponse struct {
 	contracts.Envelope
-	Holder       string        `json:"holder,omitempty"`
-	HolderState  session.State `json:"holder_state,omitempty"`
-	Unresponsive []string      `json:"unresponsive,omitempty"`
-	Kept         bool          `json:"kept,omitempty"`
+	Holder      string        `json:"holder,omitempty"`
+	HolderState session.State `json:"holder_state,omitempty"`
+	Kept        bool          `json:"kept,omitempty"`
 	// KeptReason is the state the resolution found, in the same wire words the 404's own reason
 	// carries (roleHolderError.Reason). This build keeps only for a role no claim holds
 	// (roleKeepable), so unclaimed is the one reason it sends; a lapsed claim is refused 404.

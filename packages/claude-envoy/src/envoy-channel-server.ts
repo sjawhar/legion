@@ -1608,17 +1608,15 @@ export async function executeEnvoyTool(
         message: args.message,
         ...toMessageMetadata(args),
       })
-      // The answer the model reads, its line first. A topic send whose subscriber stopped
-      // answering was accepted and stored for that session, and this result is the one place
-      // the model is told so; a kept answer is a success of its own, which the line says in the
-      // words the Oh My Pi plugin uses (`publishConfirmationText`).
+      // The answer the model reads, its line first. A publish to a topic the stream captures is
+      // answered with the envelope alone; a kept answer is a success of its own, which the line
+      // says in the words the Oh My Pi plugin uses (`publishConfirmationText`).
       return {
         message: publishConfirmationText(result),
         event_id: result.envelope.event_id,
         topic: result.envelope.topic,
         ...(result.holder === undefined ? {} : { holder: result.holder }),
         ...(result.holderState === undefined ? {} : { holder_state: result.holderState }),
-        unresponsive: result.unresponsive,
         ...(result.kept === undefined ? {} : { kept: result.kept }),
         ...(result.keptReason === undefined ? {} : { kept_reason: result.keptReason }),
       }

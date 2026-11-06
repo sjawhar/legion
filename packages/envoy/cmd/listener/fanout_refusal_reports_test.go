@@ -95,6 +95,17 @@ func TestTheFanoutReportsItsOwnRefusalsForTheSessionsItDeliversTo(t *testing.T) 
 				if err := harness.sessions.Put(sessionID, *tc.entry); err != nil {
 					t.Fatalf("register %s's entry: %v", sessionID, err)
 				}
+				// A write reaches the cache the fan-out reads through the handle's epoch
+				// (session.SessionRegistry.PutWithin, kvwatch.Copy.Put), which drops it where
+				// the watcher's own warm-up has moved that epoch since; the row then arrives
+				// with the watcher's delivery of it instead, a moment later. Every row below
+				// turns on the entry this path read -- an attempt record is left only for a
+				// session whose entry it read and nothing reaches (fanoutDelivery) -- so the
+				// message goes to the handler once that read answers, never on the write alone.
+				waitFor(t, 10*time.Second, "the seeded entry of "+sessionID+" to be readable", func() bool {
+					_, err := harness.sessions.Get(sessionID)
+					return err == nil
+				})
 			}
 			probe := exceptionProbe(t, harness.client)
 
@@ -155,6 +166,13 @@ func TestTheFanoutRecordsARecipientItCannotReachBeforeItsException(t *testing.T)
 	if err := harness.sessions.Put(sessionID, session.SessionEntry{SelfSubscribed: true, MachineID: "test-machine"}); err != nil {
 		t.Fatalf("register %s's entry: %v", sessionID, err)
 	}
+	// The attempt record this test is about is left only for a session whose entry the fan-out
+	// read, so the message goes to the handler once that read answers rather than on the write
+	// alone (the wait above the table).
+	waitFor(t, 10*time.Second, "the seeded entry of "+sessionID+" to be readable", func() bool {
+		_, err := harness.sessions.Get(sessionID)
+		return err == nil
+	})
 	probe := exceptionProbe(t, harness.client)
 
 	// The refusal: a delivery mode this entry does not advertise. The core lane carries it, as it

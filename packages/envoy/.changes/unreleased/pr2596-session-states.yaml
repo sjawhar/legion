@@ -14,8 +14,7 @@ body: |-
     claim, and only once the holder is `gone`. Every list, lookup and refusal carries `state` and
     `last_seen`, a role
     lookup answers `holder_state` and `claim_released`, a publish answers `holder_state` for the
-    role it reached and lists under `unresponsive` each topic recipient whose copy was stored
-    without waiting for a receipt, and `GET /v1/sessions` and
+    role it reached, and `GET /v1/sessions` and
     `GET /v1/registry/<id>` take `include=unresponsive`; without it an unresponsive session is not
     answered for, and the 404 keeps the `no live session <id>` prefix it had, saying in its own
     text when this listener remembers no registration to name. A session reaper

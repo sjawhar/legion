@@ -82,14 +82,15 @@
 # ---- the named checks ---------------------------------------------------------------------------
 # Each prints `PASS <name>` or `FAIL <name>: <reason>`, every selected check runs whatever the one
 # before it did, and the last line says how many ran and how many passed. The eight requirements of
-# this issue's proof map onto eleven names, because requirements 3 and 7 each hold separate things
-# whose needs differ and a reader has to be told which of them held:
+# this issue's proof map onto ten names, because requirement 3 holds separate things whose needs
+# differ and a reader has to be told which of them held:
 #   1  stalled-session-reads-unresponsive     (3) -> 3a send-to-stalled-session-is-stored
 #   2  bus-outage-keeps-claims                       3b stored-deliveries-arrive-once
 #   4  role-claim-survives-lookups                   3c role-route-reaches-its-holder
 #   5  issue-claim-refuses-the-stalled-holder
-#   6  gone-only-past-the-horizon             (7) -> 7a every-plugin-shows-the-state
-#   8  max-age-change-reaches-both-listeners         7b every-plugin-names-a-stored-follower
+#   6  gone-only-past-the-horizon
+#   7  every-plugin-shows-the-state
+#   8  max-age-change-reaches-both-listeners
 #
 # ---- what the run starts, and what stops it ------------------------------------------------------
 # A NATS server (internal/testnats/cmd/natsd), two Envoy listeners on ports held from the kernel's
@@ -143,7 +144,6 @@ checks=(
   "issue-claim-refuses-the-stalled-holder dispatch"
   "gone-only-past-the-horizon omp claude model"
   "every-plugin-shows-the-state omp claude model"
-  "every-plugin-names-a-stored-follower omp claude model"
   "max-age-change-reaches-both-listeners"
 )
 
@@ -989,19 +989,6 @@ shows_state() {
   tr -d '\\' <"$1" | grep -q '"last_seen"'
 }
 
-# names_stored_for FILE SESSION: FILE holds one line that names SESSION and the word
-# `unresponsive` together. That is what a publish answer naming a stored-for follower reads as in
-# both hosts: the session id, the answer's `unresponsive` field and the unresponsive rule all
-# reach the model in one tool result, and each host writes one result as one line. Both are asked
-# for on the one line because every host also hands its model the tool descriptions, which carry
-# `unresponsive` on lines of their own, while the follower's id is in nothing this run prompts
-# with and reaches the model only in what the tool answered. The backslashes come off first, as
-# shows_state takes them off, because each file carries that JSON inside a JSON string.
-# shellcheck disable=SC1003 # '\\' is tr's own spelling of one backslash, not an escaped quote
-names_stored_for() {
-  tr -d '\\' <"$1" | grep -F -e "$2" | grep -q -F -e unresponsive
-}
-
 # ---- Claude Code ----------------------------------------------------------------------------------------
 # Headless in stream-json both ways, the shape a Legion worker's bridge runs it in
 # (claudelaunch.Argv), with this checkout's claude-envoy as its one MCP server, and that server
@@ -1028,19 +1015,14 @@ claude_start() { # claude_start SESSION [--resume]
   agent_pid "$work/claude.pid" claude_pid
 }
 
-# claude_snapshot_shows_state and claude_snapshot_names_stored_for FOLLOWER take the evidence copy
-# of Claude Code's output and judge that copy, so what a check waited for, what it asserted on and
-# what its evidence holds are one file and one moment. Reading the live file instead has twice
-# cost a refusal whose own evidence carried the answer: the host writes a turn's `result` line
-# before it has written everything of that turn, and it keeps appending afterwards.
+# claude_snapshot_shows_state takes the evidence copy of Claude Code's output and judges that
+# copy, so what a check waited for, what it asserted on and what its evidence holds are one file
+# and one moment. Reading the live file instead has twice cost a refusal whose own evidence
+# carried the answer: the host writes a turn's `result` line before it has written everything of
+# that turn, and it keeps appending afterwards.
 claude_snapshot_shows_state() {
   cp -f "$work/claude.out" "$evidence/answers/$check.claude.out"
   shows_state "$evidence/answers/$check.claude.out"
-}
-
-claude_snapshot_names_stored_for() { # claude_snapshot_names_stored_for FOLLOWER
-  cp -f "$work/claude.out" "$evidence/answers/$check.claude.out"
-  names_stored_for "$evidence/answers/$check.claude.out" "$1"
 }
 
 # claude_turn TEXT sends one user turn and waits for that turn's result line.
@@ -1255,9 +1237,15 @@ check_stored_deliveries_arrive_once() {
 # Dispatch resolving the holder itself and forwarding the event to the holder's own agent subject
 # (internal/dispatch/outbox/role.go). Three facts decide whether anything is routed at all, and
 # getting one of them wrong leaves zero forwards for the wrong reason:
-#   - the holder is this run's own Oh My Pi session, which registers the delivery capabilities a
-#     write may ask of it and answers a forward's receipt itself (packages/pi-envoy's
-#     expectsLaneReceipt); a session this check registered on the wire would advertise none;
+#   - the holder is this run's own Oh My Pi session, whose registrations this check stops and
+#     resumes with SIGSTOP and SIGCONT: a session's state is its last registration and nothing
+#     else, so stopping the process is what moves the holder from live to unresponsive and back,
+#     which is what both arms turn on. The plugin registers a session consumer of its own and
+#     the delivery capabilities a write may ask of it (aside and steer, and btw where the host
+#     has a side turn), and answers a forward with nothing: a Dispatch envelope names no
+#     delivery mode, so every holder takes it, and the stream's acknowledgement that it stored
+#     the copy on the holder's agent subject is the whole of the forward's answer (forwardOf,
+#     internal/dispatch/outbox/role.go);
 #   - the comment is a person's (dispatch_person), the one actor whose write notifies and so
 #     reaches the issue's route at all;
 #   - the forward lands on `notifications.agent.<holder>`, never on `notifications.role.*`, under
@@ -1272,8 +1260,10 @@ check_stored_deliveries_arrive_once() {
 
 # watch_role_forwards SESSION subscribes to that session's own agent subject over core NATS and
 # appends every message that lands on it, whole and on one line, to $work/role-forwards.jsonl. It
-# answers none of them: the holder's own subscription sends a forward's receipt, and a receipt
-# from the rig would hide a holder that never sent one.
+# answers none of them: a forward is a Request on that subject whose answer is the stream's
+# acknowledgement that it stored the copy, and every subscriber of the subject, the holder
+# included, answers it with nothing (roleForward.forward, internal/dispatch/outbox/role.go), so a
+# reply from the rig would reach the forward's reply subject ahead of the stream's own.
 watch_role_forwards() {
   : >"$work/role-forwards.jsonl"
   # shellcheck disable=SC2016 # the bun program is passed verbatim; ${…} inside it is JavaScript's
@@ -1681,58 +1671,6 @@ check_every_plugin_shows_the_state() {
   grep -q "$peer" "$evidence/answers/$check.claude.out" ||
     refuse "Claude Code's envoy_sessions answer does not name the unresponsive peer $peer" || return 1
   note "both hosts showed the peer's state and its last_seen"
-}
-
-# ---- 7b. every plugin names a follower the message was only stored for ------------------------------------
-# The other tool an agent judges a peer by. A publish to an ad-hoc topic one unresponsive session
-# follows is accepted: the listener forwards that session's copy to its agent subject, where the
-# stream keeps it, asks it for no receipt, and names it under `unresponsive` (the 200 of
-# cmd/listener/api.go's publishResponse, and the 504 of confirmed.go's topicSendFailure). A host
-# that showed its model `published <event>` alone would leave an agent believing a stalled peer
-# took the message, which is the mistake this issue exists to stop. So both hosts drive
-# envoy_publish for themselves, and this refuses an answer that does not name the follower.
-check_every_plugin_names_a_stored_follower() {
-  local follower=ses_ess_publish_follower_$$ topic=notifications.team.ess-publish-$$.all
-  local marker=ess-publish-$RANDOM$RANDOM ask transcript
-  ask="Call the envoy_publish tool with topic $topic and message \"$marker\". Then reply with the tool's whole answer and nothing else."
-  registered "$follower" true "$topic" || return 1
-  wait_until 180 "the follower of the topic to read unresponsive" \
-    state_is "$port_a" "$follower" unresponsive unresponsive || return 1
-  # The listener's own answer is read first, straight off the wire, so a host that shows nothing
-  # is told apart from a listener that named nothing. Its copy is stored for the follower exactly
-  # as the two agents' copies are.
-  api "$port_a" POST /v1/messages/publish \
-    "$(jq -cn --arg t "$topic" --arg m "$marker" \
-      '{source:"agent",source_session:"ess-publisher",topic:$t,message:("wire " + $m)}')" ||
-    refuse "the publish to a topic an unresponsive session follows answered $api_status: $(head -c 300 "$answer")" || return 1
-  jq -e --arg f "$follower" '.unresponsive == [$f]' "$answer" >/dev/null ||
-    refuse "the accepted publish does not name $follower under unresponsive: $(head -c 300 "$answer")" || return 1
-  note "the listener answered the publish 200, naming $follower under unresponsive"
-  [ -n "$omp_pid" ] || omp_start || return 1
-  # omp_turn, not omp_typed: the transcript is read for what the tool answered, and the host takes
-  # the text well before the turn that calls the tool has run.
-  omp_turn "$ask" >"$evidence/answers/$check.omp.json" ||
-    refuse "Oh My Pi would not answer the envoy_publish turn" || return 1
-  transcript=$(omp_session_file)
-  cp -f "$transcript" "$evidence/answers/$check.transcript.jsonl"
-  names_stored_for "$transcript" "$follower" ||
-    refuse "Oh My Pi's envoy_publish answer does not name the unresponsive follower $follower" || return 1
-  if [ -z "$claude_pid" ]; then
-    claude_session=$(python3 -c 'import uuid; print(uuid.uuid4())')
-    claude_start "$claude_session"
-  fi
-  claude_turn "$ask" || return 1
-  # As check 7a: Claude Code's turn ends on its `result` line and the model is free to summarise
-  # what the tool answered, so one turn's prose is no measure of it. A second turn asking for the
-  # answer's own field settles it; the assertion is unchanged, and both turns' output is kept.
-  # Waited for rather than read once, as check 7a's arm is and for the same reason: a turn ends on
-  # a `result` line, which a resume writes too.
-  if ! wait_until 120 "Claude Code's answer to name the stored-for follower" claude_snapshot_names_stored_for "$follower"; then
-    claude_turn "Call the envoy_publish tool again with topic $topic and message \"$marker\", and reply with its answer's unresponsive field verbatim, as JSON." || return 1
-    wait_until 180 "Claude Code's second answer to name the stored-for follower" claude_snapshot_names_stored_for "$follower" ||
-      refuse "Claude Code's envoy_publish answer does not name the unresponsive follower $follower" || return 1
-  fi
-  note "both hosts named $follower as a follower the message is only stored for"
 }
 
 # ---- 8. a change to the bucket's maximum age reaches both listeners ---------------------------------------

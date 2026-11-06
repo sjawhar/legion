@@ -123,12 +123,11 @@ const RoleHeldWireSchema = z.object({
  * a send's `no live session <id>` carries `state` and `last_seen`
  * (`cmd/listener/api.go`'s `noLiveSessionRefusal`), and a role lookup's or a role publish's
  * `holder lapsed` carries `holder`, `holder_state`, `last_seen` and `claim_released`
- * (`cmd/listener/role_holder.go`'s `roleHolderError`). A topic send that some recipient did not
- * confirm (504 `not_confirmed`, `cmd/listener/confirmed.go`'s `topicSendFailure`) names under
- * `unresponsive` every other recipient the message was stored for. The listener's own text names
- * none of them, so `EnvoyApiError` says them itself (`refusalStateText`): an agent told its peer
- * did not answer must be told whether that peer is unresponsive — still holding its role and its
- * claims — or gone.
+ * (`cmd/listener/role_holder.go`'s `roleHolderError`). Those two are the only refusals that name
+ * a session. The listener's own text names neither the state nor the last registration, so
+ * `EnvoyApiError` says them itself (`refusalStateText`): an agent told its peer did not answer
+ * must be told whether that peer is unresponsive — still holding its role and its claims — or
+ * gone.
  */
 const ErrorWireSchema = z.object({
   error: z.string(),
@@ -143,9 +142,6 @@ const ErrorWireSchema = z.object({
   last_seen: z.number().int().optional(),
   /** Always false on a lapsed role's 404: a lookup releases no claim, whatever the state. */
   claim_released: z.boolean().optional(),
-  /** The recipients of a refused topic send the message was stored for, each past its live
-   *  window and asked for no receipt, so none of them failed this send. */
-  unresponsive: z.array(z.string()).optional(),
 });
 
 /**
@@ -153,11 +149,10 @@ const ErrorWireSchema = z.object({
  * `duplicate` is a send's: the listener already stored a send under this target and idempotency
  * key, so this one stored nothing new. Absent reads as false, as an older listener's answer does.
  * `holder` and `holder_state` are a role publish's, under the two names every role answer uses
- * (`cmd/listener/api.go`'s `publishResponse`), and `unresponsive` names every recipient of an
- * ad-hoc topic send that was past its live window: its copy was forwarded and stored for it and
- * no receipt asked of it (`cmd/listener/confirmed.go`'s `confirmTopicRecipient`), so the publish
- * is answered 200 and the sender is told its peer has the message waiting, not taken. Each is
- * omitted when there is none, and absent from a listener predating the field.
+ * (`cmd/listener/api.go`'s `publishResponse`). A publish to a topic the stream captures is
+ * answered with the envelope alone: the stream stores that one copy and each subscribed
+ * session's own consumer delivers it, so there is no per-recipient send to report. Each field
+ * is omitted when there is none, and absent from a listener predating it.
  */
 const EnvelopeResponseSchema = EnvelopeSchema.extend({
   recipient: z.string().optional(),
@@ -168,7 +163,6 @@ const EnvelopeResponseSchema = EnvelopeSchema.extend({
   // recipient's state so the sender can say how long it has been stalled; omitted when it knows
   // none, and absent from a listener predating the field.
   last_seen: z.number().int().optional(),
-  unresponsive: z.array(z.string()).optional(),
   duplicate: z.boolean().optional(),
 });
 
@@ -478,11 +472,6 @@ export type PublishResult = {
   /** A role publish's resolved holder, and the state the listener's record puts it in. */
   readonly holder?: string;
   readonly holderState?: SessionState;
-  /** The recipients of an ad-hoc topic send that were past their live window: the listener
-   *  stored this message for each of them and asked none of them for a receipt, so the publish
-   *  succeeded and those peers have not taken it yet. Empty when every recipient confirmed, and
-   *  empty from a listener predating the field. */
-  readonly unresponsive: readonly string[];
   /**
    * True on the listener's 202: no live holder took the message, so the listener kept it on the
    * role's kept lane and hands it to the role's next holder. The message is not lost, so this is
@@ -497,39 +486,26 @@ export type PublishResult = {
 
 /**
  * What a refusal naming a session's state adds to its message: which of the three states the
- * listener put that session in, when it last registered, every other recipient the message was
- * stored for, and, where either names a session that stopped answering, the rule that such a
- * session is not dead. The listener's own text says none of it ("no live session ses_x",
- * "role reviewer holder ses_x lapsed; claim retained (last seen 1762...)", "2 of 3 sessions
- * subscribed to … did not confirm"), and an agent reading only the message cannot tell a peer
- * that stopped answering from one that ended — which is the mistake this change exists to stop
- * (dispatch://INFRA-392, R7). A body that names neither adds nothing, so an older listener's
- * message is what it always was.
+ * listener put that session in, when it last registered, and, where that session stopped
+ * answering, the rule that such a session is not dead. The listener's own text says none of it
+ * ("no live session ses_x", "role reviewer holder ses_x lapsed; claim retained (last seen
+ * 1762...)"), and an agent reading only the message cannot tell a peer that stopped answering
+ * from one that ended — which is the mistake this change exists to stop (dispatch://INFRA-392,
+ * R7). A body that names no state adds nothing, so an older listener's message is what it
+ * always was.
  */
 function refusalStateText(parsed: z.infer<typeof ErrorWireSchema>): string {
-  const sentences: string[] = [];
   const state = parsed.holder_state ?? parsed.state;
-  if (state !== undefined) {
-    const who = parsed.holder === undefined ? "That session" : `Holder ${parsed.holder}`;
-    // A listener that can name no registration at all sends none (the field is omitted, or 0):
-    // the state alone is said, since a made-up time would read as knowledge nobody has.
-    const seen =
-      parsed.last_seen === undefined || parsed.last_seen <= 0
-        ? ""
-        : `, last seen ${new Date(parsed.last_seen).toISOString()}`;
-    sentences.push(`${who} is ${state}${seen}.`);
-  }
-  const stored = parsed.unresponsive ?? [];
-  if (stored.length > 0) {
-    const one = stored.length === 1;
-    sentences.push(
-      `Envoy stored the message for ${stored.join(", ")}.`,
-      `${one ? "That session" : "Those sessions"} stopped answering, so ${one ? "it" : "they"} did not fail this send.`
-    );
-  }
-  if (sentences.length === 0) return "";
-  // The rule is said once, however many of the two parts named a session that stopped answering.
-  if (state === "unresponsive" || stored.length > 0) sentences.push(UNRESPONSIVE_RULE);
+  if (state === undefined) return "";
+  const who = parsed.holder === undefined ? "That session" : `Holder ${parsed.holder}`;
+  // A listener that can name no registration at all sends none (the field is omitted, or 0):
+  // the state alone is said, since a made-up time would read as knowledge nobody has.
+  const seen =
+    parsed.last_seen === undefined || parsed.last_seen <= 0
+      ? ""
+      : `, last seen ${new Date(parsed.last_seen).toISOString()}`;
+  const sentences = [`${who} is ${state}${seen}.`];
+  if (state === "unresponsive") sentences.push(UNRESPONSIVE_RULE);
   return ` ${sentences.join(" ")}`;
 }
 
@@ -555,9 +531,6 @@ export class EnvoyApiError extends Error {
    *  lapsed role and it is always false: a lookup or a publish takes nothing from a holder,
    *  whatever its state. */
   readonly claimReleased: boolean | undefined;
-  /** The recipients a refused topic send was nonetheless stored for, when the body names any:
-   *  each stopped answering, so none of them is a reason this send was refused. */
-  readonly unresponsive: readonly string[] | undefined;
 
   constructor(
     readonly details: {
@@ -588,7 +561,6 @@ export class EnvoyApiError extends Error {
     this.sessionState = parsed?.holder_state ?? parsed?.state;
     this.lastSeen = parsed?.last_seen;
     this.claimReleased = parsed?.claim_released;
-    this.unresponsive = parsed?.unresponsive;
   }
 }
 
@@ -940,9 +912,6 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
         envelope: response,
         ...(response.holder === undefined ? {} : { holder: response.holder }),
         ...(response.holder_state === undefined ? {} : { holderState: response.holder_state }),
-        // A listener that names none, and one predating the field, both read as "every
-        // recipient took it": the caller reads one array rather than two absent cases.
-        unresponsive: response.unresponsive ?? [],
         ...(response.kept === undefined ? {} : { kept: response.kept }),
         ...(response.kept_reason === undefined ? {} : { keptReason: response.kept_reason }),
       };

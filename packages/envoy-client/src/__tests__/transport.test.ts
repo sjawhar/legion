@@ -541,12 +541,11 @@ describe("EnvoyClient", () => {
     });
   });
 
-  // The listener answers 200 for an ad-hoc topic send whose subscriber stopped answering: it
-  // stored that session's copy and asked it for no receipt, and names the session under
-  // `unresponsive` (`cmd/listener/api.go`'s `publishResponse`). The field has to survive the
-  // client, because an agent told only "published" reads a stalled peer as one that took the
-  // message (dispatch://INFRA-392, R7).
-  test("a publish names every recipient the listener only stored it for", async () => {
+  // A role publish names the holder the listener resolved and the state its record put that
+  // holder in, under the two names every role answer uses; a publish to a plain topic names
+  // neither, since the stream stores one copy each subscribed session's own consumer delivers
+  // (`cmd/listener/api.go`'s `publishResponse`).
+  test("a role publish names its holder and that holder's state, and a topic publish names neither", async () => {
     const envelope = {
       event_id: "event-stored",
       source: "agent",
@@ -559,7 +558,6 @@ describe("EnvoyClient", () => {
       trace_id: "trace-3",
     };
     const recorded = recordFetch([
-      jsonResponse({ ...envelope, unresponsive: ["ses_stalled", "ses_quiet"] }),
       jsonResponse({
         ...envelope,
         topic: "notifications.role.controller",
@@ -572,19 +570,12 @@ describe("EnvoyClient", () => {
     const publish = (topic: string) =>
       client.publish({ sourceSessionID: "ses_sender", topic, message: "broadcast" });
 
-    const stored = await publish("notifications.team.deploy-squad.all");
     const role = await publish("notifications.role.controller");
     const taken = await publish("notifications.team.deploy-squad.all");
 
-    expect(stored.unresponsive).toEqual(["ses_stalled", "ses_quiet"]);
-    // A role publish's holder and the state the listener resolved it in, under the two names
-    // every role answer uses.
     expect(role.holder).toBe("ses_holder");
     expect(role.holderState).toBe("live");
-    expect(role.unresponsive).toEqual([]);
-    // An answer naming none — every recipient confirmed, or a listener predating the field —
-    // reads as it always did.
-    expect(taken.unresponsive).toEqual([]);
+    expect(taken.holder).toBeUndefined();
     expect(taken.holderState).toBeUndefined();
   });
 
